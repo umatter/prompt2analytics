@@ -119,8 +119,12 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message, least_squares};
 use crate::regression::HacKernel;
+use crate::regression::ols::{NormalInverse, normal_equations_inverse};
+use crate::resource::{checked_len, checkpoint, try_zeros2};
 use crate::spatial::SpatialWeights;
+use crate::traits::convergence::Convergence;
 use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -169,6 +173,15 @@ impl fmt::Display for SphetSE {
             SphetSE::Standard => write!(f, "Standard (homoscedastic)"),
         }
     }
+}
+
+/// Kernel of the Kelejian-Prucha (2007) spatial HAC (sphet 2.1-1 `kernelsfun.R`), as a function
+/// of z = d_ij / bandwidth >= 0; zero for z >= 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SpatialHacKernel {
+    /// K(z) = 1 - z^2 (sphet's `stslshac` default).
+    #[default]
+    Epanechnikov,
 }
 
 /// Configuration for sphet estimation.
@@ -265,10 +278,28 @@ pub struct SphetResult {
     pub model_type: SphetModel,
     /// Standard error type used
     pub se_type: SphetSE,
-    /// Number of iterations
+    /// Newton steps of the GM solve for rho (error and SARAR models); 0 for the closed-form lag model
     pub iterations: usize,
-    /// Convergence achieved
+    /// Status of the GM solve (false at a boundary solution or at the iteration cap); true for the lag model
     pub converged: bool,
+    /// Warnings about this fit
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The GM solve for rho (error and SARAR models); `None` for the lag model
+    #[serde(default)]
+    pub convergence: Option<Convergence>,
+    /// The GM moments used for rho (error and SARAR models)
+    #[serde(default)]
+    pub rho_moments: Option<String>,
+    /// The instruments kept, e.g. `["(Intercept)", "x1", "W x1", "W^2 x1"]`; empty for the error model
+    #[serde(default)]
+    pub instruments: Vec<String>,
+    /// Kernel of the spatial HAC (se_type HAC only)
+    #[serde(default)]
+    pub hac_kernel: Option<SpatialHacKernel>,
+    /// Fixed distance bandwidth of the spatial HAC (`None` with se_type HAC: variable bandwidth)
+    #[serde(default)]
+    pub hac_bandwidth: Option<f64>,
 }
 
 impl fmt::Display for SphetResult {
@@ -413,6 +444,8 @@ pub fn run_sphet(
         coef_names.push(name.to_string());
     }
 
+    refuse_collinear_regressors(&x, &coef_names)?;
+
     // Dispatch to appropriate model
     match config.model {
         SphetModel::SpatialLag => estimate_sar_gmm(&y, &x, listw, &coef_names, &config),
@@ -470,7 +503,7 @@ pub fn sphet(
 ///
 /// Model: y = λWy + Xβ + ε
 ///
-/// Uses instruments [X, WX, W²X, ...] for the endogenous Wy.
+/// Uses the instruments of [`spatial_instruments`] for the endogenous Wy.
 fn estimate_sar_gmm(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -481,121 +514,40 @@ fn estimate_sar_gmm(
     let n = y.len();
     let k = x.ncols();
 
-    // Compute Wy (endogenous)
-    let wy = listw.lag(y);
+    let instruments = spatial_instruments(x, listw, config.instrument_order, coef_names)?;
+    let (z, z_names) = with_spatial_lag(y, x, listw, coef_names)?;
+    let t = tsls(y, &z, &instruments, k, &z_names)?;
 
-    // Build instrument matrix [X, WX, W²X, ...]
-    let h = build_instruments(x, listw, config.instrument_order)?;
-    let n_inst = h.ncols();
-
-    if n_inst < k + 1 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Insufficient instruments: {} instruments for {} + 1 parameters",
-                n_inst, k
-            ),
-        });
-    }
-
-    // Augmented regressor matrix Z = [X, Wy]
-    let mut z = Array2::zeros((n, k + 1));
-    z.slice_mut(s![.., ..k]).assign(x);
-    z.column_mut(k).assign(&wy);
-
-    // Spatial 2SLS: δ̂ = (Z'P_H Z)^{-1} Z'P_H y
-    // where P_H = H(H'H)^{-1}H' is the projection matrix
-    let hh = xtx(&h.view());
-    let (hh_inv, _) = safe_inverse(&hh.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Instrument matrix".to_string(),
-        suggestion: format!("H'H singular: {}", e),
-    })?;
-
-    // P_H Z = H(H'H)^{-1}H'Z
-    let hz = h.t().dot(&z);
-    let hh_inv_hz = hh_inv.dot(&hz);
-    let ph_z = h.dot(&hh_inv_hz);
-
-    // (Z'P_H Z)^{-1}
-    let zph_z = z.t().dot(&ph_z);
-    let (zph_z_inv, _) = safe_inverse(&zph_z.view()).map_err(|e| EconError::SingularMatrix {
-        context: "2SLS normal equations".to_string(),
-        suggestion: format!("Z'P_H Z singular: {}", e),
-    })?;
-
-    // δ̂ = (Z'P_H Z)^{-1} Z'P_H y
-    let hy = h.t().dot(y);
-    let hh_inv_hy = hh_inv.dot(&hy);
-    let ph_y = h.dot(&hh_inv_hy);
-    let zph_y = z.t().dot(&ph_y);
-    let delta = zph_z_inv.dot(&zph_y);
-
-    // Extract β and λ
-    let beta: Array1<f64> = delta.slice(s![..k]).to_owned();
-    let lambda = delta[k];
-
-    // Residuals
-    let fitted = z.dot(&delta);
+    let beta: Array1<f64> = t.delta.slice(s![..k]).to_owned();
+    let lambda = t.delta[k];
+    let fitted = z.dot(&t.delta);
     let residuals = y - &fitted;
-    let rss: f64 = residuals.iter().map(|r| r * r).sum();
-    let sigma2 = rss / (n - k - 1) as f64;
+    let df = residual_df(n, k + 1)?;
+    let sigma2 = residuals.dot(&residuals) / df as f64;
 
-    // Standard errors
-    let (vcov_mat, se_delta) =
-        compute_spatial_2sls_se(&z, &h, &residuals, sigma2, &zph_z_inv, config)?;
-
-    // Extract standard errors for β and λ
-    let se_beta: Array1<f64> = se_delta.slice(s![..k]).to_owned();
-    let se_lambda = se_delta[k];
-
-    // Z-values and p-values for β
-    let z_values: Vec<f64> = beta
-        .iter()
-        .zip(se_beta.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-    let p_values: Vec<f64> = z_values
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
-
-    // Z-value and p-value for λ
-    let lambda_z = if se_lambda > 0.0 {
-        lambda / se_lambda
-    } else {
-        0.0
+    let vcov_mat = match config.se_type {
+        SphetSE::HAC => compute_spatial_2sls_se(&t.zh, &residuals, &t.a, config)?,
+        se_type => delta_vcov(&t.zh, &residuals, &t.a, se_type)?,
     };
-    let lambda_p = 2.0 * (1.0 - normal_cdf(lambda_z.abs()));
 
-    // Convert vcov to Vec<Vec<f64>> (just for beta)
-    let vcov: Vec<Vec<f64>> = (0..k)
-        .map(|i| (0..k).map(|j| vcov_mat[[i, j]]).collect())
-        .collect();
-
-    Ok(SphetResult {
-        coefficients: beta.to_vec(),
-        coef_names: coef_names.to_vec(),
-        std_errors: se_beta.to_vec(),
-        z_values,
-        p_values,
-        vcov,
+    let mut warnings = Vec::new();
+    warnings.extend(instruments.dropped_warning());
+    Ok(build_result(ResultParts {
+        coef_names,
+        config,
+        model: SphetModel::SpatialLag,
+        beta,
+        vcov: &vcov_mat,
         lambda: Some(lambda),
-        lambda_se: Some(se_lambda),
-        lambda_z: Some(lambda_z),
-        lambda_p: Some(lambda_p),
         rho: None,
-        rho_se: None,
-        rho_z: None,
-        rho_p: None,
         sigma2,
         residuals,
         fitted,
-        n_obs: n,
-        df: n - k - 1,
-        model_type: SphetModel::SpatialLag,
-        se_type: config.se_type,
-        iterations: 1,
-        converged: true,
-    })
+        df,
+        instruments: instruments.names,
+        warnings,
+        gm: None,
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -656,57 +608,27 @@ fn estimate_sem_gmm(
     let residuals = y - &fitted;
 
     // Standard errors for β
-    let (vcov_mat, se_beta) =
-        compute_sem_se(x, &x_star, &residuals_star, sigma2, &xtx_star_inv, config)?;
+    let (vcov_mat, _) = compute_sem_se(x, &x_star, &residuals_star, sigma2, &xtx_star_inv, config)?;
 
     // Standard error for ρ (from GM theory)
     let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
 
-    // Z-values and p-values for β
-    let z_values: Vec<f64> = beta
-        .iter()
-        .zip(se_beta.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-    let p_values: Vec<f64> = z_values
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
-
-    // Z-value and p-value for ρ
-    let rho_z = if se_rho > 0.0 { rho / se_rho } else { 0.0 };
-    let rho_p = 2.0 * (1.0 - normal_cdf(rho_z.abs()));
-
-    // Convert vcov to Vec<Vec<f64>>
-    let vcov: Vec<Vec<f64>> = (0..k)
-        .map(|i| (0..k).map(|j| vcov_mat[[i, j]]).collect())
-        .collect();
-
-    Ok(SphetResult {
-        coefficients: beta.to_vec(),
-        coef_names: coef_names.to_vec(),
-        std_errors: se_beta.to_vec(),
-        z_values,
-        p_values,
-        vcov,
+    Ok(build_result(ResultParts {
+        coef_names,
+        config,
+        model: SphetModel::SpatialError,
+        beta,
+        vcov: &vcov_mat,
         lambda: None,
-        lambda_se: None,
-        lambda_z: None,
-        lambda_p: None,
-        rho: Some(rho),
-        rho_se: Some(se_rho),
-        rho_z: Some(rho_z),
-        rho_p: Some(rho_p),
+        rho: Some((rho, se_rho)),
         sigma2,
         residuals,
         fitted,
-        n_obs: n,
-        df: n - k,
-        model_type: SphetModel::SpatialError,
-        se_type: config.se_type,
-        iterations: 1,
-        converged: true,
-    })
+        df: residual_df(n, k)?,
+        instruments: Vec::new(),
+        warnings: Vec::new(),
+        gm: None,
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -728,30 +650,14 @@ fn estimate_sarar_gmm(
     let n = y.len();
     let k = x.ncols();
 
-    // Compute Wy
-    let wy = listw.lag(y);
-
-    // Build instrument matrix
-    let h = build_instruments(x, listw, config.instrument_order)?;
-
-    // Augmented regressor matrix Z = [X, Wy]
-    let mut z = Array2::zeros((n, k + 1));
-    z.slice_mut(s![.., ..k]).assign(x);
-    z.column_mut(k).assign(&wy);
+    let instruments = spatial_instruments(x, listw, config.instrument_order, coef_names)?;
+    let h = instruments.h.clone();
+    let (z, z_names) = with_spatial_lag(y, x, listw, coef_names)?;
+    let wy = z.column(k).to_owned();
 
     // Step 1: Initial S2SLS
-    let hh = xtx(&h.view());
-    let (hh_inv, _) = safe_inverse(&hh.view())?;
-    let hz = h.t().dot(&z);
-    let ph_z = h.dot(&hh_inv.dot(&hz));
-    let zph_z = z.t().dot(&ph_z);
-    let (zph_z_inv, _) = safe_inverse(&zph_z.view())?;
-    let hy = h.t().dot(y);
-    let ph_y = h.dot(&hh_inv.dot(&hy));
-    let zph_y = z.t().dot(&ph_y);
-    let delta1 = zph_z_inv.dot(&zph_y);
-
-    let u1 = y - &z.dot(&delta1);
+    let t1 = tsls(y, &z, &instruments, k, &z_names)?;
+    let u1 = y - &z.dot(&t1.delta);
 
     // Step 2: GM estimation of ρ
     let rho = estimate_rho_gm(&u1, listw, config)?;
@@ -789,112 +695,398 @@ fn estimate_sarar_gmm(
     let residuals = y - &fitted;
 
     // Standard errors
-    let (vcov_mat, se_delta) = compute_spatial_2sls_se(
-        &z_star,
-        &h_star,
-        &residuals_star,
-        sigma2,
-        &zph_z_star_inv,
-        config,
-    )?;
-
-    let se_beta: Array1<f64> = se_delta.slice(s![..k]).to_owned();
-    let se_lambda = se_delta[k];
+    let z_hat = {
+        let hh = xtx(&h_star.view());
+        let (hh_inv, _) = safe_inverse(&hh.view())?;
+        h_star.dot(&hh_inv.dot(&h_star.t().dot(&z_star)))
+    };
+    let vcov_mat = match config.se_type {
+        SphetSE::HAC => compute_spatial_2sls_se(&z_hat, &residuals_star, &zph_z_star_inv, config)?,
+        se_type => delta_vcov(&z_hat, &residuals_star, &zph_z_star_inv, se_type)?,
+    };
     let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
 
-    // Z-values and p-values
-    let z_values: Vec<f64> = beta
-        .iter()
-        .zip(se_beta.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-    let p_values: Vec<f64> = z_values
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
-
-    let lambda_z = if se_lambda > 0.0 {
-        lambda / se_lambda
-    } else {
-        0.0
-    };
-    let lambda_p = 2.0 * (1.0 - normal_cdf(lambda_z.abs()));
-
-    let rho_z = if se_rho > 0.0 { rho / se_rho } else { 0.0 };
-    let rho_p = 2.0 * (1.0 - normal_cdf(rho_z.abs()));
-
-    let vcov: Vec<Vec<f64>> = (0..k)
-        .map(|i| (0..k).map(|j| vcov_mat[[i, j]]).collect())
-        .collect();
-
-    Ok(SphetResult {
-        coefficients: beta.to_vec(),
-        coef_names: coef_names.to_vec(),
-        std_errors: se_beta.to_vec(),
-        z_values,
-        p_values,
-        vcov,
+    let mut warnings = Vec::new();
+    warnings.extend(instruments.dropped_warning());
+    Ok(build_result(ResultParts {
+        coef_names,
+        config,
+        model: SphetModel::SARAR,
+        beta,
+        vcov: &vcov_mat,
         lambda: Some(lambda),
-        lambda_se: Some(se_lambda),
-        lambda_z: Some(lambda_z),
-        lambda_p: Some(lambda_p),
-        rho: Some(rho),
-        rho_se: Some(se_rho),
-        rho_z: Some(rho_z),
-        rho_p: Some(rho_p),
+        rho: Some((rho, se_rho)),
         sigma2,
         residuals,
         fitted,
-        n_obs: n,
-        df: n - k - 1,
-        model_type: SphetModel::SARAR,
-        se_type: config.se_type,
-        iterations: 2,
-        converged: true,
-    })
+        df: residual_df(n, k + 1)?,
+        instruments: instruments.names,
+        warnings,
+        gm: None,
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Build instrument matrix [X, WX, W²X, ...].
-///
-/// Following Kelejian-Prucha, uses powers of W applied to X as instruments
-/// for the endogenous Wy.
-fn build_instruments(
+/// Everything a fit reports, in estimation order.
+struct ResultParts<'a> {
+    coef_names: &'a [String],
+    config: &'a SphetConfig,
+    model: SphetModel,
+    beta: Array1<f64>,
+    /// Covariance of (beta, lambda) when the model has a lambda, of beta otherwise.
+    vcov: &'a Array2<f64>,
+    lambda: Option<f64>,
+    /// (rho, its standard error)
+    rho: Option<(f64, f64)>,
+    sigma2: f64,
+    residuals: Array1<f64>,
+    fitted: Array1<f64>,
+    df: usize,
+    instruments: Vec<String>,
+    warnings: Vec<String>,
+    gm: Option<Convergence>,
+}
+
+/// z and its two-sided p-value; both NaN unless the standard error is finite and positive.
+fn wald(estimate: f64, se: f64) -> (f64, f64) {
+    if se.is_finite() && se > 0.0 {
+        let z = estimate / se;
+        (z, 2.0 * (1.0 - normal_cdf(z.abs())))
+    } else {
+        (f64::NAN, f64::NAN)
+    }
+}
+
+fn build_result(parts: ResultParts<'_>) -> SphetResult {
+    let ResultParts {
+        coef_names,
+        config,
+        model,
+        beta,
+        vcov,
+        lambda,
+        rho,
+        sigma2,
+        residuals,
+        fitted,
+        df,
+        instruments,
+        warnings,
+        gm,
+    } = parts;
+    let k = beta.len();
+    let se = |j: usize| vcov[[j, j]].max(0.0).sqrt();
+    let se_beta: Vec<f64> = (0..k).map(se).collect();
+    let (z_values, p_values): (Vec<f64>, Vec<f64>) =
+        beta.iter().zip(&se_beta).map(|(&b, &s)| wald(b, s)).unzip();
+    let lambda_stats = lambda.map(|l| {
+        let s = se(k);
+        let (z, p) = wald(l, s);
+        (s, z, p)
+    });
+    let rho_stats = rho.map(|(r, s)| {
+        let (z, p) = wald(r, s);
+        (z, p)
+    });
+    SphetResult {
+        coefficients: beta.to_vec(),
+        coef_names: coef_names.to_vec(),
+        std_errors: se_beta,
+        z_values,
+        p_values,
+        vcov: (0..k)
+            .map(|i| (0..k).map(|j| vcov[[i, j]]).collect())
+            .collect(),
+        lambda,
+        lambda_se: lambda_stats.map(|v| v.0),
+        lambda_z: lambda_stats.map(|v| v.1),
+        lambda_p: lambda_stats.map(|v| v.2),
+        rho: rho.map(|v| v.0),
+        rho_se: rho.map(|v| v.1),
+        rho_z: rho_stats.map(|v| v.0),
+        rho_p: rho_stats.map(|v| v.1),
+        sigma2,
+        n_obs: residuals.len(),
+        residuals,
+        fitted,
+        df,
+        model_type: model,
+        se_type: config.se_type,
+        iterations: gm.as_ref().map_or(0, |c| c.iterations),
+        converged: gm.as_ref().is_none_or(|c| c.converged),
+        warnings,
+        convergence: gm,
+        rho_moments: None,
+        instruments,
+        hac_kernel: None,
+        hac_bandwidth: None,
+    }
+}
+
+/// `n - p`, or `InsufficientData` when the fit has no residual degree of freedom.
+fn residual_df(n: usize, p: usize) -> EconResult<usize> {
+    n.checked_sub(p)
+        .filter(|df| *df > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: p + 1,
+            provided: n,
+            context: "spatial GMM: residual degrees of freedom".to_string(),
+        })
+}
+
+/// `SingularMatrix` naming the collinear regressors of `[1, X]`. The normal equations decide
+/// a full-rank design cheaply; only a doubtful one goes to the pivoted QR (`lm.fit`'s rule).
+fn refuse_collinear_regressors(x: &Array2<f64>, names: &[String]) -> EconResult<()> {
+    if normal_equations_inverse(x.view())?.is_some() {
+        return Ok(());
+    }
+    let aliased = Qr::decompose(x.view(), LM_QR_TOL)?.aliased();
+    match aliasing_message(&aliased, names) {
+        Some(message) => Err(EconError::SingularMatrix {
+            context: "sphet regressors".to_string(),
+            suggestion: format!("{message}; drop the collinear regressors"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// How a vector is projected on the kept instruments: one factorisation for the whole fit.
+enum Projector {
+    /// `(H'H)^-1`, when H is of full rank and well conditioned.
+    Normal(NormalInverse),
+    /// Pivoted QR of the kept columns, otherwise.
+    Qr(Qr),
+}
+
+/// The instruments of one fit: H of full column rank by construction.
+struct Instruments {
+    h: Array2<f64>,
+    names: Vec<String>,
+    /// Columns dropped as collinear with the others.
+    dropped: Vec<String>,
+    /// Columns before dropping.
+    candidates: usize,
+    projector: Projector,
+}
+
+impl Instruments {
+    /// `P_H Z`, column by column.
+    fn project(&self, z: ndarray::ArrayView2<'_, f64>) -> EconResult<Array2<f64>> {
+        match &self.projector {
+            Projector::Normal(normal) => {
+                Ok(self.h.dot(&normal.coefficients_multi(self.h.view(), z)))
+            }
+            Projector::Qr(qr) => {
+                let mut out = try_zeros2(z.nrows(), z.ncols(), "projected regressors")?;
+                for (j, col) in z.columns().into_iter().enumerate() {
+                    checkpoint()?;
+                    out.column_mut(j)
+                        .assign(&self.h.dot(&qr.coefficients(col)?));
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    fn dropped_warning(&self) -> Option<String> {
+        (!self.dropped.is_empty()).then(|| {
+            format!(
+                "instruments dropped as collinear with the others: {} (rank {} of {})",
+                self.dropped.join(", "),
+                self.h.ncols(),
+                self.candidates
+            )
+        })
+    }
+}
+
+/// H = [X, W X_(-1), W^2 X_(-1), ..., W^order X_(-1)]: the lags of the non-intercept columns only
+/// (column 0 of `x` is the intercept, and W 1 = 1 for row-standardised W). Columns that the
+/// pivoted QR (tol 1e-7, `lm.fit`'s rule) finds collinear with earlier ones are dropped. X is
+/// checked for full rank first and that QR pivots only later columns, so X stays H's leading block.
+fn spatial_instruments(
     x: &Array2<f64>,
     listw: &SpatialWeights,
     order: usize,
-) -> EconResult<Array2<f64>> {
+    names: &[String],
+) -> EconResult<Instruments> {
     let n = x.nrows();
     let k = x.ncols();
-    let n_cols = crate::resource::checked_len(&[k, order.saturating_add(1)], "instrument columns")?;
-
-    let mut h = crate::resource::try_zeros2(n, n_cols, "instrument matrix")?;
-
-    // Start with X
+    let lags = k - 1;
+    let n_cols = checked_len(&[lags, order], "instrument columns")?
+        .checked_add(k)
+        .ok_or_else(|| EconError::ResourceLimit("instrument columns overflow".to_string()))?;
+    let mut h = try_zeros2(n, n_cols, "instrument matrix")?;
     h.slice_mut(s![.., ..k]).assign(x);
+    let mut all_names: Vec<String> = names[..k].to_vec();
 
-    // Add WX, W²X, etc.
-    let mut wx = x.clone();
-    for o in 1..=order {
-        // Compute W^o X
-        let mut wx_new = Array2::zeros((n, k));
-        for col in 0..k {
-            let x_col = wx.column(col).to_owned();
-            let lag_col = listw.lag(&x_col);
-            wx_new.column_mut(col).assign(&lag_col);
+    for j in 1..k {
+        let mut lag = x.column(j).to_owned();
+        for o in 1..=order {
+            checkpoint()?;
+            lag = listw.lag(&lag);
+            let col = k + (o - 1) * lags + (j - 1);
+            h.column_mut(col).assign(&lag);
         }
-        wx = wx_new;
-
-        // Add to instrument matrix
-        let start_col = k * (o);
-        let end_col = k * (o + 1);
-        h.slice_mut(s![.., start_col..end_col]).assign(&wx);
+    }
+    for o in 1..=order {
+        for name in &names[1..k] {
+            all_names.push(if o == 1 {
+                format!("W {name}")
+            } else {
+                format!("W^{o} {name}")
+            });
+        }
     }
 
-    Ok(h)
+    if let Some(normal) = normal_equations_inverse(h.view())? {
+        return Ok(Instruments {
+            h,
+            names: all_names,
+            dropped: Vec::new(),
+            candidates: n_cols,
+            projector: Projector::Normal(normal),
+        });
+    }
+
+    let qr = Qr::decompose(h.view(), LM_QR_TOL)?;
+    let aliased = qr.aliased();
+    if aliased.is_empty() {
+        return Ok(Instruments {
+            h,
+            names: all_names,
+            dropped: Vec::new(),
+            candidates: n_cols,
+            projector: Projector::Qr(qr),
+        });
+    }
+    let keep: Vec<usize> = (0..n_cols).filter(|j| !aliased.contains(j)).collect();
+    let mut kept = try_zeros2(n, keep.len(), "instrument matrix")?;
+    for (out, &j) in keep.iter().enumerate() {
+        kept.column_mut(out).assign(&h.column(j));
+    }
+    let projector = Projector::Qr(Qr::decompose(kept.view(), LM_QR_TOL)?);
+    Ok(Instruments {
+        h: kept,
+        names: keep.iter().map(|&j| all_names[j].clone()).collect(),
+        dropped: aliased.iter().map(|&j| all_names[j].clone()).collect(),
+        candidates: n_cols,
+        projector,
+    })
+}
+
+/// Z = [X, Wy] and its column names (the last one is `Wy`).
+fn with_spatial_lag(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    listw: &SpatialWeights,
+    names: &[String],
+) -> EconResult<(Array2<f64>, Vec<String>)> {
+    let (n, k) = x.dim();
+    let mut z = try_zeros2(n, k + 1, "spatial 2SLS regressors")?;
+    z.slice_mut(s![.., ..k]).assign(x);
+    z.column_mut(k).assign(&listw.lag(y));
+    let mut z_names = names.to_vec();
+    z_names.push("Wy".to_string());
+    Ok((z, z_names))
+}
+
+/// One spatial 2SLS fit.
+struct Tsls {
+    delta: Array1<f64>,
+    /// `P_H Z`
+    zh: Array2<f64>,
+    /// `(Zh'Zh)^-1`
+    a: Array2<f64>,
+}
+
+/// `delta = (Zh'Zh)^-1 Zh'y` with Zh = P_H Z. The first `in_h` columns of Z are H's own leading
+/// columns (P_H leaves them unchanged), so they are copied rather than projected.
+fn tsls(
+    y: &Array1<f64>,
+    z: &Array2<f64>,
+    instruments: &Instruments,
+    in_h: usize,
+    z_names: &[String],
+) -> EconResult<Tsls> {
+    let (n, p) = z.dim();
+    let q = instruments.h.ncols();
+    if n <= q {
+        return Err(EconError::InsufficientData {
+            required: q + 1,
+            provided: n,
+            context: "spatial 2SLS: more instruments than observations".to_string(),
+        });
+    }
+    if q < p {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "spatial 2SLS needs {p} linearly independent instruments for {p} parameters, but the instruments ({}) have rank {q}; add regressors or raise instrument_order",
+                instruments.names.join(", ")
+            ),
+        });
+    }
+    let mut zh = try_zeros2(n, p, "projected regressors")?;
+    zh.slice_mut(s![.., ..in_h])
+        .assign(&z.slice(s![.., ..in_h]));
+    let projected = instruments.project(z.slice(s![.., in_h..]))?;
+    zh.slice_mut(s![.., in_h..]).assign(&projected);
+
+    match normal_equations_inverse(zh.view())? {
+        Some(normal) => {
+            let delta = normal.coefficients(zh.view(), y);
+            Ok(Tsls {
+                delta,
+                zh,
+                a: normal.inverse,
+            })
+        }
+        None => {
+            let ls = least_squares(zh.view(), y.view())?;
+            if let Some(message) = aliasing_message(&ls.aliased, z_names) {
+                return Err(EconError::SingularMatrix {
+                    context: "spatial 2SLS".to_string(),
+                    suggestion: format!("{message}; the instruments do not identify these columns"),
+                });
+            }
+            Ok(Tsls {
+                delta: ls.coefficients,
+                zh,
+                a: ls.unscaled_cov,
+            })
+        }
+    }
+}
+
+/// `sum_i u_i^2 p_i p_i'`: the White meat, from the scores `p * u`.
+fn scores(p: &Array2<f64>, u: &Array1<f64>) -> Array2<f64> {
+    let mut out = p.clone();
+    for (mut row, &ui) in out.rows_mut().into_iter().zip(u) {
+        row *= ui;
+    }
+    out
+}
+
+/// Classical `s2 A`, with s2 = u'u / (n - p), and White `A (sum u_i^2 p_i p_i') A`.
+fn delta_vcov(
+    p: &Array2<f64>,
+    u: &Array1<f64>,
+    a: &Array2<f64>,
+    se_type: SphetSE,
+) -> EconResult<Array2<f64>> {
+    match se_type {
+        SphetSE::Standard => {
+            let s2 = u.dot(u) / residual_df(p.nrows(), p.ncols())? as f64;
+            Ok(s2 * a)
+        }
+        _ => {
+            let meat = xtx(&scores(p, u).view());
+            Ok(a.dot(&meat).dot(a))
+        }
+    }
 }
 
 /// Transform a matrix: M* = (I - ρW)M
@@ -1072,109 +1264,46 @@ fn hac_max_lag(bw: usize, n: usize) -> usize {
     bw.min(n.saturating_sub(1))
 }
 
-/// Compute standard errors for spatial 2SLS.
-///
-/// Uses heteroscedasticity-robust formula from Kelejian-Prucha (2010).
+/// Row-order Newey-West covariance of a spatial 2SLS fit.
 fn compute_spatial_2sls_se(
-    z: &Array2<f64>,
-    h: &Array2<f64>,
+    z_hat: &Array2<f64>,
     residuals: &Array1<f64>,
-    sigma2: f64,
     zph_z_inv: &Array2<f64>,
     config: &SphetConfig,
-) -> EconResult<(Array2<f64>, Array1<f64>)> {
-    let n = z.nrows();
-    let k = z.ncols();
+) -> EconResult<Array2<f64>> {
+    let (n, k) = z_hat.dim();
+    let bw = config
+        .bandwidth
+        .unwrap_or_else(|| (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize);
 
-    match config.se_type {
-        SphetSE::Standard => {
-            // Var(δ̂) = σ² (Z'P_H Z)^{-1}
-            let vcov = sigma2 * zph_z_inv;
-            let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov.slice(s![..k - 1, ..k - 1]).to_owned(), se))
+    let s = scores(z_hat, residuals);
+    let mut omega = xtx(&s.view());
+
+    // Lags 1 to bw; lags >= n have no pairs in the sample and add nothing
+    for lag in 1..=hac_max_lag(bw, n) {
+        crate::resource::checkpoint()?;
+        let w = config.kernel.weight(lag, bw);
+        if w.abs() < 1e-15 {
+            continue;
         }
-        SphetSE::Robust => {
-            // Heteroscedasticity-robust: Var(δ̂) = (Z'P_H Z)^{-1} Ω̂ (Z'P_H Z)^{-1}
-            // where Ω̂ = Σᵢ ε̂ᵢ² ẑᵢ ẑᵢ'
-            let hh = xtx(&h.view());
-            let (hh_inv, _) = safe_inverse(&hh.view())?;
-            let hz = h.t().dot(z);
-            let z_hat = h.dot(&hh_inv.dot(&hz));
 
-            let mut omega = Array2::<f64>::zeros((k, k));
-            for i in 0..n {
-                let e_sq = residuals[i] * residuals[i];
-                for j in 0..k {
-                    for l in 0..k {
-                        omega[[j, l]] += e_sq * z_hat[[i, j]] * z_hat[[i, l]];
-                    }
+        let mut gamma_lag = Array2::<f64>::zeros((k, k));
+        for i in lag..n {
+            for j in 0..k {
+                for l in 0..k {
+                    gamma_lag[[j, l]] += s[[i, j]] * s[[i - lag, l]];
                 }
             }
-
-            let vcov = zph_z_inv.dot(&omega).dot(zph_z_inv);
-            let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov.slice(s![..k - 1, ..k - 1]).to_owned(), se))
         }
-        SphetSE::HAC => {
-            // HAC standard errors (Kelejian-Prucha 2007)
-            let bw = config
-                .bandwidth
-                .unwrap_or_else(|| (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize);
 
-            let hh = xtx(&h.view());
-            let (hh_inv, _) = safe_inverse(&hh.view())?;
-            let hz = h.t().dot(z);
-            let z_hat = h.dot(&hh_inv.dot(&hz));
-
-            // Score matrix
-            let mut scores = Array2::<f64>::zeros((n, k));
-            for i in 0..n {
-                for j in 0..k {
-                    scores[[i, j]] = z_hat[[i, j]] * residuals[i];
-                }
+        for j in 0..k {
+            for l in 0..k {
+                omega[[j, l]] += w * (gamma_lag[[j, l]] + gamma_lag[[l, j]]);
             }
-
-            // HAC covariance
-            let mut omega = Array2::<f64>::zeros((k, k));
-
-            // Lag 0
-            for i in 0..n {
-                for j in 0..k {
-                    for l in 0..k {
-                        omega[[j, l]] += scores[[i, j]] * scores[[i, l]];
-                    }
-                }
-            }
-
-            // Lags 1 to bw; lags >= n have no pairs in the sample and add nothing
-            for lag in 1..=hac_max_lag(bw, n) {
-                crate::resource::checkpoint()?;
-                let w = config.kernel.weight(lag, bw);
-                if w.abs() < 1e-15 {
-                    continue;
-                }
-
-                let mut gamma_lag = Array2::<f64>::zeros((k, k));
-                for i in lag..n {
-                    for j in 0..k {
-                        for l in 0..k {
-                            gamma_lag[[j, l]] += scores[[i, j]] * scores[[i - lag, l]];
-                        }
-                    }
-                }
-
-                for j in 0..k {
-                    for l in 0..k {
-                        omega[[j, l]] += w * (gamma_lag[[j, l]] + gamma_lag[[l, j]]);
-                    }
-                }
-            }
-
-            let vcov = zph_z_inv.dot(&omega).dot(zph_z_inv);
-            let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov.slice(s![..k - 1, ..k - 1]).to_owned(), se))
         }
     }
+
+    Ok(zph_z_inv.dot(&omega).dot(zph_z_inv))
 }
 
 /// Compute standard errors for SEM model.
@@ -1250,7 +1379,220 @@ fn compute_rho_se(
 mod tests {
     use super::*;
     use crate::spatial::{Neighbors, WeightStyle};
+    use p2a_validation::{Case, Check, Tol};
     use polars::prelude::*;
+
+    const N_SIM: usize = 150;
+    const XS: [&str; 2] = ["x1", "x2"];
+
+    fn column(ds: &Dataset, name: &str) -> Vec<f64> {
+        ds.df()
+            .column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+    fn knn5(coords: &[[f64; 2]]) -> SpatialWeights {
+        let pts: Vec<(f64, f64)> = coords.iter().map(|c| (c[0], c[1])).collect();
+        SpatialWeights::from_neighbors(&Neighbors::from_knn(&pts, 5), WeightStyle::RowStd)
+    }
+    fn coords_of(ds: &Dataset) -> Vec<[f64; 2]> {
+        column(ds, "cx")
+            .into_iter()
+            .zip(column(ds, "cy"))
+            .map(|(a, b)| [a, b])
+            .collect()
+    }
+    /// Case sphet_gmm_hac on sphet_sim.csv (n = 150). W = 5 nearest neighbours on (cx, cy),
+    /// row-standardised, as the case's .knn_w. The 5th and 6th neighbour distances differ by at
+    /// least 3.0e-5, so there are no ties.
+    fn sphet_case() -> (Case, Dataset, SpatialWeights, Vec<[f64; 2]>) {
+        let (case, ds) = crate::test_support::load_case("sphet_gmm_hac");
+        let coords = coords_of(&ds);
+        let w = knn5(&coords);
+        (case, ds, w, coords)
+    }
+    /// The same dataset and W for the property tests, which pin nothing from the case.
+    fn sim() -> (Dataset, SpatialWeights, Vec<[f64; 2]>) {
+        let path = p2a_validation::repo_path("validation/datasets/generated/sphet_sim.csv");
+        let ds = match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        };
+        let coords = coords_of(&ds);
+        let w = knn5(&coords);
+        (ds, w, coords)
+    }
+    fn config(model: SphetModel, se_type: SphetSE, het: bool) -> SphetConfig {
+        SphetConfig {
+            model,
+            se_type,
+            het,
+            ..Default::default()
+        }
+    }
+    /// R's delta order: (Intercept), x1, x2, then lambda for SAR/SARAR.
+    fn delta(r: &SphetResult) -> Vec<f64> {
+        r.coefficients.iter().copied().chain(r.lambda).collect()
+    }
+    fn delta_se(r: &SphetResult) -> Vec<f64> {
+        r.std_errors.iter().copied().chain(r.lambda_se).collect()
+    }
+
+    #[test]
+    fn test_validate_sphet_instruments() {
+        // R: H = cbind(X, W Xn, W^2 Xn), Xn = X[, -1]: qr(H)$rank = h_rank = 7 = h_cols. The
+        // earlier set cbind(X, W X, W^2 X) had h_old_cols = 9 columns of rank h_old_rank = 7
+        // (W 1 = 1 for row-standardised W).
+        let (case, ds, w, _) = sphet_case();
+        let r = run_sphet(
+            &ds,
+            "y_sar",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Standard, true),
+        )
+        .unwrap();
+        assert_eq!(
+            r.instruments,
+            [
+                "(Intercept)",
+                "x1",
+                "x2",
+                "W x1",
+                "W x2",
+                "W^2 x1",
+                "W^2 x2"
+            ]
+        );
+        assert_eq!(r.instruments.len() as f64, case.scalar("h_cols"));
+        assert_eq!(case.scalar("h_rank"), case.scalar("h_cols"));
+        assert_eq!(
+            (case.scalar("h_old_cols"), case.scalar("h_old_rank")),
+            (9.0, 7.0)
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        // the kept H has full column rank by construction
+        let x = Array2::from_shape_fn((N_SIM, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => column(&ds, "x1")[i],
+            _ => column(&ds, "x2")[i],
+        });
+        let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
+        let inst = spatial_instruments(&x, &w, 2, &names).unwrap();
+        let rank = Qr::decompose(inst.h.view(), LM_QR_TOL).unwrap().rank();
+        assert_eq!(rank, inst.h.ncols());
+    }
+
+    #[test]
+    fn test_validate_sphet_sar_classical() {
+        let (case, ds, w, _) = sphet_case();
+        let r = run_sphet(
+            &ds,
+            "y_sar",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Standard, true),
+        )
+        .unwrap();
+        assert_eq!(r.df, N_SIM - 4);
+        assert_eq!(
+            (r.iterations, r.converged, r.convergence.is_none()),
+            (0, true, true)
+        );
+        Check::new(&case)
+            .vector("sar_coef", &delta(&r), Tol::coef(N_SIM))
+            .vector("sar_se_classical", &delta_se(&r), Tol::se(N_SIM))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_sphet_sar_white() {
+        let (case, ds, w, _) = sphet_case();
+        let r = run_sphet(
+            &ds,
+            "y_sar",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Robust, true),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("sar_coef", &delta(&r), Tol::coef(N_SIM))
+            .vector("sar_se_white", &delta_se(&r), Tol::se(N_SIM))
+            .finish();
+    }
+
+    #[test]
+    fn test_sphet_rejects_unidentified_lag_and_collinear_regressors() {
+        let (ds, w, _) = sim();
+        // Intercept only: H = [1] cannot identify Wy (it used to be [1, W1, W^2 1], of rank 1,
+        // and an Ok fit).
+        let e = run_sphet(&ds, "y_sar", &[], &w, SphetConfig::default()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("instruments")),
+            "{e}"
+        );
+        // x3 = 2 x1: R's lm keeps x1 and aliases x3.
+        let mut df = ds.df().clone();
+        let x3: Vec<f64> = column(&ds, "x1").iter().map(|v| 2.0 * v).collect();
+        df.with_column(Column::new("x3".into(), x3)).unwrap();
+        for model in [
+            SphetModel::SpatialLag,
+            SphetModel::SpatialError,
+            SphetModel::SARAR,
+        ] {
+            let e = run_sphet(
+                &Dataset::new(df.clone()),
+                "y_sar",
+                &["x1", "x2", "x3"],
+                &w,
+                config(model, SphetSE::Robust, true),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&e, EconError::SingularMatrix { suggestion, .. } if suggestion.contains("x3")),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sphet_drops_collinear_instruments_with_a_warning() {
+        // A ring of 40 units, each with the next one as its only neighbour: W z = -z for the
+        // alternating column x2, so W x2 and W^2 x2 repeat x2 and are dropped.
+        let n = 40;
+        let nb = Neighbors::from_indices((0..n).map(|i| vec![(i + 1) % n]).collect());
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        let x1: Vec<f64> = (0..n)
+            .map(|i| ((i * 7) % 11) as f64 + 0.3 * (i % 3) as f64)
+            .collect();
+        let x2: Vec<f64> = (0..n)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x1[i] - x2[i] + ((i * 13) % 7) as f64 * 0.1)
+            .collect();
+        let d = Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap());
+        let r = run_sphet(
+            &d,
+            "y",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Robust, true),
+        )
+        .unwrap();
+        assert_eq!(r.instruments, ["(Intercept)", "x1", "x2", "W x1", "W^2 x1"]);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|m| m.contains("W x2, W^2 x2") && m.contains("rank 5 of 7")),
+            "{:?}",
+            r.warnings
+        );
+    }
 
     fn create_test_data() -> (Dataset, SpatialWeights) {
         // Create a 5x5 grid
@@ -1386,27 +1728,13 @@ mod tests {
     }
 
     #[test]
-    fn test_build_instruments() {
-        let (_, listw) = create_test_data();
-
-        let x = Array2::from_shape_fn((25, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 / 5.0 });
-
-        // Order 2: [X, WX, W²X]
-        let h = build_instruments(&x, &listw, 2).unwrap();
-        assert_eq!(h.ncols(), 6); // 2 * 3 = 6 columns
-
-        // Order 1: [X, WX]
-        let h1 = build_instruments(&x, &listw, 1).unwrap();
-        assert_eq!(h1.ncols(), 4); // 2 * 2 = 4 columns
-    }
-
-    #[test]
     fn instrument_matrix_too_large_is_an_error_not_an_abort() {
         let (_, listw) = create_test_data();
         let x = Array2::from_shape_fn((25, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 });
+        let names = ["(Intercept)".to_string(), "x".to_string()];
         for order in [usize::MAX / 4, usize::MAX] {
             assert!(matches!(
-                build_instruments(&x, &listw, order),
+                spatial_instruments(&x, &listw, order, &names),
                 Err(EconError::ResourceLimit(_))
             ));
         }
