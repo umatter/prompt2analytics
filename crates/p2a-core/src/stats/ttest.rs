@@ -57,7 +57,7 @@ use polars::prelude::DataFrame;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
 use crate::traits::estimator::{t_quantile, t_test_p_value, validate_level};
@@ -464,16 +464,6 @@ pub fn paired_t_test(
     result.estimate_2 = None; // For paired test, estimate is mean difference
 
     Ok(result)
-}
-
-/// Read a sample with its missing values dropped; a column with none left names itself and the test.
-fn sample_column(df: &DataFrame, name: &str, test: &str) -> EconResult<(Vec<f64>, MissingSummary)> {
-    let cols = ColumnRequest::new(df)
-        .numeric(name)
-        .na(NaPolicy::Omit)
-        .min_rows(1, &format!("{test}: column '{name}'"))
-        .extract()?;
-    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
 }
 
 /// Perform t-test using dataset columns.
@@ -1030,7 +1020,7 @@ mod tests {
         ));
     }
 
-    /// X-3: conf_level outside (0, 1) (95 for "95%") reached statrs inverse_cdf and panicked.
+    /// X-3: a level outside (0, 1) is refused, a percentage among them.
     #[test]
     fn test_t_test_rejects_level_95() {
         let x = [5.1, 4.8, 6.2, 5.5, 5.9, 4.7];
@@ -1074,7 +1064,7 @@ mod tests {
         );
     }
 
-    /// X-3 / R7: CIs at levels other than 0.95 through t_quantile; pinned to t.test.
+    /// X-3: CIs at levels other than 0.95 through t_quantile; pinned to t.test.
     #[test]
     fn test_validate_t_test_t3_levels() {
         use p2a_validation::{Check, Tol};

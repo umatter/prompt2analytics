@@ -74,7 +74,9 @@ p2a refuses these degenerate references (registry deviation STAT-26 on `ks_test_
 
 `KsDistribution` is the option table for the CLI and MCP surface (`normal`/`pnorm`/`norm`/`gaussian`,
 `uniform`/`punif`/`unif`, `exponential`/`pexp`/`exp`), and `TheoreticalDistribution::from_kind`
-applies R's defaults (mean 0, sd 1, min 0, max 1, rate 1).
+applies R's defaults (mean 0, sd 1, min 0, max 1, rate 1). A parameter the kind does not take is
+an `InvalidSpecification` naming both, as `ks.test` stops with "unused argument":
+`stats::ks::tests::test_ks_from_kind_refuses_parameters_of_another_kind`.
 
 ## Two-sample test with missing values and integer columns
 

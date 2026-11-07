@@ -47,11 +47,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
-use polars::prelude::DataFrame;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Result Structs
@@ -274,7 +273,8 @@ impl TheoreticalDistribution {
 
     /// The reference distribution from a kind and optional parameters, with R's defaults
     /// (mean 0, sd 1, min 0, max 1, rate 1); validated. The standard normal and U(0, 1) give
-    /// the parameter-free variants.
+    /// the parameter-free variants. A parameter the kind does not take is an error naming both,
+    /// as R's `ks.test` stops with "unused argument".
     pub fn from_kind(
         kind: KsDistribution,
         mean: Option<f64>,
@@ -283,6 +283,18 @@ impl TheoreticalDistribution {
         max: Option<f64>,
         rate: Option<f64>,
     ) -> EconResult<Self> {
+        let others: &[(&str, Option<f64>)] = match kind {
+            KsDistribution::Normal => &[("min", min), ("max", max), ("rate", rate)],
+            KsDistribution::Uniform => &[("mean", mean), ("sd", sd), ("rate", rate)],
+            KsDistribution::Exponential => {
+                &[("mean", mean), ("sd", sd), ("min", min), ("max", max)]
+            }
+        };
+        if let Some((param, _)) = others.iter().find(|(_, value)| value.is_some()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("KS reference {kind}: parameter '{param}' does not apply"),
+            });
+        }
         let dist = match kind {
             KsDistribution::Normal => {
                 let (mean, sd) = (mean.unwrap_or(0.0), sd.unwrap_or(1.0));
@@ -587,16 +599,6 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Dataset Interface
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/// Read a sample with its missing values dropped; a column with none left names itself and the test.
-fn sample_column(df: &DataFrame, name: &str, test: &str) -> EconResult<(Vec<f64>, MissingSummary)> {
-    let cols = ColumnRequest::new(df)
-        .numeric(name)
-        .na(NaPolicy::Omit)
-        .min_rows(1, &format!("{test}: column '{name}'"))
-        .extract()?;
-    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
-}
 
 /// Perform Kolmogorov-Smirnov test using dataset columns.
 ///
@@ -989,7 +991,7 @@ mod tests {
         ));
     }
 
-    /// STAT-26: invalid reference parameters are errors naming the parameter (they panicked in statrs).
+    /// STAT-26: invalid reference parameters are errors naming the parameter.
     #[test]
     fn test_ks_rejects_invalid_parameters() {
         use super::TheoreticalDistribution::*;
@@ -1243,6 +1245,75 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// R's ks.test stops on an argument the distribution does not take ("unused argument");
+    /// dropping it would test against a distribution other than the one asked for.
+    #[test]
+    fn test_ks_from_kind_refuses_parameters_of_another_kind() {
+        use super::TheoreticalDistribution as T;
+        use KsDistribution::{Exponential, Normal, Uniform};
+        let v = Some(1.5);
+        for (r, kind, param) in [
+            (
+                T::from_kind(Normal, None, None, v, None, None),
+                "normal",
+                "min",
+            ),
+            (
+                T::from_kind(Normal, None, None, None, v, None),
+                "normal",
+                "max",
+            ),
+            (
+                T::from_kind(Normal, None, None, None, None, v),
+                "normal",
+                "rate",
+            ),
+            (
+                T::from_kind(Uniform, v, None, None, None, None),
+                "uniform",
+                "mean",
+            ),
+            (
+                T::from_kind(Uniform, None, v, None, None, None),
+                "uniform",
+                "sd",
+            ),
+            (
+                T::from_kind(Uniform, None, None, None, None, v),
+                "uniform",
+                "rate",
+            ),
+            (
+                T::from_kind(Exponential, v, None, None, None, None),
+                "exponential",
+                "mean",
+            ),
+            (
+                T::from_kind(Exponential, None, v, None, None, None),
+                "exponential",
+                "sd",
+            ),
+            (
+                T::from_kind(Exponential, None, None, v, None, None),
+                "exponential",
+                "min",
+            ),
+            (
+                T::from_kind(Exponential, None, None, None, v, None),
+                "exponential",
+                "max",
+            ),
+        ] {
+            match r {
+                Err(EconError::InvalidSpecification { ref message }) => assert!(
+                    message.contains(kind) && message.contains(&format!("'{param}'")),
+                    "{message}"
+                ),
+                other => panic!("{kind} {param}: {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -16,28 +16,14 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::{NaPolicy, numeric_column};
+use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
 use crate::errors::{EconError, EconResult};
 use crate::traits::estimator::z_critical;
 
-/// Refuse a series with NaN (`NullValues`) or infinite values (`NonFiniteValues`), as R's
-/// `na.fail` refuses `NA`, naming the series.
-pub(crate) fn refuse_non_finite(x: &[f64], name: &str) -> EconResult<()> {
-    let nan = x.iter().filter(|v| v.is_nan()).count();
-    if nan > 0 {
-        return Err(EconError::NullValues {
-            column: name.to_string(),
-            count: nan,
-        });
+fn covariance_overflow() -> EconError {
+    EconError::InvalidSpecification {
+        message: "Covariances are too large for a double".to_string(),
     }
-    let inf = x.iter().filter(|v| v.is_infinite()).count();
-    if inf > 0 {
-        return Err(EconError::NonFiniteValues {
-            column: name.to_string(),
-            count: inf,
-        });
-    }
-    Ok(())
 }
 
 /// Type of autocorrelation/covariance to compute.
@@ -353,14 +339,21 @@ pub fn acf(
     }
 
     let values = match acf_type {
-        AcfType::Covariance => autocovariance(x, max_lag, demean, adjusted),
+        AcfType::Covariance => {
+            let acvf = autocovariance(x, max_lag, demean, adjusted);
+            if acvf.iter().any(|g| !g.is_finite()) {
+                return Err(covariance_overflow());
+            }
+            acvf
+        }
         AcfType::Correlation => {
             let acvf = autocovariance(x, max_lag, demean, adjusted);
             let var = acvf[0];
-            if var.is_nan() || var <= 0.0 {
+            if !var.is_finite() || var <= 0.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "Variance is zero or negative; cannot compute autocorrelation"
-                        .to_string(),
+                    message:
+                        "Variance is zero, negative or overflows; cannot compute autocorrelation"
+                            .to_string(),
                 });
             }
             acvf.into_iter().map(|g| g / var).collect()
@@ -370,9 +363,10 @@ pub fn acf(
             let acf_vals = {
                 let acvf = autocovariance(x, max_lag, demean, adjusted);
                 let var = acvf[0];
-                if var.is_nan() || var <= 0.0 {
+                if !var.is_finite() || var <= 0.0 {
                     return Err(EconError::InvalidSpecification {
-                        message: "Variance is zero or negative; cannot compute PACF".to_string(),
+                        message: "Variance is zero, negative or overflows; cannot compute PACF"
+                            .to_string(),
                     });
                 }
                 acvf.into_iter().map(|g| g / var).collect::<Vec<_>>()
@@ -447,9 +441,9 @@ pub fn pacf(x: &[f64], lag_max: Option<usize>) -> EconResult<PacfResult> {
     // First compute ACF
     let acvf = autocovariance(x, max_lag, true, false);
     let var = acvf[0];
-    if var.is_nan() || var <= 0.0 {
+    if !var.is_finite() || var <= 0.0 {
         return Err(EconError::InvalidSpecification {
-            message: "Variance is zero or negative; cannot compute PACF".to_string(),
+            message: "Variance is zero, negative or overflows; cannot compute PACF".to_string(),
         });
     }
     let acf_vals: Vec<f64> = acvf.into_iter().map(|g| g / var).collect();
@@ -637,19 +631,25 @@ pub fn ccf(
     let ccvf = cross_covariance(x, y, max_lag);
 
     let (lags, values): (Vec<i32>, Vec<f64>) = match ccf_type {
-        CcfType::Covariance => ccvf.into_iter().unzip(),
+        CcfType::Covariance => {
+            if ccvf.iter().any(|(_, c)| !c.is_finite()) {
+                return Err(covariance_overflow());
+            }
+            ccvf.into_iter().unzip()
+        }
         CcfType::Correlation => {
             // Compute variances of x and y
             let var_x = autocovariance(x, 0, true, false)[0];
             let var_y = autocovariance(y, 0, true, false)[0];
 
-            if var_x.is_nan() || var_x <= 0.0 || var_y.is_nan() || var_y <= 0.0 {
+            if !var_x.is_finite() || var_x <= 0.0 || !var_y.is_finite() || var_y <= 0.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "One or both series have zero variance".to_string(),
+                    message: "One or both series have a variance that is zero or overflows"
+                        .to_string(),
                 });
             }
 
-            let normalizer = (var_x * var_y).sqrt();
+            let normalizer = var_x.sqrt() * var_y.sqrt();
             ccvf.into_iter()
                 .map(|(lag, cov)| (lag, cov / normalizer))
                 .unzip()
@@ -985,7 +985,7 @@ mod tests {
         check.finish();
     }
 
-    /// TOOL-11: NaN or ±Inf gave all-NaN results (acf, pacf) and a panic in the MCP ccf handler. R: na.fail.
+    /// TOOL-11: NaN or ±Inf are refused, as R's na.fail refuses NA.
     #[test]
     fn test_acf_rejects_non_finite() {
         let ok = [1.0, 2.3, 1.7, 3.1, 2.2, 1.4, 2.8];
@@ -1015,7 +1015,58 @@ mod tests {
         }
     }
 
-    /// TOOL-11: a NaN cell in a dataset column is refused with the column name (the only allowed inline NaN fixture, T2 2.2);
+    /// A variance that overflows is refused; dividing by it would give an all-NaN or all-zero
+    /// result.
+    #[test]
+    fn test_acf_refuses_overflowing_variance() {
+        let x = [
+            1e200, -2.3e200, 1.7e200, 3.1e200, -2.2e200, 1.4e200, 2.8e200,
+        ];
+        let y = [1.0, 2.3, 1.7, 3.1, 2.2, 1.4, 2.8];
+        for t in [AcfType::Correlation, AcfType::Covariance, AcfType::Partial] {
+            assert!(
+                matches!(
+                    acf(&x, Some(2), t, true, false),
+                    Err(EconError::InvalidSpecification { .. })
+                ),
+                "{t:?}"
+            );
+        }
+        assert!(matches!(
+            pacf(&x, Some(2)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        for (a, b, t) in [
+            (&x, &y, CcfType::Correlation),
+            (&y, &x, CcfType::Correlation),
+            (&x, &x, CcfType::Correlation),
+            (&x, &x, CcfType::Covariance),
+        ] {
+            assert!(
+                matches!(
+                    ccf(a, b, Some(2), t),
+                    Err(EconError::InvalidSpecification { .. })
+                ),
+                "{t:?}"
+            );
+        }
+    }
+
+    /// The cross-correlation does not depend on the scale, including one where the product of
+    /// the two variances overflows while each variance fits.
+    #[test]
+    fn test_ccf_is_scale_free() {
+        let x = [1.0, -2.3, 1.7, 3.1, -2.2, 1.4, 2.8];
+        let y = [0.4, 2.3, -1.7, 1.1, 2.2, -1.4, 0.8];
+        let base = ccf(&x, &y, Some(2), CcfType::Correlation).unwrap();
+        let (big_x, big_y) = (x.map(|v| v * 1e100), y.map(|v| v * 1e100));
+        let scaled = ccf(&big_x, &big_y, Some(2), CcfType::Correlation).unwrap();
+        for (a, b) in scaled.values.iter().zip(&base.values) {
+            assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+        }
+    }
+
+    /// TOOL-11: a NaN cell in a dataset column is refused with the column name (a NaN cell can only be built inline);
     /// integer columns are accepted.
     #[test]
     fn test_run_acf_refuses_nan_cell() {
@@ -1040,7 +1091,7 @@ mod tests {
         assert!(run_acf(&ds, "i", Some(2), AcfType::Correlation).is_ok());
     }
 
-    /// STAT-62 (acf), TOOL-11, R7: acf, autocovariance, pacf and ccf pinned to R; the white-noise bound is qnorm(0.975)/sqrt(n).
+    /// STAT-62 (acf), TOOL-11: acf, autocovariance, pacf and ccf pinned to R; the white-noise bound is qnorm(0.975)/sqrt(n).
     #[test]
     fn test_validate_acf_pacf_ccf_t3() {
         let (case, ds) = crate::test_support::load_case("stat_ts_acf_spline_t3");

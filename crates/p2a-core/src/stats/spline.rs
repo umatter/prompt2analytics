@@ -1219,7 +1219,7 @@ mod tests {
         // deviation STAT-69 / STAT-40: FMM, periodic and monotone splines are not pinned (Tier 4).
     }
 
-    /// R4: n = 1 divided 0 by 0; R's seq.int(xmin, xmax, length.out = 1) is xmin.
+    /// n = 1 divided 0 by 0; R's seq.int(xmin, xmax, length.out = 1) is xmin.
     #[test]
     fn test_validate_spline_t3_n_one() {
         use crate::data::columns::{NaPolicy, numeric_column};

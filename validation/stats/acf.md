@@ -92,6 +92,11 @@ float column counts as missing.
 `y`: `stats::acf::tests::test_acf_rejects_non_finite`, `stats::acf::tests::test_run_acf_refuses_nan_cell`.
 Before, these passed the zero-variance guards and gave all-NaN results.
 
+A variance or covariance too large for a double is refused too (`InvalidSpecification`), where R
+returns NaN or Inf: `stats::acf::tests::test_acf_refuses_overflowing_variance`. `ccf` takes the two
+standard deviations separately, so a product of variances that overflows does not zero the result:
+`stats::acf::tests::test_ccf_is_scale_free`.
+
 ## Known Differences
 
 1. **PACF Algorithm**: R uses Yule-Walker equations while we use Durbin-Levinson recursion. The results agree to the pinned tolerance.

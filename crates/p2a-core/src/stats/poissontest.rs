@@ -104,15 +104,15 @@ impl std::fmt::Display for PoissonTestResult {
 
 /// Largest event count the one-sample test accepts: 2^52 = 4_503_599_627_370_496.
 ///
-/// statrs evaluates the Poisson CDF with an incomplete gamma series whose index starts at the count and grows by 1.0 in `f64`. From about
-/// 2^53 on, adding 1.0 no longer changes the index and the series never finishes, a loop no
-/// deadline can interrupt. 2^52 leaves the index room to grow exactly; a test at the bound itself
-/// still takes seconds. The bound guarantees only that the call returns: the p-value drifts from
-/// about 2^40. The two-sample test
-/// does not use that series: its p-value and interval use the binomial CDF, whose continued
-/// fraction statrs stops after 140 terms, and every loop of its interval search has a fixed
-/// iteration cap. Its counts only need a total that fits in `u64`; that the test returns says
-/// nothing about its accuracy at large totals.
+/// statrs evaluates the Poisson CDF with an incomplete gamma series whose index starts at the
+/// count and grows by 1.0 in `f64`. From about 2^53 on, adding 1.0 no longer changes the index
+/// and the series never finishes, a loop no deadline can interrupt. 2^52 leaves the index room to
+/// grow exactly; a test at the bound itself still takes seconds. The bound guarantees only that
+/// the call returns: the p-value drifts from about 2^40. The two-sample test does not use that
+/// series: its p-value and interval use the binomial CDF, whose continued fraction statrs stops
+/// after 140 terms, and every loop of its interval search has a fixed iteration cap. Its counts
+/// only need a total that fits in `u64`; that the test returns says nothing about its accuracy at
+/// large totals.
 pub const POISSON_MAX_ONE_SAMPLE_COUNT: u64 = 1 << 52;
 
 /// Refuse a one-sample count above [`POISSON_MAX_ONE_SAMPLE_COUNT`] before statrs sees it.
@@ -260,8 +260,8 @@ pub fn poisson_test(
         });
     }
 
-    // Each check is written so that NaN fails it. A NaN conf_level and an infinite T or r used to
-    // reach statrs and panic there (its gamma quantile, the incomplete gamma function).
+    // Each check is written so that NaN fails it, and none of these values reaches statrs (its
+    // gamma quantile, the incomplete gamma function).
     if let Some(&ti) = t.iter().find(|&&ti| !(ti.is_finite() && ti > 0.0)) {
         return Err(EconError::InvalidSpecification {
             message: format!("time base T must be finite and > 0, got {ti:?}"),
@@ -299,8 +299,8 @@ fn poisson_test_one_sample(
     // Expected count under H₀
     let expected = r * t;
     if !(expected.is_finite() && expected > 0.0) {
-        // statrs accepts an infinite Poisson mean and then panics in its CDF; a mean that
-        // underflows to 0 it refuses with a message that names neither r nor T.
+        // statrs does not handle an infinite Poisson mean in its CDF; a mean that underflows to
+        // 0 it refuses with a message that names neither r nor T.
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "the expected count r * T = {r:?} * {t:?} = {expected:?} must be finite and > 0"
@@ -830,8 +830,8 @@ mod tests {
         }
     }
 
-    /// FU-1: the two-sample test conditions on x[0] + x[1]. A total that does not fit in u64 used
-    /// to panic in debug builds ("attempt to add with overflow") and wrap in release builds.
+    /// FU-1: the two-sample test conditions on x[0] + x[1]. A total that does not fit in u64 is
+    /// refused.
     #[test]
     fn test_poisson_two_sample_refuses_overflowing_total() {
         for x in [
@@ -910,9 +910,7 @@ mod tests {
         assert!(upper > 3.68 && upper < 3.69, "{upper}"); // qgamma(0.975, 1) = 3.688879
     }
 
-    /// Non-finite or out-of-range T, r and conf_level used to reach statrs and panic there
-    /// (conf_level NaN in Gamma::inverse_cdf; T or r infinite, or r * T overflowing, in the
-    /// incomplete gamma function). The wording matches T3-WP40's planned validation.
+    /// Non-finite or out-of-range T, r and conf_level are refused before statrs sees them.
     #[test]
     fn test_poisson_refuses_non_finite_parameters() {
         for level in [f64::NAN, 95.0, 1.0, 0.0] {
@@ -1136,7 +1134,7 @@ mod tests {
     /// came out 2.8e-7 to 2.6e-6 above; the rule is relative now, see
     /// test_validate_poisson_rate_ratio_interval_at_levels_near_one.) At totals of 1e11 statrs'
     /// binomial CDF is itself off: the two bounds there are 2.9e-5 and 4.7e-5 from R, so 1e-4
-    /// (STAT-60 / T3-WP40).
+    /// (STAT-60).
     #[test]
     fn test_poisson_rate_ratio_interval_beyond_old_odds_limits() {
         let upper = |x: [u64; 2], t: [f64; 2], conf_level: f64| {
@@ -1204,7 +1202,7 @@ mod tests {
         // Totals of 1e16 and 1e17 are beyond where statrs' CDF is accurate. These cases come out
         // as the limits because its tails at the limits happen to fall on the right side of
         // alpha / 2 there; exact tails would give the same, since the true bounds lie beyond the
-        // range too. So they pin that result, and a change to the tail or the range (T3-WP40)
+        // range too. So they pin that result, and a change to the tail or the range
         // has to revisit them. At 5e15 to 9e15 statrs' tails fall on the wrong side, and
         // x = [1, 5e15] and [5e15, 1] came back inverted (see
         // test_poisson_rate_ratio_interval_contains_the_estimate).
@@ -1231,7 +1229,7 @@ mod tests {
         assert_relative(lower, 7.9957326545e9, 1e-4, "x = [1e11, 1] lower");
         // At 95% the upper bound of x = [m, 1] passes 1e15 from m of about 2.5e13 (R 1.18e15,
         // 1.97e15 and 3.95e15 here). The resolved lower bounds are 0.5% to 1.9% from R's, which is
-        // how accurate statrs' binomial CDF is at these totals (STAT-60 / T3-WP40), hence 3e-2.
+        // how accurate statrs' binomial CDF is at these totals (STAT-60), hence 3e-2.
         // Two of them (3e13, 5e13) lie above R's, inside its interval.
         for (x, lower_r) in [
             ([30_000_000_000_000, 1], 5.3844077761e12),
@@ -1252,7 +1250,7 @@ mod tests {
     /// around 1 and x = [1e8, 1e8] (1.0000038, 0.9999962). Exact tails never put a bound on that
     /// side (see rate_ratio_ci), so such a bound is widened to 0 or infinity now, and the interval
     /// contains the estimate and is not inverted. It need not contain R's interval, and which
-    /// bound is widened depends on statrs' errors, which a T3-WP40 tail fix may change, so only
+    /// bound is widened depends on statrs' errors, which a change to the tails may change, so only
     /// the containment is asserted, for T = [1, 1] and T = [1, 3], plus the one bound statrs gets
     /// right in a case near x[0] = x[1] (x = [2e7, 2e7]: R's upper bound 1.000620037177023).
     #[test]

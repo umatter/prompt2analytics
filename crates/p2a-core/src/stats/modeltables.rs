@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(r.group_names, ["a", "b", "c"]);
     }
 
-    /// STAT-83: a shorter or longer row panicked with an index out of bounds.
+    /// STAT-83: a shorter or longer row is refused.
     #[test]
     fn test_modeltables_ragged_is_error() {
         let a = vec!["A1".to_string(), "A2".to_string()];

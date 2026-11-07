@@ -5,7 +5,7 @@
 //! Spearman's rho.
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, refuse_non_finite};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::Alternative;
@@ -53,18 +53,6 @@ fn refuse_constant(values: &[f64], what: &str) -> EconResult<()> {
         }
         _ => Ok(()),
     }
-}
-
-/// Refuse infinite values, for which r would be NaN.
-fn refuse_inf(values: &[f64], column: &str) -> EconResult<()> {
-    let count = values.iter().filter(|v| v.is_infinite()).count();
-    if count > 0 {
-        return Err(EconError::NonFiniteValues {
-            column: column.to_string(),
-            count,
-        });
-    }
-    Ok(())
 }
 
 /// One-sided p-value from a two-sided one, for a statistic symmetric under the null.
@@ -186,8 +174,9 @@ pub fn cor_test(
 
     validate_level(conf_level, "conf_level")?;
 
-    refuse_inf(&x_clean, "x")?;
-    refuse_inf(&y_clean, "y")?;
+    // Missing values are gone; an infinite value would make r NaN.
+    refuse_non_finite(&x_clean, "x")?;
+    refuse_non_finite(&y_clean, "y")?;
     refuse_constant(&x_clean, "x")?;
     refuse_constant(&y_clean, "y")?;
 
@@ -1231,7 +1220,7 @@ mod tests {
         ));
     }
 
-    /// X-3: a constant column made r NaN and statrs' beta_reg panicked (Pearson, Spearman); Kendall returned tau 0.
+    /// X-3: a constant column is refused by every method; r would be undefined, as R's cor.test finds.
     #[test]
     fn test_cor_test_constant_column() {
         let x = [1.0, 2.0, 3.5, 4.0, 5.2, 6.1];

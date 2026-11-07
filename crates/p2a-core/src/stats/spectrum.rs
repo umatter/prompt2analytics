@@ -327,7 +327,7 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         });
     }
 
-    crate::stats::acf::refuse_non_finite(x, "x")?;
+    crate::data::columns::refuse_non_finite(x, "x")?;
 
     if !config.pad_ratio.is_finite() {
         return Err(EconError::InvalidSpecification {
@@ -736,7 +736,7 @@ pub fn spectrum_ar(
 
     // Without this a NaN slips past the zero-variance check (`NaN <= 0.0` is
     // false) and a given order returns an all-NaN spectrum.
-    crate::stats::acf::refuse_non_finite(x, "x")?;
+    crate::data::columns::refuse_non_finite(x, "x")?;
 
     // Fit AR model using Yule-Walker equations
     let max_order = order.unwrap_or_else(|| {
@@ -1771,7 +1771,7 @@ mod tests {
         Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
     }
 
-    /// STAT-38: an AR spectrum has no chi-square df (R's spec.ar has none); asking for its interval panicked.
+    /// STAT-38: an AR spectrum has no chi-square df (R's spec.ar has none), so it has no interval.
     #[test]
     fn test_spectrum_ar_no_ci() {
         let ds = t3_dataset();
@@ -1779,7 +1779,7 @@ mod tests {
             let r = run_spectrum_ar(&ds, "x", order, Some(50)).unwrap();
             assert!(!r.df.is_finite());
             assert_eq!(r.confidence_interval_multipliers(0.95).unwrap(), None);
-            let (lo, hi) = r.confidence_multipliers(0.95); // old API: no panic, no interval
+            let (lo, hi) = r.confidence_multipliers(0.95); // old API: no interval
             assert!(lo.is_nan() && hi.is_nan());
             let text = r.to_string();
             assert!(text.contains("Degrees of Freedom: not defined"), "{text}");
@@ -1800,7 +1800,7 @@ mod tests {
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("stat_spectrum_t3");
         let r = run_spectrum(&ds, "x", SpectrumConfig::with_spans(vec![3, 3])).unwrap(); // taper 0.1, detrend
-        // closed-form chi-square quantiles only (WP02 helpers: <= 8e-13), so a tight tolerance
+        // closed-form chi-square quantiles only (t_quantile family: <= 8e-13), so a tight tolerance
         const CI_TOL: Tol = Tol::new(1e-10, 0.0);
         let mut ci95 = Vec::new();
         let mut ci90 = Vec::new();

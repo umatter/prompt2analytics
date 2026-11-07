@@ -54,12 +54,11 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::SignificanceLevel;
 use crate::traits::estimator::normal_quantile;
-use polars::prelude::DataFrame;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Constants of swilk.c (Royston 1995, AS R94)
@@ -257,16 +256,6 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
         reject_normality: p_value < 0.05,
         missing: MissingSummary::none(n),
     })
-}
-
-/// Read a sample with its missing values dropped; a column with none left names itself and the test.
-fn sample_column(df: &DataFrame, name: &str, test: &str) -> EconResult<(Vec<f64>, MissingSummary)> {
-    let cols = ColumnRequest::new(df)
-        .numeric(name)
-        .na(NaPolicy::Omit)
-        .min_rows(1, &format!("{test}: column '{name}'"))
-        .extract()?;
-    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
 }
 
 /// Perform Shapiro-Wilk test using a dataset column.
@@ -561,8 +550,7 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
         let rows = ds.df().height(); // 5000
         // Float64 columns first (pre-fix: the padding was read as 4995 zeros), Int64 columns
-        // last (pre-fix: NonNumericColumn), so a pre-fix run reports the wrong numbers before
-        // it panics.
+        // last (pre-fix: NonNumericColumn), so a pre-fix run reports the wrong numbers first.
         let (int_cols, float_cols): (Vec<&str>, Vec<&str>) = SHAPIRO_COLUMNS
             .into_iter()
             .partition(|c| ["n3_124", "n3_123", "n25_int"].contains(c));

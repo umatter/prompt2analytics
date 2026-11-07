@@ -248,8 +248,9 @@ pub fn mahalanobis_with(
             EconError::SingularMatrix { context, .. } => EconError::SingularMatrix {
                 context,
                 suggestion: "drop the redundant column(s) (R's mahalanobis stops: 'system is \
-                             exactly singular'), or pass SingularCovariance::Generalized for \
-                             distances on the rank-r subspace (chi-square df = rank)"
+                             exactly singular'), or request the generalized-inverse option \
+                             (singular covariance policy = generalized) for distances on the \
+                             rank-r subspace (chi-square df = rank)"
                     .to_string(),
             },
             other => other,
@@ -586,7 +587,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Validate against R's mahalanobis() function
+    /// Property: with the sample covariance the distances sum to (n - 1) p; not an R pin.
     #[test]
     fn test_mahalanobis_distance_sum_identity() {
         // With the sample covariance the distances sum to (n - 1) p.
@@ -686,7 +687,7 @@ mod tests {
                     suggestion,
                 } => {
                     assert!(context.contains(rank), "{context}");
-                    assert!(suggestion.contains("Generalized"), "{suggestion}");
+                    assert!(suggestion.contains("generalized"), "{suggestion}");
                 }
                 other => panic!("expected SingularMatrix, got {other}"),
             }
@@ -699,7 +700,7 @@ mod tests {
         ));
     }
 
-    /// R4: the covariance needs n >= 2 rows (n - 1 = 0 divided by zero).
+    /// The covariance needs n >= 2 rows (n - 1 = 0 divided by zero).
     #[test]
     fn test_mahalanobis_needs_two_rows_for_covariance() {
         let x = ndarray::array![[1.0, 2.0]];

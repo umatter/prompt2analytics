@@ -152,11 +152,14 @@ pub use friedman::{FriedmanResult, friedman_test, run_friedman_test};
 pub use isoreg::{IsoregResult, isoreg, isoreg_predict, isoreg_y, run_isoreg};
 pub use kruskal::{KruskalWallisResult, kruskal_test, run_kruskal_test};
 pub use ks::{
-    KsTestResult, TheoreticalDistribution, ks_test, ks_test_one_sample, ks_test_two_sample,
-    run_ks_test,
+    KsDistribution, KsTestResult, TheoreticalDistribution, ks_test, ks_test_one_sample,
+    ks_test_two_sample, run_ks_test,
 };
 pub use loglin::{LoglinResult, loglin, loglin_independence, loglin_saturated, run_loglin};
-pub use mahalanobis::{MahalanobisResult, mahalanobis, mahalanobis_single, run_mahalanobis};
+pub use mahalanobis::{
+    MahalanobisResult, SingularCovariance, mahalanobis, mahalanobis_single, mahalanobis_with,
+    run_mahalanobis, run_mahalanobis_with,
+};
 pub use manova::{ManovaResult, ManovaTestResult, ManovaTestStatistic, manova_one_way, run_manova};
 pub use mantelhaen::{
     CmhAlternative, MantelHaenszelResult, StratumStats, Table2x2, mantelhaen_test,
