@@ -1,14 +1,13 @@
 //! Spatial GMM with Heteroscedasticity-Robust Estimation (sphet).
 //!
 //! Pure Rust implementation of spatial models estimated via Generalized Method
-//! of Moments (GMM) that are robust to heteroscedasticity, following the approach
-//! of Kelejian and Prucha (1998, 1999, 2010) and Arraiz et al. (2010).
+//! of Moments (GMM), following Kelejian and Prucha (1998, 1999, 2007, 2010).
 //!
 //! # Overview
 //!
-//! This module provides GMM-based estimation for spatial autoregressive models
-//! that does not assume homoscedastic errors. The key advantage over ML estimation
-//! is robustness to heteroscedasticity of unknown form.
+//! This module provides GMM-based estimation for spatial autoregressive models. With the
+//! default `het = true` it does not assume homoskedastic errors, the key advantage over ML
+//! estimation.
 //!
 //! # Models Supported
 //!
@@ -32,31 +31,44 @@
 //!
 //! # Estimation Procedure
 //!
-//! The Kelejian-Prucha approach uses a multi-step procedure:
+//! 1. **Spatial 2SLS** (lag and SARAR models): β and λ by 2SLS with the instruments
+//!    `[1, X, WX, ..., W^order X]` over the non-constant columns of X (W 1 = 1 for a
+//!    row-standardised W, so the constant is never lagged); instruments that the pivoted QR
+//!    finds collinear are dropped with a warning, and too few is an error.
 //!
-//! 1. **Step 1 (Initial 2SLS)**: Estimate β and λ using spatial 2SLS with
-//!    instruments [X, WX, W²X, ...]
+//! 2. **GM for ρ** (error and SARAR models), on the first-step residuals (OLS for the error
+//!    model). `het = true` uses the two moments of Kelejian-Prucha (2010),
+//!    E[ε̄'ε̄ - ε' diag(W'W) ε] = 0 and E[ε̄'ε] = 0 with ε̄ = Wε, which hold under heteroskedasticity
+//!    of unknown form; `het = false` uses the three homoskedastic moments of Kelejian-Prucha
+//!    (1999). Both objectives are quartics in ρ (σ² enters linearly and is concentrated out) and
+//!    are minimised exactly on [-0.99, 0.99]: the interior roots of the derivative cubic, by a
+//!    safeguarded Newton method, and the two bounds. A solution at a bound is reported as not
+//!    converged, with a warning and no SE of ρ.
 //!
-//! 2. **Step 2 (GM for ρ)**: Use residuals to estimate the spatial error
-//!    parameter ρ via Generalized Moments, exploiting moment conditions:
-//!    - E[ε'ε/n] = σ²
-//!    - E[ε'Wε/n] = 0
-//!    - E[(Wε)'(Wε)/n] = σ² tr(W'W)/n
-//!
-//! 3. **Step 3 (Cochrane-Orcutt)**: Transform data using estimated ρ and
-//!    re-estimate β and λ via 2SLS on the transformed model.
+//! 3. **Second step.** The error model: OLS of (I - ρW)y on (I - ρW)X (feasible GLS). SARAR: 2SLS
+//!    of (I - ρW)y on (I - ρW)Z with the instruments of step 1 (GS2SLS, Kelejian-Prucha 1998).
 //!
 //! # Standard Errors
 //!
-//! Standard errors are computed using the heteroscedasticity-robust
-//! variance estimator from Kelejian and Prucha (2010), which does not
-//! assume a specific form for the error variance.
+//! - **Classical:** s² (Ẑ'Ẑ)⁻¹, s² = û'û / (n - p).
+//! - **Robust:** the White (HC0) sandwich (Ẑ'Ẑ)⁻¹ Σ û_i² ẑ_i ẑ_i' (Ẑ'Ẑ)⁻¹.
+//! - **HAC:** the spatial HAC of Kelejian & Prucha (2007), robust to both heteroskedasticity and
+//!   spatial correlation of unknown form: the score cross-products of units i and j are weighted
+//!   by a kernel of their distance d_ij, from unit coordinates or a distance matrix, with a fixed
+//!   distance bandwidth or each unit's farthest W-neighbour as its bandwidth. It does not depend
+//!   on the order of the rows.
+//! - **SE of ρ:** the GMM sandwich of the identity-weighted GM estimator, with the variance of
+//!   the moments of Kelejian-Prucha (2010, Theorem 2). For the error model the first-step term is
+//!   its value under exogenous X, zero.
 //!
-//! Alternatively, spatial HAC standard errors (Kelejian & Prucha, 2007) are robust to both
-//! heteroscedasticity and spatial correlation of unknown form: the score cross-products of units
-//! i and j are weighted by a kernel of their distance d_ij, from unit coordinates or a distance
-//! matrix, with a fixed distance bandwidth or each unit's farthest W-neighbour as its bandwidth.
-//! They do not depend on the order of the rows.
+//! # Differences from sphet
+//!
+//! ρ is the identity-weighted GM estimate (`gstslshet` adds an efficient step with the inverse of
+//! the moment variance as the weight); `het = false` uses the KP (1999) three moments (`spreg`'s
+//! homoskedastic route uses the Drukker et al. two-moment version); the search interval is
+//! [-0.99, 0.99] (sphet: (-0.9, 0.9)); the variable bandwidth takes W's neighbour sets as the
+//! distance object (sphet takes a separate `sphet::distance` object); the spatial HAC is also
+//! available for the error and SARAR models.
 //!
 //! # Data requirements
 //!
@@ -112,7 +124,7 @@
 //!     ..Default::default()
 //! };
 //! let result = run_sphet(&dataset, "y", &["x1", "x2"], &listw, config)?;
-//! println!("λ = {}, SE = {}", result.lambda, result.lambda_se);
+//! println!("λ = {:?}, SE = {:?}", result.lambda, result.lambda_se);
 //! ```
 
 use ndarray::{Array1, Array2, s};
@@ -129,8 +141,8 @@ use crate::regression::HacKernel;
 use crate::regression::ols::{NormalInverse, normal_equations_inverse};
 use crate::resource::{checked_len, checkpoint, try_zeros2};
 use crate::spatial::SpatialWeights;
-use crate::traits::convergence::Convergence;
-use crate::traits::estimator::{SignificanceLevel, normal_cdf};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -180,6 +192,50 @@ impl fmt::Display for SphetSE {
         }
     }
 }
+
+crate::option_enum!(
+    SphetModel,
+    crate::options::Choices {
+        option: "model",
+        values: &[
+            (&["lag", "sar", "spatial_lag"], SphetModel::SpatialLag),
+            (&["error", "sem", "spatial_error"], SphetModel::SpatialError),
+            (&["sarar", "sac", "both", "combined"], SphetModel::SARAR),
+        ]
+    },
+    no_display
+);
+
+crate::option_enum!(
+    SphetSE,
+    crate::options::Choices {
+        option: "se_type",
+        values: &[
+            (
+                &[
+                    "robust",
+                    "white",
+                    "hc0",
+                    "heteroskedastic",
+                    "heteroscedastic"
+                ],
+                SphetSE::Robust
+            ),
+            (&["hac", "spatial_hac"], SphetSE::HAC),
+            (
+                &[
+                    "standard",
+                    "classical",
+                    "homoskedastic",
+                    "homoscedastic",
+                    "iid"
+                ],
+                SphetSE::Standard
+            ),
+        ]
+    },
+    no_display
+);
 
 /// Kernel of the Kelejian-Prucha (2007) spatial HAC (sphet 2.1-1 `kernelsfun.R`), as a function
 /// of z = d_ij / bandwidth >= 0; zero for z >= 1.
@@ -407,13 +463,43 @@ pub struct SphetResult {
     pub hac_bandwidth: Option<f64>,
 }
 
+impl ResultNotes for SphetResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
+}
+
+impl SphetResult {
+    /// The standard-error method, with the kernel and bandwidth of a spatial HAC.
+    fn se_label(&self) -> String {
+        match (self.se_type, self.hac_kernel, self.hac_bandwidth) {
+            (SphetSE::HAC, Some(k), Some(d)) => {
+                format!("Spatial HAC (Kelejian-Prucha 2007; {k} kernel, distance bandwidth {d})")
+            }
+            (SphetSE::HAC, Some(k), None) => format!(
+                "Spatial HAC (Kelejian-Prucha 2007; {k} kernel, variable bandwidth: each unit's farthest W-neighbour)"
+            ),
+            (se, _, _) => se.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for SphetResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Spatial GMM Estimation (sphet)")?;
         writeln!(f, "================================")?;
         writeln!(f)?;
         writeln!(f, "Model: {}", self.model_type)?;
-        writeln!(f, "Standard errors: {}", self.se_type)?;
+        writeln!(f, "Standard errors: {}", self.se_label())?;
+        if let Some(moments) = &self.rho_moments {
+            writeln!(f, "GM moments for rho: {moments}")?;
+        }
+        if !self.instruments.is_empty() {
+            writeln!(f, "Instruments: {}", self.instruments.join(", "))?;
+        }
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f)?;
 
@@ -472,13 +558,7 @@ impl fmt::Display for SphetResult {
         writeln!(f, "{}", "-".repeat(65))?;
         writeln!(f)?;
         writeln!(f, "sigma^2: {:.6}", self.sigma2)?;
-        writeln!(
-            f,
-            "Iterations: {} (converged: {})",
-            self.iterations, self.converged
-        )?;
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -488,8 +568,8 @@ impl fmt::Display for SphetResult {
 
 /// Run spatial GMM estimation with heteroscedasticity robustness.
 ///
-/// Implements the Kelejian-Prucha (1998, 1999, 2010) estimator for spatial
-/// autoregressive models that is robust to heteroscedasticity of unknown form.
+/// Implements the Kelejian-Prucha (1998, 1999, 2010) estimators for spatial
+/// autoregressive models, as the module documentation describes them.
 ///
 /// # Arguments
 ///
@@ -501,8 +581,8 @@ impl fmt::Display for SphetResult {
 ///
 /// # Returns
 ///
-/// Estimation results including coefficients, spatial parameters, and
-/// heteroscedasticity-robust standard errors.
+/// Estimation results including coefficients, spatial parameters and the standard errors
+/// `config.se_type` asks for.
 ///
 /// # Example
 ///
@@ -841,10 +921,19 @@ struct ResultParts<'a> {
 fn wald(estimate: f64, se: f64) -> (f64, f64) {
     if se.is_finite() && se > 0.0 {
         let z = estimate / se;
-        (z, 2.0 * (1.0 - normal_cdf(z.abs())))
+        (z, normal_p_value_two_sided(z))
     } else {
         (f64::NAN, f64::NAN)
     }
+}
+
+/// The warning for a covariance with a negative diagonal, which a spatial HAC with a kernel that
+/// is not positive semi-definite can produce; rounding around 0 does not count.
+fn negative_variance_warning(vcov: &Array2<f64>) -> Option<String> {
+    let largest = vcov.diag().iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    vcov.diag().iter().any(|&v| v < -1e-12 * largest).then(|| {
+        "the spatial HAC covariance has a negative variance (the kernel is not positive semi-definite on these distances): that standard error reads 0, with z and p NaN; use a positive semi-definite kernel such as triangular or bisquare, or another bandwidth".to_string()
+    })
 }
 
 fn build_result(parts: ResultParts<'_>) -> SphetResult {
@@ -861,10 +950,13 @@ fn build_result(parts: ResultParts<'_>) -> SphetResult {
         fitted,
         df,
         instruments,
-        warnings,
+        mut warnings,
         gm,
         rho_moments,
     } = parts;
+    if config.se_type == SphetSE::HAC {
+        warnings.extend(negative_variance_warning(vcov));
+    }
     let k = beta.len();
     let se = |j: usize| vcov[[j, j]].max(0.0).sqrt();
     let se_beta: Vec<f64> = (0..k).map(se).collect();
@@ -3247,6 +3339,137 @@ mod tests {
                 .vector(&format!("{prefix}_{key}"), &delta_se(&r), Tol::se(N_SIM));
         }
         check.finish();
+    }
+
+    #[test]
+    fn test_sphet_model_parses_aliases_and_rejects_unknown() {
+        SphetModel::choices().validate().unwrap();
+        for (s, m) in [
+            ("lag", SphetModel::SpatialLag),
+            ("SAR", SphetModel::SpatialLag),
+            ("error", SphetModel::SpatialError),
+            ("sem", SphetModel::SpatialError),
+            ("sarar", SphetModel::SARAR),
+            ("both", SphetModel::SARAR),
+            ("combined", SphetModel::SARAR),
+        ] {
+            assert_eq!(s.parse::<SphetModel>().unwrap(), m, "{s}");
+        }
+        let e = "durbin".parse::<SphetModel>().unwrap_err().to_string();
+        assert!(
+            e.contains("model") && e.contains("lag") && e.contains("sarar"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_sphet_se_parses_aliases_and_rejects_unknown() {
+        SphetSE::choices().validate().unwrap();
+        for (s, v) in [
+            ("robust", SphetSE::Robust),
+            ("White", SphetSE::Robust),
+            ("HAC", SphetSE::HAC),
+            ("standard", SphetSE::Standard),
+            ("homoscedastic", SphetSE::Standard),
+        ] {
+            assert_eq!(s.parse::<SphetSE>().unwrap(), v, "{s}");
+        }
+        assert!(
+            "newey"
+                .parse::<SphetSE>()
+                .unwrap_err()
+                .to_string()
+                .contains("se_type")
+        );
+    }
+
+    #[test]
+    fn test_validate_sphet_sar_p_values() {
+        // R 2 pnorm(-|z|): x1 1.6666858432319872e-22; 2 (1 - pnorm(|z|)) reads 0 there. Relative
+        // tolerance only, because Tol::p_value treats everything below 1e-12 as equal.
+        let (case, ds, w, _) = sphet_case();
+        let r = run_sphet(
+            &ds,
+            "y_sar",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Standard, true),
+        )
+        .unwrap();
+        let p: Vec<f64> = r.p_values.iter().copied().chain(r.lambda_p).collect();
+        Check::new(&case)
+            .vector("sar_p_classical", &p, Tol::new(Tol::se(N_SIM).rel, 0.0))
+            .finish();
+    }
+
+    #[test]
+    fn test_sphet_display_reports_se_method_moments_and_notes() {
+        let (ds, w, coords) = sim();
+        let sar = run_sphet(
+            &ds,
+            "y_sar",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Robust, true),
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            sar.contains("Standard errors: Heteroskedasticity-robust (White)"),
+            "{sar}"
+        );
+        assert!(
+            sar.contains("Instruments: (Intercept), x1, x2, W x1, W x2, W^2 x1, W^2 x2"),
+            "{sar}"
+        );
+        assert!(!sar.contains("Converged"), "{sar}");
+        let epan = SpatialHacKernel::Epanechnikov;
+        let sem = run_sphet(
+            &ds,
+            "y_sem",
+            &XS,
+            &w,
+            hac_config(SphetModel::SpatialError, true, &coords, 0.15, epan),
+        )
+        .unwrap();
+        let t = sem.to_string();
+        assert!(
+            t.contains(
+                "Standard errors: Spatial HAC (Kelejian-Prucha 2007; epanechnikov kernel, distance bandwidth 0.15)"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.contains("GM moments for rho: Kelejian-Prucha (2010)"),
+            "{t}"
+        );
+        assert!(t.contains("Converged: yes"), "{t}");
+        assert_eq!(
+            crate::traits::convergence::notes_json(&sem)["converged"],
+            serde_json::json!(true)
+        );
+        let variable = SphetConfig {
+            hac_bandwidth: None,
+            ..hac_config(SphetModel::SpatialLag, true, &coords, 1.0, epan)
+        };
+        let t = run_sphet(&ds, "y_sar", &XS, &w, variable)
+            .unwrap()
+            .to_string();
+        assert!(t.contains("epanechnikov kernel, variable bandwidth"), "{t}");
+    }
+
+    #[test]
+    fn test_sphet_hac_warns_when_a_variance_is_negative() {
+        // The rectangular kernel is not positive semi-definite: with a bandwidth that keeps
+        // every pair the meat is (Zh'u)(Zh'u)' = 0 and a coarse one can leave a negative
+        // diagonal. The hand-built covariance goes through the same check.
+        let vcov = ndarray::array![[1.0, 0.0], [0.0, -2.0]];
+        let w = negative_variance_warning(&vcov);
+        assert!(
+            w.as_deref().is_some_and(|m| m.contains("negative")),
+            "{w:?}"
+        );
+        assert!(negative_variance_warning(&ndarray::array![[1.0]]).is_none());
     }
 
     /// The layout of `create_test_data`.
