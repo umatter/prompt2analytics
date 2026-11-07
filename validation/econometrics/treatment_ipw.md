@@ -96,26 +96,28 @@ Tests: `test_validate_na_ipw_columns`, `test_validate_na_ipw_nan_outcome_is_miss
 `validation/methods/causal_na.json`, id `weighting_na_refusal`). They pin the refused column
 and the missing count; the IPW estimates are pinned by the tests above.
 
-## Wall-clock against fe13b889 (T3-PERF6A)
+## Wall-clock against fe13b889
 
-Medians in µs over five interleaved rounds of the wave-2B timing harness (`wp23`, one core,
-one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+Medians in µs over five interleaved rounds of the timing harness (`wp23`, one core, one rayon
+thread, `release`), at e4159ef0, with the machine's load average falling from 5 to 1 during the run
+(not idle); ratio is this tree over fe13b889.
+Rounds at n = 1,000 and below scatter by about 0.2 either way; those at n = 10,000 by less.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| IPW ATE | 100 | 51.80 | 49.10 | 0.95 |
-| IPW ATE | 1,000 | 324.50 | 338.50 | 1.04 |
-| IPW ATE | 10,000 | 4,029.70 | 4,471.20 | 1.11 |
-| IPW ATT | 100 | 51.80 | 44.20 | 0.85 |
-| IPW ATT | 1,000 | 328.00 | 320.30 | 0.98 |
-| IPW ATT | 10,000 | 4,165.80 | 4,192.50 | 1.01 |
+| IPW ATE, covariates on U(-2, 2) | 100 | 49.41 | 30.56 | 0.62 |
+| IPW ATE, covariates on U(-2, 2) | 1,000 | 158.82 | 121.50 | 0.77 |
+| IPW ATE, covariates on U(-2, 2) | 10,000 | 1,844.85 | 1,628.94 | 0.88 |
+| IPW ATE, covariates at mean 40, sd 10 | 1,000 | 155.74 | 138.22 | 0.89 |
+| IPW ATE, covariates at mean 40, sd 10 | 10,000 | 1,848.61 | 1,798.79 | 0.97 |
+| IPW ATT, covariates on U(-2, 2) | 1,000 | 152.61 | 110.00 | 0.72 |
+| IPW ATT, covariates on U(-2, 2) | 10,000 | 1,903.62 | 1,512.90 | 0.79 |
 
-IPW ATE at n = 10,000 stays above 1.1x. The excess is the two standard errors fe13b889 did not
-compute. In a timed run of the pieces at n = 10,000 the naive SE takes 213 µs and the
-M-estimation SE 438 µs of 4,396 µs; everything else is 3,745 µs, below the earlier tree. Both are
-already one pass over the rows each (three for the M-estimation SE: information, score
-adjustment, influence), and the efficient-influence-function SE is the one the earlier tree had.
-Not signed off; reported in the T3-PERF6 results.
+The gains depend on the design's conditioning. Uncentred covariates put the equilibrated X'WX
+above a condition number of 100 from the first step, so the propensity fit takes the refinement
+on its steps near the estimate, and each outcome model takes one refinement pass; at n = 10,000
+that costs 10% over the same data centred. Past a condition number of 1e4, or with a row its
+probability does not explain beyond `|eta| = 15`, the fit is `fit_glm`'s and pays for both loops.
 
 ## References
 

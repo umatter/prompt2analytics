@@ -193,20 +193,19 @@ Rscript validation/r/run.R --check gformula_hazard gformula_hazard_tv gformula_n
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::gformula::
 ```
 
-## Wall-clock against fe13b889 (T3-PERF6A)
+## Wall-clock against fe13b889
 
-Medians over interleaved rounds of the wave-2B timing harness (`wp28`, one core,
-one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+Medians over three interleaved rounds of the timing harness (`wp28`, one core, one rayon thread,
+`release`), at e4159ef0, on a machine with a load average of about 1; ratio is this tree over
+fe13b889.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| check 1 (ms) | 10,000 | 2,057.60 | 1,533.50 | 0.75 |
-| check 2 (ms) | 10,000 | 1,357.51 | 1,195.67 | 0.88 |
-| check 3 (ms) | 10,000 | 4,784.64 | 3,164.45 | 0.66 |
-| check 4 (ms) | 10,000 | 2,111.79 | 1,412.88 | 0.67 |
-| check 4, exact path (ms) | 1,000 | 242.74 | 167.10 | 0.69 |
-
-Three rounds; values in ms.
+| check 1 (ms) | 10,000 | 921.8 | 502.2 | 0.54 |
+| check 2 (ms) | 10,000 | 584.4 | 423.5 | 0.72 |
+| check 3 (ms) | 10,000 | 1,860.0 | 1,003.4 | 0.54 |
+| check 4 (ms) | 10,000 | 842.4 | 477.8 | 0.57 |
+| check 4, exact path (ms) | 1,000 | 109.4 | 57.5 | 0.53 |
 
 ## References
 

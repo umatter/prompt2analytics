@@ -55,11 +55,16 @@ fit are reported with the model they come from.
 
 Every logistic g and Q regression first runs `econometrics::glm::lean_logit_refined`: the same
 Fisher scoring and deviance rule as `fit_glm`, through the normal equations, with the refinement
-step the shared GLM takes when `kappa_1` of the equilibrated `X'WX` is above 100. It computes
-only what LTMLE reads. A fit leaves for `fit_glm` from glm.fit's start, which then reports it,
-when it would report anything: a linear predictor at the link's clamp, a rank-deficient design
-or `kappa_1` above 1e4, no convergence, a binomial response that is not 0/1. A response whose mean
-is within 1e-6 of 0 or 1 goes to `fit_glm` directly.
+step the shared GLM takes when `kappa_1` of the equilibrated `X'WX` is above 100, on the steps
+near the estimate (the previous step moved the deviance by less than 1e-3 relative, or the fit
+started from coefficients). A step the deviance rule stops at without one takes it afterwards,
+from the fit it started at. It computes only what LTMLE reads. A fit leaves for `fit_glm` from
+glm.fit's start, which then reports it, when it would report anything: a linear predictor at the
+link's clamp, a rank-deficient design or `kappa_1` above 1e4, no convergence, a binomial response
+that is not 0/1. A converged fit also leaves when a row its probability does not explain lies
+beyond `|eta| = 15` (`y < 1` above 15, `y > 0` below -15), because `fit_glm` loses the digits of
+`1 - mu` there and can report the fit differently. A response whose mean is within 1e-6 of 0 or 1
+goes to `fit_glm` directly.
 
 The Q regression of node `t - 1` starts from node t's coefficients on the shared history, with
 `L_t`, `A_t` and `eps_t` moved into the intercept at their means (`warm_start`); its response is
@@ -75,6 +80,11 @@ fits took more steps from it, the most being 58 where glm.fit's start took 12
 (`shifted_outcome((2500, 10, 4), 4.0, true, 0.3)`, node 5); at a limit below such a count the
 lean fit leaves for `fit_glm` from glm.fit's start. At `max_iter` 50, 60 and 75 the warnings and
 convergence status are equal on all 1,716 data sets.
+
+**Which rule these tables describe.** The gap table below and the wall-clock tables were measured
+at d7ec2c2a, where every step above `kappa_1 = 100` took the refinement and no row bound applied.
+They have not been re-measured under the rule above (refinement near the estimate and on the last
+step, the `|eta| = 15` bound).
 
 Two reported things change. `NodeModel::iterations` of a warm-started node counts the steps from
 its warm start (2 where glm.fit's start takes 4 or 5), so it is not comparable with glm.fit's.

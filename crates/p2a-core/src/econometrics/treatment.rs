@@ -24,12 +24,12 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
-use crate::econometrics::glm::fit_propensity_lean;
+use crate::econometrics::glm::{add_weighted_row, fit_propensity_lean};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::options::Choices;
-use crate::regression::ols::{normal_equations_inverse, normal_inverse_from_gram};
+use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
 use crate::stats::robust::{QuantileType, percentile_interval, quantile_sorted};
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -1714,22 +1714,108 @@ fn fit_outcome_model(
         });
     }
 
-    // X'X and X'y in one pass over the arm's rows: OLS's solve decision on the cross-product,
-    // no copy of the arm's design. A design that needs the refinement or the QR is copied below.
-    let (m, k) = (indices.len(), x.ncols());
-    if m > k && k > 0 {
-        let xs = x.as_standard_layout();
-        let rows = xs
-            .as_slice()
-            .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
-        let mut gram = Array2::<f64>::zeros((k, k));
-        let g = gram
-            .as_slice_mut()
-            .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
-        let mut xy = Array1::<f64>::zeros(k);
-        let mut sum_y = 0.0;
+    let m = indices.len();
+    if let Some((beta, sum_y)) = outcome_normal_coefficients(x, y, &indices)? {
+        let mu: Array1<f64> = x.dot(&beta);
+        let ybar = sum_y / m as f64;
+        let (mut ssr, mut sst) = (0.0, 0.0);
         for &i in &indices {
-            let (r, yi) = (&rows[i * k..(i + 1) * k], y[i]);
+            let (r, t) = (y[i] - mu[i], y[i] - ybar);
+            ssr += r * r;
+            sst += t * t;
+        }
+        let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+        return Ok((mu, r2, None));
+    }
+
+    let x_group = select_rows(x, &indices)?;
+    let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
+    // `lm.fit`'s pivoted QR, with its aliasing: the design failed OLS's normal-equations test.
+    let fit = least_squares(x_group.view(), y_group.view())?;
+    let beta = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
+    let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+    let alias = fit.aliasing_warning(names);
+    let mu: Array1<f64> = x.dot(&beta);
+
+    // R² for the group
+    let y_group_mean = y_group.mean().unwrap_or(0.0);
+    let sst: f64 = y_group.iter().map(|&yi| (yi - y_group_mean).powi(2)).sum();
+    let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+
+    Ok((mu, r2, alias))
+}
+
+/// The OLS coefficients of one arm and the sum of its `y`, from X'X and X'y in one pass over the
+/// arm's rows: OLS's solve decision on the cross-product (refined once when the conditioning asks
+/// for it), no copy of the arm's design. `None` when the design needs the QR.
+fn outcome_normal_coefficients(
+    x: ArrayView2<f64>,
+    y: &Array1<f64>,
+    indices: &[usize],
+) -> EconResult<Option<(Array1<f64>, f64)>> {
+    let (m, k) = (indices.len(), x.ncols());
+    if m <= k || k == 0 {
+        return Ok(None);
+    }
+    let xs = x.as_standard_layout();
+    let rows = xs
+        .as_slice()
+        .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
+    let mut gram = Array2::<f64>::zeros((k, k));
+    let g = gram
+        .as_slice_mut()
+        .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
+    let mut xy = Array1::<f64>::zeros(k);
+    let xys = xy
+        .as_slice_mut()
+        .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
+    let arm = ArmRows { rows, indices, y };
+    let sum_y = match k {
+        1 => arm.cross_fixed::<1>(g, xys),
+        2 => arm.cross_fixed::<2>(g, xys),
+        3 => arm.cross_fixed::<3>(g, xys),
+        4 => arm.cross_fixed::<4>(g, xys),
+        5 => arm.cross_fixed::<5>(g, xys),
+        6 => arm.cross_fixed::<6>(g, xys),
+        _ => arm.cross(k, g, xys),
+    };
+    for a in 1..k {
+        for c in 0..a {
+            gram[[a, c]] = gram[[c, a]];
+        }
+    }
+    let Some(ni) = normal_inverse_from_gram(gram.view())? else {
+        return Ok(None);
+    };
+    let mut beta = ni.inverse.dot(&xy);
+    if ni.refine {
+        // OLS's refinement step: b += (X'X)^{-1} X'(y - X b)
+        let mut xr = Array1::<f64>::zeros(k);
+        for &i in indices {
+            let r = &rows[i * k..(i + 1) * k];
+            let resid = y[i] - r.iter().zip(beta.iter()).map(|(a, b)| a * b).sum::<f64>();
+            for (s, &a) in xr.iter_mut().zip(r) {
+                *s += a * resid;
+            }
+        }
+        beta += &ni.inverse.dot(&xr);
+    }
+    Ok(Some((beta, sum_y)))
+}
+
+/// One arm's rows of the outcome design (row-major, all rows) and the outcome.
+struct ArmRows<'a> {
+    rows: &'a [f64],
+    indices: &'a [usize],
+    y: &'a Array1<f64>,
+}
+
+impl ArmRows<'_> {
+    /// `X'X` (upper triangle, into `g`), `X'y` and the sum of `y` over the arm's rows.
+    fn cross(&self, k: usize, g: &mut [f64], xy: &mut [f64]) -> f64 {
+        let mut sum_y = 0.0;
+        for &i in self.indices {
+            let (r, yi) = (&self.rows[i * k..(i + 1) * k], self.y[i]);
             sum_y += yi;
             for (a, ga) in g.chunks_exact_mut(k).enumerate() {
                 let xa = r[a];
@@ -1739,53 +1825,24 @@ fn fit_outcome_model(
                 }
             }
         }
-        for a in 1..k {
-            for c in 0..a {
-                gram[[a, c]] = gram[[c, a]];
-            }
-        }
-        if let Some(ni) = normal_inverse_from_gram(gram.view())?
-            && !ni.refine
-        {
-            let beta = ni.inverse.dot(&xy);
-            let mu: Array1<f64> = x.dot(&beta);
-            let ybar = sum_y / m as f64;
-            let (mut ssr, mut sst) = (0.0, 0.0);
-            for &i in &indices {
-                let (r, t) = (y[i] - mu[i], y[i] - ybar);
-                ssr += r * r;
-                sst += t * t;
-            }
-            let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-            return Ok((mu, r2, None));
-        }
+        sum_y
     }
 
-    let x_group = select_rows(x, &indices)?;
-    let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
-    // OLS's solve decision: the normal equations on a full-rank, well-conditioned design,
-    // `lm.fit`'s pivoted QR (with its aliasing) otherwise.
-    let (beta, ssr, alias) = match normal_equations_inverse(x_group.view())? {
-        Some(ni) => {
-            let beta = ni.coefficients(x_group.view(), &y_group);
-            let resid = &y_group - &x_group.dot(&beta);
-            (beta, resid.dot(&resid), None)
+    /// [`Self::cross`] at a width known when compiling: the same products in the same order.
+    fn cross_fixed<const K: usize>(&self, g: &mut [f64], xy: &mut [f64]) -> f64 {
+        let (rows, _) = self.rows.as_chunks::<K>();
+        let mut acc = [[0.0_f64; K]; K];
+        let mut xz = [0.0_f64; K];
+        let mut sum_y = 0.0;
+        for &i in self.indices {
+            let yi = self.y[i];
+            sum_y += yi;
+            add_weighted_row(&mut acc, &mut xz, &rows[i], 1.0, yi);
         }
-        None => {
-            let fit = least_squares(x_group.view(), y_group.view())?;
-            let beta = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
-            let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
-            (beta, ssr, fit.aliasing_warning(names))
-        }
-    };
-    let mu: Array1<f64> = x.dot(&beta);
-
-    // R² for the group
-    let y_group_mean = y_group.mean().unwrap_or(0.0);
-    let sst: f64 = y_group.iter().map(|&yi| (yi - y_group_mean).powi(2)).sum();
-    let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-
-    Ok((mu, r2, alias))
+        g.as_chunks_mut::<K>().0.copy_from_slice(&acc);
+        xy.copy_from_slice(&xz);
+        sum_y
+    }
 }
 
 /// The rows `idx` of `x`, copied row slice by row slice.
@@ -2678,6 +2735,122 @@ mod tests {
             let ybar = yg.sum() / yg.len() as f64;
             let sst: f64 = yg.iter().map(|v| (v - ybar).powi(2)).sum();
             assert!((r2 - (1.0 - ssr / sst)).abs() <= 1e-10, "r2 {r2}");
+        }
+    }
+
+    #[test]
+    fn test_outcome_model_refined_cross_product_matches_the_qr() {
+        // Natural scales and two close covariates (reciprocal condition about 4e-8): the one-pass
+        // path's coefficients against the QR. An unrefined solve is 1.8e-9 from it, outside 1e-10.
+        let (x, y, d) = outcome_design(300, false);
+        let x = Array2::from_shape_fn(x.dim(), |(i, j)| match j {
+            0 => 1.0,
+            1 => 40.0 + 10.0 * x[[i, 1]],
+            _ => 40.0 + 10.0 * x[[i, 1]] + 3e-2 * x[[i, 2]],
+        });
+        let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
+        for treated in [true, false] {
+            let idx: Vec<usize> = (0..300).filter(|&i| (d[i] >= 0.5) == treated).collect();
+            let xg = select_rows(x.view(), &idx).unwrap();
+            let normal = crate::regression::ols::normal_equations_inverse(xg.view())
+                .unwrap()
+                .expect("the normal equations take this design");
+            assert!(normal.refine, "the design must need the refinement");
+            // the one-pass path, not a fall to the QR
+            let (beta, _) = outcome_normal_coefficients(x.view(), &y, &idx)
+                .unwrap()
+                .expect("the one-pass path");
+            let yg: Array1<f64> = idx.iter().map(|&i| y[i]).collect();
+            let fit = least_squares(xg.view(), yg.view()).unwrap();
+            for (a, b) in beta.iter().zip(fit.coefficients.iter()) {
+                assert!((a - b).abs() <= 1e-10 * b.abs(), "{a} vs {b}");
+            }
+            let (mu, r2, alias) = fit_outcome_model(x.view(), &y, &d, treated, &names).unwrap();
+            assert!(alias.is_none());
+            assert_eq!(mu, x.dot(&beta));
+            let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+            let ybar = yg.sum() / yg.len() as f64;
+            let sst: f64 = yg.iter().map(|v| (v - ybar).powi(2)).sum();
+            assert!((r2 - (1.0 - ssr / sst)).abs() <= 1e-10, "r2 {r2}");
+        }
+    }
+
+    #[test]
+    fn test_ipw_is_the_same_fit_on_natural_scales() {
+        // A logit with an intercept and OLS within each arm do not depend on a covariate's origin
+        // or scale, so moving to mean 40, sd 10 changes rounding only.
+        let (x, y, d) = outcome_design(400, false);
+        // the assignment depends on the covariates, so the propensity model has slopes
+        let d = Array1::from_shape_fn(400, |i| {
+            let t = (i as f64 * 0.91).sin() + 0.8 * x[[i, 1]] - 0.5 * x[[i, 2]] + 0.2 * d[i];
+            if t > 0.1 { 1.0 } else { 0.0 }
+        });
+        let frame = |shift: f64, scale: f64| {
+            let col = |j: usize| {
+                x.column(j)
+                    .iter()
+                    .map(|v| shift + scale * v)
+                    .collect::<Vec<_>>()
+            };
+            Dataset::new(
+                df! {
+                    "y" => y.to_vec(),
+                    "d" => d.to_vec(),
+                    "x1" => col(1),
+                    "x2" => col(2),
+                }
+                .unwrap(),
+            )
+        };
+        for estimand in [Estimand::ATE, Estimand::ATT] {
+            let fit = |ds: &Dataset| {
+                let config = IpwConfig {
+                    estimand,
+                    ..Default::default()
+                };
+                run_ipw_treatment(ds, "y", "d", &["x1", "x2"], config).unwrap()
+            };
+            let (a, b) = (fit(&frame(0.0, 1.0)), fit(&frame(40.0, 10.0)));
+            assert_eq!(a.n_obs, b.n_obs);
+            for (u, v) in [
+                (a.effect, b.effect),
+                (a.std_error, b.std_error),
+                (a.se_mest.unwrap(), b.se_mest.unwrap()),
+                (a.se_eif.unwrap(), b.se_eif.unwrap()),
+            ] {
+                assert!((u - v).abs() <= 1e-10 * v.abs(), "{u} vs {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_outcome_cross_fixed_is_the_row_pass() {
+        let (x, y, d) = outcome_design(211, false);
+        for k in 1..=6 {
+            let rows: Vec<f64> = (0..211 * k)
+                .map(|c| x[[c / k, c % k % 3]] * (1.0 + (c % k) as f64))
+                .collect();
+            let indices: Vec<usize> = (0..211).filter(|&i| d[i] >= 0.5).collect();
+            let arm = ArmRows {
+                rows: &rows,
+                indices: &indices,
+                y: &y,
+            };
+            let (mut g, mut xy) = (vec![0.0; k * k], vec![0.0; k]);
+            let s = arm.cross(k, &mut g, &mut xy);
+            let (mut gf, mut xf) = (vec![0.0; k * k], vec![0.0; k]);
+            let sf = match k {
+                1 => arm.cross_fixed::<1>(&mut gf, &mut xf),
+                2 => arm.cross_fixed::<2>(&mut gf, &mut xf),
+                3 => arm.cross_fixed::<3>(&mut gf, &mut xf),
+                4 => arm.cross_fixed::<4>(&mut gf, &mut xf),
+                5 => arm.cross_fixed::<5>(&mut gf, &mut xf),
+                _ => arm.cross_fixed::<6>(&mut gf, &mut xf),
+            };
+            let bits = |v: &[f64]| v.iter().map(|a| a.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&g), bits(&gf), "k {k}");
+            assert_eq!(bits(&xy), bits(&xf), "k {k}");
+            assert_eq!(s.to_bits(), sf.to_bits(), "k {k}");
         }
     }
 
