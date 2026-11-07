@@ -1100,12 +1100,29 @@ fn spatial_lag_panel(
 ) -> Array1<f64> {
     debug_assert_eq!(y.len(), n_entities * n_time);
     let mut wy = Array1::zeros(y.len());
-    for t in 0..n_time {
-        let block = s![t * n_entities..(t + 1) * n_entities];
-        let wy_t = listw.lag(&y.slice(block).to_owned());
-        wy.slice_mut(block).assign(&wy_t);
-    }
+    lag_panel_into(y.view(), wy.view_mut(), n_entities, n_time, listw);
     wy
+}
+
+/// `out = (I_T (x) W) v`, summed as `SpatialWeights::lag` sums each row.
+fn lag_panel_into(
+    v: ArrayView1<f64>,
+    mut out: ndarray::ArrayViewMut1<f64>,
+    n: usize,
+    t: usize,
+    listw: &SpatialWeights,
+) {
+    for p in 0..t {
+        let off = p * n;
+        for i in 0..n {
+            let sw = listw.get_weights(i);
+            let mut sum = 0.0;
+            for (idx, &j) in sw.indices.iter().enumerate() {
+                sum += sw.weights[idx] * v[off + j];
+            }
+            out[off + i] = sum;
+        }
+    }
 }
 
 // ============================================================================
@@ -1190,6 +1207,9 @@ fn demean_panel(v: ArrayView1<f64>, a: Absorbed, n: usize, t: usize) -> Array1<f
         return v.to_owned();
     }
     let unit = unit_means(v, n, t);
+    if a == Absorbed::Individual {
+        return Array1::from_shape_fn(n * t, |q| v[q] - unit[q % n]);
+    }
     let period: Vec<f64> = (0..t)
         .map(|p| v.slice(s![p * n..(p + 1) * n]).sum() / n as f64)
         .collect();
@@ -1231,9 +1251,8 @@ fn lag_columns(
         x.ncols(),
         "spatially lagged spatial panel design",
     )?;
-    for (j, col) in x.columns().into_iter().enumerate() {
-        out.column_mut(j)
-            .assign(&spatial_lag_panel(&col.to_owned(), n, t, listw));
+    for (col, o) in x.columns().into_iter().zip(out.columns_mut()) {
+        lag_panel_into(col, o, n, t, listw);
     }
     Ok(out)
 }
@@ -1318,7 +1337,8 @@ fn require_non_degenerate_fit(
 /// (r b_i)^2) needs them (R: `Re(sum(log(1 - r * eigen(W)$values)))`). rho and lambda are
 /// searched on (1 / min Re w + 1e-6, 1 / max Re w - 1e-6), as the R reference.
 // T3-WP34: build from WeightsSpectrum once WP32 is merged (the weights' cached complex
-// spectrum), instead of a fresh dense eigen decomposition per call.
+// spectrum); `SPECTRUM_CACHE` stands in until then and goes with the switch.
+#[derive(Debug, Clone)]
 struct PanelSpectrum {
     re: Vec<f64>,
     im: Vec<f64>,
@@ -1326,9 +1346,65 @@ struct PanelSpectrum {
     upper: f64,
 }
 
+/// The weight lists of a `SpatialWeights`, compared exactly (bits of every weight).
+#[derive(PartialEq, Eq)]
+struct WeightsKey {
+    starts: Vec<usize>,
+    indices: Vec<usize>,
+    bits: Vec<u64>,
+}
+
+impl WeightsKey {
+    fn of(listw: &SpatialWeights) -> Self {
+        let n = listw.n();
+        let (mut starts, mut indices, mut bits) = (Vec::with_capacity(n + 1), vec![], vec![]);
+        for i in 0..n {
+            starts.push(indices.len());
+            let sw = listw.get_weights(i);
+            indices.extend_from_slice(&sw.indices);
+            bits.extend(sw.weights.iter().map(|w| w.to_bits()));
+        }
+        starts.push(indices.len());
+        Self {
+            starts,
+            indices,
+            bits,
+        }
+    }
+}
+
+/// Spectra of the last few weights used, so repeated fits on the same weights (a session's
+/// weights object, the clone each call receives) do not repeat the O(N^3) decomposition.
+/// Matched on the full weight lists, never on identity, and holding no `SpatialWeights`.
+static SPECTRUM_CACHE: std::sync::Mutex<Vec<(WeightsKey, PanelSpectrum)>> =
+    std::sync::Mutex::new(Vec::new());
+const SPECTRUM_CACHE_LEN: usize = 4;
+
 impl PanelSpectrum {
     fn new(listw: &SpatialWeights) -> EconResult<Self> {
         checkpoint()?;
+        let key = WeightsKey::of(listw);
+        {
+            let mut cache = SPECTRUM_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = cache.iter().position(|(k, _)| *k == key) {
+                let hit = cache.remove(pos);
+                let spectrum = hit.1.clone();
+                cache.push(hit);
+                return Ok(spectrum);
+            }
+        }
+        let spectrum = Self::compute(listw)?;
+        let mut cache = SPECTRUM_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if !cache.iter().any(|(k, _)| *k == key) {
+            if cache.len() == SPECTRUM_CACHE_LEN {
+                cache.remove(0);
+            }
+            cache.push((key, spectrum.clone()));
+        }
+        Ok(spectrum)
+    }
+
+    fn compute(listw: &SpatialWeights) -> EconResult<Self> {
         let w = listw.try_to_dense()?;
         let evs = ndarray_to_faer(&w.view()).eigenvalues().map_err(|_| {
             EconError::Computation(
@@ -2676,27 +2752,27 @@ struct Tsls {
 }
 
 /// P_H v from the QR of H.
+#[cfg(test)]
 fn project(qr: &Qr, v: ArrayView1<f64>) -> EconResult<Array1<f64>> {
     let mut q = qr.qty(v)?;
     q.iter_mut().skip(qr.rank()).for_each(|e| *e = 0.0);
     qr.q_times(q.view())
 }
 
-/// 2SLS of y on Z with instruments H (given by its QR). The first `n_exog` columns of Z lie
-/// in the span of H, so P = P_H Z keeps them and projects only the others. The coefficients
-/// and (P'P)^-1 come from least squares of y on P (P'Z = P'P), the residuals are y - Z d.
+/// 2SLS of y on Z with instruments H (given by its QR, rank r). With Q1 the first r columns
+/// of Q, P = P_H Z = Q1 C with C = Q1'Z (r x p), so P'P = C'C and P'y = C'(Q1'y): the
+/// coefficients and (P'P)^-1 come from least squares of Q1'y on the small C, and P is never
+/// formed. The residuals are y - Z d. The first `n_exog` columns of Z lie in the span of H
+/// (checked in tests).
 fn tsls(y: ArrayView1<f64>, z: ArrayView2<f64>, n_exog: usize, qr: &Qr) -> EconResult<Tsls> {
     let p = z.ncols();
+    let r = qr.rank();
     let under = || EconError::UnderIdentified {
         n_endogenous: p - n_exog,
-        n_instruments: qr.rank().saturating_sub(n_exog),
+        n_instruments: r.saturating_sub(n_exog),
     };
-    if qr.rank() < p {
+    if r < p {
         return Err(under());
-    }
-    let mut pz = z.to_owned();
-    for j in n_exog..p {
-        pz.column_mut(j).assign(&project(qr, z.column(j))?);
     }
     #[cfg(test)]
     for j in 0..n_exog {
@@ -2705,17 +2781,22 @@ fn tsls(y: ArrayView1<f64>, z: ArrayView2<f64>, n_exog: usize, qr: &Qr) -> EconR
         let rel = d.dot(&d).sqrt() / col.dot(&col).sqrt().max(f64::MIN_POSITIVE);
         EXOG_PROJECTION_ERROR.with(|c| c.set(c.get().max(rel)));
     }
-    let ls = least_squares(pz.view(), y)?;
-    if !ls.aliased.is_empty() {
+    let mut c = try_zeros2(r, p, "2SLS projected design")?;
+    for (j, col) in z.columns().into_iter().enumerate() {
+        c.column_mut(j).assign(&qr.qty(col)?.slice(s![..r]));
+    }
+    let qc = Qr::decompose(c.view(), LM_QR_TOL)?;
+    if qc.rank() < p {
         return Err(under());
     }
-    let residuals = &y - &z.dot(&ls.coefficients);
+    let coef = qc.coefficients(qr.qty(y)?.slice(s![..r]))?;
+    let residuals = &y - &z.dot(&coef);
     let q = qr.qty(residuals.view())?;
-    let sargan_quad = q.iter().take(qr.rank()).map(|v| v * v).sum();
+    let sargan_quad = q.iter().take(r).map(|v| v * v).sum();
     Ok(Tsls {
-        coef: ls.coefficients,
+        coef,
         residuals,
-        unscaled_cov: ls.unscaled_cov,
+        unscaled_cov: qc.unscaled_covariance()?,
         sargan_quad,
     })
 }
@@ -2979,13 +3060,13 @@ fn spatial_instruments(
     t: usize,
     listw: &SpatialWeights,
 ) -> EconResult<Array2<f64>> {
-    let wx = lag_columns(x, n, t, listw)?;
-    let wwx = lag_columns(&wx, n, t, listw)?;
     let k = x.ncols();
     let mut h = try_zeros2(x.nrows(), 3 * k, "spgm instruments")?;
     h.slice_mut(s![.., ..k]).assign(x);
-    h.slice_mut(s![.., k..2 * k]).assign(&wx);
-    h.slice_mut(s![.., 2 * k..]).assign(&wwx);
+    for j in k..3 * k {
+        let (src, mut dst) = h.multi_slice_mut((s![.., j - k], s![.., j]));
+        lag_panel_into(src.view(), dst.view_mut(), n, t, listw);
+    }
     Ok(h)
 }
 
@@ -4924,6 +5005,26 @@ mod tests {
         for part in ["none", "b", "kkp"] {
             assert!(m.contains(part), "{m}");
         }
+    }
+
+    #[test]
+    fn test_panel_spectrum_cache_matches_weights_by_content() {
+        // two separately built, equal weights share a spectrum; other weights do not
+        let coords: Vec<(f64, f64)> = (0..9)
+            .map(|k| ((k % 3) as f64, (k / 3) as f64 * 1.1))
+            .collect();
+        let build = |k| {
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, k), WeightStyle::RowStd)
+        };
+        let (a, b, c) = (build(2), build(2), build(3));
+        let direct = PanelSpectrum::compute(&a).unwrap();
+        for w in [&a, &b, &a] {
+            let s = PanelSpectrum::new(w).unwrap();
+            assert_eq!((s.re, s.im), (direct.re.clone(), direct.im.clone()));
+        }
+        let other = PanelSpectrum::new(&c).unwrap();
+        assert_eq!(other.re, PanelSpectrum::compute(&c).unwrap().re);
+        assert_ne!(other.re, direct.re);
     }
 
     #[test]

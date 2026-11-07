@@ -58,15 +58,18 @@ Jacobian of the analytic score. R 4.3.3.
   phi = 1, on a central-difference Hessian of the profile (step 1e-5). rho and lambda stay
   inside the interval the complex spectrum of W allows; log phi stays in [-30, 30].
   Convergence: max |change| / max(1, |psi|) <= `tol` (default 1e-8), at most `max_iter`
-  iterations. log|I - r W| = Re sum ln(1 - r w_i) over the complex eigenvalues.
+  iterations. log|I - r W| = Re sum ln(1 - r w_i) over the complex eigenvalues, which
+  are computed once per weights (the last four spectra are kept, matched on the full
+  weight lists).
 - **phi at its boundary.** When log phi reaches -30, phi is reported as 0 (sigma_mu = 0),
   the fit equals the pooled model, phi has no standard error (NaN) and a warning says so.
 - **Standard errors** are the inverse of minus the observed information of the full
   log-likelihood, computed as the central-difference Jacobian of the analytic score.
   splm itself may report expected-information or GLS-type SEs for some models; p2a's are
   observed-information SEs, as pinned. sigma2 is the ML estimate e'e / (NT).
-- **2SLS** (`spgm`): one QR of the instruments H per fit; only the endogenous column W y
-  is projected (the exogenous columns lie in the span of H). w2sls: Z = [X~, W y~],
+- **2SLS** (`spgm`): one QR of the instruments H per fit. With Q1 its first rank(H)
+  columns and C = Q1'Z, P_H Z = Q1 C, so the coefficients and (P'P)^-1 come from least
+  squares of Q1'y on the small matrix C; P_H Z is never formed. w2sls: Z = [X~, W y~],
   H = [X~, W X~, W^2 X~], sigma2 = u'u / (N (T - 1)), SEs with u'u / (N (T - 1) - p),
   Sargan |P_H u|^2 / sigma2. b2sls: Z = [1, Xbar, W ybar], H = [1, Xbar, W Xbar, W^2 Xbar]
   on the N entity means, sigma2 = u'u / N, sigma_1^2 = T u'u / N. ec2sls and g2sls: 2SLS of
@@ -156,8 +159,7 @@ in `econometrics::splm::tests`:
 Newton converges quadratically to the root of the analytic profile gradient (R's optimum
 is Newton-polished to |gradient| < 1e-9), hence 1e-8 on the parameters; the SEs compare a
 central difference of the analytic score with R's Richardson Jacobian. The 2SLS tests
-also check that the exogenous columns `tsls` does not project are their own projection on
-H within 1e-10.
+also check that the exogenous columns of Z are their own projection on H within 1e-10.
 
 Property tests (no R value; the same data, read from the CSV): lambda is reported for an
 error model and rho is not (`test_spml_error_lambda_not_rho`); individual, time and
