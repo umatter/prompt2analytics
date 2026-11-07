@@ -1,6 +1,25 @@
 //! SAS7BDAT file reader (pure Rust implementation).
 //!
-//! Supports reading SAS data files (.sas7bdat) into Polars DataFrames.
+//! Reads uncompressed files, 32- and 64-bit, little- and big-endian. The layout follows ReadStat
+//! (`readstat_sas.c`, `readstat_sas7bdat_read.c`) and pandas (`pandas/io/sas/sas7bdat.py`). Every
+//! case is pinned to `haven::read_sas` on the fixtures in `validation/datasets/files/`
+//! (`validation/data/readers.md`).
+//!
+//! | Field | Where |
+//! |---|---|
+//! | 64-bit integers | byte 32 is 0x33: offsets, lengths and counts are 8 bytes, else 4 |
+//! | header pad | byte 35 is 0x33: 4 bytes follow byte 164 (`pad`) |
+//! | byte order | byte 37: 0x01 little-endian, 0x00 big-endian |
+//! | header length, page size | u32 at 196 + pad and 200 + pad |
+//! | page count | u32 or u64 at 204 + pad |
+//! | page header | type, block count, subheader count: u16 at B, B + 2, B + 4 (B = 16 or 32) |
+//! | subheader pointer | offset, length (int), compression (u8), type (u8), from B + 8 |
+//!
+//! Page type 0 is a metadata page, 256 a data page and 512 a mix page; other pages are skipped. A
+//! data page holds `block count` rows after its header. A mix page holds
+//! `block count - subheader count` rows after its pointer table.
+//!
+//! Text cells are trimmed of trailing blanks and NULs; an empty cell is `""`, as haven reads it.
 
 use polars::frame::column::Column;
 use polars::prelude::*;
@@ -14,12 +33,20 @@ const SAS_MAGIC: [u8; 32] = [
     0xb3, 0x14, 0x11, 0xcf, 0xbd, 0x92, 0x08, 0x00, 0x09, 0xc7, 0x31, 0x8c, 0x18, 0x1f, 0x10, 0x11,
 ];
 
-/// Subheader signatures
-const ROW_SIZE_SIGNATURE: [u8; 4] = [0xF7, 0xF7, 0xF7, 0xF7];
-const COL_SIZE_SIGNATURE: [u8; 4] = [0xF6, 0xF6, 0xF6, 0xF6];
-const COL_TEXT_SIGNATURE: [u8; 4] = [0xFD, 0xFF, 0xFF, 0xFF];
-const COL_ATTR_SIGNATURE: [u8; 4] = [0xFC, 0xFF, 0xFF, 0xFF];
-const COL_NAME_SIGNATURE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+/// Bytes of the file header the reader parses (the fields end before byte 288 with the pad).
+const HEADER_PREFIX: usize = 288;
+
+/// Subheader signatures: the first 32-bit word in the file's byte order (the second word of a
+/// big-endian 64-bit signature whose first word is 0 or all ones).
+const SIG_ROW_SIZE: u32 = 0xF7F7_F7F7;
+const SIG_COL_SIZE: u32 = 0xF6F6_F6F6;
+const SIG_COL_TEXT: u32 = 0xFFFF_FFFD;
+const SIG_COL_NAME: u32 = 0xFFFF_FFFF;
+const SIG_COL_ATTR: u32 = 0xFFFF_FFFC;
+
+/// Subheader pointer compression codes.
+const COMPRESSION_NONE: u8 = 0;
+const COMPRESSION_TRUNCATED: u8 = 1;
 
 /// Errors that can occur during SAS file reading.
 #[derive(Error, Debug)]
@@ -87,6 +114,15 @@ enum ColumnType {
     Character,
 }
 
+/// What a page holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PageKind {
+    Meta,
+    Data,
+    Mix,
+    Skip,
+}
+
 /// Column metadata
 #[derive(Debug, Clone)]
 struct ColumnInfo {
@@ -96,672 +132,66 @@ struct ColumnInfo {
     length: usize,
 }
 
-/// SAS7BDAT file reader
-pub struct SasReader<R: Read + Seek> {
-    reader: R,
-    byte_order: ByteOrder,
+/// The header fields the page helpers need, as one `Copy` value.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
     is_64bit: bool,
-    header_length: usize,
+    byte_order: ByteOrder,
     page_size: usize,
     page_count: usize,
-    row_length: usize,
-    row_count: usize,
-    columns: Vec<ColumnInfo>,
 }
 
-impl<R: Read + Seek> SasReader<R> {
-    /// Create a new SAS reader.
-    pub fn new(mut reader: R) -> Result<Self, SasError> {
-        // Verify magic number
-        let mut magic = [0u8; 32];
-        reader.read_exact(&mut magic)?;
-        if magic != SAS_MAGIC {
-            return Err(SasError::InvalidFormat(
-                "Invalid SAS7BDAT magic number".into(),
-            ));
-        }
-
-        // Read alignment and platform info
-        reader.seek(SeekFrom::Start(32))?;
-        let mut align_byte = [0u8; 1];
-        reader.read_exact(&mut align_byte)?;
-        let is_64bit = align_byte[0] == 0x33;
-
-        reader.seek(SeekFrom::Start(35))?;
-        let mut align2_byte = [0u8; 1];
-        reader.read_exact(&mut align2_byte)?;
-
-        reader.seek(SeekFrom::Start(37))?;
-        let mut endian_byte = [0u8; 1];
-        reader.read_exact(&mut endian_byte)?;
-        let byte_order = if endian_byte[0] == 0x01 {
-            ByteOrder::LittleEndian
-        } else {
-            ByteOrder::BigEndian
-        };
-
-        // Calculate alignment offsets
-        let a1 = if is_64bit { 4 } else { 0 };
-        let _a2 = if align2_byte[0] == 0x33 { 4 } else { 0 };
-
-        // Total file length, used to reject header fields that describe more
-        // data than the file can possibly contain. These fields are read as
-        // signed integers straight from the file: a negative value would wrap
-        // to a huge `usize`, and an oversized value would drive unbounded
-        // allocation and out-of-range seeks, so each is validated here.
-        let file_len = {
-            let cur = reader.stream_position()?;
-            let end = reader.seek(SeekFrom::End(0))?;
-            reader.seek(SeekFrom::Start(cur))?;
-            end
-        };
-        let check_offset = |raw: i64, name: &str| -> Result<usize, SasError> {
-            if raw < 0 || raw as u64 > file_len {
-                return Err(SasError::InvalidFormat(format!(
-                    "{name} = {raw} is negative or exceeds the file size ({file_len} bytes); \
-                     the file is corrupt or truncated"
-                )));
-            }
-            Ok(raw as usize)
-        };
-
-        // Read header length
-        reader.seek(SeekFrom::Start((196 + a1) as u64))?;
-        let header_length = check_offset(
-            Self::read_i32(&mut reader, byte_order)? as i64,
-            "header_length",
-        )?;
-
-        // Read page size
-        reader.seek(SeekFrom::Start((200 + a1) as u64))?;
-        let page_size = check_offset(Self::read_i32(&mut reader, byte_order)? as i64, "page_size")?;
-        if page_size == 0 {
-            return Err(SasError::InvalidFormat("page_size is zero".to_string()));
-        }
-
-        // Read page count
-        reader.seek(SeekFrom::Start((204 + a1) as u64))?;
-        let page_count_raw = if is_64bit {
-            Self::read_i64(&mut reader, byte_order)?
-        } else {
-            Self::read_i32(&mut reader, byte_order)? as i64
-        };
-        if page_count_raw < 0 {
-            return Err(SasError::InvalidFormat(format!(
-                "page_count = {page_count_raw} is negative; the file is corrupt"
-            )));
-        }
-        let page_count = page_count_raw as usize;
-        // A page_count larger than the file can hold indicates corruption and
-        // would drive out-of-range page seeks in `parse_metadata`.
-        let max_pages = file_len.saturating_sub(header_length as u64) / page_size as u64;
-        if page_count as u64 > max_pages {
-            return Err(SasError::InvalidFormat(format!(
-                "declared page_count {page_count} exceeds file capacity ({max_pages} pages of \
-                 {page_size} bytes after a {header_length}-byte header in a {file_len}-byte file)"
-            )));
-        }
-
-        let mut sas_reader = SasReader {
-            reader,
-            byte_order,
-            is_64bit,
-            header_length,
-            page_size,
-            page_count,
-            row_length: 0,
-            row_count: 0,
-            columns: Vec::new(),
-        };
-
-        // Parse metadata pages
-        sas_reader.parse_metadata()?;
-
-        Ok(sas_reader)
+impl Layout {
+    fn int_len(&self) -> usize {
+        if self.is_64bit { 8 } else { 4 }
     }
-
-    /// Parse metadata from pages to get column info.
-    fn parse_metadata(&mut self) -> Result<(), SasError> {
-        let _int_size = if self.is_64bit { 8 } else { 4 };
-        let subheader_ptr_size = if self.is_64bit { 24 } else { 12 };
-        let page_header_size = if self.is_64bit { 40 } else { 24 };
-
-        let mut col_names: Vec<String> = Vec::new();
-        let mut col_attrs: Vec<(usize, usize, ColumnType)> = Vec::new(); // (offset, length, type)
-
-        for page_idx in 0..self.page_count {
-            crate::resource::checkpoint().map_err(resource_err)?;
-            let page_offset = add(self.header_length, mul(page_idx, self.page_size)?)?;
-            self.reader.seek(SeekFrom::Start(page_offset as u64))?;
-
-            // Read page type
-            let page_type_offset = if self.is_64bit { 32 } else { 16 };
-            self.reader
-                .seek(SeekFrom::Start(add(page_offset, page_type_offset)? as u64))?;
-            let page_type = Self::read_i16(&mut self.reader, self.byte_order)?;
-
-            // Only process metadata pages (0) and mixed pages (512)
-            if page_type != 0 && page_type != 512 {
-                continue;
-            }
-
-            // Read subheader count
-            let sh_count_offset = if self.is_64bit { 34 } else { 18 };
-            self.reader
-                .seek(SeekFrom::Start(add(page_offset, sh_count_offset)? as u64))?;
-            let subheader_count = field_usize(
-                Self::read_i16(&mut self.reader, self.byte_order)? as i64,
-                "subheader count",
-            )?;
-            // The pointer table must lie inside the page.
-            if add(page_header_size, mul(subheader_count, subheader_ptr_size)?)? > self.page_size {
-                return Err(SasError::InvalidFormat(format!(
-                    "subheader count {subheader_count} on page {page_idx} does not fit in the page"
-                )));
-            }
-
-            // Process subheaders
-            for sh_idx in 0..subheader_count {
-                let sh_ptr_offset = add(
-                    add(page_offset, page_header_size)?,
-                    mul(sh_idx, subheader_ptr_size)?,
-                )?;
-                self.reader.seek(SeekFrom::Start(sh_ptr_offset as u64))?;
-
-                // Read subheader offset and length
-                let sh_offset = field_usize(
-                    if self.is_64bit {
-                        Self::read_i64(&mut self.reader, self.byte_order)?
-                    } else {
-                        Self::read_i32(&mut self.reader, self.byte_order)? as i64
-                    },
-                    "subheader offset",
-                )?;
-
-                let sh_length = field_usize(
-                    if self.is_64bit {
-                        Self::read_i64(&mut self.reader, self.byte_order)?
-                    } else {
-                        Self::read_i32(&mut self.reader, self.byte_order)? as i64
-                    },
-                    "subheader length",
-                )?;
-
-                if sh_length == 0 {
-                    continue;
-                }
-
-                // A subheader must lie inside its page.
-                if add(sh_offset, sh_length)? > self.page_size {
-                    return Err(SasError::InvalidFormat(format!(
-                        "subheader {sh_idx} on page {page_idx} extends past the page"
-                    )));
-                }
-
-                // Read subheader signature
-                let sh_abs_offset = add(page_offset, sh_offset)?;
-                self.reader.seek(SeekFrom::Start(sh_abs_offset as u64))?;
-                let mut signature = [0u8; 4];
-                self.reader.read_exact(&mut signature)?;
-
-                // Process based on signature
-                if signature == ROW_SIZE_SIGNATURE {
-                    // Row size subheader
-                    let row_len_offset = if self.is_64bit { 40 } else { 20 };
-                    self.reader
-                        .seek(SeekFrom::Start(add(sh_abs_offset, row_len_offset)? as u64))?;
-                    self.row_length = field_usize(
-                        if self.is_64bit {
-                            Self::read_i64(&mut self.reader, self.byte_order)?
-                        } else {
-                            Self::read_i32(&mut self.reader, self.byte_order)? as i64
-                        },
-                        "row_length",
-                    )?;
-
-                    let row_count_offset = if self.is_64bit { 48 } else { 24 };
-                    self.reader
-                        .seek(SeekFrom::Start(add(sh_abs_offset, row_count_offset)? as u64))?;
-                    self.row_count = field_usize(
-                        if self.is_64bit {
-                            Self::read_i64(&mut self.reader, self.byte_order)?
-                        } else {
-                            Self::read_i32(&mut self.reader, self.byte_order)? as i64
-                        },
-                        "row_count",
-                    )?;
-                } else if signature == COL_SIZE_SIGNATURE {
-                    // Column size subheader - we get column count here but use attrs
-                } else if signature == COL_NAME_SIGNATURE {
-                    // Column name subheader
-                    self.parse_column_names(sh_abs_offset, sh_length, &mut col_names)?;
-                } else if signature == COL_ATTR_SIGNATURE {
-                    // Column attributes subheader
-                    self.parse_column_attributes(sh_abs_offset, sh_length, &mut col_attrs)?;
-                }
-            }
-        }
-
-        // Combine names and attributes
-        for (i, (offset, length, col_type)) in col_attrs.iter().enumerate() {
-            let name = col_names
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("col_{}", i));
-            self.columns.push(ColumnInfo {
-                name,
-                col_type: *col_type,
-                offset: *offset,
-                length: *length,
-            });
-        }
-
-        if !self.columns.is_empty() {
-            self.validate_layout()?;
-        }
-
-        Ok(())
+    fn page_type_offset(&self) -> usize {
+        if self.is_64bit { 32 } else { 16 }
     }
-
-    /// Check the row and column layout against the page geometry: the row
-    /// length is between 1 and the page size, the row count fits the pages,
-    /// every column has a nonzero width and lies inside the row, and the
-    /// column widths add up to at most the row length. So the bytes read per
-    /// row are bounded by the row length, and the cells read by the file size.
-    /// A valid file satisfies all of these. Columns are not checked for
-    /// disjointness: two overlapping columns read the same bytes of the row.
-    fn validate_layout(&self) -> Result<(), SasError> {
-        let row_length = self.row_length;
-        if row_length == 0 {
-            return Err(SasError::InvalidFormat("row_length is zero".to_string()));
-        }
-        if row_length > self.page_size {
-            return Err(SasError::InvalidFormat(format!(
-                "row_length {row_length} exceeds the page size of {} bytes",
-                self.page_size
-            )));
-        }
-        let max_rows = self.page_count.saturating_mul(self.page_size / row_length);
-        if self.row_count > max_rows {
-            return Err(SasError::InvalidFormat(format!(
-                "row_count {} exceeds what {} pages of {} bytes can hold",
-                self.row_count, self.page_count, self.page_size
-            )));
-        }
-
-        let mut total_width = 0usize;
-        for (i, column) in self.columns.iter().enumerate() {
-            let (offset, width) = (column.offset, column.length);
-            if width == 0 {
-                return Err(SasError::InvalidFormat(format!(
-                    "column {i} (offset {offset}) has width 0"
-                )));
-            }
-            if add(offset, width)? > row_length {
-                return Err(SasError::InvalidFormat(format!(
-                    "column {i} (offset {offset}, width {width}) extends past the row_length \
-                     of {row_length}"
-                )));
-            }
-            total_width = add(total_width, width)?;
-        }
-        if total_width > row_length {
-            return Err(SasError::InvalidFormat(format!(
-                "column widths add up to {total_width} bytes, more than the row_length of \
-                 {row_length}"
-            )));
-        }
-        Ok(())
+    fn page_header_size(&self) -> usize {
+        self.page_type_offset() + 8
     }
-
-    /// Parse column names from subheader.
-    fn parse_column_names(
-        &mut self,
-        sh_offset: usize,
-        sh_length: usize,
-        names: &mut Vec<String>,
-    ) -> Result<(), SasError> {
-        let int_size = if self.is_64bit { 8 } else { 4 };
-        let base_offset = add(sh_offset, 8 + int_size * 2)?;
-
-        // Read column name pointers
-        let _ptr_size = if self.is_64bit { 8 } else { 4 };
-        let entry_size = 8; // Each name entry is 8 bytes
-
-        let remaining = sh_length.saturating_sub(8 + int_size * 2);
-        let entry_count = remaining / entry_size;
-
-        for i in 0..entry_count {
-            let entry_offset = add(base_offset, mul(i, entry_size)?)?;
-            self.reader.seek(SeekFrom::Start(entry_offset as u64))?;
-
-            // Read text index, offset, and length
-            let _text_idx = Self::read_i16(&mut self.reader, self.byte_order)?;
-            let _name_offset = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
-            let name_length = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
-
-            if name_length > 0 && name_length < 256 {
-                // Read from column text subheader (simplified - assumes single text block)
-                // For now, generate placeholder names
-                names.push(format!("VAR{}", i + 1));
-            }
-        }
-
-        Ok(())
+    fn pointer_size(&self) -> usize {
+        3 * self.int_len()
     }
+}
 
-    /// Parse column attributes from subheader.
-    fn parse_column_attributes(
-        &mut self,
-        sh_offset: usize,
-        sh_length: usize,
-        attrs: &mut Vec<(usize, usize, ColumnType)>,
-    ) -> Result<(), SasError> {
-        let _int_size = if self.is_64bit { 8 } else { 4 };
-        let base_offset = add(sh_offset, if self.is_64bit { 16 } else { 12 })?;
+/// One subheader pointer of a page.
+#[derive(Debug, Clone, Copy)]
+struct Pointer {
+    offset: usize,
+    length: usize,
+    compression: u8,
+    kind: u8,
+}
 
-        let attr_size = if self.is_64bit { 16 } else { 12 };
-        let remaining = sh_length.saturating_sub(if self.is_64bit { 16 } else { 12 });
-        let attr_count = remaining / attr_size;
-
-        for i in 0..attr_count {
-            let attr_offset = add(base_offset, mul(i, attr_size)?)?;
-            self.reader.seek(SeekFrom::Start(attr_offset as u64))?;
-
-            // Read offset within row
-            let col_offset = field_usize(
-                if self.is_64bit {
-                    Self::read_i64(&mut self.reader, self.byte_order)?
-                } else {
-                    Self::read_i32(&mut self.reader, self.byte_order)? as i64
-                },
-                "column offset",
-            )?;
-
-            // Read column width
-            let col_width = field_usize(
-                Self::read_i32(&mut self.reader, self.byte_order)? as i64,
-                "column width",
-            )?;
-
-            // Read column type (1=numeric, 2=character)
-            let type_byte = {
-                let mut b = [0u8; 1];
-                self.reader.read_exact(&mut b)?;
-                b[0]
-            };
-
-            let col_type = if type_byte == 1 {
-                ColumnType::Numeric
-            } else {
-                ColumnType::Character
-            };
-
-            attrs.push((col_offset, col_width, col_type));
-        }
-
-        Ok(())
-    }
-
-    /// Read the data into a DataFrame.
-    pub fn read_to_dataframe(mut self) -> Result<DataFrame, SasError> {
-        if self.columns.is_empty() {
-            return Err(SasError::InvalidFormat("No columns found in file".into()));
-        }
-
-        // Clone column info to avoid borrow checker issues
-        let col_info: Vec<(String, ColumnType, usize, usize)> = self
-            .columns
+/// Bounds-checked unsigned read of `width` (1, 2, 4 or 8) bytes at `at` of `buf`.
+fn read_uint(buf: &[u8], at: usize, width: usize, order: ByteOrder) -> Result<u64, SasError> {
+    let end = at.checked_add(width).ok_or_else(offset_overflow)?;
+    let bytes = buf.get(at..end).ok_or_else(|| {
+        SasError::InvalidFormat(format!(
+            "a {width}-byte field at offset {at} lies outside its {}-byte block",
+            buf.len()
+        ))
+    })?;
+    Ok(match order {
+        ByteOrder::LittleEndian => bytes
             .iter()
-            .map(|c| (c.name.clone(), c.col_type, c.offset, c.length))
-            .collect();
+            .rev()
+            .fold(0u64, |v, &b| (v << 8) | u64::from(b)),
+        ByteOrder::BigEndian => bytes.iter().fold(0u64, |v, &b| (v << 8) | u64::from(b)),
+    })
+}
 
-        // Initialize column data storage
-        let mut numeric_cols: Vec<Vec<Option<f64>>> = Vec::new();
-        let mut string_cols: Vec<Vec<Option<String>>> = Vec::new();
-        let mut col_is_numeric: Vec<bool> = Vec::new();
+/// Signed read (sign-extended from `width` bytes): fields the T0 checks reject when negative.
+fn read_int(buf: &[u8], at: usize, width: usize, order: ByteOrder) -> Result<i64, SasError> {
+    let v = read_uint(buf, at, width, order)?;
+    let shift = 64 - 8 * (width as u32);
+    Ok(((v << shift) as i64) >> shift)
+}
 
-        // Bound the pre-allocation: `row_count` is parsed from a page subheader
-        // and must not be trusted to size buffers directly (a corrupt value
-        // would trigger a huge allocation). It grows as rows are actually read.
-        let row_capacity = self.row_count.min(1 << 20);
-        let cells = crate::resource::checked_len(&[col_info.len(), row_capacity], "SAS columns")
-            .map_err(resource_err)?;
-        crate::resource::check_alloc::<Option<String>>(cells, "SAS columns")
-            .map_err(resource_err)?;
-        for (_, col_type, _, _) in &col_info {
-            col_is_numeric.push(*col_type == ColumnType::Numeric);
-            if *col_type == ColumnType::Numeric {
-                numeric_cols.push(Vec::with_capacity(row_capacity));
-                string_cols.push(Vec::new()); // Placeholder
-            } else {
-                numeric_cols.push(Vec::new()); // Placeholder
-                string_cols.push(Vec::with_capacity(row_capacity));
-            }
-        }
-
-        // Read data pages
-        let page_header_size = if self.is_64bit { 40 } else { 24 };
-        if self.row_length == 0 {
-            return Err(SasError::InvalidFormat("row_length is zero".to_string()));
-        }
-
-        // Rows read so far, over all pages and whatever the column types.
-        let mut rows_read = 0usize;
-        for page_idx in 0..self.page_count {
-            if rows_read >= self.row_count {
-                break;
-            }
-            crate::resource::checkpoint().map_err(resource_err)?;
-            let page_offset = add(self.header_length, mul(page_idx, self.page_size)?)?;
-            self.reader.seek(SeekFrom::Start(page_offset as u64))?;
-
-            // Read page type
-            let page_type_offset = if self.is_64bit { 32 } else { 16 };
-            self.reader
-                .seek(SeekFrom::Start(add(page_offset, page_type_offset)? as u64))?;
-            let page_type = Self::read_i16(&mut self.reader, self.byte_order)?;
-
-            // Data pages (256) or mixed pages (512)
-            if page_type != 256 && page_type != 512 {
-                continue;
-            }
-
-            // Calculate data start offset
-            let data_start = if page_type == 256 {
-                add(page_offset, page_header_size)?
-            } else {
-                // For mixed pages, skip subheader pointers
-                let sh_count_offset = if self.is_64bit { 34 } else { 18 };
-                self.reader
-                    .seek(SeekFrom::Start(add(page_offset, sh_count_offset)? as u64))?;
-                let sh_count = field_usize(
-                    Self::read_i16(&mut self.reader, self.byte_order)? as i64,
-                    "subheader count",
-                )?;
-                let subheader_ptr_size = if self.is_64bit { 24 } else { 12 };
-                add(
-                    add(page_offset, page_header_size)?,
-                    mul(sh_count, subheader_ptr_size)?,
-                )?
-            };
-
-            // Read block count for data pages
-            let block_count_offset = if self.is_64bit { 36 } else { 20 };
-            self.reader
-                .seek(SeekFrom::Start(add(page_offset, block_count_offset)? as u64))?;
-            let block_count = field_usize(
-                Self::read_i16(&mut self.reader, self.byte_order)? as i64,
-                "block count",
-            )?;
-
-            // The rows of a page must fit in the page.
-            let page_end = add(page_offset, self.page_size)?;
-            if data_start > page_end {
-                return Err(SasError::InvalidFormat(format!(
-                    "the data on page {page_idx} would start past the end of the page"
-                )));
-            }
-            let capacity = (page_end - data_start) / self.row_length;
-            if block_count > capacity {
-                return Err(SasError::InvalidFormat(format!(
-                    "block count {block_count} on page {page_idx} exceeds the {capacity} rows \
-                     that fit in the page"
-                )));
-            }
-
-            // Read rows
-            for row_idx in 0..block_count {
-                if rows_read >= self.row_count {
-                    break;
-                }
-
-                let row_offset = add(data_start, mul(row_idx, self.row_length)?)?;
-
-                for (col_idx, (_, col_type, col_offset, col_length)) in col_info.iter().enumerate()
-                {
-                    let value_offset = add(row_offset, *col_offset)?;
-                    self.reader.seek(SeekFrom::Start(value_offset as u64))?;
-
-                    if *col_type == ColumnType::Numeric {
-                        let value = self.read_numeric_value(*col_length)?;
-                        numeric_cols[col_idx].push(value);
-                    } else {
-                        let value = self.read_string_value(*col_length)?;
-                        string_cols[col_idx].push(value);
-                    }
-                }
-                rows_read += 1;
-            }
-        }
-
-        // Build DataFrame columns
-        let mut df_columns: Vec<Column> = Vec::with_capacity(col_info.len());
-
-        for (col_idx, (col_name, col_type, _, _)) in col_info.iter().enumerate() {
-            let column = if *col_type == ColumnType::Numeric {
-                Column::new(col_name.as_str().into(), &numeric_cols[col_idx])
-            } else {
-                Column::new(col_name.as_str().into(), &string_cols[col_idx])
-            };
-            df_columns.push(column);
-        }
-
-        DataFrame::new(df_columns).map_err(SasError::PolarsError)
-    }
-
-    /// Read a numeric value.
-    fn read_numeric_value(&mut self, length: usize) -> Result<Option<f64>, SasError> {
-        if length == 8 {
-            let value = Self::read_f64(&mut self.reader, self.byte_order)?;
-            if value.is_nan() || value > 8.988e307 {
-                Ok(None)
-            } else {
-                Ok(Some(value))
-            }
-        } else if length == 4 {
-            let value = Self::read_f32(&mut self.reader, self.byte_order)?;
-            if value.is_nan() {
-                Ok(None)
-            } else {
-                Ok(Some(value as f64))
-            }
-        } else {
-            // Read truncated double. Validate the claimed length first so that a
-            // malformed file cannot push us into panicking code paths.
-            if length == 0 || length > 8 {
-                return Err(SasError::InvalidFormat(format!(
-                    "truncated double has invalid length {} (expected 1..=8)",
-                    length
-                )));
-            }
-            let mut buf = vec![0u8; 8];
-            self.reader.read_exact(&mut buf[8 - length..])?;
-            let fixed: [u8; 8] = buf.as_slice().try_into().map_err(|_| {
-                SasError::InvalidFormat(
-                    "internal: truncated-double buffer was not 8 bytes".to_string(),
-                )
-            })?;
-            let value = match self.byte_order {
-                ByteOrder::LittleEndian => f64::from_le_bytes(fixed),
-                ByteOrder::BigEndian => f64::from_be_bytes(fixed),
-            };
-            if value.is_nan() {
-                Ok(None)
-            } else {
-                Ok(Some(value))
-            }
-        }
-    }
-
-    /// Read a string value.
-    fn read_string_value(&mut self, length: usize) -> Result<Option<String>, SasError> {
-        let mut buf = vec![0u8; length];
-        self.reader.read_exact(&mut buf)?;
-
-        // Trim trailing spaces and nulls
-        let end = buf
-            .iter()
-            .rposition(|&b| b != 0 && b != 0x20)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-
-        if end == 0 {
-            Ok(None)
-        } else {
-            String::from_utf8(buf[..end].to_vec())
-                .or_else(|_| {
-                    // Try Windows-1252 encoding
-                    Ok(buf[..end].iter().map(|&b| b as char).collect())
-                })
-                .map(Some)
-        }
-    }
-
-    fn read_i16(reader: &mut R, byte_order: ByteOrder) -> Result<i16, SasError> {
-        let mut buf = [0u8; 2];
-        reader.read_exact(&mut buf)?;
-        Ok(match byte_order {
-            ByteOrder::LittleEndian => i16::from_le_bytes(buf),
-            ByteOrder::BigEndian => i16::from_be_bytes(buf),
-        })
-    }
-
-    fn read_i32(reader: &mut R, byte_order: ByteOrder) -> Result<i32, SasError> {
-        let mut buf = [0u8; 4];
-        reader.read_exact(&mut buf)?;
-        Ok(match byte_order {
-            ByteOrder::LittleEndian => i32::from_le_bytes(buf),
-            ByteOrder::BigEndian => i32::from_be_bytes(buf),
-        })
-    }
-
-    fn read_i64(reader: &mut R, byte_order: ByteOrder) -> Result<i64, SasError> {
-        let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf)?;
-        Ok(match byte_order {
-            ByteOrder::LittleEndian => i64::from_le_bytes(buf),
-            ByteOrder::BigEndian => i64::from_be_bytes(buf),
-        })
-    }
-
-    fn read_f32(reader: &mut R, byte_order: ByteOrder) -> Result<f32, SasError> {
-        let mut buf = [0u8; 4];
-        reader.read_exact(&mut buf)?;
-        Ok(match byte_order {
-            ByteOrder::LittleEndian => f32::from_le_bytes(buf),
-            ByteOrder::BigEndian => f32::from_be_bytes(buf),
-        })
-    }
-
-    fn read_f64(reader: &mut R, byte_order: ByteOrder) -> Result<f64, SasError> {
-        let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf)?;
-        Ok(match byte_order {
-            ByteOrder::LittleEndian => f64::from_le_bytes(buf),
-            ByteOrder::BigEndian => f64::from_be_bytes(buf),
-        })
-    }
+fn read_u16(buf: &[u8], at: usize, order: ByteOrder) -> Result<usize, SasError> {
+    Ok(read_uint(buf, at, 2, order)? as usize)
 }
 
 /// Windows-1252 code points of bytes 0x80..=0x9F; `None` for the five bytes the code page leaves
@@ -820,6 +250,542 @@ pub(crate) fn decode_utf8_or_windows_1252(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_owned(),
         Err(_) => decode_windows_1252_lenient(bytes),
+    }
+}
+
+/// SAS text: UTF-8 if valid, else each byte as a char.
+fn decode_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+    }
+}
+
+/// Trim trailing blanks and NULs (SAS pads text with either).
+fn trim_text(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != 0 && b != b' ')
+        .map_or(0, |i| i + 1);
+    &bytes[..end]
+}
+
+/// A SAS numeric cell: width 8 is a double (null if NaN or above 8.988e307), width 4 a float, widths
+/// 1 to 3 and 5 to 7 sit at the end of the 8 bytes.
+fn decode_numeric(cell: &[u8], order: ByteOrder) -> Option<f64> {
+    let w = cell.len();
+    if w == 0 || w > 8 {
+        return None;
+    }
+    let v = match w {
+        8 => {
+            let b: [u8; 8] = cell.try_into().ok()?;
+            let v = match order {
+                ByteOrder::LittleEndian => f64::from_le_bytes(b),
+                ByteOrder::BigEndian => f64::from_be_bytes(b),
+            };
+            if v > 8.988e307 {
+                return None;
+            }
+            v
+        }
+        4 => {
+            let b: [u8; 4] = cell.try_into().ok()?;
+            f64::from(match order {
+                ByteOrder::LittleEndian => f32::from_le_bytes(b),
+                ByteOrder::BigEndian => f32::from_be_bytes(b),
+            })
+        }
+        _ => {
+            let mut buf = [0u8; 8];
+            buf[8 - w..].copy_from_slice(cell);
+            match order {
+                ByteOrder::LittleEndian => f64::from_le_bytes(buf),
+                ByteOrder::BigEndian => f64::from_be_bytes(buf),
+            }
+        }
+    };
+    (!v.is_nan()).then_some(v)
+}
+
+/// The kind of a page from its type word.
+fn page_kind(page_type: u16) -> PageKind {
+    match page_type {
+        0 => PageKind::Meta,
+        256 => PageKind::Data,
+        512 => PageKind::Mix,
+        _ => PageKind::Skip,
+    }
+}
+
+/// Column buffers filled row by row.
+struct RowSink {
+    numeric: Vec<Vec<Option<f64>>>,
+    text: Vec<Vec<Option<String>>>,
+    rows: usize,
+}
+
+/// SAS7BDAT file reader
+pub struct SasReader<R: Read + Seek> {
+    reader: R,
+    byte_order: ByteOrder,
+    is_64bit: bool,
+    header_length: usize,
+    page_size: usize,
+    page_count: usize,
+    row_length: usize,
+    row_count: usize,
+    columns: Vec<ColumnInfo>,
+}
+
+impl<R: Read + Seek> SasReader<R> {
+    /// Create a new SAS reader: parses the header and every metadata subheader.
+    pub fn new(mut reader: R) -> Result<Self, SasError> {
+        let file_len = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
+        let mut head = [0u8; HEADER_PREFIX];
+        let mut got = 0;
+        while got < head.len() {
+            let n = reader.read(&mut head[got..])?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        if got < SAS_MAGIC.len() || head[..SAS_MAGIC.len()] != SAS_MAGIC {
+            return Err(SasError::InvalidFormat(
+                "Invalid SAS7BDAT magic number".into(),
+            ));
+        }
+        if got < head.len() {
+            return Err(SasError::InvalidFormat(format!(
+                "the file ends inside its header ({got} bytes)"
+            )));
+        }
+        let is_64bit = head[32] == 0x33;
+        let pad = if head[35] == 0x33 { 4 } else { 0 };
+        let byte_order = match head[37] {
+            0x01 => ByteOrder::LittleEndian,
+            0x00 => ByteOrder::BigEndian,
+            b => {
+                return Err(SasError::InvalidFormat(format!(
+                    "byte 37 (byte order) is 0x{b:02x}, not 0x00 or 0x01"
+                )));
+            }
+        };
+
+        // Header fields, validated against the file size (T0, DATA-49).
+        let check_offset = |raw: u64, name: &str| -> Result<usize, SasError> {
+            if raw > file_len {
+                return Err(SasError::InvalidFormat(format!(
+                    "{name} = {raw} exceeds the file size ({file_len} bytes); \
+                     the file is corrupt or truncated"
+                )));
+            }
+            usize::try_from(raw).map_err(|_| offset_overflow())
+        };
+        let header_length =
+            check_offset(read_uint(&head, 196 + pad, 4, byte_order)?, "header_length")?;
+        let page_size = check_offset(read_uint(&head, 200 + pad, 4, byte_order)?, "page_size")?;
+        if page_size == 0 {
+            return Err(SasError::InvalidFormat("page_size is zero".to_string()));
+        }
+        let int_len = if is_64bit { 8 } else { 4 };
+        let page_count_raw = read_int(&head, 204 + pad, int_len, byte_order)?;
+        if page_count_raw < 0 {
+            return Err(SasError::InvalidFormat(format!(
+                "page_count = {page_count_raw} is negative; the file is corrupt"
+            )));
+        }
+        let page_count = usize::try_from(page_count_raw).map_err(|_| offset_overflow())?;
+        // A page_count larger than the file can hold indicates corruption and
+        // would drive out-of-range page reads.
+        let max_pages = file_len.saturating_sub(header_length as u64) / page_size as u64;
+        if page_count as u64 > max_pages {
+            return Err(SasError::InvalidFormat(format!(
+                "declared page_count {page_count} exceeds file capacity ({max_pages} pages of \
+                 {page_size} bytes after a {header_length}-byte header in a {file_len}-byte file)"
+            )));
+        }
+
+        let mut sas_reader = SasReader {
+            reader,
+            byte_order,
+            is_64bit,
+            header_length,
+            page_size,
+            page_count,
+            row_length: 0,
+            row_count: 0,
+            columns: Vec::new(),
+        };
+        sas_reader.parse_metadata()?;
+        Ok(sas_reader)
+    }
+
+    /// The header fields as one `Copy` value for the page helpers.
+    fn layout(&self) -> Layout {
+        Layout {
+            is_64bit: self.is_64bit,
+            byte_order: self.byte_order,
+            page_size: self.page_size,
+            page_count: self.page_count,
+        }
+    }
+
+    /// Read page `idx` into `page` (`page_size` bytes).
+    fn read_page(&mut self, idx: usize, page: &mut [u8]) -> Result<(), SasError> {
+        let at = add(self.header_length, mul(idx, self.page_size)?)?;
+        self.reader.seek(SeekFrom::Start(at as u64))?;
+        self.reader.read_exact(page)?;
+        Ok(())
+    }
+
+    /// The page's kind, block count and subheader pointers (none on data and skipped pages).
+    fn page_header(
+        &self,
+        page: &[u8],
+        idx: usize,
+    ) -> Result<(PageKind, usize, Vec<Pointer>), SasError> {
+        let l = self.layout();
+        let t = l.page_type_offset();
+        let kind = page_kind(read_uint(page, t, 2, l.byte_order)? as u16);
+        let block_count = read_u16(page, t + 2, l.byte_order)?;
+        let subheader_count = read_u16(page, t + 4, l.byte_order)?;
+        let mut pointers = Vec::new();
+        if matches!(kind, PageKind::Meta | PageKind::Mix) {
+            // The pointer table must lie inside the page.
+            if add(
+                l.page_header_size(),
+                mul(subheader_count, l.pointer_size())?,
+            )? > l.page_size
+            {
+                return Err(SasError::InvalidFormat(format!(
+                    "subheader count {subheader_count} on page {idx} does not fit in the page"
+                )));
+            }
+            let il = l.int_len();
+            for k in 0..subheader_count {
+                let q = l.page_header_size() + k * l.pointer_size();
+                let offset = field_usize(read_int(page, q, il, l.byte_order)?, "subheader offset")?;
+                let length = field_usize(
+                    read_int(page, q + il, il, l.byte_order)?,
+                    "subheader length",
+                )?;
+                let compression = page[q + 2 * il];
+                let kind = page[q + 2 * il + 1];
+                // A subheader must lie inside its page (a truncated one is never read).
+                if length > 0
+                    && compression != COMPRESSION_TRUNCATED
+                    && add(offset, length)? > l.page_size
+                {
+                    return Err(SasError::InvalidFormat(format!(
+                        "subheader {k} on page {idx} extends past the page"
+                    )));
+                }
+                pointers.push(Pointer {
+                    offset,
+                    length,
+                    compression,
+                    kind,
+                });
+            }
+        }
+        Ok((kind, block_count, pointers))
+    }
+
+    /// The subheader signature at the start of `sh`.
+    fn signature(&self, sh: &[u8]) -> Result<u32, SasError> {
+        let l = self.layout();
+        let first = read_uint(sh, 0, 4, l.byte_order)? as u32;
+        if l.is_64bit
+            && l.byte_order == ByteOrder::BigEndian
+            && (first == 0xFFFF_FFFF || first == 0)
+        {
+            return Ok(read_uint(sh, 4, 4, l.byte_order)? as u32);
+        }
+        Ok(first)
+    }
+
+    /// Pass 1: row size, column count, column text, names and attributes from every metadata
+    /// and mix page; then the names are resolved and the layout validated.
+    fn parse_metadata(&mut self) -> Result<(), SasError> {
+        let l = self.layout();
+        let il = l.int_len();
+        let mut page =
+            crate::resource::try_vec(l.page_size, 0u8, "SAS page").map_err(resource_err)?;
+        let (mut row_length, mut row_count, mut column_count) = (None, None, None);
+        let mut texts: Vec<Vec<u8>> = Vec::new();
+        let mut names: Vec<(usize, usize, usize)> = Vec::new(); // (text block, offset, length)
+        let mut attrs: Vec<(usize, usize, ColumnType)> = Vec::new(); // (offset, width, type)
+
+        for idx in 0..l.page_count {
+            crate::resource::checkpoint().map_err(resource_err)?;
+            self.read_page(idx, &mut page)?;
+            let (kind, _, pointers) = self.page_header(&page, idx)?;
+            if !matches!(kind, PageKind::Meta | PageKind::Mix) {
+                continue;
+            }
+            for p in pointers {
+                // Truncated subheaders carry no metadata.
+                if p.length == 0 || p.compression != COMPRESSION_NONE {
+                    continue;
+                }
+                let sh = &page[p.offset..p.offset + p.length];
+                let sig = self.signature(sh)?;
+                let count_of = |entry: usize| -> Result<usize, SasError> {
+                    p.length
+                        .checked_sub(2 * il + 12)
+                        .map(|r| r / entry)
+                        .ok_or_else(|| {
+                            SasError::InvalidFormat(format!(
+                                "subheader 0x{sig:08x} on page {idx} is only {} bytes long",
+                                p.length
+                            ))
+                        })
+                };
+                match sig {
+                    SIG_ROW_SIZE => {
+                        row_length = Some(field_usize(
+                            read_int(sh, 5 * il, il, l.byte_order)?,
+                            "row_length",
+                        )?);
+                        row_count = Some(field_usize(
+                            read_int(sh, 6 * il, il, l.byte_order)?,
+                            "row_count",
+                        )?);
+                    }
+                    SIG_COL_SIZE => {
+                        column_count = Some(field_usize(
+                            read_int(sh, il, il, l.byte_order)?,
+                            "column count",
+                        )?);
+                    }
+                    SIG_COL_TEXT => {
+                        let blob = sh.get(il..).unwrap_or(&[]).to_vec();
+                        texts.push(blob);
+                    }
+                    SIG_COL_NAME => {
+                        for i in 0..count_of(8)? {
+                            let q = il + 8 + 8 * i;
+                            names.push((
+                                read_u16(sh, q, l.byte_order)?,
+                                read_u16(sh, q + 2, l.byte_order)?,
+                                read_u16(sh, q + 4, l.byte_order)?,
+                            ));
+                        }
+                    }
+                    SIG_COL_ATTR => {
+                        for i in 0..count_of(il + 8)? {
+                            let q = il + 8 + i * (il + 8);
+                            let offset =
+                                field_usize(read_int(sh, q, il, l.byte_order)?, "column offset")?;
+                            let width = field_usize(
+                                read_int(sh, q + il, 4, l.byte_order)?,
+                                "column width",
+                            )?;
+                            let code = read_uint(sh, q + il + 6, 1, l.byte_order)?;
+                            let col_type = match code {
+                                1 => ColumnType::Numeric,
+                                2 => ColumnType::Character,
+                                other => {
+                                    return Err(SasError::InvalidFormat(format!(
+                                        "column {} has the unknown type code {other} \
+                                         (1 = numeric, 2 = character)",
+                                        attrs.len()
+                                    )));
+                                }
+                            };
+                            attrs.push((offset, width, col_type));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if attrs.is_empty() {
+            return Err(SasError::InvalidFormat("No columns found in file".into()));
+        }
+        self.row_length = row_length
+            .ok_or_else(|| SasError::InvalidFormat("the file has no row size subheader".into()))?;
+        self.row_count = row_count.unwrap_or(0);
+        if names.len() != attrs.len() || column_count.is_some_and(|c| c != attrs.len()) {
+            return Err(SasError::InvalidFormat(format!(
+                "the file describes {} columns but names {} (column count {})",
+                attrs.len(),
+                names.len(),
+                column_count.map_or_else(|| "absent".to_string(), |c| c.to_string())
+            )));
+        }
+        for (j, ((t, off, len), (offset, length, col_type))) in names.iter().zip(&attrs).enumerate()
+        {
+            let raw = texts
+                .get(*t)
+                .and_then(|b| b.get(*off..off + len))
+                .ok_or_else(|| {
+                    SasError::InvalidFormat(format!(
+                        "the name of column {j} points outside the column text"
+                    ))
+                })?;
+            let name = decode_text(trim_text(raw));
+            self.columns.push(ColumnInfo {
+                name,
+                col_type: *col_type,
+                offset: *offset,
+                length: *length,
+            });
+        }
+        self.validate_layout()
+    }
+
+    /// Check the row and column layout against the page geometry: the row length is between 1
+    /// and the page size, the row count fits the pages,
+    /// every column has a nonzero width and lies inside the row,
+    /// and the column widths add up to at most the row length. So the bytes read per row are
+    /// bounded by the row length, and the cells read by the file size (T0, DATA-49). A valid file
+    /// satisfies all of these. Columns are not checked for disjointness: two overlapping columns
+    /// read the same bytes of the row.
+    fn validate_layout(&self) -> Result<(), SasError> {
+        let l = self.layout();
+        let row_length = self.row_length;
+        if row_length == 0 {
+            return Err(SasError::InvalidFormat("row_length is zero".to_string()));
+        }
+        if row_length > l.page_size {
+            return Err(SasError::InvalidFormat(format!(
+                "row_length {row_length} exceeds the page size of {} bytes",
+                l.page_size
+            )));
+        }
+        let rows_per_page = l.page_size / row_length;
+        let max_rows = l.page_count.saturating_mul(rows_per_page);
+        if self.row_count > max_rows {
+            return Err(SasError::InvalidFormat(format!(
+                "row_count {} exceeds what {} pages of {} bytes can hold",
+                self.row_count, l.page_count, l.page_size
+            )));
+        }
+
+        let mut total_width = 0usize;
+        for (i, column) in self.columns.iter().enumerate() {
+            let (offset, width) = (column.offset, column.length);
+            if width == 0 {
+                return Err(SasError::InvalidFormat(format!(
+                    "column {i} (offset {offset}) has width 0"
+                )));
+            }
+            if add(offset, width)? > row_length {
+                return Err(SasError::InvalidFormat(format!(
+                    "column {i} (offset {offset}, width {width}) extends past the row_length \
+                     of {row_length}"
+                )));
+            }
+            total_width = add(total_width, width)?;
+        }
+        if total_width > row_length {
+            return Err(SasError::InvalidFormat(format!(
+                "column widths add up to {total_width} bytes, more than the row_length of \
+                 {row_length}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Decode one row into the column buffers.
+    fn push_row(&self, sink: &mut RowSink, row: &[u8]) -> Result<(), SasError> {
+        let order = self.byte_order;
+        for (j, c) in self.columns.iter().enumerate() {
+            let cell = &row[c.offset..c.offset + c.length];
+            match c.col_type {
+                ColumnType::Numeric => sink.numeric[j].push(decode_numeric(cell, order)),
+                ColumnType::Character => {
+                    sink.text[j].push(Some(decode_text(trim_text(cell))));
+                }
+            }
+        }
+        sink.rows += 1;
+        Ok(())
+    }
+
+    /// Read the data into a DataFrame (pass 2: rows in page order).
+    pub fn read_to_dataframe(mut self) -> Result<DataFrame, SasError> {
+        let l = self.layout();
+        // Bound the pre-allocation: `row_count` is parsed from a page subheader
+        // and must not be trusted to size buffers directly (a corrupt value
+        // would trigger a huge allocation). It grows as rows are actually read.
+        let row_capacity = self.row_count.min(1 << 20);
+        let cells =
+            crate::resource::checked_len(&[self.columns.len(), row_capacity], "SAS columns")
+                .map_err(resource_err)?;
+        crate::resource::check_alloc::<Option<String>>(cells, "SAS columns")
+            .map_err(resource_err)?;
+        let mut sink = RowSink {
+            numeric: Vec::new(),
+            text: Vec::new(),
+            rows: 0,
+        };
+        for c in &self.columns {
+            let numeric = c.col_type == ColumnType::Numeric;
+            sink.numeric
+                .push(Vec::with_capacity(if numeric { row_capacity } else { 0 }));
+            sink.text
+                .push(Vec::with_capacity(if numeric { 0 } else { row_capacity }));
+        }
+        let mut page =
+            crate::resource::try_vec(l.page_size, 0u8, "SAS page").map_err(resource_err)?;
+        let mut row =
+            crate::resource::try_vec(self.row_length, 0u8, "SAS row").map_err(resource_err)?;
+
+        for idx in 0..l.page_count {
+            if sink.rows >= self.row_count {
+                break;
+            }
+            crate::resource::checkpoint().map_err(resource_err)?;
+            self.read_page(idx, &mut page)?;
+            let (kind, block_count, pointers) = self.page_header(&page, idx)?;
+
+            // Rows stored after the page header (data pages) or the pointer table (mix pages).
+            let (start, n) = match kind {
+                PageKind::Data => (l.page_header_size(), block_count),
+                PageKind::Mix => {
+                    let start = add(l.page_header_size(), mul(pointers.len(), l.pointer_size())?)?;
+                    let n = block_count.checked_sub(pointers.len()).ok_or_else(|| {
+                        SasError::InvalidFormat(format!(
+                            "block count {block_count} on page {idx} is smaller than its {} \
+                             subheaders",
+                            pointers.len()
+                        ))
+                    })?;
+                    (start, n)
+                }
+                PageKind::Meta | PageKind::Skip => continue,
+            };
+            let capacity = l.page_size.saturating_sub(start) / self.row_length;
+            if n > capacity {
+                return Err(SasError::InvalidFormat(format!(
+                    "block count {n} on page {idx} exceeds the {capacity} rows that fit in the page"
+                )));
+            }
+            for r in 0..n {
+                if sink.rows >= self.row_count {
+                    break;
+                }
+                let at = start + r * self.row_length;
+                row.copy_from_slice(&page[at..at + self.row_length]);
+                self.push_row(&mut sink, &row)?;
+            }
+        }
+
+        let mut df_columns: Vec<Column> = Vec::with_capacity(self.columns.len());
+        for (j, c) in self.columns.iter().enumerate() {
+            let column = match c.col_type {
+                ColumnType::Numeric => Column::new(c.name.as_str().into(), &sink.numeric[j]),
+                ColumnType::Character => Column::new(c.name.as_str().into(), &sink.text[j]),
+            };
+            df_columns.push(column);
+        }
+        DataFrame::new(df_columns).map_err(SasError::PolarsError)
     }
 }
 
@@ -919,212 +885,10 @@ pub(crate) mod fixture_check {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture_check::{fixture_bytes, fixture_path};
+    use super::fixture_check::{fixture_bytes, fixture_path, put};
     use super::*;
     use p2a_validation::Case;
     use std::io::Cursor;
-
-    // sas64_haven.sas7bdat (haven::write_sas: 64-bit, little-endian, no pad, header 8192, pages
-    // of 4096): page 0 holds the metadata, pages 1-4 the 60 rows (19, 19, 19, 3) of 205 bytes.
-    const H_PAGE0: usize = 8192;
-    const H_PAGE1: usize = H_PAGE0 + 4096;
-    const H_PAGE1_TYPE: usize = H_PAGE1 + 32;
-    const H_ROW_SIZE: usize = H_PAGE0 + 3288; // row length at +40, row count at +48 (i64)
-    const H_COL_ATTR: usize = H_PAGE0 + 2912; // vector j at +16 + 16 j: offset +0, width +8, type +14
-    const H_COL_NAME: usize = H_PAGE0 + 3084; // pointer j at +16 + 8 j: text block, offset, length
-    const H_COL_TEXT: usize = H_PAGE0 + 3184; // the compression literal at +8 + 12
-    // sas32_iris.sas7bdat (SAS 9.4: 32-bit, little-endian, pad 4, header 65536, one mix page).
-    const I_PAGE0: usize = 65536;
-    const I_PAGE0_TYPE: usize = I_PAGE0 + 16;
-    const I_ROW_SIZE: usize = I_PAGE0 + 65056; // row count at +24 (i32)
-    const I_COL_ATTR: usize = I_PAGE0 + 64456; // vector j at +12 + 12 j: offset +0, width +4, type +10
-
-    #[test]
-    fn test_magic_number() {
-        assert_eq!(SAS_MAGIC.len(), 32);
-        assert_eq!(SAS_MAGIC[12], 0xc2);
-    }
-
-    #[test]
-    fn test_sas_invalid_magic() {
-        let invalid_data = b"Not a valid SAS file - this is just random text";
-        let cursor = Cursor::new(invalid_data.to_vec());
-        let result = SasReader::new(cursor);
-        assert!(result.is_err());
-        match result {
-            Err(SasError::InvalidFormat(msg)) => assert!(msg.contains("magic")),
-            _ => panic!("Expected InvalidFormat error"),
-        }
-    }
-
-    #[test]
-    fn test_sas_truncated_magic() {
-        // Less than 32 bytes
-        let short_data = vec![0u8; 16];
-        let cursor = Cursor::new(short_data);
-        let result = SasReader::new(cursor);
-        assert!(result.is_err());
-    }
-
-    /// Create a minimal valid SAS7BDAT file (32-bit, little-endian).
-    /// This is a highly simplified structure for testing basic parsing.
-    fn create_minimal_sas_file() -> Vec<u8> {
-        let header_length: usize = 8192; // Standard SAS header
-        let page_size: usize = 4096; // Single page size
-        let page_count: usize = 2; // Metadata + data page
-
-        let mut buf = vec![0u8; header_length + page_size * page_count];
-
-        // === Header (first 8192 bytes) ===
-        // Magic number at offset 0
-        buf[0..32].copy_from_slice(&SAS_MAGIC);
-
-        // Alignment byte at offset 32 (0x00 = 32-bit)
-        buf[32] = 0x00;
-
-        // Align2 byte at offset 35
-        buf[35] = 0x00;
-
-        // Endianness at offset 37 (0x01 = little-endian)
-        buf[37] = 0x01;
-
-        // Platform (unused, but let's set it)
-        buf[39] = b'1'; // Unix
-
-        // Header length at offset 196 (32-bit, no alignment adjustment)
-        let header_len_offset = 196;
-        buf[header_len_offset..header_len_offset + 4]
-            .copy_from_slice(&(header_length as i32).to_le_bytes());
-
-        // Page size at offset 200
-        let page_size_offset = 200;
-        buf[page_size_offset..page_size_offset + 4]
-            .copy_from_slice(&(page_size as i32).to_le_bytes());
-
-        // Page count at offset 204 (32-bit format)
-        let page_count_offset = 204;
-        buf[page_count_offset..page_count_offset + 4]
-            .copy_from_slice(&(page_count as i32).to_le_bytes());
-
-        // === First page (metadata page) at offset header_length ===
-        let page0_offset = header_length;
-
-        // Page type at offset 16 (for 32-bit): 0 = metadata page
-        buf[page0_offset + 16..page0_offset + 18].copy_from_slice(&0i16.to_le_bytes());
-
-        // Subheader count at offset 18
-        buf[page0_offset + 18..page0_offset + 20].copy_from_slice(&4i16.to_le_bytes()); // 4 subheaders
-
-        // Page header size for 32-bit is 24 bytes
-        // Subheader pointer size for 32-bit is 12 bytes
-
-        // === Subheader pointers (start at page0_offset + 24) ===
-        let sh_ptr_base = page0_offset + 24;
-
-        // Subheader 1: Row size subheader
-        // Offset within page (relative to page start)
-        let sh1_offset: i32 = 72; // After 4 subheader pointers (24 + 4*12 = 72)
-        buf[sh_ptr_base..sh_ptr_base + 4].copy_from_slice(&sh1_offset.to_le_bytes());
-        // Length
-        buf[sh_ptr_base + 4..sh_ptr_base + 8].copy_from_slice(&32i32.to_le_bytes());
-
-        // Subheader 2: Column size subheader
-        let sh2_offset: i32 = 104;
-        buf[sh_ptr_base + 12..sh_ptr_base + 16].copy_from_slice(&sh2_offset.to_le_bytes());
-        buf[sh_ptr_base + 16..sh_ptr_base + 20].copy_from_slice(&24i32.to_le_bytes());
-
-        // Subheader 3: Column name subheader
-        let sh3_offset: i32 = 128;
-        buf[sh_ptr_base + 24..sh_ptr_base + 28].copy_from_slice(&sh3_offset.to_le_bytes());
-        buf[sh_ptr_base + 28..sh_ptr_base + 32].copy_from_slice(&40i32.to_le_bytes());
-
-        // Subheader 4: Column attributes subheader
-        let sh4_offset: i32 = 168;
-        buf[sh_ptr_base + 36..sh_ptr_base + 40].copy_from_slice(&sh4_offset.to_le_bytes());
-        buf[sh_ptr_base + 40..sh_ptr_base + 44].copy_from_slice(&36i32.to_le_bytes());
-
-        // === Row size subheader (F7F7F7F7) ===
-        let row_sh_base = page0_offset + sh1_offset as usize;
-        buf[row_sh_base..row_sh_base + 4].copy_from_slice(&ROW_SIZE_SIGNATURE);
-        // Row length at offset 20 (32-bit)
-        let row_length: i32 = 16; // 2 doubles = 16 bytes per row
-        buf[row_sh_base + 20..row_sh_base + 24].copy_from_slice(&row_length.to_le_bytes());
-        // Row count at offset 24
-        let row_count: i32 = 3; // 3 rows
-        buf[row_sh_base + 24..row_sh_base + 28].copy_from_slice(&row_count.to_le_bytes());
-
-        // === Column size subheader (F6F6F6F6) ===
-        let col_sh_base = page0_offset + sh2_offset as usize;
-        buf[col_sh_base..col_sh_base + 4].copy_from_slice(&COL_SIZE_SIGNATURE);
-        // Column count at offset 8
-        let col_count: i32 = 2;
-        buf[col_sh_base + 8..col_sh_base + 12].copy_from_slice(&col_count.to_le_bytes());
-
-        // === Column name subheader (FFFFFFFF) ===
-        let name_sh_base = page0_offset + sh3_offset as usize;
-        buf[name_sh_base..name_sh_base + 4].copy_from_slice(&COL_NAME_SIGNATURE);
-        // Base offset for names is 8 + int_size*2 = 8 + 4*2 = 16
-        // Entry size is 8 bytes
-        // We have 2 columns
-
-        // === Column attributes subheader (FCFFFFFF) ===
-        let attr_sh_base = page0_offset + sh4_offset as usize;
-        buf[attr_sh_base..attr_sh_base + 4].copy_from_slice(&COL_ATTR_SIGNATURE);
-        // Base offset is 12 for 32-bit
-        // Each attribute entry is 12 bytes for 32-bit
-
-        // Column 1: offset=0, width=8, type=1 (numeric)
-        let attr1_base = attr_sh_base + 12;
-        buf[attr1_base..attr1_base + 4].copy_from_slice(&0i32.to_le_bytes()); // offset
-        buf[attr1_base + 4..attr1_base + 8].copy_from_slice(&8i32.to_le_bytes()); // width
-        buf[attr1_base + 8] = 1; // type = numeric
-
-        // Column 2: offset=8, width=8, type=1 (numeric)
-        let attr2_base = attr_sh_base + 24;
-        buf[attr2_base..attr2_base + 4].copy_from_slice(&8i32.to_le_bytes()); // offset
-        buf[attr2_base + 4..attr2_base + 8].copy_from_slice(&8i32.to_le_bytes()); // width
-        buf[attr2_base + 8] = 1; // type = numeric
-
-        // === Second page (data page) at offset header_length + page_size ===
-        let page1_offset = header_length + page_size;
-
-        // Page type at offset 16: 256 = data page
-        buf[page1_offset + 16..page1_offset + 18].copy_from_slice(&256i16.to_le_bytes());
-
-        // Block count (number of rows in this page) at offset 20
-        buf[page1_offset + 20..page1_offset + 22].copy_from_slice(&3i16.to_le_bytes());
-
-        // Data starts at offset 24 (page_header_size for 32-bit)
-        let data_base = page1_offset + 24;
-
-        // Row 1: 1.0, 2.0
-        buf[data_base..data_base + 8].copy_from_slice(&1.0f64.to_le_bytes());
-        buf[data_base + 8..data_base + 16].copy_from_slice(&2.0f64.to_le_bytes());
-
-        // Row 2: 3.0, 4.0
-        buf[data_base + 16..data_base + 24].copy_from_slice(&3.0f64.to_le_bytes());
-        buf[data_base + 24..data_base + 32].copy_from_slice(&4.0f64.to_le_bytes());
-
-        // Row 3: 5.0, 6.0
-        buf[data_base + 32..data_base + 40].copy_from_slice(&5.0f64.to_le_bytes());
-        buf[data_base + 40..data_base + 48].copy_from_slice(&6.0f64.to_le_bytes());
-
-        buf
-    }
-
-    const PAGE0: usize = 8192; // metadata page
-    const PAGE1: usize = 8192 + 4096; // data page
-    const ROW_SH: usize = PAGE0 + 72; // row-size subheader: row_length at +20, row_count at +24
-    const ATTR1: usize = PAGE0 + 168 + 12; // column attributes: offset +0, width +4, type +8
-    const ATTR2: usize = PAGE0 + 168 + 24;
-
-    fn put_i32(b: &mut [u8], at: usize, v: i32) {
-        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
-    }
-
-    fn put_i16(b: &mut [u8], at: usize, v: i16) {
-        b[at..at + 2].copy_from_slice(&v.to_le_bytes());
-    }
 
     fn load(b: Vec<u8>) -> Result<DataFrame, SasError> {
         SasReader::new(Cursor::new(b))?.read_to_dataframe()
@@ -1134,135 +898,29 @@ mod tests {
         match r {
             Err(SasError::InvalidFormat(m)) => assert!(m.contains(needle), "{m}"),
             other => panic!(
-                "expected InvalidFormat mentioning {needle}, got {:?}",
+                "expected InvalidFormat mentioning {needle:?}, got {:?}",
                 other.map(|d| d.shape())
             ),
         }
     }
 
-    #[test]
-    fn sas_rejects_zero_row_length() {
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, ROW_SH + 20, 0);
-        put_i32(&mut b, ROW_SH + 24, 100_000);
-        put_i16(&mut b, PAGE1 + 20, -1);
-        assert_invalid(load(b), "row_length");
-    }
-
-    #[test]
-    fn sas_rejects_negative_fields() {
-        let mut b = create_minimal_sas_file();
-        b[ATTR2 + 8] = 2; // character column
-        put_i32(&mut b, ATTR2 + 4, -1); // width -1
-        assert_invalid(load(b), "width");
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, PAGE0 + 24, -100); // first subheader pointer offset
-        assert_invalid(load(b), "subheader offset");
-        let mut b = create_minimal_sas_file();
-        put_i16(&mut b, PAGE0 + 18, -1); // subheader count
-        assert_invalid(load(b), "subheader count");
-        let mut b = create_minimal_sas_file();
-        put_i16(&mut b, PAGE1 + 20, -1); // block count
-        assert_invalid(load(b), "block count");
-    }
-
-    #[test]
-    fn sas_bounds_rows_and_columns_by_the_layout() {
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, ROW_SH + 24, 1_000_000); // > 2 pages x (4096 / 16) rows
-        assert_invalid(load(b), "row_count");
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, ROW_SH + 24, 300); // fits the file, not the data page
-        put_i16(&mut b, PAGE1 + 20, 300); // page holds (4096 - 24) / 16 = 254 rows
-        assert_invalid(load(b), "block count");
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, ATTR2, 0);
-        put_i32(&mut b, ATTR2 + 4, 16); // widths 8 + 16 > row_length 16 (overlap)
-        assert_invalid(load(b), "widths");
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, ATTR2, 12); // offset 12 + width 8 > row_length 16
-        assert_invalid(load(b), "extends past");
-        let mut b = create_minimal_sas_file();
-        put_i32(&mut b, ATTR2 + 4, 0); // width 0 at offset 8, inside the row
-        assert_invalid(load(b), "(offset 8) has width 0");
-    }
-
-    #[test]
-    fn sas_stops_at_row_count_for_character_only_files() {
-        let mut b = create_minimal_sas_file();
-        b[ATTR1 + 8] = 2;
-        b[ATTR2 + 8] = 2;
-        put_i32(&mut b, ROW_SH + 24, 2); // block count stays 3
-        assert_eq!(load(b).unwrap().height(), 2);
-    }
-
-    #[test]
-    fn test_read_synthetic_sas_header() {
-        let sas_bytes = create_minimal_sas_file();
-        let cursor = Cursor::new(sas_bytes);
-        let reader = SasReader::new(cursor).expect("Failed to create SAS reader");
-
-        // Verify header parsing
-        assert!(!reader.is_64bit);
-        assert_eq!(reader.byte_order, ByteOrder::LittleEndian);
-        assert_eq!(reader.header_length, 8192);
-        assert_eq!(reader.page_size, 4096);
-        assert_eq!(reader.page_count, 2);
-        assert_eq!(reader.row_length, 16);
-        assert_eq!(reader.row_count, 3);
-        assert_eq!(reader.columns.len(), 2);
-    }
-
-    #[test]
-    fn test_read_synthetic_sas_data() {
-        let sas_bytes = create_minimal_sas_file();
-        let cursor = Cursor::new(sas_bytes);
-        let reader = SasReader::new(cursor).expect("Failed to create SAS reader");
-        let df = reader
-            .read_to_dataframe()
-            .expect("Failed to read dataframe");
-
-        assert_eq!(df.height(), 3);
-        assert_eq!(df.width(), 2);
-
-        // Get columns by index since names are auto-generated
-        let columns: Vec<_> = df.get_columns().iter().collect();
-        assert_eq!(columns.len(), 2);
-
-        // First column should have values 1.0, 3.0, 5.0
-        let col1 = columns[0].f64().unwrap();
-        assert_eq!(col1.get(0), Some(1.0));
-        assert_eq!(col1.get(1), Some(3.0));
-        assert_eq!(col1.get(2), Some(5.0));
-
-        // Second column should have values 2.0, 4.0, 6.0
-        let col2 = columns[1].f64().unwrap();
-        assert_eq!(col2.get(0), Some(2.0));
-        assert_eq!(col2.get(1), Some(4.0));
-        assert_eq!(col2.get(2), Some(6.0));
-    }
-
-    #[test]
-    fn test_sas_endianness_detection_little() {
-        // Test little-endian (default)
-        let sas_bytes = create_minimal_sas_file();
-        let cursor = Cursor::new(sas_bytes);
-        let reader = SasReader::new(cursor).expect("Failed to create reader");
-        assert_eq!(reader.byte_order, ByteOrder::LittleEndian);
-    }
-
-    #[test]
-    fn test_sas_column_types() {
-        // Verify that column type detection works
-        let sas_bytes = create_minimal_sas_file();
-        let cursor = Cursor::new(sas_bytes);
-        let reader = SasReader::new(cursor).expect("Failed to create reader");
-
-        // Verify we have 2 numeric columns
-        assert_eq!(reader.columns.len(), 2);
-        assert_eq!(reader.columns[0].col_type, ColumnType::Numeric);
-        assert_eq!(reader.columns[1].col_type, ColumnType::Numeric);
-    }
+    // sas64_haven.sas7bdat (haven::write_sas: 64-bit, little-endian, no pad, header 8192, pages
+    // of 4096): page 0 holds the metadata, pages 1-4 the 60 rows (19, 19, 19, 3) of 205 bytes.
+    const H_PAGE0: usize = 8192;
+    const H_PAGE0_SUBHEADER_COUNT: usize = H_PAGE0 + 36;
+    const H_PAGE0_POINTER0: usize = H_PAGE0 + 40; // offset (i64), length (i64), compression, type
+    const H_PAGE1: usize = H_PAGE0 + 4096;
+    const H_PAGE1_TYPE: usize = H_PAGE1 + 32;
+    const H_PAGE1_BLOCK_COUNT: usize = H_PAGE1 + 34;
+    const H_ROW_SIZE: usize = H_PAGE0 + 3288; // row length at +40, row count at +48 (i64)
+    const H_COL_ATTR: usize = H_PAGE0 + 2912; // vector j at +16 + 16 j: offset +0, width +8, type +14
+    const H_COL_NAME: usize = H_PAGE0 + 3084; // pointer j at +16 + 8 j: text block, offset, length
+    const H_COL_TEXT: usize = H_PAGE0 + 3184; // the compression literal at +8 + 12
+    // sas32_iris.sas7bdat (SAS 9.4: 32-bit, little-endian, pad 4, header 65536, one mix page).
+    const I_PAGE0: usize = 65536;
+    const I_PAGE0_TYPE: usize = I_PAGE0 + 16;
+    const I_ROW_SIZE: usize = I_PAGE0 + 65056; // row count at +24 (i32)
+    const I_COL_ATTR: usize = I_PAGE0 + 64456; // vector j at +12 + 12 j: offset +0, width +4, type +10
 
     #[test]
     fn test_windows_1252_helpers() {
@@ -1276,6 +934,28 @@ mod tests {
             "Z\u{fc}rich"
         );
         assert_eq!(decode_utf8_or_windows_1252(&[0x5A, 0xFC]), "Z\u{fc}");
+    }
+
+    #[test]
+    fn test_magic_number() {
+        assert_eq!(SAS_MAGIC.len(), 32);
+        assert_eq!(SAS_MAGIC[12], 0xc2);
+    }
+
+    #[test]
+    fn test_sas_invalid_magic() {
+        let result = SasReader::new(Cursor::new(
+            b"Not a valid SAS file - this is just random text".to_vec(),
+        ));
+        match result {
+            Err(SasError::InvalidFormat(msg)) => assert!(msg.contains("magic")),
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[test]
+    fn test_sas_truncated_magic() {
+        assert!(SasReader::new(Cursor::new(vec![0u8; 16])).is_err());
     }
 
     #[test]
@@ -1316,5 +996,169 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 18);
+    }
+
+    // ---- DATA-18, DATA-19, DATA-20, DATA-47: the uncompressed layout ----
+
+    #[test]
+    fn test_sas_header_fields_follow_byte_35() {
+        // DATA-18: byte 35 (not byte 32) adds the 4-byte pad before header_length, page_size and
+        // page_count. sas64_haven: byte 32 = 0x33, byte 35 = 0x22 (no pad); sas64_pad: the same
+        // file with the pad; sas32_iris (SAS 9.4): byte 32 = 0x22, byte 35 = 0x33.
+        for (name, is_64bit, want) in [
+            ("sas64_haven.sas7bdat", true, (8192, 4096, 5)),
+            ("sas64_pad.sas7bdat", true, (8192, 4096, 5)),
+            ("sas32_iris.sas7bdat", false, (65536, 65536, 1)),
+        ] {
+            let r = SasReader::new(Cursor::new(fixture_bytes(name))).unwrap();
+            assert_eq!(r.is_64bit, is_64bit, "{name}");
+            assert_eq!((r.header_length, r.page_size, r.page_count), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_sas_page_header_counts() {
+        // DATA-20: block count at B + 2, subheader count at B + 4. sas64_haven's data pages hold
+        // 19, 19, 19 and 3 blocks; sas32_iris's mix page 163 blocks = 13 subheaders + 150 rows.
+        assert_eq!(
+            load_sas(fixture_path("sas64_haven.sas7bdat"))
+                .unwrap()
+                .height(),
+            60
+        );
+        assert_eq!(
+            load_sas(fixture_path("sas64_pad.sas7bdat"))
+                .unwrap()
+                .height(),
+            60
+        );
+        assert_eq!(
+            load_sas(fixture_path("sas32_iris.sas7bdat"))
+                .unwrap()
+                .height(),
+            150
+        );
+    }
+
+    #[test]
+    fn test_sas_column_types_from_the_attribute_vector() {
+        // DATA-19: the type byte is at int_len + 6 of each attribute vector, after the name flag.
+        use ColumnType::{Character as C, Numeric as N};
+        let r = SasReader::new(Cursor::new(fixture_bytes("sas64_haven.sas7bdat"))).unwrap();
+        let types: Vec<ColumnType> = r.columns.iter().map(|c| c.col_type).collect();
+        assert_eq!(types, [N, N, N, N, N, N, C, C, C]);
+        let r = SasReader::new(Cursor::new(fixture_bytes("sas32_iris.sas7bdat"))).unwrap();
+        let types: Vec<ColumnType> = r.columns.iter().map(|c| c.col_type).collect();
+        assert_eq!(types, [N, N, N, N, C]);
+    }
+
+    #[test]
+    fn test_validate_sas_unknown_column_type_is_error() {
+        // DATA-19: an unknown type code is an error, not Character (ReadStat refuses too:
+        // guard__sas_type_code_3 = -1).
+        let case = Case::load("data_readers_values");
+        assert_eq!(case.scalar("guard__sas_type_code_3"), -1.0);
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        b[H_COL_ATTR + 16 + 14] = 3;
+        assert_invalid(load(b), "column 0 has the unknown type code 3");
+    }
+
+    #[test]
+    fn test_validate_sas_column_names_from_the_column_text() {
+        // DATA-47: names come from the column-text blocks the name pointers index.
+        let case = Case::load("data_readers_values");
+        for stem in ["sas64_haven", "sas32_iris"] {
+            let df = load_sas(fixture_path(&format!("{stem}.sas7bdat"))).unwrap();
+            let names: Vec<String> = df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(
+                names.as_slice(),
+                case.names(&format!("{stem}__columns")),
+                "{stem}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sas_name_pointer_outside_text_is_error() {
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_COL_NAME + 16 + 2, &500u16.to_le_bytes());
+        assert_invalid(
+            load(b),
+            "the name of column 0 points outside the column text",
+        );
+    }
+
+    // ---- T0 (DATA-49) guards, rebuilt on the real layout ----
+
+    #[test]
+    fn sas_rejects_zero_row_length() {
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_ROW_SIZE + 40, &0u64.to_le_bytes());
+        put(&mut b, H_ROW_SIZE + 48, &100_000u64.to_le_bytes());
+        put(&mut b, H_PAGE1_BLOCK_COUNT, &0xFFFFu16.to_le_bytes());
+        assert_invalid(load(b), "row_length");
+    }
+
+    #[test]
+    fn sas_rejects_negative_fields() {
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_COL_ATTR + 16 + 16 * 6 + 8, &(-1i32).to_le_bytes()); // grp width -1
+        assert_invalid(load(b), "width");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_PAGE0_POINTER0, &(-100i64).to_le_bytes()); // first subheader offset
+        assert_invalid(load(b), "subheader offset");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_PAGE0_SUBHEADER_COUNT, &0xFFFFu16.to_le_bytes()); // 65535 pointers
+        assert_invalid(load(b), "subheader count");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_PAGE1_BLOCK_COUNT, &0xFFFFu16.to_le_bytes());
+        assert_invalid(load(b), "block count");
+    }
+
+    #[test]
+    fn sas_bounds_rows_and_columns_by_the_layout() {
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_ROW_SIZE + 48, &1_000_000u64.to_le_bytes()); // > 5 pages x 19 rows
+        assert_invalid(load(b), "row_count");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_PAGE1_BLOCK_COUNT, &300u16.to_le_bytes()); // a page holds (4096 - 40) / 205 = 19
+        assert_invalid(load(b), "block count 300 on page 1 exceeds the 19 rows");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_COL_ATTR + 16 + 16 * 6 + 8, &14u32.to_le_bytes()); // grp 7 -> 14: 212 > 205
+        assert_invalid(load(b), "column widths add up to 212 bytes");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_COL_ATTR + 16 + 16, &200u64.to_le_bytes()); // income at 200, width 8
+        assert_invalid(load(b), "extends past");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_COL_ATTR + 16 + 16 + 8, &0u32.to_le_bytes()); // income width 0, inside the row (T0 da640108)
+        assert_invalid(load(b), "has width 0");
+    }
+
+    #[test]
+    fn test_validate_sas_stops_at_row_count_for_character_only_files() {
+        // ReadStat reads the same bytes as 2 text columns' 2 rows (guard__sas_char_only_row_count_2),
+        // and stops at a smaller row count too (guard__sas_row_count_59).
+        let case = Case::load("data_readers_values");
+        let mut b = fixture_bytes("sas32_iris.sas7bdat");
+        for j in 0..5 {
+            b[I_COL_ATTR + 12 + 12 * j + 10] = 2; // every column character
+        }
+        put(&mut b, I_ROW_SIZE + 24, &2u32.to_le_bytes());
+        let df = load(b).unwrap();
+        assert_eq!(df.shape(), (2, 5));
+        assert_eq!(
+            df.height() as f64,
+            case.scalar("guard__sas_char_only_row_count_2")
+        );
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_ROW_SIZE + 48, &59u64.to_le_bytes());
+        assert_eq!(
+            load(b).unwrap().height() as f64,
+            case.scalar("guard__sas_row_count_59")
+        );
     }
 }

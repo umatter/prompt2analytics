@@ -68,7 +68,10 @@
         "data_readers_values"
       ],
       "tests": [
-        "p2a-core::data::sas::tests::test_validate_data_readers_manifest_lists_every_fixture"
+        "p2a-core::data::sas::tests::test_validate_data_readers_manifest_lists_every_fixture",
+        "p2a-core::data::sas::tests::test_validate_sas_unknown_column_type_is_error",
+        "p2a-core::data::sas::tests::test_validate_sas_column_names_from_the_column_text",
+        "p2a-core::data::sas::tests::test_validate_sas_stops_at_row_count_for_character_only_files"
       ],
       "quantities": [
         "shape",
