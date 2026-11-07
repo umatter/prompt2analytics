@@ -417,7 +417,7 @@ pub fn join_with(
     // Set up join arguments
     let suffix = suffix.unwrap_or("_right");
     let suffix_str: PlSmallStr = suffix.into();
-    let (right_df, right_on_str) = suffix_right(
+    let (renamed_right, right_on_str) = suffix_right(
         left.df(),
         right.df(),
         left_on,
@@ -429,7 +429,7 @@ pub fn join_with(
     // Perform the join, on frames whose columns are chunked alike.
     let result = chunk_aligned(left.df())
         .join(
-            &chunk_aligned(&right_df),
+            &chunk_aligned(renamed_right.as_ref().unwrap_or(right.df())),
             left_on_str.as_slice(),
             right_on_str.as_slice(),
             JoinArgs::new(join_type.to_polars()).with_suffix(Some(suffix_str)),
@@ -497,8 +497,8 @@ fn refuse_empty_suffix(collisions: Vec<&String>) -> MungeResult<()> {
 
 /// polars' eager join hands its suffix to a rename that assumes the result names are unique, so the
 /// right-hand columns are renamed first: every right name (the keys too, as dplyr's `join_cols`)
-/// against the left columns polars keeps. Returns the right frame and its key names under the new
-/// names.
+/// against the left columns polars keeps. Returns the renamed right frame, `None` when polars can
+/// take `right` as it is, and the right key names to pass.
 fn suffix_right(
     left: &DataFrame,
     right: &DataFrame,
@@ -506,19 +506,19 @@ fn suffix_right(
     right_on: &[&str],
     join_type: JoinType,
     suffix: &str,
-) -> MungeResult<(DataFrame, Vec<String>)> {
+) -> MungeResult<(Option<DataFrame>, Vec<String>)> {
     let right_names = names_of(right);
+    let keys_as_they_are = || right_on.iter().map(|s| s.to_string()).collect();
     if matches!(join_type, JoinType::Semi | JoinType::Anti) {
-        let keys = right_on.iter().map(|s| s.to_string()).collect();
-        return Ok((right.clone(), keys));
+        return Ok((None, keys_as_they_are()));
     }
     let kept_left: Vec<String> = names_of(left)
         .into_iter()
         .filter(|n| !(join_type == JoinType::Right && left_on.contains(&n.as_str())))
         .collect();
+    // Inner and left joins drop the right keys.
+    let drops_right_keys = matches!(join_type, JoinType::Inner | JoinType::Left);
     if suffix.is_empty() {
-        // Inner and left joins drop the right keys.
-        let drops_right_keys = matches!(join_type, JoinType::Inner | JoinType::Left);
         refuse_empty_suffix(
             right_names
                 .iter()
@@ -528,6 +528,14 @@ fn suffix_right(
         )?;
     }
     let new_names = add_suffixes(&right_names, &kept_left, suffix)?;
+    // The usual join: only right keys that inner and left joins drop would change.
+    let unchanged = right_names
+        .iter()
+        .zip(&new_names)
+        .all(|(old, new)| old == new || (drops_right_keys && right_on.contains(&old.as_str())));
+    if unchanged {
+        return Ok((None, keys_as_they_are()));
+    }
     let keys = right_on
         .iter()
         .map(|key| {
@@ -538,7 +546,7 @@ fn suffix_right(
                 .ok_or_else(|| MungeError::ColumnNotFound(key.to_string()))
         })
         .collect::<MungeResult<Vec<String>>>()?;
-    Ok((renamed(right, &new_names)?, keys))
+    Ok((Some(renamed(right, &new_names)?), keys))
 }
 
 /// A defensive check: polars 0.52's eager join checks for duplicate names only in debug builds.
