@@ -272,7 +272,9 @@ crate::option_enum!(
 pub struct SphetConfig {
     /// Type of spatial model to estimate
     pub model: SphetModel,
-    /// Whether to use heteroscedasticity-robust estimation
+    /// true (default): the GM moments of Kelejian-Prucha (2010), robust to heteroskedasticity,
+    /// for rho and its SE; false: the three homoskedastic moments of Kelejian-Prucha (1999).
+    /// No effect on the lag model.
     pub het: bool,
     /// Standard error type
     pub se_type: SphetSE,
@@ -284,9 +286,9 @@ pub struct SphetConfig {
     pub bandwidth: Option<usize>,
     /// Number of instruments: order of W to use (default 2 means [X, WX, W²X])
     pub instrument_order: usize,
-    /// Convergence tolerance
+    /// Relative Newton-step tolerance of the GM root solve for rho
     pub tolerance: f64,
-    /// Maximum iterations
+    /// Iteration cap of the GM root solve, shared by its brackets
     pub max_iter: usize,
     /// Unit coordinates for the spatial HAC (row i = unit i of W). Set this or `distance`.
     #[serde(default)]
@@ -314,7 +316,7 @@ impl Default for SphetConfig {
             kernel: HacKernel::Bartlett,
             bandwidth: None,
             instrument_order: 2,
-            tolerance: 1e-7,
+            tolerance: 1e-10,
             max_iter: 100,
             coords: None,
             distance: None,
@@ -546,13 +548,18 @@ pub fn run_sphet(
     }
 
     let hac = validate_hac(&config, n)?;
-    refuse_collinear_regressors(&x, &coef_names)?;
+    let x_normal = refuse_collinear_regressors(&x, &coef_names)?;
+    if config.model != SphetModel::SpatialLag {
+        refuse_self_neighbours(listw)?;
+    }
 
     // Dispatch to appropriate model
     let hac = hac.as_ref();
     match config.model {
         SphetModel::SpatialLag => estimate_sar_gmm(&y, &x, listw, &coef_names, &config, hac),
-        SphetModel::SpatialError => estimate_sem_gmm(&y, &x, listw, &coef_names, &config, hac),
+        SphetModel::SpatialError => {
+            estimate_sem_gmm(&y, &x, x_normal, listw, &coef_names, &config, hac)
+        }
         SphetModel::SARAR => estimate_sarar_gmm(&y, &x, listw, &coef_names, &config, hac),
     }
 }
@@ -648,6 +655,7 @@ fn estimate_sar_gmm(
         instruments: instruments.names,
         warnings,
         gm: None,
+        rho_moments: None,
     }))
 }
 
@@ -655,14 +663,13 @@ fn estimate_sar_gmm(
 // SEM Model (Spatial Error)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Estimate spatial error model via GMM.
+/// Estimate spatial error model: the GM estimator of rho on the OLS residuals, then feasible GLS.
 ///
 /// Model: y = Xβ + u, where u = ρWu + ε
-///
-/// Uses the Kelejian-Prucha (1999) GM estimator for ρ.
 fn estimate_sem_gmm(
     y: &Array1<f64>,
     x: &Array2<f64>,
+    x_normal: Option<NormalInverse>,
     listw: &SpatialWeights,
     coef_names: &[String],
     config: &SphetConfig,
@@ -671,65 +678,53 @@ fn estimate_sem_gmm(
     let n = y.len();
     let k = x.ncols();
 
-    // Step 1: Initial OLS
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "OLS normal equations".to_string(),
-        suggestion: format!("X'X singular: {}", e),
-    })?;
-    let xty_vec = xty(&x.view(), y);
-    let beta_ols = xtx_inv.dot(&xty_vec);
-    let u_ols = y - &x.dot(&beta_ols);
+    // Step 1: OLS
+    let first = ols_fit(x, y, x_normal, coef_names)?;
 
-    // Step 2: GM estimation of ρ using moment conditions
-    let rho = estimate_rho_gm(&u_ols, listw, config)?;
+    // Step 2: GM estimation of rho
+    let gm = estimate_rho_gm(&first.residuals, listw, config.het, config)?;
+    let rho = gm.rho;
 
-    // Step 3: Cochrane-Orcutt transformation and re-estimation
-    // y* = y - ρWy, X* = X - ρWX
+    // Step 3: feasible GLS: OLS of (I - rho W) y on (I - rho W) X
     let y_star = listw.transform_y(y, rho);
     let x_star = listw.transform_x(x, rho);
+    let normal = normal_equations_inverse(x_star.view())?;
+    let second = ols_fit(&x_star, &y_star, normal, coef_names)?;
 
-    // OLS on transformed data
-    let xtx_star = xtx(&x_star.view());
-    let (xtx_star_inv, _) =
-        safe_inverse(&xtx_star.view()).map_err(|e| EconError::SingularMatrix {
-            context: "Transformed OLS".to_string(),
-            suggestion: format!("X*'X* singular: {}", e),
-        })?;
-    let xty_star = xty(&x_star.view(), &y_star);
-    let beta = xtx_star_inv.dot(&xty_star);
-
-    // Residuals in transformed space
-    let fitted_star = x_star.dot(&beta);
-    let residuals_star = &y_star - &fitted_star;
-    let rss: f64 = residuals_star.iter().map(|r| r * r).sum();
-    let sigma2 = rss / (n - k) as f64;
-
-    // Residuals in original space
-    let fitted = x.dot(&beta);
+    let df = residual_df(n, k)?;
+    let sigma2 = second.residuals.dot(&second.residuals) / df as f64;
+    let fitted = x.dot(&second.beta);
     let residuals = y - &fitted;
 
-    // Standard errors for β
-    let (vcov_mat, _) = compute_sem_se(x, &x_star, &residuals_star, sigma2, &xtx_star_inv, config)?;
+    // Standard errors for beta
+    let (vcov_mat, _) = compute_sem_se(
+        x,
+        &x_star,
+        &second.residuals,
+        sigma2,
+        &second.unscaled,
+        config,
+    )?;
 
-    // Standard error for ρ (from GM theory)
-    let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
+    // Standard error for rho
+    let se_rho = compute_rho_se(&second.residuals, listw, sigma2, config)?;
 
     Ok(build_result(ResultParts {
         coef_names,
         config,
         model: SphetModel::SpatialError,
-        beta,
+        beta: second.beta,
         vcov: &vcov_mat,
         lambda: None,
         rho: Some((rho, se_rho)),
         sigma2,
         residuals,
         fitted,
-        df: residual_df(n, k)?,
+        df,
         instruments: Vec::new(),
-        warnings: Vec::new(),
-        gm: None,
+        warnings: gm.warnings,
+        gm: Some(gm.convergence),
+        rho_moments: Some(gm_moments_name(config.het).to_string()),
     }))
 }
 
@@ -762,8 +757,9 @@ fn estimate_sarar_gmm(
     let t1 = tsls(y, &z, &instruments, k, &z_names)?;
     let u1 = y - &z.dot(&t1.delta);
 
-    // Step 2: GM estimation of ρ
-    let rho = estimate_rho_gm(&u1, listw, config)?;
+    // Step 2: GM estimation of rho
+    let gm = estimate_rho_gm(&u1, listw, config.het, config)?;
+    let rho = gm.rho;
 
     // Step 3: Cochrane-Orcutt transformation and re-estimation
     // y* = (I - ρW)y, Z* = (I - ρW)Z, H* = (I - ρW)H
@@ -813,7 +809,7 @@ fn estimate_sarar_gmm(
     )?;
     let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
 
-    let mut warnings = Vec::new();
+    let mut warnings = gm.warnings;
     warnings.extend(instruments.dropped_warning());
     Ok(build_result(ResultParts {
         coef_names,
@@ -829,7 +825,8 @@ fn estimate_sarar_gmm(
         df: residual_df(n, k + 1)?,
         instruments: instruments.names,
         warnings,
-        gm: None,
+        gm: Some(gm.convergence),
+        rho_moments: Some(gm_moments_name(config.het).to_string()),
     }))
 }
 
@@ -855,6 +852,7 @@ struct ResultParts<'a> {
     instruments: Vec<String>,
     warnings: Vec<String>,
     gm: Option<Convergence>,
+    rho_moments: Option<String>,
 }
 
 /// z and its two-sided p-value; both NaN unless the standard error is finite and positive.
@@ -883,6 +881,7 @@ fn build_result(parts: ResultParts<'_>) -> SphetResult {
         instruments,
         warnings,
         gm,
+        rho_moments,
     } = parts;
     let k = beta.len();
     let se = |j: usize| vcov[[j, j]].max(0.0).sqrt();
@@ -926,7 +925,7 @@ fn build_result(parts: ResultParts<'_>) -> SphetResult {
         converged: gm.as_ref().is_none_or(|c| c.converged),
         warnings,
         convergence: gm,
-        rho_moments: None,
+        rho_moments,
         instruments,
         hac_kernel: (config.se_type == SphetSE::HAC).then_some(config.hac_kernel),
         hac_bandwidth: config
@@ -947,10 +946,14 @@ fn residual_df(n: usize, p: usize) -> EconResult<usize> {
 }
 
 /// `SingularMatrix` naming the collinear regressors of `[1, X]`. The normal equations decide
-/// a full-rank design cheaply; only a doubtful one goes to the pivoted QR (`lm.fit`'s rule).
-fn refuse_collinear_regressors(x: &Array2<f64>, names: &[String]) -> EconResult<()> {
-    if normal_equations_inverse(x.view())?.is_some() {
-        return Ok(());
+/// a full-rank design cheaply and their inverse is returned; only a doubtful design goes to the
+/// pivoted QR (`lm.fit`'s rule).
+fn refuse_collinear_regressors(
+    x: &Array2<f64>,
+    names: &[String],
+) -> EconResult<Option<NormalInverse>> {
+    if let Some(normal) = normal_equations_inverse(x.view())? {
+        return Ok(Some(normal));
     }
     let aliased = Qr::decompose(x.view(), LM_QR_TOL)?.aliased();
     match aliasing_message(&aliased, names) {
@@ -958,7 +961,63 @@ fn refuse_collinear_regressors(x: &Array2<f64>, names: &[String]) -> EconResult<
             context: "sphet regressors".to_string(),
             suggestion: format!("{message}; drop the collinear regressors"),
         }),
-        None => Ok(()),
+        None => Ok(None),
+    }
+}
+
+/// The Kelejian-Prucha GM moments assume w_ii = 0.
+fn refuse_self_neighbours(listw: &SpatialWeights) -> EconResult<()> {
+    for i in 0..listw.n() {
+        if listw.get_weights(i).indices.contains(&i) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "spatial weights have a non-zero diagonal (unit {i} is its own neighbour); the Kelejian-Prucha GM moments need w_ii = 0"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One least-squares fit of the error model.
+struct OlsFit {
+    beta: Array1<f64>,
+    residuals: Array1<f64>,
+    /// `(X'X)^-1`
+    unscaled: Array2<f64>,
+}
+
+/// `y` on `x`: from `normal` (the normal equations' inverse of `x`), otherwise by pivoted QR.
+fn ols_fit(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    normal: Option<NormalInverse>,
+    names: &[String],
+) -> EconResult<OlsFit> {
+    match normal {
+        Some(normal) => {
+            let beta = normal.coefficients(x.view(), y);
+            let residuals = y - &x.dot(&beta);
+            Ok(OlsFit {
+                beta,
+                residuals,
+                unscaled: normal.inverse,
+            })
+        }
+        None => {
+            let ls = least_squares(x.view(), y.view())?;
+            if let Some(message) = aliasing_message(&ls.aliased, names) {
+                return Err(EconError::SingularMatrix {
+                    context: "sphet regressors".to_string(),
+                    suggestion: format!("{message}; drop the collinear regressors"),
+                });
+            }
+            Ok(OlsFit {
+                beta: ls.coefficients,
+                residuals: ls.residuals,
+                unscaled: ls.unscaled_cov,
+            })
+        }
     }
 }
 
@@ -1484,153 +1543,306 @@ fn transform_matrix(listw: &SpatialWeights, m: &Array2<f64>, rho: f64) -> Array2
     result
 }
 
-/// Estimate ρ using Generalized Moments (Kelejian-Prucha 1999).
-///
-/// Uses the moment conditions:
-/// - E[ε'ε/n] = σ²
-/// - E[ε'Wε/n] = 0
-/// - E[(Wε)'(Wε)/n] = σ² tr(W'W)/n
-///
-/// # References
-///
-/// Kelejian, H.H. & Prucha, I.R. (1999). International Economic Review, 40(2), 509-533.
+/// The GM estimate of rho is searched on [-GM_RHO_BOUND, GM_RHO_BOUND].
+const GM_RHO_BOUND: f64 = 0.99;
+
+fn gm_moments_name(het: bool) -> &'static str {
+    if het {
+        "Kelejian-Prucha (2010) heteroskedasticity-robust GM, 2 moments"
+    } else {
+        "Kelejian-Prucha (1999) GM, 3 moments (homoskedastic)"
+    }
+}
+
+/// The GM moments m(theta) = g - G (rho, rho^2[, sigma^2])'.
+struct GmParts {
+    g: Array1<f64>,
+    gmat: Array2<f64>,
+}
+
+/// Homoskedastic (Kelejian-Prucha 1999, three moments with sigma^2) or heteroskedastic
+/// (Kelejian-Prucha 2010, two moments: m1 = eb'eb - e' diag(W'W) e and m2 = eb'e, sphet's `gg_het`).
+fn gm_parts(u: &Array1<f64>, listw: &SpatialWeights, het: bool) -> GmParts {
+    let n = u.len() as f64;
+    let ub = listw.lag(u);
+    let ubb = listw.lag(&ub);
+    let (u_ub, ub_ub, u_ubb) = (u.dot(&ub), ub.dot(&ub), u.dot(&ubb));
+    let (ub_ubb, ubb_ubb) = (ub.dot(&ubb), ubb.dot(&ubb));
+    if het {
+        // diag(W'W)_j = sum_i w_ij^2
+        let mut dg = Array1::<f64>::zeros(u.len());
+        for i in 0..u.len() {
+            let sw = listw.get_weights(i);
+            for (&j, &w) in sw.indices.iter().zip(&sw.weights) {
+                dg[j] += w * w;
+            }
+        }
+        let (mut d_uu, mut d_uub, mut d_ubub) = (0.0, 0.0, 0.0);
+        for i in 0..u.len() {
+            d_uu += dg[i] * u[i] * u[i];
+            d_uub += dg[i] * u[i] * ub[i];
+            d_ubub += dg[i] * ub[i] * ub[i];
+        }
+        GmParts {
+            g: ndarray::array![(ub_ub - d_uu) / n, u_ub / n],
+            gmat: ndarray::array![
+                [2.0 * (ub_ubb - d_uub) / n, -(ubb_ubb - d_ubub) / n],
+                [(u_ubb + ub_ub) / n, -ub_ubb / n]
+            ],
+        }
+    } else {
+        let tr = listw.trace_wtw();
+        GmParts {
+            g: ndarray::array![u.dot(u) / n, ub_ub / n, u_ub / n],
+            gmat: ndarray::array![
+                [2.0 * u_ub / n, -ub_ub / n, 1.0],
+                [2.0 * ub_ubb / n, -ubb_ubb / n, tr / n],
+                [(u_ubb + ub_ub) / n, -ub_ubb / n, 0.0]
+            ],
+        }
+    }
+}
+
+/// The minimum of a GM objective on an interval.
+#[derive(Debug)]
+struct QuarticMin {
+    rho: f64,
+    objective: f64,
+    iterations: usize,
+    /// No bracket was cut off by the iteration cap.
+    converged: bool,
+    on_boundary: bool,
+    final_change: f64,
+}
+
+/// Minimiser of `f(r) = ||a - b r - c r^2||^2` on [lo, hi], exactly: the interior roots of the
+/// derivative cubic, by safeguarded Newton in the windows on which f' is monotone, and the two
+/// bounds, whichever gives the smallest f. Ties go to the smaller |r|, then the smaller r.
+fn minimise_quartic(
+    a: &[f64],
+    b: &[f64],
+    c: &[f64],
+    lo: f64,
+    hi: f64,
+    tol: f64,
+    max_iter: usize,
+) -> EconResult<QuarticMin> {
+    let flat = || {
+        EconError::InvalidSpecification {
+        message: "the GM objective for rho is flat (the first-step residuals are zero or carry no spatial information); rho is not identified"
+            .to_string(),
+    }
+    };
+    // On the unit scale: the path and the stopping rule do not depend on the units of y.
+    let scale = a
+        .iter()
+        .chain(b)
+        .chain(c)
+        .fold(0.0_f64, |m, v| m.max(v.abs()));
+    if scale == 0.0 || !scale.is_finite() {
+        return Err(flat());
+    }
+    let unit = |v: &[f64]| v.iter().map(|x| x / scale).collect::<Vec<f64>>();
+    let (a, b, c) = (unit(a), unit(b), unit(c));
+    let dot = |p: &[f64], q: &[f64]| p.iter().zip(q).map(|(x, y)| x * y).sum::<f64>();
+    // f'(r) / 2 = d0 + d1 r + d2 r^2 + d3 r^3
+    let d0 = -dot(&b, &a);
+    let d1 = dot(&b, &b) - 2.0 * dot(&c, &a);
+    let d2 = 3.0 * dot(&b, &c);
+    let d3 = 2.0 * dot(&c, &c);
+    if d0 == 0.0 && d1 == 0.0 && d2 == 0.0 && d3 == 0.0 {
+        return Err(flat());
+    }
+    let f = |r: f64| {
+        a.iter()
+            .zip(&b)
+            .zip(&c)
+            .map(|((&ai, &bi), &ci)| {
+                let m = ai - bi * r - ci * r * r;
+                m * m
+            })
+            .sum::<f64>()
+    };
+    let df = |r: f64| d0 + r * (d1 + r * (d2 + r * d3));
+    let ddf = |r: f64| d1 + r * (2.0 * d2 + r * 3.0 * d3);
+
+    // The turning points of f' split [lo, hi] into windows on which f' is monotone.
+    let mut knots = vec![lo];
+    let mut turning: Vec<f64> = Vec::with_capacity(2);
+    if d3 != 0.0 {
+        let disc = d2 * d2 - 3.0 * d1 * d3;
+        if disc > 0.0 {
+            let q = -(d2 + (if d2 < 0.0 { -1.0 } else { 1.0 }) * disc.sqrt());
+            turning.push(q / (3.0 * d3));
+            if q != 0.0 {
+                turning.push(d1 / q);
+            }
+        }
+    } else if d2 != 0.0 {
+        turning.push(-d1 / (2.0 * d2));
+    }
+    turning.sort_by(f64::total_cmp);
+    knots.extend(turning.into_iter().filter(|&t| t > lo && t < hi));
+    knots.push(hi);
+
+    let mut candidates = vec![lo, hi];
+    let mut iterations = 0;
+    let mut converged = true;
+    let mut final_change = 0.0;
+    for window in knots.windows(2) {
+        let (p, q) = (window[0], window[1]);
+        let (dp, dq) = (df(p), df(q));
+        if dp == 0.0 || dp * dq > 0.0 {
+            continue;
+        }
+        if dq == 0.0 {
+            candidates.push(q);
+            continue;
+        }
+        let (mut left, mut right) = (p, q);
+        let left_sign = dp.is_sign_positive();
+        let mut x = 0.5 * (p + q);
+        loop {
+            if iterations >= max_iter {
+                converged = false;
+                candidates.push(x);
+                break;
+            }
+            iterations += 1;
+            checkpoint()?;
+            let dx = df(x);
+            if dx == 0.0 {
+                final_change = 0.0;
+                candidates.push(x);
+                break;
+            }
+            if dx.is_sign_positive() == left_sign {
+                left = x;
+            } else {
+                right = x;
+            }
+            let slope = ddf(x);
+            let newton = x - dx / slope;
+            let next = if slope != 0.0 && newton > left && newton < right {
+                newton
+            } else {
+                0.5 * (left + right)
+            };
+            final_change = (next - x).abs() / next.abs().max(1.0);
+            x = next;
+            if final_change <= tol {
+                candidates.push(x);
+                break;
+            }
+        }
+    }
+
+    let key = |r: f64| (f(r), r.abs(), r);
+    let rho = candidates
+        .iter()
+        .copied()
+        .min_by(|&p, &q| {
+            let (kp, kq) = (key(p), key(q));
+            kp.0.total_cmp(&kq.0)
+                .then(kp.1.total_cmp(&kq.1))
+                .then(kp.2.total_cmp(&kq.2))
+        })
+        .unwrap_or(lo);
+    Ok(QuarticMin {
+        rho,
+        objective: f(rho) * scale * scale,
+        iterations,
+        converged,
+        on_boundary: rho == lo || rho == hi,
+        final_change,
+    })
+}
+
+/// The GM estimate of rho and what the rest of the fit needs from it.
+struct GmSolve {
+    rho: f64,
+    /// sigma^2 of the homoskedastic moments
+    sigma2: Option<f64>,
+    objective: f64,
+    parts: GmParts,
+    on_boundary: bool,
+    convergence: Convergence,
+    warnings: Vec<String>,
+}
+
+/// The GM estimator of rho on the first-step residuals `u`. sigma^2 enters the homoskedastic
+/// moments linearly and is concentrated out, so both objectives are quartics in rho.
 fn estimate_rho_gm(
     u: &Array1<f64>,
     listw: &SpatialWeights,
+    het: bool,
     config: &SphetConfig,
-) -> EconResult<f64> {
-    let n = u.len();
-    let n_f64 = n as f64;
-
-    // Compute Wu and W²u
-    let wu = listw.lag(u);
-    let w2u = listw.lag(&wu);
-
-    // Sample moments
-    // g1 = (1/n) u'u
-    let uu: f64 = u.iter().map(|&ui| ui * ui).sum();
-    let g1 = uu / n_f64;
-
-    // g2 = (1/n) u'Wu
-    let uwu: f64 = u.iter().zip(wu.iter()).map(|(&ui, &wui)| ui * wui).sum();
-    let g2 = uwu / n_f64;
-
-    // g3 = (1/n) (Wu)'(Wu)
-    let wuwu: f64 = wu.iter().map(|&wui| wui * wui).sum();
-    let g3 = wuwu / n_f64;
-
-    // g4 = (1/n) u'W²u
-    let uw2u: f64 = u.iter().zip(w2u.iter()).map(|(&ui, &w2ui)| ui * w2ui).sum();
-    let g4 = uw2u / n_f64;
-
-    // g5 = (1/n) (Wu)'(W²u)
-    let wuw2u: f64 = wu
-        .iter()
-        .zip(w2u.iter())
-        .map(|(&wui, &w2ui)| wui * w2ui)
-        .sum();
-    let g5 = wuw2u / n_f64;
-
-    // Trace terms for the population moment conditions
-    let tr_wtw = listw.trace_wtw();
-    let tr_w2 = listw.trace_w2();
-
-    // The GM estimator solves:
-    // [g2 - ρg3 - ρtr(W²)/n * σ²] = 0
-    // [g4 - ρg5 - ρtr(W'W·W'W)/n * σ²] ≈ 0
-    //
-    // For simplicity, use a concentrated approach:
-    // From first moment: σ² ≈ g1 - 2ρg2 + ρ²g3
-    // Substitute and solve for ρ
-
-    // Grid search followed by Newton refinement
-    let mut best_rho = 0.0;
-    let mut best_obj = f64::INFINITY;
-
-    // Grid search
-    for i in -99..100 {
-        let rho = i as f64 / 100.0;
-        let obj = gm_objective(rho, g1, g2, g3, g4, g5, tr_wtw / n_f64, tr_w2 / n_f64);
-        if obj < best_obj {
-            best_obj = obj;
-            best_rho = rho;
-        }
+) -> EconResult<GmSolve> {
+    let parts = gm_parts(u, listw, het);
+    let (g, gmat) = (&parts.g, &parts.gmat);
+    let (g0, g1) = (gmat.column(0), gmat.column(1));
+    let (min, sigma2) = if het {
+        let min = minimise_quartic(
+            &g.to_vec(),
+            &g0.to_vec(),
+            &g1.to_vec(),
+            -GM_RHO_BOUND,
+            GM_RHO_BOUND,
+            config.tolerance,
+            config.max_iter,
+        )?;
+        (min, None)
+    } else {
+        let g2 = gmat.column(2);
+        let g2g2 = g2.dot(&g2);
+        let project = |v: ndarray::ArrayView1<'_, f64>| -> Vec<f64> {
+            let t = g2.dot(&v) / g2g2;
+            v.iter().zip(g2.iter()).map(|(x, y)| x - t * y).collect()
+        };
+        let min = minimise_quartic(
+            &project(g.view()),
+            &project(g0),
+            &project(g1),
+            -GM_RHO_BOUND,
+            GM_RHO_BOUND,
+            config.tolerance,
+            config.max_iter,
+        )?;
+        let fitted = g - &(min.rho * &g0) - &(min.rho * min.rho * &g1);
+        let sigma2 = g2.dot(&fitted) / g2g2;
+        (min, Some(sigma2))
+    };
+    const CRITERION: &str = "relative step of the GM first-order condition (safeguarded Newton)";
+    let record = |converged: bool| {
+        Convergence::new(
+            converged,
+            min.iterations,
+            config.max_iter,
+            CRITERION,
+            min.final_change,
+            config.tolerance,
+        )
+    };
+    let mut warnings = Vec::new();
+    if !min.converged {
+        warnings.extend(record(false).note("GM estimation of rho"));
     }
-
-    // Newton refinement
-    for _ in 0..config.max_iter {
-        crate::resource::checkpoint()?;
-        let h = 1e-6;
-        let f0 = gm_objective(best_rho, g1, g2, g3, g4, g5, tr_wtw / n_f64, tr_w2 / n_f64);
-        let f1 = gm_objective(
-            best_rho + h,
-            g1,
-            g2,
-            g3,
-            g4,
-            g5,
-            tr_wtw / n_f64,
-            tr_w2 / n_f64,
-        );
-        let f2 = gm_objective(
-            best_rho - h,
-            g1,
-            g2,
-            g3,
-            g4,
-            g5,
-            tr_wtw / n_f64,
-            tr_w2 / n_f64,
-        );
-
-        let grad = (f1 - f2) / (2.0 * h);
-        let hess = (f1 - 2.0 * f0 + f2) / (h * h);
-
-        if hess.abs() < 1e-10 {
-            break;
-        }
-
-        let step = -grad / hess;
-        let new_rho = (best_rho + step).clamp(-0.99, 0.99);
-
-        if (new_rho - best_rho).abs() < config.tolerance {
-            best_rho = new_rho;
-            break;
-        }
-        best_rho = new_rho;
+    if min.on_boundary {
+        warnings.push(format!(
+            "GM estimate of rho is at the boundary {} of the search interval [-{GM_RHO_BOUND}, {GM_RHO_BOUND}]: the GM objective has no interior minimum, so rho and the estimates that use it are unreliable",
+            min.rho
+        ));
     }
-
-    Ok(best_rho)
-}
-
-/// GM objective function for ρ estimation.
-///
-/// Based on the quadratic form of moment conditions.
-fn gm_objective(
-    rho: f64,
-    g1: f64,
-    g2: f64,
-    g3: f64,
-    g4: f64,
-    g5: f64,
-    _tr_wtw_n: f64,
-    _tr_w2_n: f64,
-) -> f64 {
-    // σ² estimate given ρ
-    let sigma2 = g1 - 2.0 * rho * g2 + rho * rho * g3;
-
-    if sigma2 <= 0.0 {
-        return f64::INFINITY;
-    }
-
-    // Moment conditions:
-    // m1 = g2 - ρg3 - ρ*tr_w2_n*σ²
-    // m2 = g4 - ρg5 - (something involving W'W W'W)
-    let m1 = g2 - rho * g3;
-    let m2 = g4 - rho * g5;
-
-    // Quadratic objective
-    m1 * m1 + m2 * m2
+    let convergence = record(min.converged && !min.on_boundary);
+    Ok(GmSolve {
+        rho: min.rho,
+        sigma2,
+        objective: min.objective,
+        on_boundary: min.on_boundary,
+        convergence,
+        warnings,
+        parts,
+    })
 }
 
 /// Compute standard errors for SEM model.
@@ -2252,6 +2464,265 @@ mod tests {
         assert_eq!(K::QuadraticSpectral.weight(1e-300), 1.0);
     }
 
+    fn design_sim(ds: &Dataset) -> Array2<f64> {
+        let (x1, x2) = (column(ds, "x1"), column(ds, "x2"));
+        Array2::from_shape_fn((x1.len(), 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => x1[i],
+            _ => x2[i],
+        })
+    }
+    fn ols_residuals(ds: &Dataset, y: &str) -> Array1<f64> {
+        let y = Array1::from(column(ds, y));
+        least_squares(design_sim(ds).view(), y.view())
+            .unwrap()
+            .residuals
+    }
+
+    #[test]
+    fn test_validate_sphet_sem_gm_hom() {
+        // R .gm_rho: KP (1999), three moments, sigma^2 concentrated out, exact minimiser on
+        // [-0.99, 0.99]. The former invalid moments (u'Wu - rho (Wu)'Wu)^2 + (u'W^2u - rho
+        // (Wu)'W^2u)^2 gave 0.8995203819178312.
+        let (case, ds, w, _) = sphet_case();
+        let gm = estimate_rho_gm(
+            &ols_residuals(&ds, "y_sem"),
+            &w,
+            false,
+            &SphetConfig::default(),
+        )
+        .unwrap();
+        let r = run_sphet(
+            &ds,
+            "y_sem",
+            &XS,
+            &w,
+            config(SphetModel::SpatialError, SphetSE::Standard, false),
+        )
+        .unwrap();
+        // run_sphet's first step takes the normal equations, this one the QR: rounding apart
+        assert!(Tol::new(1e-11, 0.0).allows(r.rho.unwrap(), gm.rho));
+        let conv = r.convergence.clone().expect("GM convergence");
+        assert!(
+            conv.converged && conv.iterations >= 1 && conv.iterations <= conv.max_iterations,
+            "{conv:?}"
+        );
+        assert_eq!((r.iterations, r.converged), (conv.iterations, true));
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(r.rho_moments.as_deref().unwrap().contains("1999"));
+        Check::new(&case)
+            .scalar("sem_hom_rho", gm.rho, Tol::iterative(1e-8))
+            .scalar("sem_hom_gm_objective", gm.objective, Tol::iterative(1e-8))
+            .scalar(
+                "sem_hom_gm_sigma2",
+                gm.sigma2.unwrap(),
+                Tol::iterative(1e-8),
+            )
+            .vector("sem_hom_coef", &r.coefficients, Tol::iterative(1e-8))
+            .vector("sem_hom_se_classical", &r.std_errors, Tol::se(N_SIM))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_sphet_sem_gm_het() {
+        // R .gm_rho_het: KP (2010), m1 = eb'eb - e' diag(W'W) e, m2 = eb'e (sphet's gg_het).
+        let (case, ds, w, _) = sphet_case();
+        let gm = estimate_rho_gm(
+            &ols_residuals(&ds, "y_sem"),
+            &w,
+            true,
+            &SphetConfig::default(),
+        )
+        .unwrap();
+        assert!(gm.sigma2.is_none());
+        let r = run_sphet(
+            &ds,
+            "y_sem",
+            &XS,
+            &w,
+            config(SphetModel::SpatialError, SphetSE::Standard, true),
+        )
+        .unwrap();
+        // run_sphet's first step takes the normal equations, this one the QR: rounding apart
+        assert!(Tol::new(1e-11, 0.0).allows(r.rho.unwrap(), gm.rho));
+        assert!(r.converged && r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(r.rho_moments.as_deref().unwrap().contains("2010"));
+        Check::new(&case)
+            .scalar("sem_het_rho", gm.rho, Tol::iterative(1e-8))
+            .scalar("sem_het_gm_objective", gm.objective, Tol::iterative(1e-8))
+            .vector("sem_het_coef", &r.coefficients, Tol::iterative(1e-8))
+            .vector("sem_het_se_classical", &r.std_errors, Tol::se(N_SIM))
+            .finish();
+    }
+
+    #[test]
+    fn test_sphet_het_option_changes_rho() {
+        // KP (2010) vs KP (1999) give rho 0.48159 vs 0.47874 (SEM) and 0.42520 vs 0.41717 (SARAR);
+        // het used to be ignored, and both runs were identical.
+        let (ds, w, _) = sim();
+        for (model, y) in [
+            (SphetModel::SpatialError, "y_sem"),
+            (SphetModel::SARAR, "y_sarar"),
+        ] {
+            let a = run_sphet(&ds, y, &XS, &w, config(model, SphetSE::Standard, true)).unwrap();
+            let b = run_sphet(&ds, y, &XS, &w, config(model, SphetSE::Standard, false)).unwrap();
+            assert!(
+                (a.rho.unwrap() - b.rho.unwrap()).abs() > 1e-3,
+                "{model:?}: {:?} vs {:?}",
+                a.rho,
+                b.rho
+            );
+            assert_ne!(a.rho_moments, b.rho_moments);
+        }
+    }
+
+    #[test]
+    fn test_sphet_gm_flags_boundary_solution() {
+        // y = 1 + 0.8 x1 - 0.5 x2 + cx + cy: the OLS residuals are a smooth trend. R
+        // (.sphet_quartic_min on [-5, 5]) puts the GM minimum at 1.047192 (het) / 1.054467 (hom),
+        // outside [-0.99, 0.99].
+        let (ds, w, _) = sim();
+        let (x1, x2, cx, cy) = (
+            column(&ds, "x1"),
+            column(&ds, "x2"),
+            column(&ds, "cx"),
+            column(&ds, "cy"),
+        );
+        let y: Vec<f64> = (0..N_SIM)
+            .map(|i| 1.0 + 0.8 * x1[i] - 0.5 * x2[i] + cx[i] + cy[i])
+            .collect();
+        let df = df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap();
+        for het in [true, false] {
+            let r = run_sphet(
+                &Dataset::new(df.clone()),
+                "y",
+                &XS,
+                &w,
+                config(SphetModel::SpatialError, SphetSE::Standard, het),
+            )
+            .unwrap();
+            assert_eq!(r.rho, Some(0.99), "het={het}");
+            assert!(!r.converged && !r.convergence.as_ref().unwrap().converged);
+            assert!(
+                r.warnings.iter().any(|m| m.contains("boundary")),
+                "{:?}",
+                r.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_sphet_gm_reports_iteration_limit() {
+        let (ds, w, _) = sim();
+        let c = SphetConfig {
+            max_iter: 1,
+            ..config(SphetModel::SpatialError, SphetSE::Standard, true)
+        };
+        let r = run_sphet(&ds, "y_sem", &XS, &w, c).unwrap();
+        assert!(!r.converged);
+        assert!(
+            r.warnings.iter().any(|m| m.contains("did not converge")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_gm_quartic_minimiser_interior_boundary_and_flat() {
+        // Hand-computed: f = (0.5 - r)^2 -> 0.5; f = (1.5 - r)^2 -> bound 0.99 with f = 0.2601;
+        // f = (0.09 - r^2)^2 + (0.03 - 0.1 r)^2 = 0 at r = 0.3 (the other stationary points
+        // -0.017712 and -0.282288 have f > 0.0034); a, b, c = 0 is flat.
+        let m = minimise_quartic(&[0.5], &[1.0], &[0.0], -0.99, 0.99, 1e-10, 100).unwrap();
+        assert!(
+            (m.rho - 0.5).abs() < 1e-15 && m.objective < 1e-30 && m.converged && !m.on_boundary,
+            "{m:?}"
+        );
+        let m = minimise_quartic(&[1.5], &[1.0], &[0.0], -0.99, 0.99, 1e-10, 100).unwrap();
+        assert!(
+            m.rho == 0.99 && m.on_boundary && (m.objective - 0.2601).abs() < 1e-14,
+            "{m:?}"
+        );
+        let m = minimise_quartic(
+            &[0.09, 0.03],
+            &[0.0, 0.1],
+            &[1.0, 0.0],
+            -0.99,
+            0.99,
+            1e-10,
+            100,
+        )
+        .unwrap();
+        assert!(
+            (m.rho - 0.3).abs() < 1e-12 && m.objective < 1e-24 && m.converged && !m.on_boundary,
+            "{m:?}"
+        );
+        assert!(m.iterations >= 1 && m.iterations <= 100);
+        let e = minimise_quartic(&[0.0], &[0.0], &[0.0], -0.99, 0.99, 1e-10, 100).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("flat")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_sphet_gm_scale_invariant() {
+        // The GM moments scale by c^2, so rho, the Newton path and the iteration count do not
+        // depend on the units of y. The former Newton loop stopped on an absolute |hess| < 1e-10
+        // at small scales.
+        let (ds, w, _) = sim();
+        let (x1, x2, y) = (column(&ds, "x1"), column(&ds, "x2"), column(&ds, "y_sem"));
+        for het in [true, false] {
+            let fit = |s: f64| {
+                let df = df! {
+                    "y" => y.iter().map(|v| v * s).collect::<Vec<f64>>(),
+                    "x1" => x1.clone(),
+                    "x2" => x2.clone(),
+                }
+                .unwrap();
+                run_sphet(
+                    &Dataset::new(df),
+                    "y",
+                    &XS,
+                    &w,
+                    config(SphetModel::SpatialError, SphetSE::Standard, het),
+                )
+                .unwrap()
+            };
+            let base = fit(1.0);
+            for s in [1e-6, 1e6] {
+                let r = fit(s);
+                assert!(
+                    Tol::new(1e-10, 0.0).allows(r.rho.unwrap(), base.rho.unwrap()),
+                    "het={het} s={s}"
+                );
+                assert!(
+                    r.iterations.abs_diff(base.iterations) <= 1,
+                    "{} vs {}",
+                    r.iterations,
+                    base.iterations
+                );
+                for (a, b) in r.coefficients.iter().zip(&base.coefficients) {
+                    assert!(Tol::new(1e-9, 0.0).allows(*a, b * s));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sphet_rejects_self_neighbours_for_gm() {
+        let (d, _) = create_test_data();
+        let nb = Neighbors::from_indices((0..25).map(|i| vec![i, (i + 1) % 25]).collect());
+        let w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        for model in [SphetModel::SpatialError, SphetModel::SARAR] {
+            let e =
+                run_sphet(&d, "y", &["x"], &w, config(model, SphetSE::Standard, true)).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("diagonal")),
+                "{e}"
+            );
+        }
+    }
+
     /// The layout of `create_test_data`.
     fn grid_coords() -> Vec<[f64; 2]> {
         (0..5)
@@ -2486,20 +2957,6 @@ mod tests {
             run_sphet(&d, "y", &["x"], &w, c)
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))));
-    }
-
-    #[test]
-    fn test_gm_objective() {
-        // Test that objective function is well-behaved
-        let obj = gm_objective(0.5, 1.0, 0.2, 0.8, 0.1, 0.3, 0.1, 0.1);
-        assert!(obj.is_finite());
-        assert!(obj >= 0.0);
-
-        // Objective should be infinity for sigma2 <= 0
-        // sigma2 = g1 - 2*rho*g2 + rho^2*g3
-        // With rho=2, g1=0.1, g2=0.5, g3=0.01: sigma2 = 0.1 - 2*0.5 + 0.04 = -0.86 < 0
-        let obj_bad = gm_objective(2.0, 0.1, 0.5, 0.01, 0.1, 0.3, 0.1, 0.1);
-        assert!(obj_bad.is_infinite());
     }
 
     /// The integer 5 x 5 grid of `spatial.rs`'s `int_grid` (that helper is private to its
