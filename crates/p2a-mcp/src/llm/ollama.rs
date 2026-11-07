@@ -14,6 +14,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// The name used in upstream error messages.
@@ -69,10 +70,18 @@ impl OllamaProvider {
     }
 
     /// Convert our Message format to Ollama's message format.
+    ///
+    /// Tool results attached to an assistant message follow it (LLM-17); a tool-role message
+    /// directly after it that repeats one is not sent twice.
     fn to_ollama_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
         let mut result = Vec::new();
+        // The ids of the results sent right after the latest assistant message.
+        let mut sent: HashSet<&str> = HashSet::new();
 
         for msg in messages {
+            if msg.role != MessageRole::Tool {
+                sent.clear();
+            }
             match msg.role {
                 MessageRole::System | MessageRole::User | MessageRole::Assistant => {
                     let mut ollama_msg = OllamaMessage {
@@ -97,11 +106,23 @@ impl OllamaProvider {
                     }
 
                     result.push(ollama_msg);
+
+                    for tr in msg.attached_tool_results() {
+                        sent.insert(tr.tool_call_id.as_str());
+                        result.push(OllamaMessage {
+                            role: "tool".to_string(),
+                            content: tr.content.clone(),
+                            tool_calls: None,
+                        });
+                    }
                 }
                 MessageRole::Tool => {
                     // Tool results are sent as separate tool messages
                     if let Some(ref tool_results) = msg.tool_results {
-                        for tr in tool_results {
+                        for tr in tool_results
+                            .iter()
+                            .filter(|tr| !sent.contains(tr.tool_call_id.as_str()))
+                        {
                             result.push(OllamaMessage {
                                 role: "tool".to_string(),
                                 content: tr.content.clone(),
@@ -742,6 +763,73 @@ struct OllamaModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The message /api/llm/chat returns with interpret=false (calls and results on one assistant
+    /// message), replayed as history between two user turns.
+    fn replayed() -> Vec<Message> {
+        let call = ToolCall {
+            id: "call_r1_1".into(),
+            name: "list_datasets".into(),
+            arguments: serde_json::json!({}),
+        };
+        let result = ToolResult {
+            tool_call_id: "call_r1_1".into(),
+            content: "No datasets".into(),
+            is_error: false,
+        };
+        vec![
+            Message::system("sys"),
+            Message::user("list"),
+            Message {
+                role: MessageRole::Assistant,
+                content: "**list_datasets**:\nNo datasets".into(),
+                tool_calls: Some(vec![call]),
+                tool_results: Some(vec![result]),
+            },
+            Message::user("next"),
+        ]
+    }
+
+    /// LLM-17: each attached result follows its call as a `tool` message. Hand-derived from the
+    /// serde attributes of OllamaMessage / OllamaToolCall (no ids on the wire).
+    #[test]
+    fn assistant_tool_results_follow_their_calls() {
+        let p = OllamaProvider::new(ProviderConfig::default());
+        let got = serde_json::to_value(p.to_ollama_messages(&replayed())).unwrap();
+        assert_eq!(
+            got,
+            serde_json::json!([
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "list"},
+                {"role": "assistant", "content": "**list_datasets**:\nNo datasets",
+                 "tool_calls": [{"function": {"name": "list_datasets", "arguments": {}}}]},
+                {"role": "tool", "content": "No datasets"},
+                {"role": "user", "content": "next"}
+            ])
+        );
+    }
+
+    /// A tool-role message right after the assistant message that repeats an attached result is not
+    /// sent twice; a result naming none of the message's calls is not sent (no provider accepts it).
+    #[test]
+    fn tool_results_are_sent_once_and_only_for_their_calls() {
+        let p = OllamaProvider::new(ProviderConfig::default());
+        let mut h = replayed();
+        let again = h[2].tool_results.clone().unwrap();
+        h.insert(3, Message::tool_result(again));
+        let once = serde_json::to_value(p.to_ollama_messages(&replayed())).unwrap();
+        assert_eq!(serde_json::to_value(p.to_ollama_messages(&h)).unwrap(), once);
+        let mut orphan = replayed();
+        orphan[2].tool_results.as_mut().unwrap()[0].tool_call_id = "someone_else".into();
+        let sent = serde_json::to_value(p.to_ollama_messages(&orphan)).unwrap();
+        let roles: Vec<&str> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    }
 
     #[test]
     fn test_provider_type() {

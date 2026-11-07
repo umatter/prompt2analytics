@@ -14,10 +14,20 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// The name used in upstream error messages.
 const PROVIDER: &str = "Anthropic";
+
+/// One tool result as a `tool_result` content block.
+fn tool_result_block(tr: &ToolResult) -> AnthropicContentBlock {
+    AnthropicContentBlock::ToolResult {
+        tool_use_id: tr.tool_call_id.clone(),
+        content: tr.content.clone(),
+        is_error: tr.is_error.then_some(true),
+    }
+}
 
 /// Anthropic provider for LLM inference.
 pub struct AnthropicProvider {
@@ -88,14 +98,22 @@ impl AnthropicProvider {
     }
 
     /// Extract system message and convert remaining messages to Anthropic's format.
+    ///
+    /// Tool results attached to an assistant message follow it (LLM-17); a tool-role message
+    /// directly after it that repeats one is not sent twice.
     fn to_anthropic_messages(
         &self,
         messages: &[Message],
     ) -> (Option<String>, Vec<AnthropicMessage>) {
         let mut system_prompt = None;
         let mut result = Vec::new();
+        // The ids of the results sent right after the latest assistant message.
+        let mut sent: HashSet<&str> = HashSet::new();
 
         for msg in messages {
+            if msg.role != MessageRole::Tool {
+                sent.clear();
+            }
             match msg.role {
                 MessageRole::System => {
                     // Anthropic takes system as a separate parameter
@@ -138,23 +156,33 @@ impl AnthropicProvider {
                             content: AnthropicContent::Text(msg.content.clone()),
                         });
                     }
+
+                    let attached = msg.attached_tool_results();
+                    if !attached.is_empty() {
+                        sent.extend(attached.iter().map(|tr| tr.tool_call_id.as_str()));
+                        result.push(AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::Blocks(
+                                attached.into_iter().map(tool_result_block).collect(),
+                            ),
+                        });
+                    }
                 }
                 MessageRole::Tool => {
                     // Tool results go in a user message with tool_result content blocks
                     if let Some(ref tool_results) = msg.tool_results {
                         let content_blocks: Vec<AnthropicContentBlock> = tool_results
                             .iter()
-                            .map(|tr| AnthropicContentBlock::ToolResult {
-                                tool_use_id: tr.tool_call_id.clone(),
-                                content: tr.content.clone(),
-                                is_error: if tr.is_error { Some(true) } else { None },
-                            })
+                            .filter(|tr| !sent.contains(tr.tool_call_id.as_str()))
+                            .map(tool_result_block)
                             .collect();
 
-                        result.push(AnthropicMessage {
-                            role: "user".to_string(),
-                            content: AnthropicContent::Blocks(content_blocks),
-                        });
+                        if !content_blocks.is_empty() {
+                            result.push(AnthropicMessage {
+                                role: "user".to_string(),
+                                content: AnthropicContent::Blocks(content_blocks),
+                            });
+                        }
                     }
                 }
             }
@@ -901,6 +929,78 @@ enum AnthropicStreamDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The message /api/llm/chat returns with interpret=false (calls and results on one assistant
+    /// message), replayed as history between two user turns.
+    fn replayed() -> Vec<Message> {
+        let call = ToolCall {
+            id: "call_r1_1".into(),
+            name: "list_datasets".into(),
+            arguments: serde_json::json!({}),
+        };
+        let result = ToolResult {
+            tool_call_id: "call_r1_1".into(),
+            content: "No datasets".into(),
+            is_error: false,
+        };
+        vec![
+            Message::system("sys"),
+            Message::user("list"),
+            Message {
+                role: MessageRole::Assistant,
+                content: "**list_datasets**:\nNo datasets".into(),
+                tool_calls: Some(vec![call]),
+                tool_results: Some(vec![result]),
+            },
+            Message::user("next"),
+        ]
+    }
+
+    /// LLM-17: the attached results follow their calls as one user message of tool_result blocks.
+    /// Hand-derived from the serde attributes of AnthropicContent / AnthropicContentBlock.
+    #[test]
+    fn assistant_tool_results_follow_their_calls() {
+        let p = AnthropicProvider::new(ProviderConfig::default());
+        let (system, sent) = p.to_anthropic_messages(&replayed());
+        assert_eq!(system, Some("sys".to_string()));
+        assert_eq!(
+            serde_json::to_value(sent).unwrap(),
+            serde_json::json!([
+                {"role": "user", "content": "list"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "**list_datasets**:\nNo datasets"},
+                    {"type": "tool_use", "id": "call_r1_1", "name": "list_datasets", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_r1_1", "content": "No datasets"}]},
+                {"role": "user", "content": "next"}
+            ])
+        );
+    }
+
+    /// A tool-role message right after the assistant message that repeats an attached result is not
+    /// sent twice; a result naming none of the message's calls is not sent (no provider accepts it).
+    #[test]
+    fn tool_results_are_sent_once_and_only_for_their_calls() {
+        let p = AnthropicProvider::new(ProviderConfig::default());
+        let mut h = replayed();
+        let again = h[2].tool_results.clone().unwrap();
+        h.insert(3, Message::tool_result(again));
+        let once = serde_json::to_value(p.to_anthropic_messages(&replayed()).1).unwrap();
+        assert_eq!(
+            serde_json::to_value(p.to_anthropic_messages(&h).1).unwrap(),
+            once
+        );
+        let mut orphan = replayed();
+        orphan[2].tool_results.as_mut().unwrap()[0].tool_call_id = "someone_else".into();
+        let sent = serde_json::to_value(p.to_anthropic_messages(&orphan).1).unwrap();
+        let roles: Vec<&str> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+    }
 
     #[test]
     fn test_provider_type() {
