@@ -347,8 +347,8 @@ fn affinity_propagation_impl(
         return Err(EconError::ConvergenceFailure {
             iterations,
             last_change: f64::NAN,
-            suggestion: "no exemplar emerged; increase max_iterations or convergence_iterations, \
-                         or lower the damping (apcluster returns an empty clustering here)"
+            suggestion: "no exemplar emerged; increase max_iterations or lower the damping \
+                         (apcluster returns an empty clustering here)"
                 .into(),
         });
     }

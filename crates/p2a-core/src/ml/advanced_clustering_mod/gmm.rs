@@ -31,6 +31,7 @@
 //! assert_eq!(fit.model_name, "VII");
 //! ```
 
+use super::mixtures::hard_labels;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky;
 use crate::linalg::solve::SYM_RANK_TOL;
@@ -660,9 +661,10 @@ fn one_hot(labels: &[usize], n: usize, k: usize) -> EconResult<Array2<f64>> {
 ///
 /// Each iteration is an E-step followed by an M-step; the fit stops when
 /// `relative_change(l, l_prev) < tolerance`. At the iteration limit the last M-step is skipped, so
-/// the returned parameters, responsibilities and log-likelihood always belong together. The data
-/// divided by a power of two give the same partition, so the stopping rule and the ridge do not
-/// depend on the data's units; see `validation/ml/gmm.md`.
+/// the returned parameters, responsibilities and log-likelihood always belong together. The
+/// singularity check, the ridge and the k-means start do not depend on the data's units; the
+/// relative stop on `l` does, because rescaling shifts `l`, so a fit on rescaled data can end at a
+/// different iteration. See `validation/ml/gmm.md`.
 pub fn gaussian_mixture_with(
     data: ArrayView2<'_, f64>,
     config: &GmmConfig,
@@ -810,22 +812,9 @@ pub fn gaussian_mixture_with(
     }
 
     let df = n_parameters as f64;
-    let labels: Vec<usize> = resp
-        .rows()
-        .into_iter()
-        .map(|row| {
-            let mut best = 0;
-            for (j, v) in row.iter().enumerate() {
-                if *v > row[best] {
-                    best = j;
-                }
-            }
-            best
-        })
-        .collect();
 
     Ok(GaussianMixtureResult {
-        labels,
+        labels: hard_labels(&resp),
         responsibilities: resp.rows().into_iter().map(|r| r.to_vec()).collect(),
         weights,
         means: comps.iter().map(|c| c.mean.clone()).collect(),

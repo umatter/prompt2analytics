@@ -74,7 +74,7 @@ fn checked_lambda(lambda: &[f64], k: usize) -> EconResult<Vec<f64>> {
 }
 
 /// First maximum of each row.
-fn hard_labels(posterior: &Array2<f64>) -> Vec<usize> {
+pub(crate) fn hard_labels(posterior: &Array2<f64>) -> Vec<usize> {
     posterior
         .rows()
         .into_iter()
@@ -321,20 +321,7 @@ pub fn flexmix_with(
     }
     crate::ml::extract::require_finite(&x, "flexmix").map_err(spec)?;
     let k0 = config.k;
-    if k0 == 0 || k0 > n {
-        return Err(spec(format!(
-            "k must be between 1 and {n} (the number of observations), got {k0}"
-        )));
-    }
-    if config.max_iterations == 0 {
-        return Err(spec("max_iterations must be at least 1, got 0".into()));
-    }
-    if !config.tolerance.is_finite() || config.tolerance <= 0.0 {
-        return Err(spec(format!(
-            "tolerance must be finite and positive, got {}",
-            config.tolerance
-        )));
-    }
+    check_em_limits(k0, n, config.max_iterations, config.tolerance)?;
     if !config.minprior.is_finite() || !(0.0..1.0).contains(&config.minprior) {
         return Err(spec(format!(
             "minprior must be finite, at least 0 and below 1, got {}",
@@ -1167,6 +1154,7 @@ fn mv_random_start(
     centres.push(data.row(rng.gen_range(0..n)).to_vec());
     let mut distances = vec![f64::INFINITY; n];
     for c in 1..k {
+        checkpoint()?;
         let last = &centres[c - 1];
         for (dist, row) in distances.iter_mut().zip(data.rows()) {
             let to_last: f64 = row.iter().zip(last).map(|(a, b)| (a - b) * (a - b)).sum();
@@ -1880,6 +1868,11 @@ mod tests {
                 Some(seed),
             )
             .unwrap();
+            assert!(
+                r.prior.iter().all(|&p| p >= FLEXMIX_DEFAULT_MINPRIOR),
+                "seed {seed}: prior {:?}",
+                r.prior
+            );
             for (j, &s) in r.sigma.iter().enumerate() {
                 assert!(
                     s >= FLEXMIX_SIGMA_FLOOR_REL * sd * (1.0 - 1e-12),

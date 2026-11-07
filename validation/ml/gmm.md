@@ -24,7 +24,9 @@ default start is hierarchical; both reach the pinned optimum (`stopifnot` over 1
 `|dl| / (1 + |l|) < 1e-5`, which leaves the parameters about 7e-3 from the optimum on these data; the former p2a rule
 `|dl| < 1e-4` is relative 7e-8 at `|l| = 1442`. A fit that reaches `max_iterations` reports `converged = false` and a
 warning. The default `max_iterations` is 1000: at n = 100 on these data the relative stop takes more than the former
-100 passes.
+100 passes. The stop is the one step that depends on the data's units: rescaling shifts `l`, which changes the
+denominator of the relative change, so a fit on rescaled data can end at a different iteration. The singularity check,
+the ridge and the k-means start do not depend on the units.
 
 **Singular covariance.** A component's covariance counts as singular when a squared pivot of its Cholesky factor falls
 below `SYM_RANK_TOL * d` times its diagonal entry. It then gets a ridge of `GMM_SINGULAR_RIDGE = 1e-10` times each
