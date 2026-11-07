@@ -30,8 +30,14 @@ Data are wide: one row per subject, covariates and treatments per period `t = 1.
 | Outcome | `[1, baseline, L_T, A_1, ..., A_T]` | `lm` (continuous) or `glm(binomial)` (binary) |
 
 Linear models are fitted with OLS's solve decision (normal equations on a well-conditioned
-design, `lm.fit`'s pivoted QR otherwise); logistic models with the shared `glm.fit` IRLS
-(`econometrics::glm::fit_glm`, `epsilon` = `tolerance`, `maxit` = `max_iter`). Aliased
+design, `lm.fit`'s pivoted QR otherwise); logistic models with the `glm.fit` IRLS through
+`econometrics::glm::fit_logit_lean` (`epsilon` = `tolerance`, `maxit` = `max_iter`): the lean path,
+and `fit_glm`'s own fit when a fit leaves it (separation, a rank-deficient or ill-conditioned
+weighted design, no convergence, a row with `y < 1` above `eta = 15` or `y > 0` below -15, a last step
+that no longer meets the rule once refined). The default `tolerance` is 1e-8, where the gap to
+`fit_glm` on separated heavy-tailed fits whose estimates diverge can be 2.9e-7 on a coefficient and
+3.95e-6 on an SE (14 of 4,278 fits exceed 1e-9; the 12 inspected all have n at most
+30). Aliased
 columns are reported as R reports them ("Coefficients not defined because of
 singularities") and predicted with their identified columns.
 

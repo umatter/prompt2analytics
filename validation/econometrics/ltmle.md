@@ -59,11 +59,14 @@ step the shared GLM takes when `kappa_1` of the equilibrated `X'WX` is above 100
 near the estimate (the previous step moved the deviance by less than 1e-3 relative, or the fit
 started from coefficients). A step the deviance rule stops at without one takes it afterwards,
 from the fit it started at. It computes only what LTMLE reads. A fit leaves for `fit_glm` from
-glm.fit's start, which then reports it, when it would report anything: a linear predictor at the
-link's clamp, a rank-deficient design or `kappa_1` above 1e4, no convergence, a binomial response
-that is not 0/1. A converged fit also leaves when a row its probability does not explain lies
-beyond `|eta| = 15` (`y < 1` above 15, `y > 0` below -15), because `fit_glm` loses the digits of
-`1 - mu` there and can report the fit differently. A response whose mean is within 1e-6 of 0 or 1
+glm.fit's start, which then reports it, on a linear predictor at the link's clamp, a rank-deficient
+design or `kappa_1` above 1e4, no convergence, a binomial response that is not 0/1, or a last step
+that no longer meets the rule once refined. A converged fit also leaves with a row beyond
+`|eta| = 15` on the wrong side (`y < 1` above 15, `y > 0` below -15), because on a 0/1 response
+`fit_glm` loses the digits of `1 - mu` there and can report the fit differently. The check is the
+same for a fractional Q response, where `1 - 1e-8` at `eta = 18` leaves although it is well fitted;
+the bound was calibrated on 0/1 responses only, and on the sweep below no fast-path fit of 23,104
+left through it at 1e-8 and 2 of 23,102 at 1e-10. A response whose mean is within 1e-6 of 0 or 1
 goes to `fit_glm` directly.
 
 The Q regression of node `t - 1` starts from node t's coefficients on the shared history, with
@@ -75,16 +78,16 @@ decides what is reported as not converged, on the step count from glm.fit's star
 start would undercut. Of the 11,292 Q fits with a response mean off the 1e-6 guard in the sweep
 below, counting all of them at the default tolerance, the most any took from glm.fit's start is
 42, and the most among those whose warm and cold step counts differ is 16. A response mean within
-1e-6 of 0 or 1 never takes the warm path. The warm start is not always the shorter: 591 of those
-fits took more steps from it, the most being 58 where glm.fit's start took 12
-(`shifted_outcome((2500, 10, 4), 4.0, true, 0.3)`, node 5); at a limit below such a count the
+1e-6 of 0 or 1 never takes the warm path. The warm start is not always the shorter: 589 of those
+fits took more steps from it, the most being 86 where glm.fit's start took 12
+(`shifted_outcome((4000, 12, 1), 4.0, true, 0.3)`, node 7); at a limit below such a count the
 lean fit leaves for `fit_glm` from glm.fit's start. At `max_iter` 50, 60 and 75 the warnings and
 convergence status are equal on all 1,716 data sets.
 
-**Which rule these tables describe.** The gap table below and the wall-clock tables were measured
-at d7ec2c2a, where every step above `kappa_1 = 100` took the refinement and no row bound applied.
-They have not been re-measured under the rule above (refinement near the estimate and on the last
-step, the `|eta| = 15` bound).
+**Which rule these tables describe.** The gap table and figures below were measured at bd5068dd,
+under the rule above. The wall-clock tables were measured at d7ec2c2a, where every step above
+`kappa_1 = 100` took the refinement and no row bound applied, and have not been re-measured under
+that rule.
 
 Two reported things change. `NodeModel::iterations` of a warm-started node counts the steps from
 its warm start (2 where glm.fit's start takes 4 or 5), so it is not comparable with glm.fit's.
@@ -100,27 +103,27 @@ columns. "Warm off" is the lean path with the warm start off, the same set of da
 
 | Quantity | tolerance 1e-8 | warm off | 1e-8, regime mean within 1e-6 of 0 or 1 | warm off | tolerance 1e-14 | near-duplicate at 1e-7 |
 |---|---:|---:|---:|---:|---:|---:|
-| ATE | 5.3e-10 | 4e-13 | 2.1e-10 | 5e-12 | 6e-12 | 2e-11 |
-| z | 5.3e-10 | 6e-13 | 4.6e-10 | 8e-12 | 8e-13 | 3e-11 |
-| SE | 3.6e-11 | 9e-13 | 3.2e-10 | 8e-12 | 6e-12 | 3e-11 |
-| regime means | 1.2e-10 | 6e-15 | 1.7e-7 | 1.7e-7 | 6e-12 | 2e-11 |
-| regime SE | 7.4e-11 | 3e-12 | 7.0e-9 | 7.0e-9 | 6e-12 | |
-| p-value | 8.1e-10 | 2e-10 | 5.0e-9 | 9e-12 | 2e-11 | 1e-9 |
-| EIC of the ATE | 1.2e-10 | 8e-12 | 8.8e-10 | 2e-11 | 6e-12 | 2e-10 |
-| EIC of a regime | 1.3e-10 | 1e-11 | 4.1e-9 | 4.1e-9 | 1e-11 | |
-| Q* | 1.7e-9 | 1e-13 | 1.4e-7 | 1.4e-7 | 1e-11 | 1e-9 |
-| Q coefficients | 1.2e-9 | 1e-12 | 6.2e-9 | 6.2e-9 | 8.4e-7 | 4e-9 |
-| fluctuation `eps` | 1.2e-8 | 4e-10 | 8.6e-8 | 6.2e-9 | 9e-11 | 7e-10 |
+| ATE | 5.3e-10 | 1e-13 | 2.1e-10 | 5e-12 | 6e-12 | 2e-11 |
+| z | 5.3e-10 | 3e-13 | 4.6e-10 | 5e-12 | 1.1e-12 | 3e-11 |
+| SE | 3.6e-11 | 3e-13 | 3.2e-10 | 8e-13 | 6e-12 | 3e-11 |
+| regime means | 1.2e-10 | 5e-15 | 1.8e-7 | 1.8e-7 | 6e-12 | 2e-11 |
+| regime SE | 7.4e-11 | 3e-12 | 1.9e-8 | 1.9e-8 | 6e-12 | |
+| p-value | 8.1e-10 | 2e-10 | 5.0e-9 | 2e-12 | 2e-11 | 1e-9 |
+| EIC of the ATE | 1.2e-10 | 3e-12 | 8.8e-10 | 2e-12 | 6e-12 | 2e-10 |
+| EIC of a regime | 1.3e-10 | 1e-11 | 8.2e-8 | 8.2e-8 | 9e-12 | |
+| Q* | 1.7e-9 | 1e-13 | 3.6e-7 | 3.6e-7 | 2e-11 | 1e-9 |
+| Q coefficients | 1.2e-9 | 1e-12 | 7.3e-9 | 7.3e-9 | 1.3e-10 | 4e-9 |
+| fluctuation `eps` | 1.2e-8 | 4e-10 | 8.6e-8 | 6.7e-9 | 9e-11 | 7e-10 |
 | g coefficients, propensities, cumulative g, H | 6e-15 | 6e-15 | 6e-15 | 6e-15 | 5e-14 | 1e-15 |
 
 The near-duplicate column is one fixture family, not this sweep; its two empty rows were not
 measured separately. Where the gaps come from:
 
 - **The warm start, on ordinary data.** At the default tolerance the warm-off columns show the lean
-  path keeps `fit_glm`'s numbers to at most 8e-12 on the ATE, SE and z. The gap above that is the
+  path keeps `fit_glm`'s numbers to at most 5e-12 on the ATE, SE and z. The gap above that is the
   warm start's, and of the size of the deviance rule's slack, not an accuracy loss: against
   `fit_glm` at 1e-14 on the 1,193 data sets with no regime near 0 or 1, the fast path's ATE is the
-  closer on 592 and `fit_glm`'s at 1e-8 on 540 (61 tied). At `shifted_outcome((300, 3, 1), 1.5,
+  closer on 590 and `fit_glm`'s at 1e-8 on 540 (63 tied). At `shifted_outcome((300, 3, 1), 1.5,
   false, 1.2)` (ATE 0.003, gap 4.6e-10) the fast path is 2.7e-11 from that reference and `fit_glm`
   at 1e-8 is 4.9e-10; at `long_horizon(300, 6, 17)` (gap 1.7e-10) they are 1.8e-11 and 1.8e-10. It
   is the rule's slack in size, not bounded by the slack data set by data set: on 224 of the 1,193
@@ -128,22 +131,24 @@ measured separately. Where the gaps come from:
   `sparse_followers(150, 6, 0)` (3.8e-11 absolute against 1.1e-12).
 - **An always-near-0 regime, without the warm start.** At `long_horizon(1200, 8, 21)` the never
   regime's mean is about 1.5e-13 and most of its fits run the 100 steps without converging. The
-  lean path and the fast path are bit-identical there; they move psi by 1.7e-7 relative (2.6e-20
-  absolute), Q* by 1.4e-7 and one eps by 7.8e-7 on its own scale. The ATE moves by 2e-15.
+  lean path and the fast path are bit-identical there; they move psi by 1.8e-7 relative (2.8e-20
+  absolute). The largest Q* and the other regime rows are at `sparse_followers(1200, 8, 17)`, with a
+  regime mean of 1.0e-13: Q* by 3.6e-7 relative (5.5e-20 absolute), regime SE by 1.9e-8, a regime's
+  EIC by 8.2e-8 and the Q coefficients by 7.3e-9.
 - **Small denominators.** A relative gap is large where its reference is small: the 5.3e-10 on
   the ATE is 5.9e-13 absolute, at `shifted_outcome((150, 4, 3), 1.5, false, 1.2)`; the largest ATE
   gap in absolute terms is 5.2e-11. The vector scale also hides small entries: on its own scale one
   eps entry moves by 9e-5 (`shifted_outcome((1000, 3, 4), -5.0, false, 0.3)`). The other way, where
   a flat likelihood sends an entry far out, a large absolute move is small on the vector's scale:
-  an eps of order 1e14 by 2.5 at `long_horizon(150, 5, 8)`, a Q coefficient of order 1e15 by 8e6 at
+  an eps of order 1e14 by 2.5 at `long_horizon(150, 5, 8)`, a Q coefficient of order 1e15 by 1.09e7 at
   `long_horizon(1200, 8, 16)`. At tolerance 1e-10 such a coefficient moves by 2.3e-2 of the
   largest entry (`shifted_outcome((300, 8, 3), -1.0, false, 0.3)`, warm off the same). At 1e-10
-  only Q coefficients go above 1e-9, on three data sets, and the estimates stay at 3.5e-10 or
-  below. The 1e-14 column's 8.4e-7 is the same kind of entry (`long_horizon(600, 12, 17)`; the largest with no regime near 0 or 1 is
-  1e-13).
+  only Q coefficients go above 1e-9, on four data sets, and the estimates stay at 3.5e-10 or
+  below. The 1e-14 column's 1.3e-10 is the same kind of entry (`long_horizon(300, 8, 18)`; the largest with
+  no regime near 0 or 1 is 5e-14).
 
 So at the default tolerance neither 1e-10 on the ATE, z and SE nor 1e-9 on the nuisance quantities
-is a general bound: 69 of the 1,716 data sets exceed one of them
+is a general bound: 70 of the 1,716 data sets exceed one of them
 (46 with no regime near 0 or 1). The tests assert those two bounds, 1e-10 on the ATE, SE, z and
 regime means and 1e-9 on the rest at the default tolerance, on their own fixtures only, plus 1e-10
 on every quantity at 1e-14 and 1e-8 on the near-duplicate.
@@ -156,7 +161,7 @@ coefficient and the predictions. On a saturated node the likelihood is flat, and
 
 At tolerances 1e-8 and 1e-10 the warnings and convergence status are equal on all 1,716 data sets.
 At `max_iter` 2 to 6 and 49 they are equal by construction. At 1e-14, where rounding decides the
-deviance rule, the status differs on 181 of the 1,716 and the warnings on 325, with the numbers
+deviance rule, the status differs on 158 of the 1,716 and the warnings on 305, with the numbers
 within the 1e-14 column. No data set fits on one path and errors on the other.
 
 The sweep also shows something the fast paths do not change: on a regime that saturates, the
@@ -164,7 +169,10 @@ estimate itself can depend on the tolerance, on both paths alike. `shifted_outco
 3.0, false, 2.0)` has an always-treat mean of 2e-16 at 1e-8, reported as not converged, and of 1
 at 1e-10. At `sparse_followers(2500, 8, 20)` the never regime's mean is 9.4e-3 at 1e-8, with a
 converged fit, and 2e-16 at 1e-10, so the ATE moves by 9.4e-3; the two paths' ATEs are 6e-13 apart
-at 1e-8.
+at 1e-8. `fit_glm`'s ATE at 1e-8 against 1e-14 moves by more than 1e-3 on 9 of the 1,716 data sets,
+3 of them reported as converged at 1e-8, and by more than 0.1 on 3, none of them reported as
+converged. The dependence belongs to the estimator and its deviance rule, not to the fast paths. It
+is a known open item.
 
 There is no warm start across regimes. The last node's Q regression is fitted once for all
 regimes, and every earlier one already starts from its own regime's later node and takes about

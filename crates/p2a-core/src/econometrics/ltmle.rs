@@ -937,8 +937,8 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
 #[derive(Debug, Clone, Copy)]
 struct FitPaths {
     /// Through [`lean_logit_refined`], falling back to [`fit_glm`] whenever a fit leaves its
-    /// path (separation, a rank-deficient or ill-conditioned design, no convergence), so that
-    /// the shared GLM reports those cases.
+    /// path (separation, a rank-deficient or ill-conditioned design, no convergence, a converged
+    /// fit with a row beyond the bound `LEAN_MISFIT_ETA`), so that the shared GLM reports those cases.
     lean: bool,
     /// Each earlier Q regression starts from the later node's coefficients ([`warm_start`]),
     /// when `max_iter` is at least [`WARM_MIN_MAX_ITER`].
@@ -1481,9 +1481,9 @@ struct LogitNode {
     iterations: usize,
 }
 
-/// `glm(y ~ x - 1, family)` with logit link: the lean IRLS when the fit stays on its path, on
-/// which the shared GLM reports nothing, from `start` or glm.fit's start; otherwise the shared
-/// GLM from glm.fit's start, with its warnings and rank handling.
+/// `glm(y ~ x - 1, family)` with logit link: the lean IRLS when the fit stays on its path, from
+/// `start` or glm.fit's start; otherwise the shared GLM from glm.fit's start, with its warnings
+/// and rank handling.
 #[allow(clippy::too_many_arguments)]
 fn fit_logit_node(
     x: ArrayView2<f64>,
@@ -3181,17 +3181,18 @@ mod tests {
             let (x, y) = (&a.regime_estimate, &b.regime_estimate);
             assert_relative("eps", &x.fluctuation_coefs, &y.fluctuation_coefs, 1e-12);
 
-            // and the warm numbers are the closer to the tight reference, the gap being the
-            // deviance rule's slack
+            // and on these two data sets the warm numbers are the closer to the tight reference.
+            // The distances are the deviance rule's slack, at least ten times apart and well above
+            // rounding; across data sets either path can be the closer.
             let fast = run_ltmle(data, LtmleConfig::default()).unwrap();
             let tight_reference = run_ltmle_with(data, tight(), cold).unwrap();
             let distance = |r: &LtmleResult| (r.ate - tight_reference.ate).abs();
             assert!(distance(&fast) < distance(&b));
         }
 
-        // An always-near-0 regime: most of its fits run out of steps on both paths, psi is about
-        // 1e-13, and the lean path alone moves its relative numbers, with the warm start bit for
-        // bit the same. The ATE's gap stays at rounding.
+        // An always-near-0 regime: most of its fits run out of steps on both paths and psi is about
+        // 1e-13. The warm start leaves its numbers bit for bit the same. The ATE's gap stays at
+        // rounding.
         let near_zero = long_horizon(1200, 8, 21);
         assert_same_as_shared_glm(&near_zero, &LtmleConfig::default(), 1e-6, 1e-6);
         let a = run_ltmle(&near_zero, LtmleConfig::default()).unwrap();
@@ -3201,7 +3202,6 @@ mod tests {
         assert!(near(&c).psi < 1e-12, "{}", near(&c).psi);
         assert_eq!(near(&a).psi.to_bits(), near(&b).psi.to_bits());
         assert_eq!(near(&a).fluctuation_coefs, near(&b).fluctuation_coefs);
-        assert_ne!(near(&a).psi.to_bits(), near(&c).psi.to_bits());
         assert_relative("ate", &[a.ate], &[c.ate], 1e-13);
     }
 

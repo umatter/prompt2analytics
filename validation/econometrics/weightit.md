@@ -7,7 +7,7 @@ the ATE, ATT or ATC with four methods, each reproducing an R function:
 
 | Method | What is computed | R reference |
 |--------|------------------|-------------|
-| `Logistic` | inverse propensity weights from a logistic regression (the shared GLM, `glm::fit_propensity`) | `WeightIt::weightit(method = "glm")` |
+| `Logistic` | inverse propensity weights from a logistic regression (`glm::fit_logit_lean`: the lean IRLS, or `fit_glm`'s own fit when the fit leaves that path) | `WeightIt::weightit(method = "glm")` |
 | `Entropy` | entropy balancing (Hainmueller 2012): the convex dual `min log sum exp(lambda'(x_i - t))` by Newton with an Armijo search, on scores in SD units | `WeightIt::weightit(method = "ebal")`; the exact dual (Newton to `|grad| < 1e-14`) |
 | `Energy` | energy balancing (Huling & Mak 2022) at lambda = 0, solved exactly as a quadratic program | the energy-distance QP solved with `quadprog::solve.QP` (WeightIt's `energy` needs `osqp`) |
 | `Stable` | stable balancing weights with exact balance, through `sbw::run_sbw_inner` | `WeightIt::weightit(method = "optweight", tols = 0)`; the SBW QP solved with `quadprog::solve.QP` |
