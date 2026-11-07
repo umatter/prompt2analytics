@@ -4,7 +4,7 @@
     {
       "id": "viz_scatter_correlation",
       "name": "Scatter-plot Pearson correlation",
-      "category": "visualization",
+      "category": "data",
       "reference": "stats::cor (method = 'pearson')",
       "doc": "validation/visualization/charts.md",
       "cases": [
@@ -37,7 +37,7 @@
     {
       "id": "viz_boxplot_stats",
       "name": "Box-plot hinges, whiskers and outliers",
-      "category": "visualization",
+      "category": "data",
       "reference": "grDevices::boxplot.stats (coef = 1.5)",
       "doc": "validation/visualization/charts.md",
       "cases": [
@@ -60,7 +60,7 @@
     {
       "id": "viz_histogram_bins",
       "name": "Histogram bin count and counts",
-      "category": "visualization",
+      "category": "data",
       "reference": "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1)) with its defaults (right = TRUE, include.lowest = TRUE)",
       "doc": "validation/visualization/charts.md",
       "cases": [
@@ -92,7 +92,7 @@
     {
       "id": "viz_residual_diagnostics",
       "name": "Residual diagnostics: standardized residuals, Cook's distance, Q-Q quantiles",
-      "category": "visualization",
+      "category": "data",
       "reference": "stats::rstandard.lm; stats::cooks.distance.lm; stats::hatvalues; stats::qnorm(stats::ppoints(n))",
       "doc": "validation/visualization/charts.md",
       "cases": [
@@ -115,7 +115,7 @@
     {
       "id": "export_regression_tables",
       "name": "LaTeX, HTML and Markdown regression tables",
-      "category": "export",
+      "category": "data",
       "reference": "stats::lm; summary.lm (classical SEs)",
       "doc": "validation/visualization/charts.md",
       "cases": [
