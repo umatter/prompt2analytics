@@ -99,24 +99,25 @@ and the missing count; the IPW estimates are pinned by the tests above.
 ## Wall-clock against fe13b889
 
 Medians in µs over five interleaved rounds of the timing harness (`wp23`, one core, one rayon
-thread, `release`), on a machine with a load average of about 2 (not idle); ratio is this tree over fe13b889.
+thread, `release`), at e4159ef0, with the machine's load average falling from 5 to 1 during the run
+(not idle); ratio is this tree over fe13b889.
 Rounds at n = 1,000 and below scatter by about 0.2 either way; those at n = 10,000 by less.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| IPW ATE, covariates on U(-2, 2) | 100 | 45.91 | 28.60 | 0.62 |
-| IPW ATE, covariates on U(-2, 2) | 1,000 | 156.26 | 128.43 | 0.82 |
-| IPW ATE, covariates on U(-2, 2) | 10,000 | 1,894.95 | 1,715.46 | 0.91 |
-| IPW ATE, covariates at mean 40, sd 10 | 1,000 | 209.45 | 155.36 | 0.74 |
-| IPW ATE, covariates at mean 40, sd 10 | 10,000 | 1,885.79 | 1,868.97 | 0.99 |
-| IPW ATT, covariates on U(-2, 2) | 1,000 | 153.19 | 116.82 | 0.76 |
-| IPW ATT, covariates on U(-2, 2) | 10,000 | 2,051.29 | 1,864.91 | 0.91 |
+| IPW ATE, covariates on U(-2, 2) | 100 | 49.41 | 30.56 | 0.62 |
+| IPW ATE, covariates on U(-2, 2) | 1,000 | 158.82 | 121.50 | 0.77 |
+| IPW ATE, covariates on U(-2, 2) | 10,000 | 1,844.85 | 1,628.94 | 0.88 |
+| IPW ATE, covariates at mean 40, sd 10 | 1,000 | 155.74 | 138.22 | 0.89 |
+| IPW ATE, covariates at mean 40, sd 10 | 10,000 | 1,848.61 | 1,798.79 | 0.97 |
+| IPW ATT, covariates on U(-2, 2) | 1,000 | 152.61 | 110.00 | 0.72 |
+| IPW ATT, covariates on U(-2, 2) | 10,000 | 1,903.62 | 1,512.90 | 0.79 |
 
 The gains depend on the design's conditioning. Uncentred covariates put the equilibrated X'WX
 above a condition number of 100 from the first step, so the propensity fit takes the refinement
 on its steps near the estimate, and each outcome model takes one refinement pass; at n = 10,000
-that costs 9% over the same data centred. Past a condition number of 1e4 the fit is `fit_glm`'s
-and pays for both loops.
+that costs 10% over the same data centred. Past a condition number of 1e4, or with a row its
+probability does not explain beyond `|eta| = 15`, the fit is `fit_glm`'s and pays for both loops.
 
 ## References
 

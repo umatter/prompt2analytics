@@ -345,25 +345,28 @@ effect 1.3683 on this case). The direct and indirect effects are not pinned (CAU
 
 ## Wall-clock against fe13b889
 
-Medians over interleaved rounds, one core, one rayon thread, `release`, on a machine with a load average of about 2 (not idle); ratio is this tree over fe13b889.
-The first rows are the timing harness (`wp26`, five rounds), the last the Criterion group
-`MediationAnalysis` (three rounds, 99 replicates, trim 0.05).
+Medians over interleaved rounds, one core, one rayon thread, `release`, at e4159ef0; ratio is this tree
+over fe13b889. The first rows are the timing harness (`wp26`, five rounds, load average falling from 5
+to 1), the last the Criterion group `MediationAnalysis` (three rounds, 99 replicates, trim 0.05, load
+average 1.3 to 2; `econometrics_benchmarks` built with `--no-default-features --features ci` at this
+commit, against the fe13b889 binary built from the same bench).
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| harness, 199 replicates (ms) | 100 | 4.05 | 2.41 | 0.59 |
-| harness, 199 replicates (ms) | 1,000 | 35.27 | 18.54 | 0.53 |
-| harness, 199 replicates (ms) | 10,000 | 358.01 | 180.39 | 0.50 |
-| Criterion, 99 replicates (ms) | 200 | 1.65 | 1.00 | 0.60 |
-| Criterion, 99 replicates (ms) | 500 | 3.01 | 1.80 | 0.60 |
-| Criterion, 99 replicates (ms) | 1,000 | 5.58 | 3.16 | 0.57 |
+| harness, 199 replicates (ms) | 100 | 3.99 | 2.37 | 0.59 |
+| harness, 199 replicates (ms) | 1,000 | 32.40 | 16.96 | 0.52 |
+| harness, 199 replicates (ms) | 10,000 | 334.35 | 166.01 | 0.50 |
+| Criterion, 99 replicates (ms) | 200 | 1.62 | 1.00 | 0.62 |
+| Criterion, 99 replicates (ms) | 500 | 2.98 | 1.80 | 0.60 |
+| Criterion, 99 replicates (ms) | 1,000 | 5.61 | 3.17 | 0.56 |
 
 The gains depend on the design's conditioning, and the two data sets differ there. In the
 Criterion data the mediator nearly separates the arms, so trimming at 0.05 drops 77% of the rows
 and leaves a mediator that is close to a function of the covariate: the bootstrap resamples of
 those rows give the p(D = 1 | X, M) design a median condition number of 273 at its first step.
-The harness data drop 26% and stay at 11. Those fits take the refinement on their last steps;
-past a condition number of 1e4 a fit is `fit_glm`'s and pays for both loops.
+The harness data drop 26% and stay at 11. Those fits take the refinement on their last steps.
+Past a condition number of 1e4, or with a row its probability does not explain beyond
+`|eta| = 15`, a fit is `fit_glm`'s and pays for both loops.
 
 ## References
 
