@@ -88,3 +88,15 @@ p2a's full join keeps both key columns (`k`, `k_right`; DATA-43, Tier 4), so the
 Case `data_munging_join_suffix`, on `munging_join_frames.csv`. Decisive names: `left_join(AB, C)` gives `k,
 value, value_right, value_right_right`; `cross_join(AB, C)` gives `k, value, value_right, k_right,
 value_right_right`. Tests: `test_validate_join_suffix_dplyr`, `test_join_suffix_collision`.
+
+## Verification of cleaning steps
+
+A type change is a column-level change: `VerificationReport.dtype_changes`, a warning and a `Type
+changes:` block. Cells of one type compare by value; when the type changed, cells compare as doubles if
+both sides are numeric or boolean (`1L == 1.0` is TRUE), as text otherwise; a pair that cannot be cast is
+skipped with a warning. Tests: `test_verify_cleaning_int_to_float_fill`,
+`test_verify_cleaning_cast_text_to_int`, `test_apply_operation_dtype_change`.
+
+The previews run the operation: `preview_fill_na` shows each sampled cell's real new value and reports an
+unknown strategy as a warning; `preview_replace` counts typed matches in every column type. Tests:
+`test_preview_fill_na_shows_real_fill_values`, `test_preview_replace_counts_typed_matches`.
