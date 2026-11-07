@@ -806,3 +806,225 @@ mod conversations {
         );
     }
 }
+
+#[cfg(all(feature = "db", feature = "llm"))]
+mod chat_conversation {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// An Ollama stub that records each request body and answers `answers[n]` (the last repeats).
+    async fn ollama(answers: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let (b, a) = (bodies.clone(), Arc::new(answers));
+        let router = axum::Router::new().route(
+            "/api/chat",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let (b, a) = (b.clone(), a.clone());
+                async move {
+                    let n = {
+                        let mut g = b.lock().unwrap();
+                        g.push(body);
+                        g.len() - 1
+                    };
+                    axum::Json(a[n.min(a.len() - 1)].clone())
+                }
+            }),
+        );
+        (format!("http://{}", spawn_stub(router).await), bodies)
+    }
+    fn says(t: &str) -> Value {
+        json!({"message": {"role": "assistant", "content": t}, "done": true})
+    }
+    fn calls(name: &str) -> Value {
+        json!({"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": {}}}]}, "done": true})
+    }
+    /// (role, content) of a provider request's messages after the system prompt.
+    fn turns(body: &Value) -> Vec<(String, String)> {
+        body["messages"].as_array().unwrap()[1..]
+            .iter()
+            .map(|m| {
+                (
+                    m["role"].as_str().unwrap().into(),
+                    m["content"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    }
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+    async fn stored(app: &axum::Router, sid: &str, cid: &str) -> Vec<(String, String)> {
+        let (_, msgs, _) = send(
+            app,
+            "GET",
+            &format!("/api/conversations/{cid}/messages"),
+            Some(sid),
+            None,
+        )
+        .await;
+        msgs["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["role"].as_str().unwrap().into(),
+                    m["content"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    }
+
+    /// MCP-15: with a conversation and no history, the stored messages are the history, and the
+    /// reply is stored (as the stream route does). The user's message is the client's to store.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_chat_uses_the_stored_history_and_stores_its_reply() {
+        let (app, sid, cid) = super::conversations::seeded().await;
+        send(
+            &app,
+            "POST",
+            &format!("/api/conversations/{cid}/messages"),
+            Some(&sid),
+            Some(json!({"role": "assistant", "content": "hello"})),
+        )
+        .await;
+        let (base_url, bodies) = ollama(vec![says("stub reply")]).await;
+        let (s, b) = post_json(
+            &app,
+            "/api/llm/chat",
+            json!({"session_id": sid, "message": "next", "conversation_id": cid,
+            "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["data"]["message"]["content"], "stub reply");
+        assert_eq!(
+            turns(&bodies.lock().unwrap()[0]),
+            pairs(&[("user", "hi"), ("assistant", "hello"), ("user", "next")])
+        );
+        assert_eq!(
+            stored(&app, &sid, &cid).await,
+            pairs(&[
+                ("user", "hi"),
+                ("assistant", "hello"),
+                ("assistant", "stub reply")
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_chat_without_retrieve_history_sends_only_the_message() {
+        let (app, sid, cid) = super::conversations::seeded().await;
+        let (base_url, bodies) = ollama(vec![says("ok")]).await;
+        let (s, b) = post_json(&app, "/api/llm/chat", json!({"session_id": sid, "message": "next", "conversation_id": cid,
+            "retrieve_history": false, "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}})).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(
+            turns(&bodies.lock().unwrap()[0]),
+            pairs(&[("user", "next")])
+        );
+    }
+
+    /// A conversation of another session (or none) is 404 before anything is stored or sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_chat_refuses_a_conversation_of_another_session() {
+        let (app, _sid, cid) = super::conversations::seeded().await;
+        let other = new_session(&app).await;
+        let (base_url, bodies) = ollama(vec![says("ok")]).await;
+        for conv in [cid.as_str(), "no-such-conversation"] {
+            let (s, b) = post_json(
+                &app,
+                "/api/llm/chat",
+                json!({"session_id": other, "message": "x", "conversation_id": conv,
+                "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}}),
+            )
+            .await;
+            assert_eq!(
+                (s, b["code"].as_str(), b["error"].as_str()),
+                (
+                    StatusCode::NOT_FOUND,
+                    Some("not_found"),
+                    Some("Conversation not found")
+                ),
+                "{b}"
+            );
+        }
+        assert!(bodies.lock().unwrap().is_empty());
+    }
+
+    /// The reply's tool calls are recorded in the conversation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_chat_records_its_tool_calls_in_the_conversation() {
+        let (app, sid, cid) = super::conversations::seeded().await;
+        let (base_url, _) = ollama(vec![calls("list_datasets")]).await;
+        let (s, b) = post_json(&app, "/api/llm/chat", json!({"session_id": sid, "message": "list", "conversation_id": cid,
+            "interpret": false, "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}})).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (_, calls, _) = send(
+            &app,
+            "GET",
+            &format!("/api/conversations/{cid}/tool-calls"),
+            Some(&sid),
+            None,
+        )
+        .await;
+        let calls = calls["data"].as_array().unwrap().clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            (calls[0]["tool_name"].as_str(), calls[0]["status"].as_str()),
+            (Some("list_datasets"), Some("success"))
+        );
+        let last = stored(&app, &sid, &cid).await.pop().unwrap();
+        assert!(
+            last.0 == "assistant" && last.1.starts_with("**list_datasets**:"),
+            "{last:?}"
+        );
+    }
+
+    /// A client that goes away mid-chat drops the route's future: the stored reply is closed with
+    /// the stream route's text, not left an empty placeholder. Polls with a deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_chat_dropped_by_the_client_closes_its_stored_reply() {
+        let (app, sid, cid) = super::conversations::seeded().await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let notify = reached.clone();
+        let router = axum::Router::new().route(
+            "/api/chat",
+            axum::routing::post(move || {
+                let notify = notify.clone();
+                async move {
+                    notify.notify_one();
+                    std::future::pending::<axum::Json<Value>>().await
+                }
+            }),
+        );
+        let base_url = format!("http://{}", spawn_stub(router).await);
+        let body = json!({"session_id": sid, "message": "next", "conversation_id": cid,
+            "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}});
+        let chat_app = app.clone();
+        let chat = tokio::spawn(async move { post_json(&chat_app, "/api/llm/chat", body).await });
+        tokio::time::timeout(Duration::from_secs(30), reached.notified())
+            .await
+            .expect("the chat reaches the model");
+        chat.abort();
+
+        let closed = pairs(&[
+            ("user", "hi"),
+            ("assistant", "[Stopped: the client disconnected]"),
+        ]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let now = stored(&app, &sid, &cid).await;
+            if now == closed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the reply stayed open: {now:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}

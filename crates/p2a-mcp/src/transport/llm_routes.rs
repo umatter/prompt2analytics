@@ -33,10 +33,12 @@ pub struct LlmChatRequest {
     pub provider: Option<ProviderConfig>,
     #[serde(default)]
     pub history: Vec<Message>,
-    /// Whether to have the LLM interpret tool results (default: true)
+    /// true (default): call the model again with the tool results; false: return the first round's
+    /// calls and results
     #[serde(default = "default_interpret")]
     pub interpret: bool,
-    /// Optional conversation ID for persistence
+    /// With the `db` feature: the session's conversation whose history is used and where the reply
+    /// is stored (both chat routes)
     #[serde(default)]
     pub conversation_id: Option<String>,
     /// Whether to auto-retrieve history from database when conversation_id
@@ -285,6 +287,350 @@ async fn admit_tool_call(
     Ok(session)
 }
 
+/// Where a chat's tool calls and the datasets they load are recorded (db builds): the tool-call
+/// rows of the reply's message with a conversation, the dataset metadata with `db` and a session.
+#[cfg(feature = "db")]
+#[derive(Clone, Default)]
+struct ToolCallStore {
+    db: Option<Arc<crate::db::DbConnection>>,
+    /// Conversation ID for tool call persistence
+    conversation_id: Option<String>,
+    /// Message ID for tool call association
+    message_id: Option<String>,
+    /// Session ID for dataset metadata persistence
+    session_id: Option<String>,
+}
+
+#[cfg(feature = "db")]
+impl ToolCallStore {
+    /// Tool-call rows under `message_id` and dataset metadata of `session_id`.
+    fn persistent(
+        db: Arc<crate::db::DbConnection>,
+        conversation_id: String,
+        message_id: String,
+        session_id: String,
+    ) -> Self {
+        Self {
+            db: Some(db),
+            conversation_id: Some(conversation_id),
+            message_id: Some(message_id),
+            session_id: Some(session_id),
+        }
+    }
+
+    /// Dataset metadata only (needs no conversation or message).
+    fn dataset_tracking(db: Arc<crate::db::DbConnection>, session_id: String) -> Self {
+        Self {
+            db: Some(db),
+            session_id: Some(session_id),
+            ..Self::default()
+        }
+    }
+
+    /// Create the running tool-call row of a call; its id, or `None` when there is no row (no
+    /// conversation, or a failed write, which is logged).
+    async fn started(&self, name: &str, arguments: &serde_json::Value) -> Option<String> {
+        let (Some(db), Some(conv_id), Some(msg_id)) =
+            (&self.db, &self.conversation_id, &self.message_id)
+        else {
+            return None;
+        };
+        let tool_call = crate::db::ToolCall::new(
+            msg_id.clone(),
+            conv_id.clone(),
+            name.to_string(),
+            serde_json::to_string(arguments).unwrap_or_default(),
+        );
+        let tc_id = tool_call.id_string();
+
+        // Mark as running
+        let mut running_tool_call = tool_call;
+        running_tool_call.status = crate::db::ToolCallStatus::Running;
+
+        match db.create_tool_call(&running_tool_call).await {
+            Ok(_) => {
+                tracing::debug!(tool_call_id = %tc_id, "Created tool call record");
+                Some(tc_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create tool call record: {}", e);
+                None
+            }
+        }
+    }
+
+    /// What [`Self::finished`] needs of a call's arguments, which move into the call. The metadata
+    /// capture reads only their path and filename (a create_dataset csv_content or an upload_dataset
+    /// content can be large), so only those are kept, and only for a dataset loader (the tool route's
+    /// list) on a store that tracks datasets.
+    fn metadata_arguments(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        (self.db.is_some()
+            && self.session_id.is_some()
+            && super::routes_tools::METADATA_TOOLS.contains(&name))
+        .then(|| super::routes_tools::capture_fields(arguments))
+    }
+
+    /// Complete or fail the call's row `row` and capture the dataset metadata of a successful
+    /// dataset loader. Failed writes are logged.
+    async fn finished(
+        &self,
+        row: Option<&str>,
+        name: &str,
+        metadata_arguments: Option<serde_json::Value>,
+        outcome: &Result<super::http::ToolResult, String>,
+        duration_ms: i32,
+    ) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let result = match outcome {
+            Ok(result) => result,
+            Err(e) => {
+                // Update tool call record with error
+                if let Some(tc_id) = row
+                    && let Err(db_err) = db.fail_tool_call(tc_id, e, duration_ms).await
+                {
+                    tracing::warn!("Failed to update tool call record: {}", db_err);
+                }
+                return;
+            }
+        };
+        let capture = self
+            .session_id
+            .as_ref()
+            .zip(metadata_arguments)
+            .filter(|_| result.success);
+        if row.is_none() && capture.is_none() {
+            return;
+        }
+        // Extract result text for DB operations
+        let result_str = result
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                ContentItem::Text { text } => Some(text.clone()),
+                ContentItem::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Update tool call record with success
+        if let Some(tc_id) = row {
+            // Truncate result if too long (max 10KB)
+            let truncated_result = if result_str.len() > 10240 {
+                format!("{}...[truncated]", truncate_str(&result_str, 10_240))
+            } else {
+                result_str.clone()
+            };
+            if let Err(e) = db
+                .complete_tool_call(tc_id, &truncated_result, duration_ms)
+                .await
+            {
+                tracing::warn!("Failed to update tool call record: {}", e);
+            }
+        }
+
+        // Capture dataset metadata for load_dataset, upload_dataset and create_dataset, when the
+        // call succeeded (`success`, the tool route's test). It runs on the blocking pool, as on the
+        // tool route, and the call waits until its row is stored.
+        if let Some((session_id, metadata_arguments)) = capture {
+            super::routes_tools::capture_dataset_metadata_off_runtime(
+                db.clone(),
+                session_id.clone(),
+                name.to_string(),
+                metadata_arguments,
+                result_str,
+            )
+            .await;
+        }
+    }
+}
+
+/// The milliseconds of a tool call as the store records them.
+#[cfg(feature = "db")]
+fn stored_duration_ms(elapsed: std::time::Duration) -> i32 {
+    i32::try_from(elapsed.as_millis()).unwrap_or(i32::MAX)
+}
+
+/// The conversation a chat request names: its `conversation_id`, an empty string meaning none.
+#[cfg(feature = "db")]
+fn requested_conversation(conversation_id: Option<&str>) -> Option<String> {
+    conversation_id
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether `session_id` owns the conversation; a missing and a foreign one are the same `false`, so
+/// the check is not an existence oracle.
+#[cfg(feature = "db")]
+async fn owns_conversation(
+    db: &crate::db::DbConnection,
+    conversation_id: &str,
+    session_id: &str,
+) -> bool {
+    matches!(
+        db.get_conversation(conversation_id).await,
+        Ok(c) if c.session_id == session_id
+    )
+}
+
+/// An empty assistant message the reply fills in; `None` (logged) when it cannot be written.
+#[cfg(feature = "db")]
+async fn reply_placeholder(db: &crate::db::DbConnection, conversation_id: &str) -> Option<String> {
+    match db.add_message(conversation_id, "assistant", "").await {
+        Ok(msg) => {
+            let msg_id = msg.id_string();
+            tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
+            Some(msg_id)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create placeholder message: {}", e);
+            None
+        }
+    }
+}
+
+/// A conversation's stored messages as LLM history: user and assistant texts, and each assistant
+/// message's successful tool calls followed by their results (each cut to 2,000 bytes). System
+/// messages and empty assistant messages (unfilled placeholders) are skipped.
+#[cfg(feature = "db")]
+async fn stored_history(db: &crate::db::DbConnection, conversation_id: &str) -> Vec<Message> {
+    match db.get_messages(conversation_id).await {
+        Ok(db_messages) => {
+            tracing::info!(
+                conversation_id = %conversation_id,
+                message_count = db_messages.len(),
+                "Retrieved conversation history from database"
+            );
+            // Convert DB messages to LLM messages, including tool calls
+            let mut history = Vec::new();
+            for db_msg in db_messages {
+                // Get tool calls for this message
+                let tool_calls_for_msg = db.get_tool_calls_for_message(&db_msg.id_string()).await;
+
+                match db_msg.role {
+                    crate::db::MessageRole::User => {
+                        if !db_msg.content.is_empty() {
+                            history.push(Message::user(db_msg.content.clone()));
+                        }
+                    }
+                    crate::db::MessageRole::Assistant => {
+                        // Check if this message has completed tool calls
+                        if let Ok(tool_calls) = &tool_calls_for_msg {
+                            let completed_calls: Vec<_> = tool_calls
+                                .iter()
+                                .filter(|tc| tc.status == crate::db::ToolCallStatus::Success)
+                                .collect();
+
+                            if !completed_calls.is_empty() {
+                                // Create tool calls for the assistant message
+                                let llm_tool_calls: Vec<crate::llm::ToolCall> = completed_calls
+                                    .iter()
+                                    .map(|tc| crate::llm::ToolCall {
+                                        id: tc.id_string(),
+                                        name: tc.tool_name.clone(),
+                                        arguments: serde_json::from_str(&tc.arguments)
+                                            .unwrap_or(serde_json::Value::Null),
+                                    })
+                                    .collect();
+
+                                // Assistant message with tool calls
+                                history.push(Message::assistant_with_tools(
+                                    db_msg.content.clone(),
+                                    llm_tool_calls,
+                                ));
+
+                                // Tool result message
+                                let tool_results: Vec<crate::llm::ToolResult> = completed_calls
+                                    .iter()
+                                    .map(|tc| {
+                                        let result_content = tc.result.as_deref().unwrap_or("");
+                                        // Truncate long results
+                                        let truncated = truncate_tool_result(result_content, 2_000);
+                                        crate::llm::ToolResult {
+                                            tool_call_id: tc.id_string(),
+                                            content: truncated,
+                                            is_error: false,
+                                        }
+                                    })
+                                    .collect();
+
+                                history.push(Message::tool_result(tool_results));
+                            } else if !db_msg.content.is_empty() {
+                                // No tool calls, just content
+                                history.push(Message::assistant(db_msg.content.clone()));
+                            }
+                        } else if !db_msg.content.is_empty() {
+                            history.push(Message::assistant(db_msg.content.clone()));
+                        }
+                    }
+                    crate::db::MessageRole::System => {
+                        // Skip system messages in history retrieval
+                    }
+                }
+            }
+            history
+        }
+        Err(e) => {
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                error = %e,
+                "Failed to retrieve conversation history, using empty history"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Closes the stored reply of a non-streaming chat when the chat's future is dropped before it
+/// answers (the client disconnected), as [`run_chat_task`] does for the stream: the message is marked
+/// stopped and its unfinished tool calls failed.
+#[cfg(feature = "db")]
+struct UnfinishedReply {
+    db: Arc<crate::db::DbConnection>,
+    message_id: String,
+    /// False once the chat has ended and its outcome is stored by the route.
+    armed: bool,
+}
+
+#[cfg(feature = "db")]
+impl UnfinishedReply {
+    /// The chat ended; the route stores its outcome.
+    fn disarm(reply: Option<Self>) {
+        if let Some(mut reply) = reply {
+            reply.armed = false;
+        }
+    }
+}
+
+#[cfg(feature = "db")]
+impl Drop for UnfinishedReply {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (db, message_id) = (self.db.clone(), std::mem::take(&mut self.message_id));
+        runtime.spawn(async move { stop_unfinished_chat(&db, &message_id).await });
+    }
+}
+
+/// Store the reply's final text in message `msg_id`; a failed write is logged.
+#[cfg(feature = "db")]
+async fn store_reply(db: &crate::db::DbConnection, msg_id: &str, content: &str) {
+    if let Err(e) = db.update_message_content(msg_id, content).await {
+        tracing::warn!("Failed to update message content: {}", e);
+    } else {
+        tracing::debug!(message_id = %msg_id, "Updated assistant message content");
+    }
+}
+
 /// Internal tool executor that runs the LLM's tool calls through the
 /// governor. A refusal or failure becomes the tool's error text, so the
 /// model can retry with smaller parameters.
@@ -293,6 +639,8 @@ pub struct SessionToolExecutor {
     server: Arc<crate::server::AnalyticsServer>,
     chat: ChatSession,
     audit: Arc<AuditLogger>,
+    #[cfg(feature = "db")]
+    store: ToolCallStore,
 }
 
 impl SessionToolExecutor {
@@ -308,7 +656,34 @@ impl SessionToolExecutor {
             server,
             chat,
             audit,
+            #[cfg(feature = "db")]
+            store: ToolCallStore::default(),
         }
+    }
+
+    /// Record the tool calls under message `message_id` of the conversation, and the datasets they
+    /// load under the session.
+    #[cfg(feature = "db")]
+    pub fn with_persistence(
+        mut self,
+        db: Arc<crate::db::DbConnection>,
+        conversation_id: String,
+        message_id: String,
+        session_id: String,
+    ) -> Self {
+        self.store = ToolCallStore::persistent(db, conversation_id, message_id, session_id);
+        self
+    }
+
+    /// Record only the datasets the tool calls load under the session.
+    #[cfg(feature = "db")]
+    pub fn with_dataset_tracking(
+        mut self,
+        db: Arc<crate::db::DbConnection>,
+        session_id: String,
+    ) -> Self {
+        self.store = ToolCallStore::dataset_tracking(db, session_id);
+        self
     }
 }
 
@@ -318,6 +693,10 @@ impl ToolExecutor for SessionToolExecutor {
         let session =
             admit_tool_call(&self.chat, &self.server, &self.audit, name, &arguments).await?;
         tracing::warn!(">>> SessionToolExecutor::execute called for tool: {}", name);
+        #[cfg(feature = "db")]
+        let tool_call_id = self.store.started(name, &arguments).await;
+        #[cfg(feature = "db")]
+        let metadata_arguments = self.store.metadata_arguments(name, &arguments);
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
         let result = self
@@ -333,6 +712,16 @@ impl ToolExecutor for SessionToolExecutor {
             .map_err(|e| e.to_string());
         let elapsed = start.elapsed();
         tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
+        #[cfg(feature = "db")]
+        self.store
+            .finished(
+                tool_call_id.as_deref(),
+                name,
+                metadata_arguments,
+                &result,
+                stored_duration_ms(elapsed),
+            )
+            .await;
         match result {
             Ok(result) => {
                 // Convert tool result to string
@@ -530,6 +919,10 @@ async fn build_chat_messages(
 }
 
 /// LLM chat endpoint.
+///
+/// With the `db` feature, `conversation_id` behaves as on the stream route: ownership (404
+/// otherwise), the stored history when `history` is empty and `retrieve_history` is true, and the
+/// reply and its tool calls stored in the conversation.
 pub async fn llm_chat(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
@@ -582,6 +975,36 @@ pub async fn llm_chat(
         }
     };
 
+    #[cfg(feature = "db")]
+    let db = state.persistent_manager.as_ref().map(|pm| pm.db().clone());
+    #[cfg(feature = "db")]
+    let conversation = requested_conversation(request.conversation_id.as_deref());
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(conv)) = (&db, &conversation)
+        && !owns_conversation(db, conv, &request.session_id).await
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::<()>::error_with_code(
+                "Conversation not found",
+                "not_found",
+                None,
+            )),
+        )
+            .into_response();
+    }
+
+    // The client's history takes precedence; else the stored one (conversation, retrieve_history).
+    #[cfg_attr(not(feature = "db"), allow(unused_mut))]
+    let mut history = request.history;
+    #[cfg(feature = "db")]
+    if history.is_empty()
+        && request.retrieve_history
+        && let (Some(db), Some(conv)) = (&db, &conversation)
+    {
+        history = stored_history(db, conv).await;
+    }
+
     let tools = state.server.list_tools_for_llm();
 
     // The bounded dataset block (built under the governor), the history
@@ -589,7 +1012,7 @@ pub async fn llm_chat(
     let messages = match build_chat_messages(
         &state.governor,
         &session,
-        request.history,
+        history,
         request.message,
         &tools,
         &provider_config,
@@ -604,12 +1027,42 @@ pub async fn llm_chat(
     // Create provider and tool executor
     let provider = build_provider(provider_config, &settings);
     let chat = ChatSession::new(state.session_manager.clone(), session);
-    let tool_executor = SessionToolExecutor::new(
+    #[cfg_attr(not(feature = "db"), allow(unused_mut))]
+    let mut tool_executor = SessionToolExecutor::new(
         state.governor.clone(),
         state.server.clone(),
         chat.clone(),
         state.audit_logger.clone(),
     );
+
+    // The reply's stored message, and what the executor records.
+    #[cfg(feature = "db")]
+    let message_id = match (&db, &conversation) {
+        (Some(db), Some(conv)) => reply_placeholder(db, conv).await,
+        _ => None,
+    };
+    #[cfg(feature = "db")]
+    if let Some(db) = &db {
+        tool_executor = match (&conversation, &message_id) {
+            (Some(conv), Some(msg_id)) => tool_executor.with_persistence(
+                db.clone(),
+                conv.clone(),
+                msg_id.clone(),
+                request.session_id.clone(),
+            ),
+            _ => tool_executor.with_dataset_tracking(db.clone(), request.session_id.clone()),
+        };
+    }
+    // Closes the stored reply if this future is dropped before the chat ends.
+    #[cfg(feature = "db")]
+    let unfinished = db
+        .clone()
+        .zip(message_id.clone())
+        .map(|(db, message_id)| UnfinishedReply {
+            db,
+            message_id,
+            armed: true,
+        });
 
     tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), "Starting LLM chat");
 
@@ -620,9 +1073,31 @@ pub async fn llm_chat(
         .await
     {
         Ok(result) => result,
-        Err(gone) => return gone.into_response(),
+        Err(gone) => {
+            // The chat ended here, so the reply is closed with its reason (the session's
+            // conversations are deleted with it when it was deleted or evicted).
+            #[cfg(feature = "db")]
+            {
+                UnfinishedReply::disarm(unfinished);
+                if let (Some(db), Some(msg_id)) = (&db, &message_id) {
+                    store_reply(db, msg_id, "[Error: session gone]").await;
+                }
+            }
+            return gone.into_response();
+        }
     };
     let elapsed = start.elapsed();
+
+    // The chat ended: its outcome is stored below.
+    #[cfg(feature = "db")]
+    UnfinishedReply::disarm(unfinished);
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(msg_id)) = (&db, &message_id) {
+        match &result {
+            Ok(response) => store_reply(db, msg_id, &response.content).await,
+            Err(e) => store_reply(db, msg_id, &format!("[Error: {e}]")).await,
+        }
+    }
 
     match result {
         Ok(response) => {
@@ -834,18 +1309,9 @@ pub struct StreamingToolExecutor {
     chat: ChatSession,
     audit: Arc<AuditLogger>,
     sender: tokio::sync::mpsc::Sender<ProgressEvent>,
-    /// Database connection for persistence (optional)
+    /// Where the tool calls and the datasets they load are recorded
     #[cfg(feature = "db")]
-    db: Option<Arc<crate::db::DbConnection>>,
-    /// Conversation ID for tool call persistence
-    #[cfg(feature = "db")]
-    conversation_id: Option<String>,
-    /// Message ID for tool call association
-    #[cfg(feature = "db")]
-    message_id: Option<String>,
-    /// Session ID for dataset metadata persistence
-    #[cfg(feature = "db")]
-    session_id: Option<String>,
+    store: ToolCallStore,
 }
 
 impl StreamingToolExecutor {
@@ -865,13 +1331,7 @@ impl StreamingToolExecutor {
             audit,
             sender,
             #[cfg(feature = "db")]
-            db: None,
-            #[cfg(feature = "db")]
-            conversation_id: None,
-            #[cfg(feature = "db")]
-            message_id: None,
-            #[cfg(feature = "db")]
-            session_id: None,
+            store: ToolCallStore::default(),
         }
     }
 
@@ -883,10 +1343,7 @@ impl StreamingToolExecutor {
         message_id: String,
         session_id: String,
     ) -> Self {
-        self.db = Some(db);
-        self.conversation_id = Some(conversation_id);
-        self.message_id = Some(message_id);
-        self.session_id = Some(session_id);
+        self.store = ToolCallStore::persistent(db, conversation_id, message_id, session_id);
         self
     }
 
@@ -898,8 +1355,7 @@ impl StreamingToolExecutor {
         db: Arc<crate::db::DbConnection>,
         session_id: String,
     ) -> Self {
-        self.db = Some(db);
-        self.session_id = Some(session_id);
+        self.store = ToolCallStore::dataset_tracking(db, session_id);
         self
     }
 
@@ -1255,45 +1711,9 @@ impl ToolExecutor for StreamingToolExecutor {
 
         // Create tool call record in DB if persistence is enabled
         #[cfg(feature = "db")]
-        let tool_call_id = if let (Some(db), Some(conv_id), Some(msg_id)) =
-            (&self.db, &self.conversation_id, &self.message_id)
-        {
-            let tool_call = crate::db::ToolCall::new(
-                msg_id.clone(),
-                conv_id.clone(),
-                name.to_string(),
-                serde_json::to_string(&arguments).unwrap_or_default(),
-            );
-            let tc_id = tool_call.id_string();
-
-            // Mark as running
-            let mut running_tool_call = tool_call;
-            running_tool_call.status = crate::db::ToolCallStatus::Running;
-
-            match db.create_tool_call(&running_tool_call).await {
-                Ok(_) => {
-                    tracing::debug!(tool_call_id = %tc_id, "Created tool call record");
-                    Some(tc_id)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create tool call record: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // The arguments move into the call; the metadata capture reads only
-        // their path and filename (a create_dataset csv_content or an
-        // upload_dataset content can be large), so only those are kept, and
-        // only for a dataset loader (the tool route's list) on an executor
-        // that tracks datasets.
+        let tool_call_id = self.store.started(name, &arguments).await;
         #[cfg(feature = "db")]
-        let args_for_metadata = (self.db.is_some()
-            && self.session_id.is_some()
-            && super::routes_tools::METADATA_TOOLS.contains(&name))
-        .then(|| super::routes_tools::capture_fields(&arguments));
+        let metadata_arguments = self.store.metadata_arguments(name, &arguments);
 
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -1309,7 +1729,6 @@ impl ToolExecutor for StreamingToolExecutor {
             .await
             .map_err(|e| e.to_string());
         let elapsed = start.elapsed();
-        let duration_ms = elapsed.as_millis() as i32;
 
         // Extract result text for the ToolEnd event
         let result_text = match &result {
@@ -1341,58 +1760,19 @@ impl ToolExecutor for StreamingToolExecutor {
 
         tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
 
+        #[cfg(feature = "db")]
+        self.store
+            .finished(
+                tool_call_id.as_deref(),
+                name,
+                metadata_arguments,
+                &result,
+                stored_duration_ms(elapsed),
+            )
+            .await;
+
         match result {
             Ok(result) => {
-                // Extract result text for DB operations
-                #[cfg(feature = "db")]
-                let result_str = result
-                    .content
-                    .iter()
-                    .filter_map(|item| match item {
-                        ContentItem::Text { text } => Some(text.clone()),
-                        ContentItem::Image { .. } => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                // Update tool call record with success
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
-                    // Truncate result if too long (max 10KB)
-                    let truncated_result = if result_str.len() > 10240 {
-                        format!("{}...[truncated]", truncate_str(&result_str, 10_240))
-                    } else {
-                        result_str.clone()
-                    };
-                    if let Err(e) = db
-                        .complete_tool_call(tc_id, &truncated_result, duration_ms)
-                        .await
-                    {
-                        tracing::warn!("Failed to update tool call record: {}", e);
-                    }
-                }
-
-                // Capture dataset metadata for load_dataset, upload_dataset
-                // and create_dataset, the calls args_for_metadata is kept for
-                // (separate from tool call tracking: it needs only db and
-                // session_id), when the call succeeded (`success`, the tool
-                // route's test). It runs on the blocking pool, as on the tool
-                // route, and the call waits until its row is stored.
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(session_id)) = (&self.db, &self.session_id)
-                    && let Some(args_for_metadata) = args_for_metadata
-                    && result.success
-                {
-                    super::routes_tools::capture_dataset_metadata_off_runtime(
-                        db.clone(),
-                        session_id.clone(),
-                        name.to_string(),
-                        args_for_metadata,
-                        result_str,
-                    )
-                    .await;
-                }
-
                 // Extract images and send them as a separate event
                 let images: Vec<ImageData> = result
                     .content
@@ -1429,16 +1809,7 @@ impl ToolExecutor for StreamingToolExecutor {
                     .join("\n");
                 Ok(content)
             }
-            Err(e) => {
-                // Update tool call record with error
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
-                    if let Err(db_err) = db.fail_tool_call(tc_id, &e, duration_ms).await {
-                        tracing::warn!("Failed to update tool call record: {}", db_err);
-                    }
-                }
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -1690,51 +2061,29 @@ async fn run_chat_stream(
 
     // Normalize conversation_id: treat empty string as None
     #[cfg(feature = "db")]
-    let effective_conversation_id = request
-        .conversation_id
-        .as_ref()
-        .filter(|id| !id.is_empty())
-        .cloned();
+    let effective_conversation_id = requested_conversation(request.conversation_id.as_deref());
 
     // A named conversation must belong to this session. A missing and a
     // foreign conversation get the same answer, so the check is not an
     // existence oracle; it runs before the placeholder is written, stored
     // history is read or the provider is contacted.
     #[cfg(feature = "db")]
-    if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
-        let owned = matches!(
-            db.get_conversation(conv_id).await,
-            Ok(c) if c.session_id == request.session_id
-        );
-        if !owned {
-            let _ = tx
-                .send(ProgressEvent::Error {
-                    error: "Conversation not found".to_string(),
-                })
-                .await;
-            return;
-        }
+    if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id)
+        && !owns_conversation(db, conv_id, &request.session_id).await
+    {
+        let _ = tx
+            .send(ProgressEvent::Error {
+                error: "Conversation not found".to_string(),
+            })
+            .await;
+        return;
     }
 
     // Create placeholder assistant message if conversation persistence is enabled
     #[cfg(feature = "db")]
-    let message_id = if let (Some(pm), Some(conv_id)) =
-        (&state.persistent_manager, &effective_conversation_id)
-    {
-        // Create placeholder message
-        match pm.db().add_message(conv_id, "assistant", "").await {
-            Ok(msg) => {
-                let msg_id = msg.id_string();
-                tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
-                Some(msg_id)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create placeholder message: {}", e);
-                None
-            }
-        }
-    } else {
-        None
+    let message_id = match (&db_connection, &effective_conversation_id) {
+        (Some(db), Some(conv_id)) => reply_placeholder(db, conv_id).await,
+        _ => None,
     };
     #[cfg(feature = "db")]
     if let Some(id) = &message_id {
@@ -1797,108 +2146,11 @@ async fn run_chat_stream(
     // 2. history is empty
     // 3. retrieve_history flag is true (default)
     #[cfg(feature = "db")]
-    let retrieved_history: Vec<Message> = if request.retrieve_history
-        && request.history.is_empty()
-        && effective_conversation_id.is_some()
-    {
-        if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
-            match db.get_messages(conv_id).await {
-                Ok(db_messages) => {
-                    tracing::info!(
-                        conversation_id = %conv_id,
-                        message_count = db_messages.len(),
-                        "Retrieved conversation history from database"
-                    );
-                    // Convert DB messages to LLM messages, including tool calls
-                    let mut history = Vec::new();
-                    for db_msg in db_messages {
-                        // Get tool calls for this message
-                        let tool_calls_for_msg =
-                            db.get_tool_calls_for_message(&db_msg.id_string()).await;
-
-                        match db_msg.role {
-                            crate::db::MessageRole::User => {
-                                if !db_msg.content.is_empty() {
-                                    history.push(Message::user(db_msg.content.clone()));
-                                }
-                            }
-                            crate::db::MessageRole::Assistant => {
-                                // Check if this message has completed tool calls
-                                if let Ok(tool_calls) = &tool_calls_for_msg {
-                                    let completed_calls: Vec<_> = tool_calls
-                                        .iter()
-                                        .filter(|tc| {
-                                            tc.status == crate::db::ToolCallStatus::Success
-                                        })
-                                        .collect();
-
-                                    if !completed_calls.is_empty() {
-                                        // Create tool calls for the assistant message
-                                        let llm_tool_calls: Vec<crate::llm::ToolCall> =
-                                            completed_calls
-                                                .iter()
-                                                .map(|tc| crate::llm::ToolCall {
-                                                    id: tc.id_string(),
-                                                    name: tc.tool_name.clone(),
-                                                    arguments: serde_json::from_str(&tc.arguments)
-                                                        .unwrap_or(serde_json::Value::Null),
-                                                })
-                                                .collect();
-
-                                        // Assistant message with tool calls
-                                        history.push(Message::assistant_with_tools(
-                                            db_msg.content.clone(),
-                                            llm_tool_calls,
-                                        ));
-
-                                        // Tool result message
-                                        let tool_results: Vec<crate::llm::ToolResult> =
-                                            completed_calls
-                                                .iter()
-                                                .map(|tc| {
-                                                    let result_content =
-                                                        tc.result.as_deref().unwrap_or("");
-                                                    // Truncate long results
-                                                    let truncated =
-                                                        truncate_tool_result(result_content, 2_000);
-                                                    crate::llm::ToolResult {
-                                                        tool_call_id: tc.id_string(),
-                                                        content: truncated,
-                                                        is_error: false,
-                                                    }
-                                                })
-                                                .collect();
-
-                                        history.push(Message::tool_result(tool_results));
-                                    } else if !db_msg.content.is_empty() {
-                                        // No tool calls, just content
-                                        history.push(Message::assistant(db_msg.content.clone()));
-                                    }
-                                } else if !db_msg.content.is_empty() {
-                                    history.push(Message::assistant(db_msg.content.clone()));
-                                }
-                            }
-                            crate::db::MessageRole::System => {
-                                // Skip system messages in history retrieval
-                            }
-                        }
-                    }
-                    history
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        conversation_id = %conv_id,
-                        error = %e,
-                        "Failed to retrieve conversation history, using empty history"
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
+    let retrieved_history: Vec<Message> = match (&db_connection, &effective_conversation_id) {
+        (Some(db), Some(conv_id)) if request.retrieve_history && request.history.is_empty() => {
+            stored_history(db, conv_id).await
         }
-    } else {
-        Vec::new()
+        _ => Vec::new(),
     };
 
     #[cfg(not(feature = "db"))]
@@ -1993,11 +2245,7 @@ async fn run_chat_stream(
             // Update message content in database if persistence is enabled
             #[cfg(feature = "db")]
             if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                if let Err(e) = db.update_message_content(msg_id, &response.content).await {
-                    tracing::warn!("Failed to update message content: {}", e);
-                } else {
-                    tracing::debug!(message_id = %msg_id, "Updated assistant message content");
-                }
+                store_reply(db, msg_id, &response.content).await;
             }
 
             // Debug: check if content has newlines
