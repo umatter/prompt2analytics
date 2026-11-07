@@ -13,6 +13,32 @@
       "tolerance": "validation/README.md: statistics Tol::stat(n), p-values Tol::p_value(n), n = 5-60",
       "deviations": [{"finding": "STAT-27", "quantity": "exact p-values (one- and two-sample); two-sided two-sample asymptotic p", "note": "p2a has no exact distribution and applies Stephens' factor; R values in *_p_exact and two*_p_asym"}, {"finding": "STAT-26", "quantity": "degenerate reference distribution", "note": "p2a refuses; ks.test evaluates a point mass (sd = 0) or warns and returns NaN"}],
       "supersedes_legacy": []
+    },
+    {
+      "id": "acf_t3",
+      "name": "Autocorrelation, autocovariance, partial autocorrelation and cross-correlation",
+      "category": "stats",
+      "reference": "stats::acf, pacf, ccf; qnorm(0.975)/sqrt(n)",
+      "doc": "validation/stats/acf.md",
+      "cases": ["stat_ts_acf_spline_t3"],
+      "tests": ["p2a-core::stats::acf::tests::test_validate_acf_pacf_ccf_t3"],
+      "quantities": ["acf", "acvf", "pacf", "ccf and its lags", "default lag.max", "white-noise bound"],
+      "tolerance": "Tol::stat(64); lags exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spline_t3",
+      "name": "Cubic spline interpolation (natural) with R's default n",
+      "category": "stats",
+      "reference": "stats::spline(method = 'natural')",
+      "doc": "validation/stats/spline.md",
+      "cases": ["stat_ts_acf_spline_t3"],
+      "tests": ["p2a-core::stats::spline::tests::test_validate_spline_t3_default_n", "p2a-core::stats::spline::tests::test_validate_spline_t3_n_one"],
+      "quantities": ["number of points", "x grid", "y"],
+      "tolerance": "Tol::coef(30)",
+      "deviations": [{"finding": "STAT-69", "quantity": "method = 'fmm'", "note": "not pinned"}, {"finding": "STAT-40", "quantity": "monotone and periodic methods", "note": "not pinned"}],
+      "supersedes_legacy": []
     }
   ]
 }

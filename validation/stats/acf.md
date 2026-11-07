@@ -47,89 +47,36 @@ This document validates the p2a-core implementation of autocorrelation functions
 
 ### Confidence Bounds (White Noise)
 ```
-CI = ±z_{α/2} / √n ≈ ±1.96/√n  (for 95% confidence)
+CI = ±qnorm(0.975) / √n  (for 95% confidence, as R's plot.acf)
 ```
 
 ## Test Cases
 
-### Test 1: Linear Trend (n=10)
+### Case `stat_ts_acf_spline_t3` (R-pinned)
 
-**Data:**
-```r
-x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-```
+Case in `validation/r/cases/stats_misc_t3.R`, dataset
+`validation/datasets/generated/ts_acf_spline_t3.csv` (x, y of length 64).
 
-**R Code:**
-```r
-acf_result <- acf(x, lag.max = 5, plot = FALSE)
-pacf_result <- pacf(x, lag.max = 5, plot = FALSE)
-```
+| Quantity | R |
+|---|---|
+| `acf(x)`, first values | 0.9999999999999998, 0.679404516064358, 0.4362058613331962 (19 values, lag max 18) |
+| `pacf(x)`, first values | 0.679404516064358, -0.04714744993914661, 0.138145430514062 (18 values) |
+| `ccf(x, y, lag.max = 5)`, lag 0 | 0.6127412439934293 (lags -5 to 5; all in the case) |
+| white-noise bound, `qnorm(0.975)/sqrt(64)` | 0.2449954980675067 |
 
-**Results Comparison - ACF:**
+The autocovariances are in the case too. `stats::acf::tests::test_validate_acf_pacf_ccf_t3` pins all of
+them (registry `validation/methods/stats_misc_t3.json`, id `acf_t3`). Tolerance: `Tol::stat(64)`,
+lags exact.
 
-| Lag | Rust (p2a) | R | Tolerance | Status |
-|-----|------------|---|-----------|--------|
-| 0 | 1.0000 | 1.0000 | 1e-6 | ✅ |
-| 1 | 0.7000 | 0.7000 | 1e-2 | ✅ |
-| 2 | 0.4121 | 0.4121 | 1e-2 | ✅ |
-| 3 | 0.1485 | 0.1485 | 1e-2 | ✅ |
-| 4 | -0.0788 | -0.0788 | 1e-2 | ✅ |
-| 5 | -0.2576 | -0.2576 | 1e-2 | ✅ |
+### Correction to the previous version of this document
 
-**Results Comparison - PACF:**
+It quoted the PACF of 1:10 as -0.156, -0.134, -0.108, -0.076 from lag 2. R's `pacf(1:10)` is 0.7000,
+-0.1527, -0.1549, -0.1547, -0.1492, and p2a's Durbin-Levinson recursion computes the same quantity as
+R's: the case above pins it to `Tol::stat`.
 
-| Lag | Rust (p2a) | R | Tolerance | Status |
-|-----|------------|---|-----------|--------|
-| 1 | 0.7000 | 0.7000 | 1e-2 | ✅ |
-| 2 | ~-0.16 | -0.156 | 5e-2 | ✅ |
-| 3 | ~-0.15 | -0.134 | 5e-2 | ✅ |
-| 4 | ~-0.12 | -0.108 | 5e-2 | ✅ |
-| 5 | ~-0.10 | -0.076 | 0.1 | ⚠️ |
+### Properties
 
-**Note:** Higher-lag PACF values may differ slightly due to algorithm variations between Rust's Durbin-Levinson and R's implementation. The first PACF value (which equals ACF(1)) always matches exactly.
-
-**Rust Test:** `crates/p2a-core/src/stats/acf.rs::tests::test_validate_acf_against_r`
-
-### Test 2: Simulated AR(1) Process
-
-**Data Generation:**
-```r
-set.seed(42)
-n <- 100
-e <- rnorm(n, 0, 0.5)
-x <- numeric(n)
-x[1] <- e[1]
-for (t in 2:n) {
-  x[t] <- 0.7 * x[t-1] + e[t]
-}
-```
-
-**Expected Properties:**
-- ACF should decay exponentially: ρ(k) ≈ 0.7^k
-- PACF(1) ≈ 0.7, PACF(k) ≈ 0 for k > 1
-
-### Test 3: Cross-Correlation
-
-**Data:**
-```r
-x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-y <- c(2, 4, 5, 4, 5, 7, 8, 9, 10, 11)
-ccf(x, y, lag.max = 3, plot = FALSE)
-```
-
-**Properties Verified:**
-- CCF(0) equals Pearson correlation between x and y
-- CCF(x, y, k) = CCF(y, x, -k)
-
-## Numerical Precision Summary
-
-| Statistic | Typical Tolerance | Notes |
-|-----------|-------------------|-------|
-| ACF(0) | Exact (1.0) | By definition |
-| ACF(k), k > 0 | 1e-2 | Small sample variations |
-| PACF(1) | 1e-2 | Equals ACF(1) |
-| PACF(k), k > 1 | 5e-2 | Algorithm differences |
-| CCF(0) | 1e-6 | Equals correlation coefficient |
+- `stats::acf::tests::test_confidence_bounds`: the bound at n = 100.
 
 ## Missing values
 
@@ -138,12 +85,16 @@ cells, as R's `acf`, `pacf` and `ccf` do under `na.action = na.fail`, with `Null
 the column and the number of missing cells (R's `sum(is.na(x))`). The count is pinned on the
 case `stat_two_sample_na` by
 `p2a-core::stats::acf::tests::test_validate_na_ts_refusals_report_null_count`, which checks
-`run_box_test`, `run_pp_test`, `run_spectrum` and `run_spectrum_ar` the same way. A NaN value
-in a float column is not counted as missing.
+`run_box_test`, `run_pp_test`, `run_spectrum` and `run_spectrum_ar` the same way. A NaN value in a
+float column counts as missing.
+
+`acf`, `pacf` and `ccf` on slices refuse NaN (`NullValues`) and ±Inf (`NonFiniteValues`), naming `x` or
+`y`: `stats::acf::tests::test_acf_rejects_non_finite`, `stats::acf::tests::test_run_acf_refuses_nan_cell`.
+Before, these passed the zero-variance guards and gave all-NaN results.
 
 ## Known Differences
 
-1. **PACF Algorithm**: R uses Yule-Walker equations while we use Durbin-Levinson recursion. Both should give identical results mathematically, but numerical precision differences at higher lags are expected for small samples.
+1. **PACF Algorithm**: R uses Yule-Walker equations while we use Durbin-Levinson recursion. The results agree to the pinned tolerance.
 
 2. **Denominator Convention**: R divides by n (not n-k) by default, matching our `adjusted=false` default.
 

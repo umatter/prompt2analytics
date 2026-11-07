@@ -53,3 +53,27 @@ case("stat_ks_t3", "stats/ks", "ks.test: one-sample against pnorm/punif/pexp wit
        call = "ks.test(x, 'pnorm', 2, 2[, exact = FALSE, alternative]); ks.test(x, y[, exact = FALSE, alternative])",
        packages = character(0))
 })
+
+case("stat_ts_acf_spline_t3", "stats/acf", "acf, pacf, ccf (lag.max defaults and 5) on an AR(1) pair; spline(method = 'natural') with the default n = 3 length(x) and n = 1", function(ctx) {
+  set.seed(1111)
+  n <- 64
+  e <- rnorm(n); x <- numeric(n); x[1] <- e[1]; for (i in 2:n) x[i] <- 0.6 * x[i - 1] + e[i]
+  yv <- c(0, x[-n]) * 0.7 + rnorm(n, 0, 0.5)                 # y_t depends on x_{t-1}: ccf(x, y) peaks at lag -1
+  kx <- c(0.3, 1.1, 1.9, 3.2, 4.0, 5.5, 6.1, 7.4, 8.0, 9.6, rep(NA, n - 10))
+  ky <- c(round(sin(kx[1:10]) + 0.1 * kx[1:10] + c(0.03, -0.02, 0.05, 0.01, -0.04, 0.02, 0.0, -0.03, 0.04, -0.01), 6), rep(NA, n - 10))
+  d <- ctx$gen_dataset("ts_acf_spline_t3", data.frame(x = round(x, 8), y = round(yv, 8), kx = kx, ky = ky))
+  x <- d$x; y <- d$y
+  a <- acf(x, plot = FALSE); pa <- pacf(x, plot = FALSE); cv <- acf(x, type = "covariance", plot = FALSE)
+  cc <- ccf(x, y, lag.max = 5, plot = FALSE)
+  kx <- d$kx[!is.na(d$kx)]; ky <- d$ky[!is.na(d$ky)]
+  s <- spline(kx, ky, method = "natural"); s1 <- spline(kx, ky, n = 1, method = "natural")
+  stopifnot(length(s$x) == 3 * length(kx))
+  list(values = list(acf = vec(a$acf), acf_lag_max = max(a$lag), acvf = vec(cv$acf), pacf = vec(pa$acf),
+                     ccf = vec(cc$acf), ccf_lags = vec(cc$lag),
+                     acf_ci_bound = qnorm(0.975) / sqrt(n),
+                     spline_x = vec(s$x), spline_y = vec(s$y), spline_n = length(s$x),
+                     spline1_x = s1$x, spline1_y = s1$y),
+       reference = "stats::acf, pacf, ccf (lag k of ccf(x, y) is cor(x[t+k], y[t])); stats::spline(method = 'natural', n = 3 * length(x))",
+       call = "acf(x); pacf(x); acf(x, type = 'covariance'); ccf(x, y, lag.max = 5); spline(kx, ky, method = 'natural'[, n = 1])",
+       packages = character(0))
+})

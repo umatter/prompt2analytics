@@ -16,7 +16,29 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::traits::estimator::z_critical;
+
+/// Refuse a series with NaN (`NullValues`) or infinite values (`NonFiniteValues`), as R's
+/// `na.fail` refuses `NA`, naming the series.
+pub(crate) fn refuse_non_finite(x: &[f64], name: &str) -> EconResult<()> {
+    let nan = x.iter().filter(|v| v.is_nan()).count();
+    if nan > 0 {
+        return Err(EconError::NullValues {
+            column: name.to_string(),
+            count: nan,
+        });
+    }
+    let inf = x.iter().filter(|v| v.is_infinite()).count();
+    if inf > 0 {
+        return Err(EconError::NonFiniteValues {
+            column: name.to_string(),
+            count: inf,
+        });
+    }
+    Ok(())
+}
 
 /// Type of autocorrelation/covariance to compute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -29,6 +51,22 @@ pub enum AcfType {
     /// Partial autocorrelation function (via Durbin-Levinson)
     Partial,
 }
+
+crate::option_enum!(
+    AcfType,
+    crate::options::Choices {
+        option: "ACF type",
+        values: &[
+            (&["correlation", "acf", "cor"], AcfType::Correlation),
+            (
+                &["covariance", "cov", "acvf", "autocovariance"],
+                AcfType::Covariance
+            ),
+            (&["partial", "pacf"], AcfType::Partial),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for AcfType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,6 +87,18 @@ pub enum CcfType {
     /// Sample cross-covariance function
     Covariance,
 }
+
+crate::option_enum!(
+    CcfType,
+    crate::options::Choices {
+        option: "CCF type",
+        values: &[
+            (&["correlation", "cor", "ccf"], CcfType::Correlation),
+            (&["covariance", "cov"], CcfType::Covariance),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for CcfType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -279,6 +329,7 @@ pub fn acf(
     demean: bool,
     adjusted: bool,
 ) -> EconResult<AcfResult> {
+    refuse_non_finite(x, "x")?;
     let n = x.len();
 
     if n < 2 {
@@ -306,7 +357,7 @@ pub fn acf(
         AcfType::Correlation => {
             let acvf = autocovariance(x, max_lag, demean, adjusted);
             let var = acvf[0];
-            if var <= 0.0 {
+            if !(var > 0.0) {
                 return Err(EconError::InvalidSpecification {
                     message: "Variance is zero or negative; cannot compute autocorrelation"
                         .to_string(),
@@ -319,7 +370,7 @@ pub fn acf(
             let acf_vals = {
                 let acvf = autocovariance(x, max_lag, demean, adjusted);
                 let var = acvf[0];
-                if var <= 0.0 {
+                if !(var > 0.0) {
                     return Err(EconError::InvalidSpecification {
                         message: "Variance is zero or negative; cannot compute PACF".to_string(),
                     });
@@ -334,9 +385,9 @@ pub fn acf(
         }
     };
 
-    // 95% confidence bound for white noise: ±1.96/√n
+    // 95% confidence bound for white noise: ±qnorm(0.975)/√n, as R's plot.acf
     let confidence_bound = if matches!(acf_type, AcfType::Correlation | AcfType::Partial) {
-        Some(1.96 / (n as f64).sqrt())
+        Some(z_critical(0.95)? / (n as f64).sqrt())
     } else {
         None
     };
@@ -370,6 +421,7 @@ pub fn acf(
 /// - Durbin, J. (1960). "The Fitting of Time-Series Models"
 /// - Brockwell & Davis (1991), Algorithm 8.2.1
 pub fn pacf(x: &[f64], lag_max: Option<usize>) -> EconResult<PacfResult> {
+    refuse_non_finite(x, "x")?;
     let n = x.len();
 
     if n < 2 {
@@ -395,7 +447,7 @@ pub fn pacf(x: &[f64], lag_max: Option<usize>) -> EconResult<PacfResult> {
     // First compute ACF
     let acvf = autocovariance(x, max_lag, true, false);
     let var = acvf[0];
-    if var <= 0.0 {
+    if !(var > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: "Variance is zero or negative; cannot compute PACF".to_string(),
         });
@@ -405,8 +457,8 @@ pub fn pacf(x: &[f64], lag_max: Option<usize>) -> EconResult<PacfResult> {
     // Compute PACF via Durbin-Levinson
     let pacf_vals = durbin_levinson(&acf_vals)?;
 
-    // 95% confidence bound: ±1.96/√n
-    let confidence_bound = 1.96 / (n as f64).sqrt();
+    // 95% confidence bound: ±qnorm(0.975)/√n, as R's plot.acf
+    let confidence_bound = z_critical(0.95)? / (n as f64).sqrt();
 
     Ok(PacfResult {
         lags: (1..=max_lag as i32).collect(),
@@ -548,6 +600,8 @@ pub fn ccf(
     lag_max: Option<usize>,
     ccf_type: CcfType,
 ) -> EconResult<CcfResult> {
+    refuse_non_finite(x, "x")?;
+    refuse_non_finite(y, "y")?;
     let n = x.len();
 
     if n != y.len() {
@@ -589,7 +643,7 @@ pub fn ccf(
             let var_x = autocovariance(x, 0, true, false)[0];
             let var_y = autocovariance(y, 0, true, false)[0];
 
-            if var_x <= 0.0 || var_y <= 0.0 {
+            if !(var_x > 0.0) || !(var_y > 0.0) {
                 return Err(EconError::InvalidSpecification {
                     message: "One or both series have zero variance".to_string(),
                 });
@@ -602,9 +656,9 @@ pub fn ccf(
         }
     };
 
-    // 95% confidence bound for white noise: ±1.96/√n
+    // 95% confidence bound for white noise: ±qnorm(0.975)/√n, as R's plot.acf
     let confidence_bound = if matches!(ccf_type, CcfType::Correlation) {
-        Some(1.96 / (n as f64).sqrt())
+        Some(z_critical(0.95)? / (n as f64).sqrt())
     } else {
         None
     };
@@ -626,41 +680,7 @@ pub fn ccf(
 
 /// Extract a numeric column from a dataset.
 fn extract_column(dataset: &Dataset, col_name: &str) -> EconResult<Vec<f64>> {
-    use polars::prelude::*;
-
-    let series = dataset
-        .df()
-        .column(col_name)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: dataset
-                .df()
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let values = series
-        .cast(&DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-
-    // na-legacy(T4): non-strict cast (text turns into nulls; NaN passes through)
-    let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
-        column: col_name.to_string(),
-    })?;
-
-    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
-    let missing = ca.null_count();
-    if missing > 0 {
-        return Err(EconError::NullValues {
-            column: col_name.to_string(),
-            count: missing,
-        });
-    }
-    Ok(ca.into_iter().flatten().collect())
+    numeric_column(dataset.df(), col_name, NaPolicy::Fail).map(|(v, _)| v)
 }
 
 /// Run ACF on a dataset column.
@@ -749,6 +769,7 @@ pub fn run_ccf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
@@ -896,87 +917,9 @@ mod tests {
         let x: Vec<f64> = (0..100).map(|i| (i as f64).sin()).collect();
         let result = acf(&x, Some(10), AcfType::Correlation, true, false).unwrap();
 
-        // 95% CI should be approximately ±1.96/√100 = ±0.196
-        let expected = 1.96 / 10.0;
+        // 95% CI: ±qnorm(0.975)/√100
+        let expected = z_critical(0.95).unwrap() / 10.0;
         assert!(approx_eq(result.confidence_bound.unwrap(), expected, 1e-10));
-    }
-
-    /// Validation test against R values
-    /// R code:
-    /// ```r
-    /// x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-    /// acf(x, lag.max = 5, type = "correlation", plot = FALSE)
-    /// ```
-    #[test]
-    fn test_validate_acf_against_r() {
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let result = acf(&x, Some(5), AcfType::Correlation, true, false).unwrap();
-
-        // R output:
-        // Autocorrelations of series 'x', by lag
-        //      0      1      2      3      4      5
-        //  1.000  0.700  0.412  0.148 -0.079 -0.258
-
-        let r_values = [1.0, 0.700, 0.412, 0.148, -0.079, -0.258];
-
-        for (i, (&computed, &expected)) in result.values.iter().zip(r_values.iter()).enumerate() {
-            assert!(
-                (computed - expected).abs() < 0.01,
-                "ACF({}) mismatch: computed={:.4}, R={:.4}",
-                i,
-                computed,
-                expected
-            );
-        }
-    }
-
-    /// Validation test for PACF against R
-    /// R code:
-    /// ```r
-    /// x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-    /// pacf(x, lag.max = 5, plot = FALSE)
-    /// ```
-    ///
-    /// Note: R's PACF computation may differ slightly from Durbin-Levinson
-    /// at higher lags due to differences in handling finite samples and
-    /// variance estimation. The first PACF value (PACF(1) = ACF(1)) should
-    /// always match exactly.
-    #[test]
-    fn test_validate_pacf_against_r() {
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let result = pacf(&x, Some(5)).unwrap();
-
-        // R output:
-        // Partial autocorrelations of series 'x', by lag
-        //      1      2      3      4      5
-        //  0.700 -0.156 -0.134 -0.108 -0.076
-
-        // PACF(1) should match ACF(1) = 0.700 closely
-        // This is the most important value and should always match
-        assert!(
-            (result.values[0] - 0.700).abs() < 0.01,
-            "PACF(1) mismatch: computed={:.4}, R=0.700",
-            result.values[0]
-        );
-
-        // Higher lags may have larger differences, but should still be in
-        // the same general direction (negative for a linear trend series)
-        // Check PACF(2) is negative (matches R's direction)
-        assert!(
-            result.values[1] < 0.0,
-            "PACF(2) = {} should be negative for linear trend",
-            result.values[1]
-        );
-
-        // Verify all values are in valid range
-        for (i, &v) in result.values.iter().enumerate() {
-            assert!(
-                v.abs() <= 1.0,
-                "PACF({}) = {} should be in [-1, 1]",
-                i + 1,
-                v
-            );
-        }
     }
 
     #[cfg(feature = "spectral-analysis")]
@@ -1040,5 +983,97 @@ mod tests {
             }
         }
         check.finish();
+    }
+
+    /// TOOL-11: NaN or ±Inf gave all-NaN results (acf, pacf) and a panic in the MCP ccf handler. R: na.fail.
+    #[test]
+    fn test_acf_rejects_non_finite() {
+        let ok = [1.0, 2.3, 1.7, 3.1, 2.2, 1.4, 2.8];
+        let mut nan = ok;
+        nan[2] = f64::NAN;
+        let mut inf = ok;
+        inf[4] = f64::NEG_INFINITY;
+        for t in [AcfType::Correlation, AcfType::Covariance, AcfType::Partial] {
+            assert!(
+                matches!(acf(&nan, Some(2), t, true, false), Err(EconError::NullValues { ref column, count: 1 }) if column == "x")
+            );
+            assert!(
+                matches!(acf(&inf, Some(2), t, true, false), Err(EconError::NonFiniteValues { ref column, count: 1 }) if column == "x")
+            );
+        }
+        assert!(matches!(
+            pacf(&nan, Some(2)),
+            Err(EconError::NullValues { .. })
+        ));
+        for t in [CcfType::Correlation, CcfType::Covariance] {
+            assert!(
+                matches!(ccf(&ok, &nan, Some(2), t), Err(EconError::NullValues { ref column, .. }) if column == "y")
+            );
+            assert!(
+                matches!(ccf(&inf, &ok, Some(2), t), Err(EconError::NonFiniteValues { ref column, .. }) if column == "x")
+            );
+        }
+    }
+
+    /// TOOL-11: a NaN cell in a dataset column is refused with the column name (the only allowed inline NaN fixture, T2 2.2);
+    /// integer columns are accepted.
+    #[test]
+    fn test_run_acf_refuses_nan_cell() {
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "x" => [1.0, 2.3, f64::NAN, 3.1, 2.2, 1.4, 2.8],
+                "y" => [0.4, 1.1, 0.9, 1.8, 1.2, 0.7, 1.5],
+                "i" => [3i64, 1, 4, 1, 5, 9, 2],
+            }
+            .unwrap(),
+        );
+        assert!(
+            matches!(run_acf(&ds, "x", Some(2), AcfType::Correlation), Err(EconError::NullValues { ref column, count: 1 }) if column == "x")
+        );
+        assert!(matches!(
+            run_pacf(&ds, "x", Some(2)),
+            Err(EconError::NullValues { .. })
+        ));
+        assert!(
+            matches!(run_ccf(&ds, "y", "x", Some(2), CcfType::Correlation), Err(EconError::NullValues { ref column, .. }) if column == "x")
+        );
+        assert!(run_acf(&ds, "i", Some(2), AcfType::Correlation).is_ok());
+    }
+
+    /// STAT-62 (acf), TOOL-11, R7: acf, autocovariance, pacf and ccf pinned to R; the white-noise bound is qnorm(0.975)/sqrt(n).
+    #[test]
+    fn test_validate_acf_pacf_ccf_t3() {
+        let (case, ds) = crate::test_support::load_case("stat_ts_acf_spline_t3");
+        let a = run_acf(&ds, "x", None, AcfType::Correlation).unwrap();
+        let cv = run_acf(&ds, "x", None, AcfType::Covariance).unwrap();
+        let p = run_pacf(&ds, "x", None).unwrap();
+        let c = run_ccf(&ds, "x", "y", Some(5), CcfType::Correlation).unwrap();
+        let lags: Vec<f64> = c.lags.iter().map(|&l| l as f64).collect();
+        Check::new(&case)
+            .vector("acf", &a.values, Tol::stat(64))
+            .scalar("acf_lag_max", *a.lags.last().unwrap() as f64, Tol::exact())
+            .vector("acvf", &cv.values, Tol::stat(64))
+            .vector("pacf", &p.values, Tol::stat(64))
+            .vector("ccf", &c.values, Tol::stat(64))
+            .vector("ccf_lags", &lags, Tol::exact())
+            .scalar("acf_ci_bound", a.confidence_bound.unwrap(), Tol::stat(64))
+            .finish();
+        assert_eq!(p.confidence_bound, a.confidence_bound.unwrap());
+        assert_eq!(c.confidence_bound, a.confidence_bound);
+    }
+
+    #[test]
+    fn test_acf_type_parses_aliases_and_rejects_unknown() {
+        assert_eq!(AcfType::choices().validate(), Ok(()));
+        assert_eq!(CcfType::choices().validate(), Ok(()));
+        assert_eq!("PACF".parse::<AcfType>().unwrap(), AcfType::Partial);
+        assert_eq!("cov".parse::<AcfType>().unwrap(), AcfType::Covariance);
+        assert_eq!(
+            "correlation".parse::<CcfType>().unwrap(),
+            CcfType::Correlation
+        );
+        assert!("partial".parse::<CcfType>().is_err());
+        assert!("spectral".parse::<AcfType>().is_err());
+        assert_eq!(AcfType::Partial.to_string(), "Partial Autocorrelation"); // existing Display kept (no_display)
     }
 }
