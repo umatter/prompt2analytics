@@ -49,6 +49,16 @@ The case also records what ReadStat does with the corrupted copies the Rust guar
 `sas64_wlatin1_code29__grp` is haven's read of `sas64_wlatin1` with encoding byte 29 (ISO-8859-1:
 byte 0x80 is U+0080, not the euro sign).
 
+## Stata `.dta` (releases 117, 118, 119)
+
+The header is read tag by tag (`<stata_dta><header><release>`, `<byteorder>`, `<K>`, `<N>`,
+`<label>`, `<timestamp>`), then the 14 `<map>` offsets; the reader seeks to slot 2
+(`<variable_types>`), 3 (`<varnames>`) and 9 (`<data>`) and checks the tag found there (DATA-22).
+Before, it scanned forward from slot 1 (`<map>` itself) for `<K>`, which sits in the header, so every
+real file failed with `Tag not found: <K>`.
+
+Formats 102-116 and releases above 119 are `UnsupportedVersion`.
+
 ## Tests
 
 Tests that do not load `data_readers_values` (byte offsets, decoders, guards) are listed here but not in
@@ -56,5 +66,13 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 
 | Test | Pins |
 |---|---|
+| `p2a-core::data::stata::tests::test_stata_type_from_code` | type codes 65530/65526/100 -> byte, double, str100 |
+| `p2a-core::data::stata::tests::test_stata_invalid_magic` | a non-dta file is an error |
+| `p2a-core::data::stata::tests::test_stata_fixture_offsets` | the byte offsets the Stata tests patch |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_118` | `dta118_haven` = haven (DATA-22) |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_118_stata_written` | `dta118_stata_iris` (Stata 14) = haven (DATA-22, DATA-50) |
+| `p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture` | `DataLoader::load` of `dta118_haven` = haven |
+| `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF or off their tag, N and K bounds (DATA-22) |
+| `p2a-core::data::stata::tests::test_stata_pre_117_formats_are_unsupported` | formats 102-116 and release 120 are `UnsupportedVersion` |
 | `p2a-core::data::sas::tests::test_sas_fixture_offsets` | the byte offsets the SAS tests patch |
 | `p2a-core::data::sas::tests::test_validate_data_readers_manifest_lists_every_fixture` | every fixture exists and is in the case |

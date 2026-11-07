@@ -2,6 +2,52 @@
   "schema": 1,
   "methods": [
     {
+      "id": "data_read_dta",
+      "name": "Stata .dta reader (releases 117, 118, 119; LSF and MSF)",
+      "category": "data",
+      "reference": "haven::read_dta (haven 2.5.5, ReadStat) on haven-written, Stata-written and byte-level-transformed fixtures; ReadStat's refusals of the patched copies",
+      "doc": "validation/data/readers.md",
+      "cases": [
+        "data_readers_values"
+      ],
+      "tests": [
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_118",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_118_stata_written",
+        "p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture"
+      ],
+      "quantities": [
+        "shape",
+        "column names and order",
+        "numeric values of byte/int/long/float/double (missing codes null)",
+        "text values (UTF-8; release 117 Windows-1252)",
+        "refusals: <K> = 0, map offsets, observation bound, releases"
+      ],
+      "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
+      "deviations": [
+        {
+          "finding": "DATA-50",
+          "quantity": "dtype of byte, int and long",
+          "note": "convention (re-scope rule 3): loaded as Int64; haven::read_dta returns doubles; compared after a cast to f64"
+        },
+        {
+          "finding": "DATA-50",
+          "quantity": "tagged missing values .a-.z",
+          "note": "loaded as plain null; haven keeps the tag (haven::na_tag)"
+        },
+        {
+          "finding": "DATA-74",
+          "quantity": "strL contents",
+          "note": "not decoded (Tier 4): cells hold the placeholder \"<strL>\" with a warning; no fixture holds a strL"
+        },
+        {
+          "finding": "DATA-75",
+          "quantity": "value labels and display formats",
+          "note": "not read (Tier 4): haven returns labelled vectors and format attributes, p2a the codes"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "data_read_sas7bdat",
       "name": "SAS .sas7bdat reader (32/64-bit, both byte orders, uncompressed, RLE, RDC)",
       "category": "data",
