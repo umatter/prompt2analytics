@@ -431,6 +431,22 @@ fn compute_base_score(y: &ArrayView1<f64>, objective: XGBoostObjective) -> f64 {
     }
 }
 
+/// Refuse a non-finite cell of the features or the target, naming it. Shared by the tree
+/// boosters of this module family, whose sorts need NaN-free data.
+pub(super) fn check_finite_xy(x: ArrayView2<f64>, y: ArrayView1<f64>) -> EconResult<()> {
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    if let Some((i, v)) = y.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y must contain only finite values (row {i} is {v})"),
+        });
+    }
+    Ok(())
+}
+
 /// Optimal leaf weight with L1 and L2 regularization.
 /// w* = -G / (H + lambda) with L1 soft thresholding
 /// Reference: Chen & Guestrin (2016), Equation 5

@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
 
+/// Largest `n_jobs`: a thread pool of this size already exceeds any machine this runs on.
+pub const FAST_XGB_MAX_JOBS: usize = 1024;
+
 /// Fast XGBoost configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastXgbConfig {
@@ -129,7 +132,7 @@ fn compute_bins(values: &[f64], max_bin: usize) -> (Vec<f64>, Vec<u8>) {
 
     // Sort values with indices
     let mut indexed: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
     // Compute quantile-based bin edges
     let n_bins = max_bin.min(n);
@@ -273,7 +276,7 @@ impl FastXgbTree {
         Self { nodes: Vec::new() }
     }
 
-    fn predict(&self, x: &[f64], binned: &[u8]) -> f64 {
+    fn predict(&self, binned: &[u8]) -> f64 {
         if self.nodes.is_empty() {
             return 0.0;
         }
@@ -322,6 +325,37 @@ impl std::fmt::Display for FastXgbResult {
     }
 }
 
+/// Refuse what the fit cannot use: too few rows or columns, non-finite data, a bad alpha or n_jobs.
+fn validate_fast_xgb(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    config: &FastXgbConfig,
+) -> EconResult<()> {
+    let invalid = |message: String| EconError::InvalidSpecification { message };
+    if x.nrows() < 2 {
+        return Err(invalid(format!(
+            "fast_xgboost needs at least 2 rows (got {})",
+            x.nrows()
+        )));
+    }
+    if x.ncols() < 1 {
+        return Err(invalid("fast_xgboost needs at least 1 column".to_string()));
+    }
+    if !config.alpha.is_finite() || config.alpha < 0.0 {
+        return Err(invalid(format!(
+            "alpha must be finite and non-negative (got {})",
+            config.alpha
+        )));
+    }
+    if config.n_jobs > FAST_XGB_MAX_JOBS {
+        return Err(invalid(format!(
+            "n_jobs must be at most {FAST_XGB_MAX_JOBS} (got {})",
+            config.n_jobs
+        )));
+    }
+    super::xgboost::check_finite_xy(x, y)
+}
+
 /// Train a fast XGBoost model with histogram-based splitting
 pub fn fast_xgboost(
     x: ArrayView2<f64>,
@@ -338,6 +372,7 @@ pub fn fast_xgboost(
             context: "X and y must have same number of rows".to_string(),
         });
     }
+    validate_fast_xgb(x, y, config)?;
 
     // Pre-bin the data (one-time cost)
     let binned_data = BinnedData::new(x, config.max_bin);
@@ -352,6 +387,7 @@ pub fn fast_xgboost(
         }
     };
 
+    let y_vec: Vec<f64> = y.to_vec();
     let mut predictions = vec![base_score; n];
     let mut trees = Vec::with_capacity(config.n_estimators);
     let mut train_loss = Vec::with_capacity(config.n_estimators);
@@ -368,7 +404,7 @@ pub fn fast_xgboost(
         // Compute gradients and hessians
         compute_gradients_fast(
             &predictions,
-            y.as_slice().unwrap(),
+            &y_vec,
             &mut gradients,
             &mut hessians,
             config.objective,
@@ -406,12 +442,11 @@ pub fn fast_xgboost(
         // Update predictions
         for i in 0..n {
             let binned_row: Vec<u8> = (0..p).map(|j| binned_data.bins[j][i]).collect();
-            predictions[i] +=
-                config.learning_rate * tree.predict(x.row(i).as_slice().unwrap(), &binned_row);
+            predictions[i] += config.learning_rate * tree.predict(&binned_row);
         }
 
         // Compute loss
-        let loss = compute_loss(&predictions, y.as_slice().unwrap(), config.objective);
+        let loss = compute_loss(&predictions, &y_vec, config.objective);
         train_loss.push(loss);
 
         trees.push(tree);
@@ -692,8 +727,7 @@ pub fn fast_xgboost_predict(result: &FastXgbResult, x: ArrayView2<f64>) -> Vec<f
     for tree in &result.trees {
         for i in 0..n {
             let binned_row: Vec<u8> = (0..p).map(|j| binned[j][i]).collect();
-            predictions[i] += result.config.learning_rate
-                * tree.predict(x.row(i).as_slice().unwrap(), &binned_row);
+            predictions[i] += result.config.learning_rate * tree.predict(&binned_row);
         }
     }
 
@@ -712,6 +746,72 @@ mod tests {
     use rand::prelude::*;
     use rand_distr::{Distribution, Normal};
     use std::time::Instant;
+
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    fn case_matrix(ds: &crate::data::Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&Array1::from_vec(v));
+        }
+        m
+    }
+    fn case_vector(ds: &crate::data::Dataset, col: &str) -> Array1<f64> {
+        Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    #[test]
+    fn test_fast_xgboost_accepts_strided_and_column_major_views() {
+        use ndarray::ShapeBuilder;
+        let mut rng = StdRng::seed_from_u64(5);
+        let data = Array2::from_shape_fn((60, 3), |_| rng.r#gen::<f64>());
+        let y = data.column(2); // strided
+        let mut xf = Array2::<f64>::zeros((60, 2).f()); // column-major: rows are not contiguous
+        xf.assign(&data.slice(ndarray::s![.., 0..2]));
+        assert!(xf.row(0).as_slice().is_none());
+        let mut cfg = FastXgbConfig::default();
+        cfg.n_estimators = 10;
+        let r = fast_xgboost(xf.view(), y, &cfg).unwrap();
+        let r2 = fast_xgboost(xf.as_standard_layout().view(), y.to_owned().view(), &cfg).unwrap();
+        assert_eq!(r.predictions, r2.predictions);
+        assert_eq!(fast_xgboost_predict(&r, xf.view()), r.predictions);
+    }
+
+    #[test]
+    fn test_fast_xgboost_rejects_non_finite_and_bad_parameters() {
+        let mut rng = StdRng::seed_from_u64(6);
+        let mut x = Array2::from_shape_fn((30, 2), |_| rng.r#gen::<f64>());
+        let y = Array1::from_shape_fn(30, |_| rng.r#gen::<f64>());
+        x[[3, 0]] = f64::NAN;
+        let e = fast_xgboost(x.view(), y.view(), &FastXgbConfig::default()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("row 3, column 0")),
+            "{e}"
+        );
+        x[[3, 0]] = 0.5;
+        let mut bad_alpha = FastXgbConfig::default();
+        bad_alpha.alpha = -1.0;
+        let mut bad_jobs = FastXgbConfig::default();
+        bad_jobs.n_jobs = FAST_XGB_MAX_JOBS + 1;
+        for (field, cfg) in [("alpha", bad_alpha), ("n_jobs", bad_jobs)] {
+            let e = fast_xgboost(x.view(), y.view(), &cfg).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with(field)),
+                "{e}"
+            );
+        }
+        let one = Array2::<f64>::zeros((1, 2));
+        assert!(
+            fast_xgboost(
+                one.view(),
+                Array1::<f64>::zeros(1).view(),
+                &FastXgbConfig::default()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn test_fast_xgboost_speed() {
