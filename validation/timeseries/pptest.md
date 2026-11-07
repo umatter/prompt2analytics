@@ -106,7 +106,9 @@ missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 
 2. **Singular regression**: when the lagged series is constant or a linear trend (for example 1, 2, 3, ..., n), the design matrix is singular. p2a returns `SingularMatrix`, with a check on centred sums that does not depend on the scale or the level of the series; R stops with "singularities in regression".
 
-3. **Range**: p2a refuses a series whose squares do not fit a double (`InvalidSpecification`).
+3. **Near-linear series** (registry deviation STAT-6): p2a's bound is `1 - r^2(t, y_{t-1}) <= 1e-12`, or a remainder after the trend within rounding at the level of the series. It is stricter than R's QR tolerance: the remainder comes from a subtraction that loses about 1e-15 of the sum of squares of `y_{t-1}`. `PP.test` still returns a statistic down to about `1 - r^2 = 1e-14` (for n = 101, a step of 1e5 and noise of sd 1, `1 - r^2` is about 1e-13 and the statistic is about -9.85); p2a refuses these series. **Rust test:** `stats::pptest::tests::test_pp_test_refuses_near_linear_series`.
+
+4. **Range**: p2a refuses a series whose squares do not fit a double (`InvalidSpecification`).
 
 Tests: `stats::pptest::tests::test_pp_test_refuses_singular_regression`, `stats::pptest::tests::test_pp_test_refuses_exact_fit`, `stats::pptest::tests::test_pp_test_is_scale_and_level_free`, `stats::pptest::tests::test_pp_test_refuses_values_whose_squares_leave_the_range`.
 

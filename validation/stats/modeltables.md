@@ -111,7 +111,7 @@ Two tests pin model tables to the R cases of `validation/r/cases/stats_anova.R`:
 **Residual df rule:** `model_tables_two_way` takes the residual df as n minus the number of
 non-empty cells, the residual df of `aov(y ~ a * b)` (and of p2a's two-way ANOVA). Before T2-WP07
 it was `n - a * b`, one too few per empty cell (7 instead of 8 here), so its MSE disagreed with
-the two-way ANOVA. Empty cells keep a mean of 0 in the tables (STAT-83, Tier 3).
+the two-way ANOVA. Empty cells are NaN (see "Empty cells and layout").
 
 The standard errors are not compared (registry deviation STAT-75, `// deviation STAT-75` in
 both tests): p2a reports the SE of each mean, sqrt(MSE / n), while R's `model.tables(se = TRUE)`
@@ -131,6 +131,7 @@ standard error are NaN. A row whose length differs from `data[0]` is an error na
 | cell means (A1:B1, A2:B1, ...) | 4.5263333333333335, 6.398, 7.15625, 6.285, 7.515333333333333, 8.366666666666667, 9.380749999999999, NA, 11.500499999999999 |
 | cell sizes | 3, 2, 4, 2, 3, 3, 4, 0, 2 |
 | factor A means | 6.111111111111112, 7.527, 10.087333333333333 |
+| factor B means (raw, `tapply`) | 7.074666666666666, 7.0684000000000005, 8.52511111111111 |
 | grand mean | 7.6408695652173915 |
 | residual df, residual SS | 15, 7.821394000000002 |
 
@@ -140,7 +141,8 @@ standard error are NaN. A row whose length differs from `data[0]` is an error na
 **Status:** R-pinned (registry `validation/methods/stats_misc_t3.json`, id `model_tables_t3`).
 
 **Not compared:** R's `model.tables` factor B margins on this unbalanced layout are adjusted for
-factor A (`b_means_model_tables` in the case); p2a's are the raw margins. No finding covers this yet.
+factor A (`b_means_model_tables` in the case); p2a's are the raw margins, pinned to `tapply`
+(`b_means_raw`). Registry deviation STAT-75, the finding on `model.tables` and unbalanced designs.
 
 ## Numerical Precision Summary
 

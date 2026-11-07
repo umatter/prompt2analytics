@@ -74,9 +74,9 @@
       "doc": "validation/stats/modeltables.md",
       "cases": ["stat_modeltables_t3"],
       "tests": ["p2a-core::stats::modeltables::tests::test_validate_modeltables_t3_empty_cell"],
-      "quantities": ["cell means (NaN for empty cells)", "cell sizes", "factor A margins and sizes", "grand mean", "residual df and SS"],
+      "quantities": ["cell means (NaN for empty cells)", "cell sizes", "factor A margins and sizes", "factor B margins (raw)", "grand mean", "residual df and SS"],
       "tolerance": "Tol::coef(23), Tol::stat(23); counts exact",
-      "deviations": [],
+      "deviations": [{"finding": "STAT-75", "quantity": "b_means_model_tables", "note": "on an unbalanced layout model.tables gives projection-based margins for the second factor of the sequential fit; p2a reports raw marginal means, pinned to tapply (b_means_raw)"}],
       "supersedes_legacy": []
     },
     {
@@ -115,7 +115,7 @@
       "tests": ["p2a-core::stats::pptest::tests::test_validate_pp_test_t3_internals", "p2a-core::stats::pptest::tests::test_validate_pp_test_t3_statistic", "p2a-core::stats::pptest::tests::test_validate_pp_test_t3_gdp"],
       "quantities": ["Dickey-Fuller statistic (corrected t)", "p-value (R's table)", "truncation lag (from n - 1)", "gamma (rho - 1)", "t statistic", "sigma^2 (RSS/n)", "lambda^2 (Bartlett long-run variance)"],
       "tolerance": "Tol::coef(n) for gamma, Tol::stat(n) for statistics and variances, Tol::p_value(n); lag exact",
-      "deviations": [{"finding": "STAT-6", "quantity": "statistic of an exact fit", "note": "p2a refuses; PP.test warns of a perfect fit and returns a statistic made of rounding error"}],
+      "deviations": [{"finding": "STAT-6", "quantity": "statistic of an exact fit", "note": "p2a refuses; PP.test warns of a perfect fit and returns a statistic made of rounding error"}, {"finding": "STAT-6", "quantity": "statistic of a near-linear series", "note": "p2a refuses at 1 - r^2(t, y_{t-1}) <= 1e-12 or a remainder within rounding at the level of the series; PP.test still returns a statistic below that, down to about 1e-14"}],
       "supersedes_legacy": []
     },
     {

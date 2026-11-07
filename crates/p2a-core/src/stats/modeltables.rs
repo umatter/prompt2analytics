@@ -782,6 +782,12 @@ mod tests {
                 Tol::coef(23),
             )
             .named("a_n", &m.factor_a_names, &a_n, Tol::exact())
+            .named(
+                "b_means_raw",
+                &m.factor_b_names,
+                &m.factor_b_values,
+                Tol::coef(23),
+            )
             .scalar("grand_mean", m.grand_mean, Tol::coef(23))
             .scalar("resid_df", m.df_mse, Tol::exact())
             .scalar("resid_ss", m.mse * m.df_mse, Tol::stat(23))
@@ -801,7 +807,8 @@ mod tests {
         let g =
             model_tables_two_way(&gap, &names(al), &names(bl), TableType::Means, false).unwrap();
         assert!(g.factor_a_values[2].is_nan() && g.factor_a_n[2] == 0);
-        // deviation (no finding; reported): b_means_model_tables differs from p2a's raw B margins on this unbalanced layout.
+        // deviation STAT-75: b_means_model_tables, R's sequential margins, differ from p2a's raw B margins on this
+        // unbalanced layout.
     }
 
     #[test]

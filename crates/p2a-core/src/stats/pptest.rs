@@ -232,8 +232,10 @@ const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
 /// - `InvalidSpecification`: non-finite values; squares of the values that do not fit a double;
 ///   an exact fit, where the residuals are rounding error next to Δy or to the level of the
 ///   series. For an exact fit `PP.test` warns and returns a statistic made of that rounding error.
-/// - `SingularMatrix`: `y_{t-1}` is constant or a linear trend, whatever the scale of the series
-///   (`PP.test` stops: "singularities in regression").
+/// - `SingularMatrix`: `y_{t-1}` is constant or a linear trend up to rounding, whatever the scale
+///   of the series: `1 - r^2(t, y_{t-1}) <= 1e-12`, or a remainder after the trend within rounding
+///   at the level of the series. `PP.test` stops on the exact case ("singularities in regression")
+///   but still returns a statistic for a near-linear series down to about `1 - r^2 = 1e-14`.
 ///
 /// # Example
 ///
@@ -322,7 +324,9 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     if s_yy_t <= (SINGULAR_TOL * s_yy).max(rounding) {
         return Err(EconError::SingularMatrix {
             context: "X'X in Phillips-Perron regression".to_string(),
-            suggestion: "the lagged series is constant or a linear trend".to_string(),
+            suggestion:
+                "the lagged series is constant or a linear trend, up to rounding at its level"
+                    .to_string(),
         });
     }
 
@@ -753,6 +757,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// STAT-6: the bound on 1 - r^2 holds for a noisy series, stricter than `PP.test` (a registry deviation); the
+    /// designs sit a decade either side of it.
+    #[test]
+    fn test_pp_test_refuses_near_linear_series() {
+        let series = |step: f64| -> Vec<f64> {
+            (0..101)
+                .map(|i| {
+                    let noise = ((i * i * 37 % 101) as f64 - 50.0) / 29.0;
+                    step * i as f64 + noise
+                })
+                .collect()
+        };
+        assert!(matches!(
+            pp_test(&series(1e5), true),
+            Err(EconError::SingularMatrix { .. })
+        ));
+        assert!(pp_test(&series(1e4), true).unwrap().statistic.is_finite());
     }
 
     /// STAT-6: a regression that fits exactly up to rounding (a quadratic has a linear difference,
