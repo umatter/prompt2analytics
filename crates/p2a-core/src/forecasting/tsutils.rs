@@ -510,7 +510,8 @@ pub struct FilterResult {
 ///
 /// `InvalidSpecification` for empty or missing (NaN) coefficients, as R's "missing values in
 /// 'filter'", and for a convolution filter longer than the series, as R's "'filter' is longer
-/// than time series".
+/// than time series"; `Cancelled` when the budget stops a convolution (checked per block of
+/// outputs).
 ///
 /// # Example
 ///
@@ -563,7 +564,7 @@ pub fn filter(
     }
 
     let values = match method {
-        FilterMethod::Convolution => filter_convolution(x, filter_coefs, sides),
+        FilterMethod::Convolution => filter_convolution(x, filter_coefs, sides)?,
         FilterMethod::Recursive => filter_recursive(x, filter_coefs, init)?,
     };
 
@@ -579,7 +580,7 @@ pub fn filter(
 ///
 /// `result[i]` multiplies `f[0]` with `x[i + nshift]`, and is NaN where the window leaves the
 /// series. The caller has refused a filter longer than the series.
-fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> Vec<f64> {
+fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> EconResult<Vec<f64>> {
     let n = x.len();
     let p = filter_coefs.len();
     let mut result = vec![f64::NAN; n];
@@ -592,16 +593,22 @@ fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> Ve
     // from first to last; outside it the value stays NA.
     let first = p.saturating_sub(1 + nshift);
     let last = n.saturating_sub(nshift);
-    for i in first..last {
-        let top = i + nshift;
-        let mut sum = 0.0;
-        for (&fj, &xv) in filter_coefs.iter().zip(x[..=top].iter().rev()) {
-            sum += fj * xv;
+    // Each output costs O(p), with p up to n. Blocks, because a remainder per output is a measurable
+    // share of a short filter's window.
+    let stride = checkpoint_stride(p);
+    for block in (first..last).step_by(stride) {
+        checkpoint()?;
+        for i in block..block.saturating_add(stride).min(last) {
+            let top = i + nshift;
+            let mut sum = 0.0;
+            for (&fj, &xv) in filter_coefs.iter().zip(x[..=top].iter().rev()) {
+                sum += fj * xv;
+            }
+            result[i] = sum; // a NaN in the window propagates, where R gives NA
         }
-        result[i] = sum; // a NaN in the window propagates, where R gives NA
     }
 
-    result
+    Ok(result)
 }
 
 /// Recursive (autoregressive) filter.
@@ -1981,8 +1988,7 @@ mod tests {
         assert!(approx_eq(result.values[4], 5.0, 1e-10));
     }
 
-    /// Validate lag against R
-    /// R code: lag(1:5, 1)
+    /// Asserts the length only; the direction of lag is TS-29.
     #[test]
     fn test_lag_length() {
         let x: Vec<f64> = (1..=5).map(|i| i as f64).collect();
@@ -2217,6 +2223,21 @@ mod tests {
         let err =
             crate::resource::with_alloc_ceiling(Some(1 << 16), || acf_to_ar(&acf)).unwrap_err();
         assert!(err.to_string().contains("AR coefficient matrix"), "{err}");
+    }
+
+    #[test]
+    fn convolution_filter_honours_cancellation() {
+        let x: Vec<f64> = (0..300)
+            .map(|t| (t as f64 * 0.41).cos() + 0.003 * t as f64)
+            .collect();
+        let f = [0.25, 0.5, 0.25];
+        for sides in [FilterSides::One, FilterSides::Two] {
+            assert!(filter(&x, &f, FilterMethod::Convolution, sides, None).is_ok());
+            assert!(matches!(
+                cancelled(|| filter(&x, &f, FilterMethod::Convolution, sides, None)),
+                Err(EconError::Cancelled(_))
+            ));
+        }
     }
 
     // Guards only that the row loops check the budget at all. The stride rule
