@@ -506,8 +506,9 @@ pub(super) fn str_concat(
 
 /// `str_replace_value` on a String column: each value equal to `old`
 /// becomes `new`, every value is copied. Returns the bound and the
-/// number of values replaced. (A numeric column keeps its width, and a
-/// column of another type is kept: `None`.)
+/// number of values replaced. A Categorical column keeps its codes and may
+/// use one new label. (A numeric column keeps its width, and a column of
+/// another type is kept or refused: `None`.)
 pub(super) fn replace_value(
     df: &DataFrame,
     column: &str,
@@ -517,13 +518,24 @@ pub(super) fn replace_value(
     let Some(source) = df.column(column).ok() else {
         return Ok(None);
     };
-    let Ok(ca) = source.str() else {
-        return Ok(None);
+    let as_text;
+    let ca = match source.dtype() {
+        DataType::String => source.str().map_err(|e| e.to_string())?,
+        DataType::Categorical(..) => {
+            as_text = source.cast(&DataType::String).map_err(|e| e.to_string())?;
+            as_text.str().map_err(|e| e.to_string())?
+        }
+        _ => return Ok(None),
     };
     let mut matches = 0u64;
     for (row, value) in ca.into_iter().enumerate() {
         checkpoint(row)?;
         matches += u64::from(value == Some(old));
+    }
+    if matches!(source.dtype(), DataType::Categorical(..)) {
+        let mut bound = Bound::keeping(df, &[column]);
+        bound.column(column, with_new_label(source, new));
+        return Ok(Some((bound.bytes(), matches)));
     }
     let text = text_bytes(source.as_materialized_series())
         .saturating_sub(matches.saturating_mul(old.len() as u64))
@@ -636,6 +648,9 @@ pub(super) fn fill_na(
                     .saturating_add(nulls.saturating_mul(fill));
                 bound.string(name, text);
             }
+            FillStrategy::Constant(value) if matches!(dtype, DataType::Categorical(..)) => {
+                bound.column(name, with_new_label(column, value));
+            }
             FillStrategy::Mean | FillStrategy::Median if dtype.is_primitive_numeric() => {
                 bound.fixed(name, 8);
             }
@@ -654,6 +669,13 @@ pub(super) fn fill_na(
         }
     }
     Ok(Some(bound.bytes()))
+}
+
+/// What the Categorical column `source` is charged at most once its cells may
+/// also hold `label`: the same codes, its labels and that one.
+fn with_new_label(source: &Column, label: &str) -> u64 {
+    session::series_bytes(source.as_materialized_series())
+        .saturating_add(session::label_bytes(label.len()))
 }
 
 /// The text of the String or Binary column `s` after a forward (`forward`)
@@ -1249,5 +1271,40 @@ mod tests {
         }
         // text with non-text is refused by core; the bound gives up instead of guessing
         assert!(melt(&df, &["id"], &["s1", "u"], "variable", "value").is_none());
+    }
+
+    /// A replace or a constant fill of a Categorical column writes its labels through text, so the
+    /// result can use a label the column did not hold.
+    #[test]
+    fn categorical_replace_and_fill_bounds_cover_a_new_label() {
+        use p2a_core::data::munging::{
+            FillStrategy, fill_na as core_fill, replace as core_replace,
+        };
+        let long = "a new label long enough to be seen in what the quotas charge";
+        let df = DataFrame::new(vec![
+            Column::new("id".into(), [1i64, 2, 3]),
+            Column::new("c".into(), [Some("a"), None, Some("b")])
+                .cast(&DataType::from_categories(Categories::global()))
+                .unwrap(),
+        ])
+        .unwrap();
+        let ds = Dataset::new(df.clone());
+        let replaced = core_replace(&ds, "c", "a", long).unwrap();
+        let charged = session::datasets_bytes_of([("", &replaced)]);
+        let (bound, matches) = replace_value(&df, "c", "a", long)
+            .unwrap()
+            .expect("a bound");
+        assert!(
+            bound >= charged,
+            "replace: bound {bound} < charged {charged}"
+        );
+        assert_eq!(matches, 1);
+        let strategy = FillStrategy::Constant(long.to_string());
+        let filled = core_fill(&ds, Some(&["c"]), strategy.clone()).unwrap();
+        let charged = session::datasets_bytes_of([("", &filled)]);
+        let bound = fill_na(&df, Some(&["c"]), &strategy)
+            .unwrap()
+            .expect("a bound");
+        assert!(bound >= charged, "fill: bound {bound} < charged {charged}");
     }
 }
