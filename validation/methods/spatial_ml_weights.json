@@ -2,6 +2,41 @@
   "schema": 1,
   "methods": [
     {
+      "id": "spatial_ml",
+      "name": "SAR, spatial Durbin (SDM), SEM and SAC models by concentrated maximum likelihood; SAR and SDM impacts",
+      "category": "econometrics",
+      "reference": "spatialreg::lagsarlm(method = 'eigen', Durbin = FALSE/TRUE), errorsarlm, sacsarlm and impacts (lagImpactsExact, mixedImpactsExact), written out in base R (spatialreg not installed)",
+      "doc": "validation/econometrics/spatial.md",
+      "cases": [
+        "spatial_sar_sdm_sem"
+      ],
+      "tests": [
+        "p2a-core::econometrics::spatial::tests::test_validate_sar_sdm_sem_concentrated_ml",
+        "p2a-core::econometrics::spatial::tests::test_validate_sac_concentrated_ml"
+      ],
+      "quantities": [
+        "rho",
+        "lambda",
+        "coefficients (SAR, SDM with lag.x, SEM, SAC)",
+        "sigma^2",
+        "logLik",
+        "AIC",
+        "BIC",
+        "SAR residuals",
+        "SAR direct, indirect and total impacts",
+        "SEM coefficient SE, z and p"
+      ],
+      "tolerance": "validation/README.md, n = 80: rho/lambda, coefficients and impacts Tol::iterative(1e-6) (golden section; flatness bound 1.3e-7 in rho), statistics and SEs 1e-5 relative; SAR residuals 1e-6 absolute (flatness bound x max |de/drho| 2.24); SAC by coordinate descent: Tol::iterative(1e-5) at tol 1e-10, 1e-4 at the default",
+      "deviations": [
+        {
+          "finding": "SPAT-4",
+          "quantity": "SAR, SDM and SAC coefficient SEs, z and p; rho and lambda SE, z and p",
+          "note": "not compared yet: these SEs do not come from the information matrix"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "spatial_logdet",
       "name": "log|I - rho W| over the complex eigenvalues of W; feasible rho interval; traces of (I - rho W)^-1 and W (I - rho W)^-1",
       "category": "econometrics",

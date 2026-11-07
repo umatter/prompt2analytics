@@ -19,6 +19,13 @@
 //!
 //! where λ is the spatial error parameter.
 //!
+//! # Likelihood
+//!
+//! Both models and their combination (SAC) maximise the concentrated log-likelihood with
+//! log|I - ρW| = Re Σ log(1 - ρλ_i) over the **complex** eigenvalues of W (spatialreg method
+//! "eigen"). The estimates are pinned to spatialreg's formulas written out in base R
+//! (`validation/econometrics/spatial.md`).
+//!
 //! # Data requirements
 //!
 //! Row i of the dataset is unit i of the weights, so the dataset has exactly one row per
@@ -54,7 +61,11 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr};
+use crate::regression::ols::{OlsSolve, normal_equations_inverse, solve_ols};
 use crate::spatial::SpatialWeights;
+use crate::spatial::weights::WeightsSpectrum;
+use crate::traits::estimator::normal_p_value_two_sided;
 
 /// Outcome `y` and design `[1, X]` (intercept first) of a spatial cross-section model (SAR,
 /// SEM, SAC, sphet, spatial probit).
@@ -91,6 +102,84 @@ pub(crate) fn spatial_model_data(
         .na(NaPolicy::Fail)
         .extract()?;
     Ok((cols.numeric_array(y_col), cols.matrix(x_cols, true)?.data))
+}
+
+/// spatialreg (lagsarlm, errorsarlm, sacsarlm) stops with "There are aliased coefficients in the
+/// model"; so does this crate, naming the columns.
+fn aliased_error(aliased: &[usize], names: &[String]) -> EconError {
+    EconError::PerfectMulticollinearity {
+        columns: aliased
+            .iter()
+            .filter_map(|&j| names.get(j).cloned())
+            .collect(),
+    }
+}
+
+/// The regressions of y and Wy on X behind the concentrated SAR and SDM likelihood (Ord 1975):
+/// beta(rho) = b_y - rho b_wy and e(rho) = e_y - rho e_wy, linear in rho.
+struct OrdRegressions {
+    b_y: Array1<f64>,
+    b_wy: Array1<f64>,
+    e_y: Array1<f64>,
+    e_wy: Array1<f64>,
+    /// (X'X)^-1
+    unscaled: Array2<f64>,
+}
+
+/// One factorisation of X for both regressions: the normal equations on a well-conditioned
+/// design, the pivoted QR (which decides rank and aliasing) otherwise.
+fn ord_regressions(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    wy: &Array1<f64>,
+    names: &[String],
+) -> EconResult<OrdRegressions> {
+    let (b_y, b_wy, unscaled) = match normal_equations_inverse(x.view())? {
+        Some(normal) => {
+            let mut ys = Array2::zeros((y.len(), 2));
+            ys.column_mut(0).assign(y);
+            ys.column_mut(1).assign(wy);
+            let b = normal.coefficients_multi(x.view(), ys.view());
+            (
+                b.column(0).to_owned(),
+                b.column(1).to_owned(),
+                normal.inverse,
+            )
+        }
+        None => {
+            let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
+            if qr.rank() < x.ncols() {
+                return Err(aliased_error(&qr.aliased(), names));
+            }
+            (
+                qr.coefficients(y.view())?,
+                qr.coefficients(wy.view())?,
+                qr.unscaled_covariance()?,
+            )
+        }
+    };
+    let e_y = y - &x.dot(&b_y);
+    let e_wy = wy - &x.dot(&b_wy);
+    Ok(OrdRegressions {
+        b_y,
+        b_wy,
+        e_y,
+        e_wy,
+        unscaled,
+    })
+}
+
+/// The final least-squares fit on the transformed system of the SEM and the SAC.
+fn transformed_fit(
+    x_star: &Array2<f64>,
+    y_star: &Array1<f64>,
+    names: &[String],
+) -> EconResult<OlsSolve> {
+    let fit = solve_ols(x_star.view(), y_star.view())?;
+    if fit.rank < x_star.ncols() {
+        return Err(aliased_error(&fit.aliased, names));
+    }
+    Ok(fit)
 }
 
 /// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.
@@ -323,77 +412,6 @@ pub fn run_sar(
 
     let k_final = x_final.ncols();
 
-    // Compute Wy
-    let wy = listw.lag(&y);
-
-    // Get valid range for ρ
-    let (rho_min, rho_max) = listw.try_rho_range()?;
-    let rho_min = rho_min.max(-0.999);
-    let rho_max = rho_max.min(0.999);
-
-    // Optimize concentrated log-likelihood over ρ
-    let (rho_opt, _ll_opt) = optimize_rho_sar(
-        &y,
-        &wy,
-        &x_final,
-        listw,
-        rho_min,
-        rho_max,
-        config.tol,
-        config.max_iter,
-    )?;
-
-    // Compute final estimates at optimal ρ
-    // (I - ρW)y = Xβ + ε
-    let y_tilde = &y - rho_opt * &wy;
-
-    // β = (X'X)^{-1} X'y_tilde
-    let xtx_mat = xtx(&x_final.view());
-    let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-    let xty_vec = xty(&x_final.view(), &y_tilde);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Residuals and sigma^2
-    let fitted_xb = x_final.dot(&beta);
-    let residuals = &y_tilde - &fitted_xb;
-    let rss: f64 = residuals.iter().map(|&r| r * r).sum();
-    let sigma2 = rss / n as f64;
-
-    // Fitted values in original scale
-    let fitted = &fitted_xb + rho_opt * &wy;
-
-    // Log-likelihood at convergence
-    let log_det = listw.try_log_det(rho_opt)?;
-    let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
-
-    // Information matrix and standard errors
-    // Asymptotic variance-covariance matrix
-    let (se_beta, se_rho) =
-        compute_sar_standard_errors(&x_final, &wy, sigma2, rho_opt, listw, &xtx_inv, n)?;
-
-    // Z-values and p-values
-    let z_values: Vec<f64> = beta
-        .iter()
-        .zip(se_beta.iter())
-        .map(|(&b, &se)| b / se)
-        .collect();
-    let p_values: Vec<f64> = z_values
-        .iter()
-        .map(|&z| {
-            2.0 * (1.0
-                - statrs::distribution::Normal::new(0.0, 1.0)
-                    .unwrap()
-                    .cdf(z.abs()))
-        })
-        .collect();
-
-    let rho_z = rho_opt / se_rho;
-    let rho_p = 2.0
-        * (1.0
-            - statrs::distribution::Normal::new(0.0, 1.0)
-                .unwrap()
-                .cdf(rho_z.abs()));
-
     // Build coefficient names
     let mut coef_names = vec!["(Intercept)".to_string()];
     for &name in x_cols {
@@ -404,6 +422,59 @@ pub fn run_sar(
             coef_names.push(format!("lag.{}", name));
         }
     }
+
+    // Compute Wy
+    let wy = listw.lag(&y);
+
+    let ord = ord_regressions(&x_final, &y, &wy, &coef_names)?;
+    let spectrum = listw.try_spectrum()?;
+
+    // Get valid range for ρ
+    let (rho_min, rho_max) = listw.try_rho_range()?;
+    let rho_min = rho_min.max(-0.999);
+    let rho_max = rho_max.min(0.999);
+
+    // Optimize concentrated log-likelihood over ρ
+    let (rho_opt, _ll_opt) = optimize_rho_sar(
+        &ord,
+        &spectrum,
+        rho_min,
+        rho_max,
+        config.tol,
+        config.max_iter,
+    )?;
+
+    // Final estimates at the optimal ρ; the regression of y - ρWy on X is linear in ρ
+    let beta = &ord.b_y - &(rho_opt * &ord.b_wy);
+    let residuals = &ord.e_y - &(rho_opt * &ord.e_wy);
+    let rss: f64 = residuals.iter().map(|&r| r * r).sum();
+    let sigma2 = rss / n as f64;
+
+    // Fitted values in original scale
+    let fitted = &y - &residuals;
+
+    // Log-likelihood at convergence
+    let log_det = spectrum.log_det(rho_opt);
+    let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
+
+    // Information matrix and standard errors
+    // Asymptotic variance-covariance matrix
+    let (se_beta, se_rho) =
+        compute_sar_standard_errors(&x_final, &wy, sigma2, rho_opt, listw, &ord.unscaled, n)?;
+
+    // Z-values and p-values
+    let z_values: Vec<f64> = beta
+        .iter()
+        .zip(se_beta.iter())
+        .map(|(&b, &se)| b / se)
+        .collect();
+    let p_values: Vec<f64> = z_values
+        .iter()
+        .map(|&z| normal_p_value_two_sided(z))
+        .collect();
+
+    let rho_z = rho_opt / se_rho;
+    let rho_p = normal_p_value_two_sided(rho_z);
 
     // AIC and BIC
     let n_params = k_final + 2; // beta + rho + sigma2
@@ -469,6 +540,14 @@ pub fn run_sem(
     let n = y.len();
     let k = x.ncols(); // intercept + regressors
 
+    // Coefficient names
+    let mut coef_names = vec!["(Intercept)".to_string()];
+    for &name in x_cols {
+        coef_names.push(name.to_string());
+    }
+
+    let spectrum = listw.try_spectrum()?;
+
     // Get valid range for λ
     let (lambda_min, lambda_max) = listw.try_rho_range()?;
     let lambda_min = lambda_min.max(-0.999);
@@ -479,6 +558,7 @@ pub fn run_sem(
         &y,
         &x,
         listw,
+        &spectrum,
         lambda_min,
         lambda_max,
         config.tol,
@@ -491,15 +571,9 @@ pub fn run_sem(
     let x_star = listw.transform_x(&x, lambda_opt);
 
     // β = (X*'X*)^{-1} X*'y*
-    let xtx_mat = xtx(&x_star.view());
-    let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-    let xty_vec = xty(&x_star.view(), &y_star);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Residuals in transformed space
-    let fitted_star = x_star.dot(&beta);
-    let residuals_star = &y_star - &fitted_star;
-    let rss: f64 = residuals_star.iter().map(|&r| r * r).sum();
+    let fit = transformed_fit(&x_star, &y_star, &coef_names)?;
+    let beta = fit.beta;
+    let rss: f64 = fit.residuals.iter().map(|&r| r * r).sum();
     let sigma2 = rss / n as f64;
 
     // Residuals in original space
@@ -507,12 +581,12 @@ pub fn run_sem(
     let residuals = &y - &fitted;
 
     // Log-likelihood
-    let log_det = listw.try_log_det(lambda_opt)?;
+    let log_det = spectrum.log_det(lambda_opt);
     let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
 
     // Standard errors
     let (se_beta, se_lambda) =
-        compute_sem_standard_errors(&x, &x_star, sigma2, lambda_opt, listw, &xtx_inv, n)?;
+        compute_sem_standard_errors(&x, &x_star, sigma2, lambda_opt, listw, &fit.unscaled, n)?;
 
     // Z-values and p-values
     let z_values: Vec<f64> = beta
@@ -522,26 +596,11 @@ pub fn run_sem(
         .collect();
     let p_values: Vec<f64> = z_values
         .iter()
-        .map(|&z| {
-            2.0 * (1.0
-                - statrs::distribution::Normal::new(0.0, 1.0)
-                    .unwrap()
-                    .cdf(z.abs()))
-        })
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
     let lambda_z = lambda_opt / se_lambda;
-    let lambda_p = 2.0
-        * (1.0
-            - statrs::distribution::Normal::new(0.0, 1.0)
-                .unwrap()
-                .cdf(lambda_z.abs()));
-
-    // Coefficient names
-    let mut coef_names = vec!["(Intercept)".to_string()];
-    for &name in x_cols {
-        coef_names.push(name.to_string());
-    }
+    let lambda_p = normal_p_value_two_sided(lambda_z);
 
     // AIC and BIC
     let n_params = k + 2; // beta + lambda + sigma2
@@ -702,8 +761,14 @@ pub fn run_sac(
     let n = y.len();
     let k = x.ncols(); // intercept + regressors
 
+    // Coefficient names
+    let mut coef_names = vec!["(Intercept)".to_string()];
+    for &name in x_cols {
+        coef_names.push(name.to_string());
+    }
+
     // Pre-compute eigenvalues
-    let eigenvalues = listw.try_eigenvalues()?.clone();
+    let spectrum = listw.try_spectrum()?;
 
     // Get valid range for ρ and λ
     let (param_min, param_max) = listw.try_rho_range()?;
@@ -729,7 +794,7 @@ pub fn run_sac(
         &wwy,
         &x,
         &wx,
-        &eigenvalues,
+        &spectrum,
         param_min,
         param_max,
         config.tol,
@@ -749,15 +814,9 @@ pub fn run_sac(
     let x_star = &x - lambda_opt * &wx;
 
     // β = (X*'X*)^{-1} X*'y*
-    let xtx_star = xtx(&x_star.view());
-    let xtx_star_inv = matrix_inverse(&xtx_star.view())?;
-    let xty_star = xty(&x_star.view(), &y_star);
-    let beta = xtx_star_inv.dot(&xty_star);
-
-    // Residuals in transformed space
-    let fitted_star = x_star.dot(&beta);
-    let residuals_star = &y_star - &fitted_star;
-    let rss: f64 = residuals_star.iter().map(|&r| r * r).sum();
+    let fit = transformed_fit(&x_star, &y_star, &coef_names)?;
+    let beta = fit.beta;
+    let rss: f64 = fit.residuals.iter().map(|&r| r * r).sum();
     let sigma2 = rss / n_f64;
 
     // Residuals in original space
@@ -765,21 +824,13 @@ pub fn run_sac(
     let residuals = &y - &fitted - rho_opt * &wy;
 
     // Log-likelihood at convergence
-    let log_det_rho: f64 = eigenvalues
-        .iter()
-        .map(|&eig| (1.0 - rho_opt * eig).ln())
-        .sum();
-    let log_det_lambda: f64 = eigenvalues
-        .iter()
-        .map(|&eig| (1.0 - lambda_opt * eig).ln())
-        .sum();
     let ll = -0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln())
-        + log_det_rho
-        + log_det_lambda;
+        + spectrum.log_det(rho_opt)
+        + spectrum.log_det(lambda_opt);
 
     // Standard errors (simplified approximation)
     let (se_beta, se_rho, se_lambda) =
-        compute_sac_standard_errors(&x, sigma2, rho_opt, lambda_opt, listw, &xtx_star_inv)?;
+        compute_sac_standard_errors(&x, sigma2, rho_opt, lambda_opt, listw, &fit.unscaled)?;
 
     // Z-values and p-values
     let z_values: Vec<f64> = beta
@@ -789,33 +840,14 @@ pub fn run_sac(
         .collect();
     let p_values: Vec<f64> = z_values
         .iter()
-        .map(|&z| {
-            2.0 * (1.0
-                - statrs::distribution::Normal::new(0.0, 1.0)
-                    .unwrap()
-                    .cdf(z.abs()))
-        })
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
     let rho_z = rho_opt / se_rho;
-    let rho_p = 2.0
-        * (1.0
-            - statrs::distribution::Normal::new(0.0, 1.0)
-                .unwrap()
-                .cdf(rho_z.abs()));
+    let rho_p = normal_p_value_two_sided(rho_z);
 
     let lambda_z = lambda_opt / se_lambda;
-    let lambda_p = 2.0
-        * (1.0
-            - statrs::distribution::Normal::new(0.0, 1.0)
-                .unwrap()
-                .cdf(lambda_z.abs()));
-
-    // Coefficient names
-    let mut coef_names = vec!["(Intercept)".to_string()];
-    for &name in x_cols {
-        coef_names.push(name.to_string());
-    }
+    let lambda_p = normal_p_value_two_sided(lambda_z);
 
     // AIC and BIC
     let n_params = k + 3; // beta + rho + lambda + sigma2
@@ -892,7 +924,7 @@ pub fn run_sac_dataset(
 /// * `wwy` - Pre-computed W²y (n × 1)
 /// * `x` - Design matrix (n × k)
 /// * `wx` - Pre-computed WX (n × k)
-/// * `eigenvalues` - Eigenvalues of W for log-determinant computation
+/// * `spectrum` - Eigenvalues of W for the log-determinants
 /// * `param_min` - Lower bound for both ρ and λ
 /// * `param_max` - Upper bound for both ρ and λ
 /// * `tol` - Convergence tolerance
@@ -907,7 +939,7 @@ fn optimize_sac(
     wwy: &Array1<f64>, // W²y = W(Wy)
     x: &Array2<f64>,
     wx: &Array2<f64>,
-    eigenvalues: &Array1<f64>,
+    spectrum: &WeightsSpectrum,
     param_min: f64,
     param_max: f64,
     tol: f64,
@@ -937,7 +969,7 @@ fn optimize_sac(
         // X* = (I - λW)X = X - λWX
         let x_star = x - lambda * wx;
 
-        // β = (X*'X*)^{-1} X*'y*
+        // β = (X*'X*)^{-1} X*'y*; X is of full rank, so (I - λW)X is on the feasible interval
         let xtx_star = xtx(&x_star.view());
         let xtx_star_inv = match matrix_inverse(&xtx_star.view()) {
             Ok(inv) => inv,
@@ -956,35 +988,13 @@ fn optimize_sac(
             return f64::INFINITY;
         }
 
-        // Log determinants
-        let log_det_rho: f64 = eigenvalues
-            .iter()
-            .map(|&eig| {
-                let val = 1.0 - rho * eig;
-                if val > 0.0 {
-                    val.ln()
-                } else {
-                    f64::NEG_INFINITY
-                }
-            })
-            .sum();
-        let log_det_lambda: f64 = eigenvalues
-            .iter()
-            .map(|&eig| {
-                let val = 1.0 - lambda * eig;
-                if val > 0.0 {
-                    val.ln()
-                } else {
-                    f64::NEG_INFINITY
-                }
-            })
-            .sum();
-
-        if log_det_rho.is_infinite() || log_det_lambda.is_infinite() {
+        // Log determinants from the complex eigenvalues
+        let log_det = spectrum.log_det(rho) + spectrum.log_det(lambda);
+        if !log_det.is_finite() {
             return f64::INFINITY;
         }
 
-        const_term + 0.5 * n_f64 * sigma2.ln() - log_det_rho - log_det_lambda
+        const_term + 0.5 * n_f64 * sigma2.ln() - log_det
     };
 
     // Grid search for initial values
@@ -1125,19 +1135,13 @@ fn compute_sac_standard_errors(
 /// SAR: y = ρWy + Xβ + ε
 ///
 /// # Algorithm
-/// 1. Pre-compute (X'X)⁻¹ and W eigenvalues (constant across iterations)
-/// 2. For each ρ candidate:
-///    - Compute y_tilde = y - ρWy
-///    - Compute β = (X'X)⁻¹ X'y_tilde
-///    - Compute RSS and σ²
-///    - Compute log|I - ρW| = Σ ln(1 - ρλᵢ) using eigenvalues λᵢ
-/// 3. Use golden section search to find ρ minimizing negative log-likelihood
+/// With e_y and e_wy the residuals of y and Wy on X (Ord 1975), RSS(ρ) = ||e_y - ρ e_wy||² is a
+/// quadratic in ρ, so a likelihood evaluation costs three stored dot products and
+/// log|I - ρW| over the complex eigenvalues. Golden section search finds the maximum.
 ///
 /// # Arguments
-/// * `y` - Outcome vector (n × 1)
-/// * `wy` - Pre-computed spatial lag Wy (n × 1)
-/// * `x` - Design matrix (n × k)
-/// * `listw` - Spatial weights (provides eigenvalues for log-determinant)
+/// * `ord` - The regressions of y and Wy on X
+/// * `spectrum` - Eigenvalues of W for the log-determinant
 /// * `rho_min` - Lower bound for ρ (typically 1/λ_min)
 /// * `rho_max` - Upper bound for ρ (typically 1/λ_max)
 /// * `tol` - Convergence tolerance
@@ -1146,62 +1150,27 @@ fn compute_sac_standard_errors(
 /// # Returns
 /// Tuple of (ρ_optimal, log_likelihood)
 fn optimize_rho_sar(
-    y: &Array1<f64>,
-    wy: &Array1<f64>,
-    x: &Array2<f64>,
-    listw: &mut SpatialWeights,
+    ord: &OrdRegressions,
+    spectrum: &WeightsSpectrum,
     rho_min: f64,
     rho_max: f64,
     tol: f64,
     max_iter: usize,
 ) -> EconResult<(f64, f64)> {
-    let n = y.len();
-    let n_f64 = n as f64;
+    let n_f64 = ord.e_y.len() as f64;
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0; // Golden ratio
-
-    // Pre-compute (X'X)^{-1} - this is constant throughout optimization
-    let xtx_mat = xtx(&x.view());
-    let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-
-    // Pre-compute eigenvalues for log-determinant (caches in listw)
-    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     // Constant term in log-likelihood
     let const_term = 0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln());
 
-    // === Ord (1975) optimization ===
-    // Since y_tilde = y - rho*Wy, and beta = (X'X)^{-1} X'y_tilde,
-    // beta is linear in rho: beta(rho) = beta_y - rho * beta_wy
-    // where beta_y = (X'X)^{-1} X'y, beta_wy = (X'X)^{-1} X'Wy
-    //
-    // Residuals: e(rho) = y_tilde - X*beta = e_y - rho * e_wy
-    // where e_y = y - X*beta_y, e_wy = Wy - X*beta_wy
-    //
-    // RSS(rho) = ||e_y - rho * e_wy||^2 = ey_ey - 2*rho*ey_ewy + rho^2 * ewy_ewy
-    // This is a quadratic in rho, requiring only 3 pre-computed dot products!
-
-    let xty_y = xty(&x.view(), y);
-    let beta_y = xtx_inv.dot(&xty_y);
-    let fitted_y = x.dot(&beta_y);
-    let e_y: Array1<f64> = y - &fitted_y;
-
-    let xty_wy = xty(&x.view(), wy);
-    let beta_wy = xtx_inv.dot(&xty_wy);
-    let fitted_wy = x.dot(&beta_wy);
-    let e_wy: Array1<f64> = wy - &fitted_wy;
-
-    // Pre-compute the three dot products for the RSS quadratic
-    let ey_ey: f64 = e_y.iter().map(|&r| r * r).sum();
-    let ey_ewy: f64 = e_y.iter().zip(e_wy.iter()).map(|(&a, &b)| a * b).sum();
-    let ewy_ewy: f64 = e_wy.iter().map(|&r| r * r).sum();
+    let ey_ey = ord.e_y.dot(&ord.e_y);
+    let ey_ewy = ord.e_y.dot(&ord.e_wy);
+    let ewy_ewy = ord.e_wy.dot(&ord.e_wy);
 
     let mut a = rho_min;
     let mut b = rho_max;
 
-    // Concentrated log-likelihood as function of rho
-    // Now only requires O(p) work for the log-determinant (no matrix ops)
     let neg_ll = |rho: f64| -> f64 {
-        // RSS(rho) = ey_ey - 2*rho*ey_ewy + rho^2 * ewy_ewy
         let rss = ey_ey - 2.0 * rho * ey_ewy + rho * rho * ewy_ewy;
         let sigma2 = rss / n_f64;
 
@@ -1209,17 +1178,11 @@ fn optimize_rho_sar(
             return f64::INFINITY;
         }
 
-        // Log determinant using pre-computed eigenvalues: O(p) scalar ops
-        let log_det: f64 = eigenvalues
-            .iter()
-            .map(|&lambda| (1.0 - rho * lambda).ln())
-            .sum();
-
         // Negative concentrated log-likelihood (for minimization)
-        const_term + 0.5 * n_f64 * sigma2.ln() - log_det
+        const_term + 0.5 * n_f64 * sigma2.ln() - spectrum.log_det(rho)
     };
 
-    // Golden section search (each iteration is now O(p) instead of O(n*k))
+    // Golden section search (each iteration is O(p) instead of O(n*k))
     let mut c = b - (b - a) / phi;
     let mut d = a + (b - a) / phi;
     let mut fc = neg_ll(c);
@@ -1278,7 +1241,8 @@ fn optimize_rho_sar(
 /// # Arguments
 /// * `y` - Outcome vector (n × 1)
 /// * `x` - Design matrix (n × k)
-/// * `listw` - Spatial weights (provides lag and eigenvalues)
+/// * `listw` - Spatial weights (provides the lags)
+/// * `spectrum` - Eigenvalues of W for the log-determinant
 /// * `lambda_min` - Lower bound for λ
 /// * `lambda_max` - Upper bound for λ
 /// * `tol` - Convergence tolerance
@@ -1289,7 +1253,8 @@ fn optimize_rho_sar(
 fn optimize_lambda_sem(
     y: &Array1<f64>,
     x: &Array2<f64>,
-    listw: &mut SpatialWeights,
+    listw: &SpatialWeights,
+    spectrum: &WeightsSpectrum,
     lambda_min: f64,
     lambda_max: f64,
     tol: f64,
@@ -1299,9 +1264,6 @@ fn optimize_lambda_sem(
     let n_f64 = n as f64;
     let k = x.ncols();
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
-
-    // Pre-compute eigenvalues for log-determinant
-    let eigenvalues = listw.try_eigenvalues()?.clone();
 
     // Pre-compute Wy and WX (these don't change with lambda)
     let wy = listw.lag(y);
@@ -1355,7 +1317,8 @@ fn optimize_lambda_sem(
         // X*'y* = X'y - λ*(X'Wy + WX'y) + λ²*WX'Wy
         let xty_star = &xy - lambda * &xwy_plus_wxy + l2 * &wxwy;
 
-        // Solve k×k system for β (tiny for typical k=2-5)
+        // Solve k×k system for β (tiny for typical k=2-5); X is of full rank, so (I - λW)X is on
+        // the feasible interval
         let xtx_inv = match matrix_inverse(&xtx_star.view()) {
             Ok(inv) => inv,
             Err(_) => return f64::INFINITY,
@@ -1373,13 +1336,8 @@ fn optimize_lambda_sem(
             return f64::INFINITY;
         }
 
-        // Log determinant using pre-computed eigenvalues: O(p) scalar ops
-        let log_det: f64 = eigenvalues
-            .iter()
-            .map(|&lambda_eig| (1.0 - lambda * lambda_eig).ln())
-            .sum();
-
-        const_term + 0.5 * n_f64 * sigma2.ln() - log_det
+        // Log determinant from the complex eigenvalues: O(p) scalar ops
+        const_term + 0.5 * n_f64 * sigma2.ln() - spectrum.log_det(lambda)
     };
 
     // Golden section search (each iteration is now O(k³ + p) instead of O(n*k))
@@ -1672,8 +1630,6 @@ fn compute_impacts_dense(
     })
 }
 
-use statrs::distribution::ContinuousCDF;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1898,334 +1854,125 @@ mod tests {
         );
     }
 
-    // ========================================================================
-    // R-vs-Rust Validation Tests (Phase 7)
-    // ========================================================================
+    use crate::data::columns::numeric_column;
 
-    fn create_validation_spatial_data() -> (Dataset, SpatialWeights) {
-        // Create a larger spatial dataset for validation
-        // 5x5 grid (25 observations)
-        let n = 25;
-
-        // Deterministic coordinates for 5x5 grid
-        let coords: Vec<(f64, f64)> = (0..5)
-            .flat_map(|i| (0..5).map(move |j| (i as f64, j as f64)))
-            .collect();
-
-        // Create neighbors (4-nearest neighbors)
-        let nb = Neighbors::from_knn(&coords, 4);
-        let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
-
-        // Generate spatially autocorrelated data
-        // y = 1.5 + 0.8*x1 - 0.3*x2 + spatial_effect
-        let x1: Vec<f64> = (0..n).map(|i| (i as f64) / 5.0).collect();
-        let x2: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 / 6.0).collect();
-
-        let mut y: Vec<f64> = x1
-            .iter()
-            .zip(x2.iter())
-            .map(|(&x1i, &x2i)| 1.5 + 0.8 * x1i - 0.3 * x2i)
-            .collect();
-
-        // Add spatial pattern (neighboring values similar)
-        for i in 0..n {
-            let row = i / 5;
-            let col = i % 5;
-            y[i] += 0.2 * ((row + col) as f64);
-        }
-
-        let df = df! {
-            "y" => &y,
-            "x1" => &x1,
-            "x2" => &x2,
-        }
-        .unwrap();
-
-        let dataset = Dataset::new(df);
-        (dataset, listw)
+    fn col(ds: &Dataset, name: &str) -> Vec<f64> {
+        numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0
     }
 
-    #[test]
-    fn test_validate_sar_vs_r() {
-        // R reference:
-        // library(spatialreg)
-        // nb <- knn2nb(knearneigh(coords, k=4))
-        // listw <- nb2listw(nb, style="W")
-        // sar <- lagsarlm(y ~ x1 + x2, data=data, listw=listw)
-        let (dataset, mut listw) = create_validation_spatial_data();
-
-        let config = SarConfig::default();
-        let result = run_sar(&dataset, "y", &["x1", "x2"], &mut listw, config).unwrap();
-
-        // Verify structure matches R's lagsarlm output
-        assert_eq!(result.n_obs, 25);
-        assert_eq!(result.coefficients.len(), 3); // Intercept, x1, x2
-        assert_eq!(result.coef_names.len(), 3);
-        assert_eq!(result.coef_names[0], "(Intercept)");
-        assert_eq!(result.coef_names[1], "x1");
-        assert_eq!(result.coef_names[2], "x2");
-
-        // rho should be in valid range
-        assert!(
-            result.rho > -1.0 && result.rho < 1.0,
-            "rho {} out of bounds",
-            result.rho
-        );
-
-        // AIC and BIC should be finite
-        assert!(result.aic.is_finite());
-        assert!(result.bic.is_finite());
+    fn coords_of(ds: &Dataset) -> Vec<(f64, f64)> {
+        col(ds, "cx").into_iter().zip(col(ds, "cy")).collect()
     }
 
-    #[test]
-    fn test_validate_sar_spatial_coefficient() {
-        let (dataset, mut listw) = create_validation_spatial_data();
-        let result = run_sar(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw,
-            SarConfig::default(),
+    /// The case's W: 4 nearest neighbours on (cx, cy), row-standardised (spdep style "W").
+    fn knn4(ds: &Dataset) -> SpatialWeights {
+        SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords_of(ds), 4).unwrap(),
+            WeightStyle::RowStd,
         )
-        .unwrap();
-
-        // With spatial autocorrelation in data, rho should be positive
-        // (data was generated with positive spatial pattern)
-        // Note: exact value depends on DGP
-        assert!(result.rho_se > 0.0, "rho standard error should be positive");
-
-        // p-value should be in [0, 1]
-        assert!(
-            result.rho_p >= 0.0 && result.rho_p <= 1.0,
-            "rho p-value should be in [0,1]"
-        );
     }
 
+    /// R: concentrated lagsarlm (Durbin = FALSE/TRUE) and errorsarlm likelihoods with the complex
+    /// log-determinant, written out (spatialreg not installed); spatial_ml_weights.R, case
+    /// spatial_sar_sdm_sem.
     #[test]
-    fn test_validate_sem_vs_r() {
-        // R reference:
-        // sem <- errorsarlm(y ~ x1 + x2, data=data, listw=listw)
-        let (dataset, mut listw) = create_validation_spatial_data();
-
-        let config = SemConfig::default();
-        let result = run_sem(&dataset, "y", &["x1", "x2"], &mut listw, config).unwrap();
-
-        // Verify structure matches R's errorsarlm output
-        assert_eq!(result.n_obs, 25);
-        assert_eq!(result.coefficients.len(), 3);
-        assert_eq!(result.coef_names[0], "(Intercept)");
-
-        // lambda should be in valid range
-        assert!(
-            result.lambda > -1.0 && result.lambda < 1.0,
-            "lambda {} out of bounds",
-            result.lambda
-        );
-
-        // Standard errors should be positive
-        for se in &result.std_errors {
-            assert!(*se > 0.0, "SE should be positive");
-        }
-        assert!(result.lambda_se > 0.0);
-    }
-
-    #[test]
-    fn test_validate_sac_vs_r() {
-        // R reference:
-        // sac <- sacsarlm(y ~ x1 + x2, data=data, listw=listw)
-        let (dataset, mut listw) = create_validation_spatial_data();
-
-        let config = SacConfig::default();
-        let result = run_sac(&dataset, "y", &["x1", "x2"], &mut listw, config).unwrap();
-
-        // Verify structure
-        assert_eq!(result.n_obs, 25);
-        assert_eq!(result.coefficients.len(), 3);
-
-        // Both spatial params should be in valid range
-        assert!(result.rho > -1.0 && result.rho < 1.0);
-        assert!(result.lambda > -1.0 && result.lambda < 1.0);
-
-        // P-values should be valid
-        assert!(result.rho_p >= 0.0 && result.rho_p <= 1.0);
-        assert!(result.lambda_p >= 0.0 && result.lambda_p <= 1.0);
-    }
-
-    #[test]
-    fn test_validate_sar_impacts_structure() {
-        // R reference:
-        // impacts(sar)
-        let (dataset, mut listw) = create_validation_spatial_data();
-
-        let config = SarConfig {
-            compute_impacts: true,
-            ..Default::default()
-        };
-        let result = run_sar(&dataset, "y", &["x1", "x2"], &mut listw, config).unwrap();
-
-        let impacts = result.impacts.expect("Impacts should be computed");
-
-        // Should have impacts for x1 and x2 (not intercept)
-        assert_eq!(impacts.var_names.len(), 2);
-        assert_eq!(impacts.direct.len(), 2);
-        assert_eq!(impacts.indirect.len(), 2);
-        assert_eq!(impacts.total.len(), 2);
-
-        // Variable names should match
-        assert!(impacts.var_names.contains(&"x1".to_string()));
-        assert!(impacts.var_names.contains(&"x2".to_string()));
-    }
-
-    #[test]
-    fn test_validate_spatial_durbin_model() {
-        // R reference:
-        // sdm <- lagsarlm(y ~ x1 + x2, data=data, listw=listw, type="Durbin")
-        let (dataset, mut listw) = create_validation_spatial_data();
-
-        let config = SarConfig {
+    fn test_validate_sar_sdm_sem_concentrated_ml() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_sar_sdm_sem");
+        let x = ["x1", "x2"];
+        let mut w = knn4(&ds);
+        let sar = run_sar(&ds, "y", &x, &mut w, SarConfig::default()).unwrap();
+        let durbin = SarConfig {
             durbin: true,
-            compute_impacts: false,
             ..Default::default()
         };
-        let result = run_sar(&dataset, "y", &["x1", "x2"], &mut listw, config).unwrap();
-
-        // Should have intercept, x1, x2, lag.x1, lag.x2
-        assert!(result.is_durbin);
-        assert_eq!(result.coefficients.len(), 5);
-        assert!(result.coef_names.contains(&"lag.x1".to_string()));
-        assert!(result.coef_names.contains(&"lag.x2".to_string()));
-    }
-
-    #[test]
-    fn test_validate_model_comparison_aic_bic() {
-        let (dataset, mut listw) = create_validation_spatial_data();
-
-        let sar_result = run_sar(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw.clone(),
-            SarConfig::default(),
-        )
-        .unwrap();
-        let sem_result = run_sem(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw.clone(),
-            SemConfig::default(),
-        )
-        .unwrap();
-        let sac_result = run_sac(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw,
-            SacConfig::default(),
-        )
-        .unwrap();
-
-        // All models should have finite AIC/BIC
-        assert!(sar_result.aic.is_finite());
-        assert!(sem_result.aic.is_finite());
-        assert!(sac_result.aic.is_finite());
-
-        // BIC should generally be >= AIC for larger samples
-        // This relationship holds when n > e^2 ≈ 7.4
-        assert!(sar_result.bic.is_finite());
-        assert!(sem_result.bic.is_finite());
-        assert!(sac_result.bic.is_finite());
-    }
-
-    #[test]
-    fn test_validate_residuals_and_fitted() {
-        let (dataset, mut listw) = create_validation_spatial_data();
-        let result = run_sar(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw,
-            SarConfig::default(),
-        )
-        .unwrap();
-
-        // Residuals and fitted should have correct length
-        assert_eq!(result.residuals.len(), 25);
-        assert_eq!(result.fitted.len(), 25);
-
-        // Residuals should be finite
-        for r in result.residuals.iter() {
-            assert!(r.is_finite(), "Residual should be finite");
-        }
-
-        // Fitted should be finite
-        for f in result.fitted.iter() {
-            assert!(f.is_finite(), "Fitted value should be finite");
-        }
-
-        // Residual variance should match sigma2 approximately
-        let res_var: f64 = result.residuals.iter().map(|r| r * r).sum::<f64>() / 25.0;
-        let ratio = res_var / result.sigma2;
-        assert!(
-            ratio > 0.5 && ratio < 2.0,
-            "Residual variance {} should be close to sigma2 {}",
-            res_var,
-            result.sigma2
-        );
-    }
-
-    #[test]
-    fn test_validate_z_values_and_p_values() {
-        let (dataset, mut listw) = create_validation_spatial_data();
-        let result = run_sem(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw,
-            SemConfig::default(),
-        )
-        .unwrap();
-
-        // z_values = coef / se
-        for i in 0..result.coefficients.len() {
-            let expected_z = result.coefficients[i] / result.std_errors[i];
+        let sdm = run_sar(&ds, "y", &x, &mut w, durbin).unwrap();
+        let sem = run_sem(&ds, "y", &x, &mut w, SemConfig::default()).unwrap();
+        let n = sar.n_obs;
+        // Golden-section searches on flat concentrated likelihoods: the flatness bound is 1.3e-7
+        // in rho, and an R replay of the search reaches 1e-8 relative. Residuals move by at most
+        // max|de/drho| (2.24) x 1.3e-7.
+        let est = Tol::iterative(1e-6);
+        let imp = sar.impacts.as_ref().expect("SAR impacts");
+        Check::new(&case)
+            .scalar("sar_rho", sar.rho, est)
+            .named("sar_beta", &sar.coef_names, &sar.coefficients, est)
+            .scalar("sar_s2", sar.sigma2, Tol::stat(n))
+            .scalar("sar_loglik", sar.log_likelihood, Tol::stat(n))
+            .scalar("sar_aic", sar.aic, Tol::stat(n))
+            .scalar("sar_bic", sar.bic, Tol::stat(n))
+            .vector(
+                "sar_residuals",
+                &sar.residuals.to_vec(),
+                Tol::new(1e-6, 1e-6),
+            )
+            .named("sar_impact_direct", &imp.var_names, &imp.direct, est)
+            .named("sar_impact_indirect", &imp.var_names, &imp.indirect, est)
+            .named("sar_impact_total", &imp.var_names, &imp.total, est)
+            .scalar("sdm_rho", sdm.rho, est)
+            .named("sdm_beta", &sdm.coef_names, &sdm.coefficients, est)
+            .scalar("sdm_s2", sdm.sigma2, Tol::stat(n))
+            .scalar("sdm_loglik", sdm.log_likelihood, Tol::stat(n))
+            .scalar("sdm_aic", sdm.aic, Tol::stat(n))
+            .scalar("sdm_bic", sdm.bic, Tol::stat(n))
+            .scalar("sem_lambda", sem.lambda, est)
+            .named("sem_beta", &sem.coef_names, &sem.coefficients, est)
+            // errorsarlm rest.se = sqrt(s2 diag((X*'X*)^-1)), s2 = SSE / n
+            .named("sem_beta_se", &sem.coef_names, &sem.std_errors, Tol::se(n))
+            .named("sem_beta_z", &sem.coef_names, &sem.z_values, Tol::stat(n))
+            .named(
+                "sem_beta_p",
+                &sem.coef_names,
+                &sem.p_values,
+                Tol::p_value(n),
+            )
+            .scalar("sem_s2", sem.sigma2, Tol::stat(n))
+            .scalar("sem_loglik", sem.log_likelihood, Tol::stat(n))
+            .scalar("sem_aic", sem.aic, Tol::stat(n))
+            .scalar("sem_bic", sem.bic, Tol::stat(n))
+            .finish();
+        let y = col(&ds, "y");
+        for i in 0..n {
             assert!(
-                (result.z_values[i] - expected_z).abs() < 1e-8,
-                "z-value mismatch at index {}",
-                i
+                (sar.fitted[i] + sar.residuals[i] - y[i]).abs() <= 1e-12 * (1.0 + y[i].abs()),
+                "row {i}"
             );
         }
-
-        // p-values should be in [0, 1]
-        for p in &result.p_values {
-            assert!(*p >= 0.0 && *p <= 1.0, "p-value out of range");
-        }
+        assert_eq!((sar.df, sdm.df, sem.df), (n - 4, n - 6, n - 4));
     }
 
+    /// R: concentrated sacsarlm likelihood, BFGS then Newton on the analytic score
+    /// (spatial_ml_weights.R).
     #[test]
-    fn test_validate_sar_coefficient_signs() {
-        // Data was generated with:
-        // y = 1.5 + 0.8*x1 - 0.3*x2 + spatial
-        // So x1 coefficient should be positive, x2 should be negative
-        let (dataset, mut listw) = create_validation_spatial_data();
-        let result = run_sar(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            &mut listw,
-            SarConfig::default(),
-        )
-        .unwrap();
-
-        // Coefficients: [intercept, x1, x2]
-        // x1 coefficient (index 1) should be positive
-        // Note: exact value affected by spatial lag
-        // This is a structural test, not exact value test
-        assert!(result.coefficients.len() == 3);
-        // Just verify we get valid coefficients
-        for coef in &result.coefficients {
-            assert!(coef.is_finite());
-        }
+    fn test_validate_sac_concentrated_ml() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_sar_sdm_sem");
+        let mut w = knn4(&ds);
+        let tight = SacConfig {
+            tol: 1e-10,
+            max_iter: 1000,
+            ..Default::default()
+        };
+        let r = run_sac(&ds, "y", &["x1", "x2"], &mut w, tight).unwrap();
+        let n = r.n_obs;
+        // Coordinate descent with golden sections: an R replay reaches 3.1e-8 (rho) and 3.6e-7
+        // (lambda = -0.209) at tol 1e-10.
+        let it = Tol::iterative(1e-5);
+        Check::new(&case)
+            .scalar("sac_rho", r.rho, it)
+            .scalar("sac_lambda", r.lambda, it)
+            .named("sac_beta", &r.coef_names, &r.coefficients, it)
+            .scalar("sac_s2", r.sigma2, it)
+            .scalar("sac_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("sac_aic", r.aic, Tol::stat(n))
+            .scalar("sac_bic", r.bic, Tol::stat(n))
+            .finish();
+        // the package default (tol 1e-6): the replay reaches 1.4e-7 (rho), 1.6e-6 (lambda)
+        let d = run_sac(&ds, "y", &["x1", "x2"], &mut w, SacConfig::default()).unwrap();
+        Check::new(&case)
+            .scalar("sac_rho", d.rho, Tol::iterative(1e-4))
+            .scalar("sac_lambda", d.lambda, Tol::iterative(1e-4))
+            .finish();
     }
 
     use crate::linalg::matrix_ops::LinalgError;
@@ -2386,65 +2133,6 @@ mod tests {
         assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
     }
 
-    /// Relative closeness: `(a - b).abs() <= tol * max(1, |b|)`.
-    fn assert_rel(a: f64, b: f64, tol: f64, what: &str) {
-        assert!(
-            (a - b).abs() <= tol * b.abs().max(1.0),
-            "{what}: {a:.17e} vs {b:.17e}"
-        );
-    }
-
-    #[test]
-    fn sar_results_are_unchanged() {
-        // Pinned at the values the dense-inverse code printed before the trace-based impacts:
-        // [rho, intercept, slope, log-likelihood, direct, indirect, total]
-        let (d16, w16) = create_test_data();
-        let fixture = crate::spatial::test_fixtures::dataset();
-        for (dataset, mut w, y, x, pins) in [
-            (
-                d16,
-                w16,
-                "y",
-                "x",
-                [
-                    0.563062022739153,
-                    0.7115505817274794,
-                    0.5527794364074365,
-                    3.4256516808126527,
-                    0.6059112852484777,
-                    0.6592097735177948,
-                    1.2651210587662725,
-                ],
-            ),
-            (
-                fixture,
-                knn3(WeightStyle::RowStd),
-                "y",
-                "x1",
-                [
-                    0.25113680807766964,
-                    2.3239067118867496,
-                    1.745732427166816,
-                    -54.37410609368971,
-                    1.7774931103853961,
-                    0.553683593179811,
-                    2.331176703565207,
-                ],
-            ),
-        ] {
-            let r = run_sar(&dataset, y, &[x], &mut w, SarConfig::default()).unwrap();
-            let imp = r.impacts.as_ref().unwrap();
-            assert_rel(r.rho, pins[0], 1e-10, "rho");
-            assert_rel(r.coefficients[0], pins[1], 1e-10, "intercept");
-            assert_rel(r.coefficients[1], pins[2], 1e-10, "slope");
-            assert_rel(r.log_likelihood, pins[3], 1e-10, "log-likelihood");
-            assert_rel(imp.direct[0], pins[4], 1e-10, "direct");
-            assert_rel(imp.indirect[0], pins[5], 1e-10, "indirect");
-            assert_rel(imp.total[0], pins[6], 1e-10, "total");
-            assert!(imp.warnings.is_empty());
-        }
-    }
-
     #[test]
     fn estimators_reject_bad_tolerance_and_iterations() {
         let (d, mut w) = create_test_data();
@@ -2549,8 +2237,8 @@ mod tests {
     /// 5 x 5 grid, W = 4 nearest neighbours (row-standardised), integer-valued data:
     /// x1 = 6 i, x2 = 5 ((7 i) mod 13),
     /// y = round(30 (1.5 + 0.8 i/5 - 0.3 ((7 i) mod 13)/6 + 0.2 (row + col)))
-    /// (`create_validation_spatial_data` scaled by 30 and rounded, so the fit stays well
-    /// conditioned). Returns the Int64 columns, a Float64 copy and W.
+    /// (the former `create_validation_spatial_data` scaled by 30 and rounded, so the fit stays
+    /// well conditioned). Returns the Int64 columns, a Float64 copy and W.
     fn int_grid() -> (DataFrame, DataFrame, SpatialWeights) {
         let coords: Vec<(f64, f64)> = (0..5)
             .flat_map(|i| (0..5).map(move |j| (i as f64, j as f64)))
