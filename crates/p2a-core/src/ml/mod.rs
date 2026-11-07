@@ -77,8 +77,8 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **ICE Curves** | [`compute_ice_curves`] | Individual Conditional Expectation |
-//! | **Partial Dependence** | [`partial_dependence`] | Partial dependence of predictions on one feature |
+//! | **Partial Dependence** | [`partial_dependence`], [`partial_dependence_2d`], [`gbm_partial_dependence`], [`cart_partial_dependence`] | Average prediction over a feature grid; grids as `pdp::partial` (one engine: [`pdp`]; fallible prediction functions: [`pdp::try_partial_dependence`], [`pdp::try_partial_dependence_2d`]) |
+//! | **ICE Curves** | [`compute_ice_curves`], [`ice_curves_gbm`], [`ice_curves_cart`], [`ice_curves_rf`] | Individual and centred conditional expectation curves on the same engine (fallible prediction functions: [`ice::try_compute_ice_curves`]) |
 //! | **SHAP** | [`kernel_shap`], [`shap_tree_ensemble`] | SHapley Additive exPlanations (model-agnostic Kernel SHAP; tree ensembles) |
 //!
 //! ## Advanced Tree Methods
@@ -120,11 +120,8 @@
 //!
 //! ## Large-N Performance
 //!
-//! HDBSCAN and OPTICS automatically select optimal algorithms for large datasets:
-//! - n < 500: O(n²) brute-force
-//! - n < 10,000 && d <= 15: O(n log n) KD-Tree + Prim's
-//! - n >= 10,000 && d <= 15: O(n log n) Dual-Tree Boruvka
-//! - d > 15: O(n²) parallel brute-force
+//! The density-based methods choose their neighbour search by data size; [`advanced_clustering_mod`]
+//! documents the algorithm [`hdbscan()`] and [`optics()`] use.
 //!
 //! ## Example
 //!
@@ -174,13 +171,17 @@
 //! | `stats` (kmeans) | [`kmeans`], [`hierarchical`], [`cmdscale`] |
 //! | `cluster` | [`kmedoids()`], [`agnes`], [`diana`], [`clara`], [`fanny`], [`silhouette`] |
 //! | `dbscan` | [`dbscan`], [`hdbscan()`], [`optics()`] |
-//! | `mclust` | [`gaussian_mixture`], [`normal_mix_em`] |
+//! | `mclust` | [`gaussian_mixture`] |
+//! | `mixtools` | [`normal_mix_em`], [`mvnorm_mix_em`] |
+//! | `apcluster` | [`affinity_propagation`] |
 //! | `fastcluster` | [`fastcluster`] |
 //! | `dynamicTreeCut` | [`dynamic_tree_cut()`] |
 //! | `flexmix` | [`flexmix`] |
 //! | `pvclust` | [`pvclust`] |
 //! | `grf` | [`causal_forest()`] |
 //! | `BART` | [`bart()`], [`bart_causal()`] |
+//! | `pdp` | [`partial_dependence`], [`partial_dependence_2d`] |
+//! | `ICEbox` | [`compute_ice_curves`] |
 //! | `iml`, `DALEX` | [`compute_ice_curves`], [`partial_dependence`], [`kernel_shap`] |
 //! | `quantregForest` | [`quantile_rf()`] |
 //! | `party` | [`ctree()`] |
@@ -474,7 +475,7 @@ pub use trees::{
     DecisionTree, RandomForestModel, RandomForestResult, TreeNode, random_forest,
     random_forest_with_trees,
 };
-// ICE curves (Individual Conditional Expectation) - enhanced version with heterogeneity analysis
+// ICE curves on the PDP engine, with heterogeneity statistics.
 pub use ice::{
     IceConfig, IceResult, IceSpread, compute_ice_curves, ice_curves_cart, ice_curves_gbm,
     ice_curves_rf,
@@ -505,7 +506,8 @@ pub use mboost_fast::{
     FastMboostConfig, FastMboostFamily, FastMboostLearner, FastMboostResult, fast_mboost,
     fast_mboost_predict,
 };
-// PDP (Partial Dependence Plot) - original version.
+// The PDP/ICE engine: partial dependence; the grid rules (GridSpec, feature_grid) and the fallible
+// entry points are reached through the `pdp` module path.
 // The config and result types are part of the callable surface: `partial_dependence`
 // takes `&PdpConfig`, so without it no caller outside the crate can set
 // `grid_resolution`, `use_quantiles`, `quantiles`, or `center`.

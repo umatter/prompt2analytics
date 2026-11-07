@@ -488,7 +488,7 @@ impl std::fmt::Display for VariableImportanceResult {
     }
 }
 
-/// Deprecated name of [`PdpResult`](crate::ml::PdpResult). The GBM and CART helpers return the engine's result
+/// Deprecated name of [`PdpResult`]. The GBM and CART helpers return the engine's result
 /// since the PDP/ICE engine was unified: `grid_values`, `pdp_values`, `feature_name`, `model` replace
 /// `grid_values[0]`, `pd_values`, `feature_names`, `model_type`.
 #[deprecated(
