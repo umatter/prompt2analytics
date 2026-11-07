@@ -36,7 +36,7 @@
 //!
 //! - Ke, G., et al. (2017). "LightGBM: A Highly Efficient Gradient Boosting Decision Tree".
 //!   Advances in Neural Information Processing Systems 30 (NIPS 2017).
-//! - LightGBM Documentation: https://lightgbm.readthedocs.io/
+//! - LightGBM Documentation: <https://lightgbm.readthedocs.io/>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -229,7 +229,7 @@ impl std::fmt::Display for LightGbmResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -272,7 +272,7 @@ impl FeatureBins {
     fn from_data(values: &[f64], max_bins: usize) -> Self {
         // Get unique sorted values
         let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.total_cmp(b));
         sorted.dedup();
 
         if sorted.len() <= 1 {
@@ -316,10 +316,7 @@ impl FeatureBins {
     #[inline]
     fn get_bin(&self, value: f64) -> usize {
         // Binary search for the right bin
-        match self
-            .boundaries
-            .binary_search_by(|b| b.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal))
-        {
+        match self.boundaries.binary_search_by(|b| b.total_cmp(&value)) {
             Ok(i) => i + 1, // Value equals boundary, goes to right bin
             Err(i) => i,    // Value between boundaries[i-1] and boundaries[i]
         }
@@ -391,9 +388,7 @@ impl PartialOrd for LeafInfo {
 impl Ord for LeafInfo {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Max-heap by gain
-        self.gain
-            .partial_cmp(&other.gain)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        self.gain.total_cmp(&other.gain)
     }
 }
 
@@ -518,13 +513,12 @@ fn compute_gradients_hessians(
             // Huber loss
             for i in 0..n {
                 let r = y[i] - predictions[i];
-                if r.abs() <= huber_delta {
-                    gradients[i] = -r;
-                    hessians[i] = 1.0;
+                gradients[i] = if r.abs() <= huber_delta {
+                    -r
                 } else {
-                    gradients[i] = -huber_delta * r.signum();
-                    hessians[i] = 0.0; // Or small constant
-                }
+                    -huber_delta * r.signum()
+                };
+                hessians[i] = 1.0; // LightGBM RegressionHuberLoss: hessian 1
             }
         }
         LightGbmObjective::Binary => {
@@ -607,7 +601,7 @@ fn compute_init_prediction(y: &ArrayView1<f64>, objective: LightGbmObjective) ->
         LightGbmObjective::RegressionL1 => {
             // Median
             let mut sorted: Vec<f64> = y.iter().copied().collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let mid = sorted.len() / 2;
             if sorted.len() % 2 == 0 {
                 (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -1189,6 +1183,7 @@ pub fn lightgbm(
             "X and y must have same number of samples".to_string(),
         ));
     }
+    super::xgboost::check_finite_xy(x, y)?;
 
     // Validate binary targets for classification
     if config.objective == LightGbmObjective::Binary {
@@ -1591,35 +1586,56 @@ mod tests {
 
     #[test]
     fn test_lightgbm_huber() {
-        // Robust regression with outlier
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0],
-            [9.0],
-            [10.0]
-        ];
-        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 50.0]; // outlier at 10
+        // Robust regression with an outlier at x = 10 (y = 50). With unit hessians each leaf value is
+        // the mean clipped gradient, |leaf| <= delta, so the fit moves at most learning_rate * delta
+        // per iteration.
+        let x = Array2::from_shape_fn((10, 1), |(i, _)| (i + 1) as f64);
+        let mut y = Array1::from_shape_fn(10, |i| (i + 1) as f64);
+        y[9] = 50.0;
+        for iters in [99usize, 100, 101] {
+            let mut c = LightGbmConfig::default();
+            c.num_iterations = iters;
+            c.learning_rate = 0.1;
+            c.num_leaves = 8;
+            c.min_data_in_leaf = 1;
+            c.objective = LightGbmObjective::Huber;
+            c.huber_delta = 1.0;
+            let r = lightgbm(x.view(), y.view(), &c).unwrap();
+            assert!(
+                r.final_train_loss < r.train_loss[0],
+                "{iters}: {} vs {}",
+                r.final_train_loss,
+                r.train_loss[0]
+            );
+            assert!(
+                r.train_loss.windows(2).all(|w| w[1] <= w[0] + 1e-12),
+                "{iters}: loss rose"
+            );
+            let start = y.mean().unwrap(); // 9.5
+            for &p in &r.predictions {
+                assert!(
+                    p.is_finite() && (p - start).abs() <= 0.1 * iters as f64 + 1e-9,
+                    "{iters}: {p}"
+                );
+            }
+            assert!(
+                r.predictions[9] < 25.0,
+                "Huber bounds the outlier's pull: {}",
+                r.predictions[9]
+            );
+        }
+    }
 
-        let config = LightGbmConfig {
-            num_iterations: 100,
-            learning_rate: 0.1,
-            num_leaves: 8,
-            min_data_in_leaf: 1,
-            objective: LightGbmObjective::Huber,
-            huber_delta: 1.0,
-            ..Default::default()
-        };
-
-        let result = lightgbm(x.view(), y.view(), &config).unwrap();
-
-        // Loss should decrease
-        assert!(result.final_train_loss <= result.train_loss[0]);
+    #[test]
+    fn lightgbm_rejects_non_finite_inputs() {
+        let mut x = Array2::from_shape_fn((20, 2), |(i, j)| (i * 2 + j) as f64);
+        let y = Array1::from_shape_fn(20, |i| i as f64 * 0.5 + 0.1);
+        x[[4, 1]] = f64::NAN;
+        let e = lightgbm(x.view(), y.view(), &LightGbmConfig::default()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("row 4, column 1")),
+            "{e}"
+        );
     }
 
     #[test]
