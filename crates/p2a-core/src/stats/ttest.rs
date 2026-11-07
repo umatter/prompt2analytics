@@ -53,10 +53,11 @@
 //! df = n - 1
 //! ```
 
+use polars::prelude::DataFrame;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
 use crate::traits::estimator::{t_quantile, t_test_p_value, validate_level};
@@ -465,6 +466,16 @@ pub fn paired_t_test(
     Ok(result)
 }
 
+/// Read a sample with its missing values dropped; a column with none left names itself and the test.
+fn sample_column(df: &DataFrame, name: &str, test: &str) -> EconResult<(Vec<f64>, MissingSummary)> {
+    let cols = ColumnRequest::new(df)
+        .numeric(name)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &format!("{test}: column '{name}'"))
+        .extract()?;
+    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
+}
+
 /// Perform t-test using dataset columns.
 ///
 /// Convenience wrapper that extracts data from a Dataset.
@@ -532,14 +543,14 @@ pub fn t_test(
             Ok(result)
         }
         Some(y_name) => {
-            let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
-            let (y, missing_y) = numeric_column(df, y_name, NaPolicy::Omit)?;
+            let (x, missing_x) = sample_column(df, x_col, "t-test")?;
+            let (y, missing_y) = sample_column(df, y_name, "t-test")?;
             let mut result = two_sample_t_test(&x, &y, mu, alternative, var_equal, conf_level)?;
             result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
             Ok(result)
         }
         None => {
-            let (x, missing) = numeric_column(df, x_col, NaPolicy::Omit)?;
+            let (x, missing) = sample_column(df, x_col, "t-test")?;
             if paired {
                 return Err(EconError::InvalidSpecification {
                     message: "Paired test requires two columns".to_string(),
@@ -1167,5 +1178,24 @@ mod tests {
         assert_eq!(Alternative::from_str("sideways"), None);
         assert!("sideways".parse::<Alternative>().is_err());
         assert_eq!(Alternative::TwoSided.to_string(), "two.sided");
+    }
+
+    #[test]
+    fn test_t_test_all_missing_column_is_named() {
+        let ds =
+            Dataset::new(df! { "x" => [1.2, 0.4, 2.2], "y" => [None::<f64>, None, None] }.unwrap());
+        let e = t_test(
+            &ds,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            false,
+            false,
+            0.95,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("'y'") && e.contains("t-test"), "{e}");
     }
 }

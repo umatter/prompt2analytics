@@ -47,10 +47,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use polars::prelude::DataFrame;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Result Structs
@@ -587,6 +588,16 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
 // Dataset Interface
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Read a sample with its missing values dropped; a column with none left names itself and the test.
+fn sample_column(df: &DataFrame, name: &str, test: &str) -> EconResult<(Vec<f64>, MissingSummary)> {
+    let cols = ColumnRequest::new(df)
+        .numeric(name)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &format!("{test}: column '{name}'"))
+        .extract()?;
+    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
+}
+
 /// Perform Kolmogorov-Smirnov test using dataset columns.
 ///
 /// Each column drops its own missing values (null or NaN), as `ks.test` does, and the drop is
@@ -617,12 +628,12 @@ pub fn ks_test(
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
     let df = dataset.df();
-    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
+    let (x, missing_x) = sample_column(df, x_col, "Kolmogorov-Smirnov")?;
 
     match y_col {
         Some(y_name) => {
             // Two-sample test
-            let (y, missing_y) = numeric_column(df, y_name, NaPolicy::Omit)?;
+            let (y, missing_y) = sample_column(df, y_name, "Kolmogorov-Smirnov")?;
             let mut result = ks_test_two_sample(&x, &y, alternative)?;
             result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
             Ok(result)
@@ -1232,5 +1243,17 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_ks_all_missing_column_is_named() {
+        let ds = Dataset::new(
+            polars::prelude::df! { "x" => [1.2, 0.4, 2.2], "y" => [None::<f64>, None, None] }
+                .unwrap(),
+        );
+        let e = ks_test(&ds, "x", Some("y"), None, Alternative::TwoSided)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'y'") && e.contains("Kolmogorov-Smirnov"), "{e}");
     }
 }

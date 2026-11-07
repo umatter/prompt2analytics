@@ -54,11 +54,12 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
-use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::SignificanceLevel;
 use crate::traits::estimator::normal_quantile;
+use polars::prelude::DataFrame;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Constants of swilk.c (Royston 1995, AS R94)
@@ -258,6 +259,16 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
     })
 }
 
+/// Read a sample with its missing values dropped; a column with none left names itself and the test.
+fn sample_column(df: &DataFrame, name: &str, test: &str) -> EconResult<(Vec<f64>, MissingSummary)> {
+    let cols = ColumnRequest::new(df)
+        .numeric(name)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &format!("{test}: column '{name}'"))
+        .extract()?;
+    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
+}
+
 /// Perform Shapiro-Wilk test using a dataset column.
 ///
 /// Missing values (null or NaN) are dropped, as `shapiro.test` does
@@ -277,7 +288,7 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
 /// }
 /// ```
 pub fn run_shapiro_wilk(dataset: &Dataset, column: &str) -> EconResult<ShapiroWilkResult> {
-    let (x, missing) = numeric_column(dataset.df(), column, NaPolicy::Omit)?;
+    let (x, missing) = sample_column(dataset.df(), column, "Shapiro-Wilk")?;
     let mut result = shapiro_wilk_test(&x)?;
     result.missing = missing;
     Ok(result)
@@ -687,5 +698,13 @@ mod tests {
             wide.w_statistic.is_finite() && wide.w_statistic < 1.0,
             "{wide:?}"
         );
+    }
+
+    #[test]
+    fn test_shapiro_all_missing_column_is_named() {
+        let ds =
+            Dataset::new(df! { "x" => [1.2, 0.4, 2.2], "y" => [None::<f64>, None, None] }.unwrap());
+        let e = run_shapiro_wilk(&ds, "y").unwrap_err().to_string();
+        assert!(e.contains("'y'") && e.contains("Shapiro-Wilk"), "{e}");
     }
 }
