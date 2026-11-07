@@ -85,6 +85,7 @@ placeholder `"<strL>"` stays) and value labels and display formats (DATA-75).
 | 64-bit integers | byte 32 is 0x33: offsets, lengths and counts are 8 bytes, else 4 |
 | header pad | byte 35 is 0x33: 4 bytes after byte 164 (DATA-18; before, the pad came from byte 32) |
 | byte order | byte 37: 0x01 little-endian, 0x00 big-endian |
+| encoding | byte 70 |
 | header length, page size, page count | at 196, 200 and 204 plus the pad |
 | page header (B = 16 or 32) | type at B, block count at B + 2, subheader count at B + 4 (DATA-20; before, swapped) |
 | subheader pointer | offset, length (int), compression (u8), type (u8), from B + 8 |
@@ -96,6 +97,17 @@ bytes in little-endian files and at the start in big-endian files; a width-4 num
 double, not a float (DATA-21; before, `1.0` stored in 4 bytes read as 1.875). Every NaN (SAS `.`,
 `.A`-`.Z`, `._`) is null and every other value is kept: 1e308 is a SAS value (the old reader nulled
 8-byte values above 8.988e307).
+
+Text is decoded by the encoding byte, as ReadStat does. Checked byte by byte against `read_sas` for
+bytes 0x80-0xFF under codes 0, 29, 62, 64 and 204:
+
+| Code | Encoding | p2a |
+|---|---|---|
+| 20 | UTF-8 (haven's writer) | UTF-8; invalid UTF-8 is an error (ReadStat errors too) |
+| 28 | US-ASCII | non-ASCII text is an error (ReadStat errors too) |
+| 29 | ISO-8859-1 | byte = code point |
+| 0, 62, 204 | Windows-1252 (62 is SAS's wlatin1: every SAS-written file checked here) | Windows-1252; the 5 unassigned bytes are an error (ReadStat errors too) |
+| any other | (ReadStat converts with iconv; 64 decodes as Windows-1254) | ASCII text is read; non-ASCII text is an error naming the code |
 
 ## Tests
 
@@ -141,3 +153,6 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics_big_endian` | `sas64_short_be` = haven (DATA-21) |
 | `p2a-core::data::sas::tests::test_sas_truncated_numerics_both_byte_orders` | truncated doubles, hand-computed from IEEE 754 (DATA-21) |
 | `p2a-core::data::sas::tests::sas_rejects_wide_numerics` | a numeric of width 9 is refused |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_windows_1252` | `sas64_wlatin1` = haven (encoding 62) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_encoding_codes` | encoding bytes 204 and 29 and an unassigned byte, as ReadStat |
+| `p2a-core::data::sas::tests::test_sas_text_encodings` | the Windows-1252 and encoding-byte decoders, hand-computed |

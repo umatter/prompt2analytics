@@ -75,7 +75,9 @@
         "p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit",
         "p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit_pad",
         "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics",
-        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics_big_endian"
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics_big_endian",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_windows_1252",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_encoding_codes"
       ],
       "quantities": [
         "shape",
@@ -87,7 +89,13 @@
         "refusals: layout fields, unknown page and column types, missing rows, compression"
       ],
       "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
-      "deviations": [],
+      "deviations": [
+        {
+          "finding": "DATA-50",
+          "quantity": "text under encoding codes other than 0, 20, 28, 29, 62 and 204",
+          "note": "convention (re-scope rule 3): ASCII text is read and non-ASCII text is refused naming the code; ReadStat converts these codes with iconv (e.g. 64), so haven returns text where p2a returns an error (readers.md, encoding table)"
+        }
+      ],
       "supersedes_legacy": []
     }
   ]

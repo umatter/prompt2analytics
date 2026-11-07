@@ -10,6 +10,7 @@
 //! | 64-bit integers | byte 32 is 0x33: offsets, lengths and counts are 8 bytes, else 4 |
 //! | header pad | byte 35 is 0x33: 4 bytes follow byte 164 (`pad`) |
 //! | byte order | byte 37: 0x01 little-endian, 0x00 big-endian |
+//! | character encoding | byte 70: 20 UTF-8, 28 US-ASCII, 29 ISO-8859-1, 0, 62 and 204 Windows-1252 |
 //! | header length, page size | u32 at 196 + pad and 200 + pad |
 //! | page count | u32 or u64 at 204 + pad |
 //! | page header | type, block count, subheader count: u16 at B, B + 2, B + 4 (B = 16 or 32) |
@@ -139,6 +140,7 @@ struct ColumnInfo {
 struct Layout {
     is_64bit: bool,
     byte_order: ByteOrder,
+    encoding: u8,
     page_size: usize,
     page_count: usize,
 }
@@ -233,6 +235,17 @@ const WINDOWS_1252_80_9F: [Option<char>; 32] = [
     Some('\u{178}'),
 ];
 
+/// Strict Windows-1252: `Err(byte)` at the first unassigned byte (as iconv, and so ReadStat).
+pub(crate) fn decode_windows_1252(bytes: &[u8]) -> Result<String, u8> {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => WINDOWS_1252_80_9F[usize::from(b - 0x80)].ok_or(b),
+            _ => Ok(char::from(b)),
+        })
+        .collect()
+}
+
 /// Windows-1252 that maps the five unassigned bytes to the C1 control of the same value (as the
 /// WHATWG encoding standard): for text whose encoding is a guess (Stata release 117) and for
 /// showing raw bytes in error messages.
@@ -255,11 +268,29 @@ pub(crate) fn decode_utf8_or_windows_1252(bytes: &[u8]) -> String {
     }
 }
 
-/// SAS text: UTF-8 if valid, else each byte as a char.
-fn decode_text(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => s.to_owned(),
-        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+/// Decode SAS text by the header's encoding byte, as ReadStat does (verified byte by byte against
+/// haven::read_sas, validation/data/readers.md): 20 UTF-8; 28 US-ASCII; 29 ISO-8859-1; 0, 62 and
+/// 204 Windows-1252. ASCII text reads the same under every code; other non-ASCII text is refused
+/// with the code named.
+fn decode_sas_text(bytes: &[u8], encoding: u8) -> Result<String, String> {
+    if bytes.is_ascii() {
+        return Ok(String::from_utf8_lossy(bytes).into_owned());
+    }
+    match encoding {
+        20 => std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| "the file is declared UTF-8 but this text is not valid UTF-8".to_string()),
+        29 => Ok(bytes.iter().map(|&b| char::from(b)).collect()),
+        0 | 62 | 204 => decode_windows_1252(bytes).map_err(|b| {
+            format!(
+                "byte 0x{b:02X} is not a Windows-1252 character (the file declares Windows-1252)"
+            )
+        }),
+        28 => Err("the file is declared US-ASCII but this text is not ASCII".to_string()),
+        other => Err(format!(
+            "SAS character encoding code {other} is not supported for non-ASCII text (UTF-8 = 20, \
+             US-ASCII = 28, ISO-8859-1 = 29 and Windows-1252 = 0, 62, 204 are)"
+        )),
     }
 }
 
@@ -316,6 +347,8 @@ pub struct SasReader<R: Read + Seek> {
     reader: R,
     byte_order: ByteOrder,
     is_64bit: bool,
+    /// Header encoding byte (70).
+    encoding: u8,
     header_length: usize,
     page_size: usize,
     page_count: usize,
@@ -359,6 +392,7 @@ impl<R: Read + Seek> SasReader<R> {
                 )));
             }
         };
+        let encoding = head[70];
 
         // Header fields, validated against the file size (T0, DATA-49).
         let check_offset = |raw: u64, name: &str| -> Result<usize, SasError> {
@@ -398,6 +432,7 @@ impl<R: Read + Seek> SasReader<R> {
             reader,
             byte_order,
             is_64bit,
+            encoding,
             header_length,
             page_size,
             page_count,
@@ -414,6 +449,7 @@ impl<R: Read + Seek> SasReader<R> {
         Layout {
             is_64bit: self.is_64bit,
             byte_order: self.byte_order,
+            encoding: self.encoding,
             page_size: self.page_size,
             page_count: self.page_count,
         }
@@ -614,7 +650,8 @@ impl<R: Read + Seek> SasReader<R> {
                         "the name of column {j} points outside the column text"
                     ))
                 })?;
-            let name = decode_text(trim_text(raw));
+            let name = decode_sas_text(trim_text(raw), l.encoding)
+                .map_err(|e| SasError::ParseError(format!("name of column {j}: {e}")))?;
             self.columns.push(ColumnInfo {
                 name,
                 col_type: *col_type,
@@ -692,7 +729,14 @@ impl<R: Read + Seek> SasReader<R> {
             match c.col_type {
                 ColumnType::Numeric => sink.numeric[j].push(decode_numeric(cell, order)),
                 ColumnType::Character => {
-                    sink.text[j].push(Some(decode_text(trim_text(cell))));
+                    let value = decode_sas_text(trim_text(cell), self.encoding).map_err(|e| {
+                        SasError::ParseError(format!(
+                            "column {}, row {}: {e}",
+                            c.name,
+                            sink.rows + 1
+                        ))
+                    })?;
+                    sink.text[j].push(Some(value));
                 }
             }
         }
@@ -921,20 +965,6 @@ mod tests {
     const I_PAGE0_TYPE: usize = I_PAGE0 + 16;
     const I_ROW_SIZE: usize = I_PAGE0 + 65056; // row count at +24 (i32)
     const I_COL_ATTR: usize = I_PAGE0 + 64456; // vector j at +12 + 12 j: offset +0, width +4, type +10
-
-    #[test]
-    fn test_windows_1252_helpers() {
-        assert_eq!(
-            decode_windows_1252_lenient(&[0x5A, 0xFC, 0x72, 0x80, 0x35]),
-            "Z\u{fc}r\u{20ac}5"
-        );
-        assert_eq!(decode_windows_1252_lenient(&[0x8D, 0x9F]), "\u{8d}\u{178}");
-        assert_eq!(
-            decode_utf8_or_windows_1252("Z\u{fc}rich".as_bytes()),
-            "Z\u{fc}rich"
-        );
-        assert_eq!(decode_utf8_or_windows_1252(&[0x5A, 0xFC]), "Z\u{fc}");
-    }
 
     #[test]
     fn test_magic_number() {
@@ -1230,5 +1260,88 @@ mod tests {
             load(b),
             "numeric column income has width 9; SAS numerics are 1 to 8 bytes",
         );
+    }
+
+    // ---- text by the header's encoding byte ----
+
+    #[test]
+    fn test_validate_read_sas7bdat_windows_1252() {
+        // Encoding 62 (wlatin1), as every SAS-written file checked: "\u{20ac}" is 0x80.
+        haven("data_readers_values", "sas64_wlatin1");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_encoding_codes() {
+        // ReadStat on the same bytes: code 204 reads as Windows-1252 (guard__sas_wlatin1_code_204
+        // = 60 rows), code 29 as ISO-8859-1 (0x80 -> U+0080), an unassigned Windows-1252 byte is
+        // refused (guard__sas_wlatin1_byte_0x81 = -1).
+        let case = Case::load("data_readers_values");
+        let mut b = fixture_bytes("sas64_wlatin1.sas7bdat");
+        b[70] = 204;
+        let df = load(b).unwrap();
+        assert_eq!(
+            df.height() as f64,
+            case.scalar("guard__sas_wlatin1_code_204")
+        );
+        assert_matches_haven(&case, "sas64_wlatin1", &df);
+        let mut b = fixture_bytes("sas64_wlatin1.sas7bdat");
+        b[70] = 29;
+        let df = load(b).unwrap();
+        let got: Vec<Option<&str>> = df
+            .column("grp")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .collect();
+        for (g, w) in got.iter().zip(case.names("sas64_wlatin1_code29__grp")) {
+            assert_eq!(*g, Some(w.as_str()));
+        }
+        assert_eq!(case.scalar("guard__sas_wlatin1_byte_0x81"), -1.0);
+        let mut b = fixture_bytes("sas64_wlatin1.sas7bdat");
+        b[H_PAGE1 + 40 + 48] = 0x81; // the first byte of row 1's grp cell ("Z\u{fc}rich")
+        match load(b) {
+            Err(SasError::ParseError(m)) => {
+                assert!(
+                    m.contains("column grp, row 1: byte 0x81 is not a Windows-1252"),
+                    "{m}"
+                )
+            }
+            other => panic!("expected ParseError, got {:?}", other.map(|d| d.shape())),
+        }
+    }
+
+    #[test]
+    fn test_sas_text_encodings() {
+        assert_eq!(
+            decode_windows_1252(&[0x5A, 0xFC, 0x72, 0x80, 0x35]).unwrap(),
+            "Z\u{fc}r\u{20ac}5"
+        );
+        assert_eq!(decode_windows_1252(&[0x41, 0x8D]), Err(0x8D));
+        assert_eq!(decode_windows_1252_lenient(&[0x8D, 0x9F]), "\u{8d}\u{178}");
+        assert_eq!(
+            decode_utf8_or_windows_1252("Z\u{fc}rich".as_bytes()),
+            "Z\u{fc}rich"
+        );
+        assert_eq!(decode_utf8_or_windows_1252(&[0x5A, 0xFC]), "Z\u{fc}");
+        assert_eq!(decode_sas_text(&[0xE9], 29).unwrap(), "\u{e9}");
+        assert_eq!(decode_sas_text(&[0x80], 62).unwrap(), "\u{20ac}");
+        assert_eq!(decode_sas_text(&[0x80], 0).unwrap(), "\u{20ac}");
+        assert!(
+            decode_sas_text(&[0xFF], 20)
+                .unwrap_err()
+                .contains("not valid UTF-8")
+        );
+        assert!(
+            decode_sas_text(&[0xE9], 28)
+                .unwrap_err()
+                .contains("US-ASCII")
+        );
+        assert!(
+            decode_sas_text(&[0xA4], 64)
+                .unwrap_err()
+                .contains("code 64 is not supported")
+        );
+        assert_eq!(decode_sas_text(b"plain", 64).unwrap(), "plain");
     }
 }
