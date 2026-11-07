@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "viz_scatter_correlation",
+      "name": "Scatter-plot Pearson correlation",
+      "category": "visualization",
+      "reference": "stats::cor (method = 'pearson')",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_scatter_cor"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_scatter_correlation_large_offset",
+        "p2a-core::visualization::charts::tests::test_validate_scatter_correlation_tiny_scale"
+      ],
+      "quantities": [
+        "r at offsets 0, 1.7e9 and 1e12",
+        "r on a 1e-9 scale",
+        "NA for a constant variable"
+      ],
+      "tolerance": "validation/README.md statistics row, n = 200: 1e-6 relative (measured agreement 4e-16)",
+      "deviations": [
+        {
+          "finding": "DATA-61",
+          "quantity": "r of a near-constant variable",
+          "note": "convention: None (printed NaN; R: NA) when max |x - mean| <= 4 eps max |x|, where the centred values are rounding noise; stats::cor returns NA only for an exactly zero spread"
+        },
+        {
+          "finding": "DATA-61",
+          "quantity": "pairs with a non-finite value",
+          "note": "dropped before r, as the plot drops them (like cor(use = 'complete.obs') for NA); cor returns NaN when a value is +-Inf"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

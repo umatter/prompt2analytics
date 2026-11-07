@@ -1936,26 +1936,48 @@ fn rational_approximation(t: f64) -> f64 {
 
 // Helper functions
 
+/// The mean with R's correction: `m = sum / n; m += sum(x - m) / n`. The sum runs over
+/// `x / n` when the plain sum overflows.
+fn corrected_mean(x: impl Iterator<Item = f64> + Clone) -> f64 {
+    let n = x.clone().count() as f64;
+    let mean = x.clone().sum::<f64>() / n;
+    let mean = if mean.is_finite() {
+        mean
+    } else {
+        x.clone().map(|v| v / n).sum::<f64>()
+    };
+    mean + x.map(|v| v - mean).sum::<f64>() / n
+}
+
+/// Pearson r of finite pairs as R's `cor`: means with R's correction, centred deviations
+/// scaled by their largest magnitude (no overflow or underflow at any scale), and None
+/// (R: NA) for fewer than two pairs or a zero spread, judged relative to the data's
+/// magnitude (`max |x - m| <= 4 eps max |x|`, where the centred values are rounding noise).
 fn calculate_correlation(points: &[(f64, f64)]) -> Option<f64> {
     if points.len() < 2 {
         return None;
     }
-
-    let n = points.len() as f64;
-    let sum_x: f64 = points.iter().map(|p| p.0).sum();
-    let sum_y: f64 = points.iter().map(|p| p.1).sum();
-    let sum_xy: f64 = points.iter().map(|p| p.0 * p.1).sum();
-    let sum_x2: f64 = points.iter().map(|p| p.0 * p.0).sum();
-    let sum_y2: f64 = points.iter().map(|p| p.1 * p.1).sum();
-
-    let numerator = n * sum_xy - sum_x * sum_y;
-    let denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
-
-    if denominator.abs() < 1e-10 {
-        None
-    } else {
-        Some(numerator / denominator)
+    let mx = corrected_mean(points.iter().map(|p| p.0));
+    let my = corrected_mean(points.iter().map(|p| p.1));
+    let spread = |centre: f64, value: fn(&(f64, f64)) -> f64| -> Option<f64> {
+        let (mut largest, mut deviation) = (0.0f64, 0.0f64);
+        for p in points {
+            largest = largest.max(value(p).abs());
+            deviation = deviation.max((value(p) - centre).abs());
+        }
+        (deviation.is_finite() && deviation > 4.0 * f64::EPSILON * largest).then_some(deviation)
+    };
+    let sx = spread(mx, |p| p.0)?;
+    let sy = spread(my, |p| p.1)?;
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for p in points {
+        let dx = (p.0 - mx) / sx;
+        let dy = (p.1 - my) / sy;
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
     }
+    Some((sxy / (sxx.sqrt() * syy.sqrt())).clamp(-1.0, 1.0))
 }
 
 fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
@@ -2672,5 +2694,53 @@ mod tests {
         assert_eq!(result.n_merges, 3);
         assert!((result.max_distance - 3.0).abs() < 1e-10);
         assert!(!result.image_base64.is_empty());
+    }
+
+    fn small() -> ChartConfig {
+        ChartConfig {
+            width: 240,
+            height: 180,
+            ..ChartConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_scatter_correlation_large_offset() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_scatter_cor");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let r = |x: &str, y: &str| scatter_plot(&col(x), &col(y), small()).unwrap().correlation;
+        let n = case.scalar("n") as usize;
+        Check::new(&case)
+            .scalar("cor_x0", r("x0", "y").unwrap_or(f64::NAN), Tol::stat(n))
+            .scalar(
+                "cor_epoch",
+                r("x_epoch", "y").unwrap_or(f64::NAN),
+                Tol::stat(n),
+            )
+            .scalar("cor_big", r("x_big", "y").unwrap_or(f64::NAN), Tol::stat(n))
+            .finish();
+        // R: NA with "the standard deviation is zero"
+        assert!(case.scalar("cor_const").is_nan());
+        assert_eq!(r("x0", "y_const"), None);
+    }
+
+    #[test]
+    fn test_validate_scatter_correlation_tiny_scale() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_scatter_cor");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let r = scatter_plot(&col("x_tiny"), &col("y_tiny"), small())
+            .unwrap()
+            .correlation;
+        Check::new(&case)
+            .scalar(
+                "cor_tiny",
+                r.unwrap_or(f64::NAN),
+                Tol::stat(case.scalar("n") as usize),
+            )
+            .finish();
     }
 }
