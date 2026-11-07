@@ -191,6 +191,9 @@ fn transformed_fit(
 /// What a search keeps away from the ends of the interval, where I - ρW is singular.
 const INTERVAL_MARGIN: f64 = 1e-8;
 
+/// An estimate this close to an end of the interval, as a share of its width, is on the bound.
+const BOUND_FRACTION: f64 = 1e-6;
+
 /// spatialreg's search interval 1/range(Re(eig)). Refuses an interval that is not finite (W has no
 /// negative or no positive real part among its eigenvalues, up to rounding), where neither
 /// spatialreg's nor any other golden section can start.
@@ -215,7 +218,8 @@ struct GoldenSection {
     x: f64,
     value: f64,
     convergence: Convergence,
-    /// The final bracket still holds an end of the search interval.
+    /// The final bracket still holds an end of the search interval, or the estimate is within
+    /// [`BOUND_FRACTION`] of one.
     at_bound: bool,
 }
 
@@ -274,7 +278,10 @@ fn golden_section_max(
             width,
             tol,
         ),
-        at_bound: a == lower || b == upper,
+        // Near the end the objective can be lost to rounding before the bracket reaches it.
+        at_bound: a == lower
+            || b == upper
+            || (x - lower).min(upper - x) <= BOUND_FRACTION * (upper - lower),
     })
 }
 
@@ -643,11 +650,7 @@ pub fn run_sar(
 
     // Standard errors from the observed information at the MLE
     let info = sar_observed_information(&x_final, &wy, &residuals, sigma2, rho_opt, &spectrum);
-    let se = information_se(
-        &info,
-        if config.durbin { "SDM" } else { "SAR" },
-        k_final + 1,
-    )?;
+    let se = information_se(&info, model, k_final + 1, search.at_bound)?;
     let se_beta = Array1::from_iter(se[..k_final].iter().copied());
     let se_rho = se[k_final];
 
@@ -801,7 +804,7 @@ pub fn run_sem(
             -(n as f64) / (2.0 * sigma2 * sigma2) + rss / sigma2.powi(3)
         ],
     ];
-    let se_lambda = information_se(&info, "SEM", 1)?[0];
+    let se_lambda = information_se(&info, "SEM", 1, search.at_bound)?[0];
 
     // Z-values and p-values
     let z_values: Vec<f64> = beta
@@ -1093,7 +1096,8 @@ pub fn run_sac(
         ])
         .collect();
     let info = sac_observed_information(&y, &wy, &wwy, &x, &wx, &spectrum, &theta, &steps)?;
-    let se = information_se(&info, "SAC", k + 2)?;
+    let at_bound = search.rho_at_bound || search.lambda_at_bound;
+    let se = information_se(&info, "SAC", k + 2, at_bound)?;
     let se_beta = Array1::from_iter(se[..k].iter().copied());
     let (se_rho, se_lambda) = (se[k], se[k + 1]);
 
@@ -1454,10 +1458,21 @@ fn sar_observed_information(
 
 /// sqrt(diag(I^-1)) of the first `keep` parameters of an observed information matrix `info`, which
 /// must be positive definite (checked on the equilibrated matrix, so the units of y do not matter).
-fn information_se(info: &Array2<f64>, model: &str, keep: usize) -> EconResult<Vec<f64>> {
+fn information_se(
+    info: &Array2<f64>,
+    model: &str,
+    keep: usize,
+    at_bound: bool,
+) -> EconResult<Vec<f64>> {
     let not_definite = || {
+        let bound = if at_bound {
+            " (the estimate is on the interval bound: the likelihood has no interior maximum on \
+             these weights)"
+        } else {
+            ""
+        };
         EconError::Computation(format!(
-            "{model} information matrix is not positive definite at the estimate"
+            "{model} information matrix is not positive definite at the estimate{bound}"
         ))
     };
     let d = info.nrows();
@@ -2444,13 +2459,29 @@ mod tests {
 
     #[test]
     fn test_golden_section_flags_a_bound_optimum() {
-        let bound = golden_section_max(|r| Ok(r), -1.0, 1.0, 1e-10, 200).unwrap();
+        let bound = golden_section_max(Ok, -1.0, 1.0, 1e-10, 200).unwrap();
         assert!(bound.at_bound);
         assert!((bound.x - (1.0 - 1e-8)).abs() < 1e-9, "{}", bound.x);
         let inner = golden_section_max(|r| Ok(-(r - 0.3).powi(2)), -1.0, 1.0, 1e-10, 200).unwrap();
         assert!(!inner.at_bound);
         assert!((inner.x - 0.3).abs() < 1e-9, "{}", inner.x);
         assert!(inner.convergence.converged);
+    }
+
+    /// On the complete graph e(rho) is proportional to e_y, and the likelihood grows without limit
+    /// towards the lower end of the interval, so no standard error exists.
+    #[test]
+    fn test_sar_on_a_complete_graph_names_the_bound() {
+        let (d, _) = ring_data(6);
+        let complete: Vec<Vec<usize>> = (0..6)
+            .map(|i| (0..6).filter(|&j| j != i).collect())
+            .collect();
+        let mut w =
+            SpatialWeights::from_neighbors(&Neighbors::from_indices(complete), WeightStyle::RowStd);
+        match run_sar(&d, "y", &["x"], &mut w, SarConfig::default()) {
+            Err(EconError::Computation(m)) => assert!(m.contains("interval bound"), "{m}"),
+            other => panic!("expected Computation, got {other:?}"),
+        }
     }
 
     /// No eigenvalue with a real part away from zero: 1/range(Re(eig)) is not a finite interval.

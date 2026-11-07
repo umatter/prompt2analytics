@@ -45,7 +45,9 @@ From the observed information of the full log-likelihood at the MLE:
 - SAC: central differences of the analytic gradient, symmetrised (steps 1e-5 of each
   parameter's own size, so that they follow the units of y).
 
-An information matrix that is not positive definite at the estimate is `EconError::Computation`.
+An information matrix that is not positive definite at the estimate is `EconError::Computation`; the
+message says when the estimate is on the interval bound. That is what a complete-graph W gives
+(k = n - 1): the SAR likelihood grows without limit towards the lower end of the interval.
 
 ## Impacts
 

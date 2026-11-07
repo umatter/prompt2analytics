@@ -1353,7 +1353,7 @@ mod tests {
         let d = moran_test(&y, &band2(WeightStyle::RowStd), MoranAlternative::TwoSided).unwrap();
         assert_close(d.statistic, 0.40795942824716147, 1e-12);
         assert_close(d.expectation, -0.038461538461538464, 1e-15);
-        assert_close(d.variance, 0.019030437809982551, 1e-12);
+        assert_close(d.variance, 0.01903043780998255, 1e-12);
         assert_close(d.z_score, 3.236087036743305, 1e-10);
         assert_eq!(d.n_islands, 3);
     }

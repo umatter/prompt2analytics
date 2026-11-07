@@ -79,18 +79,30 @@ fn k_outside_one_to_n_minus_one_is_refused_with_exit_1() {
     }
 }
 
-/// k = n - 1, the largest valid value, still runs.
+/// k = n - 1, the largest valid value, passes the check on `k`. W is then the complete graph, where
+/// Moran's I equals its expectation for every variable (permutation variance zero) and the SAR
+/// likelihood has no interior maximum: both say so, and neither blames `k`.
 #[test]
-fn k_of_n_minus_one_still_runs() {
+fn k_of_n_minus_one_passes_the_check_on_k() {
     let tmp = tempfile::tempdir().unwrap();
     let session = session_with_points(tmp.path(), POINTS);
-    p2a()
-        .args(["--session", &session, "--format", "json"])
-        .args(&commands()[3])
-        .args(["-k", "5"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("\"moran_i\""));
+    for args in commands() {
+        p2a()
+            .args(["--session", &session, "--format", "json"])
+            .args(&args)
+            .args(["-k", "5"])
+            .assert()
+            .stderr(predicate::str::contains("k must be between").not());
+    }
+    for (i, why) in [(0, "interval bound"), (3, "variance")] {
+        p2a()
+            .args(["--session", &session, "--format", "json"])
+            .args(&commands()[i])
+            .args(["-k", "5"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(why));
+    }
 }
 
 /// The `-k` help of every spatial command gives the valid range and says
