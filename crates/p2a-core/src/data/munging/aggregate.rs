@@ -241,12 +241,14 @@ pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> Mu
         .value_counts(false, true, value_column.into(), normalize)
         .map_err(aggregation)?;
 
-    // polars leaves its groups in hash order: by count, and tied counts by value.
-    let stable = |descending: bool| SortOptions {
+    // polars leaves its groups in hash order: by count, and tied counts by value. The groups' values
+    // are unique, so the sort by value has one result without keeping the order of equal elements;
+    // the sort by count has to keep it.
+    let sort_options = |descending: bool, maintain_order: bool| SortOptions {
         descending,
         nulls_last: true,
-        maintain_order: true,
-        multithreaded: false,
+        maintain_order,
+        multithreaded: true,
         ..Default::default()
     };
     let values = counts.column(column).map_err(aggregation)?;
@@ -255,7 +257,7 @@ pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> Mu
         .map_err(aggregation)?
         .as_materialized_series();
     let order = if tallies.n_unique().map_err(aggregation)? == tallies.len() {
-        tallies.arg_sort(stable(true))
+        tallies.arg_sort(sort_options(true, false))
     } else {
         let key = match values.dtype() {
             DataType::Categorical(..) | DataType::Enum(..) => {
@@ -263,11 +265,13 @@ pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> Mu
             }
             _ => values.clone(),
         };
-        let by_value = key.as_materialized_series().arg_sort(stable(false));
+        let by_value = key
+            .as_materialized_series()
+            .arg_sort(sort_options(false, false));
         let by_count = tallies
             .take(&by_value)
             .map_err(aggregation)?
-            .arg_sort(stable(true));
+            .arg_sort(sort_options(true, true));
         by_value.take(&by_count).map_err(aggregation)?
     };
     let sorted = DataFrame::new(vec![
@@ -678,6 +682,76 @@ mod tests {
                 .df()
                 .equals_missing(value_counts(&ds, "g").unwrap().df())
         );
+    }
+
+    #[test]
+    fn test_value_counts_order_matches_a_naive_sort_on_many_groups() {
+        // Enough groups for the sorts to run on the thread pool, with many tied counts and a missing
+        // group; the expected order is a plain sort of a plain tally.
+        let mut state = 7u64;
+        let keys: Vec<Option<i64>> = (0..20_000)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let draw = (state >> 40) % 4_001;
+                (draw != 4_000).then_some(draw as i64)
+            })
+            .collect();
+        let labels: Vec<Option<String>> = keys
+            .iter()
+            .map(|k| k.map(|k| format!("user_{k}")))
+            .collect();
+
+        fn expected<K: Ord + Clone>(cells: &[Option<K>]) -> Vec<(Option<K>, u32)> {
+            let mut tally = std::collections::BTreeMap::new();
+            for cell in cells {
+                // None sorts last: compare (is missing, value)
+                *tally.entry((cell.is_none(), cell.clone())).or_insert(0u32) += 1;
+            }
+            let mut rows: Vec<(Option<K>, u32)> =
+                tally.into_iter().map(|((_, k), n)| (k, n)).collect();
+            rows.sort_by_key(|row| std::cmp::Reverse(row.1));
+            rows
+        }
+        let tallies = |c: &Dataset| -> Vec<u32> {
+            c.df()
+                .column("count")
+                .unwrap()
+                .cast(&DataType::UInt32)
+                .unwrap()
+                .u32()
+                .unwrap()
+                .into_no_null_iter()
+                .collect()
+        };
+
+        let ints = Dataset::new(df!("g" => &keys).unwrap());
+        let (want_keys, want_counts): (Vec<_>, Vec<_>) = expected(&keys).into_iter().unzip();
+        let got = value_counts(&ints, "g").unwrap();
+        let got_keys: Vec<Option<i64>> = got
+            .df()
+            .column("g")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(got_keys, want_keys);
+        assert_eq!(tallies(&got), want_counts);
+
+        let text = Dataset::new(df!("g" => &labels).unwrap());
+        let (want_labels, want_counts): (Vec<_>, Vec<_>) = expected(&labels).into_iter().unzip();
+        let got = value_counts(&text, "g").unwrap();
+        let got_labels: Vec<Option<String>> = got
+            .df()
+            .column("g")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|cell| cell.map(str::to_string))
+            .collect();
+        assert_eq!(got_labels, want_labels);
+        assert_eq!(tallies(&got), want_counts);
     }
 
     #[test]
