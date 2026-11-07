@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_gmm",
+      "name": "Gaussian mixtures (Full, Tied, Diagonal, Spherical as VVV, EEE, VVI, VII)",
+      "category": "ml",
+      "reference": "mclust::Mclust(G = 3, modelNames = VVV, EEE, VVI, VII); tight fixed points of mclust::mstep/estep",
+      "doc": "validation/ml/gmm.md",
+      "cases": [
+        "gmm_mclust_3d"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_vvv",
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_eee",
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_vvi_vii",
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_fixed_point"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "df",
+        "BIC",
+        "proportions",
+        "means",
+        "covariances",
+        "classification"
+      ],
+      "tolerance": "EM_PARAM 1e-5 relative, EM_LOGLIK 1e-12 relative (tight fixed points), FIXED_POINT 1e-10 relative from the tight values; df and classification exact. Differences from mclust in the doc: k-means start, relative_change stopping rule (iteration counts not pinned), relative ridge and a warning for a singular covariance where mclust reports NA.",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
