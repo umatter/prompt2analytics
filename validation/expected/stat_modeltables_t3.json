@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "stat_modeltables_t3",
+  "area": "stats/modeltables",
+  "method": "two-way cell means with an empty cell (3 x 3, cell A3:B2 empty), cell sizes, margins",
+  "reference": "tapply(y, list(fa, fb), mean) (NA for an empty cell); stats::model.tables(aov(y ~ fa * fb), 'means')",
+  "call": "model.tables(aov(y ~ fa * fb, d), 'means'); tapply(d$y, list(d$fa, d$fb), mean)",
+  "dataset": "validation/datasets/generated/modeltables_t3.csv",
+  "datasets": ["validation/datasets/generated/modeltables_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "cell_means": [4.5263333333333335, 6.3979999999999997, 7.15625, 6.2850000000000001, 7.5153333333333334, 8.3666666666666671, 9.380749999999999, null, 11.500499999999999],
+    "cell_n": [3, 2, 4, 2, 3, 3, 4, 0, 2],
+    "a_means": {
+      "names": ["A1", "A2", "A3"],
+      "values": [6.1111111111111116, 7.5270000000000001, 10.087333333333333]
+    },
+    "a_n": {
+      "names": ["A1", "A2", "A3"],
+      "values": [9, 8, 6]
+    },
+    "a_means_model_tables": {
+      "names": ["A1", "A2", "A3"],
+      "values": [6.1111111111111107, 7.5270000000000001, 10.087333333333333]
+    },
+    "b_means_raw": {
+      "names": ["B1", "B2", "B3"],
+      "values": [7.0746666666666664, 7.0684000000000005, 8.5251111111111104]
+    },
+    "b_means_model_tables": {
+      "names": ["B1", "B2", "B3"],
+      "values": [6.5225732689210947, 7.7486251207729469, 8.6993016639828227]
+    },
+    "grand_mean": 7.6408695652173915,
+    "resid_df": 15,
+    "resid_ss": 7.8213940000000024
+  }
+}

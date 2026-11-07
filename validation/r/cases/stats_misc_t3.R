@@ -129,3 +129,26 @@ case("stat_mahalanobis_t3", "multivariate/mahalanobis", "mahalanobis: full-rank 
        reference = "stats::mahalanobis (solve(cov): refuses a singular covariance); MASS::ginv for the generalised distances; qr(cov)$rank; qchisq(0.975, df)",
        call = "mahalanobis(X, colMeans(X), cov(X)); rowSums((C %*% MASS::ginv(cov(X))) * C)")
 })
+
+case("stat_modeltables_t3", "stats/modeltables", "two-way cell means with an empty cell (3 x 3, cell A3:B2 empty), cell sizes, margins", function(ctx) {
+  set.seed(83)
+  cells <- expand.grid(fb = c("B1", "B2", "B3"), fa = c("A1", "A2", "A3"), stringsAsFactors = FALSE)
+  reps <- c(3, 2, 4, 2, 3, 3, 4, 0, 2)                      # row-major over (A, B); A3:B2 empty
+  mu <- c(5, 6, 7, 6, 7.5, 8, 9, 10, 11)
+  fa <- rep(cells$fa, reps); fb <- rep(cells$fb, reps)
+  y <- round(rep(mu, reps) + rnorm(sum(reps), 0, 0.6), 3)
+  d <- ctx$gen_dataset("modeltables_t3", data.frame(y = y, fa = fa, fb = fb))
+  m <- aov(y ~ fa * fb, data = d)
+  mt <- model.tables(m, "means")
+  cm <- tapply(d$y, list(d$fa, d$fb), mean)                  # NA for the empty cell
+  cn <- table(d$fa, d$fb)
+  stopifnot(is.na(cm["A3", "B2"]), cn["A3", "B2"] == 0,
+            all(abs(mt$tables$`fa:fb`[!is.na(cm)] - cm[!is.na(cm)]) < 1e-12))
+  list(values = list(cell_means = vec(as.numeric(t(cm))), cell_n = vec(as.numeric(t(cn))),
+                     a_means = named(tapply(d$y, d$fa, mean)), a_n = named(c(table(d$fa))),
+                     a_means_model_tables = named(c(mt$tables$fa)),
+                     b_means_raw = named(tapply(d$y, d$fb, mean)), b_means_model_tables = named(c(mt$tables$fb)),
+                     grand_mean = mean(d$y), resid_df = df.residual(m), resid_ss = sum(residuals(m)^2)),
+       reference = "tapply(y, list(fa, fb), mean) (NA for an empty cell); stats::model.tables(aov(y ~ fa * fb), 'means')",
+       call = "model.tables(aov(y ~ fa * fb, d), 'means'); tapply(d$y, list(d$fa, d$fb), mean)", packages = character(0))
+})

@@ -75,6 +75,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
 | `generated/mahalanobis_t3.csv` | 30 × 9 (id, f1, f2, f3, a, b, p1, p2, total) | `stat_mahalanobis_t3` | `r/cases/stats_misc_t3.R` | full-rank and collinear columns, padded with NA |
+| `generated/modeltables_t3.csv` | 23 × 3 (y, fa, fb) | `stat_modeltables_t3` | `r/cases/stats_misc_t3.R` | 3 x 3 layout with the cell A3:B2 empty |
 | `generated/mtcars.csv` | 32 × 12 (model, mpg, cyl, disp, hp, drat, wt, qsec, vs, am, gear, carb) | `ols_mtcars` | `r/cases/regression.R` | `datasets::mtcars`, row names as `model` |
 | `generated/mte_boot_indices.csv` | 400 × 25 (b01-b25; 1-based row indices into rows 1-400 of `mte_sim.csv`) | `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261207 |
 | `generated/mte_sim.csv` | 2000 × 4 (y, d, z1, z2) | `mte_local_iv`, `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261205 |

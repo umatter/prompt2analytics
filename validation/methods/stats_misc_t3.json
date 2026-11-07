@@ -65,6 +65,19 @@
       "tolerance": "Tol::stat(n), Tol::coef(n); thresholds 1e-10 relative",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "model_tables_t3",
+      "name": "Two-way model tables with an empty cell",
+      "category": "stats",
+      "reference": "tapply; stats::model.tables(aov(y ~ a * b), 'means')",
+      "doc": "validation/stats/modeltables.md",
+      "cases": ["stat_modeltables_t3"],
+      "tests": ["p2a-core::stats::modeltables::tests::test_validate_modeltables_t3_empty_cell"],
+      "quantities": ["cell means (NaN for empty cells)", "cell sizes", "factor A margins and sizes", "grand mean", "residual df and SS"],
+      "tolerance": "Tol::coef(23), Tol::stat(23); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

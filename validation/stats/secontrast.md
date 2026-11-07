@@ -97,6 +97,12 @@ print(c(estimate = estimate, se = se, t = t_stat))
 **Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
 - `stats::secontrast::tests::test_contrast_t_statistic` (`crates/p2a-core/src/stats/secontrast.rs`): the t statistic is negative with abs(t) > 2.
 
+## Fewer than two groups
+
+`generate_contrasts(k, ..)` returns an empty set for k < 2, for every contrast type. R's `contr.*`
+stop there ("not enough degrees of freedom to define contrasts").
+`stats::secontrast::tests::test_contrasts_k0` checks it (not R-pinned).
+
 ## Numerical Precision Summary
 
 | Sample Size per Group | SE Tolerance |

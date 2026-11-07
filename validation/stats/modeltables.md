@@ -117,6 +117,31 @@ The standard errors are not compared (registry deviation STAT-75, `// deviation 
 both tests): p2a reports the SE of each mean, sqrt(MSE / n), while R's `model.tables(se = TRUE)`
 reports SEs for differences of means and refuses unbalanced designs.
 
+## Empty cells and layout
+
+`model_tables_two_way` takes `data[a][b]`, one vector per factor A x factor B cell. A cell with no
+observations, and a factor level with none, has a NaN mean (R: `NA`), and its effect, interaction and
+standard error are NaN. A row whose length differs from `data[0]` is an error naming the row.
+
+**R Code:** case `stat_modeltables_t3` in `validation/r/cases/stats_misc_t3.R`, dataset
+`validation/datasets/generated/modeltables_t3.csv` (3 x 3 layout, A3:B2 empty, 23 rows).
+
+| Quantity | R |
+|---|---|
+| cell means (A1:B1, A2:B1, ...) | 4.5263333333333335, 6.398, 7.15625, 6.285, 7.515333333333333, 8.366666666666667, 9.380749999999999, NA, 11.500499999999999 |
+| cell sizes | 3, 2, 4, 2, 3, 3, 4, 0, 2 |
+| factor A means | 6.111111111111112, 7.527, 10.087333333333333 |
+| grand mean | 7.6408695652173915 |
+| residual df, residual SS | 15, 7.821394000000002 |
+
+**Rust tests:** `stats::modeltables::tests::test_validate_modeltables_t3_empty_cell`,
+`stats::modeltables::tests::test_modeltables_ragged_is_error` (not R-pinned: R has no ragged layout).
+
+**Status:** R-pinned (registry `validation/methods/stats_misc_t3.json`, id `model_tables_t3`).
+
+**Not compared:** R's `model.tables` factor B margins on this unbalanced layout are adjusted for
+factor A (`b_means_model_tables` in the case); p2a's are the raw margins. No finding covers this yet.
+
 ## Numerical Precision Summary
 
 | Design | Mean Tolerance | SE Tolerance |
