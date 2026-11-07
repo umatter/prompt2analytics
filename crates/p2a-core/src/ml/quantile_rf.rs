@@ -139,8 +139,12 @@ pub struct QuantileRfResult {
     /// Quantiles that were estimated
     pub quantiles: Vec<f64>,
 
-    /// Variable importance scores (permutation importance)
+    /// Share of the total SSE decrease per feature (the IncNodePurity of quantregForest's underlying
+    /// randomForest, normalised to one; zeros if no tree split).
     pub variable_importance: Vec<f64>,
+
+    /// Mean over the trees of the in-bag SSE decrease of the splits on each feature.
+    pub inc_node_purity: Vec<f64>,
 
     /// Out-of-bag error (mean squared error at median quantile)
     pub oob_error: Option<f64>,
@@ -203,14 +207,17 @@ impl std::fmt::Display for QuantileRfResult {
 
         // Variable importance
         writeln!(f)?;
-        writeln!(f, "Variable Importance:")?;
+        writeln!(
+            f,
+            "Variable importance (share of the SSE decrease; IncNodePurity):"
+        )?;
         let mut indexed: Vec<(usize, f64)> = self
             .variable_importance
             .iter()
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -220,7 +227,11 @@ impl std::fmt::Display for QuantileRfResult {
                     .unwrap_or_else(|| format!("Feature_{}", i)),
                 None => format!("Feature_{}", i),
             };
-            writeln!(f, "  {}: {:.4}", name, importance)?;
+            writeln!(
+                f,
+                "  {}: {:.4} ({:.4})",
+                name, importance, self.inc_node_purity[*i]
+            )?;
         }
 
         if self.n_features > 10 {
@@ -266,6 +277,8 @@ pub(crate) struct QuantileTree {
     bootstrap_indices: Vec<usize>,
     /// Out-of-bag indices (samples not used in building this tree)
     oob_indices: Vec<usize>,
+    /// Summed SSE decrease of this tree's splits per feature.
+    gain: Vec<f64>,
 }
 
 impl QuantileTree {
@@ -276,6 +289,7 @@ impl QuantileTree {
             n_features,
             bootstrap_indices: Vec::new(),
             oob_indices: Vec::new(),
+            gain: Vec::new(),
         }
     }
 
@@ -304,6 +318,7 @@ impl QuantileTree {
             .min(MAX_TREE_DEPTH);
 
         // Build tree recursively
+        let mut gain = vec![0.0; x.ncols()];
         self.root = Some(self.build_tree(
             x,
             y,
@@ -313,7 +328,9 @@ impl QuantileTree {
             config.min_node_size,
             max_depth,
             rng_state,
+            &mut gain,
         ));
+        self.gain = gain;
     }
 
     /// Build tree recursively.
@@ -327,6 +344,7 @@ impl QuantileTree {
         min_node_size: usize,
         max_depth: usize,
         rng_state: &mut u64,
+        gain: &mut [f64],
     ) -> QrfNode {
         let n_samples = indices.len();
 
@@ -359,6 +377,7 @@ impl QuantileTree {
                     observation_indices: indices.to_vec(),
                 };
             }
+            add_split_gain(gain, best_feature, y, &left_indices, &right_indices);
 
             let left = self.build_tree(
                 x,
@@ -369,6 +388,7 @@ impl QuantileTree {
                 min_node_size,
                 max_depth,
                 rng_state,
+                gain,
             );
             let right = self.build_tree(
                 x,
@@ -379,6 +399,7 @@ impl QuantileTree {
                 min_node_size,
                 max_depth,
                 rng_state,
+                gain,
             );
 
             QrfNode::Split {
@@ -550,64 +571,14 @@ impl QuantileTree {
         }
     }
 
-    /// Calculate feature importances based on variance reduction.
-    fn feature_importances(&self, y: &ArrayView1<f64>) -> Array1<f64> {
-        let mut importances = Array1::zeros(self.n_features);
-        if let Some(ref root) = self.root {
-            self.accumulate_importances(root, y, &mut importances, 1.0);
-        }
-
-        // Normalize
-        let sum: f64 = importances.sum();
-        if sum > 0.0 {
-            importances /= sum;
-        }
-
-        importances
-    }
-
-    fn accumulate_importances(
-        &self,
-        node: &QrfNode,
-        y: &ArrayView1<f64>,
-        importances: &mut Array1<f64>,
-        weight: f64,
-    ) {
-        if let QrfNode::Split {
-            feature_index,
-            left,
-            right,
-            ..
-        } = node
-        {
-            // Add importance for this feature
-            importances[*feature_index] += weight;
-
-            // Get child weights
-            let (left_weight, right_weight) = match (left.as_ref(), right.as_ref()) {
-                (
-                    QrfNode::Leaf {
-                        observation_indices: li,
-                        ..
-                    },
-                    QrfNode::Leaf {
-                        observation_indices: ri,
-                        ..
-                    },
-                ) => {
-                    let total = (li.len() + ri.len()) as f64;
-                    (li.len() as f64 / total, ri.len() as f64 / total)
-                }
-                _ => (0.5, 0.5),
-            };
-
-            self.accumulate_importances(left, y, importances, weight * left_weight);
-            self.accumulate_importances(right, y, importances, weight * right_weight);
-        }
+    /// The summed SSE decrease of this tree's splits per feature.
+    fn impurity_decrease(&self) -> &[f64] {
+        &self.gain
     }
 }
 
 use super::lcg_random;
+use super::trees::add_split_gain;
 
 /// Generate bootstrap sample indices (the sample vector is allocated fallibly).
 fn bootstrap_sample(
@@ -648,7 +619,7 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
         return values[0];
     }
 
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values.sort_by(f64::total_cmp);
 
     let n = values.len() as f64;
     // Type 7 quantile (R's default): h = (n-1)*p + 1
@@ -738,14 +709,14 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 ///     assert!(row[0] >= 1.1 - 1e-9 && row[2] <= 10.0 + 1e-9);
 /// }
 ///
-/// // Each split contributes the share of training rows reaching it, summed per
-/// // feature, normalised to one within a tree and then averaged over trees, so
-/// // importances are non-negative and sum to one (less only if a tree made no
-/// // split at all).
+/// // Each importance is the feature's share of the summed SSE decrease of all
+/// // splits (randomForest IncNodePurity, normalised to one), so they are
+/// // non-negative and sum to one when any tree split.
 /// assert_eq!(result.variable_importance.len(), 2);
 /// assert!(result.variable_importance.iter().all(|&v| v >= 0.0));
 /// let total: f64 = result.variable_importance.iter().sum();
 /// assert!(total <= 1.0 + 1e-9);
+/// assert!((total - 1.0).abs() < 1e-9);
 /// ```
 ///
 /// # References
@@ -849,17 +820,33 @@ pub fn quantile_rf_with_names(
     };
 
     // Compute variable importance
-    let mut importances = Array1::zeros(n_features);
+    let mut inc_node_purity = vec![0.0f64; n_features];
     for tree in &trees {
-        importances = importances + tree.feature_importances(&y);
+        for (sum, &g) in inc_node_purity.iter_mut().zip(tree.impurity_decrease()) {
+            *sum += g;
+        }
     }
-    importances /= config.n_trees as f64;
+    for v in &mut inc_node_purity {
+        *v /= config.n_trees as f64;
+    }
+    let purity_total: f64 = inc_node_purity.iter().sum();
+    let variable_importance: Vec<f64> = inc_node_purity
+        .iter()
+        .map(|&v| {
+            if purity_total > 0.0 {
+                v / purity_total
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     Ok(QuantileRfResult {
         trees,
         predictions,
         quantiles: config.quantiles.clone(),
-        variable_importance: importances.to_vec(),
+        variable_importance,
+        inc_node_purity,
         oob_error,
         oob_predictions,
         n_trees: config.n_trees,
@@ -1423,19 +1410,15 @@ mod tests {
             r.predictions[[0, 1]],
             r.predictions[[149, 0]],
             r.predictions[[75, 2]],
-            r.variable_importance[0],
-            r.variable_importance[2],
             r.oob_error.unwrap(),
         ];
         // Captured from the partition-per-threshold code on continuous data,
         // where no SSE tie (exact or to within rounding) breaks differently and
         // no tree reaches the depth cap; must stay bit-identical.
-        const EXPECTED: [u64; 6] = [
+        const EXPECTED: [u64; 4] = [
             0x401d26720478d36c,
             0xbff92b57a34a5541,
             0x4028bfee6c5e0c40,
-            0x3fd4422ce1652783,
-            0x3fd74b00dfcb2501,
             0x4016a63d0ba8b5a4,
         ];
         assert_eq!(got.map(f64::to_bits), EXPECTED);
@@ -1908,7 +1891,7 @@ mod tests {
 
         let result = quantile_rf(x.view(), y.view(), &config).unwrap();
 
-        // Split-count importance should be non-negative and sum to ~1
+        // Shares of the SSE decrease: non-negative and summing to one
         assert_eq!(result.variable_importance.len(), 2);
         assert!(
             result.variable_importance[0] >= 0.0,
@@ -1920,8 +1903,8 @@ mod tests {
         );
         let sum: f64 = result.variable_importance.iter().sum();
         assert!(
-            (sum - 1.0).abs() < 0.01,
-            "Importances should sum to ~1.0, got {}",
+            (sum - 1.0).abs() < 1e-12,
+            "Importances should sum to 1, got {}",
             sum
         );
         // Both features should get some splits (neither should be zero)
@@ -2002,7 +1985,7 @@ mod tests {
 
         assert!(display.contains("Quantile Regression Forest Results"));
         assert!(display.contains("Number of trees: 10"));
-        assert!(display.contains("Variable Importance"));
+        assert!(display.contains("Variable importance (share of the SSE decrease; IncNodePurity)"));
     }
 
     #[test]
@@ -2037,5 +2020,81 @@ mod tests {
             result.feature_names.as_ref().unwrap(),
             &["x1".to_string(), "x2".to_string()]
         );
+    }
+
+    #[test]
+    fn test_validate_qrf_tree_importance_rpart() {
+        // WT-5. One QRF tree on all rows (min_node_size 5, depth 4, every feature) equals rpart(minsplit = 11,
+        // minbucket = 5, maxdepth = 4, cp = 0). Before: shares 0.3226, 0.3226, 0.3548 (R 0.9920, 0.0030, 0.0050).
+        use crate::data::columns::NaPolicy;
+        use p2a_validation::{Check, Tol};
+        let names = ["x0", "x1", "x2"];
+        let (case, ds) = crate::test_support::load_case("tree_importance_rpart");
+        let (x, y, _) = crate::ml::extract_xy(&ds, "y", &names, NaPolicy::Fail).unwrap();
+        let mut config = QuantileRfConfig::default();
+        config.mtry = Some(3);
+        config.min_node_size = 5;
+        config.max_depth = Some(4);
+        let mut tree = QuantileTree::new(3);
+        tree.fit(
+            &x.view(),
+            &y.view(),
+            (0..x.nrows()).collect(),
+            Vec::new(),
+            &config,
+            &mut 1u64,
+        );
+        let total: f64 = tree.impurity_decrease().iter().sum();
+        let share: Vec<f64> = tree.impurity_decrease().iter().map(|v| v / total).collect();
+        Check::new(&case)
+            .named(
+                "qrf_d4_importance",
+                &names,
+                tree.impurity_decrease(),
+                Tol::coef(200),
+            )
+            .named("qrf_d4_share", &names, &share, Tol::coef(200))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_qrf_importance_band_randomforest() {
+        // WT-5: the forest falls in randomForest(nodesize = 10)'s five-seed band widened by twice its width and
+        // ranks x0 > x2 > x1 (R transcription of this forest: 0.9596-0.9629 / 0.0094-0.0109 / 0.0276-0.0297).
+        // Before: 0.357 / 0.284 / 0.359.
+        use crate::data::columns::NaPolicy;
+        let case = p2a_validation::Case::load("rf_importance_purity");
+        let (_, ds) = crate::test_support::load_case("tree_importance_rpart");
+        let (x, y, _) =
+            crate::ml::extract_xy(&ds, "y", &["x0", "x1", "x2"], NaPolicy::Fail).unwrap();
+        let mut config = QuantileRfConfig::default();
+        config.n_trees = 500;
+        config.mtry = Some(2);
+        config.min_node_size = 5;
+        config.quantiles = vec![0.5];
+        config.keep_inbag = false;
+        config.seed = Some(20261109);
+        let r = quantile_rf(x.view(), y.view(), &config).unwrap();
+        let (lo, hi) = (case.vector("ns10_share_min"), case.vector("ns10_share_max"));
+        for j in 0..3 {
+            let w = hi[j] - lo[j];
+            let v = r.variable_importance[j];
+            assert!(
+                lo[j] - 2.0 * w <= v && v <= hi[j] + 2.0 * w,
+                "share {j}: {v}"
+            );
+        }
+        let (plo, phi) = (
+            case.vector("ns10_purity_min"),
+            case.vector("ns10_purity_max"),
+        );
+        let w = phi[0] - plo[0];
+        assert!(
+            plo[0] - 2.0 * w <= r.inc_node_purity[0] && r.inc_node_purity[0] <= phi[0] + 2.0 * w,
+            "{}",
+            r.inc_node_purity[0]
+        );
+        let f = &r.variable_importance;
+        assert!(f[0] > f[2] && f[2] > f[1], "{f:?}");
     }
 }

@@ -63,7 +63,10 @@
       ],
       "tests": [
         "p2a-core::ml::trees::tests::test_validate_rf_tree_importance_rpart",
-        "p2a-core::ml::trees::tests::test_validate_rf_importance_band_randomforest"
+        "p2a-core::ml::trees::tests::test_validate_rf_importance_band_randomforest",
+        "p2a-core::ml::gbm::tests::test_validate_gbm_stump_influence",
+        "p2a-core::ml::quantile_rf::tests::test_validate_qrf_tree_importance_rpart",
+        "p2a-core::ml::quantile_rf::tests::test_validate_qrf_importance_band_randomforest"
       ],
       "quantities": [
         "per-tree SSE decrease per feature (random forest, DecisionTree, quantile forest)",
