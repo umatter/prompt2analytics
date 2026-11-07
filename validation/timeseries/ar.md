@@ -1,108 +1,50 @@
-# Validation: Autoregressive Model Fitting (ar)
+# Autoregressive models
 
-## Method Overview
+`ar`, `run_ar` and `run_ar_with_order` in `crates/p2a-core/src/forecasting/ar.rs`.
+R reference case: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `x` (n = 60) and `s` (n = 24) of
+`validation/datasets/generated/ts_utils.csv`.
 
-The `ar()` function fits autoregressive models to time series data with automatic order selection via AIC. It supports multiple estimation methods and returns coefficients, prediction variance, and diagnostic information.
+## OLS
 
-**Key Features:**
-- Automatic order selection using AIC
-- Multiple fitting methods: Yule-Walker (default), Burg, OLS
-- Returns partial autocorrelations as byproduct
-- Computes residuals for model diagnostics
+`ArMethod::Ols` is `ar(method = "ols", intercept = FALSE)` (`stats:::ar.ols`). R's rescaling by the standard deviation
+cancels in the coefficients, the rank decision and the relative AIC, so p2a omits it.
 
-**Mathematical Background:**
+| Step | Rule |
+|---|---|
+| Orders | 0..=order_max with AIC, otherwise the fixed order or order_max |
+| Stop | at the first order m with fewer rows than lags (n - m < m), or whose `qr(X'X)` is rank-deficient at R's tolerance 1e-7; the warning is R's "singularities ... only valid up to model order m - 1" |
+| Prediction variance | SSE / (n - m) |
+| AIC | n ln(var) + 2m, relative to its minimum; `+inf` for orders not fitted |
+| Unestimable fixed order | `InsufficientData` (rows < lags) or `SingularMatrix`, both naming "AR(m) by OLS" |
 
-The AR(p) model:
-```
-x_t - μ = φ₁(x_{t-1} - μ) + φ₂(x_{t-2} - μ) + ... + φₚ(x_{t-p} - μ) + ε_t
-```
+**Factorisation.** One lag design and one X'X per order. The normal equations solve it when `normal_inverse_from_gram`
+certifies the conditioning; otherwise a pivoted QR of X does, and always for a saturated order. X'X also takes the rank
+test with R's rule.
 
-where ε_t ~ WN(0, σ²).
+**Saturated order.** With rows = lags, as for m = 12 on `s`, the fit is exact. The SSE is exactly 0, so that order's AIC
+is -inf, the relative AIC is 0 for it and `+inf` for the others, and it is selected as in R, with a second warning. R reports
+var.pred 3.365475531705031e-30 and finite relative AICs (1611.6, ...), which are the rounding of `solve(X'X)` and not
+comparable across implementations. So `ar_ols_var` and `ar_ols_aic` are recorded, not compared: the test pins the order,
+the coefficients and the infinite orders, and `test_validate_ar_ols_aic_by_order` pins the AIC differences on the
+call with `order.max = 11`.
 
-**Estimation Methods:**
+**Convention kept as p2a's.** p2a fits no intercept. R's default `ar.ols(intercept = demean)` fits a constant after
+demeaning, so R's default `ar(x, method = "ols")` differs; the pins call R with `intercept = FALSE`.
 
-1. **Yule-Walker**: Solves Yule-Walker equations via Durbin-Levinson algorithm
-2. **Burg**: Minimizes forward and backward prediction error
-3. **OLS**: Ordinary least squares regression on lagged values
+## Yule-Walker
 
-## Reference Implementations
+`ArMethod::YuleWalker` is `ar.yw`: Durbin-Levinson on the sample autocovariances. var.pred is the Durbin-Levinson variance
+times n / (n - (order + 1)). An order with n <= order + 1 is `InsufficientData` (R returns an infinite or negative value).
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| stats | R | ar | R 4.3+ |
+## Pins
 
-## Test Cases
+| Test | R call | Pinned at |
+|---|---|---|
+| `test_validate_ar_ols_short_series` | `ar(s, method = "ols", demean = TRUE, intercept = FALSE)` | order 12, exact; coefficients `Tol::coef(24)`; order 13 infinite |
+| `test_validate_ar_ols_aic_by_order` | the same, differences over orders 0..11, p2a with `order_max = 11` | `Tol::stat(24)` |
+| `test_validate_ar_ols_n60` | `ar(x, method = "ols", demean = TRUE, intercept = FALSE)` | order exact; coefficient, mean `Tol::coef(60)`; AIC, var `Tol::stat(60)` |
+| `test_validate_ar_ols_fixed_order` | `ar(s, method = "ols", aic = FALSE, order.max = 2 | 3)` | coefficients `Tol::coef(24)`, var `Tol::stat(24)` |
+| `test_validate_ar_yule_walker_var_pred` | `ar(x, method = "yule-walker")`, and fixed order 3 | order exact; coefficients `Tol::coef(60)`, var `Tol::stat(60)` |
 
-### Test 1: AR(2) Process with AIC Selection
-
-**R Code:**
-```r
-set.seed(42)
-x <- arima.sim(n=100, model=list(ar=c(0.7, -0.2)))
-result <- ar(x, method="yule-walker")
-result$order  # Order selected
-result$ar     # Coefficients
-```
-
-**Expected Behavior:**
-- AIC should select an order close to the true order (2)
-- Coefficients should be close to true values (0.7, -0.2)
-
-**Rust Test:** `crates/p2a-core/src/forecasting/ar.rs::tests::test_validate_ar_yule_walker_against_r`
-
-### Test 2: Fixed Order Fitting
-
-**Test:** Fit AR(3) with fixed order (no AIC selection).
-
-**Rust Test:** `crates/p2a-core/src/forecasting/ar.rs::tests::test_ar_fixed_order`
-
-### Test 3: Method Comparison
-
-**Test:** Compare Yule-Walker, Burg, and OLS methods on same data.
-
-**Expected:** All methods should produce reasonable coefficients, with slight differences.
-
-**Rust Test:** `crates/p2a-core/src/forecasting/ar.rs::tests::test_ar_methods`
-
-## Numerical Precision Summary
-
-| Component | Tolerance | Notes |
-|-----------|-----------|-------|
-| AR coefficients | 0.1 | Estimation variability |
-| Prediction variance | 0.1 | Scale-dependent |
-| Order selection | exact or ±1 | AIC-based |
-
-## Known Differences
-
-1. **AIC formula**: R uses `n * log(var) + 2*(p+1)`. Our implementation uses the same formula.
-
-2. **Default max order**: R uses `min(n-1, 10*log10(n))`. We match this default.
-
-3. **OLS effective sample size**: OLS method uses `n-p` observations after lagging, which affects variance estimation slightly.
-
-## Performance Comparison
-
-| Series Length | Method | Rust (µs) | R (µs) | Speedup |
-|--------------|--------|-----------|--------|---------|
-| n=50 | Yule-Walker | 10.8 | 600 | ~56x |
-| n=100 | Yule-Walker | 17.6 | 520 | ~30x |
-| n=500 | Yule-Walker | 67.0 | 740 | ~11x |
-| n=1000 | Yule-Walker | 148.2 | 760 | ~5x |
-| n=50 | Burg | ~12 | 390 | ~32x |
-| n=100 | Burg | ~20 | 380 | ~19x |
-| n=500 | Burg | ~70 | 470 | ~7x |
-| n=1000 | Burg | ~150 | 750 | ~5x |
-| n=50 | OLS | ~20 | 3970 | ~199x |
-| n=100 | OLS | ~35 | 5300 | ~151x |
-
-**Notes:**
-- Rust consistently outperforms R by 5-200x depending on method and series length
-- Yule-Walker and Burg have similar performance in Rust
-- OLS in R is significantly slower due to matrix operations overhead
-- Rust benchmarks from Criterion (median); R benchmarks from system.time (mean of 100 iterations)
-
-## References
-
-- Brockwell, P. J. & Davis, R. A. (1991). "Time Series: Theory and Methods". Springer.
-- Burg, J. P. (1967). "Maximum Entropy Spectral Analysis". 37th Meeting of the Society of Exploration Geophysicists.
-- R Core Team. `stats::ar()` function. https://stat.ethz.ch/R-manual/R-devel/library/stats/html/ar.html
+`test_ar_ols_unestimable_fixed_order_is_an_error` and `test_ar_ols_rank_stop_keeps_the_estimable_orders` hold the refusal and
+the stop; they compare no R number.

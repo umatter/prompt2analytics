@@ -23,6 +23,34 @@
       "tolerance": "Tol::coef(60) (identical summation order)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ts_ar",
+      "name": "AR order selection and fit (OLS, Burg, Yule-Walker)",
+      "category": "forecasting",
+      "reference": "stats::ar(method = 'ols', intercept = FALSE), ar(method = 'burg'), ar(method = 'yule-walker')",
+      "doc": "validation/timeseries/ar.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_short_series",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_aic_by_order",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_n60",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_fixed_order",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_yule_walker_var_pred"
+      ],
+      "quantities": [
+        "order",
+        "coefficients",
+        "var.pred",
+        "relative AIC (AIC differences on the saturated series)",
+        "x.mean",
+        "Burg partial ACF"
+      ],
+      "tolerance": "coefficients Tol::coef(n), var.pred and AIC Tol::stat(n), orders exact (n = 24, 60); ar_ols_var and the finite AICs of the saturated call are the rounding of an exact fit in R and are recorded, not compared",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
