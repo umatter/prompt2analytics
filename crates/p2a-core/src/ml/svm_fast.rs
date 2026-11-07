@@ -999,8 +999,8 @@ mod tests {
         use ndarray::{Array1, Array2};
         use p2a_validation::{Case, Check, Tol};
 
-        pub(super) fn data(label: &str) -> (Case, Array2<f64>, Array1<f64>) {
-            let (case, ds) = crate::test_support::load_case("svm_libsvm");
+        pub(super) fn data(id: &str, label: &str) -> (Case, Array2<f64>, Array1<f64>) {
+            let (case, ds) = crate::test_support::load_case(id);
             let col = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
             let (x1, x2) = (col("x1"), col("x2"));
             let x =
@@ -1043,13 +1043,14 @@ mod tests {
         /// Against e1071::svm, and the properties of a solution of the dual. Before: labels 1 and 2
         /// both mapped to +1, so the dual had no support vector (ML-103).
         pub(super) fn check(
+            id: &str,
             tag: &str,
             kernel: FastKernel,
             c: f64,
             shrinking: bool,
         ) -> FastSvmResult {
             let linear = matches!(kernel, FastKernel::Linear);
-            let (case, x, labels) = data(if linear { "cls_lin" } else { "cls" });
+            let (case, x, labels) = data(id, if linear { "cls_lin" } else { "cls" });
             let r = fast_svm(x.view(), labels.view(), &config(kernel, c, shrinking)).unwrap();
             let tol = Tol::iterative(REL);
             let mut ch = Check::new(&case);
@@ -1137,13 +1138,26 @@ mod tests {
 
     #[test]
     fn test_validate_fast_svm_libsvm_radial_c01() {
-        validate::check("radial_c01", FastKernel::Rbf { gamma: 0.5 }, 0.1, true);
+        validate::check(
+            "svm_libsvm",
+            "radial_c01",
+            FastKernel::Rbf { gamma: 0.5 },
+            0.1,
+            true,
+        );
     }
     /// Shrinking does not change the solution.
     #[test]
     fn test_validate_fast_svm_libsvm_radial_c10() {
-        let a = validate::check("radial_c10", FastKernel::Rbf { gamma: 0.5 }, 10.0, true);
+        let a = validate::check(
+            "svm_libsvm",
+            "radial_c10",
+            FastKernel::Rbf { gamma: 0.5 },
+            10.0,
+            true,
+        );
         let b = validate::check(
+            "svm_libsvm",
             "radial_c10_noshrink",
             FastKernel::Rbf { gamma: 0.5 },
             10.0,
@@ -1159,18 +1173,18 @@ mod tests {
     }
     #[test]
     fn test_validate_fast_svm_libsvm_linear_c01() {
-        validate::check("linear_c01", FastKernel::Linear, 0.1, true);
+        validate::check("svm_libsvm", "linear_c01", FastKernel::Linear, 0.1, true);
     }
     #[test]
     fn test_validate_fast_svm_libsvm_linear_c10() {
-        validate::check("linear_c10", FastKernel::Linear, 10.0, true);
+        validate::check("svm_libsvm", "linear_c10", FastKernel::Linear, 10.0, true);
     }
 
     /// ML-103: any two-valued coding gives the same machine; outputs come back in the caller's
     /// labels. The larger label is positive, so a reversed coding negates the decision values.
     #[test]
     fn test_fast_svm_labels_are_mapped_and_returned() {
-        let (_, x, cls) = validate::data("cls");
+        let (_, x, cls) = validate::data("svm_libsvm", "cls");
         let cfg = validate::config(FastKernel::Rbf { gamma: 0.5 }, 1.0, true);
         let base = fast_svm(x.view(), cls.view(), &cfg).unwrap();
         for (lo, hi) in [(0.0, 1.0), (-1.0, 1.0), (3.0, 17.0), (0.5, 1.5)] {
@@ -1267,7 +1281,7 @@ mod tests {
     /// min_working_set >= n keeps every variable active: identical to shrinking = false.
     #[test]
     fn test_fast_svm_min_working_set_floor() {
-        let (_, x, cls) = validate::data("cls");
+        let (_, x, cls) = validate::data("svm_libsvm", "cls");
         let mut floor = validate::config(FastKernel::Rbf { gamma: 0.5 }, 10.0, true);
         floor.min_working_set = 160;
         let off = validate::config(FastKernel::Rbf { gamma: 0.5 }, 10.0, false);
@@ -1293,7 +1307,7 @@ mod tests {
 
     #[test]
     fn test_fast_svm_reports_iteration_limit() {
-        let (_, x, cls) = validate::data("cls");
+        let (_, x, cls) = validate::data("svm_libsvm", "cls");
         let mut c = validate::config(FastKernel::Rbf { gamma: 0.5 }, 10.0, true);
         c.max_iter = 5;
         let r = fast_svm(x.view(), cls.view(), &c).unwrap();
@@ -1309,7 +1323,7 @@ mod tests {
     /// The polynomial kernel solves its dual too; no R case compares it.
     #[test]
     fn test_fast_svm_polynomial_is_feasible() {
-        let (_, x, cls) = validate::data("cls");
+        let (_, x, cls) = validate::data("svm_libsvm", "cls");
         let kernel = FastKernel::Polynomial {
             gamma: 0.5,
             coef0: 1.0,
@@ -1330,7 +1344,7 @@ mod tests {
 
     #[test]
     fn test_fast_svm_rejects_bad_arguments() {
-        let (_, x, cls) = validate::data("cls");
+        let (_, x, cls) = validate::data("svm_libsvm", "cls");
         let bad = |f: &dyn Fn(&mut FastSvmConfig)| {
             let mut c = FastSvmConfig::default();
             f(&mut c);

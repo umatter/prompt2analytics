@@ -398,9 +398,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | PCA | [pca.md](ml/pca.md) | R-pinned, known deviations (ML-35) |
 | t-SNE | no validation document yet | not R-pinned |
 | Classical MDS (cmdscale) | [cmdscale.md](ml/cmdscale.md) | R-pinned, known deviations (ML-98) |
-| Projection Pursuit Regression | [ppr.md](ml/ppr.md) | not R-pinned |
+| Projection Pursuit Regression | [ppr.md](ml/ppr.md) | R-pinned, known deviations (ML-34) |
 | Random Forest | no validation document yet | not R-pinned |
-| SVM | no validation document yet | not R-pinned |
+| SVM (`fast_svm` as e1071::svm; `linear_svm`, `kernel_svm` not pinned) | [svm.md](ml/svm.md) | R-pinned, known deviations (ML-103, ML-40) |
+| MARS | [mars.md](ml/mars.md) | not R-pinned |
 | Causal Forest | [causal_forest.md](ml/causal_forest.md) | R-pinned, known deviations (ML-20) |
 | BART Causal (bartCause) | [bart_causal.md](ml/bart_causal.md) | not R-pinned |
 | HDBSCAN (dbscan::hdbscan) | [hdbscan.md](ml/hdbscan.md) | R-pinned, known deviations (ML-49) |

@@ -477,8 +477,8 @@ mod tests {
     use p2a_validation::{Case, Check, Tol};
 
     /// Sorted (dx, y) of `ppr_smooth`, with unit weights.
-    fn smooth_data() -> (Case, Vec<f64>, Vec<f64>) {
-        let (case, ds) = crate::test_support::load_case("ppr_smoothers");
+    fn smooth_data(id: &str) -> (Case, Vec<f64>, Vec<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
         let col = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
         let (x, y) = (col("x"), col("y"));
         let mut o: Vec<usize> = (0..x.len()).collect();
@@ -628,7 +628,7 @@ mod tests {
     /// The returned spar is within 0.02 of the argmin of the criterion on a fine grid.
     #[test]
     fn test_ppr_spline_brent_finds_the_minimum() {
-        let (_, dx, y) = smooth_data();
+        let (_, dx, y) = smooth_data("ppr_smoothers");
         let n = dx.len();
         let w = vec![1.0; n];
         let (p, left, basis, knot) = problem(&dx, &y, &w);
@@ -703,7 +703,7 @@ mod tests {
     /// `iter` and `crit` not at all (path).
     #[test]
     fn test_validate_ppr_spline_smoother() {
-        let (case, dx, y) = smooth_data();
+        let (case, dx, y) = smooth_data("ppr_smoothers");
         let n = dx.len();
         let w = vec![1.0; n];
         let knot = ppr_spline_knots(&dx);

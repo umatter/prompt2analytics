@@ -220,6 +220,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/pairwise_legacy.csv` | 36 × 3 (set, x, g) | `stat_pairwise_legacy` | `r/cases/stats_power_loglin.R` | literal values: the three sets of `pairwise.rs`'s legacy tests |
 | `generated/panel_absorbed.csv` | 180 × 8 (id, t, x1, x2, z, w, x3, y) | `panel_absorbed_regressors` | `r/cases/econ_panel_t3.R` | seed 20261104 |
 | `generated/pggls_panel.csv` | 200 × 5 (id, t, x1, x2, y) | `pggls_sim` | `r/cases/econ_panel_t3.R` | seed 20261101 |
+| `generated/ppr_sim.csv` | 200 × 5 (y, x1, x2, x3, w) | `ppr_methods` | `r/cases/ml_ppr_svm.R` | seed 20261125 |
+| `generated/ppr_smooth.csv` | 100 × 3 (x, y, w) | `ppr_smoothers` | `r/cases/ml_ppr_svm.R` | seed 20261127 |
 | `generated/purtest_panel.csv` | 480 × 3 (id, t, y) | `purtest_lag_selection` | `r/cases/econ_purtest.R` | seed 20261204 |
 | `generated/pvcm_panel.csv` | 240 × 5 (id, t, x1, x2, y) | `pvcm_pmg_sim` | `r/cases/econ_panel_t3.R` | seed 20261102 |
 | `generated/rank_binom_grid.csv` | 23 × 5 (label, x, n, p, stat15) | `stat_rank_binom` | `r/cases/stats_rank_t3.R` | literal values: 23 (x, n, p) cells; `stat15` marks the cells of STAT-15 |
@@ -241,6 +243,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/splm_sim.csv` | 294 × 9 (id, time, cx, cy, x1, x2, y_lag, y_err, y_re; rows shuffled) | `splm_spml_spgm` | `r/cases/spatial_splm.R` | seed 20261209; N = 49 units on uniform coordinates (W = 4 nearest neighbours, row-standardised), T = 6; y_lag spatial lag rho 0.4, y_err spatial error lambda 0.5, y_re random effects with a spatially autocorrelated error; individual effects N(0, 0.8^2) |
 | `generated/stdreg_sim.csv` | 300 × 8 (yc, yb, yp, ys, a, x1, x2, x1dup) | `stdreg_glm`, `stdreg_linear`, `stdreg_separation` | `r/cases/causal_stdreg.R` | seed 20261209; yp Poisson with mean about 220; ys = 1{x1 > 0.3} (complete separation); x1dup = 2 x1 + 1 (aliased) |
 | `generated/supsmu_sine.csv` | 100 × 4 (x, y, w, xr) | `supsmu_sine` | `r/cases/regression_smoothers_t3.R` | seed 42 |
+| `generated/svm_sim.csv` | 160 × 4 (cls, cls_lin, x1, x2) | `svm_libsvm` | `r/cases/ml_ppr_svm.R` | seed 20261126; labels coded 1 and 2 |
 | `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
 | `generated/sysgmm_empluk.csv` | 1031 × 5 (firm, year, lemp, lwage, lcap) | `dpd_sys_empluk` | `r/cases/econ_sysgmm.R` | `plm::EmplUK`, logs of emp, wage and capital |
 | `generated/ts_utils.csv` | 210 × 6 (t, x, s, lev, wn, ar1; x, s, wn and ar1 end in missing cells) | `ts_filter_ar_cpt` | `r/cases/ts_utils.R` | seed 20261123 |

@@ -1622,8 +1622,8 @@ mod tests {
         use ndarray::Array2;
         use p2a_validation::{Case, Check, Tol};
 
-        pub(super) fn ppr_case() -> (Case, Array2<f64>, Vec<f64>, Vec<f64>) {
-            let (case, ds) = crate::test_support::load_case("ppr_methods");
+        pub(super) fn ppr_case(id: &str) -> (Case, Array2<f64>, Vec<f64>, Vec<f64>) {
+            let (case, ds) = crate::test_support::load_case(id);
             let col = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
             let (x1, x2, x3) = (col("x1"), col("x2"), col("x3"));
             let x = Array2::from_shape_fn((x1.len(), 3), |(i, j)| [x1[i], x2[i], x3[i]][j]);
@@ -1666,8 +1666,13 @@ mod tests {
             let v = case.vector("predict_newx"); // 7 x 3, column-major
             Array2::from_shape_fn((7, 3), |(i, j)| v[j * 7 + i])
         }
-        pub(super) fn run(tag: &str, f: impl Fn(&mut PprConfig), tol: Tol) -> (Case, PprResult) {
-            let (case, x, y, _) = ppr_case();
+        pub(super) fn run(
+            id: &str,
+            tag: &str,
+            f: impl Fn(&mut PprConfig),
+            tol: Tol,
+        ) -> (Case, PprResult) {
+            let (case, x, y, _) = ppr_case(id);
             let mut c = cfg();
             f(&mut c);
             let r = ppr_with(x.view(), &y, None, &c).unwrap();
@@ -1680,8 +1685,8 @@ mod tests {
     /// running mean with alpha replaced by the gradient (ML-34) and linear fitted values (ML-32).
     #[test]
     fn test_validate_ppr_supsmu_b0() {
-        let (case, x, _, _) = validate::ppr_case();
-        let (_, r) = validate::run("supsmu_b0", |_| {}, validate::SUPSMU_TOL);
+        let (case, x, _, _) = validate::ppr_case("ppr_methods");
+        let (_, r) = validate::run("ppr_methods", "supsmu_b0", |_| {}, validate::SUPSMU_TOL);
         assert_eq!((r.nterms, r.max_terms, r.optlevel), (2, 3, 2));
         let nx = validate::newx(&case);
         let rows: Vec<Vec<f64>> = nx.outer_iter().map(|r| r.to_vec()).collect();
@@ -1694,15 +1699,26 @@ mod tests {
     }
     #[test]
     fn test_validate_ppr_supsmu_b5() {
-        validate::run("supsmu_b5", |c| c.bass = 5.0, validate::SUPSMU_TOL);
+        validate::run(
+            "ppr_methods",
+            "supsmu_b5",
+            |c| c.bass = 5.0,
+            validate::SUPSMU_TOL,
+        );
     }
     #[test]
     fn test_validate_ppr_supsmu_span03() {
-        validate::run("supsmu_span03", |c| c.span = 0.3, validate::SUPSMU_TOL);
+        validate::run(
+            "ppr_methods",
+            "supsmu_span03",
+            |c| c.span = 0.3,
+            validate::SUPSMU_TOL,
+        );
     }
     #[test]
     fn test_validate_ppr_spline_df5() {
         let (case, r) = validate::run(
+            "ppr_methods",
             "spline_df5",
             |c| {
                 c.sm_method = SmoothingMethod::Spline;
@@ -1718,6 +1734,7 @@ mod tests {
     #[test]
     fn test_validate_ppr_gcvspline() {
         validate::run(
+            "ppr_methods",
             "gcvspline",
             |c| c.sm_method = SmoothingMethod::GcvSpline,
             validate::SPLINE_TOL,
@@ -1726,6 +1743,7 @@ mod tests {
     #[test]
     fn test_validate_ppr_gcvspline_pen2() {
         validate::run(
+            "ppr_methods",
             "gcvspline_pen2",
             |c| {
                 c.sm_method = SmoothingMethod::GcvSpline;
@@ -1737,7 +1755,7 @@ mod tests {
     /// optlevel 1 and 3 as R; optlevel 0 keeps the 3 forward terms and gofn stays 0 as R's.
     #[test]
     fn test_validate_ppr_optlevels() {
-        let (case, x, y, _) = validate::ppr_case();
+        let (case, x, y, _) = validate::ppr_case("ppr_methods");
         for (ol, tag) in [(1, "supsmu_ol1"), (3, "supsmu_ol3"), (0, "supsmu_ol0")] {
             let mut c = validate::cfg();
             c.optlevel = ol;
@@ -1758,14 +1776,14 @@ mod tests {
     }
     #[test]
     fn test_validate_ppr_weighted() {
-        let (case, x, y, w) = validate::ppr_case();
+        let (case, x, y, w) = validate::ppr_case("ppr_methods");
         let r = ppr_with(x.view(), &y, Some(&w), &validate::cfg()).unwrap();
         validate::check(&case, "supsmu_weighted", &r, validate::SUPSMU_TOL);
     }
     /// p = 1: the direction is +-1 and the search stops after one smooth.
     #[test]
     fn test_validate_ppr_one_predictor() {
-        let (case, x, y, _) = validate::ppr_case();
+        let (case, x, y, _) = validate::ppr_case("ppr_methods");
         let x1 = x.slice(ndarray::s![.., 0..1]).to_owned();
         let r = ppr_with(x1.view(), &y, None, &PprConfig::default()).unwrap();
         validate::check(&case, "supsmu_p1", &r, validate::SUPSMU_TOL);
@@ -1776,7 +1794,7 @@ mod tests {
     /// keeps its old fit goes back to the RSS at the start of the pass, as in ppr.f).
     #[test]
     fn test_ppr_fitted_equals_predict_on_training_rows() {
-        let (_, x, y, wt) = validate::ppr_case();
+        let (_, x, y, wt) = validate::ppr_case("ppr_methods");
         for (m, weights) in [
             (SmoothingMethod::Supsmu, None),
             (SmoothingMethod::Spline, None),
@@ -1875,7 +1893,7 @@ mod tests {
     /// Design section 3.2: options R distinguishes give different fits (before: bit-identical).
     #[test]
     fn test_ppr_options_change_the_fit() {
-        let (_, x, y, _) = validate::ppr_case();
+        let (_, x, y, _) = validate::ppr_case("ppr_methods");
         let rss = |f: &dyn Fn(&mut PprConfig)| {
             let mut c = validate::cfg();
             f(&mut c);
@@ -1939,7 +1957,7 @@ mod tests {
     }
     #[test]
     fn test_ppr_rejects_invalid_options() {
-        let (_, x, y, _) = validate::ppr_case();
+        let (_, x, y, _) = validate::ppr_case("ppr_methods");
         let err = |f: &dyn Fn(&mut PprConfig)| {
             let mut c = validate::cfg();
             f(&mut c);
@@ -2020,7 +2038,7 @@ mod tests {
                 .to_string()
                 .contains("at least 6")
         );
-        let (case, _, _, _) = validate::ppr_case();
+        let (case, _, _, _) = validate::ppr_case("ppr_methods");
         let r = ppr_with(x.view(), &y, None, &validate::cfg()).unwrap();
         let e = r
             .try_predict(validate::newx(&case).slice(ndarray::s![.., 0..2]))
@@ -2035,7 +2053,7 @@ mod tests {
     /// An option the chosen smoother does not use is reported, not silently ignored.
     #[test]
     fn test_ppr_reports_options_the_smoother_ignores() {
-        let (_, x, y, _) = validate::ppr_case();
+        let (_, x, y, _) = validate::ppr_case("ppr_methods");
         let mut c = validate::cfg();
         c.sm_method = SmoothingMethod::Spline;
         c.bass = 5.0;

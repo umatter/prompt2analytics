@@ -1,122 +1,95 @@
 # Projection Pursuit Regression Validation
 
-## Method Overview
+## Method
 
-Projection Pursuit Regression (PPR) fits a model of the form:
-y = sum_{m=1}^{M} f_m(alpha_m' * x) + error
+Friedman's SMART, as R's `stats::ppr` (`ppr.f`): `y = ybar + sy sum_k b_k f_k(alpha_k' x) + e`, with
+unit directions and standardised ridge functions. A forward pass from linear starts, a Gauss-Newton
+direction search with step halving, backfitting, and backward elimination from `max_terms` to `nterms`.
+The estimate is the local optimum this algorithm reaches, so the algorithm and its stopping rules follow
+`ppr.f`; the constants are its single-precision literals (`conv = 0.005_f32`, for one).
 
-where alpha_m are projection directions and f_m are univariate smooth functions (ridge functions).
+Ridge smoothers (`crates/p2a-core/src/ml/ppr/`):
 
-**Key Parameters:**
-- `x`: Predictor matrix (n x p)
-- `y`: Response vector (n)
-- `nterms`: Number of terms (ridge functions) to fit
-- `max_terms`: Maximum terms to consider for backward elimination
-- `sm_method`: Smoothing method for ridge functions
+- `supsmu` (`supsmu.rs`): Friedman's super smoother with `bass` and a cross-validated or fixed `span`.
+- `spline` and `gcvspline` (`spline.rs`): a 15-coefficient penalised cubic B-spline on `ppr.f`'s knots,
+  with the smoothing parameter matched to `df` or chosen by GCV with penalty `gcvpen`. It is a standard
+  penalised spline, not a port of `sbart`.
 
-## Reference Implementations
+`optlevel`: 0 is the forward pass only; 1 backfits `b` and `f`; 2 adds one direction step per pass (the
+default); 3 runs the full direction search per term.
 
-| Package | Function | Notes |
-|---------|----------|-------|
-| R stats | `ppr()` | Reference implementation |
+Fitted values, residuals and `predict` come from the stored ridge functions (`pppred`): exact at training
+projections, linear between them, constant beyond.
 
-## Algorithm
+## R reference
 
-1. Initialize with zero model
-2. For each term m = 1, ..., M:
-   a. Find optimal projection direction alpha_m maximizing correlation
-   b. Fit smooth function f_m to projected values
-   c. Update residuals
-3. Optional backward elimination to remove weak terms
+`validation/r/cases/ml_ppr_svm.R`:
 
-## Test Cases
+- `ppr_methods`, dataset `validation/datasets/generated/ppr_sim.csv`: `ppr(nterms = 2, max.terms = 3)`
+  with `supsmu` (cv span, bass 5, span 0.3), `spline` (df 5), `gcvspline` (gcvpen 1 and 2), optlevel 0,
+  1, 3, weights; one predictor; `predict` on new rows inside and outside the training range.
+- `ppr_smoothers`, dataset `validation/datasets/generated/ppr_smooth.csv`: `stats::supsmu` (cv, bass 5,
+  span 0.3, weights), and `smooth.spline` on `ppr.f`'s knots (df 5, GCV, GCV penalty 2), with each fit
+  also refitted at R's own `spar`.
 
-### Test Case 1: Simple Projection
+## Tests and measured agreement
 
-**R Code:**
-```r
-set.seed(42)
-n <- 200
-x <- matrix(rnorm(n * 3), n, 3)
-# True model: y = sin(x1 + x2) + noise
-alpha_true <- c(1, 1, 0) / sqrt(2)
-proj <- x %*% alpha_true
-y <- sin(2 * proj) + rnorm(n, sd = 0.1)
+| Test | Tolerance | Largest measured gap |
+|---|---|---|
+| `test_validate_ppr_supsmu_b0`, `test_validate_ppr_supsmu_b5`, `test_validate_ppr_supsmu_span03`, `test_validate_ppr_optlevels`, `test_validate_ppr_weighted`, `test_validate_ppr_one_predictor` | `Tol::new(1e-8, 1e-10)`; `yb`, `ys` `Tol::coef(n)` | 9.6e-11 relative (a fitted value near 0); 1e-12 absolute |
+| `test_validate_ppr_supsmu_smoother` | `Tol::coef(n)` | 0 |
+| `test_validate_ppr_spline_df5`, `test_validate_ppr_gcvspline`, `test_validate_ppr_gcvspline_pen2` | `Tol::new(0.03, 0.02)` | see below |
+| `test_validate_ppr_spline_smoother` | about 10x measured: `spar` 5e-3, `ratio` 3e-2, last evaluation 0.15 relative + 0.02, refit at R's `spar` 5e-3 relative + 4e-3 | see below |
 
-fit <- ppr(x, y, nterms = 1)
-print(fit$alpha)  # Should be close to c(0.707, 0.707, 0)
-print(cor(fit$fitted.values, y))  # Should be high
-```
+The spline runs, maximum gap over the vector's largest value:
 
-**Rust tests** (not R-pinned: no `ppr()` value is compared; the R-pinned case comes with ML-107 for the tests and ML-34 for the smoother options):
-- `ml::ppr::tests::test_ppr_basic` (`crates/p2a-core/src/ml/ppr.rs`): nterms, n, p and the lengths of the fitted values and residuals on its own 15-row dataset.
+| Quantity | `spline` df 5 | `gcvspline` | `gcvspline` penalty 2 |
+|---|---|---|---|
+| alpha | 1.2e-2 | 1.1e-3 | 2.2e-3 |
+| beta | 4.7e-3 | 6.1e-4 | 1.4e-3 |
+| gofn | 2.3e-3 | 8.5e-3 | 6.6e-3 |
+| gof | 2.1e-3 | 2.6e-3 | 2.4e-3 |
+| fitted values | 2.6e-3 | 9.0e-4 | 1.5e-3 |
+| edf per term | 1.2e-2 | 9.7e-3 | 1.1e-2 |
 
-### Test Case 2: Multiple Terms
+Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_value_interpolates_and_extrapolates_flat`,
+`test_ppr_pprder_pools_and_differentiates` (hand-computed from `ppr.f`'s rule; R exposes no `pprder`),
+`test_ppr_pprdir_solves_gauss_newton_step`, `test_ppr_options_change_the_fit`,
+`test_smoothing_method_parses_aliases_and_rejects_unknown`, `test_ppr_rejects_invalid_options`,
+`test_ppr_reports_options_the_smoother_ignores`, `test_ppr_spline_penalty_is_exact`,
+`test_ppr_spline_fit_is_consistent`, `test_ppr_spline_brent_finds_the_minimum`,
+`test_ppr_spline_refuses_what_it_cannot_scale`, `test_ppr_supsmu_ties_and_constant_x`.
 
-**R Code:**
-```r
-set.seed(42)
-n <- 300
-x <- matrix(rnorm(n * 4), n, 4)
-# Two-term model
-y <- sin(x[,1] + x[,2]) + cos(x[,3] - x[,4]) + rnorm(n, sd = 0.2)
+## Deviations from R
 
-fit <- ppr(x, y, nterms = 2)
-print(summary(fit))
-```
-
-**Rust tests** (not R-pinned: no `ppr()` value is compared; the R-pinned case comes with ML-107 for the tests and ML-34 for the smoother options):
-- `ml::ppr::tests::test_ppr_multiple_terms` (`crates/p2a-core/src/ml/ppr.rs`): at most 2 terms and a non-empty goodness-of-fit vector (n = 50).
-
-### Test Case 3: Comparison with R Output
-
-**R Code:**
-```r
-set.seed(42)
-X <- matrix(rnorm(100 * 3), 100, 3)
-y <- sin(X[,1] * 2 + X[,2]) + rnorm(100, sd = 0.1)
-fit <- ppr(X, y, nterms = 1)
-print(round(fit$alpha, 6))
-# Should give projection direction
-print(round(fit$fitted.values[1:5], 6))
-```
-
-**Rust tests** (not R-pinned: no `ppr()` value is compared; the R-pinned case comes with ML-107 for the tests and ML-34 for the smoother options):
-- `ml::ppr::tests::test_ppr_with_weights` (`crates/p2a-core/src/ml/ppr.rs`): n with case weights.
-- `ml::ppr::tests::test_ppr_predict` (`crates/p2a-core/src/ml/ppr.rs`): the number of predictions. No test compares fitted values, directions or ridge functions with R.
-
-## Numerical Precision Summary
-
-| Sample Size | Alpha Tolerance | Fitted Value Tolerance |
-|-------------|-----------------|----------------------|
-| n < 100 | 0.1 | 0.05 |
-| n = 100-500 | 0.05 | 0.02 |
-| n > 500 | 0.02 | 0.01 |
-
-## Known Differences
-
-1. **Smoothing method**: Different smoother implementations
-2. **Optimization**: Local optima possible; directions may differ by sign
-3. **Scaling**: Different centering/scaling conventions
-
-## Performance Notes
-
-- O(n * p * nterms) per iteration
-- Rust implementation 3-10x faster than R
-- Memory scales with n * p
+- **The spline smoothers differ from R by about 1%, on purpose.** R's `sgram.f` writes `0.333` for 1/3 in
+  the penalty, and `smooth.spline` returns the fit, df and `lambda` of its last Brent evaluation rather
+  than of the `spar` it reports. p2a integrates the penalty exactly and returns everything at the reported
+  `spar`. Refitted at R's own `spar`, the two smooths agree to 3e-4 and the df to 3.5e-4, which is the
+  `0.333` alone; `spar` agrees to 4.6e-4, `ratio` to 2.5e-3. `lambda` is not compared: it is about 6% from
+  R's, which belongs to R's last evaluation. Fits at the reported `spar` are checked inside p2a
+  (`test_ppr_spline_fit_is_consistent`).
+- **`edf` per term** belongs to the stored ridge function. R reports that of the last smoother call, a
+  rejected trial included, and at `optlevel = 0` only for the first term.
+- **`optlevel = 0` with `max_terms > nterms`** keeps every forward term and warns. R's object lists only
+  `nterms` directions but predicts with all of them.
+- **Errors where R has none:** `max_terms < nterms`, fewer than 4 rows (6 for the spline smoothers), and
+  projections pooling into fewer than three groups (R stops with `br is too large` or reads out of
+  bounds).
+- **`gof`** is the RSS the search tracked, as in R: just above the RSS of `fitted` when the last term of the
+  final pass kept its old fit.
 
 ## Missing and non-finite values
 
-- **Core.** `ppr` refuses non-finite x, y and weights (Tier 0). The projection sorts and
-  the backward-elimination minimum use the total order of `f64::total_cmp`, so a NaN can no
-  longer break the sort (for finite input only `-0.0` now sorts before `0.0`).
+- **Core.** `ppr` refuses non-finite x, y and weights before any work, so projections are
+  finite. Ties in a projection keep row order.
 - **MCP.** `ml_ppr` drops the rows with a missing value in the target or a feature
   (`NaPolicy::Omit`), as R's formula interface does: `ppr(y_na ~ x1_na + x2, nterms = 1)`
   uses 28 of the 30 rows of the WP17 fixture (`na.omit` drops rows 4 and 7, 0-based;
   R 4.3.3). The JSON reports them under `"missing"`
   (`{"n_total": 30, "n_used": 28, "n_dropped": 2, "by_column": {...}}`), and the fit equals
   the fit on the complete rows.
-- **Tests.** `ml::ppr::tests::test_ppr_projection_sort_is_total`
+- **Tests.** `test_ppr_rejects_bad_values_and_honours_cancellation`
   (`crates/p2a-core/src/ml/ppr.rs`), `test_na_mcp_ppr_omits_incomplete_rows`
   (`crates/p2a-mcp/src/tools/handlers/ml.rs`). They compare p2a with p2a and pin no R
   number.
