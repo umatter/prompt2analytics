@@ -1,5 +1,7 @@
 //! Autocomplete state management for chat input
 
+use std::ops::Range;
+
 /// Type of suggestion being displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuggestionType {
@@ -221,63 +223,78 @@ impl AutocompleteState {
         self.column_dataset.is_some()
     }
 
-    /// Get the full text to replace (from trigger position to current cursor)
-    pub fn get_replacement_range(&self) -> (usize, usize) {
-        let start = self.trigger_position;
-        let end = self.trigger_position + 1 + self.filter_text.len();
-        // In column mode, include the dataset name and dot
-        if let Some(ref ds) = self.column_dataset {
-            // @dataset.filter -> start is @, end is after filter
-            let full_len = 1 + ds.len() + 1 + self.filter_text.len(); // @ + dataset + . + filter
-            (start, start + full_len)
-        } else {
-            (start, end)
+    /// Keep the dropdown on `trigger` at `position` for this input. Opens it (filter and selection
+    /// reset) unless it is already open on the same trigger outside column mode, and records
+    /// `position` either way, so the stored offset always matches the text.
+    pub fn track(&mut self, trigger: char, position: usize) {
+        if !self.is_open || self.trigger != Some(trigger) || self.is_column_mode() {
+            self.open(trigger, position);
         }
+        self.trigger_position = position;
     }
 
-    /// The input after accepting `suggestion` (moved from ChatInput's accept_suggestion).
-    pub fn apply(&self, current_value: &str, suggestion: &Suggestion) -> String {
-        let new_value = if let Some(trigger) = self.trigger {
-            let (start, _end) = self.get_replacement_range();
-            let before = &current_value[..start];
-            let after = if self.is_column_mode() {
-                let insert_pos = start
-                    + 1
-                    + self.column_dataset.as_ref().map(|d| d.len()).unwrap_or(0)
-                    + 1
-                    + self.filter_text.len();
-                if insert_pos < current_value.len() {
-                    &current_value[insert_pos..]
-                } else {
-                    ""
-                }
-            } else {
-                let insert_pos = start + 1 + self.filter_text.len();
-                if insert_pos < current_value.len() {
-                    &current_value[insert_pos..]
-                } else {
-                    ""
-                }
-            };
-            match trigger {
-                '@' => format!(
-                    "{}@{} {}",
-                    before,
-                    suggestion.insert_text,
-                    after.trim_start()
-                ),
-                '/' => format!(
-                    "{}/{} {}",
-                    before,
-                    suggestion.insert_text,
-                    after.trim_start()
-                ),
-                _ => current_value.to_string(),
-            }
-        } else {
-            suggestion.insert_text.clone()
+    /// [`track`](Self::track) for `@dataset.` column mode.
+    pub fn track_column_mode(&mut self, dataset_name: &str, position: usize) {
+        if !self.is_open
+            || !self.is_column_mode()
+            || self.column_dataset.as_deref() != Some(dataset_name)
+        {
+            self.open_column_mode(dataset_name, position);
+        }
+        self.trigger_position = position;
+    }
+
+    /// Keep the dropdown open on prompt-history matches: no trigger, so accepting replaces the whole
+    /// input. A trigger left from an earlier input is cleared.
+    pub fn track_history(&mut self) {
+        self.is_open = true;
+        self.trigger = None;
+        self.trigger_position = 0;
+        self.column_dataset = None;
+    }
+
+    /// The bytes of `current` that accepting a suggestion replaces: the trigger, the dataset prefix
+    /// in column mode, and the filter. The trigger is looked up in `current` itself, so edits made
+    /// since the dropdown opened cannot shift the range. Names may hold spaces, so the filter text
+    /// is matched as recorded; if the text no longer has it, the range runs to the next whitespace.
+    /// `None` in history mode or when the text no longer contains the trigger.
+    pub fn replacement_range(&self, current: &str) -> Option<Range<usize>> {
+        let trigger = self.trigger?;
+        let start = find_last_trigger(current, trigger)?;
+        let after_trigger = current.get(start..)?.strip_prefix(trigger)?;
+        let body = match &self.column_dataset {
+            Some(dataset) => after_trigger
+                .strip_prefix(dataset.as_str())
+                .and_then(|rest| rest.strip_prefix('.'))
+                .unwrap_or(after_trigger),
+            None => after_trigger,
         };
-        new_value.trim_end().to_string() + " "
+        let body_start = current.len() - body.len();
+        let filter_len = if body.starts_with(self.filter_text.as_str()) {
+            self.filter_text.len()
+        } else {
+            body.find(char::is_whitespace).unwrap_or(body.len())
+        };
+        Some(start..body_start + filter_len)
+    }
+
+    /// The input after accepting `suggestion`, ending in one space.
+    ///
+    /// With a trigger, the [`replacement_range`](Self::replacement_range) becomes the trigger plus
+    /// `insert_text`, and the text after it is kept. In history mode, the suggestion replaces the
+    /// whole input. If the trigger is gone, `current` comes back unchanged. Every slice is checked
+    /// (`str::get`), so no offset can panic.
+    pub fn apply(&self, current: &str, suggestion: &Suggestion) -> String {
+        let Some(trigger) = self.trigger else {
+            return format!("{} ", suggestion.insert_text.trim_end());
+        };
+        let Some(range) = self.replacement_range(current) else {
+            return current.to_string();
+        };
+        let before = current.get(..range.start).unwrap_or_default();
+        let after = current.get(range.end..).unwrap_or_default().trim_start();
+        let value = format!("{before}{trigger}{} {after}", suggestion.insert_text);
+        format!("{} ", value.trim_end())
     }
 }
 
