@@ -38,19 +38,22 @@
 //! The panel layout the estimators require (balanced, W rows in sorted entity-id order,
 //! rows in any order, no missing values) is described under "Panel layout" on [`run_spml`].
 
-use ndarray::{Array1, Array2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
+use std::f64::consts::PI;
 use std::fmt;
 
 use super::spatial::validate_optimizer;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
-use crate::resource::{try_with_capacity, try_zeros1, try_zeros2};
+use crate::linalg::matrix_ops::{eig_symmetric, matrix_inverse, ndarray_to_faer, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
+use crate::resource::{checkpoint, try_with_capacity, try_zeros1, try_zeros2};
 use crate::spatial::SpatialWeights;
-use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided};
 
 // ============================================================================
 // Configuration Types
@@ -78,6 +81,25 @@ impl fmt::Display for SpatialPanelEffect {
     }
 }
 
+crate::option_enum!(
+    SpatialPanelEffect,
+    crate::options::Choices {
+        option: "spatial panel effect",
+        values: &[
+            (
+                &["individual", "id", "entity", "unit"],
+                SpatialPanelEffect::Individual
+            ),
+            (&["time", "period"], SpatialPanelEffect::Time),
+            (
+                &["twoways", "two_ways", "twoway", "two_way", "both"],
+                SpatialPanelEffect::TwoWays
+            ),
+        ],
+    },
+    no_display
+);
+
 /// Panel model type for spatial panel estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SpatialPanelModel {
@@ -99,6 +121,25 @@ impl fmt::Display for SpatialPanelModel {
         }
     }
 }
+
+crate::option_enum!(
+    SpatialPanelModel,
+    crate::options::Choices {
+        option: "spatial panel model",
+        values: &[
+            (
+                &["within", "fe", "fixed", "fixed_effects"],
+                SpatialPanelModel::Within
+            ),
+            (
+                &["random", "re", "random_effects"],
+                SpatialPanelModel::Random
+            ),
+            (&["pooling", "pool", "pooled"], SpatialPanelModel::Pooling),
+        ],
+    },
+    no_display
+);
 
 /// Spatial error specification type.
 ///
@@ -125,6 +166,19 @@ impl fmt::Display for SpatialErrorType {
         }
     }
 }
+
+crate::option_enum!(
+    SpatialErrorType,
+    crate::options::Choices {
+        option: "spatial error",
+        values: &[
+            (&["none", "no"], SpatialErrorType::None),
+            (&["b", "baltagi", "sem"], SpatialErrorType::Baltagi),
+            (&["kkp", "sem2", "kapoor"], SpatialErrorType::KKP),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for spatial panel ML estimation (spml).
 #[derive(Debug, Clone)]
@@ -299,16 +353,22 @@ impl Default for SpremlConfig {
 /// Variance components for spatial panel models.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpatialPanelVariance {
-    /// Individual effect variance (sigma_mu^2)
+    /// Standard deviation sigma_mu of the individual effect (random effects; 0 at the
+    /// boundary phi = 0). The field has always held the standard deviation, not the variance.
     pub sigma_mu: Option<f64>,
-    /// Time effect variance (sigma_nu^2)
+    /// Time effect standard deviation (not estimated by any model; `None`)
     pub sigma_nu: Option<f64>,
-    /// Idiosyncratic error variance (sigma_epsilon^2)
+    /// ML standard deviation of the idiosyncratic error, sqrt(e'e / (N T)) (of eps in the
+    /// random-effects model)
     pub sigma_epsilon: f64,
-    /// Spatial error parameter (lambda for SEM component)
+    /// Spatial error parameter lambda, whenever an error term is estimated
     pub lambda: Option<f64>,
-    /// Serial correlation parameter (rho_sr)
+    /// Serial correlation parameter (rho_sr; not estimated, `None`)
     pub rho_sr: Option<f64>,
+    /// phi = sigma_mu^2 / sigma_epsilon^2, the random-effects likelihood parameter (splm's
+    /// phi); `None` for within and pooled models.
+    #[serde(default)]
+    pub phi: Option<f64>,
 }
 
 /// Result from spatial panel ML estimation (spml).
@@ -370,26 +430,64 @@ pub struct SpmlResult {
     pub n_entities: usize,
     /// Number of time periods
     pub n_time: usize,
-    /// Degrees of freedom
+    /// Residual degrees of freedom: observations minus absorbed effects, coefficients and
+    /// spatial parameters
     pub df: usize,
 
-    /// Residuals (skipped for serialization)
+    /// Residuals A y - X beta on the scale the model is estimated on (demeaned for within
+    /// models, the composite error for random effects); skipped for serialization
     #[serde(skip)]
     pub residuals: Array1<f64>,
-    /// Fitted values (skipped for serialization)
+    /// Fitted values, y - residuals on the same scale (skipped for serialization)
     #[serde(skip)]
     pub fitted: Array1<f64>,
+
+    /// Every estimated parameter, in the order of `parameter_se`: the coefficients, then
+    /// "rho", "phi", "lambda" (those estimated) and "sigma2".
+    #[serde(default)]
+    pub parameter_names: Vec<String>,
+    /// Standard errors from the inverse observed information of the full log-likelihood
+    /// (NaN for a parameter at a boundary).
+    #[serde(default)]
+    pub parameter_se: Vec<f64>,
+    /// Newton on the concentrated likelihood; `None` for the closed-form non-spatial
+    /// within or pooled fit.
+    #[serde(default)]
+    pub convergence: Option<Convergence>,
+    /// Warnings about the fit.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SpmlResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 impl fmt::Display for SpmlResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "\nSpatial Panel Model (ML)")?;
         writeln!(f, "{}", "=".repeat(60))?;
-        writeln!(f, "Model: {}  Effect: {}", self.model, self.effect)?;
+        let effect = if self.model == SpatialPanelModel::Pooling {
+            "none (pooled)".to_string()
+        } else {
+            self.effect.to_string()
+        };
+        writeln!(f, "Model: {}  Effect: {}", self.model, effect)?;
+        let error = if self.spatial_error == SpatialErrorType::None {
+            "none".to_string()
+        } else {
+            self.spatial_error.to_string()
+        };
         writeln!(
             f,
-            "Spatial Lag: {}  Spatial Error: {}",
-            self.has_lag, self.spatial_error
+            "Spatial lag: {}  Spatial error: {}",
+            if self.has_lag { "yes" } else { "no" },
+            error
         )?;
         writeln!(
             f,
@@ -403,28 +501,41 @@ impl fmt::Display for SpmlResult {
         )?;
         writeln!(f, "{}", "-".repeat(60))?;
 
-        // Spatial parameters
-        if let Some(rho) = self.rho {
-            writeln!(f, "\nSpatial lag coefficient (rho):")?;
+        let block = |f: &mut fmt::Formatter<'_>,
+                     title: &str,
+                     v: f64,
+                     se: Option<f64>,
+                     z: Option<f64>,
+                     p: Option<f64>|
+         -> fmt::Result {
+            writeln!(f, "\n{title}:")?;
             writeln!(
                 f,
                 "  Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}",
+                v,
+                se.unwrap_or(f64::NAN),
+                z.unwrap_or(f64::NAN),
+                p.unwrap_or(f64::NAN)
+            )
+        };
+        if let Some(rho) = self.rho {
+            block(
+                f,
+                "Spatial lag coefficient (rho)",
                 rho,
-                self.rho_se.unwrap_or(0.0),
-                self.rho_z.unwrap_or(0.0),
-                self.rho_p.unwrap_or(1.0)
+                self.rho_se,
+                self.rho_z,
+                self.rho_p,
             )?;
         }
-
         if let Some(lambda) = self.lambda {
-            writeln!(f, "\nSpatial error coefficient (lambda):")?;
-            writeln!(
+            block(
                 f,
-                "  Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}",
+                "Spatial error coefficient (lambda)",
                 lambda,
-                self.lambda_se.unwrap_or(0.0),
-                self.lambda_z.unwrap_or(0.0),
-                self.lambda_p.unwrap_or(1.0)
+                self.lambda_se,
+                self.lambda_z,
+                self.lambda_p,
             )?;
         }
 
@@ -453,13 +564,25 @@ impl fmt::Display for SpmlResult {
         if let Some(sigma_mu) = self.variance.sigma_mu {
             writeln!(f, "  sigma_mu (individual): {:.6}", sigma_mu)?;
         }
+        if let Some(phi) = self.variance.phi {
+            let se = self
+                .parameter_names
+                .iter()
+                .position(|n| n == "phi")
+                .and_then(|i| self.parameter_se.get(i).copied())
+                .unwrap_or(f64::NAN);
+            writeln!(f, "  phi = sigma_mu^2/sigma^2: {:.6} (SE {:.6})", phi, se)?;
+        }
         writeln!(
             f,
-            "  sigma_epsilon (error): {:.6}",
+            "  sigma_epsilon (error, ML): {:.6}",
             self.variance.sigma_epsilon
         )?;
-
-        Ok(())
+        writeln!(
+            f,
+            "Standard errors: inverse observed information of the full log-likelihood"
+        )?;
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -613,30 +736,31 @@ pub fn run_spml(
     config: SpmlConfig,
 ) -> EconResult<SpmlResult> {
     validate_optimizer(config.tol, config.max_iter)?;
+    check_spml_config(&config)?;
 
     // Balanced panel in canonical layout (period blocks of entities in W row order)
     let panel = extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
     check_panel_weights(listw, &panel)?;
 
-    // Build variable names
-    let mut coef_names = vec!["(Intercept)".to_string()];
-    coef_names.extend(x_cols.iter().map(|s| s.to_string()));
-
-    let (y, x, entity_ids) = (&panel.y, &panel.x, &panel.entity_ids);
-    let (n_entities, n_time) = (panel.n_entities, panel.n_time);
-
-    // Dispatch based on model type and spatial specification
     let mut result = match config.model {
-        SpatialPanelModel::Within => run_spml_within(
-            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
-        ),
-        SpatialPanelModel::Random => run_spml_random(
-            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
-        ),
-        SpatialPanelModel::Pooling => run_spml_pooling(
-            y, x, entity_ids, n_entities, n_time, listw, &config, coef_names,
-        ),
-    }?;
+        SpatialPanelModel::Random => {
+            let mut coef_names = vec!["(Intercept)".to_string()];
+            coef_names.extend(x_cols.iter().map(|s| s.to_string()));
+            run_spml_random(
+                &panel.y,
+                &panel.x,
+                &panel.entity_ids,
+                panel.n_entities,
+                panel.n_time,
+                listw,
+                &config,
+                coef_names,
+            )?
+        }
+        SpatialPanelModel::Within | SpatialPanelModel::Pooling => {
+            fit_spml_fe(&panel, listw, &config, y_col, x_cols)?
+        }
+    };
 
     // Back to the dataset's row order
     result.residuals = to_row_order(&result.residuals, &panel.rows);
@@ -978,286 +1102,960 @@ fn spatial_lag_panel(
     wy
 }
 
-/// Column-wise `x_j - lambda * spatial_lag_panel(x_j)` (the SEM transform of the
-/// regressors), on the canonical layout.
-fn transform_panel_x(
-    x: &Array2<f64>,
-    lambda: f64,
-    n_entities: usize,
-    n_time: usize,
-    listw: &SpatialWeights,
-) -> Array2<f64> {
-    let mut out = x.clone();
-    for j in 0..x.ncols() {
-        let col = x.column(j).to_owned();
-        let wx = spatial_lag_panel(&col, n_entities, n_time, listw);
-        out.column_mut(j).assign(&(&col - lambda * &wx));
+// ============================================================================
+// Configuration checks and panel helpers
+// ============================================================================
+
+/// Combinations of model and effect that `run_spml` does not estimate.
+fn check_spml_config(config: &SpmlConfig) -> EconResult<()> {
+    let effect = SpatialPanelEffect::choices().canonical(config.effect);
+    match (config.model, config.effect) {
+        (SpatialPanelModel::Within, _) | (_, SpatialPanelEffect::Individual) => Ok(()),
+        (SpatialPanelModel::Pooling, _) => Err(EconError::InvalidSpecification {
+            message: format!(
+                "model = 'pooling' estimates no individual or time effects, so effect = \
+                 '{effect}' does not apply; use model = 'within' with effect = '{effect}', or \
+                 leave effect at 'individual'"
+            ),
+        }),
+        (SpatialPanelModel::Random, _) => Err(EconError::InvalidSpecification {
+            message: format!(
+                "random effects are individual effects (as splm::spml); effect = '{effect}' is \
+                 not available with model = 'random'; use model = 'within' for time or two-way \
+                 fixed effects"
+            ),
+        }),
     }
-    out
+}
+
+/// Effects a model sweeps out of y and X (canonical layout: index s * N + i is entity i in
+/// period s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Absorbed {
+    None,
+    Individual,
+    Time,
+    TwoWays,
+}
+
+impl Absorbed {
+    fn of(config: &SpmlConfig) -> Self {
+        match (config.model, config.effect) {
+            (SpatialPanelModel::Pooling, _) => Absorbed::None,
+            (_, SpatialPanelEffect::Individual) => Absorbed::Individual,
+            (_, SpatialPanelEffect::Time) => Absorbed::Time,
+            (_, SpatialPanelEffect::TwoWays) => Absorbed::TwoWays,
+        }
+    }
+
+    /// Number of effects absorbed (the degrees of freedom they use).
+    fn count(self, n: usize, t: usize) -> usize {
+        match self {
+            Absorbed::None => 0,
+            Absorbed::Individual => n,
+            Absorbed::Time => t,
+            Absorbed::TwoWays => n + t - 1,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Absorbed::None => "pooled data",
+            Absorbed::Individual => "entity demeaning",
+            Absorbed::Time => "period demeaning",
+            Absorbed::TwoWays => "two-way demeaning",
+        }
+    }
+}
+
+/// Entity means of a canonical-layout vector (N entries).
+fn unit_means(v: ArrayView1<f64>, n: usize, t: usize) -> Array1<f64> {
+    let mut m = Array1::<f64>::zeros(n);
+    for p in 0..t {
+        m += &v.slice(s![p * n..(p + 1) * n]);
+    }
+    m / t as f64
+}
+
+/// R: `v - ave(v, id)` | `v - ave(v, time)` | `v - ave(v, id) - ave(v, time) + mean(v)`
+/// (balanced panel, canonical layout).
+fn demean_panel(v: ArrayView1<f64>, a: Absorbed, n: usize, t: usize) -> Array1<f64> {
+    if a == Absorbed::None {
+        return v.to_owned();
+    }
+    let unit = unit_means(v, n, t);
+    let period: Vec<f64> = (0..t)
+        .map(|p| v.slice(s![p * n..(p + 1) * n]).sum() / n as f64)
+        .collect();
+    let grand = v.sum() / (n * t) as f64;
+    Array1::from_shape_fn(n * t, |q| {
+        let (p, i) = (q / n, q % n);
+        match a {
+            Absorbed::Individual => v[q] - unit[i],
+            Absorbed::Time => v[q] - period[p],
+            Absorbed::TwoWays => v[q] - unit[i] - period[p] + grand,
+            Absorbed::None => v[q],
+        }
+    })
+}
+
+/// [`demean_panel`] column by column.
+fn demean_panel_matrix(
+    x: ArrayView2<f64>,
+    a: Absorbed,
+    n: usize,
+    t: usize,
+) -> EconResult<Array2<f64>> {
+    let mut out = try_zeros2(x.nrows(), x.ncols(), "demeaned spatial panel design")?;
+    for (j, col) in x.columns().into_iter().enumerate() {
+        out.column_mut(j).assign(&demean_panel(col, a, n, t));
+    }
+    Ok(out)
+}
+
+/// W applied per period to every column of a canonical-layout matrix.
+fn lag_columns(
+    x: &Array2<f64>,
+    n: usize,
+    t: usize,
+    listw: &SpatialWeights,
+) -> EconResult<Array2<f64>> {
+    let mut out = try_zeros2(
+        x.nrows(),
+        x.ncols(),
+        "spatially lagged spatial panel design",
+    )?;
+    for (j, col) in x.columns().into_iter().enumerate() {
+        out.column_mut(j)
+            .assign(&spatial_lag_panel(&col.to_owned(), n, t, listw));
+    }
+    Ok(out)
+}
+
+/// T >= 2 for entity or two-way demeaning and random effects, N >= 2 for period or two-way
+/// demeaning.
+fn check_panel_size(a: Absorbed, random: bool, n: usize, t: usize) -> EconResult<()> {
+    if (random || matches!(a, Absorbed::Individual | Absorbed::TwoWays)) && t < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: t,
+            context: "time periods: within-entity demeaning and random effects need T >= 2".into(),
+        });
+    }
+    if matches!(a, Absorbed::Time | Absorbed::TwoWays) && n < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: "entities: demeaning by period needs N >= 2".into(),
+        });
+    }
+    Ok(())
+}
+
+/// n - absorbed - p, refused unless positive.
+fn residual_df(n: usize, absorbed: usize, p: usize) -> EconResult<usize> {
+    let used = absorbed.saturating_add(p);
+    match n.checked_sub(used) {
+        Some(df) if df > 0 => Ok(df),
+        _ => Err(EconError::InsufficientData {
+            required: used.saturating_add(1),
+            provided: n,
+            context: format!(
+                "observations: the residual degrees of freedom of the spatial panel model \
+                 would be {}",
+                n as i128 - used as i128
+            ),
+        }),
+    }
+}
+
+/// The relative residual sum of squares below which a least-squares fit counts as exact.
+const EXACT_FIT_RSS: f64 = 64.0 * f64::EPSILON * 64.0 * f64::EPSILON;
+
+/// Least squares of y on x before any spatial work: an aliased column is
+/// `PerfectMulticollinearity` (when `refuse_aliased`), and an exact fit (residual sum of
+/// squares at most (64 eps)^2 y'y, or y'y = 0) leaves the Gaussian likelihood unbounded.
+fn require_non_degenerate_fit(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    names: &[String],
+    y_col: &str,
+    what: &str,
+    refuse_aliased: bool,
+) -> EconResult<()> {
+    let yy = y.dot(y);
+    let rss = if x.ncols() == 0 {
+        yy
+    } else {
+        let ls = least_squares(x.view(), y.view())?;
+        if refuse_aliased && !ls.aliased.is_empty() {
+            return Err(EconError::PerfectMulticollinearity {
+                columns: ls.aliased.iter().map(|&j| names[j].clone()).collect(),
+            });
+        }
+        ls.residuals.dot(&ls.residuals)
+    };
+    if yy == 0.0 || rss <= EXACT_FIT_RSS * yy {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the regressors fit {y_col} exactly after the {what} (residual sum of squares \
+                 {rss:.1e} against {yy:.1e}); the Gaussian likelihood is unbounded, so the \
+                 spatial panel model cannot be estimated"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The eigenvalues of W, kept complex. kNN and other asymmetric weights have complex
+/// eigenvalues, and log|I - r W| = Re sum_i ln(1 - r w_i) = 1/2 sum_i ln((1 - r a_i)^2 +
+/// (r b_i)^2) needs them (R: `Re(sum(log(1 - r * eigen(W)$values)))`). rho and lambda are
+/// searched on (1 / min Re w + 1e-6, 1 / max Re w - 1e-6), as the R reference.
+// T3-WP34: build from WeightsSpectrum once WP32 is merged (the weights' cached complex
+// spectrum), instead of a fresh dense eigen decomposition per call.
+struct PanelSpectrum {
+    re: Vec<f64>,
+    im: Vec<f64>,
+    lower: f64,
+    upper: f64,
+}
+
+impl PanelSpectrum {
+    fn new(listw: &SpatialWeights) -> EconResult<Self> {
+        checkpoint()?;
+        let w = listw.try_to_dense()?;
+        let evs = ndarray_to_faer(&w.view()).eigenvalues().map_err(|_| {
+            EconError::Computation(
+                "the eigenvalues of the spatial weights matrix could not be computed".into(),
+            )
+        })?;
+        let (re, im): (Vec<f64>, Vec<f64>) = evs.iter().map(|z| (z.re, z.im)).unzip();
+        if re.iter().chain(&im).any(|v| !v.is_finite()) {
+            return Err(EconError::Computation(
+                "the spatial weights matrix has non-finite eigenvalues".into(),
+            ));
+        }
+        let min_re = re.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_re = re.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lower = if min_re < 0.0 {
+            1.0 / min_re + 1e-6
+        } else {
+            -1.0
+        };
+        let upper = if max_re > 0.0 {
+            1.0 / max_re - 1e-6
+        } else {
+            1.0
+        };
+        Ok(Self {
+            re,
+            im,
+            lower,
+            upper,
+        })
+    }
+
+    /// log|I - r W|.
+    fn log_det(&self, r: f64) -> f64 {
+        self.re
+            .iter()
+            .zip(&self.im)
+            .map(|(&a, &b)| 0.5 * ((1.0 - r * a).powi(2) + (r * b).powi(2)).ln())
+            .sum()
+    }
+
+    /// d/dr log|I - r W| = -Re sum w / (1 - r w)
+    /// = -sum (a - r (a^2 + b^2)) / ((1 - r a)^2 + (r b)^2).
+    fn d_log_det(&self, r: f64) -> f64 {
+        -self
+            .re
+            .iter()
+            .zip(&self.im)
+            .map(|(&a, &b)| (a - r * (a * a + b * b)) / ((1.0 - r * a).powi(2) + (r * b).powi(2)))
+            .sum::<f64>()
+    }
 }
 
 // ============================================================================
-// Fixed Effects (Within) Estimation
+// Maximum likelihood machinery (shared by the within, pooled and random models)
 // ============================================================================
 
-fn run_spml_within(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    entity_ids: &[usize],
+/// Value, gradient and parameter vector of a concentrated log-likelihood at psi;
+/// `coef_scale[j]` = sqrt(s2 [(X*'X*)^-1]_jj) of the final (G)LS (the step floor of the
+/// information below).
+struct MlProfile {
+    ll: f64,
+    grad: Vec<f64>,
+    theta: Vec<f64>,
+    coef_scale: Vec<f64>,
+}
+
+const NEWTON_CRITERION: &str = "max |change| / max(1, |psi|) of rho, log phi and lambda";
+/// Step of the central differences of the profile gradient.
+const PROFILE_STEP: f64 = 1e-5;
+
+/// Central-difference Hessian of the profile gradient at psi (one-sided towards the
+/// interior when psi_j +- h leaves [lower_j, upper_j]), symmetrised.
+fn profile_hessian<F>(
+    profile: &F,
+    psi: &[f64],
+    lower: &[f64],
+    upper: &[f64],
+) -> EconResult<Array2<f64>>
+where
+    F: Fn(&[f64]) -> EconResult<MlProfile>,
+{
+    let p = psi.len();
+    let mut h = Array2::<f64>::zeros((p, p));
+    let at = |v: f64, j: usize| -> EconResult<Vec<f64>> {
+        let mut q = psi.to_vec();
+        q[j] = v;
+        Ok(profile(&q)?.grad)
+    };
+    let center = profile(psi)?.grad;
+    for j in 0..p {
+        let (up, down) = (psi[j] + PROFILE_STEP, psi[j] - PROFILE_STEP);
+        let (gp, gm, width) = if up > upper[j] {
+            (center.clone(), at(down, j)?, PROFILE_STEP)
+        } else if down < lower[j] {
+            (at(up, j)?, center.clone(), PROFILE_STEP)
+        } else {
+            (at(up, j)?, at(down, j)?, 2.0 * PROFILE_STEP)
+        };
+        for i in 0..p {
+            h[[i, j]] = (gp[i] - gm[i]) / width;
+        }
+    }
+    Ok((&h + &h.t()) * 0.5)
+}
+
+/// -H^-1 g when H is negative definite, else g_j / max(|H_jj|, 1e-8).
+fn newton_direction(h: &Array2<f64>, g: &[f64]) -> Vec<f64> {
+    let p = g.len();
+    let gradient_step =
+        || -> Vec<f64> { (0..p).map(|j| g[j] / h[[j, j]].abs().max(1e-8)).collect() };
+    if h.iter().any(|v| !v.is_finite()) {
+        return gradient_step();
+    }
+    match eig_symmetric(&h.view()) {
+        Ok((vals, vecs)) if vals.iter().all(|&l| l < 0.0) => {
+            // delta = V diag(-1/l) V' g
+            let vg = vecs.t().dot(&Array1::from(g.to_vec()));
+            let scaled = Array1::from_shape_fn(p, |i| -vg[i] / vals[i]);
+            vecs.dot(&scaled).to_vec()
+        }
+        _ => gradient_step(),
+    }
+}
+
+/// Damped Newton ascent on a concentrated log-likelihood over psi (rho, log phi, lambda:
+/// dimensionless), clamped to [lower, upper]. Hessian: [`profile_hessian`]. Step halving
+/// (at most 30) until ll(new) >= ll(old) - 1e-12 |ll(old)|; a failed line search stops the
+/// loop (converged only when the Newton step itself is below `tol`). Converged when
+/// max_j |change_j| / max(1, |psi_j|) <= tol.
+fn newton_profile<F>(
+    profile: F,
+    psi0: &[f64],
+    lower: &[f64],
+    upper: &[f64],
+    tol: f64,
+    max_iter: usize,
+) -> EconResult<(Vec<f64>, MlProfile, Convergence)>
+where
+    F: Fn(&[f64]) -> EconResult<MlProfile>,
+{
+    let p = psi0.len();
+    let clamp = |v: &mut [f64]| {
+        for j in 0..p {
+            v[j] = v[j].clamp(lower[j], upper[j]);
+        }
+    };
+    let rel = |new: &[f64], old: &[f64]| -> f64 {
+        (0..p)
+            .map(|j| (new[j] - old[j]).abs() / old[j].abs().max(1.0))
+            .fold(0.0, f64::max)
+    };
+    let mut psi = psi0.to_vec();
+    clamp(&mut psi);
+    let mut cur = profile(&psi)?;
+    if !cur.ll.is_finite() || cur.grad.iter().any(|g| !g.is_finite()) {
+        return Err(EconError::Computation(
+            "the spatial panel log-likelihood is not finite at rho = lambda = 0, phi = 1".into(),
+        ));
+    }
+    let (mut converged, mut iterations, mut change) = (false, 0usize, f64::NAN);
+    while iterations < max_iter {
+        checkpoint()?;
+        iterations += 1;
+        let h = profile_hessian(&profile, &psi, lower, upper)?;
+        let delta = newton_direction(&h, &cur.grad);
+        let step_size = (0..p)
+            .map(|j| delta[j].abs() / psi[j].abs().max(1.0))
+            .fold(0.0, f64::max);
+        let mut accepted = None;
+        let mut t = 1.0;
+        for _ in 0..=30 {
+            let mut cand: Vec<f64> = (0..p).map(|j| psi[j] + t * delta[j]).collect();
+            clamp(&mut cand);
+            let prof = profile(&cand)?;
+            if prof.ll.is_finite()
+                && prof.grad.iter().all(|g| g.is_finite())
+                && prof.ll >= cur.ll - 1e-12 * cur.ll.abs()
+            {
+                accepted = Some((cand, prof));
+                break;
+            }
+            t *= 0.5;
+        }
+        match accepted {
+            None => {
+                change = step_size;
+                converged = step_size <= tol;
+                break;
+            }
+            Some((cand, prof)) => {
+                change = rel(&cand, &psi);
+                psi = cand;
+                cur = prof;
+                if change <= tol {
+                    converged = true;
+                    break;
+                }
+            }
+        }
+    }
+    let conv = Convergence::new(
+        converged,
+        iterations,
+        max_iter,
+        NEWTON_CRITERION,
+        change,
+        tol,
+    );
+    Ok((psi, cur, conv))
+}
+
+/// Kind of each entry of theta, for the information steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParamKind {
+    Coef(usize),
+    Spatial,
+    Scale,
+}
+
+/// Steps h_j of the information: Coef(j) 1e-5 max(|theta_j|, coef_scale_j) (1e-5 if both
+/// are 0); Spatial (rho, lambda) 1e-5, made inactive with a warning when theta_j +- 1e-5
+/// leaves `interval`; Scale (phi, sigma2) 1e-5 theta_j (a phi of 0 is made inactive by the
+/// caller). Returns (steps, active).
+fn information_steps(
+    prof: &MlProfile,
+    kinds: &[ParamKind],
+    interval: Option<(f64, f64)>,
+    names: &[String],
+    warnings: &mut Vec<String>,
+) -> (Vec<f64>, Vec<bool>) {
+    let mut steps = Vec::with_capacity(kinds.len());
+    let mut active = Vec::with_capacity(kinds.len());
+    for (j, kind) in kinds.iter().enumerate() {
+        let v = prof.theta[j];
+        match *kind {
+            ParamKind::Coef(c) => {
+                let base = v.abs().max(prof.coef_scale[c]);
+                steps.push(if base > 0.0 { 1e-5 * base } else { 1e-5 });
+                active.push(true);
+            }
+            ParamKind::Spatial => {
+                let h = 1e-5;
+                let inside = interval.is_none_or(|(lo, hi)| v - h > lo && v + h < hi);
+                if !inside {
+                    warnings.push(format!(
+                        "{} is within 1e-5 of the boundary of its interval; its standard error \
+                         is not reported",
+                        names[j]
+                    ));
+                }
+                steps.push(h);
+                active.push(inside);
+            }
+            ParamKind::Scale => {
+                steps.push(1e-5 * v.abs());
+                active.push(v > 0.0);
+            }
+        }
+    }
+    (steps, active)
+}
+
+/// Symmetrised central-difference Jacobian of an analytic score at theta over the `active`
+/// parameters (inactive rows and columns stay 0).
+fn fd_hessian<F>(score: F, theta: &[f64], steps: &[f64], active: &[bool]) -> EconResult<Array2<f64>>
+where
+    F: Fn(&[f64]) -> EconResult<Array1<f64>>,
+{
+    let p = theta.len();
+    let mut h = Array2::<f64>::zeros((p, p));
+    for j in (0..p).filter(|&j| active[j]) {
+        checkpoint()?;
+        let mut up = theta.to_vec();
+        let mut down = theta.to_vec();
+        up[j] += steps[j];
+        down[j] -= steps[j];
+        let (sp, sm) = (score(&up)?, score(&down)?);
+        for i in (0..p).filter(|&i| active[i]) {
+            h[[i, j]] = (sp[i] - sm[i]) / (2.0 * steps[j]);
+        }
+    }
+    Ok((&h + &h.t()) * 0.5)
+}
+
+/// SEs = sqrt(diag((-H_active)^-1)); NaN for inactive parameters. A non-positive eigenvalue
+/// of -H_active gives NaN for every parameter and a warning.
+fn ml_standard_errors(
+    h: &Array2<f64>,
+    active: &[bool],
+    warnings: &mut Vec<String>,
+) -> EconResult<Vec<f64>> {
+    let idx: Vec<usize> = (0..active.len()).filter(|&j| active[j]).collect();
+    let mut se = vec![f64::NAN; active.len()];
+    if idx.is_empty() {
+        return Ok(se);
+    }
+    let info = Array2::from_shape_fn((idx.len(), idx.len()), |(a, b)| -h[[idx[a], idx[b]]]);
+    let smallest = if info.iter().all(|v| v.is_finite()) {
+        eig_symmetric(&info.view())
+            .map(|(vals, _)| vals.iter().copied().fold(f64::INFINITY, f64::min))
+            .unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    };
+    if smallest.is_nan() || smallest <= 0.0 {
+        warnings.push(format!(
+            "the observed information is not positive definite at the estimate (smallest \
+             eigenvalue {smallest:.3e}); standard errors are not reported"
+        ));
+        return Ok(se);
+    }
+    let inv = sym_inverse(
+        info.view(),
+        SingularPolicy::Error,
+        "spml observed information",
+    )?;
+    for (a, &j) in idx.iter().enumerate() {
+        se[j] = inv.inverse[[a, a]].sqrt();
+    }
+    Ok(se)
+}
+
+/// Estimates of one spml fit, for [`assemble_spml`].
+struct SpmlFit {
+    theta: Vec<f64>,
+    se: Vec<f64>,
+    k: usize,
+    lag: bool,
+    phi: Option<f64>,
+    err: bool,
+    ll: f64,
+    df: usize,
+    coef_names: Vec<String>,
+    convergence: Option<Convergence>,
+    warnings: Vec<String>,
+    residuals: Array1<f64>,
+    fitted: Array1<f64>,
+}
+
+/// z and p of an estimate, NaN unless its SE is finite and positive.
+fn wald(v: f64, se: f64) -> (f64, f64) {
+    if se.is_finite() && se > 0.0 {
+        let z = v / se;
+        (z, normal_p_value_two_sided(z))
+    } else {
+        (f64::NAN, f64::NAN)
+    }
+}
+
+/// theta = [beta (k), rho?, phi?, lambda?, sigma2] into an `SpmlResult`.
+fn assemble_spml(
+    fit: SpmlFit,
+    config: &SpmlConfig,
     n_entities: usize,
     n_time: usize,
-    listw: &mut SpatialWeights,
-    config: &SpmlConfig,
-    coef_names: Vec<String>,
-) -> EconResult<SpmlResult> {
-    let n = y.len();
-    let k = x.ncols();
-
-    // Within transformation (demean by entity)
-    let y_within = demean_by_entity(y, entity_ids, n_entities);
-    let x_within = demean_matrix_by_entity(x, entity_ids, n_entities);
-
-    // For fixed effects, drop intercept column (demeaning removes it)
-    let x_fe = x_within.slice(ndarray::s![.., 1..]).to_owned();
-    let k_fe = k - 1;
-
-    let coef_names_fe: Vec<String> = coef_names[1..].to_vec();
-
-    // Handle spatial lag if specified
-    let (beta, rho_opt, sigma2, ll) = if config.lag {
-        // Spatial lag panel model: y = rho*W*y + X*beta + alpha + epsilon
-        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
-        let wy_within = demean_by_entity(&wy, entity_ids, n_entities);
-
-        // Optimize over rho using concentrated likelihood
-        let (rho_min, rho_max) = listw.try_rho_range()?;
-        let rho_min = rho_min.max(-0.99);
-        let rho_max = rho_max.min(0.99);
-
-        let (rho_opt, ll_opt) = optimize_rho_panel(
-            &y_within,
-            &wy_within,
-            &x_fe,
-            n_entities,
-            n_time,
-            listw,
-            rho_min,
-            rho_max,
-            config.tol,
-            config.max_iter,
-        )?;
-
-        // Compute beta at optimal rho
-        let y_tilde = &y_within - rho_opt * &wy_within;
-        let xtx_mat = xtx(&x_fe.view());
-        let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-        let xty_vec = xty(&x_fe.view(), &y_tilde);
-        let beta = xtx_inv.dot(&xty_vec);
-
-        let residuals = &y_tilde - &x_fe.dot(&beta);
-        let rss: f64 = residuals.iter().map(|&r| r * r).sum();
-        let df = n - n_entities - k_fe;
-        let sigma2 = rss / df as f64;
-
-        (beta, Some(rho_opt), sigma2, ll_opt)
-    } else if config.spatial_error != SpatialErrorType::None {
-        // Spatial error panel model
-        run_spml_within_sem(&y_within, &x_fe, n_entities, n_time, listw, config)?
-    } else {
-        // Standard fixed effects (no spatial)
-        let xtx_mat = xtx(&x_fe.view());
-        let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-        let xty_vec = xty(&x_fe.view(), &y_within);
-        let beta = xtx_inv.dot(&xty_vec);
-
-        let residuals = &y_within - &x_fe.dot(&beta);
-        let rss: f64 = residuals.iter().map(|&r| r * r).sum();
-        let df = n - n_entities - k_fe;
-        let sigma2 = rss / df as f64;
-
-        let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln());
-
-        (beta, None, sigma2, ll)
-    };
-
-    // Compute standard errors and statistics
-    let df = n - n_entities - k_fe - if config.lag { 1 } else { 0 };
-    let xtx_mat = xtx(&x_fe.view());
-    let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-
-    let std_errors: Vec<f64> = (0..k_fe)
-        .map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt())
-        .collect();
-
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let z_values: Vec<f64> = beta
-        .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-    let p_values: Vec<f64> = z_values
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal.cdf(z.abs())))
-        .collect();
-    let significance: Vec<SignificanceLevel> = p_values
+) -> SpmlResult {
+    let SpmlFit {
+        theta,
+        se,
+        k,
+        lag,
+        phi,
+        err,
+        ll,
+        df,
+        coef_names,
+        convergence,
+        warnings,
+        residuals,
+        fitted,
+    } = fit;
+    let n = residuals.len();
+    let coefficients = theta[..k].to_vec();
+    let std_errors = se[..k].to_vec();
+    let (z_values, p_values): (Vec<f64>, Vec<f64>) =
+        (0..k).map(|j| wald(coefficients[j], std_errors[j])).unzip();
+    let significance = p_values
         .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
-
-    // Rho statistics if present
-    let (rho_se, rho_z, rho_p) = if let Some(rho) = rho_opt {
-        let tr_w2 = listw.trace_w2();
-        let tr_wtw = listw.trace_wtw();
-        let var_rho = sigma2 / (n_time as f64 * (tr_w2 + tr_wtw));
-        let se = var_rho.sqrt().max(0.001);
-        let z = rho / se;
-        let p = 2.0 * (1.0 - normal.cdf(z.abs()));
-        (Some(se), Some(z), Some(p))
-    } else {
-        (None, None, None)
-    };
-
-    // Compute fitted values and residuals
-    let fitted = x_fe.dot(&beta);
-    let residuals = &y_within - &fitted;
-
-    // AIC and BIC
-    let n_params = k_fe + if config.lag { 2 } else { 1 }; // beta + (rho?) + sigma2
-    let aic = -2.0 * ll + 2.0 * n_params as f64;
-    let bic = -2.0 * ll + (n_params as f64) * (n as f64).ln();
-
-    Ok(SpmlResult {
-        model: SpatialPanelModel::Within,
+    let mut names = coef_names.clone();
+    let mut i = k;
+    let (mut rho, mut rho_se, mut rho_z, mut rho_p) = (None, None, None, None);
+    if lag {
+        let (z, p) = wald(theta[i], se[i]);
+        (rho, rho_se, rho_z, rho_p) = (Some(theta[i]), Some(se[i]), Some(z), Some(p));
+        names.push("rho".into());
+        i += 1;
+    }
+    if phi.is_some() {
+        names.push("phi".into());
+        i += 1;
+    }
+    let (mut lambda, mut lambda_se, mut lambda_z, mut lambda_p) = (None, None, None, None);
+    if err {
+        let (z, p) = wald(theta[i], se[i]);
+        (lambda, lambda_se, lambda_z, lambda_p) = (Some(theta[i]), Some(se[i]), Some(z), Some(p));
+        names.push("lambda".into());
+    }
+    names.push("sigma2".into());
+    let sigma2 = theta[theta.len() - 1];
+    let n_par = theta.len() as f64;
+    SpmlResult {
+        model: config.model,
         effect: config.effect,
-        has_lag: config.lag,
+        has_lag: lag,
         spatial_error: config.spatial_error,
-        coefficients: beta.to_vec(),
-        coef_names: coef_names_fe,
+        coefficients,
+        coef_names,
         std_errors,
         z_values,
         p_values,
         significance,
-        rho: rho_opt,
+        rho,
         rho_se,
         rho_z,
         rho_p,
-        lambda: None,
-        lambda_se: None,
-        lambda_z: None,
-        lambda_p: None,
+        lambda,
+        lambda_se,
+        lambda_z,
+        lambda_p,
         variance: SpatialPanelVariance {
-            sigma_mu: None,
+            sigma_mu: phi.map(|ph| (ph * sigma2).sqrt()),
             sigma_nu: None,
             sigma_epsilon: sigma2.sqrt(),
-            lambda: None,
+            lambda,
             rho_sr: None,
+            phi,
         },
         log_likelihood: ll,
-        aic,
-        bic,
+        aic: -2.0 * ll + 2.0 * n_par,
+        bic: -2.0 * ll + n_par * (n as f64).ln(),
         n_obs: n,
         n_entities,
         n_time,
         df,
         residuals,
         fitted,
+        parameter_names: names,
+        parameter_se: se,
+        convergence,
+        warnings,
+    }
+}
+
+// ============================================================================
+// Within and pooled ML
+// ============================================================================
+
+/// The lag-only profile in closed form: with one QR of X, beta(rho) = b0 - rho b1 and
+/// e(rho) = e0 - rho e1 (e0, e1 the residuals of y and W y), so a profile evaluation costs
+/// the log-determinant only.
+struct LagOnly {
+    b0: Array1<f64>,
+    b1: Array1<f64>,
+    e0e0: f64,
+    e0e1: f64,
+    e1e1: f64,
+    unscaled_diag: Array1<f64>,
+}
+
+/// Transformed (demeaned or pooled) data and the spatial lags the likelihood needs
+/// (canonical layout).
+struct FeData {
+    y: Array1<f64>,
+    x: Array2<f64>,
+    wy: Array1<f64>,
+    wwy: Array1<f64>,
+    wx: Array2<f64>,
+    n_time: usize,
+    lag_only: Option<LagOnly>,
+}
+
+/// psi = (rho?, lambda?): beta = least squares of B A y on B X; s2 = e'e / n;
+/// ll = -n/2 (ln(2 pi s2) + 1) + T (log|A| + log|B|); grad_rho = T dlog|A| + e'(B W y)/s2;
+/// grad_lambda = T dlog|B| + e'(W r)/s2 with r = A y - X beta (envelope theorem).
+fn fe_profile(
+    d: &FeData,
+    sp: Option<&PanelSpectrum>,
+    lag: bool,
+    err: bool,
+    psi: &[f64],
+    names: &[String],
+) -> EconResult<MlProfile> {
+    let rho = if lag { psi[0] } else { 0.0 };
+    let lam = if err { psi[psi.len() - 1] } else { 0.0 };
+    let (n, t) = (d.y.len() as f64, d.n_time as f64);
+    let ld = |r: f64| sp.map_or(0.0, |s| s.log_det(r));
+    if let (Some(lo), false) = (&d.lag_only, err) {
+        let ee = lo.e0e0 - 2.0 * rho * lo.e0e1 + rho * rho * lo.e1e1;
+        let s2 = ee / n;
+        let ll = -0.5 * n * ((2.0 * PI * s2).ln() + 1.0) + t * ld(rho);
+        let mut grad = Vec::with_capacity(1);
+        if let (Some(s), true) = (sp, lag) {
+            // e'(W y) = e'e1 because e is orthogonal to X
+            grad.push(t * s.d_log_det(rho) + (lo.e0e1 - rho * lo.e1e1) / s2);
+        }
+        let mut theta = (&lo.b0 - &(&lo.b1 * rho)).to_vec();
+        if lag {
+            theta.push(rho);
+        }
+        theta.push(s2);
+        let coef_scale = lo.unscaled_diag.iter().map(|v| (s2 * v).sqrt()).collect();
+        return Ok(MlProfile {
+            ll,
+            grad,
+            theta,
+            coef_scale,
+        });
+    }
+    let ay = &d.y - &(&d.wy * rho);
+    let way = &d.wy - &(&d.wwy * rho);
+    let by = &ay - &(&way * lam);
+    let bx = &d.x - &(&d.wx * lam);
+    let ls = least_squares(bx.view(), by.view())?;
+    if !ls.aliased.is_empty() {
+        return Err(EconError::PerfectMulticollinearity {
+            columns: ls.aliased.iter().map(|&j| names[j].clone()).collect(),
+        });
+    }
+    let e = &ls.residuals;
+    let s2 = e.dot(e) / n;
+    let ll = -0.5 * n * ((2.0 * PI * s2).ln() + 1.0) + t * (ld(rho) + ld(lam));
+    let mut grad = Vec::with_capacity(2);
+    if let Some(s) = sp {
+        if lag {
+            grad.push(t * s.d_log_det(rho) + e.dot(&(&d.wy - &(&d.wwy * lam))) / s2);
+        }
+        if err {
+            grad.push(t * s.d_log_det(lam) + e.dot(&(&way - &d.wx.dot(&ls.coefficients))) / s2);
+        }
+    }
+    let mut theta = ls.coefficients.to_vec();
+    if lag {
+        theta.push(rho);
+    }
+    if err {
+        theta.push(lam);
+    }
+    theta.push(s2);
+    let coef_scale = ls
+        .unscaled_cov
+        .diag()
+        .iter()
+        .map(|v| (s2 * v).sqrt())
+        .collect();
+    Ok(MlProfile {
+        ll,
+        grad,
+        theta,
+        coef_scale,
     })
 }
 
-/// Spatial error model within fixed effects.
-fn run_spml_within_sem(
-    y_within: &Array1<f64>,
-    x_fe: &Array2<f64>,
-    n_entities: usize,
-    n_time: usize,
-    listw: &mut SpatialWeights,
-    config: &SpmlConfig,
-) -> EconResult<(Array1<f64>, Option<f64>, f64, f64)> {
-    let n = y_within.len();
-    let k = x_fe.ncols();
-
-    // Get valid lambda range
-    let (lambda_min, lambda_max) = listw.try_rho_range()?;
-    let lambda_min = lambda_min.max(-0.99);
-    let lambda_max = lambda_max.min(0.99);
-
-    // Optimize lambda for spatial error
-    let eigenvalues = listw.try_eigenvalues()?.clone();
-
-    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
-    let mut a = lambda_min;
-    let mut b = lambda_max;
-
-    // Negative concentrated log-likelihood
-    let neg_ll = |lambda: f64| -> f64 {
-        // (I - lambda*W) transformation of each period's cross-section
-        let y_star = y_within - lambda * &spatial_lag_panel(y_within, n_entities, n_time, listw);
-        let x_star = transform_panel_x(x_fe, lambda, n_entities, n_time, listw);
-
-        // OLS on transformed data
-        let xtx_mat = xtx(&x_star.view());
-        let xtx_inv = match matrix_inverse(&xtx_mat.view()) {
-            Ok(inv) => inv,
-            Err(_) => return f64::INFINITY,
-        };
-        let xty_vec = xty(&x_star.view(), &y_star);
-        let beta = xtx_inv.dot(&xty_vec);
-        let residuals = &y_star - &x_star.dot(&beta);
-        let rss: f64 = residuals.iter().map(|&r| r * r).sum();
-        let sigma2 = rss / n as f64;
-
-        if sigma2 <= 0.0 {
-            return f64::INFINITY;
-        }
-
-        // Log determinant: T * sum(log(1 - lambda * eigenvalue))
-        let log_det: f64 = n_time as f64
-            * eigenvalues
-                .iter()
-                .map(|&ev| (1.0 - lambda * ev).ln())
-                .sum::<f64>();
-
-        0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) - log_det
+/// Full analytic score at theta = (beta, rho?, lambda?, s2), r = y - rho W y - X beta,
+/// e = r - lambda W r: d/dbeta = (X - lambda W X)'e / s2; d/drho = T dlog|A| +
+/// e'(W y - lambda W W y)/s2; d/dlambda = T dlog|B| + e'(W r)/s2;
+/// d/ds2 = -n/(2 s2) + e'e/(2 s2^2).
+fn fe_score(
+    d: &FeData,
+    sp: Option<&PanelSpectrum>,
+    lag: bool,
+    err: bool,
+    theta: &[f64],
+) -> Array1<f64> {
+    let k = d.x.ncols();
+    let beta = ArrayView1::from(&theta[..k]);
+    let rho = if lag { theta[k] } else { 0.0 };
+    let lam = if err {
+        theta[k + usize::from(lag)]
+    } else {
+        0.0
     };
-
-    // Golden section search
-    let mut c = b - (b - a) / phi;
-    let mut d = a + (b - a) / phi;
-
-    for _ in 0..config.max_iter {
-        crate::resource::checkpoint()?;
-        if (b - a).abs() < config.tol {
-            break;
+    let s2 = theta[theta.len() - 1];
+    let (n, t) = (d.y.len() as f64, d.n_time as f64);
+    let r = &d.y - &(&d.wy * rho) - d.x.dot(&beta);
+    let wr = &d.wy - &(&d.wwy * rho) - d.wx.dot(&beta);
+    let e = &r - &(&wr * lam);
+    let bx = &d.x - &(&d.wx * lam);
+    let mut g: Vec<f64> = bx.t().dot(&e).iter().map(|v| v / s2).collect();
+    if let Some(s) = sp {
+        if lag {
+            g.push(t * s.d_log_det(rho) + e.dot(&(&d.wy - &(&d.wwy * lam))) / s2);
         }
-        if neg_ll(c) < neg_ll(d) {
-            b = d;
-            d = c;
-            c = b - (b - a) / phi;
-        } else {
-            a = c;
-            c = d;
-            d = a + (b - a) / phi;
+        if err {
+            g.push(t * s.d_log_det(lam) + e.dot(&wr) / s2);
         }
     }
+    g.push(-n / (2.0 * s2) + e.dot(&e) / (2.0 * s2 * s2));
+    Array1::from(g)
+}
 
-    let lambda_opt = (a + b) / 2.0;
-    let ll_opt = -neg_ll(lambda_opt);
+/// Within (entity, time or two-way demeaning) and pooled lag, error and SARAR models by ML.
+fn fit_spml_fe(
+    panel: &SpatialPanelData,
+    listw: &SpatialWeights,
+    config: &SpmlConfig,
+    y_col: &str,
+    x_cols: &[&str],
+) -> EconResult<SpmlResult> {
+    let (n_ent, n_time) = (panel.n_entities, panel.n_time);
+    let n = panel.y.len();
+    let a = Absorbed::of(config);
+    check_panel_size(a, false, n_ent, n_time)?;
+    let lag = config.lag;
+    let err = config.spatial_error != SpatialErrorType::None;
+    let (x, coef_names): (Array2<f64>, Vec<String>) = if a == Absorbed::None {
+        let mut names = vec!["(Intercept)".to_string()];
+        names.extend(x_cols.iter().map(|s| s.to_string()));
+        (panel.x.clone(), names)
+    } else {
+        (
+            demean_panel_matrix(panel.x.slice(s![.., 1..]), a, n_ent, n_time)?,
+            x_cols.iter().map(|s| s.to_string()).collect(),
+        )
+    };
+    let k = x.ncols();
+    if k == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "the within spatial panel model needs at least one regressor".into(),
+        });
+    }
+    let df = residual_df(
+        n,
+        a.count(n_ent, n_time),
+        k + usize::from(lag) + usize::from(err),
+    )?;
+    let y = demean_panel(panel.y.view(), a, n_ent, n_time);
+    require_non_degenerate_fit(&y, &x, &coef_names, y_col, a.describe(), true)?;
 
-    // Compute beta at optimal lambda (recompute transformed data)
-    let y_star = y_within - lambda_opt * &spatial_lag_panel(y_within, n_entities, n_time, listw);
-    let x_star = transform_panel_x(x_fe, lambda_opt, n_entities, n_time, listw);
+    let sp = if lag || err {
+        Some(PanelSpectrum::new(listw)?)
+    } else {
+        None
+    };
+    let wy = spatial_lag_panel(&y, n_ent, n_time, listw);
+    let wwy = spatial_lag_panel(&wy, n_ent, n_time, listw);
+    let wx = lag_columns(&x, n_ent, n_time, listw)?;
+    let lag_only = if err {
+        None
+    } else {
+        let f0 = least_squares(x.view(), y.view())?;
+        let f1 = least_squares(x.view(), wy.view())?;
+        Some(LagOnly {
+            e0e0: f0.residuals.dot(&f0.residuals),
+            e0e1: f0.residuals.dot(&f1.residuals),
+            e1e1: f1.residuals.dot(&f1.residuals),
+            unscaled_diag: f0.unscaled_cov.diag().to_owned(),
+            b0: f0.coefficients,
+            b1: f1.coefficients,
+        })
+    };
+    let data = FeData {
+        y,
+        x,
+        wy,
+        wwy,
+        wx,
+        n_time,
+        lag_only,
+    };
 
-    let xtx_mat = xtx(&x_star.view());
-    let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-    let xty_vec = xty(&x_star.view(), &y_star);
-    let beta = xtx_inv.dot(&xty_vec);
-    let residuals = &y_star - &x_star.dot(&beta);
-    let rss: f64 = residuals.iter().map(|&r| r * r).sum();
-    let sigma2 = rss / (n - n_entities - k) as f64;
+    let p = usize::from(lag) + usize::from(err);
+    let mut warnings = Vec::new();
+    let (prof, convergence) = match sp.as_ref() {
+        Some(s) if p > 0 => {
+            let (_, prof, conv) = newton_profile(
+                |psi| fe_profile(&data, Some(s), lag, err, psi, &coef_names),
+                &vec![0.0; p],
+                &vec![s.lower; p],
+                &vec![s.upper; p],
+                config.tol,
+                config.max_iter,
+            )?;
+            if let Some(note) = conv.note("Spatial panel ML (spml)") {
+                warnings.push(note);
+            }
+            (prof, Some(conv))
+        }
+        _ => (
+            fe_profile(&data, None, false, false, &[], &coef_names)?,
+            None,
+        ),
+    };
 
-    // Note: For SEM, we return lambda via sigma2 field temporarily
-    // The caller will need to handle this properly
-    Ok((beta, Some(lambda_opt), sigma2, ll_opt))
+    let mut kinds: Vec<ParamKind> = (0..k).map(ParamKind::Coef).collect();
+    let mut names = coef_names.clone();
+    if lag {
+        kinds.push(ParamKind::Spatial);
+        names.push("rho".into());
+    }
+    if err {
+        kinds.push(ParamKind::Spatial);
+        names.push("lambda".into());
+    }
+    kinds.push(ParamKind::Scale);
+    names.push("sigma2".into());
+    let interval = sp.as_ref().map(|s| (s.lower, s.upper));
+    let (steps, active) = information_steps(&prof, &kinds, interval, &names, &mut warnings);
+    let hess = fd_hessian(
+        |th| Ok(fe_score(&data, sp.as_ref(), lag, err, th)),
+        &prof.theta,
+        &steps,
+        &active,
+    )?;
+    let se = ml_standard_errors(&hess, &active, &mut warnings)?;
+
+    let theta = prof.theta;
+    let beta = ArrayView1::from(&theta[..k]);
+    let rho = if lag { theta[k] } else { 0.0 };
+    let residuals = &data.y - &(&data.wy * rho) - data.x.dot(&beta);
+    let fitted = &data.y - &residuals;
+    Ok(assemble_spml(
+        SpmlFit {
+            theta,
+            se,
+            k,
+            lag,
+            phi: None,
+            err,
+            ll: prof.ll,
+            df,
+            coef_names,
+            convergence,
+            warnings,
+            residuals,
+            fitted,
+        },
+        config,
+        n_ent,
+        n_time,
+    ))
 }
 
 /// Optimize rho for spatial lag panel model.
@@ -1451,7 +2249,6 @@ fn run_spml_random(
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
     let std_errors: Vec<f64> = (0..k).map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt()).collect();
 
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let z_values: Vec<f64> = beta
         .iter()
         .zip(std_errors.iter())
@@ -1459,7 +2256,7 @@ fn run_spml_random(
         .collect();
     let p_values: Vec<f64> = z_values
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal.cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
@@ -1472,7 +2269,7 @@ fn run_spml_random(
         let var_rho = sigma2 / (n_time as f64 * (tr_w2 + tr_wtw));
         let se = var_rho.sqrt().max(0.001);
         let z = rho / se;
-        let p = 2.0 * (1.0 - normal.cdf(z.abs()));
+        let p = normal_p_value_two_sided(z);
         (Some(se), Some(z), Some(p))
     } else {
         (None, None, None)
@@ -1510,6 +2307,7 @@ fn run_spml_random(
             sigma_epsilon: sigma2_e.sqrt(),
             lambda: None,
             rho_sr: None,
+            phi: None,
         },
         log_likelihood: ll,
         aic,
@@ -1520,139 +2318,10 @@ fn run_spml_random(
         df: n - k,
         residuals,
         fitted,
-    })
-}
-
-// ============================================================================
-// Pooled Estimation
-// ============================================================================
-
-fn run_spml_pooling(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    entity_ids: &[usize],
-    n_entities: usize,
-    n_time: usize,
-    listw: &mut SpatialWeights,
-    config: &SpmlConfig,
-    coef_names: Vec<String>,
-) -> EconResult<SpmlResult> {
-    let n = y.len();
-    let k = x.ncols();
-
-    let (beta, rho_opt, sigma2, ll) = if config.lag {
-        let wy = spatial_lag_panel(y, n_entities, n_time, listw);
-
-        let (rho_min, rho_max) = listw.try_rho_range()?;
-        let (rho_opt, ll_opt) = optimize_rho_panel(
-            y,
-            &wy,
-            x,
-            n_entities,
-            n_time,
-            listw,
-            rho_min.max(-0.99),
-            rho_max.min(0.99),
-            config.tol,
-            config.max_iter,
-        )?;
-
-        let y_tilde = y - rho_opt * &wy;
-        let xtx_mat = xtx(&x.view());
-        let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-        let xty_vec = xty(&x.view(), &y_tilde);
-        let beta = xtx_inv.dot(&xty_vec);
-
-        let residuals = &y_tilde - &x.dot(&beta);
-        let sigma2 = residuals.iter().map(|&r| r * r).sum::<f64>() / (n - k) as f64;
-
-        (beta, Some(rho_opt), sigma2, ll_opt)
-    } else {
-        let xtx_mat = xtx(&x.view());
-        let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-        let xty_vec = xty(&x.view(), y);
-        let beta = xtx_inv.dot(&xty_vec);
-
-        let residuals = y - &x.dot(&beta);
-        let sigma2 = residuals.iter().map(|&r| r * r).sum::<f64>() / (n - k) as f64;
-        let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln());
-
-        (beta, None, sigma2, ll)
-    };
-
-    let xtx_mat = xtx(&x.view());
-    let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-    let std_errors: Vec<f64> = (0..k).map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt()).collect();
-
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let z_values: Vec<f64> = beta
-        .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-    let p_values: Vec<f64> = z_values
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal.cdf(z.abs())))
-        .collect();
-    let significance: Vec<SignificanceLevel> = p_values
-        .iter()
-        .map(|&p| SignificanceLevel::from_p_value(p))
-        .collect();
-
-    let (rho_se, rho_z, rho_p) = if let Some(rho) = rho_opt {
-        let tr_w2 = listw.trace_w2();
-        let tr_wtw = listw.trace_wtw();
-        let var_rho = sigma2 / (n_time as f64 * (tr_w2 + tr_wtw));
-        let se = var_rho.sqrt().max(0.001);
-        let z = rho / se;
-        let p = 2.0 * (1.0 - normal.cdf(z.abs()));
-        (Some(se), Some(z), Some(p))
-    } else {
-        (None, None, None)
-    };
-
-    let fitted = x.dot(&beta);
-    let residuals = y - &fitted;
-
-    let n_params = k + if config.lag { 2 } else { 1 };
-    let aic = -2.0 * ll + 2.0 * n_params as f64;
-    let bic = -2.0 * ll + (n_params as f64) * (n as f64).ln();
-
-    Ok(SpmlResult {
-        model: SpatialPanelModel::Pooling,
-        effect: config.effect,
-        has_lag: config.lag,
-        spatial_error: config.spatial_error,
-        coefficients: beta.to_vec(),
-        coef_names,
-        std_errors,
-        z_values,
-        p_values,
-        significance,
-        rho: rho_opt,
-        rho_se,
-        rho_z,
-        rho_p,
-        lambda: None,
-        lambda_se: None,
-        lambda_z: None,
-        lambda_p: None,
-        variance: SpatialPanelVariance {
-            sigma_mu: None,
-            sigma_nu: None,
-            sigma_epsilon: sigma2.sqrt(),
-            lambda: None,
-            rho_sr: None,
-        },
-        log_likelihood: ll,
-        aic,
-        bic,
-        n_obs: n,
-        n_entities,
-        n_time,
-        df: n - k,
-        residuals,
-        fitted,
+        parameter_names: vec![],
+        parameter_se: vec![],
+        convergence: None,
+        warnings: vec![],
     })
 }
 
@@ -1940,7 +2609,7 @@ fn run_spgm_gls(
 mod tests {
     use super::*;
     use crate::spatial::{Neighbors, WeightStyle};
-    use p2a_validation::Tol;
+    use p2a_validation::{Case, Check, Tol};
     use polars::prelude::*;
 
     fn create_spatial_panel_data() -> (Dataset, SpatialWeights) {
@@ -1987,63 +2656,6 @@ mod tests {
         let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
 
         (dataset, listw)
-    }
-
-    #[test]
-    fn test_spml_within_basic() {
-        let (dataset, mut listw) = create_spatial_panel_data();
-
-        let config = SpmlConfig {
-            model: SpatialPanelModel::Within,
-            lag: false,
-            spatial_error: SpatialErrorType::None,
-            ..Default::default()
-        };
-
-        let result = run_spml(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            "entity",
-            "time",
-            &mut listw,
-            config,
-        )
-        .unwrap();
-
-        assert_eq!(result.n_obs, 12);
-        assert_eq!(result.n_entities, 4);
-        assert_eq!(result.n_time, 3);
-        assert_eq!(result.coefficients.len(), 2); // x1, x2 (no intercept in FE)
-        assert!(result.log_likelihood.is_finite());
-    }
-
-    #[test]
-    fn test_spml_within_spatial_lag() {
-        let (dataset, mut listw) = create_spatial_panel_data();
-
-        let config = SpmlConfig {
-            model: SpatialPanelModel::Within,
-            lag: true,
-            spatial_error: SpatialErrorType::None,
-            ..Default::default()
-        };
-
-        let result = run_spml(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            "entity",
-            "time",
-            &mut listw,
-            config,
-        )
-        .unwrap();
-
-        assert!(result.has_lag);
-        assert!(result.rho.is_some());
-        let rho = result.rho.unwrap();
-        assert!(rho > -1.0 && rho < 1.0);
     }
 
     #[test]
@@ -2130,32 +2742,6 @@ mod tests {
         assert_eq!(result.method, SpgmMethod::W2sls);
         assert_eq!(result.n_entities, 4);
         assert_eq!(result.coefficients.len(), 2);
-    }
-
-    #[test]
-    fn test_spml_pooling() {
-        let (dataset, mut listw) = create_spatial_panel_data();
-
-        let config = SpmlConfig {
-            model: SpatialPanelModel::Pooling,
-            lag: false,
-            spatial_error: SpatialErrorType::None,
-            ..Default::default()
-        };
-
-        let result = run_spml(
-            &dataset,
-            "y",
-            &["x1", "x2"],
-            "entity",
-            "time",
-            &mut listw,
-            config,
-        )
-        .unwrap();
-
-        assert_eq!(result.model, SpatialPanelModel::Pooling);
-        assert_eq!(result.coefficients.len(), 3); // intercept + x1 + x2
     }
 
     /// N = 30 entities on the shared fixture's kNN-3 weights, T = 4 periods.
@@ -2363,7 +2949,8 @@ mod tests {
         assert!((x0 - 1.009_297_426_825_681_8).abs() < 1e-15, "{x0:.17}");
         for df in [a.clone(), shuffled(&a), with_labels(&shuffled(&a))] {
             let r = spml(&df, &w, lag_cfg()).unwrap();
-            // the golden section stops at |b - a| < tol = 1e-8: iterative tolerance
+            // Newton on the concentrated likelihood; the T2 reference stops optimize at
+            // tol 1e-15
             let rho = r.rho.unwrap();
             assert!(
                 Tol::iterative(1e-6).allows(rho, 0.415_229_776_053_281_8),
@@ -2380,8 +2967,10 @@ mod tests {
                 "{ll}"
             );
             let sigma2 = r.variance.sigma_epsilon.powi(2);
+            // sigma_epsilon is the ML estimate RSS / (N T) (was RSS / (n - N - k)); same R
+            // script (spml_entity_order.R): 0.044630452161004024 * 47 / 60.
             assert!(
-                Tol::iterative(1e-6).allows(sigma2, 0.044_630_452_161_004_024),
+                Tol::iterative(1e-6).allows(sigma2, 0.03496052085945315),
                 "{sigma2}"
             );
             assert_eq!((r.n_obs, r.n_entities, r.n_time, r.df), (60, 12, 5, 46));
@@ -2640,5 +3229,600 @@ mod tests {
             m.contains("row 0 has region id 'u9'") && m.contains("'u1'"),
             "{m}"
         );
+    }
+
+    // ------------------------------------------------------------------------
+    // spml and spgm against the written-out references (validation/r/cases/spatial_splm.R)
+    // ------------------------------------------------------------------------
+
+    /// splm_sim (validation/r/cases/spatial_splm.R): N = 49, T = 6, rows shuffled; W = 4
+    /// nearest neighbours, row-standardised, on the period-1 coordinates in id order (W row
+    /// i = i-th entity in sorted id order). R: no kNN ties (smallest 5th-4th neighbour
+    /// distance gap 4.06e-4); neighbours of entity 1 = 17 39 40 45. Called as
+    /// `splm_case("splm_spml_spgm")`: the case id is a literal in each test body.
+    fn splm_case(id: &str) -> (Case, Dataset, SpatialWeights) {
+        let (case, ds) = crate::test_support::load_case(id);
+        let w = splm_weights(&ds);
+        (case, ds, w)
+    }
+
+    /// The same data for the property tests, which compare no R value and so load no R
+    /// case: `validation/datasets/generated/splm_sim.csv`, read as `p2a data load` reads it.
+    fn splm_sim() -> (Dataset, SpatialWeights) {
+        let path = p2a_validation::repo_path("validation/datasets/generated/splm_sim.csv");
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        let w = splm_weights(&ds);
+        (ds, w)
+    }
+
+    /// W of splm_sim: 4 nearest neighbours of the period-1 coordinates in id order.
+    fn splm_weights(ds: &Dataset) -> SpatialWeights {
+        let col = |c: &str| -> Vec<f64> {
+            ds.df()
+                .column(c)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap())
+                .collect()
+        };
+        let (id, time, cx, cy) = (col("id"), col("time"), col("cx"), col("cy"));
+        let mut pts: Vec<(f64, (f64, f64))> = (0..id.len())
+            .filter(|&r| time[r] == 1.0)
+            .map(|r| (id[r], (cx[r], cy[r])))
+            .collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let coords: Vec<(f64, f64)> = pts.into_iter().map(|p| p.1).collect();
+        assert_eq!(coords.len(), 49);
+        let w =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 4), WeightStyle::RowStd);
+        assert_eq!(w.neighbors().get_neighbors(0), &[16, 38, 39, 44]);
+        w
+    }
+
+    fn spml_cfg(
+        model: SpatialPanelModel,
+        effect: SpatialPanelEffect,
+        lag: bool,
+        err: SpatialErrorType,
+    ) -> SpmlConfig {
+        let mut c = SpmlConfig::default();
+        c.model = model;
+        c.effect = effect;
+        c.lag = lag;
+        c.spatial_error = err;
+        c
+    }
+
+    fn fit(ds: &Dataset, w: &SpatialWeights, y: &str, cfg: SpmlConfig) -> SpmlResult {
+        run_spml(ds, y, &["x1", "x2"], "id", "time", &mut w.clone(), cfg).unwrap()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Within/pooled pins to `<tag>_{coef, rho, lambda, s2, se, loglik}`. Newton converges
+    /// quadratically, so parameters at Tol::iterative(1e-8); the SEs are a central difference
+    /// of the analytic score against R's Richardson Jacobian: Tol::iterative(1e-6).
+    fn check_spml_fe(case: &Case, r: &SpmlResult, tag: &str) {
+        let k = |s: &str| format!("{tag}_{s}");
+        Check::new(case)
+            .vector(&k("coef"), &r.coefficients, Tol::iterative(1e-8))
+            .scalar(&k("rho"), r.rho.unwrap_or(0.0), Tol::iterative(1e-8))
+            .scalar(&k("lambda"), r.lambda.unwrap_or(0.0), Tol::iterative(1e-8))
+            .scalar(
+                &k("s2"),
+                r.variance.sigma_epsilon.powi(2),
+                Tol::iterative(1e-8),
+            )
+            .vector(&k("se"), &r.parameter_se, Tol::iterative(1e-6))
+            .scalar(&k("loglik"), r.log_likelihood, Tol::iterative(1e-10))
+            .finish();
+        assert!(r.convergence.as_ref().unwrap().converged, "{tag}");
+    }
+
+    /// `ds` with `cols` multiplied by `f`.
+    fn scaled(ds: &Dataset, cols: &[&str], f: f64) -> Dataset {
+        let mut df = ds.df().clone();
+        for &c in cols {
+            let s = (df.column(c).unwrap().f64().unwrap() * f)
+                .with_name(c.into())
+                .into_series();
+            df.with_column(s).unwrap();
+        }
+        Dataset::new(df)
+    }
+
+    const LAG_NAMES: [&str; 4] = ["x1", "x2", "rho", "sigma2"];
+    const ERR_NAMES: [&str; 4] = ["x1", "x2", "lambda", "sigma2"];
+
+    #[test]
+    fn test_validate_spml_individual_lag() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_lag",
+            spml_cfg(Within, Individual, true, SpatialErrorType::None),
+        );
+        check_spml_fe(&case, &r, "individual_lag");
+        assert_eq!(r.parameter_names, strings(&LAG_NAMES));
+    }
+
+    #[test]
+    fn test_validate_spml_individual_error() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_err",
+            spml_cfg(Within, Individual, false, SpatialErrorType::Baltagi),
+        );
+        check_spml_fe(&case, &r, "individual_error");
+        assert_eq!(r.parameter_names, strings(&ERR_NAMES));
+    }
+
+    #[test]
+    fn test_validate_spml_individual_sarar() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_lag",
+            spml_cfg(Within, Individual, true, SpatialErrorType::Baltagi),
+        );
+        check_spml_fe(&case, &r, "individual_sarar");
+        assert_eq!(
+            r.parameter_names,
+            strings(&["x1", "x2", "rho", "lambda", "sigma2"])
+        );
+    }
+
+    #[test]
+    fn test_validate_spml_time_lag() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_lag",
+            spml_cfg(Within, Time, true, SpatialErrorType::None),
+        );
+        check_spml_fe(&case, &r, "time_lag");
+        assert_eq!(r.parameter_names, strings(&LAG_NAMES));
+    }
+
+    #[test]
+    fn test_validate_spml_time_error() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_err",
+            spml_cfg(Within, Time, false, SpatialErrorType::Baltagi),
+        );
+        check_spml_fe(&case, &r, "time_error");
+        assert_eq!(r.parameter_names, strings(&ERR_NAMES));
+    }
+
+    #[test]
+    fn test_validate_spml_twoways_lag() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_lag",
+            spml_cfg(Within, TwoWays, true, SpatialErrorType::None),
+        );
+        check_spml_fe(&case, &r, "twoways_lag");
+        assert_eq!(r.parameter_names, strings(&LAG_NAMES));
+    }
+
+    #[test]
+    fn test_validate_spml_twoways_error() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_err",
+            spml_cfg(Within, TwoWays, false, SpatialErrorType::Baltagi),
+        );
+        check_spml_fe(&case, &r, "twoways_error");
+        assert_eq!(r.parameter_names, strings(&ERR_NAMES));
+    }
+
+    #[test]
+    fn test_validate_spml_pooling_lag() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_lag",
+            spml_cfg(Pooling, Individual, true, SpatialErrorType::None),
+        );
+        check_spml_fe(&case, &r, "pooling_lag");
+        assert_eq!(
+            r.parameter_names,
+            strings(&["(Intercept)", "x1", "x2", "rho", "sigma2"])
+        );
+    }
+
+    #[test]
+    fn test_validate_spml_pooling_error() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        use SpatialPanelModel::*;
+        let r = fit(
+            &ds,
+            &w,
+            "y_err",
+            spml_cfg(Pooling, Individual, false, SpatialErrorType::Baltagi),
+        );
+        check_spml_fe(&case, &r, "pooling_error");
+        assert_eq!(
+            r.parameter_names,
+            strings(&["(Intercept)", "x1", "x2", "lambda", "sigma2"])
+        );
+    }
+
+    #[test]
+    fn test_validate_spml_within_none_plm() {
+        let (case, ds, w) = splm_case("splm_spml_spgm");
+        use SpatialPanelEffect::*;
+        for (effect, tag) in [
+            (Individual, "individual"),
+            (Time, "time"),
+            (TwoWays, "twoways"),
+        ] {
+            let r = fit(
+                &ds,
+                &w,
+                "y_err",
+                spml_cfg(
+                    SpatialPanelModel::Within,
+                    effect,
+                    false,
+                    SpatialErrorType::None,
+                ),
+            );
+            assert!(r.convergence.is_none() && r.rho.is_none() && r.lambda.is_none());
+            Check::new(&case)
+                .vector(
+                    &format!("{tag}_none_coef_plm"),
+                    &r.coefficients,
+                    Tol::coef(294),
+                )
+                .scalar(
+                    &format!("{tag}_none_s2"),
+                    r.variance.sigma_epsilon.powi(2),
+                    Tol::stat(294),
+                )
+                .vector(&format!("{tag}_none_se"), &r.parameter_se, Tol::se(294))
+                .scalar(
+                    &format!("{tag}_none_loglik"),
+                    r.log_likelihood,
+                    Tol::stat(294),
+                )
+                .finish();
+        }
+    }
+
+    #[test]
+    fn test_spml_error_lambda_not_rho() {
+        let (ds, w) = splm_sim();
+        let cfg = |e| {
+            spml_cfg(
+                SpatialPanelModel::Within,
+                SpatialPanelEffect::Individual,
+                false,
+                e,
+            )
+        };
+        let r = fit(&ds, &w, "y_err", cfg(SpatialErrorType::Baltagi));
+        assert!(!r.has_lag && r.rho.is_none() && r.rho_se.is_none());
+        assert!(Tol::iterative(1e-8).allows(r.lambda.unwrap(), 0.430180548080978));
+        assert!(Tol::iterative(1e-6).allows(r.lambda_se.unwrap(), 0.06205389304743795));
+        assert_eq!(r.variance.lambda, r.lambda);
+        let text = r.to_string();
+        assert!(
+            text.contains("Spatial error coefficient (lambda)"),
+            "{text}"
+        );
+        assert!(!text.contains("Spatial lag coefficient (rho)"), "{text}");
+        // within models sweep mu out: the KKP and Baltagi errors give the same fit
+        let k = fit(&ds, &w, "y_err", cfg(SpatialErrorType::KKP));
+        assert_eq!(
+            (k.coefficients, k.lambda, k.log_likelihood),
+            (r.coefficients, r.lambda, r.log_likelihood)
+        );
+    }
+
+    #[test]
+    fn test_spml_effects_change_the_estimate() {
+        let (ds, w) = splm_sim();
+        let rho = |e| {
+            fit(
+                &ds,
+                &w,
+                "y_lag",
+                spml_cfg(SpatialPanelModel::Within, e, true, SpatialErrorType::None),
+            )
+            .rho
+            .unwrap()
+        };
+        let (i, t, tw) = (
+            rho(SpatialPanelEffect::Individual),
+            rho(SpatialPanelEffect::Time),
+            rho(SpatialPanelEffect::TwoWays),
+        );
+        // R: 0.43022, 0.3739, 0.40971
+        assert!(
+            (i - t).abs() > 0.05 && (i - tw).abs() > 0.01,
+            "{i} {t} {tw}"
+        );
+    }
+
+    #[test]
+    fn test_spml_convergence_is_scale_free() {
+        let (ds, w) = splm_sim();
+        let cfg = || {
+            spml_cfg(
+                SpatialPanelModel::Within,
+                SpatialPanelEffect::Individual,
+                true,
+                SpatialErrorType::Baltagi,
+            )
+        };
+        let base = fit(&ds, &w, "y_err", cfg());
+        let it = base.convergence.as_ref().unwrap().iterations;
+        for f in [1e-6, 1e6] {
+            let r = fit(&scaled(&ds, &["y_err", "x1", "x2"], f), &w, "y_err", cfg());
+            let tol = Tol::iterative(1e-8);
+            assert!(tol.allows(r.rho.unwrap(), base.rho.unwrap()), "{f}");
+            assert!(tol.allows(r.lambda.unwrap(), base.lambda.unwrap()), "{f}");
+            assert!(
+                tol.allows(r.variance.sigma_epsilon, f * base.variance.sigma_epsilon),
+                "{f}"
+            );
+            assert!(r.convergence.unwrap().iterations.abs_diff(it) <= 1, "{f}");
+        }
+    }
+
+    #[test]
+    fn test_spml_pooling_rejects_effects() {
+        let (ds, w) = splm_sim();
+        for e in [SpatialPanelEffect::Time, SpatialPanelEffect::TwoWays] {
+            let cfg = spml_cfg(SpatialPanelModel::Pooling, e, true, SpatialErrorType::None);
+            let err = run_spml(
+                &ds,
+                "y_lag",
+                &["x1", "x2"],
+                "id",
+                "time",
+                &mut w.clone(),
+                cfg,
+            )
+            .unwrap_err();
+            let m = err.to_string();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. })
+                    && m.contains("pooling")
+                    && m.contains("effect"),
+                "{m}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_spml_perfect_fit_is_refused() {
+        let (ds, w) = create_spatial_panel_data();
+        let cfg = spml_cfg(
+            SpatialPanelModel::Within,
+            SpatialPanelEffect::Individual,
+            true,
+            SpatialErrorType::None,
+        );
+        let e = run_spml(
+            &ds,
+            "y",
+            &["x1", "x2"],
+            "entity",
+            "time",
+            &mut w.clone(),
+            cfg,
+        )
+        .unwrap_err();
+        let m = e.to_string();
+        assert!(
+            matches!(e, EconError::InvalidSpecification { .. }) && m.contains("fit y exactly"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_spml_rejects_too_small_panels() {
+        // T = 1
+        let df = df! {
+            "entity" => [1i64, 2, 3, 4, 5],
+            "time" => [1i64, 1, 1, 1, 1],
+            "y" => [1.1, 2.3, 2.9, 4.2, 5.1],
+            "x1" => [0.4, 1.3, 1.7, 2.2, 3.1],
+        }
+        .unwrap();
+        let coords: Vec<(f64, f64)> = (1..=5).map(|i| (i as f64, 0.1 * (i * i) as f64)).collect();
+        let mut w =
+            SpatialWeights::from_neighbors(&Neighbors::from_knn(&coords, 2), WeightStyle::RowStd);
+        let cfg = spml_cfg(
+            SpatialPanelModel::Within,
+            SpatialPanelEffect::Individual,
+            true,
+            SpatialErrorType::None,
+        );
+        let e = run_spml(
+            &Dataset::new(df),
+            "y",
+            &["x1"],
+            "entity",
+            "time",
+            &mut w,
+            cfg,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, EconError::InsufficientData { required: 2, provided: 1, ref context } if context.contains("time periods")),
+            "{e:?}"
+        );
+        // two-way effects on N = 4, T = 2 leave no residual degrees of freedom
+        let x1 = [0.3, 1.2, 2.2, 2.9, 0.8, 1.9, 2.4, 3.6];
+        let x2 = [1.0, 0.4, 0.9, 1.7, 0.2, 1.3, 0.5, 1.1];
+        let noise = [0.1, -0.2, 0.15, 0.05, -0.1, 0.2, -0.05, 0.12];
+        let y: Vec<f64> = (0..8)
+            .map(|i| 0.5 * x1[i] - 0.3 * x2[i] + noise[i])
+            .collect();
+        let df = df! {
+            "entity" => [0i64, 1, 2, 3, 0, 1, 2, 3],
+            "time" => [0i64, 0, 0, 0, 1, 1, 1, 1],
+            "y" => y,
+            "x1" => x1,
+            "x2" => x2,
+        }
+        .unwrap();
+        let (_, mut w4) = create_spatial_panel_data();
+        let cfg = spml_cfg(
+            SpatialPanelModel::Within,
+            SpatialPanelEffect::TwoWays,
+            true,
+            SpatialErrorType::None,
+        );
+        let e = run_spml(
+            &Dataset::new(df),
+            "y",
+            &["x1", "x2"],
+            "entity",
+            "time",
+            &mut w4,
+            cfg,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, EconError::InsufficientData { ref context, .. } if context.contains("residual degrees of freedom")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_spatial_panel_model_parses_aliases_and_rejects_unknown() {
+        SpatialPanelModel::choices().validate().unwrap();
+        for (s, v) in [
+            ("within", SpatialPanelModel::Within),
+            ("FE", SpatialPanelModel::Within),
+            ("fixed effects", SpatialPanelModel::Within),
+            ("random", SpatialPanelModel::Random),
+            ("RE", SpatialPanelModel::Random),
+            ("random-effects", SpatialPanelModel::Random),
+            ("pooling", SpatialPanelModel::Pooling),
+            ("pooled", SpatialPanelModel::Pooling),
+            ("Pool", SpatialPanelModel::Pooling),
+        ] {
+            assert_eq!(s.parse::<SpatialPanelModel>().unwrap(), v, "{s}");
+        }
+        let m = "between"
+            .parse::<SpatialPanelModel>()
+            .unwrap_err()
+            .to_string();
+        for part in ["between", "within", "random", "pooling"] {
+            assert!(m.contains(part), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_spatial_panel_effect_parses_aliases_and_rejects_unknown() {
+        SpatialPanelEffect::choices().validate().unwrap();
+        for (s, v) in [
+            ("individual", SpatialPanelEffect::Individual),
+            ("ID", SpatialPanelEffect::Individual),
+            ("entity", SpatialPanelEffect::Individual),
+            ("time", SpatialPanelEffect::Time),
+            ("Period", SpatialPanelEffect::Time),
+            ("twoways", SpatialPanelEffect::TwoWays),
+            ("two-ways", SpatialPanelEffect::TwoWays),
+            ("two_way", SpatialPanelEffect::TwoWays),
+            ("both", SpatialPanelEffect::TwoWays),
+        ] {
+            assert_eq!(s.parse::<SpatialPanelEffect>().unwrap(), v, "{s}");
+        }
+        assert!("nested".parse::<SpatialPanelEffect>().is_err());
+    }
+
+    #[test]
+    fn test_spatial_error_type_parses_aliases_and_rejects_unknown() {
+        SpatialErrorType::choices().validate().unwrap();
+        for (s, v) in [
+            ("none", SpatialErrorType::None),
+            ("b", SpatialErrorType::Baltagi),
+            ("Baltagi", SpatialErrorType::Baltagi),
+            ("SEM", SpatialErrorType::Baltagi),
+            ("kkp", SpatialErrorType::KKP),
+            ("sem2", SpatialErrorType::KKP),
+            ("Kapoor", SpatialErrorType::KKP),
+        ] {
+            assert_eq!(s.parse::<SpatialErrorType>().unwrap(), v, "{s}");
+        }
+        let m = "sac".parse::<SpatialErrorType>().unwrap_err().to_string();
+        for part in ["none", "b", "kkp"] {
+            assert!(m.contains(part), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_panel_spectrum_log_det_uses_complex_eigenvalues() {
+        let (_ds, w) = splm_sim();
+        let s = PanelSpectrum::new(&w).unwrap();
+        // R: 10 complex eigenvalues (5 pairs, |Im| >= 0.016) and a repeated real eigenvalue
+        // that R reports with |Im| = 7.6e-17; the dense decomposition may resolve that
+        // defective pair with an imaginary part near sqrt(eps), which moves log|I - rW| by
+        // its square only.
+        let mut im: Vec<f64> = s.im.iter().map(|v| v.abs()).collect();
+        im.sort_by(f64::total_cmp);
+        assert_eq!(im.iter().filter(|&&v| v > 1e-6).count(), 10, "{im:?}");
+        assert!(im[im.len() - 11] < 1e-6, "{im:?}");
+        let ld = s.log_det(0.43);
+        assert!(
+            Tol::new(1e-12, 1e-14).allows(ld, -1.020559182335464),
+            "{ld}"
+        );
+        // the real-parts formula gives -1.02797700329204
+        assert!((ld + 1.02797700329204).abs() > 1e-3);
+        assert!(
+            Tol::new(1e-12, 0.0).allows(s.lower, -2.160195419270105),
+            "{}",
+            s.lower
+        );
+        assert!(
+            Tol::new(1e-12, 0.0).allows(s.upper, 0.9999989999999964),
+            "{}",
+            s.upper
+        );
+        let fd = (s.log_det(0.43 + 1e-6) - s.log_det(0.43 - 1e-6)) / 2e-6;
+        assert!((s.d_log_det(0.43) - fd).abs() < 1e-7);
     }
 }

@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "spatial_splm_spml",
+      "name": "Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR models",
+      "category": "econometrics",
+      "reference": "written out (splm not installed): Elhorst (2003), Baltagi, Song & Koh (2003), Millo & Piras (2012) likelihoods, optimize/optim with a Newton polish, SEs from the Richardson Jacobian of the analytic score (numDeriv 2016.8.1.1); plm::plm(model = 'within', effect = ...) 2.6.7 for the non-spatial within coefficients (validation/r/cases/spatial_splm.R)",
+      "doc": "validation/econometrics/splm.md",
+      "cases": [
+        "splm_spml_spgm"
+      ],
+      "tests": [
+        "p2a-core::econometrics::splm::tests::test_validate_spml_individual_lag",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_individual_error",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_individual_sarar",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_time_lag",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_time_error",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_twoways_lag",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_twoways_error",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_pooling_lag",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_pooling_error",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_within_none_plm"
+      ],
+      "quantities": [
+        "coefficients",
+        "rho",
+        "lambda",
+        "sigma2 (ML)",
+        "SE of every parameter (observed information)",
+        "logLik",
+        "plm within coefficients"
+      ],
+      "tolerance": "n = 294. Parameters Tol::iterative(1e-8) and logLik 1e-10, because the Newton profile optimiser converges quadratically to the root of the analytic profile gradient (R's optimum is Newton-polished to |gradient| < 1e-9). SEs Tol::iterative(1e-6): central differences of the analytic score against R's Richardson Jacobian. The non-spatial within fits at validation/README.md (coef 1e-8, SE and statistics 1e-6).",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

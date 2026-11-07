@@ -70,31 +70,6 @@ model <- spml(y ~ x1 + x2, data = data,
 summary(model)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_spml_within_spatial_lag() {
-    let (dataset, mut listw) = create_spatial_panel_data();
-
-    let config = SpmlConfig {
-        model: SpatialPanelModel::Within,
-        lag: true,
-        spatial_error: SpatialErrorType::None,
-        ..Default::default()
-    };
-
-    let result = run_spml(
-        &dataset, "y", &["x1", "x2"],
-        "entity", "time", &mut listw, config
-    ).unwrap();
-
-    assert!(result.has_lag);
-    assert!(result.rho.is_some());
-    let rho = result.rho.unwrap();
-    assert!(rho > -1.0 && rho < 1.0);
-}
-```
-
 ### Test Case 2: Random Effects Model
 
 **Setup:**
