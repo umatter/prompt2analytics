@@ -2,8 +2,9 @@
 //!
 //! Key optimizations over the basic implementation:
 //! 1. Histogram-based splitting: O(n) per split instead of O(n log n)
-//! 2. Parallel histogram construction with Rayon
-//! 3. Histogram subtraction trick for sibling nodes
+//! 2. Parallel histogram construction with Rayon (the global pool, or n_jobs threads)
+//! 3. Histogram subtraction trick for sibling nodes: the larger child's histogram is parent minus
+//!    the smaller child's
 //! 4. Pre-binned data to avoid repeated sorting
 //! 5. Cache-efficient column-major storage for histograms
 //!
@@ -46,7 +47,7 @@ pub struct FastXgbConfig {
     pub objective: FastXgbObjective,
     /// Random seed
     pub seed: Option<u64>,
-    /// Number of parallel threads (0 = auto)
+    /// Threads for this fit (0 = rayon's global pool); results do not depend on it
     pub n_jobs: usize,
 }
 
@@ -326,6 +327,9 @@ pub struct FastXgbResult {
     binned_data: Option<BinnedData>,
     config: FastXgbConfig,
     base_score: f64,
+    /// Threads of the pool the fit ran on
+    #[serde(default)]
+    pub n_threads: usize,
 }
 
 impl std::fmt::Display for FastXgbResult {
@@ -406,6 +410,30 @@ pub fn fast_xgboost(
     }
     validate_fast_xgb(x, y, config)?;
 
+    if config.n_jobs == 0 {
+        return fast_xgboost_inner(x, y, config);
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.n_jobs)
+        .build()
+        .map_err(|e| {
+            EconError::Computation(format!(
+                "fast_xgboost: could not start {} worker threads: {e}",
+                config.n_jobs
+            ))
+        })?;
+    pool.install(|| fast_xgboost_inner(x, y, config))
+}
+
+/// The fit itself, on whichever rayon pool it is called from.
+fn fast_xgboost_inner(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    config: &FastXgbConfig,
+) -> EconResult<FastXgbResult> {
+    let n = x.nrows();
+    let p = x.ncols();
+
     // Pre-bin the data (one-time cost)
     let binned_data = BinnedData::new(x, config.max_bin);
 
@@ -461,7 +489,7 @@ pub fn fast_xgboost(
         };
 
         // Build tree with parallel histogram construction
-        let tree = build_tree_histogram(
+        let (tree, _) = build_tree_histogram(
             &binned_data,
             &gradients,
             &hessians,
@@ -514,6 +542,7 @@ pub fn fast_xgboost(
         binned_data: Some(binned_data),
         config: config.clone(),
         base_score,
+        n_threads: rayon::current_num_threads(),
     })
 }
 
@@ -550,6 +579,40 @@ fn compute_gradients_fast(
     }
 }
 
+/// How many nodes' histograms a tree built directly and how many it derived by subtraction.
+#[derive(Debug, Clone, Copy, Default)]
+struct HistStats {
+    built: usize,
+    subtracted: usize,
+}
+
+/// One histogram per entry of `features`, same order.
+fn build_histograms(
+    binned_data: &BinnedData,
+    gradients: &[f64],
+    hessians: &[f64],
+    samples: &[usize],
+    features: &[usize],
+) -> Vec<GradientHistogram> {
+    features
+        .par_iter()
+        .map(|&feat| {
+            let mut hist = GradientHistogram::new(binned_data.n_bins[feat]);
+            hist.build(binned_data, feat, gradients, hessians, samples);
+            hist
+        })
+        .collect()
+}
+
+/// A node waiting on the construction stack, with its histograms if its sibling's build gave them.
+struct PendingNode {
+    samples: Vec<usize>,
+    depth: usize,
+    parent: Option<usize>,
+    is_left: bool,
+    histograms: Option<Vec<GradientHistogram>>,
+}
+
 /// Build tree using histogram-based splitting with parallel construction
 fn build_tree_histogram(
     binned_data: &BinnedData,
@@ -559,14 +622,27 @@ fn build_tree_histogram(
     features: &[usize],
     config: &FastXgbConfig,
     feature_importances: &mut [f64],
-) -> FastXgbTree {
+) -> (FastXgbTree, HistStats) {
     let mut tree = FastXgbTree::new();
+    let mut stats = HistStats::default();
 
-    // Stack for depth-first construction: (samples, depth, parent_idx, is_left)
-    let mut stack: Vec<(Vec<usize>, usize, Option<usize>, bool)> = vec![];
-    stack.push((samples.to_vec(), 0, None, false));
+    // Stack for depth-first construction
+    let mut stack = vec![PendingNode {
+        samples: samples.to_vec(),
+        depth: 0,
+        parent: None,
+        is_left: false,
+        histograms: None,
+    }];
 
-    while let Some((node_samples, depth, parent_idx, is_left)) = stack.pop() {
+    while let Some(pending) = stack.pop() {
+        let PendingNode {
+            samples: node_samples,
+            depth,
+            parent: parent_idx,
+            is_left,
+            histograms,
+        } = pending;
         let n_samples = node_samples.len();
 
         // Compute node statistics
@@ -576,44 +652,40 @@ fn build_tree_histogram(
         // Leaf weight
         let weight = leaf_weight(grad_sum, hess_sum, config.lambda, config.alpha);
 
+        let node_idx = tree.nodes.len();
+        if let Some(parent) = parent_idx {
+            if is_left {
+                tree.nodes[parent].left = Some(node_idx);
+            } else {
+                tree.nodes[parent].right = Some(node_idx);
+            }
+        }
+        let leaf = FastXgbNode {
+            feature: None,
+            bin_threshold: 0,
+            threshold: 0.0,
+            left: None,
+            right: None,
+            weight,
+            gain: 0.0,
+        };
+
         // Check stopping conditions
         if depth >= config.max_depth || n_samples < 2 || hess_sum < config.min_child_weight {
-            let node_idx = tree.nodes.len();
-            tree.nodes.push(FastXgbNode {
-                feature: None,
-                bin_threshold: 0,
-                threshold: 0.0,
-                left: None,
-                right: None,
-                weight,
-                gain: 0.0,
-            });
-
-            // Link to parent
-            if let Some(parent) = parent_idx {
-                if is_left {
-                    tree.nodes[parent].left = Some(node_idx);
-                } else {
-                    tree.nodes[parent].right = Some(node_idx);
-                }
-            }
+            tree.nodes.push(leaf);
             continue;
         }
 
-        // Build histograms in parallel for all features
-        let histograms: Vec<(usize, GradientHistogram)> = features
-            .par_iter()
-            .map(|&feat| {
-                let mut hist = GradientHistogram::new(binned_data.n_bins[feat]);
-                hist.build(binned_data, feat, gradients, hessians, &node_samples);
-                (feat, hist)
-            })
-            .collect();
+        // The root's histograms, built in parallel for all features; the others came from the parent
+        let histograms = histograms.unwrap_or_else(|| {
+            stats.built += 1;
+            build_histograms(binned_data, gradients, hessians, &node_samples, features)
+        });
 
         // Find best split across all features
         let mut best_split: Option<(usize, usize, f64, f64)> = None; // (feature, bin, gain, threshold)
 
-        for (feat, hist) in &histograms {
+        for (&feat, hist) in features.iter().zip(&histograms) {
             if let Some((bin, gain)) = hist.find_best_split(
                 config.lambda,
                 config.alpha,
@@ -621,77 +693,104 @@ fn build_tree_histogram(
                 config.min_child_weight,
             ) {
                 if best_split.is_none() || gain > best_split.as_ref().unwrap().2 {
-                    let threshold = if bin < binned_data.bin_edges[*feat].len() {
-                        binned_data.bin_edges[*feat][bin]
+                    let threshold = if bin < binned_data.bin_edges[feat].len() {
+                        binned_data.bin_edges[feat][bin]
                     } else {
                         f64::INFINITY
                     };
-                    best_split = Some((*feat, bin, gain, threshold));
+                    best_split = Some((feat, bin, gain, threshold));
                 }
             }
         }
 
-        let node_idx = tree.nodes.len();
-
-        if let Some((feat, bin, gain, threshold)) = best_split {
-            // Split node
-            tree.nodes.push(FastXgbNode {
-                feature: Some(feat),
-                bin_threshold: bin,
-                threshold,
-                left: None,
-                right: None,
-                weight,
-                gain,
-            });
-
-            // Update feature importance
-            feature_importances[feat] += gain;
-
-            // Link to parent
-            if let Some(parent) = parent_idx {
-                if is_left {
-                    tree.nodes[parent].left = Some(node_idx);
-                } else {
-                    tree.nodes[parent].right = Some(node_idx);
-                }
-            }
-
-            // Partition samples
-            let (left_samples, right_samples): (Vec<_>, Vec<_>) = node_samples
-                .into_iter()
-                .partition(|&i| binned_data.get_bin(feat, i) <= bin);
-
-            // Add children to stack (right first so left is processed first)
-            if !right_samples.is_empty() {
-                stack.push((right_samples, depth + 1, Some(node_idx), false));
-            }
-            if !left_samples.is_empty() {
-                stack.push((left_samples, depth + 1, Some(node_idx), true));
-            }
-        } else {
+        let Some((feat, bin, gain, threshold)) = best_split else {
             // No valid split, make leaf
-            tree.nodes.push(FastXgbNode {
-                feature: None,
-                bin_threshold: 0,
-                threshold: 0.0,
-                left: None,
-                right: None,
-                weight,
-                gain: 0.0,
-            });
+            tree.nodes.push(leaf);
+            continue;
+        };
 
-            if let Some(parent) = parent_idx {
-                if is_left {
-                    tree.nodes[parent].left = Some(node_idx);
+        // Split node
+        tree.nodes.push(FastXgbNode {
+            feature: Some(feat),
+            bin_threshold: bin,
+            threshold,
+            left: None,
+            right: None,
+            weight,
+            gain,
+        });
+
+        // Update feature importance
+        feature_importances[feat] += gain;
+
+        // Partition samples
+        let (left_samples, right_samples): (Vec<_>, Vec<_>) = node_samples
+            .into_iter()
+            .partition(|&i| binned_data.get_bin(feat, i) <= bin);
+
+        // A child gets histograms only if it can still split: build the smaller one, subtract for
+        // the larger when both can
+        let can_split = |rows: &[usize]| {
+            depth + 1 < config.max_depth
+                && rows.len() >= 2
+                && rows.iter().map(|&i| hessians[i]).sum::<f64>() >= config.min_child_weight
+        };
+        let build =
+            |rows: &[usize]| build_histograms(binned_data, gradients, hessians, rows, features);
+        let (left_hist, right_hist) = match (can_split(&left_samples), can_split(&right_samples)) {
+            (true, true) => {
+                stats.built += 1;
+                stats.subtracted += 1;
+                let left_is_smaller = left_samples.len() <= right_samples.len();
+                let smaller = build(if left_is_smaller {
+                    &left_samples
                 } else {
-                    tree.nodes[parent].right = Some(node_idx);
+                    &right_samples
+                });
+                let larger: Vec<GradientHistogram> = histograms
+                    .par_iter()
+                    .zip(smaller.par_iter())
+                    .map(|(parent, sibling)| {
+                        let mut hist = GradientHistogram::new(parent.grad_sum.len() - 1);
+                        hist.subtract_from(parent, sibling);
+                        hist
+                    })
+                    .collect();
+                if left_is_smaller {
+                    (Some(smaller), Some(larger))
+                } else {
+                    (Some(larger), Some(smaller))
                 }
             }
-        }
+            (true, false) => {
+                stats.built += 1;
+                (Some(build(&left_samples)), None)
+            }
+            (false, true) => {
+                stats.built += 1;
+                (None, Some(build(&right_samples)))
+            }
+            (false, false) => (None, None),
+        };
+
+        // Add children to stack (right first so left is processed first)
+        stack.push(PendingNode {
+            samples: right_samples,
+            depth: depth + 1,
+            parent: Some(node_idx),
+            is_left: false,
+            histograms: right_hist,
+        });
+        stack.push(PendingNode {
+            samples: left_samples,
+            depth: depth + 1,
+            parent: Some(node_idx),
+            is_left: true,
+            histograms: left_hist,
+        });
     }
 
-    tree
+    (tree, stats)
 }
 
 fn subsample_indices(indices: &[usize], ratio: f64, seed: Option<u64>) -> Vec<usize> {
@@ -890,6 +989,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn noisy_xy(n: usize, p: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let normal = Normal::new(0.0, 0.3).unwrap();
+        let x = Array2::from_shape_fn((n, p), |_| rng.r#gen::<f64>());
+        let y = Array1::from_shape_fn(n, |i| 2.0 * x[[i, 0]] - x[[i, 1]] + normal.sample(&mut rng));
+        (x, y)
+    }
+
+    #[test]
+    fn test_fast_xgboost_n_jobs_sets_the_pool() {
+        let (x, y) = noisy_xy(300, 4, 21);
+        let mut cfg = FastXgbConfig::default();
+        cfg.n_estimators = 15;
+        let mut preds = Vec::new();
+        for jobs in [1usize, 2, 3] {
+            cfg.n_jobs = jobs;
+            let r = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+            assert_eq!(r.n_threads, jobs);
+            preds.push(r.predictions);
+        }
+        cfg.n_jobs = 0;
+        let r0 = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+        assert_eq!(r0.n_threads, rayon::current_num_threads());
+        // per-feature histograms and the feature-order reduction do not depend on the pool size
+        assert!(preds.iter().all(|p| *p == r0.predictions));
+    }
+
+    #[test]
+    fn test_histogram_subtraction_matches_direct_build() {
+        let (x, y) = noisy_xy(200, 3, 22);
+        let binned = BinnedData::new(x.view(), 64);
+        let g: Vec<f64> = y.iter().map(|v| v - 1.0).collect();
+        let h: Vec<f64> = (0..200).map(|i| 0.5 + (i % 7) as f64 / 10.0).collect();
+        let all: Vec<usize> = (0..200).collect();
+        let (small, large): (Vec<usize>, Vec<usize>) = all.iter().partition(|&&i| x[[i, 1]] < 0.3);
+        for f in 0..3 {
+            let nb = binned.n_bins[f];
+            let mut parent = GradientHistogram::new(nb);
+            let mut sib = GradientHistogram::new(nb);
+            let mut direct = GradientHistogram::new(nb);
+            let mut sub = GradientHistogram::new(nb);
+            parent.build(&binned, f, &g, &h, &all);
+            sib.build(&binned, f, &g, &h, &small);
+            direct.build(&binned, f, &g, &h, &large);
+            sub.subtract_from(&parent, &sib);
+            assert_eq!(sub.count, direct.count);
+            let scale: f64 = g.iter().map(|v| v.abs()).sum();
+            for b in 0..=nb {
+                assert!((sub.grad_sum[b] - direct.grad_sum[b]).abs() <= 1e-12 * scale);
+                assert!((sub.hess_sum[b] - direct.hess_sum[b]).abs() <= 1e-12 * 200.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_fast_xgboost_uses_histogram_subtraction() {
+        let (x, y) = noisy_xy(400, 3, 23);
+        let binned = BinnedData::new(x.view(), 256);
+        let g: Vec<f64> = y.iter().map(|v| v - y.mean().unwrap()).collect();
+        let h = vec![1.0; 400];
+        let mut cfg = FastXgbConfig::default();
+        cfg.max_depth = 4;
+        let mut imp = vec![0.0; 3];
+        let samples: Vec<usize> = (0..400).collect();
+        let (tree, stats) =
+            build_tree_histogram(&binned, &g, &h, &samples, &[0, 1, 2], &cfg, &mut imp);
+        let splits = tree.nodes.iter().filter(|n| n.feature.is_some()).count();
+        assert!(splits >= 3);
+        // every split node whose two children are both split candidates derives one by subtraction
+        assert!(stats.subtracted >= 1);
+        assert!(stats.built >= stats.subtracted + 1); // the root and the smaller children are built directly
     }
 
     #[test]
