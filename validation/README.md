@@ -444,6 +444,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | SAR Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
 | SEM Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
 | Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | not R-pinned |
+| Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR; individual random effects without, with Baltagi and with KKP spatial error | [splm.md](econometrics/splm.md) | R-pinned |
+| Spatial panel GM/2SLS (spgm): w2sls, b2sls, ec2sls, g2sls spatial lag; within GM spatial error; within GS2SLS | [splm.md](econometrics/splm.md) | R-pinned |
 
 ### Linear Algebra
 | Method | File | Status |
