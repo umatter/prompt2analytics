@@ -331,12 +331,30 @@ pub struct BoxPlotResult {
 #[derive(Debug, Clone)]
 pub struct BoxPlotStats {
     pub label: String,
+    /// Lower whisker end (`boxplot.stats()$stats[1]`).
     pub min: f64,
+    /// Lower hinge (Tukey, `fivenum`).
     pub q1: f64,
     pub median: f64,
+    /// Upper hinge (Tukey, `fivenum`).
     pub q3: f64,
+    /// Upper whisker end (`boxplot.stats()$stats[5]`).
     pub max: f64,
+    /// Values beyond 1.5 times the hinge spread, in data order.
     pub outliers: Vec<f64>,
+    /// Non-NaN values of the group (`boxplot.stats()$n`); 0 for a group without
+    /// values, whose statistics are NaN.
+    pub n: usize,
+}
+
+impl BoxPlotStats {
+    /// The statistics and outliers a chart can draw.
+    fn finite_elements(&self) -> impl Iterator<Item = f64> + '_ {
+        [self.min, self.q1, self.median, self.q3, self.max]
+            .into_iter()
+            .chain(self.outliers.iter().copied())
+            .filter(|x| x.is_finite())
+    }
 }
 
 impl std::fmt::Display for BoxPlotResult {
@@ -344,6 +362,10 @@ impl std::fmt::Display for BoxPlotResult {
         writeln!(f, "Box Plot")?;
         writeln!(f, "========")?;
         for stat in &self.statistics {
+            if stat.n == 0 {
+                writeln!(f, "{}: no values", stat.label)?;
+                continue;
+            }
             writeln!(
                 f,
                 "{}: min={:.2}, Q1={:.2}, med={:.2}, Q3={:.2}, max={:.2}",
@@ -355,7 +377,9 @@ impl std::fmt::Display for BoxPlotResult {
     }
 }
 
-/// Generate a box plot from multiple data groups.
+/// Generate a box plot from multiple data groups, with the statistics of
+/// `grDevices::boxplot.stats` (coef 1.5). A group without values keeps its slot and label,
+/// as in R's `boxplot`; infinite values count as in R and are not drawn.
 ///
 /// # Arguments
 /// * `groups` - Vector of (label, data) pairs
@@ -371,28 +395,23 @@ pub fn box_plot(
     }
 
     // Calculate statistics for each group
-    let mut statistics = Vec::new();
-    let mut all_values = Vec::new();
+    let statistics = groups
+        .iter()
+        .map(|(label, data)| calculate_box_stats(label.clone(), data))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    for (label, data) in groups {
-        let clean: Vec<f64> = data.iter().copied().filter(|x| x.is_finite()).collect();
-        if clean.is_empty() {
-            continue;
-        }
-
-        let stats = calculate_box_stats(label.clone(), &clean);
-        all_values.extend(clean.iter().copied());
-        statistics.push(stats);
-    }
-
-    if statistics.is_empty() {
+    if !statistics
+        .iter()
+        .any(|s| s.finite_elements().next().is_some())
+    {
         return Err(VisualizationError::InvalidData(
             "No valid data in groups".to_string(),
         ));
     }
 
-    let y_min = all_values.iter().copied().fold(f64::INFINITY, f64::min);
-    let y_max = all_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let finite = || statistics.iter().flat_map(BoxPlotStats::finite_elements);
+    let y_min = finite().fold(f64::INFINITY, f64::min);
+    let y_max = finite().fold(f64::NEG_INFINITY, f64::max);
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
 
     // x-axis with continuous coordinates (0 to n_groups)
@@ -439,67 +458,65 @@ pub fn box_plot(
             let x_left = x_center - box_half_width;
             let x_right = x_center + box_half_width;
 
-            // Draw box (Q1 to Q3)
-            chart
-                .draw_series(std::iter::once(Rectangle::new(
-                    [(x_left, stat.q1), (x_right, stat.q3)],
-                    DEFAULT_SERIES_COLOR.mix(0.5).filled(),
-                )))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            // Only finite elements are drawn: an empty group draws nothing, and an
+            // infinite hinge or whisker end leaves out the parts that reach it.
+            let drawn = |a: f64, b: f64| a.is_finite() && b.is_finite();
 
-            // Draw box border
-            chart
-                .draw_series(std::iter::once(Rectangle::new(
-                    [(x_left, stat.q1), (x_right, stat.q3)],
-                    BLACK.stroke_width(1),
-                )))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            if drawn(stat.q1, stat.q3) {
+                // Draw box (Q1 to Q3)
+                chart
+                    .draw_series(std::iter::once(Rectangle::new(
+                        [(x_left, stat.q1), (x_right, stat.q3)],
+                        DEFAULT_SERIES_COLOR.mix(0.5).filled(),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                // Draw box border
+                chart
+                    .draw_series(std::iter::once(Rectangle::new(
+                        [(x_left, stat.q1), (x_right, stat.q3)],
+                        BLACK.stroke_width(1),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
 
             // Draw median line
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_left, stat.median), (x_right, stat.median)],
-                    BLACK.stroke_width(2),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            if stat.median.is_finite() {
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(x_left, stat.median), (x_right, stat.median)],
+                        BLACK.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
 
-            // Draw whiskers
-            // Lower whisker (vertical line)
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_center, stat.min), (x_center, stat.q1)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
-            // Lower whisker cap
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_left + 0.1, stat.min), (x_right - 0.1, stat.min)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
-
-            // Upper whisker (vertical line)
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_center, stat.q3), (x_center, stat.max)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
-            // Upper whisker cap
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_left + 0.1, stat.max), (x_right - 0.1, stat.max)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            // Draw whiskers: the vertical line from the hinge, then the cap
+            for (whisker, hinge) in [(stat.min, stat.q1), (stat.max, stat.q3)] {
+                if drawn(whisker, hinge) {
+                    chart
+                        .draw_series(LineSeries::new(
+                            vec![(x_center, whisker), (x_center, hinge)],
+                            BLACK.stroke_width(1),
+                        ))
+                        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                    chart
+                        .draw_series(LineSeries::new(
+                            vec![(x_left + 0.1, whisker), (x_right - 0.1, whisker)],
+                            BLACK.stroke_width(1),
+                        ))
+                        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                }
+            }
 
             // Draw outliers
             chart
                 .draw_series(
-                    stat.outliers.iter().map(|&outlier| {
-                        Circle::new((x_center, outlier), 3, OUTLIER_COLOR.filled())
-                    }),
+                    stat.outliers
+                        .iter()
+                        .filter(|outlier| outlier.is_finite())
+                        .map(|&outlier| {
+                            Circle::new((x_center, outlier), 3, OUTLIER_COLOR.filled())
+                        }),
                 )
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
@@ -1980,54 +1997,33 @@ fn calculate_correlation(points: &[(f64, f64)]) -> Option<f64> {
     Some((sxy / (sxx.sqrt() * syy.sqrt())).clamp(-1.0, 1.0))
 }
 
-fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n = sorted.len();
-    let q1_idx = n / 4;
-    let median_idx = n / 2;
-    let q3_idx = 3 * n / 4;
-
-    let q1 = sorted[q1_idx];
-    let median = if n % 2 == 0 && n > 1 {
-        (sorted[median_idx - 1] + sorted[median_idx]) / 2.0
-    } else {
-        sorted[median_idx]
-    };
-    let q3 = sorted[q3_idx.min(n - 1)];
-
-    let iqr = q3 - q1;
-    let lower_fence = q1 - 1.5 * iqr;
-    let upper_fence = q3 + 1.5 * iqr;
-
-    let min = sorted
-        .iter()
-        .copied()
-        .find(|&x| x >= lower_fence)
-        .unwrap_or(sorted[0]);
-    let max = sorted
-        .iter()
-        .rev()
-        .copied()
-        .find(|&x| x <= upper_fence)
-        .unwrap_or(sorted[n - 1]);
-
-    let outliers: Vec<f64> = sorted
-        .iter()
-        .copied()
-        .filter(|&x| x < lower_fence || x > upper_fence)
-        .collect();
-
-    BoxPlotStats {
+fn calculate_box_stats(label: String, data: &[f64]) -> Result<BoxPlotStats, VisualizationError> {
+    // grDevices::boxplot.stats: NaN is dropped; +-Inf count in n and the hinges and are
+    // outliers, as in R; infinite elements are not drawn.
+    if data.iter().all(|x| x.is_nan()) {
+        return Ok(BoxPlotStats {
+            label,
+            min: f64::NAN,
+            q1: f64::NAN,
+            median: f64::NAN,
+            q3: f64::NAN,
+            max: f64::NAN,
+            outliers: Vec::new(),
+            n: 0,
+        });
+    }
+    let b = crate::stats::robust::boxplot_stats(data, 1.5).map_err(invalid_data)?;
+    let [min, q1, median, q3, max] = b.stats;
+    Ok(BoxPlotStats {
         label,
         min,
         q1,
         median,
         q3,
         max,
-        outliers,
-    }
+        outliers: b.out,
+        n: b.n,
+    })
 }
 
 /// Map a core resource error (allocation, size arithmetic, cancellation) to
@@ -2742,5 +2738,70 @@ mod tests {
                 Tol::stat(case.scalar("n") as usize),
             )
             .finish();
+    }
+
+    #[test]
+    fn test_validate_boxplot_stats_chart() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_boxplot_groups");
+        let labels = ds.df().column("group").unwrap().str().unwrap().clone();
+        let values = crate::data::columns::numeric_options(ds.df(), "value").unwrap();
+        let order = ["data62", "n4", "n12", "n7", "norm37", "const3", "allna"];
+        let mut groups: Vec<(String, Vec<f64>)> = order
+            .iter()
+            .map(|g| {
+                let v = labels
+                    .iter()
+                    .zip(&values)
+                    .filter(|(l, _)| *l == Some(*g))
+                    .map(|(_, v)| v.unwrap_or(f64::NAN))
+                    .collect();
+                (g.to_string(), v)
+            })
+            .collect();
+        // The case JSON cannot hold Inf, so the outlier is asserted below.
+        groups.push((
+            "inf6".to_string(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, f64::INFINITY],
+        ));
+        let r = box_plot(&groups, small()).unwrap();
+        // the all-missing group keeps its slot, as in R
+        assert_eq!(r.statistics.len(), order.len() + 1);
+        let mut check = Check::new(&case);
+        for (g, s) in order.iter().zip(&r.statistics) {
+            assert_eq!(s.label, *g);
+            check
+                .scalar(&format!("{g}_n"), s.n as f64, Tol::exact())
+                .scalar(&format!("{g}_n_out"), s.outliers.len() as f64, Tol::exact());
+            if s.n > 0 {
+                check.vector(
+                    &format!("{g}_stats"),
+                    &[s.min, s.q1, s.median, s.q3, s.max],
+                    Tol::exact(),
+                );
+            }
+            if !s.outliers.is_empty() {
+                check.vector(&format!("{g}_out"), &s.outliers, Tol::exact());
+            }
+        }
+        let inf = &r.statistics[7];
+        check
+            .scalar("inf6_n", inf.n as f64, Tol::exact())
+            .scalar("inf6_n_out", inf.outliers.len() as f64, Tol::exact())
+            .vector(
+                "inf6_stats",
+                &[inf.min, inf.q1, inf.median, inf.q3, inf.max],
+                Tol::exact(),
+            );
+        check.finish();
+        assert_eq!(inf.outliers, [f64::INFINITY]);
+        let empty = &r.statistics[6];
+        assert!(
+            empty.n == 0
+                && empty.median.is_nan()
+                && empty.min.is_nan()
+                && empty.outliers.is_empty()
+        );
+        assert!(format!("{r}").contains("allna: no values"));
     }
 }

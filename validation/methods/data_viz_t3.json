@@ -33,6 +33,29 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "viz_boxplot_stats",
+      "name": "Box-plot hinges, whiskers and outliers",
+      "category": "visualization",
+      "reference": "grDevices::boxplot.stats (coef = 1.5)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_boxplot_groups"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_boxplot_stats_chart"
+      ],
+      "quantities": [
+        "stats (whiskers, hinges, median) for n = 3, 4, 7, 8, 12, 37",
+        "n",
+        "outliers in data order",
+        "all-missing group n = 0",
+        "+-Inf counted, in the hinges and an outlier"
+      ],
+      "tolerance": "exact (Tol::exact): fivenum's operations in R's order",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

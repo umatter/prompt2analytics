@@ -19,3 +19,11 @@ NaN; R: NA), where the centred values are rounding noise; `stats::cor` returns N
 spread. Pairs with a non-finite value are dropped before r, as the plot drops them (like
 `cor(use = "complete.obs")` for NA); `cor` returns NaN when a value is +-Inf.
 
+## Box plot (`box_plot().statistics`)
+
+`grDevices::boxplot.stats(x, coef = 1.5)` through `stats::robust::boxplot_stats`: `min`/`max` are the
+whisker ends, `q1`/`q3` Tukey's hinges (fivenum), outliers in data order, `n` the non-NaN values. NaN is
+dropped; +-Inf are counted and listed as outliers, as R; they are not drawn. A group without values keeps
+its slot with n = 0 and NaN statistics, as R's `boxplot`. Case `viz_boxplot_groups`: e.g. `c(1, 7, 12, 15, 15, 16, 18, 18)`
+-> 1, 9.5, 15, 17, 18, no outliers. Test `test_validate_boxplot_stats_chart`, exact.
+
