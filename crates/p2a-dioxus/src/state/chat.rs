@@ -399,7 +399,28 @@ impl ChatState {
         self.history_index = -1;
     }
 
-    /// Build message history for API request.
+    /// Index of the user message that opened the turn in flight: the message just before the
+    /// trailing streaming placeholder(s), when it is a user message. `None` when the transcript
+    /// does not end in a streaming message.
+    fn in_flight_prompt(&self) -> Option<usize> {
+        let streaming = self
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| m.is_streaming)
+            .count();
+        if streaming == 0 {
+            return None;
+        }
+        let i = self.messages.len().checked_sub(streaming + 1)?;
+        self.messages.get(i).filter(|m| m.role == "user").map(|_| i)
+    }
+
+    /// Build message history for API request: the transcript *before* the turn being sent.
+    ///
+    /// ChatPanel::handle_send adds the user's message and a streaming placeholder, then calls
+    /// this. That message is the request's `message`, which the backend appends after the history,
+    /// so it is left out here.
     ///
     /// This method now includes tool calls and their results in the history,
     /// which is critical for multi-turn conversation accuracy. The LLM needs
@@ -411,7 +432,11 @@ impl ChatState {
     pub fn build_history(&self) -> Vec<Message> {
         let mut history = Vec::new();
 
-        for msg in self.messages.iter().filter(|m| !m.is_streaming) {
+        let in_flight = self.in_flight_prompt();
+        for (i, msg) in self.messages.iter().enumerate() {
+            if msg.is_streaming || Some(i) == in_flight {
+                continue;
+            }
             if msg.role == "user" {
                 // User messages are included as-is
                 if !msg.content.is_empty() {
@@ -704,6 +729,49 @@ mod tests {
         assert!(
             content.starts_with(&format!("a{}...\n[Result truncated", "é".repeat(999))),
             "{content}"
+        );
+    }
+
+    fn turns(history: &[Message]) -> Vec<(String, String)> {
+        history
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect()
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(r, c)| (r.to_string(), c.to_string()))
+            .collect()
+    }
+
+    /// The prompt being sent is the request's `message`, and the backend appends it after
+    /// `history`, so it must not be in the history too.
+    #[test]
+    fn test_build_history_leaves_out_the_prompt_being_sent() {
+        let mut chat = ChatState::new();
+        assert_eq!(turns(&send(&mut chat, "load sales.csv")), pairs(&[]));
+        finish(&mut chat, reply("Loaded sales: 100 rows, 2 columns."));
+        assert_eq!(
+            turns(&send(&mut chat, "regress price on sqft")),
+            pairs(&[
+                ("user", "load sales.csv"),
+                ("assistant", "Loaded sales: 100 rows, 2 columns.")
+            ])
+        );
+    }
+
+    /// Only the prompt of the trailing turn is left out. An earlier turn whose stream stopped
+    /// without Done keeps its prompt; its unfinished reply stays out, as before.
+    #[test]
+    fn test_build_history_skips_only_the_trailing_prompt() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "describe sales");
+        chat.append_content("The data has");
+        chat.stop_processing();
+        assert_eq!(
+            turns(&send(&mut chat, "describe sales again")),
+            pairs(&[("user", "describe sales")])
         );
     }
 }
