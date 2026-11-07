@@ -2,6 +2,45 @@
   "schema": 1,
   "methods": [
     {
+      "id": "forecasting_structts",
+      "name": "Structural time series (local level, local linear trend, BSM) by maximum likelihood, fixed variances",
+      "category": "forecasting",
+      "reference": "stats::StructTS(type = 'level' | 'trend' | 'BSM', fixed); tight optimum of its objective; stats::KalmanRun / KalmanSmooth (nit = -1)",
+      "doc": "validation/forecasting/structts.md",
+      "cases": [
+        "structts_nile_ukgas"
+      ],
+      "tests": [
+        "p2a-core::forecasting::structts::tests::test_validate_structts_nile",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_nile_trend",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_ukgas",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_fixed",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_missing",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_fixed_changes_the_fit",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_scale_invariant"
+      ],
+      "quantities": [
+        "variances (level, slope, seas, epsilon) at the tight optimum",
+        "variances on the bound 0 (exact)",
+        "log-likelihood (tight and package)",
+        "filtered states (fitted)",
+        "smoothed states (tsSmooth)",
+        "standardised residuals",
+        "fixed level variance",
+        "series with gaps",
+        "package coefficients (cross-check)"
+      ],
+      "tolerance": "tight coefficients Tol::iterative(1e-6); log-likelihoods Tol::stat(n) (n = 100, 108); states and residuals rel 1e-6 abs 1e-8; R's own L-BFGS-B coefficients 1e-4 (Nile), 2e-3 (UKgas): the measured gaps of R's early stop",
+      "deviations": [
+        {
+          "finding": "TS-27",
+          "quantity": "StructTS's reported log-likelihood with missing values (nile_na_loglik, nile_na_loglik_tight)",
+          "note": "R scales the data term by length(y)/n_obs; p2a reports the observed-data Gaussian log-likelihood, pinned to nile_na_loglik_obs_tight from the same written-out objective; series without gaps are unaffected"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "forecasting_kalman",
       "name": "Kalman filter, Durbin-Koopman smoother and forecast with state and observation intercepts",
       "category": "forecasting",
