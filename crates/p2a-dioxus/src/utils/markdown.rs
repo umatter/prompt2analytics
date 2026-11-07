@@ -725,3 +725,174 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    //! What render_markdown draws, as an HTML string. `html` walks the Element it returns: no
+    //! whitespace between nodes; `"` `&` `'` `<` `>` in text and attribute values written as
+    //! &#34; &#38; &#39; &#60; &#62;; integer attributes unquoted. The markdown has no components
+    //! or event handlers, so the tree needs no VirtualDom.
+    use super::render_markdown;
+    use dioxus::dioxus_core::{
+        Attribute, AttributeValue, DynamicNode, TemplateAttribute, TemplateNode, VNode,
+    };
+
+    fn escaped(text: &str, out: &mut String) {
+        for c in text.chars() {
+            match c {
+                '"' => out.push_str("&#34;"),
+                '&' => out.push_str("&#38;"),
+                '\'' => out.push_str("&#39;"),
+                '<' => out.push_str("&#60;"),
+                '>' => out.push_str("&#62;"),
+                c => out.push(c),
+            }
+        }
+    }
+
+    fn write_attribute(attribute: &Attribute, out: &mut String) {
+        match &attribute.value {
+            AttributeValue::Text(value) => {
+                out.push_str(&format!(" {}=\"", attribute.name));
+                escaped(value, out);
+                out.push('"');
+            }
+            AttributeValue::Int(value) => out.push_str(&format!(" {}={value}", attribute.name)),
+            other => panic!("attribute {}: unexpected value {other:?}", attribute.name),
+        }
+    }
+
+    fn write_dynamic(node: &DynamicNode, out: &mut String) {
+        match node {
+            DynamicNode::Text(text) => escaped(&text.value, out),
+            DynamicNode::Fragment(nodes) => nodes.iter().for_each(|n| write_vnode(n, out)),
+            DynamicNode::Placeholder(_) => {}
+            DynamicNode::Component(c) => panic!("unexpected component {}", c.name),
+        }
+    }
+
+    fn write_template(node: &TemplateNode, vnode: &VNode, out: &mut String) {
+        match node {
+            TemplateNode::Element {
+                tag,
+                attrs,
+                children,
+                ..
+            } => {
+                out.push_str(&format!("<{tag}"));
+                for attribute in attrs.iter() {
+                    match attribute {
+                        TemplateAttribute::Static { name, value, .. } => {
+                            out.push_str(&format!(" {name}=\""));
+                            escaped(value, out);
+                            out.push('"');
+                        }
+                        TemplateAttribute::Dynamic { id } => vnode.dynamic_attrs[*id]
+                            .iter()
+                            .for_each(|a| write_attribute(a, out)),
+                    }
+                }
+                out.push('>');
+                children.iter().for_each(|c| write_template(c, vnode, out));
+                out.push_str(&format!("</{tag}>"));
+            }
+            TemplateNode::Text { text } => escaped(text, out),
+            TemplateNode::Dynamic { id } => write_dynamic(&vnode.dynamic_nodes[*id], out),
+        }
+    }
+
+    fn write_vnode(vnode: &VNode, out: &mut String) {
+        vnode
+            .template
+            .roots
+            .iter()
+            .for_each(|root| write_template(root, vnode, out));
+    }
+
+    fn html(md: &str) -> String {
+        let element = render_markdown(md).expect("render_markdown returns a node");
+        let mut out = String::new();
+        write_vnode(&element, &mut out);
+        out
+    }
+
+    /// `html` without its `class="..."` attributes: the Tailwind classes are styling, and these
+    /// tests check structure. An escaped value never contains a raw `"`.
+    fn strip_classes(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some((head, tail)) = rest.split_once(" class=\"") {
+            out.push_str(head);
+            rest = tail.split_once('"').map_or("", |(_, after)| after);
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn structure(md: &str) -> String {
+        strip_classes(&html(md))
+    }
+
+    #[test]
+    fn test_render_markdown_inline_formatting_and_escaping() {
+        let out = structure("A **bold** and *em* word with `code` & <5.");
+        assert!(
+            out.contains(
+                "<p>A <strong>bold</strong> and <em>em</em> word with <code>code</code> &#38; &#60;5.</p>"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_code_block_keeps_text_and_language() {
+        let raw = html("```r\nlm(y ~ x, data = d)\n```\n");
+        assert!(
+            strip_classes(&raw).contains("<pre><code>lm(y ~ x, data = d)\n</code></pre>"),
+            "{raw}"
+        );
+        assert!(
+            raw.contains("class=\"text-sm text-gray-100 font-mono language-r\""),
+            "{raw}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_sanitises_links_and_remote_images() {
+        let raw = html(
+            "[docs](javascript:alert(1)) and [CRAN](https://cran.r-project.org) \
+             ![chart](https://evil.example/c.png?d=1)",
+        );
+        assert!(raw.contains(" href=\"#\""), "{raw}");
+        assert!(
+            raw.contains(" href=\"https://cran.r-project.org\""),
+            "{raw}"
+        );
+        assert!(
+            raw.contains(" href=\"https://evil.example/c.png?d=1\""),
+            "{raw}"
+        );
+        assert!(raw.contains(">[image: chart]</a>"), "{raw}");
+        assert!(!raw.contains("javascript"), "{raw}");
+        assert!(!raw.contains("<img"), "{raw}");
+    }
+
+    #[test]
+    fn test_render_markdown_ordered_list_keeps_its_start() {
+        let out = structure("3. fit\n4. test\n");
+        assert!(
+            out.contains("<ol start=3><li>fit</li><li>test</li></ol>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_drops_raw_html() {
+        let raw = html("<script>alert(1)</script>\n\nok <b>bold</b>\n");
+        assert!(
+            !raw.contains("<script") && !raw.contains("alert") && !raw.contains("<b>"),
+            "{raw}"
+        );
+        assert!(strip_classes(&raw).contains("<p>ok bold</p>"), "{raw}");
+    }
+}
