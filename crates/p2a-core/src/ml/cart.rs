@@ -908,6 +908,17 @@ fn count_non_finite(values: impl Iterator<Item = f64>) -> usize {
     values.filter(|v| !v.is_finite()).count()
 }
 
+/// A random permutation of `1..=v` repeated over `n` rows.
+fn random_folds(n: usize, v: usize, seed: u64) -> Vec<usize> {
+    let mut folds: Vec<usize> = (0..n).map(|i| i % v + 1).collect();
+    let mut state = seed;
+    for i in (1..n).rev() {
+        let j = super::lcg_random(&mut state) % (i + 1);
+        folds.swap(i, j);
+    }
+    folds
+}
+
 /// Check a fold vector; returns V.
 fn check_folds(folds: &[usize], n: usize) -> EconResult<usize> {
     let invalid = |message: String| EconError::InvalidSpecification { message };
@@ -1012,7 +1023,45 @@ fn find_leaf<'t>(root: &'t CartNode, value: impl Fn(usize) -> f64) -> &'t CartNo
     node
 }
 
+/// The result for a constant target: one leaf and no complexity table.
+fn single_leaf(
+    node: GrowNode,
+    classes: &[f64],
+    p: usize,
+    n: usize,
+    config: &CartConfig,
+) -> CartResult {
+    let mut importance = vec![0.0; p];
+    let root = to_public(&node, 1.0, classes, &mut importance);
+    CartResult {
+        n_nodes: 1,
+        n_terminal: 1,
+        depth: 0,
+        variable_importance: importance,
+        cp_table: Vec::new(),
+        cv_error: None,
+        config: config.clone(),
+        feature_names: None,
+        class_labels: None,
+        predictions: vec![root.yval; n],
+        classes: classes.to_vec(),
+        root_risk: 0.0,
+        leaf_ids: vec![1; n],
+        n_folds: 0,
+        warnings: vec![
+            "the target is constant (root deviance 0): the tree is a single node and has no \
+             complexity table"
+                .to_string(),
+        ],
+        root,
+    }
+}
+
 /// Fit a CART decision tree.
+///
+/// Without [`CartConfig::folds`], `xval >= 2` draws a seeded random permutation of `1..=V` repeated
+/// over the rows (rpart's `sample(rep(1:xval, length.out = n))`, with p2a's generator, so the folds
+/// differ from R's: pass `folds` to reproduce rpart).
 ///
 /// # Arguments
 ///
@@ -1081,12 +1130,16 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
     } else {
         config.max_depth
     };
-    let fold_labels: Option<(&[usize], usize)> = match &config.folds {
-        Some(f) => {
+    // Random folds beyond the row count would stay empty, so at most n of them are drawn.
+    let random: Option<Vec<usize>> = (config.folds.is_none() && config.xval >= 2)
+        .then(|| random_folds(n, config.xval.min(n), config.seed.unwrap_or(42)));
+    let fold_labels: Option<(&[usize], usize)> = match (&config.folds, &random) {
+        (Some(f), _) => {
             let v = check_folds(f, n)?;
             Some((f.as_slice(), v))
         }
-        None => None,
+        (None, Some(f)) => Some((f.as_slice(), config.xval.min(n))),
+        (None, None) => None,
     };
 
     // Classes by value, never through an integer cast.
@@ -1155,7 +1208,20 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
     // Main fit. alpha is the risk a split has to save.
     let mut root_eval = GrowNode::new(1, 0.0);
     grower.eval_node(&mut root_eval, 0, n);
+    if is_class && n_classes == 1 || !is_class && y.iter().all(|&v| v == y[0]) {
+        // rpart: NaN in every column of the table.
+        root_eval.risk = 0.0;
+        if !is_class {
+            root_eval.mean = y[0];
+        }
+        return Ok(single_leaf(root_eval, &classes, p, n, config));
+    }
     let root_risk = root_eval.risk;
+    if !root_risk.is_finite() {
+        return Err(invalid(
+            "CART: the sum of squares of the target overflows; rescale the target".to_string(),
+        ));
+    }
     let alpha = config.cp * root_risk;
     grower.alpha = alpha;
     let mut tree = grower.fit(n)?;
@@ -1277,6 +1343,23 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
     })
 }
 
+fn check_prediction_input(result: &CartResult, x: ArrayView2<f64>) -> EconResult<()> {
+    let invalid = |message: String| EconError::InvalidSpecification { message };
+    let p = result.variable_importance.len();
+    if x.ncols() != p {
+        return Err(invalid(format!(
+            "CART: x has {} columns but the tree was fitted on {p}",
+            x.ncols()
+        )));
+    }
+    if let Some(((i, j), _)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(invalid(format!(
+            "CART: x row {i}, column {j} is not finite; surrogate splits are not implemented"
+        )));
+    }
+    Ok(())
+}
+
 /// Predict using a fitted CART tree.
 ///
 /// # Arguments
@@ -1287,7 +1370,13 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
 /// # Returns
 ///
 /// Predictions for each observation.
+///
+/// # Errors
+///
+/// `InvalidSpecification` when `x` has another column count than the training data or a value that
+/// is not finite.
 pub fn cart_predict(result: &CartResult, x: ArrayView2<f64>) -> EconResult<Vec<f64>> {
+    check_prediction_input(result, x)?;
     Ok((0..x.nrows())
         .map(|i| find_leaf(&result.root, |j| x[[i, j]]).yval)
         .collect())
@@ -1298,7 +1387,8 @@ pub fn cart_predict(result: &CartResult, x: ArrayView2<f64>) -> EconResult<Vec<f
 ///
 /// # Errors
 ///
-/// `InvalidSpecification` for a regression tree.
+/// `InvalidSpecification` for a regression tree, when `x` has another column count than the
+/// training data, or for a value that is not finite.
 pub fn cart_predict_proba(result: &CartResult, x: ArrayView2<f64>) -> EconResult<Array2<f64>> {
     if result.classes.is_empty() {
         return Err(EconError::InvalidSpecification {
@@ -2154,5 +2244,244 @@ mod tests {
                 "row {i}"
             );
         }
+    }
+
+    /// Noisy regression data from a fixed LCG (no external RNG): y = 2 (x0 > 5) + 0.3 x1 + noise.
+    fn noisy(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Array2::zeros((n, 3));
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            for j in 0..3 {
+                x[[i, j]] = 10.0 * next();
+            }
+            y[i] = 2.0 * f64::from(u8::from(x[[i, 0]] > 5.0)) + 0.3 * x[[i, 1]] + (next() - 0.5);
+        }
+        (x, y)
+    }
+
+    #[test]
+    fn test_cart_rejects_bad_arguments() {
+        // ML-105: before, NaN went into partial_cmp(..).unwrap_or(Equal) sorts silently, and max_depth = 0 (unlimited)
+        // let node ids overflow on deep chains.
+        let (x, y) = noisy(60, 3);
+        let ok = CartConfig::default();
+        assert!(cart(x.view(), y.view(), &ok).is_ok());
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut xb = x.clone();
+            xb[[4, 1]] = bad;
+            let e = cart(xb.view(), y.view(), &ok).unwrap_err().to_string();
+            assert!(
+                e.contains("feature column 1") && e.contains("non-finite"),
+                "{e}"
+            );
+            let mut yb = y.clone();
+            yb[7] = bad;
+            assert!(
+                cart(x.view(), yb.view(), &ok)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("target")
+            );
+        }
+        let cfg = |f: &dyn Fn(&mut CartConfig)| {
+            let mut c = CartConfig::default();
+            f(&mut c);
+            c
+        };
+        let err = |c: CartConfig| cart(x.view(), y.view(), &c).unwrap_err().to_string();
+        assert!(err(cfg(&|c| c.max_depth = 31)).contains("max_depth must be at most 30"));
+        assert!(err(cfg(&|c| c.cp = f64::NAN)).contains("cp"));
+        assert!(err(cfg(&|c| c.folds = Some(vec![1; 59]))).contains("60 rows"));
+        assert!(err(cfg(&|c| c.folds = Some(vec![1; 60]))).contains("at least 2 folds"));
+        assert!(
+            err(cfg(
+                &|c| c.folds = Some((0..60).map(|i| if i < 30 { 1 } else { 3 }).collect())
+            ))
+            .contains("label 2")
+        );
+        assert!(
+            err(cfg(&|c| c.folds = Some((0..60).map(|i| i % 2).collect()))).contains("label 0")
+        ); // 0 is not a label
+        // min_bucket = 0 acts as 1 (rpart's C loop would read past the node otherwise)
+        let a = cart(
+            x.view(),
+            y.view(),
+            &cfg(&|c| {
+                c.min_bucket = 0;
+                c.min_split = 2;
+                c.xval = 0
+            }),
+        )
+        .unwrap();
+        let b = cart(
+            x.view(),
+            y.view(),
+            &cfg(&|c| {
+                c.min_bucket = 1;
+                c.min_split = 2;
+                c.xval = 0
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            a.cp_table
+                .iter()
+                .map(|r| r.cp.to_bits())
+                .collect::<Vec<_>>(),
+            b.cp_table
+                .iter()
+                .map(|r| r.cp.to_bits())
+                .collect::<Vec<_>>()
+        );
+        // prediction input
+        assert!(
+            cart_predict(&a, x.slice(ndarray::s![.., 0..2]))
+                .unwrap_err()
+                .to_string()
+                .contains("3")
+        );
+        let mut xn = x.clone();
+        xn[[0, 0]] = f64::NAN;
+        assert!(cart_predict(&a, xn.view()).is_err());
+        assert!(
+            cart_predict_proba(&a, x.view())
+                .unwrap_err()
+                .to_string()
+                .contains("classification")
+        );
+        // max_depth = 0 means 30 (rpart's limit): a 400-row chain stays within node ids and recursion
+        let xc = Array2::from_shape_fn((400, 1), |(i, _)| i as f64);
+        let yc = Array1::from_shape_fn(400, |i| (i * i) as f64 + 0.1 * ((i * 7) % 3) as f64);
+        let deep = cart(
+            xc.view(),
+            yc.view(),
+            &cfg(&|c| {
+                c.max_depth = 0;
+                c.min_split = 2;
+                c.min_bucket = 1;
+                c.cp = 0.0;
+                c.xval = 0
+            }),
+        )
+        .unwrap();
+        assert!(deep.depth <= 30);
+    }
+
+    #[test]
+    fn test_cart_random_folds_are_seeded_and_balanced() {
+        // Before: no cross-validation (cv_error None, xerror = 1.1 rel_error for every seed).
+        let (x, y) = noisy(300, 11);
+        let run = |seed: Option<u64>| {
+            let mut c = CartConfig::default();
+            c.seed = seed;
+            c.xval = 10;
+            cart(x.view(), y.view(), &c).unwrap()
+        };
+        let bits = |r: &CartResult| {
+            r.cp_table
+                .iter()
+                .map(|row| {
+                    (
+                        row.cp.to_bits(),
+                        row.rel_error.to_bits(),
+                        row.xerror.unwrap().to_bits(),
+                        row.xstd.unwrap().to_bits(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let (a, b, c, d) = (run(Some(7)), run(Some(7)), run(Some(8)), run(None));
+        assert_eq!(bits(&a), bits(&b));
+        assert_eq!(bits(&d), bits(&run(Some(42)))); // None is the documented seed 42
+        assert_eq!(a.n_folds, 10);
+        assert!(
+            a.cp_table
+                .iter()
+                .zip(&c.cp_table)
+                .all(|(p, q)| p.cp == q.cp && p.rel_error == q.rel_error)
+        );
+        assert!(
+            a.cp_table
+                .iter()
+                .zip(&c.cp_table)
+                .any(|(p, q)| p.xerror != q.xerror)
+        );
+        let f = random_folds(300, 10, 7);
+        for label in 1..=10 {
+            assert_eq!(f.iter().filter(|&&v| v == label).count(), 30);
+        }
+        // xval > n (rpart allows it: the extra folds are empty)
+        let (xs, ys) = noisy(8, 2);
+        let mut small = CartConfig::default();
+        small.min_split = 2;
+        small.min_bucket = 1;
+        small.xval = 10;
+        assert!(cart(xs.view(), ys.view(), &small).is_ok());
+    }
+
+    #[test]
+    fn test_cart_constant_target_is_a_single_leaf() {
+        // Before: a fabricated cp row {cp 1, rel_error 1, xerror 1, xstd 0}; rpart gives NaN here.
+        let (x, _) = noisy(40, 5);
+        let y = Array1::from_elem(40, 2.5);
+        for method in [CartMethod::Anova, CartMethod::Gini] {
+            let mut c = CartConfig::default();
+            c.method = method;
+            let r = cart(x.view(), y.view(), &c).unwrap();
+            assert_eq!((r.n_nodes, r.n_terminal, r.root_risk), (1, 1, 0.0));
+            assert!(r.cp_table.is_empty() && r.cv_error.is_none());
+            assert!(
+                r.warnings.iter().any(|w| w.contains("constant")),
+                "{:?}",
+                r.warnings
+            );
+            assert!(r.predictions.iter().all(|&p| p == 2.5));
+            assert!(r.to_string().contains("Warning: "));
+        }
+    }
+
+    #[test]
+    fn test_cart_unsplittable_root_has_one_cp_row() {
+        // rpart: CP = cp (alpha / root risk), nsplit 0, rel error 1; R prints xerror = xstd = 0 placeholders
+        // because no cross-validation runs without a split; here they are None.
+        let (x, y) = noisy(30, 9);
+        let mut c = CartConfig::default();
+        c.min_split = 40;
+        let r = cart(x.view(), y.view(), &c).unwrap();
+        assert_eq!(r.cp_table.len(), 1);
+        // risk x (1 / risk) is 1 only up to an ulp (49 x (1/49) = 0.9999999999999999), as in rpart
+        assert!(
+            (r.cp_table[0].cp - 0.01).abs() < 1e-15
+                && (r.cp_table[0].rel_error - 1.0).abs() < 1e-15
+        );
+        assert!(r.cp_table[0].xerror.is_none() && r.n_folds == 0);
+    }
+
+    #[test]
+    fn test_cart_method_parses_aliases_and_rejects_unknown() {
+        CartMethod::choices().validate().unwrap();
+        for (s, m) in [
+            ("anova", CartMethod::Anova),
+            ("MSE", CartMethod::Anova),
+            ("class", CartMethod::Gini),
+            ("Gini", CartMethod::Gini),
+            ("information", CartMethod::Entropy),
+            ("entropy", CartMethod::Entropy),
+        ] {
+            assert_eq!(s.parse::<CartMethod>().unwrap(), m, "{s}");
+        }
+        let e = "poisson".parse::<CartMethod>().unwrap_err().to_string();
+        assert!(
+            e.contains("anova") && e.contains("gini") && e.contains("information"),
+            "{e}"
+        );
+        assert_eq!(CartMethod::Entropy.to_string(), "information");
     }
 }
