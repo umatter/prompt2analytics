@@ -9,6 +9,9 @@ use super::common::{
     compute_silhouette_avg, compute_silhouette_from_distances, try_distance_matrix,
 };
 
+/// Seed of CLARA's samples when `seed` is `None`.
+pub const CLARA_DEFAULT_SEED: u64 = 42;
+
 // =============================================================================
 // K-Medoids (PAM - Partitioning Around Medoids)
 // =============================================================================
@@ -83,9 +86,13 @@ impl std::fmt::Display for KMedoidsResult {
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `k` - Number of clusters
 /// * `max_iterations` - Maximum iterations (default: 100)
-/// * `seed` - Optional random seed for initialization
+/// * `seed` - Ignored: PAM's BUILD and SWAP phases are deterministic (as `cluster::pam`); the
+///   parameter is kept for compatibility
 ///
 /// # Algorithm
+///
+/// PAM's SWAP here takes the first improving swap; `cluster::pam` takes the best swap per step. Both
+/// reach the same medoids on the pinned data; see `validation/ml/partitioning.md`.
 ///
 /// 1. BUILD phase: Select k medoids using a greedy algorithm
 /// 2. SWAP phase: Iteratively try swapping medoids with non-medoids
@@ -122,13 +129,18 @@ pub fn kmedoids(
     }
 
     let max_iter = max_iterations.unwrap_or(100);
+    if max_iter == 0 {
+        return Err("max_iterations must be at least 1, got 0".to_string());
+    }
+    crate::ml::extract::require_finite(&data, "k-medoids")?;
+    let _ = seed; // documented as ignored
 
     // Pairwise distances: n x n, so allocated through the resource guards
     // (CLARA calls this with a caller-supplied sample size)
     let distances = try_distance_matrix(&data, "k-medoids distance matrix")?;
 
     // BUILD phase: Initialize medoids
-    let mut medoid_indices = build_medoids(&distances, k, seed);
+    let mut medoid_indices = build_medoids(&distances, k);
 
     // Assign points to nearest medoids
     let mut labels = assign_to_medoids(&distances, &medoid_indices);
@@ -137,6 +149,7 @@ pub fn kmedoids(
     // SWAP phase
     let mut n_iterations = 0;
     for iter in 0..max_iter {
+        checkpoint().map_err(|e| e.to_string())?;
         n_iterations = iter + 1;
         let mut improved = false;
 
@@ -198,13 +211,9 @@ pub fn kmedoids(
 }
 
 /// BUILD phase: Greedy medoid initialization.
-fn build_medoids(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> Vec<usize> {
+fn build_medoids(distances: &Array2<f64>, k: usize) -> Vec<usize> {
     let n = distances.nrows();
     let mut medoids = Vec::with_capacity(k);
-    let _rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
 
     // First medoid: point that minimizes sum of distances to all others
     let mut first_medoid = 0;
@@ -377,7 +386,7 @@ impl std::fmt::Display for ClaraResult {
 /// * `samples` - Number of samples to draw (default: 5)
 /// * `sample_size` - Size of each sample (default: 40 + 2*k)
 /// * `max_iter` - Maximum PAM iterations per sample (default: 100)
-/// * `seed` - Random seed
+/// * `seed` - Random seed of the samples (default: [`CLARA_DEFAULT_SEED`])
 ///
 /// # Returns
 /// * `ClaraResult` with cluster assignments and medoids
@@ -421,6 +430,10 @@ pub fn clara(
     let n_samples = samples.unwrap_or(5);
     let samp_size = sample_size.unwrap_or(40 + 2 * k).min(n);
     let max_iterations = max_iter.unwrap_or(100);
+    if max_iterations == 0 {
+        return Err("max_iterations must be at least 1, got 0".to_string());
+    }
+    crate::ml::extract::require_finite(&data, "CLARA")?;
 
     if n_samples == 0 {
         return Err("samples must be at least 1 (got 0)".to_string());
@@ -431,10 +444,7 @@ pub fn clara(
     }
 
     // Initialize RNG
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(CLARA_DEFAULT_SEED));
 
     let mut best_objective = f64::INFINITY;
     let mut best_medoids = Vec::new();
@@ -455,13 +465,8 @@ pub fn clara(
 
         // Run PAM on sample; its samp_size x samp_size distance matrix is sized
         // by sample_size, so an error names that parameter
-        let pam_result = kmedoids(
-            sample_data.view(),
-            k,
-            Some(max_iterations),
-            Some(rng.r#gen()),
-        )
-        .map_err(|e| format!("CLARA sample of {samp_size} rows (sample_size): {e}"))?;
+        let pam_result = kmedoids(sample_data.view(), k, Some(max_iterations), None)
+            .map_err(|e| format!("CLARA sample of {samp_size} rows (sample_size): {e}"))?;
 
         // Map sample medoid indices back to original data indices
         let medoids: Vec<usize> = pam_result
@@ -571,6 +576,137 @@ mod tests {
     use crate::ml::advanced_clustering_mod::common::compute_distance_matrix;
     use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    const ARITH: Tol = Tol::new(1e-12, 1e-12);
+
+    fn case_matrix(ds: &crate::data::Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&ndarray::Array1::from_vec(v));
+        }
+        m
+    }
+
+    /// The ap_blobs data for the property tests.
+    fn ap_blobs() -> Array2<f64> {
+        let path = p2a_validation::repo_path("validation/datasets/generated/ap_blobs.csv");
+        let ds = crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        case_matrix(&ds, &["x", "y"])
+    }
+
+    #[test]
+    fn test_validate_pam_blobs() {
+        let (case, ds) = crate::test_support::load_case("pam_clara_blobs");
+        let x = case_matrix(&ds, &["x", "y"]);
+        for k in 2..=4 {
+            let r = kmedoids(x.view(), k, Some(100), None).unwrap();
+            let mut med: Vec<f64> = r.medoid_indices.iter().map(|&m| (m + 1) as f64).collect();
+            med.sort_by(f64::total_cmp);
+            let of: Vec<f64> = r
+                .labels
+                .iter()
+                .map(|&l| (r.medoid_indices[l] + 1) as f64)
+                .collect();
+            let t = |s: &str| format!("pam{k}_{s}");
+            Check::new(&case)
+                .vector(&t("medoids"), &med, Tol::exact())
+                .scalar(&t("total"), r.total_dissimilarity, ARITH)
+                .vector(&t("medoid_of"), &of, Tol::exact())
+                .vector(
+                    &t("sil_width"),
+                    r.silhouette_widths.as_ref().unwrap(),
+                    ARITH,
+                )
+                .scalar(&t("avg_sil"), r.average_silhouette.unwrap(), ARITH)
+                .finish();
+        }
+    }
+
+    #[test]
+    fn test_validate_clara_full_sample_is_pam() {
+        // clara(samples = 1, sampsize = n, pamLike = TRUE) is PAM on a shuffled copy; at k = 3 the
+        // first-improvement SWAP reaches pam's medoids under every row order tried.
+        let (case, ds) = crate::test_support::load_case("pam_clara_blobs");
+        let x = case_matrix(&ds, &["x", "y"]);
+        let n = x.nrows();
+        let r = clara(x.view(), 3, Some(1), Some(n), Some(100), Some(7)).unwrap();
+        let mut med: Vec<f64> = r.medoid_indices.iter().map(|&m| (m + 1) as f64).collect();
+        med.sort_by(f64::total_cmp);
+        let of: Vec<f64> = r
+            .labels
+            .iter()
+            .map(|&l| (r.medoid_indices[l] + 1) as f64)
+            .collect();
+        Check::new(&case)
+            .vector("clara3_medoids", &med, Tol::exact())
+            .scalar("clara3_objective", r.objective / n as f64, ARITH) // R reports the mean dissimilarity
+            .vector("clara3_medoid_of", &of, Tol::exact())
+            .scalar("clara3_avg_sil", r.average_silhouette.unwrap(), ARITH)
+            .finish();
+    }
+
+    #[test]
+    fn test_kmedoids_result_does_not_depend_on_the_seed() {
+        // BUILD and SWAP are deterministic, as cluster::pam; the seed is documented as ignored.
+        let x = ap_blobs();
+        let a = kmedoids(x.view(), 3, None, Some(1)).unwrap();
+        let b = kmedoids(x.view(), 3, None, Some(999)).unwrap();
+        let c = kmedoids(x.view(), 3, None, None).unwrap();
+        assert_eq!(
+            (a.medoid_indices.clone(), a.total_dissimilarity.to_bits()),
+            (b.medoid_indices.clone(), b.total_dissimilarity.to_bits())
+        );
+        assert_eq!(a.medoid_indices, c.medoid_indices);
+    }
+
+    #[test]
+    fn test_clara_default_seed_is_reproducible() {
+        let x = ap_blobs();
+        let a = clara(x.view(), 3, Some(3), Some(30), None, None).unwrap();
+        let b = clara(
+            x.view(),
+            3,
+            Some(3),
+            Some(30),
+            None,
+            Some(CLARA_DEFAULT_SEED),
+        )
+        .unwrap();
+        assert_eq!(
+            (a.best_sample.clone(), a.objective.to_bits()),
+            (b.best_sample, b.objective.to_bits())
+        );
+    }
+
+    #[test]
+    fn test_kmedoids_rejects_bad_parameters() {
+        let x = array![[0.0, 0.0], [0.1, 0.2], [5.0, 5.0], [5.2, 4.9]];
+        assert!(
+            kmedoids(x.view(), 2, Some(0), None)
+                .unwrap_err()
+                .contains("max_iterations")
+        );
+        assert!(
+            clara(x.view(), 2, Some(1), Some(4), Some(0), None)
+                .unwrap_err()
+                .contains("max_iterations")
+        );
+        let nan = array![[0.0, f64::NAN], [1.0, 1.0]];
+        assert!(
+            kmedoids(nan.view(), 1, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        assert!(
+            clara(nan.view(), 1, None, None, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+    }
 
     fn cancelled() -> Budget {
         let t = CancelToken::new();

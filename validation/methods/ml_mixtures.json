@@ -108,6 +108,31 @@
       "tolerance": "integers exact; net similarity and preference 1e-12 relative. Iteration counts and non-converged states are not R-pinned. No noise added (nonoise = TRUE); no exemplars is an error where apcluster returns an empty result; defaults 0.5/200/15 against apcluster's 0.9/1000/100, which would cost at least 100 iterations per run. lam5 is recorded, not pinned: apcluster oscillates to maxits, and one ulp of the preference makes the same iteration converge.",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pam_clara",
+      "name": "PAM and CLARA",
+      "category": "ml",
+      "reference": "cluster::pam, cluster::clara(samples = 1, sampsize = n, pamLike = TRUE)",
+      "doc": "validation/ml/partitioning.md",
+      "cases": [
+        "pam_clara_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::kmedoids::tests::test_validate_pam_blobs",
+        "p2a-core::ml::advanced_clustering_mod::kmedoids::tests::test_validate_clara_full_sample_is_pam"
+      ],
+      "quantities": [
+        "medoids",
+        "medoid of each point",
+        "total dissimilarity",
+        "silhouette widths",
+        "average silhouette",
+        "CLARA objective"
+      ],
+      "tolerance": "integers exact; totals and silhouettes 1e-12 (arithmetic at fixed medoids). Pinned on the case's row order: first-improvement SWAP, on permuted rows 30 % / 44 % of permutations stop elsewhere for k = 2 / 4, so CLARA is pinned at k = 3 only.",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
