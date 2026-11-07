@@ -588,16 +588,17 @@ fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> Ve
         FilterSides::One => 0,
     };
 
-    for (i, out) in result.iter_mut().enumerate() {
+    // p <= n (filter refuses a longer filter) and nshift <= p - 1 for p >= 2, so the window fits
+    // from first to last; outside it the value stays NA.
+    let first = p.saturating_sub(1 + nshift);
+    let last = n.saturating_sub(nshift);
+    for i in first..last {
         let top = i + nshift;
-        if top + 1 < p || top >= n {
-            continue;
-        }
         let mut sum = 0.0;
-        for (j, &fj) in filter_coefs.iter().enumerate() {
-            sum += fj * x[top - j];
+        for (&fj, &xv) in filter_coefs.iter().zip(x[..=top].iter().rev()) {
+            sum += fj * xv;
         }
-        *out = sum; // a NaN in the window propagates, where R gives NA
+        result[i] = sum; // a NaN in the window propagates, where R gives NA
     }
 
     result
