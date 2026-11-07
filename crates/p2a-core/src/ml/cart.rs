@@ -807,12 +807,15 @@ impl Grower<'_> {
 
     /// Run a left-out row down a fold's tree over the descending grid `cpx`. A row visits at most
     /// one node per depth, and each node is its fitted-value node over a contiguous stretch of the
-    /// grid, so the errors go into difference arrays by stretch.
+    /// grid, so the errors go into difference arrays by stretch. The errors enter relative to the
+    /// root risk (`scale` is its inverse), which keeps them and their squares in range at any scale
+    /// of the target.
     fn rundown(
         &self,
         tree: &GrowNode,
         row: usize,
         cpx: &[f64],
+        scale: f64,
         xrisk: &mut [f64],
         xsq: &mut [f64],
     ) {
@@ -825,7 +828,7 @@ impl Grower<'_> {
             } else {
                 cpx.len()
             };
-            let err = self.error(node, row);
+            let err = self.error(node, row) * scale;
             xrisk[i] += err;
             xrisk[end] -= err;
             let sq = err * err;
@@ -895,15 +898,21 @@ fn make_cp_table(
     pos
 }
 
-/// The cumulative sums of a difference array, the last (sentinel) entry dropped.
+/// The cumulative sums of a difference array of non-negative quantities, the last (sentinel) entry
+/// dropped. A stretch that closes leaves rounding noise in the sum, which never goes below zero.
 fn cumulate(diff: &[f64]) -> Vec<f64> {
     diff[..diff.len() - 1]
         .iter()
         .scan(0.0, |sum, &d| {
             *sum += d;
-            Some(*sum)
+            Some(sum.max(0.0))
         })
         .collect()
+}
+
+/// `sqrt(a * b)`, without the product leaving the range of a float.
+fn geometric_mean(a: f64, b: f64) -> f64 {
+    a.sqrt() * b.sqrt()
 }
 
 fn count_non_finite(values: impl Iterator<Item = f64>) -> usize {
@@ -1163,6 +1172,16 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
             .collect();
     }
     let n_classes = classes.len();
+    if is_class {
+        let cap = super::c50::max_classes(n);
+        if n_classes > cap {
+            return Err(invalid(format!(
+                "CART: a classification tree supports at most {cap} classes for {n} rows, but the \
+                 target has {n_classes} distinct values; it looks like an identifier or a \
+                 continuous variable. Use method anova or recode the target"
+            )));
+        }
+    }
     let y_values = y.to_vec();
 
     // The features column after column, and every column's rows in sorted order (ties in row
@@ -1204,7 +1223,6 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
         left_counts: resource::try_vec(n_classes, 0u64, "CART class counts")?,
         right_counts: resource::try_vec(n_classes, 0u64, "CART class counts")?,
     };
-    let saved = fold_labels.is_some().then(|| sorts.clone());
     grower.sorts = sorts;
 
     // Main fit. alpha is the risk a split has to save.
@@ -1218,12 +1236,29 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
         }
         return Ok(single_leaf(root_eval, &classes, p, n, config));
     }
+    // The split search squares sums of deviations and the table divides by the root risk. Within
+    // these bounds neither can leave the range of a float.
     let root_risk = root_eval.risk;
-    if !root_risk.is_finite() {
+    if root_risk.is_nan() || root_risk > f64::MAX.sqrt() {
         return Err(invalid(
             "CART: the sum of squares of the target overflows; rescale the target".to_string(),
         ));
     }
+    if root_risk < f64::MIN_POSITIVE.sqrt() {
+        return Err(invalid(
+            "CART: the sum of squares of the target underflows; rescale the target".to_string(),
+        ));
+    }
+    let scale = 1.0 / root_risk;
+    // Every fold starts again from the full fit's sort.
+    let saved = match fold_labels {
+        Some(_) => {
+            let mut saved = resource::try_vec(total, 0usize, "CART sort indices")?;
+            saved.copy_from_slice(&grower.sorts);
+            Some(saved)
+        }
+        None => None,
+    };
     let alpha = config.cp * root_risk;
     grower.alpha = alpha;
     let mut tree = grower.fit(n)?;
@@ -1245,25 +1280,23 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
         make_cp_table(&tree, root_complexity, 0, &cps, &mut risk, &mut splits);
     }
 
-    // Cross-validation over the geometric means of the table's complexities.
+    // Cross-validation over the geometric means of the table's complexities; the sums are relative
+    // to the root risk.
     let mut cv: Option<(Vec<f64>, Vec<f64>)> = None;
     let mut n_folds = 0;
     if let (Some((folds, v)), Some(saved), true) = (fold_labels, &saved, tree.split.is_some()) {
         let mut cpx = Vec::with_capacity(rows);
         cpx.push(10.0 * cps[0]);
         for pair in cps.windows(2) {
-            cpx.push((pair[0] * pair[1]).sqrt());
+            cpx.push(geometric_mean(pair[0], pair[1]));
         }
         let mut xrisk_diff = resource::try_vec(rows + 1, 0.0f64, "CART cross-validation")?;
         let mut xsq_diff = resource::try_vec(rows + 1, 0.0f64, "CART cross-validation")?;
         let mut cpx_fold = vec![0.0; rows];
+        n_folds = v;
         for g in 1..=v {
             resource::checkpoint()?;
             let held_out = folds.iter().filter(|&&f| f == g).count();
-            if held_out == 0 {
-                continue;
-            }
-            n_folds += 1;
             let train = n - held_out;
             let weight = train as f64 / n as f64;
             grower.alpha = alpha * weight;
@@ -1285,7 +1318,14 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
             let root_complexity = fold_tree.complexity;
             fix_cp(&mut fold_tree, root_complexity);
             for (row, _) in folds.iter().enumerate().filter(|&(_, &f)| f == g) {
-                grower.rundown(&fold_tree, row, &cpx_fold, &mut xrisk_diff, &mut xsq_diff);
+                grower.rundown(
+                    &fold_tree,
+                    row,
+                    &cpx_fold,
+                    scale,
+                    &mut xrisk_diff,
+                    &mut xsq_diff,
+                );
             }
         }
         let xrisk = cumulate(&xrisk_diff);
@@ -1299,19 +1339,16 @@ pub fn cart(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &CartConfig) -> Econ
     }
 
     // Assembly.
-    let scale = 1.0 / root_risk;
     let cp_table: Vec<CpTableRow> = (0..rows)
         .map(|i| CpTableRow {
             cp: cps[i] * scale,
             nsplit: splits[i],
             rel_error: risk[i] * scale,
-            xerror: cv.as_ref().map(|(r, _)| r[i] * scale),
-            xstd: cv.as_ref().map(|(_, s)| s[i] * scale),
+            xerror: cv.as_ref().map(|(r, _)| r[i]),
+            xstd: cv.as_ref().map(|(_, s)| s[i]),
         })
         .collect();
-    let cv_error = cv
-        .as_ref()
-        .map(|(r, _)| r.iter().map(|v| v * scale).collect::<Vec<f64>>());
+    let cv_error = cv.as_ref().map(|(r, _)| r.clone());
 
     let mut importance = vec![0.0; p];
     let root = to_public(&tree, scale, &classes, &mut importance);
@@ -1399,6 +1436,7 @@ pub fn cart_predict_proba(result: &CartResult, x: ArrayView2<f64>) -> EconResult
                     .to_string(),
         });
     }
+    check_prediction_input(result, x)?;
     let mut out =
         resource::try_zeros2(x.nrows(), result.classes.len(), "CART class probabilities")?;
     for i in 0..x.nrows() {
@@ -2266,12 +2304,12 @@ mod tests {
 
         // the rundown
         let mut cpx = vec![10.0 * cps[0]];
-        cpx.extend(cps.windows(2).map(|w| (w[0] * w[1]).sqrt()));
+        cpx.extend(cps.windows(2).map(|w| geometric_mean(w[0], w[1])));
         let (mut d_risk, mut d_sq) = (vec![0.0; rows + 1], vec![0.0; rows + 1]);
         let (mut risk_direct, mut sq_direct) = (vec![0.0; rows], vec![0.0; rows]);
         fix_cp(&mut tree, root_complexity);
         for row in 0..n {
-            grower.rundown(&tree, row, &cpx, &mut d_risk, &mut d_sq);
+            grower.rundown(&tree, row, &cpx, 1.0, &mut d_risk, &mut d_sq);
             let mut node = &tree;
             for i in 0..rows {
                 node = grower.descend(node, row, cpx[i]);
@@ -2345,6 +2383,21 @@ mod tests {
         let err = |c: CartConfig| cart(x.view(), y.view(), &c).unwrap_err().to_string();
         assert!(err(cfg(&|c| c.max_depth = 31)).contains("max_depth must be at most 30"));
         assert!(err(cfg(&|c| c.cp = f64::NAN)).contains("cp"));
+        assert!(err(cfg(&|c| c.cp = -0.1)).contains("cp"));
+        let no_columns = Array2::<f64>::zeros((60, 0));
+        assert!(
+            cart(no_columns.view(), y.view(), &ok)
+                .unwrap_err()
+                .to_string()
+                .contains("no columns")
+        );
+        let huge = y.mapv(|v| v * 1e200);
+        assert!(
+            cart(x.view(), huge.view(), &ok)
+                .unwrap_err()
+                .to_string()
+                .contains("overflows")
+        );
         assert!(err(cfg(&|c| c.folds = Some(vec![1; 59]))).contains("60 rows"));
         assert!(err(cfg(&|c| c.folds = Some(vec![1; 60]))).contains("at least 2 folds"));
         assert!(
@@ -2403,6 +2456,40 @@ mod tests {
                 .to_string()
                 .contains("classification")
         );
+        // class probabilities check their input as predictions do
+        let labels = y.mapv(|v| if v > 2.5 { 1.0 } else { 0.0 });
+        let tree = cart(
+            x.view(),
+            labels.view(),
+            &cfg(&|c| {
+                c.method = CartMethod::Gini;
+                c.min_split = 4;
+                c.xval = 0
+            }),
+        )
+        .unwrap();
+        assert!(cart_predict_proba(&tree, x.view()).is_ok());
+        let proba_err = |m: &Array2<f64>| cart_predict_proba(&tree, m.view()).unwrap_err();
+        let narrow = proba_err(&x.slice(ndarray::s![.., 0..1]).to_owned()).to_string();
+        assert!(
+            narrow.contains("1 columns") && narrow.contains("fitted on 3"),
+            "{narrow}"
+        );
+        let wide = Array2::<f64>::zeros((5, 4));
+        let wide = proba_err(&wide).to_string();
+        assert!(
+            wide.contains("4 columns") && wide.contains("fitted on 3"),
+            "{wide}"
+        );
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut xb = x.clone();
+            xb[[2, 1]] = bad;
+            let e = proba_err(&xb).to_string();
+            assert!(
+                e.contains("row 2") && e.contains("not finite"),
+                "{bad}: {e}"
+            );
+        }
         // max_depth = 0 means 30 (rpart's limit): a 400-row chain stays within node ids and recursion
         let xc = Array2::from_shape_fn((400, 1), |(i, _)| i as f64);
         let yc = Array1::from_shape_fn(400, |i| (i * i) as f64 + 0.1 * ((i * 7) % 3) as f64);
@@ -2419,6 +2506,111 @@ mod tests {
         )
         .unwrap();
         assert!(deep.depth <= 30);
+    }
+
+    #[test]
+    fn test_cart_cumulate_stays_at_or_above_zero() {
+        // 0.3 - 0.1 - 0.2 is about -2.8e-17 in floats: a closed stretch leaves noise, not a negative risk.
+        let sums = cumulate(&[0.3, -0.1, -0.2, 0.0]);
+        assert!(sums.iter().all(|&v| v >= 0.0), "{sums:?}");
+    }
+
+    #[test]
+    fn test_cart_exact_step_target_has_no_noise_in_xerror() {
+        // A target that four separated clusters of x explain exactly: the deep rows' cross-validated
+        // risk is a difference of large sums and has to come out at (not below) zero.
+        let sizes = [31usize, 47, 59, 83];
+        let levels = [0.1, 3.7, 8.3, 11.9];
+        let n: usize = sizes.iter().sum();
+        let mut x = Array2::zeros((n, 1));
+        let mut y = Array1::zeros(n);
+        let mut i = 0;
+        for (k, &size) in sizes.iter().enumerate() {
+            for r in 0..size {
+                x[[i, 0]] = 100.0 * k as f64 + (r * 37 % size) as f64 / size as f64;
+                y[i] = levels[k];
+                i += 1;
+            }
+        }
+        let r = cart(x.view(), y.view(), &CartConfig::default()).unwrap();
+        assert_eq!(r.cp_table.last().unwrap().nsplit, 3);
+        for row in &r.cp_table {
+            let xerror = row.xerror.unwrap();
+            assert!(xerror >= 0.0, "{row:?}");
+        }
+        let deepest = r.cp_table.last().unwrap().xerror.unwrap();
+        assert!(deepest < 1e-12, "{deepest}");
+    }
+
+    #[test]
+    fn test_cart_table_does_not_depend_on_the_scale_of_the_target() {
+        // Before: the fold errors and their squares were summed in the target's units, so inside the
+        // accepted range they could overflow or underflow, and xstd came out 0 with no error.
+        let (x, y) = noisy(200, 11);
+        let base = cart(x.view(), y.view(), &CartConfig::default()).unwrap();
+        for factor in [1e75, 1e-75] {
+            let scaled = y.mapv(|v| v * factor);
+            let r = cart(x.view(), scaled.view(), &CartConfig::default()).unwrap();
+            assert_eq!(r.cp_table.len(), base.cp_table.len());
+            for (a, b) in r.cp_table.iter().zip(&base.cp_table) {
+                assert_eq!(a.nsplit, b.nsplit);
+                for (u, v) in [
+                    (a.cp, b.cp),
+                    (a.rel_error, b.rel_error),
+                    (a.xerror.unwrap(), b.xerror.unwrap()),
+                    (a.xstd.unwrap(), b.xstd.unwrap()),
+                ] {
+                    assert!(
+                        (u - v).abs() <= 1e-9 * v.abs().max(1e-3),
+                        "{factor}: {u} {v}"
+                    );
+                }
+            }
+            assert!(r.cp_table[0].xstd.unwrap() > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_cart_refuses_a_target_scale_out_of_range() {
+        // Before: the guard caught overflow of the root risk only. A root risk of 0 or a subnormal one
+        // passed it, and 1 / root_risk filled the table with NaN.
+        let (x, y) = noisy(60, 3);
+        let fit = |factor: f64| {
+            let scaled = y.mapv(|v| v * factor);
+            cart(x.view(), scaled.view(), &CartConfig::default())
+                .unwrap_err()
+                .to_string()
+        };
+        for factor in [1e77, 1e100] {
+            assert!(fit(factor).contains("overflows"), "{factor}");
+        }
+        for factor in [1e-90, 1e-160, 1e-170] {
+            let e = fit(factor);
+            assert!(
+                e.contains("underflows") && e.contains("rescale"),
+                "{factor}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cart_caps_the_class_count() {
+        // Gini or information on a continuous target has one class per row, and every node holds a
+        // count per class. The cap is C5.0's.
+        let (x, y) = noisy(60, 3);
+        let gini = CartConfig {
+            method: CartMethod::Gini,
+            xval: 0,
+            ..CartConfig::default()
+        };
+        let e = cart(x.view(), y.view(), &gini).unwrap_err().to_string();
+        assert!(
+            e.contains("at most 30 classes") && e.contains("method anova"),
+            "{e}"
+        );
+        // At the cap the fit goes through.
+        let labels = Array1::from_shape_fn(60, |i| (i % 30) as f64);
+        assert!(cart(x.view(), labels.view(), &gini).is_ok());
     }
 
     #[test]

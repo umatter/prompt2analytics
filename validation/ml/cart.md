@@ -25,7 +25,7 @@ Case file: `validation/r/cases/ml_cart_cp.R`. Registry: `validation/methods/ml_c
   misclassification count.
 - **Cross-validation.** Each fold refits on its training rows without sorting again and is run down on the left-out
   rows at the geometric means of consecutive cp values, with the fold weights t/n: `alpha_g = alpha * (t_g / n)`
-  and `cpx_g[j] = cpx[j] * (t_g / n)`. A fold with no left-out row is skipped. `xerror` is the summed risk over the
+  and `cpx_g[j] = cpx[j] * (t_g / n)`. `xerror` is the summed risk over the
   root risk and `xstd` its standard error. `min_xerror_cp` and `one_se_cp` are read off the table. With `xval = 10`
   (the default, as rpart) a call does 11 fits, the same work as rpart.
 - **Prune.** `cart_prune(cp)` removes every subtree whose complexity is at or below `cp`, and recomputes the
@@ -33,6 +33,9 @@ Case file: `validation/r/cases/ml_cart_cp.R`. Registry: `validation/methods/ml_c
 - **Importance.** The sum of the improvements of each feature's primary splits, in the nodes that remain.
 - **Ties.** A class tie in a node takes the lowest class label.
 - **Limits.** `max_depth` is at most 30 and 0 means 30, as rpart.
+  A classification tree accepts at most max(2, min(1000, n/2)) classes (C5.0's cap; rpart has none). A target whose
+  sum of squares lies outside `sqrt(f64::MIN_POSITIVE)` to `sqrt(f64::MAX)`, about 1.5e-154 to 1.3e154, is refused
+  with a request to rescale it. Inside that range the table does not depend on the target's scale.
 
 ## Cases, values and tests
 

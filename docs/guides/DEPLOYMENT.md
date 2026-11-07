@@ -284,7 +284,8 @@ HTTP), and they never depend on the resource profile:
   infinite values first;
 - method-level caps, modelled on R's own limits: multinomial and ordered models
   accept at most 100 outcome categories; C5.0 accepts `trials` from 1 to 100 and
-  at most max(2, min(1000, n/2)) classes; Cubist accepts `committees` from 1 to
+  at most max(2, min(1000, n/2)) classes, the same class cap as a CART
+  classification tree; Cubist accepts `committees` from 1 to
   100; RD local polynomials have order at most 10, and an error is returned when
   fewer than p + 2 observations lie inside the bandwidth on either side; sphet
   `instrument_order` is at most 4; density `n` is at most 2^20; panel GLS
