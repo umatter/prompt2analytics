@@ -103,7 +103,7 @@ looks like a validation failure but is not one.
   quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
   survival, mlogit, urca, glmnet, cluster, dbscan, dfidx, dynamicTreeCut, EValue, lpSolve,
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
-  gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects.
+  gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, changepoint.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -113,7 +113,7 @@ looks like a validation failure but is not one.
                      "EValue", "lpSolve", "MatchIt", "optmatch", "rlemon", "rpart",
                      "sensemakr", "vars", "WeightIt", "quadprog", "medflex", "ltmle",
                      "fect", "gsynth", "tmle", "gmm", "bacondecomp", "did", "DRDID",
-                     "CBPS", "etwfe", "marginaleffects"))
+                     "CBPS", "etwfe", "marginaleffects", "changepoint"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -364,6 +364,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | VECM (Johansen, urca::ca.jo and cajorls) | [vecm.md](econometrics/timeseries/vecm.md) | R-pinned |
 | IRF (orthogonalised and plain) | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
+| Linear filter | [filter.md](timeseries/filter.md) | R-pinned |
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
 

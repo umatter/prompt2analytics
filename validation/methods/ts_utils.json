@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_filter",
+      "name": "Linear filtering (convolution sides 1 and 2, recursive)",
+      "category": "forecasting",
+      "reference": "stats::filter (C cfilter, rfilter)",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_even_sides1",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_even_sides2",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_odd_sides1",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_odd_sides2",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_recursive"
+      ],
+      "quantities": [
+        "filtered values with NA positions"
+      ],
+      "tolerance": "Tol::coef(60) (identical summation order)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

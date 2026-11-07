@@ -489,7 +489,9 @@ pub struct FilterResult {
 /// # Convolution Filter
 ///
 /// For sides = 1: `y[i] = sum(filter[j] * x[i - j])` for j = 0 to p-1
-/// For sides = 2: `y[i] = sum(filter[j] * x[i + o - j])` where o centers the filter
+/// For sides = 2: `y[i] = sum(filter[j] * x[i + p/2 - j])`, so the window is
+/// `x[i + p/2 - p + 1 ..= i + p/2]` (R's `nshift = length(filter) %/% 2`). Positions whose window
+/// leaves the series are NaN.
 ///
 /// # Recursive Filter
 ///
@@ -501,7 +503,14 @@ pub struct FilterResult {
 /// * `filter` - Filter coefficients
 /// * `method` - Convolution or Recursive
 /// * `sides` - For convolution: One (past only) or Two (centered)
-/// * `init` - Initial values for recursive filter
+/// * `init` - Initial values for the recursive filter: the p values before `x[0]`, oldest first
+///   (R's `init` is newest first)
+///
+/// # Errors
+///
+/// `InvalidSpecification` for empty or missing (NaN) coefficients, as R's "missing values in
+/// 'filter'", and for a convolution filter longer than the series, as R's "'filter' is longer
+/// than time series".
 ///
 /// # Example
 ///
@@ -539,6 +548,20 @@ pub fn filter(
         });
     }
 
+    if filter_coefs.iter().any(|v| v.is_nan()) {
+        return Err(EconError::InvalidSpecification {
+            message:
+                "filter coefficients contain missing values (NaN); R: missing values in 'filter'"
+                    .to_string(),
+        });
+    }
+
+    if method == FilterMethod::Convolution && p > n {
+        return Err(EconError::InvalidSpecification {
+            message: format!("'filter' (length {p}) is longer than the time series (length {n})"),
+        });
+    }
+
     let values = match method {
         FilterMethod::Convolution => filter_convolution(x, filter_coefs, sides),
         FilterMethod::Recursive => filter_recursive(x, filter_coefs, init)?,
@@ -552,39 +575,29 @@ pub fn filter(
     })
 }
 
-/// Convolution (moving average) filter.
+/// Convolution (moving average) filter, as R's C `cfilter` without `circular`.
+///
+/// `result[i]` multiplies `f[0]` with `x[i + nshift]`, and is NaN where the window leaves the
+/// series. The caller has refused a filter longer than the series.
 fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> Vec<f64> {
     let n = x.len();
     let p = filter_coefs.len();
     let mut result = vec![f64::NAN; n];
+    let nshift = match sides {
+        FilterSides::Two => p / 2,
+        FilterSides::One => 0,
+    };
 
-    match sides {
-        FilterSides::One => {
-            // One-sided: y[i] = sum(filter[j] * x[i - j]) for j = 0 to p-1
-            // Need x[i-p+1] through x[i], so start at i = p-1
-            for i in (p - 1)..n {
-                let mut sum = 0.0;
-                for j in 0..p {
-                    sum += filter_coefs[j] * x[i - j];
-                }
-                result[i] = sum;
-            }
+    for (i, out) in result.iter_mut().enumerate() {
+        let top = i + nshift;
+        if top + 1 < p || top >= n {
+            continue;
         }
-        FilterSides::Two => {
-            // Two-sided: filter is centered
-            // Offset o = (p - 1) / 2 (assuming odd filter length)
-            let offset = (p - 1) / 2;
-            for i in offset..(n - (p - 1 - offset)) {
-                let mut sum = 0.0;
-                for j in 0..p {
-                    let idx = i + offset - j;
-                    if idx < n {
-                        sum += filter_coefs[j] * x[idx];
-                    }
-                }
-                result[i] = sum;
-            }
+        let mut sum = 0.0;
+        for (j, &fj) in filter_coefs.iter().enumerate() {
+            sum += fj * x[top - j];
         }
+        *out = sum; // a NaN in the window propagates, where R gives NA
     }
 
     result
@@ -1610,6 +1623,138 @@ fn median(x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), name, crate::data::columns::NaPolicy::Omit)
+            .unwrap()
+            .0
+    }
+
+    /// Case ts_filter_ar_cpt: stats::filter(x, f, method = "convolution", sides = s) on the
+    /// 60-value random walk x.
+    fn check_filters(lengths: &[usize], sides: FilterSides, suffix: &str) {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let filters: [(&str, Vec<f64>); 4] = [
+            ("filter_p2_05", vec![0.5, 0.5]),
+            ("filter_p4_025", vec![0.25; 4]),
+            ("filter_p3_02", vec![0.2, 0.3, 0.5]),
+            (
+                "filter_p5_01111111",
+                [1.0, 2.0, 3.0, 2.0, 1.0].iter().map(|v| v / 9.0).collect(),
+            ),
+        ];
+        let mut check = Check::new(&case);
+        for (key, f) in filters.iter().filter(|(_, f)| lengths.contains(&f.len())) {
+            let r = filter(&x, f, FilterMethod::Convolution, sides, None).unwrap();
+            check.vector(&format!("{key}{suffix}"), &r.values, Tol::coef(x.len())); // NA == NaN
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_filter_even_sides2() {
+        check_filters(&[2, 4], FilterSides::Two, "");
+    }
+
+    #[test]
+    fn test_validate_filter_odd_sides2() {
+        check_filters(&[3, 5], FilterSides::Two, "");
+    }
+
+    #[test]
+    fn test_validate_filter_even_sides1() {
+        check_filters(&[2, 4], FilterSides::One, "_sides1");
+    }
+
+    #[test]
+    fn test_validate_filter_odd_sides1() {
+        check_filters(&[3, 5], FilterSides::One, "_sides1");
+    }
+
+    /// stats::filter(x, c(0.5, -0.2), method = "recursive"), init = 0 (guard).
+    #[test]
+    fn test_validate_filter_recursive() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let r = filter(
+            &x,
+            &[0.5, -0.2],
+            FilterMethod::Recursive,
+            FilterSides::One,
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("filter_recursive", &r.values, Tol::coef(x.len()))
+            .finish();
+    }
+
+    /// The finding's example. R 4.3.3: filter(x, rep(.25, 4), sides = 2) = NA 3.75 4.75 5.5
+    /// 5.75 6 6.25 7 NA NA; filter(x, 1:4, sides = 2) = NA 28 43 49 64 56 61 61 NA NA.
+    #[test]
+    fn test_filter_even_two_sided_matches_r_cfilter() {
+        let x = [1.0, 4.0, 2.0, 8.0, 5.0, 7.0, 3.0, 9.0, 6.0, 10.0];
+        let run = |f: &[f64]| {
+            filter(&x, f, FilterMethod::Convolution, FilterSides::Two, None)
+                .unwrap()
+                .values
+        };
+        let nan = f64::NAN;
+        let a = run(&[0.25; 4]);
+        let want_a = [nan, 3.75, 4.75, 5.5, 5.75, 6.0, 6.25, 7.0, nan, nan];
+        let b = run(&[1.0, 2.0, 3.0, 4.0]);
+        let want_b = [nan, 28.0, 43.0, 49.0, 64.0, 56.0, 61.0, 61.0, nan, nan];
+        for (got, want) in [(a, want_a), (b, want_b)] {
+            for (g, w) in got.iter().zip(want) {
+                assert!(*g == w || (g.is_nan() && w.is_nan()), "{got:?}");
+            }
+        }
+    }
+
+    /// R: "'filter' is longer than time series" for sides 1 and 2.
+    #[test]
+    fn test_filter_longer_than_series_is_an_error() {
+        let x = [1.0, 4.0, 2.0];
+        for (f, sides) in [
+            (vec![0.1; 10], FilterSides::Two),
+            (vec![0.1; 5], FilterSides::One),
+            (vec![0.1; 4], FilterSides::Two),
+        ] {
+            let err = filter(&x, &f, FilterMethod::Convolution, sides, None).unwrap_err();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. })
+                    && err.to_string().contains("longer than the time series"),
+                "{err}"
+            );
+        }
+        // R's recursive filter has no such limit
+        assert!(
+            filter(
+                &x,
+                &[0.1; 5],
+                FilterMethod::Recursive,
+                FilterSides::One,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    /// R: "missing values in 'filter'".
+    #[test]
+    fn test_filter_rejects_missing_coefficients() {
+        let err = filter(
+            &[1.0, 2.0, 3.0],
+            &[0.5, f64::NAN],
+            FilterMethod::Convolution,
+            FilterSides::Two,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing values"), "{err}");
+    }
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
