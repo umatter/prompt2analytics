@@ -35,6 +35,7 @@
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
+use polars_ops::series::SeriesMethods;
 
 /// Aggregation function to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,35 +234,47 @@ pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> Mu
     }
     let value_column = if normalize { "proportion" } else { "count" };
 
-    // Use lazy frame for value_counts
-    let lazy = dataset.df().clone().lazy();
+    let aggregation = |e: PolarsError| MungeError::AggregationError(e.to_string());
+    let source = dataset.df().column(column).map_err(aggregation)?;
+    let counts = source
+        .as_materialized_series()
+        .value_counts(false, true, value_column.into(), normalize)
+        .map_err(aggregation)?;
 
-    let result = lazy
-        .select([col(column).value_counts(true, true, value_column, normalize)])
-        .collect()
-        .map_err(|e| MungeError::AggregationError(e.to_string()))?;
-
-    // The result is a struct column, we need to unnest it
-    let unnested = result
-        .unnest([column], None)
-        .map_err(|e| MungeError::AggregationError(e.to_string()))?;
-
-    // polars leaves tied counts in hash order.
-    let value_key = match unnested.column(column)?.dtype() {
-        DataType::Categorical(..) | DataType::Enum(..) => col(column).cast(DataType::String),
-        _ => col(column),
+    // polars leaves its groups in hash order: by count, and tied counts by value.
+    let stable = |descending: bool| SortOptions {
+        descending,
+        nulls_last: true,
+        maintain_order: true,
+        multithreaded: false,
+        ..Default::default()
     };
-    let sorted = unnested
-        .lazy()
-        .sort_by_exprs(
-            [col(value_column), value_key],
-            SortMultipleOptions::default()
-                .with_order_descending_multi([true, false])
-                .with_nulls_last_multi([true, true])
-                .with_maintain_order(true),
-        )
-        .collect()
-        .map_err(|e| MungeError::AggregationError(e.to_string()))?;
+    let values = counts.column(column).map_err(aggregation)?;
+    let tallies = counts
+        .column(value_column)
+        .map_err(aggregation)?
+        .as_materialized_series();
+    let order = if tallies.n_unique().map_err(aggregation)? == tallies.len() {
+        tallies.arg_sort(stable(true))
+    } else {
+        let key = match values.dtype() {
+            DataType::Categorical(..) | DataType::Enum(..) => {
+                values.cast(&DataType::String).map_err(aggregation)?
+            }
+            _ => values.clone(),
+        };
+        let by_value = key.as_materialized_series().arg_sort(stable(false));
+        let by_count = tallies
+            .take(&by_value)
+            .map_err(aggregation)?
+            .arg_sort(stable(true));
+        by_value.take(&by_count).map_err(aggregation)?
+    };
+    let sorted = DataFrame::new(vec![
+        values.take(&order).map_err(aggregation)?,
+        tallies.take(&order).map_err(aggregation)?.into_column(),
+    ])
+    .map_err(aggregation)?;
 
     Ok(Dataset::new(sorted))
 }
@@ -664,6 +677,26 @@ mod tests {
                 .unwrap()
                 .df()
                 .equals_missing(value_counts(&ds, "g").unwrap().df())
+        );
+    }
+
+    #[test]
+    fn test_value_counts_orders_tied_categories_by_label() {
+        // Codes follow first appearance in the mapping ("b" before "a" here); the tie goes by label.
+        let c = Column::new("c".into(), ["b", "a", "b", "a", "z"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let ds = Dataset::new(DataFrame::new(vec![c]).unwrap());
+        let out = value_counts_with(&ds, "c", false).unwrap();
+        let labels = out
+            .df()
+            .column("c")
+            .unwrap()
+            .cast(&DataType::String)
+            .unwrap();
+        assert_eq!(
+            labels.str().unwrap().into_iter().collect::<Vec<_>>(),
+            [Some("a"), Some("b"), Some("z")]
         );
     }
 
