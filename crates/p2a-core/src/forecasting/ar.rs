@@ -407,6 +407,8 @@ fn fit_ar_burg(
     var_all.push(var0);
 
     for p in 1..=max_order {
+        checkpoint()?;
+
         // Compute reflection coefficient using Burg's formula
         let mut num = 0.0;
         let mut den = 0.0;
@@ -429,7 +431,7 @@ fn fit_ar_burg(
         } else {
             vec![]
         };
-        let mut phi_new = vec![0.0; p];
+        let mut phi_new = try_vec(p, 0.0, "the Burg coefficients")?;
         for j in 0..(p - 1) {
             phi_new[j] = phi_prev[j] - k * phi_prev[p - 2 - j];
         }
@@ -440,11 +442,13 @@ fn fit_ar_burg(
         var_all.push(new_var.max(0.0));
         phi_all.push(phi_new);
 
-        // Update forward and backward errors
-        let ef_old = ef.clone();
-        for t in p..n {
-            ef[t] = ef_old[t] - k * eb[t - 1];
-            eb[t] = eb[t - 1] - k * ef_old[t];
+        // Update forward and backward errors from the previous order's errors (R's C_Burg).
+        // Backwards, so that eb[t - 1] is still the previous order's when eb[t] is written.
+        for t in (p..n).rev() {
+            let ef_old = ef[t];
+            let eb_old = eb[t - 1];
+            ef[t] = ef_old - k * eb_old;
+            eb[t] = eb_old - k * ef_old;
         }
     }
 
@@ -867,6 +871,54 @@ mod tests {
             .finish();
     }
 
+    /// Each order of every AR route takes a budget check: `order_max` is the caller's.
+    #[test]
+    fn ar_ols_and_burg_honour_cancellation() {
+        let x: Vec<f64> = (0..200)
+            .map(|i| (i as f64 * 0.3).sin() + 0.4 * ((i * 37 % 11) as f64 - 5.0))
+            .collect();
+        for method in [ArMethod::Ols, ArMethod::Burg, ArMethod::YuleWalker] {
+            let mut c = ArConfig::default();
+            c.method = method;
+            assert!(ar(&x, c.clone()).is_ok());
+            let token = crate::resource::CancelToken::new();
+            token.cancel();
+            let stopped =
+                crate::resource::with_budget(crate::resource::Budget::new(None, token), || {
+                    ar(&x, c.clone())
+                });
+            assert!(
+                matches!(stopped, Err(EconError::Cancelled(_))),
+                "{method:?}: {stopped:?}"
+            );
+        }
+    }
+
+    /// ar(x, method = "burg"): order 1 (coef 0.8697095962524342, var.pred 1.0853375039008384),
+    /// partial ACF for orders 1..17, relative AIC 0..17; fixed order 3.
+    #[test]
+    fn test_validate_ar_burg() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let mut c = ArConfig::default();
+        c.method = ArMethod::Burg;
+        let r = ar(&x, c).unwrap();
+        let mut c3 = ArConfig::default();
+        c3.method = ArMethod::Burg;
+        c3.aic = false;
+        c3.order = Some(3);
+        let r3 = ar(&x, c3).unwrap();
+        Check::new(&case)
+            .scalar("ar_burg_order", r.order as f64, Tol::exact())
+            .vector("ar_burg_coef", &r.ar, Tol::coef(60))
+            .scalar("ar_burg_var", r.var_pred, Tol::stat(60))
+            .vector("ar_burg_aic", &r.aic.clone().unwrap(), Tol::stat(60))
+            .vector("ar_burg_pacf", &r.partial_acf, Tol::coef(60))
+            .vector("ar_burg_fixed3_coef", &r3.ar, Tol::coef(60))
+            .scalar("ar_burg_fixed3_var", r3.var_pred, Tol::stat(60))
+            .finish();
+    }
+
     #[test]
     fn test_ar_basic() {
         // Generate AR(1) process
@@ -1005,30 +1057,6 @@ mod tests {
             x[t] = 0.7 * x[t - 1] - 0.2 * x[t - 2] + box_muller_ar(&mut seed);
         }
         x
-    }
-
-    #[test]
-    fn test_validate_ar_burg_vs_r() {
-        // R reference:
-        // ar(x, method = "burg")
-        let x = create_ar2_process();
-        let result = ar(
-            &x,
-            ArConfig {
-                method: ArMethod::Burg,
-                aic: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // Check structure - Burg method should run and produce valid output
-        assert!(result.n_obs == x.len());
-        assert!(result.var_pred > 0.0);
-        assert!(result.method == ArMethod::Burg);
-
-        // Residuals should be computed
-        assert_eq!(result.resid.len(), x.len());
     }
 
     #[test]

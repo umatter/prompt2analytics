@@ -36,6 +36,15 @@ demeaning, so R's default `ar(x, method = "ols")` differs; the pins call R with 
 `ArMethod::YuleWalker` is `ar.yw`: Durbin-Levinson on the sample autocovariances. var.pred is the Durbin-Levinson variance
 times n / (n - (order + 1)). An order with n <= order + 1 is `InsufficientData` (R returns an infinite or negative value).
 
+## Burg
+
+`ArMethod::Burg` is `ar.burg` with `var.method = 1`. Each order's reflection coefficient and errors use the previous order's
+forward and backward errors, as R's `C_Burg`. The variance is `var[p - 1] (1 - k^2)`, with no n / (n - p - 1) factor.
+
+## Budget
+
+Every route checks the budget once per order (`ar_ols_and_burg_honour_cancellation`).
+
 ## Pins
 
 | Test | R call | Pinned at |
@@ -45,6 +54,7 @@ times n / (n - (order + 1)). An order with n <= order + 1 is `InsufficientData` 
 | `test_validate_ar_ols_n60` | `ar(x, method = "ols", demean = TRUE, intercept = FALSE)` | order exact; coefficient, mean `Tol::coef(60)`; AIC, var `Tol::stat(60)` |
 | `test_validate_ar_ols_fixed_order` | `ar(s, method = "ols", aic = FALSE, order.max = 2 | 3)` | coefficients `Tol::coef(24)`, var `Tol::stat(24)` |
 | `test_validate_ar_yule_walker_var_pred` | `ar(x, method = "yule-walker")`, and fixed order 3 | order exact; coefficients `Tol::coef(60)`, var `Tol::stat(60)` |
+| `test_validate_ar_burg` | `ar(x, method = "burg")`, and fixed order 3 | order exact; coefficients and partial ACF `Tol::coef(60)`; var and AIC `Tol::stat(60)` |
 
 `test_ar_ols_unestimable_fixed_order_is_an_error` and `test_ar_ols_rank_stop_keeps_the_estimable_orders` hold the refusal and
 the stop; they compare no R number.

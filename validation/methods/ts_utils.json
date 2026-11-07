@@ -38,7 +38,8 @@
         "p2a-core::forecasting::ar::tests::test_validate_ar_ols_aic_by_order",
         "p2a-core::forecasting::ar::tests::test_validate_ar_ols_n60",
         "p2a-core::forecasting::ar::tests::test_validate_ar_ols_fixed_order",
-        "p2a-core::forecasting::ar::tests::test_validate_ar_yule_walker_var_pred"
+        "p2a-core::forecasting::ar::tests::test_validate_ar_yule_walker_var_pred",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_burg"
       ],
       "quantities": [
         "order",
