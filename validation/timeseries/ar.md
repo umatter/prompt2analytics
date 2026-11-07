@@ -31,6 +31,9 @@ call with `order.max = 11`.
 **Convention kept as p2a's.** p2a fits no intercept. R's default `ar.ols(intercept = demean)` fits a constant after
 demeaning, so R's default `ar(x, method = "ols")` differs; the pins call R with `intercept = FALSE`.
 
+**p2a's addition.** R's `ar.ols` returns no partial ACF (`partialacf = NULL`). p2a reports the Durbin-Levinson path of the same
+autocovariances, not compared with R, and so also refuses a series of zero variance on this route.
+
 ## Yule-Walker
 
 `ArMethod::YuleWalker` is `ar.yw`: Durbin-Levinson on the sample autocovariances. var.pred is the Durbin-Levinson variance

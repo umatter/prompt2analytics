@@ -84,7 +84,8 @@ pub struct ArResult {
     pub x_mean: f64,
     /// AIC values relative to the minimum (only if aic=true)
     pub aic: Option<Vec<f64>>,
-    /// Partial autocorrelation coefficients at each lag
+    /// Partial autocorrelation coefficients at each lag. R's `ar.ols` returns none; with
+    /// `ArMethod::Ols` this is the Durbin-Levinson path of the same autocovariances.
     pub partial_acf: Vec<f64>,
     /// Number of observations
     pub n_obs: usize,
@@ -149,7 +150,9 @@ struct ArFit {
 /// `ar.ols(demean = config.demean, intercept = FALSE)`: orders are fitted while the lag matrix
 /// has at least as many rows as lags and `qr(X'X)` is of full rank, `var_pred` is SSE / (n - m),
 /// the AIC is n ln(var) + 2m relative to its minimum (`+inf` for orders not fitted), and a stop
-/// or a saturated order is reported in `warnings`.
+/// or a saturated order is reported in `warnings`. R's `ar.ols` returns no partial ACF; p2a fills
+/// `partial_acf` from the Durbin-Levinson path of the same autocovariances, so the `Ols` route also
+/// refuses a series of zero variance, which R's does not.
 ///
 /// # Arguments
 ///
@@ -159,8 +162,9 @@ struct ArFit {
 /// # Errors
 ///
 /// `InsufficientData` for a series of fewer than 3 values, a Yule-Walker order with
-/// n <= order + 1, or a fixed OLS order with fewer rows than lags; `SingularMatrix` for a fixed
-/// OLS order whose X'X is rank-deficient; `Cancelled` when the budget stops (checked once per
+/// n <= order + 1, or a fixed OLS order with fewer rows than lags; `InvalidSpecification` for a
+/// series of zero variance; `SingularMatrix` for a fixed OLS order whose X'X is rank-deficient;
+/// `Cancelled` when the budget stops (checked once per
 /// order).
 ///
 /// # Example
@@ -549,11 +553,11 @@ enum OlsStop {
 }
 
 impl OlsStop {
-    fn error(&self) -> EconError {
+    fn error(&self, n: usize) -> EconError {
         match *self {
             OlsStop::TooFewRows(k) => EconError::InsufficientData {
                 required: k.saturating_mul(2),
-                provided: 0,
+                provided: n,
                 context: format!("AR({k}) by OLS needs at least as many rows as lags (n - k >= k)"),
             },
             OlsStop::Singular(k) => EconError::SingularMatrix {
@@ -580,7 +584,8 @@ fn fit_ar_ols(
 ) -> EconResult<ArFit> {
     let n = y.len();
 
-    // The partial autocorrelations come from the Durbin-Levinson path, as in R's ar.ols.
+    // R's ar.ols returns no partial ACF (partialacf = NULL); p2a reports the Durbin-Levinson path
+    // of the same autocovariances.
     let (_, _, pacf) = durbin_levinson_path(y, max_order)?;
 
     let (first, last) = match fixed_order {
@@ -647,11 +652,7 @@ fn fit_ar_ols(
         (best, Some(relative))
     } else {
         if let Some(stop) = &stop {
-            let mut err = stop.error();
-            if let EconError::InsufficientData { provided, .. } = &mut err {
-                *provided = n;
-            }
-            return Err(err);
+            return Err(stop.error(n));
         }
         (0, None)
     };
@@ -1025,7 +1026,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Additional R-vs-Rust Validation Tests (Phase 6)
+    // Property tests on simulated data
     // ========================================================================
 
     /// LCG for deterministic random numbers
@@ -1098,8 +1099,6 @@ mod tests {
 
     #[test]
     fn test_ar_aic_selects_low_order_on_ar2_dgp() {
-        // R reference:
-        // ar(x, aic = TRUE)
         let x = create_ar2_process();
         let result = ar(
             &x,
