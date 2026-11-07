@@ -89,6 +89,57 @@
       "supersedes_legacy": []
     },
     {
+      "id": "ts_diffinv",
+      "name": "Discrete integration",
+      "category": "forecasting",
+      "reference": "stats::diffinv",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_diffinv_ts_filter_ar_cpt"
+      ],
+      "quantities": [
+        "integrated series (lag 1 and 2, d = 1 with xi; d = 2 zero xi)"
+      ],
+      "tolerance": "Tol::coef(12)",
+      "deviations": [
+        {
+          "finding": "TS-28",
+          "quantity": "differences >= 2 with non-zero xi",
+          "note": "p2a splits xi per level; diffinv_d2_xi recorded (R 1, 3, 5.3503169975, ...), off by up to 11"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_arma_acf",
+      "name": "Theoretical ACF/PACF of ARMA processes",
+      "category": "forecasting",
+      "reference": "stats::ARMAacf",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_arma_acf_ts_filter_ar_cpt"
+      ],
+      "quantities": [
+        "ACF of AR(1), AR(2), MA(2)",
+        "PACF of AR(2)"
+      ],
+      "tolerance": "rel 1e-10, abs 1e-12 (closed form; fixed-point stop 1e-12)",
+      "deviations": [
+        {
+          "finding": "TS-14",
+          "quantity": "mixed ARMA and persistent AR",
+          "note": "armaacf_arma11 off by 8.1e-2, armaacf_ar2_persistent by 3.6e-5; recorded only"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "ts_cpgram",
       "name": "Cumulative periodogram white-noise check",
       "category": "forecasting",

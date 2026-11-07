@@ -1864,15 +1864,57 @@ mod tests {
         assert_eq!(result.values, vec![2.0, 3.0, 4.0]);
     }
 
+    /// diffinv(x[1:12], xi = 1.5); diffinv(x[1:12], lag = 2, xi = c(1, -2)); diffinv(x[1:12], differences = 2).
+    /// diffinv_d2_xi (differences = 2, xi = c(1, 3); R 1, 3, 5.3503169975, ...) is TS-28: not asserted.
     #[test]
-    fn test_arma_acf_ar1() {
-        // AR(1) with phi = 0.8
-        // ACF should be: 1, 0.8, 0.64, 0.512, ...
-        let result = arma_acf(&[0.8], &[], 5, false).unwrap();
+    fn test_validate_diffinv_ts_filter_ar_cpt() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x12 = &col(&ds, "x")[..12];
+        Check::new(&case)
+            .vector(
+                "diffinv_lag1",
+                &diffinv(x12, 1, 1, Some(&[1.5])).unwrap().values,
+                Tol::coef(12),
+            )
+            .vector(
+                "diffinv_lag2",
+                &diffinv(x12, 2, 1, Some(&[1.0, -2.0])).unwrap().values,
+                Tol::coef(12),
+            )
+            .vector(
+                "diffinv_d2_zero",
+                &diffinv(x12, 1, 2, None).unwrap().values,
+                Tol::coef(12),
+            )
+            .finish(); // deviation TS-28: diffinv_d2_xi
+    }
 
-        assert!(approx_eq(result.values[0], 1.0, 1e-10));
-        assert!(approx_eq(result.values[1], 0.8, 0.05));
-        assert!(approx_eq(result.values[2], 0.64, 0.05));
+    /// ARMAacf(ar = 0.8), (0.5, -0.3) with its PACF (lags 1..10; R omits lag 0), ma = (0.4, 0.25). Closed-form
+    /// reference: rel 1e-10, abs 1e-12, because the AR recursion stops at |delta gamma(0)| < 1e-12.
+    /// Deviation TS-14: armaacf_arma11 (off by 8.1e-2) and armaacf_ar2_persistent (3.6e-5), not asserted.
+    #[test]
+    fn test_validate_arma_acf_ts_filter_ar_cpt() {
+        let (case, _) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let tol = Tol::new(1e-10, 1e-12);
+        let pacf = arma_acf(&[0.5, -0.3], &[], 10, true).unwrap().values;
+        Check::new(&case)
+            .vector(
+                "armaacf_ar1",
+                &arma_acf(&[0.8], &[], 10, false).unwrap().values,
+                tol,
+            )
+            .vector(
+                "armaacf_ar2",
+                &arma_acf(&[0.5, -0.3], &[], 10, false).unwrap().values,
+                tol,
+            )
+            .vector("armaacf_ar2_pacf", &pacf[1..], tol)
+            .vector(
+                "armaacf_ma2",
+                &arma_acf(&[], &[0.4, 0.25], 6, false).unwrap().values,
+                tol,
+            )
+            .finish();
     }
 
     #[test]
@@ -1941,7 +1983,7 @@ mod tests {
     /// Validate lag against R
     /// R code: lag(1:5, 1)
     #[test]
-    fn test_validate_lag_against_r() {
+    fn test_lag_length() {
         let x: Vec<f64> = (1..=5).map(|i| i as f64).collect();
         let result = lag(&x, 1).unwrap();
         // In R, lag shifts time index back, so values stay same but time shifts

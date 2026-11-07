@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pelt_single_changepoint() {
+    fn test_pelt_single_changepoint_recovers_dgp() {
         // R reference: changepoint::cpt.mean()
         // Single mean change at position 50
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pelt_two_changepoints() {
+    fn test_pelt_two_changepoints_recovers_dgp() {
         // Three segments: mean 0, mean 5, mean 0
         let mut data = create_mean_shift_data(30, 40, 0.0, 5.0, 1.0);
         let third_segment = create_mean_shift_data(0, 30, 5.0, 0.0, 1.0);
@@ -927,31 +927,30 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pelt_segment_means() {
+    fn test_pelt_segment_means_recover_dgp() {
         // Clear mean shift: 0 -> 10
         let data = create_mean_shift_data(50, 50, 0.0, 10.0, 0.5);
         let result = detect_changepoints(&data, Some(5.0), None, CostFunction::MeanChange).unwrap();
 
         // Verify segment statistics
-        if result.segments.len() == 2 {
-            // First segment should have mean near 0
-            assert!(
-                result.segments[0].mean.abs() < 2.0,
-                "First segment mean {} should be near 0",
-                result.segments[0].mean
-            );
+        assert_eq!(result.segments.len(), 2);
+        // First segment should have mean near 0
+        assert!(
+            result.segments[0].mean.abs() < 2.0,
+            "First segment mean {} should be near 0",
+            result.segments[0].mean
+        );
 
-            // Second segment should have mean near 10
-            assert!(
-                (result.segments[1].mean - 10.0).abs() < 2.0,
-                "Second segment mean {} should be near 10",
-                result.segments[1].mean
-            );
-        }
+        // Second segment should have mean near 10
+        assert!(
+            (result.segments[1].mean - 10.0).abs() < 2.0,
+            "Second segment mean {} should be near 10",
+            result.segments[1].mean
+        );
     }
 
     #[test]
-    fn test_validate_variance_change_detection() {
+    fn test_pelt_variance_change_finds_the_change() {
         // Variance change: low variance -> high variance
         let mut seed: u64 = 42;
         let mut data = Vec::with_capacity(100);
@@ -968,14 +967,17 @@ mod tests {
         let result =
             detect_changepoints(&data, Some(5.0), None, CostFunction::VarianceChange).unwrap();
 
-        // Should detect variance change (method may be less sensitive)
-        // Just verify it runs without error and produces valid output
-        assert!(!result.segments.is_empty());
+        // The variance changes at 50
+        assert!(
+            result.changepoints.iter().any(|&c| (45..=55).contains(&c)),
+            "no changepoint near 50: {:?}",
+            result.changepoints
+        );
         assert!(result.total_cost.is_finite());
     }
 
     #[test]
-    fn test_validate_binary_segmentation_vs_pelt() {
+    fn test_binary_segmentation_and_pelt_agree_on_dgp() {
         // Both methods should find similar changepoints
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
 
@@ -1008,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_min_segment_length() {
+    fn test_pelt_min_segment_length() {
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
 
         // With large minimum segment length, may find fewer changepoints
@@ -1023,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_penalty_effect() {
+    fn test_pelt_penalty_effect() {
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
 
         // Low penalty: more changepoints
@@ -1044,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_no_changepoint_constant_data() {
+    fn test_pelt_constant_data_has_no_changepoint() {
         // Constant data should have no changepoints
         let data: Vec<f64> = vec![5.0; 100];
         let result =
@@ -1059,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_total_cost_calculation() {
+    fn test_pelt_total_cost_with_manual_penalty() {
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
         let result = detect_changepoints(&data, Some(5.0), None, CostFunction::MeanChange).unwrap();
 
@@ -1072,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_segment_boundaries() {
+    fn test_pelt_segment_boundaries() {
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
         let result = detect_changepoints(&data, Some(5.0), None, CostFunction::MeanChange).unwrap();
 
@@ -1094,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mean_and_variance_cost() {
+    fn test_pelt_mean_and_variance_runs_with_mbic() {
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
         let result = detect_changepoints(&data, None, None, CostFunction::MeanAndVariance).unwrap();
 

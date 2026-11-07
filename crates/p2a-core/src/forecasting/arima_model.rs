@@ -1479,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_arima_ar1_coefficient_recovery() {
+    fn test_arima_ar1_recovers_dgp() {
         // Fit ARIMA(1,0,0) to AR(1) data with known phi=0.7
         // Verify that estimated phi is reasonably close.
         let phi_true = 0.7;
@@ -1515,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_arima_aic_finite() {
+    fn test_arima_aic_is_finite() {
         // Verify AIC is computed and finite for ARIMA(1,0,0).
         let y = generate_ar1_data(200, 0.5, 99);
 
@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_arima_011_ma_coefficient() {
+    fn test_arima_011_recovers_ma_coefficient() {
         // Fit ARIMA(0,1,1) to a random walk with MA noise.
         // Generate: y_t = y_{t-1} + e_t + theta * e_{t-1}
         use rand::{Rng, SeedableRng};

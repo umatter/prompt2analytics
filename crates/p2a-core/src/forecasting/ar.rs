@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_coefficient_recovery() {
+    fn test_ar2_coefficients_recover_dgp() {
         // Test that AR(2) with known coefficients recovers approximately
         let x = create_ar2_process();
 
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_aic_order_selection() {
+    fn test_ar_aic_selects_low_order_on_ar2_dgp() {
         // R reference:
         // ar(x, aic = TRUE)
         let x = create_ar2_process();
@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_pacf_structure() {
+    fn test_ar_pacf_structure_on_ar2_dgp() {
         // PACF should cut off after true order for AR process
         let x = create_ar2_process();
         let result = ar(
@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_residuals() {
+    fn test_ar_residuals_shape() {
         let x = create_ar2_process();
         let result = ar(
             &x,
@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_mean_centering() {
+    fn test_ar_mean_centering() {
         // Test with non-zero mean series
         let x: Vec<f64> = create_ar2_process().iter().map(|v| v + 10.0).collect();
 
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_methods_consistency() {
+    fn test_ar_methods_agree_on_ar2_dgp() {
         // All methods should give similar results for well-behaved data
         let x = create_ar2_process();
 

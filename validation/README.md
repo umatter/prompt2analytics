@@ -364,7 +364,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | VECM (Johansen, urca::ca.jo and cajorls) | [vecm.md](econometrics/timeseries/vecm.md) | R-pinned |
 | IRF (orthogonalised and plain) | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | R-pinned |
-| Linear filter | [filter.md](timeseries/filter.md) | R-pinned |
+| Linear filter, diffinv, ARMAacf | [filter.md](timeseries/filter.md) | R-pinned, known deviations (TS-14, TS-28) |
 | AR (OLS, Burg, Yule-Walker) | [ar.md](timeseries/ar.md) | R-pinned |
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |

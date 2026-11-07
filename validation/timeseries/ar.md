@@ -58,3 +58,5 @@ Every route checks the budget once per order (`ar_ols_and_burg_honour_cancellati
 
 `test_ar_ols_unestimable_fixed_order_is_an_error` and `test_ar_ols_rank_stop_keeps_the_estimable_orders` hold the refusal and
 the stop; they compare no R number.
+
+The `test_ar_*_on_ar2_dgp` tests and `test_ar2_coefficients_recover_dgp` are properties on a known process, not R pins.
