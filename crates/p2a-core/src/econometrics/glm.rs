@@ -3549,11 +3549,16 @@ mod tests {
     }
 
     /// A loose rule stops at a step that took no refinement while it ran. The step takes it
-    /// afterwards and the fit stays on the path, as close to the shared GLM's as a fit refined at
-    /// every step.
+    /// afterwards and the fit stays on the path: 2.9e-12 from the shared GLM's coefficients on this
+    /// design (kappa above 100 at every step), where the step without it is 1.9e-10 away.
     #[test]
     fn test_logit_lean_refines_a_last_step_after_the_rule_stops() {
-        let (x, y) = off_lean_design(1500, 17, true);
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(120);
+        let (mut x, y) = off_lean_design(1500, 37, true);
+        for i in 0..1500 {
+            x[[i, 2]] = x[[i, 1]] + 3.0 * rng.gen_range(-1.0..1.0);
+        }
         let mut loose = GlmSpec::logit();
         loose.epsilon = 1e-2;
         let glm = fit_glm(x.view(), y.view(), &loose).unwrap();
@@ -3564,14 +3569,10 @@ mod tests {
             (lean.iterations, lean.converged, &lean.warnings),
             (glm.iterations, glm.converged, &glm.warnings)
         );
-        for (a, b) in lean
-            .coefficients
-            .iter()
-            .zip(&glm.coefficients)
-            .chain(lean.std_errors.iter().zip(&glm.std_errors))
-        {
-            assert!((a - b).abs() <= 1e-10 * b.abs(), "{a} vs {b}");
+        for (a, b) in lean.coefficients.iter().zip(&glm.coefficients) {
+            assert!((a - b).abs() <= 1e-11 * b.abs(), "{a} vs {b}");
         }
+        assert!(largest_relative_gap(&lean, &glm) <= 1e-10);
     }
 
     /// The fixed-width cross-products are the row pass, bit for bit.
