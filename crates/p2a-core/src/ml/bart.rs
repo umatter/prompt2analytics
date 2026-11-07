@@ -61,6 +61,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
+use crate::stats::robust::percentile_interval;
 use crate::traits::estimator::normal_quantile;
 
 // ============================================================================
@@ -311,7 +312,7 @@ impl fmt::Display for BartResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (rank, (i, importance)) in indexed.iter().take(10).enumerate() {
             let name = match &self.feature_names {
@@ -825,7 +826,7 @@ impl BartSampler {
 
         // Get values of this variable in the leaf
         let mut values: Vec<f64> = obs_in_leaf.iter().map(|&i| x[[i, var]]).collect();
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        values.sort_by(f64::total_cmp);
         values.dedup();
 
         if values.len() < 2 {
@@ -1299,24 +1300,15 @@ pub fn bart_arrays(
         })
         .collect();
 
-    // Compute prediction intervals
-    let alpha = 1.0 - config.confidence_level;
-    let lower_q = (alpha / 2.0 * config.n_mcmc as f64) as usize;
-    let upper_q = ((1.0 - alpha / 2.0) * config.n_mcmc as f64) as usize;
-
+    // Prediction intervals: R's quantile(type = 7), as BART's posterior summaries are read
     let mut prediction_lower = Vec::with_capacity(n);
     let mut prediction_upper = Vec::with_capacity(n);
 
     for i in 0..n {
-        let mut col_vals: Vec<f64> = posterior_preds.column(i).to_vec();
-        col_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        prediction_lower.push(col_vals.get(lower_q).copied().unwrap_or(col_vals[0]));
-        prediction_upper.push(
-            col_vals
-                .get(upper_q.min(col_vals.len() - 1))
-                .copied()
-                .unwrap_or(*col_vals.last().unwrap()),
-        );
+        let col_vals: Vec<f64> = posterior_preds.column(i).to_vec();
+        let (lower, upper) = percentile_interval(&col_vals, config.confidence_level)?;
+        prediction_lower.push(lower);
+        prediction_upper.push(upper);
     }
 
     // Sigma posterior summaries
@@ -1563,6 +1555,24 @@ mod tests {
         assert!(text.contains("Probit BART: P(y = 1 | x)") && text.contains("PROBABILITY SUMMARY"));
         assert!(!text.contains("RESIDUAL SD"), "{text}");
         assert!(r.sigma_samples.is_none());
+    }
+
+    #[test]
+    fn bart_intervals_are_type7_percentiles() {
+        let (y, x) = generate_test_data(60, 5);
+        let mut c = tiny();
+        c.n_mcmc = 37; // a draw count where floor-index and type-7 rules differ
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let draws = r.posterior_samples.as_ref().unwrap();
+        for i in 0..r.n_obs {
+            let col = draws.column(i).to_vec();
+            let (lo, hi) = crate::stats::robust::percentile_interval(&col, 0.95).unwrap();
+            assert_eq!(
+                (r.prediction_lower[i], r.prediction_upper[i]),
+                (lo, hi),
+                "row {i}"
+            );
+        }
     }
 
     fn tiny() -> BartConfig {
