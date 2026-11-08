@@ -91,9 +91,9 @@ LightGBM has no page of its own; its rows, same conditions:
 
 Measured on 2026-11-09 with the exact XGBoost rows. The split search sums the node's row count once per
 feature instead of once per bin (same splits and gains, bit for bit). Before that change the same rows ran
-1.15-1.32x of the base; that gap was not a cost of this tree's `lightgbm.rs` edits (two release builds of the
-base's own source differed by about 20% on these rows, and a build of this tree ran within 1% of a build of the
-base made the same way). The Huber row is not like-for-like: the base's loss oscillated with zero hessians.
+1.15-1.32x of the base. Its cause was not pinned down: scratch builds under load disagreed on whether it came
+from this tree's `lightgbm.rs` edits, and a fresh build of the base in the quiet run timed within 1% of the
+earlier base build. The Huber row is not like-for-like: the base's loss oscillated with zero hessians.
 
 ## Not pinned
 
