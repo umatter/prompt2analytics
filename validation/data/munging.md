@@ -148,6 +148,59 @@ The previews run the operation: `preview_fill_na` shows each sampled cell's real
 unknown strategy as a warning; `preview_replace` counts typed matches in every column type. Tests:
 `test_preview_fill_na_shows_real_fill_values`, `test_preview_replace_counts_typed_matches`.
 
+## Wall-clock
+
+`release`, `ci` features, against `fe13b889`, five interleaved rounds (order alternating) on a quiet
+machine, 2026-11-08. "One core": `taskset` on one P core with `RAYON_NUM_THREADS=1` and
+`POLARS_MAX_THREADS=1`; "pool": the default thread pool, no `taskset`. Each cell is the median of its
+round medians; "ratio" is the median of the per-round ratios (this tree over the base), "min ratio" the
+ratio of the minima. Load average 0.9-3.4 (the pool blocks of the run itself raise it). Data (seeded
+ChaCha8): `lowcard` 10 integer levels; `highcard` uniform on 0..n, so most counts tie; `highcard_text`
+the same values as `id%08d`; fill frames 10% missing.
+
+| Row | n | base | this tree | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| `value_counts` low cardinality, one core | 100 | 13.38 µs | 4.56 µs | 0.34 | 0.32 |
+| | 10,000 | 54.47 µs | 39.89 µs | 0.73 | 0.73 |
+| | 1,000,000 | 4.02 ms | 3.55 ms | 0.88 | 0.90 |
+| `value_counts` high-cardinality integers, one core | 100 | 14.29 µs | 7.41 µs | 0.52 | 0.50 |
+| | 1,000 | 37.56 µs | 44.84 µs | 1.19 | 1.25 |
+| | 10,000 | 345.6 µs | 497.6 µs | 1.44 | 1.46 |
+| | 100,000 | 4.30 ms | 6.14 ms | 1.43 | 1.43 |
+| | 1,000,000 | 91.98 ms | 113.0 ms | 1.23 | 1.50 |
+| `value_counts` high-cardinality text, one core | 100 | 14.75 µs | 19.54 µs | 1.32 | 0.88 |
+| | 1,000 | 40.94 µs | 105.9 µs | 2.58 | 2.55 |
+| | 10,000 | 471.8 µs | 1.42 ms | 3.01 | 2.99 |
+| | 100,000 | 6.92 ms | 18.08 ms | 2.60 | 2.77 |
+| | 1,000,000 | 142.1 ms | 310.1 ms | 2.18 | 2.58 |
+| `value_counts` high-cardinality integers, pool | 10,000 | 829.0 µs | 707.0 µs | 0.85 | 0.94 |
+| | 1,000,000 | 53.65 ms | 59.13 ms | 1.09 | 0.98 |
+| `value_counts` high-cardinality text, pool | 10,000 | 969.0 µs | 1.03 ms | 1.06 | 1.34 |
+| | 100,000 | 7.66 ms | 9.93 ms | 1.15 | 0.99 |
+| | 1,000,000 | 69.38 ms | 116.4 ms | 1.68 | 1.61 |
+| `fill_na` mean, Float64 | 100 | 2.43 µs | 2.59 µs | 1.07 | 1.05 |
+| | 10,000 | 117.9 µs | 114.6 µs | 0.97 | 0.96 |
+| | 1,000,000 | 13.24 ms | 13.38 ms | 1.01 | 1.01 |
+| `fill_na` mean, Int64 | 100 | 2.48 µs | 2.62 µs | 1.04 | 1.06 |
+| | 10,000 | 95.79 µs | 92.34 µs | 0.96 | 0.95 |
+| | 1,000,000 | 11.42 ms | 11.39 ms | 1.01 | 1.00 |
+| `fill_na` mode, Int64 (new; base column: the base's mean fill) | 100 | 2.48 µs | 6.81 µs | 2.73 | 2.72 |
+| | 10,000 | 95.79 µs | 161.2 µs | 1.68 | 1.63 |
+| | 1,000,000 | 11.42 ms | 16.55 ms | 1.44 | 1.44 |
+| `preview_replace`, a match | 100 | 0.66 µs | 6.41 µs | 9.49 | 9.30 |
+| | 100,000 | 563.3 µs | 1.48 ms | 2.63 | 2.68 |
+| `preview_replace`, no match | 100 | 0.54 µs | 1.98 µs | 3.74 | 4.29 |
+| | 100,000 | 289.0 µs | 1.47 ms | 4.98 | 5.38 |
+| `preview_fill_na`, constant on a clean frame | 100-100,000 | 0.24 µs | 2.25 µs | 9.5 | 9.4 |
+
+Every other size of these rows is in the same range; fill mean at 1,000 and 100,000 rows is within
+1.01x. The previews now run the operation (above) and are accepted by the maintainer (2026-11-08) as
+measured earlier (2.3-5x and about +1.4 µs); the n = 100 match row and the fill preview's +2.0 µs here
+are above those figures. The high-cardinality `value_counts` rows have not been signed off: the tie
+order by value (`dplyr::count(sort = TRUE)`) sorts every group by value before the stable sort by
+count, a string sort for text, where the base took polars' count order. Mean fill is unchanged (within
+1.1x).
+
 ## Not covered here (Tier 4)
 
 DATA-11 (integer normalize and pct_change), DATA-36 (row and column order of deduplicate, group_by,
