@@ -489,6 +489,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Data quality profile (missing values as null or NaN, type-7 quartiles, IQR outliers) | [data_layer.md](data/data_layer.md) | R-pinned |
 | Stata .dta and SAS .sas7bdat readers (haven::read_dta, read_sas) | [readers.md](data/readers.md) | R-pinned, known deviations (DATA-50, DATA-51, DATA-74, DATA-75) |
 | Binning as base::cut (custom edges, right/left-closed, include.lowest, NA for missing and out-of-range values) | [data_layer.md](data/data_layer.md) | R-pinned |
+| Munging layer: lag/lead/diff/pct_change, bins, one-hot dummies, melt, mode fill, na_if, value counts, describe, join suffixes, filter (dplyr, tidyr, base R) | [munging.md](data/munging.md) | R-pinned, known deviations (DATA-40, DATA-41, DATA-43) |
 | Scatter-plot Pearson correlation | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
 | Box-plot hinges, whiskers and outliers | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
 | Histogram bin count and counts | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
