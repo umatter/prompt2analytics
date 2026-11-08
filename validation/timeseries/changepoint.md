@@ -83,7 +83,7 @@ compares with R.
 ## Wall-clock (signed off 2026-11-08)
 
 Medians over five interleaved rounds against `fe13b889` (changepoint.rs there is the tree before this change),
-`release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-1.9, 2026-11-08); MBIC default
+`release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0, 2026-11-08); MBIC default
 penalty, minimum segment 2. Series: `shift`, ten alternating mean regimes (0 and 2); `vshift`, ten alternating
 standard deviations (1 and 3); `white`, standard normal noise. Ratio is this tree over the base.
 
@@ -102,10 +102,11 @@ standard deviations (1 and 3); `white`, standard normal noise. Ratio is this tre
 The manual penalty 3 ln n was timed only in an earlier round on a loaded machine (4.52x at n = 1,000, 7.39x at
 n = 10,000); it was not re-timed.
 
-`MeanChange` and `MeanAndVariance` are faster than the base at every size and series (0.51-0.69). The `VarianceChange` slowdown
+`MeanChange` and `MeanAndVariance` are faster than the base at every size and series (0.50-0.89). The `VarianceChange` slowdown
 follows from the TS-7 cost: measured about the mean of the whole series, it finds no changepoint on these inputs, so
 the PELT test never prunes a candidate and the search is quadratic; the old cost about each segment's own mean rewarded
 short segments, which is what let it prune. R's `cpt.var` (changepoint 2.3, `minseglen = 2`) with a manual penalty takes
 about 990 ms on the same kind of series at n = 10,000, against 1.3-1.4 s here (about 1.4x); with MBIC R takes 4-5 ms
 because it prunes on the cost with ln(m), which is not a valid PELT bound (see "Pruning"). Signed off by the user
-as a correctness-driven slowdown.
+as a correctness-driven slowdown, every row of the table included: the `white` row at n = 10,000 (2.30x) and the
+`vshift` row at n = 100 (1.17x) have the same cause.

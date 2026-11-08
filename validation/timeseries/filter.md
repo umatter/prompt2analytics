@@ -29,6 +29,23 @@ also pads or truncates `init` where R requires `length(init) == length(filter)`.
 at `Tol::coef(60)`; `test_filter_even_two_sided_matches_r_cfilter`, `test_filter_longer_than_series_is_an_error` and
 `test_filter_rejects_missing_coefficients` hold the example and the refusals.
 
+**Wall-clock (signed off 2026-11-08).** Convolution with p = 3, medians of the round medians over five interleaved
+rounds against `fe13b889`, `release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0,
+2026-11-08). Ratio is this tree over the base.
+
+| Row | n | base (µs) | this tree (µs) | ratio (median) | ratio (min) |
+|---|---|---:|---:|---:|---:|
+| `sides = 1` | 100 | 0.203 | 0.244 | 1.20 | 1.23 |
+| `sides = 1` | 1,000 | 1.577 | 2.003 | 1.27 | 1.27 |
+| `sides = 1` | 10,000 | 15.73 | 19.82 | 1.26 | 1.26 |
+| `sides = 2` | 100 | 0.210 | 0.248 | 1.18 | 1.18 |
+| `sides = 2` | 1,000 | 1.707 | 2.001 | 1.17 | 1.17 |
+| `sides = 2` | 10,000 | 17.06 | 19.78 | 1.16 | 1.16 |
+
+The rewrite follows R's `cfilter` at the edges (NaN wherever the window leaves the series or holds a NaN) and checks
+the call's budget once per block of outputs. About 0.4 ns more per output value; the cause was not isolated (variants
+of the coefficient loop and an unblocked loop with a single check measured the same). Signed off by the user.
+
 ## diffinv
 
 Pinned: `diffinv(x[1:12], xi = 1.5)`, `diffinv(x[1:12], lag = 2, xi = c(1, -2))` and

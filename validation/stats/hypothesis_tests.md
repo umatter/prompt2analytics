@@ -295,6 +295,24 @@ The Rust implementation shows significant speedups across all methods:
 
 The larger relative speedups for small datasets are expected because R's function call overhead and object creation dominate for small inputs, while Rust has minimal overhead.
 
+### Wall-clock against the previous tree (signed off 2026-11-08)
+
+Medians of the round medians over five interleaved rounds against `fe13b889`, `release`, one P core,
+`RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0, 2026-11-08). Ratio is this tree over the base.
+
+| Row | n | base (µs) | this tree (µs) | ratio (median) |
+|---|---|---:|---:|---:|
+| one-sample t-test | 100 | 2.120 | 2.393 | 1.13 |
+| one-sample t-test | 1,000 | 3.679 | 4.519 | 1.23 |
+| one-sample t-test | 10,000 | 13.00 | 10.86 | 0.84 |
+| two-sample t-test | 100 | 2.311 | 2.560 | 1.11 |
+| two-sample t-test | 1,000 | 4.517 | 2.307 | 0.51 |
+| two-sample t-test | 10,000 | 23.45 | 21.32 | 0.91 |
+
+The p-value and the interval now come from the shared accurate t-tail helpers (`t_test_p_value`, `t_quantile`)
+instead of statrs `StudentsT`. Their cost depends on the t statistic, not on n, so the change is a fixed amount per
+call and the ratio varies with the data. Signed off by the user.
+
 ---
 
 ## Known Differences

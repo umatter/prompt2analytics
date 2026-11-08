@@ -80,7 +80,7 @@ tight values:
 ## Wall-clock (signed off 2026-11-08)
 
 `release`, one P core, `RAYON_NUM_THREADS=1`, five interleaved rounds against `fe13b889` on a quiet machine (load
-average 1.1-1.9, 2026-11-08); medians of the round medians. Ratio is this tree over the base.
+average 1.1-2.0, 2026-11-08); medians of the round medians. Ratio is this tree over the base.
 
 | Row | n | iterations (base / this tree) | base (ms) | this tree (ms) | ratio | per iteration |
 |---|---|---|---:|---:|---:|---:|

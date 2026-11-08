@@ -153,7 +153,7 @@ Numbers on the case's dataset.
 ## Wall-clock (signed off)
 
 `release`, one P core, `RAYON_NUM_THREADS=1`, five interleaved rounds against `fe13b889` (sphet.rs there is the tree
-before this change) on a quiet machine (load average 1.1-1.9, 2026-11-08); k = 4 nearest neighbours on a grid,
+before this change) on a quiet machine (load average 1.1-2.0, 2026-11-08); k = 4 nearest neighbours on a grid,
 robust SE. Medians of the round medians (ms; the minima agree within 3%), ratio this tree over the base.
 
 | Row | n | base | this tree | ratio |

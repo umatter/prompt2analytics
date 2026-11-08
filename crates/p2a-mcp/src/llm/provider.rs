@@ -238,9 +238,10 @@ impl Message {
     /// A result whose `tool_call_id` names none of the message's calls is left out: no provider
     /// accepts a result without its call. Empty for every other message.
     ///
-    /// Cost: the converters that replay these results take 1.7x to 4.6x what they took when they
-    /// dropped them (and the provider answered 400), linear in the number of results and under
-    /// 10 ms at 10,000 attached results (signed off 2026-11-08). Text-only messages are unchanged.
+    /// Cost: the converters that replay these results take 1.7-2.3x what they took when they
+    /// dropped them (and the provider answered 400) on a quiet machine, 4.6x on a loaded run;
+    /// linear in the number of results and under 10 ms at 10,000 attached results (signed off
+    /// 2026-11-08). Text-only messages are unchanged.
     pub fn attached_tool_results(&self) -> Vec<&ToolResult> {
         if self.role != MessageRole::Assistant {
             return Vec::new();
