@@ -165,21 +165,21 @@ the same values as `id%08d`; fill frames 10% missing.
 | `value_counts` low cardinality, one core | 100 | 13.38 µs | 4.56 µs | 0.34 | 0.32 |
 | | 10,000 | 54.47 µs | 39.89 µs | 0.73 | 0.73 |
 | | 1,000,000 | 4.02 ms | 3.55 ms | 0.88 | 0.90 |
-| `value_counts` high-cardinality integers, one core | 100 | 14.29 µs | 7.41 µs | 0.52 | 0.50 |
-| | 1,000 | 37.56 µs | 44.84 µs | 1.19 | 1.25 |
-| | 10,000 | 345.6 µs | 497.6 µs | 1.44 | 1.46 |
-| | 100,000 | 4.30 ms | 6.14 ms | 1.43 | 1.43 |
-| | 1,000,000 | 91.98 ms | 113.0 ms | 1.23 | 1.50 |
-| `value_counts` high-cardinality text, one core | 100 | 14.75 µs | 19.54 µs | 1.32 | 0.88 |
-| | 1,000 | 40.94 µs | 105.9 µs | 2.58 | 2.55 |
-| | 10,000 | 471.8 µs | 1.42 ms | 3.01 | 2.99 |
-| | 100,000 | 6.92 ms | 18.08 ms | 2.60 | 2.77 |
-| | 1,000,000 | 142.1 ms | 310.1 ms | 2.18 | 2.58 |
-| `value_counts` high-cardinality integers, pool | 10,000 | 829.0 µs | 707.0 µs | 0.85 | 0.94 |
-| | 1,000,000 | 53.65 ms | 59.13 ms | 1.09 | 0.98 |
-| `value_counts` high-cardinality text, pool | 10,000 | 969.0 µs | 1.03 ms | 1.06 | 1.34 |
-| | 100,000 | 7.66 ms | 9.93 ms | 1.15 | 0.99 |
-| | 1,000,000 | 69.38 ms | 116.4 ms | 1.68 | 1.61 |
+| `value_counts` high-cardinality integers, one core | 100 | 14.21 µs | 3.21 µs | 0.23 | 0.22 |
+| | 1,000 | 37.30 µs | 23.87 µs | 0.64 | 0.63 |
+| | 10,000 | 345.8 µs | 321.4 µs | 0.93 | 0.94 |
+| | 100,000 | 4.30 ms | 4.25 ms | 0.99 | 0.99 |
+| | 1,000,000 | 89.60 ms | 90.30 ms | 1.01 | 0.92 |
+| `value_counts` high-cardinality text, one core | 100 | 14.69 µs | 3.71 µs | 0.25 | 0.24 |
+| | 1,000 | 41.08 µs | 26.78 µs | 0.65 | 0.65 |
+| | 10,000 | 480.1 µs | 429.2 µs | 0.89 | 1.09 |
+| | 100,000 | 6.77 ms | 6.76 ms | 0.98 | 0.98 |
+| | 1,000,000 | 139.4 ms | 140.0 ms | 0.95 | 0.87 |
+| `value_counts` high-cardinality integers, pool | 10,000 | 870.2 µs | 673.4 µs | 0.75 | 0.84 |
+| | 1,000,000 | 53.80 ms | 54.08 ms | 1.02 | 0.95 |
+| `value_counts` high-cardinality text, pool | 10,000 | 999.7 µs | 911.0 µs | 0.91 | 0.85 |
+| | 100,000 | 8.84 ms | 7.28 ms | 0.82 | 0.92 |
+| | 1,000,000 | 68.50 ms | 68.20 ms | 0.99 | 1.03 |
 | `fill_na` mean, Float64 | 100 | 2.43 µs | 2.59 µs | 1.07 | 1.05 |
 | | 10,000 | 117.9 µs | 114.6 µs | 0.97 | 0.96 |
 | | 1,000,000 | 13.24 ms | 13.38 ms | 1.01 | 1.01 |
@@ -198,8 +198,11 @@ the same values as `id%08d`; fill frames 10% missing.
 Every other size of these rows is in the same range; fill mean at 1,000 and 100,000 rows is within
 1.01x. The previews now run the operation (above) and are accepted by the maintainer (2026-11-08) as
 measured earlier (2.3-5x and about +1.4 µs); the n = 100 match row and the fill preview's +2.0 µs here
-are above those figures. The high-cardinality `value_counts` rows above were measured with ties ordered
-by value; ties now follow first appearance (see "Value counts"), and these rows will be re-measured.
+are above those figures. The high-cardinality `value_counts` rows were re-measured on 2026-11-09 (same
+conditions, five rounds, load average 1.7-3.5, base rebuilt in the same run) after ties came to follow first
+appearance (see "Value counts"); with ties ordered by value they had run 1.19-3.01x of the base. In that
+run the low-cardinality rows ran 0.18-1.06x, mean fill 0.88-1.06x, `preview_replace` 2.8-5.5x (9.4x for
+the n = 100 match row) and the fill preview +2.05 µs; the other rows of the table are from 2026-11-08.
 Mean fill is unchanged (within 1.1x).
 
 ## Not covered here (Tier 4)
