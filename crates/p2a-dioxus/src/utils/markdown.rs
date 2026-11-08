@@ -95,10 +95,20 @@ fn classify_image(dest_url: &str) -> ImageRender {
     }
 }
 
+/// The pulldown-cmark extensions [`render_markdown`] parses: exactly the ones it draws.
+///
+/// `Options::all()` would also enable smart punctuation, which rewrites `--robust` as an en dash and
+/// straight quotes as curly ones, breaking commands copied from an answer. It would also enable
+/// footnotes, task lists, metadata blocks, heading attributes, definition lists and GFM blockquote
+/// tags, whose events the renderer skips, so their markers would vanish. Without them that text
+/// stays literal CommonMark.
+fn markdown_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_MATH
+}
+
 /// Render markdown text to RSX elements with proper styling
 pub fn render_markdown(text: &str) -> Element {
-    let options = Options::all();
-    let parser = Parser::new_ext(text, options);
+    let parser = Parser::new_ext(text, markdown_options());
     let events: Vec<Event> = parser.collect();
 
     let elements = render_events(&events);
@@ -147,6 +157,27 @@ fn render_events(events: &[Event]) -> Vec<Element> {
             Event::Rule => {
                 elements.push(rsx! {
                     hr { class: "my-4 border-gray-300 dark:border-gray-600" }
+                });
+                idx += 1;
+            }
+            // TeX is shown as its source, in its delimiters. There is no math typesetter in the
+            // bundle, and dropping the event would lose the formula.
+            Event::InlineMath(math) => {
+                let m = math.to_string();
+                elements.push(rsx! {
+                    code { class: "px-1.5 py-0.5 text-sm bg-gray-100 dark:bg-gray-700 rounded font-mono",
+                        "${m}$"
+                    }
+                });
+                idx += 1;
+            }
+            // Display math sits inside a paragraph, so a block `div` would be invalid HTML.
+            Event::DisplayMath(math) => {
+                let m = math.to_string();
+                elements.push(rsx! {
+                    code { class: "block my-4 p-4 overflow-x-auto text-sm bg-gray-100 dark:bg-gray-700 rounded font-mono whitespace-pre-wrap",
+                        "$${m}$$"
+                    }
                 });
                 idx += 1;
             }
@@ -508,11 +539,14 @@ fn render_table_content(events: &[Event]) -> Vec<Element> {
     while idx < events.len() {
         match &events[idx] {
             Event::Start(Tag::TableHead) => {
+                // pulldown-cmark puts the header cells directly in TableHead, without a TableRow.
                 let end_idx = find_table_section_end(&events[idx..], TagEnd::TableHead);
-                let rows = render_table_rows(&events[idx + 1..idx + end_idx], true);
+                let cells = render_table_cells(&events[idx + 1..idx + end_idx], true);
                 elements.push(rsx! {
                     thead { class: "bg-gray-100 dark:bg-gray-700",
-                        {rows.into_iter()}
+                        tr { class: "border-b border-gray-300 dark:border-gray-600",
+                            {cells.into_iter()}
+                        }
                     }
                 });
                 idx += end_idx + 1;
@@ -535,32 +569,6 @@ fn render_table_content(events: &[Event]) -> Vec<Element> {
     }
 
     elements
-}
-
-/// Render table rows
-fn render_table_rows(events: &[Event], is_header: bool) -> Vec<Element> {
-    let mut rows: Vec<Element> = Vec::new();
-    let mut idx = 0;
-
-    while idx < events.len() {
-        match &events[idx] {
-            Event::Start(Tag::TableRow) => {
-                let end_idx = find_table_section_end(&events[idx..], TagEnd::TableRow);
-                let cells = render_table_cells(&events[idx + 1..idx + end_idx], is_header);
-                rows.push(rsx! {
-                    tr { class: "border-b border-gray-300 dark:border-gray-600",
-                        {cells.into_iter()}
-                    }
-                });
-                idx += end_idx + 1;
-            }
-            _ => {
-                idx += 1;
-            }
-        }
-    }
-
-    rows
 }
 
 /// Render table cells
@@ -723,5 +731,227 @@ mod tests {
         ] {
             assert_eq!(sanitize_url(url), "#", "should be neutralized: {url:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    //! What render_markdown draws, as an HTML string. `html` walks the Element it returns: no
+    //! whitespace between nodes; `"` `&` `'` `<` `>` in text and attribute values written as
+    //! &#34; &#38; &#39; &#60; &#62;; integer attributes unquoted. The markdown has no components
+    //! or event handlers, so the tree needs no VirtualDom.
+    use super::render_markdown;
+    use dioxus::dioxus_core::{
+        Attribute, AttributeValue, DynamicNode, TemplateAttribute, TemplateNode, VNode,
+    };
+
+    fn escaped(text: &str, out: &mut String) {
+        for c in text.chars() {
+            match c {
+                '"' => out.push_str("&#34;"),
+                '&' => out.push_str("&#38;"),
+                '\'' => out.push_str("&#39;"),
+                '<' => out.push_str("&#60;"),
+                '>' => out.push_str("&#62;"),
+                c => out.push(c),
+            }
+        }
+    }
+
+    fn write_attribute(attribute: &Attribute, out: &mut String) {
+        match &attribute.value {
+            AttributeValue::Text(value) => {
+                out.push_str(&format!(" {}=\"", attribute.name));
+                escaped(value, out);
+                out.push('"');
+            }
+            AttributeValue::Int(value) => out.push_str(&format!(" {}={value}", attribute.name)),
+            other => panic!("attribute {}: unexpected value {other:?}", attribute.name),
+        }
+    }
+
+    fn write_dynamic(node: &DynamicNode, out: &mut String) {
+        match node {
+            DynamicNode::Text(text) => escaped(&text.value, out),
+            DynamicNode::Fragment(nodes) => nodes.iter().for_each(|n| write_vnode(n, out)),
+            DynamicNode::Placeholder(_) => {}
+            DynamicNode::Component(c) => panic!("unexpected component {}", c.name),
+        }
+    }
+
+    fn write_template(node: &TemplateNode, vnode: &VNode, out: &mut String) {
+        match node {
+            TemplateNode::Element {
+                tag,
+                attrs,
+                children,
+                ..
+            } => {
+                out.push_str(&format!("<{tag}"));
+                for attribute in attrs.iter() {
+                    match attribute {
+                        TemplateAttribute::Static { name, value, .. } => {
+                            out.push_str(&format!(" {name}=\""));
+                            escaped(value, out);
+                            out.push('"');
+                        }
+                        TemplateAttribute::Dynamic { id } => vnode.dynamic_attrs[*id]
+                            .iter()
+                            .for_each(|a| write_attribute(a, out)),
+                    }
+                }
+                out.push('>');
+                children.iter().for_each(|c| write_template(c, vnode, out));
+                out.push_str(&format!("</{tag}>"));
+            }
+            TemplateNode::Text { text } => escaped(text, out),
+            TemplateNode::Dynamic { id } => write_dynamic(&vnode.dynamic_nodes[*id], out),
+        }
+    }
+
+    fn write_vnode(vnode: &VNode, out: &mut String) {
+        vnode
+            .template
+            .roots
+            .iter()
+            .for_each(|root| write_template(root, vnode, out));
+    }
+
+    fn html(md: &str) -> String {
+        let element = render_markdown(md).expect("render_markdown returns a node");
+        let mut out = String::new();
+        write_vnode(&element, &mut out);
+        out
+    }
+
+    /// `html` without its `class="..."` attributes: the Tailwind classes are styling, and these
+    /// tests check structure. An escaped value never contains a raw `"`.
+    fn strip_classes(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some((head, tail)) = rest.split_once(" class=\"") {
+            out.push_str(head);
+            rest = tail.split_once('"').map_or("", |(_, after)| after);
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn structure(md: &str) -> String {
+        strip_classes(&html(md))
+    }
+
+    #[test]
+    fn test_render_markdown_inline_formatting_and_escaping() {
+        let out = structure("A **bold** and *em* word with `code` & <5.");
+        assert!(
+            out.contains(
+                "<p>A <strong>bold</strong> and <em>em</em> word with <code>code</code> &#38; &#60;5.</p>"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_code_block_keeps_text_and_language() {
+        let raw = html("```r\nlm(y ~ x, data = d)\n```\n");
+        assert!(
+            strip_classes(&raw).contains("<pre><code>lm(y ~ x, data = d)\n</code></pre>"),
+            "{raw}"
+        );
+        assert!(
+            raw.contains("class=\"text-sm text-gray-100 font-mono language-r\""),
+            "{raw}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_sanitises_links_and_remote_images() {
+        let raw = html(
+            "[docs](javascript:alert(1)) and [CRAN](https://cran.r-project.org) \
+             ![chart](https://evil.example/c.png?d=1)",
+        );
+        assert!(raw.contains(" href=\"#\""), "{raw}");
+        assert!(
+            raw.contains(" href=\"https://cran.r-project.org\""),
+            "{raw}"
+        );
+        assert!(
+            raw.contains(" href=\"https://evil.example/c.png?d=1\""),
+            "{raw}"
+        );
+        assert!(raw.contains(">[image: chart]</a>"), "{raw}");
+        assert!(!raw.contains("javascript"), "{raw}");
+        assert!(!raw.contains("<img"), "{raw}");
+    }
+
+    #[test]
+    fn test_render_markdown_ordered_list_keeps_its_start() {
+        let out = structure("3. fit\n4. test\n");
+        assert!(
+            out.contains("<ol start=3><li>fit</li><li>test</li></ol>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_drops_raw_html() {
+        let raw = html("<script>alert(1)</script>\n\nok <b>bold</b>\n");
+        assert!(
+            !raw.contains("<script") && !raw.contains("alert") && !raw.contains("<b>"),
+            "{raw}"
+        );
+        assert!(strip_classes(&raw).contains("<p>ok bold</p>"), "{raw}");
+    }
+
+    /// pulldown-cmark 0.12 puts the header cells directly in TableHead (no TableRow).
+    #[test]
+    fn test_render_markdown_table_has_header_row() {
+        let out = structure(
+            "| Variable | Estimate | SE |\n|---|---:|---:|\n| sqft | 0.4812 | 0.0123 |\n| Größe | -1.07 | 0.31 |\n",
+        );
+        assert!(
+            out.contains("<thead><tr><th>Variable</th><th>Estimate</th><th>SE</th></tr></thead>"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "<tr><td>sqft</td><td>0.4812</td><td>0.0123</td></tr><tr><td>Größe</td><td>-1.07</td><td>0.31</td></tr></table>"
+            ),
+            "{out}"
+        );
+    }
+
+    /// InlineMath and DisplayMath events were skipped, so formulas vanished.
+    #[test]
+    fn test_render_markdown_keeps_math_as_tex_source() {
+        let out = structure("Fit: $\\hat\\beta_1 = 0.48$ and\n\n$$R^2 = 0.71$$\n");
+        assert!(
+            out.contains("<p>Fit: <code>$\\hat\\beta_1 = 0.48$</code> and</p>"),
+            "{out}"
+        );
+        assert!(out.contains("<p><code>$$R^2 = 0.71$$</code></p>"), "{out}");
+    }
+
+    /// Smart punctuation turned `--robust` into an en dash and straight quotes into curly ones, so
+    /// commands copied from an answer broke.
+    #[test]
+    fn test_render_markdown_keeps_flags_and_quotes() {
+        let out = structure("Run `p2a reg ols` with --robust hc1 on \"sales\" and 'grunfeld'.");
+        assert!(
+            out.contains("with --robust hc1 on &#34;sales&#34; and &#39;grunfeld&#39;."),
+            "{out}"
+        );
+    }
+
+    /// With task lists enabled, the [ ] / [x] marker events were skipped. Without the extension the
+    /// markers are plain text.
+    #[test]
+    fn test_render_markdown_keeps_task_markers() {
+        let out = structure("- [ ] check residuals\n- [x] fit model\n");
+        assert!(
+            out.contains("<li>[ ] check residuals</li><li>[x] fit model</li>"),
+            "{out}"
+        );
     }
 }

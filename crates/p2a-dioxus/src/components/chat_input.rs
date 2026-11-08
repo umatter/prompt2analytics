@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::{DatasetMeta, ToolDefinition, api};
 use crate::components::AutocompleteDropdown;
-use crate::state::autocomplete::{AutocompleteState, Suggestion};
+use crate::state::autocomplete::{AutocompleteState, Suggestion, find_last_trigger};
 use crate::state::{ChatState, SessionState};
 
 /// ChatInput component - textarea with send button and autocomplete
@@ -176,16 +176,15 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
             textarea_value.set(value.clone());
 
             // Try to detect autocomplete triggers
-            let suggestions = detect_and_generate_suggestions(
+            let mut ac = autocomplete.write();
+            if let Some(suggestions) = detect_and_generate_suggestions(
                 &value,
-                &mut autocomplete,
+                &mut ac,
                 &cached_tools.read(),
                 &cached_datasets.read(),
                 &chat_state.read().prompt_history,
-            );
-
-            if let Some(suggestions) = suggestions {
-                autocomplete.write().set_suggestions(suggestions);
+            ) {
+                ac.set_suggestions(suggestions);
             }
         }
     };
@@ -316,10 +315,12 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
     }
 }
 
-/// Detect triggers and generate suggestions based on input
+/// Detect triggers and generate suggestions based on input.
+///
+/// Runs on every input event, so the trigger offset in `ac` always matches the text.
 fn detect_and_generate_suggestions(
     input: &str,
-    autocomplete: &mut Signal<AutocompleteState>,
+    ac: &mut AutocompleteState,
     tools: &[ToolDefinition],
     datasets: &[DatasetMeta],
     history: &[String],
@@ -327,91 +328,60 @@ fn detect_and_generate_suggestions(
     // Look for @ or / triggers by scanning for the most recent trigger that
     // could be active. `find_last_trigger` returns a byte offset into `input`.
 
-    // Check for @dataset. pattern first (column mode)
-    if let Some(at_pos) = find_last_trigger(input, '@') {
-        let after_at = &input[at_pos + 1..];
-
-        // Check if we have a complete dataset name followed by a dot
-        if let Some(dot_pos) = after_at.find('.') {
-            let dataset_name = &after_at[..dot_pos];
-            let filter = &after_at[dot_pos + 1..];
-
-            // Verify this dataset exists
-            if let Some(dataset) = datasets.iter().find(|d| d.name == dataset_name) {
-                // Open in column mode
-                let mut ac = autocomplete.write();
-                if !ac.is_open
-                    || !ac.is_column_mode()
-                    || ac.column_dataset.as_deref() != Some(dataset_name)
-                {
-                    ac.open_column_mode(dataset_name, at_pos);
-                }
-                ac.set_filter(filter);
-                drop(ac);
-
-                // Generate column suggestions
-                let filter_lower = filter.to_lowercase();
-                let suggestions: Vec<Suggestion> = dataset
+    // @dataset.column (column mode) and @dataset
+    if let Some(at_pos) = find_last_trigger(input, '@')
+        && let Some(after_at) = after_trigger(input, at_pos, '@')
+    {
+        if let Some((dataset_name, filter)) = after_at.split_once('.')
+            && let Some(dataset) = datasets.iter().find(|d| d.name == dataset_name)
+        {
+            ac.track_column_mode(dataset_name, at_pos);
+            ac.set_filter(filter);
+            let filter_lower = filter.to_lowercase();
+            return Some(
+                dataset
                     .column_names
                     .iter()
                     .filter(|col| filter.is_empty() || col.to_lowercase().contains(&filter_lower))
                     .take(10)
                     .map(|col| Suggestion::column(col, dataset_name))
-                    .collect();
-
-                return Some(suggestions);
-            }
+                    .collect(),
+            );
         }
-
-        // Not column mode - dataset mode
-        let filter = after_at;
-
-        // Make sure there's no space after @ (which would cancel the trigger)
-        if !filter.contains(' ') {
-            let mut ac = autocomplete.write();
-            if !ac.is_open || ac.trigger != Some('@') || ac.is_column_mode() {
-                ac.open('@', at_pos);
-            }
-            ac.set_filter(filter);
-            drop(ac);
-
-            // Generate dataset suggestions
-            let filter_lower = filter.to_lowercase();
-            let suggestions: Vec<Suggestion> = datasets
-                .iter()
-                .filter(|d| filter.is_empty() || d.name.to_lowercase().contains(&filter_lower))
-                .take(10)
-                .map(|d| Suggestion::dataset(&d.name, d.row_count, d.column_count))
-                .collect();
-
-            return Some(suggestions);
+        // Not column mode: a space after the @ cancels the trigger.
+        if !after_at.contains(' ') {
+            ac.track('@', at_pos);
+            ac.set_filter(after_at);
+            let filter_lower = after_at.to_lowercase();
+            return Some(
+                datasets
+                    .iter()
+                    .filter(|d| {
+                        after_at.is_empty() || d.name.to_lowercase().contains(&filter_lower)
+                    })
+                    .take(10)
+                    .map(|d| Suggestion::dataset(&d.name, d.row_count, d.column_count))
+                    .collect(),
+            );
         }
     }
 
-    // Check for / trigger (tools)
-    if let Some(slash_pos) = find_last_trigger(input, '/') {
-        let filter = &input[slash_pos + 1..];
-
-        // Make sure there's no space after / (which would cancel the trigger)
-        if !filter.contains(' ') {
-            let mut ac = autocomplete.write();
-            if !ac.is_open || ac.trigger != Some('/') {
-                ac.open('/', slash_pos);
-            }
-            ac.set_filter(filter);
-            drop(ac);
-
-            // Generate tool suggestions
-            let filter_lower = filter.to_lowercase();
-            let suggestions: Vec<Suggestion> = tools
+    // /tool; a space after the / cancels the trigger.
+    if let Some(slash_pos) = find_last_trigger(input, '/')
+        && let Some(filter) = after_trigger(input, slash_pos, '/')
+        && !filter.contains(' ')
+    {
+        ac.track('/', slash_pos);
+        ac.set_filter(filter);
+        let filter_lower = filter.to_lowercase();
+        return Some(
+            tools
                 .iter()
                 .filter(|t| filter.is_empty() || t.name.to_lowercase().contains(&filter_lower))
                 .take(10)
                 .map(|t| Suggestion::tool(&t.name, &t.description))
-                .collect();
-
-            return Some(suggestions);
-        }
+                .collect(),
+        );
     }
 
     // No trigger found - check for history matching (free text)
@@ -433,44 +403,21 @@ fn detect_and_generate_suggestions(
             .collect();
 
         if !matching.is_empty() {
-            let mut ac = autocomplete.write();
-            if !ac.is_open {
-                ac.is_open = true;
-                ac.trigger = None;
-                ac.trigger_position = 0;
-            }
+            ac.track_history();
             ac.set_filter(input);
-            drop(ac);
 
             return Some(matching);
         }
     }
 
     // No suggestions - close autocomplete
-    autocomplete.write().close();
+    ac.close();
     None
 }
 
-/// Find the **byte offset** of the last occurrence of a trigger character
-/// (`@` or `/`) that could start an autocomplete pattern — i.e. one at the
-/// start of the input or immediately after whitespace.
-///
-/// Returns a byte offset (not a char index) so callers can slice the input
-/// string directly. The trigger characters are single-byte ASCII, so the
-/// offset immediately after the trigger is always a valid char boundary.
-/// (The previous version returned a `Vec<char>` index that callers used as a
-/// byte index — corrupting the filter text, or panicking, whenever a
-/// multi-byte character preceded the trigger.)
-fn find_last_trigger(input: &str, trigger: char) -> Option<usize> {
-    let mut result = None;
-    let mut prev_is_boundary = true; // start of string counts as a boundary
-    for (byte_idx, c) in input.char_indices() {
-        if c == trigger && prev_is_boundary {
-            result = Some(byte_idx);
-        }
-        prev_is_boundary = c.is_whitespace();
-    }
-    result
+/// The text after the trigger at `position`, or `None` when `input` has no `trigger` there.
+fn after_trigger(input: &str, position: usize, trigger: char) -> Option<&str> {
+    input.get(position..)?.strip_prefix(trigger)
 }
 
 /// Accept a suggestion and insert it into the textarea
@@ -479,107 +426,153 @@ fn accept_suggestion(
     autocomplete: &mut Signal<AutocompleteState>,
     suggestion: &Suggestion,
 ) {
-    let ac = autocomplete.read();
-    let current_value = textarea_value.read().clone();
-
-    let new_value = if let Some(trigger) = ac.trigger {
-        // We have a trigger - replace from trigger position
-        let (start, _end) = ac.get_replacement_range();
-        let before = &current_value[..start];
-        let after = if ac.is_column_mode() {
-            // In column mode, insert @dataset.column
-            let insert_pos = start
-                + 1
-                + ac.column_dataset.as_ref().map(|d| d.len()).unwrap_or(0)
-                + 1
-                + ac.filter_text.len();
-            if insert_pos < current_value.len() {
-                &current_value[insert_pos..]
-            } else {
-                ""
-            }
-        } else {
-            let insert_pos = start + 1 + ac.filter_text.len();
-            if insert_pos < current_value.len() {
-                &current_value[insert_pos..]
-            } else {
-                ""
-            }
-        };
-
-        // Build the new value
-        match trigger {
-            '@' => {
-                if ac.is_column_mode() {
-                    // Insert full @dataset.column
-                    format!(
-                        "{}@{} {}",
-                        before,
-                        suggestion.insert_text,
-                        after.trim_start()
-                    )
-                } else {
-                    // Insert @dataset (without trailing dot to allow column access)
-                    format!(
-                        "{}@{} {}",
-                        before,
-                        suggestion.insert_text,
-                        after.trim_start()
-                    )
-                }
-            }
-            '/' => {
-                // Insert /tool
-                format!(
-                    "{}/{} {}",
-                    before,
-                    suggestion.insert_text,
-                    after.trim_start()
-                )
-            }
-            _ => current_value,
-        }
-    } else {
-        // History mode - replace entire input
-        suggestion.insert_text.clone()
-    };
-
-    drop(ac);
-    textarea_value.set(new_value.trim_end().to_string() + " ");
+    let new_value = autocomplete
+        .read()
+        .apply(&textarea_value.read(), suggestion);
+    textarea_value.set(new_value);
     autocomplete.write().close();
 }
 
 #[cfg(test)]
-mod trigger_tests {
-    use super::find_last_trigger;
+mod accept_tests {
+    //! ChatInput's input handling replayed without a runtime. Each input is the whole textarea
+    //! value, as `handle_input` sees it. Then the selected suggestion is accepted, as the Tab branch
+    //! of `handle_keydown` does.
+    use super::detect_and_generate_suggestions;
+    use crate::api::{DatasetMeta, ToolDefinition};
+    use crate::state::autocomplete::AutocompleteState;
 
-    #[test]
-    fn returns_byte_offset_after_multibyte_chars() {
-        // "café @data" — 'é' is 2 bytes, so the '@' is at byte offset 6, not
-        // char index 5. The returned offset must let `&input[pos + 1..]` slice
-        // correctly to "data".
-        let input = "café @data";
-        let at = find_last_trigger(input, '@').unwrap();
-        assert_eq!(&input[at..at + 1], "@");
-        assert_eq!(&input[at + 1..], "data");
+    fn datasets() -> Vec<DatasetMeta> {
+        vec![
+            DatasetMeta {
+                id: "ds-1".into(),
+                session_id: "s-1".into(),
+                name: "sales".into(),
+                source_path: None,
+                source_type: "csv".into(),
+                row_count: 100,
+                column_count: 2,
+                column_names: vec!["price".into(), "sqft".into()],
+                loaded_at: String::new(),
+                file_size_bytes: None,
+            },
+            DatasetMeta {
+                id: "ds-2".into(),
+                session_id: "s-1".into(),
+                name: "my data".into(),
+                source_path: None,
+                source_type: "csv".into(),
+                row_count: 100,
+                column_count: 1,
+                column_names: vec!["unit price".into()],
+                loaded_at: String::new(),
+                file_size_bytes: None,
+            },
+        ]
     }
 
-    #[test]
-    fn requires_start_or_whitespace_before_trigger() {
-        // '@' embedded in a word (email-like) is not a trigger.
-        assert_eq!(find_last_trigger("foo@bar", '@'), None);
-        // At start.
-        assert_eq!(find_last_trigger("@ds", '@'), Some(0));
-        // Picks the last valid trigger.
-        let input = "@a @b";
-        let at = find_last_trigger(input, '@').unwrap();
-        assert_eq!(&input[at + 1..], "b");
+    fn tools() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "regression_ols".into(),
+            description: "OLS regression".into(),
+            input_schema: None,
+        }]
     }
 
+    /// Replays `inputs`, then accepts the selected suggestion; returns the new input and the
+    /// state the dropdown was in when the suggestion was accepted.
+    fn type_then_tab(inputs: &[&str], history: &[String]) -> (String, AutocompleteState) {
+        let (tools, datasets) = (tools(), datasets());
+        let mut ac = AutocompleteState::new();
+        for value in inputs {
+            if let Some(s) =
+                detect_and_generate_suggestions(value, &mut ac, &tools, &datasets, history)
+            {
+                ac.set_suggestions(s);
+            }
+        }
+        let current = inputs.last().copied().unwrap_or_default();
+        let selected = ac
+            .get_selected()
+            .cloned()
+            .expect("a suggestion is selected");
+        (ac.apply(current, &selected), ac)
+    }
+
+    /// Guard: no edits before the trigger.
     #[test]
-    fn slash_trigger_after_multibyte() {
-        let input = "λ /tool";
-        let slash = find_last_trigger(input, '/').unwrap();
-        assert_eq!(&input[slash + 1..], "tool");
+    fn test_accept_suggestion_plain() {
+        assert_eq!(type_then_tab(&["@", "@s"], &[]).0, "@sales ");
+        assert_eq!(
+            type_then_tab(&["/", "/r", "/re"], &[]).0,
+            "/regression_ols "
+        );
+        assert_eq!(
+            type_then_tab(&["@sales.", "@sales.p"], &[]).0,
+            "@sales.price "
+        );
+        assert_eq!(
+            type_then_tab(&["an"], &["analyze sales".to_string()]).0,
+            "analyze sales "
+        );
+    }
+
+    /// "abc @s", then "abc " deleted: the offset 4 kept from the opening input was past the end of
+    /// "@s".
+    #[test]
+    fn test_accept_suggestion_after_edit_before_trigger() {
+        let (value, ac) = type_then_tab(&["abc @", "abc @s", "@s"], &[]);
+        assert_eq!(value, "@sales ");
+        assert_eq!(ac.trigger_position, 0);
+    }
+
+    /// A multi-byte character typed before an open trigger.
+    #[test]
+    fn test_accept_suggestion_after_multibyte_edit_before_trigger() {
+        let (value, ac) = type_then_tab(&["@s", " @s", "中 @s"], &[]);
+        assert_eq!(value, "中 @sales ");
+        assert_eq!(ac.trigger_position, 4);
+    }
+
+    /// A space typed before an open trigger.
+    #[test]
+    fn test_accept_suggestion_after_space_before_trigger() {
+        assert_eq!(type_then_tab(&["@s", " @s"], &[]).0, " @sales ");
+    }
+
+    /// The `/` trigger.
+    #[test]
+    fn test_accept_tool_suggestion_after_edit_before_trigger() {
+        assert_eq!(
+            type_then_tab(&["/re", "x /re"], &[]).0,
+            "x /regression_ols "
+        );
+    }
+
+    /// Column mode kept the offset too.
+    #[test]
+    fn test_accept_column_suggestion_after_edit_before_trigger() {
+        let (value, ac) = type_then_tab(&["@sales.p", "y @sales.p"], &[]);
+        assert_eq!(value, "y @sales.price ");
+        assert_eq!(ac.trigger_position, 2);
+    }
+
+    /// Dataset and column names can hold spaces: the whole `@dataset.filter` is replaced, not just
+    /// its first word.
+    #[test]
+    fn test_accept_column_suggestion_with_spaces_in_the_names() {
+        assert_eq!(
+            type_then_tab(&["@my data.unit p"], &[]).0,
+            "@my data.unit price "
+        );
+    }
+
+    /// History after a trigger: the history branch reset the trigger only when the dropdown was
+    /// closed, so the history suggestion was inserted after an '@'.
+    #[test]
+    fn test_accept_history_suggestion_after_a_trigger() {
+        let (value, ac) = type_then_tab(&["@s", "ana"], &["analyze sales".to_string()]);
+        assert_eq!(value, "analyze sales ");
+        assert_eq!(ac.trigger, None);
     }
 }
