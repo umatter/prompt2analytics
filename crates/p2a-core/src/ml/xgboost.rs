@@ -1278,11 +1278,13 @@ mod tests {
     #[test]
     fn test_split_gain_on_thresholded_sums() {
         // 0.5 * [T(GL)^2/(HL+l) + T(GR)^2/(HR+l) - T(G)^2/(H+l)] - gamma, T = ThresholdL1(., alpha)
-        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.0) - 4.0 / 3.0).abs() < 1e-13);
-        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 1.0, 0.0) - 7.0 / 30.0).abs() < 1e-13);
-        assert!((split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0, 0.0) - (-5.0 / 3.0)).abs() < 1e-13);
+        // The terms are near 21 (half an ulp is 1.8e-15 each), so a gain of 4/3 carries about
+        // 1e-15 of rounding (measured 1.1e-15): 1e-14 is a few ulps of the terms.
+        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.0) - 4.0 / 3.0).abs() < 1e-14);
+        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 1.0, 0.0) - 7.0 / 30.0).abs() < 1e-14);
+        assert!((split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0, 0.0) - (-5.0 / 3.0)).abs() < 1e-14);
         assert!(
-            (split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.5) - (4.0 / 3.0 - 0.5)).abs() < 1e-13
+            (split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.5) - (4.0 / 3.0 - 0.5)).abs() < 1e-14
         );
     }
 

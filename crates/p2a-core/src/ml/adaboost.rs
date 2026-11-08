@@ -1289,17 +1289,17 @@ mod tests {
         let w0 = vec![1.0 / 120.0; 120];
         let (_, e, alpha, w1) =
             samme_round(&x.view(), &orders, &codes, &[0.0, 1.0, 2.0], &w0, 1, 1.0).unwrap();
-        assert!((e - 47.0 / 120.0).abs() < 1e-13); // 47 rows misclassified
-        assert!((alpha - (146.0f64 / 47.0).ln()).abs() < 1e-13); // ln(73/47) + ln 2
+        assert!((e - 47.0 / 120.0).abs() < 1e-15); // 47 rows misclassified
+        assert!((alpha - (146.0f64 / 47.0).ln()).abs() < 1e-14); // ln(73/47) + ln 2
         assert_eq!(
             w1.iter()
-                .filter(|&&w| (w - 1.0 / 219.0).abs() < 1e-13)
+                .filter(|&&w| (w - 1.0 / 219.0).abs() < 1e-15)
                 .count(),
             73
         );
         assert_eq!(
             w1.iter()
-                .filter(|&&w| (w - 2.0 / 141.0).abs() < 1e-13)
+                .filter(|&&w| (w - 2.0 / 141.0).abs() < 1e-15)
                 .count(),
             47
         );
@@ -1355,7 +1355,7 @@ mod tests {
         let m1 = ada(&ds, "yb", AdaBoostType::M1, 1, 1.0);
         let s2 = ada(&ds, "yb", AdaBoostType::Samme, 1, 1.0);
         for (a, b) in s2.estimator_weights.iter().zip(&m1.estimator_weights) {
-            assert!((a - 2.0 * b).abs() <= 1e-13 * a.abs());
+            assert!((a - 2.0 * b).abs() <= 1e-14 * a.abs());
         }
         assert_eq!(s2.class_predictions, m1.class_predictions);
     }

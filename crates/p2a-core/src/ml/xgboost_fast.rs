@@ -910,9 +910,10 @@ mod tests {
         h.count = vec![2, 2];
         let (bin, g0) = h.find_best_split(1.0, 0.0, 0.0, 1.0).unwrap(); // (lambda, alpha, gamma, mcw)
         assert_eq!(bin, 0);
-        assert!((g0 - 4.0 / 3.0).abs() < 1e-13); // 0.5 (64/3 + 4/3 - 100/5)
+        // terms near 21 round by up to 1.8e-15 each (measured 1.1e-15): a few ulps of the terms
+        assert!((g0 - 4.0 / 3.0).abs() < 1e-14); // 0.5 (64/3 + 4/3 - 100/5)
         let (_, g1) = h.find_best_split(1.0, 1.0, 0.0, 1.0).unwrap();
-        assert!((g1 - 7.0 / 30.0).abs() < 1e-13); // 0.5 (49/3 + 1/3 - 81/5)
+        assert!((g1 - 7.0 / 30.0).abs() < 1e-14); // 0.5 (49/3 + 1/3 - 81/5)
     }
 
     #[test]
