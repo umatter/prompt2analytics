@@ -1513,11 +1513,11 @@ mod tests {
         let mut half = || 0.5;
         // -qnorm(0.25)
         assert!(
-            (truncated_normal(0.0, true, &mut half).unwrap() - 0.67448975019608171).abs() < 1e-12
+            (truncated_normal(0.0, true, &mut half).unwrap() - 0.6744897501960817).abs() < 1e-12
         );
         // 1 + qnorm(pnorm(-1) / 2)
         let z = truncated_normal(1.0, false, &mut half).unwrap();
-        assert!((z - (-0.40960870929345439)).abs() < 1e-12, "{z}");
+        assert!((z - (-0.4096087092934544)).abs() < 1e-12, "{z}");
         let mut s = 9u64;
         let mut u = move || (crate::ml::lcg_random(&mut s) % 1_000_000 + 1) as f64 / 1_000_002.0;
         for mean in [-35.0, -3.0, 0.0, 2.0, 40.0] {
