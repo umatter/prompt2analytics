@@ -34,7 +34,7 @@
 //! The algorithm uses Bayesian backfitting with Gibbs sampling:
 //!
 //! 1. For j = 1,...,m: Draw (T_j, M_j) given all other trees and sigma
-//!    - Use Metropolis-Hastings with grow/prune/change proposals for tree structure
+//!    - Use Metropolis-Hastings with grow/prune proposals for tree structure
 //!    - Draw leaf values from conjugate normal posterior
 //!
 //! 2. Draw sigma^2 from its conditional inverse-gamma posterior
@@ -54,7 +54,6 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
@@ -532,6 +531,13 @@ struct BartSampler {
 /// a uniform source.
 const TAIL_MAX_REJECTIONS: usize = 10_000;
 
+/// R's pnorm. statrs' `Normal::cdf` errs near the 11th digit (pnorm(-1) comes out 1.36e-11 high):
+/// its erfc carries the single-precision offsets of its rational fits as decimal doubles
+/// (0.3440242112 for 0.34402421116828918...).
+fn std_normal_cdf(x: f64) -> f64 {
+    r_mathlib::normal_cdf(x, 0.0, 1.0, true, false)
+}
+
 /// A draw of z ~ N(mean, 1) truncated to z > 0 (`positive`) or z <= 0, by inversion, or by Robert's
 /// (1995) exponential rejection sampler when the side has probability below 1e-100.
 fn truncated_normal(
@@ -539,8 +545,7 @@ fn truncated_normal(
     positive: bool,
     uniform: &mut dyn FnMut() -> f64,
 ) -> EconResult<f64> {
-    let std_normal = Normal::standard();
-    let side = std_normal.cdf(if positive { mean } else { -mean });
+    let side = std_normal_cdf(if positive { mean } else { -mean });
     if side >= 1e-100 {
         let u = uniform().clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
         let q = normal_quantile((u * side).max(f64::MIN_POSITIVE))?;
@@ -1280,8 +1285,7 @@ pub fn bart_arrays(
 
         let mut pred = sampler.predict(x_owned.view());
         if config.classification {
-            let std_normal = Normal::standard();
-            pred.mapv_inplace(|f| std_normal.cdf(sampler.offset + f));
+            pred.mapv_inplace(|f| std_normal_cdf(sampler.offset + f));
         }
         posterior_preds.row_mut(iter).assign(&pred);
         sigma_samples.push(sampler.sigma);
@@ -1513,7 +1517,7 @@ mod tests {
         );
         // 1 + qnorm(pnorm(-1) / 2)
         let z = truncated_normal(1.0, false, &mut half).unwrap();
-        assert!((z - (-0.40960870929345439)).abs() < 1e-9, "{z}"); // statrs' cdf and quantile: not to the last bits
+        assert!((z - (-0.40960870929345439)).abs() < 1e-12, "{z}");
         let mut s = 9u64;
         let mut u = move || (crate::ml::lcg_random(&mut s) % 1_000_000 + 1) as f64 / 1_000_002.0;
         for mean in [-35.0, -3.0, 0.0, 2.0, 40.0] {
