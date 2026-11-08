@@ -28,3 +28,23 @@ Not compared, and open:
   for degree 1), and the span formulas differ (finding WT-11).
 - Every knot of a variable is scored separately, where earth sweeps a variable's knots in one pass.
   The results of the two do not differ; the sweep would be faster.
+
+## Wall-clock
+
+`release`, p2a-core without default features, against `fe13b889`, five rounds with the sides interleaved per row
+(order rotated per round), one P core (`taskset`), one rayon thread, 2026-11-08, load average 1.2-1.5 from the
+second round on. Friedman-1 data, p = 5, noise sd 1, `MarsConfig` defaults except `fast`. Cells are the median of
+the round medians; "ratio" is this tree over the base, "min ratio" the ratio of the minima.
+
+| `fast` | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| default (fast for n > 200) | 100 | 1.48 | 1.24 | 0.83 | 0.84 |
+|  | 1,000 | 39.4 | 42.1 | 1.07 | 1.07 |
+|  | 10,000 | 1,150 | 520 | 0.45 | 0.45 |
+| `Some(false)` | 100 | 1.48 | 1.24 | 0.84 | 0.84 |
+|  | 1,000 | 172 | 224 | 1.30 | 1.31 |
+|  | 10,000 | 36,200 | 16,600 | 0.46 | 0.46 |
+
+The one row above 1.1x, fast mode switched off by the caller at n = 1,000 (1.30x), is reached only by an explicit
+`fast = Some(false)` above n = 200, and was signed off by the maintainer on 2026-11-08: the forward pass detects
+rank by Gram-Schmidt instead of adding a ridge, and the same path is 0.46x of the base at n = 10,000.
