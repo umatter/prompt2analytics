@@ -1,206 +1,114 @@
-# Validation: StructTS (Structural Time Series)
+# Structural time series (StructTS)
 
-## Method Overview
+Status: **R-pinned** to `stats::StructTS` (`validation/methods/ts_statespace.json`, method
+`forecasting_structts`, case `structts_nile_ukgas`, `validation/r/cases/ts_statespace.R`). Recompute with
+`Rscript validation/r/run.R --check structts_nile_ukgas`; rewrite with
+`Rscript validation/r/run.R --write structts_nile_ukgas`.
 
-StructTS fits structural time series models by maximum likelihood estimation using the Kalman filter. The models decompose a time series into unobserved components:
+`p2a_core::forecasting::structts::struct_ts` fits the local level (`Level`), local linear trend (`Trend`) and
+basic structural model (`BSM`) by Gaussian maximum likelihood through the Kalman filter
+(`validation/forecasting/kalman.md`).
 
-- **Local Level** (`level`): y_t = μ_t + ε_t, μ_{t+1} = μ_t + η_t
-- **Local Linear Trend** (`trend`): y_t = μ_t + ε_t, μ_{t+1} = μ_t + β_t + η_t, β_{t+1} = β_t + ζ_t
-- **Basic Structural Model** (`BSM`): y_t = μ_t + γ_t + ε_t (adds stochastic seasonality)
+## What p2a computes, step by step
 
-Key parameters:
-- `model_type`: Type of structural model (Level, Trend, or BSM)
-- `frequency`: Seasonal period for BSM (required for BSM)
-- `fixed`: Optional vector of fixed variance parameters
+| Step | p2a | R |
+|---|---|---|
+| Scale | `vx = var(y)/100` over the non-missing values | `vx <- var(x, na.rm = TRUE)/100` |
+| Prior | `a_0 = (y_1, 0, ...)`; `P_0 = 1e6 vx` in **every** entry, a matrix of rank one | `Z$a[1] <- x[1]`, `Z$P[] <- 1e+06 * vx` |
+| State layout | level, [slope], [seasonal `s-1` states]; `m = 1 + slope + (s-1)` | `makeLevel`, `makeTrend`, `makeBSM` |
+| Objective | `f = 0.5 (Σ v²/F + Σ ln F) / n_obs`, over the observed values, with every observation in it | `getLike` through `C_KalmanLike` |
+| Parameters | variances in units of `vx`, starting at 1; at least 0 | `init[mask] / vx`, `lower = 0` |
+| `fixed` | absolute variances in R's order: (level, epsilon), (level, slope, epsilon), (level, slope, seas, epsilon) | the same |
+| All variances 0 | `f = 1000`, gradient 0 | `getLike`: `if(all(p == 0)) return(1000)` |
+| Optimiser | projected Newton on `p >= 0` with the exact gradient (the differentiated filter) | L-BFGS-B with a finite-difference gradient |
+| Log-likelihood | `-n_obs f - 0.5 n_obs ln 2π`, with `n_obs` the observed values | `-length(y) f - 0.5 n_obs ln 2π`: see "Series with gaps" |
+| `filtered_level`, `filtered_slope`, `filtered_seasonal` | filtered states | `fitted(fit)` |
+| `level`, `slope`, `seasonal` | smoothed states | `tsSmooth(fit)` |
+| `standardized_residuals` | `v_t / sqrt(F_t)`, NaN at a missing value | `residuals(fit)` |
 
-## Reference Implementations
+AIC and BIC count the free variances; BIC uses the observed values. R reports neither.
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| stats | R | `StructTS()` | R 4.3.2 |
+**Every observation stays in the likelihood.** The written-out recursion with no threshold reproduces
+`C_KalmanLike` exactly for Nile and to `3.6e-11` for the raw UKgas BSM. A rule that drops an observation by the
+size of its gain gives NaN on Nile and `0.96048893` where C gives `0.95159552` on UKgas, so p2a has no such rule.
+The first observation therefore adds a large `ln F` and a small `v²/F`; its standardised residual is 0.
 
-## Test Cases
+**Why the tight optimum, not R's stopping point.** R's L-BFGS-B stops on a relative change in `f` of about
+`2e-9` with a finite-difference gradient, short of the optimum of its own objective. Its stopping point cannot be
+reproduced by another optimiser and is not a property of the model. The reference is the optimum of the same
+objective, found in the R case by Newton's method on the exact gradient, written out and checked against
+`stats::KalmanLike`, with the Karush-Kuhn-Tucker sign checked at every bound (`*_tight` keys); R's default fit stays
+pinned as a cross-check at its measured gap.
 
-### Test 1: Nile River Flow - Local Level Model
+**Why the optimiser is what it is.** Nelder-Mead on log variances could not reach a variance of 0, which is
+where the Nile trend slope and the UKgas level sit. The projected Newton search holds a bound with
+`A = {i : x_i = 0, g_i >= 0}` and accepts a projected step on the Armijo condition. While a step still reduces `f` by more
+than `1e-6`, the curvature of the free set is the scoring matrix `Σ [∂v_i ∂v_j / F + ½ ∂F_i ∂F_j / F²] / n_obs` (the
+expected Hessian, Harvey 1990, sec. 3.4.6), which the differentiated filter computes in the same pass. Then the search
+finishes on Newton steps with the Hessian from forward differences of the exact gradient, shifted when it is not
+positive definite, so that it converges quadratically; a stop on the criterion after scoring steps waits for one Newton
+step taken from within the tolerance.
 
-This classic dataset is often used to demonstrate local level models.
+## Guards
 
-**R Code**:
-```r
-# Nile River annual flow data (1871-1970)
-data(Nile)
+- `n >= 10`; for BSM, `period >= 2` and `n >= 2 period` (at most half the series).
+- `max_iter >= 1`; `tolerance` finite and positive.
+- `fixed` of R's length, each value finite and at least 0, not all of them set.
+- The first value must not be missing: R stops there too (`the first value of the time series must not be
+  missing`), so its branches for a leading NA are dead code. An infinite value is refused; NaN is a missing value.
+- A constant series is `InvalidSpecification` (there is no variance to estimate).
 
-# Fit local level model
-fit <- StructTS(Nile, type = "level")
-print(fit)
+## Pinned values
 
-# Expected output:
-# Variances:
-#   level    epsilon
-#  1469.072 15099.803
-```
+`test_validate_structts_nile`, `test_validate_structts_nile_trend`, `test_validate_structts_ukgas`,
+`test_validate_structts_fixed`, `test_validate_structts_missing`, `test_validate_structts_fixed_changes_the_fit` and
+`test_validate_structts_scale_invariant` load the case.
 
-**Results Comparison**:
+| Fit | Variances at the tight optimum | Log-likelihood | Gap of R's default fit (relative) |
+|---|---|---|---|
+| Nile, level | level 1469.17100, epsilon 15098.52464 | -643.20099 | 1.66e-5 |
+| Nile, trend | level 1426.84359, slope 0, epsilon 15047.40747 | -645.80743 | 7.55e-5 |
+| UKgas (`log10`), BSM period 4 | level 0, slope 1.73040e-5, seas 7.13574e-4, epsilon 3.68206e-4 | 153.99930 | 1.50e-3 |
+| Nile, level fixed at 1500 | level 1500, epsilon 15052.64834 | -643.20127 | - |
+| Nile with gaps (rows 21-25, 61) | level 523.90653, epsilon 16798.60704 | -603.99846 (observed-data) | - |
 
-| Parameter | R (StructTS) | Rust (p2a) | Tolerance |
-|-----------|--------------|------------|-----------|
-| level variance | 1469.07 | ~1469 | 10.0 |
-| epsilon variance | 15099.80 | ~15100 | 100.0 |
-| log-likelihood | ~-632.5 | ~-632.5 | 1.0 |
+Tolerances: tight variances `Tol::iterative(1e-6)`; log-likelihoods `Tol::stat(n)`; states and standardised
+residuals, which cross zero, relative `1e-6` with absolute `1e-8`; R's default variances `1e-4` for Nile and `2e-3`
+for UKgas, its measured gaps. Variances on their bound are exactly 0, as in R.
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-27 for the estimator):
-- `forecasting::structts::tests::test_validate_structts_local_level_tracks_data` (`crates/p2a-core/src/forecasting/structts.rs`): n = 150 and the filtered level stays within 10 of the data. No `StructTS` value is compared.
+### Series with gaps
 
-### Test 2: Local Linear Trend Model
+R's `loglik` is `-length(y) f - 0.5 n_obs ln 2π`, which scales the data term by `length(y)/n_obs` when values are
+missing. p2a reports the Gaussian log-likelihood of the observed values, `-n_obs f - 0.5 n_obs ln 2π`, pinned to
+`nile_na_loglik_obs_tight`, computed in the R case from the same objective. This is the registry's deviation
+for `nile_na_loglik` and `nile_na_loglik_tight`. The estimates, the objective and every series without gaps are
+unaffected: with no missing value the two formulas agree.
 
-**R Code**:
-```r
-set.seed(42)
-n <- 100
-# Generate trend + noise
-level <- cumsum(0.5 + rnorm(n, 0, 0.3))
-y <- ts(level + rnorm(n, 0, 2))
+## Convergence
 
-fit <- StructTS(y, type = "trend")
-print(fit)
-```
+The stopping criterion is the scaled projected gradient `max_{i free} |g_i| max(x_i, 1) <= tolerance` (default
+`1e-8`). `x` is in units of `vx`, so a rescaled series follows the same path and `f` only shifts by a constant
+(`test_validate_structts_scale_invariant`, factors `1e-6` and `1e6`). The search also stops as converged when a step changes
+`f` by at most `1e-14` and `x` by at most `1e-12`.
 
-**Results Comparison**:
+Near the optimum the reduction a Newton step predicts falls below the rounding of `f`, a sum over the series: at the
+UKgas optimum a gradient of `4e-6` predicts about `5e-14`. Such a step (a predicted reduction of at most
+`1e-10 max(|f|, 1)`) is accepted when it reduces the scaled projected gradient, which the differentiated filter computes
+far more precisely than that; when it reduces neither, the search stops as converged
+(`minimize_nonnegative_judges_a_step_below_the_rounding_of_the_objective_by_its_gradient`).
 
-| Parameter | R (StructTS) | Rust (p2a) | Tolerance |
-|-----------|--------------|------------|-----------|
-| level variance | varies | varies | 20% |
-| slope variance | varies | varies | 20% |
-| epsilon variance | varies | varies | 20% |
+A stop at `max_iter` is `converged = false`, recorded in `convergence` and in `warnings` as "StructTS did not
+converge after N iterations (...)" (`test_structts_reports_iteration_limit`). A line search that cannot reduce the
+objective adds "StructTS: the line search could not reduce the objective further; the estimates may not be at the
+optimum". A stopped budget or an allocation refusal stops the search at once; a failed filter pass in a trial
+only halves the step (`minimize_nonnegative_treats_only_a_failed_filter_as_a_failed_trial`).
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-27 for the estimator):
-- `forecasting::structts::tests::test_validate_structts_trend_model_positive_slope` (`crates/p2a-core/src/forecasting/structts.rs`): the average slope on linearly trending data exceeds 0.5. No `StructTS` value is compared.
+## Performance
 
-### Test 3: Basic Structural Model (BSM)
-
-**R Code**:
-```r
-# UKgas dataset - quarterly UK gas consumption
-data(UKgas)
-
-fit <- StructTS(UKgas, type = "BSM")
-print(fit)
-
-# Components
-tsdiag(fit)
-```
-
-**Results Comparison**:
-
-| Parameter | R (StructTS) | Rust (p2a) | Tolerance |
-|-----------|--------------|------------|-----------|
-| level variance | varies | varies | 20% |
-| slope variance | varies | varies | 20% |
-| seas variance | varies | varies | 20% |
-| epsilon variance | varies | varies | 20% |
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-27 for the estimator):
-- `forecasting::structts::tests::test_validate_structts_bsm_components_sum_to_data` (`crates/p2a-core/src/forecasting/structts.rs`): seasonal and slope components are returned and fitted + residual equals the data within 1e-10.
-- `forecasting::structts::tests::test_validate_structts_loglikelihood_computed` (`crates/p2a-core/src/forecasting/structts.rs`): a finite log-likelihood for each model type. No `StructTS` value is compared.
-
-## Numerical Precision Summary
-
-- Variance parameters: Within 20% of R results (MLE can have multiple local optima)
-- Log-likelihood: Within 1% of R results
-- Filtered states: Within 5% of R results
-- Smoothed states: Within 5% of R results
-
-## Known Differences
-
-1. **Optimization Algorithm**: R uses `optim()` with BFGS; Rust uses Nelder-Mead with log-transformed parameters.
-
-2. **Default Initialization**: R uses diffuse initialization with very large variance; Rust uses a configurable approach.
-
-3. **Convergence Criteria**: Slight differences in convergence thresholds can lead to slightly different parameter estimates.
-
-## Performance Comparison
-
-**Note**: R's StructTS uses highly optimized C/Fortran code from the stats package, including BFGS optimization from the `optim()` function. The Rust implementation uses pure Rust with Nelder-Mead optimization on log-transformed variance parameters.
-
-### Local Level Model
-
-| Dataset Size | Rust (ms) | R (ms) | Speedup |
-|--------------|-----------|--------|---------|
-| n=50 | 4.4 | 2.5 | 0.57x |
-| n=100 | 9.6 | 1.7 | 0.18x |
-| n=200 | 19.0 | 1.9 | 0.10x |
-| n=500 | 46.7 | 4.7 | 0.10x |
-
-### Local Linear Trend Model
-
-| Dataset Size | Rust (ms) | R (ms) | Speedup |
-|--------------|-----------|--------|---------|
-| n=50 | 11.8 | 3.0 | 0.25x |
-| n=100 | 29.8 | 4.3 | 0.14x |
-| n=200 | 61.7 | 4.4 | 0.07x |
-| n=500 | 167.0 | 6.8 | 0.04x |
-
-### Basic Structural Model (BSM)
-
-| Dataset Size | Rust (ms) | R (ms) | Speedup |
-|--------------|-----------|--------|---------|
-| n=48 | 78.0 | 76.6 | 0.98x |
-| n=96 | 154.1 | 283.6 | 1.84x |
-| n=144 | 231.4 | 146.3 | 0.63x |
-| n=240 | 368.7 | 443.8 | 1.20x |
-
-### Analysis
-
-R's StructTS is faster for simple models (Level, Trend) but Rust is competitive for the BSM model.
-
-**Why R is faster for simple models:**
-
-1. **BFGS vs Nelder-Mead**: R's BFGS uses gradient information for faster convergence, while Nelder-Mead is derivative-free and requires more function evaluations.
-
-2. **C Implementation**: R's Kalman filter and optimizer are implemented in highly optimized C/Fortran code with BLAS routines.
-
-3. **PORT Library**: R uses the L-BFGS-B algorithm from the PORT library, which is highly tuned for this type of problem.
-
-**Why Rust is competitive for BSM:**
-
-For BSM (4 parameters), the optimization overhead is a smaller fraction of total time. The per-iteration cost of the Kalman filter dominates, and Rust's Kalman filter is reasonably efficient.
-
-### Optimization History
-
-| Iteration | Algorithm | Level n=100 | Improvement |
-|-----------|-----------|-------------|-------------|
-| Initial | Coordinate descent | 56.2 ms | baseline |
-| v2 | Nelder-Mead | 12.0 ms | 4.7x |
-| v3 | NM + log-transform | 9.6 ms | 5.9x |
-
-**Future Optimizations**:
-- Add the `argmin` crate with L-BFGS and analytical gradients
-- Use BLAS-optimized Kalman filter operations
-- Pre-compute partial derivatives for faster gradient estimation
-
-## Kalman Filter Performance (Stand-alone)
-
-The Kalman filter alone (without MLE optimization) is fast:
-
-| Dataset Size | Rust Filter (µs) | Rust Smoother (µs) | Rust Forecast (µs) |
-|--------------|------------------|--------------------|--------------------|
-| n=100 | 147 | 519 | 11 |
-| n=500 | 778 | 2,556 | 11 |
-| n=1000 | 1,495 | 5,159 | 11 |
-| n=5000 | 8,000 | 25,004 | 11 |
-
-The Kalman filter shows linear O(n) scaling as expected. The smoother is about 3-4x slower due to the backward pass. Forecasting is O(h) where h is the horizon, independent of input length.
-
-## Input data (column types and missing values)
-
-`run_struct_ts` reads its columns through the shared extractor with `NaPolicy::Fail`. Integer and Boolean columns are accepted (an `Int64` column gives the result of its `Float64` copy); a missing value (empty cell, NA or NaN) is an error naming the column and the count (`EconError::NullValues`); a text column is refused (`NonNumericColumn`) and an absent one is `ColumnNotFound`.
-
-R's `StructTS` Kalman filter skips a missing observation; p2a's does not, and refuses the column instead, so fill the gaps first.
-
-Test: `test_na_struct_ts_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
+Regenerate with `cargo bench -p p2a-core --bench forecasting_benchmarks -- StructTS`.
 
 ## References
 
-- Harvey, A. C. (1989). *Forecasting, Structural Time Series Models and the Kalman Filter*. Cambridge University Press.
-- Durbin, J., & Koopman, S. J. (2012). *Time Series Analysis by State Space Methods* (2nd ed.). Oxford University Press.
-- R Core Team. `StructTS` documentation. https://stat.ethz.ch/R-manual/R-devel/library/stats/html/StructTS.html
+- Harvey, A. C. (1990). *Forecasting, Structural Time Series Models and the Kalman Filter*. Cambridge.
+- Durbin, J. and Koopman, S. J. (2012). *Time Series Analysis by State Space Methods*, 2nd ed. Oxford.
+- R Core Team. `stats::StructTS`, `src/library/stats/R/StructTS.R` and `src/library/ts/src/arima.c`.

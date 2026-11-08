@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "forecasting_structts",
+      "name": "Structural time series (local level, local linear trend, BSM) by maximum likelihood, fixed variances",
+      "category": "forecasting",
+      "reference": "stats::StructTS(type = 'level' | 'trend' | 'BSM', fixed); tight optimum of its objective; stats::KalmanRun / KalmanSmooth (nit = -1)",
+      "doc": "validation/forecasting/structts.md",
+      "cases": [
+        "structts_nile_ukgas"
+      ],
+      "tests": [
+        "p2a-core::forecasting::structts::tests::test_validate_structts_nile",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_nile_trend",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_ukgas",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_fixed",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_missing",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_fixed_changes_the_fit",
+        "p2a-core::forecasting::structts::tests::test_validate_structts_scale_invariant"
+      ],
+      "quantities": [
+        "variances (level, slope, seas, epsilon) at the tight optimum",
+        "variances on the bound 0 (exact)",
+        "log-likelihood (tight and package)",
+        "filtered states (fitted)",
+        "smoothed states (tsSmooth)",
+        "standardised residuals",
+        "fixed level variance",
+        "series with gaps",
+        "package coefficients (cross-check)"
+      ],
+      "tolerance": "tight coefficients Tol::iterative(1e-6); log-likelihoods Tol::stat(n) (n = 100, 108); states and residuals rel 1e-6 abs 1e-8; R's own L-BFGS-B coefficients 1e-4 (Nile), 2e-3 (UKgas): the measured gaps of R's early stop",
+      "deviations": [
+        {
+          "finding": "TS-27",
+          "quantity": "StructTS's reported log-likelihood with missing values (nile_na_loglik, nile_na_loglik_tight)",
+          "note": "R scales the data term by length(y)/n_obs; p2a reports the observed-data Gaussian log-likelihood, pinned to nile_na_loglik_obs_tight from the same written-out objective; series without gaps are unaffected"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "forecasting_kalman",
+      "name": "Kalman filter, Durbin-Koopman smoother and forecast with state and observation intercepts",
+      "category": "forecasting",
+      "reference": "stats::KalmanRun / KalmanLike / KalmanSmooth / KalmanForecast (nit = -1) on the model augmented with a constant state",
+      "doc": "validation/forecasting/kalman.md",
+      "cases": [
+        "kalman_intercepts"
+      ],
+      "tests": [
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_intercepts",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_smoother_intercepts",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_intercepts_change_the_fit",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_smoother_singular_covariance",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_filter_scale_invariant",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_likelihood_terms_match_filter_and_differences"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "filtered level and slope",
+        "innovations and their variances",
+        "smoothed level, slope and level variance",
+        "forecasts and forecast variances",
+        "log-likelihood without intercepts",
+        "smoothed level with a singular predicted covariance"
+      ],
+      "tolerance": "validation/README.md, n = 50: states, innovations, forecasts 1e-6 relative; log-likelihood 1e-5",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "forecasting_causal_impact",
+      "name": "CausalImpact counterfactual from a local-level StructTS fit on the pre-period",
+      "category": "forecasting",
+      "reference": "stats::StructTS(type = 'level') on the pre-period (tight optimum) + stats::KalmanForecast; qnorm(0.975) bands. The CausalImpact package (bsts) is not installed and is not the reference.",
+      "doc": "validation/forecasting/causal_impact.md",
+      "cases": [
+        "structts_nile_ukgas"
+      ],
+      "tests": [
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_counterfactual_nile"
+      ],
+      "quantities": [
+        "model variances",
+        "pre-period log-likelihood",
+        "counterfactual forecast",
+        "upper 95% band",
+        "point effects",
+        "cumulative effect"
+      ],
+      "tolerance": "Tol::iterative(1e-6); log-likelihood Tol::stat(90)",
+      "deviations": [
+        {
+          "finding": "TS-5",
+          "quantity": "cumulative and average effect intervals, p-value",
+          "note": "the variance of the cumulative effect is the sum of the marginal forecast variances; placebo coverage of the 95% cumulative interval 0.35-0.46 (R simulation of the same design; test_causal_impact_placebo_calibration asserts the pointwise intervals only)."
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

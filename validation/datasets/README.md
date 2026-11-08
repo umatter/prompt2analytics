@@ -75,6 +75,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
+| `generated/kalman_intercepts.csv` | 50 × 2 (t, y) | `kalman_intercepts` | `r/cases/ts_statespace.R` | seed 20261124 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
 | `generated/mahalanobis_t3.csv` | 30 × 9 (id, f1, f2, f3, a, b, p1, p2, total) | `stat_mahalanobis_t3` | `r/cases/stats_misc_t3.R` | full-rank and collinear columns, padded with NA |
@@ -91,6 +92,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/bgtest_ar1.csv` | 100 × 2 (y, x) | `diag_bgtest_ar1` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/reset_quad.csv` | 100 × 2 (y, x) | `diag_reset_quad` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/harvtest_nonlin.csv` | 100 × 2 (y, x) | `diag_harvtest_nonlin` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
+| `generated/structts_series.csv` | 108 × 4 (t, nile, ukgas, nile_na) | `structts_nile_ukgas` | `r/cases/ts_statespace.R` | `datasets::Nile`, `log10(datasets::UKgas)`; `nile_na` missing in rows 21-25 and 61 |
 | `generated/ts_acf_spline_t3.csv` | 64 × 4 (x, y, kx, ky) | `stat_ts_acf_spline_t3` | `r/cases/stats_misc_t3.R` | AR(1) pair and spline knots, padded with NA |
 | `generated/ttest_levels_t3.csv` | 15 × 3 (id, x, y) | `stat_ttest_levels_t3` | `r/cases/stats_misc_t3.R` | two samples, padded with NA |
 | `generated/wald_sim.csv` | 100 × 4 (y, x1, x2, x3) | `diag_wald_sim` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |

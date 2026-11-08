@@ -1,189 +1,92 @@
-# CausalImpact Validation
+# CausalImpact
 
-## Method Overview
+Status: **R-pinned** for the counterfactual only (`validation/methods/ts_statespace.json`, method
+`forecasting_causal_impact`, case `structts_nile_ukgas`, `validation/r/cases/ts_statespace.R`). Recompute with
+`Rscript validation/r/run.R --check structts_nile_ukgas`.
 
-CausalImpact is a Bayesian structural time series approach for estimating the causal effect of an intervention. The method was introduced by Google and uses state-space models to construct a counterfactual prediction of what would have happened in the absence of the intervention.
+The reference is `stats::StructTS(type = "level")` on the pre-period at the tight optimum of its objective plus
+`stats::KalmanForecast`, with `qnorm(0.975)` bands. The `CausalImpact` package (bsts) is not installed and is not
+the reference: p2a takes the method's idea from it, not its numbers.
 
-**Key Features:**
-- Uses pre-intervention data to fit a structural time series model
-- Predicts counterfactual for post-intervention period
-- Provides Bayesian credible intervals for causal effects
-- Supports control time series as covariates
-- Returns cumulative, average, and relative effects
+## What is computed
 
-## Implementation Details
+1. **Controls.** With control series, OLS of the response on an intercept and the controls over the pre-period
+   (`regression::ols::solve_ols`). The residuals feed the model. An aliased control has a NaN coefficient and its
+   adjustment uses the identified coefficients only, as `predict.lm` on a rank-deficient fit; two warnings say so.
+2. **Model.** The StructTS engine (`validation/forecasting/structts.md`) on the pre-period: R's prior and objective,
+   a local level plus an optional slope and an optional dummy seasonal of `seasonal_period` seasons.
+3. **Counterfactual.** The Kalman filter over the pre-period and `kalman_forecast` over the gap and the
+   post-period, with the regression added back.
+4. **Effects.** Point effect = observed − predicted; bands `predicted ± z_critical(1 − alpha) · se`; the summary and
+   the tail probabilities (`Normal::sf` for an upper tail).
 
-**File:** `crates/p2a-core/src/forecasting/causal_impact.rs`
+It is not Bayesian. The intervals are the plug-in Gaussian forecast of the fitted model, not a posterior: the
+"credible interval" wording in the MCP text and the `prob_positive` names are carried over from the method's source.
 
-**Algorithm:**
-1. **Model Fitting (Pre-period only):**
-   - Fit a local level model (random walk + noise)
-   - Optionally include local linear trend
-   - Optionally include seasonality
-   - Optionally include regression on control series
+## Period rules
 
-2. **Counterfactual Prediction:**
-   - Use Kalman filter to predict post-intervention observations
-   - Generate prediction intervals from Kalman variance estimates
+Both periods are inclusive and in the units of the time column.
 
-3. **Causal Effect Estimation:**
-   - Point effect = observed - predicted
-   - Cumulative effect = sum of point effects over post-period
-   - Relative effect = cumulative effect / sum of predicted values
-   - Bayesian p-value from normal approximation
+| Input | Result |
+|---|---|
+| Start after end | `pre_period start 39 is after its end 0` (and the same for `post_period`) |
+| No time value in the period | `post_period [200, 210] contains no time values (the time column runs from 0 to 79)` |
+| Time column not strictly increasing | `time column 'time' must be strictly increasing; row 5 has 3 after 4` |
+| Pre-period not ending before the post-period | `Pre-period must end before post-period begins (pre_period ends at time .., post_period starts at time ..)` |
+| Pre-period starting before the data | clipped, with the warning `pre_period start -5 is before the first time value 0; the pre-period starts at 0` |
+| Post-period ending after the data | clipped, with the warning `post_period end 500 is after the last time value 99; the post-period ends at 99` |
+| Fewer than 10 pre-period observations | `InsufficientData` |
 
-## Reference Implementation
+`alpha` must be strictly between 0 and 1, `max_iter` at least 1 and `tolerance` finite and positive.
+Convergence is reported in `convergence` and `warnings` (`ResultNotes`).
 
-**R Package:** `CausalImpact` by Google
-- Version: 1.3.0
-- CRAN: https://cran.r-project.org/package=CausalImpact
-- GitHub: https://google.github.io/CausalImpact/
+## Seasonal period
 
-## Test Cases
+`seasonal_period` must be at least 2 and at most the length of the pre-period, checked before anything is sized by
+it (`causal_impact_refuses_a_seasonal_period_below_two`,
+`causal_impact_refuses_a_seasonal_period_longer_than_the_pre_period`).
 
-### Test Case 1: Positive Treatment Effect
+## The R-pinned counterfactual
 
-**Setup:**
-```r
-# R code to generate reference results
-library(CausalImpact)
-set.seed(42)
+`test_validate_causal_impact_counterfactual_nile`: Nile, pre-period 1-90, post-period 91-100.
 
-# Generate data with known treatment effect
-n_pre <- 70
-n_post <- 30
-n <- n_pre + n_post
+| Quantity | Value | Tolerance |
+|---|---|---|
+| Level variance | 1266.84610 | `Tol::iterative(1e-6)` |
+| Observation variance | 15537.38597 | `Tol::iterative(1e-6)` |
+| Pre-period log-likelihood | -579.50460 | `Tol::stat(90)` |
+| Forecast (all 10 steps) | 888.94647 | `Tol::iterative(1e-6)` |
+| Upper 95% band, first step | 1170.61181 | `Tol::iterative(1e-6)` |
+| Point effect, first step | 131.05353 | `Tol::iterative(1e-6)` |
+| Cumulative effect | -143.46468 | `Tol::iterative(1e-6)` |
 
-# Local level random walk + treatment effect
-y <- numeric(n)
-level <- 100
-for (t in 1:n) {
-  level <- level + rnorm(1, 0, 1)
-  effect <- if (t > n_pre) 10 else 0
-  y[t] <- level + effect + rnorm(1, 0, 0.5)
-}
+## Placebo calibration
 
-# Run CausalImpact
-data <- zoo(y, 1:n)
-impact <- CausalImpact(data, c(1, n_pre), c(n_pre + 1, n))
-summary(impact)
-```
+`test_causal_impact_placebo_calibration` draws 200 seeded local-level series with no intervention
+(`sigma_eta = 0.5`, `sigma_eps = 1`, `n_pre = 80`, `n_post = 20`) and asserts that the fit converges, the one-step
+95% interval covers 0 at a rate in `[0.88, 0.995]`, the pointwise intervals over all horizons at a rate in
+`[0.88, 0.975]`, and the average effect is unbiased within 4 Monte Carlo standard errors. The windows sit 4-5 Monte
+Carlo standard errors from the same design run with `stats::StructTS` and `KalmanForecast` in R (six seeds): one-step
+0.905-0.965, pointwise 0.918-0.939. p2a's rates at the test's seed are 0.94 and 0.9365. There is no R value to
+compare directly, so this is a property test and stays out of the registry.
 
-**Expected Results:**
-- Cumulative effect: ~300 (30 * 10)
-- Average effect: ~10
-- Effect should be statistically significant
+## Known deviation
 
-### Test Case 2: No Treatment Effect
+The registry's deviation for finding TS-5: the variance of the cumulative effect is the sum of the marginal forecast
+variances, which ignores that forecast errors of a random walk are correlated. In a simulation of a placebo design with
+`stats::StructTS` and `KalmanForecast` in R, the 95% cumulative interval covered 0.35-0.46 of the time and its
+false-positive rate was 0.62-0.71. Do not read the cumulative interval or the p-value as calibrated.
 
-**Setup:**
-```r
-set.seed(123)
-n_pre <- 70
-n_post <- 30
+## Tests
 
-y <- numeric(n_pre + n_post)
-level <- 100
-for (t in 1:(n_pre + n_post)) {
-  level <- level + rnorm(1, 0, 1)
-  y[t] <- level + rnorm(1, 0, 0.5)
-}
-
-data <- zoo(y, 1:(n_pre + n_post))
-impact <- CausalImpact(data, c(1, n_pre), c(n_pre + 1, n_pre + n_post))
-summary(impact)
-```
-
-**Expected Results:**
-- Cumulative effect: close to 0
-- Effect should NOT be statistically significant
-- p-value > 0.05
-
-### Test Case 3: With Control Series
-
-**Setup:**
-```r
-set.seed(456)
-n_pre <- 70
-n_post <- 30
-n <- n_pre + n_post
-
-# Control series (unaffected by treatment)
-control <- 50 + cumsum(rnorm(n, 0, 1))
-
-# Response driven by control + treatment effect
-y <- 0.5 * control + rnorm(n, 0, 0.5)
-y[(n_pre + 1):n] <- y[(n_pre + 1):n] + 8  # Treatment effect of 8
-
-data <- cbind(y, control)
-data <- zoo(data, 1:n)
-impact <- CausalImpact(data, c(1, n_pre), c(n_pre + 1, n))
-summary(impact)
-```
-
-**Expected Results:**
-- Cumulative effect: ~240 (30 * 8)
-- Effect should be statistically significant
-- Control series should improve prediction accuracy
-
-## Comparison with R CausalImpact
-
-| Metric | R CausalImpact | Rust p2a-core | Tolerance |
-|--------|----------------|---------------|-----------|
-| Cumulative Effect | Baseline | Match within 20% | 0.20 |
-| Average Effect | Baseline | Match within 20% | 0.20 |
-| Effect Direction | Baseline | Must match | Exact |
-| Significance | Baseline | Should match | - |
-
-Note: Higher tolerance is acceptable because:
-1. Different random number generators
-2. Different optimization algorithms for MLE
-3. Bayesian methods can have larger variance in point estimates
-
-## Rust Test Functions
-
-Located in `crates/p2a-core/src/forecasting/causal_impact.rs`:
-- `test_causal_impact_positive_effect`
-- `test_causal_impact_no_effect`
-- `test_causal_impact_with_controls`
-- `test_causal_impact_invalid_periods`
-- `test_causal_impact_insufficient_pre_period`
-- `test_causal_impact_with_trend`
-- `test_causal_impact_model_info`
-- `test_causal_impact_inference`
-
-## Input data (column types and missing values)
-
-`run_causal_impact` reads its columns through the shared extractor with `NaPolicy::Fail`. Integer and Boolean columns are accepted (an `Int64` column gives the result of its `Float64` copy); a missing value (empty cell, NA or NaN) is an error naming the column and the count (`EconError::NullValues`); a text column is refused (`NonNumericColumn`) and an absent one is `ColumnNotFound`.
-
-R's CausalImpact models a missing response in the pre-period; p2a refuses it, and a missing value in the time column or a control series too. The time column must hold whole numbers (or dates): a fractional time value is an error naming the row, where it used to be truncated by a cast.
-
-Test: `test_na_causal_impact_int64_and_missing` (on `validation/datasets/generated/arima_series.csv`, the dataset of the ARIMA case `arima_css_forecast`: columns `ai` (Int64), `a_na` and `ai_na` (two missing cells), `lab` (text)).
-
-## References
-
-1. Brodersen, K. H., Gallusser, F., Koehler, J., Remy, N., & Scott, S. L. (2015).
-   "Inferring causal impact using Bayesian structural time series models".
-   *Annals of Applied Statistics*, 9(1), 247-274.
-   https://doi.org/10.1214/14-AOAS788
-
-2. Harvey, A. C. (1990). *Forecasting, Structural Time Series Models and the
-   Kalman Filter*. Cambridge University Press.
-
-3. Durbin, J. & Koopman, S. J. (2012). *Time Series Analysis by State Space
-   Methods* (2nd ed.). Oxford Statistical Science Series.
-
-4. R package `CausalImpact`:
-   - CRAN: https://cran.r-project.org/package=CausalImpact
-   - Documentation: https://google.github.io/CausalImpact/
-
-## Status
-
-- [x] Core algorithm implemented
-- [x] Local level model support
-- [x] Local linear trend support
-- [x] Control series support
-- [x] Unit tests written
-- [x] MCP tool added
-- [ ] Seasonal model validation (basic support implemented)
-- [ ] Cross-validation with R package on real datasets
+- R-pinned: `test_validate_causal_impact_counterfactual_nile`.
+- Input rules: `test_causal_impact_rejects_inverted_periods`, `test_causal_impact_rejects_degenerate_config`,
+  `test_causal_impact_clipped_periods_warn`, `test_causal_impact_invalid_periods`,
+  `test_causal_impact_insufficient_pre_period`.
+- Reporting: `test_causal_impact_reports_convergence`, `test_causal_impact_aliased_control_warns`,
+  `test_causal_impact_tail_probability_is_not_zero`.
+- Properties on simulated data, no R values: `test_causal_impact_placebo_calibration`, `test_causal_impact_positive_effect`,
+  `test_causal_impact_with_controls`, `test_causal_impact_with_trend`, `test_causal_impact_model_info`,
+  `test_causal_impact_inference`, `test_causal_impact_cumulative_effect_recovers_dgp`,
+  `test_causal_impact_point_effects_recover_dgp`, `test_causal_impact_intervals_are_ordered`,
+  `test_causal_impact_series_lengths`.
