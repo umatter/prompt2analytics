@@ -79,19 +79,20 @@ tight values:
 
 ## Wall-clock (signed off 2026-11-08)
 
-`release`, one core, against the tree before this change (11db3f8e; its k-means start differs from fe13b889's only in
-`ml/clustering.rs`). Ratio is this tree over the base.
+`release`, one P core, `RAYON_NUM_THREADS=1`, five interleaved rounds against `fe13b889` on a quiet machine (load
+average 1.1-1.9, 2026-11-08); medians of the round medians. Ratio is this tree over the base.
 
 | Row | n | iterations (base / this tree) | base (ms) | this tree (ms) | ratio | per iteration |
 |---|---|---|---:|---:|---:|---:|
-| `gaussian_mixture` default, `mixture_3d` | 100 | 25 / 308 | 4.762 | 11.773 | 2.47 | 0.57 |
-| default, blob data | 100 | equal | 0.475 | 0.178 | 0.38 | 0.56 |
-| default, blob data | 1,000 | equal | 4.481 | 1.481 | 0.33 | 0.50 |
-| default, blob data | 10,000 | equal | 50.548 | 15.091 | 0.30 | 0.45 |
+| `gaussian_mixture` default, `mixture_3d` (first 100 rows) | 100 | 25-67 / 308 | 1.889 | 5.035 | 2.67 | 0.57 |
+| 50 iterations, `mixture_3d` (first 100 rows) | 100 | 50 / 50 | 1.446 | 0.856 | 0.59 | 0.59 |
+| default, blob data (5 columns, 3 clusters, seed 42) | 100 | 3 / 2 | 0.173 | 0.079 | 0.46 | |
+| default, blob data | 1,000 | 3 / 2 | 1.640 | 0.615 | 0.38 | |
+| default, blob data | 10,000 | 4 / 3 | 20.25 | 8.43 | 0.42 | |
 
-The `mixture_3d` row is a median of five runs on a loaded machine; the blob rows are medians of five from an earlier
-round of the same change (load average 31-69).
-Each iteration is cheaper (0.57x), but on `mixture_3d` the old absolute stop `|dl| < 1e-4` ended after 25 iterations
+The base's unseeded start makes its iteration count on `mixture_3d` vary between runs (25-67); its per-iteration
+cost is the 50-iteration row.
+Each iteration is cheaper (0.57-0.59x), but on `mixture_3d` the old absolute stop `|dl| < 1e-4` ended after 25-67 iterations
 at a worse fit, while the relative stop runs to convergence (308 iterations). A fit that converges slowly can now use up
 to the default 1000 iterations where the old limit was 100, about 5.7x the old cost by the per-iteration ratio. Signed
 off by the user as a correctness-driven slowdown.

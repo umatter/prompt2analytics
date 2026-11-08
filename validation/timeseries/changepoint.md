@@ -82,20 +82,27 @@ compares with R.
 
 ## Wall-clock (signed off 2026-11-08)
 
-Medians over three interleaved rounds against the tree before this change (11db3f8e; changepoint.rs as at fe13b889),
-`release`, one core, load average 46-54; series of mean and variance shifts, minimum segment 2. Ratio is this tree over
-the base; `default` is MBIC, `manual` the penalty 3 ln n.
+Medians over five interleaved rounds against `fe13b889` (changepoint.rs there is the tree before this change),
+`release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-1.9, 2026-11-08); MBIC default
+penalty, minimum segment 2. Series: `shift`, ten alternating mean regimes (0 and 2); `vshift`, ten alternating
+standard deviations (1 and 3); `white`, standard normal noise. Ratio is this tree over the base.
 
 | Row | n | base (ms) | this tree (ms) | ratio (median) | ratio (min) |
 |---|---|---:|---:|---:|---:|
-| `VarianceChange`, default | 100 | 0.111 | 0.134 | 1.20 | 1.00 |
-| `VarianceChange`, manual | 100 | 0.111 | 0.131 | 1.18 | 0.95 |
-| `VarianceChange`, default | 1,000 | 2.85 | 13.0 | 4.56 | 5.20 |
-| `VarianceChange`, manual | 1,000 | 2.85 | 12.9 | 4.52 | 3.52 |
-| `VarianceChange`, default | 10,000 | 174 | 1,416 | 8.13 | 7.97 |
-| `VarianceChange`, manual | 10,000 | 181 | 1,339 | 7.39 | 7.18 |
+| `VarianceChange`, `shift` | 100 | 0.0455 | 0.0447 | 0.98 | 0.98 |
+| `VarianceChange`, `shift` | 1,000 | 1.22 | 4.23 | 3.45 | 3.46 |
+| `VarianceChange`, `shift` | 10,000 | 73.7 | 423 | 5.74 | 5.76 |
+| `VarianceChange`, `vshift` | 100 | 0.0377 | 0.0443 | 1.17 | 1.17 |
+| `VarianceChange`, `vshift` | 1,000 | 1.21 | 0.721 | 0.60 | 0.60 |
+| `VarianceChange`, `vshift` | 10,000 | 74.2 | 45.9 | 0.62 | 0.62 |
+| `VarianceChange`, `white` | 100 | 0.0626 | 0.0467 | 0.75 | 0.75 |
+| `VarianceChange`, `white` | 1,000 | 4.53 | 4.43 | 0.98 | 0.98 |
+| `VarianceChange`, `white` | 10,000 | 187 | 430 | 2.30 | 2.30 |
 
-`MeanChange` and `MeanAndVariance` are faster than the base at every size (0.46-0.84). The `VarianceChange` slowdown
+The manual penalty 3 ln n was timed only in an earlier round on a loaded machine (4.52x at n = 1,000, 7.39x at
+n = 10,000); it was not re-timed.
+
+`MeanChange` and `MeanAndVariance` are faster than the base at every size and series (0.51-0.69). The `VarianceChange` slowdown
 follows from the TS-7 cost: measured about the mean of the whole series, it finds no changepoint on these inputs, so
 the PELT test never prunes a candidate and the search is quadratic; the old cost about each segment's own mean rewarded
 short segments, which is what let it prune. R's `cpt.var` (changepoint 2.3, `minseglen = 2`) with a manual penalty takes
