@@ -1,12 +1,37 @@
-//! Stata DTA file reader (supports versions 117-119).
+//! Stata DTA file reader for formats 117 (Stata 13), 118 (Stata 14-18) and 119 (Stata 15-18, more
+//! than 32,767 variables), little-endian (LSF) and big-endian (MSF).
 //!
-//! This is a pure Rust implementation for reading Stata .dta files.
+//! This is a pure Rust implementation of Stata's `dta` specification. The header is read tag by
+//! tag; the `<map>` then locates every section (slot 2 `<variable_types>`, 3 `<varnames>`, 9
+//! `<data>`, 10 `<strls>`), and the reader checks the tag at each offset instead of scanning for
+//! it. Field widths by release:
+//!
+//! | Release | `<K>` | `<N>` | label length | variable name |
+//! |---|---|---|---|---|
+//! | 117 | u16 | u32 | u8 | 33 bytes |
+//! | 118 | u16 | u64 | u16 | 129 bytes |
+//! | 119 | u32 | u64 | u16 | 129 bytes |
+//!
+//! Text is UTF-8 in releases 118 and 119. Release 117 text is read as UTF-8 when it is valid UTF-8
+//! (haven and ReadStat write UTF-8) and as Windows-1252 otherwise (Stata 13 writes the platform
+//! encoding). A `str#` value ends at its first NUL and loses its trailing blanks, as haven reads
+//! it (Stata itself keeps them). Values are pinned to `haven::read_dta` on the fixtures in
+//! `validation/datasets/files/` (`validation/data/readers.md`). Formats before 117 (Stata 12 and
+//! earlier) are refused with [`StataError::UnsupportedVersion`]; strL contents and value labels are
+//! not decoded (see the strL warning in [`StataReader::read_to_dataframe`]).
+//!
+//! Numeric storage types: byte, int and long load as Int64, float and double as Float64. Every
+//! missing code (`.`, `.a`-`.z`) loads as null: byte above 100, int above 32,740, long above
+//! 2,147,483,620, float above 0x7EFFFFFF (1.70141173319e38) and double above 0x7FDFFFFFFFFFFFFF
+//! (8.98846567431e307), the format's largest values. A file must declare at least one variable.
 
 use polars::frame::column::Column;
 use polars::prelude::*;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
+
+use super::sas::{decode_utf8_or_windows_1252, decode_windows_1252_lenient};
 
 /// Errors that can occur during Stata file reading.
 #[derive(Error, Debug)]
@@ -34,6 +59,52 @@ enum ByteOrder {
     BigEndian,    // MSF
 }
 
+/// The three XML-tagged dta releases and their field widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Release {
+    R117,
+    R118,
+    R119,
+}
+
+impl Release {
+    fn k_width(self) -> usize {
+        if self == Release::R119 { 4 } else { 2 }
+    }
+    fn n_width(self) -> usize {
+        if self == Release::R117 { 4 } else { 8 }
+    }
+    fn label_length_width(self) -> usize {
+        if self == Release::R117 { 1 } else { 2 }
+    }
+    fn name_len(self) -> usize {
+        if self == Release::R117 { 33 } else { 129 }
+    }
+    /// Release 117 text may be Windows-1252; 118 and 119 are UTF-8.
+    fn decode(self, bytes: &[u8], what: impl FnOnce() -> String) -> Result<String, StataError> {
+        match self {
+            Release::R117 => Ok(decode_utf8_or_windows_1252(bytes)),
+            Release::R118 | Release::R119 => String::from_utf8(bytes.to_vec())
+                .map_err(|_| StataError::ParseError(format!("{} is not valid UTF-8", what()))),
+        }
+    }
+}
+
+/// `<map>` slots (Stata dta specification, section 5.2).
+const MAP_SLOTS: usize = 14;
+const MAP_VARIABLE_TYPES: usize = 2;
+const MAP_VARNAMES: usize = 3;
+const MAP_SORTLIST: usize = 4;
+const MAP_DATA: usize = 9;
+const MAP_STRLS: usize = 10;
+const DATA_TAG: &[u8] = b"<data>";
+const DATA_END_TAG: &[u8] = b"</data>";
+/// The format's largest non-missing float and double; every missing code is above them.
+const FLOAT_MAX: f32 = f32::from_bits(0x7EFF_FFFF);
+const DOUBLE_MAX: f64 = f64::from_bits(0x7FDF_FFFF_FFFF_FFFF);
+/// Rows between two resource checkpoints.
+const ROWS_PER_CHECKPOINT: u64 = 1 << 16;
+
 /// Stata variable type
 #[derive(Debug, Clone)]
 enum StataType {
@@ -45,9 +116,7 @@ enum StataType {
     Str(usize), // Fixed-length string
     StrL,       // Long string (reference)
 }
-
 impl StataType {
-    #[allow(dead_code)]
     fn from_code(code: u16) -> Result<Self, StataError> {
         match code {
             65530 => Ok(StataType::Byte),
@@ -88,78 +157,113 @@ struct Variable {
 pub struct StataReader<R: Read + Seek> {
     reader: BufReader<R>,
     byte_order: ByteOrder,
-    #[allow(dead_code)]
-    version: u8,
+    release: Release,
     n_vars: usize,
     n_obs: u64,
     variables: Vec<Variable>,
+    /// First byte of the rows (just after `<data>`).
     data_offset: u64,
+    /// Bytes from `data_offset` to `<strls>`: the rows and `</data>`.
+    data_len: u64,
 }
 
 impl<R: Read + Seek> StataReader<R> {
-    /// Create a new Stata reader from a file.
+    /// Create a new Stata reader from a file: header, `<map>`, variable types and names.
     pub fn new(reader: R) -> Result<Self, StataError> {
         let mut reader = BufReader::new(reader);
+        let file_len = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
 
-        // Read and parse header
-        let (version, byte_order) = Self::read_header(&mut reader)?;
-
-        if !(117..=119).contains(&version) {
-            return Err(StataError::UnsupportedVersion(version));
+        // Formats 102-116 are binary: byte 0 is the format, byte 1 the byte order (1 or 2).
+        let mut first = [0u8; 2];
+        if reader.read(&mut first)? == 2
+            && (102..=116).contains(&first[0])
+            && matches!(first[1], 1 | 2)
+        {
+            return Err(StataError::UnsupportedVersion(first[0]));
         }
+        reader.seek(SeekFrom::Start(0))?;
 
-        // Skip to map section and read offsets
-        Self::skip_to_tag(&mut reader, b"<map>")?;
-        let offsets = Self::read_map(&mut reader, byte_order)?;
+        let (release, byte_order) = Self::read_header(&mut reader)?;
+        let n_vars_raw = Self::read_uint(&mut reader, release.k_width(), byte_order)?;
+        Self::expect(&mut reader, b"</K><N>")?;
+        let n_obs = Self::read_uint(&mut reader, release.n_width(), byte_order)?;
+        Self::expect(&mut reader, b"</N><label>")?;
+        let label_len = Self::read_uint(&mut reader, release.label_length_width(), byte_order)?;
+        Self::skip(&mut reader, label_len)?;
+        Self::expect(&mut reader, b"</label><timestamp>")?;
+        let timestamp_len = Self::read_uint(&mut reader, 1, byte_order)?;
+        Self::skip(&mut reader, timestamp_len)?;
+        Self::expect(&mut reader, b"</timestamp></header><map>")?;
+        let mut map = [0u64; MAP_SLOTS];
+        for slot in &mut map {
+            *slot = Self::read_uint(&mut reader, 8, byte_order)?;
+        }
+        Self::expect(&mut reader, b"</map>")?;
 
-        // Read number of variables and observations
-        reader.seek(SeekFrom::Start(offsets[1]))?; // variable_types offset
-        Self::skip_to_tag(&mut reader, b"<K>")?;
-        let n_vars = Self::read_u16(&mut reader, byte_order)? as usize;
+        // A dataset without variables cannot hold observations (and the row loop would spin):
+        // Stata refuses to save one, and ReadStat refuses to read one (DATA-73).
+        if n_vars_raw == 0 {
+            return Err(StataError::InvalidFormat(format!(
+                "the file declares no variables (<K> = 0) and {n_obs} observations; a Stata \
+                 dataset has at least one variable"
+            )));
+        }
+        Self::validate_map(&map, file_len)?;
+        let types_section = map[MAP_VARNAMES] - map[MAP_VARIABLE_TYPES];
+        let names_section = map[MAP_SORTLIST] - map[MAP_VARNAMES];
+        let types_fit = n_vars_raw
+            .checked_mul(2)
+            .and_then(|b| b.checked_add(b"<variable_types>".len() as u64))
+            .is_some_and(|end| end <= types_section);
+        let names_fit = n_vars_raw
+            .checked_mul(release.name_len() as u64)
+            .and_then(|b| b.checked_add(b"<varnames>".len() as u64))
+            .is_some_and(|end| end <= names_section);
+        if !types_fit || !names_fit {
+            return Err(StataError::InvalidFormat(format!(
+                "<K> = {n_vars_raw} variables do not fit in the <variable_types> and <varnames> \
+                 sections; the file is truncated or corrupt"
+            )));
+        }
+        let n_vars = usize::try_from(n_vars_raw)
+            .map_err(|_| StataError::InvalidFormat(format!("<K> = {n_vars_raw} is too large")))?;
 
-        Self::skip_to_tag(&mut reader, b"<N>")?;
-        let n_obs = Self::read_u64(&mut reader, byte_order)?;
-
-        // Read variable types
-        Self::skip_to_tag(&mut reader, b"<variable_types>")?;
+        Self::seek_tag(&mut reader, map[MAP_VARIABLE_TYPES], b"<variable_types>")?;
         let mut var_types = Vec::with_capacity(n_vars);
         for _ in 0..n_vars {
-            let code = Self::read_u16(&mut reader, byte_order)?;
+            let code = Self::read_uint(&mut reader, 2, byte_order)? as u16;
             var_types.push(StataType::from_code(code)?);
         }
 
-        // Read variable names
-        Self::skip_to_tag(&mut reader, b"<varnames>")?;
+        Self::seek_tag(&mut reader, map[MAP_VARNAMES], b"<varnames>")?;
         let mut variables = Vec::with_capacity(n_vars);
-        let name_len = if version >= 118 { 129 } else { 33 };
-
-        for i in 0..n_vars {
-            let name = Self::read_fixed_string(&mut reader, name_len)?;
-            variables.push(Variable {
-                name,
-                dtype: var_types[i].clone(),
-            });
+        for (i, dtype) in var_types.into_iter().enumerate() {
+            let name = Self::read_fixed_string(&mut reader, release.name_len(), release, || {
+                format!("the name of variable {}", i + 1)
+            })?;
+            variables.push(Variable { name, dtype });
         }
 
-        // Find data offset
-        let data_offset = offsets[5]; // data section offset
+        Self::seek_tag(&mut reader, map[MAP_DATA], DATA_TAG)?;
+        let data_offset = map[MAP_DATA] + DATA_TAG.len() as u64;
+        let data_len = map[MAP_STRLS].saturating_sub(data_offset);
 
         Ok(StataReader {
             reader,
             byte_order,
-            version,
+            release,
             n_vars,
             n_obs,
             variables,
             data_offset,
+            data_len,
         })
     }
 
     /// Read the entire dataset into a Polars DataFrame.
     pub fn read_to_dataframe(mut self) -> Result<DataFrame, StataError> {
-        // Seek to data section
         self.reader.seek(SeekFrom::Start(self.data_offset))?;
-        Self::skip_to_tag(&mut self.reader, b"<data>")?;
 
         // Clone variable info to avoid borrow issues
         let var_types: Vec<StataType> = self.variables.iter().map(|v| v.dtype.clone()).collect();
@@ -185,136 +289,178 @@ impl<R: Read + Seek> StataReader<R> {
         // Guard against a corrupt/malicious header declaring an implausible
         // observation count. `n_obs` comes straight from the file's `<N>` tag;
         // using it to pre-size the column buffers below would let a tiny file
-        // trigger a multi-gigabyte allocation. Bound it by the bytes actually
-        // available in the data section (each row occupies `row_size` bytes).
-        let row_size: usize = var_types.iter().map(StataType::size).sum();
-        if row_size > 0 {
-            let cur = self.reader.stream_position()?;
-            let end = self.reader.seek(SeekFrom::End(0))?;
-            self.reader.seek(SeekFrom::Start(cur))?;
-            let available = end.saturating_sub(cur);
-            let max_obs = available / row_size as u64;
-            if self.n_obs > max_obs {
-                return Err(StataError::InvalidFormat(format!(
-                    "declared observation count {} exceeds what the file can hold \
-                     ({} rows of {} bytes in {} remaining bytes); file is truncated or corrupt",
-                    self.n_obs, max_obs, row_size, available
-                )));
-            }
+        // trigger a multi-gigabyte allocation. The `<data>` section, located by
+        // `<map>`, holds exactly the rows and `</data>`.
+        let row_size: u64 = var_types.iter().map(|t| t.size() as u64).sum();
+        let rows_end = DATA_END_TAG.len() as u64;
+        let max_obs = self
+            .data_len
+            .saturating_sub(rows_end)
+            .checked_div(row_size)
+            .unwrap_or(0);
+        let fits = self
+            .n_obs
+            .checked_mul(row_size)
+            .and_then(|b| b.checked_add(rows_end))
+            .is_some_and(|need| need <= self.data_len);
+        if !fits {
+            return Err(StataError::InvalidFormat(format!(
+                "declared observation count {} exceeds what the file can hold \
+                 ({max_obs} rows of {row_size} bytes in a {}-byte <data> section); file is \
+                 truncated or corrupt",
+                self.n_obs, self.data_len
+            )));
         }
 
-        // Prepare column builders. Capacity is bounded above (see the guard
-        // just above), so this cannot be abused for a huge allocation.
-        let capacity = (self.n_obs as usize).min(1 << 20);
-        let mut columns: Vec<Vec<AnyValue>> = vec![Vec::with_capacity(capacity); self.n_vars];
+        // Column buffers, one per variable and typed by it, grown past their initial capacity as
+        // rows are read. The guard above bounds n_obs by the file size; every cell the file
+        // declares is also checked against the per-allocation ceiling.
+        let n_obs = usize::try_from(self.n_obs).unwrap_or(usize::MAX);
+        let capacity = n_obs.min(1 << 20);
+        let cells = crate::resource::checked_len(&[self.n_vars, n_obs], "Stata columns")
+            .map_err(resource_err)?;
+        crate::resource::check_alloc::<Option<String>>(cells, "Stata columns")
+            .map_err(resource_err)?;
+        let mut columns = Vec::with_capacity(self.n_vars);
+        for dtype in &var_types {
+            columns.push(ColumnBuf::for_type(dtype, capacity)?);
+        }
 
-        // Read observations
-        for _ in 0..self.n_obs {
+        for row in 0..self.n_obs {
+            if row % ROWS_PER_CHECKPOINT == 0 {
+                crate::resource::checkpoint().map_err(resource_err)?;
+            }
             for (var_idx, dtype) in var_types.iter().enumerate() {
-                let value = self.read_value(dtype)?;
-                columns[var_idx].push(value);
+                self.read_value(dtype, &var_names[var_idx], &mut columns[var_idx])?;
             }
         }
 
-        // Convert to Polars columns
-        let mut polars_columns: Vec<Column> = Vec::with_capacity(self.n_vars);
-
-        for (var_idx, dtype) in var_types.iter().enumerate() {
-            let col = self.build_column(&var_names[var_idx], dtype, &columns[var_idx])?;
-            polars_columns.push(col);
-        }
-
+        let polars_columns: Vec<Column> = columns
+            .into_iter()
+            .zip(&var_names)
+            .map(|(buf, name)| buf.into_column(name))
+            .collect();
         DataFrame::new(polars_columns).map_err(StataError::PolarsError)
     }
 
-    fn read_header(reader: &mut BufReader<R>) -> Result<(u8, ByteOrder), StataError> {
-        // Read until we find <stata_dta>
-        Self::skip_to_tag(reader, b"<stata_dta>")?;
-
-        // Read <header>
-        Self::skip_to_tag(reader, b"<release>")?;
-
-        // Read version number (3 bytes as ASCII)
-        let mut version_buf = [0u8; 3];
-        reader.read_exact(&mut version_buf)?;
-        let version_str = std::str::from_utf8(&version_buf)
-            .map_err(|_| StataError::InvalidFormat("Invalid version string".into()))?;
-        let version: u8 = version_str
-            .trim()
-            .parse()
-            .map_err(|_| StataError::InvalidFormat("Cannot parse version".into()))?;
-
-        // Skip to byteorder
-        Self::skip_to_tag(reader, b"<byteorder>")?;
-        let mut order_buf = [0u8; 3];
-        reader.read_exact(&mut order_buf)?;
-
-        let byte_order = match &order_buf {
+    /// `<stata_dta><header><release>NNN</release><byteorder>XXX</byteorder><K>`, read exactly.
+    fn read_header(reader: &mut BufReader<R>) -> Result<(Release, ByteOrder), StataError> {
+        Self::expect(reader, b"<stata_dta><header><release>")?;
+        let mut release = [0u8; 3];
+        reader.read_exact(&mut release)?;
+        let release = match &release {
+            b"117" => Release::R117,
+            b"118" => Release::R118,
+            b"119" => Release::R119,
+            other => {
+                let shown = decode_windows_1252_lenient(other);
+                return Err(if !other.iter().all(u8::is_ascii_digit) {
+                    StataError::InvalidFormat(format!("release {shown:?} is not a number"))
+                } else {
+                    match shown.parse::<u8>() {
+                        Ok(v) => StataError::UnsupportedVersion(v),
+                        Err(_) => StataError::InvalidFormat(format!(
+                            "release {shown} is not supported (117, 118 and 119 are)"
+                        )),
+                    }
+                });
+            }
+        };
+        Self::expect(reader, b"</release><byteorder>")?;
+        let mut order = [0u8; 3];
+        reader.read_exact(&mut order)?;
+        let byte_order = match &order {
             b"LSF" => ByteOrder::LittleEndian,
             b"MSF" => ByteOrder::BigEndian,
             _ => return Err(StataError::InvalidFormat("Invalid byte order".into())),
         };
-
-        Ok((version, byte_order))
+        Self::expect(reader, b"</byteorder><K>")?;
+        Ok((release, byte_order))
     }
 
-    fn skip_to_tag(reader: &mut BufReader<R>, tag: &[u8]) -> Result<(), StataError> {
-        let mut buffer = Vec::new();
-        let tag_len = tag.len();
+    /// The next `tag.len()` bytes must be `tag`.
+    fn expect(reader: &mut BufReader<R>, tag: &[u8]) -> Result<(), StataError> {
+        let at = reader.stream_position()?;
+        let shown = decode_windows_1252_lenient(tag);
+        let mut buf = vec![0u8; tag.len()];
+        reader.read_exact(&mut buf).map_err(|_| {
+            StataError::InvalidFormat(format!(
+                "expected {shown} at byte {at}, but the file ends first"
+            ))
+        })?;
+        if buf != tag {
+            return Err(StataError::InvalidFormat(format!(
+                "expected {shown} at byte {at}, found {:?}",
+                decode_windows_1252_lenient(&buf)
+            )));
+        }
+        Ok(())
+    }
 
-        loop {
-            let byte = {
-                let mut b = [0u8; 1];
-                if reader.read(&mut b)? == 0 {
-                    return Err(StataError::InvalidFormat(format!(
-                        "Tag not found: {}",
-                        String::from_utf8_lossy(tag)
-                    )));
-                }
-                b[0]
-            };
+    /// Seek to a `<map>` offset and check the section tag there.
+    fn seek_tag(reader: &mut BufReader<R>, offset: u64, tag: &[u8]) -> Result<(), StataError> {
+        reader.seek(SeekFrom::Start(offset))?;
+        Self::expect(reader, tag)
+    }
 
-            buffer.push(byte);
+    fn skip(reader: &mut BufReader<R>, n: u64) -> Result<(), StataError> {
+        let n = i64::try_from(n)
+            .map_err(|_| StataError::InvalidFormat(format!("length {n} is too large")))?;
+        reader.seek(SeekFrom::Current(n))?;
+        Ok(())
+    }
 
-            if buffer.len() >= tag_len && &buffer[buffer.len() - tag_len..] == tag {
-                return Ok(());
-            }
-
-            // Prevent unbounded memory growth
-            if buffer.len() > 10_000_000 {
-                return Err(StataError::InvalidFormat(
-                    "Tag search exceeded limit".into(),
-                ));
+    /// The sections the reader uses lie inside the file, in the specification's order.
+    fn validate_map(map: &[u64; MAP_SLOTS], file_len: u64) -> Result<(), StataError> {
+        for (slot, tag) in [
+            (MAP_VARIABLE_TYPES, "<variable_types>"),
+            (MAP_VARNAMES, "<varnames>"),
+            (MAP_SORTLIST, "<sortlist>"),
+            (MAP_DATA, "<data>"),
+            (MAP_STRLS, "<strls>"),
+        ] {
+            if map[slot] > file_len {
+                return Err(StataError::InvalidFormat(format!(
+                    "<map> places {tag} at byte {}, past the end of the {file_len}-byte file",
+                    map[slot]
+                )));
             }
         }
-    }
-
-    fn read_map(reader: &mut BufReader<R>, byte_order: ByteOrder) -> Result<Vec<u64>, StataError> {
-        let mut offsets = Vec::with_capacity(14);
-        for _ in 0..14 {
-            offsets.push(Self::read_u64(reader, byte_order)?);
+        let ordered = map[MAP_VARIABLE_TYPES] < map[MAP_VARNAMES]
+            && map[MAP_VARNAMES] < map[MAP_SORTLIST]
+            && map[MAP_SORTLIST] <= map[MAP_DATA]
+            && map[MAP_DATA] < map[MAP_STRLS];
+        if !ordered {
+            return Err(StataError::InvalidFormat(format!(
+                "<map> sections are out of order (variable_types {}, varnames {}, sortlist {}, \
+                 data {}, strls {})",
+                map[MAP_VARIABLE_TYPES],
+                map[MAP_VARNAMES],
+                map[MAP_SORTLIST],
+                map[MAP_DATA],
+                map[MAP_STRLS]
+            )));
         }
-        Ok(offsets)
+        Ok(())
     }
 
-    fn read_u16(reader: &mut BufReader<R>, byte_order: ByteOrder) -> Result<u16, StataError> {
-        let mut buf = [0u8; 2];
-        reader.read_exact(&mut buf)?;
-        Ok(match byte_order {
-            ByteOrder::LittleEndian => u16::from_le_bytes(buf),
-            ByteOrder::BigEndian => u16::from_be_bytes(buf),
-        })
-    }
-
-    fn read_u64(reader: &mut BufReader<R>, byte_order: ByteOrder) -> Result<u64, StataError> {
+    /// An unsigned integer of `width` (1, 2, 4 or 8) bytes in the file's byte order.
+    fn read_uint(
+        reader: &mut BufReader<R>,
+        width: usize,
+        byte_order: ByteOrder,
+    ) -> Result<u64, StataError> {
         let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf)?;
+        let bytes = &mut buf[..width.min(8)];
+        reader.read_exact(bytes)?;
         Ok(match byte_order {
-            ByteOrder::LittleEndian => u64::from_le_bytes(buf),
-            ByteOrder::BigEndian => u64::from_be_bytes(buf),
+            ByteOrder::LittleEndian => bytes
+                .iter()
+                .rev()
+                .fold(0u64, |v, &b| (v << 8) | u64::from(b)),
+            ByteOrder::BigEndian => bytes.iter().fold(0u64, |v, &b| (v << 8) | u64::from(b)),
         })
     }
-
     fn read_i8(reader: &mut BufReader<R>) -> Result<i8, StataError> {
         let mut buf = [0u8; 1];
         reader.read_exact(&mut buf)?;
@@ -357,115 +503,112 @@ impl<R: Read + Seek> StataReader<R> {
         })
     }
 
-    fn read_fixed_string(reader: &mut BufReader<R>, len: usize) -> Result<String, StataError> {
+    /// A NUL-terminated fixed-width string without its trailing blanks, as ReadStat reads it,
+    /// decoded by the release's text rule.
+    fn read_fixed_string(
+        reader: &mut BufReader<R>,
+        len: usize,
+        release: Release,
+        what: impl FnOnce() -> String,
+    ) -> Result<String, StataError> {
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
 
         // Find null terminator
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-
-        String::from_utf8(buf[..end].to_vec())
-            .map_err(|_| StataError::ParseError("Invalid UTF-8 in string".into()))
+        let end = buf[..end]
+            .iter()
+            .rposition(|&b| b != b' ')
+            .map_or(0, |i| i + 1);
+        release.decode(&buf[..end], what)
     }
-
-    fn read_value(&mut self, dtype: &StataType) -> Result<AnyValue<'static>, StataError> {
-        match dtype {
-            StataType::Byte => {
-                let v = Self::read_i8(&mut self.reader)?;
-                // Stata missing values for byte: > 100
-                if v > 100 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Int64(v as i64))
-                }
-            }
-            StataType::Int => {
-                let v = Self::read_i16(&mut self.reader, self.byte_order)?;
-                // Stata missing values for int: > 32740
-                if v > 32740 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Int64(v as i64))
-                }
-            }
-            StataType::Long => {
-                let v = Self::read_i32(&mut self.reader, self.byte_order)?;
-                // Stata missing values for long: > 2147483620
-                if v > 2147483620 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Int64(v as i64))
-                }
-            }
-            StataType::Float => {
-                let v = Self::read_f32(&mut self.reader, self.byte_order)?;
-                if v.is_nan() || v > 1.701e38 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Float64(v as f64))
-                }
-            }
-            StataType::Double => {
-                let v = Self::read_f64(&mut self.reader, self.byte_order)?;
-                if v.is_nan() || v > 8.988e307 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Float64(v))
-                }
-            }
-            StataType::Str(len) => {
-                let s = Self::read_fixed_string(&mut self.reader, *len)?;
-                Ok(AnyValue::StringOwned(s.into()))
-            }
-            StataType::StrL => {
-                // Read strL reference (v, o) - 8 bytes
-                let mut buf = [0u8; 8];
-                self.reader.read_exact(&mut buf)?;
-                // For now, return placeholder - full strL support requires reading strls section
-                Ok(AnyValue::StringOwned("<strL>".into()))
-            }
-        }
-    }
-
-    fn build_column(
-        &self,
-        name: &str,
+    /// Read one cell of `dtype` and push it to the variable's buffer.
+    fn read_value(
+        &mut self,
         dtype: &StataType,
-        values: &[AnyValue<'static>],
-    ) -> Result<Column, StataError> {
-        match dtype {
-            StataType::Byte | StataType::Int | StataType::Long => {
-                let vals: Vec<Option<i64>> = values
-                    .iter()
-                    .map(|v| match v {
-                        AnyValue::Int64(i) => Some(*i),
-                        _ => None,
-                    })
-                    .collect();
-                Ok(Column::new(name.into(), vals))
+        name: &str,
+        buf: &mut ColumnBuf,
+    ) -> Result<(), StataError> {
+        match (dtype, buf) {
+            (StataType::Byte, ColumnBuf::Int(v)) => {
+                let x = Self::read_i8(&mut self.reader)?;
+                v.push((x <= 100).then_some(i64::from(x))); // 101..=127: . and .a-.z
             }
-            StataType::Float | StataType::Double => {
-                let vals: Vec<Option<f64>> = values
-                    .iter()
-                    .map(|v| match v {
-                        AnyValue::Float64(f) => Some(*f),
-                        _ => None,
-                    })
-                    .collect();
-                Ok(Column::new(name.into(), vals))
+            (StataType::Int, ColumnBuf::Int(v)) => {
+                let x = Self::read_i16(&mut self.reader, self.byte_order)?;
+                v.push((x <= 32_740).then_some(i64::from(x)));
             }
-            StataType::Str(_) | StataType::StrL => {
-                let vals: Vec<Option<String>> = values
-                    .iter()
-                    .map(|v| match v {
-                        AnyValue::StringOwned(s) => Some(s.to_string()),
-                        _ => None,
-                    })
-                    .collect();
-                Ok(Column::new(name.into(), vals))
+            (StataType::Long, ColumnBuf::Int(v)) => {
+                let x = Self::read_i32(&mut self.reader, self.byte_order)?;
+                v.push((x <= 2_147_483_620).then_some(i64::from(x)));
+            }
+            (StataType::Float, ColumnBuf::Float(v)) => {
+                let x = Self::read_f32(&mut self.reader, self.byte_order)?;
+                v.push((!x.is_nan() && x <= FLOAT_MAX).then_some(f64::from(x)));
+            }
+            (StataType::Double, ColumnBuf::Float(v)) => {
+                let x = Self::read_f64(&mut self.reader, self.byte_order)?;
+                v.push((!x.is_nan() && x <= DOUBLE_MAX).then_some(x));
+            }
+            (StataType::Str(len), ColumnBuf::Text(v)) => {
+                let release = self.release;
+                let s = Self::read_fixed_string(&mut self.reader, *len, release, || {
+                    format!("a value of variable {name}")
+                })?;
+                v.push(Some(s));
+            }
+            (StataType::StrL, ColumnBuf::Text(v)) => {
+                // strL reference (v, o): 8 bytes. The <strls> section is not decoded (DATA-74).
+                let mut b = [0u8; 8];
+                self.reader.read_exact(&mut b)?;
+                v.push(Some("<strL>".to_string()));
+            }
+            _ => {
+                return Err(StataError::ParseError(format!(
+                    "internal: the buffer of variable {name} does not match its type"
+                )));
             }
         }
+        Ok(())
     }
+}
+
+/// The values of one variable, typed by its storage type.
+enum ColumnBuf {
+    Int(Vec<Option<i64>>),
+    Float(Vec<Option<f64>>),
+    Text(Vec<Option<String>>),
+}
+
+impl ColumnBuf {
+    fn for_type(dtype: &StataType, capacity: usize) -> Result<Self, StataError> {
+        let what = "Stata columns";
+        Ok(match dtype {
+            StataType::Byte | StataType::Int | StataType::Long => ColumnBuf::Int(
+                crate::resource::try_with_capacity(capacity, what).map_err(resource_err)?,
+            ),
+            StataType::Float | StataType::Double => ColumnBuf::Float(
+                crate::resource::try_with_capacity(capacity, what).map_err(resource_err)?,
+            ),
+            StataType::Str(_) | StataType::StrL => ColumnBuf::Text(
+                crate::resource::try_with_capacity(capacity, what).map_err(resource_err)?,
+            ),
+        })
+    }
+
+    fn into_column(self, name: &str) -> Column {
+        match self {
+            ColumnBuf::Int(v) => Column::new(name.into(), v),
+            ColumnBuf::Float(v) => Column::new(name.into(), v),
+            ColumnBuf::Text(v) => Column::new(name.into(), v),
+        }
+    }
+}
+
+/// Map a core resource error (allocation size, cancellation) to a parse error, as the SAS reader
+/// does: a large valid file is not a corrupt one.
+fn resource_err(e: crate::errors::EconError) -> StataError {
+    StataError::ParseError(e.to_string())
 }
 
 /// Load a Stata DTA file into a Polars DataFrame.
@@ -478,7 +621,29 @@ pub fn load_stata(path: impl AsRef<Path>) -> Result<DataFrame, StataError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::sas::fixture_check::{assert_matches_haven, fixture_bytes, fixture_path, put};
+    use p2a_validation::Case;
     use std::io::Cursor;
+
+    fn load(b: Vec<u8>) -> Result<DataFrame, StataError> {
+        StataReader::new(Cursor::new(b))?.read_to_dataframe()
+    }
+
+    fn assert_invalid(r: Result<DataFrame, StataError>, needle: &str) {
+        match r {
+            Err(StataError::InvalidFormat(m)) => assert!(m.contains(needle), "{m}"),
+            other => panic!(
+                "expected InvalidFormat mentioning {needle:?}, got {:?}",
+                other.map(|d| d.shape())
+            ),
+        }
+    }
+
+    // dta118_haven.dta (haven::write_dta(version = 14), LSF): the <K> value (u16) at byte 70, the
+    // <N> value (u64) at 79, the 14 <map> slots (u64) from byte 163.
+    const K118: usize = 70;
+    const N118: usize = 79;
+    const MAP118: usize = 163;
 
     #[test]
     fn test_stata_type_from_code() {
@@ -487,319 +652,245 @@ mod tests {
         assert!(matches!(StataType::from_code(100), Ok(StataType::Str(100))));
     }
 
-    /// Generate a minimal valid Stata DTA version 118 file.
-    fn create_test_dta_file() -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // === Header section ===
-        buf.extend_from_slice(b"<stata_dta>");
-        buf.extend_from_slice(b"<header>");
-        buf.extend_from_slice(b"<release>118</release>");
-        buf.extend_from_slice(b"<byteorder>LSF</byteorder>"); // Little-endian
-        // Track position BEFORE <K> - the reader seeks to offsets[1] then scans for <K>
-        let before_k_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<K>");
-        buf.extend_from_slice(&2u16.to_le_bytes()); // 2 variables
-        buf.extend_from_slice(b"</K>");
-        buf.extend_from_slice(b"<N>");
-        buf.extend_from_slice(&3u64.to_le_bytes()); // 3 observations
-        buf.extend_from_slice(b"</N>");
-        buf.extend_from_slice(b"<label>");
-        buf.extend_from_slice(&0u16.to_le_bytes()); // No label
-        buf.extend_from_slice(b"</label>");
-        buf.extend_from_slice(b"<timestamp>");
-        buf.extend_from_slice(&0u8.to_le_bytes()); // No timestamp
-        buf.extend_from_slice(b"</timestamp>");
-        buf.extend_from_slice(b"</header>");
-
-        // === Map section (14 offsets) ===
-        buf.extend_from_slice(b"<map>");
-
-        // Placeholder offsets - will be filled in
-        let offset_placeholder_pos = buf.len();
-        for _ in 0..14 {
-            buf.extend_from_slice(&0u64.to_le_bytes());
-        }
-        buf.extend_from_slice(b"</map>");
-
-        // === Variable types section ===
-        let var_types_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<variable_types>");
-        buf.extend_from_slice(&65526u16.to_le_bytes()); // Double
-        buf.extend_from_slice(&65526u16.to_le_bytes()); // Double
-        buf.extend_from_slice(b"</variable_types>");
-
-        // === Variable names section ===
-        let _varnames_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<varnames>");
-        // Version 118 uses 129-byte names
-        let mut name1 = vec![0u8; 129];
-        name1[..2].copy_from_slice(b"x1");
-        buf.extend_from_slice(&name1);
-        let mut name2 = vec![0u8; 129];
-        name2[..2].copy_from_slice(b"x2");
-        buf.extend_from_slice(&name2);
-        buf.extend_from_slice(b"</varnames>");
-
-        // === Sortlist section ===
-        buf.extend_from_slice(b"<sortlist>");
-        buf.extend_from_slice(
-            &[0u16; 3]
-                .iter()
-                .flat_map(|x| x.to_le_bytes())
-                .collect::<Vec<u8>>(),
-        );
-        buf.extend_from_slice(b"</sortlist>");
-
-        // === Formats section ===
-        buf.extend_from_slice(b"<formats>");
-        // 57-byte format strings for version 118
-        let mut fmt1 = vec![0u8; 57];
-        fmt1[..6].copy_from_slice(b"%10.0g");
-        buf.extend_from_slice(&fmt1);
-        let mut fmt2 = vec![0u8; 57];
-        fmt2[..6].copy_from_slice(b"%10.0g");
-        buf.extend_from_slice(&fmt2);
-        buf.extend_from_slice(b"</formats>");
-
-        // === Value label names section ===
-        buf.extend_from_slice(b"<value_label_names>");
-        // 129-byte value label names
-        buf.extend_from_slice(&vec![0u8; 129 * 2]);
-        buf.extend_from_slice(b"</value_label_names>");
-
-        // === Variable labels section ===
-        buf.extend_from_slice(b"<variable_labels>");
-        // 321-byte variable labels for version 118
-        buf.extend_from_slice(&vec![0u8; 321 * 2]);
-        buf.extend_from_slice(b"</variable_labels>");
-
-        // === Characteristics section ===
-        buf.extend_from_slice(b"<characteristics>");
-        buf.extend_from_slice(b"</characteristics>");
-
-        // === Data section ===
-        let data_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<data>");
-        // 3 observations, 2 doubles each
-        // Row 1: 1.0, 2.0
-        buf.extend_from_slice(&1.0f64.to_le_bytes());
-        buf.extend_from_slice(&2.0f64.to_le_bytes());
-        // Row 2: 3.0, 4.0
-        buf.extend_from_slice(&3.0f64.to_le_bytes());
-        buf.extend_from_slice(&4.0f64.to_le_bytes());
-        // Row 3: 5.0, 6.0
-        buf.extend_from_slice(&5.0f64.to_le_bytes());
-        buf.extend_from_slice(&6.0f64.to_le_bytes());
-        buf.extend_from_slice(b"</data>");
-
-        // === Strls section (empty) ===
-        buf.extend_from_slice(b"<strls>");
-        buf.extend_from_slice(b"</strls>");
-
-        // === Value labels section (empty) ===
-        buf.extend_from_slice(b"<value_labels>");
-        buf.extend_from_slice(b"</value_labels>");
-
-        // === End ===
-        buf.extend_from_slice(b"</stata_dta>");
-
-        // Now go back and fill in the map offsets
-        // The reader: seeks to offsets[1], scans forward for <K>, then <N>, then <variable_types>, etc.
-        // offsets[5] is used to seek before scanning for <data>
-        let offsets: [u64; 14] = [
-            0,                // 0: stata_dta
-            before_k_offset,  // 1: position before <K> tag
-            var_types_offset, // 2: variable_types (unused by reader)
-            0,                // 3: sortlist
-            0,                // 4: formats
-            data_offset,      // 5: data - reader seeks here, then scans for <data>
-            0,                // 6: strls
-            0,                // 7: value_labels
-            0,
-            0,
-            0,
-            0,
-            0,                // 8-12: reserved
-            buf.len() as u64, // 13: end of file
-        ];
-
-        // Write offsets to the map section
-        let mut offset_buf = Vec::new();
-        for offset in &offsets {
-            offset_buf.extend_from_slice(&offset.to_le_bytes());
-        }
-        buf[offset_placeholder_pos..offset_placeholder_pos + 112].copy_from_slice(&offset_buf);
-
-        buf
-    }
-
-    #[test]
-    fn test_read_synthetic_dta() {
-        let dta_bytes = create_test_dta_file();
-        let cursor = Cursor::new(dta_bytes);
-        let reader = StataReader::new(cursor).expect("Failed to create reader");
-
-        assert_eq!(reader.n_vars, 2);
-        assert_eq!(reader.n_obs, 3);
-        assert_eq!(reader.variables.len(), 2);
-        assert_eq!(reader.variables[0].name, "x1");
-        assert_eq!(reader.variables[1].name, "x2");
-
-        let df = reader
-            .read_to_dataframe()
-            .expect("Failed to read dataframe");
-
-        assert_eq!(df.height(), 3);
-        assert_eq!(df.width(), 2);
-
-        // Check values
-        let x1 = df.column("x1").unwrap().f64().unwrap();
-        let x2 = df.column("x2").unwrap().f64().unwrap();
-
-        assert_eq!(x1.get(0), Some(1.0));
-        assert_eq!(x1.get(1), Some(3.0));
-        assert_eq!(x1.get(2), Some(5.0));
-        assert_eq!(x2.get(0), Some(2.0));
-        assert_eq!(x2.get(1), Some(4.0));
-        assert_eq!(x2.get(2), Some(6.0));
-    }
-
     #[test]
     fn test_stata_invalid_magic() {
-        let invalid_data = b"Not a valid Stata file";
-        let cursor = Cursor::new(invalid_data.to_vec());
-        let result = StataReader::new(cursor);
-        assert!(result.is_err());
+        assert!(StataReader::new(Cursor::new(b"Not a valid Stata file".to_vec())).is_err());
     }
 
     #[test]
-    fn test_stata_missing_values() {
-        // Create a DTA file with missing values
-        let mut buf = Vec::new();
-
-        buf.extend_from_slice(b"<stata_dta>");
-        buf.extend_from_slice(b"<header>");
-        buf.extend_from_slice(b"<release>118</release>");
-        buf.extend_from_slice(b"<byteorder>LSF</byteorder>");
-        // Track position before <K>
-        let before_k_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<K>");
-        buf.extend_from_slice(&1u16.to_le_bytes()); // 1 variable
-        buf.extend_from_slice(b"</K>");
-        buf.extend_from_slice(b"<N>");
-        buf.extend_from_slice(&2u64.to_le_bytes()); // 2 observations
-        buf.extend_from_slice(b"</N>");
-        buf.extend_from_slice(b"<label>");
-        buf.extend_from_slice(&0u16.to_le_bytes());
-        buf.extend_from_slice(b"</label>");
-        buf.extend_from_slice(b"<timestamp>");
-        buf.extend_from_slice(&0u8.to_le_bytes());
-        buf.extend_from_slice(b"</timestamp>");
-        buf.extend_from_slice(b"</header>");
-
-        // Map
-        buf.extend_from_slice(b"<map>");
-        let offset_pos = buf.len();
-        for _ in 0..14 {
-            buf.extend_from_slice(&0u64.to_le_bytes());
-        }
-        buf.extend_from_slice(b"</map>");
-
-        // Variable types
-        let var_types_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<variable_types>");
-        buf.extend_from_slice(&65526u16.to_le_bytes()); // Double
-        buf.extend_from_slice(b"</variable_types>");
-
-        // Variable names
-        buf.extend_from_slice(b"<varnames>");
-        let mut name = vec![0u8; 129];
-        name[..3].copy_from_slice(b"val");
-        buf.extend_from_slice(&name);
-        buf.extend_from_slice(b"</varnames>");
-
-        // Sortlist
-        buf.extend_from_slice(b"<sortlist>");
-        buf.extend_from_slice(
-            &[0u16; 2]
-                .iter()
-                .flat_map(|x| x.to_le_bytes())
-                .collect::<Vec<u8>>(),
+    fn test_stata_fixture_offsets() {
+        // The constants above are this layout; a regenerated fixture with another layout fails here.
+        let b = fixture_bytes("dta118_haven.dta");
+        assert_eq!(&b[K118 - 3..K118], b"<K>");
+        assert_eq!(&b[N118 - 3..N118], b"<N>");
+        assert_eq!(&b[MAP118 - 5..MAP118], b"<map>");
+        assert_eq!(
+            u64::from_le_bytes(b[MAP118 + 8..MAP118 + 16].try_into().unwrap()),
+            158
         );
-        buf.extend_from_slice(b"</sortlist>");
+        let b = fixture_bytes("dta119_haven.dta");
+        assert_eq!(&b[67..70], b"<K>");
+        assert_eq!(&b[70..74], &[6, 0, 0, 0]); // release 119: <K> is a u32
+    }
 
-        // Formats
-        buf.extend_from_slice(b"<formats>");
-        let mut fmt = vec![0u8; 57];
-        fmt[..6].copy_from_slice(b"%10.0g");
-        buf.extend_from_slice(&fmt);
-        buf.extend_from_slice(b"</formats>");
+    // ---- R-pinned: haven::read_dta on the committed fixtures (Tol::exact) ----
 
-        // Value label names
-        buf.extend_from_slice(b"<value_label_names>");
-        buf.extend_from_slice(&[0u8; 129]);
-        buf.extend_from_slice(b"</value_label_names>");
+    #[test]
+    fn test_validate_read_haven_dta_118() {
+        // DATA-22: <map> slot 2 is <variable_types>, 3 <varnames>, 9 <data>; <K> and <N> are in
+        // the header before <map>.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta118_haven.dta")).unwrap();
+        assert_matches_haven(&case, "dta118_haven", &df);
+    }
 
-        // Variable labels
-        buf.extend_from_slice(b"<variable_labels>");
-        buf.extend_from_slice(&vec![0u8; 321]);
-        buf.extend_from_slice(b"</variable_labels>");
+    #[test]
+    fn test_validate_read_haven_dta_118_stata_written() {
+        // DATA-22, DATA-50: written by Stata 14 itself (4 float columns, variable labels, str10).
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta118_stata_iris.dta")).unwrap();
+        assert_matches_haven(&case, "dta118_stata_iris", &df);
+    }
 
-        // Characteristics
-        buf.extend_from_slice(b"<characteristics>");
-        buf.extend_from_slice(b"</characteristics>");
+    #[test]
+    fn test_validate_read_haven_dta_117() {
+        // DATA-51: release 117 stores <N> in 4 bytes and the label length in 1; haven writes UTF-8.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta117_haven.dta")).unwrap();
+        assert_matches_haven(&case, "dta117_haven", &df);
+    }
 
-        // Data
-        let data_offset = buf.len() as u64;
-        buf.extend_from_slice(b"<data>");
-        // Row 1: valid value
-        buf.extend_from_slice(&42.0f64.to_le_bytes());
-        // Row 2: Stata missing value (NaN pattern > 8.988e307)
-        buf.extend_from_slice(&f64::NAN.to_le_bytes());
-        buf.extend_from_slice(b"</data>");
+    #[test]
+    fn test_validate_read_haven_dta_117_windows_1252() {
+        // DATA-51: Stata 13 writes str# text in Windows-1252 ("Z\u{fc}rich" = 5A FC 72 69 63 68,
+        // "\u{20ac}5" = 80 35); haven reads it with encoding = "windows-1252".
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta117_latin1.dta")).unwrap();
+        assert_matches_haven(&case, "dta117_latin1", &df);
+    }
 
-        // Strls
-        buf.extend_from_slice(b"<strls>");
-        buf.extend_from_slice(b"</strls>");
+    #[test]
+    fn test_validate_read_haven_dta_119() {
+        // DATA-51: release 119 stores <K> in 4 bytes.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta119_haven.dta")).unwrap();
+        assert_matches_haven(&case, "dta119_haven", &df);
+    }
 
-        // Value labels
-        buf.extend_from_slice(b"<value_labels>");
-        buf.extend_from_slice(b"</value_labels>");
+    #[test]
+    fn test_validate_read_haven_dta_119_big_endian() {
+        // DATA-51: an MSF 119 file; read as u16, its <K> would be 0.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta119_msf.dta")).unwrap();
+        assert_matches_haven(&case, "dta119_msf", &df);
+    }
 
-        buf.extend_from_slice(b"</stata_dta>");
+    #[test]
+    fn test_stata_119_k_is_four_bytes() {
+        // DATA-51: byte 72 is the third byte of release 119's u32 <K>: K = 6 + 65536 = 65542,
+        // which does not fit the sections (a u16 read sees K = 6 and then misreads the header).
+        let mut b = fixture_bytes("dta119_haven.dta");
+        b[72] = 1;
+        assert_invalid(load(b), "<K> = 65542 variables do not fit");
+    }
 
-        // Fill map - offsets[1] must point BEFORE <K>
-        let offsets: [u64; 14] = [
-            0,
-            before_k_offset,
-            var_types_offset,
-            0,
-            0,
-            data_offset,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            buf.len() as u64,
-        ];
-        let mut offset_buf = Vec::new();
-        for offset in &offsets {
-            offset_buf.extend_from_slice(&offset.to_le_bytes());
+    #[test]
+    fn test_validate_read_haven_dta_118_storage_types() {
+        // byte, int, long, float, double at their valid extremes (100, 32740, 2147483620,
+        // 1.7014117331926443e38 = 0x7EFFFFFF, 8.9884656743115785e307 = 0x7FDFFFFFFFFFFFFF are
+        // values; ., .a, .b, .c, .z, .y are null).
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta118_types.dta")).unwrap();
+        assert_matches_haven(&case, "dta118_types", &df);
+        let dtypes: Vec<DataType> = df.get_columns().iter().map(|c| c.dtype().clone()).collect();
+        assert_eq!(
+            dtypes,
+            [
+                DataType::Int64,
+                DataType::Int64,
+                DataType::Int64,
+                DataType::Float64,
+                DataType::Float64
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validate_dataloader_loads_dta_fixture() {
+        // The path `p2a data load` and MCP load_dataset take.
+        let case = Case::load("data_readers_values");
+        let ds = crate::data::DataLoader::load(fixture_path("dta118_haven.dta")).unwrap();
+        assert_eq!(ds.name(), Some("dta118_haven"));
+        assert_matches_haven(&case, "dta118_haven", ds.df());
+    }
+
+    // ---- refusals ----
+
+    #[test]
+    fn test_validate_stata_k0_n_positive_is_error() {
+        // DATA-73: with <K> = 0 the N guard never ran and the row loop spun N times. ReadStat
+        // refuses the same patched bytes (case values guard__dta_k0_n3, guard__dta_k0_n2p40 = -1).
+        // N = 2^40 comes last: before the fix it spins (debug builds), N = 3 fails first.
+        let case = Case::load("data_readers_values");
+        assert_eq!(case.scalar("guard__dta_k0_n3"), -1.0);
+        assert_eq!(case.scalar("guard__dta_k0_n2p40"), -1.0);
+        for n in [3u64, 0, 1 << 40] {
+            let mut b = fixture_bytes("dta118_haven.dta");
+            put(&mut b, K118, &0u16.to_le_bytes());
+            put(&mut b, N118, &n.to_le_bytes());
+            assert_invalid(
+                load(b),
+                &format!("no variables (<K> = 0) and {n} observations"),
+            );
         }
-        buf[offset_pos..offset_pos + 112].copy_from_slice(&offset_buf);
+    }
 
-        let cursor = Cursor::new(buf);
-        let reader = StataReader::new(cursor).expect("Failed to create reader");
-        let df = reader
-            .read_to_dataframe()
-            .expect("Failed to read dataframe");
+    #[test]
+    fn test_stata_column_buffers_respect_the_allocation_ceiling() {
+        // G3: 6 variables x 6 rows x 24 bytes = 864 bytes of column buffers, refused under a
+        // 64-byte per-allocation ceiling instead of allocated.
+        let e = crate::resource::with_alloc_ceiling(Some(64), || {
+            load_stata(fixture_path("dta118_haven.dta")).unwrap_err()
+        });
+        match e {
+            StataError::ParseError(m) => {
+                assert!(
+                    m.contains("Stata columns") && m.contains("per-allocation limit"),
+                    "{m}"
+                )
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+        assert!(load_stata(fixture_path("dta118_haven.dta")).is_ok()); // ceiling restored
+    }
 
-        let col = df.column("val").unwrap().f64().unwrap();
-        assert_eq!(col.get(0), Some(42.0));
-        assert_eq!(col.get(1), None); // Missing value should be null
+    #[test]
+    fn test_stata_cell_check_covers_every_declared_row() {
+        // The buffers start at 2^20 rows at most, and the rest grows in the read. 1.5 x 2^20 rows
+        // of 6 cells need 226 MiB: above this ceiling, while the first 2^20 rows' 151 MiB are not.
+        let mut b = fixture_bytes("dta118_haven.dta");
+        let n = 3u64 << 19;
+        let end = b.len() + n as usize * 57;
+        b.resize(end, 0);
+        put(&mut b, N118, &n.to_le_bytes());
+        put(&mut b, MAP118 + 8 * 10, &(end as u64).to_le_bytes()); // <strls>, after the rows
+        let e = crate::resource::with_alloc_ceiling(Some(160 << 20), || load(b).unwrap_err());
+        match e {
+            StataError::ParseError(m) => assert!(m.contains("Stata columns"), "{m}"),
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_read_dta_trailing_blanks() {
+        // ReadStat strips a str# value's trailing blanks and keeps its leading ones. `sw` is a
+        // str26, 23 bytes into the 57-byte row; the case patches the same cells of the same file.
+        let case = Case::load("data_readers_values");
+        let mut b = fixture_bytes("dta118_haven.dta");
+        let data = u64::from_le_bytes(b[MAP118 + 72..MAP118 + 80].try_into().unwrap()) as usize + 6;
+        for (i, cell) in [&b"x  "[..], b"  y ", b"   "].iter().enumerate() {
+            let at = data + 57 * i + 23;
+            b[at..at + 26].fill(0);
+            put(&mut b, at, cell);
+        }
+        let df = load(b).unwrap();
+        let got: Vec<&str> = df
+            .column("sw")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(got, case.names("dta118_blanks__sw"));
+        assert_eq!(got[..3], ["x", "  y", ""]);
+    }
+
+    #[test]
+    fn test_stata_map_and_header_guards() {
+        // DATA-22: each <map> offset is checked against the file and against the tag found there;
+        // the T0 observation guard is bounded by the <data> section.
+        let len = fixture_bytes("dta118_haven.dta").len() as u64;
+        let mut b = fixture_bytes("dta118_haven.dta");
+        put(&mut b, MAP118 + 8 * 9, &(len + 100).to_le_bytes());
+        assert_invalid(
+            load(b),
+            "<map> places <data> at byte 4837, past the end of the 4737-byte file",
+        );
+        let mut b = fixture_bytes("dta118_haven.dta");
+        put(&mut b, MAP118 + 8 * 2, &282u64.to_le_bytes()); // <variable_types> is at 281
+        assert_invalid(load(b), "expected <variable_types> at byte 282");
+        let mut b = fixture_bytes("dta118_haven.dta");
+        put(&mut b, N118, &1_000_000u64.to_le_bytes());
+        assert_invalid(
+            load(b),
+            "declared observation count 1000000 exceeds what the file can hold (6 rows of 57 \
+             bytes in a 349-byte <data> section)",
+        );
+        let mut b = fixture_bytes("dta118_haven.dta");
+        put(&mut b, K118, &60_000u16.to_le_bytes());
+        assert_invalid(load(b), "<K> = 60000 variables do not fit");
+    }
+
+    #[test]
+    fn test_stata_pre_117_formats_are_unsupported() {
+        // Formats 102-116 are binary (byte 0 the format, byte 1 the byte order); releases after
+        // 119 are not read either.
+        assert!(matches!(
+            load(vec![114, 2, 1, 0, 0, 0, 0, 0]),
+            Err(StataError::UnsupportedVersion(114))
+        ));
+        let mut b = fixture_bytes("dta118_haven.dta");
+        b[28..31].copy_from_slice(b"120");
+        assert!(matches!(load(b), Err(StataError::UnsupportedVersion(120))));
+        // Three digits that do not fit the error's u8, and text that is not a release at all.
+        let mut b = fixture_bytes("dta118_haven.dta");
+        b[28..31].copy_from_slice(b"300");
+        assert_invalid(
+            load(b),
+            "release 300 is not supported (117, 118 and 119 are)",
+        );
+        let mut b = fixture_bytes("dta118_haven.dta");
+        b[28..31].copy_from_slice(b"+12");
+        assert_invalid(load(b), "release \"+12\" is not a number");
     }
 }

@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "data_read_dta",
+      "name": "Stata .dta reader (releases 117, 118, 119; LSF and MSF)",
+      "category": "data",
+      "reference": "haven::read_dta (haven 2.5.5, ReadStat) on haven-written, Stata-written and byte-level-transformed fixtures; ReadStat's refusals of the patched copies",
+      "doc": "validation/data/readers.md",
+      "cases": [
+        "data_readers_values"
+      ],
+      "tests": [
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_118",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_118_stata_written",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_117",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_117_windows_1252",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_119",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_118_storage_types",
+        "p2a-core::data::stata::tests::test_validate_read_dta_trailing_blanks",
+        "p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture",
+        "p2a-core::data::stata::tests::test_validate_stata_k0_n_positive_is_error"
+      ],
+      "quantities": [
+        "shape",
+        "column names and order",
+        "numeric values of byte/int/long/float/double (missing codes null)",
+        "text values (UTF-8; release 117 Windows-1252; trailing blanks stripped)",
+        "refusals: <K> = 0, map offsets, observation bound, releases"
+      ],
+      "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
+      "deviations": [
+        {
+          "finding": "DATA-51",
+          "quantity": "release-117 text, default decoding",
+          "note": "convention (re-scope rule 3): p2a decodes release-117 text as UTF-8 when the bytes are valid UTF-8, else as Windows-1252; haven::read_dta(encoding = NULL) reads every release-117 file as Windows-1252, so haven's own UTF-8 117 files show mojibake there; the pins call read_dta with the encoding that gives the intended text (dta117_haven: UTF-8, dta117_latin1: windows-1252)"
+        },
+        {
+          "finding": "DATA-50",
+          "quantity": "dtype of byte, int and long",
+          "note": "convention (re-scope rule 3): loaded as Int64; haven::read_dta returns doubles; compared after a cast to f64"
+        },
+        {
+          "finding": "DATA-50",
+          "quantity": "tagged missing values .a-.z",
+          "note": "loaded as plain null; haven keeps the tag (haven::na_tag)"
+        },
+        {
+          "finding": "DATA-74",
+          "quantity": "strL contents",
+          "note": "not decoded (Tier 4): cells hold the placeholder \"<strL>\" with a warning; no fixture holds a strL"
+        },
+        {
+          "finding": "DATA-75",
+          "quantity": "value labels and display formats",
+          "note": "not read (Tier 4): haven returns labelled vectors and format attributes, p2a the codes"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "data_read_sas7bdat",
+      "name": "SAS .sas7bdat reader (32/64-bit, both byte orders, uncompressed, RLE, RDC)",
+      "category": "data",
+      "reference": "haven::read_sas (haven 2.5.5, ReadStat) on haven-written, SAS-written and byte-level-transformed fixtures; ReadStat's reads and refusals of the patched copies; RLE/RDC command tables of ReadStat (hand-built decoder tests)",
+      "doc": "validation/data/readers.md",
+      "cases": [
+        "data_readers_values"
+      ],
+      "tests": [
+        "p2a-core::data::sas::tests::test_validate_data_readers_manifest_lists_every_fixture",
+        "p2a-core::data::sas::tests::test_validate_sas_unknown_column_type_is_error",
+        "p2a-core::data::sas::tests::test_validate_sas_column_names_from_the_column_text",
+        "p2a-core::data::sas::tests::test_validate_sas_stops_at_row_count_for_character_only_files",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit_pad",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics_big_endian",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_windows_1252",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_encoding_codes",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_32_bit",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rle",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rle_wide",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rle_32_bit",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rdc",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rdc_32_bit",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_masked_page_types",
+        "p2a-core::data::sas::tests::test_validate_sas_unknown_page_type_is_error",
+        "p2a-core::data::sas::tests::test_validate_sas_missing_rows_are_an_error",
+        "p2a-core::data::sas::tests::test_validate_dataloader_loads_sas7bdat_fixture"
+      ],
+      "quantities": [
+        "shape",
+        "column names and order",
+        "numeric values (widths 3-8, both byte orders; NaN null)",
+        "text values by encoding byte (20, 28, 29, 0/62/204)",
+        "RLE and RDC rows",
+        "page types 0x0000/0x0400/0x4000, 0x0100, 0x0200/0x0280, 0x9000",
+        "refusals: layout fields, unknown page and column types, missing rows, compression"
+      ],
+      "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
+      "deviations": [
+        {
+          "finding": "DATA-50",
+          "quantity": "text under encoding codes other than 0, 20, 28, 29, 62 and 204",
+          "note": "convention (re-scope rule 3): ASCII text is read and non-ASCII text is refused naming the code; ReadStat converts these codes with iconv (e.g. 64), so haven returns text where p2a returns an error (readers.md, encoding table)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
