@@ -34,7 +34,7 @@
 //! The algorithm uses Bayesian backfitting with Gibbs sampling:
 //!
 //! 1. For j = 1,...,m: Draw (T_j, M_j) given all other trees and sigma
-//!    - Use Metropolis-Hastings with grow/prune/change proposals for tree structure
+//!    - Use Metropolis-Hastings with grow/prune proposals for tree structure
 //!    - Draw leaf values from conjugate normal posterior
 //!
 //! 2. Draw sigma^2 from its conditional inverse-gamma posterior
@@ -43,14 +43,14 @@
 //!
 //! - Chipman, H. A., George, E. I., & McCulloch, R. E. (2010). BART: Bayesian
 //!   Additive Regression Trees. *Annals of Applied Statistics*, 4(1), 266-298.
-//!   https://doi.org/10.1214/09-AOAS285
+//!   <https://doi.org/10.1214/09-AOAS285>
 //!
 //! - R package `BART`: Sparapani, R., Spanbauer, C., & McCulloch, R. (2021).
 //!   *Nonparametric Machine Learning and Efficient Computation with Bayesian
 //!   Additive Regression Trees: The BART R Package*. JSS, 97(1).
-//!   https://CRAN.R-project.org/package=BART
+//!   <https://CRAN.R-project.org/package=BART>
 //!
-//! R equivalent: `BART::wbart()`, `BART::pbart()`, `BART::lbart()`
+//! R equivalent: `BART::wbart()` (regression), `BART::pbart()` (classification)
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
+use crate::stats::robust::percentile_interval;
+use crate::traits::estimator::normal_quantile;
 
 // ============================================================================
 // Configuration
@@ -144,7 +146,8 @@ pub struct BartConfig {
     /// Confidence level for prediction intervals. Default: 0.95.
     pub confidence_level: f64,
 
-    /// Whether to perform classification (probit BART). Default: false.
+    /// Probit BART as `BART::pbart`: y coded 0/1, Albert-Chib latent draws, leaf prior SD
+    /// 3 / (k sqrt(n_trees)); predictions are posterior mean probabilities. Default: false.
     pub classification: bool,
 }
 
@@ -198,11 +201,16 @@ pub struct BartResult {
     /// Feature names (if provided).
     pub feature_names: Option<Vec<String>>,
 
-    /// Posterior mean of residual standard deviation sigma.
+    /// Posterior mean of residual standard deviation sigma (probit BART: the fixed latent SD, 1).
     pub sigma: f64,
 
     /// Posterior standard deviation of sigma.
     pub sigma_sd: f64,
+
+    /// Probit BART's qnorm(mean(y)), the constant of P(y = 1 | x) = Phi(offset + f(x)); 0 for
+    /// regression.
+    #[serde(default)]
+    pub offset: f64,
 
     /// Number of observations.
     pub n_obs: usize,
@@ -245,15 +253,25 @@ impl fmt::Display for BartResult {
         )?;
         writeln!(f)?;
 
-        writeln!(f, "RESIDUAL SD (sigma):")?;
-        writeln!(
-            f,
-            "  Posterior mean: {:.4}  (SD: {:.4})",
-            self.sigma, self.sigma_sd
-        )?;
-        writeln!(f)?;
+        if self.config.classification {
+            writeln!(
+                f,
+                "Probit BART: P(y = 1 | x) = Phi(offset + f(x)), offset = qnorm(mean y) = {:.4}, latent SD fixed at 1",
+                self.offset
+            )?;
+            writeln!(f)?;
+            writeln!(f, "PROBABILITY SUMMARY:")?;
+        } else {
+            writeln!(f, "RESIDUAL SD (sigma):")?;
+            writeln!(
+                f,
+                "  Posterior mean: {:.4}  (SD: {:.4})",
+                self.sigma, self.sigma_sd
+            )?;
+            writeln!(f)?;
 
-        writeln!(f, "PREDICTION SUMMARY:")?;
+            writeln!(f, "PREDICTION SUMMARY:")?;
+        }
         let pred_mean: f64 = self.predictions.iter().sum::<f64>() / self.predictions.len() as f64;
         let pred_min = self
             .predictions
@@ -293,7 +311,7 @@ impl fmt::Display for BartResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (rank, (i, importance)) in indexed.iter().take(10).enumerate() {
             let name = match &self.feature_names {
@@ -503,6 +521,54 @@ struct BartSampler {
     n_features: usize,
     /// Data standard deviation (for scaling)
     y_sd: f64,
+    /// Probit BART: sigma stays at 1 and the sweep's target is the latent draw
+    probit: bool,
+    /// Probit BART's qnorm(mean(y)); 0 for regression
+    offset: f64,
+}
+
+/// Deepest tail draws: each accepts with probability above 0.7, so this bound is never reached by
+/// a uniform source.
+const TAIL_MAX_REJECTIONS: usize = 10_000;
+
+/// R's pnorm. statrs' `Normal::cdf` errs near the 11th digit (pnorm(-1) comes out 1.36e-11 high):
+/// its erfc carries the single-precision offsets of its rational fits as decimal doubles
+/// (0.3440242112 for 0.34402421116828918...).
+fn std_normal_cdf(x: f64) -> f64 {
+    r_mathlib::normal_cdf(x, 0.0, 1.0, true, false)
+}
+
+/// A draw of z ~ N(mean, 1) truncated to z > 0 (`positive`) or z <= 0, by inversion, or by Robert's
+/// (1995) exponential rejection sampler when the side has probability below 1e-100.
+fn truncated_normal(
+    mean: f64,
+    positive: bool,
+    uniform: &mut dyn FnMut() -> f64,
+) -> EconResult<f64> {
+    let side = std_normal_cdf(if positive { mean } else { -mean });
+    if side >= 1e-100 {
+        let u = uniform().clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+        let q = normal_quantile((u * side).max(f64::MIN_POSITIVE))?;
+        return Ok(if positive {
+            (mean - q).max(f64::MIN_POSITIVE)
+        } else {
+            (mean + q).min(0.0)
+        });
+    }
+    // The standardised tail beyond a = -mean (positive side) or a = mean (negative side)
+    let a = if positive { -mean } else { mean };
+    let lambda = (a + (a * a + 4.0).sqrt()) / 2.0;
+    for _ in 0..TAIL_MAX_REJECTIONS {
+        let u1 = uniform().clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+        let u2 = uniform();
+        let e = a - u1.ln() / lambda;
+        if u2 <= (-(e - lambda).powi(2) / 2.0).exp() {
+            return Ok(if positive { mean + e } else { mean - e });
+        }
+    }
+    Err(EconError::Computation(format!(
+        "probit BART: no truncated normal draw for mean {mean} in {TAIL_MAX_REJECTIONS} proposals"
+    )))
 }
 
 impl BartSampler {
@@ -511,6 +577,24 @@ impl BartSampler {
         let n = y.len();
         let p = x.ncols();
         let m = config.n_trees;
+
+        if config.classification {
+            // The latent SD is 1 and the leaf prior fixed; trees start at 0 around the offset
+            let mut trees = try_with_capacity::<BartTree>(m, "BART trees")?;
+            trees.extend((0..m).map(|_| BartTree::new(0.0)));
+            return Ok(Self {
+                trees,
+                sigma: 1.0,
+                sigma_mu: 3.0 / (config.k * (m as f64).sqrt()),
+                config: config.clone(),
+                rng: config.seed.unwrap_or(42),
+                var_counts: vec![0; p],
+                n_features: p,
+                y_sd: 1.0,
+                probit: true,
+                offset: normal_quantile(y.mean().unwrap_or(0.5))?,
+            });
+        }
 
         // Compute data statistics for scaling
         let y_mean = y.mean().unwrap_or(0.0);
@@ -538,6 +622,8 @@ impl BartSampler {
             var_counts: vec![0; p],
             n_features: p,
             y_sd,
+            probit: false,
+            offset: 0.0,
         })
     }
 
@@ -593,7 +679,22 @@ impl BartSampler {
         p.ln() - (1.0 - p).ln()
     }
 
-    /// Run one MCMC iteration (one full sweep through all trees)
+    /// Probit BART's latent draw: z_i ~ N(offset + f(x_i), 1) truncated by y_i, returned as
+    /// z - offset, the sweep's backfitting target.
+    fn draw_latent(&mut self, y01: &Array1<f64>, x: ArrayView2<f64>) -> EconResult<Array1<f64>> {
+        let fit = self.predict(x);
+        let offset = self.offset;
+        let mut latent = Array1::zeros(y01.len());
+        let mut uniform = || self.random();
+        for i in 0..y01.len() {
+            let z = truncated_normal(offset + fit[i], y01[i] == 1.0, &mut uniform)?;
+            latent[i] = z - offset;
+        }
+        Ok(latent)
+    }
+
+    /// Run one MCMC iteration (one full sweep through all trees) on the backfitting target `y`: the
+    /// response for regression, the latent draw for probit BART
     fn step(&mut self, y: &Array1<f64>, x: ArrayView2<f64>) {
         let m = self.trees.len();
         let n = y.len();
@@ -616,6 +717,10 @@ impl BartSampler {
             // Update current fit
             let new_tree_fit = self.trees[j].predict(x);
             current_fit = current_fit - &tree_fit + &new_tree_fit;
+        }
+
+        if self.probit {
+            return;
         }
 
         // Update sigma
@@ -726,7 +831,7 @@ impl BartSampler {
 
         // Get values of this variable in the leaf
         let mut values: Vec<f64> = obs_in_leaf.iter().map(|&i| x[[i, var]]).collect();
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        values.sort_by(f64::total_cmp);
         values.dedup();
 
         if values.len() < 2 {
@@ -1130,6 +1235,19 @@ pub fn bart_arrays(
         });
     }
 
+    if config.classification {
+        if let Some((i, v)) = y.iter().enumerate().find(|&(_, &v)| v != 0.0 && v != 1.0) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("classification needs y coded 0/1 (row {i} is {v})"),
+            });
+        }
+        if y.iter().all(|&v| v == y[0]) {
+            return Err(EconError::InvalidSpecification {
+                message: "classification needs both classes in y".to_string(),
+            });
+        }
+    }
+
     // Convert to owned arrays
     let y_owned = y.to_owned();
     let x_owned = x.to_owned();
@@ -1144,7 +1262,12 @@ pub fn bart_arrays(
     // Burn-in
     for _ in 0..config.n_burn {
         checkpoint()?;
-        sampler.step(&y_owned, x_owned.view());
+        if config.classification {
+            let latent = sampler.draw_latent(&y_owned, x_owned.view())?;
+            sampler.step(&latent, x_owned.view());
+        } else {
+            sampler.step(&y_owned, x_owned.view());
+        }
     }
 
     // Reset variable importance counts after burn-in
@@ -1153,9 +1276,17 @@ pub fn bart_arrays(
     // Collect posterior samples
     for iter in 0..config.n_mcmc {
         checkpoint()?;
-        sampler.step(&y_owned, x_owned.view());
+        if config.classification {
+            let latent = sampler.draw_latent(&y_owned, x_owned.view())?;
+            sampler.step(&latent, x_owned.view());
+        } else {
+            sampler.step(&y_owned, x_owned.view());
+        }
 
-        let pred = sampler.predict(x_owned.view());
+        let mut pred = sampler.predict(x_owned.view());
+        if config.classification {
+            pred.mapv_inplace(|f| std_normal_cdf(sampler.offset + f));
+        }
         posterior_preds.row_mut(iter).assign(&pred);
         sigma_samples.push(sampler.sigma);
     }
@@ -1173,24 +1304,15 @@ pub fn bart_arrays(
         })
         .collect();
 
-    // Compute prediction intervals
-    let alpha = 1.0 - config.confidence_level;
-    let lower_q = (alpha / 2.0 * config.n_mcmc as f64) as usize;
-    let upper_q = ((1.0 - alpha / 2.0) * config.n_mcmc as f64) as usize;
-
+    // Prediction intervals: R's quantile(type = 7), as BART's posterior summaries are read
     let mut prediction_lower = Vec::with_capacity(n);
     let mut prediction_upper = Vec::with_capacity(n);
 
     for i in 0..n {
-        let mut col_vals: Vec<f64> = posterior_preds.column(i).to_vec();
-        col_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        prediction_lower.push(col_vals.get(lower_q).copied().unwrap_or(col_vals[0]));
-        prediction_upper.push(
-            col_vals
-                .get(upper_q.min(col_vals.len() - 1))
-                .copied()
-                .unwrap_or(*col_vals.last().unwrap()),
-        );
+        let col_vals: Vec<f64> = posterior_preds.column(i).to_vec();
+        let (lower, upper) = percentile_interval(&col_vals, config.confidence_level)?;
+        prediction_lower.push(lower);
+        prediction_upper.push(upper);
     }
 
     // Sigma posterior summaries
@@ -1216,13 +1338,14 @@ pub fn bart_arrays(
         feature_names,
         sigma,
         sigma_sd,
+        offset: sampler.offset,
         n_obs: n,
         n_features: p,
         n_trees: config.n_trees,
         n_samples: config.n_mcmc,
         config: config.clone(),
         posterior_samples: Some(posterior_preds),
-        sigma_samples: Some(sigma_samples),
+        sigma_samples: (!config.classification).then_some(sigma_samples),
     })
 }
 
@@ -1283,6 +1406,177 @@ mod tests {
         let t = CancelToken::new();
         t.cancel();
         Budget::new(None, t)
+    }
+
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    fn case_matrix(ds: &Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&Array1::from_vec(v));
+        }
+        m
+    }
+    fn case_vector(ds: &Dataset, col: &str) -> Array1<f64> {
+        Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    #[test]
+    fn test_validate_bart_probit_single_leaf_posterior() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_probit_single_leaf");
+        let x = case_matrix(&ds, &["x1"]);
+        let y = case_vector(&ds, "y");
+        let c = BartConfig {
+            classification: true,
+            n_trees: 1,
+            max_depth: 0,
+            n_burn: 200,
+            n_mcmc: 4000,
+            k: 2.0,
+            seed: Some(46),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        assert!(
+            r.predictions
+                .iter()
+                .all(|&p| (p - r.predictions[0]).abs() < 1e-15)
+        ); // the tree never splits
+        assert_eq!((r.sigma, r.sigma_sd), (1.0, 0.0));
+        // Monte Carlo tolerance: 200 R replications of this chain have SD 0.001745 (mean) and 0.001045 (SD); 5 SD each.
+        Check::new(&case)
+            .scalar("offset", r.offset, Tol::coef(40))
+            .scalar("post_mean_p", r.predictions[0], Tol::new(0.0, 0.009))
+            .scalar("post_sd_p", r.prediction_sd[0], Tol::new(0.0, 0.006))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_bart_probit_tracks_glm_probit() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_probit_glm");
+        let x = case_matrix(&ds, &["x1", "x2", "x3"]);
+        let y = case_vector(&ds, "y");
+        let p_glm = case.vector("glm_prob");
+        let c = BartConfig {
+            classification: true,
+            n_trees: 50,
+            n_burn: 200,
+            n_mcmc: 300,
+            seed: Some(46),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        assert_eq!(r.sigma, 1.0);
+        for i in 0..r.n_obs {
+            assert!(
+                0.0 < r.prediction_lower[i]
+                    && r.prediction_lower[i] <= r.predictions[i]
+                    && r.predictions[i] <= r.prediction_upper[i]
+                    && r.prediction_upper[i] < 1.0,
+                "row {i}"
+            );
+        }
+        let n = p_glm.len() as f64;
+        let mad = r
+            .predictions
+            .iter()
+            .zip(&p_glm)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / n;
+        let (ma, mb) = (
+            r.predictions.iter().sum::<f64>() / n,
+            p_glm.iter().sum::<f64>() / n,
+        );
+        let cov: f64 = r
+            .predictions
+            .iter()
+            .zip(&p_glm)
+            .map(|(a, b)| (a - ma) * (b - mb))
+            .sum();
+        let sa = r
+            .predictions
+            .iter()
+            .map(|a| (a - ma).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let sb = p_glm.iter().map(|b| (b - mb).powi(2)).sum::<f64>().sqrt();
+        // A seeded property: six emulated chains on these data give mad 0.0436-0.0591, cor 0.943-0.975.
+        assert!(mad < 0.085, "mean |p_bart - p_glm| = {mad}");
+        assert!(cov / (sa * sb) > 0.90, "cor = {}", cov / (sa * sb));
+    }
+
+    #[test]
+    fn test_truncated_normal_draws_stay_on_their_side() {
+        let mut half = || 0.5;
+        // -qnorm(0.25)
+        assert!(
+            (truncated_normal(0.0, true, &mut half).unwrap() - 0.6744897501960817).abs() < 1e-12
+        );
+        // 1 + qnorm(pnorm(-1) / 2)
+        let z = truncated_normal(1.0, false, &mut half).unwrap();
+        assert!((z - (-0.4096087092934544)).abs() < 1e-12, "{z}");
+        let mut s = 9u64;
+        let mut u = move || (crate::ml::lcg_random(&mut s) % 1_000_000 + 1) as f64 / 1_000_002.0;
+        for mean in [-35.0, -3.0, 0.0, 2.0, 40.0] {
+            for _ in 0..200 {
+                let zp = truncated_normal(mean, true, &mut u).unwrap();
+                let zn = truncated_normal(mean, false, &mut u).unwrap();
+                assert!(zp > 0.0 && zp.is_finite(), "mean {mean}: {zp}");
+                assert!(zn <= 0.0 && zn.is_finite(), "mean {mean}: {zn}");
+            }
+        }
+        // the tail branch (Robert 1995): E[z | z > 0] for z ~ N(-35, 1) = -35 + phi(35) / Phi(-35)
+        let tail: Vec<f64> = (0..2000)
+            .map(|_| truncated_normal(-35.0, true, &mut u).unwrap())
+            .collect();
+        let m = tail.iter().sum::<f64>() / 2000.0;
+        assert!((m - 0.028524970596052412).abs() < 0.0035, "{m}"); // 5 SE: conditional SD 0.0285, 2000 draws
+    }
+
+    #[test]
+    fn bart_probit_rejects_non_binary_and_single_class() {
+        let (y, x) = generate_test_data(40, 2);
+        let mut c = tiny();
+        c.classification = true;
+        let e = bart_arrays(y.view(), x.view(), None, c.clone()).unwrap_err();
+        assert!(e.to_string().contains("coded 0/1"), "{e}");
+        let ones = Array1::from_elem(40, 1.0);
+        let e = bart_arrays(ones.view(), x.view(), None, c).unwrap_err();
+        assert!(e.to_string().contains("both classes"), "{e}");
+    }
+
+    #[test]
+    fn test_bart_probit_display_names_the_model() {
+        let (y, x) = generate_test_data(40, 2);
+        let y01 = y.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
+        let mut c = tiny();
+        c.classification = true;
+        let r = bart_arrays(y01.view(), x.view(), None, c).unwrap();
+        let text = r.to_string();
+        assert!(text.contains("Probit BART: P(y = 1 | x)") && text.contains("PROBABILITY SUMMARY"));
+        assert!(!text.contains("RESIDUAL SD"), "{text}");
+        assert!(r.sigma_samples.is_none());
+    }
+
+    #[test]
+    fn bart_intervals_are_type7_percentiles() {
+        let (y, x) = generate_test_data(60, 5);
+        let mut c = tiny();
+        c.n_mcmc = 37; // a draw count where floor-index and type-7 rules differ
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let draws = r.posterior_samples.as_ref().unwrap();
+        for i in 0..r.n_obs {
+            let col = draws.column(i).to_vec();
+            let (lo, hi) = crate::stats::robust::percentile_interval(&col, 0.95).unwrap();
+            assert_eq!(
+                (r.prediction_lower[i], r.prediction_upper[i]),
+                (lo, hi),
+                "row {i}"
+            );
+        }
     }
 
     fn tiny() -> BartConfig {

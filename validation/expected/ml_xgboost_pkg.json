@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "ml_xgboost_pkg",
+  "area": "ml/xgboost",
+  "method": "XGBoost exact trees with and without L1 against the xgboost package",
+  "reference": "xgboost::xgb.train(tree_method = 'exact'): the package itself, in single precision, a cross-check of ml_xgboost_l1's exact trees; p2a's histogram trees bin differently and are not compared",
+  "call": "reg:squarederror, tree_method = 'exact', base_score = mean(y), eta = 0.3, lambda = 1, alpha in {0, 3}, gamma = 0, min_child_weight = 1, max_depth = 2, nrounds = 3",
+  "dataset": "validation/datasets/generated/xgb_small.csv",
+  "datasets": ["validation/datasets/generated/xgb_small.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "xgboost": "3.2.1.1"
+  },
+  "values": {
+    "a0_pred": [0.80626153945922852, 1.3374239206314087, 2.0638427734375, 0.80626153945922852, 0.80626153945922852, 1.3374239206314087, 0.80626153945922852, 0.80626153945922852, 1.0271604061126709, 0.80626153945922852, 0.80626153945922852, 0.80626153945922852, 0.80626153945922852, 1.3374239206314087, 0.80626153945922852, 1.3374239206314087],
+    "a0_root": [1, -0.69823050499999995, 1.8465347299999999],
+    "a3_pred": [1.0073446035385132, 1.1585615873336792, 1.1585615873336792, 1.0073446035385132, 1.0073446035385132, 1.1585615873336792, 1.0073446035385132, 1.0073446035385132, 1.1585615873336792, 1.0298962593078613, 1.0073446035385132, 1.1585615873336792, 1.0073446035385132, 1.1585615873336792, 1.0073446035385132, 1.1585615873336792],
+    "a3_root": [0, 0.58617901800000005, 0.1070429905]
+  }
+}

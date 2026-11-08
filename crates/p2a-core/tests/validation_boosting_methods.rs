@@ -1,10 +1,9 @@
-//! Validation tests for XGBoost, LightGBM, MBoost, and BART implementations.
+//! DGP-recovery checks for XGBoost, LightGBM, mboost and BART.
 //!
-//! These tests verify:
-//! 1. Accuracy: R² > 0.80 on synthetic regression data
-//! 2. Feature importance: x1 (coef=2) ranked higher than x2 (coef=0.5)
-//! 3. Classification accuracy: > 80% on separable data
-//! 4. Performance: Timing information for comparison
+//! None of these tests compares with R: each recovers a simulated DGP (an R-squared or accuracy
+//! bound, the stronger coefficient ranked first). The tests compared with R or with published
+//! algorithms are in the modules `ml::{adaboost, xgboost, xgboost_fast, mboost, bart}` and in the
+//! GBM module.
 
 use ndarray::{Array1, Array2};
 use p2a_core::ml::{
@@ -14,7 +13,6 @@ use p2a_core::ml::{
 };
 use rand::prelude::*;
 use rand_distr::{Distribution, Normal};
-use std::time::Instant;
 
 /// Create synthetic regression data: y = 2*x1 + 0.5*x2 + noise
 fn create_regression_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
@@ -74,15 +72,6 @@ fn compute_r2(y_true: &Array1<f64>, y_pred: &[f64]) -> f64 {
     1.0 - ss_res / ss_tot
 }
 
-fn compute_mse(y_true: &Array1<f64>, y_pred: &[f64]) -> f64 {
-    y_true
-        .iter()
-        .zip(y_pred.iter())
-        .map(|(&yt, &yp)| (yt - yp).powi(2))
-        .sum::<f64>()
-        / y_true.len() as f64
-}
-
 fn compute_accuracy(y_true: &Array1<f64>, y_pred: &[f64], threshold: f64) -> f64 {
     let correct: usize = y_true
         .iter()
@@ -96,7 +85,7 @@ fn compute_accuracy(y_true: &Array1<f64>, y_pred: &[f64], threshold: f64) -> f64
 }
 
 #[test]
-fn test_validate_xgboost_regression() {
+fn xgboost_regression_recovers_dgp() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = XGBoostConfig {
@@ -113,21 +102,9 @@ fn test_validate_xgboost_regression() {
         ..Default::default()
     };
 
-    let start = Instant::now();
     let result = xgboost(x.view(), y.view(), &config).unwrap();
-    let elapsed = start.elapsed();
 
     let r2 = compute_r2(&y, &result.predictions);
-    let mse = compute_mse(&y, &result.predictions);
-
-    println!("XGBoost Regression Results:");
-    println!("  MSE: {:.6}", mse);
-    println!("  R²:  {:.4}", r2);
-    println!("  Time: {:.4}s", elapsed.as_secs_f64());
-    println!(
-        "  Feature Importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.feature_importances[0], result.feature_importances[1], result.feature_importances[2]
-    );
 
     // Validation criteria
     assert!(r2 > 0.80, "XGBoost R² should be > 0.80, got {:.4}", r2);
@@ -138,7 +115,7 @@ fn test_validate_xgboost_regression() {
 }
 
 #[test]
-fn test_validate_xgboost_classification() {
+fn xgboost_classification_recovers_dgp() {
     let (x, y) = create_classification_data(200, 42);
 
     let config = XGBoostConfig {
@@ -150,15 +127,9 @@ fn test_validate_xgboost_classification() {
         ..Default::default()
     };
 
-    let start = Instant::now();
     let result = xgboost(x.view(), y.view(), &config).unwrap();
-    let elapsed = start.elapsed();
 
     let accuracy = compute_accuracy(&y, &result.predictions, 0.5);
-
-    println!("XGBoost Classification Results:");
-    println!("  Accuracy: {:.4}", accuracy);
-    println!("  Time: {:.4}s", elapsed.as_secs_f64());
 
     assert!(
         accuracy > 0.75,
@@ -168,7 +139,7 @@ fn test_validate_xgboost_classification() {
 }
 
 #[test]
-fn test_validate_lightgbm_regression() {
+fn lightgbm_regression_recovers_dgp() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = LightGbmConfig {
@@ -185,21 +156,9 @@ fn test_validate_lightgbm_regression() {
         ..Default::default()
     };
 
-    let start = Instant::now();
     let result = lightgbm(x.view(), y.view(), &config).unwrap();
-    let elapsed = start.elapsed();
 
     let r2 = compute_r2(&y, &result.predictions);
-    let mse = compute_mse(&y, &result.predictions);
-
-    println!("LightGBM Regression Results:");
-    println!("  MSE: {:.6}", mse);
-    println!("  R²:  {:.4}", r2);
-    println!("  Time: {:.4}s", elapsed.as_secs_f64());
-    println!(
-        "  Feature Importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.feature_importances[0], result.feature_importances[1], result.feature_importances[2]
-    );
 
     assert!(r2 > 0.70, "LightGBM R² should be > 0.70, got {:.4}", r2);
     assert!(
@@ -209,7 +168,7 @@ fn test_validate_lightgbm_regression() {
 }
 
 #[test]
-fn test_validate_mboost_regression() {
+fn mboost_tree_regression_recovers_dgp() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = MboostConfig {
@@ -222,27 +181,15 @@ fn test_validate_mboost_regression() {
         ..Default::default()
     };
 
-    let start = Instant::now();
     let result = mboost(x.view(), y.view(), &config).unwrap();
-    let elapsed = start.elapsed();
 
     let r2 = compute_r2(&y, &result.predictions);
-    let mse = compute_mse(&y, &result.predictions);
-
-    println!("MBoost Regression Results (Tree):");
-    println!("  MSE: {:.6}", mse);
-    println!("  R²:  {:.4}", r2);
-    println!("  Time: {:.4}s", elapsed.as_secs_f64());
-    println!(
-        "  Variable Importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
-    );
 
     assert!(r2 > 0.75, "MBoost R² should be > 0.75, got {:.4}", r2);
 }
 
 #[test]
-fn test_validate_mboost_linear() {
+fn mboost_linear_selects_the_signal() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = MboostConfig {
@@ -254,19 +201,7 @@ fn test_validate_mboost_linear() {
         ..Default::default()
     };
 
-    let start = Instant::now();
     let result = mboost(x.view(), y.view(), &config).unwrap();
-    let elapsed = start.elapsed();
-
-    let r2 = compute_r2(&y, &result.predictions);
-
-    println!("MBoost Linear Results:");
-    println!("  R²:  {:.4}", r2);
-    println!("  Time: {:.4}s", elapsed.as_secs_f64());
-    println!(
-        "  Variable Importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
-    );
 
     // Linear base learner should identify x1 as most important
     assert!(
@@ -276,7 +211,7 @@ fn test_validate_mboost_linear() {
 }
 
 #[test]
-fn test_validate_bart_regression() {
+fn bart_regression_recovers_dgp() {
     let (x, y) = create_regression_data(100, 42);
 
     let config = BartConfig {
@@ -288,44 +223,18 @@ fn test_validate_bart_regression() {
         ..Default::default()
     };
 
-    let start = Instant::now();
     let result = bart_arrays(y.view(), x.view(), None, config).unwrap();
-    let elapsed = start.elapsed();
 
     let r2 = compute_r2(&y, &result.predictions);
-    let mse = compute_mse(&y, &result.predictions);
-
-    println!("BART Regression Results:");
-    println!("  MSE: {:.6}", mse);
-    println!("  R²:  {:.4}", r2);
-    println!("  Time: {:.4}s", elapsed.as_secs_f64());
-    println!("  Sigma (posterior mean): {:.4}", result.sigma);
-    println!(
-        "  Variable importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
-    );
-
-    // Check prediction intervals
-    let mut in_interval = 0;
-    for i in 0..y.len() {
-        if y[i] >= result.prediction_lower[i] && y[i] <= result.prediction_upper[i] {
-            in_interval += 1;
-        }
-    }
-    let coverage = in_interval as f64 / y.len() as f64;
-    println!("  95% CI Coverage: {:.1}%", coverage * 100.0);
 
     assert!(r2 > 0.50, "BART R² should be > 0.50, got {:.4}", r2);
 }
 
 #[test]
-fn test_benchmark_all_methods() {
-    println!("\n====== BOOSTING METHODS BENCHMARK ======\n");
-
+fn boosting_methods_recover_dgp() {
     let (x, y) = create_regression_data(500, 42);
 
     // XGBoost
-    let start = Instant::now();
     let xgb_result = xgboost(
         x.view(),
         y.view(),
@@ -336,11 +245,9 @@ fn test_benchmark_all_methods() {
         },
     )
     .unwrap();
-    let xgb_time = start.elapsed();
     let xgb_r2 = compute_r2(&y, &xgb_result.predictions);
 
     // LightGBM
-    let start = Instant::now();
     let lgb_result = lightgbm(
         x.view(),
         y.view(),
@@ -351,11 +258,9 @@ fn test_benchmark_all_methods() {
         },
     )
     .unwrap();
-    let lgb_time = start.elapsed();
     let lgb_r2 = compute_r2(&y, &lgb_result.predictions);
 
     // MBoost
-    let start = Instant::now();
     let mb_result = mboost(
         x.view(),
         y.view(),
@@ -366,12 +271,10 @@ fn test_benchmark_all_methods() {
         },
     )
     .unwrap();
-    let mb_time = start.elapsed();
     let mb_r2 = compute_r2(&y, &mb_result.predictions);
 
     // BART (smaller for speed)
     let (x_small, y_small) = create_regression_data(100, 42);
-    let start = Instant::now();
     let bart_result = bart_arrays(
         y_small.view(),
         x_small.view(),
@@ -385,32 +288,7 @@ fn test_benchmark_all_methods() {
         },
     )
     .unwrap();
-    let bart_time = start.elapsed();
     let bart_r2 = compute_r2(&y_small, &bart_result.predictions);
-
-    println!("Method        | R²      | Time (ms) | Notes");
-    println!("--------------|---------|-----------|------");
-    println!(
-        "XGBoost       | {:.4}  | {:>7.2}  | n=500, 100 trees",
-        xgb_r2,
-        xgb_time.as_secs_f64() * 1000.0
-    );
-    println!(
-        "LightGBM      | {:.4}  | {:>7.2}  | n=500, 100 trees",
-        lgb_r2,
-        lgb_time.as_secs_f64() * 1000.0
-    );
-    println!(
-        "MBoost        | {:.4}  | {:>7.2}  | n=500, 100 iters",
-        mb_r2,
-        mb_time.as_secs_f64() * 1000.0
-    );
-    println!(
-        "BART          | {:.4}  | {:>7.2}  | n=100, 30 trees (MCMC)",
-        bart_r2,
-        bart_time.as_secs_f64() * 1000.0
-    );
-    println!();
 
     // All should achieve reasonable R²
     assert!(xgb_r2 > 0.80, "XGBoost R² too low");

@@ -9,7 +9,8 @@
 //! - **Second-order optimization**: Uses both gradient (g) and hessian (h) for tree construction
 //! - **Regularized objective**: Includes gamma (split penalty) and lambda (L2 weight penalty)
 //! - **Optimal leaf weights**: Analytically computed as w* = -G / (H + lambda)
-//! - **Split gain formula**: Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G+H)^2/(H+lambda)] - gamma
+//! - **Split gain formula**: Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G+H)^2/(H+lambda)] - gamma,
+//!   with G replaced by ThresholdL1(G, alpha) when alpha > 0 (XGBoost CalcGain)
 //!
 //! ## Example
 //!
@@ -36,8 +37,8 @@
 //! ## References
 //!
 //! - Chen, T., & Guestrin, C. (2016). "XGBoost: A Scalable Tree Boosting System".
-//!   Proceedings of the 22nd ACM SIGKDD, 785-794. https://doi.org/10.1145/2939672.2939785
-//! - XGBoost Documentation: https://xgboost.readthedocs.io/en/stable/tutorials/model.html
+//!   Proceedings of the 22nd ACM SIGKDD, 785-794. <https://doi.org/10.1145/2939672.2939785>
+//! - XGBoost Documentation: <https://xgboost.readthedocs.io/en/stable/tutorials/model.html>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -111,9 +112,11 @@ pub struct XGBoostConfig {
     pub min_child_weight: f64,
     /// Fraction of samples to use for each tree (subsample)
     pub subsample: f64,
-    /// Fraction of features to use for each tree (colsample_bytree)
+    /// Fraction of columns sampled once per tree (colsample_bytree): ceil(fraction * p), at least 1
     pub colsample_bytree: f64,
-    /// Fraction of features to use for each split (colsample_bylevel)
+    /// Fraction of the tree's columns sampled once per depth level, shared by every node at that
+    /// level (XGBoost colsample_bylevel): ceil(fraction * columns), at least 1 (XGBoost uses
+    /// floor, at least 1)
     pub colsample_bylevel: f64,
     /// Objective function
     pub objective: XGBoostObjective,
@@ -263,10 +266,18 @@ impl std::fmt::Display for XGBoostResult {
         writeln!(f, "Learning rate: {:.4}", self.config.learning_rate)?;
         writeln!(f, "Max depth: {}", self.config.max_depth)?;
         writeln!(f, "Lambda (L2): {:.4}", self.config.lambda)?;
+        writeln!(f, "Alpha (L1): {:.4}", self.config.alpha)?;
         writeln!(f, "Gamma (min split gain): {:.4}", self.config.gamma)?;
 
         if self.config.subsample < 1.0 {
             writeln!(f, "Subsample: {:.2}", self.config.subsample)?;
+        }
+        if self.config.colsample_bylevel < 1.0 {
+            writeln!(
+                f,
+                "Colsample by level: {:.2}",
+                self.config.colsample_bylevel
+            )?;
         }
         if self.config.colsample_bytree < 1.0 {
             writeln!(f, "Colsample by tree: {:.2}", self.config.colsample_bytree)?;
@@ -304,7 +315,7 @@ impl std::fmt::Display for XGBoostResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -431,30 +442,48 @@ fn compute_base_score(y: &ArrayView1<f64>, objective: XGBoostObjective) -> f64 {
     }
 }
 
+/// Refuse a non-finite cell of the features or the target, naming it. Shared by the tree
+/// boosters of this module family, whose sorts need NaN-free data.
+pub(super) fn check_finite_xy(x: ArrayView2<f64>, y: ArrayView1<f64>) -> EconResult<()> {
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    if let Some((i, v)) = y.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y must contain only finite values (row {i} is {v})"),
+        });
+    }
+    Ok(())
+}
+
+/// XGBoost's ThresholdL1: the sum of gradients soft-thresholded by alpha.
+#[inline]
+fn threshold_l1(g: f64, alpha: f64) -> f64 {
+    if g > alpha {
+        g - alpha
+    } else if g < -alpha {
+        g + alpha
+    } else {
+        0.0
+    }
+}
+
 /// Optimal leaf weight with L1 and L2 regularization.
-/// w* = -G / (H + lambda) with L1 soft thresholding
-/// Reference: Chen & Guestrin (2016), Equation 5
+/// w* = -ThresholdL1(G, alpha) / (H + lambda)
+/// Reference: Chen & Guestrin (2016), Equation 5; XGBoost CalcWeight
 #[inline]
 fn optimal_weight(g_sum: f64, h_sum: f64, lambda: f64, alpha: f64) -> f64 {
     if h_sum < 1e-10 {
         return 0.0;
     }
-
-    // L1 soft thresholding
-    let g_thresh = if g_sum > alpha {
-        g_sum - alpha
-    } else if g_sum < -alpha {
-        g_sum + alpha
-    } else {
-        return 0.0;
-    };
-
-    -g_thresh / (h_sum + lambda)
+    -threshold_l1(g_sum, alpha) / (h_sum + lambda)
 }
 
-/// Compute split gain.
-/// Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G_L+G_R)^2/(H_L+H_R+lambda)] - gamma
-/// Reference: Chen & Guestrin (2016), Equation 7
+/// Compute split gain on the thresholded sums, T = ThresholdL1(., alpha).
+/// Gain = 0.5 * [T(G_L)^2/(H_L+lambda) + T(G_R)^2/(H_R+lambda) - T(G_L+G_R)^2/(H_L+H_R+lambda)] - gamma
+/// Reference: Chen & Guestrin (2016), Equation 7; XGBoost CalcGain
 #[inline]
 fn split_gain(
     g_left: f64,
@@ -462,29 +491,51 @@ fn split_gain(
     g_right: f64,
     h_right: f64,
     lambda: f64,
+    alpha: f64,
     gamma: f64,
 ) -> f64 {
-    let score_left = if h_left > 0.0 {
-        g_left * g_left / (h_left + lambda)
-    } else {
-        0.0
-    };
-    let score_right = if h_right > 0.0 {
-        g_right * g_right / (h_right + lambda)
-    } else {
-        0.0
-    };
-    let score_parent = {
-        let g_total = g_left + g_right;
-        let h_total = h_left + h_right;
-        if h_total > 0.0 {
-            g_total * g_total / (h_total + lambda)
+    let score = |g: f64, h: f64| {
+        if h > 0.0 {
+            let t = threshold_l1(g, alpha);
+            t * t / (h + lambda)
         } else {
             0.0
         }
     };
+    0.5 * (score(g_left, h_left) + score(g_right, h_right)
+        - score(g_left + g_right, h_left + h_right))
+        - gamma
+}
 
-    0.5 * (score_left + score_right - score_parent) - gamma
+/// `split_gain` at alpha = 0, where ThresholdL1 is the identity on finite sums: the same
+/// arithmetic without the three soft-thresholds per candidate.
+#[inline]
+fn split_gain_l2(
+    g_left: f64,
+    h_left: f64,
+    g_right: f64,
+    h_right: f64,
+    lambda: f64,
+    gamma: f64,
+) -> f64 {
+    let score = |g: f64, h: f64| if h > 0.0 { g * g / (h + lambda) } else { 0.0 };
+    0.5 * (score(g_left, h_left) + score(g_right, h_right)
+        - score(g_left + g_right, h_left + h_right))
+        - gamma
+}
+
+/// `f64::total_cmp`'s order as an integer key: sorting by it is sorting by `total_cmp`, one
+/// integer comparison per step instead of two bit transforms.
+#[inline]
+fn total_order_key(v: f64) -> i64 {
+    let b = v.to_bits() as i64;
+    b ^ (((b >> 63) as u64) >> 1) as i64
+}
+
+/// Inverse of `total_order_key` (the transform is its own inverse).
+#[inline]
+fn from_total_order_key(k: i64) -> f64 {
+    f64::from_bits((k ^ (((k >> 63) as u64) >> 1) as i64) as u64)
 }
 
 /// Build an XGBoost tree using exact greedy algorithm.
@@ -494,6 +545,8 @@ fn build_tree(
     h: &ArrayView1<f64>,
     indices: &[usize],
     feature_indices: &[usize],
+    levels: &mut LevelColumns,
+    rng_state: &mut u64,
     config: &XGBoostConfig,
     depth: usize,
 ) -> XGBoostNode {
@@ -524,11 +577,19 @@ fn build_tree(
     let mut best_split: Option<(usize, f64)> = None;
     let mut best_left_indices = Vec::new();
     let mut best_right_indices = Vec::new();
+    let l1 = config.alpha != 0.0;
 
-    for &feature in feature_indices {
-        // Sort indices by feature value
-        let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
-        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for &feature in levels.columns(depth, feature_indices, rng_state) {
+        // Sort indices by feature value (stable, total_cmp order, via integer keys)
+        let mut keyed: Vec<(i64, usize)> = indices
+            .iter()
+            .map(|&i| (total_order_key(x[[i, feature]]), i))
+            .collect();
+        keyed.sort_by_key(|p| p.0);
+        let sorted: Vec<(f64, usize)> = keyed
+            .into_iter()
+            .map(|(k, i)| (from_total_order_key(k), i))
+            .collect();
 
         // Scan with incremental sums - O(n) after sorting
         let mut g_left = 0.0;
@@ -553,14 +614,26 @@ fn build_tree(
                 continue;
             }
 
-            let gain = split_gain(
-                g_left,
-                h_left,
-                g_right,
-                h_right,
-                config.lambda,
-                config.gamma,
-            );
+            let gain = if l1 {
+                split_gain(
+                    g_left,
+                    h_left,
+                    g_right,
+                    h_right,
+                    config.lambda,
+                    config.alpha,
+                    config.gamma,
+                )
+            } else {
+                split_gain_l2(
+                    g_left,
+                    h_left,
+                    g_right,
+                    h_right,
+                    config.lambda,
+                    config.gamma,
+                )
+            };
 
             if gain > best_gain {
                 best_gain = gain;
@@ -592,6 +665,8 @@ fn build_tree(
         h,
         &best_left_indices,
         feature_indices,
+        levels,
+        rng_state,
         config,
         depth + 1,
     );
@@ -601,6 +676,8 @@ fn build_tree(
         h,
         &best_right_indices,
         feature_indices,
+        levels,
+        rng_state,
         config,
         depth + 1,
     );
@@ -636,22 +713,61 @@ fn random_subsample(n: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize> 
     indices
 }
 
-/// Select a random subset of feature indices.
-fn random_features(n_features: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize> {
+/// A random subset of `base` of ceil(fraction * len) entries, at least 1 (all of it, with no
+/// draw, when fraction >= 1).
+fn random_subset(base: &[usize], fraction: f64, rng_state: &mut u64) -> Vec<usize> {
     if fraction >= 1.0 {
-        return (0..n_features).collect();
+        return base.to_vec();
     }
 
-    let n_select = ((n_features as f64) * fraction).ceil() as usize;
-    let mut indices: Vec<usize> = (0..n_features).collect();
+    let n = base.len();
+    let n_select = (((n as f64) * fraction).ceil() as usize).clamp(1, n);
+    let mut indices = base.to_vec();
 
-    for i in 0..n_select.min(n_features) {
-        let j = i + lcg_random(rng_state) % (n_features - i);
+    for i in 0..n_select {
+        let j = i + lcg_random(rng_state) % (n - i);
         indices.swap(i, j);
     }
 
     indices.truncate(n_select);
     indices
+}
+
+/// Select a random subset of feature indices.
+fn random_features(n_features: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize> {
+    random_subset(&(0..n_features).collect::<Vec<_>>(), fraction, rng_state)
+}
+
+/// The columns of one tree's depth levels: each level's subset is drawn from the tree's columns
+/// the first time a node at that depth is split, and reused by every other node at that depth.
+struct LevelColumns {
+    fraction: f64,
+    sets: Vec<Vec<usize>>,
+}
+
+impl LevelColumns {
+    fn new(fraction: f64) -> Self {
+        Self {
+            fraction,
+            sets: Vec::new(),
+        }
+    }
+
+    fn columns<'a>(
+        &'a mut self,
+        depth: usize,
+        tree_columns: &'a [usize],
+        rng_state: &mut u64,
+    ) -> &'a [usize] {
+        if self.fraction >= 1.0 {
+            return tree_columns;
+        }
+        while self.sets.len() <= depth {
+            self.sets
+                .push(random_subset(tree_columns, self.fraction, rng_state));
+        }
+        &self.sets[depth]
+    }
 }
 
 /// Fit an XGBoost model.
@@ -688,6 +804,24 @@ pub fn xgboost(
             "X and y must have same number of samples".to_string(),
         ));
     }
+
+    if !(config.colsample_bylevel > 0.0 && config.colsample_bylevel <= 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "colsample_bylevel must be in (0, 1] (got {})",
+                config.colsample_bylevel
+            ),
+        });
+    }
+    if !config.alpha.is_finite() || config.alpha < 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "alpha must be finite and non-negative (got {})",
+                config.alpha
+            ),
+        });
+    }
+    check_finite_xy(x, y)?;
 
     // Validate binary targets for classification
     if config.objective == XGBoostObjective::BinaryLogistic {
@@ -737,6 +871,8 @@ pub fn xgboost(
             &h.view(),
             &sample_indices,
             &feature_indices,
+            &mut LevelColumns::new(config.colsample_bylevel),
+            &mut rng_state,
             config,
             0,
         );
@@ -906,7 +1042,103 @@ pub fn run_xgboost_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
     use ndarray::array;
+    use p2a_validation::{Check, Tol};
+
+    fn case_matrix(ds: &crate::data::Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&Array1::from_vec(v));
+        }
+        m
+    }
+    fn case_vector(ds: &crate::data::Dataset, col: &str) -> Array1<f64> {
+        Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    fn four_signal_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut u = || (lcg_random(&mut s) % 100_000) as f64 / 100_000.0;
+        let x = Array2::from_shape_fn((n, 4), |_| u());
+        let noise: Vec<f64> = (0..n).map(|_| 0.1 * (u() - 0.5)).collect();
+        let y = Array1::from_shape_fn(n, |i| x.row(i).sum() + noise[i]);
+        (x, y)
+    }
+    fn features_by_depth(
+        node: &XGBoostNode,
+        depth: usize,
+        out: &mut Vec<std::collections::BTreeSet<usize>>,
+    ) {
+        if let XGBoostNode::Split {
+            feature,
+            left,
+            right,
+            ..
+        } = node
+        {
+            if out.len() <= depth {
+                out.resize_with(depth + 1, Default::default);
+            }
+            out[depth].insert(*feature);
+            features_by_depth(left, depth + 1, out);
+            features_by_depth(right, depth + 1, out);
+        }
+    }
+    fn bylevel_fit(fraction: f64) -> XGBoostResult {
+        let (x, y) = four_signal_data(200, 13);
+        let mut c = XGBoostConfig::default();
+        c.n_estimators = 20;
+        c.max_depth = 3;
+        c.learning_rate = 0.3;
+        c.colsample_bylevel = fraction;
+        c.seed = Some(7);
+        xgboost(x.view(), y.view(), &c).unwrap()
+    }
+
+    #[test]
+    fn test_colsample_bylevel_one_feature_per_level() {
+        // ceil(0.25 * 4) = 1 column per level: every split at one depth of one tree uses the same column
+        let r = bylevel_fit(0.25);
+        let mut roots = std::collections::BTreeSet::new();
+        for t in &r.trees {
+            let mut levels = Vec::new();
+            features_by_depth(&t.root, 0, &mut levels);
+            assert!(levels.iter().all(|s| s.len() <= 1), "{levels:?}");
+            roots.extend(levels.first().into_iter().flatten().copied());
+        }
+        assert!(
+            roots.len() >= 2,
+            "the level draws vary across trees: {roots:?}"
+        );
+        // not vacuous: without per-level sampling some depth mixes columns
+        let full = bylevel_fit(1.0);
+        assert!(full.trees.iter().any(|t| {
+            let mut l = Vec::new();
+            features_by_depth(&t.root, 0, &mut l);
+            l.iter().any(|s| s.len() >= 2)
+        }));
+    }
+
+    #[test]
+    fn test_colsample_bylevel_changes_the_fit() {
+        assert_ne!(bylevel_fit(1.0).predictions, bylevel_fit(0.25).predictions);
+    }
+
+    #[test]
+    fn test_xgboost_rejects_bad_colsample_bylevel() {
+        let (x, y) = four_signal_data(20, 1);
+        for v in [0.0, -0.5, 1.5, f64::NAN] {
+            let mut c = XGBoostConfig::default();
+            c.colsample_bylevel = v;
+            let e = xgboost(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with("colsample_bylevel")),
+                "{e}"
+            );
+        }
+    }
 
     #[test]
     fn test_xgboost_regression_basic() {
@@ -991,49 +1223,177 @@ mod tests {
 
     #[test]
     fn test_xgboost_regularization() {
-        // Test that regularization actually affects the model
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0],
-            [9.0],
-            [10.0]
+        // y = x = 1..10, base 5.5, one depth-1 round, eta 0.3. The best split is x <= 5.5 for every
+        // setting below (score k(10 - k)/2 per side); G_L = 12.5 over 5 rows, G_R = -12.5.
+        let x = Array2::from_shape_fn((10, 1), |(i, _)| (i + 1) as f64);
+        let y = Array1::from_shape_fn(10, |i| (i + 1) as f64);
+        for (lambda, alpha, gamma, w) in [
+            (0.0, 0.0, 0.0, 2.5),          // 12.5 / 5
+            (10.0, 0.0, 1.0, 12.5 / 15.0), // 12.5 / (5 + 10); gain 0.5 * 20.83 - 1 > 0
+            (0.0, 10.0, 0.0, 0.5),         // ThresholdL1(12.5, 10) / 5
+        ] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 1;
+            c.max_depth = 1;
+            c.learning_rate = 0.3;
+            c.lambda = lambda;
+            c.alpha = alpha;
+            c.gamma = gamma;
+            c.min_child_weight = 0.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            for i in 0..10 {
+                let want = if i < 5 { 5.5 - 0.3 * w } else { 5.5 + 0.3 * w };
+                assert!(
+                    (r.predictions[i] - want).abs() < 1e-12,
+                    "lambda {lambda} alpha {alpha}: {} vs {want}",
+                    r.predictions[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_xgboost_exact_l1() {
+        let (case, ds) = crate::test_support::load_case("ml_xgboost_l1");
+        let x = case_matrix(&ds, &["x1", "x2"]);
+        let y = case_vector(&ds, "y");
+        let mut chk = Check::new(&case);
+        for (alpha, pred, root) in [
+            (0.0, "exact_a0_pred", "exact_a0_root"),
+            (3.0, "exact_a3_pred", "exact_a3_root"),
+        ] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 3;
+            c.max_depth = 2;
+            c.learning_rate = 0.3;
+            c.lambda = 1.0;
+            c.alpha = alpha;
+            c.gamma = 0.0;
+            c.min_child_weight = 1.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            let XGBoostNode::Split {
+                feature,
+                threshold,
+                gain,
+                ..
+            } = &r.trees[0].root
+            else {
+                panic!("root is a leaf")
+            };
+            chk.vector(pred, &r.predictions, Tol::coef(16)).vector(
+                root,
+                &[*feature as f64, *threshold, *gain],
+                Tol::coef(16),
+            );
+        }
+        chk.finish();
+    }
+
+    /// The xgboost package itself, in single precision, hence the absolute tolerance.
+    #[test]
+    fn test_validate_xgboost_exact_package() {
+        let (case, ds) = crate::test_support::load_case("ml_xgboost_pkg");
+        let x = case_matrix(&ds, &["x1", "x2"]);
+        let y = case_vector(&ds, "y");
+        let single_precision = Tol::new(0.0, 1e-6);
+        let mut chk = Check::new(&case);
+        for (alpha, pred, root) in [(0.0, "a0_pred", "a0_root"), (3.0, "a3_pred", "a3_root")] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 3;
+            c.max_depth = 2;
+            c.learning_rate = 0.3;
+            c.lambda = 1.0;
+            c.alpha = alpha;
+            c.gamma = 0.0;
+            c.min_child_weight = 1.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            let XGBoostNode::Split {
+                feature,
+                threshold,
+                gain,
+                ..
+            } = &r.trees[0].root
+            else {
+                panic!("root is a leaf")
+            };
+            chk.vector(pred, &r.predictions, single_precision).vector(
+                root,
+                &[*feature as f64, *threshold, *gain],
+                single_precision,
+            );
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_split_gain_on_thresholded_sums() {
+        // 0.5 * [T(GL)^2/(HL+l) + T(GR)^2/(HR+l) - T(G)^2/(H+l)] - gamma, T = ThresholdL1(., alpha)
+        // The terms are near 21 (half an ulp is 1.8e-15 each), so a gain of 4/3 carries about
+        // 1e-15 of rounding (measured 1.1e-15): 1e-14 is a few ulps of the terms.
+        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.0) - 4.0 / 3.0).abs() < 1e-14);
+        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 1.0, 0.0) - 7.0 / 30.0).abs() < 1e-14);
+        assert!((split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0, 0.0) - (-5.0 / 3.0)).abs() < 1e-14);
+        assert!(
+            (split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.5) - (4.0 / 3.0 - 0.5)).abs() < 1e-14
+        );
+    }
+
+    #[test]
+    fn split_gain_l2_is_split_gain_at_alpha_zero_bitwise() {
+        let gs = [
+            0.0, -0.0, 1.0, -1.0, 3.7, -8.25, 1e-300, -1e-300, 5e-324, 1e150, -1e150, 0.1, -0.3,
         ];
-        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let hs = [0.0, 1e-12, 0.5, 2.0, 17.3, 1e200];
+        for &gl in &gs {
+            for &gr in &gs {
+                for &hl in &hs {
+                    for &hr in &hs {
+                        for (lambda, gamma) in [(0.0, 0.0), (1.0, 0.0), (0.7, 0.25)] {
+                            let a = split_gain(gl, hl, gr, hr, lambda, 0.0, gamma);
+                            let b = split_gain_l2(gl, hl, gr, hr, lambda, gamma);
+                            assert!(
+                                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                                "{gl} {hl} {gr} {hr} {lambda} {gamma}: {a} vs {b}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-        // No regularization
-        let config_noreg = XGBoostConfig {
-            n_estimators: 20,
-            learning_rate: 0.3,
-            max_depth: 3,
-            lambda: 0.0,
-            gamma: 0.0,
-            ..Default::default()
-        };
-
-        // Strong regularization
-        let config_reg = XGBoostConfig {
-            n_estimators: 20,
-            learning_rate: 0.3,
-            max_depth: 3,
-            lambda: 10.0,
-            gamma: 1.0,
-            ..Default::default()
-        };
-
-        let result_noreg = xgboost(x.view(), y.view(), &config_noreg).unwrap();
-        let result_reg = xgboost(x.view(), y.view(), &config_reg).unwrap();
-
-        // Regularized model should have higher training error (less overfitting)
-        // This is expected behavior - regularization trades training accuracy for generalization
-        // Note: With only 10 samples, both models may fit well, so we just check they run
-        assert!(result_noreg.final_train_rmse >= 0.0);
-        assert!(result_reg.final_train_rmse >= 0.0);
+    #[test]
+    fn total_order_key_sorts_as_total_cmp() {
+        let vals = [
+            3.0,
+            -0.0,
+            0.0,
+            -1.5,
+            f64::INFINITY,
+            5e-324,
+            -5e-324,
+            f64::NEG_INFINITY,
+            0.0,
+            2.0,
+            -0.0,
+            -1.5,
+            f64::MAX,
+            f64::MIN,
+            1e-310,
+        ];
+        let mut by_cmp: Vec<(f64, usize)> = vals.iter().copied().zip(0..).collect();
+        by_cmp.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut keyed: Vec<(i64, usize)> =
+            vals.iter().map(|&v| total_order_key(v)).zip(0..).collect();
+        keyed.sort_by_key(|p| p.0);
+        let by_key: Vec<(f64, usize)> = keyed
+            .into_iter()
+            .map(|(k, i)| (from_total_order_key(k), i))
+            .collect();
+        assert_eq!(by_cmp.len(), by_key.len());
+        for (a, b) in by_cmp.iter().zip(&by_key) {
+            assert_eq!((a.0.to_bits(), a.1), (b.0.to_bits(), b.1));
+        }
     }
 
     #[test]
@@ -1184,14 +1544,14 @@ mod tests {
     fn test_split_gain() {
         // Test the split gain calculation
         // Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G+H)^2/(H+lambda)] - gamma
-        let gain = split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0);
+        let gain = split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0, 0.0);
         // Left: (-5)^2 / (2+1) = 25/3
         // Right: (-5)^2 / (2+1) = 25/3
         // Parent: (-10)^2 / (4+1) = 100/5 = 20
         // Gain = 0.5 * (25/3 + 25/3 - 20) - 0 = 0.5 * (50/3 - 20) = 0.5 * (-10/3) < 0
 
         // A good split should have positive gain
-        let good_gain = split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0);
+        let good_gain = split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.0);
         // This represents a split where one side has much stronger gradient
         // Should have positive gain
         assert!(good_gain > 0.0, "Good split should have positive gain");

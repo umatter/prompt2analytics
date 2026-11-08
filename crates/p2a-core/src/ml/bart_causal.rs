@@ -53,24 +53,24 @@
 //!
 //! - Hill, J. L. (2011). Bayesian Nonparametric Modeling for Causal Inference.
 //!   *Journal of Computational and Graphical Statistics*, 20(1), 217-240.
-//!   https://doi.org/10.1198/jcgs.2010.08162
+//!   <https://doi.org/10.1198/jcgs.2010.08162>
 //!
 //! - Chipman, H. A., George, E. I., & McCulloch, R. E. (2010). BART: Bayesian
 //!   Additive Regression Trees. *Annals of Applied Statistics*, 4(1), 266-298.
-//!   https://doi.org/10.1214/09-AOAS285
+//!   <https://doi.org/10.1214/09-AOAS285>
 //!
 //! - Hahn, P. R., Murray, J. S., & Carvalho, C. M. (2020). Bayesian Regression
 //!   Tree Models for Causal Inference: Regularization, Confounding, and
 //!   Heterogeneous Effects. *Bayesian Analysis*, 15(3), 965-1056.
-//!   https://doi.org/10.1214/19-BA1195
+//!   <https://doi.org/10.1214/19-BA1195>
 //!
 //! - Kunzel, S. R., Sekhon, J. S., Bickel, P. J., & Yu, B. (2019). Metalearners
 //!   for Estimating Heterogeneous Treatment Effects using Machine Learning.
 //!   *Proceedings of the National Academy of Sciences*, 116(10), 4156-4165.
-//!   https://doi.org/10.1073/pnas.1804597116
+//!   <https://doi.org/10.1073/pnas.1804597116>
 //!
 //! - R package `bartCause`: Dorie, V. (2020). *bartCause: Causal Inference
-//!   using BART*. https://CRAN.R-project.org/package=bartCause
+//!   using BART*. <https://CRAN.R-project.org/package=bartCause>
 //!
 //! R equivalent: `bartCause::bartc()`
 
@@ -83,6 +83,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
+use crate::stats::robust::{QuantileType, percentile_interval, quantile_sorted};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Configuration for BART-based causal inference.
@@ -429,14 +430,14 @@ impl fmt::Display for BartCausalResult {
         writeln!(f, "CATE DISTRIBUTION:")?;
         if !self.cate.is_empty() {
             let mut sorted = self.cate.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = sorted.len();
+            sorted.sort_by(f64::total_cmp);
+            let q = |p: f64| quantile_sorted(&sorted, p, QuantileType::T7);
             writeln!(f, "  Min:    {:.4}", sorted.first().unwrap_or(&0.0))?;
-            writeln!(f, "  10%:    {:.4}", sorted[n / 10])?;
-            writeln!(f, "  25%:    {:.4}", sorted[n / 4])?;
-            writeln!(f, "  Median: {:.4}", sorted[n / 2])?;
-            writeln!(f, "  75%:    {:.4}", sorted[3 * n / 4])?;
-            writeln!(f, "  90%:    {:.4}", sorted[9 * n / 10])?;
+            writeln!(f, "  10%:    {:.4}", q(0.10))?;
+            writeln!(f, "  25%:    {:.4}", q(0.25))?;
+            writeln!(f, "  Median: {:.4}", q(0.50))?;
+            writeln!(f, "  75%:    {:.4}", q(0.75))?;
+            writeln!(f, "  90%:    {:.4}", q(0.90))?;
             writeln!(f, "  Max:    {:.4}", sorted.last().unwrap_or(&0.0))?;
         }
         writeln!(f)?;
@@ -1111,7 +1112,7 @@ pub fn bart_causal_arrays(
 
     // Confidence interval for ATE (percentile method)
     let alpha = 1.0 - config.confidence_level;
-    let (ate_ci_lower, ate_ci_upper) = percentile_ci(&ate_bootstrap, alpha);
+    let (ate_ci_lower, ate_ci_upper) = percentile_ci(&ate_bootstrap, alpha)?;
 
     // Compute CATE confidence intervals
     let mut cate_lower = Vec::with_capacity(n);
@@ -1121,7 +1122,7 @@ pub fn bart_causal_arrays(
     for i in 0..n {
         let obs_bootstrap: Vec<f64> = cate_draws.slice(s![..n_draws, i]).to_vec();
         let se = bootstrap_se(&obs_bootstrap);
-        let (ci_low, ci_high) = percentile_ci(&obs_bootstrap, alpha);
+        let (ci_low, ci_high) = percentile_ci(&obs_bootstrap, alpha)?;
         cate_lower.push(ci_low);
         cate_upper.push(ci_high);
         cate_se_vec.push(se);
@@ -1138,7 +1139,7 @@ pub fn bart_causal_arrays(
         .enumerate()
         .map(|(i, name)| (name.clone(), avg_importance[i]))
         .collect();
-    variable_importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    variable_importance.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     Ok(BartCausalResult {
         ate,
@@ -1476,26 +1477,13 @@ fn bootstrap_se(samples: &[f64]) -> f64 {
     variance.sqrt()
 }
 
-/// Compute percentile confidence interval.
-fn percentile_ci(samples: &[f64], alpha: f64) -> (f64, f64) {
-    if samples.is_empty() {
-        return (f64::NAN, f64::NAN);
+/// Percentile interval of the draws: R's quantile(type = 7); NaN with no draws or a NaN draw.
+/// Any other error (the level, the sort buffer's allocation, a cancelled budget) is returned.
+fn percentile_ci(samples: &[f64], alpha: f64) -> EconResult<(f64, f64)> {
+    if samples.is_empty() || samples.iter().any(|v| v.is_nan()) {
+        return Ok((f64::NAN, f64::NAN));
     }
-
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n = sorted.len();
-    let lower_idx = ((alpha / 2.0) * n as f64).floor() as usize;
-    let upper_idx = ((1.0 - alpha / 2.0) * n as f64).ceil() as usize;
-
-    let lower = sorted.get(lower_idx).copied().unwrap_or(sorted[0]);
-    let upper = sorted
-        .get(upper_idx.min(n - 1))
-        .copied()
-        .unwrap_or(sorted[n - 1]);
-
-    (lower, upper)
+    percentile_interval(samples, 1.0 - alpha)
 }
 
 // ============================================================================
@@ -2090,15 +2078,14 @@ mod tests {
     /// Golden (characterization) test: captured on the code before the
     /// sweep and the pre-allocated draw matrix, on a continuous outcome and
     /// without the propensity ensemble, so no SSE tie breaks differently; it
-    /// passes before and after.
+    /// passes before and after. The interval bounds are not part of it: their
+    /// rule changed to R's type-7 quantile on purpose.
     #[test]
     fn bart_causal_outputs_unchanged_by_the_sweep() {
-        const GOLDEN: [u64; 5] = [
+        const GOLDEN: [u64; 3] = [
             4611755592916943784,
             4598325582365110606,
             4611869894934495320,
-            4611929815967930294,
-            4611545322639029136,
         ];
         let (y, w, x) = generate_test_data(80, 42);
         let cfg = BartCausalConfig {
@@ -2109,13 +2096,7 @@ mod tests {
             ..Default::default()
         };
         let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
-        let got = [
-            r.ate,
-            r.ate_se,
-            r.cate[0],
-            r.cate_lower[0],
-            r.cate_upper[79],
-        ];
+        let got = [r.ate, r.ate_se, r.cate[0]];
         let bits = got.map(f64::to_bits);
         assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
     }
@@ -2320,11 +2301,18 @@ mod tests {
     #[test]
     fn test_percentile_ci() {
         let samples: Vec<f64> = (0..100).map(|i| i as f64).collect();
-        let (lower, upper) = percentile_ci(&samples, 0.05);
+        let (lower, upper) = percentile_ci(&samples, 0.05).unwrap();
 
-        // 95% CI should be approximately [2.5, 97.5]
-        assert!((lower - 2.0).abs() < 3.0);
-        assert!((upper - 97.0).abs() < 3.0);
+        // R: quantile(0:99, c(0.025, 0.975)) = 2.475, 96.525 (type 7)
+        assert!(
+            (lower - 2.475).abs() < 1e-12 && (upper - 96.525).abs() < 1e-12,
+            "{lower} {upper}"
+        );
+        assert!(percentile_ci(&[], 0.05).unwrap().0.is_nan());
+        assert!(percentile_ci(&[1.0, f64::NAN], 0.05).unwrap().1.is_nan());
+        // the sort buffer goes through the allocation ceiling: its error is not an interval
+        let err = with_alloc_ceiling(Some(64), || percentile_ci(&samples, 0.05)).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
     }
 
     #[test]

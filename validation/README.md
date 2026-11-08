@@ -105,7 +105,7 @@ looks like a validation failure but is not one.
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
-  randomForest, purrr, gbm, dplyr, tidyr.
+  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -118,7 +118,7 @@ looks like a validation failure but is not one.
                      "CBPS", "etwfe", "marginaleffects", "mclust", "mixtools", "flexmix",
                      "apcluster", "e1071", "changepoint", "spatialreg",
                      "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr",
-                     "gbm", "dplyr", "tidyr"))
+                     "gbm", "dplyr", "tidyr", "mboost", "xgboost"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -416,6 +416,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
 | CART (rpart: complexity table, V-fold cross-validation, prune, importance) | [cart.md](ml/cart.md) | R-pinned, known deviations (ML-125) |
 | Impurity importance of random forest, GBM and quantile forest (gbm::relative.influence, randomForest::importance) | [tree_importance.md](ml/tree_importance.md) | R-pinned |
+| AdaBoost (M1 and SAMME written out with rpart learners; R2's first learner) | [adaboost.md](ml/adaboost.md) | R-pinned |
+| XGBoost exact trees (xgboost::xgb.train; the L1 rule written out); histogram trees | [xgboost.md](ml/xgboost.md) | R-pinned |
+| Component-wise boosting (mboost::mboost with bols; four families); the tree learner is not R-pinned | [mboost.md](ml/mboost.md) | R-pinned |
+| BART (probit: quadrature posterior and glm property, no BART-package pin; regression sampler unpinned) | [bart.md](ml/bart.md) | R-pinned, known deviations (ML-16) |
 
 ### Statistical Methods
 | Method | File | Status |

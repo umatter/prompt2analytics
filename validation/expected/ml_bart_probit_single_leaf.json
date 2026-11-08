@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "ml_bart_probit_single_leaf",
+  "area": "ml/bart",
+  "method": "Probit BART with unsplittable trees: exact posterior of Phi(offset + f)",
+  "reference": "BART::pbart model (Chipman, George & McCulloch 2010, sec. 4; Albert & Chib 1993): y = 1{z > 0}, z ~ N(binaryOffset + f, 1), binaryOffset = qnorm(mean(y)), leaf prior N(0, (3 / (k sqrt(m)))^2); with unsplittable trees f ~ N(0, 9 / k^2); posterior by stats::integrate (rel.tol 1e-13); BART is not a case dependency",
+  "call": "k = 2; posterior mean and sd of pnorm(qnorm(mean(y)) + f) under p(f | y)",
+  "dataset": "validation/datasets/generated/bart_probit_small.csv",
+  "datasets": ["validation/datasets/generated/bart_probit_small.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "offset": -0.38532046640756762,
+    "post_mean_p": 0.35154258835820318,
+    "post_sd_p": 0.073548564193444327,
+    "prior_sd_f": 1.5
+  }
+}

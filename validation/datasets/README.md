@@ -268,6 +268,11 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cart_ties.csv` | 30 × 3 (cls, x, z) | `cart_class_ties` | `r/cases/ml_cart_cp.R` | seed 20261110 |
 | `generated/cart_xor.csv` | 40 × 3 (y, x0, x1) | `cart_prune_xor` | `r/cases/ml_cart_cp.R` | seed 20261111 |
 | `generated/tree_importance.csv` | 200 × 4 (y, x0, x1, x2) | `tree_importance_rpart`, `gbm_stump_influence`, `rf_importance_purity` | `r/cases/ml_tree_importance.R` | seed 20261109 |
+| `generated/adaboost_sim.csv` | 120 × 6 (x1, x2, x3, y3, yb, yr) | `ml_adaboost_samme` | `r/cases/ml_boosting_t3.R` | seed 46 |
+| `generated/xgb_small.csv` | 16 × 3 (x1, x2, y) | `ml_xgboost_l1`; read by `ml_xgboost_pkg` | `r/cases/ml_boosting_t3.R` | seed 4637 |
+| `generated/mboost_sim.csv` | 200 × 6 (x1, x2, x3, yg, yb, yc) | `ml_mboost_bols`; read by `ml_mboost_pkg` | `r/cases/ml_boosting_t3.R` | seed 4636 |
+| `generated/bart_probit_small.csv` | 40 × 2 (x1, y) | `ml_bart_probit_single_leaf` | `r/cases/ml_boosting_t3.R` | seed 4639 |
+| `generated/bart_probit_sim.csv` | 300 × 4 (x1, x2, x3, y) | `ml_bart_probit_glm` | `r/cases/ml_boosting_t3.R` | seed 4640 |
 
 ## Adding a dataset
 

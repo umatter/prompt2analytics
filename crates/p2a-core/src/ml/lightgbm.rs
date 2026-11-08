@@ -36,7 +36,7 @@
 //!
 //! - Ke, G., et al. (2017). "LightGBM: A Highly Efficient Gradient Boosting Decision Tree".
 //!   Advances in Neural Information Processing Systems 30 (NIPS 2017).
-//! - LightGBM Documentation: https://lightgbm.readthedocs.io/
+//! - LightGBM Documentation: <https://lightgbm.readthedocs.io/>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -229,7 +229,7 @@ impl std::fmt::Display for LightGbmResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -272,7 +272,7 @@ impl FeatureBins {
     fn from_data(values: &[f64], max_bins: usize) -> Self {
         // Get unique sorted values
         let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.total_cmp(b));
         sorted.dedup();
 
         if sorted.len() <= 1 {
@@ -316,10 +316,7 @@ impl FeatureBins {
     #[inline]
     fn get_bin(&self, value: f64) -> usize {
         // Binary search for the right bin
-        match self
-            .boundaries
-            .binary_search_by(|b| b.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal))
-        {
+        match self.boundaries.binary_search_by(|b| b.total_cmp(&value)) {
             Ok(i) => i + 1, // Value equals boundary, goes to right bin
             Err(i) => i,    // Value between boundaries[i-1] and boundaries[i]
         }
@@ -391,9 +388,7 @@ impl PartialOrd for LeafInfo {
 impl Ord for LeafInfo {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Max-heap by gain
-        self.gain
-            .partial_cmp(&other.gain)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        self.gain.total_cmp(&other.gain)
     }
 }
 
@@ -518,13 +513,12 @@ fn compute_gradients_hessians(
             // Huber loss
             for i in 0..n {
                 let r = y[i] - predictions[i];
-                if r.abs() <= huber_delta {
-                    gradients[i] = -r;
-                    hessians[i] = 1.0;
+                gradients[i] = if r.abs() <= huber_delta {
+                    -r
                 } else {
-                    gradients[i] = -huber_delta * r.signum();
-                    hessians[i] = 0.0; // Or small constant
-                }
+                    -huber_delta * r.signum()
+                };
+                hessians[i] = 1.0; // LightGBM RegressionHuberLoss: hessian 1
             }
         }
         LightGbmObjective::Binary => {
@@ -607,7 +601,7 @@ fn compute_init_prediction(y: &ArrayView1<f64>, objective: LightGbmObjective) ->
         LightGbmObjective::RegressionL1 => {
             // Median
             let mut sorted: Vec<f64> = y.iter().copied().collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let mid = sorted.len() / 2;
             if sorted.len() % 2 == 0 {
                 (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -730,6 +724,8 @@ fn find_best_split(
         let mut left_grad = 0.0;
         let mut left_hess = 0.0;
         let mut left_count = 0usize;
+        // The node's row count, summed once per feature rather than once per bin
+        let total_count: usize = hist.count.iter().sum();
 
         // Scan through bins, computing cumulative sums
         for bin in 0..num_bins - 1 {
@@ -737,7 +733,7 @@ fn find_best_split(
             left_hess += hist.hessian_sum[bin];
             left_count += hist.count[bin];
 
-            let right_count = hist.count.iter().sum::<usize>() - left_count;
+            let right_count = total_count - left_count;
 
             // Check min_data_in_leaf constraint
             if left_count < min_data_in_leaf || right_count < min_data_in_leaf {
@@ -1189,6 +1185,7 @@ pub fn lightgbm(
             "X and y must have same number of samples".to_string(),
         ));
     }
+    super::xgboost::check_finite_xy(x, y)?;
 
     // Validate binary targets for classification
     if config.objective == LightGbmObjective::Binary {
@@ -1591,35 +1588,56 @@ mod tests {
 
     #[test]
     fn test_lightgbm_huber() {
-        // Robust regression with outlier
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0],
-            [9.0],
-            [10.0]
-        ];
-        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 50.0]; // outlier at 10
+        // Robust regression with an outlier at x = 10 (y = 50). With unit hessians each leaf value is
+        // the mean clipped gradient, |leaf| <= delta, so the fit moves at most learning_rate * delta
+        // per iteration.
+        let x = Array2::from_shape_fn((10, 1), |(i, _)| (i + 1) as f64);
+        let mut y = Array1::from_shape_fn(10, |i| (i + 1) as f64);
+        y[9] = 50.0;
+        for iters in [99usize, 100, 101] {
+            let mut c = LightGbmConfig::default();
+            c.num_iterations = iters;
+            c.learning_rate = 0.1;
+            c.num_leaves = 8;
+            c.min_data_in_leaf = 1;
+            c.objective = LightGbmObjective::Huber;
+            c.huber_delta = 1.0;
+            let r = lightgbm(x.view(), y.view(), &c).unwrap();
+            assert!(
+                r.final_train_loss < r.train_loss[0],
+                "{iters}: {} vs {}",
+                r.final_train_loss,
+                r.train_loss[0]
+            );
+            assert!(
+                r.train_loss.windows(2).all(|w| w[1] <= w[0] + 1e-12),
+                "{iters}: loss rose"
+            );
+            let start = y.mean().unwrap(); // 9.5
+            for &p in &r.predictions {
+                assert!(
+                    p.is_finite() && (p - start).abs() <= 0.1 * iters as f64 + 1e-9,
+                    "{iters}: {p}"
+                );
+            }
+            assert!(
+                r.predictions[9] < 25.0,
+                "Huber bounds the outlier's pull: {}",
+                r.predictions[9]
+            );
+        }
+    }
 
-        let config = LightGbmConfig {
-            num_iterations: 100,
-            learning_rate: 0.1,
-            num_leaves: 8,
-            min_data_in_leaf: 1,
-            objective: LightGbmObjective::Huber,
-            huber_delta: 1.0,
-            ..Default::default()
-        };
-
-        let result = lightgbm(x.view(), y.view(), &config).unwrap();
-
-        // Loss should decrease
-        assert!(result.final_train_loss <= result.train_loss[0]);
+    #[test]
+    fn lightgbm_rejects_non_finite_inputs() {
+        let mut x = Array2::from_shape_fn((20, 2), |(i, j)| (i * 2 + j) as f64);
+        let y = Array1::from_shape_fn(20, |i| i as f64 * 0.5 + 0.1);
+        x[[4, 1]] = f64::NAN;
+        let e = lightgbm(x.view(), y.view(), &LightGbmConfig::default()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("row 4, column 1")),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1845,5 +1863,77 @@ mod tests {
         // With regularization, gain should be lower
         let gain_reg = compute_split_gain(-1.0, 2.0, 1.0, 2.0, 1.0);
         assert!(gain_reg < gain);
+    }
+
+    /// The split search before the row count was hoisted out of the bin loop: the reference
+    /// `find_best_split` must match exactly.
+    fn find_best_split_naive(
+        histograms: &[Histogram],
+        feature_subset: &[usize],
+        total_grad: f64,
+        total_hess: f64,
+        min_data_in_leaf: usize,
+        lambda_l2: f64,
+    ) -> Option<(usize, usize, f64)> {
+        let mut best_gain = 0.0;
+        let mut best_split = None;
+        for &feature in feature_subset {
+            let hist = &histograms[feature];
+            let num_bins = hist.gradient_sum.len();
+            if num_bins <= 1 {
+                continue;
+            }
+            let (mut lg, mut lh, mut lc) = (0.0, 0.0, 0usize);
+            for bin in 0..num_bins - 1 {
+                lg += hist.gradient_sum[bin];
+                lh += hist.hessian_sum[bin];
+                lc += hist.count[bin];
+                let rc = hist.count.iter().sum::<usize>() - lc;
+                if lc < min_data_in_leaf || rc < min_data_in_leaf {
+                    continue;
+                }
+                let gain = compute_split_gain(lg, lh, total_grad - lg, total_hess - lh, lambda_l2);
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_split = Some((feature, bin));
+                }
+            }
+        }
+        best_split.map(|(f, b)| (f, b, best_gain))
+    }
+
+    #[test]
+    fn find_best_split_matches_per_bin_count_reference() {
+        let mut state = 7u64;
+        for case in 0..200 {
+            let n_features = 1 + case % 4;
+            let hists: Vec<Histogram> = (0..n_features)
+                .map(|f| {
+                    let bins = 1 + (case * 7 + f * 13) % 40;
+                    let mut h = Histogram::new(bins);
+                    for b in 0..bins {
+                        let c = lcg_random(&mut state) % 6;
+                        h.count[b] = c;
+                        let g = (lcg_random(&mut state) % 2001) as f64 / 1000.0 - 1.0;
+                        h.gradient_sum[b] = g * c as f64;
+                        h.hessian_sum[b] = c as f64 * if case % 2 == 0 { 1.0 } else { 0.37 };
+                    }
+                    h
+                })
+                .collect();
+            // every feature histogram holds the same node: use feature 0's totals
+            let tg: f64 = hists[0].gradient_sum.iter().sum();
+            let th: f64 = hists[0].hessian_sum.iter().sum();
+            let subset: Vec<usize> = (0..n_features).collect();
+            for (min_leaf, lambda) in [(1, 0.0), (3, 1.0), (20, 0.5)] {
+                let a = find_best_split(&hists, &subset, tg, th, min_leaf, lambda);
+                let b = find_best_split_naive(&hists, &subset, tg, th, min_leaf, lambda);
+                assert_eq!(
+                    a.map(|(f, bin, g)| (f, bin, g.to_bits())),
+                    b.map(|(f, bin, g)| (f, bin, g.to_bits())),
+                    "case {case}, min_data_in_leaf {min_leaf}"
+                );
+            }
+        }
     }
 }

@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_adaboost",
+      "name": "AdaBoost.M1, SAMME and AdaBoost.R2 with depth-limited CART weak learners",
+      "category": "ml",
+      "reference": "SAMME (Zhu et al. 2009; adabag::boosting(coeflearn = 'Zhu', boos = FALSE)) and AdaBoost.M1 written out in R with rpart::rpart weak learners (adabag not a case dependency); rpart anova for the first R2 learner",
+      "doc": "validation/ml/adaboost.md",
+      "cases": [
+        "ml_adaboost_samme"
+      ],
+      "tests": [
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_depth1",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_depth2",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_learning_rate",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_first_round_weights",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_m1_depth1",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_m1_depth3",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_r2_first_learner"
+      ],
+      "quantities": [
+        "estimator weights",
+        "weak-learner weighted errors",
+        "round-1 weights",
+        "class predictions",
+        "training accuracy",
+        "M1 scores",
+        "first R2 learner fitted values"
+      ],
+      "tolerance": "validation/README.md, n = 120: 1e-8 relative; labels and accuracies exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_xgboost_l1",
+      "name": "XGBoost exact and histogram trees: L1 leaf weights and gains",
+      "category": "ml",
+      "reference": "xgboost::xgb.train(tree_method = 'exact') 3.2 for the exact trees (case ml_xgboost_pkg); XGBoost exact greedy (Chen & Guestrin 2016) and p2a's histogram variant with xgboost's CalcWeight/CalcGain L1 rule, published algorithm written out in R (ml_xgboost_l1). The package's histogram trees bin differently and are not compared.",
+      "doc": "validation/ml/xgboost.md",
+      "cases": [
+        "ml_xgboost_l1",
+        "ml_xgboost_pkg"
+      ],
+      "tests": [
+        "p2a-core::ml::xgboost::tests::test_validate_xgboost_exact_l1",
+        "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_stump",
+        "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_four_rounds",
+        "p2a-core::ml::xgboost::tests::test_validate_xgboost_exact_package"
+      ],
+      "quantities": [
+        "predictions after 3 (exact) and 4 (histogram) rounds",
+        "root split feature, threshold and gain",
+        "stump bin and leaf weights",
+        "package predictions, root split and gain, alpha 0 and 3"
+      ],
+      "tolerance": "validation/README.md, n = 16: 1e-6 relative; split feature and bin exact; the xgboost package: 1e-6 absolute (it computes in single precision)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_mboost",
+      "name": "Component-wise boosting with bols learners: Gaussian, Binomial(), Binomial(type = 'glm'), Poisson; least-squares tree learner",
+      "category": "ml",
+      "reference": "mboost::mboost(y ~ bols(x1) + bols(x2) + bols(x3)) 2.9 (case ml_mboost_pkg: offset, coefficients, selections, fitted responses after 100 steps); the same family definitions (R/family.R) written out in R (ml_mboost_bols: also the first step and the 2000-step paths); stats::lm and stats::glm for the limits; the tree learner is p2a's own least-squares tree written out in R, a self-consistency check, not R-pinned (mboost's btree is ctree-based)",
+      "doc": "validation/ml/mboost.md",
+      "cases": [
+        "ml_mboost_bols",
+        "ml_mboost_pkg"
+      ],
+      "tests": [
+        "p2a-core::ml::mboost::tests::test_validate_mboost_gaussian_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_glm_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_poisson_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_converged_limits",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_package_paths",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_tree_depth"
+      ],
+      "quantities": [
+        "offset",
+        "first step",
+        "coefficients and intercept after 100 steps",
+        "selection counts",
+        "fitted responses",
+        "converged coefficients (lm, glm, glm / 2)",
+        "tree-learner fits at depth 1 and 2"
+      ],
+      "tolerance": "100-step paths and tree fits: validation/README.md, n = 200: 1e-8 relative; 2000-step paths and limits: 1e-6 relative (iterative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_bart_probit",
+      "name": "Probit BART (classification) by data augmentation",
+      "category": "ml",
+      "reference": "BART::pbart model (the BART package is not a dependency of these cases): exact posterior with unsplittable trees by stats::integrate; glm(binomial(probit)) as a property target",
+      "doc": "validation/ml/bart.md",
+      "cases": [
+        "ml_bart_probit_single_leaf",
+        "ml_bart_probit_glm"
+      ],
+      "tests": [
+        "p2a-core::ml::bart::tests::test_validate_bart_probit_single_leaf_posterior",
+        "p2a-core::ml::bart::tests::test_validate_bart_probit_tracks_glm_probit"
+      ],
+      "quantities": [
+        "offset",
+        "posterior mean and SD of P(y = 1)",
+        "proximity to glm probit probabilities (property)"
+      ],
+      "tolerance": "offset 1e-6 relative; posterior mean 0.009 and SD 0.006 absolute (5 Monte Carlo SDs from 200 R replications); glm property: mean absolute difference < 0.085, correlation > 0.90",
+      "deviations": [
+        {
+          "finding": "ML-16",
+          "quantity": "tree grow/prune kernel",
+          "note": "Probit and regression BART share a kernel whose Metropolis-Hastings ratio is an open finding (ML-16, ML-121); the single-leaf pin excludes it and the glm property is insensitive to it."
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

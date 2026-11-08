@@ -4,7 +4,7 @@
 //! 1. Parallel base learner evaluation across features
 //! 2. Efficient componentwise linear with proper coefficient accumulation
 //! 3. Vectorized residual updates
-//! 4. Early stopping with efficient cross-validation
+//! 4. Early stopping on a seeded holdout split
 //!
 //! Reference: Bühlmann & Hothorn (2007), "Boosting Algorithms: Regularization,
 //! Prediction and Model Fitting"
@@ -13,9 +13,13 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::lcg_random;
 use super::mboost::check_step_size;
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_with_capacity};
+
+/// Seed of the validation split when [`FastMboostConfig::seed`] is `None`.
+pub const FAST_MBOOST_DEFAULT_SEED: u64 = 42;
 
 /// Fast MBoost configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,11 +34,14 @@ pub struct FastMboostConfig {
     pub base_learner: FastMboostLearner,
     /// Loss function family
     pub family: FastMboostFamily,
-    /// Early stopping patience (0 = no early stopping)
+    /// Stop when the validation risk has not improved for this many iterations; the model is
+    /// truncated to the best iteration (0 = off)
     pub early_stopping_rounds: usize,
-    /// Validation fraction for early stopping
+    /// Share of rows held out when early stopping is on (ceil, at least 1 row, at least 2
+    /// training rows)
     pub validation_fraction: f64,
-    /// Random seed
+    /// Draws the validation split (default [`FAST_MBOOST_DEFAULT_SEED`]); unused without early
+    /// stopping
     pub seed: Option<u64>,
 }
 
@@ -115,8 +122,14 @@ pub struct FastMboostResult {
     pub m_stop: usize,
     /// Training risk per iteration
     pub risk: Vec<f64>,
-    /// Validation risk if early stopping used
+    /// Risk on the validation rows after each iteration that ran (early stopping only)
     pub val_risk: Option<Vec<f64>>,
+    /// Rows (ascending) held out for early stopping
+    #[serde(default)]
+    pub validation_rows: Option<Vec<usize>>,
+    /// 1-based iteration with the smallest validation risk; the model is truncated to it
+    #[serde(default)]
+    pub best_iteration: Option<usize>,
     /// Coefficients per feature (for linear learners)
     pub coefficients: Option<Vec<f64>>,
     /// Offset (intercept)
@@ -125,6 +138,9 @@ pub struct FastMboostResult {
     config: FastMboostConfig,
     #[serde(skip)]
     learners: Vec<FittedLearner>,
+    /// Training means of the features, which the linear learners centre at
+    #[serde(default)]
+    x_means: Vec<f64>,
 }
 
 impl std::fmt::Display for FastMboostResult {
@@ -197,19 +213,160 @@ pub fn fast_mboost(
     }
     check_step_size(config.nu)?;
 
-    // A strided y (say, a column of a row-major matrix) has no slice; copy it
-    // once instead
-    let y_owned;
-    let y_slice: &[f64] = match y.as_slice() {
-        Some(s) => s,
-        None => {
-            y_owned = y.to_vec();
-            &y_owned
+    if config.early_stopping_rounds == 0 {
+        // A strided y (say, a column of a row-major matrix) has no slice; copy it
+        // once instead
+        let y_owned;
+        let y_slice: &[f64] = match y.as_slice() {
+            Some(s) => s,
+            None => {
+                y_owned = y.to_vec();
+                &y_owned
+            }
+        };
+        let fit = boost_rows(x, y_slice, config, None)?;
+        return Ok(fit.into_result(config, p, None));
+    }
+
+    let (train, validation) = validation_split(n, config)?;
+    let x_train = x.select(Axis(0), &train);
+    let y_train: Vec<f64> = train.iter().map(|&i| y[i]).collect();
+    let x_val = x.select(Axis(0), &validation);
+    let y_val: Vec<f64> = validation.iter().map(|&i| y[i]).collect();
+    let fit = boost_rows(
+        x_train.view(),
+        &y_train,
+        config,
+        Some((x_val.view(), y_val.as_slice())),
+    )?;
+    let predictions = apply_learners(&fit.learners, config.nu, fit.offset, &fit.x_means, x);
+    let mut result = fit.into_result(config, p, Some(validation));
+    result.predictions = predictions;
+    Ok(result)
+}
+
+/// Training and validation rows (each ascending) of an early-stopping fit: the rows are permuted
+/// by a seeded Fisher-Yates loop and the first ceil(validation_fraction * n) positions are held out.
+fn validation_split(n: usize, config: &FastMboostConfig) -> EconResult<(Vec<usize>, Vec<usize>)> {
+    let f = config.validation_fraction;
+    if !(f > 0.0 && f < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("validation_fraction must be in (0, 1) (got {f})"),
+        });
+    }
+    let n_val = (f * n as f64).ceil() as usize;
+    if n_val + 2 > n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "validation_fraction {f} holds out {n_val} of {n} rows; at least 2 training rows are needed"
+            ),
+        });
+    }
+    let mut rows: Vec<usize> = (0..n).collect();
+    let mut state = config.seed.unwrap_or(FAST_MBOOST_DEFAULT_SEED);
+    for i in (1..n).rev() {
+        let j = lcg_random(&mut state) % (i + 1);
+        rows.swap(i, j);
+    }
+    let mut validation = rows[..n_val].to_vec();
+    let mut train = rows[n_val..].to_vec();
+    validation.sort_unstable();
+    train.sort_unstable();
+    Ok((train, validation))
+}
+
+/// One boosting run on the rows it is given, cut back to the best iteration when validation rows
+/// are supplied.
+struct BoostedRows {
+    predictions: Vec<f64>,
+    offset: f64,
+    x_means: Vec<f64>,
+    learners: Vec<FittedLearner>,
+    risk: Vec<f64>,
+    val_risk: Option<Vec<f64>>,
+    best_iteration: Option<usize>,
+}
+
+impl BoostedRows {
+    fn into_result(
+        self,
+        config: &FastMboostConfig,
+        p: usize,
+        validation_rows: Option<Vec<usize>>,
+    ) -> FastMboostResult {
+        // Accumulated coefficients for componentwise linear and selection counts, from the kept
+        // learners
+        let mut accumulated_coefs = vec![0.0; p];
+        let mut feature_selection_count = vec![0usize; p];
+        for learner in &self.learners {
+            match learner {
+                FittedLearner::Linear { feature, coef, .. } => {
+                    feature_selection_count[*feature] += 1;
+                    accumulated_coefs[*feature] += config.nu * coef;
+                }
+                FittedLearner::Stump { feature, .. } => {
+                    feature_selection_count[*feature] += 1;
+                }
+                FittedLearner::Tree { nodes } => {
+                    for node in nodes {
+                        if let Some(feat) = node.feature {
+                            feature_selection_count[feat] += 1;
+                        }
+                    }
+                }
+            }
         }
-    };
+
+        // Normalize feature importances
+        let total_sel: usize = feature_selection_count.iter().sum();
+        let feature_importances: Vec<f64> = if total_sel > 0 {
+            feature_selection_count
+                .iter()
+                .map(|&c| c as f64 / total_sel as f64)
+                .collect()
+        } else {
+            vec![0.0; p]
+        };
+
+        // For linear learners, return accumulated coefficients (already in original scale)
+        let coefficients = if matches!(config.base_learner, FastMboostLearner::ComponentwiseLinear)
+        {
+            Some(accumulated_coefs)
+        } else {
+            None
+        };
+
+        FastMboostResult {
+            predictions: self.predictions,
+            feature_importances,
+            m_stop: self.learners.len(),
+            risk: self.risk,
+            val_risk: self.val_risk,
+            validation_rows,
+            best_iteration: self.best_iteration,
+            coefficients,
+            offset: self.offset,
+            config: config.clone(),
+            learners: self.learners,
+            x_means: self.x_means,
+        }
+    }
+}
+
+/// The boosting loop on `x` and `y`. With `validation` (rows the fit never sees) the risk on those
+/// rows is recorded after every iteration, the loop stops after `early_stopping_rounds` iterations
+/// without improvement, and the learners and training risk are cut back to the best iteration.
+fn boost_rows(
+    x: ArrayView2<f64>,
+    y: &[f64],
+    config: &FastMboostConfig,
+    validation: Option<(ArrayView2<f64>, &[f64])>,
+) -> EconResult<BoostedRows> {
+    let n = x.nrows();
+    let p = x.ncols();
 
     // Initialize offset and predictions
-    let offset = compute_initial_offset(y_slice, config.family);
+    let offset = compute_initial_offset(y, config.family);
     let mut predictions = vec![offset; n];
 
     // Pre-compute feature statistics for centering
@@ -222,18 +379,19 @@ pub fn fast_mboost(
         })
         .collect();
 
-    // Accumulated coefficients for componentwise linear
-    let mut accumulated_coefs = vec![0.0; p];
-    let mut feature_selection_count = vec![0usize; p];
-
     let mut learners = try_with_capacity(config.m_stop, "fast mboost learners")?;
     let mut risk = try_with_capacity(config.m_stop, "fast mboost risk path")?;
+
+    let mut val_predictions = validation.map(|(x_val, _)| vec![offset; x_val.nrows()]);
+    let mut val_risk: Vec<f64> = Vec::new();
+    let mut best = 0usize; // 1-based; 0 before the first iteration
+    let mut best_risk = f64::INFINITY;
 
     for m in 0..config.m_stop {
         checkpoint()?;
 
         // Compute negative gradient (pseudo-residuals)
-        let residuals = compute_negative_gradient(&predictions, y_slice, config.family);
+        let residuals = compute_negative_gradient(&predictions, y, config.family);
 
         // Fit base learner and get update
         let (learner, update) = match &config.base_learner {
@@ -249,60 +407,99 @@ pub fn fast_mboost(
             predictions[i] += config.nu * update[i];
         }
 
-        // Track feature selection
-        match &learner {
-            FittedLearner::Linear { feature, coef, .. } => {
-                feature_selection_count[*feature] += 1;
-                accumulated_coefs[*feature] += config.nu * coef;
-            }
-            FittedLearner::Stump { feature, .. } => {
-                feature_selection_count[*feature] += 1;
-            }
-            FittedLearner::Tree { nodes } => {
-                for node in nodes {
-                    if let Some(feat) = node.feature {
-                        feature_selection_count[feat] += 1;
-                    }
-                }
-            }
-        }
-
         // Compute training risk
-        let train_risk = compute_risk(&predictions, y_slice, config.family);
+        let train_risk = compute_risk(&predictions, y, config.family);
         risk.push(train_risk);
 
-        learners.push(learner);
+        if let (Some((x_val, y_val)), Some(val_pred)) = (validation, val_predictions.as_mut()) {
+            apply_learner(&learner, config.nu, &x_means, x_val, val_pred);
+            let current = compute_risk(val_pred, y_val, config.family);
+            val_risk.push(current);
+            if current < best_risk {
+                best_risk = current;
+                best = m + 1;
+            }
+            learners.push(learner);
+            if m + 1 - best >= config.early_stopping_rounds {
+                break;
+            }
+        } else {
+            learners.push(learner);
+        }
     }
 
-    // Normalize feature importances
-    let total_sel: usize = feature_selection_count.iter().sum();
-    let feature_importances: Vec<f64> = if total_sel > 0 {
-        feature_selection_count
-            .iter()
-            .map(|&c| c as f64 / total_sel as f64)
-            .collect()
+    let (val_risk, best_iteration) = if validation.is_some() {
+        learners.truncate(best);
+        risk.truncate(best);
+        (Some(val_risk), (best > 0).then_some(best))
     } else {
-        vec![0.0; p]
+        (None, None)
     };
 
-    // For linear learners, return accumulated coefficients (already in original scale)
-    let coefficients = if matches!(config.base_learner, FastMboostLearner::ComponentwiseLinear) {
-        Some(accumulated_coefs)
-    } else {
-        None
-    };
-
-    Ok(FastMboostResult {
+    Ok(BoostedRows {
         predictions,
-        feature_importances,
-        m_stop: learners.len(),
-        risk,
-        val_risk: None,
-        coefficients,
         offset,
-        config: config.clone(),
+        x_means,
         learners,
+        risk,
+        val_risk,
+        best_iteration,
     })
+}
+
+/// Add one learner's update, `nu` times its fit, to `predictions` (the arithmetic of the training
+/// loop, with the features centred at the training means).
+fn apply_learner(
+    learner: &FittedLearner,
+    nu: f64,
+    x_means: &[f64],
+    x: ArrayView2<f64>,
+    predictions: &mut [f64],
+) {
+    let n = x.nrows();
+    match learner {
+        FittedLearner::Linear { feature, coef, .. } => {
+            let x_mean = x_means[*feature];
+            for i in 0..n {
+                predictions[i] += nu * (coef * (x[[i, *feature]] - x_mean));
+            }
+        }
+        FittedLearner::Stump {
+            feature,
+            threshold,
+            left_val,
+            right_val,
+        } => {
+            for i in 0..n {
+                let val = if x[[i, *feature]] <= *threshold {
+                    *left_val
+                } else {
+                    *right_val
+                };
+                predictions[i] += nu * val;
+            }
+        }
+        FittedLearner::Tree { nodes } => {
+            for i in 0..n {
+                predictions[i] += nu * predict_tree(nodes, x.row(i));
+            }
+        }
+    }
+}
+
+/// `offset + sum nu * update` over the learners, in learner order.
+fn apply_learners(
+    learners: &[FittedLearner],
+    nu: f64,
+    offset: f64,
+    x_means: &[f64],
+    x: ArrayView2<f64>,
+) -> Vec<f64> {
+    let mut predictions = vec![offset; x.nrows()];
+    for learner in learners {
+        apply_learner(learner, nu, x_means, x, &mut predictions);
+    }
+    predictions
 }
 
 /// Compute initial offset based on family
@@ -738,53 +935,25 @@ fn compute_risk(predictions: &[f64], y: &[f64], family: FastMboostFamily) -> f64
     }
 }
 
-/// Make predictions with trained model
+/// Make predictions with trained model. Linear learners centre at the training means; a result
+/// deserialised without them falls back to the means of the rows given here.
 pub fn fast_mboost_predict(result: &FastMboostResult, x: ArrayView2<f64>) -> Vec<f64> {
-    let n = x.nrows();
-    let p = x.ncols();
-    let mut predictions = vec![result.offset; n];
-
-    // Compute means from prediction data (same approach as original mboost)
-    let x_means: Vec<f64> = (0..p).map(|j| x.column(j).mean().unwrap_or(0.0)).collect();
-
-    for learner in &result.learners {
-        match learner {
-            FittedLearner::Linear {
-                feature,
-                coef,
-                intercept: _,
-            } => {
-                // Use centered prediction like training: coef * (x - x_mean)
-                let x_mean = x_means[*feature];
-                for i in 0..n {
-                    predictions[i] += result.config.nu * coef * (x[[i, *feature]] - x_mean);
-                }
-            }
-            FittedLearner::Stump {
-                feature,
-                threshold,
-                left_val,
-                right_val,
-            } => {
-                for i in 0..n {
-                    let val = if x[[i, *feature]] <= *threshold {
-                        *left_val
-                    } else {
-                        *right_val
-                    };
-                    predictions[i] += result.config.nu * val;
-                }
-            }
-            FittedLearner::Tree { nodes } => {
-                for i in 0..n {
-                    let val = predict_tree(nodes, x.row(i));
-                    predictions[i] += result.config.nu * val;
-                }
-            }
-        }
-    }
-
-    predictions
+    let batch_means: Vec<f64>;
+    let x_means: &[f64] = if result.x_means.is_empty() {
+        batch_means = (0..x.ncols())
+            .map(|j| x.column(j).mean().unwrap_or(0.0))
+            .collect();
+        &batch_means
+    } else {
+        &result.x_means
+    };
+    apply_learners(
+        &result.learners,
+        result.config.nu,
+        result.offset,
+        x_means,
+        x,
+    )
 }
 
 fn predict_tree(nodes: &[TreeNode], x: ArrayView1<f64>) -> f64 {
@@ -819,6 +988,132 @@ mod tests {
     use rand::prelude::*;
     use rand_distr::{Distribution, Normal};
     use std::time::Instant;
+
+    fn noise_xy(n: usize, p: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let x = Array2::from_shape_fn((n, p), |_| rng.r#gen::<f64>());
+        let y = Array1::from_shape_fn(n, |_| normal.sample(&mut rng));
+        (x, y)
+    }
+    fn es_config(learner: FastMboostLearner, seed: u64) -> FastMboostConfig {
+        let mut c = FastMboostConfig::default();
+        c.m_stop = 300;
+        c.nu = 0.3;
+        c.base_learner = learner;
+        c.early_stopping_rounds = 10;
+        c.validation_fraction = 0.25;
+        c.seed = Some(seed);
+        c
+    }
+
+    #[test]
+    fn fast_mboost_early_stopping_stops_at_the_best_validation_risk() {
+        let (x, y) = noise_xy(200, 3, 11);
+        let r = fast_mboost(x.view(), y.view(), &es_config(FastMboostLearner::Stump, 5)).unwrap();
+        let val = r.val_risk.as_ref().expect("validation risk path");
+        let best = r.best_iteration.expect("best iteration");
+        let argmin = val
+            .iter()
+            .enumerate()
+            .fold(
+                (0, f64::INFINITY),
+                |(bi, bv), (i, &v)| {
+                    if v < bv { (i, v) } else { (bi, bv) }
+                },
+            )
+            .0
+            + 1;
+        assert_eq!(best, argmin);
+        assert_eq!(val.len(), best + 10, "stopped by the patience rule");
+        assert!(best < 300);
+        assert_eq!((r.m_stop, r.risk.len()), (best, best));
+        let rows = r.validation_rows.as_ref().unwrap();
+        assert_eq!(rows.len(), 50); // ceil(0.25 * 200)
+        assert!(rows.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(r.predictions.len(), 200);
+    }
+
+    #[test]
+    fn fast_mboost_early_stopping_equals_refit_on_training_rows() {
+        let (x, y) = noise_xy(200, 3, 12);
+        for learner in [
+            FastMboostLearner::Stump,
+            FastMboostLearner::ComponentwiseLinear,
+        ] {
+            let cfg = es_config(learner.clone(), 8);
+            let r = fast_mboost(x.view(), y.view(), &cfg).unwrap();
+            let rows = r.validation_rows.clone().unwrap();
+            let train: Vec<usize> = (0..200)
+                .filter(|i| rows.binary_search(i).is_err())
+                .collect();
+            let mut c2 = cfg.clone();
+            c2.early_stopping_rounds = 0;
+            c2.m_stop = r.best_iteration.unwrap();
+            let xt = x.select(Axis(0), &train);
+            let yt = y.select(Axis(0), &train);
+            let r2 = fast_mboost(xt.view(), yt.view(), &c2).unwrap();
+            assert_eq!(r.risk, r2.risk);
+            assert_eq!(r.coefficients, r2.coefficients);
+            for (k, &i) in train.iter().enumerate() {
+                assert_eq!(
+                    r.predictions[i].to_bits(),
+                    r2.predictions[k].to_bits(),
+                    "row {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_mboost_seed_draws_the_validation_split() {
+        let (x, y) = noise_xy(120, 2, 13);
+        let a = fast_mboost(x.view(), y.view(), &es_config(FastMboostLearner::Stump, 1)).unwrap();
+        let b = fast_mboost(x.view(), y.view(), &es_config(FastMboostLearner::Stump, 1)).unwrap();
+        let c = fast_mboost(x.view(), y.view(), &es_config(FastMboostLearner::Stump, 2)).unwrap();
+        assert_eq!(a.validation_rows, b.validation_rows);
+        assert_eq!(a.predictions, b.predictions);
+        assert_ne!(a.validation_rows, c.validation_rows);
+    }
+
+    #[test]
+    fn fast_mboost_rejects_bad_validation_fraction() {
+        let (x, y) = noise_xy(40, 2, 14);
+        // 0.99: ceil(39.6) = 40 leaves no training row
+        for f in [0.0, 1.0, -0.1, f64::NAN, 0.99] {
+            let mut c = es_config(FastMboostLearner::Stump, 1);
+            c.validation_fraction = f;
+            let e = fast_mboost(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with("validation_fraction")),
+                "{f}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_mboost_predict_uses_training_means() {
+        let mut rng = StdRng::seed_from_u64(15);
+        let normal = Normal::new(0.0, 0.3).unwrap();
+        let x = Array2::from_shape_fn((150, 3), |_| rng.r#gen::<f64>());
+        let y = Array1::from_shape_fn(150, |i| {
+            2.0 * x[[i, 0]] - x[[i, 2]] + normal.sample(&mut rng)
+        });
+        let r = fast_mboost(x.view(), y.view(), &FastMboostConfig::default()).unwrap();
+        let one = fast_mboost_predict(&r, x.slice(ndarray::s![7..8, ..]));
+        assert!(
+            (one[0] - r.predictions[7]).abs() <= 1e-12 * r.predictions[7].abs().max(1.0),
+            "{} vs {}",
+            one[0],
+            r.predictions[7]
+        );
+        let all = fast_mboost_predict(&r, x.view());
+        assert!(
+            all.iter()
+                .zip(&r.predictions)
+                .all(|(a, b)| (a - b).abs() <= 1e-12 * b.abs().max(1.0))
+        );
+    }
 
     fn cancelled() -> Budget {
         let t = CancelToken::new();
