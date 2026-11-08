@@ -739,11 +739,13 @@ mod render_tests {
     //! What render_markdown draws, as an HTML string. `html` walks the Element it returns: no
     //! whitespace between nodes; `"` `&` `'` `<` `>` in text and attribute values written as
     //! &#34; &#38; &#39; &#60; &#62;; integer attributes unquoted. The markdown has no components
-    //! or event handlers, so the tree needs no VirtualDom.
+    //! or event handlers, so the tree needs no VirtualDom. One test renders every document through
+    //! dioxus-ssr (a dev-dependency) in a VirtualDom and requires the same string.
     use super::render_markdown;
     use dioxus::dioxus_core::{
         Attribute, AttributeValue, DynamicNode, TemplateAttribute, TemplateNode, VNode,
     };
+    use dioxus::prelude::{Element, VirtualDom};
 
     fn escaped(text: &str, out: &mut String) {
         for c in text.chars() {
@@ -822,6 +824,38 @@ mod render_tests {
         let mut out = String::new();
         write_vnode(&element, &mut out);
         out
+    }
+
+    /// What dioxus-ssr renders for `md`, inside a VirtualDom as in the app.
+    fn ssr_html(md: &str) -> String {
+        fn app(md: String) -> Element {
+            render_markdown(&md)
+        }
+        let mut dom = VirtualDom::new_with_props(app, md.to_string());
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    /// Every document the tests below render, so the walker can be checked against dioxus-ssr.
+    const DOCUMENTS: &[&str] = &[
+        "A **bold** and *em* word with `code` & <5.",
+        "```r\nlm(y ~ x, data = d)\n```\n",
+        "[docs](javascript:alert(1)) and [CRAN](https://cran.r-project.org) \
+         ![chart](https://evil.example/c.png?d=1)",
+        "3. fit\n4. test\n",
+        "<script>alert(1)</script>\n\nok <b>bold</b>\n",
+        "| Variable | Estimate | SE |\n|---|---:|---:|\n| sqft | 0.4812 | 0.0123 |\n| Größe | -1.07 | 0.31 |\n",
+        "Fit: $\\hat\\beta_1 = 0.48$ and\n\n$$R^2 = 0.71$$\n",
+        "Run `p2a reg ols` with --robust hc1 on \"sales\" and 'grunfeld'.",
+        "- [ ] check residuals\n- [x] fit model\n",
+    ];
+
+    /// The tests below read the walker's string; it must be what the app's renderer draws.
+    #[test]
+    fn test_render_markdown_walker_matches_dioxus_ssr() {
+        for md in DOCUMENTS {
+            assert_eq!(html(md), ssr_html(md), "document {md:?}");
+        }
     }
 
     /// `html` without its `class="..."` attributes: the Tailwind classes are styling, and these
