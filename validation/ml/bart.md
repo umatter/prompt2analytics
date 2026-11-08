@@ -48,6 +48,22 @@ Registered as `ml_bart_probit` (`ml/bart.rs`): `test_validate_bart_probit_single
 Offset `Tol::coef(40)`. Posterior mean 0.009 and SD 0.006 absolute: 5 SDs of 200 R replications of this chain (0.001745
 and 0.001045). glm property: mean absolute difference below 0.085 and correlation above 0.90.
 
+## Wall-clock
+
+`release`, `ci` features, against `fe13b889`: one fit per process, nine rounds, base and this tree
+interleaved per row with the order alternating, one P core (`taskset`), `RAYON_NUM_THREADS=1`, 2026-11-08,
+load average 1.5-4.2 (falling from a finished build; the fits run on their own core). Data: n x 5 uniform
+design, y = 2 x1 + 0.5 x2 + noise. Cells are medians; "ratio" is this tree over the base, "min ratio" the
+ratio of the minima.
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| BART regression, 50 trees, 20 burn-in, 50 draws | 100 | 13.45 | 13.49 | 1.00 | 1.00 |
+|  | 1,000 | 145.1 | 143.4 | 0.99 | 0.98 |
+|  | 10,000 | 1,508.8 | 1,504.8 | 1.00 | 1.00 |
+
+Within 1.1x. Probit BART is new (the base ignored `classification`) and is not timed.
+
 ## Not pinned
 
 The regression sampler: not R-pinned. Its grow/prune kernel, shared with probit, has open findings (ML-15, ML-16, ML-64,

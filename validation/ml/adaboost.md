@@ -56,6 +56,34 @@ for bit, depths 1-5, both targets), `test_adaboost_r2_max_depth_changes_the_fit`
 
 `Tol::coef(120)` (1e-8 relative for n = 120) for weights, errors and scores; labels and accuracies exact.
 
+## Wall-clock
+
+`release`, `ci` features, against `fe13b889`: one fit per process, nine rounds, base and this tree
+interleaved per row with the order alternating, one P core (`taskset`), `RAYON_NUM_THREADS=1`, 2026-11-08,
+load average 1.5-4.2 (falling from a finished build; the fits run on their own core). Data: n x 5 uniform
+design, y = 2 x1 + 0.5 x2 + noise. Cells are medians; "ratio" is this tree over the base, "min ratio" the
+ratio of the minima.
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| M1, stumps (default; 50 rounds) | 100 | 0.433 | 0.332 | 0.77 | 0.78 |
+|  | 1,000 | 7.03 | 2.96 | 0.42 | 0.43 |
+|  | 10,000 | 118.2 | 31.87 | 0.27 | 0.27 |
+| R2, stumps | 1,000 | 18.76 | 15.59 | 0.83 | 0.83 |
+|  | 10,000 | 234.2 | 161.5 | 0.69 | 0.69 |
+
+M1 now chooses its stumps by weighted Gini, so the default row is not the same selection as the base's;
+the work is comparable. Behaviour changes, not like-for-like: SAMME with two classes (the base ran M1 under
+that name) and depth 3 (the base ignored `max_depth` and fitted stumps; this tree grows depth-3 trees):
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| SAMME, K = 2, stumps | 1,000 | 7.00 | 3.13 | 0.45 | 0.45 |
+| M1, depth 3 | 1,000 | 6.94 | 7.00 | 1.01 | 1.03 |
+|  | 10,000 | 118.0 | 68.58 | 0.58 | 0.58 |
+
+The like-for-like rows are faster than the base.
+
 ## Not pinned
 
 The R2 loop beyond its first learner: Drucker's loop deviations are the open finding ML-110.

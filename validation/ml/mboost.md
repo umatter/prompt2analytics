@@ -63,6 +63,31 @@ Fast mboost's early stopping, seed and training means have property tests in `ml
 100-step paths and tree fits: `Tol::coef(200)` (1e-8 relative for n = 200); 2000-step paths and limits: 1e-6 relative
 (iterative); selections exact.
 
+## Wall-clock
+
+`release`, `ci` features, against `fe13b889`: one fit per process, nine rounds, base and this tree
+interleaved per row with the order alternating, one P core (`taskset`), `RAYON_NUM_THREADS=1`, 2026-11-08,
+load average 1.5-4.2 (falling from a finished build; the fits run on their own core). Data: n x 5 uniform
+design, y = 2 x1 + 0.5 x2 + noise. Cells are medians; "ratio" is this tree over the base, "min ratio" the
+ratio of the minima.
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| mboost, Gaussian, `bols` (default) | 100 | 0.148 | 0.130 | 0.88 | 1.02 |
+|  | 1,000 | 1.06 | 1.05 | 0.99 | 1.00 |
+|  | 10,000 | 10.52 | 10.49 | 1.00 | 1.01 |
+| mboost, binomial | 1,000 | 3.42 | 3.38 | 0.99 | 0.99 |
+| mboost, tree learner, depth 1 | 1,000 | 2.67 | 2.75 | 1.03 | 1.03 |
+|  | 10,000 | 27.75 | 28.57 | 1.03 | 1.03 |
+| fast mboost, defaults | 100 | 1.54 | 1.89 | 1.23 | 0.99 |
+|  | 1,000 | 3.22 | 3.20 | 0.99 | 0.98 |
+|  | 10,000 | 15.03 | 15.04 | 1.00 | 0.99 |
+
+Within 1.1x. Fast mboost at n = 100: single fits fall into two modes on both sides, about 0.65 ms and 1.9 ms;
+the minima agree (0.99) and the median of the per-round ratios is 1.02, while the median of the medians (1.23)
+counts more slow-mode rounds on this tree's side. The binomial family's definition changed (half log-odds), with
+the same work per step.
+
 ## Not pinned
 
 The tree learner against mboost (`btree` is a different learner), `mboost_cv`'s folds. For gbm, see

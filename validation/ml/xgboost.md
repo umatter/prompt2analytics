@@ -53,6 +53,47 @@ last-bit differences, strided and column-major input views.
 Written-out rule: `Tol::coef(16)` (1e-6 relative for n = 16), split features and bins exact. Package:
 1e-6 absolute, the resolution of its single-precision arithmetic.
 
+## Wall-clock
+
+`release`, `ci` features, against `fe13b889`: one fit per process, nine rounds, base and this tree
+interleaved per row with the order alternating, one P core (`taskset`), `RAYON_NUM_THREADS=1`, 2026-11-08,
+load average 1.5-4.2 (falling from a finished build; the fits run on their own core). Data: n x 5 uniform
+design, y = 2 x1 + 0.5 x2 + noise. Cells are medians; "ratio" is this tree over the base, "min ratio" the
+ratio of the minima.
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| exact XGBoost, defaults | 100 | 6.68 | 8.11 | 1.21 | 1.21 |
+|  | 1,000 | 76.98 | 86.94 | 1.13 | 1.13 |
+|  | 10,000 | 972.6 | 1,039.7 | 1.07 | 1.07 |
+| fast (histogram) XGBoost, defaults | 100 | 34.97 | 35.81 | 1.02 | 1.05 |
+|  | 1,000 | 77.83 | 83.45 | 1.07 | 1.06 |
+|  | 10,000 | 201.3 | 182.4 | 0.91 | 0.92 |
+
+Exact XGBoost at n = 100 and 1,000 (1.21x, 1.13x) has not been signed off. The per-node sort compares with
+`total_cmp` and the split gain soft-thresholds its three sums; reverting the sort comparator alone leaves
+1.19x / 1.10x. With `alpha = 1` the split gain itself changes (alpha now enters it), so the trees differ and the
+row is not like-for-like:
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| exact XGBoost, alpha = 1 | 1,000 | 78.58 | 32.08 | 0.41 | 0.41 |
+
+LightGBM has no page of its own; its rows, same conditions:
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| LightGBM, L2, defaults | 100 | 4.77 | 6.29 | 1.32 | 1.31 |
+|  | 1,000 | 277.6 | 319.7 | 1.15 | 1.15 |
+|  | 10,000 | 2,934.2 | 3,388.7 | 1.16 | 1.15 |
+| LightGBM, Huber | 1,000 | 279.7 | 320.6 | 1.15 | 1.14 |
+
+The LightGBM rows (1.15-1.32x) have not been signed off. A build of this tree with the base's `lightgbm.rs`
+runs at 1.00x, and one with only the `total_cmp` comparisons reverted still at 1.31x, so the cost is in
+`lightgbm.rs` but not in a comparison; the L2 path does no new work per iteration (the remaining edits are the
+Huber unit hessians and the up-front finite check). The Huber row is not like-for-like: the base's loss
+oscillated with zero hessians.
+
 ## Not pinned
 
 The histogram trees against the package (the bins differ); `colsample_*` draws (p2a's own generator). Fast
