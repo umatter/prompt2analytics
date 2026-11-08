@@ -32,12 +32,22 @@
 //!
 //! ## GCV Criterion
 //!
-//! GCV = RSS / (n * (1 - d/n)^2)
+//! GCV = RSS / (n * (1 - d/n)^2), and infinite once d >= n (earth's `GetGcv`; Friedman 1991, eq. 30)
 //!
 //! where:
 //! - RSS = Residual Sum of Squares
 //! - n = number of observations
 //! - d = effective degrees of freedom (including penalty for knots)
+//!
+//! ## Fitting
+//!
+//! Each forward candidate is scored by orthogonalising it against the current model (modified
+//! Gram-Schmidt with one re-orthogonalisation pass), so one candidate costs O(n m). A hinge whose
+//! remainder is below the relative column tolerance of [`crate::linalg::solve::least_squares`] is
+//! aliased: a collinear pair adds only its identified hinge, as earth does. The backward pass does
+//! one pivoted QR per pruning step and reads every deletion's RSS from it.
+//!
+//! The method is not pinned to R (earth is not installed): see `validation/ml/mars.md`.
 //!
 //! # References
 //!
@@ -57,9 +67,12 @@
 //!
 //! R equivalent: `earth::earth()`
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use crate::linalg::solve::{LM_QR_TOL, LeastSquares, least_squares};
+use crate::resource;
 
 /// Configuration for MARS model fitting.
 #[derive(Debug, Clone)]
@@ -68,8 +81,8 @@ pub struct MarsConfig {
     /// Default: 1 (additive model)
     pub degree: usize,
 
-    /// Maximum number of terms (basis functions) in the final model after pruning.
-    /// If None, uses automatic selection based on GCV.
+    /// A cap: the pruned model has at most `nprune` terms (intercept included), chosen by GCV among
+    /// the sizes up to `nprune`, as earth. If None, the best GCV of any size.
     /// Default: None
     pub nprune: Option<usize>,
 
@@ -103,7 +116,8 @@ pub struct MarsConfig {
     /// Default: 20
     pub fast_k: usize,
 
-    /// Include intercept term.
+    /// Include an intercept term. `false`: no constant column, and R-squared is uncentred, as in
+    /// `lm(y ~ 0 + ...)`.
     /// Default: true
     pub intercept: bool,
 }
@@ -288,7 +302,7 @@ pub struct MarsResult {
     /// Adjusted R-squared
     pub r_squared_adj: f64,
 
-    /// Variable importance scores (sum of |coefficient * basis function variance|)
+    /// Variable importance scores (sum of |coefficient| x standard deviation of the basis function)
     pub variable_importance: Vec<f64>,
 
     /// Feature names (if provided)
@@ -396,8 +410,7 @@ impl std::fmt::Display for MarsResult {
             })
             .collect();
 
-        importance_with_names
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        importance_with_names.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         // Normalize to 100
         let max_imp = importance_with_names
@@ -495,22 +508,24 @@ pub fn mars(
     config: MarsConfig,
     feature_names: Option<Vec<String>>,
 ) -> Result<MarsResult, String> {
+    validate_config(&x, &y, &config, feature_names.as_deref())?;
     let n = x.nrows();
     let p = x.ncols();
 
-    if y.len() != n {
-        return Err(format!("y has length {} but x has {} rows", y.len(), n));
-    }
-
-    if n < 3 {
-        return Err("Need at least 3 observations for MARS".to_string());
-    }
-
     // Compute y statistics
-    let y_mean = y.mean().unwrap_or(0.0);
-    let tss: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
-    if tss < 1e-10 {
+    let (null_rss, constant) = if config.intercept {
+        let y_mean = y.mean().unwrap_or(0.0);
+        (
+            y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>(),
+            y.iter().all(|&yi| yi == y[0]),
+        )
+    } else {
+        (
+            y.iter().map(|&yi| yi * yi).sum::<f64>(),
+            y.iter().all(|&yi| yi == 0.0),
+        )
+    };
+    if constant {
         return Err("Response variable has zero variance".to_string());
     }
 
@@ -522,13 +537,15 @@ pub fn mars(
 
     let use_fast = config.fast.unwrap_or(n > 200);
     let minspan = config.minspan.unwrap_or_else(|| compute_minspan(n));
-    let endspan = config.endspan.unwrap_or_else(|| compute_endspan(n));
+    let endspan = config
+        .endspan
+        .unwrap_or_else(|| compute_endspan(n).min((n - 1) / 2));
 
     // Find candidate knots for each variable
     let candidate_knots = find_candidate_knots(&x, minspan, endspan, use_fast, config.fast_k);
 
     // Forward pass: build up model by adding basis functions
-    let (forward_basis, forward_coefs) = forward_pass(
+    let (forward_basis, forward_columns) = forward_pass(
         &x,
         &y,
         &candidate_knots,
@@ -537,34 +554,41 @@ pub fn mars(
         config.thresh,
         &config,
     )?;
+    if forward_basis.is_empty() {
+        return Err(
+            "MARS: no basis function improves on the empty model and intercept = false".to_string(),
+        );
+    }
 
     // Backward pass: prune using GCV
-    let (final_basis, final_coefs, gcv_history) = backward_pass(
-        &x,
+    let (selected, gcv_history) = backward_pass(
         &y,
         forward_basis,
-        forward_coefs,
+        forward_columns,
         config.nprune,
         config.penalty,
     )?;
+    let BasisFit {
+        basis: final_basis,
+        coefficients: final_coefs,
+        fitted,
+        rss,
+        gcv,
+    } = selected;
 
-    // Compute final statistics
-    let fitted = predict_internal(&x, &final_basis, &final_coefs);
     let residuals: Vec<f64> = y
         .iter()
         .zip(fitted.iter())
         .map(|(&yi, &fi)| yi - fi)
         .collect();
-    let rss: f64 = residuals.iter().map(|r| r * r).sum();
 
-    let r_squared = 1.0 - rss / tss;
+    let r_squared = 1.0 - rss / null_rss;
     let n_terms = final_basis.len();
-    let r_squared_adj =
-        1.0 - (1.0 - r_squared) * ((n - 1) as f64) / ((n - n_terms) as f64).max(1.0);
-
-    // GCV for final model
-    let effective_df = compute_effective_df(&final_basis, config.penalty);
-    let gcv = compute_gcv(rss, n, effective_df);
+    let df_residual = n.checked_sub(n_terms).filter(|&d| d > 0).ok_or_else(|| {
+        format!("MARS: no residual degrees of freedom (n = {n}, terms = {n_terms})")
+    })?;
+    let df_null = if config.intercept { n - 1 } else { n };
+    let r_squared_adj = 1.0 - (1.0 - r_squared) * (df_null as f64) / (df_residual as f64);
 
     // Variable importance
     let variable_importance = compute_variable_importance(&x, &final_basis, &final_coefs, p);
@@ -577,7 +601,7 @@ pub fn mars(
         }
     }
     for knots in cuts.values_mut() {
-        knots.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        knots.sort_by(f64::total_cmp);
         knots.dedup();
     }
 
@@ -600,6 +624,75 @@ pub fn mars(
     })
 }
 
+/// Every parameter against what the data can support, before any work.
+fn validate_config(
+    x: &ArrayView2<f64>,
+    y: &ArrayView1<f64>,
+    config: &MarsConfig,
+    feature_names: Option<&[String]>,
+) -> Result<(), String> {
+    let (n, p) = x.dim();
+    if y.len() != n {
+        return Err(format!("y has length {} but x has {} rows", y.len(), n));
+    }
+    if n < 3 {
+        return Err("Need at least 3 observations for MARS".to_string());
+    }
+    if p == 0 {
+        return Err("MARS: need at least one predictor".to_string());
+    }
+    if x.iter().any(|v| !v.is_finite()) || y.iter().any(|v| !v.is_finite()) {
+        return Err("MARS: x and y must not contain non-finite values".to_string());
+    }
+    if config.degree == 0 {
+        return Err("MARS: degree must be at least 1, got 0".to_string());
+    }
+    if config.nprune == Some(0) {
+        return Err("MARS: nprune must be at least 1, got 0".to_string());
+    }
+    if config.nk == Some(0) {
+        return Err("MARS: nk must be at least 1, got 0".to_string());
+    }
+    if let Some(k) = config.minspan {
+        if k == 0 || k > n {
+            return Err(format!(
+                "MARS: minspan must be between 1 and n = {n}, got {k}"
+            ));
+        }
+    }
+    if let Some(k) = config.endspan {
+        if k == 0 || k.saturating_mul(2) >= n {
+            return Err(format!(
+                "MARS: endspan must be at least 1 and less than n/2 (n = {n}), got {k}"
+            ));
+        }
+    }
+    if !(config.penalty.is_finite() && config.penalty >= 0.0) {
+        return Err(format!(
+            "MARS: penalty must be finite and non-negative, got {}",
+            config.penalty
+        ));
+    }
+    if !(config.thresh.is_finite() && config.thresh >= 0.0) {
+        return Err(format!(
+            "MARS: thresh must be finite and non-negative, got {}",
+            config.thresh
+        ));
+    }
+    if config.fast_k == 0 {
+        return Err("MARS: fast_k must be at least 1, got 0".to_string());
+    }
+    if let Some(names) = feature_names {
+        if names.len() != p {
+            return Err(format!(
+                "MARS: feature_names has {} names for {p} predictors",
+                names.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Compute minimum span between knots.
 /// Formula from Friedman (1991): floor(-log2(-1/n * log(1-0.05)) / 2.5)
 fn compute_minspan(n: usize) -> usize {
@@ -616,6 +709,9 @@ fn compute_endspan(n: usize) -> usize {
     compute_minspan(n)
 }
 
+/// Candidate knots closer than this share of their value are one knot: rounding, not data.
+const KNOT_ROUNDING: f64 = 64.0 * f64::EPSILON;
+
 /// Find candidate knot locations for each variable.
 fn find_candidate_knots(
     x: &ArrayView2<f64>,
@@ -631,11 +727,11 @@ fn find_candidate_knots(
     for j in 0..p {
         // Get sorted unique values for this variable
         let mut col_vals: Vec<f64> = x.column(j).iter().copied().collect();
-        col_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        col_vals.sort_by(f64::total_cmp);
 
         // Apply endspan: skip first and last endspan observations
-        let start = endspan.min(n / 2);
-        let end = (n - endspan).max(start + 1);
+        let start = endspan;
+        let end = n - endspan;
 
         let valid_range: Vec<f64> = col_vals[start..end].to_vec();
 
@@ -649,19 +745,18 @@ fn find_candidate_knots(
         let mut last_idx: Option<usize> = None;
 
         for (i, &val) in valid_range.iter().enumerate() {
-            match last_idx {
-                None => {
-                    selected.push(val);
-                    last_idx = Some(i);
-                }
-                Some(li) if i >= li + minspan => {
-                    // Check if value is different from last selected
-                    if (val - *selected.last().unwrap()).abs() > 1e-10 {
-                        selected.push(val);
-                        last_idx = Some(i);
-                    }
-                }
-                _ => {}
+            let Some(li) = last_idx else {
+                selected.push(val);
+                last_idx = Some(i);
+                continue;
+            };
+            let Some(&last) = selected.last() else {
+                continue;
+            };
+            // A value differs from the last selected by more than its rounding, at any scale of x.
+            if i >= li + minspan && val - last > KNOT_ROUNDING * val.abs().max(last.abs()) {
+                selected.push(val);
+                last_idx = Some(i);
             }
         }
 
@@ -681,7 +776,108 @@ fn find_candidate_knots(
     knots
 }
 
-/// Forward pass: greedily add basis functions.
+/// One candidate pair against the current model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PairScore {
+    /// RSS with the identified hinges of the pair added
+    rss: f64,
+    keep_pos: bool,
+    keep_neg: bool,
+}
+
+/// An orthonormal basis `q` of the identified columns of the current model and the residual `r` of
+/// `y` on it.
+struct ForwardState {
+    q: Vec<Vec<f64>>,
+    r: Vec<f64>,
+    rss: f64,
+}
+
+/// Remove the component of `v` in the span of `q` (modified Gram-Schmidt).
+fn project_out(q: &[Vec<f64>], v: &mut [f64]) {
+    for col in q {
+        let d = dot(col, v);
+        for (vi, ci) in v.iter_mut().zip(col) {
+            *vi -= d * ci;
+        }
+    }
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+impl ForwardState {
+    fn new(y: &ArrayView1<f64>) -> Result<Self, String> {
+        let mut r = resource::try_vec(y.len(), 0.0, "MARS residuals").map_err(|e| e.to_string())?;
+        for (ri, yi) in r.iter_mut().zip(y.iter()) {
+            *ri = *yi;
+        }
+        let rss = dot(&r, &r);
+        Ok(ForwardState {
+            q: Vec::new(),
+            r,
+            rss,
+        })
+    }
+
+    /// `u` becomes the unit remainder of `b` off the model and off `prior`; false when `b` is
+    /// aliased: the remainder is at most `LM_QR_TOL` of its norm, the column rule of the pivoted QR.
+    fn identify(&self, b: &[f64], prior: Option<&[f64]>, u: &mut [f64]) -> bool {
+        let norm_b = dot(b, b).sqrt();
+        u.copy_from_slice(b);
+        for _ in 0..2 {
+            project_out(&self.q, u);
+            if let Some(q1) = prior {
+                let d = dot(q1, u);
+                for (ui, ci) in u.iter_mut().zip(q1) {
+                    *ui -= d * ci;
+                }
+            }
+        }
+        let norm_u = dot(u, u).sqrt();
+        if !norm_u.gt(&(LM_QR_TOL * norm_b)) {
+            return false;
+        }
+        u.iter_mut().for_each(|v| *v /= norm_u);
+        true
+    }
+
+    /// The RSS with `pos` and `neg` added, in O(n m). `u1` and `u2` are work space of length n.
+    fn score(&self, pos: &[f64], neg: &[f64], u1: &mut [f64], u2: &mut [f64]) -> PairScore {
+        let mut rss = self.rss;
+        let keep_pos = self.identify(pos, None, u1);
+        if keep_pos {
+            rss -= dot(u1, &self.r).powi(2);
+        }
+        let keep_neg = self.identify(neg, keep_pos.then_some(&*u1), u2);
+        if keep_neg {
+            rss -= dot(u2, &self.r).powi(2);
+        }
+        PairScore {
+            rss: rss.max(0.0),
+            keep_pos,
+            keep_neg,
+        }
+    }
+
+    /// Append an identified column; false (and no change) when it is aliased.
+    fn accept(&mut self, b: &[f64]) -> Result<bool, String> {
+        let mut u = resource::try_vec(b.len(), 0.0, "MARS basis").map_err(|e| e.to_string())?;
+        if !self.identify(b, None, &mut u) {
+            return Ok(false);
+        }
+        let d = dot(&u, &self.r);
+        for (ri, ui) in self.r.iter_mut().zip(&u) {
+            *ri -= d * ui;
+        }
+        self.rss = dot(&self.r, &self.r);
+        self.q.push(u);
+        Ok(true)
+    }
+}
+
+/// Forward pass: greedily add basis functions. Returns them with their evaluated columns.
 fn forward_pass(
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
@@ -690,357 +886,278 @@ fn forward_pass(
     max_degree: usize,
     thresh: f64,
     config: &MarsConfig,
-) -> Result<(Vec<BasisFunction>, Vec<f64>), String> {
+) -> Result<(Vec<BasisFunction>, Vec<Vec<f64>>), String> {
     let n = x.nrows();
     let p = x.ncols();
+    let alloc = |what: &str, fill: f64| resource::try_vec(n, fill, what).map_err(|e| e.to_string());
 
-    // Start with intercept only
-    let mut basis_functions: Vec<BasisFunction> = vec![BasisFunction::intercept()];
-
-    // Fit initial model (intercept only)
-    let y_mean = y.mean().unwrap_or(0.0);
-    let initial_rss: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
-    let mut current_rss = initial_rss;
-    let mut residuals = y.to_owned();
-    for r in residuals.iter_mut() {
-        *r -= y_mean;
+    let mut state = ForwardState::new(y)?;
+    let mut basis_functions: Vec<BasisFunction> = Vec::new();
+    let mut columns: Vec<Vec<f64>> = Vec::new();
+    let mut n_knots = 0usize;
+    // Without an intercept the constant is still a parent of the first hinges, outside the design.
+    let ones = alloc("MARS basis", 1.0)?;
+    if config.intercept {
+        basis_functions.push(BasisFunction::intercept());
+        state.accept(&ones)?;
+        columns.push(ones.clone());
     }
-
-    let initial_gcv = compute_gcv(
-        initial_rss,
+    let mut current_gcv = compute_gcv(
+        state.rss,
         n,
-        compute_effective_df(&basis_functions, config.penalty),
+        effective_df(basis_functions.len(), n_knots, config.penalty),
     );
-    let mut current_gcv = initial_gcv;
+
+    let (mut pos, mut neg) = (alloc("MARS basis", 0.0)?, alloc("MARS basis", 0.0)?);
+    let (mut u1, mut u2) = (alloc("MARS basis", 0.0)?, alloc("MARS basis", 0.0)?);
+    let mut xj = alloc("MARS basis", 0.0)?;
 
     // Iteratively add basis function pairs
     while basis_functions.len() < max_terms {
         let mut best_gcv_reduction = 0.0;
-        let mut best_pair: Option<(BasisFunction, BasisFunction)> = None;
-        let mut best_parent_idx: Option<usize> = None;
+        // (parent's index in the basis, variable, knot, what the pair keeps)
+        let mut best: Option<(Option<usize>, usize, f64, PairScore)> = None;
 
-        // Try adding a new hinge pair to each existing basis function
-        // (or as a new main effect if degree allows)
-        let n_current = basis_functions.len();
-
-        for parent_idx in 0..n_current {
-            let parent = &basis_functions[parent_idx];
-            let parent_degree = parent.degree();
+        let first_parent = usize::from(!config.intercept);
+        for parent_pos in 0..basis_functions.len() + first_parent {
+            let parent = parent_pos.checked_sub(first_parent);
+            let (parent_col, parent_hinges): (&[f64], &[HingeFunction]) = match parent {
+                Some(i) => (&columns[i], &basis_functions[i].hinges),
+                None => (&ones, &[]),
+            };
+            let parent_degree = parent_hinges.len();
 
             // Check if we can add another hinge to this parent
             if parent_degree >= max_degree {
                 continue;
             }
 
-            // Get variables already used by this parent
-            let used_vars: Vec<usize> = parent.hinges.iter().map(|h| h.variable).collect();
-
             // Try each variable not already in parent
             for j in 0..p {
-                if used_vars.contains(&j) {
+                if parent_hinges.iter().any(|h| h.variable == j) {
                     continue;
+                }
+                resource::checkpoint().map_err(|e| e.to_string())?;
+                for (slot, v) in xj.iter_mut().zip(x.column(j).iter()) {
+                    *slot = *v;
                 }
 
                 // Try each knot
                 for &knot in &candidate_knots[j] {
-                    // Create positive and negative hinge pair
-                    let hinge_pos = HingeFunction {
-                        variable: j,
-                        knot,
-                        hinge_type: HingeType::Positive,
-                        variable_name: None,
-                    };
-                    let hinge_neg = HingeFunction {
-                        variable: j,
-                        knot,
-                        hinge_type: HingeType::Negative,
-                        variable_name: None,
-                    };
-
-                    let basis_pos = if parent_degree == 0 {
-                        BasisFunction::single(hinge_pos.clone())
-                    } else {
-                        BasisFunction::interaction(parent_idx, &parent.hinges, hinge_pos.clone())
-                    };
-
-                    let basis_neg = if parent_degree == 0 {
-                        BasisFunction::single(hinge_neg.clone())
-                    } else {
-                        BasisFunction::interaction(parent_idx, &parent.hinges, hinge_neg.clone())
-                    };
-
-                    // Evaluate new basis functions
-                    let b_pos = basis_pos.evaluate_all(x);
-                    let b_neg = basis_neg.evaluate_all(x);
-
-                    // Check if basis functions have any variation
-                    let var_pos: f64 = b_pos.iter().map(|&v| v * v).sum::<f64>() / n as f64
-                        - (b_pos.sum() / n as f64).powi(2);
-                    let var_neg: f64 = b_neg.iter().map(|&v| v * v).sum::<f64>() / n as f64
-                        - (b_neg.sum() / n as f64).powi(2);
-
-                    if var_pos < 1e-10 && var_neg < 1e-10 {
+                    resource::checkpoint().map_err(|e| e.to_string())?;
+                    for i in 0..n {
+                        pos[i] = parent_col[i] * (xj[i] - knot).max(0.0);
+                        neg[i] = parent_col[i] * (knot - xj[i]).max(0.0);
+                    }
+                    let score = state.score(&pos, &neg, &mut u1, &mut u2);
+                    let added = usize::from(score.keep_pos) + usize::from(score.keep_neg);
+                    if added == 0 {
                         continue;
                     }
-
-                    // Build design matrix with existing basis + new pair
-                    let mut test_basis = basis_functions.clone();
-                    test_basis.push(basis_pos.clone());
-                    test_basis.push(basis_neg.clone());
-
-                    // Fit model and compute GCV
-                    if let Ok((test_coefs, test_rss)) = fit_ols(x, y, &test_basis) {
-                        let test_df = compute_effective_df(&test_basis, config.penalty);
-                        let test_gcv = compute_gcv(test_rss, n, test_df);
-
-                        let gcv_reduction = current_gcv - test_gcv;
-                        if gcv_reduction > best_gcv_reduction {
-                            best_gcv_reduction = gcv_reduction;
-                            best_pair = Some((basis_pos, basis_neg));
-                            best_parent_idx = Some(parent_idx);
-                        }
+                    let test_df = effective_df(
+                        basis_functions.len() + added,
+                        n_knots + added * (parent_degree + 1),
+                        config.penalty,
+                    );
+                    let gcv_reduction = current_gcv - compute_gcv(score.rss, n, test_df);
+                    if gcv_reduction > best_gcv_reduction {
+                        best_gcv_reduction = gcv_reduction;
+                        best = Some((parent, j, knot, score));
                     }
                 }
             }
         }
 
         // Check if improvement meets threshold
-        let relative_improvement = best_gcv_reduction / (current_gcv + 1e-10);
-        if relative_improvement < thresh || best_pair.is_none() {
+        let Some((parent, j, knot, score)) = best else {
+            break;
+        };
+        // `best` is set only on a positive reduction, so current_gcv > 0 here
+        if best_gcv_reduction / current_gcv < thresh {
             break;
         }
 
-        // Add best pair
-        let (basis_pos, basis_neg) = best_pair.unwrap();
-        basis_functions.push(basis_pos);
-        basis_functions.push(basis_neg);
-
-        // Update current model
-        if let Ok((_, new_rss)) = fit_ols(x, y, &basis_functions) {
-            current_rss = new_rss;
-            let new_df = compute_effective_df(&basis_functions, config.penalty);
-            current_gcv = compute_gcv(current_rss, n, new_df);
+        // Add the identified hinges of the best pair
+        for (keep, hinge_type) in [
+            (score.keep_pos, HingeType::Positive),
+            (score.keep_neg, HingeType::Negative),
+        ] {
+            if !keep {
+                continue;
+            }
+            let hinge = HingeFunction {
+                variable: j,
+                knot,
+                hinge_type,
+                variable_name: None,
+            };
+            let parent_col: &[f64] = parent.map_or(&ones, |i| &columns[i]);
+            let mut column = alloc("MARS basis", 0.0)?;
+            for i in 0..n {
+                column[i] = parent_col[i] * hinge.evaluate(x[[i, j]]);
+            }
+            if !state.accept(&column)? {
+                continue; // rounding moved it across the rule; the model stays identified
+            }
+            let term = match parent {
+                Some(i) if !basis_functions[i].hinges.is_empty() => {
+                    let hinges = basis_functions[i].hinges.clone();
+                    BasisFunction::interaction(i, &hinges, hinge)
+                }
+                _ => BasisFunction::single(hinge),
+            };
+            n_knots += term.hinges.len();
+            basis_functions.push(term);
+            columns.push(column);
         }
+        current_gcv = compute_gcv(
+            state.rss,
+            n,
+            effective_df(basis_functions.len(), n_knots, config.penalty),
+        );
     }
 
-    // Final fit
-    let (coefs, _) = fit_ols(x, y, &basis_functions)?;
-
-    Ok((basis_functions, coefs))
+    Ok((basis_functions, columns))
 }
 
-/// Backward pass: prune basis functions using GCV.
+/// The model the backward pass chose, with the statistics of its one fit: `gcv_history`, the result
+/// and `predict` agree exactly.
+struct BasisFit {
+    basis: Vec<BasisFunction>,
+    coefficients: Vec<f64>,
+    fitted: Vec<f64>,
+    rss: f64,
+    gcv: f64,
+}
+
+/// The RSS increase from deleting each identified column of a fit: `beta_j^2 / (X'X)^-1_jj`. An
+/// aliased column costs 0.
+fn deletion_costs(fit: &LeastSquares) -> Vec<f64> {
+    (0..fit.coefficients.len())
+        .map(|j| {
+            if fit.aliased.contains(&j) {
+                0.0
+            } else {
+                fit.coefficients[j].powi(2) / fit.unscaled_cov[[j, j]]
+            }
+        })
+        .collect()
+}
+
+fn fit_columns(y: &ArrayView1<f64>, columns: &[Vec<f64>]) -> Result<LeastSquares, String> {
+    let mut design =
+        resource::try_zeros2(y.len(), columns.len(), "MARS design").map_err(|e| e.to_string())?;
+    for (mut slot, column) in design.columns_mut().into_iter().zip(columns) {
+        for (d, v) in slot.iter_mut().zip(column) {
+            *d = *v;
+        }
+    }
+    least_squares(design.view(), *y).map_err(|e| format!("MARS: {e}"))
+}
+
+/// Backward pass: prune to one term, recording the GCV of every size, and return the best model of
+/// at most `nprune` terms (ties to the smaller). One QR per step.
 fn backward_pass(
-    x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
     mut basis: Vec<BasisFunction>,
-    mut coefs: Vec<f64>,
+    mut columns: Vec<Vec<f64>>,
     nprune: Option<usize>,
     penalty: f64,
-) -> Result<(Vec<BasisFunction>, Vec<f64>, Vec<(usize, f64)>), String> {
-    let n = x.nrows();
-    let mut gcv_history = Vec::new();
+) -> Result<(BasisFit, Vec<(usize, f64)>), String> {
+    let n = y.len();
+    let cap = nprune.unwrap_or(usize::MAX);
+    let mut gcv_history = Vec::with_capacity(basis.len());
+    let mut best: Option<BasisFit> = None;
 
-    // Initial GCV
-    let (_, rss) = fit_ols(x, y, &basis)?;
-    let initial_gcv = compute_gcv(rss, n, compute_effective_df(&basis, penalty));
-    gcv_history.push((basis.len(), initial_gcv));
-
-    let mut best_gcv = initial_gcv;
-    let mut best_basis = basis.clone();
-    let mut best_coefs = coefs.clone();
-
-    // Try removing each term (except intercept) and check GCV
-    while basis.len() > 1 {
-        let target_terms = nprune.unwrap_or(1);
-        if basis.len() <= target_terms {
-            break;
-        }
-
-        let mut best_removal_gcv = f64::INFINITY;
-        let mut best_removal_idx = None;
-
-        // Try removing each non-intercept term
-        for i in 1..basis.len() {
-            let mut test_basis = basis.clone();
-            test_basis.remove(i);
-
-            if let Ok((_, test_rss)) = fit_ols(x, y, &test_basis) {
-                let test_df = compute_effective_df(&test_basis, penalty);
-                let test_gcv = compute_gcv(test_rss, n, test_df);
-
-                if test_gcv < best_removal_gcv {
-                    best_removal_gcv = test_gcv;
-                    best_removal_idx = Some(i);
+    loop {
+        resource::checkpoint().map_err(|e| e.to_string())?;
+        let fit = fit_columns(y, &columns)?;
+        let identified = fit.aliased.is_empty();
+        // On a full-rank fit the RSS comes from the coefficients, as predict computes it.
+        let mut fitted =
+            resource::try_vec(if identified { n } else { 0 }, 0.0, "MARS fitted values")
+                .map_err(|e| e.to_string())?;
+        if identified {
+            for (column, &c) in columns.iter().zip(fit.coefficients.iter()) {
+                for (f, v) in fitted.iter_mut().zip(column) {
+                    *f += c * v;
                 }
             }
         }
-
-        if let Some(idx) = best_removal_idx {
-            basis.remove(idx);
-            let (new_coefs, _) = fit_ols(x, y, &basis)?;
-            coefs = new_coefs;
-
-            gcv_history.push((basis.len(), best_removal_gcv));
-
-            // Track best model
-            if best_removal_gcv < best_gcv {
-                best_gcv = best_removal_gcv;
-                best_basis = basis.clone();
-                best_coefs = coefs.clone();
-            }
+        let rss: f64 = if identified {
+            y.iter().zip(&fitted).map(|(a, b)| (a - b).powi(2)).sum()
         } else {
+            fit.residuals.iter().map(|e| e * e).sum()
+        };
+        let gcv = compute_gcv(rss, n, compute_effective_df(&basis, penalty));
+        gcv_history.push((basis.len(), gcv));
+
+        // An aliased size is never chosen: the same RSS with the column gone has a lower GCV.
+        if identified && basis.len() <= cap && best.as_ref().is_none_or(|b| gcv <= b.gcv) {
+            best = Some(BasisFit {
+                basis: basis.clone(),
+                coefficients: fit.coefficients.to_vec(),
+                fitted,
+                rss,
+                gcv,
+            });
+        }
+        if basis.len() == 1 {
             break;
         }
-    }
 
-    // Return best model found during pruning
-    Ok((best_basis, best_coefs, gcv_history))
-}
-
-/// Fit OLS given basis functions.
-fn fit_ols(
-    x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
-    basis: &[BasisFunction],
-) -> Result<(Vec<f64>, f64), String> {
-    let n = x.nrows();
-    let k = basis.len();
-
-    if k == 0 {
-        return Err("No basis functions".to_string());
-    }
-
-    // Build design matrix
-    let mut design = Array2::zeros((n, k));
-    for (j, b) in basis.iter().enumerate() {
-        let col = b.evaluate_all(x);
-        design.column_mut(j).assign(&col);
-    }
-
-    // Solve (X'X)^-1 X'y via QR decomposition approach
-    // Use simple normal equations for stability
-    let xtx = design.t().dot(&design);
-    let xty = design.t().dot(y);
-
-    // Add small regularization for numerical stability
-    let mut xtx_reg = xtx.clone();
-    for i in 0..k {
-        xtx_reg[[i, i]] += 1e-8;
-    }
-
-    // Solve using Cholesky-like approach (via inversion)
-    let coefs = solve_linear_system(&xtx_reg, &xty)?;
-
-    // Compute RSS
-    let fitted = design.dot(&coefs);
-    let rss: f64 = y
-        .iter()
-        .zip(fitted.iter())
-        .map(|(&yi, &fi)| (yi - fi).powi(2))
-        .sum();
-
-    Ok((coefs.to_vec(), rss))
-}
-
-/// Solve linear system Ax = b.
-fn solve_linear_system(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, String> {
-    let n = a.nrows();
-
-    // Simple Gaussian elimination with partial pivoting
-    let mut aug = Array2::zeros((n, n + 1));
-    for i in 0..n {
-        for j in 0..n {
-            aug[[i, j]] = a[[i, j]];
-        }
-        aug[[i, n]] = b[i];
-    }
-
-    // Forward elimination
-    for i in 0..n {
-        // Find pivot
-        let mut max_row = i;
-        let mut max_val = aug[[i, i]].abs();
-        for k in (i + 1)..n {
-            if aug[[k, i]].abs() > max_val {
-                max_val = aug[[k, i]].abs();
-                max_row = k;
+        // The intercept is never removed; aliased columns go first.
+        let first = usize::from(basis[0].hinges.is_empty());
+        let costs = deletion_costs(&fit);
+        let removable_aliased = fit.aliased.iter().any(|&j| j >= first);
+        let mut remove: Option<(usize, f64)> = None;
+        for j in first..basis.len() {
+            if removable_aliased && !fit.aliased.contains(&j) {
+                continue;
+            }
+            let term = &basis[j];
+            let knots: usize = basis.iter().map(|b| b.hinges.len()).sum();
+            let d = effective_df(basis.len() - 1, knots - term.hinges.len(), penalty);
+            let test = compute_gcv(rss + costs[j], n, d);
+            if remove.is_none_or(|(_, g)| test < g) {
+                remove = Some((j, test));
             }
         }
-
-        if max_val < 1e-14 {
-            return Err("Singular matrix in linear solve".to_string());
-        }
-
-        // Swap rows
-        if max_row != i {
-            for j in 0..=n {
-                let temp = aug[[i, j]];
-                aug[[i, j]] = aug[[max_row, j]];
-                aug[[max_row, j]] = temp;
-            }
-        }
-
-        // Eliminate
-        for k in (i + 1)..n {
-            let factor = aug[[k, i]] / aug[[i, i]];
-            for j in i..=n {
-                aug[[k, j]] -= factor * aug[[i, j]];
-            }
-        }
+        let Some((j, _)) = remove else {
+            break;
+        };
+        basis.remove(j);
+        columns.remove(j);
     }
 
-    // Back substitution
-    let mut x = Array1::zeros(n);
-    for i in (0..n).rev() {
-        let mut sum = aug[[i, n]];
-        for j in (i + 1)..n {
-            sum -= aug[[i, j]] * x[j];
-        }
-        x[i] = sum / aug[[i, i]];
-    }
-
-    Ok(x)
+    let selected = best.ok_or_else(|| {
+        "MARS: no model of at most nprune terms has a finite fit; rescale the data".to_string()
+    })?;
+    Ok((selected, gcv_history))
 }
 
-/// Predict using basis functions and coefficients.
-fn predict_internal(x: &ArrayView2<f64>, basis: &[BasisFunction], coefs: &[f64]) -> Vec<f64> {
-    let n = x.nrows();
-    let mut predictions = vec![0.0; n];
-
-    for (b, &c) in basis.iter().zip(coefs.iter()) {
-        let vals = b.evaluate_all(x);
-        for i in 0..n {
-            predictions[i] += c * vals[i];
-        }
-    }
-
-    predictions
+/// Effective degrees of freedom: d = number_of_terms + penalty * number_of_knots / 2
+/// (hinges come in pairs, so divide by 2).
+fn effective_df(n_terms: usize, n_knots: usize, penalty: f64) -> f64 {
+    n_terms as f64 + penalty * n_knots as f64 / 2.0
 }
 
-/// Compute effective degrees of freedom.
-/// d = number_of_terms + penalty * number_of_knots / 2
+/// Effective degrees of freedom of a basis.
 fn compute_effective_df(basis: &[BasisFunction], penalty: f64) -> f64 {
-    let n_terms = basis.len() as f64;
-    let n_knots: f64 = basis.iter().map(|b| b.hinges.len() as f64).sum();
-    // Hinges come in pairs, so divide by 2
-    n_terms + penalty * n_knots / 2.0
+    let n_knots = basis.iter().map(|b| b.hinges.len()).sum();
+    effective_df(basis.len(), n_knots, penalty)
 }
 
-/// Compute GCV criterion.
-/// GCV = RSS / (n * (1 - d/n)^2)
+/// GCV = RSS / (n * (1 - d/n)^2), infinite once d >= n: earth's `GetGcv`; Friedman (1991), eq. 30.
 fn compute_gcv(rss: f64, n: usize, effective_df: f64) -> f64 {
     let n_f = n as f64;
-    let denom = (1.0 - effective_df / n_f).powi(2) * n_f;
-    if denom > 1e-10 {
-        rss / denom
-    } else {
-        f64::INFINITY
+    if !effective_df.lt(&n_f) {
+        return f64::INFINITY;
     }
+    rss / (n_f * (1.0 - effective_df / n_f).powi(2))
 }
 
-/// Compute variable importance.
+/// Variable importance: sum of |coefficient| x standard deviation of the basis function.
 fn compute_variable_importance(
     x: &ArrayView2<f64>,
     basis: &[BasisFunction],
@@ -1078,7 +1195,8 @@ fn compute_variable_importance(
 /// * `x` - Feature matrix
 /// * `y` - Response vector
 /// * `degree` - Maximum interaction degree (default: 1)
-/// * `nprune` - Maximum terms in final model (default: auto)
+/// * `nprune` - A cap: the pruned model has at most nprune terms (intercept included), chosen by GCV
+///   among sizes <= nprune, as earth (default: the best GCV of any size)
 /// * `thresh` - GCV improvement threshold (default: 0.001)
 pub fn run_mars(
     x: ArrayView2<f64>,
@@ -1336,5 +1454,370 @@ mod tests {
         assert!(result.r_squared > 0.9);
         assert_eq!(result.n_obs, 10);
         assert_eq!(result.n_features, 1);
+    }
+
+    fn two_kink(n: usize, extra: usize) -> (Array2<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((n, 1 + extra), |(i, j)| {
+            if j == 0 {
+                i as f64 / (n - 1) as f64
+            } else {
+                ((i * (7 + 4 * j)) % 17) as f64 / 16.0
+            }
+        });
+        let y = (0..n)
+            .map(|i| {
+                let t = x[[i, 0]];
+                2.0 * (t - 0.3).max(0.0) - 5.0 * (t - 0.7).max(0.0)
+                    + 0.02 * (((i * 13) % 7) as f64 - 3.0)
+            })
+            .collect();
+        (x, Array1::from_vec(y))
+    }
+
+    /// WT-12: nprune is a cap on the pruned model (earth). Before: the best-GCV model of any size.
+    #[test]
+    fn test_mars_respects_nprune() {
+        for (n, fast) in [(120, Some(false)), (240, None)] {
+            let (x, y) = two_kink(n, 2);
+            let full = {
+                let c = MarsConfig {
+                    fast,
+                    ..Default::default()
+                };
+                mars(x.view(), y.view(), c, None).unwrap()
+            };
+            assert!(
+                full.basis_functions.len() > 2,
+                "n = {n}: full model {}",
+                full.basis_functions.len()
+            );
+            for cap in [1usize, 2, 3] {
+                let c = MarsConfig {
+                    fast,
+                    nprune: Some(cap),
+                    ..Default::default()
+                };
+                let r = mars(x.view(), y.view(), c, None).unwrap();
+                assert!(
+                    r.basis_functions.len() <= cap,
+                    "n = {n}, nprune = {cap}: {} terms",
+                    r.basis_functions.len()
+                );
+                let best = r
+                    .gcv_history
+                    .iter()
+                    .filter(|(k, _)| *k <= cap)
+                    .map(|(_, g)| *g)
+                    .fold(f64::INFINITY, f64::min);
+                assert_eq!(
+                    r.gcv, best,
+                    "returned GCV must be the best among sizes <= {cap}"
+                );
+            }
+        }
+    }
+
+    /// ML-96: earth's GCV is infinite once the effective number of parameters reaches n.
+    #[test]
+    fn test_mars_gcv_infinite_at_df_ge_n() {
+        assert!((compute_gcv(2.5, 10, 4.0) - 0.6944444444444444).abs() < 1e-15);
+        assert_eq!(compute_gcv(2.5, 10, 10.0), f64::INFINITY);
+        assert_eq!(compute_gcv(2.5, 10, 16.0), f64::INFINITY);
+        let x = Array2::from_shape_fn((8, 3), |(i, j)| match j {
+            0 => i as f64 / 7.0,
+            1 => ((i * 3) % 8) as f64 / 7.0,
+            _ => ((i * 5) % 8) as f64 / 7.0,
+        });
+        let y = Array1::from_shape_fn(8, |i| {
+            4.0 * (x[[i, 0]] - 0.5).abs() + 0.01 * ((i * 7) % 5) as f64
+        });
+        let r = mars(x.view(), y.view(), MarsConfig::default(), None).unwrap();
+        assert!(
+            r.effective_df() < 8.0 && r.gcv.is_finite() && r.r_squared_adj.is_finite(),
+            "{r}"
+        );
+        assert!(r.basis_functions.len() < 8);
+    }
+
+    /// GCV of the returned additive model = Friedman (1991) eq. 30 / earth GetGcv.
+    #[test]
+    fn test_mars_gcv_matches_friedman_formula() {
+        let (x, y) = two_kink(120, 2);
+        let c = MarsConfig {
+            fast: Some(false),
+            ..Default::default()
+        };
+        let r = mars(x.view(), y.view(), c, None).unwrap();
+        let m = r.basis_functions.len() as f64;
+        assert!(
+            r.basis_functions
+                .iter()
+                .skip(1)
+                .all(|b| b.hinges.len() == 1)
+        );
+        let d = m + 3.0 * (m - 1.0) / 2.0;
+        assert_eq!(d, r.effective_df());
+        let want = r.rss / (120.0 * (1.0 - d / 120.0).powi(2));
+        assert!((r.gcv - want).abs() <= 1e-12 * want, "{} vs {want}", r.gcv);
+    }
+
+    /// Candidate knots are told apart at the rounding of x: rescaling a predictor rescales the
+    /// knots and leaves the terms. Before: an absolute gap collapsed a predictor on a small scale
+    /// to one candidate.
+    #[test]
+    fn test_mars_candidate_knots_are_scale_free_in_x() {
+        let (x, y) = two_kink(120, 0);
+        let fit = |scale: f64| {
+            let c = MarsConfig {
+                fast: Some(false),
+                ..Default::default()
+            };
+            let scaled = x.mapv(|v| v * scale);
+            let r = mars(scaled.view(), y.view(), c, None).unwrap();
+            r.basis_functions
+                .iter()
+                .map(|b| {
+                    b.hinges
+                        .iter()
+                        .map(|h| {
+                            (
+                                h.variable,
+                                h.knot / scale,
+                                h.hinge_type == HingeType::Positive,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = fit(1.0);
+        assert!(base.len() > 1, "{base:?}");
+        for scale in [1e-12, 1e12] {
+            let got = fit(scale);
+            assert_eq!(got.len(), base.len(), "{scale}: {got:?}");
+            for (g, b) in got.iter().flatten().zip(base.iter().flatten()) {
+                assert_eq!((g.0, g.2), (b.0, b.2), "{scale}");
+                assert!(
+                    (g.1 - b.1).abs() <= 1e-9 * b.1.abs().max(1.0),
+                    "{scale}: {g:?} {b:?}"
+                );
+            }
+        }
+    }
+
+    /// The stopping rule is relative: rescaling y gives the same terms at any scale, however small
+    /// its GCV. Before: an absolute floor in the denominator left tiny responses intercept-only.
+    #[test]
+    fn test_mars_stopping_rule_is_scale_free() {
+        let (x, y) = two_kink(120, 0);
+        let terms = |scale: f64, intercept: bool| {
+            let c = MarsConfig {
+                intercept,
+                fast: Some(false),
+                ..Default::default()
+            };
+            let scaled = y.mapv(|v| v * scale);
+            let r = mars(x.view(), scaled.view(), c, None).unwrap();
+            r.basis_functions
+                .iter()
+                .map(|b| {
+                    b.hinges
+                        .iter()
+                        .map(|h| (h.variable, h.knot, h.hinge_type == HingeType::Positive))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for intercept in [true, false] {
+            let base = terms(1.0, intercept);
+            assert!(base.len() > 1, "{base:?}");
+            assert_eq!(terms(1e-6, intercept), base);
+            assert_eq!(terms(1e6, intercept), base);
+        }
+    }
+
+    /// WT-12: intercept = false fits without the constant; the fit is least squares on the
+    /// returned basis.
+    #[test]
+    fn test_mars_without_intercept() {
+        let (x, y) = two_kink(120, 1);
+        let c = MarsConfig {
+            intercept: false,
+            fast: Some(false),
+            ..Default::default()
+        };
+        let r = mars(x.view(), y.view(), c, None).unwrap();
+        assert!(
+            r.basis_functions.iter().all(|b| !b.hinges.is_empty()),
+            "intercept present"
+        );
+        let design = Array2::from_shape_fn((120, r.basis_functions.len()), |(i, j)| {
+            r.basis_functions[j].evaluate(&x.row(i))
+        });
+        let ls = crate::linalg::solve::least_squares(design.view(), y.view()).unwrap();
+        for (a, b) in r.coefficients.iter().zip(ls.coefficients.iter()) {
+            assert!((a - b).abs() <= 1e-10 * b.abs().max(1.0));
+        }
+        let syy: f64 = y.iter().map(|v| v * v).sum();
+        assert!((r.r_squared - (1.0 - r.rss / syy)).abs() < 1e-12);
+        let m = r.basis_functions.len() as f64;
+        assert!(
+            (r.r_squared_adj - (1.0 - (1.0 - r.r_squared) * 120.0 / (120.0 - m))).abs() < 1e-12
+        );
+        assert_eq!(r.predict(&x.view()).to_vec(), r.fitted_values);
+    }
+
+    /// Every returned basis is identified; a collinear second hinge pair on one variable enters as
+    /// a single hinge (earth). Before: both hinges, design rank = terms - 1, 1e-8 ridge.
+    #[test]
+    fn test_mars_design_has_full_rank() {
+        let (x, y) = two_kink(120, 0);
+        let c = MarsConfig {
+            fast: Some(false),
+            ..Default::default()
+        };
+        let r = mars(x.view(), y.view(), c, None).unwrap();
+        let k = r.basis_functions.len();
+        let design =
+            Array2::from_shape_fn((120, k), |(i, j)| r.basis_functions[j].evaluate(&x.row(i)));
+        let ls = crate::linalg::solve::least_squares(design.view(), y.view()).unwrap();
+        assert_eq!(ls.rank, k, "rank {} of {k}", ls.rank);
+        assert!(r.coefficients.iter().all(|b| b.is_finite()));
+    }
+
+    /// Parameters are validated; nothing panics. Before: an endspan above n panicked.
+    #[test]
+    fn test_mars_validates_parameters() {
+        let (x, y) = two_kink(20, 1);
+        let err = |f: &dyn Fn(&mut MarsConfig)| {
+            let mut c = MarsConfig::default();
+            f(&mut c);
+            mars(x.view(), y.view(), c, None).unwrap_err()
+        };
+        assert!(err(&|c| c.endspan = Some(25)).contains("endspan"));
+        assert!(err(&|c| c.endspan = Some(10)).contains("endspan")); // 2 * endspan must be < n
+        assert!(err(&|c| c.minspan = Some(0)).contains("minspan"));
+        assert!(err(&|c| c.nprune = Some(0)).contains("nprune"));
+        assert!(err(&|c| c.nk = Some(0)).contains("nk"));
+        assert!(err(&|c| c.degree = 0).contains("degree"));
+        assert!(err(&|c| c.penalty = -1.0).contains("penalty"));
+        assert!(err(&|c| c.thresh = f64::NAN).contains("thresh"));
+        assert!(err(&|c| c.fast_k = 0).contains("fast_k"));
+        let mut xn = x.clone();
+        xn[[3, 0]] = f64::NAN;
+        assert!(
+            mars(xn.view(), y.view(), MarsConfig::default(), None)
+                .unwrap_err()
+                .contains("non-finite")
+        );
+        assert!(
+            mars(
+                x.view(),
+                y.view(),
+                MarsConfig::default(),
+                Some(vec!["a".into()])
+            )
+            .unwrap_err()
+            .contains("feature_names")
+        );
+    }
+
+    /// Every forward candidate's RSS and every backward deletion's RSS equal a full least-squares
+    /// refit, with the same aliased set, on noisy data with collinear second hinges and degree 2.
+    #[test]
+    fn test_mars_incremental_scoring_matches_refits() {
+        let n = 240;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            if j == 0 {
+                (i as f64 / (n - 1) as f64) * 2.0
+            } else {
+                ((i * 37) % 101) as f64 / 100.0
+            }
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            let (a, b) = (x[[i, 0]], x[[i, 1]]);
+            (a - 0.6).max(0.0) * 3.0 + a * b + 0.05 * (((i * 13) % 11) as f64 - 5.0)
+        });
+        let refit = |cols: &[Vec<f64>]| {
+            let d = Array2::from_shape_fn((n, cols.len()), |(i, j)| cols[j][i]);
+            least_squares(d.view(), y.view()).unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1e-300);
+
+        let mut state = ForwardState::new(&y.view()).unwrap();
+        let ones = vec![1.0; n];
+        assert!(state.accept(&ones).unwrap());
+        let mut cols = vec![ones.clone()];
+        let (mut u1, mut u2) = (vec![0.0; n], vec![0.0; n]);
+        let mut aliased_seen = 0;
+        // Accept a pair per step; the later knots are collinear with the earlier pairs, and the
+        // first one has an all-zero hinge.
+        for (step, (j, parent, knot)) in [
+            (0, 0, 0.0),
+            (0, 0, 0.6),
+            (1, 2, 0.5), // on the hinge of x0 at 0.6: degree 2
+            (0, 0, 1.4),
+            (0, 0, 0.6),
+            (1, 0, 0.3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let parent_col = cols[parent.min(cols.len() - 1)].clone();
+            let pos: Vec<f64> = (0..n)
+                .map(|i| parent_col[i] * (x[[i, j]] - knot).max(0.0))
+                .collect();
+            let neg: Vec<f64> = (0..n)
+                .map(|i| parent_col[i] * (knot - x[[i, j]]).max(0.0))
+                .collect();
+            let score = state.score(&pos, &neg, &mut u1, &mut u2);
+            let mut design = cols.clone();
+            design.push(pos.clone());
+            design.push(neg.clone());
+            let ls = refit(&design);
+            let rss: f64 = ls.residuals.iter().map(|e| e * e).sum();
+            assert!(close(score.rss, rss), "step {step}: {} {rss}", score.rss);
+            let k = cols.len();
+            assert_eq!(!score.keep_pos, ls.aliased.contains(&k), "step {step}");
+            assert_eq!(
+                !score.keep_neg,
+                ls.aliased.contains(&(k + 1)),
+                "step {step}"
+            );
+            aliased_seen += usize::from(!score.keep_pos) + usize::from(!score.keep_neg);
+            for (keep, column) in [(score.keep_pos, pos), (score.keep_neg, neg)] {
+                if keep {
+                    assert!(state.accept(&column).unwrap());
+                    cols.push(column);
+                }
+            }
+        }
+        assert!(
+            aliased_seen >= 2,
+            "the test needs collinear hinges: {aliased_seen}"
+        );
+
+        // Backward: each deletion's RSS from one fit equals the refit without that column.
+        let ls = refit(&cols);
+        assert!(ls.aliased.is_empty());
+        let rss: f64 = ls.residuals.iter().map(|e| e * e).sum();
+        let costs = deletion_costs(&ls);
+        for j in 1..cols.len() {
+            let mut fewer = cols.clone();
+            fewer.remove(j);
+            let r = refit(&fewer);
+            let want: f64 = r.residuals.iter().map(|e| e * e).sum();
+            assert!(
+                close(rss + costs[j], want),
+                "{j}: {} {want}",
+                rss + costs[j]
+            );
+        }
+        // An aliased column costs nothing.
+        let mut twice = cols.clone();
+        twice.push(cols[1].clone());
+        let ls = refit(&twice);
+        assert_eq!(ls.aliased, vec![cols.len()]);
+        assert_eq!(deletion_costs(&ls)[cols.len()], 0.0);
     }
 }

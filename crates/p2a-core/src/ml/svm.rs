@@ -57,11 +57,7 @@ impl std::fmt::Display for SvmResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| {
-            b.1.abs()
-                .partial_cmp(&a.1.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indexed.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
 
         for (i, weight) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -223,10 +219,20 @@ pub fn linear_svm(
     })
 }
 
-/// Convert target values to binary -1/+1.
-fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32)), String> {
+/// Two classes in a response: the smaller value is -1, the larger +1.
+pub(crate) struct BinaryClasses {
+    pub(crate) y: Array1<f64>,
+    pub(crate) negative: f64,
+    pub(crate) positive: f64,
+}
+
+/// Exactly two finite values, ordered; the one mapping from labels to -1/+1 of the SVM solvers.
+pub(crate) fn binary_classes(target: &ArrayView1<f64>) -> Result<BinaryClasses, String> {
+    if target.iter().any(|v| !v.is_finite()) {
+        return Err("SVM: the labels contain non-finite values".to_string());
+    }
     let mut unique_values: Vec<f64> = target.iter().cloned().collect();
-    unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    unique_values.sort_by(f64::total_cmp);
     unique_values.dedup();
 
     if unique_values.len() != 2 {
@@ -236,18 +242,20 @@ fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32
         ));
     }
 
-    let neg_class = unique_values[0] as i32;
-    let pos_class = unique_values[1] as i32;
+    let (negative, positive) = (unique_values[0], unique_values[1]);
+    let y = target.map(|&v| if v == negative { -1.0 } else { 1.0 });
 
-    let y = target.map(|&v| {
-        if (v - unique_values[0]).abs() < 1e-10 {
-            -1.0
-        } else {
-            1.0
-        }
-    });
+    Ok(BinaryClasses {
+        y,
+        negative,
+        positive,
+    })
+}
 
-    Ok((y, (neg_class, pos_class)))
+/// Convert target values to binary -1/+1.
+fn convert_to_binary(target: &ArrayView1<f64>) -> Result<(Array1<f64>, (i32, i32)), String> {
+    let b = binary_classes(target)?;
+    Ok((b.y, (b.negative as i32, b.positive as i32)))
 }
 
 /// The outcome of [`smo_linear`].
@@ -1598,6 +1606,23 @@ mod tests {
             result.train_accuracy >= 0.5,
             "Train accuracy should be at least 50%, got {:.1}%",
             result.train_accuracy * 100.0
+        );
+    }
+
+    #[test]
+    fn test_binary_classes_validates_and_orders() {
+        let b = binary_classes(&ndarray::array![2.0, 1.0, 2.0, 1.0].view()).unwrap();
+        assert_eq!((b.negative, b.positive), (1.0, 2.0));
+        assert_eq!(b.y.to_vec(), vec![1.0, -1.0, 1.0, -1.0]);
+        let err = |v: ndarray::Array1<f64>| binary_classes(&v.view()).err().unwrap();
+        assert!(err(ndarray::array![1.0, 1.0]).contains("exactly 2 classes, found 1"));
+        assert!(err(ndarray::array![1.0, 2.0, 3.0]).contains("found 3"));
+        assert!(err(ndarray::array![1.0, f64::NAN]).contains("non-finite"));
+        assert_eq!(
+            convert_to_binary(&ndarray::array![0.0, 1.0].view())
+                .unwrap()
+                .1,
+            (0, 1)
         );
     }
 }

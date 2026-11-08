@@ -561,6 +561,7 @@ fn ppr_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("nterms3", &label), &label, |b, _| {
             let config = PprConfig {
                 nterms: 3,
+                max_terms: 3,
                 ..Default::default()
             };
             b.iter(|| ppr(x.view(), &y, None, config.clone()))

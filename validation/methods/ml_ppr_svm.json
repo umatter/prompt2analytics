@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ppr",
+      "name": "Projection pursuit regression (Friedman's SMART, as R's ppr.f)",
+      "category": "ml",
+      "reference": "stats::ppr(nterms, max.terms, sm.method = 'supsmu' | 'spline' | 'gcvspline', bass, span, df, gcvpen, optlevel, weights); stats::supsmu; stats::smooth.spline(all.knots = ppr.f knots, control.spar = ppr's)",
+      "doc": "validation/ml/ppr.md",
+      "cases": [
+        "ppr_methods",
+        "ppr_smoothers"
+      ],
+      "tests": [
+        "p2a-core::ml::ppr::supsmu::tests::test_validate_ppr_supsmu_smoother",
+        "p2a-core::ml::ppr::spline::tests::test_validate_ppr_spline_smoother",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_supsmu_b0",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_supsmu_b5",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_supsmu_span03",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_spline_df5",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_gcvspline",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_gcvspline_pen2",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_optlevels",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_weighted",
+        "p2a-core::ml::ppr::tests::test_validate_ppr_one_predictor"
+      ],
+      "quantities": [
+        "projection directions (alpha)",
+        "ridge coefficients (beta)",
+        "gofn",
+        "gof",
+        "fitted values",
+        "RSS",
+        "yb",
+        "ys",
+        "equivalent df (spline methods)",
+        "predict() on new rows (inside and outside the training range)",
+        "super smoother: cv span, bass 5, span 0.3, weights",
+        "spline smoother: knots, spar, ratio, smooth and edf at R's last evaluation, and smooth and edf refitted at R's spar (df matching, GCV, GCV penalty 2)"
+      ],
+      "tolerance": "Super-smoother runs: Tol::new(1e-8, 1e-10) (largest measured gap 1e-10 relative). Spline runs: Tol::new(0.03, 0.02), about 3x the measured gap (at most 1.2% relative on the scale of each quantity), see the deviation; yb and ys Tol::coef(n). Spline smoother: spar 5e-3 relative, ratio 3e-2, R's last evaluation 0.15 relative + 0.02, refit at R's spar 5e-3 relative + 4e-3, each about 10x measured.",
+      "deviations": [
+        {
+          "finding": "ML-34",
+          "quantity": "optlevel 0 with max.terms > nterms",
+          "note": "p2a returns every forward-pass term (nterms = terms fitted) with a warning; R's object lists only the first nterms directions but predicts with all of them. Fitted values, gof and the directions and coefficients of all terms equal R's (the pin uses ppr(nterms = 3, max.terms = 3, optlevel = 0), whose fitted values R checks to be identical)."
+        },
+        {
+          "finding": "ML-34",
+          "quantity": "spline and gcvspline: every fit quantity, and the spline smoother's lambda (not compared)",
+          "note": "The smoother is a standard penalised B-spline: exact 1/3 in the penalty (R's sgram.f writes 0.333) and the fit, df and lambda of the reported spar (R returns those of its last Brent evaluation). R-compared at measured tolerance, not to digits. lambda is outside the Check (about 6% from R's, which belongs to R's last evaluation); ratio and spar are in it."
+        },
+        {
+          "finding": "ML-34",
+          "quantity": "edf per term",
+          "note": "edf belongs to the stored ridge function. R reports that of the last smoother call, a rejected trial included, and at optlevel 0 only for the first term; that is why the run at optlevel 0 (supsmu) has no edf key and spline edf is at the spline tolerance."
+        },
+        {
+          "finding": "ML-34",
+          "quantity": "spline, gcvspline and gcvspline penalty 2 runs: alpha, beta, gofn, gof, fitted values, RSS, edf and predict, pinned at Tol::new(0.03, 0.02)",
+          "note": "The pins are kept at this tolerance, above the 1e-2 relative asked of an accepted smoother: the largest measured gaps are 1.20e-2 (spline_df5 alpha), 1.15e-2 (spline_df5 edf) and 1.09e-2 (gcvspline_pen2 edf), every other spline-run quantity below 1e-2. R's sbart (smooth.spline's Fortran search) is not ported; the gaps come from its 0.333 penalty constant and its last-evaluation fit, which the smoother tests measure separately."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "fast_svm",
+      "name": "Support vector classification, LIBSVM C-SVC (fast_svm)",
+      "category": "ml",
+      "reference": "e1071::svm(type = 'C-classification', kernel = 'radial' | 'linear', cost, gamma, scale = FALSE, tolerance = 1e-10, shrinking) (LIBSVM 3.x)",
+      "doc": "validation/ml/svm.md",
+      "cases": [
+        "svm_libsvm"
+      ],
+      "tests": [
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_radial_c01",
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_radial_c10",
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_linear_c01",
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_linear_c10"
+      ],
+      "quantities": [
+        "decision values on the training rows",
+        "bias (rho)",
+        "radial: number and indices of support vectors, dual coefficients",
+        "linear: weights w",
+        "predictions in the original labels",
+        "shrinking on and off",
+        "properties of every run: 0 <= alpha <= C, sum alpha y = 0, optimality condition, dual objective at least e1071's"
+      ],
+      "tolerance": "Tol::iterative(4e-7), 10x the largest difference measured in the five runs (3.3e-8, a radial dual coefficient), below the 1e-6 limit; support-vector counts and indices (radial) and predictions exact. p2a runs at e1071's tolerance 1e-10 with the rows in their original order.",
+      "deviations": [
+        {
+          "finding": "ML-103",
+          "quantity": "linear runs: alphas and support-vector indices (not compared)",
+          "note": "The dual of a linear kernel need not be unique, so only w is compared; the dual objective of p2a's alphas is checked against e1071's."
+        },
+        {
+          "finding": "ML-40",
+          "quantity": "linear_svm and kernel_svm (ml/svm.rs) against svm_libsvm",
+          "note": "not pinned: linear_svm's select_second_alpha hard-codes the bound 1.0; kernel_svm's SMO skips alpha steps below 1e-5, so it is accurate only to its KKT tolerance. fast_svm is the LIBSVM-equivalent solver."
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
