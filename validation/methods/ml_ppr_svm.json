@@ -54,6 +54,11 @@
           "finding": "ML-34",
           "quantity": "edf per term",
           "note": "edf belongs to the stored ridge function. R reports that of the last smoother call, a rejected trial included, and at optlevel 0 only for the first term; that is why the run at optlevel 0 (supsmu) has no edf key and spline edf is at the spline tolerance."
+        },
+        {
+          "finding": "ML-34",
+          "quantity": "spline, gcvspline and gcvspline penalty 2 runs: alpha, beta, gofn, gof, fitted values, RSS, edf and predict, pinned at Tol::new(0.03, 0.02)",
+          "note": "The pins are kept at this tolerance, above the 1e-2 relative asked of an accepted smoother: the largest measured gaps are 1.20e-2 (spline_df5 alpha), 1.15e-2 (spline_df5 edf) and 1.09e-2 (gcvspline_pen2 edf), every other spline-run quantity below 1e-2. R's sbart (smooth.spline's Fortran search) is not ported; the gaps come from its 0.333 penalty constant and its last-evaluation fit, which the smoother tests measure separately."
         }
       ],
       "supersedes_legacy": []

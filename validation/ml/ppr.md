@@ -52,6 +52,10 @@ The spline runs, maximum gap over the vector's largest value:
 | fitted values | 2.6e-3 | 9.0e-4 | 1.5e-3 |
 | edf per term | 1.2e-2 | 9.7e-3 | 1.1e-2 |
 
+Three of these gaps exceed 1e-2 (1.20e-2 `spline` alpha, 1.15e-2 `spline` edf, 1.09e-2 `gcvspline`
+penalty 2 edf). The pins stay at `Tol::new(0.03, 0.02)` and are recorded as a registry deviation (ML-34):
+`sbart` is not ported.
+
 Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_value_interpolates_and_extrapolates_flat`,
 `test_ppr_pprder_pools_and_differentiates` (hand-computed from `ppr.f`'s rule; R exposes no `pprder`),
 `test_ppr_pprdir_solves_gauss_newton_step`, `test_ppr_options_change_the_fit`,

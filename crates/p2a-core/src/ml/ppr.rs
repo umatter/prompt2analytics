@@ -1774,6 +1774,9 @@ mod tests {
         pub(super) const SUPSMU_TOL: Tol = Tol::new(1e-8, 1e-10);
         /// The spline runs: R's penalty (0.333 for 1/3) and last-evaluation fit steer its search,
         /// so these are R-compared at about 3x the measured gap, not to digits (validation/ml/ppr.md).
+        // deviation ML-34: every quantity of the spline runs is pinned at this tolerance; the largest
+        // gaps (1.20e-2 spline_df5 alpha, 1.15e-2 spline_df5 edf, 1.09e-2 gcvspline_pen2 edf) exceed
+        // 1e-2 because R's sbart is not ported.
         pub(super) const SPLINE_TOL: Tol = Tol::new(0.03, 0.02);
 
         pub(super) fn check(case: &Case, tag: &str, r: &PprResult, tol: Tol) {
