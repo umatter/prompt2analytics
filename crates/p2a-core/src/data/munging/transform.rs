@@ -991,4 +991,35 @@ mod tests {
         let ds = Dataset::new(df!("v" => [1.5f32, 2.5, 3.5]).unwrap());
         assert_eq!(filter(&ds, "v", "gt", "2.0").unwrap().nrows(), 2);
     }
+
+    #[test]
+    fn test_validate_filter_integer_with_nulls() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_filter: dplyr::filter drops rows whose condition is NA (Int64 and Float64 with NA)
+        let (case, ds) = crate::test_support::load_case("data_munging_filter");
+        let ids = |d: &Dataset| -> Vec<f64> {
+            d.df()
+                .column("id")
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(Option::unwrap)
+                .collect()
+        };
+        Check::new(&case)
+            .vector(
+                "ids_x_ge_5",
+                &ids(&filter(&ds, "x", "ge", "5").unwrap()),
+                Tol::exact(),
+            )
+            .vector(
+                "ids_y_lt_9",
+                &ids(&filter(&ds, "y", "lt", "9").unwrap()),
+                Tol::exact(),
+            )
+            .finish();
+    }
 }

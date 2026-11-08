@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "data_munging_model_matrix",
+  "area": "data/munging",
+  "method": "stats::model.matrix(~ 0 + factor(g)): one dummy per level of an integer-coded factor",
+  "reference": "stats::model.matrix(~ 0 + factor(g))",
+  "call": "model.matrix(~ 0 + factor(g), d)",
+  "dataset": "validation/datasets/generated/munging_factor.csv",
+  "datasets": ["validation/datasets/generated/munging_factor.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "levels": [1, 2, 3],
+    "dummy_1": [0, 0, 1, 0, 1, 0, 0, 0, 1, 0],
+    "dummy_2": [1, 0, 0, 1, 0, 0, 0, 1, 0, 1],
+    "dummy_3": [0, 1, 0, 0, 0, 1, 1, 0, 0, 0],
+    "level_counts": [3, 4, 3]
+  }
+}

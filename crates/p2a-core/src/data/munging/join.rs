@@ -12,6 +12,14 @@
 //! - **Anti Join**: Keep rows from left that have no match in right
 //! - **Semi Join**: Keep rows from left that have a match in right (no right columns)
 //!
+//! # Column names
+//!
+//! A right-hand column whose name is taken gets the suffix (default `_right`), again until the name
+//! is unique, as `dplyr`'s `add_suffixes`: `value` becomes `value_right_right` when the left side
+//! has `value_right`. The right keys take part although inner and left joins drop them. An empty
+//! suffix that leaves a name on both sides is an error. Full joins keep both key columns (DATA-43),
+//! the right one as `<key>_right`.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -32,6 +40,7 @@ use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 /// `df` with all its columns chunked alike: `df` itself when they already
 /// are, otherwise a copy with every column in one chunk. Every frame handed
@@ -404,23 +413,157 @@ pub fn join_with(
 
     // Convert to owned strings for Polars (PlSmallStr needs owned data)
     let left_on_str: Vec<String> = left_on.iter().map(|s| s.to_string()).collect();
-    let right_on_str: Vec<String> = right_on_cols.iter().map(|s| s.to_string()).collect();
 
     // Set up join arguments
-    let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
+    let suffix = suffix.unwrap_or("_right");
+    let suffix_str: PlSmallStr = suffix.into();
+    let (renamed_right, right_on_str) = suffix_right(
+        left.df(),
+        right.df(),
+        left_on,
+        &right_on_cols,
+        join_type,
+        suffix,
+    )?;
 
     // Perform the join, on frames whose columns are chunked alike.
     let result = chunk_aligned(left.df())
         .join(
-            &chunk_aligned(right.df()),
+            &chunk_aligned(renamed_right.as_ref().unwrap_or(right.df())),
             left_on_str.as_slice(),
             right_on_str.as_slice(),
             JoinArgs::new(join_type.to_polars()).with_suffix(Some(suffix_str)),
             None, // JoinTypeOptions
         )
         .map_err(|e| MungeError::JoinError(e.to_string()))?;
+    refuse_duplicate_names(&result)?;
 
     Ok(Dataset::new(result))
+}
+
+/// dplyr:::add_suffixes(x, y, suffix): the names `x` made unique against `y` and each other (earlier
+/// names win) by appending `suffix`, again, to every later duplicate. `suffix == ""` returns `x`.
+fn add_suffixes(x: &[String], y: &[String], suffix: &str) -> MungeResult<Vec<String>> {
+    if suffix.is_empty() {
+        return Ok(x.to_vec());
+    }
+    let mut all: Vec<String> = y.iter().chain(x).cloned().collect();
+    for _ in 0..=all.len() {
+        let mut seen = HashSet::with_capacity(all.len());
+        let dup: Vec<usize> = (0..all.len())
+            .filter(|&i| !seen.insert(all[i].clone()))
+            .collect();
+        if dup.is_empty() {
+            return Ok(all.split_off(y.len()));
+        }
+        for i in dup {
+            all[i].push_str(suffix);
+        }
+    }
+    Err(MungeError::JoinError(
+        "could not make the joined column names unique".into(),
+    ))
+}
+
+fn names_of(df: &DataFrame) -> Vec<String> {
+    df.get_column_names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect()
+}
+
+/// `right` with its columns renamed so that nothing is left for polars to suffix.
+fn renamed(right: &DataFrame, names: &[String]) -> MungeResult<DataFrame> {
+    let columns = right
+        .get_columns()
+        .iter()
+        .zip(names)
+        .map(|(c, new)| c.clone().with_name(new.as_str().into()))
+        .collect();
+    DataFrame::new(columns).map_err(|e| MungeError::JoinError(e.to_string()))
+}
+
+fn refuse_empty_suffix(collisions: Vec<&String>) -> MungeResult<()> {
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = collisions.iter().map(|n| n.as_str()).collect();
+    Err(MungeError::JoinError(format!(
+        "an empty suffix cannot keep apart the column names both datasets keep ({}); give a \
+         non-empty suffix",
+        names.join(", ")
+    )))
+}
+
+/// polars' eager join hands its suffix to a rename that assumes the result names are unique, so the
+/// right-hand columns are renamed first: every right name (the keys too, as dplyr's `join_cols`)
+/// against the left columns polars keeps. Returns the renamed right frame, `None` when polars can
+/// take `right` as it is, and the right key names to pass.
+fn suffix_right(
+    left: &DataFrame,
+    right: &DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    join_type: JoinType,
+    suffix: &str,
+) -> MungeResult<(Option<DataFrame>, Vec<String>)> {
+    let right_names = names_of(right);
+    let keys_as_they_are = || right_on.iter().map(|s| s.to_string()).collect();
+    if matches!(join_type, JoinType::Semi | JoinType::Anti) {
+        return Ok((None, keys_as_they_are()));
+    }
+    let kept_left: Vec<String> = names_of(left)
+        .into_iter()
+        .filter(|n| !(join_type == JoinType::Right && left_on.contains(&n.as_str())))
+        .collect();
+    // Inner and left joins drop the right keys.
+    let drops_right_keys = matches!(join_type, JoinType::Inner | JoinType::Left);
+    if suffix.is_empty() {
+        refuse_empty_suffix(
+            right_names
+                .iter()
+                .filter(|n| !(drops_right_keys && right_on.contains(&n.as_str())))
+                .filter(|n| kept_left.contains(n))
+                .collect(),
+        )?;
+    }
+    let new_names = add_suffixes(&right_names, &kept_left, suffix)?;
+    // The usual join: only right keys that inner and left joins drop would change.
+    let unchanged = right_names
+        .iter()
+        .zip(&new_names)
+        .all(|(old, new)| old == new || (drops_right_keys && right_on.contains(&old.as_str())));
+    if unchanged {
+        return Ok((None, keys_as_they_are()));
+    }
+    let keys = right_on
+        .iter()
+        .map(|key| {
+            right_names
+                .iter()
+                .position(|n| n == key)
+                .map(|i| new_names[i].clone())
+                .ok_or_else(|| MungeError::ColumnNotFound(key.to_string()))
+        })
+        .collect::<MungeResult<Vec<String>>>()?;
+    Ok((Some(renamed(right, &new_names)?), keys))
+}
+
+/// A defensive check: polars 0.52's eager join checks for duplicate names only in debug builds.
+fn refuse_duplicate_names(result: &DataFrame) -> MungeResult<()> {
+    let mut seen = HashSet::with_capacity(result.width());
+    let duplicates: Vec<&str> = result
+        .get_column_names()
+        .iter()
+        .map(|n| n.as_str())
+        .filter(|n| !seen.insert(*n))
+        .collect();
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+    Err(MungeError::JoinError(format!(
+        "internal: the join produced duplicate column names {duplicates:?}"
+    )))
 }
 
 /// Left join: Keep all rows from left, matching rows from right.
@@ -688,16 +831,30 @@ pub fn cross_join_with(
         )));
     }
 
-    let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
+    let suffix = suffix.unwrap_or("_right");
+    let suffix_str: PlSmallStr = suffix.into();
+    let left_names = names_of(left.df());
+    let right_names = names_of(right.df());
+    if suffix.is_empty() {
+        refuse_empty_suffix(
+            right_names
+                .iter()
+                .filter(|n| left_names.contains(n))
+                .collect(),
+        )?;
+    }
+    let new_names = add_suffixes(&right_names, &left_names, suffix)?;
+    let right_df = renamed(right.df(), &new_names)?;
 
     let result = chunk_aligned(left.df())
         .cross_join(
-            &chunk_aligned(right.df()),
+            &chunk_aligned(&right_df),
             Some(suffix_str),
             None,
             MaintainOrderJoin::None,
         )
         .map_err(|e| MungeError::JoinError(format!("Cross join failed: {}", e)))?;
+    refuse_duplicate_names(&result)?;
 
     Ok(Dataset::new(result))
 }
@@ -1610,5 +1767,128 @@ mod tests {
 
         assert!(result.df().column("value").is_ok());
         assert!(result.df().column("value_other").is_ok());
+    }
+
+    fn col_names(d: &Dataset) -> Vec<String> {
+        d.df()
+            .get_column_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_join_suffix_collision() {
+        // DATA-14: (a) chained joins with the default suffix and (b) a right side that already holds
+        // both `value` and `value_right` give unique column names, suffixed again as dplyr does.
+        let a = Dataset::new(df!("k" => [1i64, 2], "value" => [1.5, 2.5]).unwrap());
+        let b = Dataset::new(df!("k" => [1i64, 2], "value" => [10.5, 20.5]).unwrap());
+        let c = Dataset::new(df!("k" => [1i64, 2], "value" => [100.5, 200.25]).unwrap());
+        let ab = left_join(&a, &b, &["k"], None, None).unwrap();
+        assert_eq!(col_names(&ab), ["k", "value", "value_right"]);
+        for jt in [
+            JoinType::Left,
+            JoinType::Inner,
+            JoinType::Right,
+            JoinType::Full,
+        ] {
+            let n = col_names(&join(&ab, &c, &["k"], None, jt, None).unwrap());
+            let unique: std::collections::HashSet<&String> = n.iter().collect();
+            assert_eq!(unique.len(), n.len(), "{jt:?}: {n:?}");
+            assert!(n.iter().any(|x| x == "value_right_right"), "{jt:?}: {n:?}");
+        }
+        assert_eq!(
+            col_names(&left_join(&a, &ab, &["k"], None, None).unwrap()),
+            ["k", "value", "value_right", "value_right_right"]
+        );
+        assert_eq!(
+            col_names(&cross_join(&ab, &c, None).unwrap()),
+            ["k", "value", "value_right", "k_right", "value_right_right"]
+        );
+        // dplyr renames against the right key too, although the join drops it:
+        // inner_join(l, r, by = c(a = "x_r"), suffix = c("", "_r")) -> a, x, x_r_r (R 4.3.3, dplyr 1.2.1)
+        let l = Dataset::new(df!("a" => [1i64, 2], "x" => [0.5, 1.5]).unwrap());
+        let r = Dataset::new(df!("x_r" => [1i64, 2], "x" => [5.5, 6.5]).unwrap());
+        assert_eq!(
+            col_names(&inner_join(&l, &r, &["a"], Some(&["x_r"]), Some("_r")).unwrap()),
+            ["a", "x", "x_r_r"]
+        );
+        // an empty suffix cannot keep shared names apart (dplyr silently drops a column here)
+        let e = err_text(join(&a, &c, &["k"], None, JoinType::Left, Some("")));
+        assert!(e.contains("value") && e.contains("suffix"), "{e}");
+        // no collision: unchanged
+        assert_eq!(
+            col_names(&left_join(&ab, &c, &["k"], None, Some("_c")).unwrap()),
+            ["k", "value", "value_right", "value_c"]
+        );
+    }
+
+    #[test]
+    fn test_validate_join_suffix_dplyr() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_munging_t3.R, case data_munging_join_suffix: dplyr joins with
+        // suffix = c("", "_right"); full_join(keep = TRUE) because p2a's full join keeps both keys (DATA-43)
+        let (case, ds) = crate::test_support::load_case("data_munging_join_suffix");
+        let frame = |name: &str, cols: &[&str]| -> Dataset {
+            let df = ds.df();
+            let mask = df.column("frame").unwrap().str().unwrap().equal(name);
+            Dataset::new(
+                df.filter(&mask)
+                    .unwrap()
+                    .select(cols.iter().copied())
+                    .unwrap(),
+            )
+        };
+        let (a, ab, c) = (
+            frame("A", &["k", "value"]),
+            frame("AB", &["k", "value", "value_right"]),
+            frame("C", &["k", "value"]),
+        );
+        let runs = [
+            ("a", left_join(&ab, &c, &["k"], None, None).unwrap()),
+            ("b", left_join(&a, &ab, &["k"], None, None).unwrap()),
+            ("c", full_join(&ab, &ab, &["k"], None, None).unwrap()),
+            ("d", right_join(&ab, &c, &["k"], None, None).unwrap()),
+            ("e", inner_join(&ab, &c, &["k"], None, None).unwrap()),
+            ("f", cross_join(&ab, &c, None).unwrap()),
+            ("g", left_join(&ab, &c, &["k"], None, Some("_c")).unwrap()),
+        ];
+        let mut check = Check::new(&case);
+        for (s, out) in &runs {
+            let keys: Vec<String> = if *s == "f" {
+                vec!["k".into(), "k_right".into()]
+            } else {
+                vec!["k".into()]
+            };
+            let sorted = out.df().sort(keys, SortMultipleOptions::default()).unwrap();
+            let prefix = format!("{s}__");
+            let mut want: Vec<String> = case
+                .keys()
+                .filter_map(|k| k.strip_prefix(prefix.as_str()))
+                .map(str::to_string)
+                .collect();
+            let mut got: Vec<String> = sorted
+                .get_column_names()
+                .iter()
+                .map(|n| n.to_string())
+                .collect();
+            want.sort();
+            got.sort();
+            assert_eq!(got, want, "scenario {s}");
+            for name in &got {
+                let v: Vec<f64> = sorted
+                    .column(name)
+                    .unwrap()
+                    .cast(&DataType::Float64)
+                    .unwrap()
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|x| x.unwrap_or(f64::NAN))
+                    .collect();
+                check.vector(&format!("{s}__{name}"), &v, Tol::exact());
+            }
+        }
+        check.finish();
     }
 }

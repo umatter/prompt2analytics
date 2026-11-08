@@ -10,9 +10,14 @@ use crate::data::Dataset;
 use crate::data::columns::is_numeric_dtype;
 
 /// Strategy for handling missing values when filling.
+///
+/// `Constant` and `Zero` write a value of the column's own type, so the column keeps its type
+/// (`Mean` and `Median` give Float64). `FillStrategy::parse` reads the strategy from user input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FillStrategy {
-    /// Fill with a constant value (parsed based on column type)
+    /// Fill with a constant, parsed in the column's type: every integer width (with a range
+    /// check), Float32/64, Boolean (as R's `as.logical`), Date (`YYYY-MM-DD`), String (verbatim),
+    /// Categorical or Enum labels.
     Constant(String),
     /// Fill with the mean of the observed values (numeric only)
     Mean,
@@ -22,8 +27,175 @@ pub enum FillStrategy {
     Forward,
     /// Backward fill (use next non-null value)
     Backward,
-    /// Fill with zero (numeric) or empty string (string)
+    /// Fill with zero (numeric), FALSE (boolean) or an empty string (text).
     Zero,
+    /// The most frequent observed value, R `names(which.max(table(x)))`: ties go to the first level
+    /// in R's factor order (numbers ascending, text by bytes, FALSE before TRUE, dates
+    /// chronological), not to the first occurrence.
+    Mode,
+}
+
+/// The strategy keyword, for parsing user input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FillStrategyKind {
+    Mean,
+    Median,
+    Mode,
+    Forward,
+    Backward,
+    Zero,
+    Constant,
+}
+
+crate::option_enum!(
+    FillStrategyKind,
+    crate::options::Choices {
+        option: "fill strategy",
+        values: &[
+            (&["mean"], FillStrategyKind::Mean),
+            (&["median"], FillStrategyKind::Median),
+            (&["mode", "most_frequent"], FillStrategyKind::Mode),
+            (
+                &["forward", "ffill", "locf", "forward_fill"],
+                FillStrategyKind::Forward
+            ),
+            (
+                &["backward", "bfill", "nocb", "backward_fill"],
+                FillStrategyKind::Backward
+            ),
+            (&["zero"], FillStrategyKind::Zero),
+            (&["constant", "value"], FillStrategyKind::Constant),
+        ],
+    }
+);
+
+impl FillStrategy {
+    /// Parse a strategy keyword (case- and separator-insensitive) and, for `constant`, take the fill
+    /// value from `value` with its case kept.
+    ///
+    /// # Errors
+    ///
+    /// [`MungeError::InvalidExpression`] for an unknown keyword, `constant` without a value, and a
+    /// value with another strategy.
+    pub fn parse(strategy: &str, value: Option<&str>) -> MungeResult<FillStrategy> {
+        let kind: FillStrategyKind = strategy.parse().map_err(|e| match e {
+            crate::errors::EconError::InvalidSpecification { message } => {
+                MungeError::InvalidExpression(message)
+            }
+            other => MungeError::InvalidExpression(other.to_string()),
+        })?;
+        if kind == FillStrategyKind::Constant {
+            return match value {
+                Some(v) => Ok(FillStrategy::Constant(v.to_string())),
+                None => Err(MungeError::InvalidExpression(
+                    "fill strategy 'constant' needs a value".to_string(),
+                )),
+            };
+        }
+        if value.is_some() {
+            return Err(MungeError::InvalidExpression(format!(
+                "a fill value is only used with strategy 'constant', not '{kind}'"
+            )));
+        }
+        Ok(match kind {
+            FillStrategyKind::Mean => FillStrategy::Mean,
+            FillStrategyKind::Median => FillStrategy::Median,
+            FillStrategyKind::Mode => FillStrategy::Mode,
+            FillStrategyKind::Forward => FillStrategy::Forward,
+            FillStrategyKind::Backward => FillStrategy::Backward,
+            FillStrategyKind::Zero => FillStrategy::Zero,
+            FillStrategyKind::Constant => unreachable!("returned above"),
+        })
+    }
+
+    /// The keyword of this strategy.
+    pub fn kind(&self) -> FillStrategyKind {
+        match self {
+            FillStrategy::Constant(_) => FillStrategyKind::Constant,
+            FillStrategy::Mean => FillStrategyKind::Mean,
+            FillStrategy::Median => FillStrategyKind::Median,
+            FillStrategy::Forward => FillStrategyKind::Forward,
+            FillStrategy::Backward => FillStrategyKind::Backward,
+            FillStrategy::Zero => FillStrategyKind::Zero,
+            FillStrategy::Mode => FillStrategyKind::Mode,
+        }
+    }
+}
+
+/// What [`fill_na_with`] did.
+#[derive(Clone)]
+pub struct FillOutcome {
+    pub dataset: Dataset,
+    /// Every column the strategy was applied to, in the order filled, with the number of cells
+    /// filled (0 allowed).
+    pub filled: Vec<(String, usize)>,
+    /// The value written into each filled column, as text: the constant, "0"/"false"/"", the mean or
+    /// median (`{}` of the f64), the mode's label; absent for forward/backward.
+    pub fill_values: Vec<(String, String)>,
+    /// Columns skipped because no columns were named and the strategy does not apply to their type
+    /// (column, the error a named column would have raised, as text).
+    pub skipped: Vec<(String, String)>,
+}
+
+impl FillOutcome {
+    /// One sentence for the user: "Filled 6 missing values in 3 columns: k (2, with 1), f (2, with
+    /// 2.5), s (2, with 'a')". Text values are quoted, forward and backward print "k (2)", and only
+    /// columns with at least one filled cell are listed; "No missing values were filled" when none
+    /// was; then, if any column was skipped, "; skipped 2 columns: age (reason), when (reason)".
+    pub fn summary(&self) -> String {
+        fn count(n: usize, one: &str) -> String {
+            if n == 1 {
+                format!("1 {one}")
+            } else {
+                format!("{n} {one}s")
+            }
+        }
+        let changed: Vec<&(String, usize)> = self.filled.iter().filter(|(_, n)| *n > 0).collect();
+        let mut out = if changed.is_empty() {
+            "No missing values were filled".to_string()
+        } else {
+            let total = changed.iter().map(|(_, n)| *n).sum::<usize>();
+            let parts: Vec<String> = changed
+                .iter()
+                .map(|(c, n)| {
+                    let value = self.fill_values.iter().find(|(v, _)| v == c);
+                    match value {
+                        Some((_, v)) if self.is_text_column(c) => format!("{c} ({n}, with '{v}')"),
+                        Some((_, v)) => format!("{c} ({n}, with {v})"),
+                        None => format!("{c} ({n})"),
+                    }
+                })
+                .collect();
+            format!(
+                "Filled {} in {}: {}",
+                count(total, "missing value"),
+                count(changed.len(), "column"),
+                parts.join(", ")
+            )
+        };
+        if !self.skipped.is_empty() {
+            let parts: Vec<String> = self
+                .skipped
+                .iter()
+                .map(|(c, reason)| format!("{c} ({reason})"))
+                .collect();
+            out.push_str(&format!(
+                "; skipped {}: {}",
+                count(self.skipped.len(), "column"),
+                parts.join(", ")
+            ));
+        }
+        out
+    }
+
+    fn is_text_column(&self, column: &str) -> bool {
+        self.dataset.df().column(column).is_ok_and(|c| {
+            matches!(
+                c.dtype(),
+                DataType::String | DataType::Categorical(..) | DataType::Enum(..)
+            )
+        })
+    }
 }
 
 /// Drop rows containing null values.
@@ -103,18 +275,13 @@ pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeR
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
-/// * `columns` - Columns to fill (None = all columns; then mean and median skip
-///   the non-numeric columns)
+/// * `columns` - Columns to fill (None = all columns; then a column the strategy does not apply
+///   to is skipped)
 /// * `strategy` - How to fill missing values
 ///
 /// # Errors
 ///
-/// [`MungeError::ColumnNotFound`] for a named column that does not exist;
-/// [`MungeError::TypeMismatch`] for mean or median of a named non-numeric
-/// column; [`MungeError::InvalidValue`] for mean or median of a numeric (or
-/// named, all-null) column without an observed value, whose mean or median is
-/// undefined; [`MungeError::InvalidValue`] for a constant that does not parse
-/// for the column's type.
+/// As [`fill_na_with`].
 ///
 /// # Example
 /// ```ignore
@@ -129,6 +296,29 @@ pub fn fill_na(
     columns: Option<&[&str]>,
     strategy: FillStrategy,
 ) -> MungeResult<Dataset> {
+    fill_na_with(dataset, columns, &strategy).map(|o| o.dataset)
+}
+
+/// Fill missing values and report what was filled ([`fill_na`] returns only the dataset).
+///
+/// With no columns named, a column the strategy or the constant does not fit (a text constant and a
+/// numeric column, mean of a text column, zero of a date) is left as it is and listed in
+/// [`FillOutcome::skipped`]; a named one is an error.
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`] for a named column that does not exist;
+/// [`MungeError::TypeMismatch`] for a named column whose type the strategy does not apply to (mean
+/// or median of a non-numeric column; zero of a date or categorical column; any strategy but
+/// forward and backward on a datetime, time, duration, decimal, binary or nested column);
+/// [`MungeError::InvalidValue`] for a constant the column's type cannot hold (named columns), and,
+/// named or not, for the mean, median or mode of a column without an observed value, which is
+/// undefined.
+pub fn fill_na_with(
+    dataset: &Dataset,
+    columns: Option<&[&str]>,
+    strategy: &FillStrategy,
+) -> MungeResult<FillOutcome> {
     let df = dataset.df();
 
     let cols_to_fill: Vec<String> = match columns {
@@ -149,100 +339,255 @@ pub fn fill_na(
 
     let named = columns.is_some();
     let mut result_df = df.clone();
+    let mut filled = Vec::new();
+    let mut fill_values = Vec::new();
+    let mut skipped = Vec::new();
 
     for col_name in &cols_to_fill {
         let source = result_df.column(col_name)?;
         let dtype = source.dtype().clone();
         let col = &nan_to_null(source)?;
+        let missing_before = col.null_count();
 
-        let filled_col = match &strategy {
-            FillStrategy::Constant(value) => fill_with_constant(col, value)?,
+        let outcome = match strategy {
+            FillStrategy::Constant(value) => fill_constant(col, value)?,
             FillStrategy::Mean | FillStrategy::Median => {
                 if !named && !is_numeric_dtype(&dtype, false) {
-                    continue; // Skip non-numeric columns nobody named
+                    // Nobody named this non-numeric column.
+                    ColumnFill::Inapplicable(MungeError::TypeMismatch {
+                        column: col_name.clone(),
+                        expected: "numeric (fill_na mean or median)".to_string(),
+                        found: dtype.to_string(),
+                    })
+                } else {
+                    let median = matches!(strategy, FillStrategy::Median);
+                    let (column, value) = fill_with_statistic(&result_df, col_name, col, median)?;
+                    ColumnFill::Filled {
+                        column,
+                        value: Some(value.to_string()),
+                    }
                 }
-                let median = matches!(strategy, FillStrategy::Median);
-                fill_with_statistic(&result_df, col_name, col, median)?
             }
-            FillStrategy::Forward => fill_forward(col)?,
-            FillStrategy::Backward => fill_backward(col)?,
-            FillStrategy::Zero => fill_with_zero(col)?,
+            FillStrategy::Forward => ColumnFill::Filled {
+                column: fill_forward(col)?,
+                value: None,
+            },
+            FillStrategy::Backward => ColumnFill::Filled {
+                column: fill_backward(col)?,
+                value: None,
+            },
+            FillStrategy::Zero => fill_zero(col)?,
+            FillStrategy::Mode => fill_mode(&result_df, col_name, col)?,
         };
 
-        result_df = result_df.with_column(filled_col)?.clone();
+        match outcome {
+            ColumnFill::Filled { column, value } => {
+                filled.push((
+                    col_name.clone(),
+                    missing_before.saturating_sub(column.null_count()),
+                ));
+                if let Some(value) = value {
+                    fill_values.push((col_name.clone(), value));
+                }
+                result_df.with_column(column)?;
+            }
+            ColumnFill::Inapplicable(e) => {
+                if named {
+                    return Err(e);
+                }
+                skipped.push((col_name.clone(), e.to_string()));
+            }
+        }
     }
 
-    Ok(Dataset::new(result_df))
+    Ok(FillOutcome {
+        dataset: Dataset::new(result_df),
+        filled,
+        fill_values,
+        skipped,
+    })
 }
 
-fn fill_with_constant(col: &Column, value: &str) -> MungeResult<Column> {
+/// What a fill does to one column.
+enum ColumnFill {
+    /// The filled column and the value written, as text (forward and backward have none).
+    Filled {
+        column: Column,
+        value: Option<String>,
+    },
+    /// This strategy or value does not fit this column's type: an error when the column was named, a
+    /// `skipped` entry when it was not.
+    Inapplicable(MungeError),
+}
+
+/// A literal that parsed gives `Ok(value)`; one that did not is `Inapplicable`, not a failed fill.
+macro_rules! parsed_or_inapplicable {
+    ($parsed:expr) => {
+        match $parsed {
+            Ok(v) => v,
+            Err(e) => return Ok(ColumnFill::Inapplicable(e)),
+        }
+    };
+}
+
+/// The missing cells of `col` (NaN already null) set to the constant `text`, parsed in the column's
+/// type.
+fn fill_constant(col: &Column, text: &str) -> MungeResult<ColumnFill> {
     let dtype = col.dtype();
     let name = col.name().clone();
+    let column = col.name().as_str();
 
-    match dtype {
-        DataType::Int64 => {
-            let val: i64 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: name.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            let ca = col.i64()?.fill_null_with_values(val)?;
-            Ok(ca.into_column())
-        }
-        DataType::Int32 => {
-            let val: i32 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: name.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            let ca = col.i32()?.fill_null_with_values(val)?;
-            Ok(ca.into_column())
-        }
+    macro_rules! integer {
+        ($method:ident, $native:ty) => {{
+            let v = parsed_or_inapplicable!(parse_int::<$native>(column, dtype, text));
+            col.$method()?.fill_null_with_values(v)?.into_column()
+        }};
+    }
+
+    let filled = match dtype {
+        DataType::Int8 => integer!(i8, i8),
+        DataType::Int16 => integer!(i16, i16),
+        DataType::Int32 => integer!(i32, i32),
+        DataType::Int64 => integer!(i64, i64),
+        DataType::Int128 => integer!(i128, i128),
+        DataType::UInt8 => integer!(u8, u8),
+        DataType::UInt16 => integer!(u16, u16),
+        DataType::UInt32 => integer!(u32, u32),
+        DataType::UInt64 => integer!(u64, u64),
+        DataType::UInt128 => integer!(u128, u128),
         DataType::Float64 => {
-            let val: f64 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: name.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as float".to_string(),
-            })?;
+            let v = parsed_or_inapplicable!(parse_float(column, dtype, text));
             // na-ok: dtype matched by the arm; fill_na mapped NaN to null
-            let ca = col.f64()?.fill_null_with_values(val)?;
-            Ok(ca.into_column())
+            col.f64()?.fill_null_with_values(v)?.into_column()
         }
         DataType::Float32 => {
-            let val: f32 = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: name.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as float".to_string(),
-            })?;
+            let v = parsed_or_inapplicable!(parse_f32(column, dtype, text));
             // na-ok: dtype matched by the arm; fill_na mapped NaN to null
-            let ca = col.f32()?.fill_null_with_values(val)?;
-            Ok(ca.into_column())
-        }
-        DataType::String => {
-            let ca = col.str()?;
-            let filled: StringChunked = ca
-                .into_iter()
-                .map(|opt| {
-                    opt.map(|s| s.to_string())
-                        .unwrap_or_else(|| value.to_string())
-                })
-                .collect();
-            Ok(filled.with_name(name).into_column())
+            col.f32()?.fill_null_with_values(v)?.into_column()
         }
         DataType::Boolean => {
-            let val: bool = value.parse().map_err(|_| MungeError::InvalidValue {
-                column: name.to_string(),
-                value: value.to_string(),
-                reason: "Cannot parse as boolean".to_string(),
-            })?;
-            let ca = col.bool()?.fill_null_with_values(val)?;
-            Ok(ca.into_column())
+            let v = parsed_or_inapplicable!(parse_bool(column, text));
+            col.bool()?.fill_null_with_values(v)?.into_column()
         }
-        _ => {
-            // For other types, try to fill as-is or skip
-            Ok(col.clone())
+        DataType::Date => {
+            let v = parsed_or_inapplicable!(parse_date(column, text));
+            col.date()?
+                .physical()
+                .fill_null_with_values(v)?
+                .into_date()
+                .into_column()
+        }
+        DataType::String => fill_text(col.str()?, text).with_name(name).into_column(),
+        DataType::Categorical(..) | DataType::Enum(..) => {
+            let as_text = col.cast(&DataType::String)?;
+            let filled = fill_text(as_text.str()?, text)
+                .with_name(name)
+                .into_column();
+            parsed_or_inapplicable!(filled.strict_cast(dtype).map_err(|_| invalid_value(
+                column,
+                text,
+                "not a category of the enum column".to_string()
+            )))
+        }
+        other => {
+            return Ok(ColumnFill::Inapplicable(MungeError::TypeMismatch {
+                column: column.to_string(),
+                expected: "a string, categorical, boolean, integer, float or date column"
+                    .to_string(),
+                found: other.to_string(),
+            }));
+        }
+    };
+    Ok(ColumnFill::Filled {
+        column: filled,
+        value: Some(text.to_string()),
+    })
+}
+
+fn fill_text(ca: &StringChunked, value: &str) -> StringChunked {
+    ca.iter().map(|cell| Some(cell.unwrap_or(value))).collect()
+}
+
+/// The missing cells of `col` set to 0, FALSE or "": R's `tidyr::replace_na(x, 0)` has no zero for a
+/// date or a factor, and neither has this.
+fn fill_zero(col: &Column) -> MungeResult<ColumnFill> {
+    let dtype = col.dtype();
+    let (text, printed) = match dtype {
+        dt if dt.is_integer() || dt.is_float() => ("0", "0"),
+        DataType::Boolean => ("FALSE", "false"),
+        DataType::String => ("", ""),
+        other => {
+            return Ok(ColumnFill::Inapplicable(MungeError::TypeMismatch {
+                column: col.name().to_string(),
+                expected: "a numeric, boolean or string column (fill_na zero)".to_string(),
+                found: other.to_string(),
+            }));
+        }
+    };
+    Ok(match fill_constant(col, text)? {
+        ColumnFill::Filled { column, .. } => ColumnFill::Filled {
+            column,
+            value: Some(printed.to_string()),
+        },
+        inapplicable => inapplicable,
+    })
+}
+
+/// The missing cells of `col` (`name` of `df`, NaN already null in `col`) set to the most frequent
+/// observed value, as R's `names(which.max(table(x)))`: ties go to the first level in R's factor
+/// order. A column without an observed value is an error.
+fn fill_mode(df: &DataFrame, name: &str, col: &Column) -> MungeResult<ColumnFill> {
+    let dtype = col.dtype();
+    let supported = dtype.is_integer()
+        || dtype.is_float()
+        || matches!(
+            dtype,
+            DataType::String
+                | DataType::Categorical(..)
+                | DataType::Enum(..)
+                | DataType::Boolean
+                | DataType::Date
+        );
+    if !supported {
+        return Ok(ColumnFill::Inapplicable(MungeError::TypeMismatch {
+            column: name.to_string(),
+            expected: "a string, categorical, boolean, integer, float or date column".to_string(),
+            found: dtype.to_string(),
+        }));
+    }
+    let stopped = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
+    let (codes, levels) = crate::data::columns::factor_options(df, name).map_err(stopped)?;
+    let mut counts =
+        crate::resource::try_vec(levels.len(), 0usize, "mode level counts").map_err(stopped)?;
+    for (i, code) in codes.iter().enumerate() {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(stopped)?;
+        }
+        if let Some(code) = code {
+            counts[*code as usize] += 1;
         }
     }
+    // The first index holding the maximum, as which.max.
+    let most = counts
+        .iter()
+        .enumerate()
+        .fold(None::<(usize, usize)>, |best, (i, &n)| match best {
+            Some((_, m)) if m >= n => best,
+            _ if n > 0 => Some((i, n)),
+            _ => best,
+        });
+    let Some((level, _)) = most else {
+        return Err(invalid_value(
+            name,
+            "mode",
+            "the column has no observed values (all null or NaN), so its mode is undefined; \
+             drop the column or fill it with a constant"
+                .to_string(),
+        ));
+    };
+    // The label parses back exactly: decimal integers, shortest round-trip floats, TRUE/FALSE, ISO
+    // dates, text and category labels.
+    fill_constant(col, &levels[level])
 }
 
 /// `col` with its NaN cells made null (float columns; others unchanged), so
@@ -270,14 +615,14 @@ fn nan_to_null(col: &Column) -> MungeResult<Column> {
 
 /// The column `name` of `df` (`col`, its NaN cells made null) with its missing
 /// cells filled by the mean (`median` false) or the median of its observed
-/// values, as Float64. A column without an observed value is an error: its
+/// values, as Float64, and that value. A column without an observed value is an error: its
 /// mean and median are undefined (R: `mean(c(NA, NA), na.rm = TRUE)` is NaN).
 fn fill_with_statistic(
     df: &DataFrame,
     name: &str,
     col: &Column,
     median: bool,
-) -> MungeResult<Column> {
+) -> MungeResult<(Column, f64)> {
     let which = if median { "median" } else { "mean" };
     let cells = super::numeric_cells(df, name, false)?;
     let observed: Float64Chunked = cells.into_iter().flatten().map(Some).collect();
@@ -297,7 +642,7 @@ fn fill_with_statistic(
     let float_col = col.cast(&DataType::Float64)?;
     // na-ok: cast to Float64 above; the fill below replaces the missing cells
     let filled = float_col.f64()?.fill_null_with_values(value)?;
-    Ok(filled.with_name(col.name().clone()).into_column())
+    Ok((filled.with_name(col.name().clone()).into_column(), value))
 }
 
 fn fill_forward(col: &Column) -> MungeResult<Column> {
@@ -308,41 +653,6 @@ fn fill_forward(col: &Column) -> MungeResult<Column> {
 fn fill_backward(col: &Column) -> MungeResult<Column> {
     let filled = col.fill_null(FillNullStrategy::Backward(None))?;
     Ok(filled)
-}
-
-fn fill_with_zero(col: &Column) -> MungeResult<Column> {
-    let dtype = col.dtype();
-    let name = col.name().clone();
-
-    match dtype {
-        DataType::Int64 => {
-            let ca = col.i64()?.fill_null_with_values(0)?;
-            Ok(ca.into_column())
-        }
-        DataType::Int32 => {
-            let ca = col.i32()?.fill_null_with_values(0)?;
-            Ok(ca.into_column())
-        }
-        DataType::Float64 => {
-            // na-ok: dtype matched by the arm; fill_na mapped NaN to null
-            let ca = col.f64()?.fill_null_with_values(0.0)?;
-            Ok(ca.into_column())
-        }
-        DataType::Float32 => {
-            // na-ok: dtype matched by the arm; fill_na mapped NaN to null
-            let ca = col.f32()?.fill_null_with_values(0.0)?;
-            Ok(ca.into_column())
-        }
-        DataType::String => {
-            let ca = col.str()?;
-            let filled: StringChunked = ca
-                .into_iter()
-                .map(|opt| opt.map(|s| s.to_string()).unwrap_or_default())
-                .collect();
-            Ok(filled.with_name(name).into_column())
-        }
-        _ => Ok(col.clone()),
-    }
 }
 
 /// Remove duplicate rows.
@@ -776,7 +1086,365 @@ pub fn clip(
     Ok(Dataset::new(result_df))
 }
 
-/// Replace specific values in a column.
+/// Options of [`replace_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceOptions {
+    /// A new value of "" (after trim), "NA" (exactly) or "null" (any ASCII case) writes a missing
+    /// value. Default true. `old_value` is always literal.
+    pub null_tokens: bool,
+}
+
+impl Default for ReplaceOptions {
+    fn default() -> Self {
+        ReplaceOptions { null_tokens: true }
+    }
+}
+
+/// What [`replace_with`] did.
+#[derive(Clone)]
+pub struct ReplaceOutcome {
+    pub dataset: Dataset,
+    pub column: String,
+    pub old_value: String,
+    /// `None`: the matches became missing.
+    pub new_value: Option<String>,
+    pub n_replaced: usize,
+}
+
+impl ReplaceOutcome {
+    /// One sentence for the user: "Replaced 2 values '3' with missing in column 'k'", "Replaced 1
+    /// value '-99' with '0' in column 'i32'" or "No value '-99' found in column 'k'; nothing was
+    /// replaced".
+    pub fn summary(&self) -> String {
+        if self.n_replaced == 0 {
+            return format!(
+                "No value '{}' found in column '{}'; nothing was replaced",
+                self.old_value, self.column
+            );
+        }
+        let values = if self.n_replaced == 1 {
+            "value"
+        } else {
+            "values"
+        };
+        let with = match &self.new_value {
+            Some(v) => format!("'{v}'"),
+            None => "missing".to_string(),
+        };
+        format!(
+            "Replaced {} {values} '{}' with {with} in column '{}'",
+            self.n_replaced, self.old_value, self.column
+        )
+    }
+}
+
+/// The new value of [`replace`] and [`replace_with`] that writes a missing value by default.
+fn is_null_token(v: &str) -> bool {
+    v.trim().is_empty() || v == "NA" || v.eq_ignore_ascii_case("null")
+}
+
+fn invalid_value(column: &str, value: &str, reason: String) -> MungeError {
+    MungeError::InvalidValue {
+        column: column.to_string(),
+        value: value.to_string(),
+        reason,
+    }
+}
+
+/// An integer literal for a column of type `dtype`: decimal digits, or a finite integral number
+/// such as "1e3" (as R's `as.integer`).
+fn parse_int<T>(column: &str, dtype: &DataType, text: &str) -> MungeResult<T>
+where
+    T: TryFrom<i128> + std::str::FromStr,
+{
+    let t = text.trim();
+    if let Ok(v) = t.parse::<T>() {
+        return Ok(v);
+    }
+    // 2^127 as f64: below it the conversion to i128 is exact for an integral value.
+    const I128_BOUND: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
+    let wide = t.parse::<i128>().ok().or_else(|| {
+        t.parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && v.fract() == 0.0 && v.abs() < I128_BOUND)
+            .map(|v| v as i128)
+    });
+    let out_of_range = || format!("out of range for the column type {dtype}");
+    match wide {
+        Some(v) => T::try_from(v).map_err(|_| invalid_value(column, text, out_of_range())),
+        // An integral number beyond i128 (or digits beyond it) is a number the type cannot hold.
+        None if t
+            .parse::<f64>()
+            .is_ok_and(|v| v.is_finite() && v.fract() == 0.0) =>
+        {
+            Err(invalid_value(column, text, out_of_range()))
+        }
+        None => Err(invalid_value(
+            column,
+            text,
+            format!("not an integer (the column is {dtype})"),
+        )),
+    }
+}
+
+fn parse_float(column: &str, dtype: &DataType, text: &str) -> MungeResult<f64> {
+    text.trim().parse::<f64>().map_err(|_| {
+        invalid_value(
+            column,
+            text,
+            format!("not a number (the column is {dtype})"),
+        )
+    })
+}
+
+fn parse_f32(column: &str, dtype: &DataType, text: &str) -> MungeResult<f32> {
+    let v = parse_float(column, dtype, text)?;
+    if v.is_finite() && v.abs() > f64::from(f32::MAX) {
+        return Err(invalid_value(
+            column,
+            text,
+            format!("out of range for the column type {dtype}"),
+        ));
+    }
+    Ok(v as f32)
+}
+
+/// A logical literal, as R's `as.logical`.
+fn parse_bool(column: &str, text: &str) -> MungeResult<bool> {
+    match text.trim() {
+        "TRUE" | "true" | "T" | "True" => Ok(true),
+        "FALSE" | "false" | "F" | "False" => Ok(false),
+        _ => Err(invalid_value(
+            column,
+            text,
+            "not a logical value (TRUE/FALSE, T/F, true/false; the column is bool)".to_string(),
+        )),
+    }
+}
+
+/// A `YYYY-MM-DD` literal as days since 1970-01-01, the physical value of a Date cell.
+fn parse_date(column: &str, text: &str) -> MungeResult<i32> {
+    let not_a_date = || {
+        invalid_value(
+            column,
+            text,
+            "not a date in YYYY-MM-DD form (the column is date)".to_string(),
+        )
+    };
+    let date =
+        chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").map_err(|_| not_a_date())?;
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).ok_or_else(not_a_date)?;
+    i32::try_from(date.signed_duration_since(epoch).num_days()).map_err(|_| not_a_date())
+}
+
+/// Parses `old_value` with `parse`; a missing-value token that does not parse says that `replace`
+/// cannot match a missing cell, instead of calling the token a bad literal.
+fn parse_old<T>(
+    column: &str,
+    text: &str,
+    parse: impl Fn(&str) -> MungeResult<T>,
+) -> MungeResult<T> {
+    parse(text).map_err(|e| {
+        if is_null_token(text) {
+            invalid_value(
+                column,
+                text,
+                "a missing value cannot be matched by replace; use fill_na to fill missing values"
+                    .to_string(),
+            )
+        } else {
+            e
+        }
+    })
+}
+
+/// The cells of `ca` with every match of `is_match` set to `new`, and the number of matches.
+fn replace_values<T>(
+    ca: &ChunkedArray<T>,
+    is_match: impl Fn(T::Native) -> bool,
+    new: Option<T::Native>,
+) -> (ChunkedArray<T>, usize)
+where
+    T: PolarsNumericType,
+{
+    let mut n = 0usize;
+    let replaced: ChunkedArray<T> = ca
+        .iter()
+        .map(|cell| match cell {
+            Some(v) if is_match(v) => {
+                n += 1;
+                new
+            }
+            other => other,
+        })
+        .collect();
+    (replaced.with_name(ca.name().clone()), n)
+}
+
+// DATA-69 (Tier 4): the match keeps its absolute-epsilon rule.
+fn float_matches(v: f64, old: f64) -> bool {
+    (v - old).abs() < f64::EPSILON
+}
+
+/// The column with every cell equal to `old` replaced by `new` (`None`: missing), with its name and
+/// type kept, and the number of cells replaced. `old` and `new` are literals of the column's type.
+fn replace_column(col: &Column, old: &str, new: Option<&str>) -> MungeResult<(Column, usize)> {
+    let dtype = col.dtype();
+    let name = col.name().clone();
+    let column = col.name().as_str();
+
+    macro_rules! integer {
+        ($method:ident, $native:ty) => {{
+            let old_v = parse_old(column, old, |t| parse_int::<$native>(column, dtype, t))?;
+            let new_v = new
+                .map(|t| parse_int::<$native>(column, dtype, t))
+                .transpose()?;
+            let (ca, n) = replace_values(col.$method()?, |v| v == old_v, new_v);
+            (ca.into_column(), n)
+        }};
+    }
+
+    Ok(match dtype {
+        DataType::Int8 => integer!(i8, i8),
+        DataType::Int16 => integer!(i16, i16),
+        DataType::Int32 => integer!(i32, i32),
+        DataType::Int64 => integer!(i64, i64),
+        DataType::Int128 => integer!(i128, i128),
+        DataType::UInt8 => integer!(u8, u8),
+        DataType::UInt16 => integer!(u16, u16),
+        DataType::UInt32 => integer!(u32, u32),
+        DataType::UInt64 => integer!(u64, u64),
+        DataType::UInt128 => integer!(u128, u128),
+        DataType::Float32 => {
+            // A Float32 cell holds the f32 nearest to its literal: compare in f32, widened.
+            let old_v = f64::from(parse_old(column, old, |t| parse_f32(column, dtype, t))?);
+            let new_v = new.map(|t| parse_f32(column, dtype, t)).transpose()?;
+            let (ca, n) = replace_values(col.f32()?, |v| float_matches(f64::from(v), old_v), new_v);
+            (ca.into_column(), n)
+        }
+        DataType::Float64 => {
+            let old_v = parse_old(column, old, |t| parse_float(column, dtype, t))?;
+            let new_v = new.map(|t| parse_float(column, dtype, t)).transpose()?;
+            // na-ok: dtype matched by the arm; values are compared, nulls stay null
+            let (ca, n) = replace_values(col.f64()?, |v| float_matches(v, old_v), new_v);
+            (ca.into_column(), n)
+        }
+        DataType::Boolean => {
+            let old_v = parse_old(column, old, |t| parse_bool(column, t))?;
+            let new_v = new.map(|t| parse_bool(column, t)).transpose()?;
+            let mut n = 0usize;
+            let replaced: BooleanChunked = col
+                .bool()?
+                .iter()
+                .map(|cell| match cell {
+                    Some(v) if v == old_v => {
+                        n += 1;
+                        new_v
+                    }
+                    other => other,
+                })
+                .collect();
+            (replaced.with_name(name).into_column(), n)
+        }
+        DataType::String => {
+            let (ca, n) = replace_text(col.str()?, old, new);
+            (ca.with_name(name).into_column(), n)
+        }
+        DataType::Date => {
+            let old_v = parse_old(column, old, |t| parse_date(column, t))?;
+            let new_v = new.map(|t| parse_date(column, t)).transpose()?;
+            let (days, n) = replace_values(col.date()?.physical(), |v| v == old_v, new_v);
+            (days.into_date().into_column(), n)
+        }
+        DataType::Categorical(..) | DataType::Enum(..) => {
+            let text = col.cast(&DataType::String)?;
+            let (ca, n) = replace_text(text.str()?, old, new);
+            let back = ca
+                .with_name(name)
+                .into_column()
+                .strict_cast(dtype)
+                .map_err(|_| {
+                    invalid_value(
+                        column,
+                        new.unwrap_or(""),
+                        "not a category of the enum column".to_string(),
+                    )
+                })?;
+            (back, n)
+        }
+        DataType::Null => (col.clone(), 0),
+        other => {
+            return Err(MungeError::TypeMismatch {
+                column: column.to_string(),
+                expected: "a string, categorical, boolean, integer, float or date column (cast \
+                           it first with munge_cast)"
+                    .to_string(),
+                found: other.to_string(),
+            });
+        }
+    })
+}
+
+/// The cells of `ca` with every exact match of `old` replaced by `new`, and the number of matches.
+fn replace_text(ca: &StringChunked, old: &str, new: Option<&str>) -> (StringChunked, usize) {
+    let mut n = 0usize;
+    let replaced: StringChunked = ca
+        .iter()
+        .map(|cell| match cell {
+            Some(v) if v == old => {
+                n += 1;
+                new
+            }
+            other => other,
+        })
+        .collect();
+    (replaced, n)
+}
+
+/// Replace the cells of a column equal to `old_value` by `new_value`, or by a missing value (R:
+/// `dplyr::na_if(x, old)`, or `replace(x, x == old, new)`).
+///
+/// `new_value` is missing when it is `None` and, with [`ReplaceOptions::null_tokens`] (the
+/// default), when it is "" (after trim), "NA" or "null" (any ASCII case). The values are parsed in
+/// the column's own type, so the column keeps its type:
+/// every integer width (with a range check), Float32 and Float64, Boolean (as R's `as.logical`),
+/// Date (`YYYY-MM-DD`), String and Categorical or Enum labels (both compared exactly, so "NA" there
+/// matches the text `NA`). A missing cell is never matched: filling one is `fill_na`'s job.
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`]; [`MungeError::InvalidValue`] for a value the column's type cannot
+/// hold; [`MungeError::TypeMismatch`] for any other column type (Datetime, Time, Duration, Decimal,
+/// Binary, nested).
+pub fn replace_with(
+    dataset: &Dataset,
+    column: &str,
+    old_value: &str,
+    new_value: Option<&str>,
+    options: &ReplaceOptions,
+) -> MungeResult<ReplaceOutcome> {
+    let df = dataset.df();
+    let col = df
+        .column(column)
+        .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
+    crate::resource::checkpoint().map_err(|e| invalid_value(column, old_value, e.to_string()))?;
+
+    let new = new_value.filter(|v| !(options.null_tokens && is_null_token(v)));
+    let (replaced, n_replaced) = replace_column(col, old_value, new)?;
+
+    let mut result = df.clone();
+    result.with_column(replaced)?;
+    Ok(ReplaceOutcome {
+        dataset: Dataset::new(result),
+        column: column.to_string(),
+        old_value: old_value.to_string(),
+        new_value: new.map(str::to_string),
+        n_replaced,
+    })
+}
+
+/// Replace specific values in a column: [`replace_with`] with the default options, so a new value of
+/// "", "NA" or "null" writes a missing value.
 ///
 /// # Arguments
 /// * `dataset` - Source dataset
@@ -789,86 +1457,14 @@ pub fn replace(
     old_value: &str,
     new_value: &str,
 ) -> MungeResult<Dataset> {
-    let df = dataset.df();
-
-    if df.column(column).is_err() {
-        return Err(MungeError::ColumnNotFound(column.to_string()));
-    }
-
-    let col = df.column(column)?;
-    let dtype = col.dtype();
-    let name = col.name().clone();
-
-    let replaced_col = match dtype {
-        DataType::String => {
-            let ca = col.str()?;
-            let replaced: StringChunked = ca
-                .into_iter()
-                .map(|opt| {
-                    opt.map(|s| {
-                        if s == old_value {
-                            new_value.to_string()
-                        } else {
-                            s.to_string()
-                        }
-                    })
-                })
-                .collect();
-            replaced.with_name(name).into_column()
-        }
-        DataType::Int64 => {
-            let old_val: i64 = old_value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: old_value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            let new_val: i64 = new_value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: new_value.to_string(),
-                reason: "Cannot parse as integer".to_string(),
-            })?;
-            let ca = col.i64()?;
-            let replaced: Int64Chunked = ca
-                .into_iter()
-                .map(|opt| opt.map(|v| if v == old_val { new_val } else { v }))
-                .collect();
-            replaced.with_name(name).into_column()
-        }
-        DataType::Float64 => {
-            let old_val: f64 = old_value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: old_value.to_string(),
-                reason: "Cannot parse as float".to_string(),
-            })?;
-            let new_val: f64 = new_value.parse().map_err(|_| MungeError::InvalidValue {
-                column: column.to_string(),
-                value: new_value.to_string(),
-                reason: "Cannot parse as float".to_string(),
-            })?;
-            // na-ok: dtype matched by the arm; values are compared, nulls stay null
-            let ca = col.f64()?;
-            let replaced: Float64Chunked = ca
-                .into_iter()
-                .map(|opt| {
-                    opt.map(|v| {
-                        if (v - old_val).abs() < f64::EPSILON {
-                            new_val
-                        } else {
-                            v
-                        }
-                    })
-                })
-                .collect();
-            replaced.with_name(name).into_column()
-        }
-        _ => col.clone(),
-    };
-
-    let mut result_df = df.clone();
-    result_df = result_df.drop(column)?;
-    result_df = result_df.with_column(replaced_col)?.clone();
-
-    Ok(Dataset::new(result_df))
+    replace_with(
+        dataset,
+        column,
+        old_value,
+        Some(new_value),
+        &ReplaceOptions::default(),
+    )
+    .map(|o| o.dataset)
 }
 
 /// Trim whitespace from string columns.
@@ -2178,5 +2774,632 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f64s(&i, "v"), vec![Some(1.0), Some(5.0)]);
+    }
+
+    /// Cells of any numeric/boolean column as f64 (null -> None).
+    fn num_cells(ds: &Dataset, c: &str) -> Vec<Option<f64>> {
+        f64s(ds, c)
+    }
+    /// Cells as text (categoricals by label; null -> None).
+    fn text_cells(ds: &Dataset, c: &str) -> Vec<Option<String>> {
+        ds.df()
+            .column(c)
+            .unwrap()
+            .cast(&DataType::String)
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.map(str::to_string))
+            .collect()
+    }
+    /// R's NA as NaN, to compare with a case vector (`Check` treats NaN as equal to NaN). Every test that
+    /// uses it also asserts the null count, because NaN would pass the comparison.
+    fn as_r(v: &[Option<f64>]) -> Vec<f64> {
+        v.iter().map(|x| x.unwrap_or(f64::NAN)).collect()
+    }
+    /// Text cells against a `.strings()` case value (missing -> "").
+    fn as_r_names(v: &[Option<String>]) -> Vec<String> {
+        v.iter().map(|x| x.clone().unwrap_or_default()).collect()
+    }
+    fn dtype(ds: &Dataset, c: &str) -> DataType {
+        ds.df().column(c).unwrap().dtype().clone()
+    }
+    /// The error text of any munging result that must fail (outcomes holding a Dataset are not Debug).
+    fn err_any<T>(r: MungeResult<T>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_replace_with_none_gives_null() {
+        // DATA-9 repro: "null" was written as the text 'null' (String) or refused ("Cannot parse as
+        // integer/float"); Int32 came back unchanged. R: dplyr::na_if(x, sentinel).
+        let ds = Dataset::new(
+            df!("s" => ["ok", "N/A", "ok"], "i" => [1i64, -99, 3],
+                                  "f" => [1.5, -99.0, 3.5], "i32" => [1i32, -99, 3])
+            .unwrap(),
+        );
+        let s = replace(&ds, "s", "N/A", "null").unwrap();
+        assert_eq!(
+            text_cells(&s, "s"),
+            [Some("ok".to_string()), None, Some("ok".to_string())]
+        );
+        for (c, token) in [("i", "null"), ("f", "NA"), ("i32", "")] {
+            let out = replace(&ds, c, "-99", token).unwrap();
+            assert_eq!(
+                out.df().column(c).unwrap().null_count(),
+                1,
+                "{c} with {token:?}"
+            );
+            assert_eq!(dtype(&out, c), dtype(&ds, c), "{c}: the type is kept");
+            assert_eq!(num_cells(&out, c)[2], num_cells(&ds, c)[2]);
+        }
+        // None is missing whatever the options; with the tokens off, "NA" is literal text in a text
+        // column and an error in an integer column
+        let off = ReplaceOptions { null_tokens: false };
+        let o = replace_with(&ds, "i", "-99", None, &off).unwrap();
+        assert_eq!(
+            (
+                o.n_replaced,
+                o.dataset.df().column("i").unwrap().null_count()
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            o.summary(),
+            "Replaced 1 value '-99' with missing in column 'i'"
+        );
+        let lit = replace_with(&ds, "s", "N/A", Some("NA"), &off).unwrap();
+        assert_eq!(text_cells(&lit.dataset, "s")[1].as_deref(), Some("NA"));
+        let e = err_any(replace_with(&ds, "i", "-99", Some("NA"), &off));
+        assert!(e.contains("'NA'") && e.contains("not an integer"), "{e}");
+        // a missing value cannot be matched by replace (that is fill_na)
+        let e = err_any(replace_with(&ds, "i", "NA", Some("0"), &off));
+        assert!(e.contains("fill_na"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_replace_na_if() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_munging_t3.R, case data_munging_na_if: dplyr::na_if(x, sentinel)
+        let (case, ds) = crate::test_support::load_case("data_munging_na_if");
+        assert_eq!(dtype(&ds, "k"), DataType::Int64);
+        let k = replace(&ds, "k", "3", "null").unwrap(); // the str_replace_value workflow
+        let f = replace_with(&ds, "f", "1.25", None, &ReplaceOptions::default()).unwrap();
+        let s = replace(&ds, "s", "c", "NA").unwrap();
+        assert_eq!(dtype(&k, "k"), DataType::Int64);
+        assert_eq!(
+            (f.n_replaced, f.summary().as_str()),
+            (2, "Replaced 2 values '1.25' with missing in column 'f'")
+        );
+        let present: Vec<f64> = text_cells(&s, "s")
+            .iter()
+            .map(|v| if v.is_some() { 1.0 } else { f64::NAN })
+            .collect();
+        Check::new(&case)
+            .vector("k_na_if_3", &as_r(&num_cells(&k, "k")), Tol::exact())
+            .vector(
+                "f_na_if_1_25",
+                &as_r(&num_cells(&f.dataset, "f")),
+                Tol::exact(),
+            )
+            .vector("s_na_if_c", &present, Tol::exact())
+            .finish();
+        assert_eq!(as_r_names(&text_cells(&s, "s")), case.names("s_na_if_c"));
+        // missing, not NaN: R's NA positions are polars nulls (2 original + 2 replaced)
+        assert_eq!(k.df().column("k").unwrap().null_count(), 4);
+        assert_eq!(f.dataset.df().column("f").unwrap().null_count(), 4);
+        assert_eq!(s.df().column("s").unwrap().null_count(), 4);
+    }
+
+    #[test]
+    fn test_replace_typed_every_dtype() {
+        // DATA-38 repro: replace on every dtype but String/Int64/Float64 returned the column unchanged
+        // while the tool reported success (Int32 [1, -99, 3] stayed [1, -99, 3]).
+        let date = |d: &[Option<i32>]| {
+            Int32Chunked::from_slice_options("d".into(), d)
+                .into_date()
+                .into_column()
+        };
+        let cat = Column::new("c".into(), ["a", "b", "a"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("i32".into(), [1i32, -99, 3]),
+                Column::new("f32".into(), [1.0f32, -99.0, 3.0]),
+                Column::new("i16".into(), [1i16, -99, 3]),
+                Column::new("u32".into(), [1u32, 99, 3]),
+                Column::new("f32b".into(), [0.1f32, 0.25, 0.1]),
+                Column::new("u8".into(), [1u8, 99, 3]),
+                Column::new("b".into(), [Some(true), Some(false), None]),
+                date(&[Some(18262), Some(18263), None]), // 2020-01-01, 2020-01-02 (R as.numeric(as.Date(..)))
+                cat,
+            ])
+            .unwrap(),
+        );
+        assert_eq!(
+            num_cells(&replace(&ds, "i32", "-99", "0").unwrap(), "i32"),
+            [Some(1.0), Some(0.0), Some(3.0)]
+        );
+        let run = |c: &str, old: &str, new: Option<&str>| {
+            replace_with(&ds, c, old, new, &ReplaceOptions::default()).unwrap()
+        };
+        for c in ["i32", "f32", "i16"] {
+            let o = run(c, "-99", Some("0"));
+            assert_eq!(
+                (o.n_replaced, num_cells(&o.dataset, c)),
+                (1, vec![Some(1.0), Some(0.0), Some(3.0)]),
+                "{c}"
+            );
+            assert_eq!(dtype(&o.dataset, c), dtype(&ds, c), "{c}");
+        }
+        assert_eq!(
+            run("i32", "-99", Some("0")).summary(),
+            "Replaced 1 value '-99' with '0' in column 'i32'"
+        );
+        let u = run("u32", "99", None);
+        assert_eq!(
+            (dtype(&u.dataset, "u32"), num_cells(&u.dataset, "u32")),
+            (DataType::UInt32, vec![Some(1.0), None, Some(3.0)])
+        );
+        // a Float32 cell 0.1 widens to 0.10000000149011612, not to the double 0.1
+        let f = run("f32b", "0.1", Some("0.5"));
+        assert_eq!(
+            (f.n_replaced, dtype(&f.dataset, "f32b")),
+            (2, DataType::Float32)
+        );
+        assert_eq!(
+            f.dataset
+                .df()
+                .column("f32b")
+                .unwrap()
+                .f32()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some(0.5f32), Some(0.25), Some(0.5)]
+        );
+        let e = err_any(replace_with(
+            &ds,
+            "u8",
+            "99",
+            Some("300"),
+            &ReplaceOptions::default(),
+        ));
+        assert!(
+            e.contains("'300'") && e.contains("out of range") && e.contains("u8"),
+            "{e}"
+        );
+        let b = run("b", "FALSE", Some("TRUE"));
+        assert_eq!(
+            b.dataset
+                .df()
+                .column("b")
+                .unwrap()
+                .bool()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some(true), Some(true), None]
+        );
+        let d = run("d", "2020-01-02", Some("2020-02-01")); // 2020-02-01 = 18293
+        assert_eq!(dtype(&d.dataset, "d"), DataType::Date);
+        assert_eq!(
+            d.dataset
+                .df()
+                .column("d")
+                .unwrap()
+                .date()
+                .unwrap()
+                .physical()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some(18262), Some(18293), None]
+        );
+        let c = run("c", "a", Some("z"));
+        assert!(matches!(
+            dtype(&c.dataset, "c"),
+            DataType::Categorical(_, _)
+        ));
+        assert_eq!(
+            (c.n_replaced, text_cells(&c.dataset, "c")),
+            (
+                2,
+                vec![Some("z".into()), Some("b".into()), Some("z".into())]
+            )
+        );
+        let e = err_any(replace_with(
+            &ds,
+            "i32",
+            "x",
+            Some("0"),
+            &ReplaceOptions::default(),
+        ));
+        assert!(e.contains("'x'") && e.contains("i32"), "{e}");
+        assert_eq!(
+            run("i32", "7", Some("0")).summary(),
+            "No value '7' found in column 'i32'; nothing was replaced"
+        );
+    }
+
+    #[test]
+    fn test_replace_unsupported_dtype_is_error() {
+        // DATA-38: the old `_ => col.clone()` arm reported success on any other dtype
+        let t = Int64Chunked::from_slice("t".into(), &[0, 1_000_000])
+            .into_datetime(TimeUnit::Microseconds, None)
+            .into_column();
+        let ds = Dataset::new(DataFrame::new(vec![t]).unwrap());
+        let e = err_text(replace(&ds, "t", "0", "1"));
+        assert!(e.contains("'t'") && e.contains("datetime"), "{e}");
+    }
+
+    #[test]
+    fn test_fill_constant_uint32_and_date() {
+        // DATA-38 repro: Constant and Zero fills of UInt32, Int16 and Date columns left the nulls in place.
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("u".into(), [Some(5u32), None, Some(7)]),
+                Column::new("i16".into(), [Some(1i16), None, Some(3)]),
+                Int32Chunked::from_slice_options("d".into(), &[Some(18262), None, Some(18263)])
+                    .into_date()
+                    .into_column(),
+            ])
+            .unwrap(),
+        );
+        let fill = |c: &str, v: &str| fill_na(&ds, Some(&[c]), FillStrategy::Constant(v.into()));
+        let u = fill("u", "7").unwrap();
+        assert_eq!(
+            (dtype(&u, "u"), num_cells(&u, "u")),
+            (DataType::UInt32, vec![Some(5.0), Some(7.0), Some(7.0)])
+        );
+        let i = fill("i16", "300").unwrap();
+        assert_eq!(
+            (dtype(&i, "i16"), num_cells(&i, "i16")),
+            (DataType::Int16, vec![Some(1.0), Some(300.0), Some(3.0)])
+        );
+        let d = fill("d", "2021-06-30").unwrap(); // R: as.numeric(as.Date("2021-06-30")) = 18808
+        assert_eq!(dtype(&d, "d"), DataType::Date);
+        assert_eq!(
+            d.df()
+                .column("d")
+                .unwrap()
+                .date()
+                .unwrap()
+                .physical()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some(18262), Some(18808), Some(18263)]
+        );
+        for (c, v, needle) in [
+            ("i16", "70000", "out of range"),
+            ("u", "-1", "out of range"),
+            ("d", "30/06/2021", "YYYY-MM-DD"),
+        ] {
+            let e = err_text(fill(c, v));
+            assert!(e.contains(needle) && e.contains(&format!("'{c}'")), "{e}");
+        }
+        let z = fill_na(&ds, Some(&["u", "i16"]), FillStrategy::Zero).unwrap();
+        assert_eq!(
+            (
+                num_cells(&z, "u")[1],
+                num_cells(&z, "i16")[1],
+                dtype(&z, "u")
+            ),
+            (Some(0.0), Some(0.0), DataType::UInt32)
+        );
+        let e = err_text(fill_na(&ds, Some(&["d"]), FillStrategy::Zero)); // R: tidyr::replace_na(<Date>, 0) errors
+        assert!(e.contains("'d'") && e.contains("date"), "{e}");
+    }
+
+    #[test]
+    fn test_fill_zero_and_constant_every_dtype() {
+        let cat = Column::new("c".into(), [Some("a"), None])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("f32".into(), [Some(1.5f32), None]),
+                Column::new("i8".into(), [Some(1i8), None]),
+                Column::new("u64".into(), [Some(1u64), None]),
+                Column::new("b".into(), [Some(true), None]),
+                Column::new("s".into(), [Some("x"), None]),
+                cat,
+            ])
+            .unwrap(),
+        );
+        let z = fill_na(&ds, None, FillStrategy::Zero).unwrap(); // categorical: skipped, no zero label
+        assert_eq!(
+            [
+                num_cells(&z, "f32")[1],
+                num_cells(&z, "i8")[1],
+                num_cells(&z, "u64")[1],
+                num_cells(&z, "b")[1]
+            ],
+            [Some(0.0); 4]
+        );
+        assert_eq!(
+            (
+                dtype(&z, "f32"),
+                dtype(&z, "i8"),
+                dtype(&z, "u64"),
+                dtype(&z, "b")
+            ),
+            (
+                DataType::Float32,
+                DataType::Int8,
+                DataType::UInt64,
+                DataType::Boolean
+            )
+        );
+        assert_eq!(text_cells(&z, "s")[1].as_deref(), Some(""));
+        assert_eq!(z.df().column("c").unwrap().null_count(), 1);
+        let e = err_text(fill_na(&ds, Some(&["c"]), FillStrategy::Zero)); // named: an error, not a skip
+        assert!(e.contains("'c'") && e.contains("fill_na zero"), "{e}");
+        let c = fill_na(&ds, Some(&["c"]), FillStrategy::Constant("z".into())).unwrap();
+        assert!(matches!(dtype(&c, "c"), DataType::Categorical(_, _)));
+        assert_eq!(
+            text_cells(&c, "c"),
+            [Some("a".to_string()), Some("z".to_string())]
+        );
+        let b = fill_na(&ds, Some(&["b"]), FillStrategy::Constant("F".into())).unwrap(); // R as.logical("F")
+        assert_eq!(
+            b.df().column("b").unwrap().bool().unwrap().get(1),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_regex_helpers_match_stringr() {
+        // DATA-42: the regex helpers had no value tests.
+        // x <- c("ann@ex.org, bob@ex.com", NA, "no email", "tim@a.b.c")
+        let ds = Dataset::new(
+            df!("x" => [Some("ann@ex.org, bob@ex.com"), None, Some("no email"), Some("tim@a.b.c")])
+                .unwrap(),
+        );
+        // stringr::str_match(x, "([a-z]+)@([a-z.]+)")[, 3]: "ex.org" NA NA "a.b.c"
+        let m = regex_extract(&ds, "x", "([a-z]+)@([a-z.]+)", "dom", 2).unwrap();
+        assert_eq!(
+            split_col(&m, "dom"),
+            [Some("ex.org".into()), None, None, Some("a.b.c".into())]
+        );
+        // str_extract_all(x, "[a-z]+@") pasted with ";": "ann@;bob@" NA "" "tim@"
+        let a = regex_extract_all(&ds, "x", "[a-z]+@", "users", Some(";")).unwrap();
+        assert_eq!(
+            split_col(&a, "users"),
+            [
+                Some("ann@;bob@".into()),
+                None,
+                Some(String::new()),
+                Some("tim@".into())
+            ]
+        );
+        // str_count(x, "@"): 2 NA 0 1
+        let c = regex_count(&ds, "x", "@", "n").unwrap();
+        assert_eq!(
+            c.df()
+                .column("n")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some(2), None, Some(0), Some(1)]
+        );
+        // str_replace_all(x, "([a-z]+)@", "<\\1>") (p2a writes the group as $1)
+        let r = regex_replace(&ds, "x", "([a-z]+)@", "<$1>").unwrap();
+        assert_eq!(
+            split_col(&r, "x"),
+            [
+                Some("<ann>ex.org, <bob>ex.com".into()),
+                None,
+                Some("no email".into()),
+                Some("<tim>a.b.c".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fill_mode() {
+        // DATA-28 (core): 'mode' was advertised but did not exist. R: names(which.max(table(x))), ties to
+        // the first level in R's sorted order: table(c(TRUE, FALSE)) gives "FALSE" (R 4.3.3).
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("b".into(), [Some(true), None, Some(false), Some(true)]),
+                Column::new("tie".into(), [Some(true), Some(false), None, None]),
+                Column::new("u".into(), [Some(5u32), Some(7), None, Some(7)]),
+                Int32Chunked::from_slice_options(
+                    "d".into(),
+                    &[Some(18263), None, Some(18262), Some(18263)],
+                )
+                .into_date()
+                .into_column(),
+                Column::new("c".into(), [Some("b"), Some("a"), None, Some("b")])
+                    .cast(&DataType::from_categories(Categories::global()))
+                    .unwrap(),
+            ])
+            .unwrap(),
+        );
+        let o = fill_na_with(&ds, None, &FillStrategy::Mode).unwrap();
+        let df = o.dataset.df();
+        let bools = |c: &str| {
+            df.column(c)
+                .unwrap()
+                .bool()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bools("b"),
+            [Some(true), Some(true), Some(false), Some(true)]
+        );
+        assert_eq!(
+            bools("tie"),
+            [Some(true), Some(false), Some(false), Some(false)]
+        );
+        assert_eq!(
+            (dtype(&o.dataset, "u"), num_cells(&o.dataset, "u")[2]),
+            (DataType::UInt32, Some(7.0))
+        );
+        assert_eq!(
+            df.column("d").unwrap().date().unwrap().physical().get(1),
+            Some(18263)
+        );
+        assert_eq!(text_cells(&o.dataset, "c")[2].as_deref(), Some("b"));
+        let values: Vec<(&str, &str)> = o
+            .fill_values
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("b", "TRUE"),
+                ("tie", "FALSE"),
+                ("u", "7"),
+                ("d", "2020-01-02"),
+                ("c", "b")
+            ]
+        );
+        assert_eq!(
+            o.filled.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+            [1, 2, 1, 1, 1]
+        );
+        let e = err_text(fill_na(
+            &Dataset::new(df!("z" => [None::<i64>, None]).unwrap()),
+            None,
+            FillStrategy::Mode,
+        ));
+        assert!(
+            e.contains("'z'") && e.contains("no observed values") && e.contains("mode"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_validate_fill_mode() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_munging_t3.R, case data_munging_fill_mode:
+        // replace_na(x, names(which.max(table(x)))); k ties 3 (first in the data) and 1 -> 1; s ties a, b, c -> "a"
+        let (case, ds) = crate::test_support::load_case("data_munging_fill_mode");
+        let o = fill_na_with(&ds, Some(&["k", "f", "s"]), &FillStrategy::Mode).unwrap();
+        assert_eq!(dtype(&o.dataset, "k"), DataType::Int64); // the mode keeps the integer type
+        Check::new(&case)
+            .vector("k_filled", &as_r(&num_cells(&o.dataset, "k")), Tol::exact())
+            .vector("f_filled", &as_r(&num_cells(&o.dataset, "f")), Tol::exact())
+            .scalar(
+                "k_mode",
+                o.fill_values[0].1.parse::<f64>().unwrap(),
+                Tol::exact(),
+            )
+            .scalar(
+                "f_mode",
+                o.fill_values[1].1.parse::<f64>().unwrap(),
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(
+            as_r_names(&text_cells(&o.dataset, "s")),
+            case.names("s_filled")
+        );
+        assert_eq!(case.names("s_mode"), [o.fill_values[2].1.clone()]);
+        assert_eq!(
+            o.summary(),
+            "Filled 6 missing values in 3 columns: k (2, with 1), f (2, with 2.5), s (2, with 'a')"
+        );
+    }
+
+    #[test]
+    fn test_fill_strategy_kind_parses_aliases_and_rejects_unknown() {
+        FillStrategyKind::choices().validate().unwrap();
+        for (s, k) in [
+            ("MEAN", FillStrategyKind::Mean),
+            ("Forward-Fill", FillStrategyKind::Forward),
+            ("ffill", FillStrategyKind::Forward),
+            ("LOCF", FillStrategyKind::Forward),
+            ("bfill", FillStrategyKind::Backward),
+            ("most frequent", FillStrategyKind::Mode),
+            ("Mode", FillStrategyKind::Mode),
+            ("constant", FillStrategyKind::Constant),
+        ] {
+            assert_eq!(s.parse::<FillStrategyKind>().unwrap(), k, "{s}");
+        }
+        let e = "interpolate"
+            .parse::<FillStrategyKind>()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown fill strategy 'interpolate'; expected one of: mean, median, mode, forward, backward, zero, constant"), "{e}");
+    }
+
+    #[test]
+    fn test_fill_strategy_parse() {
+        // DATA-28 / LLM-12: keywords are case-insensitive, the constant keeps its case, unknown is an error
+        assert!(matches!(
+            FillStrategy::parse("Mode", None).unwrap(),
+            FillStrategy::Mode
+        ));
+        assert!(
+            matches!(FillStrategy::parse("constant", Some("Unknown")).unwrap(), FillStrategy::Constant(v) if v == "Unknown")
+        );
+        for (s, v, needle) in [
+            ("interpolate", None, "unknown fill strategy 'interpolate'"),
+            ("constant", None, "needs a value"),
+            (
+                "mean",
+                Some("3"),
+                "only used with strategy 'constant', not 'mean'",
+            ),
+        ] {
+            let e = err_any(FillStrategy::parse(s, v));
+            assert!(e.contains(needle), "{s}: {e}");
+        }
+        assert_eq!(FillStrategy::Mode.kind(), FillStrategyKind::Mode);
+    }
+
+    #[test]
+    fn test_fill_na_with_skips_columns_that_cannot_take_the_constant() {
+        // DATA-28: with no columns named, a text constant failed on the first numeric column
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("name".into(), [Some("Ann"), None]),
+                Column::new("age".into(), [None, Some(30i64)]),
+                Int32Chunked::from_slice_options("when".into(), &[Some(18262), None])
+                    .into_date()
+                    .into_column(),
+            ])
+            .unwrap(),
+        );
+        let o = fill_na_with(&ds, None, &FillStrategy::Constant("Unknown".into())).unwrap();
+        assert_eq!(
+            text_cells(&o.dataset, "name"),
+            [Some("Ann".to_string()), Some("Unknown".to_string())]
+        );
+        assert_eq!(o.dataset.df().column("age").unwrap().null_count(), 1);
+        assert_eq!(
+            o.skipped
+                .iter()
+                .map(|(c, _)| c.as_str())
+                .collect::<Vec<_>>(),
+            ["age", "when"]
+        );
+        assert_eq!(
+            o.summary(),
+            "Filled 1 missing value in 1 column: name (1, with 'Unknown'); skipped 2 columns: \
+            age (Invalid value 'Unknown' for column 'age': not an integer (the column is i64)), \
+            when (Invalid value 'Unknown' for column 'when': not a date in YYYY-MM-DD form (the column is date))"
+        );
+        assert!(fill_na(&ds, None, FillStrategy::Constant("Unknown".into())).is_ok()); // was "Cannot parse as integer"
+        assert!(
+            err_text(fill_na(
+                &ds,
+                Some(&["age"]),
+                FillStrategy::Constant("Unknown".into())
+            ))
+            .contains("'age'")
+        );
     }
 }

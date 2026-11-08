@@ -24,6 +24,7 @@
 //! let transposed = transpose(&data)?;
 //! ```
 
+use super::CHECKPOINT_EVERY;
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
@@ -127,6 +128,18 @@ pub fn pivot(dataset: &Dataset, index: &[&str], on: &str, values: &str) -> Munge
 /// // 2  | 2020 | 200
 /// // 2  | 2021 | 220
 /// ```
+///
+/// As `tidyr::pivot_longer`, the long order runs row by row, nulls stay null, and the value column
+/// takes the columns' common type (integer + double gives double; two integer columns stay
+/// integer).
+///
+/// # Errors
+///
+/// [`MungeError::ColumnNotFound`] for a column that does not exist; [`MungeError::ReshapeError`] for
+/// no value variable, duplicate output names, text melted together with non-text columns (tidyr
+/// refuses them too), a date, datetime, duration or time column melted together with another kind of
+/// column (dates combine with datetimes, as in tidyr, and durations of different units with each
+/// other), and types without a common type.
 pub fn melt(
     dataset: &Dataset,
     id_vars: &[&str],
@@ -157,65 +170,153 @@ pub fn melt(
         ));
     }
 
-    // Build the melted dataframe manually
-    let mut columns: Vec<Column> = Vec::new();
+    let value_type = melt_value_type(df, value_vars)?;
 
-    // For each id column, repeat values for each value_var
-    for id_col in id_vars {
-        let id_column = df
-            .column(id_col)
-            .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
-        // Build index array to repeat each row n_value_cols times
-        let mut idx = Vec::with_capacity(n_rows * n_value_cols);
+    let stopped = |e: crate::errors::EconError| MungeError::ReshapeError(e.to_string());
+    let n_out =
+        crate::resource::checked_len(&[n_rows, n_value_cols], "melt output").map_err(stopped)?;
+    if IdxSize::try_from(n_out).is_err() {
+        return Err(MungeError::ReshapeError(format!(
+            "melt would give {n_out} rows, more than the {} a dataset holds",
+            IdxSize::MAX
+        )));
+    }
+    crate::resource::check_alloc::<IdxSize>(n_out, "melt row index").map_err(stopped)?;
+
+    let mut columns: Vec<Column> = Vec::with_capacity(id_vars.len() + 2);
+
+    // Each id cell, repeated once per value variable. The size check above covers `as IdxSize`.
+    if !id_vars.is_empty() {
+        let mut idx: Vec<IdxSize> =
+            crate::resource::try_with_capacity(n_out, "melt row index").map_err(stopped)?;
         for i in 0..n_rows {
+            if i.is_multiple_of(CHECKPOINT_EVERY) {
+                crate::resource::checkpoint().map_err(stopped)?;
+            }
             for _ in 0..n_value_cols {
                 idx.push(i as IdxSize);
             }
         }
-        let idx_ca = IdxCa::new("".into(), idx);
-        let repeated = id_column
-            .take(&idx_ca)
-            .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
-        columns.push(repeated);
-    }
-
-    // Create the variable name column
-    let mut var_names: Vec<&str> = Vec::with_capacity(n_rows * n_value_cols);
-    for _ in 0..n_rows {
-        for var in value_vars {
-            var_names.push(var);
-        }
-    }
-    let var_col = Column::new(variable_name.into(), var_names);
-    columns.push(var_col);
-
-    // Create the value column by stacking all value columns
-    let mut values: Vec<f64> = Vec::with_capacity(n_rows * n_value_cols);
-    for row_idx in 0..n_rows {
-        for var in value_vars {
-            let val_column = df
-                .column(var)
+        let idx_ca = IdxCa::from_vec("".into(), idx);
+        for id_col in id_vars {
+            let repeated = df
+                .column(id_col)
+                .and_then(|c| c.take(&idx_ca))
                 .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
-            // Try to get as f64, handling different types
-            // na-legacy(T4): DATA-15 (pivot_longer reads nulls and non-f64/i64/i32 columns as NaN)
-            let val = if let Ok(f64_col) = val_column.f64() {
-                f64_col.get(row_idx).unwrap_or(f64::NAN)
-            } else if let Ok(i64_col) = val_column.i64() {
-                i64_col.get(row_idx).map(|v| v as f64).unwrap_or(f64::NAN)
-            } else if let Ok(i32_col) = val_column.i32() {
-                i32_col.get(row_idx).map(|v| v as f64).unwrap_or(f64::NAN)
-            } else {
-                f64::NAN
-            };
-            values.push(val);
+            columns.push(repeated);
         }
     }
-    let value_col = Column::new(value_name.into(), values);
-    columns.push(value_col);
+
+    // The variable names, row by row.
+    let mut var_names: Vec<&str> =
+        crate::resource::try_with_capacity(n_out, "melt variable names").map_err(stopped)?;
+    for i in 0..n_rows {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(stopped)?;
+        }
+        var_names.extend_from_slice(value_vars);
+    }
+    columns.push(Column::new(variable_name.into(), var_names));
+
+    // The values: every column in the common type, end to end, then gathered row by row. Nulls stay
+    // null and NaN stays NaN.
+    let mut stacked: Option<Series> = None;
+    for var in value_vars {
+        let cast = df
+            .column(var)?
+            .strict_cast(&value_type)
+            .map_err(|e| MungeError::ReshapeError(format!("cannot melt column '{var}': {e}")))?
+            .take_materialized_series();
+        match &mut stacked {
+            None => stacked = Some(cast),
+            Some(all) => {
+                all.append(&cast)?;
+            }
+        }
+    }
+    let stacked = stacked.ok_or_else(|| {
+        MungeError::ReshapeError("At least one value variable is required".to_string())
+    })?;
+    let mut order: Vec<IdxSize> =
+        crate::resource::try_with_capacity(n_out, "melt row order").map_err(stopped)?;
+    for i in 0..n_rows {
+        if i.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(stopped)?;
+        }
+        for j in 0..n_value_cols {
+            order.push((j * n_rows + i) as IdxSize);
+        }
+    }
+    let values = stacked.take(&IdxCa::from_vec("".into(), order))?;
+    columns.push(values.with_name(value_name.into()).into_column());
 
     let result = DataFrame::new(columns).map_err(|e| MungeError::ReshapeError(e.to_string()))?;
 
     Ok(Dataset::new(result))
+}
+
+/// The type of [`melt`]'s value column: the common type of the value columns, or an error when they
+/// do not combine without changing what the values mean.
+fn melt_value_type(df: &DataFrame, value_vars: &[&str]) -> MungeResult<DataType> {
+    let mut distinct: Vec<&str> = Vec::with_capacity(value_vars.len());
+    for v in value_vars {
+        if !distinct.contains(v) {
+            distinct.push(v);
+        }
+    }
+    let selected = df.select(distinct.iter().copied())?;
+    let dtypes = selected.dtypes();
+    let refuse = |why: &str| {
+        let list: Vec<String> = distinct
+            .iter()
+            .zip(&dtypes)
+            .map(|(name, dt)| format!("'{name}' ({dt})"))
+            .collect();
+        MungeError::ReshapeError(format!(
+            "cannot melt {} into one value column: {why}; cast them to one type first with \
+             munge_cast",
+            list.join(", ")
+        ))
+    };
+    // Dates and datetimes are points in time and combine. The polars supertype would also take a
+    // duration with a date, and read the duration's count as a date.
+    let temporal_family = |dt: &DataType| match dt {
+        DataType::Date | DataType::Datetime(..) => Some(0),
+        DataType::Duration(..) => Some(1),
+        DataType::Time => Some(2),
+        _ => None,
+    };
+    if dtypes.iter().any(DataType::is_temporal)
+        && dtypes
+            .iter()
+            .any(|dt| temporal_family(dt) != temporal_family(&dtypes[0]))
+    {
+        return Err(refuse(
+            "dates, durations, times and other columns do not combine (R's tidyr::pivot_longer \
+             refuses a date with anything but a datetime too)",
+        ));
+    }
+    let common = match selected.get_supertype() {
+        Some(Ok(dt)) => dt,
+        _ => return Err(refuse("the types have no common type")),
+    };
+    let is_label = |dt: &DataType| {
+        matches!(
+            dt,
+            DataType::String | DataType::Categorical(..) | DataType::Enum(..)
+        )
+    };
+    if matches!(common, DataType::String) && !dtypes.iter().all(is_label) {
+        return Err(refuse(
+            "text and non-text columns do not combine (R's tidyr::pivot_longer refuses them too)",
+        ));
+    }
+    if matches!(common, DataType::Categorical(..) | DataType::Enum(..))
+        && dtypes.iter().any(|dt| dt != &dtypes[0])
+    {
+        return Ok(DataType::String);
+    }
+    Ok(common)
 }
 
 /// Transpose a dataset (swap rows and columns).
@@ -529,9 +630,14 @@ mod tests {
         let result = melt(&ds, &["id"], &["val_2020", "val_2021"], "year", "value").unwrap();
 
         assert_eq!(result.nrows(), 4);
-        assert!(result.df().column("id").is_ok());
-        assert!(result.df().column("year").is_ok());
-        assert!(result.df().column("value").is_ok());
+        assert_eq!(
+            text_cells(&result, "year"),
+            ["val_2020", "val_2021", "val_2020", "val_2021"].map(|v| Some(v.to_string()))
+        );
+        assert_eq!(
+            num_cells(&result, "value"),
+            [Some(100.0), Some(110.0), Some(200.0), Some(220.0)]
+        );
     }
 
     #[test]
@@ -591,8 +697,239 @@ mod tests {
         let result = stack(&ds, &["q1", "q2", "q3"], "value", "quarter").unwrap();
 
         assert_eq!(result.nrows(), 6); // 2 ids x 3 quarters
-        assert!(result.df().column("id").is_ok());
-        assert!(result.df().column("quarter").is_ok());
-        assert!(result.df().column("value").is_ok());
+        assert_eq!(
+            num_cells(&result, "value"),
+            [10.0, 11.0, 12.0, 20.0, 21.0, 22.0].map(Some)
+        );
+        assert_eq!(
+            text_cells(&result, "quarter"),
+            ["q1", "q2", "q3", "q1", "q2", "q3"].map(|v| Some(v.to_string()))
+        );
+    }
+
+    /// The error text of a call that must fail (`Dataset` is not `Debug`).
+    fn err_text(r: MungeResult<Dataset>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+    /// Cells of any numeric/boolean column as f64 (null -> None).
+    fn num_cells(ds: &Dataset, c: &str) -> Vec<Option<f64>> {
+        ds.df()
+            .column(c)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+    /// Cells as text (categoricals by label; null -> None).
+    fn text_cells(ds: &Dataset, c: &str) -> Vec<Option<String>> {
+        ds.df()
+            .column(c)
+            .unwrap()
+            .cast(&DataType::String)
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.map(str::to_string))
+            .collect()
+    }
+    /// R's NA as NaN, to compare with a case vector (`Check` treats NaN as equal to NaN). Every test that
+    /// uses it also asserts the null count, because NaN would pass the comparison.
+    fn as_r(v: &[Option<f64>]) -> Vec<f64> {
+        v.iter().map(|x| x.unwrap_or(f64::NAN)).collect()
+    }
+    fn dtype(ds: &Dataset, c: &str) -> DataType {
+        ds.df().column(c).unwrap().dtype().clone()
+    }
+
+    #[test]
+    fn test_validate_melt_pivot_longer() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_munging_t3.R, case data_munging_pivot_longer (tidyr::pivot_longer):
+        // row-major long format; integer + double -> double; integer + integer -> integer; NA stays NA
+        let (case, ds) = crate::test_support::load_case("data_munging_pivot_longer");
+        let long = melt(&ds, &["id"], &["a", "b", "c"], "var", "val").unwrap();
+        let int_long = melt(&ds, &["id"], &["a", "c"], "var", "val").unwrap();
+        assert_eq!(dtype(&long, "val"), DataType::Float64);
+        assert_eq!(dtype(&int_long, "val"), DataType::Int64);
+        let val = long.df().column("val").unwrap();
+        assert_eq!(val.null_count(), 2); // R: 2 NA (was 0: NaN)
+        assert!(
+            num_cells(&long, "val")
+                .iter()
+                .flatten()
+                .all(|v| !v.is_nan())
+        );
+        assert_eq!(int_long.df().column("val").unwrap().null_count(), 1);
+        let vars = |d: &Dataset| -> Vec<String> {
+            text_cells(d, "var")
+                .into_iter()
+                .map(Option::unwrap)
+                .collect()
+        };
+        assert_eq!(vars(&long), case.names("long_val"));
+        assert_eq!(vars(&int_long), case.names("long_int_val"));
+        Check::new(&case)
+            .vector("long_id", &as_r(&num_cells(&long, "id")), Tol::exact())
+            .vector("long_val", &as_r(&num_cells(&long, "val")), Tol::exact())
+            .vector(
+                "long_int_id",
+                &as_r(&num_cells(&int_long, "id")),
+                Tol::exact(),
+            )
+            .vector(
+                "long_int_val",
+                &as_r(&num_cells(&int_long, "val")),
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_melt_keeps_dtypes_and_nulls() {
+        // DATA-15 repro: values were rebuilt as f64, so nulls became NaN and text, u32, f32 and bool columns
+        // became all-NaN (val = [1, NaN, NaN, ..], null_count 0, group means NaN).
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("id".into(), [1i64, 2]),
+                Column::new("s1".into(), [Some("x"), None]),
+                Column::new("s2".into(), [None, Some("y")]),
+                Column::new("u".into(), [5u32, 6]),
+                Column::new("f".into(), [Some(1.5f32), None]),
+                Column::new("b".into(), [Some(true), None]),
+                Column::new("a".into(), [Some(1.0f64), None]),
+            ])
+            .unwrap(),
+        );
+        let m = |vars: &[&str]| melt(&ds, &["id"], vars, "var", "val").unwrap();
+        // tidyr::pivot_longer(d, c(s1, s2)): "x" NA NA "y" (character; R 4.3.3, tidyr 1.3.2)
+        let s = m(&["s1", "s2"]);
+        assert_eq!(
+            (dtype(&s, "val"), text_cells(&s, "val")),
+            (
+                DataType::String,
+                vec![Some("x".into()), None, None, Some("y".into())]
+            )
+        );
+        for (c, dt) in [
+            ("u", DataType::UInt32),
+            ("f", DataType::Float32),
+            ("b", DataType::Boolean),
+        ] {
+            assert_eq!(dtype(&m(&[c]), "val"), dt, "{c}");
+        }
+        assert_eq!(m(&["b"]).df().column("val").unwrap().null_count(), 1);
+        // u32 + f32 -> f64 (polars supertype; vctrs: integer + double -> double), nulls stay null
+        let uf = m(&["u", "f"]);
+        assert_eq!(
+            (dtype(&uf, "val"), num_cells(&uf, "val")),
+            (
+                DataType::Float64,
+                vec![Some(5.0), Some(1.5), Some(6.0), None]
+            )
+        );
+        // the mean of 'a' over its present values is 1 (was NaN for every group)
+        let au = m(&["a", "u"]);
+        let mask = au.df().column("var").unwrap().str().unwrap().equal("a");
+        assert_eq!(
+            au.df()
+                .filter(&mask)
+                .unwrap()
+                .column("val")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .mean(),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn test_melt_refuses_text_with_numbers() {
+        // tidyr: pivot_longer(d, c(a, s)) -> "Can't combine `a` <integer> and `s` <character>."
+        let ds = Dataset::new(
+            df!("id" => [1i64, 2], "a" => [Some(1i64), None], "s" => [Some("x"), None]).unwrap(),
+        );
+        let e = err_text(melt(&ds, &["id"], &["a", "s"], "var", "val"));
+        assert!(
+            e.contains("'a' (i64)") && e.contains("'s' (str)") && e.contains("munge_cast"),
+            "{e}"
+        );
+        // vctrs refuses a date with a number too; a polars supertype would give day counts
+        let dated = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("id".into(), [1i64, 2]),
+                Int32Chunked::from_slice("d".into(), &[18262, 18263])
+                    .into_date()
+                    .into_column(),
+                Column::new("a".into(), [1i64, 2]),
+            ])
+            .unwrap(),
+        );
+        let e = err_text(melt(&dated, &["id"], &["d", "a"], "var", "val"));
+        assert!(e.contains("'d' (date)") && e.contains("munge_cast"), "{e}");
+        // a duration's count is not a date, whatever the polars supertype says; nor a time of day
+        let date = || {
+            Int32Chunked::from_slice("d".into(), &[18262, 18263])
+                .into_date()
+                .into_column()
+        };
+        let span = |unit| {
+            Int64Chunked::from_slice("span".into(), &[1_000, 2_000])
+                .into_duration(unit)
+                .into_column()
+        };
+        let moment = Int64Chunked::from_slice("at".into(), &[86_400_000, 172_800_000])
+            .into_datetime(TimeUnit::Milliseconds, None)
+            .into_column();
+        let clock = Int64Chunked::from_slice("clock".into(), &[1_000, 2_000])
+            .into_time()
+            .into_column();
+        let frame = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("id".into(), [1i64, 2]),
+                date(),
+                moment.clone(),
+                span(TimeUnit::Milliseconds),
+                clock.clone(),
+            ])
+            .unwrap(),
+        );
+        for pair in [
+            ["d", "span"],
+            ["at", "span"],
+            ["span", "clock"],
+            ["d", "clock"],
+        ] {
+            let e = err_text(melt(&frame, &["id"], &pair, "var", "val"));
+            assert!(e.contains(pair[0]) && e.contains("munge_cast"), "{e}");
+        }
+    }
+
+    #[test]
+    fn test_melt_combines_dates_with_datetimes() {
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("id".into(), [1i64, 2]),
+                Int32Chunked::from_slice("d".into(), &[1, 2])
+                    .into_date()
+                    .into_column(),
+                Int64Chunked::from_slice("at".into(), &[3_600_000, 90_000_000])
+                    .into_datetime(TimeUnit::Milliseconds, None)
+                    .into_column(),
+            ])
+            .unwrap(),
+        );
+        let out = melt(&ds, &["id"], &["d", "at"], "var", "val").unwrap();
+        let val = out.df().column("val").unwrap();
+        assert!(matches!(val.dtype(), DataType::Datetime(..)), "{val:?}");
+        assert_eq!(val.len(), 4);
+        assert_eq!(val.null_count(), 0);
     }
 }

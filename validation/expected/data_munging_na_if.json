@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "data_munging_na_if",
+  "area": "data/munging",
+  "method": "dplyr::na_if: a sentinel value becomes NA in integer, double and character columns",
+  "reference": "dplyr::na_if(x, y)",
+  "call": "na_if(d$k, 3L); na_if(d$f, 1.25); na_if(d$s, 'c')",
+  "dataset": "validation/datasets/generated/munging_fill.csv",
+  "datasets": ["validation/datasets/generated/munging_fill.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "dplyr": "1.2.1"
+  },
+  "values": {
+    "k_na_if_3": [null, null, 1, null, 1, 2, null, 5, 4, 6],
+    "f_na_if_1_25": [2.5, null, null, 2.5, 3.75, null, 2.5, null, 0.5, 4.125],
+    "s_na_if_c": {
+      "names": ["b", "a", "", "b", "a", "", "", "", "d", "e"],
+      "values": [1, 1, null, 1, 1, null, null, null, 1, 1]
+    }
+  }
+}

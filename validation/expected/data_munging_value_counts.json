@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "data_munging_value_counts",
+  "area": "data/munging",
+  "method": "dplyr::count(d, g, sort = TRUE) with the NA group; proportion = n / sum(n)",
+  "reference": "dplyr::count(sort = TRUE); n / sum(n)",
+  "call": "count(d, g, sort = TRUE) %>% mutate(proportion = n / sum(n))",
+  "dataset": "validation/datasets/generated/munging_counts.csv",
+  "datasets": ["validation/datasets/generated/munging_counts.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "dplyr": "1.2.1"
+  },
+  "values": {
+    "vc_g": [2, 7, null, 5],
+    "vc_n": [4, 3, 2, 1],
+    "vc_proportion": [0.40000000000000002, 0.29999999999999999, 0.20000000000000001, 0.10000000000000001]
+  }
+}

@@ -10,6 +10,8 @@ use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::Dataset;
+use super::columns::is_numeric_dtype;
+use super::munging::clean::{FillStrategy, ReplaceOptions, fill_na_with, replace_with};
 use super::quality::generate_quality_profile;
 
 /// Result of a cleaning operation with verification.
@@ -45,6 +47,17 @@ pub struct VerificationReport {
     pub quality_delta: QualityDelta,
     /// Any warnings generated during verification
     pub warnings: Vec<String>,
+    /// Columns whose type changed
+    #[serde(default)]
+    pub dtype_changes: Vec<DtypeChange>,
+}
+
+/// A column whose type a cleaning step changed (polars dtype names, e.g. "i64", "f64").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DtypeChange {
+    pub column: String,
+    pub before: String,
+    pub after: String,
 }
 
 /// Example of a change made during cleaning.
@@ -386,11 +399,33 @@ fn preview_case_change(
     }
 }
 
-/// Preview fill_na operation.
+/// Cell `idx` of `col` as a preview prints it: floats with `{}` (`3`, `2.5`), everything else as its
+/// text (text unquoted, `null` for missing, ISO dates).
+fn cell_text(col: &Column, idx: usize) -> String {
+    match col.get(idx) {
+        Ok(AnyValue::Float64(v)) => v.to_string(),
+        Ok(AnyValue::Float32(v)) => v.to_string(),
+        Ok(v) => v.str_value().into_owned(),
+        Err(_) => "null".to_string(),
+    }
+}
+
+/// Is cell `idx` of `col` what a fill treats as missing (null, or NaN in a float column)?
+fn cell_is_missing(col: &Column, idx: usize) -> bool {
+    match col.get(idx) {
+        Ok(AnyValue::Null) => true,
+        Ok(AnyValue::Float64(v)) => v.is_nan(),
+        Ok(AnyValue::Float32(v)) => v.is_nan(),
+        _ => false,
+    }
+}
+
+/// Preview fill_na operation: runs the fill, so the samples show the real new values, and an unknown
+/// strategy or one that does not apply is a warning with nothing affected.
 fn preview_fill_na(
     df: &DataFrame,
     columns: Option<&[String]>,
-    _strategy: &str,
+    strategy: &str,
     value: Option<&str>,
     sample_size: usize,
     row_count: usize,
@@ -399,44 +434,47 @@ fn preview_fill_na(
     let mut total_affected = 0;
     let mut warnings = Vec::new();
 
-    let cols_to_check: Vec<String> = match columns {
-        Some(cols) => cols.to_vec(),
-        None => df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
+    let named: Option<Vec<&str>> = columns.map(|c| c.iter().map(String::as_str).collect());
+    let outcome = FillStrategy::parse(strategy, value)
+        .and_then(|parsed| fill_na_with(&Dataset::new(df.clone()), named.as_deref(), &parsed));
 
-    let fill_value = value.unwrap_or("<strategy value>");
-
-    for col_name in &cols_to_check {
-        if let Ok(col) = df.column(col_name) {
-            let null_count = col.null_count();
-            if null_count > 0 {
-                total_affected += null_count;
-                // Find sample null positions
+    match outcome {
+        Err(e) => warnings.push(e.to_string()),
+        Ok(outcome) => {
+            let filled_df = outcome.dataset.df();
+            for (col_name, n_filled) in &outcome.filled {
+                if *n_filled == 0 {
+                    continue;
+                }
+                total_affected += *n_filled;
+                let (Ok(before), Ok(after)) = (df.column(col_name), filled_df.column(col_name))
+                else {
+                    continue;
+                };
+                // Up to 2 samples per column.
                 let mut samples_for_col = 0;
-                for idx in 0..col.len() {
-                    if col.get(idx).map(|v| v.is_null()).unwrap_or(false)
-                        && sample_changes.len() < sample_size
-                        && samples_for_col < 2
-                    {
+                for idx in 0..before.len() {
+                    if samples_for_col == 2 || sample_changes.len() >= sample_size {
+                        break;
+                    }
+                    if cell_is_missing(before, idx) && !cell_is_missing(after, idx) {
                         sample_changes.push(ChangeExample {
                             row_index: idx,
                             column: col_name.clone(),
-                            before: "null".to_string(),
-                            after: fill_value.to_string(),
+                            before: cell_text(before, idx),
+                            after: cell_text(after, idx),
                         });
                         samples_for_col += 1;
                     }
                 }
             }
+            for (col_name, reason) in &outcome.skipped {
+                warnings.push(format!("Column '{col_name}' would be skipped: {reason}"));
+            }
+            if total_affected == 0 {
+                warnings.push("No null values found in specified columns".to_string());
+            }
         }
-    }
-
-    if total_affected == 0 {
-        warnings.push("No null values found in specified columns".to_string());
     }
 
     let pct_affected = if row_count > 0 {
@@ -448,7 +486,7 @@ fn preview_fill_na(
     CleaningPreview {
         operation: CleaningOperation::FillNa {
             columns: columns.map(|c| c.to_vec()),
-            strategy: _strategy.to_string(),
+            strategy: strategy.to_string(),
             value: value.map(|v| v.to_string()),
         }
         .description(),
@@ -600,44 +638,41 @@ fn preview_replace(
     let mut total_affected = 0;
     let mut warnings = Vec::new();
 
-    if let Ok(col) = df.column(column) {
-        match col.dtype() {
-            DataType::String => {
-                if let Ok(ca) = col.str() {
-                    for (idx, val) in ca.into_iter().enumerate() {
-                        if let Some(s) = val {
-                            if s == old_value {
-                                total_affected += 1;
-                                if sample_changes.len() < sample_size {
-                                    sample_changes.push(ChangeExample {
-                                        row_index: idx,
-                                        column: column.to_string(),
-                                        before: s.to_string(),
-                                        after: new_value.to_string(),
-                                    });
-                                }
-                            }
+    match replace_with(
+        &Dataset::new(df.clone()),
+        column,
+        old_value,
+        Some(new_value),
+        &ReplaceOptions::default(),
+    ) {
+        Err(e) => warnings.push(e.to_string()),
+        Ok(outcome) => {
+            total_affected = outcome.n_replaced;
+            if total_affected == 0 {
+                warnings.push(format!(
+                    "No values matching '{}' found in column '{}'",
+                    old_value, column
+                ));
+            } else if let (Ok(before), Ok(after)) =
+                (df.column(column), outcome.dataset.df().column(column))
+            {
+                match first_changes(before, after, sample_size) {
+                    Ok(rows) => {
+                        for idx in rows {
+                            sample_changes.push(ChangeExample {
+                                row_index: idx,
+                                column: column.to_string(),
+                                before: cell_text(before, idx),
+                                after: cell_text(after, idx),
+                            });
                         }
                     }
+                    Err(reason) => warnings.push(format!(
+                        "Column '{column}': values were not compared ({reason})"
+                    )),
                 }
             }
-            _ => {
-                // For numeric types, try to parse
-                warnings.push(format!(
-                    "Column '{}' is not a string column. Comparison will be exact.",
-                    column
-                ));
-            }
         }
-    } else {
-        warnings.push(format!("Column '{}' not found", column));
-    }
-
-    if total_affected == 0 {
-        warnings.push(format!(
-            "No values matching '{}' found in column '{}'",
-            old_value, column
-        ));
     }
 
     let pct_affected = if row_count > 0 {
@@ -807,7 +842,7 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
     };
 
     // Detect changes by comparing dataframes
-    let (rows_modified, sample_changes) = detect_changes(before, after, 5);
+    let scan = detect_changes(before, after, 5);
 
     let mut warnings = Vec::new();
     if rows_after == 0 && rows_before > 0 {
@@ -819,35 +854,102 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
             quality_delta.issues_introduced.len()
         ));
     }
+    warnings.extend(scan.warnings);
 
     VerificationReport {
         rows_before,
         rows_after,
-        rows_modified,
+        rows_modified: scan.rows_modified,
         rows_removed: rows_before.saturating_sub(rows_after),
         rows_added: rows_after.saturating_sub(rows_before),
-        sample_changes,
+        sample_changes: scan.sample_changes,
         quality_delta,
         warnings,
+        dtype_changes: scan.dtype_changes,
     }
 }
 
+/// What [`detect_changes`] found.
+struct ChangeScan {
+    rows_modified: usize,
+    sample_changes: Vec<ChangeExample>,
+    dtype_changes: Vec<DtypeChange>,
+    warnings: Vec<String>,
+}
+
+/// The first `limit` rows where [`changed_mask`] would be true, without comparing the rest of the
+/// column when the two columns share a type.
+fn first_changes(before: &Column, after: &Column, limit: usize) -> Result<Vec<usize>, String> {
+    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
+    if before.dtype() == after.dtype() && !categorical(before.dtype()) {
+        return Ok((0..before.len())
+            .filter(|&idx| before.get(idx).ok() != after.get(idx).ok())
+            .take(limit)
+            .collect());
+    }
+    let mask = changed_mask(before, after)?;
+    Ok(mask
+        .iter()
+        .enumerate()
+        .filter(|(_, changed)| **changed)
+        .map(|(idx, _)| idx)
+        .take(limit)
+        .collect())
+}
+
+/// One flag per row: does the cell differ between `before` and `after` (of the same height)?
+///
+/// Columns of one type compare by value. polars' `AnyValue` comparison has no rule for two types, so
+/// a type change compares as doubles when both sides are numeric or boolean (R: `1L == 1.0` is TRUE)
+/// and as text otherwise (labels for categoricals, ISO dates, decimal numbers). The error names a
+/// pair that cannot be cast.
+fn changed_mask(before: &Column, after: &Column) -> Result<Vec<bool>, String> {
+    let (dt_before, dt_after) = (before.dtype(), after.dtype());
+    let incomparable = || format!("{dt_before} -> {dt_after}");
+    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
+    if dt_before == dt_after && !categorical(dt_before) {
+        return Ok((0..before.len())
+            .map(|idx| before.get(idx).ok() != after.get(idx).ok())
+            .collect());
+    }
+    if is_numeric_dtype(dt_before, true) && is_numeric_dtype(dt_after, true) {
+        let as_doubles = |c: &Column| c.cast(&DataType::Float64).map_err(|_| incomparable());
+        let (a, b) = (as_doubles(before)?, as_doubles(after)?);
+        // na-ok: cast to Float64 above; both sides are compared with their nulls
+        let (a, b) = (
+            a.f64().map_err(|_| incomparable())?,
+            b.f64().map_err(|_| incomparable())?,
+        );
+        return Ok(a
+            .iter()
+            .zip(b.iter())
+            .map(|cells| match cells {
+                (None, None) => false,
+                (Some(x), Some(y)) => !(x == y || (x.is_nan() && y.is_nan())),
+                _ => true,
+            })
+            .collect());
+    }
+    let as_text = |c: &Column| c.cast(&DataType::String).map_err(|_| incomparable());
+    let (a, b) = (as_text(before)?, as_text(after)?);
+    let (a, b) = (
+        a.str().map_err(|_| incomparable())?,
+        b.str().map_err(|_| incomparable())?,
+    );
+    Ok(a.iter().zip(b.iter()).map(|(x, y)| x != y).collect())
+}
+
 /// Detect changes between two datasets.
-fn detect_changes(
-    before: &Dataset,
-    after: &Dataset,
-    sample_size: usize,
-) -> (usize, Vec<ChangeExample>) {
+fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> ChangeScan {
     let df_before = before.df();
     let df_after = after.df();
 
-    let mut changes = Vec::new();
-    let mut modified_count = 0;
-
-    // Only compare if row counts are the same
-    if df_before.height() != df_after.height() {
-        return (0, changes);
-    }
+    let mut scan = ChangeScan {
+        rows_modified: 0,
+        sample_changes: Vec::new(),
+        dtype_changes: Vec::new(),
+        warnings: Vec::new(),
+    };
 
     let col_names: Vec<String> = df_before
         .get_column_names()
@@ -865,26 +967,47 @@ fn detect_changes(
             Err(_) => continue,
         };
 
-        // Compare values
-        for idx in 0..df_before.height() {
-            let val_before = col_before.get(idx).ok();
-            let val_after = col_after.get(idx).ok();
+        if col_before.dtype() != col_after.dtype() {
+            let change = DtypeChange {
+                column: col_name.clone(),
+                before: col_before.dtype().to_string(),
+                after: col_after.dtype().to_string(),
+            };
+            scan.warnings.push(format!(
+                "Column '{}' changed type from {} to {}",
+                change.column, change.before, change.after
+            ));
+            scan.dtype_changes.push(change);
+        }
 
-            if val_before != val_after {
-                modified_count += 1;
-                if changes.len() < sample_size {
-                    changes.push(ChangeExample {
-                        row_index: idx,
-                        column: col_name.clone(),
-                        before: format!("{:?}", val_before),
-                        after: format!("{:?}", val_after),
-                    });
-                }
+        // Cells are only compared when the row counts are the same
+        if df_before.height() != df_after.height() {
+            continue;
+        }
+
+        let mask = match changed_mask(col_before, col_after) {
+            Ok(mask) => mask,
+            Err(reason) => {
+                scan.warnings.push(format!(
+                    "Column '{col_name}': values were not compared ({reason})"
+                ));
+                continue;
+            }
+        };
+        for (idx, _) in mask.iter().enumerate().filter(|(_, changed)| **changed) {
+            scan.rows_modified += 1;
+            if scan.sample_changes.len() < sample_size {
+                scan.sample_changes.push(ChangeExample {
+                    row_index: idx,
+                    column: col_name.clone(),
+                    before: format!("{:?}", col_before.get(idx).ok()),
+                    after: format!("{:?}", col_after.get(idx).ok()),
+                });
             }
         }
     }
 
-    (modified_count, changes)
+    scan
 }
 
 impl VerificationReport {
@@ -921,6 +1044,16 @@ impl VerificationReport {
             "Issues: {} → {}\n",
             self.quality_delta.issues_before, self.quality_delta.issues_after
         ));
+
+        if !self.dtype_changes.is_empty() {
+            summary.push_str("\nType changes:\n");
+            for change in &self.dtype_changes {
+                summary.push_str(&format!(
+                    "  {}: {} → {}\n",
+                    change.column, change.before, change.after
+                ));
+            }
+        }
 
         if !self.quality_delta.issues_resolved.is_empty() {
             summary.push_str(&format!(
@@ -1180,5 +1313,181 @@ mod tests {
         assert!(summary.contains("Trim whitespace"));
         assert!(summary.contains("10"));
         assert!(summary.contains("Alice"));
+    }
+
+    #[test]
+    fn test_verify_cleaning_int_to_float_fill() {
+        // DATA-23: a mean fill turns Int64 into Float64; verify_cleaning reports the type change and
+        // compares the cells by value across the two numeric types.
+        let before =
+            Dataset::new(df!("x" => [Some(1i64), None, Some(3)], "y" => ["a", "b", "c"]).unwrap());
+        let after =
+            crate::data::munging::fill_na(&before, None, crate::data::munging::FillStrategy::Mean)
+                .unwrap();
+        assert_eq!(after.df().column("x").unwrap().dtype(), &DataType::Float64);
+        let report = verify_cleaning(&before, &after, "fill_na mean");
+        assert_eq!(report.rows_modified, 1); // only the filled cell (1 == 1.0, as R's ==)
+        assert_eq!(
+            report.dtype_changes,
+            [DtypeChange {
+                column: "x".into(),
+                before: "i64".into(),
+                after: "f64".into()
+            }]
+        );
+        assert_eq!(
+            (
+                report.sample_changes[0].row_index,
+                report.sample_changes[0].column.as_str()
+            ),
+            (1, "x")
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Column 'x' changed type from i64 to f64"),
+            "{:?}",
+            report.warnings
+        );
+        assert!(
+            report.summary().contains("Type changes:\n  x: i64 → f64\n"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    #[test]
+    fn test_verify_cleaning_cast_text_to_int() {
+        // String vs Int64 cells reached the same unimplemented! arm
+        let before = Dataset::new(df!("v" => ["1", "N/A", "3"]).unwrap());
+        let after = crate::data::munging::cast(&before, "v", "int").unwrap();
+        let report = verify_cleaning(&before, &after, "cast");
+        assert_eq!(report.rows_modified, 1); // "1" == 1 and "3" == 3 as text; "N/A" -> missing
+        assert_eq!(report.dtype_changes.len(), 1);
+        assert_eq!(report.sample_changes[0].row_index, 1);
+    }
+
+    #[test]
+    fn test_preview_fill_na_shows_real_fill_values() {
+        // LLM-12 (core): the preview showed "<strategy value>" for every strategy and ignored the strategy
+        let ds = Dataset::new(df!("value" => [Some(1i64), None, Some(3), None, Some(5)]).unwrap());
+        let after = |strategy: &str, value: Option<&str>| -> Vec<String> {
+            let op = CleaningOperation::FillNa {
+                columns: Some(vec!["value".into()]),
+                strategy: strategy.into(),
+                value: value.map(str::to_string),
+            };
+            preview_cleaning(&ds, &op, 5)
+                .sample_changes
+                .iter()
+                .map(|c| c.after.clone())
+                .collect()
+        };
+        assert_eq!(after("mean", None), ["3", "3"]); // mean(c(1, 3, 5)) = 3
+        assert_eq!(after("Median", None), ["3", "3"]);
+        assert_eq!(after("mode", None), ["1", "1"]); // all tie; R's which.max(table()) takes level 1
+        assert_eq!(after("forward", None), ["1", "3"]);
+        assert_eq!(after("bfill", None), ["3", "5"]);
+        assert_eq!(after("constant", Some("7")), ["7", "7"]);
+        let bad = preview_cleaning(
+            &ds,
+            &CleaningOperation::FillNa {
+                columns: None,
+                strategy: "interpolate".into(),
+                value: None,
+            },
+            5,
+        );
+        assert_eq!((bad.rows_affected, bad.sample_changes.len()), (0, 0));
+        assert!(
+            bad.warnings
+                .iter()
+                .any(|w| w.contains("unknown fill strategy 'interpolate'")),
+            "{:?}",
+            bad.warnings
+        );
+    }
+
+    #[test]
+    fn test_preview_replace_counts_typed_matches() {
+        // DATA-38: a numeric column previewed 0 matches with "not a string column", although apply replaced them
+        let ds = Dataset::new(df!("v" => [-99i64, 1, -99, 3]).unwrap());
+        let op = CleaningOperation::Replace {
+            column: "v".into(),
+            old_value: "-99".into(),
+            new_value: "null".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 5);
+        assert_eq!(p.rows_affected, 2);
+        let s: Vec<(usize, &str, &str)> = p
+            .sample_changes
+            .iter()
+            .map(|c| (c.row_index, c.before.as_str(), c.after.as_str()))
+            .collect();
+        assert_eq!(s, [(0, "-99", "null"), (2, "-99", "null")]);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn test_preview_replace_samples_the_first_changes() {
+        let ds = Dataset::new(df!("v" => [1i64, -99, 2, -99, -99, 3]).unwrap());
+        let op = CleaningOperation::Replace {
+            column: "v".into(),
+            old_value: "-99".into(),
+            new_value: "0".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 2);
+        assert_eq!(p.rows_affected, 3);
+        let rows: Vec<usize> = p.sample_changes.iter().map(|c| c.row_index).collect();
+        assert_eq!(rows, [1, 3]);
+
+        // a label a categorical column did not hold goes through the type-changing comparison
+        let labels = Column::new("c".into(), ["a", "b", "a"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let ds = Dataset::new(DataFrame::new(vec![labels]).unwrap());
+        let op = CleaningOperation::Replace {
+            column: "c".into(),
+            old_value: "a".into(),
+            new_value: "z".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 1);
+        assert_eq!(p.rows_affected, 2);
+        assert_eq!(p.sample_changes.len(), 1);
+        assert_eq!(p.sample_changes[0].row_index, 0);
+        assert_eq!(p.sample_changes[0].after, "z");
+    }
+
+    #[test]
+    fn test_preview_with_nothing_to_change_says_so() {
+        let ds = Dataset::new(df!("v" => [1i64, 2, 3], "s" => ["a", "b", "c"]).unwrap());
+        let p = preview_cleaning(
+            &ds,
+            &CleaningOperation::FillNa {
+                columns: None,
+                strategy: "forward".into(),
+                value: None,
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 0);
+        assert!(p.sample_changes.is_empty());
+        assert_eq!(p.warnings, ["No null values found in specified columns"]);
+        let p = preview_cleaning(
+            &ds,
+            &CleaningOperation::Replace {
+                column: "s".into(),
+                old_value: "absent".into(),
+                new_value: "x".into(),
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 0);
+        assert!(p.sample_changes.is_empty());
+        assert_eq!(
+            p.warnings,
+            ["No values matching 'absent' found in column 's'"]
+        );
     }
 }

@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "data_munging_pivot_longer",
+  "area": "data/munging",
+  "method": "tidyr::pivot_longer: row-major long format, NA kept, integer + double -> double, integer + integer -> integer",
+  "reference": "tidyr::pivot_longer(cols, names_to = 'var', values_to = 'val')",
+  "call": "pivot_longer(d, c(a, b, c), names_to = 'var', values_to = 'val'); pivot_longer(d, c(a, c), ...)",
+  "dataset": "validation/datasets/generated/munging_wide.csv",
+  "datasets": ["validation/datasets/generated/munging_wide.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "tidyr": "1.3.2"
+  },
+  "values": {
+    "long_id": [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+    "long_val": {
+      "names": ["a", "b", "c", "a", "b", "c", "a", "b", "c", "a", "b", "c"],
+      "values": [1, 0.5, 5, null, 1.75, 6, 3, null, 7, 4, 2.25, 8]
+    },
+    "long_int_id": [1, 1, 2, 2, 3, 3, 4, 4],
+    "long_int_val": {
+      "names": ["a", "c", "a", "c", "a", "c", "a", "c"],
+      "values": [1, 5, null, 6, 3, 7, 4, 8]
+    }
+  }
+}

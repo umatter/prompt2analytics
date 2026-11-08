@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "data_munging_filter",
+  "area": "data/munging",
+  "method": "dplyr::filter on an integer and a double column with NA (rows whose condition is NA are dropped)",
+  "reference": "dplyr::filter(d, x >= 5); dplyr::filter(d, y < 9)",
+  "call": "filter(d, x >= 5)$id; filter(d, y < 9)$id",
+  "dataset": "validation/datasets/generated/munging_long.csv",
+  "datasets": ["validation/datasets/generated/munging_long.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "dplyr": "1.2.1"
+  },
+  "values": {
+    "ids_x_ge_5": [1, 4, 6, 9, 11, 12],
+    "ids_y_lt_9": [2, 5, 6, 7, 10, 11]
+  }
+}

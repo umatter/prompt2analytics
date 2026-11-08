@@ -30,6 +30,7 @@ use p2a_core::{
             MungeError,
             MutateExpr,
             bin_with,
+            clean::fill_na_with,
             concat,
             deduplicate,
             diff,
@@ -37,7 +38,6 @@ use p2a_core::{
             // Clean operations
             drop_na,
             estimate_join_shape,
-            fill_na,
             // Transform operations
             filter,
             // Aggregate operations
@@ -1348,8 +1348,10 @@ impl AnalyticsServer {
             .await?;
         }
 
-        let result = match fill_na(&dataset, columns.as_deref(), strategy) {
-            Ok(ds) => ds,
+        // With no columns named, a column the strategy or the constant does not fit is left as it
+        // is; the summary names it, so the caller learns which columns were not filled.
+        let outcome = match fill_na_with(&dataset, columns.as_deref(), &strategy) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Fill NA failed: {}",
@@ -1357,13 +1359,14 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+        let summary = outcome.summary();
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(result_name.clone(), result);
+        datasets.insert(result_name.clone(), outcome.dataset);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Filled null values with strategy '{}', saved as '{}'",
-            request.strategy, result_name
+            "Filled null values with strategy '{}', saved as '{}'. {}.",
+            request.strategy, result_name, summary
         ))]))
     }
 
@@ -3016,7 +3019,9 @@ mod tests {
     use crate::session::{DATASET_QUOTA_EXCEEDED, DatasetAdmission, Session, SessionManager};
     use crate::tools::limits::{self, Limits};
     use p2a_core::data::munging::bin;
-    use p2a_core::data::munging::{JoinShape, JoinType, MungeResult, cast_columns, concat};
+    use p2a_core::data::munging::{
+        JoinShape, JoinType, MungeResult, cast_columns, concat, fill_na,
+    };
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
     use std::sync::Arc;
@@ -4079,6 +4084,38 @@ mod tests {
                 && !message.contains("sample fewer columns"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn munge_fill_na_names_the_columns_a_constant_does_not_fit() {
+        // No columns named: the text constant fills the String column and leaves the Float64
+        // column as it is, and the reply says so.
+        let server = server_with(vec![(
+            "d",
+            df!("x" => [Some(1.5), None, Some(2.25)], "s" => [Some("a"), None, None]).unwrap(),
+        )]);
+        let out = run(
+            Limits::off(),
+            server.munge_fill_na(Parameters(FillNaRequest {
+                dataset: "d".into(),
+                columns: None,
+                strategy: "none".into(),
+                result_name: Some("f".into()),
+            })),
+        );
+        assert_ne!(out.is_error, Some(true), "{}", text(&out));
+        let t = text(&out);
+        assert!(t.contains("s (2, with 'none')"), "{t}");
+        assert!(t.contains("skipped 1 column: x ("), "{t}");
+        let filled = server
+            .datasets
+            .blocking_read()
+            .get("f")
+            .unwrap()
+            .df()
+            .clone();
+        assert_eq!(filled.column("s").unwrap().null_count(), 0);
+        assert_eq!(filled.column("x").unwrap().null_count(), 1);
     }
 
     #[test]

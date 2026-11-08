@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "data_munging_lag",
+  "area": "data/munging",
+  "method": "dplyr::lag / lead (positional, within groups), diff and pct_change on integer data with NA",
+  "reference": "dplyr::lag, dplyr::lead (group_by(g)); x - lag(x, k); (y - lag(y)) / lag(y)",
+  "call": "d %>% group_by(g) %>% mutate(lag2 = lag(x, 2), lead1 = lead(y, 1))",
+  "dataset": "validation/datasets/generated/munging_long.csv",
+  "datasets": ["validation/datasets/generated/munging_long.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "dplyr": "1.2.1"
+  },
+  "values": {
+    "lag1_x": [null, 5, 3, null, 8, 2, 7, 4, null, 6, 1, 9],
+    "lag2_x_by_g": [null, null, null, null, 3, 5, null, null, 8, null, 4, 2],
+    "lead1_y_by_g": [13.4155, null, 8.0373000000000001, 8.1602999999999994, null, 8.5154999999999994, 12.529400000000001, 8.5643999999999991, 14.946199999999999, null, null, null],
+    "diff1_y": [null, -2.3254999999999999, 5.3387999999999991, null, null, -0.12299999999999933, -1.2716000000000003, 5.7637000000000009, null, null, 0.048899999999999721, 6.3818000000000001],
+    "diff2_x": [null, null, null, 5, null, -1, 2, null, 2, null, 3, 9],
+    "pct_change1_y": [null, -0.2235584780142662, 0.66101254225116679, null, null, -0.015072975258262483, -0.15821233498811793, 0.85190002512674246, null, null, 0.0057424696142328374, 0.74515435990845835]
+  }
+}

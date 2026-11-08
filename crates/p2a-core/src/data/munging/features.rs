@@ -1933,7 +1933,8 @@ mod tests {
 
         let result = bin(&ds, "value", BinStrategy::EqualWidth(5), None).unwrap();
 
-        assert!(result.df().column("value_binned").is_ok());
+        // R: as.integer(cut(c(5, 15, 25, 35, 45), 5)) - 1
+        assert_eq!(codes_of(&result, "value_binned"), [0.0, 1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
@@ -1946,12 +1947,33 @@ mod tests {
 
         let result = one_hot_encode(&ds, "category", false).unwrap();
 
-        // Should have one column per category
-        assert!(
-            result.df().column("category_\"a\"").is_ok()
-                || result.df().column("category_\"b\"").is_ok()
-                || result.df().column("category_\"c\"").is_ok()
-        );
+        // One dummy per level, found by the cell where it is 1 (row 0 is a, row 1 b, row 3 c);
+        // names of text levels: DATA-41 (Tier 4)
+        let dummies: Vec<Vec<f64>> = result
+            .df()
+            .get_column_names()
+            .iter()
+            .filter(|n| n.starts_with("category_"))
+            .map(|n| {
+                num_cells(&result, n.as_str())
+                    .into_iter()
+                    .map(Option::unwrap)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(dummies.len(), 3);
+        for row in 0..5 {
+            assert_eq!(
+                dummies.iter().map(|d| d[row]).sum::<f64>(),
+                1.0,
+                "row {row}"
+            );
+        }
+        let total_at = |row: usize| -> f64 {
+            let d = dummies.iter().find(|d| d[row] == 1.0).unwrap();
+            d.iter().sum()
+        };
+        assert_eq!((total_at(0), total_at(1), total_at(3)), (2.0, 2.0, 1.0));
     }
 
     #[test]
@@ -2003,7 +2025,11 @@ mod tests {
 
         let result = rank(&ds, "value", false).unwrap();
 
-        assert!(result.df().column("value_rank").is_ok());
+        // R: rank(c(30, 10, 20, 50, 40)); the values are distinct (the tie rule is DATA-71, Tier 4)
+        assert_eq!(
+            num_cells(&result, "value_rank"),
+            [3.0, 1.0, 2.0, 5.0, 4.0].map(Some)
+        );
     }
 
     #[test]
@@ -2018,5 +2044,143 @@ mod tests {
             lag(&ds, "nonexistent", 1, None),
             Err(MungeError::ColumnNotFound(_))
         ));
+    }
+
+    /// Cells of any numeric/boolean column as f64 (null -> None).
+    fn num_cells(ds: &Dataset, c: &str) -> Vec<Option<f64>> {
+        ds.df()
+            .column(c)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+    /// R's NA as NaN, to compare with a case vector (`Check` treats NaN as equal to NaN). Every test that
+    /// uses it also asserts the null count, because NaN would pass the comparison.
+    fn as_r(v: &[Option<f64>]) -> Vec<f64> {
+        v.iter().map(|x| x.unwrap_or(f64::NAN)).collect()
+    }
+    fn dtype(ds: &Dataset, c: &str) -> DataType {
+        ds.df().column(c).unwrap().dtype().clone()
+    }
+
+    #[test]
+    fn test_validate_lag_dplyr() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_munging_t3.R, case data_munging_lag. dplyr::lag/lead are positional,
+        // within group_by groups, in data order (the groups here are interleaved); so is p2a's lag. A
+        // time-aware lag (plm::lag, gaps) is DATA-39 (Tier 4).
+        let (case, ds) = crate::test_support::load_case("data_munging_lag");
+        assert_eq!(dtype(&ds, "x"), DataType::Int64);
+        let l1 = lag(&ds, "x", 1, None).unwrap();
+        let l2 = lag(&ds, "x", 2, Some(&["g"])).unwrap();
+        let ld = lead(&ds, "y", 1, Some(&["g"])).unwrap();
+        let d1 = diff(&ds, "y", 1).unwrap();
+        let d2 = diff(&ds, "x", 2).unwrap();
+        let pc = pct_change(&ds, "y", 1).unwrap();
+        assert_eq!(
+            (dtype(&l1, "x_lag1"), dtype(&d2, "x_diff2")),
+            (DataType::Int64, DataType::Int64)
+        ); // R: is.integer
+        // the same IEEE subtraction and division as R on the same doubles; 1e-14 only guards against fma
+        let float = Tol::new(1e-14, 0.0);
+        Check::new(&case)
+            .vector("lag1_x", &as_r(&num_cells(&l1, "x_lag1")), Tol::exact())
+            .vector(
+                "lag2_x_by_g",
+                &as_r(&num_cells(&l2, "x_lag2")),
+                Tol::exact(),
+            )
+            .vector(
+                "lead1_y_by_g",
+                &as_r(&num_cells(&ld, "y_lead1")),
+                Tol::exact(),
+            )
+            .vector("diff1_y", &as_r(&num_cells(&d1, "y_diff1")), float)
+            .vector("diff2_x", &as_r(&num_cells(&d2, "x_diff2")), Tol::exact())
+            .vector(
+                "pct_change1_y",
+                &as_r(&num_cells(&pc, "y_pct_change1")),
+                float,
+            )
+            .finish();
+        // NA is missing, not NaN
+        for (d, c, k) in [
+            (&l1, "x_lag1", "lag1_x"),
+            (&l2, "x_lag2", "lag2_x_by_g"),
+            (&pc, "y_pct_change1", "pct_change1_y"),
+        ] {
+            assert_eq!(
+                d.df().column(c).unwrap().null_count(),
+                case.vector(k).iter().filter(|v| v.is_nan()).count(),
+                "{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_cut() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_cut: cut(x, 4) on Int64 with NA and ties, and p2a's Quantile(3) =
+        // cut(x, c(-Inf, quantile(x, 1:2 / 3, type = 7, na.rm = TRUE), Inf)); edges by the same arithmetic as R
+        let (case, ds) = crate::test_support::load_case("data_munging_cut");
+        let ew = bin_with(
+            &ds,
+            "x",
+            BinStrategy::EqualWidth(4),
+            None,
+            &BinOptions::default(),
+        )
+        .unwrap();
+        let q = bin_with(
+            &ds,
+            "x",
+            BinStrategy::Quantile(3),
+            None,
+            &BinOptions::default(),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("ew_breaks", &ew.edges, Tol::exact())
+            .vector("ew_codes", &codes_of(&ew.dataset, "x_binned"), Tol::exact())
+            .vector("q_edges", &q.edges[1..3], Tol::exact())
+            .vector("q_codes", &codes_of(&q.dataset, "x_binned"), Tol::exact())
+            .scalar("n_na", ew.n_missing as f64, Tol::exact())
+            .finish();
+        assert_eq!((q.edges[0], q.edges[3]), (f64::NEG_INFINITY, f64::INFINITY));
+    }
+
+    #[test]
+    fn test_validate_model_matrix() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_model_matrix: model.matrix(~ 0 + factor(g)) on an Int64 factor. Not pinned:
+        // drop_first's baseline (DATA-40, Tier 4: an arbitrary level instead of R's first) and the names
+        // of text levels (DATA-41, Tier 4: quoted); see the registry deviations.
+        let (case, ds) = crate::test_support::load_case("data_munging_model_matrix");
+        assert_eq!(dtype(&ds, "g"), DataType::Int64);
+        let out = one_hot_encode(&ds, "g", false).unwrap();
+        assert_eq!(out.df().width(), ds.df().width() + 3);
+        let levels: Vec<String> = case
+            .vector("levels")
+            .iter()
+            .map(|v| format!("{}", *v as i64))
+            .collect();
+        let dummy = |l: &str| -> Vec<f64> {
+            num_cells(&out, &format!("g_{l}"))
+                .into_iter()
+                .map(Option::unwrap)
+                .collect()
+        };
+        let d: Vec<Vec<f64>> = levels.iter().map(|l| dummy(l)).collect();
+        let counts: Vec<f64> = d.iter().map(|v| v.iter().sum()).collect();
+        Check::new(&case)
+            .vector("dummy_1", &d[0], Tol::exact())
+            .vector("dummy_2", &d[1], Tol::exact())
+            .vector("dummy_3", &d[2], Tol::exact())
+            .vector("level_counts", &counts, Tol::exact())
+            .finish();
     }
 }

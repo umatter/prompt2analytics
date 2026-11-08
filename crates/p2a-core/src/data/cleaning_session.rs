@@ -89,6 +89,9 @@ pub struct VerificationReportSummary {
     pub completeness_after: f64,
     pub issues_resolved: usize,
     pub issues_introduced: usize,
+    /// Columns whose type changed.
+    #[serde(default)]
+    pub dtype_changes: usize,
 }
 
 impl From<&VerificationReport> for VerificationReportSummary {
@@ -102,6 +105,7 @@ impl From<&VerificationReport> for VerificationReportSummary {
             completeness_after: report.quality_delta.completeness_after,
             issues_resolved: report.quality_delta.issues_resolved.len(),
             issues_introduced: report.quality_delta.issues_introduced.len(),
+            dtype_changes: report.dtype_changes.len(),
         }
     }
 }
@@ -688,5 +692,63 @@ mod tests {
             Some(&"Sales Cleanup".to_string())
         );
         assert_eq!(session.get_metadata("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_apply_operation_dtype_change() {
+        // DATA-23: apply_operation (:213) and compare_checkpoints (:363) went through the panicking comparison
+        let mut session = CleaningSession::new(create_test_dataset(), "test_data");
+        let report = session
+            .apply_operation(
+                "fill_na",
+                "Fill value with the mean",
+                HashMap::new(),
+                |ds| {
+                    crate::data::munging::fill_na(
+                        ds,
+                        Some(&["value"]),
+                        crate::data::munging::FillStrategy::Mean,
+                    )
+                    .map_err(|e| e.to_string())
+                },
+            )
+            .unwrap();
+        let change = crate::data::verification::DtypeChange {
+            column: "value".into(),
+            before: "i32".into(),
+            after: "f64".into(),
+        };
+        assert_eq!(
+            (report.rows_modified, report.dtype_changes.clone()),
+            (1, vec![change])
+        );
+        assert_eq!(
+            session.audit_trail[0]
+                .verification
+                .as_ref()
+                .unwrap()
+                .dtype_changes,
+            1
+        );
+        assert_eq!(
+            session
+                .compare_checkpoints(0, 1)
+                .unwrap()
+                .dtype_changes
+                .len(),
+            1
+        );
+        // R: mean(c(100, 200, 400)) = 233.33333333333334
+        assert_eq!(
+            session
+                .current_dataset()
+                .df()
+                .column("value")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .get(2),
+            Some(700.0 / 3.0)
+        );
     }
 }
