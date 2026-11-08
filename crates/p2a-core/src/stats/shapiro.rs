@@ -54,10 +54,11 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
-use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::normal_quantile;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Constants of swilk.c (Royston 1995, AS R94)
@@ -276,7 +277,7 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
 /// }
 /// ```
 pub fn run_shapiro_wilk(dataset: &Dataset, column: &str) -> EconResult<ShapiroWilkResult> {
-    let (x, missing) = numeric_column(dataset.df(), column, NaPolicy::Omit)?;
+    let (x, missing) = sample_column(dataset.df(), column, "Shapiro-Wilk")?;
     let mut result = shapiro_wilk_test(&x)?;
     result.missing = missing;
     Ok(result)
@@ -312,11 +313,10 @@ fn swilk(x: &[f64]) -> EconResult<(f64, f64)> {
     if n == 3 {
         a[0] = std::f64::consts::FRAC_1_SQRT_2;
     } else {
-        let normal = Normal::standard();
         let an25 = an + 0.25;
         let mut summ2 = 0.0;
         for (i, ai) in a.iter_mut().enumerate() {
-            let m = normal.inverse_cdf(((i + 1) as f64 - 0.375) / an25);
+            let m = normal_quantile(((i + 1) as f64 - 0.375) / an25)?;
             *ai = m;
             summ2 += m * m;
         }
@@ -529,7 +529,11 @@ mod tests {
                 .scalar(&format!("{col}_w"), r.w_statistic, Tol::stat(r.n))
                 .scalar(&format!("{col}_p"), r.p_value, Tol::p_value(r.n))
                 .scalar(&format!("{col}_n"), r.n as f64, Tol::exact());
-            assert_eq!(r.reject_normality, r.p_value < 0.05, "{col}");
+            assert_eq!(
+                r.reject_normality,
+                case.scalar(&format!("{col}_p")) < 0.05,
+                "{col}"
+            );
         }
         check.finish();
     }
@@ -546,8 +550,7 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("stat_shapiro_wilk");
         let rows = ds.df().height(); // 5000
         // Float64 columns first (pre-fix: the padding was read as 4995 zeros), Int64 columns
-        // last (pre-fix: NonNumericColumn), so a pre-fix run reports the wrong numbers before
-        // it panics.
+        // last (pre-fix: NonNumericColumn), so a pre-fix run reports the wrong numbers first.
         let (int_cols, float_cols): (Vec<&str>, Vec<&str>) = SHAPIRO_COLUMNS
             .into_iter()
             .partition(|c| ["n3_124", "n3_123", "n25_int"].contains(c));
@@ -683,5 +686,13 @@ mod tests {
             wide.w_statistic.is_finite() && wide.w_statistic < 1.0,
             "{wide:?}"
         );
+    }
+
+    #[test]
+    fn test_shapiro_all_missing_column_is_named() {
+        let ds =
+            Dataset::new(df! { "x" => [1.2, 0.4, 2.2], "y" => [None::<f64>, None, None] }.unwrap());
+        let e = run_shapiro_wilk(&ds, "y").unwrap_err().to_string();
+        assert!(e.contains("'y'") && e.contains("Shapiro-Wilk"), "{e}");
     }
 }

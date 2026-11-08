@@ -774,4 +774,51 @@ mod tests {
             "cor[0,1] should be 1.0 for perfect correlation"
         );
     }
+
+    /// STAT-67 (weighted): weighted.mean and cov.wt with unequal weights (unbiased, ML, correlation, normalised weights).
+    #[test]
+    fn test_validate_cov_wt_t3() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_robust_weighted_t3");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let (x1, x2, w) = (col("x1"), col("x2"), col("w"));
+        let x = ndarray::Array2::from_shape_fn(
+            (x1.len(), 2),
+            |(i, j)| if j == 0 { x1[i] } else { x2[i] },
+        );
+        let u = cov_wt(
+            &x,
+            Some(&w),
+            true,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
+        let m = cov_wt(
+            &x,
+            Some(&w),
+            false,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::ML,
+        )
+        .unwrap();
+        let colmajor = |a: &Vec<Vec<f64>>| vec![a[0][0], a[1][0], a[0][1], a[1][1]]; // R's as.numeric(matrix)
+        Check::new(&case)
+            .scalar(
+                "wmean",
+                weighted_mean(&x1, &w, true).unwrap(),
+                Tol::coef(25),
+            )
+            .vector("covwt_center", &u.center, Tol::coef(25))
+            .vector("covwt_unbiased", &colmajor(&u.cov), Tol::stat(25))
+            .vector(
+                "covwt_cor",
+                &colmajor(u.cor.as_ref().unwrap()),
+                Tol::stat(25),
+            )
+            .vector("covwt_ml", &colmajor(&m.cov), Tol::stat(25))
+            .vector("covwt_wt", &u.wt, Tol::coef(25))
+            .finish();
+    }
 }

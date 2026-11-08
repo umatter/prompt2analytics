@@ -22,17 +22,16 @@
 //! Δyₜ = α + βt + γyₜ₋₁ + uₜ
 //! ```
 //!
-//! The Phillips-Perron Z(τ) statistic corrects the ADF t-statistic:
+//! The statistic is R's `PP.test` "Dickey-Fuller" statistic, the corrected t statistic Z(τ):
 //! ```text
-//! Z(τ) = τ̂ × √(σ̂²/λ²) - (λ² - σ̂²) × T / (2λ × s)
+//! Z(τ) = τ̂ × √(σ̂²/λ²) - n³ / (4 √3 √D √λ²) × (λ² - σ̂²)
 //! ```
 //!
-//! Where:
-//! - τ̂ = t-statistic from OLS regression
-//! - σ̂² = residual variance
+//! Where, with n = length(x) - 1:
+//! - τ̂ = t-statistic of γ̂ from the OLS regression
+//! - σ̂² = residual sum of squares / n
 //! - λ² = Newey-West long-run variance estimate
-//! - s = standard error of γ̂
-//! - T = sample size
+//! - D = det(X'X) for X = [1, t, yₜ₋₁], t = 1..n, computed from centred sums
 //!
 //! The Newey-West estimator for long-run variance:
 //! ```text
@@ -43,23 +42,25 @@
 //!
 //! # Critical Values
 //!
-//! P-values are interpolated from Table 4.2, page 103 of Banerjee et al. (1993).
-//! These are the same critical values as for the ADF test.
+//! P-values are interpolated as R's `PP.test` does (Banerjee et al. 1993, Table 4.2 as tabulated
+//! in R), clamped to [0.01, 0.99].
 
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
 
 /// Result of Phillips-Perron unit root test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PPTestResult {
-    /// Z(τ) test statistic (Dickey-Fuller tau statistic with PP correction)
+    /// PP.test's "Dickey-Fuller" statistic: the corrected t statistic Z(t_alpha) (R does not
+    /// return Z(alpha))
     pub statistic: f64,
-    /// Truncation lag parameter used
+    /// Truncation lag: trunc(4 ((n - 1)/100)^0.25), or 12 with lshort = false, as PP.test
     pub truncation_lag: usize,
-    /// P-value (interpolated from critical value tables)
+    /// P-value from R's table, interpolated and clamped to [0.01, 0.99]
     pub p_value: f64,
     /// Significance level based on p-value
     pub significance: SignificanceLevel,
@@ -158,74 +159,59 @@ fn newey_west_variance(residuals: &[f64], truncation_lag: usize) -> f64 {
     sigma_sq + 2.0 * gamma_sum
 }
 
-/// Interpolate p-value from critical value tables (Banerjee et al., 1993).
-///
-/// Critical values for the PP test with constant and trend.
-/// These match R's PP.test which uses Table 4.2 from Banerjee et al. (1993).
-fn interpolate_p_value(statistic: f64, n: usize) -> f64 {
-    // Critical values for different significance levels (with constant and trend)
-    // From Banerjee et al. (1993), Table 4.2
-    // The test statistic follows a non-standard distribution under H₀
-
-    // Critical values at different significance levels for n = ∞
-    // These are the asymptotic critical values
-    // More negative statistic -> stronger rejection of unit root
-    const CV_001: f64 = -4.38; // 0.1% significance
-    const CV_01: f64 = -4.04; // 1% significance
-    const CV_025: f64 = -3.73; // 2.5% significance
-    const CV_05: f64 = -3.45; // 5% significance
-    const CV_10: f64 = -3.15; // 10% significance
-    const CV_90: f64 = -1.28; // 90% (very weak evidence against H₀)
-
-    // For finite samples, critical values are slightly more negative
-    // Apply small-sample correction (approximately)
-    let n_f = n as f64;
-    let correction = if n < 25 {
-        // More conservative for very small samples
-        -0.6 * (25.0 - n_f) / 25.0
-    } else if n < 100 {
-        // Small correction for moderate samples
-        -0.15 * (100.0 - n_f) / 100.0
-    } else {
-        0.0
-    };
-
-    let cv_001 = CV_001 + correction;
-    let cv_01 = CV_01 + correction;
-    let cv_025 = CV_025 + correction;
-    let cv_05 = CV_05 + correction;
-    let cv_10 = CV_10 + correction;
-    let cv_90 = CV_90 + correction * 0.5;
-
-    // Interpolate p-value based on where the statistic falls
-    if statistic <= cv_001 {
-        // Very significant, p < 0.001
-        0.001 * (cv_001 - statistic + 1.0).recip().min(1.0)
-    } else if statistic <= cv_01 {
-        // Between 0.1% and 1%
-        let ratio = (statistic - cv_01) / (cv_001 - cv_01);
-        0.001 + ratio * (0.01 - 0.001)
-    } else if statistic <= cv_025 {
-        // Between 1% and 2.5%
-        let ratio = (statistic - cv_025) / (cv_01 - cv_025);
-        0.01 + ratio * (0.025 - 0.01)
-    } else if statistic <= cv_05 {
-        // Between 2.5% and 5%
-        let ratio = (statistic - cv_05) / (cv_025 - cv_05);
-        0.025 + ratio * (0.05 - 0.025)
-    } else if statistic <= cv_10 {
-        // Between 5% and 10%
-        let ratio = (statistic - cv_10) / (cv_05 - cv_10);
-        0.05 + ratio * (0.10 - 0.05)
-    } else if statistic <= cv_90 {
-        // Between 10% and 90%
-        let ratio = (statistic - cv_90) / (cv_10 - cv_90);
-        0.10 + ratio * (0.90 - 0.10)
-    } else {
-        // Very weak evidence against H₀
-        0.90 + 0.09 * (1.0 - (-statistic).exp().min(1.0))
+/// The interval of ascending `xs` holding `x` and the weight of its upper end, clamped to the ends
+/// as R's `approx(rule = 2)`.
+fn bracket(xs: &[f64], x: f64) -> (usize, usize, f64) {
+    let last = xs.len() - 1;
+    if x <= xs[0] {
+        return (0, 0, 0.0);
     }
+    if x >= xs[last] {
+        return (last, last, 0.0);
+    }
+    let hi = xs.partition_point(|&v| v < x);
+    (hi - 1, hi, (x - xs[hi - 1]) / (xs[hi] - xs[hi - 1]))
 }
+
+/// Linear interpolation of `(xs, ys)` at a bracket.
+fn at_bracket(ys: &[f64], (lo, hi, w): (usize, usize, f64)) -> f64 {
+    ys[lo] + w * (ys[hi] - ys[lo])
+}
+
+/// The p-value of `PP.test`: R's table (Banerjee et al. 1993, Table 4.2) is interpolated in the
+/// sample size `m` (the regression's) for each p, and then p is interpolated in the statistic.
+/// Both interpolations clamp at the table's ends. NaN stays NaN.
+fn pp_p_value(stat: f64, m: usize) -> f64 {
+    const TABLE_T: [f64; 6] = [25.0, 50.0, 100.0, 250.0, 500.0, 100000.0];
+    const TABLE_P: [f64; 8] = [0.01, 0.025, 0.05, 0.10, 0.90, 0.95, 0.975, 0.99];
+    // One row per p, one column per T
+    const TABLE: [[f64; 6]; 8] = [
+        [-4.38, -4.15, -4.04, -3.99, -3.98, -3.96],
+        [-3.95, -3.80, -3.73, -3.69, -3.68, -3.66],
+        [-3.60, -3.50, -3.45, -3.43, -3.42, -3.41],
+        [-3.24, -3.18, -3.15, -3.13, -3.13, -3.12],
+        [-1.14, -1.19, -1.22, -1.23, -1.24, -1.25],
+        [-0.80, -0.87, -0.90, -0.92, -0.93, -0.94],
+        [-0.50, -0.58, -0.62, -0.64, -0.65, -0.66],
+        [-0.15, -0.24, -0.28, -0.31, -0.32, -0.33],
+    ];
+    if stat.is_nan() {
+        return f64::NAN;
+    }
+    let in_t = bracket(&TABLE_T, m as f64);
+    let critical = TABLE.map(|row| at_bracket(&row, in_t));
+    at_bracket(&TABLE_P, bracket(&critical, stat))
+}
+
+/// Relative size below which the trend leaves nothing of `y_{t-1}`: `1 - r^2(t, y_{t-1})`.
+const SINGULAR_TOL: f64 = 1e-12;
+/// Residual norm relative to the norm of Δy below which the regression fits exactly.
+const EXACT_FIT_TOL: f64 = 1e-12;
+/// Rounding error per value, in units of `f64::EPSILON * max|x|`, that a series on a level far
+/// above its movements carries. Differences of two rounded values reach about 1 unit.
+const ROUNDING_ULPS: f64 = 4.0;
+/// Below this a sum of squares has lost digits to subnormal numbers.
+const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
 
 /// Perform the Phillips-Perron unit root test on a time series.
 ///
@@ -233,12 +219,23 @@ fn interpolate_p_value(statistic: f64, n: usize) -> f64 {
 ///
 /// * `x` - Numeric vector (time series data)
 /// * `lshort` - If true, use short truncation lag (default: true)
-///   - lshort=true: trunc(4*(n/100)^0.25)
-///   - lshort=false: trunc(12*(n/100)^0.25)
+///   - lshort=true: trunc(4*((n-1)/100)^0.25)
+///   - lshort=false: trunc(12*((n-1)/100)^0.25)
 ///
 /// # Returns
 ///
 /// `PPTestResult` with the Z(τ) test statistic, p-value, and additional diagnostics.
+///
+/// # Errors
+///
+/// - `InsufficientData`: fewer than 5 observations (the regression needs a positive residual df).
+/// - `InvalidSpecification`: non-finite values; squares of the values that do not fit a double;
+///   an exact fit, where the residuals are rounding error next to Δy or to the level of the
+///   series. For an exact fit `PP.test` warns and returns a statistic made of that rounding error.
+/// - `SingularMatrix`: `y_{t-1}` is constant or a linear trend up to rounding, whatever the scale
+///   of the series: `1 - r^2(t, y_{t-1}) <= 1e-12`, or a remainder after the trend within rounding
+///   at the level of the series. `PP.test` stops on the exact case ("singularities in regression")
+///   but still returns a statistic for a near-linear series down to about `1 - r^2 = 1e-14`.
 ///
 /// # Example
 ///
@@ -261,11 +258,13 @@ fn interpolate_p_value(statistic: f64, n: usize) -> f64 {
 pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     let n = x.len();
 
-    if n < 4 {
+    if n < 5 {
         return Err(EconError::InsufficientData {
-            required: 4,
+            required: 5,
             provided: n,
-            context: "Phillips-Perron test requires at least 4 observations".to_string(),
+            context: "Phillips-Perron: the regression on [1, t, y_{t-1}] needs a positive \
+                      residual df (n - 4)"
+                .to_string(),
         });
     }
 
@@ -276,107 +275,96 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
         });
     }
 
-    // Compute truncation lag
-    let truncation_lag = compute_truncation_lag(n, lshort);
-
-    // Build design matrix for the regression:
-    // Δyₜ = α + β*t + γ*yₜ₋₁ + uₜ
-    //
-    // We regress Δy on [1, t, y_{t-1}]
-
     let n_reg = n - 1; // Number of observations in regression
 
-    // Build vectors for regression
-    let mut delta_y = Vec::with_capacity(n_reg);
-    let mut y_lag = Vec::with_capacity(n_reg);
-    let mut trend = Vec::with_capacity(n_reg);
+    // Compute truncation lag (R: n is length(x) - 1 here)
+    let truncation_lag = compute_truncation_lag(n_reg, lshort);
 
-    for t in 1..n {
-        delta_y.push(x[t] - x[t - 1]);
-        y_lag.push(x[t - 1]);
-        trend.push(t as f64);
+    // OLS of Δy on [1, t, y_{t-1}], from sums centred on the means, so that no check or step
+    // depends on the scale or the level of the series.
+    let m = n_reg as f64;
+    let t_bar = (m + 1.0) / 2.0;
+    let s_tt = m * (m * m - 1.0) / 12.0; // t = 1..=m
+    let (mut sum_y, mut sum_dy, mut max_abs) = (0.0, 0.0, 0.0f64);
+    for w in x.windows(2) {
+        sum_y += w[0];
+        sum_dy += w[1] - w[0];
+        max_abs = max_abs.max(w[0].abs());
+    }
+    max_abs = max_abs.max(x[n_reg].abs());
+    let (y_bar, dy_bar) = (sum_y / m, sum_dy / m);
+
+    let (mut s_yy, mut s_ty, mut s_td, mut s_yd, mut sum_dy2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (i, w) in x.windows(2).enumerate() {
+        let t_dev = (i + 1) as f64 - t_bar;
+        let y_dev = w[0] - y_bar;
+        let dy = w[1] - w[0];
+        s_yy += y_dev * y_dev;
+        s_ty += t_dev * y_dev;
+        s_td += t_dev * dy;
+        s_yd += y_dev * dy;
+        sum_dy2 += dy * dy;
     }
 
-    // OLS regression: Δy = α + β*t + γ*y_{t-1} + u
-    // Design matrix X = [1, t, y_{t-1}]
-
-    // Compute X'X and X'y using explicit formulas for 3x3 case
-    // X = [1, t, y_lag]
-    let sum_1: f64 = n_reg as f64;
-    let sum_t: f64 = trend.iter().sum();
-    let sum_y: f64 = y_lag.iter().sum();
-    let sum_t2: f64 = trend.iter().map(|t| t * t).sum();
-    let sum_ty: f64 = trend.iter().zip(y_lag.iter()).map(|(t, y)| t * y).sum();
-    let sum_y2: f64 = y_lag.iter().map(|y| y * y).sum();
-
-    let sum_dy: f64 = delta_y.iter().sum();
-    let sum_t_dy: f64 = trend.iter().zip(delta_y.iter()).map(|(t, dy)| t * dy).sum();
-    let sum_y_dy: f64 = y_lag.iter().zip(delta_y.iter()).map(|(y, dy)| y * dy).sum();
-
-    // X'X matrix (symmetric 3x3)
-    // [ n,       sum_t,    sum_y   ]
-    // [ sum_t,   sum_t2,   sum_ty  ]
-    // [ sum_y,   sum_ty,   sum_y2  ]
-
-    // X'y vector
-    // [ sum_dy   ]
-    // [ sum_t_dy ]
-    // [ sum_y_dy ]
-
-    // Solve using Cramer's rule or direct inverse
-    // For robustness, compute determinant and check for singularity
-    let det = sum_1 * (sum_t2 * sum_y2 - sum_ty * sum_ty)
-        - sum_t * (sum_t * sum_y2 - sum_ty * sum_y)
-        + sum_y * (sum_t * sum_ty - sum_t2 * sum_y);
-
-    if det.abs() < 1e-14 {
-        return Err(EconError::SingularMatrix {
-            context: "X'X in Phillips-Perron regression".to_string(),
-            suggestion: "Check for multicollinearity or constant series".to_string(),
+    let squares_underflow = s_yy < MIN_ACCURATE_SQUARES && x[..n_reg].iter().any(|v| *v != x[0]);
+    if !(s_yy.is_finite() && sum_dy2.is_finite()) || squares_underflow {
+        return Err(EconError::InvalidSpecification {
+            message: "Phillips-Perron: the squares of the values do not fit a double; rescale \
+                      the series"
+                .to_string(),
         });
     }
 
-    // Compute inverse of X'X (cofactor matrix / det)
-    let inv_det = 1.0 / det;
+    // What a sum of squares over m rows is worth when each value only carries rounding error.
+    let rounding = m * (ROUNDING_ULPS * f64::EPSILON * max_abs).powi(2);
 
-    // Cofactors for row 3 (needed for γ coefficient and its variance)
-    let c31 = sum_t * sum_ty - sum_t2 * sum_y;
-    let c32 = sum_t * sum_y - sum_1 * sum_ty;
-    let c33 = sum_1 * sum_t2 - sum_t * sum_t;
+    // Sum of squares of y_{t-1} after the trend. It is s_tt s_yy - s_ty^2 over s_tt, and
+    // det(X'X) = m s_tt s_yy_t.
+    let s_yy_t = s_yy - s_ty * (s_ty / s_tt);
+    if s_yy_t <= (SINGULAR_TOL * s_yy).max(rounding) {
+        return Err(EconError::SingularMatrix {
+            context: "X'X in Phillips-Perron regression".to_string(),
+            suggestion:
+                "the lagged series is constant or a linear trend, up to rounding at its level"
+                    .to_string(),
+        });
+    }
 
-    // Compute γ̂ (coefficient on y_{t-1})
-    // γ̂ = [row 3 of (X'X)^{-1}] · [X'y]
-    let gamma_hat = inv_det * (c31 * sum_dy + c32 * sum_t_dy + c33 * sum_y_dy);
+    let gamma_hat = (s_yd - s_ty * (s_td / s_tt)) / s_yy_t;
+    let beta_hat = (s_td - gamma_hat * s_ty) / s_tt;
 
-    // Compute all coefficients for residuals
-    let c11 = sum_t2 * sum_y2 - sum_ty * sum_ty;
-    let c12 = sum_ty * sum_y - sum_t * sum_y2;
-    let c13 = sum_t * sum_ty - sum_t2 * sum_y;
-    let c21 = c12;
-    let c22 = sum_1 * sum_y2 - sum_y * sum_y;
-    let c23 = sum_t * sum_y - sum_1 * sum_ty;
-
-    let alpha_hat = inv_det * (c11 * sum_dy + c12 * sum_t_dy + c13 * sum_y_dy);
-    let beta_hat = inv_det * (c21 * sum_dy + c22 * sum_t_dy + c23 * sum_y_dy);
-
-    // Compute residuals
-    let residuals: Vec<f64> = (0..n_reg)
-        .map(|i| delta_y[i] - alpha_hat - beta_hat * trend[i] - gamma_hat * y_lag[i])
+    let residuals: Vec<f64> = x
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| {
+            (w[1] - w[0] - dy_bar)
+                - beta_hat * ((i + 1) as f64 - t_bar)
+                - gamma_hat * (w[0] - y_bar)
+        })
         .collect();
 
     // Residual sum of squares
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
 
+    let exact_fit = || {
+        Err(EconError::InvalidSpecification {
+            message: "Phillips-Perron: the long-run variance is zero (the regression on \
+                      [1, t, y_{t-1}] fits exactly)"
+                .to_string(),
+        })
+    };
+    if rss <= (EXACT_FIT_TOL * EXACT_FIT_TOL * sum_dy2).max(rounding) {
+        return exact_fit();
+    }
+
     // Degrees of freedom
-    let df = n_reg - 3; // n - 1 observations, 3 parameters
+    let df = n_reg - 3; // n - 1 observations, 3 parameters; positive since n >= 5
 
     // Residual variance σ̂² (different from Newey-West divisor)
     let sigma_sq = rss / df as f64;
 
-    // Standard error of γ̂
-    // Var(γ̂) = σ̂² × [(X'X)^{-1}]_{33}
-    let var_gamma = sigma_sq * inv_det * c33;
-    let se_gamma = var_gamma.sqrt();
+    // Standard error of γ̂: Var(γ̂) = σ̂² [(X'X)^{-1}]_{33} = σ̂² / s_yy_t
+    let se_gamma = (sigma_sq / s_yy_t).sqrt();
 
     // OLS t-statistic for γ
     let t_stat = gamma_hat / se_gamma;
@@ -385,35 +373,24 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     let lambda_sq = newey_west_variance(&residuals, truncation_lag);
 
     // Residual variance for PP correction (using n divisor, not df)
-    let sigma_sq_nw = rss / n_reg as f64;
+    let sigma_sq_nw = rss / m;
 
-    // Phillips-Perron Z(τ) statistic
-    // Z(τ) = τ̂ × √(σ̂²/λ²) - (λ² - σ̂²) × T / (2λ × s)
-    //
-    // Note: R uses a slightly different formula that matches this asymptotically
-    // Z(τ) = τ̂ × √(σ̂²/λ²) - 0.5 × (λ² - σ̂²) × (T × s² / λ²)^0.5 / s
+    if lambda_sq.is_nan() || lambda_sq <= 0.0 {
+        return exact_fit();
+    }
 
-    let t_reg = n_reg as f64;
+    // PP.test's statistic, with the sign of λ² - σ̂² kept. sqrt(dx) is sqrt(det(X'X)).
+    let dx_sqrt = (m * s_tt).sqrt() * s_yy_t.sqrt();
+    let z_tau = (sigma_sq_nw / lambda_sq).sqrt() * t_stat
+        - m.powi(3) / (4.0 * 3f64.sqrt() * dx_sqrt * lambda_sq.sqrt()) * (lambda_sq - sigma_sq_nw);
 
-    // Compute the correction term
-    // Using the formula from R's PP.test source code
-    let ratio = if lambda_sq > 0.0 {
-        sigma_sq_nw / lambda_sq
-    } else {
-        1.0
-    };
+    if !z_tau.is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("Phillips-Perron: the statistic is not finite ({z_tau})"),
+        });
+    }
 
-    let correction = if lambda_sq > sigma_sq_nw && se_gamma > 0.0 {
-        (lambda_sq - sigma_sq_nw) * t_reg.sqrt()
-            / (2.0 * lambda_sq.sqrt() * se_gamma * t_reg.sqrt())
-    } else {
-        0.0
-    };
-
-    let z_tau = t_stat * ratio.sqrt() - correction * t_reg;
-
-    // Interpolate p-value
-    let p_value = interpolate_p_value(z_tau, n);
+    let p_value = pp_p_value(z_tau, n_reg);
 
     Ok(PPTestResult {
         statistic: z_tau,
@@ -447,41 +424,7 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
 /// println!("{}", result);
 /// ```
 pub fn run_pp_test(dataset: &Dataset, column: &str, lshort: bool) -> EconResult<PPTestResult> {
-    use polars::prelude::*;
-
-    let series = dataset
-        .df()
-        .column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: dataset
-                .df()
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let values = series
-        .cast(&DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?;
-
-    // na-legacy(T4): non-strict cast (text turns into nulls; NaN passes through)
-    let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
-        column: column.to_string(),
-    })?;
-
-    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
-    let missing = ca.null_count();
-    if missing > 0 {
-        return Err(EconError::NullValues {
-            column: column.to_string(),
-            count: missing,
-        });
-    }
-    let x: Vec<f64> = ca.into_iter().flatten().collect();
+    let (x, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     let mut result = pp_test(&x, lshort)?;
     result.series_name = Some(column.to_string());
@@ -611,74 +554,6 @@ mod tests {
         assert!(display.contains("p-value"));
     }
 
-    /// Validation test against R
-    ///
-    /// R code:
-    /// ```r
-    /// x <- rnorm(1000)
-    /// PP.test(x)
-    /// # Dickey-Fuller Z(alpha) = -998.65, Truncation lag parameter = 7, p-value = 0.01
-    /// ```
-    ///
-    /// Note: R's PP.test returns Z(alpha), not Z(tau). The statistic format differs
-    /// but both test the same null hypothesis.
-    #[test]
-    fn test_validate_random_data_against_r() {
-        // Generate reproducible "random" data
-        let x: Vec<f64> = (0..1000)
-            .map(|i: u64| {
-                let seed = (i.wrapping_mul(1103515245).wrapping_add(12345)) % (1 << 31);
-                (seed as f64 / (1u64 << 31) as f64 - 0.5) * 2.0
-            })
-            .collect();
-
-        let result = pp_test(&x, true).unwrap();
-
-        // For random (stationary) data, we expect:
-        // - Very negative test statistic
-        // - Low p-value (reject unit root)
-        assert_eq!(result.truncation_lag, 7); // trunc(4*(1000/100)^0.25) = 7
-        assert!(
-            result.statistic < 0.0,
-            "Random data should have negative test statistic"
-        );
-    }
-
-    /// Validation against R with cumulative sum (unit root)
-    ///
-    /// R code:
-    /// ```r
-    /// set.seed(42)
-    /// x <- cumsum(rnorm(1000))
-    /// PP.test(x)
-    /// # Dickey-Fuller = -7.66, Truncation lag parameter = 7, p-value = 0.7102
-    /// ```
-    #[test]
-    fn test_validate_cumsum_against_r() {
-        // Generate cumulative sum (random walk)
-        let noise: Vec<f64> = (0..1000)
-            .map(|i: u64| {
-                let seed = (i.wrapping_mul(1103515245).wrapping_add(12345)) % (1 << 31);
-                (seed as f64 / (1u64 << 31) as f64 - 0.5) * 2.0
-            })
-            .collect();
-
-        let mut x = vec![0.0f64; 1000];
-        x[0] = noise[0];
-        for i in 1..1000 {
-            x[i] = x[i - 1] + noise[i];
-        }
-
-        let result = pp_test(&x, true).unwrap();
-
-        // For unit root process, we expect:
-        // - Less negative test statistic
-        // - Higher p-value (fail to reject unit root)
-        assert_eq!(result.truncation_lag, 7);
-        // Random walk should have higher p-value (fail to reject unit root)
-        // The exact values depend on the random seed, but the pattern should hold
-    }
-
     /// Test lshort parameter effect
     #[test]
     fn test_lshort_parameter() {
@@ -744,5 +619,247 @@ mod tests {
         let dataset = Dataset::new(df);
         let result = run_pp_test(&dataset, "nonexistent", true);
         assert!(result.is_err());
+    }
+
+    /// STAT-67 (PP): the regression and Newey-West internals of PP.test, pinned where both lag rules agree (n = 200).
+    #[test]
+    fn test_validate_pp_test_t3_internals() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_pp_t3");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Omit).unwrap().0;
+        let mut c = Check::new(&case);
+        for series in ["ar", "rw"] {
+            let x = col(series);
+            for (tag, lshort) in [("short", true), ("long", false)] {
+                let r = pp_test(&x, lshort).unwrap();
+                let k = |q: &str| format!("{series}_{tag}_{q}");
+                c.scalar(&k("gamma"), r.gamma_hat, Tol::coef(200))
+                    .scalar(&k("t"), r.t_statistic, Tol::stat(200))
+                    .scalar(&k("sigma2"), r.sigma_squared, Tol::stat(200))
+                    .scalar(&k("lambda2"), r.lambda_squared, Tol::stat(200))
+                    .scalar(&k("lag"), r.truncation_lag as f64, Tol::exact());
+                // {series}_{tag}_stat and _p: pinned by test_validate_pp_test_t3_statistic.
+            }
+        }
+        let r = pp_test(&col("rw100"), true).unwrap();
+        c.scalar("rw100_short_gamma", r.gamma_hat, Tol::coef(100))
+            .scalar("rw100_short_t", r.t_statistic, Tol::stat(100))
+            .scalar("rw100_short_sigma2", r.sigma_squared, Tol::stat(100))
+            .finish();
+        // rw100_short_lag (R 3 from n - 1 = 99) and rw100_short_lambda2: pinned by
+        // test_validate_pp_test_t3_statistic.
+    }
+
+    /// Four observations leave 3 regression rows and 3 parameters, a residual df of 0 (sigma^2 = 0/0).
+    #[test]
+    fn test_pp_test_needs_positive_residual_df() {
+        let e = pp_test(&[1.0, 2.5, 2.0, 3.7], true).unwrap_err();
+        assert!(
+            matches!(
+                e,
+                EconError::InsufficientData {
+                    required: 5,
+                    provided: 4,
+                    ..
+                }
+            ),
+            "{e}"
+        );
+        assert!(pp_test(&[1.0, 2.5, 2.0, 3.7, 3.1], true).is_ok());
+    }
+
+    /// STAT-6, STAT-35: PP.test's "Dickey-Fuller" statistic (the corrected t), its lag from n - 1 and its p-value
+    /// from R's table, on the five fits of stat_pp_t3.
+    #[test]
+    fn test_validate_pp_test_t3_statistic() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_pp_t3");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Omit).unwrap().0;
+        let mut c = Check::new(&case);
+        for (series, tag, lshort, n) in [
+            ("ar", "short", true, 200),
+            ("ar", "long", false, 200),
+            ("rw", "short", true, 200),
+            ("rw", "long", false, 200),
+            ("rw100", "short", true, 100),
+        ] {
+            let r = pp_test(&col(series), lshort).unwrap();
+            let k = |q: &str| format!("{series}_{tag}_{q}");
+            c.scalar(&k("stat"), r.statistic, Tol::stat(n))
+                .scalar(&k("p"), r.p_value, Tol::p_value(n))
+                .scalar(&k("lag"), r.truncation_lag as f64, Tol::exact())
+                .scalar(&k("lambda2"), r.lambda_squared, Tol::stat(n));
+        }
+        c.finish();
+    }
+
+    /// STAT-6: the paper's series (examples.tex, Section 4.4). R: Dickey-Fuller -12.0184558378257, lag 5, p 0.01.
+    #[test]
+    fn test_validate_pp_test_t3_gdp() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_pp_gdp_t3");
+        let short = run_pp_test(&ds, "gdp_growth", true).unwrap();
+        let long = run_pp_test(&ds, "gdp_growth", false).unwrap();
+        let n = short.n_obs;
+        Check::new(&case)
+            .scalar("gdp_short_stat", short.statistic, Tol::stat(n))
+            .scalar("gdp_short_lag", short.truncation_lag as f64, Tol::exact())
+            .scalar("gdp_short_p", short.p_value, Tol::p_value(n))
+            .scalar("gdp_long_stat", long.statistic, Tol::stat(n))
+            .scalar("gdp_long_lag", long.truncation_lag as f64, Tol::exact())
+            .scalar("gdp_long_p", long.p_value, Tol::p_value(n))
+            .finish();
+    }
+
+    /// STAT-6: the correction keeps its sign (p2a clipped it to 0 when lambda^2 <= sigma^2). ar_long has
+    /// lambda2 1.1002914390310594 < sigma2 1.1623414925199784, so the statistic exceeds sqrt(ssqru/ssqrtl) t.
+    #[test]
+    fn test_pp_correction_keeps_sign() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let path = p2a_validation::repo_path("validation/datasets/generated/pp_t3.csv");
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        let x = numeric_column(ds.df(), "ar", NaPolicy::Omit).unwrap().0;
+        let r = pp_test(&x, false).unwrap();
+        assert!(r.lambda_squared < r.sigma_squared);
+        assert!(r.statistic > (r.sigma_squared / r.lambda_squared).sqrt() * r.t_statistic);
+    }
+
+    /// A noisy series with no exact relation, for the scale and level checks below.
+    fn noisy_series() -> Vec<f64> {
+        let mut y = 0.0;
+        (0..120)
+            .map(|i| {
+                let i = f64::from(i);
+                y = 0.7 * y + (i * 1.37).sin() + 0.6 * (i * i * 0.41).cos();
+                y
+            })
+            .collect()
+    }
+
+    /// STAT-6: y_{t-1} collinear with the trend (linear with a step rounding touches, constant,
+    /// linear on a level far above the step) makes X'X singular whatever the scale.
+    #[test]
+    fn test_pp_test_refuses_singular_regression() {
+        let linear: Vec<f64> = (0..50).map(|i| 0.37 + 0.3 * f64::from(i)).collect();
+        let integer_step: Vec<f64> = (1..=50).map(f64::from).collect();
+        let high_level: Vec<f64> = (0..50).map(|i| 1e12 + 0.3 * f64::from(i)).collect();
+        let tiny_linear: Vec<f64> = linear.iter().map(|v| v * 1e-12).collect();
+        for x in [linear, integer_step, high_level, tiny_linear, vec![2.5; 50]] {
+            for lshort in [true, false] {
+                assert!(
+                    matches!(pp_test(&x, lshort), Err(EconError::SingularMatrix { .. })),
+                    "{:?} .. {:?}: {:?}",
+                    x[0],
+                    x[49],
+                    pp_test(&x, lshort).map(|r| r.statistic)
+                );
+            }
+        }
+    }
+
+    /// STAT-6: the bound on 1 - r^2 holds for a noisy series, stricter than `PP.test` (a registry deviation); the
+    /// designs sit a decade either side of it.
+    #[test]
+    fn test_pp_test_refuses_near_linear_series() {
+        let series = |step: f64| -> Vec<f64> {
+            (0..101)
+                .map(|i| {
+                    let noise = ((i * i * 37 % 101) as f64 - 50.0) / 29.0;
+                    step * i as f64 + noise
+                })
+                .collect()
+        };
+        assert!(matches!(
+            pp_test(&series(1e5), true),
+            Err(EconError::SingularMatrix { .. })
+        ));
+        assert!(pp_test(&series(1e4), true).unwrap().statistic.is_finite());
+    }
+
+    /// STAT-6: a regression that fits exactly up to rounding (a quadratic has a linear difference,
+    /// a geometric series a difference proportional to its lag) has no statistic to report.
+    #[test]
+    fn test_pp_test_refuses_exact_fit() {
+        let quadratic: Vec<f64> = (0..50)
+            .map(|i| {
+                let i = f64::from(i);
+                0.37 + 0.3 * i + 0.01 * i * i
+            })
+            .collect();
+        let high_level: Vec<f64> = quadratic.iter().map(|v| 1e12 + v).collect();
+        let geometric: Vec<f64> = (0..50).map(|i| 3.0 * 1.1f64.powi(i)).collect();
+        let tiny: Vec<f64> = geometric.iter().map(|v| v * 1e-12).collect();
+        for x in [quadratic, high_level, geometric, tiny] {
+            for lshort in [true, false] {
+                let r = pp_test(&x, lshort);
+                match r {
+                    Err(EconError::InvalidSpecification { ref message }) => {
+                        assert!(message.contains("fits exactly"), "{message}")
+                    }
+                    other => panic!(
+                        "{:?} .. {:?}: {:?}",
+                        x[0],
+                        x[49],
+                        other.map(|r| r.statistic)
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The statistic, gamma and t do not depend on the scale or the level of the series, so a
+    /// small scale is not "singular" and a high level is not an exact fit.
+    #[test]
+    fn test_pp_test_is_scale_and_level_free() {
+        let x = noisy_series();
+        let base = pp_test(&x, true).unwrap();
+        assert!(base.statistic.is_finite() && base.statistic < 0.0);
+        for scale in [1e-12, 1e-100, 1e12, 1e100] {
+            let scaled: Vec<f64> = x.iter().map(|v| v * scale).collect();
+            let r = pp_test(&scaled, true).unwrap();
+            for (a, b) in [
+                (r.statistic, base.statistic),
+                (r.gamma_hat, base.gamma_hat),
+                (r.t_statistic, base.t_statistic),
+            ] {
+                assert!((a - b).abs() <= 1e-9 * b.abs(), "scale {scale}: {a} vs {b}");
+            }
+            let ratio = r.sigma_squared / (base.sigma_squared * scale * scale);
+            assert!((ratio - 1.0).abs() < 1e-9, "scale {scale}: {ratio}");
+        }
+        let shifted: Vec<f64> = x.iter().map(|v| v + 1e9).collect();
+        let r = pp_test(&shifted, true).unwrap();
+        assert!((r.statistic - base.statistic).abs() < 1e-4, "{r:?}");
+    }
+
+    /// Squares that do not fit an f64 give a refusal, never a NaN statistic.
+    #[test]
+    fn test_pp_test_refuses_values_whose_squares_leave_the_range() {
+        let x = noisy_series();
+        for scale in [1e200, 1e-200] {
+            let scaled: Vec<f64> = x.iter().map(|v| v * scale).collect();
+            let r = pp_test(&scaled, true);
+            match r {
+                Err(EconError::InvalidSpecification { ref message }) => {
+                    assert!(message.contains("squares"), "{message}")
+                }
+                other => panic!("scale {scale}: {:?}", other.map(|r| r.statistic)),
+            }
+        }
+    }
+
+    /// STAT-35: R's table is interpolated in T, then in the statistic, both with approx(rule = 2).
+    #[test]
+    fn test_pp_p_value_clamps_and_is_monotone() {
+        assert_eq!(pp_p_value(-50.0, 199), 0.01);
+        assert_eq!(pp_p_value(5.0, 199), 0.99);
+        assert_eq!(pp_p_value(-3.0, 10), pp_p_value(-3.0, 25)); // T below 25 uses the T = 25 row
+        assert_eq!(pp_p_value(-3.0, 10_000_000), pp_p_value(-3.0, 100_000)); // T above 1e5 uses the last row
+        let grid: Vec<f64> = (0..=60).map(|i| -5.0 + 0.1 * i as f64).collect();
+        let p: Vec<f64> = grid.iter().map(|&s| pp_p_value(s, 199)).collect();
+        assert!(p.windows(2).all(|w| w[0] <= w[1]));
+        assert!(pp_p_value(f64::NAN, 199).is_nan());
     }
 }

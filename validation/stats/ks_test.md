@@ -28,121 +28,55 @@ Where F_n and G_m are empirical CDFs, and F_0 is the theoretical CDF.
 
 ## Test Cases
 
-### Test 1: Two-Sample Test - Shifted Distributions
+### One-sample tests against distributions with parameters (R-pinned)
 
-Two samples with one shifted relative to the other.
+Case `stat_ks_t3` in `validation/r/cases/stats_misc_t3.R`; data in
+`validation/datasets/generated/ks_t3.csv`. No ties in any sample.
 
-**R Code:**
 ```r
-set.seed(42)
-x <- c(1.2, 1.5, 1.8, 2.1, 2.4)
-y <- c(2.0, 2.5, 3.0, 3.5, 4.0)
-
-result <- ks.test(x, y)
-print(result)
-# D = 0.8, p-value = 0.0476 (exact)
+ks.test(xn, "pnorm", 2, 2, exact = FALSE)     # also alternative = "greater" and "less"
+ks.test(xu, "punif", -1.5, 3, exact = FALSE)
+ks.test(xe, "pexp", 0.8, exact = FALSE)
 ```
 
-**Results Comparison:**
+| Reference | n | D | p (asymptotic) | D+ | p (greater) | D- | p (less) |
+|---|---|---|---|---|---|---|---|
+| `pnorm(2, 2)` | 30 | 0.20855369992548178 | 0.14705778828807003 | 0.012858791667085596 | 0.9901281385125487 | 0.20855369992548178 | 0.07355817088636814 |
+| `punif(-1.5, 3)` | 25 | 0.24555555555555558 | 0.09809220328878654 | 0.15522222222222223 | 0.29978284585485815 | 0.24555555555555558 | 0.049051890902218225 |
+| `pexp(0.8)` | 40 | 0.2258535956589462 | 0.03378814171051292 | 0.02180511454303294 | 0.9626772811058978 | 0.2258535956589462 | 0.016894152315484544 |
 
-| Metric | R | Rust (p2a) | Tolerance |
-|--------|---|------------|-----------|
-| D statistic | 0.8 | 0.8 | < 0.01 |
-| p-value | 0.0476 | ~0.05 | < 0.02 |
+Pinned with `Tol::stat(n)` and `Tol::p_value(n)`, and n exactly, by
+`stats::ks::tests::test_validate_ks_t3_one_sample`.
 
-**Rust Test:** `crates/p2a-core/src/stats/ks.rs::tests::test_validate_ks_two_sample_against_r`
+### Two-sample tests (R-pinned)
 
-### Test 2: Identical Samples (Ties)
-
-Testing the same data against itself.
-
-**R Code:**
 ```r
-x <- 1:5
-y <- 1:5
-
-result <- ks.test(x, y)
-print(result)
-# D = 0, p-value = 1 (with warning about ties)
+ks.test(x5, y5, exact = FALSE)   # 1.2, 1.5, 1.8, 2.1, 2.4 against 2, 2.5, 3, 3.5, 4
+ks.test(xa, ya, exact = FALSE)   # n = 60 and 45
 ```
 
-**Results Comparison:**
+| Samples | D | D+ | p (greater) | D- | p (less) |
+|---|---|---|---|---|---|
+| `x5`, `y5` | 0.8 | 0.8 | 0.04076220397836616 | 0 | 1 |
+| `xa`, `ya` | 0.23888888888888887 | 0.23888888888888887 | 0.05313493619748799 | 0.07222222222222223 | 0.7647135434753901 |
 
-| Metric | R | Rust (p2a) | Tolerance |
-|--------|---|------------|-----------|
-| D statistic | 0 | ~0 | < 0.01 |
-| p-value | 1 | > 0.9 | - |
+Pinned by `stats::ks::tests::test_validate_ks_t3_two_sample`. The two-sided p-values are a known
+deviation (below).
 
-**Rust Test:** `crates/p2a-core/src/stats/ks.rs::tests::test_validate_ks_identical_against_r`
+### Reference parameters
 
-### Test 3: One-Sample Test Against Normal Distribution
+`TheoreticalDistribution::validate` checks the parameters once, before any point is evaluated:
+the mean finite; sd and rate finite and above 0; min and max finite with min below max. The error
+is `InvalidSpecification` naming the parameter ("KS reference normal: sd must be finite and > 0,
+got 0"), tested by `stats::ks::tests::test_ks_rejects_invalid_parameters`. `ks.test` is more
+permissive: it evaluates a point mass at `sd = 0` and warns and returns NaN for a negative rate.
+p2a refuses these degenerate references (registry deviation STAT-26 on `ks_test_t3`).
 
-Testing approximately normal data against standard normal CDF.
-
-**R Code:**
-```r
-x <- c(-0.56, 0.12, -0.89, 0.45, 0.23, -0.11, 0.78, -0.34,
-       0.56, -0.67, 0.89, -0.23, 0.01, 0.45, -0.78, 0.34,
-       -0.45, 0.67, -0.12, 0.23)
-
-result <- ks.test(x, "pnorm")
-print(result)
-# D should be small, p-value > 0.05 (fail to reject normality)
-```
-
-**Results Comparison:**
-
-| Metric | Expected | Rust (p2a) | Tolerance |
-|--------|----------|------------|-----------|
-| D statistic | < 0.3 | < 0.3 | - |
-| p-value | > 0.05 | > 0.05 | - |
-| Reject H0 | No | No | - |
-
-**Rust Test:** `crates/p2a-core/src/stats/ks.rs::tests::test_validate_ks_one_sample_normal_against_r`
-
-### Test 4: One-Sample Test Against Uniform Distribution
-
-Testing uniformly spaced data against uniform(0,1) CDF.
-
-**R Code:**
-```r
-x <- seq(0.09, 0.91, length.out = 10)  # Uniformly spaced in (0,1)
-
-result <- ks.test(x, "punif")
-print(result)
-# Should not reject uniformity
-```
-
-**Results Comparison:**
-
-| Metric | Expected | Rust (p2a) | Tolerance |
-|--------|----------|------------|-----------|
-| Reject H0 | No | No | - |
-| p-value | > 0.05 | > 0.05 | - |
-
-**Rust Test:** `crates/p2a-core/src/stats/ks.rs::tests::test_validate_ks_uniform_against_r`
-
-### Test 5: Larger Samples (n=100)
-
-Two samples from similar normal distributions.
-
-**R Code:**
-```r
-set.seed(42)
-x <- qnorm(seq(0.01, 0.99, length.out = 100))
-y <- qnorm(seq(0.005, 0.995, length.out = 100))
-
-result <- ks.test(x, y)
-# Similar distributions should have high p-value
-```
-
-**Results Comparison:**
-
-| Metric | Expected | Rust (p2a) | Tolerance |
-|--------|----------|------------|-----------|
-| p-value | > 0.01 | > 0.01 | - |
-
-**Rust Test:** `crates/p2a-core/src/stats/ks.rs::tests::test_validate_ks_larger_sample_against_r`
+`KsDistribution` is the option table for the CLI and MCP surface (`normal`/`pnorm`/`norm`/`gaussian`,
+`uniform`/`punif`/`unif`, `exponential`/`pexp`/`exp`), and `TheoreticalDistribution::from_kind`
+applies R's defaults (mean 0, sd 1, min 0, max 1, rate 1). A parameter the kind does not take is
+an `InvalidSpecification` naming both, as `ks.test` stops with "unused argument":
+`stats::ks::tests::test_ks_from_kind_refuses_parameters_of_another_kind`.
 
 ## Two-sample test with missing values and integer columns
 
@@ -175,25 +109,27 @@ line `Missing values: ...`, and accept integer columns. A text column is `NonNum
 **Status:** R-pinned with a known deviation (registry `validation/methods/stats_onesample.json`,
 id `ks_test_two_sample`).
 
-## Numerical Precision Summary
-
-| Test Case | D Statistic Match | P-value Match |
-|-----------|-------------------|---------------|
-| Two-sample shifted | Exact | < 0.02 |
-| Identical samples | Exact (0) | Exact |
-| One-sample normal | Comparable | Comparable |
-| One-sample uniform | Comparable | Comparable |
-| Large sample | Comparable | Comparable |
-
 ## Known Differences
 
-1. **Tie Handling**: R warns about ties in the two-sample case and may use slightly different tie-breaking. Our implementation processes ties by group and computes D after all tied observations are processed.
+**STAT-27 (registry `ks_test_t3`):** p2a has no exact distribution. It reports an asymptotic p-value
+where R's default is exact, applies Stephens' (1970) factor to the two-sided two-sample p-value and
+cuts the series off at `sqrt(n) D >= 3` (p = 0, R about 3e-8). R's values are recorded in the case
+for the method that replaces this:
 
-2. **Exact vs Asymptotic P-values**: R uses exact p-values for small samples (n*m < 10000) when there are no ties. Our implementation uses asymptotic approximation with Stephens (1970) correction for all cases.
+| Case key | R | p2a |
+|---|---|---|
+| `norm_p_exact` | 0.12705346811680995 | 0.14705778828807003 (asymptotic, equal to `norm_p_asym`) |
+| `unif_p_exact` | 0.08193161051708098 | 0.09809220328878654 |
+| `exp_p_exact` | 0.028313228455144945 | 0.03378814171051292 |
+| `two5_p_exact` / `two5_p_asym` | 0.07936507936507936 / 0.08151888641220961 | 0.036146190769284631 |
+| `twol_p_exact` / `twol_p_asym` | 0.0922124055286588 / 0.10625393011376794 | 0.08997965487690876 |
 
-3. **One-sided Tests**: The interpretation of "greater" and "less" alternatives follows R's convention:
-   - "greater": Tests if CDF of x is not below CDF of y (x stochastically greater)
-   - "less": Tests if CDF of x is not above CDF of y (x stochastically smaller)
+**Direction of the one-sided tests (R's convention):** "greater" means the CDF of x lies above that
+of y, so x tends to be smaller; "less" means the CDF of x lies below that of y, so x tends to be
+larger.
+
+**Ties:** two-sample ties are grouped by exact equality, as R's `unique` does, and D is computed
+after all tied observations are processed.
 
 ## Performance Comparison
 

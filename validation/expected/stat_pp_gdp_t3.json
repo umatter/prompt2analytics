@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "stat_pp_gdp_t3",
+  "area": "timeseries/pptest",
+  "method": "PP.test on the paper's gdp_quarterly$gdp_growth (n = 280), short and long lag",
+  "reference": "stats::PP.test (cross-check tseries::pp.test, type Z(t_alpha))",
+  "call": "PP.test(gdp_growth, lshort = TRUE | FALSE)",
+  "dataset": "validation/datasets/gdp_quarterly.csv",
+  "datasets": ["validation/datasets/gdp_quarterly.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "tseries": "0.10.63"
+  },
+  "values": {
+    "gdp_short_stat": -12.018455837825698,
+    "gdp_short_lag": 5,
+    "gdp_short_p": 0.01,
+    "gdp_long_stat": -11.686391180032054,
+    "gdp_long_lag": 15,
+    "gdp_long_p": 0.01,
+    "n": 280,
+    "tseries_short_stat": -12.018455837825698
+  }
+}

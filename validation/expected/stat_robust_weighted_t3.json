@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "stat_robust_weighted_t3",
+  "area": "stats/robust",
+  "method": "mad (default and constant = 1, given centre), weighted.mean and cov.wt (unbiased, ML, cor) with unequal weights",
+  "reference": "stats::mad (constant 1.4826); stats::weighted.mean; stats::cov.wt (wt normalised; unbiased divisor 1 - sum(wt^2))",
+  "call": "mad(x1[, constant, center]); weighted.mean(x1, w); cov.wt(cbind(x1, x2), wt = w, cor = TRUE[, method = 'ML'])",
+  "dataset": "validation/datasets/generated/robust_weighted_t3.csv",
+  "datasets": ["validation/datasets/generated/robust_weighted_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "mad": 3.0227248800000002,
+    "mad_const1": 2.0388000000000002,
+    "mad_center10": 3.7128751800000006,
+    "wmean": 8.4650527168362864,
+    "covwt_center": [8.4650527168362864, 3.8714933443673631],
+    "covwt_unbiased": [9.2937390532949671, 3.86984720894979, 3.86984720894979, 5.1640857120929873],
+    "covwt_cor": [1, 0.55860119469695724, 0.55860119469695724, 1],
+    "covwt_ml": [8.8403266837110603, 3.6810495051541889, 3.6810495051541889, 4.912146172363351],
+    "covwt_wt": [0.053773285910483498, 0.064654717047575458, 0.065359016797549047, 0.038313906398563233, 0.02771419516146072, 0.060252843610240525, 0.045321688910800434, 0.041518470260943061, 0.010071486424622319, 0.063774342360108469, 0.026904250448991092, 0.051836461598056133, 0.045286473923301762, 0.053667640947987469, 0.015001584674437442, 0.06708455118498434, 0.057823009472831637, 0.011022291087086664, 0.039229496073528901, 0.014543789836954608, 0.048948832623164421, 0.026692960523999016, 0.023840546536605983, 0.040250730710990598, 0.0071134274747332469]
+  }
+}

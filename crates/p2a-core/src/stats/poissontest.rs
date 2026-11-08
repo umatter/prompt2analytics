@@ -24,8 +24,9 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/poisson.test.html>
 
 use crate::errors::{EconError, EconResult};
+use crate::traits::estimator::chi_squared_quantile;
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{Binomial, ContinuousCDF, DiscreteCDF, Poisson};
+use statrs::distribution::{Binomial, DiscreteCDF, Poisson};
 
 /// Alternative hypothesis for the Poisson test.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -37,6 +38,18 @@ pub enum PoissonAlternative {
     /// One-sided test (rate < hypothesized value)
     Less,
 }
+
+crate::option_enum!(
+    PoissonAlternative,
+    crate::options::Choices {
+        option: "alternative",
+        values: &[
+            (&["two.sided", "twosided"], PoissonAlternative::TwoSided),
+            (&["greater", "right", "gt"], PoissonAlternative::Greater),
+            (&["less", "left", "lt"], PoissonAlternative::Less),
+        ],
+    }
+);
 
 /// Result of the Poisson test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,16 +104,15 @@ impl std::fmt::Display for PoissonTestResult {
 
 /// Largest event count the one-sample test accepts: 2^52 = 4_503_599_627_370_496.
 ///
-/// statrs evaluates the Poisson CDF and the chi-squared quantiles of the exact interval with an
-/// incomplete gamma series whose index starts at the count and grows by 1.0 in `f64`. From about
-/// 2^53 on, adding 1.0 no longer changes the index and the series never finishes, a loop no
-/// deadline can interrupt. 2^52 leaves the index room to grow exactly; a test at the bound itself
-/// still takes seconds. The bound guarantees only that the call returns: the interval can be NaN
-/// from about 2e6 and the p-value drifts from about 2^40 (STAT-60 / T3-WP40). The two-sample test
-/// does not use that series: its p-value and interval use the binomial CDF, whose continued
-/// fraction statrs stops after 140 terms, and every loop of its interval search has a fixed
-/// iteration cap. Its counts only need a total that fits in `u64`; that the test returns says
-/// nothing about its accuracy at large totals.
+/// statrs evaluates the Poisson CDF with an incomplete gamma series whose index starts at the
+/// count and grows by 1.0 in `f64`. From about 2^53 on, adding 1.0 no longer changes the index
+/// and the series never finishes, a loop no deadline can interrupt. 2^52 leaves the index room to
+/// grow exactly; a test at the bound itself still takes seconds. The bound guarantees only that
+/// the call returns: the p-value drifts from about 2^40. The two-sample test does not use that
+/// series: its p-value and interval use the binomial CDF, whose continued fraction statrs stops
+/// after 140 terms, and every loop of its interval search has a fixed iteration cap. Its counts
+/// only need a total that fits in `u64`; that the test returns says nothing about its accuracy at
+/// large totals.
 pub const POISSON_MAX_ONE_SAMPLE_COUNT: u64 = 1 << 52;
 
 /// Refuse a one-sample count above [`POISSON_MAX_ONE_SAMPLE_COUNT`] before statrs sees it.
@@ -192,6 +204,10 @@ fn two_sample_estimate(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<f64> {
 ///
 /// Tests H₀: λ₁/λ₂ = r where X₁ ~ Poisson(λ₁T₁), X₂ ~ Poisson(λ₂T₂).
 ///
+/// The two-sided p-value doubles the smaller tail (R's `poisson.test` sums the outcomes no more
+/// likely than the observed one), and the interval is two-sided for every alternative (R's is
+/// one-sided for a one-sided alternative): STAT-58, STAT-59.
+///
 /// # Errors
 ///
 /// `EconError::InvalidSpecification` when:
@@ -205,8 +221,7 @@ fn two_sample_estimate(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<f64> {
 ///   that overflows on its own is not refused when the ratio is representable, and neither is an
 ///   `r * T[0]` outside `f64`: the null's p is then formed from logarithms.
 ///
-/// `EconError::Computation` when a chi-squared distribution for the one-sample interval cannot be
-/// built.
+/// `EconError::Computation` when a chi-squared quantile of the one-sample interval fails.
 ///
 /// # Example
 ///
@@ -245,8 +260,8 @@ pub fn poisson_test(
         });
     }
 
-    // Each check is written so that NaN fails it. A NaN conf_level and an infinite T or r used to
-    // reach statrs and panic there (Gamma::inverse_cdf, the incomplete gamma function).
+    // Each check is written so that NaN fails it, and none of these values reaches statrs (its
+    // gamma quantile, the incomplete gamma function).
     if let Some(&ti) = t.iter().find(|&&ti| !(ti.is_finite() && ti > 0.0)) {
         return Err(EconError::InvalidSpecification {
             message: format!("time base T must be finite and > 0, got {ti:?}"),
@@ -284,8 +299,8 @@ fn poisson_test_one_sample(
     // Expected count under H₀
     let expected = r * t;
     if !(expected.is_finite() && expected > 0.0) {
-        // statrs accepts an infinite Poisson mean and then panics in its CDF; a mean that
-        // underflows to 0 it refuses with a message that names neither r nor T.
+        // statrs does not handle an infinite Poisson mean in its CDF; a mean that underflows to
+        // 0 it refuses with a message that names neither r nor T.
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "the expected count r * T = {r:?} * {t:?} = {expected:?} must be finite and > 0"
@@ -306,12 +321,12 @@ fn poisson_test_one_sample(
         }
         PoissonAlternative::Greater => {
             // P(X >= x) = 1 - P(X < x) = 1 - P(X <= x-1)
-            if x == 0 { 1.0 } else { 1.0 - pois.cdf(x - 1) }
+            if x == 0 { 1.0 } else { pois.sf(x - 1) }
         }
         PoissonAlternative::TwoSided => {
             // Two-sided: 2 * min(P(X <= x), P(X >= x))
             let p_left = pois.cdf(x);
-            let p_right = if x == 0 { 1.0 } else { 1.0 - pois.cdf(x - 1) };
+            let p_right = if x == 0 { 1.0 } else { pois.sf(x - 1) };
             2.0 * p_left.min(p_right).min(0.5)
         }
     };
@@ -372,20 +387,12 @@ fn poisson_test_two_sample(
                 binom.cdf(x1)
             }
             PoissonAlternative::Greater => {
-                // P(X₁ >= x₁) = 1 - P(X₁ <= x₁ - 1)
-                if x1 == 0 {
-                    1.0
-                } else {
-                    1.0 - binom.cdf(x1 - 1)
-                }
+                // P(X₁ >= x₁) = P(X₁ > x₁ - 1)
+                if x1 == 0 { 1.0 } else { binom.sf(x1 - 1) }
             }
             PoissonAlternative::TwoSided => {
                 let p_left = binom.cdf(x1);
-                let p_right = if x1 == 0 {
-                    1.0
-                } else {
-                    1.0 - binom.cdf(x1 - 1)
-                };
+                let p_right = if x1 == 0 { 1.0 } else { binom.sf(x1 - 1) };
                 2.0 * p_left.min(p_right).min(0.5)
             }
         }
@@ -414,8 +421,6 @@ fn poisson_test_two_sample(
 /// `poisson_test` keeps `x` at or below [`POISSON_MAX_ONE_SAMPLE_COUNT`]; `x + 1` is still checked
 /// before any distribution is built.
 fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
-    use statrs::distribution::ChiSquared;
-
     let x_plus_1 = x
         .checked_add(1)
         .ok_or_else(|| EconError::InvalidSpecification {
@@ -424,25 +429,17 @@ fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
                 u64::MAX
             ),
         })?;
-    let chi_squared = |df: f64| {
-        ChiSquared::new(df).map_err(|e| {
-            EconError::Computation(format!(
-                "chi-squared distribution with {df} degrees of freedom: {e}"
-            ))
-        })
-    };
-
     let alpha = 1.0 - conf_level;
 
     // Lower bound: chi-squared quantile
     let lower = if x == 0 {
         0.0
     } else {
-        chi_squared(2.0 * x as f64)?.inverse_cdf(alpha / 2.0) / 2.0
+        chi_squared_quantile(alpha / 2.0, 2.0 * x as f64)? / 2.0
     };
 
     // Upper bound: chi-squared quantile
-    let upper = chi_squared(2.0 * x_plus_1 as f64)?.inverse_cdf(1.0 - alpha / 2.0) / 2.0;
+    let upper = chi_squared_quantile(1.0 - alpha / 2.0, 2.0 * x_plus_1 as f64)? / 2.0;
 
     Ok((lower, upper))
 }
@@ -589,7 +586,7 @@ fn rate_ratio_from_odds(s: f64, t1: f64, t2: f64) -> f64 {
 ///
 /// Near x[0] = x[1] from totals of about 4e7, and for any counts from about 2e14 (a zero count)
 /// or 3e14, statrs' binomial CDF is off by tens of percent or more, and the result is unreliable
-/// in every direction (STAT-60 / T3-WP40):
+/// in every direction:
 /// - bounds inside the range are tens of percent off (x = [0, 2e14]: upper bound 25% below R's;
 ///   x = [1, 3e14]: upper bound 28% above; x = [1e15, 1]: lower bound 30% above);
 /// - from about 3e14 the limit returns above fire for bounds inside the range, and the limit is
@@ -610,12 +607,8 @@ fn find_odds_bound(x1: u64, x2: u64, n: u64, alpha: f64, find_lower: bool) -> f6
         if let Ok(binom) = Binomial::new(p, n) {
             if find_lower {
                 // For lower bound: we want P(X₁ >= x₁ | H₀)
-                // = 1 - P(X₁ <= x₁ - 1) = 1 - F(x₁ - 1)
-                if x1 == 0 {
-                    1.0
-                } else {
-                    1.0 - binom.cdf(x1 - 1)
-                }
+                // = P(X₁ > x₁ - 1)
+                if x1 == 0 { 1.0 } else { binom.sf(x1 - 1) }
             } else {
                 // For upper bound: we want P(X₁ <= x₁ | H₀) = F(x₁)
                 binom.cdf(x1)
@@ -830,127 +823,6 @@ mod tests {
     // Validation Tests Against R
     // ========================================================================
 
-    #[test]
-    fn test_validate_poisson_against_r() {
-        // R code:
-        // poisson.test(137, 24.19893)
-        //
-        // Result:
-        // data:  137 time base: 24.19893
-        // number of events = 137, time base = 24.199, p-value < 2.2e-16
-        // alternative hypothesis: true event rate is not equal to 1
-        // 95 percent confidence interval:
-        //  4.739093 6.665835
-        // sample estimates:
-        // event rate
-        //   5.661765
-
-        let result =
-            poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
-
-        println!("R validation (one-sample):");
-        println!("Rate estimate: {:.6}", result.estimate);
-        println!("p-value: {:.10}", result.p_value);
-        println!(
-            "95% CI: ({:.6}, {:.6})",
-            result.conf_int.0, result.conf_int.1
-        );
-
-        // R gives: rate = 5.661765
-        assert!(
-            (result.estimate - 5.661765).abs() < 0.001,
-            "Rate estimate mismatch: got {}",
-            result.estimate
-        );
-
-        // R gives: p-value < 2.2e-16
-        assert!(
-            result.p_value < 1e-10,
-            "p-value should be very small, got {}",
-            result.p_value
-        );
-
-        // R gives: 95% CI (4.739093, 6.665835)
-        // Note: Small differences in chi-squared quantile computation lead to ~0.02 differences
-        assert!(
-            (result.conf_int.0 - 4.739093).abs() < 0.02,
-            "CI lower mismatch: got {}",
-            result.conf_int.0
-        );
-        assert!(
-            (result.conf_int.1 - 6.665835).abs() < 0.02,
-            "CI upper mismatch: got {}",
-            result.conf_int.1
-        );
-    }
-
-    #[test]
-    fn test_validate_poisson_two_sample_against_r() {
-        // R code:
-        // poisson.test(c(11, 21), c(800, 3011))
-        //
-        // Two-sample rate comparison test
-        // Under H₀: λ₁/λ₂ = 1, we condition on X₁+X₂ and use binomial distribution
-        // where p = T₁/(T₁+T₂) = 800/3811 ≈ 0.2099
-        //
-        // Our implementation follows the exact conditional method:
-        // - Rate ratio estimate = (11/800) / (21/3011) ≈ 1.971
-        // - Expected X₁ under H₀ = n × p = 32 × 0.2099 ≈ 6.72
-        // - P-value computed from Binomial(32, 0.2099)
-
-        let result = poisson_test(
-            &[11, 21],
-            &[800.0, 3011.0],
-            1.0,
-            PoissonAlternative::TwoSided,
-            0.95,
-        )
-        .unwrap();
-
-        println!("R validation (two-sample):");
-        println!("Rate ratio: {:.6}", result.estimate);
-        println!("Expected count1: {:.4}", result.parameter);
-        println!("p-value: {:.4}", result.p_value);
-        println!(
-            "95% CI: ({:.6}, {:.6})",
-            result.conf_int.0, result.conf_int.1
-        );
-
-        // Rate ratio = (11/800) / (21/3011) = 0.01375 / 0.00697 ≈ 1.9715
-        assert!(
-            (result.estimate - 1.9715).abs() < 0.01,
-            "Rate ratio mismatch: got {}",
-            result.estimate
-        );
-
-        // Expected count = 32 * (800/3811) ≈ 6.717
-        assert!(
-            (result.parameter - 6.717).abs() < 0.1,
-            "Expected count mismatch: got {}",
-            result.parameter
-        );
-
-        // Two-sample test: significant evidence that rates differ
-        // CI should not include 1.0 if p < 0.05, or include 1.0 if p > 0.05
-        assert!(
-            result.p_value > 0.05,
-            "p-value indicates non-significant result, got {}",
-            result.p_value
-        );
-
-        // CI should include 1.0 since p > 0.05
-        assert!(
-            result.conf_int.0 < 1.0 && result.conf_int.1 > 1.0,
-            "CI should include 1.0: ({:.4}, {:.4})",
-            result.conf_int.0,
-            result.conf_int.1
-        );
-
-        // R: 95 percent confidence interval 0.858426403391639 4.27726594365407
-        assert_relative(result.conf_int.0, 0.858426403391639, 1e-7, "CI lower vs R");
-        assert_relative(result.conf_int.1, 4.27726594365407, 1e-7, "CI upper vs R");
-    }
-
     fn refusal(x: &[u64], t: &[f64], r: f64, conf_level: f64) -> String {
         match poisson_test(x, t, r, PoissonAlternative::TwoSided, conf_level) {
             Err(EconError::InvalidSpecification { message }) => message,
@@ -958,8 +830,8 @@ mod tests {
         }
     }
 
-    /// FU-1: the two-sample test conditions on x[0] + x[1]. A total that does not fit in u64 used
-    /// to panic in debug builds ("attempt to add with overflow") and wrap in release builds.
+    /// FU-1: the two-sample test conditions on x[0] + x[1]. A total that does not fit in u64 is
+    /// refused.
     #[test]
     fn test_poisson_two_sample_refuses_overflowing_total() {
         for x in [
@@ -1038,9 +910,7 @@ mod tests {
         assert!(upper > 3.68 && upper < 3.69, "{upper}"); // qgamma(0.975, 1) = 3.688879
     }
 
-    /// Non-finite or out-of-range T, r and conf_level used to reach statrs and panic there
-    /// (conf_level NaN in Gamma::inverse_cdf; T or r infinite, or r * T overflowing, in the
-    /// incomplete gamma function). The wording matches T3-WP40's planned validation.
+    /// Non-finite or out-of-range T, r and conf_level are refused before statrs sees them.
     #[test]
     fn test_poisson_refuses_non_finite_parameters() {
         for level in [f64::NAN, 95.0, 1.0, 0.0] {
@@ -1264,7 +1134,7 @@ mod tests {
     /// came out 2.8e-7 to 2.6e-6 above; the rule is relative now, see
     /// test_validate_poisson_rate_ratio_interval_at_levels_near_one.) At totals of 1e11 statrs'
     /// binomial CDF is itself off: the two bounds there are 2.9e-5 and 4.7e-5 from R, so 1e-4
-    /// (STAT-60 / T3-WP40).
+    /// (STAT-60).
     #[test]
     fn test_poisson_rate_ratio_interval_beyond_old_odds_limits() {
         let upper = |x: [u64; 2], t: [f64; 2], conf_level: f64| {
@@ -1332,7 +1202,7 @@ mod tests {
         // Totals of 1e16 and 1e17 are beyond where statrs' CDF is accurate. These cases come out
         // as the limits because its tails at the limits happen to fall on the right side of
         // alpha / 2 there; exact tails would give the same, since the true bounds lie beyond the
-        // range too. So they pin that result, and a change to the tail or the range (T3-WP40)
+        // range too. So they pin that result, and a change to the tail or the range
         // has to revisit them. At 5e15 to 9e15 statrs' tails fall on the wrong side, and
         // x = [1, 5e15] and [5e15, 1] came back inverted (see
         // test_poisson_rate_ratio_interval_contains_the_estimate).
@@ -1359,7 +1229,7 @@ mod tests {
         assert_relative(lower, 7.9957326545e9, 1e-4, "x = [1e11, 1] lower");
         // At 95% the upper bound of x = [m, 1] passes 1e15 from m of about 2.5e13 (R 1.18e15,
         // 1.97e15 and 3.95e15 here). The resolved lower bounds are 0.5% to 1.9% from R's, which is
-        // how accurate statrs' binomial CDF is at these totals (STAT-60 / T3-WP40), hence 3e-2.
+        // how accurate statrs' binomial CDF is at these totals (STAT-60), hence 3e-2.
         // Two of them (3e13, 5e13) lie above R's, inside its interval.
         for (x, lower_r) in [
             ([30_000_000_000_000, 1], 5.3844077761e12),
@@ -1380,7 +1250,7 @@ mod tests {
     /// around 1 and x = [1e8, 1e8] (1.0000038, 0.9999962). Exact tails never put a bound on that
     /// side (see rate_ratio_ci), so such a bound is widened to 0 or infinity now, and the interval
     /// contains the estimate and is not inverted. It need not contain R's interval, and which
-    /// bound is widened depends on statrs' errors, which a T3-WP40 tail fix may change, so only
+    /// bound is widened depends on statrs' errors, which a change to the tails may change, so only
     /// the containment is asserted, for T = [1, 1] and T = [1, 3], plus the one bound statrs gets
     /// right in a case near x[0] = x[1] (x = [2e7, 2e7]: R's upper bound 1.000620037177023).
     #[test]
@@ -1503,5 +1373,64 @@ mod tests {
         let display = format!("{}", result);
         assert!(display.contains("Exact Poisson test"));
         assert!(display.contains("p-value"));
+    }
+
+    /// STAT-67 (poisson.test) and STAT-60: estimates, expected counts, one-sided p-values, the symmetric two-sided p and
+    /// the two-sided exact CIs (one-sample qgamma, two-sample binom.test). STAT-60's band (shapes 125..160) is covered by
+    /// big_ci (x = 137) and x150_ci.
+    #[test]
+    fn test_validate_poisson_test_t3() {
+        use super::PoissonAlternative::*;
+        use p2a_validation::{Check, Tol};
+        let (case, _ds) = crate::test_support::load_case("stat_poisson_t3");
+        let ci = |r: &PoissonTestResult| [r.conf_int.0, r.conf_int.1];
+        let big = poisson_test(&[137], &[24.19893], 1.0, TwoSided, 0.95).unwrap();
+        let x10 = poisson_test(&[10], &[5.0], 1.0, TwoSided, 0.95).unwrap();
+        let x10l = poisson_test(&[10], &[5.0], 1.0, Less, 0.95).unwrap();
+        let x10g = poisson_test(&[10], &[5.0], 1.0, Greater, 0.95).unwrap();
+        let x150 = poisson_test(&[150], &[1.0], 1.0, TwoSided, 0.95).unwrap();
+        let rr = poisson_test(&[11, 21], &[800.0, 3011.0], 1.0, TwoSided, 0.95).unwrap();
+        let rrl = poisson_test(&[11, 21], &[800.0, 3011.0], 1.0, Less, 0.95).unwrap();
+        let rrg = poisson_test(&[11, 21], &[800.0, 3011.0], 1.0, Greater, 0.95).unwrap();
+        let big6 = poisson_test(&[1_000_000], &[1.0], 1.0, TwoSided, 0.95).unwrap();
+        let sym = poisson_test(&[3, 10], &[1.0, 1.0], 1.0, TwoSided, 0.95).unwrap();
+        Check::new(&case)
+            .vector("big_ci", &ci(&big), Tol::stat(137))
+            .scalar("big_est", big.estimate, Tol::coef(137))
+            .scalar("big_expected", big.parameter, Tol::coef(137))
+            .vector("x10_two_ci", &ci(&x10), Tol::stat(10))
+            .scalar("x10_less_p", x10l.p_value, Tol::p_value(10))
+            .scalar("x10_greater_p", x10g.p_value, Tol::p_value(10))
+            .scalar("x10_expected", x10.parameter, Tol::exact())
+            .vector("x150_ci", &ci(&x150), Tol::stat(150))
+            .vector("x1e6_ci", &ci(&big6), Tol::stat(1_000_000))
+            .vector("rr_two_ci", &ci(&rr), Tol::stat(32))
+            .scalar("rr_less_p", rrl.p_value, Tol::p_value(32))
+            .scalar("rr_greater_p", rrg.p_value, Tol::p_value(32))
+            .scalar("rr_est", rr.estimate, Tol::coef(32))
+            .scalar("rr_expected", rr.parameter, Tol::coef(32))
+            .scalar("sym_p", sym.p_value, Tol::p_value(13))
+            .vector("sym_ci", &ci(&sym), Tol::stat(13))
+            .scalar("sym_est", sym.estimate, Tol::coef(13))
+            .scalar("sym_expected", sym.parameter, Tol::coef(13))
+            .finish();
+        // deviation STAT-58: big_p, x10_two_p, x2_r5_p, rr_two_p (R's minlike rule; p2a doubles the smaller tail).
+        // deviation STAT-59: x10_less_ci, x10_greater_ci, rr_less_ci, rr_greater_ci (one-sided intervals).
+        // not pinned (R's own parameter formula at r != 1, reported): rr_r2_r_parameter; p2a reports rr_r2_binomial_mean.
+    }
+
+    #[test]
+    fn test_poisson_alternative_parses_aliases_and_rejects_unknown() {
+        assert_eq!(PoissonAlternative::choices().validate(), Ok(()));
+        assert_eq!(
+            "two-sided".parse::<PoissonAlternative>().unwrap(),
+            PoissonAlternative::TwoSided
+        );
+        assert_eq!(
+            "Greater".parse::<PoissonAlternative>().unwrap(),
+            PoissonAlternative::Greater
+        );
+        assert!("bigger".parse::<PoissonAlternative>().is_err());
+        assert_eq!(PoissonAlternative::Less.to_string(), "less");
     }
 }

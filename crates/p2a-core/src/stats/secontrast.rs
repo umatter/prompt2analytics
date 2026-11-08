@@ -215,8 +215,27 @@ pub enum ContrastType {
     Poly,
 }
 
+crate::option_enum!(
+    ContrastType,
+    crate::options::Choices {
+        option: "contrast type",
+        values: &[
+            (&["treatment", "contr.treatment"], ContrastType::Treatment),
+            (&["helmert", "contr.helmert"], ContrastType::Helmert),
+            (&["sum", "contr.sum"], ContrastType::Sum),
+            (&["poly", "polynomial", "contr.poly"], ContrastType::Poly),
+        ],
+    }
+);
+
 /// Generate a standard contrast matrix for k groups.
+///
+/// k < 2 has no contrasts (R's contr.* stop with 'not enough degrees of freedom to define
+/// contrasts'); an empty set is returned.
 pub fn generate_contrasts(k: usize, contrast_type: ContrastType) -> Vec<Vec<f64>> {
+    if k < 2 {
+        return Vec::new();
+    }
     match contrast_type {
         ContrastType::Treatment => {
             // Compare each group (2..k) to group 1
@@ -476,5 +495,38 @@ mod tests {
         let result = se_contrast(&anova, &contrasts);
 
         assert!(result.is_err());
+    }
+
+    /// STAT-84: k - 1 underflowed for Sum with k = 0; every type now returns no contrasts for k < 2.
+    #[test]
+    fn test_contrasts_k0() {
+        for t in [
+            ContrastType::Treatment,
+            ContrastType::Helmert,
+            ContrastType::Sum,
+            ContrastType::Poly,
+        ] {
+            assert!(generate_contrasts(0, t).is_empty(), "{t:?}");
+            assert!(generate_contrasts(1, t).is_empty(), "{t:?}");
+        }
+        assert_eq!(
+            generate_contrasts(2, ContrastType::Sum),
+            vec![vec![0.5, -0.5]]
+        ); // unchanged for k >= 2
+    }
+
+    #[test]
+    fn test_contrast_type_parses_aliases_and_rejects_unknown() {
+        assert_eq!(ContrastType::choices().validate(), Ok(()));
+        assert_eq!(
+            "contr.helmert".parse::<ContrastType>().unwrap(),
+            ContrastType::Helmert
+        );
+        assert_eq!(
+            "Polynomial".parse::<ContrastType>().unwrap(),
+            ContrastType::Poly
+        );
+        assert_eq!("SUM".parse::<ContrastType>().unwrap(), ContrastType::Sum);
+        assert!("deviation".parse::<ContrastType>().is_err());
     }
 }

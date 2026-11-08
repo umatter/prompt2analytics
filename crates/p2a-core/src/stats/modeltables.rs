@@ -65,6 +65,17 @@ pub enum TableType {
     Effects,
 }
 
+crate::option_enum!(
+    TableType,
+    crate::options::Choices {
+        option: "table type",
+        values: &[
+            (&["means", "mean"], TableType::Means),
+            (&["effects", "effect"], TableType::Effects),
+        ],
+    }
+);
+
 /// Result of model.tables computation for one-way ANOVA.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelTablesResult {
@@ -225,7 +236,9 @@ pub fn model_tables_effects(anova: &AnovaResult) -> Result<ModelTablesResult, St
 /// * `compute_se` - Whether to compute standard errors
 ///
 /// # Returns
-/// A `TwoWayModelTablesResult` containing the requested tables
+/// A `TwoWayModelTablesResult` containing the requested tables. An empty cell, and a factor level
+/// with no observations, have a NaN mean (R: NA); their effects and interaction terms are NaN too.
+/// The layout must be rectangular: a row whose length differs from `data[0]` is an error.
 pub fn model_tables_two_way(
     data: &[Vec<Vec<f64>>],
     factor_a_names: &[String],
@@ -256,8 +269,18 @@ pub fn model_tables_two_way(
         ));
     }
 
-    // Compute cell statistics
-    let mut cell_means = vec![vec![0.0; b_levels]; a_levels];
+    for (i, row) in data.iter().enumerate() {
+        if row.len() != b_levels {
+            return Err(format!(
+                "data[{i}] has {} factor B cells, data[0] has {b_levels}; the layout must be \
+                 rectangular (one cell per factor A x factor B level, empty cells as empty vectors)",
+                row.len()
+            ));
+        }
+    }
+
+    // Compute cell statistics (a cell with no observations stays NaN, R's NA)
+    let mut cell_means = vec![vec![f64::NAN; b_levels]; a_levels];
     let mut cell_n = vec![vec![0usize; b_levels]; a_levels];
     let mut total_sum = 0.0;
     let mut total_n = 0;
@@ -298,7 +321,7 @@ pub fn model_tables_two_way(
     };
 
     // Compute marginal means for factor A
-    let mut factor_a_means = vec![0.0; a_levels];
+    let mut factor_a_means = vec![f64::NAN; a_levels];
     let mut factor_a_n = vec![0usize; a_levels];
     for i in 0..a_levels {
         let mut sum = 0.0;
@@ -316,7 +339,7 @@ pub fn model_tables_two_way(
     }
 
     // Compute marginal means for factor B
-    let mut factor_b_means = vec![0.0; b_levels];
+    let mut factor_b_means = vec![f64::NAN; b_levels];
     let mut factor_b_n = vec![0usize; b_levels];
     for j in 0..b_levels {
         let mut sum = 0.0;
@@ -694,5 +717,105 @@ mod tests {
             .scalar("aov_df_within", r.df_mse, Tol::exact())
             .finish();
         assert_eq!(r.group_names, ["a", "b", "c"]);
+    }
+
+    /// STAT-83: a shorter or longer row is refused.
+    #[test]
+    fn test_modeltables_ragged_is_error() {
+        let a = vec!["A1".to_string(), "A2".to_string()];
+        let b = vec!["B1".to_string(), "B2".to_string()];
+        let short = vec![vec![vec![1.0, 2.0], vec![3.0, 4.1]], vec![vec![5.0, 6.2]]];
+        let long = vec![
+            vec![vec![1.0, 2.0], vec![3.0, 4.1]],
+            vec![vec![5.0], vec![6.2], vec![7.4]],
+        ];
+        for data in [short, long] {
+            let e = model_tables_two_way(&data, &a, &b, TableType::Means, true).unwrap_err();
+            assert!(e.contains("data[1]") && e.contains("rectangular"), "{e}");
+        }
+    }
+
+    /// STAT-83: an empty cell is NaN (R: NA), not 0; its effects and interaction are NaN; the rest is R's.
+    #[test]
+    fn test_validate_modeltables_t3_empty_cell() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_modeltables_t3");
+        let df = ds.df();
+        let y = numeric_column(df, "y", NaPolicy::Fail).unwrap().0;
+        let fa = df.column("fa").unwrap().str().unwrap();
+        let fb = df.column("fb").unwrap().str().unwrap();
+        let (al, bl) = (["A1", "A2", "A3"], ["B1", "B2", "B3"]);
+        let mut data = vec![vec![Vec::new(); 3]; 3];
+        for (i, &yi) in y.iter().enumerate() {
+            let a = al.iter().position(|l| fa.get(i) == Some(*l)).unwrap();
+            let b = bl.iter().position(|l| fb.get(i) == Some(*l)).unwrap();
+            data[a][b].push(yi);
+        }
+        let names = |l: [&str; 3]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let m =
+            model_tables_two_way(&data, &names(al), &names(bl), TableType::Means, true).unwrap();
+        let cells: Vec<f64> = m
+            .cell_values
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let ns: Vec<f64> = m
+            .cell_n
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flatten()
+            .map(|&n| n as f64)
+            .collect();
+        let a_n: Vec<f64> = m.factor_a_n.iter().map(|&n| n as f64).collect();
+        Check::new(&case)
+            .vector("cell_means", &cells, Tol::coef(23))
+            .vector("cell_n", &ns, Tol::exact())
+            .named(
+                "a_means",
+                &m.factor_a_names,
+                &m.factor_a_values,
+                Tol::coef(23),
+            )
+            .named("a_n", &m.factor_a_names, &a_n, Tol::exact())
+            .named(
+                "b_means_raw",
+                &m.factor_b_names,
+                &m.factor_b_values,
+                Tol::coef(23),
+            )
+            .scalar("grand_mean", m.grand_mean, Tol::coef(23))
+            .scalar("resid_df", m.df_mse, Tol::exact())
+            .scalar("resid_ss", m.mse * m.df_mse, Tol::stat(23))
+            .finish();
+        assert!(cells[7].is_nan()); // A3:B2
+        let se = m.se.unwrap();
+        assert!(se.cells.unwrap()[2][1].is_nan());
+        let e =
+            model_tables_two_way(&data, &names(al), &names(bl), TableType::Effects, false).unwrap();
+        assert!(e.cell_values.unwrap()[2][1].is_nan());
+        let inter = e.interaction.unwrap();
+        assert!(inter[2][1].is_nan());
+        assert!(inter.iter().flatten().filter(|v| v.is_nan()).count() == 1);
+        // a factor level with no observations at all: NaN margin, not 0
+        let mut gap = data.clone();
+        gap[2] = vec![Vec::new(); 3];
+        let g =
+            model_tables_two_way(&gap, &names(al), &names(bl), TableType::Means, false).unwrap();
+        assert!(g.factor_a_values[2].is_nan() && g.factor_a_n[2] == 0);
+        // deviation STAT-75: b_means_model_tables, R's sequential margins, differ from p2a's raw B margins on this
+        // unbalanced layout.
+    }
+
+    #[test]
+    fn test_table_type_parses_aliases_and_rejects_unknown() {
+        assert_eq!(TableType::choices().validate(), Ok(()));
+        assert_eq!("Effects".parse::<TableType>().unwrap(), TableType::Effects);
+        assert_eq!("mean".parse::<TableType>().unwrap(), TableType::Means);
+        assert!("medians".parse::<TableType>().is_err());
     }
 }

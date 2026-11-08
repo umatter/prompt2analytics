@@ -135,7 +135,7 @@
       ],
       "quantities": ["r", "t", "df", "p", "95% CI (Fisher z)", "n pairs"],
       "tolerance": "validation/README.md, n < 100: r 1e-6, t and CI 1e-5 relative, p 1e-5 (abs 1e-12); df and counts exact",
-      "deviations": [],
+      "deviations": [{"finding": "X-3", "quantity": "correlation of a constant column", "note": "p2a refuses; cor.test returns NA with the warning 'the standard deviation is zero'"}],
       "supersedes_legacy": []
     },
     {

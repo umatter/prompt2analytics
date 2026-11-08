@@ -30,95 +30,60 @@ For two-sample tests, given X₁ ~ Poisson(λ₁T₁) and X₂ ~ Poisson(λ₂T�
 
 ## Test Cases
 
-### Test 1: One-Sample Test - High Rate
+All values are from case `stat_poisson_t3` in `validation/r/cases/stats_misc_t3.R`, pinned by
+`stats::poissontest::tests::test_validate_poisson_test_t3` (registry
+`validation/methods/stats_misc_t3.json`, id `poisson_test_t3`).
 
-**R Code:**
-```r
-poisson.test(137, 24.19893)
+### One sample
 
-# Result:
-# number of events = 137, time base = 24.199, p-value < 2.2e-16
-# alternative hypothesis: true event rate is not equal to 1
-# 95 percent confidence interval:
-#  4.739093 6.665835
-# sample estimates:
-# event rate
-#   5.661765
-```
+| Call | Quantity | R |
+|---|---|---|
+| `poisson.test(137, 24.19893)` | estimate | 5.661407343217241 |
+| | expected count | 24.19893 |
+| | 95% CI | 4.753124804848748, 6.692709334176071 |
+| `poisson.test(10, 5)` | 95% CI | 0.9590777392264869, 3.678071208403556 |
+| | p, less | 0.986304731401617 |
+| | p, greater | 0.03182805730620481 |
+| `poisson.test(150, 1)` | 95% CI | 126.95616130124485, 176.01716609707458 |
+| `poisson.test(1e6, 1)` | 95% CI | 998040.9833402939, 1001961.9119454322 |
 
-**Results Comparison:**
+The intervals take their chi-square quantiles from `chi_squared_quantile`. Statrs' `Gamma::inverse_cdf`
+gave (4.744084, 6.681476) for the first call and (126.7548828, 175.6572266) for `x = 150`; shapes from
+125 to 160 were affected (STAT-60, closed).
 
-| Metric | R Value | Rust Value | Tolerance |
-|--------|---------|------------|-----------|
-| Rate estimate | 5.661765 | 5.6614 | 0.001 |
-| p-value | < 2.2e-16 | < 1e-10 | - |
-| 95% CI lower | 4.739093 | 4.744 | 0.02 |
-| 95% CI upper | 6.665835 | 6.681 | 0.02 |
+### Two samples
 
-**Rust Test:** `crates/p2a-core/src/stats/poissontest.rs::tests::test_validate_poisson_against_r`
+| Call | Quantity | R |
+|---|---|---|
+| `poisson.test(c(11, 21), c(800, 3011))` | rate ratio | 1.9714880952380953 |
+| | expected count | 6.717397008659145 |
+| | 95% CI | 0.8584264033916392, 4.277265943654071 |
+| | p, less | 0.975931823227312 |
+| | p, greater | 0.05600865978769969 |
+| `poisson.test(c(3, 10), c(1, 1))` (symmetric null) | p | 0.09228515625000003 |
+| | 95% CI | 0.05305399048476324, 1.1651186104840492 |
 
-### Test 2: Two-Sample Rate Comparison
+### Confidence levels and alternatives
 
-**R Code:**
-```r
-poisson.test(c(11, 21), c(800, 3011))
-
-# Result:
-# count1 = 11, expected count1 = 6.7174, p-value = 0.07967
-# alternative hypothesis: true rate ratio is not equal to 1
-# 95 percent confidence interval:
-#  0.8584264 4.2772659
-# sample estimates:
-# rate ratio
-#   1.971488
-```
-
-**Results Comparison:**
-
-| Metric | R Value | Rust Value | Tolerance |
-|--------|---------|------------|-----------|
-| Rate ratio | 1.971488 | 1.9715 | 0.01 |
-| Expected count | 6.7174 | 6.717 | 0.01 |
-| p-value | 0.07967 | 0.112 | Different (see notes) |
-| 95% CI lower | 0.8584 | 0.8584 | 0.001 |
-| 95% CI upper | 4.2773 | 4.2773 | 0.001 |
-
-**Notes on Differences:**
-- Rate ratio and expected count match exactly
-- CI bounds match exactly (both implementations use same conditional method)
-- P-value differs slightly (different exact binomial calculation), but both correctly indicate marginal non-significance (p close to 0.05, CI includes 1.0)
-
-**Rust Test:** `crates/p2a-core/src/stats/poissontest.rs::tests::test_validate_poisson_two_sample_against_r`
-
-### Test 3: One-Sided Alternatives
-
-**Test:** Verify one-sided tests produce correct directional p-values.
-
-**R Code:**
-```r
-# Rate = 15/10 = 1.5, testing against H0: rate = 1.0
-poisson.test(15, 10, alternative="greater")  # p should be small
-poisson.test(15, 10, alternative="less")     # p should be large
-```
-
-**Rust Test:** `crates/p2a-core/src/stats/poissontest.rs::tests::test_poisson_alternatives`
+A `conf_level` outside (0, 1) is refused (see [hypothesis_tests.md](hypothesis_tests.md)):
+`stats::poissontest::tests::test_poisson_refuses_non_finite_parameters`. One-sided p-values have the
+expected direction: `stats::poissontest::tests::test_poisson_alternatives`.
 
 ## Numerical Precision Summary
 
 | Component | Tolerance | Notes |
 |-----------|-----------|-------|
-| Rate estimate | 0.001 | Exact calculation |
-| p-value | - | Order of magnitude agreement |
-| One-sample CI | 0.02 | Chi-squared quantile differences |
-| Two-sample CI | 0.5 | Different exact methods |
+| Estimates, expected counts | `Tol::coef(n)` | n = the total count |
+| Intervals | `Tol::stat(n)` | |
+| p-values | `Tol::p_value(n)` | |
 
 ## Known Differences
 
-1. **Expected count display**: R may compute "expected count" differently for display purposes. Core test statistic and conclusions match.
+1. **STAT-58: two-sided p-value.** R sums the outcomes no more likely than the observed one; p2a doubles the smaller tail. They agree only for a symmetric null (`sym_p`). R's values: `big_p` 2.8452272641144545e-56, `x10_two_p` 0.03856600430529028, `x2_r5_p` 0.25802369355308846, `rr_two_p` 0.07966863303332952. Not compared.
 
-2. **Two-sample CI method**: R uses Clopper-Pearson type exact intervals. Our implementation uses bisection search on conditional binomial. Both are exact methods but may give slightly different bounds.
+2. **STAT-59: one-sided intervals.** p2a reports the two-sided interval for every alternative; R reports a one-sided one. R's values are `x10_less_ci`, `x10_greater_ci`, `rr_less_ci` and `rr_greater_ci` in the case. Not compared.
 
-3. **Two-sample p-value**: Slight differences in the exact conditional test computation. Both correctly identify significant vs non-significant results.
+3. **Expected count at r != 1 (observation, no finding).** R's `parameter` for a two-sample test at `r = 2` is 7.505130460275579 (`rr_r2_r_parameter`, its own formula); p2a reports the null binomial's mean, 11.103882021253524 (`rr_r2_binomial_mean`). Not compared.
 
 ## Performance Comparison
 

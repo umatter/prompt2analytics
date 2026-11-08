@@ -28,8 +28,10 @@
 //! Where F_n and G_m are the empirical CDFs of the two samples.
 //!
 //! For one-sided alternatives:
-//! - D+ = sup_x [F_n(x) - G_m(x)] ("greater")
-//! - D- = sup_x [G_m(x) - F_n(x)] ("less")
+//! - D+ = sup_x [F_n(x) - G_m(x)]: alternative "greater", the CDF of x lies above that of y
+//!   (x tends to be smaller)
+//! - D- = sup_x [G_m(x) - F_n(x)]: alternative "less", the CDF of x lies below that of y
+//!   (x tends to be larger)
 //!
 //! ## Asymptotic Distribution
 //!
@@ -45,7 +47,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
@@ -173,33 +175,192 @@ pub enum TheoreticalDistribution {
     Exponential { rate: f64 },
 }
 
-impl TheoreticalDistribution {
-    /// Compute the CDF at point x.
+/// Kind of reference distribution, for the CLI and MCP option strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KsDistribution {
+    /// Normal distribution (`pnorm`)
+    Normal,
+    /// Uniform distribution (`punif`)
+    Uniform,
+    /// Exponential distribution (`pexp`)
+    Exponential,
+}
+
+crate::option_enum!(
+    KsDistribution,
+    crate::options::Choices {
+        option: "distribution",
+        values: &[
+            (
+                &["normal", "pnorm", "norm", "gaussian"],
+                KsDistribution::Normal
+            ),
+            (&["uniform", "punif", "unif"], KsDistribution::Uniform),
+            (&["exponential", "pexp", "exp"], KsDistribution::Exponential),
+        ],
+    }
+);
+
+/// The reference distribution, built once after its parameters were validated.
+enum ReferenceCdf {
+    Normal(statrs::distribution::Normal),
+    Uniform(statrs::distribution::Uniform),
+    Exp(statrs::distribution::Exp),
+}
+
+impl ReferenceCdf {
     fn cdf(&self, x: f64) -> f64 {
-        use statrs::distribution::{ContinuousCDF, Exp, Normal, Uniform};
+        use statrs::distribution::ContinuousCDF;
 
         match self {
-            TheoreticalDistribution::Normal => {
-                let dist = Normal::new(0.0, 1.0).unwrap();
-                dist.cdf(x)
-            }
+            ReferenceCdf::Normal(d) => d.cdf(x),
+            ReferenceCdf::Uniform(d) => d.cdf(x),
+            ReferenceCdf::Exp(d) => d.cdf(x),
+        }
+    }
+}
+
+impl TheoreticalDistribution {
+    /// Check the parameters: mean finite; sd and rate finite and above 0; a and b finite with
+    /// a below b. Stricter than `ks.test`, which evaluates a point mass at `sd = 0` and warns
+    /// and returns NaN for a negative rate. The error names the parameter.
+    pub fn validate(&self) -> EconResult<()> {
+        let refuse = |message: String| Err(EconError::InvalidSpecification { message });
+        match *self {
+            TheoreticalDistribution::Normal | TheoreticalDistribution::Uniform => Ok(()),
             TheoreticalDistribution::NormalParams { mean, sd } => {
-                let dist = Normal::new(*mean, *sd).unwrap();
-                dist.cdf(x)
-            }
-            TheoreticalDistribution::Uniform => {
-                let dist = Uniform::new(0.0, 1.0).unwrap();
-                dist.cdf(x)
+                if !mean.is_finite() {
+                    return refuse(format!(
+                        "KS reference normal: mean must be finite, got {mean}"
+                    ));
+                }
+                if !(sd.is_finite() && sd > 0.0) {
+                    return refuse(format!(
+                        "KS reference normal: sd must be finite and > 0, got {sd}"
+                    ));
+                }
+                Ok(())
             }
             TheoreticalDistribution::UniformParams { a, b } => {
-                let dist = Uniform::new(*a, *b).unwrap();
-                dist.cdf(x)
+                if !a.is_finite() {
+                    return refuse(format!(
+                        "KS reference uniform: a (min) must be finite, got {a}"
+                    ));
+                }
+                if !b.is_finite() {
+                    return refuse(format!(
+                        "KS reference uniform: b (max) must be finite, got {b}"
+                    ));
+                }
+                if a >= b {
+                    return refuse(format!(
+                        "KS reference uniform: a (min) must be less than b (max), got a = {a}, \
+                         b = {b}"
+                    ));
+                }
+                Ok(())
             }
             TheoreticalDistribution::Exponential { rate } => {
-                let dist = Exp::new(*rate).unwrap();
-                dist.cdf(x)
+                if !(rate.is_finite() && rate > 0.0) {
+                    return refuse(format!(
+                        "KS reference exponential: rate must be finite and > 0, got {rate}"
+                    ));
+                }
+                Ok(())
             }
         }
+    }
+
+    /// The reference distribution from a kind and optional parameters, with R's defaults
+    /// (mean 0, sd 1, min 0, max 1, rate 1); validated. The standard normal and U(0, 1) give
+    /// the parameter-free variants. A parameter the kind does not take is an error naming both,
+    /// as R's `ks.test` stops with "unused argument".
+    pub fn from_kind(
+        kind: KsDistribution,
+        mean: Option<f64>,
+        sd: Option<f64>,
+        min: Option<f64>,
+        max: Option<f64>,
+        rate: Option<f64>,
+    ) -> EconResult<Self> {
+        let others: &[(&str, Option<f64>)] = match kind {
+            KsDistribution::Normal => &[("min", min), ("max", max), ("rate", rate)],
+            KsDistribution::Uniform => &[("mean", mean), ("sd", sd), ("rate", rate)],
+            KsDistribution::Exponential => {
+                &[("mean", mean), ("sd", sd), ("min", min), ("max", max)]
+            }
+        };
+        if let Some((param, _)) = others.iter().find(|(_, value)| value.is_some()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("KS reference {kind}: parameter '{param}' does not apply"),
+            });
+        }
+        let dist = match kind {
+            KsDistribution::Normal => {
+                let (mean, sd) = (mean.unwrap_or(0.0), sd.unwrap_or(1.0));
+                if mean == 0.0 && sd == 1.0 {
+                    TheoreticalDistribution::Normal
+                } else {
+                    TheoreticalDistribution::NormalParams { mean, sd }
+                }
+            }
+            KsDistribution::Uniform => {
+                let (a, b) = (min.unwrap_or(0.0), max.unwrap_or(1.0));
+                if a == 0.0 && b == 1.0 {
+                    TheoreticalDistribution::Uniform
+                } else {
+                    TheoreticalDistribution::UniformParams { a, b }
+                }
+            }
+            KsDistribution::Exponential => TheoreticalDistribution::Exponential {
+                rate: rate.unwrap_or(1.0),
+            },
+        };
+        dist.validate()?;
+        Ok(dist)
+    }
+
+    /// R's name for the distribution: "pnorm", "pnorm(mean = 2, sd = 2)", "punif",
+    /// "punif(min = -1.5, max = 3)", "pexp(rate = 0.8)".
+    pub fn label(&self) -> String {
+        match self {
+            TheoreticalDistribution::Normal => "pnorm".to_string(),
+            TheoreticalDistribution::NormalParams { mean, sd } => {
+                format!("pnorm(mean = {mean}, sd = {sd})")
+            }
+            TheoreticalDistribution::Uniform => "punif".to_string(),
+            TheoreticalDistribution::UniformParams { a, b } => {
+                format!("punif(min = {a}, max = {b})")
+            }
+            TheoreticalDistribution::Exponential { rate } => format!("pexp(rate = {rate})"),
+        }
+    }
+
+    /// Validate the parameters and build the distribution.
+    fn reference_cdf(&self) -> EconResult<ReferenceCdf> {
+        use statrs::distribution as sd;
+
+        self.validate()?;
+        let unreachable = |e: &dyn std::fmt::Display| {
+            EconError::Internal(format!("KS reference distribution after validation: {e}"))
+        };
+        Ok(match *self {
+            TheoreticalDistribution::Normal => {
+                ReferenceCdf::Normal(sd::Normal::new(0.0, 1.0).map_err(|e| unreachable(&e))?)
+            }
+            TheoreticalDistribution::NormalParams { mean, sd: s } => {
+                ReferenceCdf::Normal(sd::Normal::new(mean, s).map_err(|e| unreachable(&e))?)
+            }
+            TheoreticalDistribution::Uniform => {
+                ReferenceCdf::Uniform(sd::Uniform::new(0.0, 1.0).map_err(|e| unreachable(&e))?)
+            }
+            TheoreticalDistribution::UniformParams { a, b } => {
+                ReferenceCdf::Uniform(sd::Uniform::new(a, b).map_err(|e| unreachable(&e))?)
+            }
+            TheoreticalDistribution::Exponential { rate } => {
+                ReferenceCdf::Exp(sd::Exp::new(rate).map_err(|e| unreachable(&e))?)
+            }
+        })
     }
 }
 
@@ -230,6 +391,8 @@ pub fn ks_test_one_sample(
     distribution: TheoreticalDistribution,
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
+    let cdf = distribution.reference_cdf()?;
+
     // Filter out NaN values
     let mut data: Vec<f64> = x.iter().copied().filter(|v| !v.is_nan()).collect();
     let n = data.len();
@@ -243,7 +406,7 @@ pub fn ks_test_one_sample(
     }
 
     // Sort data
-    data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    data.sort_by(f64::total_cmp);
 
     // Compute D statistic
     let mut d_plus = 0.0_f64;
@@ -252,7 +415,7 @@ pub fn ks_test_one_sample(
     for (i, &xi) in data.iter().enumerate() {
         let f_emp_upper = (i + 1) as f64 / n as f64; // F_n(x_i)
         let f_emp_lower = i as f64 / n as f64; // F_n(x_i^-)
-        let f_theo = distribution.cdf(xi);
+        let f_theo = cdf.cdf(xi);
 
         d_plus = d_plus.max(f_emp_upper - f_theo);
         d_minus = d_minus.max(f_theo - f_emp_lower);
@@ -385,28 +548,18 @@ pub fn ks_test_two_sample(
 ///
 /// Uses the efficient algorithm of tracking both CDFs simultaneously.
 /// Following R's convention:
-/// - D+ = max[F_n(x) - G_m(x)] : x stochastically greater than y
-/// - D- = max[G_m(x) - F_n(x)] : x stochastically less than y
+/// - D+ = max[F_n(x) - G_m(x)]: alternative "greater", the CDF of x lies above that of y
+///   (x tends to be smaller)
+/// - D- = max[G_m(x) - F_n(x)]: alternative "less", the CDF of x lies below that of y
+///   (x tends to be larger)
 fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
     let n = x.len() as f64;
     let m = y.len() as f64;
 
-    // Create combined sorted array with labels
-    // Include a small index to handle ties consistently
-    let mut combined: Vec<(f64, bool, usize)> =
-        x.iter().enumerate().map(|(i, &v)| (v, true, i)).collect();
-    combined.extend(y.iter().enumerate().map(|(i, &v)| (v, false, i)));
-
-    // Sort by value, then by source (x before y for ties, to match R behavior)
-    combined.sort_by(|a, b| {
-        match a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal) {
-            std::cmp::Ordering::Equal => {
-                // For ties, process all at once (doesn't matter order)
-                std::cmp::Ordering::Equal
-            }
-            other => other,
-        }
-    });
+    // Combined sorted array with labels; tied values are processed together below
+    let mut combined: Vec<(f64, bool)> = x.iter().map(|&v| (v, true)).collect();
+    combined.extend(y.iter().map(|&v| (v, false)));
+    combined.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut d_plus = 0.0_f64;
     let mut d_minus = 0.0_f64;
@@ -422,7 +575,7 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
         let mut x_count = 0usize;
         let mut y_count = 0usize;
 
-        while i < combined.len() && (combined[i].0 - current_val).abs() < 1e-15 {
+        while i < combined.len() && combined[i].0 == current_val {
             if combined[i].1 {
                 x_count += 1;
             } else {
@@ -477,12 +630,12 @@ pub fn ks_test(
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
     let df = dataset.df();
-    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
+    let (x, missing_x) = sample_column(df, x_col, "Kolmogorov-Smirnov")?;
 
     match y_col {
         Some(y_name) => {
             // Two-sample test
-            let (y, missing_y) = numeric_column(df, y_name, NaPolicy::Omit)?;
+            let (y, missing_y) = sample_column(df, y_name, "Kolmogorov-Smirnov")?;
             let mut result = ks_test_two_sample(&x, &y, alternative)?;
             result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
             Ok(result)
@@ -603,6 +756,7 @@ fn kolmogorov_cdf_complement(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     #[test]
@@ -778,141 +932,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Validation Tests Against R
-    // ========================================================================
-
-    #[test]
-    fn test_validate_ks_two_sample_against_r() {
-        // R: ks.test(c(1.2, 1.5, 1.8, 2.1, 2.4), c(2.0, 2.5, 3.0, 3.5, 4.0))
-        // Expected:
-        //   D = 0.8, p-value = 0.0476
-        let x = vec![1.2, 1.5, 1.8, 2.1, 2.4];
-        let y = vec![2.0, 2.5, 3.0, 3.5, 4.0];
-
-        let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
-
-        assert!(
-            (result.statistic - 0.8).abs() < 0.01,
-            "D mismatch: Rust={}, R=0.8",
-            result.statistic
-        );
-        // P-value can vary due to exact vs asymptotic, so we use a wider tolerance
-        assert!(
-            result.p_value < 0.1,
-            "p-value should be small: Rust={}",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_ks_identical_against_r() {
-        // R: ks.test(1:5, 1:5)
-        // R actually gives D = 0.2 due to tie handling in the two-sample case
-        // (when there are ties, the empirical CDFs can have small differences)
-        // R reports: D = 0, p-value = 1 with a warning about ties
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-
-        let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
-
-        // With proper tie handling, D should be 0 or very small
-        assert!(
-            result.statistic < 0.01,
-            "D should be 0 or very small for identical samples: {}",
-            result.statistic
-        );
-        // P-value should be high
-        assert!(
-            result.p_value > 0.5,
-            "p-value should be high for identical samples: {}",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_ks_one_sample_normal_against_r() {
-        // R: set.seed(42); ks.test(rnorm(20), "pnorm")
-        // Using fixed data that is approximately normal
-        let x = vec![
-            -0.56, 0.12, -0.89, 0.45, 0.23, -0.11, 0.78, -0.34, 0.56, -0.67, 0.89, -0.23, 0.01,
-            0.45, -0.78, 0.34, -0.45, 0.67, -0.12, 0.23,
-        ];
-
-        let result =
-            ks_test_one_sample(&x, TheoreticalDistribution::Normal, Alternative::TwoSided).unwrap();
-
-        // For approximately normal data, D should be small and p-value large
-        assert!(
-            result.statistic < 0.3,
-            "D should be small for normal-ish data: {}",
-            result.statistic
-        );
-        assert!(
-            result.p_value > 0.05,
-            "p-value should be high for normal-ish data: {}",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_ks_uniform_against_r() {
-        // R: ks.test(seq(0.05, 0.95, length.out=10), "punif")
-        // Uniformly spaced data on (0,1)
-        let x: Vec<f64> = (1..=10).map(|i| i as f64 / 11.0).collect();
-
-        let result =
-            ks_test_one_sample(&x, TheoreticalDistribution::Uniform, Alternative::TwoSided)
-                .unwrap();
-
-        // Should not reject uniformity
-        assert!(
-            result.p_value > 0.05,
-            "Uniform data should not reject uniform dist: p={}",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_ks_larger_sample_against_r() {
-        // R: ks.test(rnorm(100), rnorm(100))
-        // Two samples from same normal distribution - should not reject
-        // Using deterministic normal-like data
-        let x: Vec<f64> = (0..100)
-            .map(|i| {
-                let t = i as f64 / 99.0;
-                fast_inv_normal(t)
-            })
-            .collect();
-        let y: Vec<f64> = (0..100)
-            .map(|i| {
-                let t = (i as f64 + 0.5) / 100.5; // Slightly offset
-                fast_inv_normal(t)
-            })
-            .collect();
-
-        let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
-
-        // Same distribution, should not reject
-        assert!(
-            result.p_value > 0.01,
-            "Similar normal samples should have high p-value: {}",
-            result.p_value
-        );
-    }
-
-    /// Fast inverse normal approximation for test data generation.
-    fn fast_inv_normal(p: f64) -> f64 {
-        // Simple approximation for generating normal-like test data
-        let p = p.clamp(0.001, 0.999);
-        let a = 2.0 * p - 1.0;
-        let sign = a.signum();
-        let a = a.abs();
-        // Approximate inverse error function
-        let t = (2.0 / std::f64::consts::PI).sqrt() * (a + a.powi(3) / 3.0);
-        sign * t * 1.4
-    }
-
-    // ========================================================================
     // Missing values and integer columns (case stat_two_sample_na,
     // validation/r/cases/stats_onesample.R)
     // ========================================================================
@@ -929,7 +948,7 @@ mod tests {
             .scalar("n_yi", r.n_2.unwrap() as f64, Tol::exact())
             .finish();
         // deviation STAT-27: ks_p (R's exact p conditional on ties 0.15653867760174539;
-        // p2a's asymptotic p with Stephens' correction 0.19563779265722031) is not pinned.
+        // p2a's asymptotic p with Stephens' correction 0.19563779265722) is not pinned.
     }
 
     #[test]
@@ -970,5 +989,342 @@ mod tests {
             run_ks_test(&ds, "x", "nope", Alternative::TwoSided),
             Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
         ));
+    }
+
+    /// STAT-26: invalid reference parameters are errors naming the parameter.
+    #[test]
+    fn test_ks_rejects_invalid_parameters() {
+        use super::TheoreticalDistribution::*;
+        let x = [0.31, -1.22, 0.84, 1.93, -0.47, 0.05];
+        let bad = [
+            (NormalParams { mean: 0.0, sd: 0.0 }, "sd"),
+            (
+                NormalParams {
+                    mean: 0.0,
+                    sd: -1.0,
+                },
+                "sd",
+            ),
+            (
+                NormalParams {
+                    mean: 0.0,
+                    sd: f64::NAN,
+                },
+                "sd",
+            ),
+            (
+                NormalParams {
+                    mean: 0.0,
+                    sd: f64::INFINITY,
+                },
+                "sd",
+            ),
+            (
+                NormalParams {
+                    mean: f64::NAN,
+                    sd: 1.0,
+                },
+                "mean",
+            ),
+            (
+                NormalParams {
+                    mean: f64::INFINITY,
+                    sd: 1.0,
+                },
+                "mean",
+            ),
+            (UniformParams { a: 1.0, b: 1.0 }, "less than b"),
+            (UniformParams { a: 1.0, b: 0.0 }, "less than b"),
+            (
+                UniformParams {
+                    a: f64::NAN,
+                    b: 1.0,
+                },
+                "a (min)",
+            ),
+            (
+                UniformParams {
+                    a: 0.0,
+                    b: f64::INFINITY,
+                },
+                "b (max)",
+            ),
+            (Exponential { rate: 0.0 }, "rate"),
+            (Exponential { rate: -2.0 }, "rate"),
+            (Exponential { rate: f64::NAN }, "rate"),
+            (
+                Exponential {
+                    rate: f64::INFINITY,
+                },
+                "rate",
+            ),
+        ];
+        for (dist, name) in bad {
+            assert!(dist.validate().is_err(), "{dist:?}");
+            for alt in [
+                Alternative::TwoSided,
+                Alternative::Greater,
+                Alternative::Less,
+            ] {
+                let e = ks_test_one_sample(&x, dist, alt).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.contains(name)),
+                    "{dist:?}: {e}"
+                );
+            }
+        }
+        // the dataset wrapper reaches the same check
+        let ds = Dataset::new(polars::prelude::df! { "x" => x.to_vec() }.unwrap());
+        assert!(
+            ks_test(
+                &ds,
+                "x",
+                None,
+                Some(Exponential { rate: 0.0 }),
+                Alternative::TwoSided
+            )
+            .is_err()
+        );
+        // valid parameters still run
+        assert!(
+            ks_test_one_sample(
+                &x,
+                NormalParams { mean: 0.0, sd: 2.0 },
+                Alternative::TwoSided
+            )
+            .is_ok()
+        );
+    }
+
+    /// STAT-67: one-sample KS against R (ks.test(x, "pnorm"/"punif"/"pexp", ...)). The asymptotic p is R's
+    /// exact = FALSE value (sqrt(n) D >= 1 in every case, where R's pKS2 with tol 1e-6 is exact to ~1e-15).
+    #[test]
+    fn test_validate_ks_t3_one_sample() {
+        use super::TheoreticalDistribution::*;
+        let (case, ds) = crate::test_support::load_case("stat_ks_t3");
+        let mut c = Check::new(&case);
+        for (tag, col, dist) in [
+            ("norm", "xn", NormalParams { mean: 2.0, sd: 2.0 }),
+            ("unif", "xu", UniformParams { a: -1.5, b: 3.0 }),
+            ("exp", "xe", Exponential { rate: 0.8 }),
+        ] {
+            let two = ks_test(&ds, col, None, Some(dist), Alternative::TwoSided).unwrap();
+            let gt = ks_test(&ds, col, None, Some(dist), Alternative::Greater).unwrap();
+            let lt = ks_test(&ds, col, None, Some(dist), Alternative::Less).unwrap();
+            let n = two.n;
+            c.scalar(&format!("{tag}_d"), two.statistic, Tol::stat(n))
+                .scalar(&format!("{tag}_p_asym"), two.p_value, Tol::p_value(n))
+                .scalar(&format!("{tag}_dplus"), gt.statistic, Tol::stat(n))
+                .scalar(
+                    &format!("{tag}_p_greater_asym"),
+                    gt.p_value,
+                    Tol::p_value(n),
+                )
+                .scalar(&format!("{tag}_dminus"), lt.statistic, Tol::stat(n))
+                .scalar(&format!("{tag}_p_less_asym"), lt.p_value, Tol::p_value(n))
+                .scalar(&format!("n_{col}"), n as f64, Tol::exact());
+            // deviation STAT-27: {tag}_p_exact (R's default exact p; norm 0.12705346811680995) is not pinned.
+        }
+        c.finish();
+    }
+
+    /// STAT-67, X-13: two-sample KS against R. D, D+ and D- and the one-sided asymptotic p-values are R's;
+    /// the two-sided p-values are deviations.
+    #[test]
+    fn test_validate_ks_t3_two_sample() {
+        let (case, ds) = crate::test_support::load_case("stat_ks_t3");
+        let mut c = Check::new(&case);
+        for (tag, x, y) in [("two5", "x5", "y5"), ("twol", "xa", "ya")] {
+            let two = ks_test(&ds, x, Some(y), None, Alternative::TwoSided).unwrap();
+            let gt = ks_test(&ds, x, Some(y), None, Alternative::Greater).unwrap();
+            let lt = ks_test(&ds, x, Some(y), None, Alternative::Less).unwrap();
+            let n = two.n.min(two.n_2.unwrap());
+            c.scalar(&format!("{tag}_d"), two.statistic, Tol::stat(n))
+                .scalar(&format!("{tag}_dplus"), gt.statistic, Tol::stat(n))
+                .scalar(
+                    &format!("{tag}_p_greater_asym"),
+                    gt.p_value,
+                    Tol::p_value(n),
+                )
+                .scalar(&format!("{tag}_dminus"), lt.statistic, Tol::stat(n))
+                .scalar(&format!("{tag}_p_less_asym"), lt.p_value, Tol::p_value(n));
+            // deviation STAT-27: {tag}_p_exact (R exact; two5 0.07936507936507936) and {tag}_p_asym
+            // (R 0.08151888641220961; p2a applies Stephens' factor: 0.036146190769284631) are not pinned.
+        }
+        c.scalar(
+            "n_xa",
+            ks_test(&ds, "xa", Some("ya"), None, Alternative::TwoSided)
+                .unwrap()
+                .n as f64,
+            Tol::exact(),
+        )
+        .scalar(
+            "n_ya",
+            ks_test(&ds, "xa", Some("ya"), None, Alternative::TwoSided)
+                .unwrap()
+                .n_2
+                .unwrap() as f64,
+            Tol::exact(),
+        )
+        .finish();
+    }
+
+    #[test]
+    fn test_ks_distribution_parses_aliases_and_rejects_unknown() {
+        assert_eq!(KsDistribution::choices().validate(), Ok(()));
+        assert_eq!(
+            "pnorm".parse::<KsDistribution>().unwrap(),
+            KsDistribution::Normal
+        );
+        assert_eq!(
+            " Gaussian ".parse::<KsDistribution>().unwrap(),
+            KsDistribution::Normal
+        );
+        assert_eq!(
+            "PUNIF".parse::<KsDistribution>().unwrap(),
+            KsDistribution::Uniform
+        );
+        assert_eq!(
+            "pexp".parse::<KsDistribution>().unwrap(),
+            KsDistribution::Exponential
+        );
+        let e = "weibull".parse::<KsDistribution>().unwrap_err().to_string();
+        assert!(
+            e.contains("unknown distribution 'weibull'")
+                && e.contains("normal, uniform, exponential"),
+            "{e}"
+        );
+        assert_eq!(KsDistribution::Uniform.to_string(), "uniform");
+    }
+
+    #[test]
+    fn test_ks_from_kind_uses_r_defaults_and_labels() {
+        use super::TheoreticalDistribution as T;
+        let n = T::from_kind(KsDistribution::Normal, None, None, None, None, None).unwrap();
+        assert_eq!(n, T::Normal);
+        assert_eq!(n.label(), "pnorm");
+        let n2 = T::from_kind(
+            KsDistribution::Normal,
+            Some(2.0),
+            Some(2.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(n2, T::NormalParams { mean: 2.0, sd: 2.0 });
+        assert_eq!(n2.label(), "pnorm(mean = 2, sd = 2)");
+        assert_eq!(
+            T::from_kind(KsDistribution::Uniform, None, None, None, None, None).unwrap(),
+            T::Uniform
+        );
+        let u = T::from_kind(
+            KsDistribution::Uniform,
+            None,
+            None,
+            Some(-1.5),
+            Some(3.0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(u.label(), "punif(min = -1.5, max = 3)");
+        assert_eq!(
+            T::from_kind(KsDistribution::Exponential, None, None, None, None, None).unwrap(),
+            T::Exponential { rate: 1.0 }
+        );
+        assert_eq!(T::Exponential { rate: 0.8 }.label(), "pexp(rate = 0.8)");
+        assert!(T::from_kind(KsDistribution::Uniform, None, None, Some(1.0), None, None).is_err()); // min 1 >= default max 1
+        assert!(
+            T::from_kind(
+                KsDistribution::Exponential,
+                None,
+                None,
+                None,
+                None,
+                Some(-1.0)
+            )
+            .is_err()
+        );
+    }
+
+    /// R's ks.test stops on an argument the distribution does not take ("unused argument");
+    /// dropping it would test against a distribution other than the one asked for.
+    #[test]
+    fn test_ks_from_kind_refuses_parameters_of_another_kind() {
+        use super::TheoreticalDistribution as T;
+        use KsDistribution::{Exponential, Normal, Uniform};
+        let v = Some(1.5);
+        for (r, kind, param) in [
+            (
+                T::from_kind(Normal, None, None, v, None, None),
+                "normal",
+                "min",
+            ),
+            (
+                T::from_kind(Normal, None, None, None, v, None),
+                "normal",
+                "max",
+            ),
+            (
+                T::from_kind(Normal, None, None, None, None, v),
+                "normal",
+                "rate",
+            ),
+            (
+                T::from_kind(Uniform, v, None, None, None, None),
+                "uniform",
+                "mean",
+            ),
+            (
+                T::from_kind(Uniform, None, v, None, None, None),
+                "uniform",
+                "sd",
+            ),
+            (
+                T::from_kind(Uniform, None, None, None, None, v),
+                "uniform",
+                "rate",
+            ),
+            (
+                T::from_kind(Exponential, v, None, None, None, None),
+                "exponential",
+                "mean",
+            ),
+            (
+                T::from_kind(Exponential, None, v, None, None, None),
+                "exponential",
+                "sd",
+            ),
+            (
+                T::from_kind(Exponential, None, None, v, None, None),
+                "exponential",
+                "min",
+            ),
+            (
+                T::from_kind(Exponential, None, None, None, v, None),
+                "exponential",
+                "max",
+            ),
+        ] {
+            match r {
+                Err(EconError::InvalidSpecification { ref message }) => assert!(
+                    message.contains(kind) && message.contains(&format!("'{param}'")),
+                    "{message}"
+                ),
+                other => panic!("{kind} {param}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ks_all_missing_column_is_named() {
+        let ds = Dataset::new(
+            polars::prelude::df! { "x" => [1.2, 0.4, 2.2], "y" => [None::<f64>, None, None] }
+                .unwrap(),
+        );
+        let e = ks_test(&ds, "x", Some("y"), None, Alternative::TwoSided)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'y'") && e.contains("Kolmogorov-Smirnov"), "{e}");
     }
 }

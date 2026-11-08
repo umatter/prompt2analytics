@@ -817,6 +817,41 @@ pub fn numeric_column(
     Ok((values, cols.missing))
 }
 
+/// Read a sample with its missing values dropped; a column with none left names itself and the test.
+pub(crate) fn sample_column(
+    df: &DataFrame,
+    name: &str,
+    test: &str,
+) -> EconResult<(Vec<f64>, MissingSummary)> {
+    let mut cols = ColumnRequest::new(df)
+        .numeric(name)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &format!("{test}: column '{name}'"))
+        .extract()?;
+    let values = cols.numerics.remove(name).unwrap_or_default();
+    Ok((values, cols.missing))
+}
+
+/// Refuse a series with NaN (`NullValues`) or infinite values (`NonFiniteValues`), as R's
+/// `na.fail` refuses `NA`, naming the series.
+pub(crate) fn refuse_non_finite(x: &[f64], name: &str) -> EconResult<()> {
+    let nan = x.iter().filter(|v| v.is_nan()).count();
+    if nan > 0 {
+        return Err(EconError::NullValues {
+            column: name.to_string(),
+            count: nan,
+        });
+    }
+    let inf = x.iter().filter(|v| v.is_infinite()).count();
+    if inf > 0 {
+        return Err(EconError::NonFiniteValues {
+            column: name.to_string(),
+            count: inf,
+        });
+    }
+    Ok(())
+}
+
 /// Strict numeric check, missing (null or NaN) as `None`; for code that handles gaps itself
 /// (Friedman blocks, time-series gap checks, LTMLE censoring). Booleans are 0/1; `±Inf`
 /// is refused with `EconError::NonFiniteValues`.

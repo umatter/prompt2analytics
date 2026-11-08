@@ -108,9 +108,11 @@ The previous version quoted R values that R does not produce, and its tests chec
 
 | Sample | Quoted before | R 4.3.3 `shapiro.test` |
 |---|---|---|
-| `set.seed(42); round(rnorm(20), 4)` (1.3710, -0.5647, ...) | W 0.9341, p 0.1836 | W 0.9440295936, p 0.2853909932 |
+| the vector printed in the previous version (1.3710, -0.5647, 0.3631, ...) | W 0.9341, p 0.1836 | W 0.9440295936, p 0.2853909932 |
 | c(1.2, 2.3, 3.1, 4.5, 5.2) | W 0.9856, p 0.9609 | W 0.9696171562, p 0.8727907673 |
 | c(0.05, 0.12, ..., 12.96) (n = 15) | W ~0.75 | W 0.7648546811, p 0.00134718194 |
+
+The vector in the first row is not exactly `round(rnorm(20), 4)` after `set.seed(42)`, which gives W 0.9440265759, p 0.2853540816.
 
 Before the port, p2a's W lacked Royston's coefficient corrections and each p-value branch used
 a wrong formula or tail (STAT-1): n = 5 gave W 0.9866, p 0 against R's 0.9696, 0.8728.

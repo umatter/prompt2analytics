@@ -1,0 +1,330 @@
+# validation/r/cases/stats_misc_t3.R -- references: KS with distribution parameters,
+# PP.test internals, cancor, prop.test, poisson.test, Mahalanobis (full rank and singular),
+# two-way model tables with an empty cell, t.test at other confidence levels, acf/pacf/ccf,
+# spline's default n, spec.pgram's grid and spec.ci (STAT-26, STAT-38, STAT-54, STAT-83, STAT-67,
+# X-3, STAT-6, STAT-35, STAT-60; STAT-62, TOOL-11 and TOOL-25 core parts).
+#
+# Some keys are not pinned by the tests: they are registry deviations of open findings
+# (STAT-16, STAT-27, STAT-39, STAT-58, STAT-59, STAT-63, STAT-68), named in a
+# `// deviation <id>` comment next to the Check. Their R values are recorded here so a later fix
+# can pin them without recomputing.
+
+# One column per sample; NA padding keeps a rectangular CSV (Rust drops it with NaPolicy::Omit,
+# the KS wrappers do the same since T2-WP06).
+.pad <- function(cols) {
+  len <- max(lengths(cols))
+  df <- data.frame(id = seq_len(len))
+  for (k in names(cols)) { v <- rep(NA_real_, len); v[seq_along(cols[[k]])] <- cols[[k]]; df[[k]] <- v }
+  df
+}
+
+case("stat_ks_t3", "stats/ks", "ks.test: one-sample against pnorm/punif/pexp with parameters, two-sample; D, D+, D-, asymptotic and exact p", function(ctx) {
+  set.seed(20261022)
+  cols <- list(xn = round(rnorm(30, 3, 2), 4), xu = round(runif(25, -1, 3), 4), xe = round(rexp(40, 0.5), 4),
+               x5 = c(1.2, 1.5, 1.8, 2.1, 2.4), y5 = c(2.0, 2.5, 3.0, 3.5, 4.0))
+  set.seed(77)
+  cols$xa <- round(rnorm(60), 5); cols$ya <- round(rnorm(45, 0.4, 1.2), 5)
+  d <- ctx$gen_dataset("ks_t3", .pad(cols))
+  g <- function(k) d[[k]][!is.na(d[[k]])]
+  xn <- g("xn"); xu <- g("xu"); xe <- g("xe"); x5 <- g("x5"); y5 <- g("y5"); xa <- g("xa"); ya <- g("ya")
+  stopifnot(!anyDuplicated(xn), !anyDuplicated(xu), !anyDuplicated(xe), !anyDuplicated(c(xa, ya)), !anyDuplicated(c(x5, y5)))
+  one <- function(x, ...) {
+    a <- ks.test(x, ..., exact = FALSE); e <- ks.test(x, ...)
+    gt <- ks.test(x, ..., alternative = "greater", exact = FALSE); lt <- ks.test(x, ..., alternative = "less", exact = FALSE)
+    stopifnot(sqrt(length(x)) * a$statistic >= 1)   # R's pKS2 (tol 1e-6) is exact to ~1e-15 only for sqrt(n) D >= 1
+    list(d = unname(a$statistic), p_asym = a$p.value, p_exact = e$p.value,
+         dplus = unname(gt$statistic), p_greater_asym = gt$p.value, dminus = unname(lt$statistic), p_less_asym = lt$p.value)
+  }
+  two <- function(x, y) {
+    a <- ks.test(x, y, exact = FALSE); e <- ks.test(x, y)
+    gt <- ks.test(x, y, alternative = "greater", exact = FALSE); lt <- ks.test(x, y, alternative = "less", exact = FALSE)
+    list(d = unname(a$statistic), p_asym = a$p.value, p_exact = e$p.value,
+         dplus = unname(gt$statistic), p_greater_asym = gt$p.value, dminus = unname(lt$statistic), p_less_asym = lt$p.value)
+  }
+  v <- list()
+  add <- function(prefix, l) for (k in names(l)) v[[paste0(prefix, "_", k)]] <<- l[[k]]
+  add("norm", one(xn, "pnorm", 2, 2))
+  add("unif", one(xu, "punif", -1.5, 3))
+  add("exp", one(xe, "pexp", 0.8))
+  add("two5", two(x5, y5))
+  add("twol", two(xa, ya))
+  v$n_xn <- length(xn); v$n_xu <- length(xu); v$n_xe <- length(xe); v$n_xa <- length(xa); v$n_ya <- length(ya)
+  list(values = v, reference = "stats::ks.test (exact = FALSE: C_pKS2 tol 1e-6 and exp(-2 n D^2); exact: pkolmogorov2x / psmirnov)",
+       call = "ks.test(x, 'pnorm', 2, 2[, exact = FALSE, alternative]); ks.test(x, y[, exact = FALSE, alternative])",
+       packages = character(0))
+})
+
+case("stat_ts_acf_spline_t3", "stats/acf", "acf, pacf, ccf (lag.max defaults and 5) on an AR(1) pair; spline(method = 'natural') with the default n = 3 length(x) and n = 1", function(ctx) {
+  set.seed(1111)
+  n <- 64
+  e <- rnorm(n); x <- numeric(n); x[1] <- e[1]; for (i in 2:n) x[i] <- 0.6 * x[i - 1] + e[i]
+  yv <- c(0, x[-n]) * 0.7 + rnorm(n, 0, 0.5)                 # y_t depends on x_{t-1}: ccf(x, y) peaks at lag -1
+  kx <- c(0.3, 1.1, 1.9, 3.2, 4.0, 5.5, 6.1, 7.4, 8.0, 9.6, rep(NA, n - 10))
+  ky <- c(round(sin(kx[1:10]) + 0.1 * kx[1:10] + c(0.03, -0.02, 0.05, 0.01, -0.04, 0.02, 0.0, -0.03, 0.04, -0.01), 6), rep(NA, n - 10))
+  d <- ctx$gen_dataset("ts_acf_spline_t3", data.frame(x = round(x, 8), y = round(yv, 8), kx = kx, ky = ky))
+  x <- d$x; y <- d$y
+  a <- acf(x, plot = FALSE); pa <- pacf(x, plot = FALSE); cv <- acf(x, type = "covariance", plot = FALSE)
+  cc <- ccf(x, y, lag.max = 5, plot = FALSE)
+  kx <- d$kx[!is.na(d$kx)]; ky <- d$ky[!is.na(d$ky)]
+  s <- spline(kx, ky, method = "natural"); s1 <- spline(kx, ky, n = 1, method = "natural")
+  stopifnot(length(s$x) == 3 * length(kx))
+  list(values = list(acf = vec(a$acf), acf_lag_max = max(a$lag), acvf = vec(cv$acf), pacf = vec(pa$acf),
+                     ccf = vec(cc$acf), ccf_lags = vec(cc$lag),
+                     acf_ci_bound = qnorm(0.975) / sqrt(n),
+                     spline_x = vec(s$x), spline_y = vec(s$y), spline_n = length(s$x),
+                     spline1_x = s1$x, spline1_y = s1$y),
+       reference = "stats::acf, pacf, ccf (lag k of ccf(x, y) is cor(x[t+k], y[t])); stats::spline(method = 'natural', n = 3 * length(x))",
+       call = "acf(x); pacf(x); acf(x, type = 'covariance'); ccf(x, y, lag.max = 5); spline(kx, ky, method = 'natural'[, n = 1])",
+       packages = character(0))
+})
+
+case("stat_spectrum_t3", "timeseries/spectrum", "spec.pgram grid and peak (n = 96, spans = c(3, 3), taper 0.1) and plot.spec's spec.ci multipliers", function(ctx) {
+  set.seed(9696)
+  n <- 96
+  tt <- 1:n
+  x <- sin(2 * pi * tt / 8) + 0.5 * arima.sim(list(ar = 0.4), n)
+  d <- ctx$gen_dataset("spectrum_t3", data.frame(t = tt, x = round(as.numeric(x), 8)))
+  stopifnot(nextn(n) == n)
+  sp <- spec.pgram(d$x, spans = c(3, 3), taper = 0.1, detrend = TRUE, plot = FALSE)
+  raw <- spec.pgram(d$x, taper = 0, detrend = TRUE, plot = FALSE)
+  # plot.spec's private spec.ci, verbatim (R 4.3.3)
+  spec_ci <- function(df, coverage = 0.95) {
+    tail <- (1 - coverage)
+    upper.quantile <- 1 - tail * pchisq(df, df, lower.tail = FALSE)
+    lower.quantile <- tail * pchisq(df, df)
+    1 / (qchisq(c(upper.quantile, lower.quantile), df) / df)
+  }
+  list(values = list(freq = vec(sp$freq), peak_freq = sp$freq[which.max(sp$spec)], spec = vec(sp$spec),
+                     df = sp$df, bandwidth = sp$bandwidth, raw_spec = vec(raw$spec), raw_df = raw$df, raw_bandwidth = raw$bandwidth,
+                     ci_df = vec(c(sp$df, 2, 18, 7.5)),
+                     ci95_at_df = vec(c(spec_ci(sp$df), spec_ci(2), spec_ci(18), spec_ci(7.5))),
+                     ci90_at_df = vec(c(spec_ci(sp$df, 0.9), spec_ci(2, 0.9), spec_ci(18, 0.9), spec_ci(7.5, 0.9)))),
+       reference = "stats::spec.pgram (frequencies k / N, modified Daniell spans, taper); stats:::plot.spec's spec.ci (unequal tails proportional to P(X <= df))",
+       call = "spec.pgram(x, spans = c(3, 3), taper = 0.1, detrend = TRUE); spec_ci(df, coverage)", packages = character(0))
+})
+
+case("stat_mahalanobis_t3", "multivariate/mahalanobis", "mahalanobis: full-rank distances; singular covariances (R refuses) and the Moore-Penrose distances with the rank", function(ctx) {
+  set.seed(31)
+  n <- 30
+  f1 <- round(rnorm(n, 10, 2), 4); f2 <- round(0.5 * f1 + rnorm(n, 0, 1), 4); f3 <- round(rnorm(n, -1, 0.5), 4)
+  a <- c(1, 2, 3, 4, 5.5, rep(NA, n - 5)); b <- 2 * a
+  set.seed(32)
+  p1 <- round(c(runif(8, 1, 5), rep(NA, n - 8)), 2); p2 <- round(c(runif(8, 0, 3), rep(NA, n - 8)), 2)
+  d <- ctx$gen_dataset("mahalanobis_t3", data.frame(id = 1:n, f1 = f1, f2 = f2, f3 = f3, a = a, b = b, p1 = p1, p2 = p2, total = p1 + p2))
+  F <- as.matrix(d[, c("f1", "f2", "f3")])
+  full <- mahalanobis(F, colMeans(F), cov(F))
+  sing <- function(M) {
+    err <- tryCatch({ mahalanobis(M, colMeans(M), cov(M)); 0 }, error = function(e) 1)
+    S <- cov(M); G <- MASS::ginv(S); C <- sweep(M, 2, colMeans(M))
+    list(r_error = err, ginv_d2 = vec(rowSums((C %*% G) * C)), rank = qr(S)$rank,
+         threshold_rank = qchisq(0.975, qr(S)$rank), threshold_p = qchisq(0.975, ncol(M)))
+  }
+  A <- as.matrix(d[1:5, c("a", "b")]); P <- as.matrix(d[1:8, c("p1", "p2", "total")])
+  s2 <- sing(A); s3 <- sing(P)
+  stopifnot(s2$r_error == 1, s3$r_error == 1, s2$rank == 1, s3$rank == 2)
+  v <- list(full_d2 = vec(full), full_center = named(colMeans(F)), full_threshold = qchisq(0.975, 3))
+  for (k in names(s2)) v[[paste0("ab_", k)]] <- s2[[k]]
+  for (k in names(s3)) v[[paste0("total_", k)]] <- s3[[k]]
+  list(values = v, packages = "MASS",
+       reference = "stats::mahalanobis (solve(cov): refuses a singular covariance); MASS::ginv for the generalised distances; qr(cov)$rank; qchisq(0.975, df)",
+       call = "mahalanobis(X, colMeans(X), cov(X)); rowSums((C %*% MASS::ginv(cov(X))) * C)")
+})
+
+case("stat_modeltables_t3", "stats/modeltables", "two-way cell means with an empty cell (3 x 3, cell A3:B2 empty), cell sizes, margins", function(ctx) {
+  set.seed(83)
+  cells <- expand.grid(fb = c("B1", "B2", "B3"), fa = c("A1", "A2", "A3"), stringsAsFactors = FALSE)
+  reps <- c(3, 2, 4, 2, 3, 3, 4, 0, 2)                      # row-major over (A, B); A3:B2 empty
+  mu <- c(5, 6, 7, 6, 7.5, 8, 9, 10, 11)
+  fa <- rep(cells$fa, reps); fb <- rep(cells$fb, reps)
+  y <- round(rep(mu, reps) + rnorm(sum(reps), 0, 0.6), 3)
+  d <- ctx$gen_dataset("modeltables_t3", data.frame(y = y, fa = fa, fb = fb))
+  m <- aov(y ~ fa * fb, data = d)
+  mt <- model.tables(m, "means")
+  cm <- tapply(d$y, list(d$fa, d$fb), mean)                  # NA for the empty cell
+  cn <- table(d$fa, d$fb)
+  stopifnot(is.na(cm["A3", "B2"]), cn["A3", "B2"] == 0,
+            all(abs(mt$tables$`fa:fb`[!is.na(cm)] - cm[!is.na(cm)]) < 1e-12))
+  list(values = list(cell_means = vec(as.numeric(t(cm))), cell_n = vec(as.numeric(t(cn))),
+                     a_means = named(tapply(d$y, d$fa, mean)), a_n = named(c(table(d$fa))),
+                     a_means_model_tables = named(c(mt$tables$fa)),
+                     b_means_raw = named(tapply(d$y, d$fb, mean)), b_means_model_tables = named(c(mt$tables$fb)),
+                     grand_mean = mean(d$y), resid_df = df.residual(m), resid_ss = sum(residuals(m)^2)),
+       reference = "tapply(y, list(fa, fb), mean) (NA for an empty cell); stats::model.tables(aov(y ~ fa * fb), 'means')",
+       call = "model.tables(aov(y ~ fa * fb, d), 'means'); tapply(d$y, list(d$fa, d$fb), mean)", packages = character(0))
+})
+
+case("stat_ttest_levels_t3", "stats/ttest", "t.test at conf.level 0.90 and 0.99, all alternatives (one-sample, Welch, paired)", function(ctx) {
+  set.seed(303)
+  x <- round(rnorm(12, 5.2, 1.1), 3); y <- round(rnorm(15, 4.6, 1.6), 3)
+  d <- ctx$gen_dataset("ttest_levels_t3", .pad(list(x = x, y = y)))
+  x <- d$x[!is.na(d$x)]; y <- d$y[!is.na(d$y)]
+  v <- list()
+  # Two-sided: both bounds (key _ci). One-sided: only the finite bound (_upper for 'less', _lower for
+  # 'greater'); the other is -Inf / Inf, which a case file cannot store.
+  put <- function(prefix, tag, h) {
+    ci <- as.numeric(h$conf.int)
+    if (tag == "two") v[[paste0(prefix, "_two_ci")]] <<- vec(ci)
+    else if (tag == "less") { stopifnot(ci[1] == -Inf); v[[paste0(prefix, "_less_upper")]] <<- ci[2] }
+    else { stopifnot(ci[2] == Inf); v[[paste0(prefix, "_greater_lower")]] <<- ci[1] }
+    v[[paste0(prefix, "_", tag, "_p")]] <<- h$p.value
+  }
+  for (alt in c("two.sided", "less", "greater")) {
+    tag <- c(two.sided = "two", less = "less", greater = "greater")[[alt]]
+    put("one90", tag, t.test(x, mu = 5, alternative = alt, conf.level = 0.90))
+    put("welch99", tag, t.test(x, y, alternative = alt, conf.level = 0.99))
+    put("paired90", tag, t.test(x, y[1:12], paired = TRUE, alternative = alt, conf.level = 0.90))
+  }
+  v$one90_t <- unname(t.test(x, mu = 5)$statistic); v$welch_df <- unname(t.test(x, y)$parameter)
+  list(values = v, reference = "stats::t.test (qt(conf.level) one-sided, qt((1 + conf.level)/2) two-sided)",
+       call = "t.test(x, mu = 5, conf.level = 0.9, alternative); t.test(x, y, conf.level = 0.99, alternative); t.test(x, y[1:12], paired = TRUE, ...)",
+       packages = character(0))
+})
+
+case("stat_prop_t3", "stats/prop_test", "prop.test: one-, two- and k-sample, with and without continuity correction, all alternatives", function(ctx) {
+  d <- ctx$dataset("datasets/grunfeld.csv")   # no data needed: prop.test works on counts recorded below
+  v <- list(one_x = 15, one_n = 100, one_p = 0.1, two_x1 = 30, two_n1 = 100, two_x2 = 40, two_n2 = 100)
+  alts <- c(two.sided = "two", less = "less", greater = "greater")
+  for (cor in c(TRUE, FALSE)) for (alt in names(alts)) {
+    tag <- paste0(if (cor) "cc" else "nocc", "_", alts[[alt]])
+    a <- suppressWarnings(prop.test(15, 100, p = 0.1, alternative = alt, correct = cor))
+    v[[paste0("one_", tag, "_stat")]] <- unname(a$statistic); v[[paste0("one_", tag, "_p")]] <- a$p.value
+    v[[paste0("one_", tag, "_ci")]] <- vec(a$conf.int)
+    b <- prop.test(c(30, 40), c(100, 100), alternative = alt, correct = cor)
+    v[[paste0("two_", tag, "_stat")]] <- unname(b$statistic); v[[paste0("two_", tag, "_p")]] <- b$p.value
+    v[[paste0("two_", tag, "_ci")]] <- vec(b$conf.int)
+  }
+  v$one_est <- 15 / 100; v$two_est <- vec(c(0.3, 0.4))
+  k <- prop.test(c(30, 40, 35), c(100, 100, 100))
+  v$k_x <- vec(c(30, 40, 35)); v$k_n <- vec(c(100, 100, 100))
+  v$k_stat <- unname(k$statistic); v$k_df <- unname(k$parameter); v$k_p <- k$p.value
+  list(dataset = "validation/datasets/grunfeld.csv", values = v,
+       reference = "stats::prop.test (Yates YATES = 0.5 capped at |x - n p|; Wilson score CI for k = 1, Wald +- YATES sum(1/n) for k = 2)",
+       call = "prop.test(15, 100, p = 0.1, ...); prop.test(c(30, 40), c(100, 100), ...); prop.test(c(30, 40, 35), c(100, 100, 100))",
+       packages = character(0))
+})
+
+case("stat_pp_t3", "timeseries/pptest", "PP.test and its internals (gamma, t, sigma^2, Newey-West lambda^2, lag) for n = 200 and n = 100", function(ctx) {
+  set.seed(4040)
+  e <- rnorm(200)
+  ar <- numeric(200); ar[1] <- e[1]; for (i in 2:200) ar[i] <- 0.5 * ar[i - 1] + e[i]
+  rw <- cumsum(rnorm(200)) + 0.02 * (1:200)
+  rw100 <- cumsum(rnorm(100))
+  d <- ctx$gen_dataset("pp_t3", .pad(list(ar = round(ar, 8), rw = round(rw, 8), rw100 = round(rw100, 8))))
+  parts <- function(x, lshort) {
+    z <- embed(x, 2); yt <- z[, 1]; yt1 <- z[, 2]; n <- length(yt)
+    u <- (1L:n) - n / 2
+    res <- lm(yt ~ 1 + u + yt1)
+    cf <- coef(summary(res))
+    ee <- residuals(res)
+    ssqru <- sum(ee^2) / n
+    l <- if (lshort) trunc(4 * (n / 100)^0.25) else trunc(12 * (n / 100)^0.25)
+    ssqrtl <- ssqru + .Call(stats:::C_pp_sum, ee, l)
+    pt <- PP.test(x, lshort = lshort)
+    stopifnot(unname(pt$parameter) == l)
+    list(gamma = cf[3, 1] - 1, t = (cf[3, 1] - 1) / cf[3, 2], sigma2 = ssqru, lambda2 = ssqrtl, lag = l,
+         stat = unname(pt$statistic), p = pt$p.value)
+  }
+  v <- list()
+  add <- function(prefix, l) for (k in names(l)) v[[paste0(prefix, "_", k)]] <<- l[[k]]
+  ar <- d$ar; rw <- d$rw; rw100 <- d$rw100[!is.na(d$rw100)]
+  add("ar_short", parts(ar, TRUE)); add("ar_long", parts(ar, FALSE))
+  add("rw_short", parts(rw, TRUE)); add("rw_long", parts(rw, FALSE))
+  add("rw100_short", parts(rw100, TRUE))
+  # p2a computes the lag from length(x) instead of length(x) - 1 (STAT-6): at n = 200 both rules give
+  # 4 (short) and 14 (long); at n = 100 R gives 3 and p2a 4.
+  v$p2a_rule_lag_n100 <- trunc(4 * (100 / 100)^0.25)
+  stopifnot(v$ar_short_lag == trunc(4 * (200 / 100)^0.25), v$ar_long_lag == trunc(12 * (200 / 100)^0.25),
+            v$rw100_short_lag != v$p2a_rule_lag_n100)
+  list(values = v, reference = "stats::PP.test (internals recomputed with its own code: embed, lm, C_pp_sum)",
+       call = "PP.test(x, lshort = TRUE | FALSE)", packages = character(0))
+})
+
+case("stat_pp_gdp_t3", "timeseries/pptest", "PP.test on the paper's gdp_quarterly$gdp_growth (n = 280), short and long lag", function(ctx) {
+  g <- ctx$dataset("datasets/gdp_quarterly.csv")
+  x <- g$gdp_growth
+  stopifnot(!anyNA(x))
+  s <- PP.test(x, lshort = TRUE); l <- PP.test(x, lshort = FALSE)
+  v <- list(gdp_short_stat = unname(s$statistic), gdp_short_lag = unname(s$parameter), gdp_short_p = s$p.value,
+            gdp_long_stat = unname(l$statistic), gdp_long_lag = unname(l$parameter), gdp_long_p = l$p.value,
+            n = length(x))
+  # Cross-check, recorded, not pinned: tseries' Z(t_alpha) uses the same regression, lag rule and table. If it
+  # differs from PP.test, say so in pptest.md; the Rust tests pin PP.test.
+  v$tseries_short_stat <- unname(tseries::pp.test(x, type = "Z(t_alpha)", lshort = TRUE)$statistic)
+  list(values = v, reference = "stats::PP.test (cross-check tseries::pp.test, type Z(t_alpha))",
+       call = "PP.test(gdp_growth, lshort = TRUE | FALSE)", packages = c("tseries"))
+})
+
+case("stat_cancor_t3", "multivariate/cancor", "cancor: correlations, coefficients and centres (n = 100, p = 3, q = 2; scale invariance)", function(ctx) {
+  set.seed(42)
+  n <- 100
+  z <- rnorm(n)
+  X <- cbind(z + rnorm(n, 0, 0.5), 0.8 * z + rnorm(n, 0, 0.5), 0.5 * z + rnorm(n, 0, 0.7))
+  Y <- cbind(0.9 * z + rnorm(n, 0, 0.4), 0.7 * z + rnorm(n, 0, 0.6))
+  d <- ctx$gen_dataset("cancor_t3", data.frame(x1 = round(X[, 1], 8), x2 = round(X[, 2], 8), x3 = round(X[, 3], 8),
+                                                  y1 = round(Y[, 1], 8), y2 = round(Y[, 2], 8)))
+  Xd <- as.matrix(d[, c("x1", "x2", "x3")]); Yd <- as.matrix(d[, c("y1", "y2")])
+  cc <- cancor(Xd, Yd)
+  cc10 <- cancor(Xd * 10, Yd * 0.01)
+  stopifnot(max(abs(cc$cor - cc10$cor)) < 1e-12)
+  # Coefficients are identified up to the sign of each canonical pair; normalise so that the first
+  # x coefficient of every pair is positive (the Rust test applies the same rule).
+  s <- sign(cc$xcoef[1, seq_along(cc$cor)])
+  xc <- sweep(cc$xcoef[, seq_along(cc$cor), drop = FALSE], 2, s, "*")
+  yc <- sweep(cc$ycoef[, seq_along(cc$cor), drop = FALSE], 2, s, "*")
+  list(values = list(cor = vec(cc$cor), xcoef = vec(as.numeric(xc)), ycoef = vec(as.numeric(yc)),
+                     xcenter = named(cc$xcenter), ycenter = named(cc$ycenter), n_canonical = length(cc$cor)),
+       reference = "stats::cancor (QR of the centred data, SVD of Qx'Qy)",
+       call = "cancor(as.matrix(d[, c('x1','x2','x3')]), as.matrix(d[, c('y1','y2')]))", packages = character(0))
+})
+
+case("stat_poisson_t3", "stats/poisson_test", "poisson.test: one-sample (exact CI, minlike two-sided p) and two-sample (binom.test); all alternatives", function(ctx) {
+  d <- ctx$dataset("datasets/grunfeld.csv")   # no data needed
+  v <- list()
+  p <- poisson.test(137, 24.19893)
+  v$big_p <- p$p.value; v$big_ci <- vec(p$conf.int); v$big_est <- unname(p$estimate); v$big_expected <- 1 * 24.19893
+  v$x1e6_ci <- vec(poisson.test(1e6, 1)$conf.int)   # large-count interval (STAT-60)
+  for (alt in c("two.sided", "less", "greater")) {
+    a <- poisson.test(10, 5, alternative = alt); tag <- c(two.sided = "two", less = "less", greater = "greater")[[alt]]
+    v[[paste0("x10_", tag, "_p")]] <- a$p.value
+    ci <- as.numeric(a$conf.int); ci[!is.finite(ci)] <- NA   # Inf upper bound of 'greater' cannot be stored
+    v[[paste0("x10_", tag, "_ci")]] <- vec(ci)
+  }
+  v$x10_expected <- 5
+  v$x150_ci <- vec(poisson.test(150, 1)$conf.int)              # gamma shape 150: inside statrs' 125..160 band (STAT-60)
+  v$x2_r5_p <- poisson.test(2, 1, r = 5)$p.value
+  for (alt in c("two.sided", "less", "greater")) {
+    a <- poisson.test(c(11, 21), c(800, 3011), alternative = alt); tag <- c(two.sided = "two", less = "less", greater = "greater")[[alt]]
+    v[[paste0("rr_", tag, "_p")]] <- a$p.value
+    ci <- as.numeric(a$conf.int); ci[!is.finite(ci)] <- NA
+    v[[paste0("rr_", tag, "_ci")]] <- vec(ci)
+  }
+  rr <- poisson.test(c(11, 21), c(800, 3011))
+  v$rr_est <- unname(rr$estimate); v$rr_expected <- unname(rr$parameter)
+  sy <- poisson.test(c(3, 10), c(1, 1))
+  v$sym_p <- sy$p.value; v$sym_ci <- vec(sy$conf.int); v$sym_est <- unname(sy$estimate); v$sym_expected <- unname(sy$parameter)
+  r2 <- poisson.test(c(11, 21), c(800, 3011), r = 2)
+  v$rr_r2_p <- r2$p.value
+  v$rr_r2_r_parameter <- unname(r2$parameter)                   # R: sum(x) r T1 / (T1 + r T2)
+  v$rr_r2_binomial_mean <- 32 * 2 * 800 / (2 * 800 + 3011)      # the binomial mean binom.test uses (p2a's parameter)
+  list(dataset = "validation/datasets/grunfeld.csv", values = v,
+       reference = "stats::poisson.test (one-sample: qgamma CI, minlike two-sided p; two-sample: binom.test)",
+       call = "poisson.test(137, 24.19893); poisson.test(10, 5, alternative); poisson.test(c(11, 21), c(800, 3011), ...)",
+       packages = character(0))
+})
+
+case("stat_robust_weighted_t3", "stats/robust", "mad (default and constant = 1, given centre), weighted.mean and cov.wt (unbiased, ML, cor) with unequal weights", function(ctx) {
+  set.seed(6767)
+  n <- 25
+  x1 <- round(rnorm(n, 10, 3), 4); x2 <- round(0.4 * x1 + rnorm(n, 0, 1.5), 4); w <- round(runif(n, 0.2, 2), 3)
+  d <- ctx$gen_dataset("robust_weighted_t3", data.frame(x1 = x1, x2 = x2, w = w))
+  X <- as.matrix(d[, c("x1", "x2")])
+  cu <- cov.wt(X, wt = d$w, cor = TRUE)
+  cm <- cov.wt(X, wt = d$w, method = "ML")
+  list(values = list(mad = mad(d$x1), mad_const1 = mad(d$x1, constant = 1), mad_center10 = mad(d$x1, center = 10),
+                     wmean = weighted.mean(d$x1, d$w),
+                     covwt_center = vec(cu$center), covwt_unbiased = vec(as.numeric(cu$cov)), covwt_cor = vec(as.numeric(cu$cor)),
+                     covwt_ml = vec(as.numeric(cm$cov)), covwt_wt = vec(cu$wt)),
+       reference = "stats::mad (constant 1.4826); stats::weighted.mean; stats::cov.wt (wt normalised; unbiased divisor 1 - sum(wt^2))",
+       call = "mad(x1[, constant, center]); weighted.mean(x1, w); cov.wt(cbind(x1, x2), wt = w, cor = TRUE[, method = 'ML'])",
+       packages = character(0))
+})

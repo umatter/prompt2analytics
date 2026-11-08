@@ -366,6 +366,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
+| Phillips-Perron unit root test (PP.test) | [pptest.md](timeseries/pptest.md) | R-pinned, known deviations (STAT-6) |
+| Spectrum (spec.pgram, spec.ar) | [spectrum.md](timeseries/spectrum.md) | R-pinned, known deviations (STAT-39, STAT-68) |
 
 ### Forecasting
 | Method | File | Status |
@@ -411,15 +413,19 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Cochran-Mantel-Haenszel Test | [mantelhaen_test.md](stats/mantelhaen_test.md) | R-pinned |
 | Shapiro-Wilk normality test | [shapiro_wilk.md](stats/shapiro_wilk.md) | R-pinned |
 | t-tests (one-sample, Welch, pooled, paired) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
-| Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-27) |
+| Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-26, STAT-27) |
+| Exact Poisson test (poisson.test) | [poisson_test.md](stats/poisson_test.md) | R-pinned, known deviations (STAT-58, STAT-59) |
+| Test of proportions (prop.test) | [prop_test.md](stats/prop_test.md) | R-pinned, known deviations (STAT-59, STAT-63) |
+| Spline and linear interpolation: default number of points (spline, approx) | [spline.md](stats/spline.md) | R-pinned, known deviations (STAT-40, STAT-69) |
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned, known deviations (STAT-29) |
 | Ansari-Bradley test of scale | [ansari.md](stats/ansari.md) | R-pinned, known deviations (STAT-12, STAT-13, STAT-14, STAT-79) |
 | Exact binomial test | [binom.md](stats/binom.md) | R-pinned, known deviations (STAT-15) |
 | Bartlett, Fligner-Killeen and F tests of variances | [bartlett.md](stats/bartlett.md) | R-pinned |
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
-| Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned |
-| Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned |
+| Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
+| Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned, known deviations (TOOL-10) |
+| Canonical correlation (cancor) | [cancor.md](multivariate/cancor.md) | R-pinned, known deviations (STAT-16) |
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
 | Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-69, STAT-87) |

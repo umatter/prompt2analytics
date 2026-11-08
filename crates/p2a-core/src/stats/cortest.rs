@@ -5,12 +5,15 @@
 //! Spearman's rho.
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, refuse_non_finite};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::Alternative;
+use crate::traits::estimator::{
+    normal_p_value_two_sided, normal_quantile, t_test_p_value, validate_level, z_critical,
+};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, Normal, StudentsT};
+use std::borrow::Cow;
 
 /// Method for computing correlation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -22,6 +25,48 @@ pub enum CorrelationMethod {
     Kendall,
     /// Spearman's rho rank correlation
     Spearman,
+}
+
+crate::option_enum!(
+    CorrelationMethod,
+    crate::options::Choices {
+        option: "method",
+        values: &[
+            (&["pearson"], CorrelationMethod::Pearson),
+            (&["kendall"], CorrelationMethod::Kendall),
+            (&["spearman"], CorrelationMethod::Spearman),
+        ],
+    }
+);
+
+/// Below this a sum of squares has lost digits to subnormal numbers.
+const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+
+/// Refuse a constant column, whose correlation is undefined. `what` names it in the message.
+fn refuse_constant(values: &[f64], what: &str) -> EconResult<()> {
+    match values.first() {
+        Some(&first) if values.iter().all(|&v| v == first) => {
+            Err(EconError::InvalidSpecification {
+                message: format!(
+                    "{what} is constant (all {} values are {first}); the correlation is undefined \
+                     (R's cor.test returns NA: 'the standard deviation is zero')",
+                    values.len()
+                ),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// One-sided p-value from a two-sided one, for a statistic symmetric under the null.
+fn one_sided(p2: f64, statistic: f64, alternative: Alternative) -> f64 {
+    match alternative {
+        Alternative::TwoSided => p2,
+        Alternative::Greater if statistic > 0.0 => p2 / 2.0,
+        Alternative::Greater => 1.0 - p2 / 2.0,
+        Alternative::Less if statistic < 0.0 => p2 / 2.0,
+        Alternative::Less => 1.0 - p2 / 2.0,
+    }
 }
 
 /// Result of a correlation test.
@@ -77,7 +122,8 @@ pub struct CorTestResult {
 /// # Returns
 ///
 /// A `CorTestResult` containing the correlation coefficient, test statistic,
-/// p-value, and confidence interval (for Pearson).
+/// p-value, and confidence interval (for Pearson). `conf_level` must lie in (0, 1). A constant `x`
+/// or `y` is refused (R's `cor.test` returns NA), as are infinite values.
 ///
 /// # Example
 ///
@@ -106,15 +152,21 @@ pub fn cor_test(
         });
     }
 
-    // Remove pairs with NaN
-    let pairs: Vec<(f64, f64)> = x
-        .iter()
-        .zip(y.iter())
-        .filter(|(a, b)| !a.is_nan() && !b.is_nan())
-        .map(|(a, b)| (*a, *b))
-        .collect();
+    // Remove pairs with NaN; the input is used as it is when it has none
+    let has_nan = x.iter().chain(y).any(|v| v.is_nan());
+    let (x_clean, y_clean): (Cow<[f64]>, Cow<[f64]>) = if has_nan {
+        let (xs, ys): (Vec<f64>, Vec<f64>) = x
+            .iter()
+            .zip(y)
+            .filter(|(a, b)| !a.is_nan() && !b.is_nan())
+            .map(|(a, b)| (*a, *b))
+            .unzip();
+        (Cow::Owned(xs), Cow::Owned(ys))
+    } else {
+        (Cow::Borrowed(x), Cow::Borrowed(y))
+    };
 
-    let n = pairs.len();
+    let n = x_clean.len();
     if n < 3 {
         return Err(EconError::InsufficientData {
             required: 3,
@@ -123,14 +175,13 @@ pub fn cor_test(
         });
     }
 
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "conf_level must be between 0 and 1".to_string(),
-        });
-    }
+    validate_level(conf_level, "conf_level")?;
 
-    let x_clean: Vec<f64> = pairs.iter().map(|(a, _)| *a).collect();
-    let y_clean: Vec<f64> = pairs.iter().map(|(_, b)| *b).collect();
+    // Missing values are gone; an infinite value would make r NaN.
+    refuse_non_finite(&x_clean, "x")?;
+    refuse_non_finite(&y_clean, "y")?;
+    refuse_constant(&x_clean, "x")?;
+    refuse_constant(&y_clean, "y")?;
 
     match method {
         CorrelationMethod::Pearson => pearson_test(&x_clean, &y_clean, alternative, conf_level),
@@ -148,6 +199,14 @@ fn pearson_test(
 ) -> EconResult<CorTestResult> {
     let n = x.len();
     let r = pearson_correlation(x, y);
+    // The columns are not constant here (`cor_test` refuses that), so only their range is left.
+    if r.is_nan() {
+        return Err(EconError::InvalidSpecification {
+            message: "the squared deviations of x or y do not fit a double (overflow or \
+                      underflow); rescale the column"
+                .to_string(),
+        });
+    }
 
     // Test statistic: t = r * sqrt((n-2) / (1-r²))
     let df = (n - 2) as f64;
@@ -183,15 +242,7 @@ fn pearson_test(
             }
         }
     } else {
-        let t_dist = StudentsT::new(0.0, 1.0, df).map_err(|e| {
-            EconError::Computation(format!("Failed to create t distribution: {}", e))
-        })?;
-
-        match alternative {
-            Alternative::TwoSided => 2.0 * (1.0 - t_dist.cdf(t_stat.abs())),
-            Alternative::Less => t_dist.cdf(t_stat),
-            Alternative::Greater => 1.0 - t_dist.cdf(t_stat),
-        }
+        one_sided(t_test_p_value(t_stat, df), t_stat, alternative)
     };
 
     // Confidence interval using Fisher's z-transformation
@@ -200,21 +251,17 @@ fn pearson_test(
         let z = 0.5 * ((1.0 + r) / (1.0 - r)).ln();
         let se_z = 1.0 / ((n - 3) as f64).sqrt();
 
-        let normal = Normal::new(0.0, 1.0)
-            .map_err(|e| EconError::Computation(format!("Failed to create normal: {}", e)))?;
-
-        let alpha = 1.0 - conf_level;
         let (z_low, z_high) = match alternative {
             Alternative::TwoSided => {
-                let z_crit = normal.inverse_cdf(1.0 - alpha / 2.0);
+                let z_crit = z_critical(conf_level)?;
                 (z - z_crit * se_z, z + z_crit * se_z)
             }
             Alternative::Less => {
-                let z_crit = normal.inverse_cdf(1.0 - alpha);
+                let z_crit = normal_quantile(conf_level)?;
                 (-1.0, z + z_crit * se_z)
             }
             Alternative::Greater => {
-                let z_crit = normal.inverse_cdf(1.0 - alpha);
+                let z_crit = normal_quantile(conf_level)?;
                 (z - z_crit * se_z, 1.0)
             }
         };
@@ -280,14 +327,7 @@ fn spearman_test(
     let p_value = if t_stat.is_infinite() {
         0.0
     } else {
-        let t_dist = StudentsT::new(0.0, 1.0, df)
-            .map_err(|e| EconError::Computation(format!("t distribution error: {}", e)))?;
-
-        match alternative {
-            Alternative::TwoSided => 2.0 * (1.0 - t_dist.cdf(t_stat.abs())),
-            Alternative::Less => t_dist.cdf(t_stat),
-            Alternative::Greater => 1.0 - t_dist.cdf(t_stat),
-        }
+        one_sided(t_test_p_value(t_stat, df), t_stat, alternative)
     };
 
     // Note: R uses S statistic, but we use t for simplicity
@@ -348,14 +388,7 @@ fn kendall_test(
         0.0
     };
 
-    let normal = Normal::new(0.0, 1.0)
-        .map_err(|e| EconError::Computation(format!("Normal distribution error: {}", e)))?;
-
-    let p_value = match alternative {
-        Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z_stat.abs())),
-        Alternative::Less => normal.cdf(z_stat),
-        Alternative::Greater => 1.0 - normal.cdf(z_stat),
-    };
+    let p_value = one_sided(normal_p_value_two_sided(z_stat), z_stat, alternative);
 
     Ok(CorTestResult {
         estimate: tau,
@@ -490,7 +523,8 @@ fn kendall_var_s_no_ties(n: usize) -> f64 {
     (n * n.saturating_sub(1) * (2 * n + 5)) as f64 / 18.0
 }
 
-/// Compute Pearson correlation coefficient.
+/// Pearson correlation coefficient. NaN for a constant column and for squares a double cannot hold
+/// accurately (infinite, or lost to underflow).
 fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
     let n = x.len() as f64;
     let x_mean: f64 = x.iter().sum::<f64>() / n;
@@ -508,26 +542,29 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
         sum_y2 += dy * dy;
     }
 
-    if sum_x2 == 0.0 || sum_y2 == 0.0 {
+    let accurate = |sum: f64| (MIN_ACCURATE_SQUARES..=f64::MAX).contains(&sum);
+    if !accurate(sum_x2) || !accurate(sum_y2) || !sum_xy.is_finite() {
         return f64::NAN;
     }
 
-    sum_xy / (sum_x2 * sum_y2).sqrt()
+    // The product of the sums can overflow where each sum fits; rounding can leave |r| just above 1.
+    (sum_xy / (sum_x2.sqrt() * sum_y2.sqrt())).clamp(-1.0, 1.0)
 }
 
 /// Assign ranks to data, handling ties with average ranks.
 fn rank_data(data: &[f64]) -> Vec<f64> {
     let n = data.len();
     let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Tied values share a rank, so the order among them does not matter
+    indexed.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
     let mut ranks = vec![0.0; n];
     let mut i = 0;
 
     while i < n {
         let mut j = i;
-        // Find all elements with the same value (ties)
-        while j < n && (indexed[j].1 - indexed[i].1).abs() < 1e-15 {
+        // Find all elements with the same value (ties are exact equality, as in R's rank)
+        while j < n && indexed[j].1 == indexed[i].1 {
             j += 1;
         }
         // Assign average rank to all tied elements
@@ -549,33 +586,8 @@ pub fn run_cor_test(
     alternative: &str,
     conf_level: f64,
 ) -> EconResult<CorTestResult> {
-    let method = match method.to_lowercase().as_str() {
-        "pearson" => CorrelationMethod::Pearson,
-        "spearman" => CorrelationMethod::Spearman,
-        "kendall" => CorrelationMethod::Kendall,
-        _ => {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Unknown method: {}. Use 'pearson', 'spearman', or 'kendall'",
-                    method
-                ),
-            });
-        }
-    };
-
-    let alternative = match alternative.to_lowercase().as_str() {
-        "two.sided" | "two_sided" | "twosided" => Alternative::TwoSided,
-        "less" => Alternative::Less,
-        "greater" => Alternative::Greater,
-        _ => {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Unknown alternative: {}. Use 'two.sided', 'less', or 'greater'",
-                    alternative
-                ),
-            });
-        }
-    };
+    let method = method.parse::<CorrelationMethod>()?;
+    let alternative = alternative.parse::<Alternative>()?;
 
     cor_test(x, y, method, alternative, conf_level)
 }
@@ -599,6 +611,8 @@ pub fn run_cor_test_dataset(
         .numerics(&[x_col, y_col])
         .na(NaPolicy::Omit)
         .extract()?;
+    refuse_constant(cols.numeric(x_col), &format!("column '{x_col}'"))?;
+    refuse_constant(cols.numeric(y_col), &format!("column '{y_col}'"))?;
     let mut result = run_cor_test(
         cols.numeric(x_col),
         cols.numeric(y_col),
@@ -667,14 +681,8 @@ mod tests {
             0.0
         };
 
-        let normal = Normal::new(0.0, 1.0)
-            .map_err(|e| EconError::Computation(format!("Normal distribution error: {}", e)))?;
-
-        let p_value = match alternative {
-            Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z_stat.abs())),
-            Alternative::Less => normal.cdf(z_stat),
-            Alternative::Greater => 1.0 - normal.cdf(z_stat),
-        };
+        // the same tail helper as the code under test: this reference checks S, tau and z
+        let p_value = one_sided(normal_p_value_two_sided(z_stat), z_stat, alternative);
 
         Ok(CorTestResult {
             estimate: tau,
@@ -1099,8 +1107,70 @@ mod tests {
         );
     }
 
+    /// r does not depend on the scale; the product of the two sums leaves the range before either sum does.
     #[test]
-    fn test_validate_correlation_names() {
+    fn test_pearson_is_scale_free() {
+        let x = [1.0, -2.3, 1.7, 3.1, -2.2, 1.4, 2.8];
+        let y = [0.4, 2.3, -1.7, 1.1, 2.2, -1.4, 0.8];
+        let run = |x: &[f64], y: &[f64]| {
+            cor_test(
+                x,
+                y,
+                CorrelationMethod::Pearson,
+                Alternative::TwoSided,
+                0.95,
+            )
+            .unwrap()
+        };
+        let base = run(&x, &y);
+        for scale in [1e80, 1e100, 1e-100] {
+            let scaled = run(&x.map(|v| v * scale), &y.map(|v| v * scale));
+            assert!((scaled.estimate - base.estimate).abs() < 1e-12);
+            assert!((scaled.p_value - base.p_value).abs() < 1e-10);
+        }
+        // Perfectly correlated data stay perfectly correlated, with r inside [-1, 1] and a defined CI.
+        let big = x.map(|v| v * 1e100);
+        let perfect = run(&big, &big);
+        assert!((perfect.estimate - 1.0).abs() < 1e-12 && perfect.estimate <= 1.0);
+        assert!(perfect.p_value < 1e-10);
+        assert!(perfect.conf_low.unwrap() > 0.99);
+    }
+
+    /// Squares that overflow or underflow are refused, not an r of 0 or NaN in an `Ok`.
+    #[test]
+    fn test_pearson_refuses_squares_out_of_range() {
+        let x = [1.0, -2.3, 1.7, 3.1, -2.2, 1.4, 2.8];
+        let y = [0.4, 2.3, -1.7, 1.1, 2.2, -1.4, 0.8];
+        for scale in [1e200, 1e-200] {
+            for (a, b) in [(x.map(|v| v * scale), y), (x, y.map(|v| v * scale))] {
+                let err = cor_test(
+                    &a,
+                    &b,
+                    CorrelationMethod::Pearson,
+                    Alternative::TwoSided,
+                    0.95,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(err, EconError::InvalidSpecification { ref message } if message.contains("rescale")),
+                    "{err}"
+                );
+            }
+            // Ranks do not see the scale.
+            let big = x.map(|v| v * scale);
+            let spearman = cor_test(
+                &big,
+                &y,
+                CorrelationMethod::Spearman,
+                Alternative::TwoSided,
+                0.95,
+            );
+            assert!(spearman.unwrap().estimate.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_cor_test_names() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -1139,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_run_cor_test_wrapper() {
+    fn test_run_cor_test_wrapper() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -1224,5 +1294,108 @@ mod tests {
             run_cor_test_dataset(&ds, "x", "y", "pearsn", "two.sided", 0.95),
             Err(EconError::InvalidSpecification { .. })
         ));
+    }
+
+    /// X-3: a constant column is refused by every method; r would be undefined, as R's cor.test finds.
+    #[test]
+    fn test_cor_test_constant_column() {
+        let x = [1.0, 2.0, 3.5, 4.0, 5.2, 6.1];
+        let c = [3.0; 6];
+        for m in [
+            CorrelationMethod::Pearson,
+            CorrelationMethod::Spearman,
+            CorrelationMethod::Kendall,
+        ] {
+            for alt in [
+                Alternative::TwoSided,
+                Alternative::Less,
+                Alternative::Greater,
+            ] {
+                let e = cor_test(&x, &c, m, alt, 0.95).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.starts_with("y is constant")),
+                    "{m:?}: {e}"
+                );
+                let e = cor_test(&c, &x, m, alt, 0.95).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.starts_with("x is constant")),
+                    "{m:?}: {e}"
+                );
+            }
+        }
+        // constant after the NaN pair is dropped
+        let y = [3.0, 3.0, f64::NAN, 3.0, 3.0, 3.0];
+        assert!(
+            cor_test(
+                &x,
+                &y,
+                CorrelationMethod::Pearson,
+                Alternative::TwoSided,
+                0.95
+            )
+            .is_err()
+        );
+        // ±Inf is refused (r would be NaN)
+        let xi = [1.0, 2.0, f64::INFINITY, 4.0, 5.0];
+        let yi = [1.1, 2.3, 2.9, 4.2, 5.1];
+        assert!(
+            matches!(cor_test(&xi, &yi, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95),
+            Err(EconError::NonFiniteValues { ref column, count: 1 }) if column == "x")
+        );
+        // the dataset wrapper names the column
+        let ds = crate::data::Dataset::new(
+            polars::prelude::df! { "a" => x.to_vec(), "k" => c.to_vec() }.unwrap(),
+        );
+        let e = run_cor_test_dataset(&ds, "a", "k", "pearson", "two.sided", 0.95).unwrap_err();
+        assert!(e.to_string().contains("'k' is constant"), "{e}");
+    }
+
+    #[test]
+    fn test_cor_test_rejects_invalid_level() {
+        let x = [1.0, 2.0, 3.5, 4.0, 5.2, 6.1];
+        let y = [1.3, 2.1, 2.9, 4.4, 5.0, 6.6];
+        for level in [f64::NAN, 95.0, 0.0, 1.0] {
+            let e = cor_test(
+                &x,
+                &y,
+                CorrelationMethod::Pearson,
+                Alternative::TwoSided,
+                level,
+            )
+            .unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains("conf_level must be strictly between 0 and 1"),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_correlation_method_parses_aliases_and_rejects_unknown() {
+        assert_eq!(CorrelationMethod::choices().validate(), Ok(()));
+        assert_eq!(
+            "Spearman".parse::<CorrelationMethod>().unwrap(),
+            CorrelationMethod::Spearman
+        );
+        let e = run_cor_test(
+            &[1.0, 2.0, 3.0, 4.5],
+            &[1.2, 1.9, 3.3, 4.1],
+            "pearsons",
+            "two.sided",
+            0.95,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("unknown method 'pearsons'"), "{e}");
+        assert!(
+            run_cor_test(
+                &[1.0, 2.0, 3.0, 4.5],
+                &[1.2, 1.9, 3.3, 4.1],
+                "kendall",
+                "Two-Sided",
+                0.95
+            )
+            .is_ok()
+        );
     }
 }

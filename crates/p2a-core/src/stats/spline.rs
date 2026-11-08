@@ -24,9 +24,26 @@ pub enum SplineMethod {
     Fmm,
     /// Periodic spline for cyclical data.
     Periodic,
-    /// Monotone Hermite spline (Fritsch-Carlson method).
+    /// Monotone Hermite spline (Fritsch-Carlson method). The spelling "hyman" maps here, as in the
+    /// MCP handler, though R's "hyman" filter is another method (STAT-40).
     MonotoneFC,
 }
+
+crate::option_enum!(
+    SplineMethod,
+    crate::options::Choices {
+        option: "spline method",
+        values: &[
+            (&["natural"], SplineMethod::Natural),
+            (&["fmm"], SplineMethod::Fmm),
+            (&["periodic"], SplineMethod::Periodic),
+            (
+                &["monoH.FC", "monotonefc", "monotone", "hyman"],
+                SplineMethod::MonotoneFC
+            ),
+        ],
+    }
+);
 
 /// Method for linear/constant interpolation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -38,6 +55,17 @@ pub enum ApproxMethod {
     Constant,
 }
 
+crate::option_enum!(
+    ApproxMethod,
+    crate::options::Choices {
+        option: "approx method",
+        values: &[
+            (&["linear"], ApproxMethod::Linear),
+            (&["constant", "step"], ApproxMethod::Constant),
+        ],
+    }
+);
+
 /// Rule for handling values outside the interpolation range.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum ApproxRule {
@@ -47,6 +75,17 @@ pub enum ApproxRule {
     /// Return the nearest endpoint value.
     Nearest,
 }
+
+crate::option_enum!(
+    ApproxRule,
+    crate::options::Choices {
+        option: "approx rule",
+        values: &[
+            (&["na", "1"], ApproxRule::Na),
+            (&["nearest", "boundary", "const", "2"], ApproxRule::Nearest),
+        ],
+    }
+);
 
 /// Result of spline interpolation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,8 +161,8 @@ pub fn spline(
         SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
     };
 
-    // Determine output x values
-    let x_out = output_points(&xs, xout, n)?;
+    // Determine output x values (R's default n = 3 * length(x))
+    let x_out = output_points(&xs, xout, n, 3 * xs.len())?;
 
     // Evaluate spline at output points
     let mut y_out: Vec<f64> = resource::try_with_capacity(x_out.len(), "interpolation points")?;
@@ -175,8 +214,8 @@ pub fn approx(
 ) -> EconResult<ApproxResult> {
     let (xs, ys) = prepare_approx_knots(x, y)?;
 
-    // Determine output x values
-    let x_out = output_points(&xs, xout, n)?;
+    // Determine output x values (R's default n = 50)
+    let x_out = output_points(&xs, xout, n, 50)?;
 
     // Interpolate at output points
     let mut y_out: Vec<f64> = resource::try_with_capacity(x_out.len(), "interpolation points")?;
@@ -313,9 +352,15 @@ fn prepare_approx_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)
     Ok((xs, ys))
 }
 
-/// The output points: a copy of `xout`, or `n` (default 50) equally spaced points over the
-/// knots' range. The buffer is allocated fallibly.
-fn output_points(xs: &[f64], xout: Option<&[f64]>, n: Option<usize>) -> EconResult<Vec<f64>> {
+/// The output points: a copy of `xout`, or `n` (or `default_n`) equally spaced points over the
+/// knots' range. `n = 0` is no point and `n = 1` the lower end, as `seq.int(.., length.out = n)`.
+/// The buffer is allocated fallibly.
+fn output_points(
+    xs: &[f64],
+    xout: Option<&[f64]>,
+    n: Option<usize>,
+    default_n: usize,
+) -> EconResult<Vec<f64>> {
     match xout {
         Some(xo) => {
             let mut out = resource::try_with_capacity(xo.len(), "interpolation points")?;
@@ -323,11 +368,17 @@ fn output_points(xs: &[f64], xout: Option<&[f64]>, n: Option<usize>) -> EconResu
             Ok(out)
         }
         None => {
-            let n_pts = n.unwrap_or(50);
+            let n_pts = n.unwrap_or(default_n);
             let x_min = xs[0];
             let x_max = xs[xs.len() - 1];
             let mut out = resource::try_with_capacity(n_pts, "interpolation points")?;
-            out.extend((0..n_pts).map(|i| x_min + (x_max - x_min) * i as f64 / (n_pts - 1) as f64));
+            if n_pts == 1 {
+                out.push(x_min);
+            } else {
+                out.extend(
+                    (0..n_pts).map(|i| x_min + (x_max - x_min) * i as f64 / (n_pts - 1) as f64),
+                );
+            }
             Ok(out)
         }
     }
@@ -1089,17 +1140,9 @@ mod tests {
         assert!((f(5.0) - 6.0).abs() < 1e-10); // Extrapolation
     }
 
-    /// Validation test against R's spline() function
+    /// The natural spline passes through its knots and returns the points asked for.
     #[test]
-    fn test_validate_spline_against_r() {
-        // R code:
-        // x <- c(0, 1, 2, 3, 4, 5)
-        // y <- c(0, 0.8, 0.9, 0.1, -0.8, -1.0)
-        // result <- spline(x, y, n=11, method="natural")
-        // result$y
-        // Expected: 0.0000000  0.5657895  0.8605263  0.8842105  0.6368421  0.1184211
-        //          -0.5631579 -0.8252632 -0.7663158 -0.3863158  0.3142105
-
+    fn test_spline_passes_through_knots() {
         let x = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![0.0, 0.8, 0.9, 0.1, -0.8, -1.0];
 
@@ -1157,5 +1200,73 @@ mod tests {
                 result.y[i]
             );
         }
+    }
+
+    /// TOOL-25: R's spline() evaluates n = 3 * length(x) points by default (p2a used 50); pinned to spline(method = "natural").
+    #[test]
+    fn test_validate_spline_t3_default_n() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_ts_acf_spline_t3");
+        let kx = numeric_column(ds.df(), "kx", NaPolicy::Omit).unwrap().0;
+        let ky = numeric_column(ds.df(), "ky", NaPolicy::Omit).unwrap().0;
+        let s = spline(&kx, &ky, None, None, SplineMethod::Natural).unwrap();
+        Check::new(&case)
+            .scalar("spline_n", s.n as f64, Tol::exact())
+            .vector("spline_x", &s.x, Tol::coef(30))
+            .vector("spline_y", &s.y, Tol::coef(30))
+            .finish();
+        // deviation STAT-69 / STAT-40: FMM, periodic and monotone splines are not pinned (Tier 4).
+    }
+
+    /// n = 1 divided 0 by 0; R's seq.int(xmin, xmax, length.out = 1) is xmin.
+    #[test]
+    fn test_validate_spline_t3_n_one() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_ts_acf_spline_t3");
+        let kx = numeric_column(ds.df(), "kx", NaPolicy::Omit).unwrap().0;
+        let ky = numeric_column(ds.df(), "ky", NaPolicy::Omit).unwrap().0;
+        let s = spline(&kx, &ky, None, Some(1), SplineMethod::Natural).unwrap();
+        Check::new(&case)
+            .scalar("spline1_x", s.x[0], Tol::coef(10))
+            .scalar("spline1_y", s.y[0], Tol::coef(10))
+            .finish();
+        assert_eq!(s.n, 1);
+        assert!(
+            spline(&kx, &ky, None, Some(0), SplineMethod::Natural)
+                .unwrap()
+                .x
+                .is_empty()
+        );
+        let a = approx(
+            &kx,
+            &ky,
+            None,
+            Some(1),
+            ApproxMethod::Linear,
+            ApproxRule::Na,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(a.x, vec![kx.iter().copied().fold(f64::INFINITY, f64::min)]);
+    }
+
+    #[test]
+    fn test_spline_method_parses_aliases_and_rejects_unknown() {
+        assert_eq!(SplineMethod::choices().validate(), Ok(()));
+        assert_eq!(ApproxMethod::choices().validate(), Ok(()));
+        assert_eq!(ApproxRule::choices().validate(), Ok(()));
+        assert_eq!("FMM".parse::<SplineMethod>().unwrap(), SplineMethod::Fmm);
+        assert_eq!(
+            "monoH.FC".parse::<SplineMethod>().unwrap(),
+            SplineMethod::MonotoneFC
+        );
+        assert_eq!(
+            "step".parse::<ApproxMethod>().unwrap(),
+            ApproxMethod::Constant
+        );
+        assert_eq!("2".parse::<ApproxRule>().unwrap(), ApproxRule::Nearest);
+        assert!("akima".parse::<SplineMethod>().is_err());
     }
 }

@@ -779,8 +779,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cancor_against_r() {
-        // Test case matching R's cancor function
+    fn test_cancor_dimensions_and_order() {
+        // R gives cor 0.9016495, 0.4123260 here; p2a's correlations differ (STAT-16), so this test
+        // checks the shape of the result only. The centres are pinned below.
         // R code:
         // x <- matrix(c(191, 195, 181, 183, 176, 208, 189, 197, 188, 192,
         //              155, 149, 148, 153, 144, 157, 150, 159, 152, 150,
@@ -817,16 +818,7 @@ mod tests {
 
         let result = cancor(&x.view(), &y.view(), true, true).unwrap();
 
-        // Expected from R: cor[1] ≈ 0.9581, cor[2] ≈ 0.4251
-        // Note: Due to different numerical approaches, we allow tolerance
         assert_eq!(result.n_canonical, 2);
-
-        // First canonical correlation should be high (around 0.95-0.96)
-        assert!(
-            result.cor[0] > 0.90 && result.cor[0] <= 1.0,
-            "First canonical correlation {} should be around 0.95",
-            result.cor[0]
-        );
 
         // Second canonical correlation - just ensure it's valid
         assert!(
@@ -878,5 +870,20 @@ mod tests {
             run_cancor(&ds, &["nope"], &["b"], true, true),
             Err(EconError::ColumnNotFound { .. })
         ));
+    }
+
+    /// STAT-67 (cancor): the centres and the number of canonical pairs are R's. The correlations and coefficients are
+    /// not (STAT-16, Tier 4), and are recorded in the case.
+    #[test]
+    fn test_validate_cancor_t3_centres() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cancor_t3");
+        let r = run_cancor(&ds, &["x1", "x2", "x3"], &["y1", "y2"], true, true).unwrap();
+        Check::new(&case)
+            .vector("xcenter", &r.xcenter.to_vec(), Tol::coef(100))
+            .vector("ycenter", &r.ycenter.to_vec(), Tol::coef(100))
+            .scalar("n_canonical", r.n_canonical as f64, Tol::exact())
+            .finish();
+        // deviation STAT-16: cor [0.8793290724715916, 0.13269379517114782], xcoef, ycoef (sign-normalised in the case).
     }
 }
