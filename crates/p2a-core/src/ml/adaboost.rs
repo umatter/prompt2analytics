@@ -547,6 +547,9 @@ pub struct AdaBoostResult {
     /// Internal: the weak learners for prediction
     #[serde(skip)]
     pub(crate) learners: Vec<WeakTree>,
+    /// Internal: the number of training columns, which prediction requires
+    #[serde(skip)]
+    pub(crate) n_features: usize,
 }
 
 impl ResultNotes for AdaBoostResult {
@@ -734,6 +737,7 @@ fn adaboost_m1(
         classes: Some(labels.to_vec()),
         warnings,
         learners,
+        n_features: x.ncols(),
     })
 }
 
@@ -867,6 +871,7 @@ fn adaboost_samme(
         classes: Some(labels),
         warnings,
         learners,
+        n_features: x.ncols(),
     })
 }
 
@@ -987,6 +992,7 @@ fn adaboost_r2(
         classes: None,
         warnings: Vec::new(),
         learners,
+        n_features: x.ncols(),
     })
 }
 
@@ -1121,6 +1127,15 @@ pub fn adaboost_predict(result: &AdaBoostResult, x: ArrayView2<f64>) -> EconResu
         return Err(EconError::Computation(
             "Model has no fitted estimators".to_string(),
         ));
+    }
+    if x.ncols() != result.n_features {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "AdaBoost was trained on {} columns; the prediction matrix has {}",
+                result.n_features,
+                x.ncols()
+            ),
+        });
     }
 
     match result.config.boost_type {
@@ -1673,6 +1688,28 @@ mod tests {
         assert_eq!(predictions.len(), 2);
         assert!(predictions[0] < 0.0); // Should be negative (class -1)
         assert!(predictions[1] > 0.0); // Should be positive (class +1)
+    }
+
+    #[test]
+    fn test_adaboost_predict_refuses_wrong_column_count() {
+        let x_train = array![[1.0, 0.0], [2.0, 0.0], [8.0, 1.0], [9.0, 1.0],];
+        let y_train = array![-1.0, -1.0, 1.0, 1.0];
+        for boost_type in [AdaBoostType::M1, AdaBoostType::Samme, AdaBoostType::R2] {
+            let config = AdaBoostConfig {
+                n_estimators: 5,
+                boost_type,
+                ..Default::default()
+            };
+            let result = adaboost(x_train.view(), y_train.view(), &config).unwrap();
+            for x_test in [array![[1.5]], array![[1.5, 0.0, 2.0]]] {
+                let err = adaboost_predict(&result, x_test.view()).unwrap_err();
+                assert!(
+                    matches!(err, EconError::InvalidSpecification { ref message } if message.contains("2 columns")),
+                    "{boost_type:?}: {err}"
+                );
+            }
+            assert!(adaboost_predict(&result, array![[1.5, 0.0]].view()).is_ok());
+        }
     }
 
     #[test]
