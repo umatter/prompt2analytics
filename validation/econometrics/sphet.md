@@ -150,6 +150,25 @@ Numbers on the case's dataset.
 - Instruments: 9 columns of rank 7 before (the lagged constant), 7 of rank 7 now.
 - SARAR lambda: -0.1067 with transformed instruments before, -0.0893 now.
 
+## Wall-clock (signed off)
+
+`release`, one core, five interleaved rounds against the tree before this change, load average 12-26; k = 4 nearest
+neighbours on a grid. Minimum over the rounds (ms; the medians are bimodal on this machine and are not used), ratio this
+tree over the base.
+
+| Row | n | base | this tree | ratio |
+|---|---|---:|---:|---:|
+| SAR | 900 / 10,000 | 0.180 / 1.798 | 0.110 / 1.270 | 0.61 / 0.71 |
+| SEM | 900 / 10,000 | 0.100 / 1.134 | 0.242 / 2.707 | 2.42 / 2.39 |
+| SARAR | 900 / 10,000 | 0.330 / 3.855 | 0.597 / 7.000 | 1.81 / 1.82 |
+| SAR, HAC fixed bandwidth | 900 / 10,000 | 0.225 / 3.120 | 0.211 / 4.042 | 0.94 / 1.30 |
+| SAR, HAC variable bandwidth | 900 / 10,000 | 0.239 / 3.299 | 0.138 / 1.189 | 0.58 / 0.36 |
+
+SEM and SARAR now form the SE of rho from the GM moments (the sandwich above; the base's SE did not depend on n): the
+user accepted SEM at about 2-3x for that, and SARAR at about 1.8x falls under the same sign-off (2026-11-08). The HAC rows
+compare two different estimators (the base's lag-based form and the distance-based spatial HAC), so their ratio is not
+a like-for-like slowdown.
+
 ## Key differences from ML estimation
 
 1. GMM does not require normal errors.

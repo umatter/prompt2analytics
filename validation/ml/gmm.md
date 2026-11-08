@@ -77,6 +77,25 @@ tight values:
 - The start (k-means, not `hc`) and the stopping rule above. Iteration counts are not pinned.
 - Singular covariance: ridge and warning where mclust reports `NA`.
 
+## Wall-clock (signed off 2026-11-08)
+
+`release`, one core, against the tree before this change (11db3f8e; its k-means start differs from fe13b889's only in
+`ml/clustering.rs`). Ratio is this tree over the base.
+
+| Row | n | iterations (base / this tree) | base (ms) | this tree (ms) | ratio | per iteration |
+|---|---|---|---:|---:|---:|---:|
+| `gaussian_mixture` default, `mixture_3d` | 100 | 25 / 308 | 4.762 | 11.773 | 2.47 | 0.57 |
+| default, blob data | 100 | equal | 0.475 | 0.178 | 0.38 | 0.56 |
+| default, blob data | 1,000 | equal | 4.481 | 1.481 | 0.33 | 0.50 |
+| default, blob data | 10,000 | equal | 50.548 | 15.091 | 0.30 | 0.45 |
+
+The `mixture_3d` row is a median of five runs on a loaded machine; the blob rows are medians of five from an earlier
+round of the same change (load average 31-69).
+Each iteration is cheaper (0.57x), but on `mixture_3d` the old absolute stop `|dl| < 1e-4` ended after 25 iterations
+at a worse fit, while the relative stop runs to convergence (308 iterations). A fit that converges slowly can now use up
+to the default 1000 iterations where the old limit was 100, about 5.7x the old cost by the per-iteration ratio. Signed
+off by the user as a correctness-driven slowdown.
+
 ## Tests
 
 R-pinned: `test_validate_gmm_mclust_vvv`, `test_validate_gmm_mclust_eee`, `test_validate_gmm_mclust_vvi_vii`,
