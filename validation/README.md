@@ -104,7 +104,8 @@ looks like a validation failure but is not one.
   survival, mlogit, urca, glmnet, cluster, dbscan, dfidx, dynamicTreeCut, EValue, lpSolve,
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
-  flexmix, apcluster, e1071, changepoint.
+  flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
+  randomForest, purrr.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -115,7 +116,8 @@ looks like a validation failure but is not one.
                      "sensemakr", "vars", "WeightIt", "quadprog", "medflex", "ltmle",
                      "fect", "gsynth", "tmle", "gmm", "bacondecomp", "did", "DRDID",
                      "CBPS", "etwfe", "marginaleffects", "mclust", "mixtools", "flexmix",
-                     "apcluster", "e1071", "changepoint"))
+                     "apcluster", "e1071", "changepoint", "spatialreg",
+                     "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
