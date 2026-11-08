@@ -101,7 +101,9 @@ Case `data_munging_na_if`, on `munging_fill.csv`. Decisive value:
 
 `value_counts_with(.., normalize)`: counts, or proportions with every row in the denominator (the
 missing values are a group of their own), as `dplyr::count(d, g, sort = TRUE)` and `n / sum(n)`. Tied
-counts order by value, ascending, missing last.
+counts follow the order in which their values first appear in the column (deviation DATA-65:
+`dplyr::count(sort = TRUE)` orders them by value; sorting every group by value cost 1.2-3x the count
+itself on columns where most values are distinct). The order is the same on every call.
 
 Case `data_munging_value_counts`, on `munging_counts.csv`. Decisive values: `vc_n = [4, 3, 2, 1]`,
 `vc_proportion = [0.4, 0.3, 0.2, 0.1]`. Tests: `test_validate_value_counts`,
@@ -196,10 +198,9 @@ the same values as `id%08d`; fill frames 10% missing.
 Every other size of these rows is in the same range; fill mean at 1,000 and 100,000 rows is within
 1.01x. The previews now run the operation (above) and are accepted by the maintainer (2026-11-08) as
 measured earlier (2.3-5x and about +1.4 µs); the n = 100 match row and the fill preview's +2.0 µs here
-are above those figures. The high-cardinality `value_counts` rows have not been signed off: the tie
-order by value (`dplyr::count(sort = TRUE)`) sorts every group by value before the stable sort by
-count, a string sort for text, where the base took polars' count order. Mean fill is unchanged (within
-1.1x).
+are above those figures. The high-cardinality `value_counts` rows above were measured with ties ordered
+by value; ties now follow first appearance (see "Value counts"), and these rows will be re-measured.
+Mean fill is unchanged (within 1.1x).
 
 ## Not covered here (Tier 4)
 

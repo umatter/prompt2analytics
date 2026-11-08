@@ -35,7 +35,6 @@
 use super::error::{MungeError, MungeResult};
 use crate::data::Dataset;
 use polars::prelude::*;
-use polars_ops::series::SeriesMethods;
 
 /// Aggregation function to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,8 +224,10 @@ pub fn value_counts(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
 /// a group of their own and count in the denominator) instead of "count" when `normalize`, as
 /// `dplyr::count(d, x, sort = TRUE) |> mutate(proportion = n / sum(n))`.
 ///
-/// Rows run from the largest count down; tied counts by value, ascending, missing last (categories
-/// by label), as `dplyr::count(sort = TRUE)`, so the order does not change between calls.
+/// Rows run from the largest count down; tied counts in the order their values first appear in the
+/// column, so the order does not change between calls. `dplyr::count(sort = TRUE)` orders tied counts
+/// by value instead: sorting every group by value costs more than the count itself on columns where
+/// most values are distinct, so tie order is a recorded deviation from dplyr.
 pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> MungeResult<Dataset> {
     // Validate column exists
     if dataset.df().column(column).is_err() {
@@ -236,49 +237,32 @@ pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> Mu
 
     let aggregation = |e: PolarsError| MungeError::AggregationError(e.to_string());
     let source = dataset.df().column(column).map_err(aggregation)?;
-    let counts = source
-        .as_materialized_series()
-        .value_counts(false, true, value_column.into(), normalize)
-        .map_err(aggregation)?;
+    let source = source.as_materialized_series();
 
-    // polars leaves its groups in hash order: by count, and tied counts by value. The groups' values
-    // are unique, so the sort by value has one result without keeping the order of equal elements;
-    // the sort by count has to keep it.
-    let sort_options = |descending: bool, maintain_order: bool| SortOptions {
-        descending,
+    // Sorted group tuples come in order of first appearance; the stable sort by count keeps that
+    // order among tied counts. Missing values are a group of their own.
+    let groups = source.group_tuples(true, true).map_err(aggregation)?;
+    // SAFETY: the groups were computed from `source` itself, so every index is in bounds.
+    let values: Column = unsafe { source.agg_first(&groups) }.into();
+    let counts = groups.group_count();
+    let order = counts.arg_sort(SortOptions {
+        descending: true,
         nulls_last: true,
-        maintain_order,
+        maintain_order: true,
         multithreaded: true,
         ..Default::default()
-    };
-    let values = counts.column(column).map_err(aggregation)?;
-    let tallies = counts
-        .column(value_column)
-        .map_err(aggregation)?
-        .as_materialized_series();
-    let order = if tallies.n_unique().map_err(aggregation)? == tallies.len() {
-        tallies.arg_sort(sort_options(true, false))
+    });
+    let counts = counts.take(&order).map_err(aggregation)?;
+    let tallies = if normalize {
+        let rows = source.len() as f64;
+        let shares: Float64Chunked =
+            counts.apply_nonnull_values_generic(DataType::Float64, |n| n as f64 / rows);
+        shares.with_name(value_column.into()).into_column()
     } else {
-        let key = match values.dtype() {
-            DataType::Categorical(..) | DataType::Enum(..) => {
-                values.cast(&DataType::String).map_err(aggregation)?
-            }
-            _ => values.clone(),
-        };
-        let by_value = key
-            .as_materialized_series()
-            .arg_sort(sort_options(false, false));
-        let by_count = tallies
-            .take(&by_value)
-            .map_err(aggregation)?
-            .arg_sort(sort_options(true, true));
-        by_value.take(&by_count).map_err(aggregation)?
+        counts.with_name(value_column.into()).into_column()
     };
-    let sorted = DataFrame::new(vec![
-        values.take(&order).map_err(aggregation)?,
-        tallies.take(&order).map_err(aggregation)?.into_column(),
-    ])
-    .map_err(aggregation)?;
+    let sorted = DataFrame::new(vec![values.take(&order).map_err(aggregation)?, tallies])
+        .map_err(aggregation)?;
 
     Ok(Dataset::new(sorted))
 }
@@ -625,8 +609,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0.5, 2.0 / 6.0, 1.0 / 6.0]
         );
-        // Tied counts come in the order of dplyr::count(x, sort = TRUE): value ascending, missing last,
-        // the same on every call.
+        // Tied counts come in the order their values first appear ("b", "a", then "c" and the missing
+        // value), the same on every call. dplyr::count(x, sort = TRUE) gives "a", "b", "c", NA.
         let tied = Dataset::new(
             df!("g" => [Some("b"), Some("a"), Some("b"), Some("a"), Some("c"), None]).unwrap(),
         );
@@ -640,7 +624,7 @@ mod tests {
                     .unwrap()
                     .into_iter()
                     .collect::<Vec<_>>(),
-                [Some("a"), Some("b"), Some("c"), None]
+                [Some("b"), Some("a"), Some("c"), None]
             );
             assert_eq!(
                 c.df()
@@ -663,7 +647,7 @@ mod tests {
                     .unwrap()
                     .into_iter()
                     .collect::<Vec<_>>(),
-                [Some("a"), Some("b"), Some("c"), None]
+                [Some("b"), Some("a"), Some("c"), None]
             );
             assert_eq!(
                 t.df()
@@ -685,9 +669,10 @@ mod tests {
     }
 
     #[test]
-    fn test_value_counts_order_matches_a_naive_sort_on_many_groups() {
-        // Enough groups for the sorts to run on the thread pool, with many tied counts and a missing
-        // group; the expected order is a plain sort of a plain tally.
+    fn test_value_counts_order_matches_a_naive_tally_on_many_groups() {
+        // Enough groups for the grouping and the sort to run on the thread pool, with many tied counts
+        // and a missing group; the expected order is a plain tally in order of first appearance,
+        // stable-sorted by count.
         let mut state = 7u64;
         let keys: Vec<Option<i64>> = (0..20_000)
             .map(|_| {
@@ -702,14 +687,16 @@ mod tests {
             .collect();
 
         fn expected<K: Ord + Clone>(cells: &[Option<K>]) -> Vec<(Option<K>, u32)> {
-            let mut tally = std::collections::BTreeMap::new();
+            let mut slot = std::collections::BTreeMap::new();
+            let mut rows: Vec<(Option<K>, u32)> = Vec::new();
             for cell in cells {
-                // None sorts last: compare (is missing, value)
-                *tally.entry((cell.is_none(), cell.clone())).or_insert(0u32) += 1;
+                let at = *slot.entry(cell.clone()).or_insert_with(|| {
+                    rows.push((cell.clone(), 0));
+                    rows.len() - 1
+                });
+                rows[at].1 += 1;
             }
-            let mut rows: Vec<(Option<K>, u32)> =
-                tally.into_iter().map(|((_, k), n)| (k, n)).collect();
-            rows.sort_by_key(|row| std::cmp::Reverse(row.1));
+            rows.sort_by_key(|row| std::cmp::Reverse(row.1)); // stable: first appearance among ties
             rows
         }
         let tallies = |c: &Dataset| -> Vec<u32> {
@@ -755,9 +742,37 @@ mod tests {
     }
 
     #[test]
-    fn test_value_counts_orders_tied_categories_by_label() {
-        // Codes follow first appearance in the mapping ("b" before "a" here); the tie goes by label.
-        let c = Column::new("c".into(), ["b", "a", "b", "a", "z"])
+    fn test_value_counts_empty_and_all_missing_columns() {
+        let empty = Dataset::new(df!("g" => Vec::<i64>::new()).unwrap());
+        for normalize in [false, true] {
+            assert_eq!(
+                value_counts_with(&empty, "g", normalize).unwrap().nrows(),
+                0
+            );
+        }
+        let missing = Dataset::new(df!("g" => [None::<&str>, None, None]).unwrap());
+        let c = value_counts_with(&missing, "g", false).unwrap();
+        assert_eq!(c.nrows(), 1);
+        assert_eq!(c.df().column("g").unwrap().null_count(), 1);
+        let n = c
+            .df()
+            .column("count")
+            .unwrap()
+            .cast(&DataType::Int64)
+            .unwrap();
+        assert_eq!(n.i64().unwrap().get(0), Some(3));
+        let p = value_counts_with(&missing, "g", true).unwrap();
+        assert_eq!(
+            p.df().column("proportion").unwrap().f64().unwrap().get(0),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn test_value_counts_orders_tied_categories_by_first_appearance() {
+        // "a" and "b" tie; "a" comes first in the data, as does its row of the result. The global
+        // mapping may already hold "b" with a smaller code (another test), which must not decide.
+        let c = Column::new("c".into(), ["a", "b", "b", "a", "z"])
             .cast(&DataType::from_categories(Categories::global()))
             .unwrap();
         let ds = Dataset::new(DataFrame::new(vec![c]).unwrap());
@@ -772,6 +787,25 @@ mod tests {
             labels.str().unwrap().into_iter().collect::<Vec<_>>(),
             [Some("a"), Some("b"), Some("z")]
         );
+        let later = Column::new("c".into(), ["b", "a", "b", "a", "z"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let out = value_counts_with(
+            &Dataset::new(DataFrame::new(vec![later]).unwrap()),
+            "c",
+            false,
+        )
+        .unwrap();
+        let labels = out
+            .df()
+            .column("c")
+            .unwrap()
+            .cast(&DataType::String)
+            .unwrap();
+        assert_eq!(
+            labels.str().unwrap().into_iter().collect::<Vec<_>>(),
+            [Some("b"), Some("a"), Some("z")]
+        );
     }
 
     #[test]
@@ -779,6 +813,8 @@ mod tests {
         use p2a_validation::{Check, Tol};
         // validation/r/cases/data_munging_t3.R, case data_munging_value_counts:
         // dplyr::count(d, g, sort = TRUE) (NA is a group) and n / sum(n); counts 4, 3, 2, 1 are distinct
+        // deviation DATA-65: tied counts follow first appearance, not dplyr's value order; the case has
+        // no tie (the R case stops on one), so tie order stays out of the Check.
         let (case, ds) = crate::test_support::load_case("data_munging_value_counts");
         let f = |d: &Dataset, c: &str| -> Vec<f64> {
             d.df()

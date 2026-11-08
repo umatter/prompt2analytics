@@ -47,7 +47,8 @@
      "doc": "validation/data/munging.md", "cases": ["data_munging_value_counts"],
      "tests": ["p2a-core::data::munging::aggregate::tests::test_validate_value_counts"],
      "quantities": ["values (NA a group)", "counts", "proportions"],
-     "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
+     "tolerance": "exact", "deviations": [
+       {"finding": "DATA-65", "quantity": "order of tied counts", "note": "tied counts follow first appearance in the column; dplyr::count(sort = TRUE) orders them by value. Sorting every group by value cost 1.2-3x the count itself on high-cardinality columns. The case has distinct counts (the R case stops on a tie), so no tie is compared"}], "supersedes_legacy": []},
     {"id": "data_describe", "name": "Column summaries (count, mean, sd, min, max) with na.rm",
      "category": "data", "reference": "sum(!is.na(x)); mean, sd, min, max (na.rm = TRUE)",
      "doc": "validation/data/munging.md", "cases": ["data_munging_describe"],
