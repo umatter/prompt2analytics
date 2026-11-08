@@ -1112,7 +1112,7 @@ pub fn bart_causal_arrays(
 
     // Confidence interval for ATE (percentile method)
     let alpha = 1.0 - config.confidence_level;
-    let (ate_ci_lower, ate_ci_upper) = percentile_ci(&ate_bootstrap, alpha);
+    let (ate_ci_lower, ate_ci_upper) = percentile_ci(&ate_bootstrap, alpha)?;
 
     // Compute CATE confidence intervals
     let mut cate_lower = Vec::with_capacity(n);
@@ -1122,7 +1122,7 @@ pub fn bart_causal_arrays(
     for i in 0..n {
         let obs_bootstrap: Vec<f64> = cate_draws.slice(s![..n_draws, i]).to_vec();
         let se = bootstrap_se(&obs_bootstrap);
-        let (ci_low, ci_high) = percentile_ci(&obs_bootstrap, alpha);
+        let (ci_low, ci_high) = percentile_ci(&obs_bootstrap, alpha)?;
         cate_lower.push(ci_low);
         cate_upper.push(ci_high);
         cate_se_vec.push(se);
@@ -1477,9 +1477,13 @@ fn bootstrap_se(samples: &[f64]) -> f64 {
     variance.sqrt()
 }
 
-/// Percentile interval of the draws: R's quantile(type = 7); NaN with no draws.
-fn percentile_ci(samples: &[f64], alpha: f64) -> (f64, f64) {
-    percentile_interval(samples, 1.0 - alpha).unwrap_or((f64::NAN, f64::NAN))
+/// Percentile interval of the draws: R's quantile(type = 7); NaN with no draws or a NaN draw.
+/// Any other error (the level, the sort buffer's allocation, a cancelled budget) is returned.
+fn percentile_ci(samples: &[f64], alpha: f64) -> EconResult<(f64, f64)> {
+    if samples.is_empty() || samples.iter().any(|v| v.is_nan()) {
+        return Ok((f64::NAN, f64::NAN));
+    }
+    percentile_interval(samples, 1.0 - alpha)
 }
 
 // ============================================================================
@@ -2297,14 +2301,18 @@ mod tests {
     #[test]
     fn test_percentile_ci() {
         let samples: Vec<f64> = (0..100).map(|i| i as f64).collect();
-        let (lower, upper) = percentile_ci(&samples, 0.05);
+        let (lower, upper) = percentile_ci(&samples, 0.05).unwrap();
 
         // R: quantile(0:99, c(0.025, 0.975)) = 2.475, 96.525 (type 7)
         assert!(
             (lower - 2.475).abs() < 1e-12 && (upper - 96.525).abs() < 1e-12,
             "{lower} {upper}"
         );
-        assert!(percentile_ci(&[], 0.05).0.is_nan());
+        assert!(percentile_ci(&[], 0.05).unwrap().0.is_nan());
+        assert!(percentile_ci(&[1.0, f64::NAN], 0.05).unwrap().1.is_nan());
+        // the sort buffer goes through the allocation ceiling: its error is not an interval
+        let err = with_alloc_ceiling(Some(64), || percentile_ci(&samples, 0.05)).unwrap_err();
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
     }
 
     #[test]
