@@ -15,7 +15,9 @@
 //! the other; when the distance falls just outside the band none of those evaluations is a
 //! link, so the link cap does not bound the work. Candidates are always judged with the
 //! exact distance formula, and ties are broken by the lower index, so the result is the one
-//! an all-pairs search gives.
+//! an all-pairs search gives. For k nearest neighbours that is
+//! `spdep::knearneigh(x, k, use_kd_tree = FALSE)`; spdep's default kd-tree search (dbscan) can
+//! order exact distance ties differently.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -152,9 +154,11 @@ impl Neighbors {
     /// k nearest neighbours (Euclidean), with input validation and cooperative cancellation.
     ///
     /// For each observation, its `k` closest other observations; distance ties are broken by
-    /// the lower index, exactly as an all-pairs search with a stable sort would. Runs in
-    /// O(n log n) time for well-spread points (a bucketed k-d tree), also when many
-    /// observations share one location, and O(n k) memory.
+    /// the lower index, exactly as an all-pairs search with a stable sort would. That is
+    /// `spdep::knearneigh(x, k, use_kd_tree = FALSE)`; spdep's default kd-tree search (dbscan)
+    /// can order exact distance ties differently. Runs in O(n log n) time for well-spread
+    /// points (a bucketed k-d tree), also when many observations share one location, and
+    /// O(n k) memory.
     ///
     /// # Errors
     ///
@@ -391,7 +395,11 @@ impl Neighbors {
 
     /// Get the average number of neighbors.
     pub fn avg_neighbors(&self) -> f64 {
-        self.n_links() as f64 / self.n as f64
+        if self.n == 0 {
+            0.0
+        } else {
+            self.n_links() as f64 / self.n as f64
+        }
     }
 
     /// Make the neighbor structure symmetric.
@@ -1033,7 +1041,10 @@ mod tests {
     use crate::errors::{EconError, EconResult};
     use crate::spatial::test_fixtures::coords;
 
-    // R 4.3.3, dbscan 1.2.6. spdep::knearneigh(use_kd_tree = TRUE) and dnearneigh() delegate to these:
+    // R 4.3.3, dbscan 1.2.6. spdep::knearneigh(use_kd_tree = TRUE) and dnearneigh() delegate to these.
+    // This fixture has no distance ties, so dbscan's kd-tree agrees with brute force, which is
+    // spdep::knearneigh(x, k, use_kd_tree = FALSE); on exact ties dbscan can order differently (see
+    // test_validate_knn_ties_match_knearneigh_without_kd_tree).
     //   coords <- cbind(cx, cy)                                   # fixture
     //   t(apply(dbscan::kNN(coords, k = 3)$id, 1, sort)) - 1      # == brute force via order(D[i, ])
     //   lapply(dbscan::frNN(coords, eps = 2.0)$id, sort)          # == which(D[i, ] > 0 & D[i, ] <= 2)
@@ -1454,5 +1465,34 @@ mod tests {
 
         // Should be approximately 3940 km
         assert!((dist - 3940.0).abs() < 50.0);
+    }
+
+    #[test]
+    fn test_empty_neighbour_list_has_zero_average() {
+        let nb = Neighbors::from_knn(&[], 5);
+        assert_eq!((nb.n(), nb.n_links()), (0, 0));
+        assert_eq!(nb.avg_neighbors(), 0.0);
+    }
+
+    /// R: brute force with the stable order() on a tied 5 x 5 integer grid, i.e.
+    /// spdep::knearneigh(xy, 4, use_kd_tree = FALSE) (spatial_ml_weights.R, case
+    /// spatial_weights_moran). dbscan's kd-tree, spdep's default, can break these ties differently.
+    #[test]
+    fn test_validate_knn_ties_match_knearneigh_without_kd_tree() {
+        use p2a_validation::{Case, Check, Tol};
+        let case = Case::load("spatial_weights_moran");
+        // row-major as expand.grid(0:4, 0:4): x varies fastest
+        let grid: Vec<(f64, f64)> = (0..5)
+            .flat_map(|y| (0..5).map(move |x| (x as f64, y as f64)))
+            .collect();
+        let nb = Neighbors::try_from_knn(&grid, 4).unwrap();
+        // as.vector(t(apply(.))): one row of four sorted ids per unit, column by column
+        let per_unit: Vec<f64> = (0..4)
+            .flat_map(|col| (0..25).map(move |i| (i, col)))
+            .map(|(i, col): (usize, usize)| nb.get_neighbors(i)[col] as f64)
+            .collect();
+        Check::new(&case)
+            .vector("knn_grid_ties", &per_unit, Tol::exact())
+            .finish();
     }
 }

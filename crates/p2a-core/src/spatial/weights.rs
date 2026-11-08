@@ -9,25 +9,79 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
 use super::neighbors::Neighbors;
-use crate::errors::EconResult;
+use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_zeros2};
 
-/// Weighting style for spatial weights matrix.
+/// Weighting style for spatial weights matrix, as `spdep::nb2listw` with `zero.policy = TRUE`.
 ///
-/// Controls how the raw neighbor relationships are converted to weights.
+/// Controls how the binary neighbour list B is converted to weights. A unit without neighbours
+/// (an island) keeps an empty row and does not count in `eff.n = n - #islands`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WeightStyle {
-    /// Binary weights (0/1) - "B" in R
+    /// spdep "B": w_ij = 1.
     Binary,
-    /// Row-standardized (weights sum to 1 for each row) - "W" in R
+    /// spdep "W": w_ij = 1 / n_i; each row with neighbours sums to 1.
     #[default]
     RowStd,
-    /// Globally standardized (weights sum to n) - "C" in R
+    /// spdep "C": w_ij = eff.n / sum(B); the weights sum to eff.n.
     GlobalStd,
-    /// Variance-stabilizing (Tiefelsdorf et al. 1999) - "S" in R
+    /// spdep "S" (Tiefelsdorf, Griffith & Boots 1999): w_ij = (eff.n / Q) / sqrt(n_i) with
+    /// Q = sum_i sqrt(n_i); the weights sum to eff.n.
     VarStab,
-    /// Minmax normalization (divide by largest row sum) - "minmax" in R
+    /// spdep "minmax" (Kelejian & Prucha 2010): w_ij = 1 / min(max_i row sum, max_j column sum).
     MinMax,
+    /// spdep "U": w_ij = 1 / sum(B); the weights sum to 1.
+    UnitSum,
+    /// General weights not derived from a style, such as the unstandardised inverse-distance
+    /// weights of [`SpatialWeights::from_distance_decay`]. A label only: `FromStr` refuses it,
+    /// and [`SpatialWeights::from_neighbors`] has no general weights to apply, so it builds
+    /// binary weights and labels them `Binary`.
+    Custom,
+}
+
+crate::option_enum!(
+    WeightStyle,
+    crate::options::Choices {
+        option: "weight style",
+        values: &[
+            (
+                &["W", "row", "rowstd", "row_standardised", "row_standardized"],
+                WeightStyle::RowStd
+            ),
+            (&["B", "binary"], WeightStyle::Binary),
+            (
+                &[
+                    "C",
+                    "global",
+                    "globalstd",
+                    "globally_standardised",
+                    "globally_standardized"
+                ],
+                WeightStyle::GlobalStd
+            ),
+            (&["U", "unit_sum", "unitsum"], WeightStyle::UnitSum),
+            (&["minmax", "mm", "min_max"], WeightStyle::MinMax),
+            (
+                &[
+                    "S",
+                    "varstab",
+                    "variance_stabilising",
+                    "variance_stabilizing"
+                ],
+                WeightStyle::VarStab
+            ),
+        ],
+    },
+    no_display
+);
+
+impl std::fmt::Display for WeightStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WeightStyle::Custom => f.write_str("custom"),
+            s => f.write_str(Self::choices().canonical(*s)),
+        }
+    }
 }
 
 /// Sparse representation of spatial weights for a single observation.
@@ -88,10 +142,125 @@ pub struct SpatialWeights {
 struct Spectrum {
     /// Real parts, sorted ascending (what [`SpatialWeights::eigenvalues`] returns).
     real_sorted: Array1<f64>,
-    /// All eigenvalues as (real, imaginary) pairs; empty when the decomposition failed.
+    /// All eigenvalues as (real, imaginary) pairs.
     values: Vec<(f64, f64)>,
-    /// False when the decomposition failed and `real_sorted` is the legacy zero fallback.
+    /// The real eigenvalues, when every other one has its exact conjugate in `values`.
+    reals: Vec<f64>,
+    /// One (a, b), b > 0, per conjugate pair a ± bi; empty with `reals` when they do not pair up.
+    pairs: Vec<(f64, f64)>,
+    /// False for the NaN placeholder the infallible legacy methods cache after a failure.
     ok: bool,
+}
+
+/// The eigenvalues of W as the spatial likelihoods need them (spatialreg method "eigen").
+///
+/// Built by [`SpatialWeights::try_spectrum`], which caches it; cheap to clone.
+#[derive(Debug, Clone)]
+pub struct WeightsSpectrum(Arc<Spectrum>);
+
+impl WeightsSpectrum {
+    /// log|I - ρW| = Re Σ log(1 - ρλ_i) = Σ ln|1 - ρλ_i| over the complex eigenvalues. A conjugate
+    /// pair a ± bi contributes ln((1 - ρa)² + (ρb)²): one logarithm per pair, since the method is
+    /// evaluated at every step of a likelihood search.
+    pub fn log_det(&self, rho: f64) -> f64 {
+        let s = &*self.0;
+        if s.reals.len() + 2 * s.pairs.len() != s.values.len() {
+            return s
+                .values
+                .iter()
+                .map(|&(a, b)| {
+                    let (u, v) = (1.0 - rho * a, rho * b);
+                    0.5 * (u * u + v * v).ln()
+                })
+                .sum();
+        }
+        let reals: f64 = s.reals.iter().map(|&a| (1.0 - rho * a).abs().ln()).sum();
+        let pairs: f64 = s
+            .pairs
+            .iter()
+            .map(|&(a, b)| {
+                let (u, v) = (1.0 - rho * a, rho * b);
+                (u * u + v * v).ln()
+            })
+            .sum();
+        reals + pairs
+    }
+
+    /// tr((I - ρW)^-1) = Re Σ 1 / (1 - ρλ_i).
+    pub fn trace_inverse(&self, rho: f64) -> f64 {
+        self.0
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                let u = 1.0 - rho * a;
+                let v = -rho * b;
+                u / (u * u + v * v)
+            })
+            .sum()
+    }
+
+    /// tr(W (I - ρW)^-1) = Re Σ λ_i / (1 - ρλ_i).
+    pub fn trace_w_inverse(&self, rho: f64) -> f64 {
+        self.0
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                let u = 1.0 - rho * a;
+                let v = -rho * b;
+                (a * u + b * v) / (u * u + v * v)
+            })
+            .sum()
+    }
+
+    /// tr((W (I - ρW)^-1)²) = Re Σ (λ_i / (1 - ρλ_i))², a curvature term of the spatial
+    /// log-likelihoods.
+    pub fn trace_w_inverse_squared(&self, rho: f64) -> f64 {
+        self.0
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                let u = 1.0 - rho * a;
+                let v = -rho * b;
+                let d = u * u + v * v;
+                let re = (a * u + b * v) / d;
+                let im = (b * u - a * v) / d;
+                re * re - im * im
+            })
+            .sum()
+    }
+
+    /// min_i |1 - ρλ_i|; 0 means that I - ρW is singular.
+    pub fn min_modulus(&self, rho: f64) -> f64 {
+        self.0
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                let u = 1.0 - rho * a;
+                let v = rho * b;
+                u * u + v * v
+            })
+            .fold(f64::INFINITY, f64::min)
+            .sqrt()
+    }
+
+    /// The number of eigenvalues with |Im λ| above `im_tol`.
+    pub fn n_complex(&self, im_tol: f64) -> usize {
+        self.0
+            .values
+            .iter()
+            .filter(|(_, b)| b.abs() > im_tol)
+            .count()
+    }
+
+    /// The eigenvalues as (real, imaginary) pairs, in the order of the eigen decomposition.
+    pub fn eigenvalues(&self) -> &[(f64, f64)] {
+        &self.0.values
+    }
+
+    /// The real parts, sorted ascending (what [`SpatialWeights::eigenvalues`] returns).
+    pub fn real_parts_sorted(&self) -> &Array1<f64> {
+        &self.0.real_sorted
+    }
 }
 
 impl SpatialWeights {
@@ -113,94 +282,60 @@ impl SpatialWeights {
     /// ```
     pub fn from_neighbors(nb: &Neighbors, style: WeightStyle) -> Self {
         let n = nb.n();
-        let mut weights = Vec::with_capacity(n);
+        let style = if style == WeightStyle::Custom {
+            WeightStyle::Binary
+        } else {
+            style
+        };
+        let card = nb.cardinalities();
+        let eff_n = card.iter().filter(|&&c| c > 0).count() as f64;
+        let links = nb.n_links() as f64;
 
-        // First pass: calculate raw weights based on style
-        let raw_weights: Vec<SparseWeights> = (0..n)
-            .map(|i| {
-                let indices = nb.get_neighbors(i).to_vec();
-                let n_neighbors = indices.len();
-                let w = if n_neighbors == 0 {
-                    vec![]
-                } else {
-                    match style {
-                        WeightStyle::Binary => vec![1.0; n_neighbors],
-                        WeightStyle::RowStd => vec![1.0 / n_neighbors as f64; n_neighbors],
-                        // For other styles, start with binary and transform later
-                        _ => vec![1.0; n_neighbors],
-                    }
-                };
-                SparseWeights {
-                    indices,
-                    weights: w,
-                }
-            })
-            .collect();
-
-        // Apply global transformations for certain styles
-        match style {
+        // The one weight of each row (spdep nb2listw on the binary list)
+        let per_row: Vec<f64> = match style {
+            WeightStyle::Binary | WeightStyle::Custom => vec![1.0; n],
+            WeightStyle::RowStd => card
+                .iter()
+                .map(|&c| if c > 0 { 1.0 / c as f64 } else { 0.0 })
+                .collect(),
             WeightStyle::GlobalStd => {
-                // Sum of all weights should equal n
-                let total: f64 = raw_weights
-                    .iter()
-                    .map(|sw| sw.weights.iter().sum::<f64>())
-                    .sum();
-                let scale = if total > 0.0 { n as f64 / total } else { 1.0 };
-                weights = raw_weights
-                    .into_iter()
-                    .map(|sw| SparseWeights {
-                        indices: sw.indices,
-                        weights: sw.weights.iter().map(|&w| w * scale).collect(),
-                    })
-                    .collect();
+                vec![if links > 0.0 { eff_n / links } else { 0.0 }; n]
+            }
+            WeightStyle::UnitSum => vec![if links > 0.0 { 1.0 / links } else { 0.0 }; n],
+            WeightStyle::MinMax => {
+                let mut col_sums = vec![0usize; n];
+                for i in 0..n {
+                    for &j in nb.get_neighbors(i) {
+                        if let Some(c) = col_sums.get_mut(j) {
+                            *c += 1;
+                        }
+                    }
+                }
+                let max_row = card.iter().copied().max().unwrap_or(0);
+                let max_col = col_sums.iter().copied().max().unwrap_or(0);
+                let divisor = max_row.min(max_col) as f64;
+                vec![if divisor > 0.0 { 1.0 / divisor } else { 0.0 }; n]
             }
             WeightStyle::VarStab => {
-                // Variance-stabilizing: w_ij = 1/sqrt(n_i * n_j)
-                let cardinalities = nb.cardinalities();
-                weights = raw_weights
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, sw)| {
-                        let ni = cardinalities[i] as f64;
-                        let w: Vec<f64> = sw
-                            .indices
-                            .iter()
-                            .map(|&j| {
-                                let nj = cardinalities[j] as f64;
-                                if ni > 0.0 && nj > 0.0 {
-                                    1.0 / (ni * nj).sqrt()
-                                } else {
-                                    0.0
-                                }
-                            })
-                            .collect();
-                        SparseWeights {
-                            indices: sw.indices,
-                            weights: w,
+                // Rows scaled by 1 / sqrt(sum_j b_ij^2) = 1 / sqrt(n_i), then all rescaled to eff.n
+                let q: f64 = card.iter().map(|&c| (c as f64).sqrt()).sum();
+                card.iter()
+                    .map(|&c| {
+                        if c > 0 && q > 0.0 {
+                            eff_n / q / (c as f64).sqrt()
+                        } else {
+                            0.0
                         }
                     })
-                    .collect();
+                    .collect()
             }
-            WeightStyle::MinMax => {
-                // Divide all weights by the maximum row sum
-                let row_sums: Vec<f64> = raw_weights
-                    .iter()
-                    .map(|sw| sw.weights.iter().sum())
-                    .collect();
-                let max_sum = row_sums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let scale = if max_sum > 0.0 { 1.0 / max_sum } else { 1.0 };
-                weights = raw_weights
-                    .into_iter()
-                    .map(|sw| SparseWeights {
-                        indices: sw.indices,
-                        weights: sw.weights.iter().map(|&w| w * scale).collect(),
-                    })
-                    .collect();
-            }
-            _ => {
-                weights = raw_weights;
-            }
-        }
+        };
+        let weights: Vec<SparseWeights> = (0..n)
+            .map(|i| SparseWeights {
+                indices: nb.get_neighbors(i).to_vec(),
+                weights: vec![per_row[i]; card[i]],
+            })
+            .collect();
 
         SpatialWeights {
             // O(1): the neighbour lists are shared, not copied
@@ -262,7 +397,7 @@ impl SpatialWeights {
         let style = if row_standardize {
             WeightStyle::RowStd
         } else {
-            WeightStyle::Binary // Not quite accurate, but closest
+            WeightStyle::Custom
         };
 
         SpatialWeights {
@@ -335,20 +470,27 @@ impl SpatialWeights {
         w
     }
 
-    /// Compute eigenvalues of W.
+    /// Compute the real parts of the eigenvalues of W, sorted ascending.
     ///
     /// Eigenvalues are needed for ML estimation to compute log|I - ρW|
     /// and to determine the valid range for ρ.
     ///
     /// This uses dense matrix operations so is only suitable for moderate n. If the
-    /// decomposition fails, every eigenvalue is reported as 0.
+    /// decomposition fails, every eigenvalue is reported as NaN;
+    /// [`SpatialWeights::try_eigenvalues`] reports the failure as an error.
     pub fn eigenvalues(&mut self) -> &Array1<f64> {
+        &self.cached_or_failed_spectrum().real_sorted
+    }
+
+    /// The cached spectrum, computed when missing; a failure is cached as the NaN placeholder.
+    fn cached_or_failed_spectrum(&mut self) -> &Arc<Spectrum> {
         let spectrum = match self.spectrum.take() {
             Some(s) => s,
-            // Use faer for eigenvalue computation
-            None => Arc::new(compute_spectrum(&self.to_dense())),
+            None => Arc::new(
+                compute_spectrum(&self.to_dense()).unwrap_or_else(|_| failed_spectrum(self.n)),
+            ),
         };
-        &self.spectrum.insert(spectrum).real_sorted
+        self.spectrum.insert(spectrum)
     }
 
     /// Dense n x n copy of W, allocated fallibly.
@@ -369,64 +511,59 @@ impl SpatialWeights {
     }
 
     /// Eigenvalues of W like [`SpatialWeights::eigenvalues`], but the dense matrix behind
-    /// them is allocated fallibly and an installed budget is checked first.
-    ///
-    /// If the eigen decomposition fails, the eigenvalues are reported as zeros (the legacy
-    /// behaviour, kept), so log|I - ρW| is 0 and the ρ range is unbounded.
+    /// them is allocated fallibly, an installed budget is checked first and a failed eigen
+    /// decomposition is an error.
     ///
     /// # Errors
     ///
-    /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the dense
-    /// matrix cannot be allocated; [`EconError::Cancelled`](crate::errors::EconError::Cancelled)
-    /// when an installed budget has expired.
+    /// As [`SpatialWeights::try_spectrum`].
     pub fn try_eigenvalues(&mut self) -> EconResult<&Array1<f64>> {
-        Ok(&self.try_spectrum()?.real_sorted)
+        self.try_spectrum()?;
+        match &self.spectrum {
+            Some(s) => Ok(&s.real_sorted),
+            None => Err(spectrum_unavailable()),
+        }
     }
 
     /// The valid range for ρ like [`SpatialWeights::rho_range`], with the errors of
-    /// [`SpatialWeights::try_eigenvalues`]. If the eigen decomposition fails, the range is
-    /// (-inf, inf) (see [`SpatialWeights::try_eigenvalues`]).
+    /// [`SpatialWeights::try_spectrum`].
     pub fn try_rho_range(&mut self) -> EconResult<(f64, f64)> {
         Ok(rho_range_from(self.try_eigenvalues()?))
     }
 
-    /// log|I - ρW| like [`SpatialWeights::log_det`], with the errors of
-    /// [`SpatialWeights::try_eigenvalues`]. If the eigen decomposition fails, it is 0 for
-    /// every ρ (see [`SpatialWeights::try_eigenvalues`]).
+    /// log|I - ρW| from the complex eigenvalues ([`WeightsSpectrum::log_det`]), with the errors
+    /// of [`SpatialWeights::try_spectrum`].
     pub fn try_log_det(&mut self, rho: f64) -> EconResult<f64> {
-        Ok(log_det_from(self.try_eigenvalues()?, rho))
+        Ok(self.try_spectrum()?.log_det(rho))
     }
 
-    /// The cached spectrum, computed fallibly when missing.
-    fn try_spectrum(&mut self) -> EconResult<&Arc<Spectrum>> {
-        let spectrum = match self.spectrum.take() {
-            Some(s) => s,
-            None => {
-                checkpoint()?;
-                Arc::new(compute_spectrum(&self.try_to_dense()?))
-            }
-        };
-        Ok(self.spectrum.insert(spectrum))
+    /// The eigenvalues of W, computed once (cached, and shared by clones).
+    ///
+    /// # Errors
+    ///
+    /// [`EconError::Computation`] when a weight is not finite, or the eigen decomposition does
+    /// not converge or returns a non-finite value (not cached);
+    /// [`EconError::ResourceLimit`] when the dense matrix cannot be allocated;
+    /// [`EconError::Cancelled`] when an installed budget has expired.
+    pub fn try_spectrum(&mut self) -> EconResult<WeightsSpectrum> {
+        if let Some(s) = &self.spectrum {
+            return if s.ok {
+                Ok(WeightsSpectrum(Arc::clone(s)))
+            } else {
+                Err(spectrum_unavailable())
+            };
+        }
+        checkpoint()?;
+        let spectrum = Arc::new(compute_spectrum(&self.try_to_dense()?)?);
+        self.spectrum = Some(Arc::clone(&spectrum));
+        Ok(WeightsSpectrum(spectrum))
     }
 
     /// tr((I - ρW)^-1) = Σ Re(1 / (1 - ρλ)) over the complex eigenvalues λ of W.
     ///
-    /// `None` when the eigen decomposition failed or the sum is not finite (1 - ρλ = 0).
+    /// `None` when the sum is not finite (1 - ρλ = 0).
     pub(crate) fn trace_inverse_i_minus_rho_w(&mut self, rho: f64) -> EconResult<Option<f64>> {
-        let spectrum = self.try_spectrum()?;
-        if !spectrum.ok {
-            return Ok(None);
-        }
-        let sum: f64 = spectrum
-            .values
-            .iter()
-            .map(|&(a, b)| {
-                // 1 - ρ(a + bi) = (1 - ρa) - ρb i
-                let re = 1.0 - rho * a;
-                let im = rho * b;
-                re / (re * re + im * im)
-            })
-            .sum();
+        let sum = self.try_spectrum()?.trace_inverse(rho);
         Ok(sum.is_finite().then_some(sum))
     }
 
@@ -449,17 +586,13 @@ impl SpatialWeights {
         rho: f64,
         b: &Array1<f64>,
     ) -> EconResult<Array1<f64>> {
-        let spectrum = Arc::clone(self.try_spectrum()?);
-        let q = if spectrum.ok {
-            rho.abs()
-                * spectrum
-                    .values
-                    .iter()
-                    .map(|&(a, im)| a.hypot(im))
-                    .fold(0.0, f64::max)
-        } else {
-            f64::INFINITY
-        };
+        let spectrum = self.try_spectrum()?;
+        let q = rho.abs()
+            * spectrum
+                .eigenvalues()
+                .iter()
+                .map(|&(a, im)| a.hypot(im))
+                .fold(0.0, f64::max);
         if q < 0.99 {
             let max_iter = if q > 0.0 {
                 let needed = (1e-17_f64.ln() / q.ln()).ceil();
@@ -506,10 +639,11 @@ impl SpatialWeights {
         Arc::ptr_eq(&self.weights, &other.weights)
     }
 
-    /// Compute log|I - ρW| using eigenvalues.
+    /// Compute log|I - ρW| from the complex eigenvalues (spatialreg method "eigen").
     ///
-    /// This is the log-determinant term needed for spatial ML estimation.
-    /// Uses the formula: log|I - ρW| = Σ log(1 - ρ*λ_i)
+    /// log|I - ρW| = Re Σ log(1 - ρλ_i) = Σ ln|1 - ρλ_i|: a conjugate pair a ± bi contributes
+    /// ln((1 - ρa)² + (ρb)²), and summing ln(1 - ρa) over the real parts alone is wrong for an
+    /// asymmetric W such as k nearest neighbours.
     ///
     /// # Arguments
     ///
@@ -517,18 +651,24 @@ impl SpatialWeights {
     ///
     /// # Returns
     ///
-    /// The log-determinant value
+    /// The log-determinant value, NaN when the eigen decomposition failed;
+    /// [`SpatialWeights::try_log_det`] reports the failure as an error.
     pub fn log_det(&mut self, rho: f64) -> f64 {
-        log_det_from(self.eigenvalues(), rho)
+        WeightsSpectrum(Arc::clone(self.cached_or_failed_spectrum())).log_det(rho)
     }
 
     /// Get the valid range for ρ based on eigenvalues.
     ///
-    /// For the model to be valid, we need |I - ρW| > 0, which requires
-    /// ρ to be in (1/λ_min, 1/λ_max) where λ_min and λ_max are the
-    /// extreme eigenvalues of W.
+    /// The interval is (1/λ_min, 1/λ_max) over the **real parts** of the eigenvalues, as
+    /// spatialreg's `eig.range`. It is (NaN, NaN) when the eigen decomposition failed;
+    /// [`SpatialWeights::try_rho_range`] reports the failure as an error.
     pub fn rho_range(&mut self) -> (f64, f64) {
-        rho_range_from(self.eigenvalues())
+        let spectrum = self.cached_or_failed_spectrum();
+        if spectrum.ok {
+            rho_range_from(&spectrum.real_sorted)
+        } else {
+            (f64::NAN, f64::NAN)
+        }
     }
 
     /// Compute (I - ρW)y.
@@ -690,11 +830,6 @@ pub struct WeightsSummary {
     pub style: WeightStyle,
 }
 
-/// log|I - ρW| = Σ log(1 - ρλ_i) from the (real parts of the) eigenvalues.
-fn log_det_from(eigs: &Array1<f64>, rho: f64) -> f64 {
-    eigs.iter().map(|&lambda| (1.0 - rho * lambda).ln()).sum()
-}
-
 /// (1/λ_min, 1/λ_max), open-ended when no eigenvalue has that sign.
 fn rho_range_from(eigs: &Array1<f64>) -> (f64, f64) {
     let lambda_min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
@@ -714,43 +849,105 @@ fn rho_range_from(eigs: &Array1<f64>) -> (f64, f64) {
     (lower, upper)
 }
 
-/// Compute the eigenvalues of a matrix using faer.
-fn compute_spectrum(m: &Array2<f64>) -> Spectrum {
+/// The eigenvalues of a dense W, from faer's general (complex) decomposition.
+fn compute_spectrum(w: &Array2<f64>) -> EconResult<Spectrum> {
     use crate::linalg::matrix_ops::ndarray_to_faer;
 
-    let n = m.nrows();
-    let mat = ndarray_to_faer(&m.view());
-
-    // For general (non-symmetric) matrices, use complex eigenvalue decomposition
-    // and take real parts (spatial weights matrices typically have real eigenvalues)
-    let eigenvalues = mat.eigenvalues();
-
-    // Extract real parts from the Result
-    let (mut eigs_vec, values, ok): (Vec<f64>, Vec<(f64, f64)>, bool) = match eigenvalues {
-        Ok(evs) => (
-            evs.iter().map(|ev| ev.re).collect(),
-            evs.iter().map(|ev| (ev.re, ev.im)).collect(),
-            true,
-        ),
-        Err(_) => {
-            // Fallback: return zeros if eigenvalue computation fails
-            (vec![0.0; n], Vec::new(), false)
-        }
-    };
-
-    // Sort eigenvalues
-    eigs_vec.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    Spectrum {
-        real_sorted: Array1::from_vec(eigs_vec),
-        values,
-        ok,
+    let n = w.nrows();
+    let bad = w.iter().filter(|v| !v.is_finite()).count();
+    if bad > 0 {
+        return Err(EconError::Computation(format!(
+            "spatial weights contain {bad} non-finite value(s); log|I - rho W| is undefined"
+        )));
     }
+    let evs = ndarray_to_faer(&w.view()).eigenvalues().map_err(|_| {
+        EconError::Computation(format!(
+            "eigendecomposition of the {n} x {n} spatial weights matrix did not converge; \
+             log|I - rho W| cannot be computed"
+        ))
+    })?;
+    let values: Vec<(f64, f64)> = evs.iter().map(|ev| (ev.re, ev.im)).collect();
+    if values.iter().any(|(a, b)| !a.is_finite() || !b.is_finite()) {
+        return Err(EconError::Computation(format!(
+            "eigendecomposition of the {n} x {n} spatial weights matrix returned a non-finite \
+             eigenvalue; log|I - rho W| cannot be computed"
+        )));
+    }
+    let mut real: Vec<f64> = values.iter().map(|&(a, _)| a).collect();
+    real.sort_by(f64::total_cmp);
+    let (reals, pairs) = conjugate_pairs(&values);
+    Ok(Spectrum {
+        real_sorted: Array1::from_vec(real),
+        values,
+        reals,
+        pairs,
+        ok: true,
+    })
+}
+
+/// The real eigenvalues and one member of each conjugate pair; both empty unless every complex
+/// eigenvalue has its exact conjugate.
+fn conjugate_pairs(values: &[(f64, f64)]) -> (Vec<f64>, Vec<(f64, f64)>) {
+    let reals: Vec<f64> = values.iter().filter(|v| v.1 == 0.0).map(|v| v.0).collect();
+    let sorted = |sign: f64| {
+        let mut side: Vec<(f64, f64)> = values
+            .iter()
+            .filter(|v| v.1 * sign > 0.0)
+            .map(|v| (v.0, v.1 * sign))
+            .collect();
+        side.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)));
+        side
+    };
+    let pairs = sorted(1.0);
+    if pairs == sorted(-1.0) {
+        (reals, pairs)
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
+/// What the infallible legacy methods cache after a failed decomposition: every value NaN.
+fn failed_spectrum(n: usize) -> Spectrum {
+    Spectrum {
+        real_sorted: Array1::from_elem(n, f64::NAN),
+        values: vec![(f64::NAN, f64::NAN); n],
+        reals: Vec::new(),
+        pairs: Vec::new(),
+        ok: false,
+    }
+}
+
+fn spectrum_unavailable() -> EconError {
+    EconError::Computation(
+        "the eigenvalues of the spatial weights matrix could not be computed".to_string(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use crate::errors::EconError;
+    use crate::spatial::{MoranAlternative, moran_test};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0
+    }
+
+    fn coords_of(ds: &crate::data::Dataset) -> Vec<(f64, f64)> {
+        col(ds, "cx").into_iter().zip(col(ds, "cy")).collect()
+    }
+
+    fn expect_spec(r: EconResult<impl std::fmt::Debug>, needles: &[&str]) {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                for n in needles {
+                    assert!(message.contains(n), "`{message}` does not mention `{n}`");
+                }
+            }
+            other => panic!("expected InvalidSpecification mentioning {needles:?}, got {other:?}"),
+        }
+    }
 
     fn simple_neighbors() -> Neighbors {
         // 4-point grid: 0-1
@@ -940,5 +1137,238 @@ mod tests {
         assert!(lower < 0.0);
         assert!(upper > 0.0);
         assert!((upper - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_weight_style_parses_aliases_and_rejects_unknown() {
+        WeightStyle::choices().validate().unwrap();
+        use WeightStyle::*;
+        for (s, v) in [
+            ("W", RowStd),
+            ("w", RowStd),
+            ("row", RowStd),
+            ("RowStd", RowStd),
+            ("row-standardised", RowStd),
+            ("B", Binary),
+            ("binary", Binary),
+            ("C", GlobalStd),
+            ("global", GlobalStd),
+            ("U", UnitSum),
+            ("unit sum", UnitSum),
+            ("minmax", MinMax),
+            ("MM", MinMax),
+            ("min-max", MinMax),
+            ("S", VarStab),
+            ("varstab", VarStab),
+            ("Variance_Stabilizing", VarStab),
+        ] {
+            assert_eq!(s.parse::<WeightStyle>().unwrap(), v, "{s}");
+        }
+        for bad in ["custom", "unstandardized", "Q", ""] {
+            expect_spec(
+                bad.parse::<WeightStyle>(),
+                &["weight style", "W, B, C, U, minmax, S"],
+            );
+        }
+        let shown: Vec<String> = [RowStd, Binary, GlobalStd, UnitSum, MinMax, VarStab, Custom]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(shown, ["W", "B", "C", "U", "minmax", "S", "custom"]);
+    }
+
+    /// R: spdep::nb2listw styles written out (validation/r/cases/spatial_ml_weights.R, case
+    /// spatial_weights_moran).
+    #[test]
+    fn test_validate_weight_styles() {
+        use WeightStyle::*;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_weights_moran");
+        let coords = coords_of(&ds);
+        let n = coords.len();
+        let x1 = Array1::from(col(&ds, "x1"));
+        let band = Neighbors::try_from_distance(&coords, 0.0, 0.2, None).unwrap();
+        let cards: Vec<f64> = band.cardinalities().iter().map(|&c| c as f64).collect();
+        let mut chk = Check::new(&case);
+        chk.scalar("band_links", band.n_links() as f64, Tol::exact())
+            .vector("band_row_sums", &cards, Tol::exact());
+        for (key, style) in [
+            ("W", RowStd),
+            ("B", Binary),
+            ("C", GlobalStd),
+            ("U", UnitSum),
+            ("minmax", MinMax),
+            ("S", VarStab),
+        ] {
+            let w = SpatialWeights::from_neighbors(&band, style);
+            assert_eq!(w.style(), style);
+            let row_sums: Vec<f64> = (0..n)
+                .map(|i| w.get_weights(i).weights.iter().sum())
+                .collect();
+            let moran = moran_test(&x1, &w, MoranAlternative::Greater).unwrap();
+            chk.vector(
+                &format!("style_{key}_row1"),
+                &w.get_weights(0).weights,
+                Tol::coef(n),
+            )
+            .scalar(&format!("style_{key}_sum"), w.sum_weights(), Tol::coef(n))
+            .vector(&format!("style_{key}_row_sums"), &row_sums, Tol::coef(n))
+            .scalar(
+                &format!("style_{key}_moran_I"),
+                moran.statistic,
+                Tol::stat(n),
+            );
+        }
+        // minmax divides by min(max row sum 3, max column sum 2) (spdep; Kelejian & Prucha 2010)
+        let asym = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![1, 2, 3], vec![2], vec![3], vec![1]]),
+            MinMax,
+        );
+        chk.scalar(
+            "asym_minmax_weight",
+            asym.get_weights(0).weights[0],
+            Tol::exact(),
+        )
+        .scalar("asym_minmax_sum", asym.sum_weights(), Tol::coef(4));
+        // islands: C and S scale to eff.n = n - #islands (zero.policy = TRUE), U to 1
+        let isl = Neighbors::try_from_distance(&coords, 0.0, 0.12, None).unwrap();
+        let ids: Vec<f64> = isl.isolates().iter().map(|&i| i as f64).collect();
+        chk.scalar("n_islands", ids.len() as f64, Tol::exact())
+            .vector("islands", &ids, Tol::exact())
+            .scalar(
+                "islands_style_C_sum",
+                SpatialWeights::from_neighbors(&isl, GlobalStd).sum_weights(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "islands_style_S_sum",
+                SpatialWeights::from_neighbors(&isl, VarStab).sum_weights(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "islands_style_U_sum",
+                SpatialWeights::from_neighbors(&isl, UnitSum).sum_weights(),
+                Tol::coef(n),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_distance_decay_weights_are_labelled_custom() {
+        let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 2.0), (1.5, 1.5)];
+        let nb = Neighbors::from_knn(&coords, 2);
+        assert_eq!(
+            SpatialWeights::from_distance_decay(&nb, &coords, 1.0, false).style(),
+            WeightStyle::Custom
+        );
+        assert_eq!(
+            SpatialWeights::from_distance_decay(&nb, &coords, 1.0, true).style(),
+            WeightStyle::RowStd
+        );
+        // from_neighbors has no general weights to apply: Custom builds binary weights and says so
+        let b = SpatialWeights::from_neighbors(&nb, WeightStyle::Custom);
+        assert_eq!(b.style(), WeightStyle::Binary);
+        assert!(b.get_weights(0).weights.iter().all(|&w| w == 1.0));
+    }
+
+    /// The case's W: 4 nearest neighbours on (cx, cy), row-standardised (spdep style "W").
+    fn knn4(ds: &crate::data::Dataset) -> SpatialWeights {
+        SpatialWeights::from_neighbors(
+            &Neighbors::try_from_knn(&coords_of(ds), 4).unwrap(),
+            WeightStyle::RowStd,
+        )
+    }
+
+    /// R: Re(sum(log(1 - rho * eigen(W)$values))) (spatialreg method "eigen"); cross-checked against
+    /// determinant(I - rho W) in the case. spatial_ml_weights.R, case spatial_sar_sdm_sem.
+    #[test]
+    fn test_validate_logdet_complex_eigenvalues() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_sar_sdm_sem");
+        let mut w = knn4(&ds);
+        let n = w.n();
+        let rhos = case.vector("logdet_rho");
+        let spec = w.try_spectrum().unwrap();
+        let ld: Vec<f64> = rhos.iter().map(|&r| w.try_log_det(r).unwrap()).collect();
+        let legacy: Vec<f64> = rhos.iter().map(|&r| w.log_det(r)).collect();
+        assert_eq!(ld, legacy);
+        let (lo, hi) = w.try_rho_range().unwrap();
+        Check::new(&case)
+            .vector("logdet", &ld, Tol::stat(n))
+            .vector("logdet_direct", &ld, Tol::stat(n))
+            // |Im| > 1e-4: the genuine conjugate pairs (near-defective eigenvalues carry
+            // |Im| <= 1.2e-6 of rounding)
+            .scalar("n_complex_eigen", spec.n_complex(1e-4) as f64, Tol::exact())
+            .vector("rho_range", &[lo, hi], Tol::coef(n))
+            .scalar("tr_inv_rho05", spec.trace_inverse(0.5), Tol::stat(n))
+            .scalar("tr_aw_rho05", spec.trace_w_inverse(0.5), Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_eigen_failure_is_an_error_not_zeros() {
+        let mut w = SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::RowStd);
+        Arc::make_mut(&mut w.weights)[0].weights[0] = f64::NAN;
+        match w.try_log_det(0.5) {
+            Err(EconError::Computation(m)) => assert!(m.contains("non-finite"), "{m}"),
+            other => panic!("expected Computation, got {other:?}"),
+        }
+        assert!(w.try_spectrum().is_err() && w.try_eigenvalues().is_err());
+        assert!(w.try_rho_range().is_err());
+        assert!(w.log_det(0.5).is_nan());
+        let (lo, hi) = w.rho_range();
+        assert!(lo.is_nan() && hi.is_nan());
+        assert!(w.eigenvalues().iter().all(|v| v.is_nan()));
+        // the placeholder stays an error for the fallible forms
+        assert!(w.try_spectrum().is_err());
+    }
+
+    /// The spatial timing cells compute the eigenvalues once and fit many times.
+    #[test]
+    fn test_spectrum_is_cached_after_eigenvalues() {
+        let mut w = SpatialWeights::from_neighbors(&simple_neighbors(), WeightStyle::RowStd);
+        let _ = w.eigenvalues();
+        let a = w.try_spectrum().unwrap();
+        let b = w.try_spectrum().unwrap();
+        assert!(Arc::ptr_eq(&a.0, &b.0));
+    }
+
+    /// `log_det` on a W with complex eigenvalues is the log-determinant of the dense matrix: a
+    /// directed 3-cycle has eigenvalues 1 and exp(±2πi/3), det(I - ρW) = 1 - ρ³.
+    /// One logarithm per conjugate pair gives the sum over all eigenvalues, also through the route
+    /// for a list that does not pair up.
+    #[test]
+    fn test_log_det_by_conjugate_pairs_matches_the_full_sum() {
+        let mut w = crate::spatial::test_fixtures::knn3(WeightStyle::RowStd);
+        let spec = w.try_spectrum().unwrap();
+        assert!(!spec.0.pairs.is_empty());
+        let values = spec.eigenvalues().to_vec();
+        let unpaired = WeightsSpectrum(Arc::new(Spectrum {
+            real_sorted: spec.0.real_sorted.clone(),
+            values: values.clone(),
+            reals: Vec::new(),
+            pairs: Vec::new(),
+            ok: true,
+        }));
+        for rho in [-0.8, 0.0, 0.5, 0.9] {
+            let full: f64 = values
+                .iter()
+                .map(|&(a, b)| 0.5 * ((1.0 - rho * a).powi(2) + (rho * b).powi(2)).ln())
+                .sum();
+            assert!((spec.log_det(rho) - full).abs() < 1e-11, "{rho}");
+            assert!((unpaired.log_det(rho) - full).abs() < 1e-11, "{rho}");
+        }
+        let (reals, pairs) = conjugate_pairs(&[(0.5, 0.0), (0.1, 0.2), (0.1, -0.3)]);
+        assert!(reals.is_empty() && pairs.is_empty());
+    }
+
+    #[test]
+    fn test_log_det_of_a_directed_cycle() {
+        let nb = Neighbors::from_indices(vec![vec![1], vec![2], vec![0]]);
+        let mut w = SpatialWeights::from_neighbors(&nb, WeightStyle::Binary);
+        for rho in [-0.8_f64, 0.3, 0.9] {
+            let exact = (1.0 - rho.powi(3)).ln();
+            assert!((w.try_log_det(rho).unwrap() - exact).abs() < 1e-12, "{rho}");
+        }
     }
 }

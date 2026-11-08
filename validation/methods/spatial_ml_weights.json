@@ -1,0 +1,125 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "spatial_ml",
+      "name": "SAR, spatial Durbin (SDM), SEM and SAC models by concentrated maximum likelihood; SAR and SDM impacts",
+      "category": "econometrics",
+      "reference": "spatialreg::lagsarlm(method = 'eigen', Durbin = FALSE/TRUE), errorsarlm, sacsarlm and impacts (lagImpactsExact, mixedImpactsExact), written out in base R (spatialreg not installed)",
+      "doc": "validation/econometrics/spatial.md",
+      "cases": [
+        "spatial_sar_sdm_sem"
+      ],
+      "tests": [
+        "p2a-core::econometrics::spatial::tests::test_validate_sar_sdm_sem_concentrated_ml",
+        "p2a-core::econometrics::spatial::tests::test_validate_sac_concentrated_ml",
+        "p2a-core::econometrics::spatial::tests::test_validate_spatial_ml_se_observed_information",
+        "p2a-core::econometrics::spatial::tests::test_validate_sdm_impacts"
+      ],
+      "quantities": [
+        "rho",
+        "lambda",
+        "coefficients (SAR, SDM with lag.x, SEM, SAC)",
+        "sigma^2",
+        "logLik",
+        "AIC",
+        "BIC",
+        "SAR residuals",
+        "SAR and SDM direct, indirect and total impacts",
+        "SEM coefficient SE, z and p",
+        "observed-information coefficient, rho and lambda SEs (SAR, SDM, SAC; lambda for the SEM)"
+      ],
+      "tolerance": "validation/README.md, n = 80: rho/lambda, coefficients and impacts Tol::iterative(1e-6) (golden section; flatness bound 1.3e-7 in rho), statistics and SEs 1e-5 relative; SAR residuals 1e-6 absolute (flatness bound x max |de/drho| 2.24); SAC by coordinate descent: Tol::iterative(1e-5) at tol 1e-10, 1e-4 at the default",
+      "deviations": [
+        {
+          "finding": "SPAT-4",
+          "quantity": "SAR, SDM and SAC coefficient SEs, z and p; rho and lambda SE, z and p",
+          "note": "p2a uses the observed information at the MLE (analytic for SAR, SDM and the SEM (lambda, s2) block; the SAC by central differences of the analytic gradient); spatialreg's method 'eigen' reports the expected information (sar_se), which differs at finite n; SEM beta SEs keep errorsarlm's block-diagonal form"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_logdet",
+      "name": "log|I - rho W| over the complex eigenvalues of W; feasible rho interval; traces of (I - rho W)^-1 and W (I - rho W)^-1",
+      "category": "econometrics",
+      "reference": "spatialreg method 'eigen': Re(sum(log(1 - rho * eigen(W)$values))), eig.range = 1 / range(Re(eig)); base::determinant cross-check",
+      "doc": "validation/spatial/weights.md",
+      "cases": [
+        "spatial_sar_sdm_sem"
+      ],
+      "tests": [
+        "p2a-core::spatial::weights::tests::test_validate_logdet_complex_eigenvalues"
+      ],
+      "quantities": [
+        "log-determinant at rho = -0.8, 0.5, 0.9",
+        "number of complex eigenvalues (|Im| > 1e-4)",
+        "rho interval",
+        "tr((I - 0.5 W)^-1)",
+        "tr(W (I - 0.5 W)^-1)"
+      ],
+      "tolerance": "validation/README.md, n = 80: 1e-5 relative (statistics), rho interval 1e-6, count exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_weights",
+      "name": "Spatial weight styles W, B, C, U, minmax and S; k-nearest-neighbour ties",
+      "category": "econometrics",
+      "reference": "spdep::nb2listw(style, zero.policy = TRUE) and spdep::knearneigh(x, k, use_kd_tree = FALSE), written out in base R (spdep not installed)",
+      "doc": "validation/spatial/weights.md",
+      "cases": [
+        "spatial_weights_moran"
+      ],
+      "tests": [
+        "p2a-core::spatial::weights::tests::test_validate_weight_styles",
+        "p2a-core::spatial::neighbors::tests::test_validate_knn_ties_match_knearneigh_without_kd_tree"
+      ],
+      "quantities": [
+        "row-1 weights",
+        "weight sums",
+        "row sums",
+        "Moran's I under each style",
+        "minmax on an asymmetric list",
+        "C, S and U sums with islands",
+        "island ids",
+        "neighbour sets on a tied integer grid"
+      ],
+      "tolerance": "validation/README.md, n = 80: weights 1e-6, Moran's I 1e-5 relative; counts and neighbour ids exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_moran",
+      "name": "Moran's I (randomisation variance) and Geary's C with its Cliff-Ord randomisation variance, with islands (adjust.n)",
+      "category": "econometrics",
+      "reference": "spdep::moran.test(randomisation = TRUE, alternative = 'greater' | 'two.sided', zero.policy = TRUE, adjust.n = TRUE) and spdep::geary(), written out in base R (spdep not installed); Geary's variance is the written-out Cliff-Ord formula, checked against an exact permutation variance",
+      "doc": "validation/spatial/moran.md",
+      "cases": [
+        "spatial_weights_moran"
+      ],
+      "tests": [
+        "p2a-core::spatial::diagnostics::tests::test_validate_moran_islands"
+      ],
+      "quantities": [
+        "I",
+        "E[I]",
+        "randomisation variance",
+        "z",
+        "p (greater, two-sided)",
+        "Geary's C",
+        "Geary's randomisation variance, z and p",
+        "number of islands"
+      ],
+      "tolerance": "validation/README.md, n = 80: statistics 1e-5 relative, p-values 1e-5 relative / 1e-12 absolute",
+      "deviations": [
+        {
+          "finding": "SPAT-28",
+          "quantity": "degenerate inputs",
+          "note": "p2a refuses S0 = 0, constant x, fewer than 4 units with neighbours and a non-positive variance where spdep returns NaN"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
