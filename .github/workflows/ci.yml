@@ -20,9 +20,10 @@ env:
 
 # This workflow runs on the free GitHub-hosted Ubuntu runner. The heavier
 # checks (release builds, the `database` feature that pulls in duckdb-sys,
-# the `cuda` feature, and the p2a-dioxus desktop target with WebKit/GTK) are
-# deliberately excluded here — they run on the self-hosted Spark runner or
-# during local validation. Keep this file boring and minutes-cheap.
+# the `db` feature of p2a-mcp, the `cuda` feature, and the p2a-dioxus desktop
+# target with WebKit/GTK) are deliberately excluded here — they run on the
+# self-hosted Spark runner or during local validation. Keep this file boring
+# and minutes-cheap.
 
 jobs:
   fmt:
@@ -72,27 +73,51 @@ jobs:
       - name: Install system dependencies
         # `libopenblas-dev` for the matrix backend, `libfontconfig1-dev` for
         # the `visualization` feature (plotters → yeslogic-fontconfig-sys).
-        # `p2a-cli` and `p2a-mcp` pull `p2a-core/full`, which includes
-        # `visualization`, so fontconfig is required even when `p2a-core`
-        # itself is built with the slimmer `ci` feature alias.
+        # `p2a-cli` and `p2a-mcp` enable p2a-core's `visualization` feature,
+        # so fontconfig is required for them as for `p2a-core --features ci`.
         run: |
           sudo apt-get update
           sudo apt-get install -y libopenblas-dev libfontconfig1-dev
 
+      - name: Keep duckdb-sys out of the CI feature sets
+        # p2a-mcp and p2a-cli reach p2a-core's `database` feature (and the
+        # ~1.5 GB libduckdb-sys build) only through their own `database`
+        # feature, which the CI feature sets leave off. `cargo tree -i` fails
+        # with "did not match any packages" when libduckdb-sys is not in a
+        # package's tree; any other outcome fails this step.
+        run: |
+          for spec in "p2a-core --no-default-features --features ci" \
+                      "p2a-mcp --no-default-features --features http,llm,auth,websocket" \
+                      "p2a-cli --no-default-features --features spectral-analysis"; do
+            # $spec is split into arguments on purpose.
+            if out=$(cargo tree --locked -p $spec -i libduckdb-sys 2>&1); then
+              echo "::error::libduckdb-sys is in the dependency tree of: $spec"
+              echo "$out"
+              exit 1
+            fi
+            case "$out" in
+              *"did not match any packages"*) echo "ok: $spec" ;;
+              *) echo "::error::cargo tree failed for: $spec"; echo "$out"; exit 1 ;;
+            esac
+          done
+
       - name: Run tests (cheap subset)
         # `p2a-core` uses the `ci` feature alias (full minus database) to avoid
-        # the ~1.5 GB libduckdb-sys compile. `p2a-mcp` drops the SurrealDB-
-        # backed `db` feature but keeps `websocket`: it adds only
+        # the ~1.5 GB libduckdb-sys compile. `p2a-mcp` and `p2a-cli` depend on
+        # p2a-core without `database` and pass it through with their own
+        # `database` feature, which these commands leave off (the step above
+        # checks it), so the SQL tool tests run locally. `p2a-mcp` drops the
+        # SurrealDB-backed `db` feature but keeps `websocket`: it adds only
         # tokio-tungstenite and tungstenite to a build made anyway (axum's
         # `ws` is always on), and without it the websocket transport's
         # tests, the `/ws` routing test and the limits-hold test over a
         # websocket session never compile. A separate step with its own
         # feature set would build p2a-mcp and its test binaries a second
-        # time. `p2a-cli` runs with its own `database` feature off so feature
-        # unification doesn't pull duckdb-sys back in. `p2a-chat` has no test
-        # surface and no p2a-core dependency, so it's not invoked here.
-        # `p2a-dioxus` is not compiled here — its WebKit/GTK deps dominate
-        # compile time and it's tested locally.
+        # time. `p2a-text` (dependency-free text helpers) and `p2a-chat` (the
+        # terminal client, no p2a-core dependency) run their own tests.
+        # `p2a-dioxus` is not compiled here — its
+        # WebKit/GTK deps dominate compile time and its web target is checked
+        # in its own job.
         #
         # --tests runs unit + integration tests only; doctests are gated
         # separately in the step below so a failing example is distinguishable
@@ -109,6 +134,8 @@ jobs:
           cargo test -p p2a-core --tests --no-default-features --features ci
           cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"
           cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis
+          cargo test -p p2a-text
+          cargo test -p p2a-chat --lib
         env:
           RUST_TEST_THREADS: 4
 
@@ -204,6 +231,7 @@ jobs:
           cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
           cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
           cargo clippy -p p2a-chat
+          cargo clippy -p p2a-text
           cargo clippy -p p2a-validation --all-targets
 
   dioxus-check:

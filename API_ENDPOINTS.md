@@ -31,12 +31,14 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 | POST | `/api/conversations` | `db` | with the session database | body `session_id` |
 | GET | `/api/conversations` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/conversations/{id}` | `db` | with the session database | `X-P2A-Session-Id` |
+| GET | `/api/conversations/{id}/full` | `db` | with the session database; answers as `GET /api/conversations/{id}` | `X-P2A-Session-Id` |
 | PUT | `/api/conversations/{id}` | `db` | with the session database | `X-P2A-Session-Id` |
 | DELETE | `/api/conversations/{id}` | `db` | with the session database | `X-P2A-Session-Id` |
 | POST | `/api/conversations/{id}/archive` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/conversations/{id}/messages` | `db` | with the session database | `X-P2A-Session-Id` |
 | POST | `/api/conversations/{id}/messages` | `db` | with the session database | `X-P2A-Session-Id` |
 | DELETE | `/api/conversations/{id}/messages` | `db` | with the session database | `X-P2A-Session-Id` |
+| POST | `/api/conversations/{id}/messages/clear` | `db` | with the session database; answers as `DELETE /api/conversations/{id}/messages` | `X-P2A-Session-Id` |
 | GET | `/api/conversations/{id}/tool-calls` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/messages/{id}/tool-calls` | `db` | with the session database | `X-P2A-Session-Id` |
 | GET | `/api/sessions/{session_id}/settings` | `db` | with the session database | path id |
@@ -49,6 +51,8 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 - The `db` routes exist when the server is built with the `db` feature and its session database opens. The database is in memory unless `P2A_DB_PATH` names a directory.
 - With `P2A_ACCESS_TOKEN` set, every route except `/health` and CORS preflight needs `Authorization: Bearer <token>`.
 - A route that is not registered in the server's mode answers 404 with an empty body (`GET /api/sessions` answers 405 there, because `POST /api/sessions` exists).
+- With the session database, a stored session within its TTL (a RocksDB server after a restart) is taken back by every route that takes a session id and by the websocket `auth` message; when the session table is full the HTTP routes answer 503 `capacity`.
+- The tools a server has depend on its build: without the `database` feature (CI's `--no-default-features --features http,llm,auth,websocket`) the seven `db_*` tools are missing; the default build, `full` and `embedded` have them.
 
 ---
 
@@ -190,6 +194,8 @@ The reload runs as one governed call (memory admission, the session's slot, the 
 GET /api/tools
 ```
 
+One entry per tool of this build, sorted by name (abridged here: one entry, two of its properties, descriptions shortened). Every input schema has `"additionalProperties": false`: an argument the tool does not take is refused.
+
 **Response:**
 ```json
 {
@@ -197,24 +203,17 @@ GET /api/tools
   "data": [
     {
       "name": "load_dataset",
-      "description": "Load a dataset from a file path (CSV, Excel, etc.)",
+      "description": "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. ...",
       "input_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "properties": {
-          "session_id": { "type": "string", "description": "Session ID" },
-          "path": { "type": "string", "description": "File path" },
-          "name": { "type": "string", "description": "Dataset name" }
+          "path": {"type": "string", "description": "Path of the data file, relative to the server's data directory ..."},
+          "name": {"type": ["string", "null"], "description": "Optional name to identify this dataset. ..."}
         },
-        "required": ["session_id", "path"]
+        "required": ["path"],
+        "additionalProperties": false
       }
-    },
-    {
-      "name": "describe_dataset",
-      "description": "Get summary statistics for a dataset",
-      "input_schema": { ... }
     }
-    // ... 268 more tools
   ]
 }
 ```
@@ -224,7 +223,7 @@ GET /api/tools
 POST /api/tools/{tool_name}
 ```
 
-**Request:**
+**Request** (`POST /api/tools/load_dataset`):
 ```json
 {
   "session_id": "51963a14-…",
@@ -248,6 +247,12 @@ A tool that runs and fails still answers HTTP 200, with `data.success: false` (c
 
 ```json
 {"success":true,"data":{"success":false,"content":[{"type":"text","text":"Failed to load dataset: File not found: missing.csv"}],"error":"Failed to load dataset: File not found: missing.csv"}}
+```
+
+An argument the tool does not take is refused before the tool runs: 400 `invalid_arguments`, with serde's message naming the field and listing the accepted ones (abridged):
+
+```json
+{"success":false,"error":"Failed to parse arguments for 'regression_ols': unknown field `robust_type`, expected one of `dataset`, `y`, `x`, ...","code":"invalid_arguments"}
 ```
 
 The same holds for limits a tool checks while it runs (file size, export size, join output, table cells), and for the free-form DuckDB tools in the hosted profile: while `sql_freeform` is false (the hosted default; `P2A_LIMIT_OVERRIDES=sql_freeform=true` re-enables them), `db_duckdb_query` and `db_query_file` answer with a tool error whose text is "free-form SQL is not available on the public demo; load the file with load_dataset instead". `db_sqlite_query` and the table and schema tools are not affected.
@@ -290,30 +295,35 @@ POST /api/llm/chat
     "max_tokens": 2000
   },
   "interpret": true,
-  "conversation_id": "conv_abc123",
+  "conversation_id": "e104f3c9-…",
   "retrieve_history": true
 }
 ```
 
-**Response:**
+- `interpret` (default `true`): after a round of tool calls the model is called again with the results, until it answers without calling a tool; the answer is the model's final message. With `false` the loop stops after the first round and answers that round's calls and results without calling the model again. Tools run in both modes.
+- `history` is sent before `message` and takes precedence over the stored history. A message that carries both `tool_calls` and `tool_results` (the answer with `interpret: false`) can be sent back as it is; each result reaches the model right after its call.
+- `conversation_id` (servers with the `db` feature): the conversation must belong to `session_id`, otherwise the answer is 404 `not_found` "Conversation not found", before anything is stored or sent to the provider. With an empty `history` and `retrieve_history: true` (the default) the conversation's stored messages are the history. The reply is stored in the conversation as an assistant message, with its tool calls. The user's `message` is not stored (post it with `POST /api/conversations/{id}/messages`). The streaming route does the same.
+- `max_tool_iterations`: model calls per request (default 25), clamped to `llm_max_tool_iterations` (25 hosted, 50 otherwise).
+
+**Response** with `interpret: true`: the model's final message; the tools that ran are reported only by the stream route's events.
+```json
+{"success":true,"data":{"message":{"role":"assistant","content":"The correlation between price and demand is -0.62 ..."}}}
+```
+
+**Response** with `interpret: false`: the first round's calls and their results. Tool-call ids are `call_<request>_<n>`: `<request>` is 12 hex digits drawn for each chat request and `<n>` counts its calls from 1, so ids do not repeat within a conversation.
 ```json
 {
   "success": true,
   "data": {
     "message": {
       "role": "assistant",
-      "content": "I'll analyze the correlation...",
+      "content": "**regression_ols**:\nOLS Regression Results ...",
       "tool_calls": [
-        {
-          "id": "call_001",
-          "name": "regression_ols",
-          "arguments": {
-            "dataset": "sales_data",
-            "y_col": "demand",
-            "x_cols": ["price"],
-            "intercept": true
-          }
-        }
+        {"id": "call_4f9a1c2e7b3d_1", "name": "regression_ols",
+         "arguments": {"dataset": "sales_data", "y": "demand", "x": ["price"]}}
+      ],
+      "tool_results": [
+        {"tool_call_id": "call_4f9a1c2e7b3d_1", "content": "OLS Regression Results ...", "is_error": false}
       ]
     }
   }
@@ -325,7 +335,7 @@ POST /api/llm/chat
 POST /api/llm/chat/stream
 ```
 
-**Request:** (same as non-streaming)
+**Request:** the fields of the non-streaming route, with the same meaning.
 ```json
 {
   "session_id": "abc123",
@@ -356,7 +366,7 @@ An unknown or expired `session_id` does not change the HTTP status: the response
   "type": "tool_start",
   "tool": "load_dataset",
   "arguments": {
-    "path": "/data/sales.csv",
+    "path": "sales.csv",
     "name": "sales_data"
   }
 }
@@ -402,28 +412,10 @@ An unknown or expired `session_id` does not change the HTTP status: the response
 
 #### Event 6: Done (final message)
 ```json
-{
-  "type": "done",
-  "message": {
-    "role": "assistant",
-    "content": "Based on the analysis, the correlation is 0.87...",
-    "tool_calls": [
-      {
-        "id": "call_001",
-        "name": "regression_ols",
-        "arguments": {...}
-      }
-    ],
-    "tool_results": [
-      {
-        "tool_call_id": "call_001",
-        "content": "Regression results...",
-        "is_error": false
-      }
-    ]
-  }
-}
+{"type": "done", "message": {"role": "assistant", "content": "Based on the analysis, the correlation is 0.87..."}}
 ```
+
+With `interpret: true` the message is the model's final answer, as in the non-streaming response; with `interpret: false` it carries `tool_calls` and `tool_results` as shown there.
 
 #### Event 7: Error
 ```json
@@ -612,55 +604,19 @@ GET /api/conversations/{conversation_id}
 GET /api/conversations/{conversation_id}/full
 ```
 
-Not implemented by the server in this version.
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "conversation": {
-      "id": "conv_001",
-      "session_id": "abc123",
-      "title": "Sales Analysis",
-      ...
-    },
-    "messages": [
-      {
-        "id": "msg_001",
-        "conversation_id": "conv_001",
-        "role": "user",
-        "content": "Load sales data",
-        "created_at": "2026-03-07T10:00:00Z",
-        "token_count": 5,
-        "model": "gpt-4o-mini"
-      },
-      {
-        "id": "msg_002",
-        "conversation_id": "conv_001",
-        "role": "assistant",
-        "content": "I'll load the sales data...",
-        "created_at": "2026-03-07T10:01:00Z",
-        "token_count": 42,
-        "model": "gpt-4o-mini"
-      }
-    ]
-  }
-}
-```
+Answers exactly as `GET /api/conversations/{conversation_id}` (an alias kept for older clients).
 
 ### Update Conversation
 ```
 PUT /api/conversations/{conversation_id}
 ```
 
-**Request:**
+**Request:** `title`, `is_archived` or both:
 ```json
-{
-  "title": "Updated Title",
-  "is_archived": false
-}
+{"title": "Updated Title", "is_archived": true}
 ```
+
+Applies `title`, then `is_archived`, and answers the updated conversation, in the shape of the archive response below. An empty body answers 400 `invalid_arguments` ("send `title`, `is_archived` or both"); any other field answers 422 with the plain-text message "Failed to deserialize the JSON body into the target type: unknown field `archived`, expected `title` or `is_archived` ...".
 
 ### Archive Conversation
 ```
@@ -717,21 +673,11 @@ DELETE /api/conversations/{conversation_id}/messages
 POST /api/conversations/{conversation_id}/messages/clear
 ```
 
-Not implemented by the server in this version.
-
-**Request:** (empty body)
-```json
-{}
-```
+Answers exactly as `DELETE /api/conversations/{conversation_id}/messages`, an alias kept for older clients.
 
 **Response:**
 ```json
-{
-  "success": true,
-  "data": {
-    "deleted_count": 10
-  }
-}
+{"success":true,"data":{"deleted_count":10}}
 ```
 
 ### Get Tool Calls of a Conversation
@@ -884,17 +830,17 @@ While every slot is held by work past its deadline, `/health` answers 503 with `
 ### Message (History Item)
 ```typescript
 interface Message {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
-  tool_calls?: ToolCall[];      // For assistant messages
-  tool_results?: ToolResult[];   // For tool role messages
+  tool_calls?: ToolCall[];       // assistant messages
+  tool_results?: ToolResult[];   // tool messages, or an assistant message after its own tool_calls (interpret: false)
 }
 ```
 
 ### ToolCall
 ```typescript
 interface ToolCall {
-  id: string;                    // Unique call ID
+  id: string;                    // call_<request>_<n> for calls the server ran
   name: string;                  // Tool name (e.g., "regression_ols")
   arguments: Record<string, any>; // Tool arguments
 }
@@ -930,10 +876,10 @@ interface LlmChatRequest {
   message: string;               // User message
   provider?: ProviderConfig;     // LLM provider (uses env defaults if not provided)
   history?: Message[];           // Conversation history
-  interpret: boolean;            // Whether to auto-execute tools (default: true)
-  conversation_id?: string;      // For persistent conversations (optional)
-  retrieve_history: boolean;     // Auto-retrieve history from DB (default: true)
-  max_tool_iterations?: number;  // Tool-loop rounds (default 25), clamped to the server's
+  interpret: boolean;            // true (default): call the model again with the tool results; false: return the first round's calls and results
+  conversation_id?: string;      // db builds: the session's conversation; its history is used and the reply stored
+  retrieve_history: boolean;     // with conversation_id and an empty history: use the stored messages (default true)
+  max_tool_iterations?: number;  // Model calls per request (default 25), clamped to the server's
                                  // llm_max_tool_iterations (25 hosted, 50 otherwise)
 }
 ```
@@ -965,7 +911,7 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 400 | `unknown_tool` | no tool has this name |
 | 400 | `invalid_arguments` | malformed tool arguments (the parser's message, which quotes the offending value, is cut to its first 160 and last 96 bytes when it is longer than 256), `user_id`, message role, or a missing or conflicting session id on the conversation routes |
 | 401 | none | a token is configured and the request has none or a wrong one: plain-text body `missing or invalid bearer token` and `WWW-Authenticate: Bearer` |
-| 404 | `not_found` | missing, or not owned by the caller's session. A route not registered in this mode answers 404 with an empty body; a session that is unknown when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 404 `"Session not found"` without a `code` (the stream route reports these as an SSE `error` event); a session that goes while `/api/llm/chat` runs answers with a code (`session_not_found`, `session_expired`) |
+| 404 | `not_found` | missing, or not owned by the caller's session, including a `conversation_id` the session does not own on `/api/llm/chat`. A route not registered in this mode answers 404 with an empty body; a session that is unknown when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 404 `"Session not found"` without a `code` (the stream route reports these as an SSE `error` event); a session that goes while `/api/llm/chat` runs answers with a code (`session_not_found`, `session_expired`) |
 | 404 | `session_not_found` | the session of a running chat (`/api/llm/chat`) or of an authenticated websocket was deleted or evicted (the websocket sends it as the `code` of an `error` message) |
 | 410 | `session_expired` | the session expired (session and conversation routes); a session that has expired when a request on `POST /api/tools/{name}` or `/api/llm/chat` starts answers 410 `"Session expired"` without a `code` (the stream route reports these as an SSE `error` event); a session that expires while `/api/llm/chat` runs answers 410 with `code` `session_expired`, and an authenticated websocket's `error` carries the same code |
 | 413 | `payload_too_large` | a message, title or settings string above `message_bytes`. A request body above `P2A_MAX_HTTP_BODY_MB` answers 413 with the plain-text body `length limit exceeded` and no `code`; one sent without a `Content-Length` is cut off at the cap and answers 413 with the plain-text body `Failed to buffer the request body: length limit exceeded`. In the hosted profile a JSON body may be at most 2 MiB (or the cap, when that is lower); a longer one within the cap answers 413 with that second body |
@@ -978,6 +924,8 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 503 | `capacity` | the session table is full: `Retry-After: 60` |
 | 504 | `deadline_exceeded` | the tool call ran past the server's time limit; `details {limit_secs}` |
 | 500 | `internal` | the tool panicked or the server failed; the session survives |
+
+A request body that does not deserialize into the route's request type answers 422 (400 for malformed JSON) with axum's plain-text message and no `code`.
 
 The non-streaming `/api/llm/chat` also answers 400 for a refused provider configuration (host not allowed, missing key), 502 when the provider returned an error and 504 when it did not answer in time, without a `code`.
 
@@ -1004,14 +952,12 @@ content-type: application/json
 
 ## Data Loading via Tools
 
-Datasets are loaded using the `load_dataset` tool (not a direct HTTP endpoint):
+Datasets are loaded with the `load_dataset` tool, called as any tool (**Request**, `POST /api/tools/load_dataset`):
 
-**Tool: load_dataset**
 ```json
 {
-  "session_id": "abc123",
-  "path": "data.csv",
-  "name": "my_data"
+  "session_id": "51963a14-…",
+  "arguments": {"path": "data.csv", "name": "my_data"}
 }
 ```
 
@@ -1021,20 +967,21 @@ Missing values: `na_strings` (optional) lists the strings read as missing in a C
 
 ```json
 {
-  "session_id": "abc123",
-  "path": "survey.csv",
-  "name": "survey",
-  "na_strings": ["NA", "", "."]
+  "session_id": "51963a14-…",
+  "arguments": {"path": "survey.csv", "name": "survey", "na_strings": ["NA", "", "."]}
 }
 ```
 
-Supported formats:
+Supported formats, by extension:
 - CSV (`.csv`)
-- Excel (`.xlsx`, `.xls`)
-- Parquet (`.parquet`)
-- JSON Lines (`.jsonl`)
+- Parquet (`.parquet`, `.pq`)
+- Excel and OpenDocument spreadsheets (`.xlsx`, `.xls`, `.xlsb`, `.ods`)
 - Stata (`.dta`)
 - SAS (`.sas7bdat`)
+- JSON Lines (`.jsonl`, `.ndjson`): one flat JSON object per line
+- JSON records (`.json`): one array of flat JSON objects, the layout `export_dataset` writes
+
+`upload_dataset` (base64 `content` and a `filename`) reads CSV and Parquet only.
 
 After loading, datasets are stored in the session and can be referenced by name in subsequent tool calls.
 
@@ -1086,8 +1033,8 @@ The paper's evaluation harness drives a loopback server without a token, which r
 5. **Extract results**: From `tool_end.result` or final message content
 
 ### Key Points for Scripting
-- **Conversation ID** is optional but enables history persistence
-- **`retrieve_history: true`** (default) automatically loads prior turns from database
+- With the `db` feature, `conversation_id` makes both chat routes use the stored history (when `history` is empty and `retrieve_history` is true) and store the reply and its tool calls; the client stores the user's message (`POST /api/conversations/{id}/messages`).
+- Tool-call ids are `call_<request>_<n>`; an `interpret: false` answer can be replayed as history as it is.
 - **Tool calls** in assistant message are paired with tool results via matching `tool_call_id`
 - **`is_error: false`** field is required in `ToolResult` for OpenAI compatibility
 - **SSE stream ends** after `done` or `error` event

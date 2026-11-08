@@ -67,11 +67,15 @@ pub fn conversation_routes(state: ConversationState, mode: DeploymentMode) -> Ro
         .route("/conversations/{id}", get(get_conversation))
         .route("/conversations/{id}", put(update_conversation))
         .route("/conversations/{id}", delete(delete_conversation))
+        // Alias kept for older clients: answers as GET /conversations/{id}.
+        .route("/conversations/{id}/full", get(get_conversation))
         .route("/conversations/{id}/archive", post(archive_conversation))
         // Messages
         .route("/conversations/{id}/messages", get(get_messages))
         .route("/conversations/{id}/messages", post(add_message))
         .route("/conversations/{id}/messages", delete(clear_messages))
+        // Alias kept for older clients: answers as DELETE /conversations/{id}/messages.
+        .route("/conversations/{id}/messages/clear", post(clear_messages))
         // Tool calls
         .route(
             "/conversations/{id}/tool-calls",
@@ -370,9 +374,15 @@ pub struct CreateConversationRequest {
     pub title: String,
 }
 
+/// `PUT /conversations/{id}`: any of the two fields, at least one; an unknown field is refused
+/// (422), so a misspelled one is never a silent no-op.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateConversationRequest {
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub is_archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -475,7 +485,8 @@ async fn get_conversation(
     respond(StatusCode::OK, result)
 }
 
-/// Update a conversation's title.
+/// Update a conversation's title and/or archive state, in that order; answers the updated
+/// conversation.
 async fn update_conversation(
     State(state): State<ConversationState>,
     CallerSession(caller): CallerSession,
@@ -486,11 +497,26 @@ async fn update_conversation(
     if let Err(e) = pm.authorize_conversation(&caller, &id).await {
         return error_response(e);
     }
-    let result = pm
-        .update_conversation_title(&id, &request.title)
-        .await
-        .map(ConversationResponse::from);
-    respond(StatusCode::OK, result)
+    let result: Result<Option<Conversation>, PersistentSessionError> = async {
+        let mut updated = None;
+        if let Some(title) = request.title.as_deref() {
+            updated = Some(pm.update_conversation_title(&id, title).await?);
+        }
+        if let Some(archived) = request.is_archived {
+            updated = Some(pm.set_conversation_archived(&id, archived).await?);
+        }
+        Ok(updated)
+    }
+    .await;
+    match result {
+        Ok(Some(conv)) => ok(StatusCode::OK, ConversationResponse::from(conv)),
+        Ok(None) => error_with(
+            StatusCode::BAD_REQUEST,
+            "send `title`, `is_archived` or both",
+            "invalid_arguments",
+        ),
+        Err(e) => error_response(e),
+    }
 }
 
 /// Delete a conversation.

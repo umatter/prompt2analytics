@@ -160,6 +160,9 @@ struct WsState {
     server: Arc<AnalyticsServer>,
     session_manager: Arc<SessionManager>,
     governor: Arc<ToolGovernor>,
+    /// With persistence, `Auth` adopts a stored session.
+    #[cfg(feature = "db")]
+    persistent: Option<Arc<crate::persistent_session::PersistentSessionManager>>,
 }
 
 impl WsState {
@@ -173,11 +176,42 @@ impl WsState {
             server,
             session_manager,
             governor,
+            #[cfg(feature = "db")]
+            persistent: None,
         }
+    }
+
+    /// The session `Auth` names, or the text it is refused with. With persistence a stored
+    /// session still within its TTL is adopted, as on the HTTP routes.
+    async fn session_for_auth(&self, id: &str) -> Result<Arc<Session>, String> {
+        #[cfg(feature = "db")]
+        if let Some(pm) = &self.persistent {
+            use crate::persistent_session::PersistentSessionError;
+            return pm.get_session(id).await.map_err(|e| match e {
+                PersistentSessionError::Session(e) => auth_refusal(e),
+                other => {
+                    tracing::warn!(session_id = %id, error = %other, "Session lookup failed");
+                    "internal error".to_string()
+                }
+            });
+        }
+        self.session_manager
+            .get_session(id)
+            .await
+            .map_err(auth_refusal)
     }
 
     fn is_authenticated(&self) -> bool {
         self.session.is_some()
+    }
+}
+
+/// The text an `Auth` answer gives for a session it could not find.
+fn auth_refusal(error: SessionError) -> String {
+    match error {
+        SessionError::NotFound => "Session not found".to_string(),
+        SessionError::Expired => "Session expired".to_string(),
+        e => e.to_string(),
     }
 }
 
@@ -199,14 +233,13 @@ pub async fn ws_handler(
         .max_frame_size(cap)
         .on_upgrade(move |socket| async move {
             let _hold = hold;
-            handle_socket(
-                socket,
-                state.server,
-                state.session_manager,
-                state.governor,
-                cap,
-            )
-            .await
+            let ws_state = WsState::new(state.server, state.session_manager, state.governor);
+            #[cfg(feature = "db")]
+            let ws_state = WsState {
+                persistent: state.persistent_manager,
+                ..ws_state
+            };
+            handle_socket(socket, ws_state, cap).await
         })
 }
 
@@ -224,13 +257,7 @@ const CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// Handle a WebSocket connection; messages waiting behind the one being
 /// handled may take up to `waiting_bytes` in total.
-async fn handle_socket(
-    socket: WebSocket,
-    server: Arc<AnalyticsServer>,
-    session_manager: Arc<SessionManager>,
-    governor: Arc<ToolGovernor>,
-    waiting_bytes: usize,
-) {
+async fn handle_socket(socket: WebSocket, mut ws_state: WsState, waiting_bytes: usize) {
     let (mut sender, mut receiver) = socket.split();
 
     // Create a channel for sending messages
@@ -250,7 +277,6 @@ async fn handle_socket(
         let _ = sender.close().await;
     });
 
-    let mut ws_state = WsState::new(server, session_manager, governor);
     let mut waiting = Waiting::new(waiting_bytes);
     loop {
         let text = match waiting.pop() {
@@ -448,41 +474,22 @@ async fn handle_client_message(
 ) -> Result<(), String> {
     match msg {
         ClientMessage::Auth { session_id } => {
-            match state.session_manager.get_session(&session_id).await {
+            let answer = match state.session_for_auth(&session_id).await {
                 Ok(session) => {
                     state.session = Some(session);
-                    tx.send(ServerMessage::AuthResult {
+                    ServerMessage::AuthResult {
                         success: true,
                         error: None,
-                    })
-                    .await
-                    .map_err(|_| "Channel closed".to_string())?;
+                    }
                 }
-                Err(SessionError::NotFound) => {
-                    tx.send(ServerMessage::AuthResult {
-                        success: false,
-                        error: Some("Session not found".to_string()),
-                    })
-                    .await
-                    .map_err(|_| "Channel closed".to_string())?;
-                }
-                Err(SessionError::Expired) => {
-                    tx.send(ServerMessage::AuthResult {
-                        success: false,
-                        error: Some("Session expired".to_string()),
-                    })
-                    .await
-                    .map_err(|_| "Channel closed".to_string())?;
-                }
-                Err(e) => {
-                    tx.send(ServerMessage::AuthResult {
-                        success: false,
-                        error: Some(e.to_string()),
-                    })
-                    .await
-                    .map_err(|_| "Channel closed".to_string())?;
-                }
-            }
+                Err(error) => ServerMessage::AuthResult {
+                    success: false,
+                    error: Some(error),
+                },
+            };
+            tx.send(answer)
+                .await
+                .map_err(|_| "Channel closed".to_string())?;
         }
 
         ClientMessage::Tool { id, name, args } => {
@@ -674,6 +681,58 @@ mod tests {
         };
         let json = serde_json::to_string(&without).unwrap();
         assert!(!json.contains("\"code\""), "{json}");
+    }
+
+    /// A stored session within its TTL (a server after a restart) is adopted by `Auth`, and a
+    /// server without persistence still answers from the registry alone.
+    #[cfg(feature = "db")]
+    #[tokio::test]
+    async fn auth_adopts_a_stored_session() {
+        use crate::config::SessionConfig;
+        use crate::exec::ExecConfig;
+        use crate::persistent_session::PersistentSessionManager;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
+        let pm = PersistentSessionManager::new(None, sessions.clone(), Default::default())
+            .await
+            .unwrap();
+        let stored = uuid::Uuid::new_v4().to_string();
+        pm.db()
+            .upsert_session(&crate::db::DbSession::new(stored.clone(), None))
+            .await
+            .unwrap();
+        let server = Arc::new(AnalyticsServer::new());
+        let (tx, mut rx) = mpsc::channel(8);
+        let auth = ClientMessage::Auth {
+            session_id: stored.clone(),
+        };
+
+        let mut registry_only = WsState::new(server.clone(), sessions.clone(), governor.clone());
+        handle_client_message(&mut registry_only, auth, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: false, .. })
+        ));
+
+        let mut state = WsState::new(server, sessions.clone(), governor);
+        state.persistent = Some(Arc::new(pm));
+        let auth = ClientMessage::Auth {
+            session_id: stored.clone(),
+        };
+        handle_client_message(&mut state, auth, &tx).await.unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        assert!(state.is_authenticated());
+        assert!(sessions.get_session(&stored).await.is_ok());
     }
 
     #[tokio::test]

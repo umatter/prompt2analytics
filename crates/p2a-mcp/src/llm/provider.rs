@@ -233,6 +233,24 @@ pub struct Message {
 }
 
 impl Message {
+    /// The tool results an assistant message carries for its own tool calls, in the results' order
+    /// (`/api/llm/chat` with `interpret: false` returns the calls and their results on one message).
+    /// A result whose `tool_call_id` names none of the message's calls is left out: no provider
+    /// accepts a result without its call. Empty for every other message.
+    pub fn attached_tool_results(&self) -> Vec<&ToolResult> {
+        if self.role != MessageRole::Assistant {
+            return Vec::new();
+        }
+        let (Some(calls), Some(results)) = (&self.tool_calls, &self.tool_results) else {
+            return Vec::new();
+        };
+        let ids: std::collections::HashSet<&str> = calls.iter().map(|c| c.id.as_str()).collect();
+        results
+            .iter()
+            .filter(|r| ids.contains(r.tool_call_id.as_str()))
+            .collect()
+    }
+
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: MessageRole::System,
@@ -509,6 +527,41 @@ pub trait LlmProvider: Send + Sync {
         interpret: bool,
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError>;
+}
+
+#[cfg(test)]
+mod attached_tool_results_tests {
+    use super::*;
+
+    /// Duplicates and the results' order are kept, an orphan is dropped, and only an assistant
+    /// message has attached results: the output of a nested filter over calls and results.
+    #[test]
+    fn test_attached_tool_results_keeps_matching_results_in_order() {
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "t".into(),
+            arguments: serde_json::json!({}),
+        };
+        let result = |id: &str| ToolResult {
+            tool_call_id: id.into(),
+            content: "r".into(),
+            is_error: false,
+        };
+        let mut message = Message {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_calls: Some(vec![call("a"), call("b"), call("c")]),
+            tool_results: Some(["c", "x", "a", "b", "a"].map(result).to_vec()),
+        };
+        let ids: Vec<&str> = message
+            .attached_tool_results()
+            .iter()
+            .map(|r| r.tool_call_id.as_str())
+            .collect();
+        assert_eq!(ids, ["c", "a", "b", "a"]);
+        message.role = MessageRole::User;
+        assert!(message.attached_tool_results().is_empty());
+    }
 }
 
 #[cfg(test)]

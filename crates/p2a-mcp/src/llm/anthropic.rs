@@ -1,10 +1,13 @@
 //! Anthropic LLM provider implementation.
 //!
-//! Connects to Anthropic's Messages API for LLM inference with tool calling support.
+//! Connects to Anthropic's Messages API for LLM inference with tool calling support. This module
+//! is message conversion and transport; the tool-calling loop is [`super::tool_loop`].
 
 use super::LlmSettings;
-use super::context::push_tool_results_for_model;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
+use super::tool_loop::{
+    AssistantTurn, StreamSink, ToolLoopConfig, ToolLoopProvider, run_tool_loop,
+};
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
     ToolCall, ToolDefinition, ToolExecutor, ToolResult, build_http_client,
@@ -14,10 +17,19 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
 
 /// The name used in upstream error messages.
 const PROVIDER: &str = "Anthropic";
+
+/// One tool result as a `tool_result` content block.
+fn tool_result_block(tr: &ToolResult) -> AnthropicContentBlock {
+    AnthropicContentBlock::ToolResult {
+        tool_use_id: tr.tool_call_id.clone(),
+        content: tr.content.clone(),
+        is_error: tr.is_error.then_some(true),
+    }
+}
 
 /// Anthropic provider for LLM inference.
 pub struct AnthropicProvider {
@@ -88,14 +100,22 @@ impl AnthropicProvider {
     }
 
     /// Extract system message and convert remaining messages to Anthropic's format.
+    ///
+    /// Tool results attached to an assistant message follow it (LLM-17); a tool-role message
+    /// directly after it that repeats one is not sent twice.
     fn to_anthropic_messages(
         &self,
         messages: &[Message],
     ) -> (Option<String>, Vec<AnthropicMessage>) {
         let mut system_prompt = None;
         let mut result = Vec::new();
+        // The ids of the results sent right after the latest assistant message.
+        let mut sent: HashSet<&str> = HashSet::new();
 
         for msg in messages {
+            if msg.role != MessageRole::Tool {
+                sent.clear();
+            }
             match msg.role {
                 MessageRole::System => {
                     // Anthropic takes system as a separate parameter
@@ -138,23 +158,33 @@ impl AnthropicProvider {
                             content: AnthropicContent::Text(msg.content.clone()),
                         });
                     }
+
+                    let attached = msg.attached_tool_results();
+                    if !attached.is_empty() {
+                        sent.extend(attached.iter().map(|tr| tr.tool_call_id.as_str()));
+                        result.push(AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::Blocks(
+                                attached.into_iter().map(tool_result_block).collect(),
+                            ),
+                        });
+                    }
                 }
                 MessageRole::Tool => {
                     // Tool results go in a user message with tool_result content blocks
                     if let Some(ref tool_results) = msg.tool_results {
                         let content_blocks: Vec<AnthropicContentBlock> = tool_results
                             .iter()
-                            .map(|tr| AnthropicContentBlock::ToolResult {
-                                tool_use_id: tr.tool_call_id.clone(),
-                                content: tr.content.clone(),
-                                is_error: if tr.is_error { Some(true) } else { None },
-                            })
+                            .filter(|tr| !sent.contains(tr.tool_call_id.as_str()))
+                            .map(tool_result_block)
                             .collect();
 
-                        result.push(AnthropicMessage {
-                            role: "user".to_string(),
-                            content: AnthropicContent::Blocks(content_blocks),
-                        });
+                        if !content_blocks.is_empty() {
+                            result.push(AnthropicMessage {
+                                role: "user".to_string(),
+                                content: AnthropicContent::Blocks(content_blocks),
+                            });
+                        }
                     }
                 }
             }
@@ -175,157 +205,12 @@ impl AnthropicProvider {
             .collect()
     }
 
-    /// Execute the tool calling loop until the LLM produces a final response.
-    async fn execute_tool_loop(
-        &self,
-        messages: &mut Vec<Message>,
-        tools: &[ToolDefinition],
-        tool_executor: &dyn ToolExecutor,
-        max_iterations: usize,
-        interpret: bool,
-    ) -> Result<Message, LlmError> {
-        let mut iterations = 0;
-        let mut tool_call_history: Vec<u64> = Vec::new();
-        let mut tool_name_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut last_text_content = String::new();
-
-        loop {
-            iterations += 1;
-            if iterations > max_iterations {
-                tracing::warn!(
-                    "Maximum tool execution iterations ({}) exceeded, returning partial results",
-                    max_iterations
-                );
-                let fallback = if last_text_content.is_empty() {
-                    "Analysis reached the maximum number of tool calls. Here are the results gathered so far.".to_string()
-                } else {
-                    last_text_content
-                };
-                return Ok(Message {
-                    role: MessageRole::Assistant,
-                    content: fallback,
-                    tool_calls: None,
-                    tool_results: None,
-                });
-            }
-
-            // Make the API call
-            let response = self.call_api(messages, tools).await?;
-
-            // Track last text content for graceful degradation
-            if !response.content.is_empty() {
-                last_text_content = response.content.clone();
-            }
-
-            // Check if there are tool calls to execute
-            if let Some(ref tool_calls) = response.tool_calls {
-                if !tool_calls.is_empty() {
-                    // Loop detection: hash (tool_name, arguments) for each call
-                    let mut iteration_hash = std::hash::DefaultHasher::new();
-                    for tc in tool_calls {
-                        tc.name.hash(&mut iteration_hash);
-                        tc.arguments.to_string().hash(&mut iteration_hash);
-                    }
-                    let hash = Hasher::finish(&iteration_hash);
-
-                    // Check for exact repeat of previous iteration
-                    if tool_call_history.last() == Some(&hash) {
-                        tracing::warn!(
-                            "Loop detected: exact repeat of previous tool calls, breaking"
-                        );
-                        let fallback = if last_text_content.is_empty() {
-                            "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.".to_string()
-                        } else {
-                            last_text_content
-                        };
-                        return Ok(Message {
-                            role: MessageRole::Assistant,
-                            content: fallback,
-                            tool_calls: None,
-                            tool_results: None,
-                        });
-                    }
-                    tool_call_history.push(hash);
-
-                    // Check for same tool called too many times
-                    for tc in tool_calls {
-                        let count = tool_name_counts.entry(tc.name.clone()).or_insert(0);
-                        *count += 1;
-                        if *count > 3 {
-                            tracing::warn!(
-                                "Loop detected: tool '{}' called {} times, breaking",
-                                tc.name,
-                                count
-                            );
-                            let fallback = if last_text_content.is_empty() {
-                                format!(
-                                    "Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.",
-                                    tc.name
-                                )
-                            } else {
-                                last_text_content
-                            };
-                            return Ok(Message {
-                                role: MessageRole::Assistant,
-                                content: fallback,
-                                tool_calls: None,
-                                tool_results: None,
-                            });
-                        }
-                    }
-
-                    // Add the assistant message with tool calls
-                    messages.push(response.clone());
-
-                    // Execute each tool and collect results
-                    let mut tool_results = Vec::new();
-                    let mut tool_outputs = Vec::new();
-                    for tc in tool_calls {
-                        let result = tool_executor.execute(&tc.name, tc.arguments.clone()).await;
-                        let is_error = result.is_err();
-                        let content = result.unwrap_or_else(|e| format!("Error: {}", e));
-                        tool_outputs.push(format!("**{}**:\n{}", tc.name, content));
-                        tool_results.push(ToolResult {
-                            tool_call_id: tc.id.clone(),
-                            content,
-                            is_error,
-                        });
-                    }
-
-                    // Add tool results as a new message
-                    push_tool_results_for_model(messages, &tool_results, self.loop_tool_bytes);
-
-                    // If interpret is false, return raw tool output without calling LLM again
-                    if !interpret {
-                        tracing::info!(
-                            "interpret=false, returning raw tool output without LLM interpretation"
-                        );
-                        return Ok(Message {
-                            role: MessageRole::Assistant,
-                            content: tool_outputs.join("\n\n"),
-                            tool_calls: Some(tool_calls.clone()),
-                            tool_results: Some(tool_results),
-                        });
-                    }
-                    tracing::info!("interpret=true, continuing to LLM for interpretation");
-
-                    // Continue the loop to get the next response (interpretation)
-                    continue;
-                }
-            }
-
-            // No tool calls - this is the final response
-            return Ok(response);
-        }
-    }
-
     /// Make a single API call to Anthropic.
     async fn call_api(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<Message, LlmError> {
+    ) -> Result<AssistantTurn, LlmError> {
         let url = format!("{}/v1/messages", self.base_url());
         let api_key = self.api_key()?;
 
@@ -395,15 +280,9 @@ impl AnthropicProvider {
             }
         }
 
-        Ok(Message {
-            role: MessageRole::Assistant,
+        Ok(AssistantTurn {
             content: text_content,
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            tool_results: None,
+            tool_calls,
         })
     }
 
@@ -412,8 +291,8 @@ impl AnthropicProvider {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        callback: &(dyn Fn(StreamChunk) + Send + Sync),
-    ) -> Result<Message, LlmError> {
+        callback: &StreamSink,
+    ) -> Result<AssistantTurn, LlmError> {
         let url = format!("{}/v1/messages", self.base_url());
         let api_key = self.api_key()?;
 
@@ -526,175 +405,10 @@ impl AnthropicProvider {
             }
         }
 
-        Ok(Message {
-            role: MessageRole::Assistant,
+        Ok(AssistantTurn {
             content: text_content,
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            tool_results: None,
+            tool_calls,
         })
-    }
-
-    /// Execute the streaming tool calling loop.
-    async fn execute_tool_loop_stream(
-        &self,
-        messages: &mut Vec<Message>,
-        tools: &[ToolDefinition],
-        tool_executor: &dyn ToolExecutor,
-        max_iterations: usize,
-        interpret: bool,
-        callback: &(dyn Fn(StreamChunk) + Send + Sync),
-    ) -> Result<Message, LlmError> {
-        let mut iterations = 0;
-        let mut tool_call_history: Vec<u64> = Vec::new();
-        let mut tool_name_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut last_text_content = String::new();
-
-        loop {
-            iterations += 1;
-            if iterations > max_iterations {
-                tracing::warn!(
-                    "Maximum tool execution iterations ({}) exceeded, returning partial results",
-                    max_iterations
-                );
-                let fallback = if last_text_content.is_empty() {
-                    "Analysis reached the maximum number of tool calls. Here are the results gathered so far.".to_string()
-                } else {
-                    last_text_content
-                };
-                return Ok(Message {
-                    role: MessageRole::Assistant,
-                    content: fallback,
-                    tool_calls: None,
-                    tool_results: None,
-                });
-            }
-
-            // Make the streaming API call
-            let response = self.call_api_stream(messages, tools, callback).await?;
-
-            // Track last text content for graceful degradation
-            if !response.content.is_empty() {
-                last_text_content = response.content.clone();
-            }
-
-            // Check if there are tool calls to execute
-            if let Some(ref tool_calls) = response.tool_calls {
-                if !tool_calls.is_empty() {
-                    // Loop detection: hash (tool_name, arguments) for each call
-                    let mut iteration_hash = std::hash::DefaultHasher::new();
-                    for tc in tool_calls {
-                        tc.name.hash(&mut iteration_hash);
-                        tc.arguments.to_string().hash(&mut iteration_hash);
-                    }
-                    let hash = Hasher::finish(&iteration_hash);
-
-                    // Check for exact repeat of previous iteration
-                    if tool_call_history.last() == Some(&hash) {
-                        tracing::warn!(
-                            "Loop detected: exact repeat of previous tool calls, breaking"
-                        );
-                        let fallback = if last_text_content.is_empty() {
-                            "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.".to_string()
-                        } else {
-                            last_text_content
-                        };
-                        return Ok(Message {
-                            role: MessageRole::Assistant,
-                            content: fallback,
-                            tool_calls: None,
-                            tool_results: None,
-                        });
-                    }
-                    tool_call_history.push(hash);
-
-                    // Check for same tool called too many times
-                    for tc in tool_calls {
-                        let count = tool_name_counts.entry(tc.name.clone()).or_insert(0);
-                        *count += 1;
-                        if *count > 3 {
-                            tracing::warn!(
-                                "Loop detected: tool '{}' called {} times, breaking",
-                                tc.name,
-                                count
-                            );
-                            let fallback = if last_text_content.is_empty() {
-                                format!(
-                                    "Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.",
-                                    tc.name
-                                )
-                            } else {
-                                last_text_content
-                            };
-                            return Ok(Message {
-                                role: MessageRole::Assistant,
-                                content: fallback,
-                                tool_calls: None,
-                                tool_results: None,
-                            });
-                        }
-                    }
-
-                    // Add the assistant message with tool calls
-                    messages.push(response.clone());
-
-                    // Execute each tool and collect results
-                    let mut tool_results = Vec::new();
-                    let mut tool_outputs = Vec::new();
-                    for tc in tool_calls {
-                        // Notify about tool call
-                        callback(StreamChunk::ToolCall {
-                            tool_call: tc.clone(),
-                        });
-
-                        let result = tool_executor.execute(&tc.name, tc.arguments.clone()).await;
-                        let is_error = result.is_err();
-                        let content = result.unwrap_or_else(|e| format!("Error: {}", e));
-                        tool_outputs.push(format!("**{}**:\n{}", tc.name, content));
-
-                        let tool_result = ToolResult {
-                            tool_call_id: tc.id.clone(),
-                            content,
-                            is_error,
-                        };
-
-                        // Notify about tool result
-                        callback(StreamChunk::ToolResult {
-                            tool_result: tool_result.clone(),
-                        });
-
-                        tool_results.push(tool_result);
-                    }
-
-                    // Add tool results as a new message
-                    push_tool_results_for_model(messages, &tool_results, self.loop_tool_bytes);
-
-                    // If interpret is false, return raw tool output without calling LLM again
-                    if !interpret {
-                        tracing::info!(
-                            "interpret=false, returning raw tool output without LLM interpretation"
-                        );
-                        return Ok(Message {
-                            role: MessageRole::Assistant,
-                            content: tool_outputs.join("\n\n"),
-                            tool_calls: Some(tool_calls.clone()),
-                            tool_results: Some(tool_results),
-                        });
-                    }
-                    tracing::info!("interpret=true, continuing to LLM for interpretation");
-
-                    // Continue the loop to get the next response (interpretation)
-                    continue;
-                }
-            }
-
-            // No tool calls - this is the final response
-            return Ok(response);
-        }
     }
 }
 
@@ -729,20 +443,13 @@ impl LlmProvider for AnthropicProvider {
         tool_executor: &dyn ToolExecutor,
         interpret: bool,
     ) -> Result<Message, LlmError> {
-        let mut conversation = messages.to_vec();
-        let max_iterations = super::provider::effective_max_tool_iterations(
-            None,
-            self.config.max_tool_iterations,
+        let config = ToolLoopConfig::for_provider(
+            &self.config,
             self.max_iterations_cap,
-        );
-        self.execute_tool_loop(
-            &mut conversation,
-            tools,
-            tool_executor,
-            max_iterations,
+            self.loop_tool_bytes,
             interpret,
-        )
-        .await
+        );
+        run_tool_loop(self, messages, tools, tool_executor, &config, None).await
     }
 
     async fn chat_stream(
@@ -753,21 +460,44 @@ impl LlmProvider for AnthropicProvider {
         interpret: bool,
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError> {
-        let mut conversation = messages.to_vec();
-        let max_iterations = super::provider::effective_max_tool_iterations(
-            None,
-            self.config.max_tool_iterations,
+        let config = ToolLoopConfig::for_provider(
+            &self.config,
             self.max_iterations_cap,
+            self.loop_tool_bytes,
+            interpret,
         );
-        self.execute_tool_loop_stream(
-            &mut conversation,
+        run_tool_loop(
+            self,
+            messages,
             tools,
             tool_executor,
-            max_iterations,
-            interpret,
-            callback.as_ref(),
+            &config,
+            Some(callback.as_ref()),
         )
         .await
+    }
+}
+
+#[async_trait]
+impl ToolLoopProvider for AnthropicProvider {
+    fn convert(&self, messages: &[Message]) -> Result<Value, LlmError> {
+        let (system, wire_messages) = self.to_anthropic_messages(messages);
+        let mut wire = serde_json::Map::new();
+        wire.insert("system".into(), serde_json::to_value(system)?);
+        wire.insert("messages".into(), serde_json::to_value(wire_messages)?);
+        Ok(Value::Object(wire))
+    }
+
+    async fn call(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        stream: Option<&StreamSink>,
+    ) -> Result<AssistantTurn, LlmError> {
+        match stream {
+            Some(sink) => self.call_api_stream(messages, tools, sink).await,
+            None => self.call_api(messages, tools).await,
+        }
     }
 }
 
@@ -901,6 +631,78 @@ enum AnthropicStreamDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The message /api/llm/chat returns with interpret=false (calls and results on one assistant
+    /// message), replayed as history between two user turns.
+    fn replayed() -> Vec<Message> {
+        let call = ToolCall {
+            id: "call_r1_1".into(),
+            name: "list_datasets".into(),
+            arguments: serde_json::json!({}),
+        };
+        let result = ToolResult {
+            tool_call_id: "call_r1_1".into(),
+            content: "No datasets".into(),
+            is_error: false,
+        };
+        vec![
+            Message::system("sys"),
+            Message::user("list"),
+            Message {
+                role: MessageRole::Assistant,
+                content: "**list_datasets**:\nNo datasets".into(),
+                tool_calls: Some(vec![call]),
+                tool_results: Some(vec![result]),
+            },
+            Message::user("next"),
+        ]
+    }
+
+    /// LLM-17: the attached results follow their calls as one user message of tool_result blocks.
+    /// Hand-derived from the serde attributes of AnthropicContent / AnthropicContentBlock.
+    #[test]
+    fn assistant_tool_results_follow_their_calls() {
+        let p = AnthropicProvider::new(ProviderConfig::default());
+        let (system, sent) = p.to_anthropic_messages(&replayed());
+        assert_eq!(system, Some("sys".to_string()));
+        assert_eq!(
+            serde_json::to_value(sent).unwrap(),
+            serde_json::json!([
+                {"role": "user", "content": "list"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "**list_datasets**:\nNo datasets"},
+                    {"type": "tool_use", "id": "call_r1_1", "name": "list_datasets", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_r1_1", "content": "No datasets"}]},
+                {"role": "user", "content": "next"}
+            ])
+        );
+    }
+
+    /// A tool-role message right after the assistant message that repeats an attached result is not
+    /// sent twice; a result naming none of the message's calls is not sent (no provider accepts it).
+    #[test]
+    fn tool_results_are_sent_once_and_only_for_their_calls() {
+        let p = AnthropicProvider::new(ProviderConfig::default());
+        let mut h = replayed();
+        let again = h[2].tool_results.clone().unwrap();
+        h.insert(3, Message::tool_result(again));
+        let once = serde_json::to_value(p.to_anthropic_messages(&replayed()).1).unwrap();
+        assert_eq!(
+            serde_json::to_value(p.to_anthropic_messages(&h).1).unwrap(),
+            once
+        );
+        let mut orphan = replayed();
+        orphan[2].tool_results.as_mut().unwrap()[0].tool_call_id = "someone_else".into();
+        let sent = serde_json::to_value(p.to_anthropic_messages(&orphan).1).unwrap();
+        let roles: Vec<&str> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+    }
 
     #[test]
     fn test_provider_type() {

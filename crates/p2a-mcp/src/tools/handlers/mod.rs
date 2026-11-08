@@ -11,18 +11,19 @@
 //! ```ignore
 //! let tool_router = Self::tool_router()  // main router
 //!     + Self::utils_router()
-//!     + Self::database_router()
 //!     + Self::viz_router()
 //!     + Self::data_router()
 //!     + Self::ml_router()
 //!     // ... other category routers
 //!     ;
+//! #[cfg(feature = "database")]
+//! let tool_router = tool_router + Self::database_router();
 //! ```
 //!
 //! # Migration Status
 //!
 //! - `utils`: Migrated (seed management, reports, session export/import)
-//! - `database`: Migrated (SQLite, DuckDB queries)
+//! - `database`: Migrated (SQLite, DuckDB queries; feature `database`)
 //! - `viz`: Migrated (visualization tools)
 //! - `data`: Migrated (data loading, export, inspection, cleaning)
 //! - `ml`: Migrated (clustering, dimensionality reduction, supervised learning, causal ML)
@@ -38,6 +39,7 @@
 pub mod causal;
 pub mod cleaning;
 pub mod data;
+#[cfg(feature = "database")]
 pub mod database;
 pub mod discrete;
 pub mod hypothesis;

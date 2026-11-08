@@ -193,8 +193,11 @@ The `ci` alias is `full` minus `database`: the `database` feature pulls in `duck
 ~1.5 GB of native objects and dominates build time, so CI and quick local iterations drop it.
 `forecasting` and `visualization` gate whole modules (`#[cfg(feature = ...)]` in `lib.rs`), so code that
 touches them must be feature-gated too. `p2a-cli` re-exports `database` and `spectral-analysis` (both on by
-default); `p2a-mcp` defaults to no features and needs `--features full` (or `embedded`) for the HTTP/LLM/DB
-server; `p2a-dioxus` has no default and is selected per platform (`web`, `desktop`, `mobile`) by `dx`.
+default); `p2a-mcp` depends on p2a-core without `database` and passes it through with its own `database`
+feature (on by default and in `full` and `embedded`), which compiles the seven SQL tools; its other features
+are off by default, so the HTTP/LLM/conversation server needs `--features full` (or `embedded`), and CI's
+`--no-default-features --features "http,llm,auth,websocket"` builds neither duckdb-sys nor the SQL tools;
+`p2a-dioxus` has no default and is selected per platform (`web`, `desktop`, `mobile`) by `dx`.
 
 ```bash
 cargo build -p p2a-core --all-features                  # everything incl. cuda (needs CUDA toolkit)
@@ -617,7 +620,9 @@ crates/p2a-mcp/src/
 │                          #   HTTP: datasets, seed, cleaning sessions, spatial weights, profiler; byte
 │                          #   accounting for the session-data quotas (charged by exec.rs)
 ├── persistent_session.rs  # SurrealDB-backed conversations over that registry (feature `db`)
-├── llm/                   # Provider abstraction: anthropic.rs, openai.rs, ollama.rs; tools.rs holds the
+├── llm/                   # tool_loop.rs: the one tool-calling loop (iteration cap, loop detection,
+│                          #   interpret, call_<request>_<n> ids); anthropic.rs, openai.rs, ollama.rs
+│                          #   implement only message conversion and transport; tools.rs holds the
 │                          #   *curated* LLM-facing tool subset, context.rs/tokens.rs manage the budget;
 │                          #   egress.rs: host allowlist, resolve-check-pin resolver, no redirects
 ├── transport/             # http.rs (shared types, build_app, bind/serve, /health), middleware.rs (CORS,
@@ -711,7 +716,6 @@ These are composed in `server.rs`:
 ```rust
 let tool_router = Self::tool_router()
     + Self::utils_router()
-    + Self::database_router()
     + Self::data_router()
     + Self::viz_router()
     + Self::ml_router()
@@ -727,6 +731,8 @@ let tool_router = Self::tool_router()
     + Self::survival_router()
     + Self::cleaning_router()
     + Self::search_router();
+#[cfg(feature = "database")]
+let tool_router = tool_router + Self::database_router();
 ```
 
 `search_router` (`handlers/search.rs`) is a meta-layer, not an analytics category: it exposes
@@ -993,7 +999,8 @@ Auto-discovered guidance:
 `.github/workflows/ci.yml` runs on the free GitHub runner and is kept cheap on purpose:
 
 - **Gating**: `cargo fmt --all -- --check`; `cargo test --tests` for p2a-core (`ci` feature), p2a-mcp
-  (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`); doctests for p2a-core (`ci`) and p2a-mcp
+  (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`); `cargo test -p p2a-text` and `cargo test -p p2a-chat --lib`; a step that fails when a CI
+  feature set reaches libduckdb-sys; doctests for p2a-core (`ci`) and p2a-mcp
   (`http,llm,auth,websocket`) in their own step; then the validation step: `cargo test -p p2a-validation`
   (includes the NA guard, `tests/na_guard.rs`),
   the strict validation lint (`validation_status.py lint --strict` on the three `--list` outputs), the Python
@@ -1022,12 +1029,15 @@ Auto-discovered guidance:
   process policies differ from those of a server still running in the process (held until its last connection or
   websocket session closes), so a test serves a configuration whose resource profile is off, with no overrides and
   the default policies, or runs in a binary whose servers share one config (`crates/p2a-mcp/tests/serve_limits.rs`).
-- **Clippy runs but does not gate** (with the test step's feature sets, plus `p2a-chat`; lib and bin targets
+- **Clippy runs but does not gate** (with the test step's feature sets, plus `p2a-chat` and `p2a-text`; lib and bin targets
   only, no `--tests`): p2a-core has a pre-existing backlog of clippy violations, and `Cargo.toml`
   `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...). Do
   not "fix" the allow-list to make a build green; do keep new code warning-free.
-- **Excluded from CI**: release builds, the `database` feature (duckdb-sys), the `db` feature of p2a-mcp
-  (SurrealDB), `cuda`, the Dioxus desktop target (WebKit/GTK), and `p2a-chat` tests (it has no test surface).
+- **Excluded from CI**: release builds; the `database` feature (duckdb-sys: p2a-mcp and p2a-cli pass it through
+  from their own `database` feature, which CI leaves off, and a CI step fails if a CI feature set reaches
+  libduckdb-sys), so the SQL tool handler tests run locally with `cargo test -p p2a-mcp --no-default-features
+  --features "http,llm,auth,database" --lib -- tools::handlers::database`; the `db` feature of p2a-mcp
+  (SurrealDB); `cuda`; and the Dioxus desktop target (WebKit/GTK).
   These are exercised locally or on the self-hosted runner. A weekly `audit.yml` runs `cargo audit`; its RUSTSEC
   exemptions live as flags in that file (not `.cargo/audit.toml`, which is gitignored and would never reach CI).
 - **Ignored tests are benchmarks.** `tests/benchmark_ml_rust.rs`, every test in

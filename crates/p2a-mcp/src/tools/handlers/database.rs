@@ -1,6 +1,10 @@
 //! Database tool handlers (SQLite, DuckDB queries).
 //!
 //! This module defines database tools using the `#[tool_router(router = database_router)]` pattern.
+//!
+//! Compiled with the `database` feature (on by default and in `full`/`embedded`); its tests run with
+//! it: `cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,database" --lib --
+//! tools::handlers::database`.
 
 use rmcp::{
     ErrorData as McpError,

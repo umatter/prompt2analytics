@@ -11,6 +11,12 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+/// The body of `DELETE /api/conversations/{id}/messages`.
+#[derive(Deserialize)]
+struct DeletedCount {
+    deleted_count: u32,
+}
+
 /// The header the backend reads the caller's session id from on
 /// conversation, message and tool-call routes.
 const SESSION_HEADER: &str = "X-P2A-Session-Id";
@@ -230,6 +236,21 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Perform a DELETE request with extra headers and parse its JSON body
+    async fn delete_json_with<T>(
+        &self,
+        endpoint: &str,
+        headers: &HashMap<String, String>,
+    ) -> Result<ApiResponse<T>, String>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let response = self
+            .send("DELETE", endpoint, None, &header_pairs(headers))
+            .await?;
+        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
+    }
+
     // === Session endpoints ===
 
     /// Create a new session; it becomes the current session whose id the
@@ -395,9 +416,20 @@ impl ApiClient {
         }
     }
 
-    /// Get a conversation by ID
+    /// Get a conversation by ID (the server answers it with its messages; only the conversation is
+    /// kept)
     pub async fn get_conversation(&self, conversation_id: &str) -> Result<Conversation, String> {
-        let response: ApiResponse<Conversation> = self
+        self.get_conversation_with_messages(conversation_id)
+            .await
+            .map(|c| c.conversation)
+    }
+
+    /// Get a conversation with all messages
+    pub async fn get_conversation_with_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<ConversationWithMessages, String> {
+        let response: ApiResponse<ConversationWithMessages> = self
             .get_with(
                 &format!("/api/conversations/{conversation_id}"),
                 &session_headers(None),
@@ -415,30 +447,8 @@ impl ApiClient {
         }
     }
 
-    /// Get a conversation with all messages
-    pub async fn get_conversation_with_messages(
-        &self,
-        conversation_id: &str,
-    ) -> Result<ConversationWithMessages, String> {
-        let response: ApiResponse<ConversationWithMessages> = self
-            .get_with(
-                &format!("/api/conversations/{conversation_id}/full"),
-                &session_headers(None),
-            )
-            .await?;
-
-        if response.success {
-            response
-                .data
-                .ok_or_else(|| "No conversation in response".to_string())
-        } else {
-            Err(response
-                .error
-                .unwrap_or_else(|| "Unknown error".to_string()))
-        }
-    }
-
-    /// Update a conversation's title
+    /// Update a conversation's title and/or archive state (`PUT`; the server applies the fields that
+    /// are set)
     pub async fn update_conversation(
         &self,
         conversation_id: &str,
@@ -534,15 +544,9 @@ impl ApiClient {
 
     /// Clear all messages in a conversation
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, String> {
-        #[derive(Deserialize)]
-        struct ClearResponse {
-            deleted_count: u32,
-        }
-
-        let response: ApiResponse<ClearResponse> = self
-            .post_with(
-                &format!("/api/conversations/{conversation_id}/messages/clear"),
-                &serde_json::json!({}),
+        let response: ApiResponse<DeletedCount> = self
+            .delete_json_with(
+                &format!("/api/conversations/{conversation_id}/messages"),
                 &session_headers(None),
             )
             .await?;
@@ -775,6 +779,21 @@ pub fn install_backend_csp() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server's conversation body (captured, API_ENDPOINTS.md "Get Conversation") and its clear
+    /// body parse into the types get_conversation_with_messages and clear_messages read.
+    #[test]
+    fn server_conversation_bodies_parse() {
+        let got: ApiResponse<ConversationWithMessages> = serde_json::from_str(r#"{"success":true,"data":{"conversation":{"id":"e104f3c9","session_id":"51963a14","title":"Sales analysis","created_at":"2026-10-22T18:50:10.649869292+00:00","updated_at":"2026-10-22T18:50:10.673463679+00:00","is_archived":false,"message_count":1,"last_message_preview":"Regress price on sqft"},"messages":[{"id":"4ea7256f","conversation_id":"e104f3c9","role":"user","content":"Regress price on sqft","created_at":"2026-10-22T18:50:10.672294916+00:00"}]}}"#).unwrap();
+        let data = got.data.unwrap();
+        assert_eq!(
+            (data.conversation.id.as_str(), data.messages.len()),
+            ("e104f3c9", 1)
+        );
+        let cleared: ApiResponse<DeletedCount> =
+            serde_json::from_str(r#"{"success":true,"data":{"deleted_count":1}}"#).unwrap();
+        assert_eq!(cleared.data.unwrap().deleted_count, 1);
+    }
 
     #[test]
     fn auth_header_is_attached_only_with_a_token() {
