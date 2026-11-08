@@ -103,7 +103,8 @@ looks like a validation failure but is not one.
   quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
   survival, mlogit, urca, glmnet, cluster, dbscan, dfidx, dynamicTreeCut, EValue, lpSolve,
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
-  gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects.
+  gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
+  flexmix, apcluster, e1071.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -113,7 +114,8 @@ looks like a validation failure but is not one.
                      "EValue", "lpSolve", "MatchIt", "optmatch", "rlemon", "rpart",
                      "sensemakr", "vars", "WeightIt", "quadprog", "medflex", "ltmle",
                      "fect", "gsynth", "tmle", "gmm", "bacondecomp", "did", "DRDID",
-                     "CBPS", "etwfe", "marginaleffects"))
+                     "CBPS", "etwfe", "marginaleffects", "mclust", "mixtools", "flexmix",
+                     "apcluster", "e1071"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -397,6 +399,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | HDBSCAN (dbscan::hdbscan) | [hdbscan.md](ml/hdbscan.md) | R-pinned, known deviations (ML-49) |
 | OPTICS (dbscan::optics, extractDBSCAN, extractXi) | [optics.md](ml/optics.md) | R-pinned |
 | Silhouette (cluster::silhouette) | [silhouette.md](ml/silhouette.md) | R-pinned |
+| Gaussian mixtures (mclust::Mclust VVV, EEE, VVI, VII) | [gmm.md](ml/gmm.md) | R-pinned |
+| Mixture EMs (mixtools::normalmixEM, mvnormalmixEM; flexmix::flexmix) | [mixtures.md](ml/mixtures.md) | R-pinned |
+| Affinity propagation (apcluster::apcluster) | [affinity_propagation.md](ml/affinity_propagation.md) | R-pinned |
+| PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 
 ### Statistical Methods

@@ -1,11 +1,15 @@
 //! Spectral clustering on an RBF or k-nearest-neighbour affinity graph ([`spectral_clustering`]).
 
+use crate::options::Choices;
+use crate::resource::{checkpoint, try_zeros2};
 use ndarray::{Array2, ArrayView2, Axis};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 
-use super::common::compute_distance_matrix;
+use super::common::try_distance_matrix;
+
+/// Seed of the k-means step when `seed` is `None`.
+pub const SPECTRAL_DEFAULT_SEED: u64 = 42;
 
 // =============================================================================
 // Spectral Clustering
@@ -75,16 +79,32 @@ pub enum AffinityType {
     Precomputed,
 }
 
+/// The affinity names `AffinityType` parses (its payloads get their defaults).
+#[derive(Clone, Copy, PartialEq)]
+enum AffinityKind {
+    Rbf,
+    Knn,
+    Precomputed,
+}
+
+static AFFINITY_CHOICES: Choices<AffinityKind> = Choices {
+    option: "affinity type",
+    values: &[
+        (&["rbf", "gaussian"], AffinityKind::Rbf),
+        (&["knn", "nearest_neighbors"], AffinityKind::Knn),
+        (&["precomputed"], AffinityKind::Precomputed),
+    ],
+};
+
 impl std::str::FromStr for AffinityType {
-    type Err = String;
+    type Err = crate::errors::EconError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "rbf" => Ok(AffinityType::Rbf { gamma: 1.0 }),
-            "knn" => Ok(AffinityType::Knn { k: 10 }),
-            "precomputed" => Ok(AffinityType::Precomputed),
-            _ => Err(format!("Unknown affinity type: {}", s)),
-        }
+        Ok(match AFFINITY_CHOICES.parse(s)? {
+            AffinityKind::Rbf => AffinityType::Rbf { gamma: 1.0 },
+            AffinityKind::Knn => AffinityType::Knn { k: 10 },
+            AffinityKind::Precomputed => AffinityType::Precomputed,
+        })
     }
 }
 
@@ -97,7 +117,7 @@ impl std::str::FromStr for AffinityType {
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_clusters` - Number of clusters
 /// * `affinity` - Affinity matrix type (default: RBF with auto gamma)
-/// * `seed` - Optional random seed for k-means step
+/// * `seed` - Seed of the k-means step (default: [`SPECTRAL_DEFAULT_SEED`])
 ///
 /// # Algorithm
 ///
@@ -129,6 +149,17 @@ pub fn spectral_clustering(
         ));
     }
 
+    crate::ml::extract::require_finite(&data, "spectral clustering")?;
+    match affinity {
+        Some(AffinityType::Rbf { gamma }) if !gamma.is_finite() || gamma <= 0.0 => {
+            return Err(format!("gamma must be finite and positive, got {gamma}"));
+        }
+        Some(AffinityType::Knn { k: 0 }) => {
+            return Err("knn affinity: k must be at least 1, got 0".to_string());
+        }
+        _ => {}
+    }
+
     // Default affinity: RBF with auto gamma
     let affinity_type = affinity.unwrap_or_else(|| {
         // Auto-compute gamma as 1 / (n_features * variance)
@@ -145,8 +176,8 @@ pub fn spectral_clustering(
 
     // Build affinity matrix
     let affinity_matrix = match affinity_type {
-        AffinityType::Rbf { gamma } => build_rbf_affinity(&data, gamma),
-        AffinityType::Knn { k } => build_knn_affinity(&data, k),
+        AffinityType::Rbf { gamma } => build_rbf_affinity(&data, gamma)?,
+        AffinityType::Knn { k } => build_knn_affinity(&data, k)?,
         AffinityType::Precomputed => {
             // Assume data IS the affinity matrix
             if data.nrows() != data.ncols() {
@@ -160,7 +191,11 @@ pub fn spectral_clustering(
     let (eigenvalues, eigenvectors) = compute_laplacian_eigenvectors(&affinity_matrix, n_clusters)?;
 
     // Cluster the eigenvector embeddings with k-means
-    let labels = cluster_eigenvectors(&eigenvectors, n_clusters, seed)?;
+    let labels = cluster_eigenvectors(
+        &eigenvectors,
+        n_clusters,
+        Some(seed.unwrap_or(SPECTRAL_DEFAULT_SEED)),
+    )?;
 
     Ok(SpectralClusteringResult {
         labels,
@@ -173,9 +208,10 @@ pub fn spectral_clustering(
 }
 
 /// Build RBF affinity matrix.
-fn build_rbf_affinity(data: &ArrayView2<f64>, gamma: f64) -> Array2<f64> {
+fn build_rbf_affinity(data: &ArrayView2<f64>, gamma: f64) -> Result<Array2<f64>, String> {
     let n = data.nrows();
-    let mut affinity = Array2::zeros((n, n));
+    let mut affinity =
+        try_zeros2(n, n, "spectral clustering affinity").map_err(|e| e.to_string())?;
 
     for i in 0..n {
         for j in i..n {
@@ -193,18 +229,19 @@ fn build_rbf_affinity(data: &ArrayView2<f64>, gamma: f64) -> Array2<f64> {
         }
     }
 
-    affinity
+    Ok(affinity)
 }
 
 /// Build k-nearest neighbors affinity matrix.
-fn build_knn_affinity(data: &ArrayView2<f64>, k: usize) -> Array2<f64> {
+fn build_knn_affinity(data: &ArrayView2<f64>, k: usize) -> Result<Array2<f64>, String> {
     let n = data.nrows();
     let k = k.min(n - 1);
 
     // Compute all pairwise distances
-    let distances = compute_distance_matrix(data);
+    let distances = try_distance_matrix(data, "spectral clustering distances")?;
 
-    let mut affinity = Array2::zeros((n, n));
+    let mut affinity =
+        try_zeros2(n, n, "spectral clustering affinity").map_err(|e| e.to_string())?;
 
     // For each point, find its k nearest neighbors
     for i in 0..n {
@@ -212,7 +249,7 @@ fn build_knn_affinity(data: &ArrayView2<f64>, k: usize) -> Array2<f64> {
             .filter(|&j| i != j)
             .map(|j| (distances[[i, j]], j))
             .collect();
-        dist_idx.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        dist_idx.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         for (dist, j) in dist_idx.into_iter().take(k) {
             // Use Gaussian kernel for edge weights
@@ -223,7 +260,7 @@ fn build_knn_affinity(data: &ArrayView2<f64>, k: usize) -> Array2<f64> {
         }
     }
 
-    affinity
+    Ok(affinity)
 }
 
 /// Compute normalized Laplacian eigenvectors using power iteration.
@@ -247,7 +284,8 @@ fn compute_laplacian_eigenvectors(
     // to find the largest eigenvectors of D^(-1) * A
 
     // For simplicity, use the symmetric normalized affinity
-    let mut normalized = Array2::zeros((n, n));
+    let mut normalized =
+        try_zeros2(n, n, "spectral clustering Laplacian").map_err(|e| e.to_string())?;
     for i in 0..n {
         for j in 0..n {
             normalized[[i, j]] = d_inv_sqrt[i] * affinity[[i, j]] * d_inv_sqrt[j];
@@ -260,6 +298,7 @@ fn compute_laplacian_eigenvectors(
     let mut rng = StdRng::seed_from_u64(42);
 
     for eig_idx in 0..k {
+        checkpoint().map_err(|e| e.to_string())?;
         // Initialize random vector
         let mut v: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() - 0.5).collect();
 
@@ -279,6 +318,7 @@ fn compute_laplacian_eigenvectors(
 
         // Power iteration
         for _ in 0..100 {
+            checkpoint().map_err(|e| e.to_string())?;
             // Matrix-vector multiplication
             let mut v_new = vec![0.0; n];
             for i in 0..n {
@@ -381,6 +421,35 @@ mod tests {
     use super::*;
 
     use ndarray::array;
+
+    #[test]
+    fn test_spectral_rejects_bad_parameters_and_default_seed_is_fixed() {
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| {
+            (i % 2) as f64 * 5.0 + 0.1 * ((i * 3 + j) as f64).sin()
+        });
+        let e = |a| spectral_clustering(x.view(), 2, Some(a), None).unwrap_err();
+        assert!(e(AffinityType::Rbf { gamma: 0.0 }).contains("gamma"));
+        assert!(e(AffinityType::Knn { k: 0 }).contains("k must"));
+        let mut nan = x.clone();
+        nan[[1, 1]] = f64::NAN;
+        assert!(
+            spectral_clustering(nan.view(), 2, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        let a = spectral_clustering(x.view(), 2, None, None).unwrap();
+        let b = spectral_clustering(x.view(), 2, None, Some(SPECTRAL_DEFAULT_SEED)).unwrap();
+        assert_eq!(a.labels, b.labels);
+        assert!("RBF".parse::<AffinityType>().is_ok());
+        assert!(
+            "cosine"
+                .parse::<AffinityType>()
+                .unwrap_err()
+                .to_string()
+                .contains("expected one of: rbf, knn, precomputed")
+        );
+        AFFINITY_CHOICES.validate().unwrap();
+    }
 
     #[test]
     fn test_spectral_clustering_basic() {

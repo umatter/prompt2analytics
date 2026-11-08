@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_gmm",
+      "name": "Gaussian mixtures (Full, Tied, Diagonal, Spherical as VVV, EEE, VVI, VII)",
+      "category": "ml",
+      "reference": "mclust::Mclust(G = 3, modelNames = VVV, EEE, VVI, VII); tight fixed points of mclust::mstep/estep",
+      "doc": "validation/ml/gmm.md",
+      "cases": [
+        "gmm_mclust_3d"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_vvv",
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_eee",
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_vvi_vii",
+        "p2a-core::ml::advanced_clustering_mod::gmm::tests::test_validate_gmm_mclust_fixed_point"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "df",
+        "BIC",
+        "proportions",
+        "means",
+        "covariances",
+        "classification"
+      ],
+      "tolerance": "EM_PARAM 1e-5 relative, EM_LOGLIK 1e-12 relative (tight fixed points), FIXED_POINT 1e-10 relative from the tight values; df and classification exact. Differences from mclust in the doc: k-means start, relative_change stopping rule (iteration counts not pinned), relative ridge and a warning for a singular covariance where mclust reports NA.",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_mixtools",
+      "name": "Normal and multivariate normal mixture EM",
+      "category": "ml",
+      "reference": "mixtools::normalmixEM, mixtools::mvnormalmixEM",
+      "doc": "validation/ml/mixtures.md",
+      "cases": [
+        "mixtools_em"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_uni",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_uni_start",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_uni_fixed_point",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_mv",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_mv_start"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "lambda",
+        "mu",
+        "sigma"
+      ],
+      "tolerance": "EM_PARAM 1e-5 relative, EM_LOGLIK 1e-12 relative (tight fixed points), FIXED_POINT 1e-10 relative from the tight values. Standard EM against normalmixEM's previous-mu sigma update: same fixed point, noted in the doc.",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_flexmix",
+      "name": "Gaussian regression mixtures with minprior",
+      "category": "ml",
+      "reference": "flexmix::flexmix(FLXMRglm(family = \"gaussian\")); a written-out FLXfit in the case",
+      "doc": "validation/ml/mixtures.md",
+      "cases": [
+        "flexmix_minprior"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_flexmix_minprior",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_flexmix_keep"
+      ],
+      "quantities": [
+        "k",
+        "k0",
+        "log-likelihood",
+        "df",
+        "AIC",
+        "BIC",
+        "prior",
+        "coefficients",
+        "sigma",
+        "cluster"
+      ],
+      "tolerance": "prune 1e-9 relative, keep 1e-7 relative (a borderline stop); log-likelihood 1e-12 and 1e-11; integers exact. Iteration counts and the iteration of a removal are not R-pinned. Exact-fit component: floor and warning where R stops with NaN; the random start uses p2a's RNG, the pins pass the case's start column.",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_affinity_propagation",
+      "name": "Affinity propagation",
+      "category": "ml",
+      "reference": "apcluster::apcluster(negDistMat(r = 2), q = 0.5, nonoise = TRUE)",
+      "doc": "validation/ml/affinity_propagation.md",
+      "cases": [
+        "apcluster_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::affinity::tests::test_validate_apcluster_lam9",
+        "p2a-core::ml::advanced_clustering_mod::affinity::tests::test_validate_apcluster_lam9_defaults"
+      ],
+      "quantities": [
+        "exemplars",
+        "exemplar of each point",
+        "n_clusters",
+        "net similarity",
+        "converged",
+        "preference"
+      ],
+      "tolerance": "integers exact; net similarity and preference 1e-12 relative. Iteration counts and non-converged states are not R-pinned. No noise added (nonoise = TRUE); no exemplars is an error where apcluster returns an empty result; defaults 0.5/200/15 against apcluster's 0.9/1000/100, which would cost at least 100 iterations per run. lam5 is recorded, not pinned: apcluster oscillates to maxits, and one ulp of the preference makes the same iteration converge.",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pam_clara",
+      "name": "PAM and CLARA",
+      "category": "ml",
+      "reference": "cluster::pam, cluster::clara(samples = 1, sampsize = n, pamLike = TRUE)",
+      "doc": "validation/ml/partitioning.md",
+      "cases": [
+        "pam_clara_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::kmedoids::tests::test_validate_pam_blobs",
+        "p2a-core::ml::advanced_clustering_mod::kmedoids::tests::test_validate_clara_full_sample_is_pam"
+      ],
+      "quantities": [
+        "medoids",
+        "medoid of each point",
+        "total dissimilarity",
+        "silhouette widths",
+        "average silhouette",
+        "CLARA objective"
+      ],
+      "tolerance": "integers exact; totals and silhouettes 1e-12 (arithmetic at fixed medoids). Pinned on the case's row order: first-improvement SWAP, on permuted rows 30 % / 44 % of permutations stop elsewhere for k = 2 / 4, so CLARA is pinned at k = 3 only.",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_fuzzy_partitioning",
+      "name": "Fuzzy c-means (hard partition) and FANNY (recorded)",
+      "category": "ml",
+      "reference": "e1071::cmeans, cluster::fanny",
+      "doc": "validation/ml/partitioning.md",
+      "cases": [
+        "fuzzy_reference_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_blobs_labels"
+      ],
+      "quantities": [
+        "c-means hard partition"
+      ],
+      "tolerance": "exact",
+      "deviations": [
+        {
+          "finding": "ML-9",
+          "quantity": "c-means centres, memberships, withinerror",
+          "note": "2/(m-1) applied to squared distances; recorded in the case for the fix"
+        },
+        {
+          "finding": "ML-11",
+          "quantity": "FANNY memberships, coefficients, objective, clustering",
+          "note": "not the Kaufman-Rousseeuw iteration; recorded in the case for the fix"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

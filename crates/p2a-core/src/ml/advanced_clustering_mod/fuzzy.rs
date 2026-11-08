@@ -1,11 +1,16 @@
 //! Fuzzy clustering: fuzzy c-means ([`fuzzy_cmeans`]; R `e1071::cmeans`) and FANNY ([`fanny`]; R `cluster::fanny`).
 
+use crate::options::Choices;
+use crate::resource::checkpoint;
+use crate::traits::convergence::relative_change;
 use ndarray::{Array2, ArrayView2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 
-use super::common::compute_distance_matrix;
+use super::common::try_distance_matrix;
+
+/// Seed of the random memberships when `seed` is `None`.
+pub const FUZZY_DEFAULT_SEED: u64 = 42;
 
 // =============================================================================
 // Fuzzy C-Means Clustering
@@ -92,22 +97,22 @@ pub enum FcmDistance {
     Manhattan,
 }
 
-impl std::str::FromStr for FcmDistance {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "euclidean" | "euclid" => Ok(FcmDistance::Euclidean),
-            "manhattan" | "l1" => Ok(FcmDistance::Manhattan),
-            _ => Err(format!(
-                "Unknown distance metric: {}. Use 'euclidean' or 'manhattan'",
-                s
-            )),
-        }
+crate::option_enum!(
+    FcmDistance,
+    Choices {
+        option: "distance metric",
+        values: &[
+            (&["euclidean", "euclid"], FcmDistance::Euclidean),
+            (&["manhattan", "cityblock", "l1"], FcmDistance::Manhattan),
+        ],
     }
-}
+);
 
 /// Run Fuzzy C-Means clustering.
+///
+/// Not yet R-equivalent: the exponent `2/(m-1)` is applied to squared distances, so centres,
+/// memberships and the objective differ from `e1071::cmeans`; the hard partition is pinned. See
+/// `validation/ml/partitioning.md`.
 ///
 /// Fuzzy C-Means is a soft clustering algorithm where each point has a degree
 /// of membership to all clusters, rather than belonging to exactly one cluster.
@@ -115,7 +120,7 @@ impl std::str::FromStr for FcmDistance {
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_clusters` - Number of clusters
-/// * `m` - Fuzziness parameter (must be > 1, default: 2.0). Higher values mean softer clusters.
+/// * `m` - Fuzziness parameter (finite and above 1, default: 2.0). Higher values mean softer clusters.
 /// * `max_iterations` - Maximum iterations (default: 100)
 /// * `tolerance` - Convergence tolerance for objective function (default: sqrt(machine epsilon))
 /// * `distance` - Distance metric (euclidean or manhattan)
@@ -161,19 +166,23 @@ pub fn fuzzy_cmeans(
     }
 
     let fuzz = m.unwrap_or(2.0);
-    if fuzz <= 1.0 {
-        return Err("Fuzziness parameter m must be > 1".to_string());
+    if !fuzz.is_finite() || fuzz <= 1.0 {
+        return Err(format!("m must be finite and above 1, got {fuzz}"));
     }
 
     let max_iter = max_iterations.unwrap_or(100);
     let tol = tolerance.unwrap_or(f64::EPSILON.sqrt());
+    if max_iter == 0 {
+        return Err("max_iterations must be at least 1, got 0".to_string());
+    }
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(format!("tolerance must be finite and positive, got {tol}"));
+    }
+    crate::ml::extract::require_finite(&data, "fuzzy c-means")?;
     let dist_metric = distance.unwrap_or(FcmDistance::Euclidean);
 
     // Initialize membership matrix randomly
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(FUZZY_DEFAULT_SEED));
 
     let mut membership = Array2::zeros((n, n_clusters));
     for i in 0..n {
@@ -198,6 +207,7 @@ pub fn fuzzy_cmeans(
     let mut withinerror;
 
     for iter in 0..max_iter {
+        checkpoint().map_err(|e| e.to_string())?;
         n_iterations = iter + 1;
 
         // Update centers: cⱼ = Σᵢ uᵢⱼᵐ xᵢ / Σᵢ uᵢⱼᵐ
@@ -214,7 +224,7 @@ pub fn fuzzy_cmeans(
             }
 
             for k in 0..d {
-                centers[[j, k]] = if weight_sum > 1e-10 {
+                centers[[j, k]] = if weight_sum > 0.0 {
                     weighted_sum[k] / weight_sum
                 } else {
                     // If cluster is empty, reinitialize to a random point
@@ -238,7 +248,7 @@ pub fn fuzzy_cmeans(
             // Check if point coincides with any center
             let mut at_center = None;
             for j in 0..n_clusters {
-                if distances[[i, j]] < 1e-10 {
+                if distances[[i, j]] == 0.0 {
                     at_center = Some(j);
                     break;
                 }
@@ -270,8 +280,7 @@ pub fn fuzzy_cmeans(
         }
 
         // Check convergence
-        let rel_change = (prev_error - withinerror).abs() / (prev_error.abs() + 1e-10);
-        if rel_change < tol {
+        if relative_change(withinerror, prev_error) < tol {
             converged = true;
             break;
         }
@@ -440,6 +449,9 @@ impl std::fmt::Display for FannyResult {
 ///
 /// This is equivalent to fuzzy c-medoids with modified normalization.
 ///
+/// Not yet R-equivalent: this is not `cluster::fanny`'s Kaufman-Rousseeuw iteration, so memberships,
+/// coefficients and the objective differ. See `validation/ml/partitioning.md`.
+///
 /// # References
 ///
 /// - Kaufman & Rousseeuw (1990). "Finding Groups in Data".
@@ -459,21 +471,29 @@ pub fn fanny(
     }
 
     let m = membership_exponent.unwrap_or(2.0);
-    if m <= 1.0 {
-        return Err("membership_exponent must be > 1".to_string());
+    if !m.is_finite() || m <= 1.0 {
+        return Err(format!(
+            "membership_exponent must be finite and above 1, got {m}"
+        ));
     }
 
     let max_iterations = max_iter.unwrap_or(500);
     let tolerance = tol.unwrap_or(1e-8);
+    if max_iterations == 0 {
+        return Err("max_iterations must be at least 1, got 0".to_string());
+    }
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(format!(
+            "tolerance must be finite and positive, got {tolerance}"
+        ));
+    }
+    crate::ml::extract::require_finite(&data, "FANNY")?;
 
     // Compute distance matrix
-    let distances = compute_distance_matrix(&data);
+    let distances = try_distance_matrix(&data, "FANNY distance matrix")?;
 
     // Initialize RNG
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(FUZZY_DEFAULT_SEED));
 
     // Initialize membership matrix
     let mut membership = Array2::zeros((n, k));
@@ -493,6 +513,7 @@ pub fn fanny(
     let mut prev_objective = f64::INFINITY;
 
     for iter in 0..max_iterations {
+        checkpoint().map_err(|e| e.to_string())?;
         n_iterations = iter + 1;
 
         // Update membership based on distances
@@ -577,13 +598,13 @@ pub fn fanny(
     // Hard cluster assignments
     let clustering: Vec<usize> = (0..n)
         .map(|i| {
-            (0..k)
-                .max_by(|&a, &b| {
-                    membership[[i, a]]
-                        .partial_cmp(&membership[[i, b]])
-                        .unwrap_or(Ordering::Equal)
-                })
-                .unwrap_or(0)
+            let mut best = 0;
+            for v in 1..k {
+                if membership[[i, v]] > membership[[i, best]] {
+                    best = v;
+                }
+            }
+            best
         })
         .collect();
 
@@ -676,6 +697,140 @@ mod tests {
     use super::*;
 
     use ndarray::array;
+
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_fcm_cmeans_blobs_labels() {
+        // deviation ML-9: p2a applies 2/(m-1) to squared distances, so centres, memberships and
+        // withinerror differ from e1071::cmeans; the hard partition agrees. Only the partition is
+        // pinned.
+        let (case, ds) = crate::test_support::load_case("fuzzy_reference_blobs");
+        let mut x = Array2::zeros((ds.nrows(), 2));
+        for (j, c) in ["x", "y"].iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            x.column_mut(j).assign(&ndarray::Array1::from_vec(v));
+        }
+        let r = fuzzy_cmeans(
+            x.view(),
+            3,
+            Some(2.0),
+            Some(10_000),
+            Some(1e-12),
+            None,
+            Some(5),
+        )
+        .unwrap();
+        assert!(r.converged);
+        let mut o: Vec<usize> = (0..3).collect();
+        o.sort_by(|&a, &b| r.centers[[a, 0]].total_cmp(&r.centers[[b, 0]]));
+        let mut pos = [0usize; 3];
+        for (p, &k) in o.iter().enumerate() {
+            pos[k] = p;
+        }
+        let labels: Vec<f64> = r.labels.iter().map(|&l| (pos[l] + 1) as f64).collect();
+        Check::new(&case)
+            .vector("cmeans_cluster", &labels, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_fuzzy_cmeans_stopping_rule_is_scale_free() {
+        // The old rule |dJ| / (|J| + 1e-10) stopped at once when J < 1e-10 (data in small units).
+        let x = Array2::from_shape_fn((30, 2), |(i, j)| {
+            [[0.0, 0.0], [3.0, 0.0], [1.5, 2.5]][i % 3][j] + 0.3 * ((i * 7 + j * 3) as f64).sin()
+        });
+        let base = fuzzy_cmeans(x.view(), 3, None, Some(500), None, None, Some(1)).unwrap();
+        let c = 2f64.powi(-30);
+        let small = fuzzy_cmeans((&x * c).view(), 3, None, Some(500), None, None, Some(1)).unwrap();
+        assert_eq!(small.n_iterations, base.n_iterations);
+        assert_eq!(small.labels, base.labels);
+    }
+
+    #[test]
+    fn test_fcm_distance_parses_aliases_and_rejects_unknown() {
+        FcmDistance::choices().validate().unwrap();
+        assert_eq!(
+            "Euclidean".parse::<FcmDistance>().unwrap(),
+            FcmDistance::Euclidean
+        );
+        assert_eq!(
+            "cityblock".parse::<FcmDistance>().unwrap(),
+            FcmDistance::Manhattan
+        );
+        assert_eq!("l1".parse::<FcmDistance>().unwrap(), FcmDistance::Manhattan);
+        assert!(
+            "cosine"
+                .parse::<FcmDistance>()
+                .unwrap_err()
+                .to_string()
+                .contains("expected one of: euclidean, manhattan")
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_methods_reject_bad_parameters_and_default_seeds_are_fixed() {
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| {
+            (i % 3) as f64 * 4.0 + 0.1 * ((i + j) as f64).sin()
+        });
+        assert!(
+            fuzzy_cmeans(x.view(), 2, None, Some(0), None, None, None)
+                .unwrap_err()
+                .contains("max_iterations")
+        );
+        assert!(
+            fuzzy_cmeans(x.view(), 2, None, None, Some(0.0), None, None)
+                .unwrap_err()
+                .contains("tolerance")
+        );
+        assert!(
+            fanny(x.view(), 2, None, Some(0), None, None)
+                .unwrap_err()
+                .contains("max_iterations")
+        );
+        assert!(
+            fanny(x.view(), 2, None, None, Some(f64::NAN), None)
+                .unwrap_err()
+                .contains("tolerance")
+        );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0] {
+            let e = fuzzy_cmeans(x.view(), 2, Some(bad), None, None, None, None).unwrap_err();
+            assert!(e.contains("m must be finite and above 1"), "{e}");
+            let e = fanny(x.view(), 2, Some(bad), None, None, None).unwrap_err();
+            assert!(
+                e.contains("membership_exponent must be finite and above 1"),
+                "{e}"
+            );
+        }
+        let mut nan = x.clone();
+        nan[[0, 0]] = f64::NAN;
+        assert!(
+            fuzzy_cmeans(nan.view(), 2, None, None, None, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        assert!(
+            fanny(nan.view(), 2, None, None, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        let a = fuzzy_cmeans(x.view(), 2, None, None, None, None, None).unwrap();
+        let b = fuzzy_cmeans(
+            x.view(),
+            2,
+            None,
+            None,
+            None,
+            None,
+            Some(FUZZY_DEFAULT_SEED),
+        )
+        .unwrap();
+        assert_eq!(a.withinerror.to_bits(), b.withinerror.to_bits());
+        let f1 = fanny(x.view(), 2, None, None, None, None).unwrap();
+        let f2 = fanny(x.view(), 2, None, None, None, Some(FUZZY_DEFAULT_SEED)).unwrap();
+        assert_eq!(f1.objective.to_bits(), f2.objective.to_bits());
+    }
 
     #[test]
     fn test_fuzzy_cmeans_basic() {
