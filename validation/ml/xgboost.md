@@ -7,11 +7,12 @@
 `CalcWeight` and `CalcGain`): the leaf weight is `-ThresholdL1(G, alpha) / (H + lambda)` and each gain term
 `ThresholdL1(G, alpha)^2 / (H + lambda)`.
 
-- **Histogram bins.** Edges are the sorted values at `floor(i n / bins)` and a value goes to the first edge
-  it does not exceed, so the two smallest values share bin 0. The binning is p2a's, not the package's
-  sketch.
+- **Histogram bins.** With `bins = min(max_bin, n)`, the edges are the sorted values at 0-based positions
+  `floor(i n / bins)`, `i = 1, ..., bins - 1` (repeated values once), and a value goes to the first edge it
+  does not exceed, so bin 0 holds at least the `floor(n / bins) + 1` smallest values (the two smallest when
+  `max_bin >= n`). The binning is p2a's, not the package's sketch.
 - **`colsample_bylevel`.** Each tree level samples `ceil(fraction * columns)` columns, at least 1, out of
-  the tree's columns. XGBoost uses floor; p2a's ceil is a recorded deviation on both field docs.
+  the tree's columns. XGBoost uses floor; the field's doc records p2a's ceil as a deviation.
 - **`n_jobs`.** A positive value runs the fit in an own rayon pool of that size; 0 uses the global pool.
 - **Histogram subtraction.** A node builds the smaller child's histogram and subtracts it from its own for
   the sibling, as the fast module's header says.
@@ -38,9 +39,9 @@
 
 ## Tests
 
-Registered as `ml_xgboost_l1`: `test_validate_xgboost_exact_l1`, `test_validate_xgboost_exact_package`
-(`ml/xgboost.rs`), `test_validate_fast_xgboost_l1_stump`, `test_validate_fast_xgboost_l1_four_rounds`
-(`ml/xgboost_fast.rs`).
+Registered under `ml_xgboost_l1` (cases `ml_xgboost_l1` and `ml_xgboost_pkg`):
+`test_validate_xgboost_exact_l1`, `test_validate_xgboost_exact_package` (`ml/xgboost.rs`),
+`test_validate_fast_xgboost_l1_stump`, `test_validate_fast_xgboost_l1_four_rounds` (`ml/xgboost_fast.rs`).
 
 Properties: `colsample_bylevel` sampling and its ceil rule, `n_jobs` and subtraction give the same trees up to
 last-bit differences, strided and column-major input views.

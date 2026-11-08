@@ -15,7 +15,8 @@ With `classification = true` it runs probit BART as `BART::pbart` (`y` coded 0/1
 - each kept draw stores `Phi(offset + f)`; `predictions` are the posterior mean probabilities (pbart's
   `prob.train.mean`).
 
-Prediction intervals in both modes are percentiles of the draws, R's `quantile(type = 7)`.
+`Phi` is R's `pnorm` (r_mathlib; statrs' normal CDF errs near the 11th digit). Prediction intervals in both
+modes are percentiles of the draws, R's `quantile(type = 7)`.
 
 ## R references
 
