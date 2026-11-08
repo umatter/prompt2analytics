@@ -171,6 +171,7 @@
 //! | **SVM** | Support vector machines | [`linear_svm`] |
 //! | **Causal Forest** | Heterogeneous treatment effects | [`causal_forest()`] |
 //! | **BART Causal** | Bayesian trees for causal | [`bart_causal()`] |
+//! | **Partial dependence / ICE** | Marginal effects on pdp::partial's grids | [`partial_dependence`], [`compute_ice_curves`] |
 //!
 //! ### Export & Visualization
 //!
