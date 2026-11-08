@@ -36,8 +36,11 @@
 //! dropped. Missing values (null or NaN) in y or X are refused with
 //! `EconError::NullValues` naming the column (spatialprobit, like spatialreg, has no
 //! `na.omit` route); remove the incomplete rows and rebuild W first. Integer and Boolean
-//! columns are accepted. The outcome is 0/1: an Int64, Float64 or Boolean column with both
-//! values present.
+//! columns are accepted. The outcome is exactly 0/1: an Int64, Float64 or Boolean column with
+//! both values present; any other value is refused, not dichotomised.
+//!
+//! `n_draws` must be at least 2 (a posterior standard deviation needs two retained draws),
+//! `thin` at least 1, and `compute_impacts` needs at least one regressor besides the intercept.
 //!
 //! # Estimation Method
 //!
@@ -45,7 +48,9 @@
 //! following LeSage & Pace (2009). The algorithm uses:
 //!
 //! 1. Albert & Chib (1993) data augmentation for latent y*
-//! 2. Truncated normal sampling for latent outcomes
+//! 2. Exact one-sided truncated normal draws for the latent outcomes, in both tails: normal
+//!    rejection when the bound is on the near side of the mean, Robert's (1995) exponential
+//!    rejection when it is on the far side
 //! 3. Gibbs sampling for parameters
 //!
 //! # Marginal Effects
@@ -77,6 +82,9 @@
 //!   A Monte Carlo Analysis". In Anselin, L., Florax, R.J.G.M. & Rey, S.J. (Eds.),
 //!   Advances in Spatial Econometrics (pp. 169-195). Springer.
 //!
+//! - Robert, C.P. (1995). "Simulation of truncated normal variables". *Statistics and
+//!   Computing*, 5(2), 121-125. https://doi.org/10.1007/BF00143942
+//!
 //! - R package `spatialprobit`: Wilhelm, S. & de Matos, M.G. (2013).
 //!   https://cran.r-project.org/package=spatialprobit
 
@@ -88,7 +96,8 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
 use crate::resource::{try_zeros1, try_zeros2};
 use crate::spatial::SpatialWeights;
-use crate::traits::estimator::{normal_cdf, normal_pdf};
+use crate::stats::robust::percentile_interval;
+use crate::traits::estimator::{normal_cdf, normal_p_value_two_sided, normal_pdf};
 
 /// Model type for spatial probit estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +117,9 @@ impl std::fmt::Display for SpatialProbitModel {
     }
 }
 
+/// The seed of a run whose configuration sets none.
+pub const SPATIAL_PROBIT_DEFAULT_SEED: u64 = 42;
+
 /// Configuration for spatial probit model estimation.
 #[derive(Debug, Clone)]
 pub struct SpatialProbitConfig {
@@ -126,7 +138,7 @@ pub struct SpatialProbitConfig {
     pub rho_prior_range: (f64, f64),
     /// Compute marginal effects
     pub compute_impacts: bool,
-    /// Random seed for reproducibility (optional)
+    /// Random seed; `None` uses [`SPATIAL_PROBIT_DEFAULT_SEED`], so every run is reproducible.
     pub seed: Option<u64>,
     /// Show progress (for long MCMC runs)
     pub verbose: bool,
@@ -229,27 +241,97 @@ pub struct SpatialProbitResult {
     pub rho_draws: Array1<f64>,
 }
 
+/// The R type-7 credible interval of `draws`; NaN for a level outside (0, 1) or no draws.
+fn credible_interval(draws: &[f64], level: f64) -> (f64, f64) {
+    percentile_interval(draws, level).unwrap_or((f64::NAN, f64::NAN))
+}
+
 impl SpatialProbitResult {
-    /// Compute 95% credible interval for a coefficient.
+    /// The central credible interval of coefficient `idx` at `level` (R type-7 quantiles of the
+    /// retained draws); NaN for an index that does not exist or a level outside (0, 1).
     pub fn credible_interval_beta(&self, idx: usize, level: f64) -> (f64, f64) {
-        let alpha = (1.0 - level) / 2.0;
-        let mut draws: Vec<f64> = self.beta_draws.column(idx).to_vec();
-        draws.sort_by(|a, b| a.total_cmp(b));
-        let n = draws.len();
-        let lower_idx = ((n as f64) * alpha) as usize;
-        let upper_idx = ((n as f64) * (1.0 - alpha)) as usize;
-        (draws[lower_idx], draws[upper_idx.min(n - 1)])
+        if idx >= self.beta_draws.ncols() {
+            return (f64::NAN, f64::NAN);
+        }
+        credible_interval(&self.beta_draws.column(idx).to_vec(), level)
     }
 
-    /// Compute 95% credible interval for spatial parameter.
+    /// The central credible interval of the spatial parameter at `level` (R type-7 quantiles of
+    /// the retained draws); NaN for a level outside (0, 1).
     pub fn credible_interval_rho(&self, level: f64) -> (f64, f64) {
-        let alpha = (1.0 - level) / 2.0;
-        let mut draws: Vec<f64> = self.rho_draws.to_vec();
-        draws.sort_by(|a, b| a.total_cmp(b));
-        let n = draws.len();
-        let lower_idx = ((n as f64) * alpha) as usize;
-        let upper_idx = ((n as f64) * (1.0 - alpha)) as usize;
-        (draws[lower_idx], draws[upper_idx.min(n - 1)])
+        credible_interval(&self.rho_draws.to_vec(), level)
+    }
+}
+
+impl std::fmt::Display for SpatialProbitImpacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "Spatial impacts (probability scale; posterior mean and SD):"
+        )?;
+        if self.var_names.is_empty() {
+            return writeln!(f, "(no regressors)");
+        }
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>10} {:>12} {:>10} {:>12} {:>10}",
+            "Variable", "Direct", "(SD)", "Indirect", "(SD)", "Total", "(SD)"
+        )?;
+        for (i, name) in self.var_names.iter().enumerate() {
+            writeln!(
+                f,
+                "{name:>15} {:>12.6} {:>10.6} {:>12.6} {:>10.6} {:>12.6} {:>10.6}",
+                self.direct[i],
+                self.direct_se[i],
+                self.indirect[i],
+                self.indirect_se[i],
+                self.total[i],
+                self.total_se[i]
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for SpatialProbitResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let spatial = match self.model_type {
+            SpatialProbitModel::Sar => "rho",
+            SpatialProbitModel::Sem => "lambda",
+        };
+        writeln!(f, "{} (Bayesian MCMC)", self.model_type)?;
+        writeln!(f, "Retained draws: {}", self.n_draws)?;
+        writeln!(f)?;
+        let (low, high) = self.credible_interval_rho(0.95);
+        writeln!(
+            f,
+            "{spatial}: {:.6} (posterior SD {:.6}, z = {:.3}, p = {:.4}; 95% credible interval [{low:.6}, {high:.6}])",
+            self.rho, self.rho_se, self.rho_z, self.rho_p
+        )?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Mean", "Std.Dev", "z", "P>|z|"
+        )?;
+        for (i, name) in self.coef_names.iter().enumerate() {
+            writeln!(
+                f,
+                "{name:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}",
+                self.coefficients[i], self.std_errors[i], self.z_values[i], self.p_values[i]
+            )?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Log-likelihood: {:.4}", self.log_likelihood)?;
+        writeln!(f, "DIC: {:.4}", self.dic)?;
+        writeln!(f, "Pseudo R-squared: {:.4}", self.pseudo_r_squared)?;
+        writeln!(f, "Percent correctly predicted: {:.2}", self.pcp)?;
+        writeln!(f, "N: {}", self.n_obs)?;
+        if let Some(impacts) = &self.impacts {
+            writeln!(f)?;
+            write!(f, "{impacts}")?;
+        }
+        Ok(())
     }
 }
 
@@ -344,13 +426,28 @@ fn run_spatial_probit_internal(
 ) -> EconResult<SpatialProbitResult> {
     // Refuse impossible draw counts before any work.
     total_mcmc_draws(&config)?;
+    if config.compute_impacts && x_cols.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "compute_impacts needs at least one regressor besides the intercept; pass x columns or set compute_impacts = false".to_string(),
+        });
+    }
 
     // y (0/1, integer or Boolean) and [1, X]; one row per unit of W, no missing values
     let (y, x) = super::spatial::spatial_model_data(dataset, y_col, x_cols, listw)?;
     let n = y.len();
 
     // Validate y is binary
-    let n_positive = y.iter().filter(|&&v| v >= 0.5).count();
+    let is_non_binary = |v: f64| v != 0.0 && v != 1.0;
+    if let Some(row) = y.iter().position(|&v| is_non_binary(v)) {
+        let count = y.iter().filter(|&&v| is_non_binary(v)).count();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Dependent variable '{y_col}' must be binary (0/1); row {row} is {} ({count} non-binary values)",
+                y[row]
+            ),
+        });
+    }
+    let n_positive = y.iter().filter(|&&v| v == 1.0).count();
     if n_positive == 0 || n_positive == n {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -385,7 +482,7 @@ fn run_spatial_probit_internal(
         .collect();
     let p_values: Vec<f64> = z_values
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
     let rho_z = if rho_std > 1e-10 {
@@ -393,7 +490,7 @@ fn run_spatial_probit_internal(
     } else {
         0.0
     };
-    let rho_p = 2.0 * (1.0 - normal_cdf(rho_z.abs()));
+    let rho_p = normal_p_value_two_sided(rho_z);
 
     // Build coefficient names
     let mut coef_names = vec!["(Intercept)".to_string()];
@@ -475,12 +572,14 @@ fn run_spatial_probit_internal(
 }
 
 /// The number of Gibbs iterations, burn_in + n_draws * thin, after checking that at least
-/// one draw is kept, the thinning interval is positive and the total does not overflow.
+/// two draws are kept, the thinning interval is positive and the total does not overflow.
 fn total_mcmc_draws(config: &SpatialProbitConfig) -> EconResult<usize> {
     let (n_draws, burn_in, thin) = (config.n_draws, config.burn_in, config.thin);
-    if n_draws == 0 {
+    if n_draws < 2 {
         return Err(EconError::InvalidSpecification {
-            message: "n_draws must be at least 1".to_string(),
+            message: format!(
+                "n_draws must be at least 2 (posterior standard deviations need two retained draws), got {n_draws}"
+            ),
         });
     }
     if thin == 0 {
@@ -526,10 +625,8 @@ fn run_mcmc_spatial_probit(
 
     // Initialize RNG
     use rand::SeedableRng;
-    let mut rng = match config.seed {
-        Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-        None => rand::rngs::StdRng::from_entropy(),
-    };
+    let mut rng =
+        rand::rngs::StdRng::seed_from_u64(config.seed.unwrap_or(SPATIAL_PROBIT_DEFAULT_SEED));
 
     // Prior parameters
     let prior_precision = config.prior_beta_precision.unwrap_or(0.01);
@@ -584,6 +681,11 @@ fn run_mcmc_spatial_probit(
             prior_precision,
             &mut rng,
         )?;
+        if !beta.iter().all(|v| v.is_finite()) {
+            return Err(EconError::Computation(format!(
+                "spatial probit: non-finite coefficient draw at iteration {iter}"
+            )));
+        }
 
         // --- Step 3: Sample rho given (y*, beta) using griddy Gibbs ---
         let (new_rho, accepted) = sample_rho_griddy_gibbs(
@@ -1084,104 +1186,53 @@ fn compute_spatial_probit_impacts(
     })
 }
 
-/// Sample from truncated normal, truncated above threshold.
+/// Exact draw from N(0, 1) truncated to [a, inf). For a <= 0, normal rejection (acceptance
+/// Phi(-a) >= 1/2). Otherwise Robert's (1995) exponential rejection with the optimal rate
+/// lambda = (a + sqrt(a^2 + 4)) / 2, accepting z = a + E/lambda with probability
+/// exp(-(z - lambda)^2 / 2) (acceptance above 0.76 for a > 0). NaN or +inf returns a (no loop);
+/// the Gibbs loop refuses non-finite draws.
+fn standard_normal_truncated_below<R: rand::Rng>(a: f64, rng: &mut R) -> f64 {
+    use rand_distr::{Distribution, Exp1, StandardNormal};
+    if a.is_nan() || a == f64::INFINITY {
+        return a;
+    }
+    if a <= 0.0 {
+        loop {
+            let z: f64 = StandardNormal.sample(rng);
+            if z >= a {
+                return z;
+            }
+        }
+    }
+    let lambda = 0.5 * (a + (a * a + 4.0).sqrt());
+    loop {
+        let e: f64 = Exp1.sample(rng);
+        let z = a + e / lambda;
+        let u: f64 = rng.r#gen();
+        if u <= (-0.5 * (z - lambda) * (z - lambda)).exp() {
+            return z;
+        }
+    }
+}
+
+/// Draw from N(mu, sigma^2) truncated to [lower, inf).
 fn sample_truncated_normal_above<R: rand::Rng>(
     mu: f64,
     sigma: f64,
     lower: f64,
     rng: &mut R,
 ) -> f64 {
-    // Use inverse CDF method
-    let alpha = (lower - mu) / sigma;
-    let phi_alpha = normal_cdf(alpha);
-
-    // Ensure valid range for Uniform
-    let lower_bound = phi_alpha.max(1e-10);
-    let upper_bound = 1.0 - 1e-10;
-
-    if lower_bound >= upper_bound {
-        // Extreme case: return value just above threshold
-        return lower + 0.01 * sigma;
-    }
-
-    // Sample u ~ Uniform(phi_alpha, 1)
-    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
-
-    // Return mu + sigma * Phi^{-1}(u)
-    mu + sigma * inverse_normal_cdf(u)
+    mu + sigma * standard_normal_truncated_below((lower - mu) / sigma, rng)
 }
 
-/// Sample from truncated normal, truncated below threshold.
+/// Draw from N(mu, sigma^2) truncated to (-inf, upper].
 fn sample_truncated_normal_below<R: rand::Rng>(
     mu: f64,
     sigma: f64,
     upper: f64,
     rng: &mut R,
 ) -> f64 {
-    // Use inverse CDF method
-    let beta = (upper - mu) / sigma;
-    let phi_beta = normal_cdf(beta);
-
-    // Ensure valid range for Uniform
-    let lower_bound = 1e-10;
-    let upper_bound = phi_beta.max(2e-10);
-
-    if lower_bound >= upper_bound {
-        // Extreme case: return value just below threshold
-        return upper - 0.01 * sigma;
-    }
-
-    // Sample u ~ Uniform(0, phi_beta)
-    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
-
-    // Return mu + sigma * Phi^{-1}(u)
-    mu + sigma * inverse_normal_cdf(u)
-}
-
-/// The largest scale rand 0.8's `UniformFloat::new(low, high)` settles on, for
-/// `low < high`: the largest `s <= high - low` with `s * max_rand + low < high`.
-///
-/// rand lowers the scale one ulp at a time until that holds, which takes about 1e10 steps
-/// when `high - low` is tiny next to `high` (the truncated-normal draws meet that once the
-/// mean is about 6 standard deviations from the threshold) and cannot be interrupted. The
-/// condition is monotone in `s`, so bisection on the bit pattern finds the same value in at
-/// most 64 steps.
-fn uniform_scale(low: f64, high: f64) -> f64 {
-    // (u64::MAX >> 12) with exponent 0, minus 1: the largest value0_1 rand produces
-    let max_rand = f64::from_bits((u64::MAX >> 12) | (1023_u64 << 52)) - 1.0;
-    let fits = |s: f64| s * max_rand + low < high;
-    let scale = high - low;
-    if fits(scale) {
-        return scale;
-    }
-    // `fits(0.0)` holds because low < high; non-negative floats are ordered by their bits.
-    let (mut lo, mut hi) = (0_u64, scale.to_bits());
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if fits(f64::from_bits(mid)) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    f64::from_bits(lo)
-}
-
-/// `rand_distr::Uniform::new(low, high).sample(rng)` for `low < high`, bit for bit, with the
-/// scale from [`uniform_scale`] instead of rand's ulp-by-ulp construction loop.
-fn uniform_f64<R: rand::Rng>(low: f64, high: f64, rng: &mut R) -> f64 {
-    let scale = uniform_scale(low, high);
-    // a value in [1, 2) from the top 52 bits, as rand's UniformFloat::sample does
-    let value1_2 = f64::from_bits((rng.next_u64() >> 12) | (1023_u64 << 52));
-    let value0_1 = value1_2 - 1.0;
-    value0_1 * scale + low
-}
-
-/// Inverse of standard normal CDF (quantile function).
-fn inverse_normal_cdf(p: f64) -> f64 {
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    normal.inverse_cdf(p.max(1e-15).min(1.0 - 1e-15))
+    mu - sigma * standard_normal_truncated_below((mu - upper) / sigma, rng)
 }
 
 /// Compute standard deviation of an array.
@@ -1422,7 +1473,8 @@ mod tests {
         // overflow of burn_in + n_draws * thin, and an n_draws x k buffer larger than isize::MAX bytes
         for c in [
             cfg(usize::MAX / 2, 0, 3),
-            cfg(1, usize::MAX, 1),
+            // n_draws = 1 is refused before the overflow check
+            cfg(2, usize::MAX, 1),
             cfg(usize::MAX / 8, 0, 1),
         ] {
             assert!(matches!(
@@ -1441,40 +1493,6 @@ mod tests {
             run_sar_probit(&d, "y", &["x"], &mut w, cfg(10, 5, 1))
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))));
-    }
-
-    #[test]
-    fn uniform_draws_match_rand_and_tiny_intervals_finish() {
-        use rand::SeedableRng;
-        use rand_distr::{Distribution, Uniform};
-        for (low, high) in [
-            (0.0, 1.0),
-            (1e-10, 0.3),
-            (1e-10, 2e-10),
-            (0.5, 1.0 - 1e-10),
-            (0.9, 1.0 - 1e-10),
-            (-3.0, 2.0),
-        ] {
-            let mut a = rand::rngs::StdRng::seed_from_u64(9);
-            let mut b = rand::rngs::StdRng::seed_from_u64(9);
-            let dist: Uniform<f64> = Uniform::new(low, high);
-            for _ in 0..200 {
-                assert_eq!(
-                    dist.sample(&mut a).to_bits(),
-                    uniform_f64(low, high, &mut b).to_bits(),
-                    "[{low}, {high})"
-                );
-            }
-        }
-        // rand's own construction needs ~1e10 one-ulp steps for this interval
-        let (low, high) = (1.0 - 1.5e-10, 1.0 - 1e-10);
-        let max_rand = 1.0 - f64::EPSILON;
-        let s = uniform_scale(low, high);
-        assert!(s * max_rand + low < high);
-        assert!(f64::from_bits(s.to_bits() + 1) * max_rand + low >= high);
-        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-        let u = uniform_f64(low, high, &mut rng);
-        assert!((low..high).contains(&u));
     }
 
     // R 4.3.3 (fixture): X <- cbind(1, x1); xb <- X %*% beta; A <- diag(n); Wp <- W; rp <- rho
@@ -1534,6 +1552,7 @@ mod tests {
         };
         // Pinned at the values the dense-W sampler printed. Summation order may change the
         // floating-point noise, so 1e-8 relative.
+        // Re-pinned for the exact truncated-normal sampler (Robert 1995, SPAT-6).
         let close = |a: f64, b: f64, what: &str| {
             assert!(
                 (a - b).abs() <= 1e-8 * b.abs().max(1.0),
@@ -1549,24 +1568,24 @@ mod tests {
             (
                 &sar,
                 [
-                    0.26853377453216576,
-                    -1.5824391907711777,
-                    0.9247471464298688,
-                    0.5945409283880447,
-                    0.29034472301461767,
-                    -10.513275392427618,
-                    80.0,
+                    0.21561581519656442,
+                    -1.7620719814393688,
+                    1.0100875460961094,
+                    0.6419059802897408,
+                    0.31414857742601277,
+                    -10.554279814396638,
+                    83.33333333333333,
                 ],
             ),
             (
                 &sem,
                 [
-                    0.3468302105165128,
-                    -4.773850063209376,
-                    6.219834386413967,
-                    7.425521429647995,
-                    4.244364752859552,
-                    -100.86956513153757,
+                    0.375057484757089,
+                    -8.136770598618815,
+                    6.6014133446280585,
+                    7.0002900603296965,
+                    5.28338700058015,
+                    -80.85099173669074,
                     76.66666666666667,
                 ],
             ),
@@ -1580,21 +1599,216 @@ mod tests {
             close(r.pcp, pins[6], "pcp");
         }
         let imp = sar.impacts.as_ref().unwrap();
-        close(imp.direct[0], 0.16947020129887946, "direct");
-        close(imp.indirect[0], 0.06864930005662946, "indirect");
-        close(imp.total[0], 0.2381195013555089, "total");
-        close(imp.direct_se[0], 0.03478246966142034, "direct se");
-        close(imp.indirect_se[0], 0.07196166499069034, "indirect se");
-        close(imp.total_se[0], 0.07184313351227577, "total se");
+        close(imp.direct[0], 0.17744956884009333, "direct");
+        close(imp.indirect[0], 0.05606513641769403, "indirect");
+        close(imp.total[0], 0.23351470525778736, "total");
+        close(imp.direct_se[0], 0.03314944949117544, "direct se");
+        close(imp.indirect_se[0], 0.06918302638820466, "indirect se");
+        close(imp.total_se[0], 0.07512769921233899, "total se");
         assert!(sem.impacts.is_none());
     }
 
+    fn probit_config(n_draws: usize, impacts: bool) -> SpatialProbitConfig {
+        let mut c = SpatialProbitConfig::default();
+        c.n_draws = n_draws;
+        c.burn_in = 10;
+        c.compute_impacts = impacts;
+        c.seed = Some(42);
+        c
+    }
+
     #[test]
-    fn test_inverse_normal_cdf() {
-        // Test known values
-        assert!((inverse_normal_cdf(0.5) - 0.0).abs() < 1e-6);
-        assert!(inverse_normal_cdf(0.975) > 1.9 && inverse_normal_cdf(0.975) < 2.0);
-        assert!(inverse_normal_cdf(0.025) < -1.9 && inverse_normal_cdf(0.025) > -2.0);
+    fn test_spatial_probit_rejects_n_draws_0() {
+        // n_draws = 1 returned Ok with NaN posterior SDs (0/0) before.
+        let (d, mut w) = create_test_spatial_binary_data();
+        for n_draws in [0, 1] {
+            for run in [run_sar_probit, run_sem_probit] {
+                let e = run(&d, "y", &["x"], &mut w, probit_config(n_draws, false)).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.contains("n_draws")),
+                    "{e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_thin_0() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        let mut c = probit_config(10, false);
+        c.thin = 0;
+        let e = run_sar_probit(&d, "y", &["x"], &mut w, c).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("thin")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_non_binary() {
+        // Before: y in {0, 1.7} (and counts) were thresholded at 0.5 without a word.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let y: Vec<f64> = outcome(&d).iter().map(|v| 1.7 * v).collect();
+        let mut df = d.df().clone();
+        df.with_column(Column::new("y".into(), y)).unwrap();
+        let e = run_sem_probit(
+            &Dataset::new(df),
+            "y",
+            &["x"],
+            &mut w,
+            probit_config(10, false),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("binary") && message.contains("'y'")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_impacts_without_regressors() {
+        // Before: Ok with empty impact vectors, which a caller reading variable 0 cannot index.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let e = run_sar_probit(&d, "y", &[], &mut w, probit_config(10, true)).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("compute_impacts")),
+            "{e}"
+        );
+        assert!(run_sar_probit(&d, "y", &[], &mut w, probit_config(10, false)).is_ok());
+    }
+
+    /// Exact CDF of N(mu, 1) truncated to [0, inf) (above) or (-inf, 0] (below), through upper tails.
+    fn truncnorm_cdf(x: f64, mu: f64, above: bool) -> f64 {
+        use statrs::distribution::{ContinuousCDF, Normal};
+        let nd = Normal::new(0.0, 1.0).unwrap();
+        if above {
+            1.0 - nd.sf(x - mu) / nd.sf(-mu)
+        } else {
+            nd.sf(mu - x) / nd.sf(mu)
+        }
+    }
+
+    fn ks_check(mu: f64, above: bool, mean: f64, sd: f64, seed: u64) {
+        use rand::SeedableRng;
+        const N: usize = 20_000;
+        // sqrt(-log(0.5e-6) / 2) / sqrt(N): P(D > D_CRIT) = 1e-6
+        const D_CRIT: f64 = 0.019045116000253333;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut draws: Vec<f64> = (0..N)
+            .map(|_| {
+                if above {
+                    sample_truncated_normal_above(mu, 1.0, 0.0, &mut rng)
+                } else {
+                    sample_truncated_normal_below(mu, 1.0, 0.0, &mut rng)
+                }
+            })
+            .collect();
+        assert!(
+            draws
+                .iter()
+                .all(|&v| if above { v >= 0.0 } else { v <= 0.0 }),
+            "mu={mu}: a draw violates the bound"
+        );
+        let m = draws.iter().sum::<f64>() / N as f64;
+        assert!(
+            (m - mean).abs() < 5.0 * sd / (N as f64).sqrt(),
+            "mu={mu}: mean {m} vs {mean}"
+        );
+        draws.sort_by(|a, b| a.total_cmp(b));
+        let d = draws.iter().enumerate().fold(0.0_f64, |acc, (i, &x)| {
+            let f = truncnorm_cdf(x, mu, above);
+            acc.max(f - i as f64 / N as f64)
+                .max((i + 1) as f64 / N as f64 - f)
+        });
+        assert!(d < D_CRIT, "mu={mu}: KS D = {d}");
+    }
+
+    #[test]
+    fn test_truncated_normal_sampler_ks() {
+        // Exact means/SDs from R (lam = dnorm(a) / pnorm(a, lower.tail = FALSE)). The inverse-CDF
+        // sampler drew 7 + qnorm(U(1e-10, 2e-10)) in (0.639, 0.746) at mu = 7 (y = 0), all above
+        // the bound, and returned the constant 0.01 at mu = -8 (y = 1).
+        for (c, &(mu, above, mean, sd)) in [
+            (1.0, true, 1.2875999709391783, 0.7935277473262076),
+            (-2.5, true, 0.3227447976639053, 0.29828476565376677),
+            (-8.0, true, 0.12136811223612298, 0.11968660511206433),
+            (7.0, false, -0.1375456132264974, 0.13513664083682866),
+            (-0.5, false, -1.0091604338370335, 0.6972628168032245),
+        ]
+        .iter()
+        .enumerate()
+        {
+            ks_check(mu, above, mean, sd, 20_261_022 + c as u64);
+        }
+    }
+
+    #[test]
+    fn test_truncated_normal_sampler_tail_6_sigma() {
+        // mu = -6.2 for y = 1: the inverse-CDF sampler worked on Uniform(Phi(6.2), 1 - 1e-10), an
+        // interval of width 1.8e-10.
+        ks_check(
+            -6.2,
+            true,
+            0.1538203828034117,
+            0.15050885838734468,
+            20_261_029,
+        );
+    }
+
+    #[test]
+    fn test_spatial_probit_credible_intervals_are_type7() {
+        // R quantile(type = 7) at 0.025 / 0.975 of 10 sorted draws: x1 + 0.225 (x2 - x1),
+        // x9 + 0.775 (x10 - x9). Before: draws[floor(10 * 0.025)] = x1 and draws[floor(10 * 0.975)] = x10.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let mut c = probit_config(10, false);
+        c.burn_in = 5;
+        let r = run_sar_probit(&d, "y", &["x"], &mut w, c).unwrap();
+        let mut s = r.rho_draws.to_vec();
+        s.sort_by(|a, b| a.total_cmp(b));
+        let expect = (s[0] + 0.225 * (s[1] - s[0]), s[8] + 0.775 * (s[9] - s[8]));
+        let got = r.credible_interval_rho(0.95);
+        assert!(
+            (got.0 - expect.0).abs() <= 1e-12 && (got.1 - expect.1).abs() <= 1e-12,
+            "{got:?} vs {expect:?}"
+        );
+        assert!(r.credible_interval_beta(5, 0.95).0.is_nan());
+        assert!(r.credible_interval_rho(1.5).0.is_nan());
+    }
+
+    #[test]
+    fn test_spatial_probit_unseeded_runs_are_reproducible() {
+        // seed None uses SPATIAL_PROBIT_DEFAULT_SEED (before: entropy, so two runs differed).
+        let (d, w) = create_test_spatial_binary_data();
+        let run = || {
+            let mut c = probit_config(20, false);
+            c.seed = None;
+            run_sem_probit(&d, "y", &["x"], &mut w.clone(), c).unwrap()
+        };
+        assert_eq!(format!("{:?}", run()), format!("{:?}", run()));
+    }
+    #[test]
+    fn test_spatial_probit_display_lists_every_impact_se() {
+        // Every variable's own posterior SDs, not one "Std.Errors" row.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let mut df = d.df().clone();
+        let x2: Vec<f64> = (0..25).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
+        df.with_column(Column::new("x2".into(), x2)).unwrap();
+        let mut c = probit_config(50, true);
+        c.burn_in = 25;
+        let r = run_sar_probit(&Dataset::new(df), "y", &["x", "x2"], &mut w, c).unwrap();
+        let imp = r.impacts.as_ref().unwrap();
+        let text = r.to_string();
+        for (i, name) in imp.var_names.iter().enumerate() {
+            let total = format!("{:.6}", imp.total[i]);
+            let row = text
+                .lines()
+                .find(|l| l.trim_start().starts_with(name.as_str()) && l.contains(&total))
+                .unwrap_or_else(|| panic!("no impact row for {name}:\n{text}"));
+            for v in [imp.direct_se[i], imp.indirect_se[i], imp.total_se[i]] {
+                assert!(row.contains(&format!("{v:.6}")), "{row}");
+            }
+        }
+        assert!(!text.contains("Std.Errors"), "{text}");
     }
 
     fn short_chain() -> SpatialProbitConfig {
