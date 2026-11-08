@@ -34,6 +34,7 @@ use p2a_core::{
     SphetSE,
     SpmlConfig,
     WeightStyle,
+    econometrics::sphet::SpatialHacKernel,
     // Moran's I test
     moran_test,
     // Regression
@@ -652,22 +653,52 @@ impl AnalyticsServer {
             _ => SphetSE::Robust, // Default: robust
         };
 
-        // Parse HAC kernel
-        use p2a_core::regression::HacKernel;
-        let kernel = match request.kernel.as_deref() {
-            Some("parzen") => HacKernel::Parzen,
-            Some("quadratic_spectral") | Some("qs") => HacKernel::QuadraticSpectral,
-            Some("tukey_hanning") | Some("tukey") => HacKernel::TukeyHanning,
-            Some("truncated") => HacKernel::Truncated,
-            _ => HacKernel::Bartlett, // Default
-        };
+        // The spatial HAC works on distances between the units: it needs their coordinates and
+        // takes sphet's variable bandwidth (each unit's farthest neighbour in the weights).
+        let mut hac_kernel = SpatialHacKernel::default();
+        let mut coords = None;
+        if se_type == SphetSE::HAC {
+            if request.bandwidth.is_some() {
+                return error_text(
+                    "bandwidth is not used by the spatial HAC: each unit's bandwidth is its largest \
+                     distance to its neighbours in the weights. Leave bandwidth unset."
+                        .to_string(),
+                );
+            }
+            hac_kernel = match p2a_core::options::parse_or(
+                request.kernel.as_deref(),
+                SpatialHacKernel::default(),
+            ) {
+                Ok(k) => k,
+                Err(e) => return error_text(e.to_string()),
+            };
+            let (Some(cx), Some(cy)) = (request.coord_x.as_deref(), request.coord_y.as_deref())
+            else {
+                return error_text(
+                    "se_type 'hac' needs the coordinates of the units: set coord_x and coord_y \
+                     to the columns the weights were built from."
+                        .to_string(),
+                );
+            };
+            let cols = match common::numeric_columns(&dataset, &[cx, cy], NaPolicy::Fail) {
+                Ok(c) => c,
+                Err(e) => return error_text(with_hint(e, MISSING_HINT_MODELS)),
+            };
+            coords = Some(
+                cols.numeric(cx)
+                    .iter()
+                    .zip(cols.numeric(cy))
+                    .map(|(&a, &b)| [a, b])
+                    .collect::<Vec<[f64; 2]>>(),
+            );
+        }
 
         let config = SphetConfig {
             model,
             het: true,
             se_type,
-            kernel,
-            bandwidth: request.bandwidth,
+            hac_kernel,
+            coords,
             instrument_order: request.instrument_order.unwrap_or(2),
             ..Default::default()
         };
@@ -1147,7 +1178,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel GMM model (spgm).
     #[tool(
-        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: it does not yet match the R reference (splm::spgm): the spatial error parameter is not estimated, b2sls and ec2sls run w2sls, and g2sls ignores the weights; see the release notes."
+        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. The spatial error model (spatial_error, alone or with lag) is estimated with w2sls only; b2sls, ec2sls and g2sls estimate the spatial lag model, which is their default."
     )]
     pub async fn spatial_panel_gmm(
         &self,
@@ -1178,10 +1209,13 @@ impl AnalyticsServer {
             _ => SpgmMethod::W2sls, // Default: within/fixed effects
         };
 
+        // Only w2sls estimates the spatial error model; the other methods estimate the spatial
+        // lag model, so that is their default.
+        let within = method == SpgmMethod::W2sls;
         let config = SpgmConfig {
             method,
-            lag: request.lag.unwrap_or(false),
-            spatial_error: request.spatial_error.unwrap_or(true),
+            lag: request.lag.unwrap_or(!within),
+            spatial_error: request.spatial_error.unwrap_or(within),
             ..Default::default()
         };
 
@@ -1610,6 +1644,8 @@ mod tests {
                 se_type: None,
                 kernel: None,
                 bandwidth: None,
+                coord_x: None,
+                coord_y: None,
                 instrument_order: None,
             }))),
             rt.block_on(s.sar_probit_model(Parameters(SarProbitRequest {
@@ -1675,6 +1711,85 @@ mod tests {
     // ------------------------------------------------------------------------
     // T2-WP14: integer columns, refused missing values, sorted-id panel W rows.
     // ------------------------------------------------------------------------
+
+    /// se_type 'hac' is the distance-based spatial HAC: it runs with the coordinate columns,
+    /// takes a spatial kernel, and refuses the old lag bandwidth and a missing coordinate.
+    #[test]
+    fn test_sphet_hac_runs_on_the_coordinate_columns() {
+        let s = fixture_server();
+        let rt = runtime();
+        let call = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "dataset": "fx", "y": "y", "x": ["x1"], "weights": "w", "se_type": "hac",
+            });
+            for (k, val) in extra.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            let r = rt.block_on(s.sphet_model(Parameters(req(v)))).unwrap();
+            (r.is_error, text(&r))
+        };
+        for model in ["lag", "error", "sarar"] {
+            let (err, t) =
+                call(serde_json::json!({"model": model, "coord_x": "cx", "coord_y": "cy"}));
+            assert_ne!(err, Some(true), "{model}: {t}");
+            assert!(t.contains("HAC"), "{model}: {t}");
+        }
+        let (err, t) = call(serde_json::json!({
+            "coord_x": "cx", "coord_y": "cy", "kernel": "bartlett",
+        }));
+        assert_ne!(err, Some(true), "{t}");
+        let (err, t) = call(serde_json::json!({"coord_x": "cx"}));
+        assert_eq!(err, Some(true), "{t}");
+        assert!(t.contains("coord_x and coord_y"), "{t}");
+        let (err, t) = call(serde_json::json!({
+            "coord_x": "cx", "coord_y": "cy", "bandwidth": 3,
+        }));
+        assert_eq!(err, Some(true), "{t}");
+        assert!(t.contains("bandwidth is not used"), "{t}");
+        let (err, t) = call(serde_json::json!({
+            "coord_x": "cx", "coord_y": "cy", "kernel": "gaussian",
+        }));
+        assert_eq!(err, Some(true), "{t}");
+        assert!(t.contains("hac_kernel"), "{t}");
+        let (err, t) = call(serde_json::json!({"coord_x": "cx", "coord_y": "nope"}));
+        assert_eq!(err, Some(true), "{t}");
+        assert!(t.contains("nope"), "{t}");
+    }
+
+    /// b2sls, ec2sls and g2sls estimate the spatial lag model and default to it; the spatial
+    /// error model stays w2sls's default, and asking another method for it names w2sls.
+    #[test]
+    fn test_spgm_defaults_follow_the_method() {
+        let s = fixture_server();
+        let rt = runtime();
+        let call = |args: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "dataset": "fxp", "y": "y", "x": ["x1", "x2"], "entity_col": "entity",
+                "time_col": "time", "weights": "w",
+            });
+            for (k, val) in args.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            let r = rt
+                .block_on(s.spatial_panel_gmm(Parameters(req(v))))
+                .unwrap();
+            (r.is_error, text(&r))
+        };
+        for method in ["b2sls", "ec2sls", "g2sls"] {
+            let (err, t) = call(serde_json::json!({"method": method}));
+            assert_ne!(err, Some(true), "{method}: {t}");
+            assert!(
+                t.contains("Spatial Lag: true  Spatial Error: false"),
+                "{method}: {t}"
+            );
+            let (err, t) = call(serde_json::json!({"method": method, "spatial_error": true}));
+            assert_eq!(err, Some(true), "{method}: {t}");
+            assert!(t.contains("w2sls"), "{method}: {t}");
+        }
+        let (err, t) = call(serde_json::json!({}));
+        assert_ne!(err, Some(true), "{t}");
+        assert!(t.contains("Spatial Lag: false  Spatial Error: true"), "{t}");
+    }
 
     fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
         serde_json::from_value(v).unwrap()

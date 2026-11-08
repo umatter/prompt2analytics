@@ -192,17 +192,31 @@ pub struct SphetRequest {
     )]
     pub se_type: Option<String>,
 
-    /// HAC kernel type (for se_type='hac')
+    /// Spatial HAC kernel (for se_type='hac')
     #[schemars(
-        description = "HAC kernel: 'bartlett', 'parzen', 'quadratic_spectral', 'tukey_hanning', or 'truncated'. Default is 'bartlett'."
+        description = "Kernel of the spatial HAC (se_type='hac'), a function of distance over bandwidth: 'epanechnikov' (default, as sphet), 'triangular' (also 'bartlett'), 'rectangular' (also 'truncated'), 'bisquare', 'parzen', 'tukey_hanning' or 'quadratic_spectral'."
     )]
     pub kernel: Option<String>,
 
-    /// HAC bandwidth (for se_type='hac')
+    /// No longer used with se_type='hac'
     #[schemars(
-        description = "Bandwidth for HAC estimation. If not specified, uses automatic bandwidth selection."
+        description = "Not used: the spatial HAC takes each unit's bandwidth as its largest distance to its neighbours in the weights (sphet's variable bandwidth). Leave unset; a value with se_type='hac' is refused."
     )]
     pub bandwidth: Option<usize>,
+
+    /// x coordinate column for the spatial HAC
+    #[schemars(
+        description = "Column of the x coordinate (or longitude) of each unit, required with se_type='hac': the column the weights were built from, one row per unit of the weights."
+    )]
+    #[serde(default)]
+    pub coord_x: Option<String>,
+
+    /// y coordinate column for the spatial HAC
+    #[schemars(
+        description = "Column of the y coordinate (or latitude) of each unit, required with se_type='hac'."
+    )]
+    #[serde(default)]
+    pub coord_y: Option<String>,
 
     /// Instrument order (default 2)
     #[schemars(description = "Order of spatial lag instruments [X, WX, W^2X, ...]. Default is 2.")]
@@ -376,13 +390,13 @@ pub struct SpgmRequest {
 
     /// Include spatial lag
     #[schemars(
-        description = "If true, includes spatial lag of dependent variable (uses IV/GMM for identification). Default is false."
+        description = "If true, includes spatial lag of dependent variable (uses IV/GMM for identification). Default: false for 'w2sls', true for the other methods (they estimate the spatial lag model only)."
     )]
     pub lag: Option<bool>,
 
     /// Include spatial error
     #[schemars(
-        description = "If true, includes spatially correlated error term. Default is true."
+        description = "If true, includes spatially correlated error term (estimated with method 'w2sls' only). Default: true for 'w2sls', false for the other methods."
     )]
     pub spatial_error: Option<bool>,
 }
