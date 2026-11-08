@@ -5,34 +5,20 @@
 //! the cumulative periodogram follows a uniform distribution, and confidence bands
 //! based on the Kolmogorov-Smirnov distribution can detect departures from white noise.
 //!
-//! # Mathematical Background
+//! # Algorithm
 //!
-//! ## Periodogram
+//! The body of R's `stats::cpgram`, which plots and returns nothing:
 //!
-//! The periodogram at Fourier frequency ωⱼ = 2πj/n is:
+//! 1. Centre the series, then taper with `spec.taper`: with m = floor(n p), the first and
+//!    last m values are multiplied by 0.5 (1 - cos(pi (2i - 1) / (2m))), i = 1..m.
+//! 2. The periodogram `|X_k|^2 / n` at the frequencies k / n, k = 1..=mp, where floor(n / 2) + 1
+//!    points are R's set with (0, 0), and the last is dropped when that count is even.
+//! 3. The cumulative periodogram C_k, normalised to end at 1, against the line 2 f.
 //!
-//! I(ωⱼ) = (1/n) |Σₜ xₜ exp(-i ωⱼ t)|²
-//!
-//! ## Cumulative Periodogram
-//!
-//! The normalized cumulative periodogram is:
-//!
-//! C(ωⱼ) = Σₖ₌₁ʲ I(ωₖ) / Σₖ₌₁ᴹ I(ωₖ)
-//!
-//! where M = ⌊(n-1)/2⌋.
-//!
-//! ## White Noise Test
-//!
-//! Under H₀ (white noise), C(ωⱼ) should lie close to the line connecting
-//! (0, 0) to (0.5, 1). The Kolmogorov-Smirnov statistic:
-//!
-//! D = max|C(ωⱼ) - j/M|
-//!
-//! tests for departures from white noise.
-//!
-//! ## Confidence Bands
-//!
-//! The 95% confidence bands are ±1.358/√M (Kolmogorov-Smirnov critical value).
+//! The band half-width is R's 1.358 / q with q = sqrt(mp) + 0.12 + 0.11 / sqrt(mp), the 5 % point
+//! of Stephens's modified Kolmogorov statistic. The series is white noise when
+//! max_k |C_k - 2 f_k| is within the band, and `ks_statistic` is that maximum times q, with the
+//! asymptotic Kolmogorov survival function as `ks_p_value`.
 //!
 //! # References
 //!
@@ -61,13 +47,14 @@ use std::f64::consts::PI;
 
 #[cfg(any(test, not(feature = "spectral-analysis")))]
 use crate::resource::checkpoint;
+use crate::resource::try_vec;
 #[cfg(feature = "spectral-analysis")]
 use crate::resource::try_with_capacity;
 
 /// Result of cumulative periodogram computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpgramResult {
-    /// Frequencies at which the cumulative periodogram is evaluated
+    /// Frequencies k / n at which the cumulative periodogram is evaluated (R's set without 0)
     pub freq: Vec<f64>,
     /// Cumulative periodogram values (normalized to [0, 1])
     pub cpgram: Vec<f64>,
@@ -83,10 +70,13 @@ pub struct CpgramResult {
     pub is_white_noise: bool,
     /// Maximum deviation from expected uniform distribution
     pub max_deviation: f64,
-    /// Kolmogorov-Smirnov test statistic
+    /// Stephens-modified Kolmogorov statistic D (sqrt(mp) + 0.12 + 0.11 / sqrt(mp)), 5 % point 1.358
     pub ks_statistic: f64,
-    /// Approximate p-value for white noise test
+    /// Asymptotic Kolmogorov p-value of `ks_statistic`
     pub ks_p_value: f64,
+    /// R's band half-width 1.358 / (sqrt(mp) + 0.12 + 0.11 / sqrt(mp)), mp = freq.len()
+    #[serde(default)]
+    pub critical_value: f64,
 }
 
 /// Compute the cumulative periodogram of a time series.
@@ -103,6 +93,10 @@ pub struct CpgramResult {
 /// # Returns
 /// A `CpgramResult` containing the cumulative periodogram and confidence intervals
 ///
+/// # Errors
+/// Fails on fewer than 4 observations, a non-finite value, a taper outside [0, 0.5], a series
+/// without variation once tapered, and values so large that the periodogram overflows.
+///
 /// # Example
 /// ```
 /// use p2a_core::forecasting::cpgram::cpgram;
@@ -117,63 +111,77 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
         return Err("Time series must have at least 4 observations".to_string());
     }
 
-    let taper_prop = taper.unwrap_or(0.1).clamp(0.0, 0.5);
-
-    // Apply cosine bell taper
-    let tapered = apply_taper(x, taper_prop);
-
-    // Compute periodogram via FFT
-    let pgram = compute_periodogram(&tapered)?;
-    let m = pgram.len(); // Number of Fourier frequencies
-
-    // Compute cumulative periodogram (normalized)
-    let total: f64 = pgram.iter().sum();
-    let mut cumsum = Vec::with_capacity(m);
-    let mut running_sum = 0.0;
-
-    for &p in &pgram {
-        running_sum += p;
-        cumsum.push(if total > 0.0 {
-            running_sum / total
-        } else {
-            0.0
-        });
+    if let Some(i) = x.iter().position(|v| !v.is_finite()) {
+        return Err(format!(
+            "cpgram needs a finite series (non-finite value at position {i})"
+        ));
     }
 
-    // Compute frequencies (normalized to [0, 0.5])
-    let freq: Vec<f64> = (1..=m).map(|i| i as f64 / (2.0 * m as f64)).collect();
+    let taper_prop = taper.unwrap_or(0.1);
+    if !(0.0..=0.5).contains(&taper_prop) {
+        return Err(format!(
+            "taper must be between 0 and 0.5 (R spec.taper), got {taper_prop}"
+        ));
+    }
 
-    // Compute Kolmogorov-Smirnov confidence bands
-    // For white noise, the cumulative periodogram should be close to the identity line
-    // The KS critical value at 95% is approximately 1.36 / sqrt(n)
-    let ks_critical = 1.36 / (m as f64).sqrt();
+    // Centre BEFORE tapering, or the taper turns the mean into a low-frequency component.
+    let mean = x.iter().sum::<f64>() / n as f64;
+    let mut tapered = try_vec(n, 0.0, "the cpgram series").map_err(|e| e.to_string())?;
+    for (t, v) in tapered.iter_mut().zip(x) {
+        *t = v - mean;
+    }
+    apply_taper(&mut tapered, taper_prop);
+
+    // R's frequency set: floor(n / 2) + 1 points with (0, 0), the last dropped if that is even.
+    let mut pgram = compute_periodogram(&tapered)?;
+    let len = n / 2 + 1;
+    let mp = if len.is_multiple_of(2) {
+        len - 2
+    } else {
+        len - 1
+    };
+    pgram.truncate(mp);
+
+    let total: f64 = pgram.iter().sum();
+    // The series is finite here, so a total that is not comes from overflow. Past that point every
+    // cumulated value would be NaN, and the deviation folded over them would read as white noise.
+    if !total.is_finite() {
+        return Err("values too large: the periodogram overflows".to_string());
+    }
+    if total <= 0.0 {
+        return Err("the tapered series has no variation".to_string());
+    }
+    let mut cumsum = Vec::with_capacity(mp);
+    let mut running_sum = 0.0;
+    for &p in &pgram {
+        running_sum += p;
+        cumsum.push(running_sum / total);
+    }
+
+    let freq: Vec<f64> = (1..=mp).map(|k| k as f64 / n as f64).collect();
+
+    let sqrt_mp = (mp as f64).sqrt();
+    let q = sqrt_mp + 0.12 + 0.11 / sqrt_mp;
+    let critical_value = 1.358 / q;
 
     let upper_ci: Vec<f64> = freq
         .iter()
-        .map(|&f| (f * 2.0 + ks_critical).min(1.0))
+        .map(|&f| (f * 2.0 + critical_value).min(1.0))
         .collect();
     let lower_ci: Vec<f64> = freq
         .iter()
-        .map(|&f| (f * 2.0 - ks_critical).max(0.0))
+        .map(|&f| (f * 2.0 - critical_value).max(0.0))
         .collect();
 
-    // Compute KS statistic (maximum deviation from expected uniform distribution)
-    let expected: Vec<f64> = freq.iter().map(|&f| f * 2.0).collect();
-    let mut max_deviation = 0.0;
-    for i in 0..m {
-        let deviation = (cumsum[i] - expected[i]).abs();
-        if deviation > max_deviation {
-            max_deviation = deviation;
-        }
-    }
+    let max_deviation = cumsum
+        .iter()
+        .zip(&freq)
+        .map(|(c, f)| (c - f / 0.5).abs())
+        .fold(0.0, f64::max);
 
-    let ks_statistic = max_deviation * (m as f64).sqrt();
-
-    // Approximate p-value using Kolmogorov distribution
-    let ks_p_value = kolmogorov_p_value(ks_statistic);
-
-    // Check if within confidence bands
-    let is_white_noise = max_deviation <= ks_critical;
+    let ks_statistic = max_deviation * q;
+    let ks_p_value = kolmogorov_sf(ks_statistic);
+    let is_white_noise = max_deviation <= critical_value;
 
     Ok(CpgramResult {
         freq,
@@ -186,73 +194,42 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
         max_deviation,
         ks_statistic,
         ks_p_value,
+        critical_value,
     })
 }
 
-/// Apply a cosine bell (split cosine) taper to the data.
-fn apply_taper(x: &[f64], taper: f64) -> Vec<f64> {
-    if taper <= 0.0 {
-        return x.to_vec();
-    }
-
+/// R's `spec.taper`: a split cosine bell over the first and last floor(n p) values.
+fn apply_taper(x: &mut [f64], taper: f64) {
     let n = x.len();
-    let m = (taper * n as f64).round() as usize;
-
-    if m == 0 {
-        return x.to_vec();
+    let m = (n as f64 * taper).floor() as usize;
+    for i in 1..=m {
+        let w = 0.5 * (1.0 - (PI * (2 * i - 1) as f64 / (2 * m) as f64).cos());
+        x[i - 1] *= w;
+        x[n - i] *= w;
     }
-
-    let mut tapered = x.to_vec();
-
-    // Apply cosine bell to first m points
-    for i in 0..m.min(n) {
-        let w = 0.5 * (1.0 - (PI * i as f64 / m as f64).cos());
-        tapered[i] *= w;
-    }
-
-    // Apply cosine bell to last m points
-    for i in 0..m.min(n) {
-        let idx = n - 1 - i;
-        let w = 0.5 * (1.0 - (PI * i as f64 / m as f64).cos());
-        tapered[idx] *= w;
-    }
-
-    // Adjust for mean after tapering
-    let mean: f64 = tapered.iter().sum::<f64>() / n as f64;
-    for v in &mut tapered {
-        *v -= mean;
-    }
-
-    tapered
 }
 
 /// Compute the periodogram ordinates `|X_k|² / n` at the Fourier frequencies
-/// `k = 1..=n/2` of the centered series, with an FFT (O(n log n)) when the
+/// `k = 1..=n/2` of the centred, tapered series, with an FFT (O(n log n)) when the
 /// `spectral-analysis` feature is enabled and a direct DFT otherwise.
 fn compute_periodogram(x: &[f64]) -> Result<Vec<f64>, String> {
-    let n = x.len();
-
-    // Center the data
-    let mean: f64 = x.iter().sum::<f64>() / n as f64;
-    let centered: Vec<f64> = x.iter().map(|&v| v - mean).collect();
-
     #[cfg(feature = "spectral-analysis")]
     {
-        periodogram_fft(&centered)
+        periodogram_fft(x)
     }
     #[cfg(not(feature = "spectral-analysis"))]
     {
-        periodogram_direct(&centered)
+        periodogram_direct(x)
     }
 }
 
-/// Periodogram of a centered series via rustfft.
+/// Periodogram via rustfft.
 #[cfg(feature = "spectral-analysis")]
-fn periodogram_fft(centered: &[f64]) -> Result<Vec<f64>, String> {
-    let n = centered.len();
+fn periodogram_fft(x: &[f64]) -> Result<Vec<f64>, String> {
+    let n = x.len();
     let mut buf: Vec<Complex<f64>> =
         try_with_capacity(n, "the periodogram FFT buffer").map_err(|e| e.to_string())?;
-    buf.extend(centered.iter().map(|&v| Complex::new(v, 0.0)));
+    buf.extend(x.iter().map(|&v| Complex::new(v, 0.0)));
 
     FftPlanner::new().plan_fft_forward(n).process(&mut buf);
 
@@ -264,11 +241,11 @@ fn periodogram_fft(centered: &[f64]) -> Result<Vec<f64>, String> {
         .collect())
 }
 
-/// Periodogram of a centered series via a direct DFT (O(n²)): the fallback
-/// for builds without `spectral-analysis`, and the reference in tests.
+/// Periodogram via a direct DFT (O(n²)): the fallback for builds without
+/// `spectral-analysis`, and the reference in tests.
 #[cfg(any(test, not(feature = "spectral-analysis")))]
-fn periodogram_direct(centered: &[f64]) -> Result<Vec<f64>, String> {
-    let n = centered.len();
+fn periodogram_direct(x: &[f64]) -> Result<Vec<f64>, String> {
+    let n = x.len();
     let n_freq = n / 2; // Number of Fourier frequencies (excluding DC and Nyquist)
 
     let mut pgram = Vec::with_capacity(n_freq);
@@ -281,7 +258,7 @@ fn periodogram_direct(centered: &[f64]) -> Result<Vec<f64>, String> {
         let mut cos_sum = 0.0;
         let mut sin_sum = 0.0;
 
-        for (t, &xt) in centered.iter().enumerate() {
+        for (t, &xt) in x.iter().enumerate() {
             cos_sum += xt * (freq * t as f64).cos();
             sin_sum += xt * (freq * t as f64).sin();
         }
@@ -294,33 +271,38 @@ fn periodogram_direct(centered: &[f64]) -> Result<Vec<f64>, String> {
     Ok(pgram)
 }
 
-/// Approximate p-value from Kolmogorov distribution.
-/// Uses the asymptotic approximation.
-fn kolmogorov_p_value(d: f64) -> f64 {
-    if d <= 0.0 {
+/// Survival function of the asymptotic Kolmogorov distribution: P(K > x).
+fn kolmogorov_sf(x: f64) -> f64 {
+    if x <= 0.0 {
         return 1.0;
     }
-    // For very small d, the asymptotic formula is numerically unstable
-    // and the p-value is effectively 1.0
-    if d < 0.1 {
-        return 1.0;
-    }
-    if d >= 2.0 {
-        return 0.0;
-    }
-
-    // Asymptotic formula: P(D > d) ≈ 2 * sum_{k=1}^∞ (-1)^{k-1} exp(-2k²d²)
-    let mut p = 0.0;
-    for k in 1..=100 {
-        let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
-        let term = sign * (-2.0 * (k as f64).powi(2) * d * d).exp();
-        p += term;
-        if term.abs() < 1e-10 {
-            break;
+    let p = if x < 1.0 {
+        // 1 - F(x), the theta form of F, which converges fast for small x.
+        let mut sum = 0.0;
+        let mut k = 1.0_f64;
+        loop {
+            let term = (-k * k * PI * PI / (8.0 * x * x)).exp();
+            sum += term;
+            if term < 1e-17 * sum || term == 0.0 {
+                break;
+            }
+            k += 2.0;
         }
-    }
-
-    (2.0 * p).clamp(0.0, 1.0)
+        1.0 - (2.0 * PI).sqrt() / x * sum
+    } else {
+        // The alternating series, which keeps its digits in the tail.
+        let mut sum = 0.0;
+        for k in 1..=100 {
+            let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
+            let term = (-2.0 * (k as f64).powi(2) * x * x).exp();
+            sum += sign * term;
+            if term < 1e-300 {
+                break;
+            }
+        }
+        2.0 * sum
+    };
+    p.clamp(0.0, 1.0)
 }
 
 /// Run cumulative periodogram analysis (convenience wrapper).
@@ -330,8 +312,8 @@ pub fn run_cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String>
 
 /// Test for white noise using the cumulative periodogram.
 ///
-/// Returns the KS test statistic and p-value for the null hypothesis
-/// that the series is white noise.
+/// Returns the Stephens-modified Kolmogorov statistic and its asymptotic p-value for the null
+/// hypothesis that the series is white noise.
 pub fn white_noise_test(x: &[f64], taper: Option<f64>) -> Result<(f64, f64), String> {
     let result = cpgram(x, taper)?;
     Ok((result.ks_statistic, result.ks_p_value))
@@ -340,7 +322,108 @@ pub fn white_noise_test(x: &[f64], taper: Option<f64>) -> Result<(f64, f64), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use p2a_validation::{Check, Tol};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), name, crate::data::columns::NaPolicy::Omit)
+            .unwrap()
+            .0
+    }
+
+    fn check_cpgram(case_id: &str, series: &str) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let x = col(&ds, series);
+        let n = x.len();
+        let r = cpgram(&x, Some(0.1)).unwrap();
+        let k = |s: &str| format!("cpgram_{series}_{s}");
+        Check::new(&case)
+            .vector(&k("freq"), &r.freq, Tol::coef(n))
+            .vector(&k("cpgram"), &r.cpgram, Tol::stat(n))
+            .scalar(&k("crit"), r.critical_value, Tol::stat(n))
+            .scalar(&k("max_dev"), r.max_deviation, Tol::stat(n))
+            .scalar(&k("stat"), r.ks_statistic, Tol::stat(n))
+            .scalar(&k("p"), r.ks_p_value, Tol::p_value(n))
+            .scalar(
+                &k("white"),
+                if r.is_white_noise { 1.0 } else { 0.0 },
+                Tol::exact(),
+            )
+            .finish();
+        let lower_ok = r
+            .lower_ci
+            .iter()
+            .zip(&r.freq)
+            .all(|(l, f)| (*l - (2.0 * f - r.critical_value).max(0.0)).abs() < 1e-15);
+        assert!(lower_ok);
+    }
+
+    /// N(3, 1) white noise, n = 100: 50 frequencies k/100, crit 0.18843774417144613, max dev
+    /// 0.10889787598160139, statistic 0.7847860641362071, p 0.5690823493746275, white.
+    #[test]
+    fn test_validate_cpgram_white_noise() {
+        check_cpgram("ts_filter_ar_cpt", "wn");
+    }
+
+    /// AR(1) 0.9 around 10, n = 120: 60 frequencies, crit 0.1723313593732768, max dev
+    /// 0.7753420099521079, statistic 6.1098250100511695, p 7.527266358277316e-33, not white.
+    #[test]
+    fn test_validate_cpgram_ar1() {
+        check_cpgram("ts_filter_ar_cpt", "ar1");
+    }
+
+    /// Asymptotic Kolmogorov survival function. R 4.3.3: 1 - .Call(stats:::C_pKS2, x, 1e-15) for
+    /// x < 1, and 2 sum_k (-1)^(k-1) exp(-2 k^2 x^2) for x >= 1 (where 1 - pKS2 loses digits).
+    #[test]
+    fn test_kolmogorov_sf_matches_r() {
+        for (x, p) in [
+            (0.3, 0.9999906941986655),
+            (0.5, 0.9639452436648751),
+            (1.0, 0.26999967167735456),
+            (1.358, 0.05002679733444698),
+            (2.0, 0.0006709252557796953),
+            (3.0, 3.045995948942526e-08),
+        ] {
+            assert!(
+                Tol::new(1e-12, 1e-300).allows(kolmogorov_sf(x), p),
+                "x = {x}: {} vs {p}",
+                kolmogorov_sf(x)
+            );
+        }
+        assert_eq!(kolmogorov_sf(0.0), 1.0);
+    }
+
+    /// R spec.taper: "'p' must be between 0 and 0.5"; the series must be finite.
+    #[test]
+    fn test_cpgram_rejects_bad_taper_and_non_finite() {
+        let x: Vec<f64> = (0..40).map(|i| ((i * 13) % 7) as f64 + 3.0).collect();
+        for t in [-0.1, 0.6, f64::NAN] {
+            assert!(cpgram(&x, Some(t)).unwrap_err().contains("taper"), "{t}");
+        }
+        let mut y = x.clone();
+        y[3] = f64::INFINITY;
+        assert!(cpgram(&y, None).unwrap_err().contains("finite"));
+    }
     use approx::assert_relative_eq;
+
+    /// Finite values whose periodogram overflows: every cumulated value would be NaN, and the
+    /// largest deviation, folded past the NaNs, would be 0 and report white noise.
+    #[test]
+    fn test_cpgram_refuses_a_periodogram_that_overflows() {
+        let noisy = |scale: f64| -> Vec<f64> {
+            (0..64)
+                .map(|i| scale * (((i * 37) % 11) as f64 * 0.09 - 0.45))
+                .collect()
+        };
+        for scale in [1e200, 1e308] {
+            let e = cpgram(&noisy(scale), Some(0.1)).unwrap_err();
+            assert!(e.contains("too large"), "{scale}: {e}");
+        }
+        // Not the overflow: no variation, and a large scale that still fits.
+        let e = cpgram(&[3.0; 64], Some(0.1)).unwrap_err();
+        assert!(e.contains("no variation"), "{e}");
+        assert!(cpgram(&noisy(1e100), Some(0.1)).is_ok());
+    }
 
     #[test]
     fn test_cpgram_basic() {
@@ -358,27 +441,6 @@ mod tests {
 
         // Frequencies should be in (0, 0.5]
         assert!(result.freq.iter().all(|&f| f > 0.0 && f <= 0.5));
-    }
-
-    #[test]
-    fn test_cpgram_white_noise() {
-        // Generate white noise (random numbers)
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        let mut x = Vec::with_capacity(200);
-        for i in 0..200 {
-            i.hash(&mut hasher);
-            let h = hasher.finish();
-            x.push((h as f64 / u64::MAX as f64) - 0.5);
-        }
-
-        let result = cpgram(&x, Some(0.1)).unwrap();
-
-        // For white noise, cumulative periodogram should be close to uniform
-        // (though this is a statistical test, so we just check structure)
-        assert!(result.max_deviation < 1.0);
     }
 
     #[test]
@@ -411,22 +473,17 @@ mod tests {
     }
 
     #[test]
-    fn test_kolmogorov_p_value() {
-        // Very small D should give p close to 1
-        assert!(kolmogorov_p_value(0.01) > 0.9);
-
-        // Very large D should give p close to 0
-        assert!(kolmogorov_p_value(2.0) < 0.01);
-    }
-
-    #[test]
     fn test_apply_taper() {
-        let x = vec![1.0; 10];
-        let tapered = apply_taper(&x, 0.3);
+        let mut x = vec![1.0; 10];
+        apply_taper(&mut x, 0.3);
 
-        // Tapered ends should be smaller than middle
-        // (After mean-centering, check structure)
-        assert_eq!(tapered.len(), 10);
+        // R: spec.taper(rep(1, 10), 0.3) has w = 0.5 (1 - cos(pi (2i - 1) / 6)), i = 1..3.
+        let w = [0.06698729810778065, 0.5, 0.9330127018922194];
+        for i in 0..3 {
+            assert_relative_eq!(x[i], w[i], max_relative = 1e-14);
+            assert_relative_eq!(x[9 - i], w[i], max_relative = 1e-14);
+        }
+        assert_eq!(&x[3..7], &[1.0; 4]);
     }
 
     #[test]
@@ -475,7 +532,10 @@ mod tests {
             0.000553155027280382,
             0.0282290746094887,
         ];
-        let p = compute_periodogram(&mk(16)).unwrap();
+        let x = mk(16);
+        let mean = x.iter().sum::<f64>() / 16.0;
+        let centred: Vec<f64> = x.iter().map(|v| v - mean).collect();
+        let p = compute_periodogram(&centred).unwrap();
         assert_eq!(p.len(), 8);
         for (a, b) in p.iter().zip(R) {
             assert_relative_eq!(*a, b, max_relative = 1e-9);
@@ -486,7 +546,7 @@ mod tests {
     ///   xx <- spec.taper(scale(x, TRUE, FALSE), p = 0); y <- Mod(fft(xx))^2/65; y[1] <- 0
     ///   y <- y[1:33]; (cumsum(y)/sum(y))[-1]
     /// Untapered, this module's cumulative periodogram is R's without the leading 0
-    /// (the tapered case is TS-9, tier 4).
+    /// (the tapered case: test_validate_cpgram_white_noise / _ar1).
     #[test]
     fn test_validate_cpgram_untapered_against_r() {
         const R: [f64; 32] = [

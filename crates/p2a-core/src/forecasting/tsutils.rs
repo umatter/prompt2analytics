@@ -489,7 +489,9 @@ pub struct FilterResult {
 /// # Convolution Filter
 ///
 /// For sides = 1: `y[i] = sum(filter[j] * x[i - j])` for j = 0 to p-1
-/// For sides = 2: `y[i] = sum(filter[j] * x[i + o - j])` where o centers the filter
+/// For sides = 2: `y[i] = sum(filter[j] * x[i + p/2 - j])`, so the window is
+/// `x[i + p/2 - p + 1 ..= i + p/2]` (R's `nshift = length(filter) %/% 2`). Positions whose window
+/// leaves the series are NaN.
 ///
 /// # Recursive Filter
 ///
@@ -501,7 +503,15 @@ pub struct FilterResult {
 /// * `filter` - Filter coefficients
 /// * `method` - Convolution or Recursive
 /// * `sides` - For convolution: One (past only) or Two (centered)
-/// * `init` - Initial values for recursive filter
+/// * `init` - Initial values for the recursive filter: the p values before `x[0]`, oldest first
+///   (R's `init` is newest first)
+///
+/// # Errors
+///
+/// `InvalidSpecification` for empty or missing (NaN) coefficients, as R's "missing values in
+/// 'filter'", and for a convolution filter longer than the series, as R's "'filter' is longer
+/// than time series"; `Cancelled` when the budget stops a convolution (checked per block of
+/// outputs).
 ///
 /// # Example
 ///
@@ -539,8 +549,22 @@ pub fn filter(
         });
     }
 
+    if filter_coefs.iter().any(|v| v.is_nan()) {
+        return Err(EconError::InvalidSpecification {
+            message:
+                "filter coefficients contain missing values (NaN); R: missing values in 'filter'"
+                    .to_string(),
+        });
+    }
+
+    if method == FilterMethod::Convolution && p > n {
+        return Err(EconError::InvalidSpecification {
+            message: format!("'filter' (length {p}) is longer than the time series (length {n})"),
+        });
+    }
+
     let values = match method {
-        FilterMethod::Convolution => filter_convolution(x, filter_coefs, sides),
+        FilterMethod::Convolution => filter_convolution(x, filter_coefs, sides)?,
         FilterMethod::Recursive => filter_recursive(x, filter_coefs, init)?,
     };
 
@@ -552,42 +576,39 @@ pub fn filter(
     })
 }
 
-/// Convolution (moving average) filter.
-fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> Vec<f64> {
+/// Convolution (moving average) filter, as R's C `cfilter` without `circular`.
+///
+/// `result[i]` multiplies `f[0]` with `x[i + nshift]`, and is NaN where the window leaves the
+/// series. The caller has refused a filter longer than the series.
+fn filter_convolution(x: &[f64], filter_coefs: &[f64], sides: FilterSides) -> EconResult<Vec<f64>> {
     let n = x.len();
     let p = filter_coefs.len();
     let mut result = vec![f64::NAN; n];
+    let nshift = match sides {
+        FilterSides::Two => p / 2,
+        FilterSides::One => 0,
+    };
 
-    match sides {
-        FilterSides::One => {
-            // One-sided: y[i] = sum(filter[j] * x[i - j]) for j = 0 to p-1
-            // Need x[i-p+1] through x[i], so start at i = p-1
-            for i in (p - 1)..n {
-                let mut sum = 0.0;
-                for j in 0..p {
-                    sum += filter_coefs[j] * x[i - j];
-                }
-                result[i] = sum;
+    // p <= n (filter refuses a longer filter) and nshift <= p - 1 for p >= 2, so the window fits
+    // from first to last; outside it the value stays NA.
+    let first = p.saturating_sub(1 + nshift);
+    let last = n.saturating_sub(nshift);
+    // Each output costs O(p), with p up to n. Blocks, because a remainder per output is a measurable
+    // share of a short filter's window.
+    let stride = checkpoint_stride(p);
+    for block in (first..last).step_by(stride) {
+        checkpoint()?;
+        for i in block..block.saturating_add(stride).min(last) {
+            let top = i + nshift;
+            let mut sum = 0.0;
+            for (&fj, &xv) in filter_coefs.iter().zip(x[..=top].iter().rev()) {
+                sum += fj * xv;
             }
-        }
-        FilterSides::Two => {
-            // Two-sided: filter is centered
-            // Offset o = (p - 1) / 2 (assuming odd filter length)
-            let offset = (p - 1) / 2;
-            for i in offset..(n - (p - 1 - offset)) {
-                let mut sum = 0.0;
-                for j in 0..p {
-                    let idx = i + offset - j;
-                    if idx < n {
-                        sum += filter_coefs[j] * x[idx];
-                    }
-                }
-                result[i] = sum;
-            }
+            result[i] = sum; // a NaN in the window propagates, where R gives NA
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Recursive (autoregressive) filter.
@@ -1610,6 +1631,138 @@ fn median(x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), name, crate::data::columns::NaPolicy::Omit)
+            .unwrap()
+            .0
+    }
+
+    /// Case ts_filter_ar_cpt: stats::filter(x, f, method = "convolution", sides = s) on the
+    /// 60-value random walk x.
+    fn check_filters(case_id: &str, lengths: &[usize], sides: FilterSides, suffix: &str) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let x = col(&ds, "x");
+        let filters: [(&str, Vec<f64>); 4] = [
+            ("filter_p2_05", vec![0.5, 0.5]),
+            ("filter_p4_025", vec![0.25; 4]),
+            ("filter_p3_02", vec![0.2, 0.3, 0.5]),
+            (
+                "filter_p5_01111111",
+                [1.0, 2.0, 3.0, 2.0, 1.0].iter().map(|v| v / 9.0).collect(),
+            ),
+        ];
+        let mut check = Check::new(&case);
+        for (key, f) in filters.iter().filter(|(_, f)| lengths.contains(&f.len())) {
+            let r = filter(&x, f, FilterMethod::Convolution, sides, None).unwrap();
+            check.vector(&format!("{key}{suffix}"), &r.values, Tol::coef(x.len())); // NA == NaN
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_filter_even_sides2() {
+        check_filters("ts_filter_ar_cpt", &[2, 4], FilterSides::Two, "");
+    }
+
+    #[test]
+    fn test_validate_filter_odd_sides2() {
+        check_filters("ts_filter_ar_cpt", &[3, 5], FilterSides::Two, "");
+    }
+
+    #[test]
+    fn test_validate_filter_even_sides1() {
+        check_filters("ts_filter_ar_cpt", &[2, 4], FilterSides::One, "_sides1");
+    }
+
+    #[test]
+    fn test_validate_filter_odd_sides1() {
+        check_filters("ts_filter_ar_cpt", &[3, 5], FilterSides::One, "_sides1");
+    }
+
+    /// stats::filter(x, c(0.5, -0.2), method = "recursive"), init = 0 (guard).
+    #[test]
+    fn test_validate_filter_recursive() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let r = filter(
+            &x,
+            &[0.5, -0.2],
+            FilterMethod::Recursive,
+            FilterSides::One,
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("filter_recursive", &r.values, Tol::coef(x.len()))
+            .finish();
+    }
+
+    /// The finding's example. R 4.3.3: filter(x, rep(.25, 4), sides = 2) = NA 3.75 4.75 5.5
+    /// 5.75 6 6.25 7 NA NA; filter(x, 1:4, sides = 2) = NA 28 43 49 64 56 61 61 NA NA.
+    #[test]
+    fn test_filter_even_two_sided_matches_r_cfilter() {
+        let x = [1.0, 4.0, 2.0, 8.0, 5.0, 7.0, 3.0, 9.0, 6.0, 10.0];
+        let run = |f: &[f64]| {
+            filter(&x, f, FilterMethod::Convolution, FilterSides::Two, None)
+                .unwrap()
+                .values
+        };
+        let nan = f64::NAN;
+        let a = run(&[0.25; 4]);
+        let want_a = [nan, 3.75, 4.75, 5.5, 5.75, 6.0, 6.25, 7.0, nan, nan];
+        let b = run(&[1.0, 2.0, 3.0, 4.0]);
+        let want_b = [nan, 28.0, 43.0, 49.0, 64.0, 56.0, 61.0, 61.0, nan, nan];
+        for (got, want) in [(a, want_a), (b, want_b)] {
+            for (g, w) in got.iter().zip(want) {
+                assert!(*g == w || (g.is_nan() && w.is_nan()), "{got:?}");
+            }
+        }
+    }
+
+    /// R: "'filter' is longer than time series" for sides 1 and 2.
+    #[test]
+    fn test_filter_longer_than_series_is_an_error() {
+        let x = [1.0, 4.0, 2.0];
+        for (f, sides) in [
+            (vec![0.1; 10], FilterSides::Two),
+            (vec![0.1; 5], FilterSides::One),
+            (vec![0.1; 4], FilterSides::Two),
+        ] {
+            let err = filter(&x, &f, FilterMethod::Convolution, sides, None).unwrap_err();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. })
+                    && err.to_string().contains("longer than the time series"),
+                "{err}"
+            );
+        }
+        // R's recursive filter has no such limit
+        assert!(
+            filter(
+                &x,
+                &[0.1; 5],
+                FilterMethod::Recursive,
+                FilterSides::One,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    /// R: "missing values in 'filter'".
+    #[test]
+    fn test_filter_rejects_missing_coefficients() {
+        let err = filter(
+            &[1.0, 2.0, 3.0],
+            &[0.5, f64::NAN],
+            FilterMethod::Convolution,
+            FilterSides::Two,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing values"), "{err}");
+    }
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
@@ -1719,15 +1872,57 @@ mod tests {
         assert_eq!(result.values, vec![2.0, 3.0, 4.0]);
     }
 
+    /// diffinv(x[1:12], xi = 1.5); diffinv(x[1:12], lag = 2, xi = c(1, -2)); diffinv(x[1:12], differences = 2).
+    /// diffinv_d2_xi (differences = 2, xi = c(1, 3); R 1, 3, 5.3503169975, ...) is TS-28: not asserted.
     #[test]
-    fn test_arma_acf_ar1() {
-        // AR(1) with phi = 0.8
-        // ACF should be: 1, 0.8, 0.64, 0.512, ...
-        let result = arma_acf(&[0.8], &[], 5, false).unwrap();
+    fn test_validate_diffinv_ts_filter_ar_cpt() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x12 = &col(&ds, "x")[..12];
+        Check::new(&case)
+            .vector(
+                "diffinv_lag1",
+                &diffinv(x12, 1, 1, Some(&[1.5])).unwrap().values,
+                Tol::coef(12),
+            )
+            .vector(
+                "diffinv_lag2",
+                &diffinv(x12, 2, 1, Some(&[1.0, -2.0])).unwrap().values,
+                Tol::coef(12),
+            )
+            .vector(
+                "diffinv_d2_zero",
+                &diffinv(x12, 1, 2, None).unwrap().values,
+                Tol::coef(12),
+            )
+            .finish(); // deviation TS-28: diffinv_d2_xi
+    }
 
-        assert!(approx_eq(result.values[0], 1.0, 1e-10));
-        assert!(approx_eq(result.values[1], 0.8, 0.05));
-        assert!(approx_eq(result.values[2], 0.64, 0.05));
+    /// ARMAacf(ar = 0.8), (0.5, -0.3) with its PACF (lags 1..10; R omits lag 0), ma = (0.4, 0.25). Closed-form
+    /// reference: rel 1e-10, abs 1e-12, because the AR recursion stops at |delta gamma(0)| < 1e-12.
+    /// Deviation TS-14: armaacf_arma11 (off by 8.1e-2) and armaacf_ar2_persistent (3.6e-5), not asserted.
+    #[test]
+    fn test_validate_arma_acf_ts_filter_ar_cpt() {
+        let (case, _) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let tol = Tol::new(1e-10, 1e-12);
+        let pacf = arma_acf(&[0.5, -0.3], &[], 10, true).unwrap().values;
+        Check::new(&case)
+            .vector(
+                "armaacf_ar1",
+                &arma_acf(&[0.8], &[], 10, false).unwrap().values,
+                tol,
+            )
+            .vector(
+                "armaacf_ar2",
+                &arma_acf(&[0.5, -0.3], &[], 10, false).unwrap().values,
+                tol,
+            )
+            .vector("armaacf_ar2_pacf", &pacf[1..], tol)
+            .vector(
+                "armaacf_ma2",
+                &arma_acf(&[], &[0.4, 0.25], 6, false).unwrap().values,
+                tol,
+            )
+            .finish();
     }
 
     #[test]
@@ -1793,10 +1988,9 @@ mod tests {
         assert!(approx_eq(result.values[4], 5.0, 1e-10));
     }
 
-    /// Validate lag against R
-    /// R code: lag(1:5, 1)
+    /// Asserts the length only; the direction of lag is TS-29.
     #[test]
-    fn test_validate_lag_against_r() {
+    fn test_lag_length() {
         let x: Vec<f64> = (1..=5).map(|i| i as f64).collect();
         let result = lag(&x, 1).unwrap();
         // In R, lag shifts time index back, so values stay same but time shifts
@@ -2029,6 +2223,21 @@ mod tests {
         let err =
             crate::resource::with_alloc_ceiling(Some(1 << 16), || acf_to_ar(&acf)).unwrap_err();
         assert!(err.to_string().contains("AR coefficient matrix"), "{err}");
+    }
+
+    #[test]
+    fn convolution_filter_honours_cancellation() {
+        let x: Vec<f64> = (0..300)
+            .map(|t| (t as f64 * 0.41).cos() + 0.003 * t as f64)
+            .collect();
+        let f = [0.25, 0.5, 0.25];
+        for sides in [FilterSides::One, FilterSides::Two] {
+            assert!(filter(&x, &f, FilterMethod::Convolution, sides, None).is_ok());
+            assert!(matches!(
+                cancelled(|| filter(&x, &f, FilterMethod::Convolution, sides, None)),
+                Err(EconError::Cancelled(_))
+            ));
+        }
     }
 
     // Guards only that the row loops check the budget at all. The stride rule

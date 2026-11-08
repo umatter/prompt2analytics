@@ -24,6 +24,12 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/ar.html>
 
 use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::xtx;
+use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
+use crate::regression::ols::normal_inverse_from_gram;
+use crate::resource::{checkpoint, try_vec, try_zeros1, try_zeros2};
+use crate::traits::convergence::{ResultNotes, notes_text};
+use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
 /// Method for AR model fitting.
@@ -78,7 +84,8 @@ pub struct ArResult {
     pub x_mean: f64,
     /// AIC values relative to the minimum (only if aic=true)
     pub aic: Option<Vec<f64>>,
-    /// Partial autocorrelation coefficients at each lag
+    /// Partial autocorrelation coefficients at each lag. R's `ar.ols` returns none; with
+    /// `ArMethod::Ols` this is the Durbin-Levinson path of the same autocovariances.
     pub partial_acf: Vec<f64>,
     /// Number of observations
     pub n_obs: usize,
@@ -87,6 +94,15 @@ pub struct ArResult {
     /// Residuals (first `order` values are NA represented as NaN)
     #[serde(skip)]
     pub resid: Vec<f64>,
+    /// R's ar warnings (OLS singularity stop, saturated order); shown by Display.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for ArResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for ArResult {
@@ -114,16 +130,42 @@ impl std::fmt::Display for ArResult {
                 }
             }
         }
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
+/// What a fitting route returns; `ar` adds the mean, the residuals and the labels.
+struct ArFit {
+    ar: Vec<f64>,
+    var_pred: f64,
+    pacf: Vec<f64>,
+    aic: Option<Vec<f64>>,
+    warnings: Vec<String>,
+}
+
 /// Fit an autoregressive model to a time series.
+///
+/// The methods follow `stats::ar`: `YuleWalker` is `ar.yw` (`var_pred` is the Durbin-Levinson
+/// variance times n / (n - (order + 1))), `Burg` is `ar.burg` and `Ols` is
+/// `ar.ols(demean = config.demean, intercept = FALSE)`: orders are fitted while the lag matrix
+/// has at least as many rows as lags and `qr(X'X)` is of full rank, `var_pred` is SSE / (n - m),
+/// the AIC is n ln(var) + 2m relative to its minimum (`+inf` for orders not fitted), and a stop
+/// or a saturated order is reported in `warnings`. R's `ar.ols` returns no partial ACF; p2a fills
+/// `partial_acf` from the Durbin-Levinson path of the same autocovariances, so the `Ols` route also
+/// refuses a series of zero variance, which R's does not.
 ///
 /// # Arguments
 ///
 /// * `x` - Time series data
 /// * `config` - Configuration options
+///
+/// # Errors
+///
+/// `InsufficientData` for a series of fewer than 3 values, a Yule-Walker order with
+/// n <= order + 1, or a fixed OLS order with fewer rows than lags; `InvalidSpecification` for a
+/// series of zero variance; `SingularMatrix` for a fixed OLS order whose X'X is rank-deficient;
+/// `Cancelled` when the budget stops (checked once per
+/// order).
 ///
 /// # Example
 ///
@@ -163,11 +205,19 @@ pub fn ar(x: &[f64], config: ArConfig) -> EconResult<ArResult> {
     let y: Vec<f64> = x.iter().map(|v| v - x_mean).collect();
 
     // Fit based on method
-    let (ar_coefs, var_pred, partial_acf, aic_values) = match config.method {
+    let fit = match config.method {
         ArMethod::YuleWalker => fit_ar_yule_walker_full(&y, max_order, config.aic, config.order)?,
         ArMethod::Burg => fit_ar_burg(&y, max_order, config.aic, config.order)?,
         ArMethod::Ols => fit_ar_ols(&y, max_order, config.aic, config.order)?,
     };
+
+    let ArFit {
+        ar: ar_coefs,
+        var_pred,
+        pacf: partial_acf,
+        aic: aic_values,
+        warnings,
+    } = fit;
 
     // Compute residuals
     let order = ar_coefs.len();
@@ -190,21 +240,22 @@ pub fn ar(x: &[f64], config: ArConfig) -> EconResult<ArResult> {
         n_obs: n,
         method: config.method,
         resid,
+        warnings,
     })
 }
 
-/// Fit AR model using Yule-Walker equations with full diagnostics.
-fn fit_ar_yule_walker_full(
+/// The Durbin-Levinson recursion on the sample autocovariances: per order 0..=max_order the
+/// coefficients and the innovation variance, and the partial autocorrelations.
+fn durbin_levinson_path(
     y: &[f64],
     max_order: usize,
-    use_aic: bool,
-    fixed_order: Option<usize>,
-) -> EconResult<(Vec<f64>, f64, Vec<f64>, Option<Vec<f64>>)> {
+) -> EconResult<(Vec<Vec<f64>>, Vec<f64>, Vec<f64>)> {
     let n = y.len();
 
     // Compute autocovariances up to max_order
     let mut gamma = Vec::with_capacity(max_order + 1);
     for k in 0..=max_order {
+        checkpoint()?;
         let mut sum = 0.0;
         for t in 0..(n - k) {
             sum += y[t] * y[t + k];
@@ -237,6 +288,7 @@ fn fit_ar_yule_walker_full(
         var_all.push(gamma[0] * (1.0 - phi_11 * phi_11));
 
         for p in 2..=max_order {
+            checkpoint()?;
             let phi_prev = &phi_all[p - 1];
 
             // Compute partial autocorrelation phi_pp
@@ -248,7 +300,7 @@ fn fit_ar_yule_walker_full(
             pacf.push(phi_pp);
 
             // Update coefficients
-            let mut phi_new = vec![0.0; p];
+            let mut phi_new = try_vec(p, 0.0, "the Durbin-Levinson coefficients")?;
             for j in 0..(p - 1) {
                 phi_new[j] = phi_prev[j] - phi_pp * phi_prev[p - 2 - j];
             }
@@ -261,6 +313,19 @@ fn fit_ar_yule_walker_full(
             var_all.push(new_var.max(0.0));
         }
     }
+
+    Ok((phi_all, var_all, pacf))
+}
+
+/// Fit AR model using Yule-Walker equations with full diagnostics.
+fn fit_ar_yule_walker_full(
+    y: &[f64],
+    max_order: usize,
+    use_aic: bool,
+    fixed_order: Option<usize>,
+) -> EconResult<ArFit> {
+    let n = y.len();
+    let (phi_all, var_all, pacf) = durbin_levinson_path(y, max_order)?;
 
     // Select order based on AIC or fixed
     let (selected_order, aic_values) = if let Some(order) = fixed_order {
@@ -294,10 +359,25 @@ fn fit_ar_yule_walker_full(
         (max_order, None)
     };
 
-    let ar_coefs = phi_all[selected_order].clone();
-    let var_pred = var_all[selected_order];
+    // R's ar.yw: var.pred * n / (n - (order + 1))
+    let den = n
+        .checked_sub(selected_order + 1)
+        .filter(|d| *d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: selected_order + 2,
+            provided: n,
+            context: format!(
+                "Yule-Walker AR({selected_order}): R's var.pred * n / (n - (order + 1)) needs n > order + 1"
+            ),
+        })?;
 
-    Ok((ar_coefs, var_pred, pacf, aic_values))
+    Ok(ArFit {
+        ar: phi_all[selected_order].clone(),
+        var_pred: var_all[selected_order] * n as f64 / den as f64,
+        pacf,
+        aic: aic_values,
+        warnings: Vec::new(),
+    })
 }
 
 /// Fit AR model using Burg's method.
@@ -308,7 +388,7 @@ fn fit_ar_burg(
     max_order: usize,
     use_aic: bool,
     fixed_order: Option<usize>,
-) -> EconResult<(Vec<f64>, f64, Vec<f64>, Option<Vec<f64>>)> {
+) -> EconResult<ArFit> {
     let n = y.len();
 
     // Initialize forward and backward prediction errors
@@ -331,6 +411,8 @@ fn fit_ar_burg(
     var_all.push(var0);
 
     for p in 1..=max_order {
+        checkpoint()?;
+
         // Compute reflection coefficient using Burg's formula
         let mut num = 0.0;
         let mut den = 0.0;
@@ -353,7 +435,7 @@ fn fit_ar_burg(
         } else {
             vec![]
         };
-        let mut phi_new = vec![0.0; p];
+        let mut phi_new = try_vec(p, 0.0, "the Burg coefficients")?;
         for j in 0..(p - 1) {
             phi_new[j] = phi_prev[j] - k * phi_prev[p - 2 - j];
         }
@@ -364,11 +446,13 @@ fn fit_ar_burg(
         var_all.push(new_var.max(0.0));
         phi_all.push(phi_new);
 
-        // Update forward and backward errors
-        let ef_old = ef.clone();
-        for t in p..n {
-            ef[t] = ef_old[t] - k * eb[t - 1];
-            eb[t] = eb[t - 1] - k * ef_old[t];
+        // Update forward and backward errors from the previous order's errors (R's C_Burg).
+        // Backwards, so that eb[t - 1] is still the previous order's when eb[t] is written.
+        for t in (p..n).rev() {
+            let ef_old = ef[t];
+            let eb_old = eb[t - 1];
+            ef[t] = ef_old - k * eb_old;
+            eb[t] = eb_old - k * ef_old;
         }
     }
 
@@ -407,197 +491,187 @@ fn fit_ar_burg(
         (max_order.min(phi_all.len() - 1), None)
     };
 
-    let ar_coefs = phi_all[selected_order].clone();
-    let var_pred = var_all[selected_order];
-
-    Ok((ar_coefs, var_pred, pacf, aic_values))
+    Ok(ArFit {
+        ar: phi_all[selected_order].clone(),
+        var_pred: var_all[selected_order],
+        pacf,
+        aic: aic_values,
+        warnings: Vec::new(),
+    })
 }
 
-/// Fit AR model using OLS.
+/// One order of `ar.ols`: coefficients and SSE of `y[t + m]` on its `m` lags, or `None` when
+/// `qr(X'X)` is rank-deficient (R's stop rule, tolerance 1e-7). The caller ensures `rows >= m >= 1`.
+///
+/// One lag design per order: the normal equations when they are safe, the pivoted QR otherwise
+/// and for a saturated order (`rows == m`), whose residuals are exactly zero.
+fn fit_ols_order(y: &[f64], m: usize, rows: usize) -> EconResult<Option<(Vec<f64>, f64)>> {
+    let mut x = try_zeros2(rows, m, "the AR lag design")?;
+    let mut resp = try_zeros1(rows, "the AR response")?;
+    for t in 0..rows {
+        resp[t] = y[t + m];
+        for k in 0..m {
+            x[[t, k]] = y[t + m - k - 1];
+        }
+    }
+
+    let gram = xtx(&x.view());
+    if Qr::decompose(gram.view(), LM_QR_TOL)?.rank() < m {
+        return Ok(None);
+    }
+
+    let solved: Option<Array1<f64>> = if rows > m {
+        normal_inverse_from_gram(gram.view())?.map(|inv| inv.coefficients(x.view(), &resp))
+    } else {
+        None
+    };
+    let (coefs, sse) = match solved {
+        Some(beta) => {
+            let sse = (&resp - &x.dot(&beta)).iter().map(|r| r * r).sum();
+            (beta, sse)
+        }
+        None => {
+            let ls = least_squares(x.view(), resp.view())?;
+            if ls.rank < m {
+                return Ok(None);
+            }
+            let sse = if rows == m {
+                0.0
+            } else {
+                ls.residuals.iter().map(|r| r * r).sum()
+            };
+            (ls.coefficients, sse)
+        }
+    };
+    Ok(Some((coefs.to_vec(), sse)))
+}
+
+/// Why an order could not be fitted by OLS.
+enum OlsStop {
+    TooFewRows(usize),
+    Singular(usize),
+}
+
+impl OlsStop {
+    fn error(&self, n: usize) -> EconError {
+        match *self {
+            OlsStop::TooFewRows(k) => EconError::InsufficientData {
+                required: k.saturating_mul(2),
+                provided: n,
+                context: format!("AR({k}) by OLS needs at least as many rows as lags (n - k >= k)"),
+            },
+            OlsStop::Singular(k) => EconError::SingularMatrix {
+                context: format!("AR({k}) by OLS: X'X is rank-deficient"),
+                suggestion: "use a lower order".to_string(),
+            },
+        }
+    }
+
+    fn order(&self) -> usize {
+        match *self {
+            OlsStop::TooFewRows(k) | OlsStop::Singular(k) => k,
+        }
+    }
+}
+
+/// Fit AR model using OLS, as `stats::ar.ols(intercept = FALSE)`. R's rescaling by the standard
+/// deviation cancels in the coefficients, the rank decision and the relative AIC, so it is omitted.
 fn fit_ar_ols(
     y: &[f64],
     max_order: usize,
     use_aic: bool,
     fixed_order: Option<usize>,
-) -> EconResult<(Vec<f64>, f64, Vec<f64>, Option<Vec<f64>>)> {
+) -> EconResult<ArFit> {
     let n = y.len();
 
-    // Also compute PACF via Yule-Walker for consistency
-    let (_, _, pacf, _) = fit_ar_yule_walker_full(y, max_order, false, Some(max_order))?;
+    // R's ar.ols returns no partial ACF (partialacf = NULL); p2a reports the Durbin-Levinson path
+    // of the same autocovariances.
+    let (_, _, pacf) = durbin_levinson_path(y, max_order)?;
 
-    let mut phi_all: Vec<Vec<f64>> = Vec::with_capacity(max_order + 1);
-    let mut var_all: Vec<f64> = Vec::with_capacity(max_order + 1);
+    let (first, last) = match fixed_order {
+        Some(k) => (k, k),
+        None if use_aic => (0, max_order),
+        None => (max_order, max_order),
+    };
+    let searching = fixed_order.is_none() && use_aic;
 
-    // Order 0: just variance
-    let var0 = y.iter().map(|v| v * v).sum::<f64>() / n as f64;
-    phi_all.push(vec![]);
-    var_all.push(var0);
+    let mut aic_raw = vec![f64::INFINITY; if searching { max_order + 1 } else { 0 }];
+    let mut fits: Vec<(Vec<f64>, f64, usize)> = Vec::new();
+    let mut stop = None;
 
-    for p in 1..=max_order {
-        if n <= p {
-            break;
-        }
-
-        // Build design matrix and response
-        let n_eff = n - p;
-        let mut x_data = vec![0.0; n_eff * p];
-        let mut y_vec = vec![0.0; n_eff];
-
-        for t in 0..n_eff {
-            y_vec[t] = y[t + p];
-            for k in 0..p {
-                x_data[t * p + k] = y[t + p - k - 1];
-            }
-        }
-
-        // Solve normal equations: (X'X)^{-1} X'y
-        // Using simple Cholesky or direct solve for small p
-        let mut xtx = vec![0.0; p * p];
-        let mut xty = vec![0.0; p];
-
-        for i in 0..p {
-            for j in 0..p {
-                let mut sum = 0.0;
-                for t in 0..n_eff {
-                    sum += x_data[t * p + i] * x_data[t * p + j];
-                }
-                xtx[i * p + j] = sum;
-            }
-            let mut sum = 0.0;
-            for t in 0..n_eff {
-                sum += x_data[t * p + i] * y_vec[t];
-            }
-            xty[i] = sum;
-        }
-
-        // Solve using simple Gauss elimination (could use more robust method)
-        let phi = match solve_linear_system(&xtx, &xty, p) {
-            Some(coefs) => coefs,
-            None => {
-                // Singular system, use Yule-Walker instead
-                let (yw_coefs, _, _, _) = fit_ar_yule_walker_full(y, p, false, Some(p))?;
-                yw_coefs
+    for m in first..=last {
+        checkpoint()?;
+        let rows = match n.checked_sub(m) {
+            Some(rows) if rows >= m => rows,
+            _ => {
+                stop = Some(OlsStop::TooFewRows(m));
+                break;
             }
         };
-
-        // Compute residual variance
-        let mut sse = 0.0;
-        for t in 0..n_eff {
-            let mut fitted = 0.0;
-            for k in 0..p {
-                fitted += phi[k] * x_data[t * p + k];
-            }
-            let resid = y_vec[t] - fitted;
-            sse += resid * resid;
+        let fit = if m == 0 {
+            Some((Vec::new(), y.iter().map(|v| v * v).sum::<f64>()))
+        } else {
+            fit_ols_order(y, m, rows)?
+        };
+        let Some((coefs, sse)) = fit else {
+            stop = Some(OlsStop::Singular(m));
+            break;
+        };
+        let var = sse / rows as f64;
+        if searching {
+            // ln(0) = -inf for a saturated order
+            aic_raw[m] = n as f64 * var.ln() + 2.0 * m as f64;
         }
-        let var = sse / (n_eff - p) as f64;
-
-        phi_all.push(phi);
-        var_all.push(var.max(0.0));
+        fits.push((coefs, var, rows));
     }
 
-    // Ensure enough orders
-    while phi_all.len() <= max_order {
-        phi_all.push(phi_all.last().unwrap_or(&vec![]).clone());
-        var_all.push(*var_all.last().unwrap_or(&var0));
+    let mut warnings = Vec::new();
+    if searching && let Some(stop) = &stop {
+        let m = stop.order();
+        warnings.push(format!(
+            "model order {m}: singularities in the computation of the projection matrix; results are only valid up to model order {}",
+            m - 1
+        ));
     }
 
-    // Select order
-    let (selected_order, aic_values) = if let Some(order) = fixed_order {
-        let order = order.min(phi_all.len() - 1);
-        (order, None)
-    } else if use_aic {
-        let mut aic_vals = Vec::with_capacity(phi_all.len());
-        let mut min_aic = f64::INFINITY;
-        let mut best_order = 0;
-
-        for p in 0..phi_all.len() {
-            let var = var_all[p];
-            if var <= 0.0 {
-                aic_vals.push(f64::INFINITY);
-                continue;
-            }
-            // Use effective sample size
-            let n_eff = if p == 0 { n } else { n - p };
-            let aic = n_eff as f64 * var.ln() + 2.0 * (p + 1) as f64;
-            aic_vals.push(aic);
-            if aic < min_aic {
-                min_aic = aic;
-                best_order = p;
-            }
-        }
-
-        let aic_relative: Vec<f64> = aic_vals.iter().map(|a| a - min_aic).collect();
-        (best_order, Some(aic_relative))
+    let (index, aic) = if searching {
+        let min = aic_raw.iter().copied().fold(f64::INFINITY, f64::min);
+        let best = aic_raw.iter().position(|a| *a == min).unwrap_or(0);
+        let relative = aic_raw
+            .iter()
+            .map(|a| {
+                if min.is_finite() {
+                    a - min
+                } else if *a == min {
+                    0.0
+                } else {
+                    f64::INFINITY
+                }
+            })
+            .collect();
+        (best, Some(relative))
     } else {
-        (max_order.min(phi_all.len() - 1), None)
+        if let Some(stop) = &stop {
+            return Err(stop.error(n));
+        }
+        (0, None)
     };
 
-    let ar_coefs = phi_all[selected_order].clone();
-    let var_pred = var_all[selected_order];
-
-    Ok((ar_coefs, var_pred, pacf, aic_values))
-}
-
-/// Simple linear system solver for small systems.
-fn solve_linear_system(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
-    if n == 0 {
-        return Some(vec![]);
+    let (coefs, var_pred, rows) = fits.swap_remove(index);
+    let m = coefs.len();
+    if m > 0 && rows == m {
+        warnings.push(format!(
+            "AR({m}) by OLS uses {rows} observations for {m} lags: zero residual degrees of freedom, so the fit is exact and its prediction variance is rounding error"
+        ));
     }
 
-    // Copy matrix and vector
-    let mut aug = vec![0.0; n * (n + 1)];
-    for i in 0..n {
-        for j in 0..n {
-            aug[i * (n + 1) + j] = a[i * n + j];
-        }
-        aug[i * (n + 1) + n] = b[i];
-    }
-
-    // Gaussian elimination with partial pivoting
-    for k in 0..n {
-        // Find pivot
-        let mut max_idx = k;
-        let mut max_val = aug[k * (n + 1) + k].abs();
-        for i in (k + 1)..n {
-            let val = aug[i * (n + 1) + k].abs();
-            if val > max_val {
-                max_val = val;
-                max_idx = i;
-            }
-        }
-
-        if max_val < 1e-14 {
-            return None; // Singular
-        }
-
-        // Swap rows
-        if max_idx != k {
-            for j in 0..=n {
-                aug.swap(k * (n + 1) + j, max_idx * (n + 1) + j);
-            }
-        }
-
-        // Eliminate
-        for i in (k + 1)..n {
-            let factor = aug[i * (n + 1) + k] / aug[k * (n + 1) + k];
-            for j in k..=n {
-                aug[i * (n + 1) + j] -= factor * aug[k * (n + 1) + j];
-            }
-        }
-    }
-
-    // Back substitution
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut sum = aug[i * (n + 1) + n];
-        for j in (i + 1)..n {
-            sum -= aug[i * (n + 1) + j] * x[j];
-        }
-        x[i] = sum / aug[i * (n + 1) + i];
-    }
-
-    Some(x)
+    Ok(ArFit {
+        ar: coefs,
+        var_pred,
+        pacf,
+        aic,
+        warnings,
+    })
 }
 
 /// Convenience function to run AR model fitting with default settings.
@@ -620,6 +694,231 @@ pub fn run_ar_with_order(x: &[f64], order: usize) -> EconResult<ArResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use p2a_validation::{Check, Tol};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), name, crate::data::columns::NaPolicy::Omit)
+            .unwrap()
+            .0
+    }
+
+    fn sample_variance(v: &[f64]) -> f64 {
+        let m = v.iter().sum::<f64>() / v.len() as f64;
+        v.iter().map(|a| (a - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64
+    }
+
+    fn ols(order_max: Option<usize>, aic: bool, order: Option<usize>) -> ArConfig {
+        let mut c = ArConfig::default();
+        c.method = ArMethod::Ols;
+        c.order_max = order_max;
+        c.aic = aic;
+        c.order = order;
+        c
+    }
+
+    /// Case ts_filter_ar_cpt: ar(s, method = "ols", intercept = FALSE), n = 24, default order.max 13.
+    /// R fits 0..12 (12 = saturated), stops at 13 with "singularities", selects 12.
+    #[test]
+    fn test_validate_ar_ols_short_series() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let s = col(&ds, "s");
+        let r = ar(&s, ols(None, true, None)).unwrap();
+        let aic = r.aic.clone().unwrap();
+        assert_eq!(aic.len(), 14);
+        let r_infinite = case.vector("ar_ols_aic_infinite_orders"); // [13]
+        let infinite: Vec<f64> = r_infinite
+            .iter()
+            .map(|&k| {
+                if aic[k as usize].is_infinite() {
+                    k
+                } else {
+                    -1.0
+                }
+            })
+            .collect();
+        Check::new(&case)
+            .scalar("ar_ols_order", r.order as f64, Tol::exact()) // 12
+            .vector("ar_ols_coef", &r.ar, Tol::coef(24))
+            .vector("ar_ols_aic_infinite_orders", &infinite, Tol::exact())
+            .finish();
+        assert_eq!(aic[12], 0.0);
+        // R's var.pred 3.365475531705031e-30 and its finite relative AICs (1611.6, ...) are
+        // the rounding of an exact fit and not comparable; the AIC differences are pinned by
+        // test_validate_ar_ols_aic_by_order.
+        assert!(
+            r.var_pred.abs() < 1e-20 * sample_variance(&s),
+            "{}",
+            r.var_pred
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("model order 13")
+                    && w.contains("only valid up to model order 12")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("zero residual degrees of freedom")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(format!("{r}").contains("Warning: model order 13"));
+    }
+
+    /// The same call with order.max = 11: every order has residual df >= 2, so the AIC
+    /// differences are R's n ln(SSE_m / (n - m)) + 2m (key ar_ols_aic_diff = aic[k] - aic[0]).
+    #[test]
+    fn test_validate_ar_ols_aic_by_order() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let s = col(&ds, "s");
+        let r = ar(&s, ols(Some(11), true, None)).unwrap();
+        let aic = r.aic.unwrap();
+        let diff: Vec<f64> = aic.iter().map(|a| a - aic[0]).collect();
+        Check::new(&case)
+            .vector("ar_ols_aic_diff", &diff, Tol::stat(24))
+            .finish();
+    }
+
+    /// ar(x, method = "ols", intercept = FALSE) on the 60-value series: order 1, coefficient,
+    /// var.pred (SSE / (n - m)), x.mean and the relative AIC for orders 0..17.
+    #[test]
+    fn test_validate_ar_ols_n60() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let r = ar(&x, ols(None, true, None)).unwrap();
+        Check::new(&case)
+            .scalar("ar_ols_n60_order", r.order as f64, Tol::exact())
+            .vector("ar_ols_n60_coef", &r.ar, Tol::coef(60))
+            .vector("ar_ols_n60_aic", &r.aic.clone().unwrap(), Tol::stat(60))
+            .scalar("ar_ols_n60_var", r.var_pred, Tol::stat(60))
+            .scalar("ar_ols_n60_mean", r.x_mean, Tol::coef(60))
+            .finish();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// ar(s, method = "ols", aic = FALSE, order.max = 2 | 3): var.pred 0.9278760628690985 and
+    /// 0.9698929739989995 (SSE / (n - m)).
+    #[test]
+    fn test_validate_ar_ols_fixed_order() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let s = col(&ds, "s");
+        let mut check = Check::new(&case);
+        for m in [2usize, 3] {
+            let r = ar(&s, ols(None, false, Some(m))).unwrap();
+            assert_eq!(r.order, m);
+            check
+                .vector(&format!("ar_ols_fixed{m}_coef"), &r.ar, Tol::coef(24))
+                .scalar(&format!("ar_ols_fixed{m}_var"), r.var_pred, Tol::stat(24));
+        }
+        check.finish();
+    }
+
+    /// R: ar(s, method = "ols", aic = FALSE, order.max = 13) warns and stops ("AA %*% t(X)").
+    #[test]
+    fn test_ar_ols_unestimable_fixed_order_is_an_error() {
+        let path = p2a_validation::repo_path("validation/datasets/generated/ts_utils.csv");
+        let ds = crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        let s = col(&ds, "s");
+        let err = ar(&s, ols(None, false, Some(13))).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EconError::InsufficientData { .. } | EconError::SingularMatrix { .. }
+            ) && err.to_string().contains("AR(13) by OLS"),
+            "{err}"
+        );
+        // An order beyond the series is the same refusal.
+        let err = ar(&s, ols(None, false, Some(usize::MAX))).unwrap_err();
+        assert!(matches!(err, EconError::InsufficientData { .. }), "{err}");
+    }
+
+    /// A series of an exact low-order recursion: the rank of X'X stops the search at R's rule,
+    /// on a design with rows to spare, with R's warning.
+    #[test]
+    fn test_ar_ols_rank_stop_keeps_the_estimable_orders() {
+        let x: Vec<f64> = (0..50).map(|i| (i as f64 * 0.7).sin()).collect();
+        let r = ar(&x, ols(Some(8), true, None)).unwrap();
+        assert!(r.order <= 7, "{}", r.order);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("singularities")),
+            "{:?}",
+            r.warnings
+        );
+        let aic = r.aic.unwrap();
+        assert_eq!(aic[r.order], 0.0);
+        assert!(aic[8].is_infinite());
+    }
+
+    /// ar(x, method = "yule-walker"): order 1, var.pred = DL variance * 60 / 58; fixed order 3.
+    #[test]
+    fn test_validate_ar_yule_walker_var_pred() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let r = ar(&x, ArConfig::default()).unwrap();
+        let mut c3 = ArConfig::default();
+        c3.aic = false;
+        c3.order = Some(3);
+        let r3 = ar(&x, c3).unwrap();
+        Check::new(&case)
+            .scalar("ar_yw_order", r.order as f64, Tol::exact())
+            .vector("ar_yw_coef", &r.ar, Tol::coef(60))
+            .scalar("ar_yw_var", r.var_pred, Tol::stat(60))
+            .vector("ar_yw_fixed3_coef", &r3.ar, Tol::coef(60))
+            .scalar("ar_yw_fixed3_var", r3.var_pred, Tol::stat(60))
+            .finish();
+    }
+
+    /// Each order of every AR route takes a budget check: `order_max` is the caller's.
+    #[test]
+    fn ar_ols_and_burg_honour_cancellation() {
+        let x: Vec<f64> = (0..200)
+            .map(|i| (i as f64 * 0.3).sin() + 0.4 * ((i * 37 % 11) as f64 - 5.0))
+            .collect();
+        for method in [ArMethod::Ols, ArMethod::Burg, ArMethod::YuleWalker] {
+            let mut c = ArConfig::default();
+            c.method = method;
+            assert!(ar(&x, c.clone()).is_ok());
+            let token = crate::resource::CancelToken::new();
+            token.cancel();
+            let stopped =
+                crate::resource::with_budget(crate::resource::Budget::new(None, token), || {
+                    ar(&x, c.clone())
+                });
+            assert!(
+                matches!(stopped, Err(EconError::Cancelled(_))),
+                "{method:?}: {stopped:?}"
+            );
+        }
+    }
+
+    /// ar(x, method = "burg"): order 1 (coef 0.8697095962524342, var.pred 1.0853375039008384),
+    /// partial ACF for orders 1..17, relative AIC 0..17; fixed order 3.
+    #[test]
+    fn test_validate_ar_burg() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let x = col(&ds, "x");
+        let mut c = ArConfig::default();
+        c.method = ArMethod::Burg;
+        let r = ar(&x, c).unwrap();
+        let mut c3 = ArConfig::default();
+        c3.method = ArMethod::Burg;
+        c3.aic = false;
+        c3.order = Some(3);
+        let r3 = ar(&x, c3).unwrap();
+        Check::new(&case)
+            .scalar("ar_burg_order", r.order as f64, Tol::exact())
+            .vector("ar_burg_coef", &r.ar, Tol::coef(60))
+            .scalar("ar_burg_var", r.var_pred, Tol::stat(60))
+            .vector("ar_burg_aic", &r.aic.clone().unwrap(), Tol::stat(60))
+            .vector("ar_burg_pacf", &r.partial_acf, Tol::coef(60))
+            .vector("ar_burg_fixed3_coef", &r3.ar, Tol::coef(60))
+            .scalar("ar_burg_fixed3_var", r3.var_pred, Tol::stat(60))
+            .finish();
+    }
 
     #[test]
     fn test_ar_basic() {
@@ -717,44 +1016,6 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_validate_ar_yule_walker_against_r() {
-        // R code:
-        // set.seed(42)
-        // x <- arima.sim(n=100, model=list(ar=c(0.7, -0.2)))
-        // result <- ar(x, method="yule-walker")
-        // result$order  # Order selected
-        // result$ar     # Coefficients
-
-        // Use deterministic test data
-        let x: Vec<f64> = (0..100)
-            .map(|i| {
-                0.7 * ((i as f64 - 1.0).max(0.0) * 0.1).sin()
-                    - 0.2 * ((i as f64 - 2.0).max(0.0) * 0.1).sin()
-                    + (i as f64 * 0.1).cos()
-            })
-            .collect();
-
-        let result = ar(
-            &x,
-            ArConfig {
-                method: ArMethod::YuleWalker,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        println!("Yule-Walker result:");
-        println!("Order: {}", result.order);
-        println!("AR coefficients: {:?}", result.ar);
-        println!("Var: {:.6}", result.var_pred);
-        println!("PACF: {:?}", result.partial_acf);
-
-        // Check that we get reasonable results
-        assert!(result.order > 0);
-        assert!(result.ar.iter().all(|c| c.abs() < 2.0)); // Coefficients should be reasonable
-    }
-
-    #[test]
     fn test_ar_display() {
         let x: Vec<f64> = (0..50).map(|i| (i as f64 * 0.2).sin()).collect();
         let result = ar(&x, ArConfig::default()).unwrap();
@@ -765,7 +1026,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Additional R-vs-Rust Validation Tests (Phase 6)
+    // Property tests on simulated data
     // ========================================================================
 
     /// LCG for deterministic random numbers
@@ -800,69 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_burg_vs_r() {
-        // R reference:
-        // ar(x, method = "burg")
-        let x = create_ar2_process();
-        let result = ar(
-            &x,
-            ArConfig {
-                method: ArMethod::Burg,
-                aic: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // Check structure - Burg method should run and produce valid output
-        assert!(result.n_obs == x.len());
-        assert!(result.var_pred > 0.0);
-        assert!(result.method == ArMethod::Burg);
-
-        // Residuals should be computed
-        assert_eq!(result.resid.len(), x.len());
-    }
-
-    #[test]
-    fn test_validate_ar_ols_vs_r() {
-        // R reference:
-        // ar(x, method = "ols")
-        let x = create_ar2_process();
-        let result = ar(
-            &x,
-            ArConfig {
-                method: ArMethod::Ols,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // Check structure
-        assert!(result.order > 0);
-        assert!(result.var_pred > 0.0);
-
-        // OLS should give similar results to Yule-Walker
-        let yw_result = ar(
-            &x,
-            ArConfig {
-                method: ArMethod::YuleWalker,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // Orders should be similar (within 1-2)
-        let order_diff = (result.order as i32 - yw_result.order as i32).abs();
-        assert!(
-            order_diff <= 3,
-            "Order difference too large: {} vs {}",
-            result.order,
-            yw_result.order
-        );
-    }
-
-    #[test]
-    fn test_validate_ar_coefficient_recovery() {
+    fn test_ar2_coefficients_recover_dgp() {
         // Test that AR(2) with known coefficients recovers approximately
         let x = create_ar2_process();
 
@@ -899,9 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_aic_order_selection() {
-        // R reference:
-        // ar(x, aic = TRUE)
+    fn test_ar_aic_selects_low_order_on_ar2_dgp() {
         let x = create_ar2_process();
         let result = ar(
             &x,
@@ -938,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_pacf_structure() {
+    fn test_ar_pacf_structure_on_ar2_dgp() {
         // PACF should cut off after true order for AR process
         let x = create_ar2_process();
         let result = ar(
@@ -975,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_residuals() {
+    fn test_ar_residuals_shape() {
         let x = create_ar2_process();
         let result = ar(
             &x,
@@ -1025,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_mean_centering() {
+    fn test_ar_mean_centering() {
         // Test with non-zero mean series
         let x: Vec<f64> = create_ar2_process().iter().map(|v| v + 10.0).collect();
 
@@ -1049,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ar_methods_consistency() {
+    fn test_ar_methods_agree_on_ar2_dgp() {
         // All methods should give similar results for well-behaved data
         let x = create_ar2_process();
 

@@ -199,6 +199,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/hclust_ties.csv` | 40 × 2 (u, v) | `hclust_methods` | `r/cases/ml_hierarchical.R` | seed 7 |
 | `generated/hdfe_disconnected.csv` | 80 × 5 (firm, year, x, z, y) | `hdfe_disconnected` | `r/cases/econ_panel_t3.R` | seed 20261105 |
 | `generated/hdfe_scale.csv` | 1000 × 5 (firm, year, x, y, y_big) | `hdfe_map_scale` | `r/cases/econ_panel_t3.R` | seed 20261103 |
+| `generated/holtwinters_series.csv` | 144 × 5 (t, airpass, co2, q, ns; trailing missing cells) | `ts_holtwinters_forecast` | `r/cases/ts_holtwinters.R` | AirPassengers, co2 to 1969, legacy seeds 42 and 123 |
 | `generated/line_outliers.csv` | 30 × 2 (x, y) | `line_tukey_outliers` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:30, the old line test's y with outliers at x = 5, 15 and 25 |
 | `generated/loess_skewed.csv` | 100 × 2 (x, y) | `loess_skewed_direct` | `r/cases/regression_smoothers_t3.R` | seed 20261128 |
 | `generated/loess_x10.csv` | 10 × 2 (x, y) | `loess_x10_direct` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:10, near-linear y |
@@ -242,6 +243,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/supsmu_sine.csv` | 100 × 4 (x, y, w, xr) | `supsmu_sine` | `r/cases/regression_smoothers_t3.R` | seed 42 |
 | `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
 | `generated/sysgmm_empluk.csv` | 1031 × 5 (firm, year, lemp, lwage, lcap) | `dpd_sys_empluk` | `r/cases/econ_sysgmm.R` | `plm::EmplUK`, logs of emp, wage and capital |
+| `generated/ts_utils.csv` | 210 × 6 (t, x, s, lev, wn, ar1; x, s, wn and ar1 end in missing cells) | `ts_filter_ar_cpt` | `r/cases/ts_utils.R` | seed 20261123 |
 | `generated/var_canada.csv` | 84 × 4 (e, prod, rw, U) | `var_canada` | `r/cases/ts_var.R` | `vars::Canada` |
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
 | `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |

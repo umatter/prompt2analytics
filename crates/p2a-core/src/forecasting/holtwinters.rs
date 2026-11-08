@@ -22,6 +22,7 @@ use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_with_capacity};
+use crate::traits::estimator::{validate_level, z_critical};
 
 /// Type of seasonal component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -36,18 +37,19 @@ pub enum SeasonalType {
 /// Configuration for Holt-Winters fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoltWintersConfig {
-    /// Level smoothing parameter (0 < α < 1). None = optimize automatically.
+    /// Level smoothing parameter (0 < α <= 1). None = optimize automatically.
     pub alpha: Option<f64>,
-    /// Trend smoothing parameter (0 < β < 1). None = optimize, Some(false) = no trend.
-    /// Use beta = None for automatic optimization, or explicitly set a value.
-    /// Set to Some(0.0) or use_trend = false to disable trend component.
+    /// Trend smoothing parameter (0 <= β <= 1), used with `use_trend`. None = optimize.
+    /// Some(0.0) keeps a trend that is not updated (R's beta = 0); `use_trend = false` has none.
     pub beta: Option<f64>,
-    /// Seasonal smoothing parameter (0 < γ < 1). None = optimize automatically.
-    /// Set to Some(0.0) or use_seasonal = false to disable seasonal component.
+    /// Seasonal smoothing parameter (0 <= γ <= 1), used with `use_seasonal`. None = optimize.
+    /// Some(0.0) keeps a seasonal component that is not updated (R's gamma = 0);
+    /// `use_seasonal = false` has none.
     pub gamma: Option<f64>,
     /// Type of seasonal component.
     pub seasonal: SeasonalType,
-    /// Seasonal period (e.g., 12 for monthly, 4 for quarterly, 7 for daily with weekly pattern).
+    /// Seasonal period (e.g., 12 for monthly, 4 for quarterly, 7 for daily with weekly pattern):
+    /// at least 1, and at least 2 for a seasonal model.
     pub period: usize,
     /// Number of starting periods for initialization (minimum 2).
     pub start_periods: usize,
@@ -102,7 +104,10 @@ pub struct HoltWintersResult {
     pub seasonal_type: SeasonalType,
     /// Seasonal period.
     pub period: usize,
-    /// Level component at each time point.
+    /// Level component at each time point; NaN before the first filtered observation, as in
+    /// `fitted`, `residuals` and `trend`. The filter starts as R's `HoltWinters`: at t = `period`
+    /// (0-based) for a seasonal model, t = 2 for Holt's linear trend, t = 1 for simple exponential
+    /// smoothing.
     pub level: Vec<f64>,
     /// Trend component at each time point. None if trend disabled.
     pub trend: Option<Vec<f64>>,
@@ -127,6 +132,31 @@ impl HoltWintersResult {
     pub fn forecast(&self, h: usize) -> EconResult<Vec<f64>> {
         holt_winters_forecast(self, h)
     }
+
+    /// Forecasts with prediction intervals; see [`holt_winters_predict`].
+    pub fn predict(&self, horizon: usize, level: f64) -> EconResult<HoltWintersForecast> {
+        holt_winters_predict(self, horizon, level)
+    }
+}
+
+/// Forecasts with prediction intervals from [`holt_winters_predict`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoltWintersForecast {
+    /// Number of periods ahead.
+    pub horizon: usize,
+    /// Confidence level of the intervals.
+    pub level: f64,
+    /// R `predict()[, "fit"]`.
+    pub forecast: Vec<f64>,
+    /// Standard error of each forecast; the interval is
+    /// forecast -/+ qnorm((1 + level) / 2) * std_errors.
+    pub std_errors: Vec<f64>,
+    /// Lower limits.
+    pub lower: Vec<f64>,
+    /// Upper limits.
+    pub upper: Vec<f64>,
+    /// var(residuals(fit)): sample variance (divisor m - 1) of the m one-step errors.
+    pub residual_variance: f64,
 }
 
 /// Fit Holt-Winters exponential smoothing model.
@@ -141,6 +171,13 @@ impl HoltWintersResult {
 /// [`crate::resource::with_budget`] is cancelled or past its deadline (checked
 /// once per optimiser iteration; when no smoothing parameter is left to
 /// estimate, no optimiser runs and the budget is not checked).
+///
+/// # Errors
+/// [`EconError::InvalidSpecification`], naming the parameter, for `period` (0; below 2 when
+/// seasonal), `alpha` (not in (0, 1]), `beta` and `gamma` (not in [0, 1], when used),
+/// `start_periods` (below 2 when seasonal), `max_iter` (0), `tolerance` (not finite and positive)
+/// and a seasonal size that overflows; [`EconError::InsufficientData`] for a series shorter than
+/// 3 values or two seasonal cycles.
 ///
 /// # Example
 /// ```ignore
@@ -169,17 +206,13 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
         });
     }
 
+    validate_config(&config, n)?;
+
     if config.use_seasonal && n < period * 2 {
         return Err(EconError::InsufficientData {
             required: period * 2,
             provided: n,
             context: "Seasonal Holt-Winters requires at least 2 full seasonal cycles".to_string(),
-        });
-    }
-
-    if config.use_seasonal && period < 2 {
-        return Err(EconError::InvalidSpecification {
-            message: "Seasonal period must be at least 2".to_string(),
         });
     }
 
@@ -212,7 +245,7 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
     };
 
     // Initialize level, trend, and seasonal components
-    let (l_start, b_start, s_start) = initialize_components(
+    let (l_start, b_start, s_start, start_t) = initialize_components(
         y,
         period,
         config.use_trend,
@@ -226,6 +259,7 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
         (alpha, beta, gamma) = optimize_parameters(
             y,
             period,
+            start_t,
             &l_start,
             &b_start,
             &s_start,
@@ -247,6 +281,7 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
     let (level, trend, seasonal, fitted, residuals, sse) = run_filter(
         y,
         period,
+        start_t,
         &l_start,
         &b_start,
         &s_start,
@@ -258,36 +293,16 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
         config.seasonal,
     )?;
 
-    // For seasonal models, run_filter returns n-period values for level/trend
-    // and we need to prepend NaN values to match the original series length
-    let (full_level, full_fitted, full_residuals) = if config.use_seasonal {
-        let mut full_level = vec![f64::NAN; period];
-        full_level.extend(level.iter().copied());
-
-        let mut full_fitted = vec![f64::NAN; period];
-        full_fitted.extend(fitted.iter().copied());
-
-        let mut full_residuals = vec![f64::NAN; period];
-        full_residuals.extend(residuals.iter().copied());
-
-        (full_level, full_fitted, full_residuals)
-    } else {
-        (level.clone(), fitted.clone(), residuals.clone())
+    // run_filter returns the values from start_t on; the series' first start_t positions are NaN.
+    let with_prefix = |v: &[f64]| {
+        let mut full = vec![f64::NAN; start_t];
+        full.extend_from_slice(v);
+        full
     };
-
-    let full_trend = if config.use_trend {
-        if config.use_seasonal {
-            let mut full_t = vec![f64::NAN; period];
-            if let Some(ref t) = trend {
-                full_t.extend(t.iter().copied());
-            }
-            Some(full_t)
-        } else {
-            trend.clone()
-        }
-    } else {
-        None
-    };
+    let full_level = with_prefix(&level);
+    let full_fitted = with_prefix(&fitted);
+    let full_residuals = with_prefix(&residuals);
+    let full_trend = trend.as_deref().map(with_prefix);
 
     // Extract final coefficients
     let final_level = *level.last().unwrap_or(&l_start);
@@ -331,6 +346,62 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
     })
 }
 
+/// Check a configuration against R's rules, before any work.
+fn validate_config(config: &HoltWintersConfig, n: usize) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    let period = config.period;
+
+    if period == 0 {
+        return invalid("period must be at least 1, got 0".to_string());
+    }
+    if config.use_seasonal {
+        if period < 2 {
+            return invalid(format!(
+                "period must be at least 2 for a seasonal model, got {period}"
+            ));
+        }
+        if config.start_periods < 2 {
+            return invalid(format!(
+                "start_periods must be at least 2 (need at least 2 periods to compute seasonal start values), got {}",
+                config.start_periods
+            ));
+        }
+        if period.checked_mul(2).is_none() || period.checked_mul(config.start_periods).is_none() {
+            return invalid(format!(
+                "period {period} with {} start periods is too large for {n} observations",
+                config.start_periods
+            ));
+        }
+    }
+    if let Some(a) = config.alpha
+        && !(a.is_finite() && a > 0.0 && a <= 1.0)
+    {
+        return invalid(format!("alpha must be in (0, 1], got {a}"));
+    }
+    if config.use_trend
+        && let Some(b) = config.beta
+        && !(0.0..=1.0).contains(&b)
+    {
+        return invalid(format!("beta must be in [0, 1], got {b}"));
+    }
+    if config.use_seasonal
+        && let Some(g) = config.gamma
+        && !(0.0..=1.0).contains(&g)
+    {
+        return invalid(format!("gamma must be in [0, 1], got {g}"));
+    }
+    if config.max_iter == 0 {
+        return invalid("max_iter must be at least 1, got 0".to_string());
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return invalid(format!(
+            "tolerance must be finite and positive, got {}",
+            config.tolerance
+        ));
+    }
+    Ok(())
+}
+
 /// Generate forecasts from a fitted Holt-Winters model.
 ///
 /// # Arguments
@@ -338,8 +409,21 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
 /// * `h` - Forecast horizon (number of periods ahead)
 ///
 /// # Returns
-/// Vector of h forecast values.
+/// Vector of h forecast values, or [`EconError::InvalidSpecification`] for a result whose seasonal
+/// coefficients do not fit its period.
 pub fn holt_winters_forecast(result: &HoltWintersResult, h: usize) -> EconResult<Vec<f64>> {
+    if let Some(s) = &result.coefficients.seasonal
+        && (result.period == 0 || s.len() != result.period)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "HoltWintersResult is inconsistent: {} seasonal coefficients for period {}",
+                s.len(),
+                result.period
+            ),
+        });
+    }
+
     if h == 0 {
         return Ok(vec![]);
     }
@@ -371,6 +455,103 @@ pub fn holt_winters_forecast(result: &HoltWintersResult, h: usize) -> EconResult
     Ok(forecasts)
 }
 
+/// Forecasts with prediction intervals, as `predict.HoltWinters(prediction.interval = TRUE)` for
+/// additive and non-seasonal fits: the variance at horizon h is
+/// var(residuals) (1 + sum_{j=1}^{h-1} psi_j^2), with
+/// psi_j = alpha (1 + j beta) + 1{j mod f = 0} gamma (1 - alpha) (Yar and Chatfield).
+///
+/// Multiplicative seasonal intervals are refused: `predict.HoltWinters`' formula for them reads the
+/// trend where a seasonal index belongs, puts alpha + gamma (1 - alpha) where the one-step term
+/// is 1, and shifts the seasonal indices without a trend. A fit without a seasonal component uses
+/// the additive formula whatever its label.
+///
+/// # Errors
+/// [`EconError::InvalidSpecification`] for a horizon of 0, a level outside (0, 1), and a
+/// multiplicative seasonal fit; [`EconError::InsufficientData`] for fewer than two one-step errors;
+/// [`EconError::ResourceLimit`] for a horizon over the allocation ceiling; [`EconError::Cancelled`]
+/// when the budget stops (checked once per horizon).
+pub fn holt_winters_predict(
+    result: &HoltWintersResult,
+    horizon: usize,
+    level: f64,
+) -> EconResult<HoltWintersForecast> {
+    validate_level(level, "level")?;
+    if horizon == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "horizon must be at least 1".to_string(),
+        });
+    }
+    if result.coefficients.seasonal.is_some()
+        && result.seasonal_type == SeasonalType::Multiplicative
+    {
+        return Err(EconError::InvalidSpecification {
+            message: "prediction intervals are implemented for additive and non-seasonal Holt-Winters fits; use holt_winters_forecast for multiplicative point forecasts".to_string(),
+        });
+    }
+    let forecast = holt_winters_forecast(result, horizon)?;
+
+    let (mut count, mut mean) = (0usize, 0.0);
+    for r in result.residuals.iter().filter(|r| !r.is_nan()) {
+        count += 1;
+        mean += r;
+    }
+    if count < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: count,
+            context: "prediction intervals need the variance of at least two one-step errors"
+                .to_string(),
+        });
+    }
+    mean /= count as f64;
+    let residual_variance = result
+        .residuals
+        .iter()
+        .filter(|r| !r.is_nan())
+        .map(|r| (r - mean).powi(2))
+        .sum::<f64>()
+        / (count - 1) as f64;
+
+    let alpha = result.alpha;
+    let beta = result.beta.unwrap_or(0.0);
+    let gamma = result.gamma.unwrap_or(0.0);
+    let f = result.period.max(1);
+    let z = z_critical(level)?;
+
+    let what = "the Holt-Winters prediction horizon";
+    let mut std_errors = try_with_capacity(horizon, what)?;
+    let mut lower = try_with_capacity(horizon, what)?;
+    let mut upper = try_with_capacity(horizon, what)?;
+    let mut factor = 1.0;
+    for (h, &fit) in forecast.iter().enumerate() {
+        checkpoint()?;
+        // h is 0-based: this step adds psi_h^2 to the variance of horizon h + 1.
+        if h > 0 {
+            let seasonal_term = if h % f == 0 {
+                gamma * (1.0 - alpha)
+            } else {
+                0.0
+            };
+            let psi = alpha * (1.0 + h as f64 * beta) + seasonal_term;
+            factor += psi * psi;
+        }
+        let se = (residual_variance * factor).sqrt();
+        std_errors.push(se);
+        lower.push(fit - z * se);
+        upper.push(fit + z * se);
+    }
+
+    Ok(HoltWintersForecast {
+        horizon,
+        level,
+        forecast,
+        std_errors,
+        lower,
+        upper,
+        residual_variance,
+    })
+}
+
 /// Run Holt-Winters on a dataset column.
 ///
 /// # Arguments
@@ -399,8 +580,9 @@ pub fn run_holt_winters(
     let (y, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     // Determine if trend/seasonal should be used
-    let use_trend = beta.map(|b| b > 0.0).unwrap_or(true);
-    let use_seasonal = gamma.map(|g| g > 0.0).unwrap_or(period >= 2);
+    // (only an exact 0 turns a component off; an out-of-range value reaches the validation)
+    let use_trend = beta.map(|b| b != 0.0).unwrap_or(true);
+    let use_seasonal = gamma.map(|g| g != 0.0).unwrap_or(period >= 2);
 
     let config = HoltWintersConfig {
         alpha,
@@ -423,16 +605,18 @@ pub fn run_holt_winters(
 // Internal Functions
 // ============================================================================
 
-/// Initialize level, trend, and seasonal components using R-compatible method.
+/// Initialize level, trend, and seasonal components as R's `HoltWinters`, and return the first
+/// filtered position (0-based) with them.
 ///
-/// R's HoltWinters uses the following initialization for seasonal models:
+/// Holt's linear trend starts at t = 2 with l = x[1], b = x[1] - x[0]; simple exponential
+/// smoothing at t = 1 with l = x[0]. A seasonal model starts at t = period, as follows:
 /// 1. Decompose the first `start_periods * period` observations using centered moving average
 /// 2. Extract trend component (has NAs at edges due to centering)
 /// 3. Fit linear regression on non-NA trend values: trend ~ 1:n
 /// 4. l_start = intercept, b_start = slope
 /// 5. s_start = seasonal component from decompose
 ///
-/// This matches R's HoltWinters() initialization exactly.
+/// Without a trend, b_start is 0 and l_start stays the intercept.
 fn initialize_components(
     y: &[f64],
     period: usize,
@@ -440,18 +624,15 @@ fn initialize_components(
     use_seasonal: bool,
     seasonal_type: SeasonalType,
     start_periods: usize,
-) -> EconResult<(f64, f64, Vec<f64>)> {
+) -> EconResult<(f64, f64, Vec<f64>, usize)> {
     let n = y.len();
 
     if !use_seasonal {
-        // Non-seasonal initialization: R uses x[1] for level, x[2]-x[1] for trend
-        let l0 = y[0];
-        let b0 = if use_trend && n >= 2 {
-            y[1] - y[0]
+        return Ok(if use_trend {
+            (y[1], y[1] - y[0], vec![], 2)
         } else {
-            0.0
-        };
-        return Ok((l0, b0, vec![]));
+            (y[0], 0.0, vec![], 1)
+        });
     }
 
     // Need at least 2 periods for seasonal initialization
@@ -490,13 +671,8 @@ fn initialize_components(
 
     // Fit linear regression: trend ~ 1:n (1-indexed time)
     // This is R's approach: .lm.fit(cbind(1, seq_along(dat)), dat)
-    let (l_start, b_start) = if use_trend {
-        fit_trend_regression(&trend_valid)
-    } else {
-        // No trend: just use mean of trend values
-        let mean_trend = trend_valid.iter().map(|(_, t)| t).sum::<f64>() / trend_valid.len() as f64;
-        (mean_trend, 0.0)
-    };
+    let (l_start, slope) = fit_trend_regression(&trend_valid);
+    let b_start = if use_trend { slope } else { 0.0 };
 
     // Compute seasonal indices: y - trend for additive, y / trend for multiplicative
     let mut s_init = vec![0.0; period];
@@ -547,7 +723,7 @@ fn initialize_components(
         }
     }
 
-    Ok((l_start, b_start, s_init))
+    Ok((l_start, b_start, s_init, period))
 }
 
 /// Compute centered moving average (R's decompose approach).
@@ -634,13 +810,13 @@ fn fit_trend_regression(data: &[(usize, f64)]) -> (f64, f64) {
 
 /// Run the Holt-Winters filter with given parameters.
 ///
-/// Implements R's exact filtering algorithm:
-/// - For seasonal models, filtering starts at observation `period`
+/// R's filtering algorithm, from observation `start_t` (see `initialize_components`):
 /// - Uses circular buffer for seasonal indices (like R)
 /// - One-step-ahead forecast: a[t-1] + b[t-1] + s[j] where j = t mod period
 fn run_filter(
     y: &[f64],
     period: usize,
+    start_t: usize,
     l_start: &f64,
     b_start: &f64,
     s_start: &[f64],
@@ -659,9 +835,6 @@ fn run_filter(
     f64,
 )> {
     let n = y.len();
-
-    // For seasonal models, R's HoltWinters starts filtering at observation `period`
-    let start_t = if use_seasonal { period } else { 0 };
 
     let mut level = Vec::with_capacity(n - start_t);
     let mut trend = if use_trend {
@@ -694,7 +867,7 @@ fn run_filter(
 
     for t in start_t..n {
         // Position within seasonal cycle
-        let j = t % period;
+        let j = if use_seasonal { t % period } else { 0 };
 
         // Get seasonal index from circular buffer
         let s_prev = if use_seasonal {
@@ -772,6 +945,7 @@ fn run_filter(
 fn optimize_parameters(
     y: &[f64],
     period: usize,
+    start_t: usize,
     l_start: &f64,
     b_start: &f64,
     s_start: &[f64],
@@ -787,25 +961,30 @@ fn optimize_parameters(
     max_iter: usize,
     tolerance: f64,
 ) -> EconResult<(f64, f64, f64)> {
-    let alpha = init_alpha.clamp(0.01, 0.99);
-    let beta = init_beta.clamp(0.01, 0.99);
-    let gamma = init_gamma.clamp(0.01, 0.99);
+    // Only what is optimised stays in the optimiser's box: a fixed value is used as given.
+    let start = |init: f64, optimize: bool| {
+        if optimize {
+            init.clamp(0.01, 0.99)
+        } else {
+            init
+        }
+    };
+    let alpha = start(init_alpha, optimize_alpha);
+    let beta = start(init_beta, optimize_beta);
+    let gamma = start(init_gamma, optimize_gamma);
 
     // Build the objective function that evaluates SSE
     let objective = |params: &[f64]| -> f64 {
-        let a = params[0].clamp(0.01, 0.99);
-        let b = params[1].clamp(0.01, 0.99);
-        let g = params[2].clamp(0.01, 0.99);
-
         match run_filter(
             y,
             period,
+            start_t,
             l_start,
             b_start,
             s_start,
-            a,
-            b,
-            g,
+            params[0],
+            params[1],
+            params[2],
             use_trend,
             use_seasonal,
             seasonal_type,
@@ -850,7 +1029,7 @@ fn optimize_parameters(
         let mut idx = 0;
         for (i, &optimizing) in param_mask.iter().enumerate() {
             if optimizing {
-                full[i] = reduced_params[idx];
+                full[i] = reduced_params[idx].clamp(0.01, 0.99);
                 idx += 1;
             }
         }
@@ -1075,6 +1254,399 @@ where
 mod tests {
     use super::*;
 
+    use p2a_validation::{Check, Tol};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), name, crate::data::columns::NaPolicy::Omit)
+            .unwrap()
+            .0
+    }
+
+    /// The case's series, for tests that compare no R number.
+    fn series_dataset() -> Dataset {
+        let path =
+            p2a_validation::repo_path("validation/datasets/generated/holtwinters_series.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    fn hw(
+        y: &[f64],
+        period: usize,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        seasonal: SeasonalType,
+    ) -> HoltWintersResult {
+        let mut c = HoltWintersConfig::default();
+        c.period = period;
+        c.seasonal = seasonal;
+        c.alpha = Some(alpha);
+        c.use_trend = beta.is_some();
+        c.beta = beta;
+        c.use_seasonal = gamma.is_some(); // Some(0.0) is R's gamma = 0 (seasonal, not updated)
+        c.gamma = gamma;
+        holt_winters(y, c).unwrap()
+    }
+
+    fn coef_names(r: &HoltWintersResult) -> Vec<String> {
+        let mut v = vec!["a".to_string()];
+        if r.coefficients.trend.is_some() {
+            v.push("b".into());
+        }
+        if let Some(s) = &r.coefficients.seasonal {
+            v.extend((1..=s.len()).map(|i| format!("s{i}")));
+        }
+        v
+    }
+
+    fn coef_values(r: &HoltWintersResult) -> Vec<f64> {
+        let mut v = vec![r.coefficients.level];
+        v.extend(r.coefficients.trend);
+        if let Some(s) = &r.coefficients.seasonal {
+            v.extend(s.iter().copied());
+        }
+        v
+    }
+
+    fn sample_variance(res: &[f64]) -> f64 {
+        let m = res.iter().sum::<f64>() / res.len() as f64;
+        res.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (res.len() - 1) as f64
+    }
+
+    /// SSE, coefficients, one-step error count and variance, 12-step forecasts with 95 % intervals.
+    fn check_fit(case: &p2a_validation::Case, tag: &str, r: &HoltWintersResult, n: usize) {
+        let p = holt_winters_predict(r, 12, 0.95).unwrap();
+        let nres = r.residuals.iter().filter(|v| !v.is_nan()).count();
+        Check::new(case)
+            .scalar(&format!("{tag}_sse"), r.sse, Tol::stat(n))
+            .named(
+                &format!("{tag}_coef"),
+                &coef_names(r),
+                &coef_values(r),
+                Tol::coef(n),
+            )
+            .scalar(&format!("{tag}_nres"), nres as f64, Tol::exact())
+            .scalar(&format!("{tag}_resvar"), p.residual_variance, Tol::stat(n))
+            .vector(&format!("{tag}_fit"), &p.forecast, Tol::coef(n))
+            .vector(&format!("{tag}_upr"), &p.upper, Tol::stat(n))
+            .vector(&format!("{tag}_lwr"), &p.lower, Tol::stat(n))
+            .finish();
+    }
+
+    /// A fixed value stays as given while another parameter is optimised: at 1.0 and 0.0 it left
+    /// the optimiser's box and came back as 0.99 and 0.01.
+    #[test]
+    fn test_fixed_parameters_are_not_clamped_while_optimising() {
+        let ds = series_dataset();
+        let y = col(&ds, "airpass");
+        let fit = |alpha: Option<f64>, beta: Option<f64>, gamma: Option<f64>| {
+            let mut c = HoltWintersConfig::default();
+            c.period = 12;
+            c.alpha = alpha;
+            c.beta = beta;
+            c.gamma = gamma;
+            holt_winters(&y, c).unwrap()
+        };
+
+        let r = fit(Some(1.0), None, Some(0.2));
+        assert_eq!(r.alpha, 1.0);
+        assert_eq!(r.gamma, Some(0.2));
+        for fixed in [0.0, 1.0] {
+            let r = fit(None, Some(fixed), None);
+            assert_eq!(r.beta, Some(fixed));
+            let r = fit(None, None, Some(fixed));
+            assert_eq!(r.gamma, Some(fixed));
+        }
+
+        // The reported fit uses the fixed values: refitting at the optimum reproduces the SSE.
+        let opt = fit(Some(1.0), None, Some(0.0));
+        let again = fit(Some(1.0), opt.beta, Some(0.0));
+        assert_eq!(opt.sse.to_bits(), again.sse.to_bits());
+    }
+
+    /// The objective uses a fixed value as given, not the optimiser's edge. The first step of a
+    /// noisy level series starts Holt's trend at 3. With a fixed beta of 0 that trend stays, and
+    /// alpha must be large to keep the errors down (0.81 on a grid of this series). With a beta of
+    /// 0.01 the trend decays, and an objective on that value would choose a small alpha (0.23), with
+    /// several times the SSE at beta = 0.
+    #[test]
+    fn test_fixed_beta_of_zero_reaches_the_objective() {
+        let mut seed = 20_261_107u64;
+        let mut y: Vec<f64> = (0..5000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345) % (1 << 31);
+                100.0 + 17.0 * (seed as f64 / (1u64 << 31) as f64 - 0.5)
+            })
+            .collect();
+        y[0] = y[1] - 3.0;
+        let fit = |alpha: Option<f64>| {
+            let mut c = HoltWintersConfig::default();
+            c.use_seasonal = false;
+            c.alpha = alpha;
+            c.beta = Some(0.0);
+            holt_winters(&y, c).unwrap()
+        };
+        let opt = fit(None);
+        assert_eq!(opt.beta, Some(0.0));
+        let grid_best = (1..100)
+            .map(|i| fit(Some(i as f64 / 100.0)).sse)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            opt.sse <= grid_best * 1.01,
+            "alpha {}: {} vs {grid_best}",
+            opt.alpha,
+            opt.sse
+        );
+    }
+
+    /// X-5: `run_holt_winters` sends period 0 to the non-seasonal path, and the filter took
+    /// the seasonal position of every observation.
+    #[test]
+    fn test_holtwinters_rejects_period_0() {
+        let ds = series_dataset();
+        let err = run_holt_winters(&ds, "airpass", 0, SeasonalType::Additive, None, None, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. })
+                && err.to_string().contains("period"),
+            "{err}"
+        );
+        let y = col(&ds, "airpass");
+        let mut c = HoltWintersConfig::default();
+        c.period = 0;
+        c.use_seasonal = false;
+        c.alpha = Some(0.5);
+        c.beta = Some(0.1);
+        assert!(
+            holt_winters(&y, c)
+                .unwrap_err()
+                .to_string()
+                .contains("period")
+        );
+        // a deserialized result with seasonal coefficients and period 0 must not stop the
+        // process in the forecasts
+        let mut fit = hw(&y, 12, 0.3, Some(0.05), Some(0.4), SeasonalType::Additive);
+        fit.period = 0;
+        assert!(
+            holt_winters_forecast(&fit, 3).is_err() && holt_winters_predict(&fit, 3, 0.95).is_err()
+        );
+    }
+
+    /// R: "cannot fit models without level ('alpha' must not be 0 or FALSE)", "'alpha', 'beta'
+    /// and 'gamma' must be within the unit interval", "need at least 2 periods to compute
+    /// seasonal start values".
+    #[test]
+    fn test_holtwinters_rejects_out_of_range_parameters() {
+        let ds = series_dataset();
+        let y = col(&ds, "airpass");
+        let base = || {
+            let mut c = HoltWintersConfig::default();
+            c.alpha = Some(0.3);
+            c.beta = Some(0.1);
+            c.gamma = Some(0.2);
+            c
+        };
+        type Set = fn(&mut HoltWintersConfig);
+        let cases: [(&str, Set); 9] = [
+            ("alpha", |c: &mut HoltWintersConfig| c.alpha = Some(0.0)),
+            ("alpha", |c: &mut HoltWintersConfig| c.alpha = Some(1.5)),
+            ("beta", |c: &mut HoltWintersConfig| c.beta = Some(-0.1)),
+            ("gamma", |c: &mut HoltWintersConfig| c.gamma = Some(2.0)),
+            ("start_periods", |c: &mut HoltWintersConfig| {
+                c.start_periods = 1
+            }),
+            ("max_iter", |c: &mut HoltWintersConfig| c.max_iter = 0), // checked always, not only when optimising
+            ("tolerance", |c: &mut HoltWintersConfig| {
+                c.tolerance = f64::NAN
+            }),
+            ("period", |c: &mut HoltWintersConfig| c.period = 1),
+            ("too large", |c: &mut HoltWintersConfig| {
+                c.period = usize::MAX
+            }),
+        ];
+        for (name, set) in cases.iter() {
+            let mut c = base();
+            set(&mut c);
+            let err = holt_winters(&y, c).unwrap_err();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. })
+                    && err.to_string().contains(name),
+                "{name}: {err}"
+            );
+        }
+        let mut c = base();
+        c.start_periods = usize::MAX;
+        let err = holt_winters(&y, c).unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+        let fit = hw(&y, 12, 0.3, Some(0.05), Some(0.4), SeasonalType::Additive);
+        for (h, level) in [(0usize, 0.95), (3, 1.0), (3, 0.0), (3, f64::NAN)] {
+            assert!(holt_winters_predict(&fit, h, level).is_err(), "{h} {level}");
+        }
+    }
+
+    /// co2 to 1969 (n = 132), alpha 0.5, beta 0.01, gamma 0.3, additive; plus level 0.8 to
+    /// h = 24 (key co2_add_upr80_h24).
+    #[test]
+    fn test_validate_holtwinters_forecast_additive() {
+        let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
+        let y = col(&ds, "co2");
+        let r = hw(&y, 12, 0.5, Some(0.01), Some(0.3), SeasonalType::Additive);
+        check_fit(&case, "co2_add", &r, y.len());
+        let p80 = holt_winters_predict(&r, 24, 0.8).unwrap();
+        Check::new(&case)
+            .vector("co2_add_upr80_h24", &p80.upper, Tol::stat(y.len()))
+            .finish();
+    }
+
+    /// AirPassengers, alpha 0.3, beta 0.05, gamma 0.4, multiplicative: the fit and point
+    /// forecasts are pinned; intervals are refused.
+    #[test]
+    fn test_validate_holtwinters_forecast_multiplicative() {
+        let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
+        let y = col(&ds, "airpass");
+        let n = y.len();
+        let r = hw(
+            &y,
+            12,
+            0.3,
+            Some(0.05),
+            Some(0.4),
+            SeasonalType::Multiplicative,
+        );
+        let res: Vec<f64> = r
+            .residuals
+            .iter()
+            .copied()
+            .filter(|v| !v.is_nan())
+            .collect();
+        // deviation TS-22: airpass_mult_upr, airpass_mult_lwr
+        Check::new(&case)
+            .scalar("airpass_mult_sse", r.sse, Tol::stat(n))
+            .named(
+                "airpass_mult_coef",
+                &coef_names(&r),
+                &coef_values(&r),
+                Tol::coef(n),
+            )
+            .scalar("airpass_mult_nres", res.len() as f64, Tol::exact())
+            .scalar("airpass_mult_resvar", sample_variance(&res), Tol::stat(n))
+            .vector(
+                "airpass_mult_fit",
+                &holt_winters_forecast(&r, 12).unwrap(),
+                Tol::coef(n),
+            )
+            .finish();
+        let err = holt_winters_predict(&r, 12, 0.95).unwrap_err();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. })
+                && err.to_string().contains("multiplicative"),
+            "{err}"
+        );
+    }
+
+    /// Holt (gamma = FALSE), alpha 0.6, beta 0.1: R starts at t = 3 with l = x[2],
+    /// b = x[2] - x[1]; 142 one-step errors.
+    #[test]
+    fn test_validate_holtwinters_forecast_holt() {
+        let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
+        let y = col(&ds, "airpass");
+        let r = hw(&y, 12, 0.6, Some(0.1), None, SeasonalType::Additive);
+        check_fit(&case, "airpass_holt", &r, y.len());
+        // The label of a fit without a seasonal component changes nothing.
+        let m = hw(&y, 12, 0.6, Some(0.1), None, SeasonalType::Multiplicative);
+        assert_eq!(m.sse.to_bits(), r.sse.to_bits());
+        assert_eq!(
+            holt_winters_predict(&m, 12, 0.95).unwrap().std_errors,
+            holt_winters_predict(&r, 12, 0.95).unwrap().std_errors
+        );
+    }
+
+    /// Additive without trend (beta = FALSE, gamma 0.2): l.start = intercept of the trend
+    /// regression. SES (alpha 0.4): starts at t = 2, 143 errors.
+    #[test]
+    fn test_validate_holtwinters_notrend_and_ses() {
+        let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
+        let y = col(&ds, "airpass");
+        check_fit(
+            &case,
+            "airpass_notrend",
+            &hw(&y, 12, 0.3, None, Some(0.2), SeasonalType::Additive),
+            y.len(),
+        );
+        check_fit(
+            &case,
+            "airpass_ses",
+            &hw(&y, 12, 0.4, None, None, SeasonalType::Additive),
+            y.len(),
+        );
+    }
+
+    /// The filter at R's optimum (alpha, beta, gamma read from the case; they reproduce the
+    /// legacy validation/expected/holtwinters_*.csv to their 15 digits): AirPassengers
+    /// multiplicative, additive (gamma = 1), the legacy quarterly series (period 4, gamma = 0)
+    /// and the legacy non-seasonal Holt series. The optimiser itself is not pinned (deviation
+    /// TS-24).
+    #[test]
+    fn test_validate_holtwinters_at_r_optimum() {
+        let (case, ds) = crate::test_support::load_case("ts_holtwinters_forecast");
+        let par = |tag: &str, p: &str| case.named(&format!("{tag}_par"), p);
+        let runs = [
+            (
+                "opt_mult",
+                "airpass",
+                12,
+                SeasonalType::Multiplicative,
+                true,
+                true,
+            ),
+            ("opt_add", "airpass", 12, SeasonalType::Additive, true, true),
+            (
+                "opt_quarterly",
+                "q",
+                4,
+                SeasonalType::Multiplicative,
+                true,
+                true,
+            ),
+            (
+                "opt_nonseasonal",
+                "ns",
+                1,
+                SeasonalType::Additive,
+                true,
+                false,
+            ),
+        ];
+        for (tag, column, period, kind, trend, season) in runs {
+            let y = col(&ds, column);
+            let r = hw(
+                &y,
+                period,
+                par(tag, "alpha"),
+                trend.then(|| par(tag, "beta")),
+                season.then(|| par(tag, "gamma")),
+                kind,
+            );
+            let mut check = Check::new(&case);
+            check
+                .scalar(&format!("{tag}_sse"), r.sse, Tol::stat(y.len()))
+                .named(
+                    &format!("{tag}_coef"),
+                    &coef_names(&r),
+                    &coef_values(&r),
+                    Tol::coef(y.len()),
+                );
+            if tag == "opt_mult" {
+                check.vector(
+                    "opt_mult_fit",
+                    &holt_winters_forecast(&r, 12).unwrap(),
+                    Tol::coef(y.len()),
+                );
+            }
+            check.finish();
+        }
+    }
+
     /// X-2: an Int64 column fits as its Float64 copy; missing values, text and absent
     /// columns are refused by name (they were read as 0 or refused as non-numeric).
     #[test]
@@ -1091,10 +1663,6 @@ mod tests {
         assert_null_values(&run("ai_na").unwrap_err(), "ai_na", 2);
         assert_non_numeric(&run("lab").unwrap_err(), "lab");
         assert_not_found(&run("nope").unwrap_err(), "nope");
-    }
-
-    fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-        (a - b).abs() < tol
     }
 
     #[test]
@@ -1278,75 +1846,6 @@ mod tests {
 
         let result = holt_winters(&y, config);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_holt_winters_against_r() {
-        // Test case: AirPassengers-like data (first 24 months)
-        // R code:
-        // > ap <- AirPassengers[1:24]
-        // > m <- HoltWinters(ts(ap, frequency=12), alpha=0.2, beta=0.1, gamma=0.3)
-        // > m$SSE  # 369.5158
-        // > m$coefficients["a"]  # 147.9523
-        // > m$coefficients["b"]  # 1.66295
-        let y = vec![
-            112.0, 118.0, 132.0, 129.0, 121.0, 135.0, 148.0, 148.0, 136.0, 119.0, 104.0, 118.0,
-            115.0, 126.0, 141.0, 135.0, 125.0, 149.0, 170.0, 170.0, 158.0, 133.0, 114.0, 140.0,
-        ];
-
-        let config = HoltWintersConfig {
-            alpha: Some(0.2),
-            beta: Some(0.1),
-            gamma: Some(0.3),
-            seasonal: SeasonalType::Additive,
-            period: 12,
-            use_trend: true,
-            use_seasonal: true,
-            ..Default::default()
-        };
-
-        let result = holt_winters(&y, config).unwrap();
-
-        // Check basic properties
-        assert_eq!(result.n_obs, 24);
-        assert_eq!(result.period, 12);
-        assert!(approx_eq(result.alpha, 0.2, 0.001));
-
-        // Check SSE matches R exactly
-        // R's SSE: 369.5158
-        assert!(
-            approx_eq(result.sse, 369.5158, 0.01),
-            "SSE mismatch: Rust={}, R=369.5158",
-            result.sse
-        );
-
-        // Check final coefficients match R
-        // R: a = 147.9523, b = 1.66295
-        assert!(
-            approx_eq(result.coefficients.level, 147.9523, 0.01),
-            "Level mismatch: Rust={}, R=147.9523",
-            result.coefficients.level
-        );
-        assert!(
-            approx_eq(result.coefficients.trend.unwrap(), 1.66295, 0.01),
-            "Trend mismatch: Rust={:?}, R=1.66295",
-            result.coefficients.trend
-        );
-
-        // Fitted values should be close to original (filter out NaN values)
-        let valid_residuals: Vec<f64> = result
-            .residuals
-            .iter()
-            .filter(|r| !r.is_nan())
-            .copied()
-            .collect();
-        let mean_abs_error: f64 =
-            valid_residuals.iter().map(|r| r.abs()).sum::<f64>() / valid_residuals.len() as f64;
-        assert!(
-            mean_abs_error < 30.0,
-            "Mean absolute error too high: {}",
-            mean_abs_error
-        );
     }
 
     #[test]

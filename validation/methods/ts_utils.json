@@ -1,0 +1,215 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_filter",
+      "name": "Linear filtering (convolution sides 1 and 2, recursive)",
+      "category": "forecasting",
+      "reference": "stats::filter (C cfilter, rfilter)",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_even_sides1",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_even_sides2",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_odd_sides1",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_odd_sides2",
+        "p2a-core::forecasting::tsutils::tests::test_validate_filter_recursive"
+      ],
+      "quantities": [
+        "filtered values with NA positions"
+      ],
+      "tolerance": "Tol::coef(60) (identical summation order)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_ar",
+      "name": "AR order selection and fit (OLS, Burg, Yule-Walker)",
+      "category": "forecasting",
+      "reference": "stats::ar(method = 'ols', intercept = FALSE), ar(method = 'burg'), ar(method = 'yule-walker')",
+      "doc": "validation/timeseries/ar.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_short_series",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_aic_by_order",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_n60",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_ols_fixed_order",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_yule_walker_var_pred",
+        "p2a-core::forecasting::ar::tests::test_validate_ar_burg"
+      ],
+      "quantities": [
+        "order",
+        "coefficients",
+        "var.pred",
+        "relative AIC (AIC differences on the saturated series)",
+        "x.mean",
+        "Burg partial ACF"
+      ],
+      "tolerance": "coefficients Tol::coef(n), var.pred and AIC Tol::stat(n), orders exact (n = 24, 60); ar_ols_var and the finite AICs of the saturated call are the rounding of an exact fit in R and are recorded, not compared",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_changepoint",
+      "name": "PELT changepoints (variance, mean and variance, mean)",
+      "category": "forecasting",
+      "reference": "changepoint::cpt.var, cpt.meanvar, cpt.mean (method = 'PELT', penalty = 'MBIC' | 'Manual')",
+      "doc": "validation/timeseries/changepoint.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_var_large_level",
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_var_manual_penalty",
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_meanvar_large_level",
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_mean_large_level"
+      ],
+      "quantities": [
+        "changepoints",
+        "penalty",
+        "total cost (sum of segment costs incl. MBIC terms)"
+      ],
+      "tolerance": "changepoints exact, penalty and cost Tol::stat(210)",
+      "deviations": [
+        {
+          "finding": "TS-8",
+          "quantity": "binary segmentation",
+          "note": "zero default threshold and no penalty; cpt.mean BinSeg MBIC Q = 10 finds 0 changepoints (cpt_mean_binseg_ncpts), recorded only"
+        },
+        {
+          "finding": "TS-18",
+          "quantity": "cpt.mean and cpt.meanvar on uncentred data at large levels (cpt_meanvar_cpts, 54 changepoints)",
+          "note": "changepoint cancels on raw sums; p2a centres, and the pins use R on the centred series"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_diffinv",
+      "name": "Discrete integration",
+      "category": "forecasting",
+      "reference": "stats::diffinv",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_diffinv_ts_filter_ar_cpt"
+      ],
+      "quantities": [
+        "integrated series (lag 1 and 2, d = 1 with xi; d = 2 zero xi)"
+      ],
+      "tolerance": "Tol::coef(12)",
+      "deviations": [
+        {
+          "finding": "TS-28",
+          "quantity": "differences >= 2 with non-zero xi",
+          "note": "p2a splits xi per level; diffinv_d2_xi recorded (R 1, 3, 5.3503169975, ...), off by up to 11"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_arma_acf",
+      "name": "Theoretical ACF/PACF of ARMA processes",
+      "category": "forecasting",
+      "reference": "stats::ARMAacf",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_arma_acf_ts_filter_ar_cpt"
+      ],
+      "quantities": [
+        "ACF of AR(1), AR(2), MA(2)",
+        "PACF of AR(2)"
+      ],
+      "tolerance": "rel 1e-10, abs 1e-12 (closed form; fixed-point stop 1e-12)",
+      "deviations": [
+        {
+          "finding": "TS-14",
+          "quantity": "mixed ARMA and persistent AR",
+          "note": "armaacf_arma11 off by 8.1e-2, armaacf_ar2_persistent by 3.6e-5; recorded only"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_cpgram",
+      "name": "Cumulative periodogram white-noise check",
+      "category": "forecasting",
+      "reference": "the body of stats::cpgram (spec.taper, fft, band 1.358 / (sqrt(mp) + 0.12 + 0.11 / sqrt(mp))); asymptotic Kolmogorov (stats:::C_pKS2)",
+      "doc": "validation/timeseries/cpgram.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::cpgram::tests::test_validate_cpgram_white_noise",
+        "p2a-core::forecasting::cpgram::tests::test_validate_cpgram_ar1"
+      ],
+      "quantities": [
+        "frequencies",
+        "cumulative periodogram",
+        "critical value",
+        "max deviation",
+        "statistic",
+        "p-value",
+        "white verdict"
+      ],
+      "tolerance": "Tol::stat(n) (n = 100, 120); p Tol::p_value(n)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_holtwinters",
+      "name": "Holt-Winters filtering and predict intervals",
+      "category": "forecasting",
+      "reference": "stats::HoltWinters (fixed parameters; R's optimum), stats::predict.HoltWinters(prediction.interval = TRUE)",
+      "doc": "validation/forecasting/holtwinters.md",
+      "cases": [
+        "ts_holtwinters_forecast"
+      ],
+      "tests": [
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_additive",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_multiplicative",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_holt",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_notrend_and_ses",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_at_r_optimum"
+      ],
+      "quantities": [
+        "SSE",
+        "coefficients",
+        "one-step error count and variance",
+        "forecasts",
+        "additive and non-seasonal prediction intervals (95 %, and 80 % to h = 24)"
+      ],
+      "tolerance": "coefficients and forecasts Tol::coef(n), SSE, limits and variance Tol::stat(n), counts exact",
+      "deviations": [
+        {
+          "finding": "TS-24",
+          "quantity": "optimised alpha, beta, gamma",
+          "note": "p2a optimises by Nelder-Mead on [0.01, 0.99] and uses a fixed value as given; not pinned; the filter is pinned at R's optimum"
+        },
+        {
+          "finding": "TS-22",
+          "quantity": "multiplicative prediction intervals (airpass_mult_upr, airpass_mult_lwr)",
+          "note": "predict.HoltWinters reads the trend b for s_f when (rel - j) mod f = 0, uses alpha + gamma (1 - alpha) for the one-step term (its h = 1 interval is 0.58 of the residual SD on the case) and shifts the seasonal indices without a trend; p2a refuses multiplicative intervals"
+        }
+      ],
+      "supersedes_legacy": [
+        "validation/expected/holtwinters_airpassengers_add.csv",
+        "validation/expected/holtwinters_airpassengers_mult.csv",
+        "validation/expected/holtwinters_forecast.csv",
+        "validation/expected/holtwinters_nonseasonal.csv",
+        "validation/expected/holtwinters_nonseasonal_data.csv",
+        "validation/expected/holtwinters_synthetic_data.csv",
+        "validation/expected/holtwinters_synthetic_quarterly.csv"
+      ]
+    }
+  ]
+}

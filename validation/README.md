@@ -104,7 +104,7 @@ looks like a validation failure but is not one.
   survival, mlogit, urca, glmnet, cluster, dbscan, dfidx, dynamicTreeCut, EValue, lpSolve,
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
-  flexmix, apcluster, e1071.
+  flexmix, apcluster, e1071, changepoint.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -115,7 +115,7 @@ looks like a validation failure but is not one.
                      "sensemakr", "vars", "WeightIt", "quadprog", "medflex", "ltmle",
                      "fect", "gsynth", "tmle", "gmm", "bacondecomp", "did", "DRDID",
                      "CBPS", "etwfe", "marginaleffects", "mclust", "mixtools", "flexmix",
-                     "apcluster", "e1071"))
+                     "apcluster", "e1071", "changepoint"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -365,7 +365,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | VARMA (Hannan-Rissanen two-step) | [varma.md](econometrics/timeseries/varma.md) | R-pinned |
 | VECM (Johansen, urca::ca.jo and cajorls) | [vecm.md](econometrics/timeseries/vecm.md) | R-pinned |
 | IRF (orthogonalised and plain) | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
-| Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
+| Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | R-pinned |
+| Linear filter, diffinv, ARMAacf | [filter.md](timeseries/filter.md) | R-pinned, known deviations (TS-14, TS-28) |
+| AR (OLS, Burg, Yule-Walker) | [ar.md](timeseries/ar.md) | R-pinned |
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
 | Phillips-Perron unit root test (PP.test) | [pptest.md](timeseries/pptest.md) | R-pinned, known deviations (STAT-6) |
@@ -380,7 +382,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Kalman filter, smoother and forecast with intercepts | [kalman.md](forecasting/kalman.md) | R-pinned |
 | CausalImpact counterfactual (StructTS fit and Kalman forecast) | [causal_impact.md](forecasting/causal_impact.md) | R-pinned, known deviations (TS-5) |
 | GARCH(p, q) (maximum likelihood, normal and Student-t errors, variance forecasts) | [garch.md](forecasting/garch.md) | R-pinned |
-| Changepoint | no validation document yet | not R-pinned |
+| Holt-Winters (filter, additive and non-seasonal prediction intervals) | [holtwinters.md](forecasting/holtwinters.md) | R-pinned, known deviations (TS-22, TS-24) |
+| Changepoint (PELT: cpt.var, cpt.meanvar, cpt.mean) | [changepoint.md](timeseries/changepoint.md) | R-pinned, known deviations (TS-18, TS-8) |
 
 ### Machine Learning
 | Method | File | Status |
