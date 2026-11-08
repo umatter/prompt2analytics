@@ -128,6 +128,7 @@ case("mixtools_em", "ml/clustering", "mixtools normalmixEM (univariate) and mvno
 }
 
 case("flexmix_minprior", "ml/clustering", "flexmix regression mixture from a fixed 3-cluster start: minprior = 0.1 removes the third component, minprior = 0.05 keeps it", function(ctx) {
+  # flexmix's generics are named: library(mboost) in an earlier case attaches stabs, whose parameters() masks flexmix's.
   set.seed(20261112)
   n <- 200; x <- runif(n, 0, 10); g <- sample(1:2, n, replace = TRUE, prob = c(0.6, 0.4))
   y <- ifelse(g == 1, 1 + 0.5 * x, 6 - 0.4 * x) + rnorm(n, 0, 0.6)
@@ -138,15 +139,15 @@ case("flexmix_minprior", "ml/clustering", "flexmix regression mixture from a fix
     f <- flexmix(y ~ x, data = d, cluster = d$start, control = list(minprior = cfg$mp, tolerance = 1e-12, iter.max = 5000))
     stopifnot(f@converged)
     r <- .flex_rep(X, d$y, d$start, 3, cfg$mp, 1e-12, 5000)
-    p <- parameters(f); o <- order(p["coef.(Intercept)", ])
+    p <- flexmix::parameters(f); o <- order(p["coef.(Intercept)", ])
     stopifnot(r$k == f@k, r$iter == f@iter, abs(r$llh - as.numeric(logLik(f))) < 1e-9, max(abs(rbind(r$coef, r$sigma) - p)) < 1e-12)
     tg <- cfg$tag
     v[[paste0(tg, "_k")]] <- f@k; v[[paste0(tg, "_k0")]] <- max(d$start); v[[paste0(tg, "_iterations")]] <- f@iter
     v[[paste0(tg, "_removed_at")]] <- vec(if (length(r$removed)) r$removed else 0)
     v[[paste0(tg, "_loglik")]] <- as.numeric(logLik(f)); v[[paste0(tg, "_df")]] <- attr(logLik(f), "df")
     v[[paste0(tg, "_aic")]] <- AIC(f); v[[paste0(tg, "_bic")]] <- BIC(f)
-    v[[paste0(tg, "_prior")]] <- vec(prior(f)[o]); v[[paste0(tg, "_coef")]] <- vec(p[1:2, o]); v[[paste0(tg, "_sigma")]] <- vec(p[3, o])
-    v[[paste0(tg, "_cluster")]] <- vec(match(clusters(f), o))
+    v[[paste0(tg, "_prior")]] <- vec(flexmix::prior(f)[o]); v[[paste0(tg, "_coef")]] <- vec(p[1:2, o]); v[[paste0(tg, "_sigma")]] <- vec(p[3, o])
+    v[[paste0(tg, "_cluster")]] <- vec(match(flexmix::clusters(f), o))
   }
   # A start posterior that puts component 3 on exactly two points: lm.wfit fits them exactly, sigma = 0,
   # and flexmix stops with "Log-likelihood: NaN" (p2a floors sigma and warns instead).
