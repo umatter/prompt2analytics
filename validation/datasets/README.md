@@ -223,6 +223,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/shap_kernel_sim.csv` | 20 × 12 (x0-x11) | `shap_kernel_sim` | `r/cases/ml_shap.R` | seed 4802 |
 | `generated/shap_tree_sim.csv` | 80 × 5 (x0, x1, x2, x3, y) | `shap_tree_rpart` | `r/cases/ml_shap.R` | seed 4801 |
 | `generated/smoothers_t3.csv` | 100 × 4 (x, y, xm, ym) | `smoothers_gcv_periodic_loess` | `r/cases/regression_smoothers_t3.R` | seed 20261127 |
+| `generated/splm_sim.csv` | 294 × 9 (id, time, cx, cy, x1, x2, y_lag, y_err, y_re; rows shuffled) | `splm_spml_spgm` | `r/cases/spatial_splm.R` | seed 20261209; N = 49 units on uniform coordinates (W = 4 nearest neighbours, row-standardised), T = 6; y_lag spatial lag rho 0.4, y_err spatial error lambda 0.5, y_re random effects with a spatially autocorrelated error; individual effects N(0, 0.8^2) |
 | `generated/stdreg_sim.csv` | 300 × 8 (yc, yb, yp, ys, a, x1, x2, x1dup) | `stdreg_glm`, `stdreg_linear`, `stdreg_separation` | `r/cases/causal_stdreg.R` | seed 20261209; yp Poisson with mean about 220; ys = 1{x1 > 0.3} (complete separation); x1dup = 2 x1 + 1 (aliased) |
 | `generated/supsmu_sine.csv` | 100 × 4 (x, y, w, xr) | `supsmu_sine` | `r/cases/regression_smoothers_t3.R` | seed 42 |
 | `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
