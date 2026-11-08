@@ -81,6 +81,49 @@ Property tests that load no case: `test_cart_exact_tie_takes_the_first_candidate
   checked, and 4 of them differed in `xerror`/`xstd` by up to 3.3%. These are tie-order differences, and no pinned
   case is affected.
 
+## Wall-clock
+
+`release`, `ci` features, against `fe13b889`, five rounds with base and this tree interleaved per row (order
+alternating), one P core (`taskset`), one rayon and polars thread, 2026-11-08, load average 1.3-2.8. Cells are
+the median of the round medians; "ratio" is this tree over the base, "min ratio" the ratio of the minima. R
+(4.3, one BLAS thread) runs once per round on the same CSV, timed with `proc.time()`.
+
+CART: the `noisy` design of the tests with p = 10 (gini: y > 2.5), `cart()` defaults otherwise; R is
+`rpart(y ~ ., d, control = rpart.control(xval = ., maxsurrogate = 0, maxcompete = 0))`. The `ml_benchmark`
+rows use that example's data and settings (depth 5, `min_split` 20, `min_bucket` 7, cp 0.01, default `xval`).
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio | R (ms) | this tree / R |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| anova, `xval = 0` | 100 | 0.054 | 0.026 | 0.49 | 0.55 | 1.22 | 0.02 |
+|  | 1,000 | 1.11 | 0.475 | 0.43 | 0.42 | 2.06 | 0.23 |
+|  | 10,000 | 14.39 | 5.14 | 0.36 | 0.36 | 11.40 | 0.45 |
+| anova, `xval = 10` (default) | 100 | 0.062 | 0.269 | 4.33 | 5.09 | 1.60 | 0.17 |
+|  | 1,000 | 1.13 | 2.99 | 2.66 | 2.68 | 5.27 | 0.57 |
+|  | 10,000 | 14.41 | 28.22 | 1.96 | 1.97 | 43.50 | 0.65 |
+| gini, `xval = 0` | 100 | 0.104 | 0.028 | 0.27 | 0.28 | 1.36 | 0.02 |
+|  | 1,000 | 1.97 | 0.497 | 0.25 | 0.25 | 2.53 | 0.20 |
+|  | 10,000 | 25.79 | 5.55 | 0.21 | 0.21 | 16.00 | 0.35 |
+| gini, `xval = 10` (default) | 100 | 0.108 | 0.228 | 2.12 | 2.17 | 1.82 | 0.12 |
+|  | 1,000 | 1.96 | 3.19 | 1.63 | 1.65 | 8.00 | 0.40 |
+|  | 10,000 | 25.59 | 31.81 | 1.24 | 1.25 | 73.00 | 0.44 |
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| `ml_benchmark` CART regression | 1,000 | 1.22 | 3.59 | 2.95 | 2.98 |
+|  | 5,000 | 7.30 | 18.10 | 2.48 | 2.49 |
+|  | 10,000 | 15.06 | 35.37 | 2.35 | 2.36 |
+|  | 50,000 | 87.28 | 196.1 | 2.25 | 2.25 |
+| `ml_benchmark` CART classification | 1,000 | 2.15 | 3.37 | 1.56 | 1.57 |
+|  | 5,000 | 13.23 | 16.89 | 1.28 | 1.28 |
+|  | 10,000 | 26.88 | 34.41 | 1.28 | 1.27 |
+|  | 50,000 | 156.9 | 212.7 | 1.36 | 1.33 |
+
+Without cross-validation a fit is 2-5x faster than the base. The base ran no cross-validation (its `xerror` and
+`xstd` columns were not cross-validated, and its `xval = 10` time equals its `xval = 0` time); the default
+`xval = 10` now runs the 11 fits rpart runs, the default kept by the maintainer (2026-10-30) against an estimate of
+1.5-5x. Measured: 1.24-4.33x of the base and 0.13-0.65x of rpart; the `ml_benchmark` rows, which run the default
+10 folds, 1.28-2.95x. These ratios have not been signed off.
+
 ## Running
 
 ```bash
