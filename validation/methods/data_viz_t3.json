@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "viz_scatter_correlation",
+      "name": "Scatter-plot Pearson correlation",
+      "category": "data",
+      "reference": "stats::cor (method = 'pearson')",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_scatter_cor"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_scatter_correlation_large_offset",
+        "p2a-core::visualization::charts::tests::test_validate_scatter_correlation_tiny_scale"
+      ],
+      "quantities": [
+        "r at offsets 0, 1.7e9 and 1e12",
+        "r on a 1e-9 scale",
+        "NA for a constant variable"
+      ],
+      "tolerance": "validation/README.md statistics row, n = 200: 1e-6 relative (measured agreement 4e-16)",
+      "deviations": [
+        {
+          "finding": "DATA-61",
+          "quantity": "r of a near-constant variable",
+          "note": "convention: None (printed NaN; R: NA) when max |x - mean| <= 4 eps max |x|, where the centred values are rounding noise; stats::cor returns NA only for an exactly zero spread"
+        },
+        {
+          "finding": "DATA-61",
+          "quantity": "pairs with a non-finite value",
+          "note": "dropped before r, as the plot drops them (like cor(use = 'complete.obs') for NA); cor returns NaN when a value is +-Inf"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "viz_boxplot_stats",
+      "name": "Box-plot hinges, whiskers and outliers",
+      "category": "data",
+      "reference": "grDevices::boxplot.stats (coef = 1.5)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_boxplot_groups"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_boxplot_stats_chart"
+      ],
+      "quantities": [
+        "stats (whiskers, hinges, median) for n = 3, 4, 7, 8, 12, 37",
+        "n",
+        "outliers in data order",
+        "all-missing group n = 0",
+        "+-Inf counted, in the hinges and an outlier"
+      ],
+      "tolerance": "n and outlier counts exact (Tol::exact); statistics and outliers validation/README.md statistics row (Tol::stat(n))",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "viz_histogram_bins",
+      "name": "Histogram bin count and counts",
+      "category": "data",
+      "reference": "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1)) with its defaults (right = TRUE, include.lowest = TRUE)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_histogram_bins"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_histogram_sturges_and_counts"
+      ],
+      "quantities": [
+        "nclass.Sturges for n = 1, 5, 8, 16, 100, 1000, 1024",
+        "breaks",
+        "counts (n = 100; n = 50 on a 1e-11 scale; a decimal grid with values on the breaks)"
+      ],
+      "tolerance": "bin number and counts exact (Tol::exact); breaks validation/README.md statistics row (Tol::stat(n))",
+      "deviations": [
+        {
+          "finding": "DATA-85",
+          "quantity": "default breaks",
+          "note": "convention: nclass.Sturges equal-width bins from min to max; R's hist() passes the Sturges count to pretty() (n = 100: 10 bins where p2a has 8); pinned against hist(breaks = seq(min, max, length.out = k + 1))"
+        },
+        {
+          "finding": "DATA-85",
+          "quantity": "constant data",
+          "note": "convention: k bins of width 1 from the value; hist() builds pretty() breaks around it"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "viz_residual_diagnostics",
+      "name": "Residual diagnostics: standardized residuals, Cook's distance, Q-Q quantiles",
+      "category": "data",
+      "reference": "stats::rstandard.lm; stats::cooks.distance.lm; stats::hatvalues; stats::qnorm(stats::ppoints(n))",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_residual_diag"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_cooks_distance_rstandard",
+        "p2a-core::visualization::charts::tests::test_validate_qq_theoretical_quantiles"
+      ],
+      "quantities": [
+        "rstandard, cooks.distance and sigma for lm(mpg ~ wt + hp + qsec) with hat values (p = 4)",
+        "lm(mpg ~ wt) without leverage (one-predictor hat values, p = 2)",
+        "leverage one -> NaN",
+        "qnorm(ppoints(n)) for n = 1, 8, 11, 32"
+      ],
+      "tolerance": "validation/README.md statistics row, n = 32: 1e-5 relative (measured 7.4e-15); quantiles 1e-11 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "export_regression_tables",
+      "name": "LaTeX, HTML and Markdown regression tables",
+      "category": "data",
+      "reference": "stats::lm; summary.lm (classical SEs)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "export_ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::export::latex::tests::test_validate_latex_table_ols_grunfeld",
+        "p2a-core::export::html::tests::test_validate_html_table_ols_grunfeld",
+        "p2a-core::export::markdown::tests::test_validate_markdown_table_ols_grunfeld"
+      ],
+      "quantities": [
+        "coefficients and SEs at 4 decimals",
+        "stars of R's p-values",
+        "N, R2, adj. R2 (4 decimals), F (2 decimals)"
+      ],
+      "tolerance": "printed precision (Tol::printed(4), Tol::printed(2))",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

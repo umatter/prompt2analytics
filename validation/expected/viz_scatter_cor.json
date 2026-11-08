@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "viz_scatter_cor",
+  "area": "visualization",
+  "method": "Scatter-plot Pearson correlation at large offsets and tiny scale (stats::cor)",
+  "reference": "stats::cor (method = 'pearson')",
+  "call": "cor(x, y) for x in x0, x0 + 1.7e9, x0 + 1e12 and (x0, y) * 1e-9; cor(x0, rep(5.25, n))",
+  "dataset": "validation/datasets/generated/viz_scatter_cor.csv",
+  "datasets": ["validation/datasets/generated/viz_scatter_cor.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n": 200,
+    "cor_x0": 0.8828950961695764,
+    "cor_epoch": 0.88289509614599526,
+    "cor_big": 0.88289508066799227,
+    "cor_tiny": 0.88289509616957651,
+    "cor_const": null
+  }
+}

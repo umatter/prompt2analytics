@@ -2,9 +2,12 @@
 
 #[cfg(feature = "file-formats")]
 use calamine::{Data, Range, Reader, open_workbook_auto};
-#[cfg(feature = "file-formats")]
 use polars::frame::column::Column;
 use polars::prelude::*;
+use serde::Deserialize;
+use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -57,6 +60,16 @@ pub enum LoadError {
     /// without the words of an `unwrap` (see [`DataLoader::load_parquet`]).
     #[error("polars failed while reading the parquet file: {0}")]
     ParquetPanic(String),
+
+    /// A malformed JSON Lines or JSON records file; the message names the line
+    /// (JSON Lines) or the record, line and column (JSON).
+    #[error("JSON error: {0}")]
+    Json(String),
+
+    /// The file or a buffer would exceed the allocation ceiling, or the
+    /// computation was cancelled.
+    #[error("{0}")]
+    Resource(String),
 }
 
 /// The field-metadata keys polars marks a Categorical or Enum type with:
@@ -314,6 +327,397 @@ fn polars_unwinding<T>(read: impl FnOnce() -> T) -> Result<T, LoadError> {
     })
 }
 
+// JSON Lines and JSON records
+
+/// One cell of a flat record. Text without escapes borrows from the file's text.
+enum JsonCell<'a> {
+    Null,
+    Bool(bool),
+    Int(i64),
+    /// An integer above `i64::MAX`.
+    UInt(u64),
+    Float(f64),
+    Text(Cow<'a, str>),
+}
+
+const _: () = assert!(std::mem::size_of::<JsonCell<'static>>() <= 32);
+
+/// Records read so far, one vector of cells per column. A column is padded with
+/// nulls when its next value arrives, and at the end by [`RecordTable::into_frame`],
+/// so a key costs one allocation per column and a record only touches its own keys.
+#[derive(Default)]
+struct RecordTable<'a> {
+    names: Vec<String>,
+    index: HashMap<String, usize>,
+    columns: Vec<Vec<JsonCell<'a>>>,
+    rows: usize,
+    /// A resource error raised inside a serde visitor, which can only return
+    /// serde's error type.
+    failure: Option<LoadError>,
+}
+
+impl<'a> RecordTable<'a> {
+    /// Before each record: the row limit and, every 65,536 records, the budget and
+    /// the size of the table so far.
+    fn tick(&mut self) -> Result<(), LoadError> {
+        if self.rows >= IdxSize::MAX as usize {
+            return Err(LoadError::Resource(format!(
+                "the file holds more than {} records, polars' row limit",
+                IdxSize::MAX
+            )));
+        }
+        if self.rows.is_multiple_of(1 << 16) {
+            crate::resource::checkpoint().map_err(resource_err)?;
+            self.check_table_size(self.columns.len())?;
+        }
+        Ok(())
+    }
+
+    /// The whole table at its current size, null cells included, must fit the ceiling.
+    fn check_table_size(&self, n_columns: usize) -> Result<(), LoadError> {
+        let cells = crate::resource::checked_len(&[self.rows + 1, n_columns], "JSON table")
+            .map_err(resource_err)?;
+        crate::resource::check_alloc::<JsonCell>(cells, "JSON table").map_err(resource_err)
+    }
+
+    /// The column of `key`, created on first use, for the record being read.
+    fn column_of(&mut self, key: &str) -> Result<usize, ColumnError> {
+        if let Some(&j) = self.index.get(key) {
+            // A column already holding this record's cell has seen the key.
+            if self.columns[j].len() == self.rows + 1 {
+                return Err(ColumnError::Duplicate);
+            }
+            return Ok(j);
+        }
+        crate::resource::checkpoint()
+            .map_err(resource_err)
+            .and_then(|()| self.check_table_size(self.columns.len() + 1))
+            .map_err(ColumnError::Failed)?;
+        let j = self.columns.len();
+        self.names.push(key.to_string());
+        self.index.insert(key.to_string(), j);
+        self.columns.push(Vec::new());
+        Ok(j)
+    }
+
+    /// Set this record's cell of column `j`, padding the rows it was absent from.
+    fn set(&mut self, j: usize, cell: JsonCell<'a>) -> Result<(), LoadError> {
+        let needed = self.rows + 1;
+        if self.columns[j].capacity() < needed {
+            // Padding fills this column to the table's height, so the table counts here too.
+            self.check_table_size(self.columns.len())?;
+            let column = &mut self.columns[j];
+            let capacity = needed.max(column.capacity().saturating_mul(2));
+            crate::resource::check_alloc::<JsonCell>(capacity, "JSON column")
+                .map_err(resource_err)?;
+            column
+                .try_reserve_exact(capacity - column.len())
+                .map_err(|_| {
+                    LoadError::Resource(format!(
+                        "a JSON column of {capacity} cells could not be allocated"
+                    ))
+                })?;
+        }
+        let column = &mut self.columns[j];
+        column.resize_with(self.rows, || JsonCell::Null);
+        column.push(cell);
+        Ok(())
+    }
+
+    /// One polars column per name, each column's cells freed once it is built.
+    fn into_frame(self) -> Result<DataFrame, LoadError> {
+        if self.rows == 0 {
+            return Err(LoadError::Json(
+                "the file contains no JSON records".to_string(),
+            ));
+        }
+        if self.columns.is_empty() {
+            return Err(LoadError::Json(
+                "the JSON records contain no fields".to_string(),
+            ));
+        }
+        // Empty and sparse records add height without touching a column; every column
+        // below is built at the full height.
+        let rows = self.rows;
+        let cells = crate::resource::checked_len(&[rows, self.columns.len()], "JSON table")
+            .map_err(resource_err)?;
+        crate::resource::check_alloc::<JsonCell>(cells, "JSON table").map_err(resource_err)?;
+        let mut columns = Vec::with_capacity(self.columns.len());
+        for (name, cells) in self.names.into_iter().zip(self.columns) {
+            crate::resource::checkpoint().map_err(resource_err)?;
+            columns.push(json_column(&name, &cells, rows));
+        }
+        Ok(DataFrame::new(columns)?)
+    }
+}
+
+/// The polars column of `cells`, the type inferred from its non-null cells; `rows`
+/// is the frame's height, so the rows after the last cell are null.
+fn json_column(name: &str, cells: &[JsonCell<'_>], rows: usize) -> Column {
+    let (mut bools, mut ints, mut floats, mut texts) = (false, false, false, false);
+    for cell in cells {
+        match cell {
+            JsonCell::Null => {}
+            JsonCell::Bool(_) => bools = true,
+            JsonCell::Int(_) => ints = true,
+            JsonCell::UInt(_) | JsonCell::Float(_) => floats = true,
+            JsonCell::Text(_) => texts = true,
+        }
+    }
+    let name = PlSmallStr::from(name);
+    let tail = rows - cells.len();
+    let is_number = ints || floats;
+    if !texts && !bools && ints && !floats {
+        let values = cells.iter().map(|c| match c {
+            JsonCell::Int(v) => Some(*v),
+            _ => None,
+        });
+        let values = values.chain(std::iter::repeat_n(None, tail));
+        Int64Chunked::from_iter_options(name, values)
+            .into_series()
+            .into()
+    } else if !texts && !bools && is_number {
+        let values = cells.iter().map(|c| match c {
+            JsonCell::Int(v) => Some(*v as f64),
+            JsonCell::UInt(v) => Some(*v as f64),
+            JsonCell::Float(v) => Some(*v),
+            _ => None,
+        });
+        let values = values.chain(std::iter::repeat_n(None, tail));
+        Float64Chunked::from_iter_options(name, values)
+            .into_series()
+            .into()
+    } else if !texts && bools && !is_number {
+        let values = cells.iter().map(|c| match c {
+            JsonCell::Bool(v) => Some(*v),
+            _ => None,
+        });
+        let values = values.chain(std::iter::repeat_n(None, tail));
+        BooleanChunked::from_iter_options(name, values)
+            .into_series()
+            .into()
+    } else {
+        let values = cells.iter().map(|c| match c {
+            JsonCell::Null => None,
+            JsonCell::Bool(v) => Some(Cow::Borrowed(if *v { "true" } else { "false" })),
+            JsonCell::Int(v) => Some(Cow::Owned(v.to_string())),
+            JsonCell::UInt(v) => Some(Cow::Owned(v.to_string())),
+            JsonCell::Float(v) => Some(Cow::Owned(format!("{v:?}"))),
+            JsonCell::Text(v) => Some(Cow::Borrowed(v.as_ref())),
+        });
+        let values = values.chain(std::iter::repeat_n(None, tail));
+        StringChunked::from_iter_options(name, values)
+            .into_series()
+            .into()
+    }
+}
+
+/// Why [`RecordTable::column_of`] gave no column.
+enum ColumnError {
+    Duplicate,
+    Failed(LoadError),
+}
+
+/// Reads one record into the table, field by field.
+struct RecordSeed<'t, 'a> {
+    table: &'t mut RecordTable<'a>,
+}
+
+impl<'de> DeserializeSeed<'de> for RecordSeed<'_, 'de> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for RecordSeed<'_, 'de> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(JsonKey(key)) = map.next_key::<JsonKey<'de>>()? {
+            let j = match self.table.column_of(&key) {
+                Ok(j) => j,
+                Err(ColumnError::Duplicate) => {
+                    return Err(A::Error::custom(format!(
+                        "duplicate field '{}'",
+                        shown_key(&key)
+                    )));
+                }
+                Err(ColumnError::Failed(e)) => return Err(self.table.fail(e)),
+            };
+            let cell = map.next_value_seed(CellSeed { key: &key })?;
+            if let Err(e) = self.table.set(j, cell) {
+                return Err(self.table.fail(e));
+            }
+        }
+        self.table.rows += 1;
+        Ok(())
+    }
+}
+
+impl RecordTable<'_> {
+    /// Keep `failure` for the caller and give serde an error to stop with.
+    fn fail<E: serde::de::Error>(&mut self, failure: LoadError) -> E {
+        let error = E::custom(failure.to_string());
+        self.failure = Some(failure);
+        error
+    }
+}
+
+/// Reads the array of a `.json` file, one record at a time.
+struct RecordsVisitor<'t, 'a> {
+    table: &'t mut RecordTable<'a>,
+}
+
+impl<'de> Visitor<'de> for RecordsVisitor<'_, 'de> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an array of JSON objects")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        loop {
+            if let Err(e) = self.table.tick() {
+                return Err(self.table.fail(e));
+            }
+            let seed = RecordSeed {
+                table: &mut *self.table,
+            };
+            if seq.next_element_seed(seed)?.is_none() {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// A field name, borrowed when it has no escapes.
+struct JsonKey<'a>(Cow<'a, str>);
+
+impl<'de> Deserialize<'de> for JsonKey<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+        impl<'de> Visitor<'de> for KeyVisitor {
+            type Value = JsonKey<'de>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a field name")
+            }
+
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+                Ok(JsonKey(Cow::Borrowed(v)))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(JsonKey(Cow::Owned(v.to_string())))
+            }
+        }
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
+/// Reads one field's value; `key` names it in the error for a nested value.
+struct CellSeed<'k> {
+    key: &'k str,
+}
+
+impl CellSeed<'_> {
+    fn nested<E: serde::de::Error>(&self, what: &str) -> E {
+        E::custom(format!(
+            "field '{}' holds a nested {what}; only flat records (one value per field) are \
+             supported",
+            shown_key(self.key)
+        ))
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for CellSeed<'_> {
+    type Value = JsonCell<'de>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for CellSeed<'_> {
+    type Value = JsonCell<'de>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(JsonCell::Null)
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(JsonCell::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(JsonCell::Int(v))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(i64::try_from(v).map_or(JsonCell::UInt(v), JsonCell::Int))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(JsonCell::Float(v))
+    }
+
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+        Ok(JsonCell::Text(Cow::Borrowed(v)))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(JsonCell::Text(Cow::Owned(v.to_string())))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, _seq: A) -> Result<Self::Value, A::Error> {
+        Err(self.nested("array"))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<Self::Value, A::Error> {
+        Err(self.nested("object"))
+    }
+}
+
+/// A field name as error messages quote it.
+fn shown_key(key: &str) -> Cow<'_, str> {
+    p2a_text::ellipsize(key, 64)
+}
+
+/// serde_json's message without its " at line L column C" suffix, kept short: the message
+/// quotes a record that is a bare string in full, however long it is.
+fn json_error_text(e: &serde_json::Error) -> String {
+    let text = e.to_string();
+    let suffix = format!(" at line {} column {}", e.line(), e.column());
+    let message = text.strip_suffix(&suffix).unwrap_or(&text);
+    p2a_text::ellipsize(message, 200).into_owned()
+}
+
+fn resource_err(e: crate::errors::EconError) -> LoadError {
+    LoadError::Resource(e.to_string())
+}
+
+/// The file's text, its size checked against the allocation ceiling first.
+fn read_json_text(path: &Path) -> Result<String, LoadError> {
+    let len = usize::try_from(std::fs::metadata(path)?.len()).unwrap_or(usize::MAX);
+    crate::resource::check_alloc::<u8>(len, "JSON file").map_err(resource_err)?;
+    String::from_utf8(std::fs::read(path)?).map_err(|e| {
+        LoadError::Json(format!(
+            "the file is not valid UTF-8 (byte {})",
+            e.utf8_error().valid_up_to()
+        ))
+    })
+}
+
 /// Data loader supporting multiple file formats.
 ///
 /// Every CSV reader treats the strings of [`DataLoader::DEFAULT_NA_STRINGS`] (R
@@ -339,10 +743,29 @@ impl DataLoader {
     /// missing in every case.
     pub const DEFAULT_NA_STRINGS: &'static [&'static str] = &["NA", ""];
 
+    /// Lower-case file extensions that [`DataLoader::load`] reads in this build
+    /// (the `file-formats` feature adds xlsx, xls, xlsb and ods).
+    pub fn supported_extensions() -> &'static [&'static str] {
+        #[cfg(feature = "file-formats")]
+        {
+            &[
+                "csv", "parquet", "pq", "xlsx", "xls", "xlsb", "ods", "dta", "sas7bdat", "jsonl",
+                "ndjson", "json",
+            ]
+        }
+        #[cfg(not(feature = "file-formats"))]
+        {
+            &[
+                "csv", "parquet", "pq", "dta", "sas7bdat", "jsonl", "ndjson", "json",
+            ]
+        }
+    }
+
     /// Load a dataset from a file path.
     ///
-    /// The file format is automatically detected from the extension. CSV files are
-    /// read with [`DataLoader::DEFAULT_NA_STRINGS`] as missing values.
+    /// The file format is automatically detected from the extension
+    /// ([`DataLoader::supported_extensions`]). CSV files are read with
+    /// [`DataLoader::DEFAULT_NA_STRINGS`] as missing values.
     pub fn load(path: impl AsRef<Path>) -> Result<Dataset, LoadError> {
         Self::load_impl(path.as_ref(), None)
     }
@@ -381,14 +804,17 @@ impl DataLoader {
             "xlsx" | "xls" | "xlsb" | "ods" => return Err(LoadError::ExcelNotSupported),
             "dta" => Self::load_stata(path)?,
             "sas7bdat" => Self::load_sas(path)?,
+            "jsonl" | "ndjson" => Self::load_jsonl(path)?,
+            "json" => Self::load_json(path)?,
             _ => {
-                #[cfg(feature = "file-formats")]
-                let supported = "csv, parquet, xlsx, xls, xlsb, ods, dta, sas7bdat";
-                #[cfg(not(feature = "file-formats"))]
-                let supported = "csv, parquet, dta, sas7bdat (enable 'file-formats' feature for xlsx/xls/xlsb/ods)";
+                let hint = if cfg!(feature = "file-formats") {
+                    ""
+                } else {
+                    " (enable the 'file-formats' feature for xlsx/xls/xlsb/ods)"
+                };
                 return Err(LoadError::UnsupportedFormat(format!(
-                    "Extension '{}' not supported. Supported formats: {}",
-                    extension, supported
+                    "Extension '{extension}' not supported. Supported formats: {}{hint}",
+                    Self::supported_extensions().join(", ")
                 )));
             }
         };
@@ -401,6 +827,95 @@ impl DataLoader {
         }
 
         Ok(dataset)
+    }
+
+    /// Load a JSON Lines file (`.jsonl`, `.ndjson`): one flat JSON object per line,
+    /// UTF-8. See [`DataLoader::from_jsonl_string`] for the rules.
+    pub fn load_jsonl(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
+        Self::from_jsonl_string(&read_json_text(path.as_ref())?)
+    }
+
+    /// Parse JSON Lines text: one flat JSON object per line. Blank lines are skipped,
+    /// and a byte order mark and CRLF line ends are accepted.
+    ///
+    /// Columns appear in order of first use. A column of integers that fit `i64` is
+    /// Int64, a column of numbers Float64 (correctly rounded), a column of booleans
+    /// Boolean, and anything else String (a number or boolean in a String column
+    /// becomes the text of its value: `1`, `3.5`, `true`). `null` and absent keys are
+    /// null. Nested arrays and objects and duplicate keys are errors naming the line.
+    ///
+    /// ```
+    /// let df = p2a_core::DataLoader::from_jsonl_string("{\"a\": 1, \"b\": \"x\"}\n{\"a\": 2}\n").unwrap();
+    /// assert_eq!(df.height(), 2);
+    /// ```
+    pub fn from_jsonl_string(data: &str) -> Result<DataFrame, LoadError> {
+        let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+        let mut table = RecordTable::default();
+        for (i, raw) in data.split('\n').enumerate() {
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            if line.trim().is_empty() {
+                continue;
+            }
+            table.tick()?;
+            let mut de = serde_json::Deserializer::from_str(line);
+            let parsed = RecordSeed { table: &mut table }
+                .deserialize(&mut de)
+                .and_then(|()| de.end());
+            if let Err(e) = parsed {
+                return Err(table.failure.take().unwrap_or_else(|| {
+                    LoadError::Json(format!(
+                        "line {}: {} (column {})",
+                        i + 1,
+                        json_error_text(&e),
+                        e.column()
+                    ))
+                }));
+            }
+        }
+        table.into_frame()
+    }
+
+    /// Load a JSON file (`.json`) holding an array of flat records, the layout `export_dataset`
+    /// writes. [`Dataset::to_json_string`] has the same layout but currently wraps string values
+    /// in literal quotes, which come back as part of the text.
+    pub fn load_json(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
+        Self::from_json_string(&read_json_text(path.as_ref())?)
+    }
+
+    /// Parse a JSON array of flat objects, with the column rules of
+    /// [`DataLoader::from_jsonl_string`]. The records go straight into the table as
+    /// they are read, so the document is never held as a tree of values.
+    pub fn from_json_string(data: &str) -> Result<DataFrame, LoadError> {
+        let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+        if !data.trim_start().starts_with('[') {
+            return Err(LoadError::Json(
+                "a .json file must hold an array of records ([{...}, ...]), the layout \
+                 export_dataset writes; for one record per line use a .jsonl file"
+                    .to_string(),
+            ));
+        }
+        let mut table = RecordTable::default();
+        let mut de = serde_json::Deserializer::from_str(data);
+        if let Err(e) = de.deserialize_seq(RecordsVisitor { table: &mut table }) {
+            return Err(table.failure.take().unwrap_or_else(|| {
+                LoadError::Json(format!(
+                    "record {}: {} (line {}, column {})",
+                    table.rows + 1,
+                    json_error_text(&e),
+                    e.line(),
+                    e.column()
+                ))
+            }));
+        }
+        de.end().map_err(|e| {
+            LoadError::Json(format!(
+                "{} (line {}, column {})",
+                json_error_text(&e),
+                e.line(),
+                e.column()
+            ))
+        })?;
+        table.into_frame()
     }
 
     /// Load a CSV file eagerly (entire file into memory), with
@@ -1013,6 +1528,305 @@ mod tests {
                 "expected UnsupportedFormat, got {:?}",
                 other.map(|d| d.nrows())
             ),
+        }
+    }
+
+    fn json_err(r: Result<DataFrame, LoadError>) -> String {
+        match r {
+            Err(LoadError::Json(m)) => m,
+            Err(e) => panic!("expected LoadError::Json, got {e:?}"),
+            Ok(df) => panic!("expected LoadError::Json, got {df}"),
+        }
+    }
+
+    fn opt_i64(df: &DataFrame, name: &str) -> Vec<Option<i64>> {
+        df.column(name).unwrap().i64().unwrap().iter().collect()
+    }
+
+    fn opt_f64(df: &DataFrame, name: &str) -> Vec<Option<f64>> {
+        df.column(name).unwrap().f64().unwrap().iter().collect()
+    }
+
+    fn opt_str(df: &DataFrame, name: &str) -> Vec<Option<String>> {
+        df.column(name)
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .map(|v| v.map(String::from))
+            .collect()
+    }
+
+    fn some(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    #[test]
+    fn test_load_jsonl_types_and_nulls() {
+        let text = concat!(
+            r#"{"id": 1, "x": 1.5, "flag": true, "name": "Größe", "mixed": 1}"#,
+            "\n",
+            r#"{"id": 2, "x": null, "flag": false, "name": "a\"b\\c\u00e9", "mixed": "two"}"#,
+            "\n",
+            r#"{"x": -0.125, "id": 3, "flag": null, "extra": 7}"#,
+            "\n",
+            "\n",
+            r#"{"id": 4, "x": 2, "name": null, "mixed": 3.5}"#,
+            "\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["sample.jsonl", "sample.NDJSON"] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, text).unwrap();
+            let ds = DataLoader::load(&path).unwrap();
+            assert_eq!(ds.name(), Some("sample"));
+            let df = ds.df();
+            assert_eq!(df.height(), 4);
+            let names: Vec<&str> = df.get_column_names().iter().map(|n| n.as_str()).collect();
+            assert_eq!(names, ["id", "x", "flag", "name", "mixed", "extra"]);
+            assert_eq!(
+                opt_i64(df, "id"),
+                [Some(1), Some(2), Some(3), Some(4)],
+                "id"
+            );
+            assert_eq!(
+                opt_f64(df, "x"),
+                [Some(1.5), None, Some(-0.125), Some(2.0)],
+                "x"
+            );
+            let flag: Vec<Option<bool>> =
+                df.column("flag").unwrap().bool().unwrap().iter().collect();
+            assert_eq!(flag, [Some(true), Some(false), None, None]);
+            assert_eq!(
+                opt_str(df, "name"),
+                [some("Größe"), some("a\"b\\cé"), None, None]
+            );
+            assert_eq!(
+                opt_str(df, "mixed"),
+                [some("1"), some("two"), None, some("3.5")]
+            );
+            assert_eq!(opt_i64(df, "extra"), [None, None, Some(7), None]);
+            match DataLoader::load_with_na(&path, &["NA"]) {
+                Err(LoadError::UnsupportedFormat(m)) => {
+                    assert!(m.contains("na_strings applies only to CSV files"), "{m}")
+                }
+                other => panic!("{:?}", other.map(|d| d.nrows())),
+            }
+        }
+    }
+
+    #[test]
+    fn test_load_jsonl_floats_are_correctly_rounded() {
+        let sources = [
+            "442.96881516653684",
+            "-943.3050469559873",
+            "-109.22561189039709",
+            "0.1",
+        ];
+        let text = format!(
+            "{{\"s\": \"-1.5e3 \\\"7\\\" 12\", \"v\": {}}}\n{{\"v\": {}}}\n{{\"v\": {}}}\n{{\"v\": {}}}\n",
+            sources[0], sources[1], sources[2], sources[3]
+        );
+        let df = DataLoader::from_jsonl_string(&text).unwrap();
+        let v = opt_f64(&df, "v");
+        for (got, t) in v.iter().zip(sources) {
+            assert_eq!(got.unwrap().to_bits(), t.parse::<f64>().unwrap().to_bits());
+        }
+        assert_eq!(opt_str(&df, "s")[0], some("-1.5e3 \"7\" 12"));
+
+        let df = DataLoader::from_jsonl_string("{\"big\": 9007199254740993}\n").unwrap();
+        assert_eq!(opt_i64(&df, "big"), [Some(9007199254740993)]);
+
+        let df =
+            DataLoader::from_jsonl_string("{\"u\": 18446744073709551615}\n{\"u\": 1}\n").unwrap();
+        assert_eq!(opt_f64(&df, "u"), [Some(18446744073709551616.0), Some(1.0)]);
+
+        // In a String column a number becomes the text of its value.
+        let df = DataLoader::from_jsonl_string(
+            "{\"m\": 1.50}\n{\"m\": \"x\"}\n{\"m\": true}\n{\"m\": 18446744073709551615}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            opt_str(&df, "m"),
+            [
+                some("1.5"),
+                some("x"),
+                some("true"),
+                some("18446744073709551615")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_load_jsonl_rejects_malformed_input() {
+        let cases: [(&str, &[&str]); 8] = [
+            (
+                "{\"a\": 1}\n{\"a\": [1, 2]}\n",
+                &["line 2", "'a'", "nested array"],
+            ),
+            ("{\"a\": {\"b\": 1}}\n", &["line 1", "'a'", "nested object"]),
+            ("[1, 2]\n", &["line 1", "JSON object"]),
+            ("{\"a\": 1}\n\n{\"a\": 1,}\n", &["line 3"]),
+            ("{\"a\": 1, \"a\": 2}\n", &["line 1", "duplicate field 'a'"]),
+            ("{\"a\": NaN}\n", &["line 1"]),
+            ("{\"a\": 1e400}\n", &["line 1", "out of range"]),
+            ("{\"a\": 1} trailing\n", &["line 1"]),
+        ];
+        for (input, needles) in cases {
+            let m = json_err(DataLoader::from_jsonl_string(input));
+            for needle in needles {
+                assert!(m.contains(needle), "{input:?}: {m}");
+            }
+            assert!(!m.contains(" at line "), "{m}");
+        }
+        for empty in ["", "\n  \n"] {
+            let m = json_err(DataLoader::from_jsonl_string(empty));
+            assert!(m.contains("no JSON records"), "{m}");
+        }
+        let m = json_err(DataLoader::from_jsonl_string("{}\n{}\n"));
+        assert!(m.contains("no fields"), "{m}");
+
+        let long = "k".repeat(200);
+        let m = json_err(DataLoader::from_jsonl_string(&format!(
+            "{{\"{long}\": [1]}}"
+        )));
+        assert!(m.contains(&format!("'{}...'", "k".repeat(61))), "{m}");
+        assert!(!m.contains(&"k".repeat(62)), "{m}");
+
+        // A record that is one long string: serde_json quotes all of it.
+        let text = "s".repeat(500);
+        let m = json_err(DataLoader::from_jsonl_string(&format!(
+            "{{\"a\": 1}}\n\"{text}\"\n"
+        )));
+        assert!(m.contains("line 2") && m.len() < 300, "{m}");
+        let m = json_err(DataLoader::from_json_string(&format!("[\"{text}\"]")));
+        assert!(m.contains("record 1") && m.len() < 300, "{m}");
+
+        let df = DataLoader::from_jsonl_string("\u{feff}{\"a\": 1}\r\n{\"a\": 2}\r\n").unwrap();
+        assert_eq!(opt_i64(&df, "a"), [Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn test_load_json_records_round_trip_exact() {
+        let n = 400;
+        let x: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.618034).sin() * 1e3 / 7.0 + i as f64 / 3.0)
+            .collect();
+        let k: Vec<i64> = (0..n).map(|i| 7 * i as i64 - 1000).collect();
+        let t: Vec<Option<&str>> = (0..n)
+            .map(|i| if i % 9 == 0 { None } else { Some("é\"t") })
+            .collect();
+        let frame = df!("x" => &x, "k" => &k, "s" => &t).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.json");
+        std::fs::write(&path, Dataset::new(frame).to_json_string().unwrap()).unwrap();
+        let ds = DataLoader::load(&path).unwrap();
+        let df = ds.df();
+        assert_eq!(df.height(), n);
+        for (got, want) in opt_f64(df, "x").iter().zip(&x) {
+            assert_eq!(got.unwrap().to_bits(), want.to_bits());
+        }
+        let got_k: Vec<i64> = opt_i64(df, "k").into_iter().map(Option::unwrap).collect();
+        assert_eq!(got_k, k);
+        // to_json_string wraps strings in literal quotes, so only the null positions of the
+        // string column are compared until it writes plain JSON strings.
+        for (i, v) in opt_str(df, "s").iter().enumerate() {
+            assert_eq!(v.is_none(), i % 9 == 0, "row {i}");
+        }
+        let df = DataLoader::from_json_string("[{\"s\": \"é\\\"t\"}, {\"s\": null}]").unwrap();
+        assert_eq!(opt_str(&df, "s"), [some("é\"t"), None]);
+
+        let m = json_err(DataLoader::from_json_string("{\"a\": 1}"));
+        assert!(m.contains("array of records"), "{m}");
+        let m = json_err(DataLoader::from_json_string("[{\"a\": 1}, {\"a\": [2]}]"));
+        assert!(m.contains("record 2") && m.contains("nested array"), "{m}");
+        let m = json_err(DataLoader::from_json_string("[{\"a\": 1}, 2]"));
+        assert!(m.contains("record 2") && m.contains("JSON object"), "{m}");
+        let m = json_err(DataLoader::from_json_string("[{\"a\": 1}] x"));
+        assert!(m.contains("line 1"), "{m}");
+        let m = json_err(DataLoader::from_json_string("[]"));
+        assert!(m.contains("no JSON records"), "{m}");
+    }
+
+    #[test]
+    fn test_json_loader_refuses_tables_above_the_ceiling() {
+        // Every record adds a column: the table's null cells count, not only the text.
+        let text: String = (0..400).map(|i| format!("{{\"k{i}\": 1}}\n")).collect();
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_jsonl_string(&text)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        let records = format!(
+            "[{}]",
+            (0..400)
+                .map(|i| format!("{{\"k{i}\": 1}}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_json_string(&records)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        // One wide record and then empty ones: no column is created and no size tick falls
+        // after the first record, so only the frame's own check sees the height.
+        let head: String = (0..400)
+            .map(|i| format!("\"k{i}\": 1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let wide = format!("{{{head}}}\n{}", "{}\n".repeat(399));
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_jsonl_string(&wide)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        let wide_records = format!("[{{{head}}}{}]", ",{}".repeat(399));
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_json_string(&wide_records)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        assert_eq!(
+            DataLoader::from_jsonl_string(&wide).unwrap().shape(),
+            (400, 400)
+        );
+        // The padding of existing columns is refused when it happens: the bad last line is
+        // never reached.
+        let refilled = format!("{wide}{{{head}}}\nnot json\n");
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_jsonl_string(&refilled)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        // Without the ceiling the same text loads, padded with nulls.
+        let df = DataLoader::from_jsonl_string(&text).unwrap();
+        assert_eq!((df.height(), df.width()), (400, 400));
+        assert_eq!(
+            df.column("k399").unwrap().null_count(),
+            399,
+            "only the last record has k399"
+        );
+        assert_eq!(df.column("k0").unwrap().null_count(), 399, "only the first");
+    }
+
+    #[test]
+    fn test_supported_extensions_and_unsupported_message() {
+        let ext = DataLoader::supported_extensions();
+        for e in [
+            "jsonl", "ndjson", "json", "csv", "parquet", "pq", "dta", "sas7bdat",
+        ] {
+            assert!(ext.contains(&e), "{e}");
+        }
+        if cfg!(feature = "file-formats") {
+            for e in ["xlsx", "xls", "xlsb", "ods"] {
+                assert!(ext.contains(&e), "{e}");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.txt");
+        std::fs::write(&path, "x").unwrap();
+        match DataLoader::load(&path) {
+            Err(LoadError::UnsupportedFormat(m)) => {
+                assert!(m.contains("Extension 'txt' not supported"), "{m}");
+                assert!(m.contains(&ext.join(", ")), "{m}");
+            }
+            other => panic!("{:?}", other.map(|d| d.nrows())),
         }
     }
 

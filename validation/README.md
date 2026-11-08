@@ -465,6 +465,11 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CLI `data load` missing-value markers (default `NA` and empty, `--na-strings`) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Data quality profile (missing values as null or NaN, type-7 quartiles, IQR outliers) | [data_layer.md](data/data_layer.md) | R-pinned |
 | Binning as base::cut (custom edges, right/left-closed, include.lowest, NA for missing and out-of-range values) | [data_layer.md](data/data_layer.md) | R-pinned |
+| Scatter-plot Pearson correlation | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
+| Box-plot hinges, whiskers and outliers | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
+| Histogram bin count and counts | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
+| Residual diagnostics: standardized residuals, Cook's distance, Q-Q quantiles | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
+| LaTeX, HTML and Markdown regression tables | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
 
 ### Interfaces (CLI exhibits, MCP)
 | Method | File | Status |

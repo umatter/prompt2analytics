@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "viz_histogram_bins",
+  "area": "visualization",
+  "method": "Histogram bin count (nclass.Sturges) and equal-width bin counts",
+  "reference": "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1)) with its defaults (right = TRUE, include.lowest = TRUE)",
+  "call": "k <- nclass.Sturges(x); hist(x, breaks = seq(min(x), max(x), length.out = k + 1), plot = FALSE)$counts",
+  "dataset": "validation/datasets/generated/viz_histogram_samples.csv",
+  "datasets": ["validation/datasets/generated/viz_histogram_samples.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "sturges_n": [1, 5, 8, 16, 100, 1000, 1024],
+    "sturges_k": [1, 4, 4, 5, 8, 11, 11],
+    "norm100_k": 8,
+    "norm100_breaks": [5.4661717803011314, 6.5683920998242851, 7.6706124193474379, 8.7728327388705907, 9.8750530583937444, 10.977273377916898, 12.07949369744005, 13.181714016963204, 14.283934336486357],
+    "norm100_counts": [4, 7, 9, 13, 31, 17, 12, 7],
+    "small50_k": 7,
+    "small50_breaks": [8.7211194341675611e-12, 1.5712118421027763e-11, 2.2703117407887962e-11, 2.9694116394748167e-11, 3.6685115381608365e-11, 4.3676114368468564e-11, 5.0667113355328769e-11, 5.7658112342188974e-11],
+    "small50_counts": [3, 6, 10, 14, 9, 4, 4],
+    "grid13_k": 5,
+    "grid13_breaks": [0, 0.20000000000000001, 0.40000000000000002, 0.60000000000000009, 0.80000000000000004, 1],
+    "grid13_counts": [3, 3, 2, 3, 2]
+  }
+}

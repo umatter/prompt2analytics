@@ -3,6 +3,7 @@
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
@@ -49,6 +50,13 @@ pub struct HistogramResult {
     pub max: f64,
     /// Mean value
     pub mean: f64,
+    /// Values per bin; bin i is `(breaks[i], breaks[i + 1]]`, the first also holding
+    /// the minimum, with values within 1e-7 bin widths of a break assigned as R's
+    /// `hist()` does.
+    pub counts: Vec<u32>,
+    /// The `bins + 1` edges: `min + i * width` for `i < bins` and `max` last (R's
+    /// `seq(min, max, length.out = bins + 1)`); `min + i` (width 1) for constant data.
+    pub breaks: Vec<f64>,
 }
 
 impl std::fmt::Display for HistogramResult {
@@ -63,11 +71,28 @@ impl std::fmt::Display for HistogramResult {
     }
 }
 
+/// R's `nclass.Sturges`, `ceiling(log2(n) + 1)`, in integers; `n >= 1`.
+fn sturges_bins(n: usize) -> usize {
+    let log2 = n.ilog2() as usize;
+    if n.is_power_of_two() {
+        log2 + 1
+    } else {
+        log2 + 2
+    }
+}
+
 /// Generate a histogram from numeric data.
+///
+/// `k` equal-width bins from min to max, right-closed with the lowest value included, values
+/// within 1e-7 bin widths of a break assigned as R's `hist()` does (R:
+/// `hist(x, breaks = seq(min, max, length.out = k + 1))` with its defaults); default
+/// `k` = `nclass.Sturges`; R's default `hist()` breaks (`pretty()`) differ. Constant data
+/// (a range of at most 4 eps times the data's magnitude) get `k` bins of width 1 from the
+/// value.
 ///
 /// # Arguments
 /// * `data` - Numeric values to plot
-/// * `bins` - Number of bins (default: auto-calculated)
+/// * `bins` - Number of bins (default: `nclass.Sturges`)
 /// * `config` - Chart configuration
 pub fn histogram(
     data: &[f64],
@@ -98,35 +123,52 @@ pub fn histogram(
         ));
     }
 
-    // Auto-calculate bins using Sturges' rule if not specified
-    let n_bins = bins
-        .unwrap_or_else(|| {
-            let n = clean_data.len() as f64;
-            (1.0 + 3.322 * n.log10()).ceil() as usize
-        })
-        .max(1);
+    if clean_data.len() > u32::MAX as usize {
+        return Err(VisualizationError::InvalidData(format!(
+            "a histogram counts at most {} values",
+            u32::MAX
+        )));
+    }
 
-    // Calculate bin edges and counts
-    let bin_width = if (max_val - min_val).abs() < 1e-10 {
-        1.0
-    } else {
-        (max_val - min_val) / n_bins as f64
-    };
+    let n_bins = bins.unwrap_or_else(|| sturges_bins(clean_data.len()));
+
+    // Bin width; the breaks exist before anything is counted.
+    let range = max_val - min_val;
+    let constant = range <= 4.0 * f64::EPSILON * min_val.abs().max(max_val.abs());
+    let bin_width = if constant { 1.0 } else { range / n_bins as f64 };
 
     let mut counts = resource::try_vec(n_bins, 0u32, "histogram bins").map_err(invalid_data)?;
+    let n_edges = n_bins
+        .checked_add(1)
+        .ok_or_else(|| VisualizationError::InvalidData(format!("bins is too large: {n_bins}")))?;
+    let mut breaks =
+        resource::try_vec(n_edges, 0.0f64, "histogram bins (edges)").map_err(invalid_data)?;
+    for (i, edge) in breaks.iter_mut().enumerate() {
+        *edge = min_val + i as f64 * bin_width;
+    }
+    breaks[n_bins] = if constant {
+        min_val + n_bins as f64
+    } else {
+        max_val
+    };
 
+    let x_range = checked_axis_range(min_val, breaks[n_bins] + bin_width * 0.01, "x")?;
+
+    // R's hist(): right-closed bins compared with breaks shifted by this fuzz.
+    let fuzz = 1e-7 * if n_bins <= 2 { range } else { bin_width };
     for &val in &clean_data {
-        let bin_idx = if bin_width > 0.0 {
-            ((val - min_val) / bin_width).floor() as usize
-        } else {
-            0
-        };
-        let bin_idx = bin_idx.min(n_bins - 1);
-        counts[bin_idx] += 1;
+        let mut bin = (((val - min_val) / bin_width).ceil() as usize)
+            .saturating_sub(1)
+            .min(n_bins - 1);
+        if bin > 0 && val <= breaks[bin] + fuzz {
+            bin -= 1;
+        } else if bin + 1 < n_bins && val > breaks[bin + 1] + fuzz {
+            bin += 1;
+        }
+        counts[bin] += 1;
     }
 
     let max_count = *counts.iter().max().unwrap_or(&1);
-    let x_range = checked_axis_range(min_val, max_val + bin_width * 0.01, "x")?;
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
@@ -163,8 +205,7 @@ pub fn histogram(
         // Draw histogram bars as rectangles
         for (i, &count) in counts.iter().enumerate() {
             resource::checkpoint().map_err(invalid_data)?;
-            let x0 = min_val + i as f64 * bin_width;
-            let x1 = x0 + bin_width;
+            let (x0, x1) = (breaks[i], breaks[i + 1]);
 
             chart
                 .draw_series(std::iter::once(Rectangle::new(
@@ -187,6 +228,8 @@ pub fn histogram(
         min: min_val,
         max: max_val,
         mean: mean_val,
+        counts,
+        breaks,
     })
 }
 
@@ -331,12 +374,30 @@ pub struct BoxPlotResult {
 #[derive(Debug, Clone)]
 pub struct BoxPlotStats {
     pub label: String,
+    /// Lower whisker end (`boxplot.stats()$stats[1]`).
     pub min: f64,
+    /// Lower hinge (Tukey, `fivenum`).
     pub q1: f64,
     pub median: f64,
+    /// Upper hinge (Tukey, `fivenum`).
     pub q3: f64,
+    /// Upper whisker end (`boxplot.stats()$stats[5]`).
     pub max: f64,
+    /// Values beyond 1.5 times the hinge spread, in data order.
     pub outliers: Vec<f64>,
+    /// Non-NaN values of the group (`boxplot.stats()$n`); 0 for a group without
+    /// values, whose statistics are NaN.
+    pub n: usize,
+}
+
+impl BoxPlotStats {
+    /// The statistics and outliers a chart can draw.
+    fn finite_elements(&self) -> impl Iterator<Item = f64> + '_ {
+        [self.min, self.q1, self.median, self.q3, self.max]
+            .into_iter()
+            .chain(self.outliers.iter().copied())
+            .filter(|x| x.is_finite())
+    }
 }
 
 impl std::fmt::Display for BoxPlotResult {
@@ -344,6 +405,10 @@ impl std::fmt::Display for BoxPlotResult {
         writeln!(f, "Box Plot")?;
         writeln!(f, "========")?;
         for stat in &self.statistics {
+            if stat.n == 0 {
+                writeln!(f, "{}: no values", stat.label)?;
+                continue;
+            }
             writeln!(
                 f,
                 "{}: min={:.2}, Q1={:.2}, med={:.2}, Q3={:.2}, max={:.2}",
@@ -355,7 +420,9 @@ impl std::fmt::Display for BoxPlotResult {
     }
 }
 
-/// Generate a box plot from multiple data groups.
+/// Generate a box plot from multiple data groups, with the statistics of
+/// `grDevices::boxplot.stats` (coef 1.5). A group without values keeps its slot and label,
+/// as in R's `boxplot`; infinite values count as in R and are not drawn.
 ///
 /// # Arguments
 /// * `groups` - Vector of (label, data) pairs
@@ -371,28 +438,23 @@ pub fn box_plot(
     }
 
     // Calculate statistics for each group
-    let mut statistics = Vec::new();
-    let mut all_values = Vec::new();
+    let statistics = groups
+        .iter()
+        .map(|(label, data)| calculate_box_stats(label.clone(), data))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    for (label, data) in groups {
-        let clean: Vec<f64> = data.iter().copied().filter(|x| x.is_finite()).collect();
-        if clean.is_empty() {
-            continue;
-        }
-
-        let stats = calculate_box_stats(label.clone(), &clean);
-        all_values.extend(clean.iter().copied());
-        statistics.push(stats);
-    }
-
-    if statistics.is_empty() {
+    if !statistics
+        .iter()
+        .any(|s| s.finite_elements().next().is_some())
+    {
         return Err(VisualizationError::InvalidData(
             "No valid data in groups".to_string(),
         ));
     }
 
-    let y_min = all_values.iter().copied().fold(f64::INFINITY, f64::min);
-    let y_max = all_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let finite = || statistics.iter().flat_map(BoxPlotStats::finite_elements);
+    let y_min = finite().fold(f64::INFINITY, f64::min);
+    let y_max = finite().fold(f64::NEG_INFINITY, f64::max);
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
 
     // x-axis with continuous coordinates (0 to n_groups)
@@ -439,67 +501,65 @@ pub fn box_plot(
             let x_left = x_center - box_half_width;
             let x_right = x_center + box_half_width;
 
-            // Draw box (Q1 to Q3)
-            chart
-                .draw_series(std::iter::once(Rectangle::new(
-                    [(x_left, stat.q1), (x_right, stat.q3)],
-                    DEFAULT_SERIES_COLOR.mix(0.5).filled(),
-                )))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            // Only finite elements are drawn: an empty group draws nothing, and an
+            // infinite hinge or whisker end leaves out the parts that reach it.
+            let drawn = |a: f64, b: f64| a.is_finite() && b.is_finite();
 
-            // Draw box border
-            chart
-                .draw_series(std::iter::once(Rectangle::new(
-                    [(x_left, stat.q1), (x_right, stat.q3)],
-                    BLACK.stroke_width(1),
-                )))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            if drawn(stat.q1, stat.q3) {
+                // Draw box (Q1 to Q3)
+                chart
+                    .draw_series(std::iter::once(Rectangle::new(
+                        [(x_left, stat.q1), (x_right, stat.q3)],
+                        DEFAULT_SERIES_COLOR.mix(0.5).filled(),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                // Draw box border
+                chart
+                    .draw_series(std::iter::once(Rectangle::new(
+                        [(x_left, stat.q1), (x_right, stat.q3)],
+                        BLACK.stroke_width(1),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
 
             // Draw median line
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_left, stat.median), (x_right, stat.median)],
-                    BLACK.stroke_width(2),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            if stat.median.is_finite() {
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(x_left, stat.median), (x_right, stat.median)],
+                        BLACK.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
 
-            // Draw whiskers
-            // Lower whisker (vertical line)
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_center, stat.min), (x_center, stat.q1)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
-            // Lower whisker cap
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_left + 0.1, stat.min), (x_right - 0.1, stat.min)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
-
-            // Upper whisker (vertical line)
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_center, stat.q3), (x_center, stat.max)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
-            // Upper whisker cap
-            chart
-                .draw_series(LineSeries::new(
-                    vec![(x_left + 0.1, stat.max), (x_right - 0.1, stat.max)],
-                    BLACK.stroke_width(1),
-                ))
-                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            // Draw whiskers: the vertical line from the hinge, then the cap
+            for (whisker, hinge) in [(stat.min, stat.q1), (stat.max, stat.q3)] {
+                if drawn(whisker, hinge) {
+                    chart
+                        .draw_series(LineSeries::new(
+                            vec![(x_center, whisker), (x_center, hinge)],
+                            BLACK.stroke_width(1),
+                        ))
+                        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                    chart
+                        .draw_series(LineSeries::new(
+                            vec![(x_left + 0.1, whisker), (x_right - 0.1, whisker)],
+                            BLACK.stroke_width(1),
+                        ))
+                        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                }
+            }
 
             // Draw outliers
             chart
                 .draw_series(
-                    stat.outliers.iter().map(|&outlier| {
-                        Circle::new((x_center, outlier), 3, OUTLIER_COLOR.filled())
-                    }),
+                    stat.outliers
+                        .iter()
+                        .filter(|outlier| outlier.is_finite())
+                        .map(|&outlier| {
+                            Circle::new((x_center, outlier), 3, OUTLIER_COLOR.filled())
+                        }),
                 )
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
@@ -728,7 +788,7 @@ pub fn event_study_plot(
     }
 
     // Sort by time
-    valid_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    valid_points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Calculate bounds
     let x_min = valid_points.first().unwrap().0;
@@ -1204,7 +1264,7 @@ pub fn irf_plot(
     }
 
     // Sort by horizon
-    valid_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    valid_points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Calculate bounds
     let x_min = valid_points.first().unwrap().0;
@@ -1360,10 +1420,26 @@ pub struct ResidualDiagnosticsResult {
     pub residuals_vs_leverage: String,
     /// Number of observations
     pub n_observations: usize,
-    /// Standardized residuals
+    /// Standardized residuals (R's `rstandard`); NaN at leverage one
     pub standardized_residuals: Vec<f64>,
-    /// Cook's distances
+    /// Cook's distances (R's `cooks.distance`); NaN at leverage one
     pub cooks_distance: Vec<f64>,
+    /// Hat values used: the given leverage or the one-predictor formula.
+    pub leverage: Vec<f64>,
+    /// Number of coefficients p (given, or the rounded sum of the hat values).
+    pub n_params: usize,
+    /// Residual standard error `sqrt(sum e^2 / (n - p))` (R's `summary.lm` sigma).
+    pub sigma: f64,
+    /// 0-based input row of each element of the vectors above.
+    pub rows: Vec<usize>,
+    /// What the caller should know: the leverage fallback, observations not plotted.
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for ResidualDiagnosticsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for ResidualDiagnosticsResult {
@@ -1371,6 +1447,13 @@ impl std::fmt::Display for ResidualDiagnosticsResult {
         writeln!(f, "Residual Diagnostics")?;
         writeln!(f, "====================")?;
         writeln!(f, "Observations: {}", self.n_observations)?;
+        writeln!(f, "Coefficients (p): {}", self.n_params)?;
+        writeln!(
+            f,
+            "Residual standard error: {:.4} on {} degrees of freedom",
+            self.sigma,
+            self.n_observations - self.n_params
+        )?;
         writeln!(f)?;
         writeln!(f, "Plots Generated:")?;
         writeln!(
@@ -1384,17 +1467,25 @@ impl std::fmt::Display for ResidualDiagnosticsResult {
             f,
             "  - Residuals vs Leverage: {} bytes",
             self.residuals_vs_leverage.len()
-        )
+        )?;
+        write!(f, "{}", notes_text(self))
     }
 }
 
-/// Generate residual diagnostic plots for regression analysis.
+/// Generate residual diagnostic plots for regression analysis: R's `plot.lm`
+/// (`which = c(1:3, 5)`).
 ///
 /// Creates four diagnostic plots:
 /// 1. Residuals vs Fitted - checks linearity and homoscedasticity
-/// 2. Normal Q-Q - checks normality of residuals
+/// 2. Normal Q-Q - checks normality of residuals (`qnorm(ppoints(n))`)
 /// 3. Scale-Location - checks homoscedasticity (√|standardized residuals| vs fitted)
 /// 4. Residuals vs Leverage - identifies influential observations
+///
+/// The standardized residuals are R's `rstandard` and the Cook's distances R's
+/// `cooks.distance`, both NaN and not plotted at leverage one. They are exact only with the
+/// model's hat values: without `leverage` the one-predictor formula is used, with a warning,
+/// which is exact for a model with one regressor and an intercept. Leverage that is not a
+/// number in `[0, 1]` at a used row is an error naming the row.
 ///
 /// # Arguments
 /// * `fitted` - Fitted/predicted values from the regression
@@ -1405,6 +1496,19 @@ pub fn residual_diagnostics(
     fitted: &[f64],
     residuals: &[f64],
     leverage: Option<&[f64]>,
+    config: ChartConfig,
+) -> Result<ResidualDiagnosticsResult, VisualizationError> {
+    residual_diagnostics_with(fitted, residuals, leverage, None, config)
+}
+
+/// As [`residual_diagnostics`], with the model size. `n_params`: R's model rank; `None` takes
+/// it from the hat values (their rounded sum) or, without them, from the one-predictor
+/// formula.
+pub fn residual_diagnostics_with(
+    fitted: &[f64],
+    residuals: &[f64],
+    leverage: Option<&[f64]>,
+    n_params: Option<usize>,
     config: ChartConfig,
 ) -> Result<ResidualDiagnosticsResult, VisualizationError> {
     if fitted.is_empty() || residuals.is_empty() {
@@ -1419,85 +1523,127 @@ pub fn residual_diagnostics(
         ));
     }
 
-    let n = fitted.len();
+    if leverage.is_some_and(|lev| lev.len() != fitted.len()) {
+        return Err(VisualizationError::InvalidData(
+            "Leverage must have same length as fitted".to_string(),
+        ));
+    }
 
     // Filter out invalid values
-    let valid_indices: Vec<usize> = (0..n)
+    let rows: Vec<usize> = (0..fitted.len())
         .filter(|&i| fitted[i].is_finite() && residuals[i].is_finite())
         .collect();
 
-    if valid_indices.is_empty() {
+    if rows.is_empty() {
         return Err(VisualizationError::InvalidData(
             "No valid data points".to_string(),
         ));
     }
 
-    let fitted_valid: Vec<f64> = valid_indices.iter().map(|&i| fitted[i]).collect();
-    let residuals_valid: Vec<f64> = valid_indices.iter().map(|&i| residuals[i]).collect();
+    let fitted_valid: Vec<f64> = rows.iter().map(|&i| fitted[i]).collect();
+    let residuals_valid: Vec<f64> = rows.iter().map(|&i| residuals[i]).collect();
+    let n_valid = rows.len();
+    let mut warnings = Vec::new();
 
-    let n_valid = fitted_valid.len();
-
-    // Calculate standardized residuals
-    let mean_residual: f64 = residuals_valid.iter().sum::<f64>() / n_valid as f64;
-    let variance: f64 = residuals_valid
-        .iter()
-        .map(|r| (r - mean_residual).powi(2))
-        .sum::<f64>()
-        / (n_valid - 1) as f64;
-    let std_dev = variance.sqrt();
-
-    let standardized_residuals: Vec<f64> = if std_dev > 1e-10 {
-        residuals_valid
-            .iter()
-            .map(|r| (r - mean_residual) / std_dev)
-            .collect()
-    } else {
-        vec![0.0; n_valid]
+    // Leverage and the number of coefficients
+    let (leverage_valid, p) = match leverage {
+        Some(lev) => {
+            let hat = given_leverage(lev, &rows)?;
+            let p = match n_params {
+                Some(p) => p,
+                None => params_from_hat_values(&hat)?,
+            };
+            (hat, p)
+        }
+        None => {
+            let (hat, p0, note) = one_predictor_leverage(&fitted_valid);
+            if let Some(p) = n_params
+                && p != p0
+            {
+                return Err(VisualizationError::InvalidData(format!(
+                    "n_params = {p} needs the model's hat values (leverage); without them only a \
+                     model with one regressor and an intercept (p = 2) can be diagnosed"
+                )));
+            }
+            warnings.push(note.to_string());
+            (hat, p0)
+        }
     };
 
-    // Calculate or use provided leverage values
-    let leverage_valid: Vec<f64> = if let Some(lev) = leverage {
-        if lev.len() != n {
-            return Err(VisualizationError::InvalidData(
-                "Leverage must have same length as fitted".to_string(),
-            ));
-        }
-        valid_indices.iter().map(|&i| lev[i]).collect()
-    } else {
-        // Simple approximation: 1/n + (x - mean(x))^2 / sum((x - mean(x))^2)
-        let mean_fitted: f64 = fitted_valid.iter().sum::<f64>() / n_valid as f64;
-        let ss_fitted: f64 = fitted_valid.iter().map(|f| (f - mean_fitted).powi(2)).sum();
-        if ss_fitted > 1e-10 {
-            fitted_valid
-                .iter()
-                .map(|f| 1.0 / n_valid as f64 + (f - mean_fitted).powi(2) / ss_fitted)
-                .collect()
+    if p == 0 || p >= n_valid {
+        return Err(VisualizationError::InvalidData(format!(
+            "the model has {p} coefficients (n_params); that must be at least 1 and below the \
+             number of observations ({n_valid})"
+        )));
+    }
+    let df = n_valid - p;
+
+    // sigma, scaled so that it cannot overflow
+    let largest = residuals_valid.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+    if largest == 0.0 {
+        return Err(VisualizationError::InvalidData(
+            "all residuals are zero (a perfect fit): standardized residuals and Cook's distance \
+             are undefined"
+                .to_string(),
+        ));
+    }
+    let scaled_rss: f64 = residuals_valid.iter().map(|e| (e / largest).powi(2)).sum();
+    let sigma = largest * (scaled_rss / df as f64).sqrt();
+
+    // R's rstandard.lm and cooks.distance.lm; leverage one as lm.influence
+    let mut standardized_residuals = Vec::with_capacity(n_valid);
+    let mut cooks_distance = Vec::with_capacity(n_valid);
+    let mut leverage_one = Vec::new();
+    for ((e, h), row) in residuals_valid.iter().zip(&leverage_valid).zip(&rows) {
+        if *h >= 1.0 - 10.0 * f64::EPSILON {
+            standardized_residuals.push(f64::NAN);
+            cooks_distance.push(f64::NAN);
+            leverage_one.push(*row);
         } else {
-            vec![1.0 / n_valid as f64; n_valid]
+            let r = e / (sigma * (1.0 - h).sqrt());
+            standardized_residuals.push(r);
+            cooks_distance.push(r * r * h / (p as f64 * (1.0 - h)));
         }
-    };
+    }
+    if !leverage_one.is_empty() {
+        const LISTED: usize = 20;
+        let count = leverage_one.len();
+        let (listed, rows_label) = if count > LISTED {
+            (&leverage_one[..LISTED], "first rows")
+        } else {
+            (&leverage_one[..], "rows")
+        };
+        warnings.push(format!(
+            "observations with leverage one have NaN standardized residuals and Cook's \
+             distances and are not plotted ({count} observations, {rows_label} {listed:?})"
+        ));
+    }
 
-    // Calculate Cook's distance: D_i = (r_i^2 / p) * (h_i / (1 - h_i))
-    // where p is number of parameters (approximate with 2 for simple regression)
-    let p = 2.0;
-    let cooks_distance: Vec<f64> = standardized_residuals
-        .iter()
-        .zip(leverage_valid.iter())
-        .map(|(r, h)| {
-            let h_clamped = h.min(0.9999);
-            (r.powi(2) / p) * (h_clamped / (1.0 - h_clamped))
-        })
+    // Generate the four diagnostic plots: all rows against the fitted values, the rest
+    // only where the standardized residual is a number.
+    let plotted: Vec<usize> = (0..n_valid)
+        .filter(|&i| standardized_residuals[i].is_finite())
         .collect();
+    if plotted.is_empty() {
+        return Err(VisualizationError::InvalidData(
+            "every observation has leverage one, so standardized residuals and Cook's distance \
+             are undefined and nothing can be plotted"
+                .to_string(),
+        ));
+    }
+    let pick = |v: &[f64]| -> Vec<f64> { plotted.iter().map(|&i| v[i]).collect() };
+    let fitted_plotted = pick(&fitted_valid);
+    let standardized_plotted = pick(&standardized_residuals);
 
-    // Generate the four diagnostic plots
     let residuals_vs_fitted =
         generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
-    let qq_plot = generate_qq_plot(&standardized_residuals, &config)?;
-    let scale_location = generate_scale_location(&fitted_valid, &standardized_residuals, &config)?;
+    let qq_plot = generate_qq_plot(&standardized_plotted, &config)?;
+    let scale_location = generate_scale_location(&fitted_plotted, &standardized_plotted, &config)?;
     let residuals_vs_leverage = generate_residuals_vs_leverage(
-        &leverage_valid,
-        &standardized_residuals,
-        &cooks_distance,
+        &pick(&leverage_valid),
+        &standardized_plotted,
+        &pick(&cooks_distance),
+        p,
         &config,
     )?;
 
@@ -1509,7 +1655,72 @@ pub fn residual_diagnostics(
         n_observations: n_valid,
         standardized_residuals,
         cooks_distance,
+        leverage: leverage_valid,
+        n_params: p,
+        sigma,
+        rows,
+        warnings,
     })
+}
+
+/// The hat values of the used rows, clamped to `[0, 1]`; a value that is not a number in
+/// that range (up to rounding) is an error naming the row.
+fn given_leverage(lev: &[f64], rows: &[usize]) -> Result<Vec<f64>, VisualizationError> {
+    rows.iter()
+        .map(|&i| {
+            let v = lev[i];
+            if v.is_finite() && (-1e-12..=1.0 + 1e-12).contains(&v) {
+                Ok(v.clamp(0.0, 1.0))
+            } else {
+                Err(VisualizationError::InvalidData(format!(
+                    "leverage at row {i} is {v}; hat values must be finite numbers between 0 and 1"
+                )))
+            }
+        })
+        .collect()
+}
+
+/// The number of coefficients of a linear model from its hat values, whose sum is its rank.
+fn params_from_hat_values(hat: &[f64]) -> Result<usize, VisualizationError> {
+    let sum: f64 = hat.iter().sum();
+    let p = sum.round();
+    if (sum - p).abs() > 0.05 || p < 1.0 {
+        return Err(VisualizationError::InvalidData(format!(
+            "the leverage values sum to {sum:.4}, but the hat values of a linear model sum to its \
+             number of coefficients; pass the model's hat values (R: hatvalues(model)) or n_params"
+        )));
+    }
+    Ok(p as usize)
+}
+
+/// Hat values without the design: `1/n + (f - mean f)^2 / sum (f - mean f)^2` (p = 2), exact
+/// for a model with one regressor and an intercept; 1/n (p = 1) for constant fitted values.
+/// Also the number of coefficients and the warning that says so.
+fn one_predictor_leverage(fitted: &[f64]) -> (Vec<f64>, usize, &'static str) {
+    let n = fitted.len() as f64;
+    let mean = corrected_mean(fitted.iter().copied());
+    let largest = fitted.iter().fold(0.0f64, |m, f| m.max(f.abs()));
+    let spread = fitted.iter().fold(0.0f64, |m, f| m.max((f - mean).abs()));
+    if !spread.is_finite() || spread <= 4.0 * f64::EPSILON * largest {
+        return (
+            vec![1.0 / n; fitted.len()],
+            1,
+            "leverage not supplied and the fitted values are constant: hat values 1/n as for an \
+             intercept-only model (p = 1)",
+        );
+    }
+    let squares: Vec<f64> = fitted
+        .iter()
+        .map(|f| ((f - mean) / spread).powi(2))
+        .collect();
+    let sum: f64 = squares.iter().sum();
+    (
+        squares.iter().map(|q| 1.0 / n + q / sum).collect(),
+        2,
+        "leverage not supplied: hat values computed as for a regression on one predictor (1/n + \
+         (f - mean f)^2 / sum (f - mean f)^2, p = 2); exact only for a model with one regressor \
+         and an intercept; pass the model's hat values (R: hatvalues(model)) for any other model",
+    )
 }
 
 /// Generate Residuals vs Fitted plot.
@@ -1593,21 +1804,27 @@ fn generate_residuals_vs_fitted(
     encode_rgb_to_png_base64(&buffer, config.width, config.height)
 }
 
+/// The abscissae of a normal Q-Q plot: R's `qnorm(ppoints(n))`.
+fn qq_theoretical_quantiles(n: usize) -> Result<Vec<f64>, VisualizationError> {
+    let a = if n <= 10 { 0.375 } else { 0.5 };
+    (1..=n)
+        .map(|i| {
+            let p = (i as f64 - a) / (n as f64 + 1.0 - 2.0 * a);
+            crate::traits::normal_quantile(p).map_err(invalid_data)
+        })
+        .collect()
+}
+
 /// Generate Q-Q plot for normality check.
 fn generate_qq_plot(
     standardized_residuals: &[f64],
     config: &ChartConfig,
 ) -> Result<String, VisualizationError> {
-    let n = standardized_residuals.len();
-
     // Sort residuals
     let mut sorted_residuals: Vec<f64> = standardized_residuals.to_vec();
-    sorted_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_residuals.sort_by(f64::total_cmp);
 
-    // Calculate theoretical quantiles (standard normal)
-    let theoretical: Vec<f64> = (1..=n)
-        .map(|i| normal_quantile((i as f64 - 0.5) / n as f64))
-        .collect();
+    let theoretical = qq_theoretical_quantiles(sorted_residuals.len())?;
 
     let x_min = theoretical.first().copied().unwrap_or(-3.0);
     let x_max = theoretical.last().copied().unwrap_or(3.0);
@@ -1763,6 +1980,7 @@ fn generate_residuals_vs_leverage(
     leverage: &[f64],
     standardized_residuals: &[f64],
     cooks_distance: &[f64],
+    n_params: usize,
     config: &ChartConfig,
 ) -> Result<String, VisualizationError> {
     let x_min = 0.0;
@@ -1820,7 +2038,7 @@ fn generate_residuals_vs_leverage(
         // Draw Cook's distance contour lines (approximate)
         if has_influential {
             // D = r^2 * h / (p * (1-h)) => r = sqrt(D * p * (1-h) / h)
-            let p = 2.0;
+            let p = n_params as f64;
             for &d in &[0.5, 1.0] {
                 let contour_points: Vec<(f64, f64)> = (1..100)
                     .map(|i| {
@@ -1880,7 +2098,7 @@ fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
     }
 
     let mut sorted_points = points.to_vec();
-    sorted_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let n = sorted_points.len();
     let window = ((n as f64 * span) as usize).max(3).min(n);
@@ -1904,108 +2122,79 @@ fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
     smoothed
 }
 
-/// Approximation of the standard normal quantile function (inverse CDF).
-fn normal_quantile(p: f64) -> f64 {
-    // Rational approximation by Abramowitz and Stegun
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-
-    let p_clamped = p.max(1e-10).min(1.0 - 1e-10);
-
-    if p_clamped < 0.5 {
-        -rational_approximation((-2.0 * p_clamped.ln()).sqrt())
-    } else {
-        rational_approximation((-2.0 * (1.0 - p_clamped).ln()).sqrt())
-    }
-}
-
-fn rational_approximation(t: f64) -> f64 {
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
-}
-
 // Helper functions
 
+/// The mean with R's correction: `m = sum / n; m += sum(x - m) / n`. The sum runs over
+/// `x / n` when the plain sum overflows.
+fn corrected_mean(x: impl Iterator<Item = f64> + Clone) -> f64 {
+    let n = x.clone().count() as f64;
+    let mean = x.clone().sum::<f64>() / n;
+    let mean = if mean.is_finite() {
+        mean
+    } else {
+        x.clone().map(|v| v / n).sum::<f64>()
+    };
+    mean + x.map(|v| v - mean).sum::<f64>() / n
+}
+
+/// Pearson r of finite pairs as R's `cor`: means with R's correction, centred deviations
+/// scaled by their largest magnitude (no overflow or underflow at any scale), and None
+/// (R: NA) for fewer than two pairs or a zero spread, judged relative to the data's
+/// magnitude (`max |x - m| <= 4 eps max |x|`, where the centred values are rounding noise).
 fn calculate_correlation(points: &[(f64, f64)]) -> Option<f64> {
     if points.len() < 2 {
         return None;
     }
-
-    let n = points.len() as f64;
-    let sum_x: f64 = points.iter().map(|p| p.0).sum();
-    let sum_y: f64 = points.iter().map(|p| p.1).sum();
-    let sum_xy: f64 = points.iter().map(|p| p.0 * p.1).sum();
-    let sum_x2: f64 = points.iter().map(|p| p.0 * p.0).sum();
-    let sum_y2: f64 = points.iter().map(|p| p.1 * p.1).sum();
-
-    let numerator = n * sum_xy - sum_x * sum_y;
-    let denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
-
-    if denominator.abs() < 1e-10 {
-        None
-    } else {
-        Some(numerator / denominator)
+    let mx = corrected_mean(points.iter().map(|p| p.0));
+    let my = corrected_mean(points.iter().map(|p| p.1));
+    let spread = |centre: f64, value: fn(&(f64, f64)) -> f64| -> Option<f64> {
+        let (mut largest, mut deviation) = (0.0f64, 0.0f64);
+        for p in points {
+            largest = largest.max(value(p).abs());
+            deviation = deviation.max((value(p) - centre).abs());
+        }
+        (deviation.is_finite() && deviation > 4.0 * f64::EPSILON * largest).then_some(deviation)
+    };
+    let sx = spread(mx, |p| p.0)?;
+    let sy = spread(my, |p| p.1)?;
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for p in points {
+        let dx = (p.0 - mx) / sx;
+        let dy = (p.1 - my) / sy;
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
     }
+    Some((sxy / (sxx.sqrt() * syy.sqrt())).clamp(-1.0, 1.0))
 }
 
-fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n = sorted.len();
-    let q1_idx = n / 4;
-    let median_idx = n / 2;
-    let q3_idx = 3 * n / 4;
-
-    let q1 = sorted[q1_idx];
-    let median = if n % 2 == 0 && n > 1 {
-        (sorted[median_idx - 1] + sorted[median_idx]) / 2.0
-    } else {
-        sorted[median_idx]
-    };
-    let q3 = sorted[q3_idx.min(n - 1)];
-
-    let iqr = q3 - q1;
-    let lower_fence = q1 - 1.5 * iqr;
-    let upper_fence = q3 + 1.5 * iqr;
-
-    let min = sorted
-        .iter()
-        .copied()
-        .find(|&x| x >= lower_fence)
-        .unwrap_or(sorted[0]);
-    let max = sorted
-        .iter()
-        .rev()
-        .copied()
-        .find(|&x| x <= upper_fence)
-        .unwrap_or(sorted[n - 1]);
-
-    let outliers: Vec<f64> = sorted
-        .iter()
-        .copied()
-        .filter(|&x| x < lower_fence || x > upper_fence)
-        .collect();
-
-    BoxPlotStats {
+fn calculate_box_stats(label: String, data: &[f64]) -> Result<BoxPlotStats, VisualizationError> {
+    // grDevices::boxplot.stats: NaN is dropped; +-Inf count in n and the hinges and are
+    // outliers, as in R; infinite elements are not drawn.
+    if data.iter().all(|x| x.is_nan()) {
+        return Ok(BoxPlotStats {
+            label,
+            min: f64::NAN,
+            q1: f64::NAN,
+            median: f64::NAN,
+            q3: f64::NAN,
+            max: f64::NAN,
+            outliers: Vec::new(),
+            n: 0,
+        });
+    }
+    let b = crate::stats::robust::boxplot_stats(data, 1.5).map_err(invalid_data)?;
+    let [min, q1, median, q3, max] = b.stats;
+    Ok(BoxPlotStats {
         label,
         min,
         q1,
         median,
         q3,
         max,
-        outliers,
-    }
+        outliers: b.out,
+        n: b.n,
+    })
 }
 
 /// Map a core resource error (allocation, size arithmetic, cancellation) to
@@ -2672,5 +2861,447 @@ mod tests {
         assert_eq!(result.n_merges, 3);
         assert!((result.max_distance - 3.0).abs() < 1e-10);
         assert!(!result.image_base64.is_empty());
+    }
+
+    fn small() -> ChartConfig {
+        ChartConfig {
+            width: 240,
+            height: 180,
+            ..ChartConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_scatter_correlation_large_offset() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_scatter_cor");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let r = |x: &str, y: &str| scatter_plot(&col(x), &col(y), small()).unwrap().correlation;
+        let n = case.scalar("n") as usize;
+        Check::new(&case)
+            .scalar("cor_x0", r("x0", "y").unwrap_or(f64::NAN), Tol::stat(n))
+            .scalar(
+                "cor_epoch",
+                r("x_epoch", "y").unwrap_or(f64::NAN),
+                Tol::stat(n),
+            )
+            .scalar("cor_big", r("x_big", "y").unwrap_or(f64::NAN), Tol::stat(n))
+            .finish();
+        // R: NA with "the standard deviation is zero"
+        assert!(case.scalar("cor_const").is_nan());
+        assert_eq!(r("x0", "y_const"), None);
+    }
+
+    #[test]
+    fn test_validate_scatter_correlation_tiny_scale() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_scatter_cor");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let r = scatter_plot(&col("x_tiny"), &col("y_tiny"), small())
+            .unwrap()
+            .correlation;
+        Check::new(&case)
+            .scalar(
+                "cor_tiny",
+                r.unwrap_or(f64::NAN),
+                Tol::stat(case.scalar("n") as usize),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_boxplot_stats_chart() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_boxplot_groups");
+        let labels = ds.df().column("group").unwrap().str().unwrap().clone();
+        let values = crate::data::columns::numeric_options(ds.df(), "value").unwrap();
+        let order = ["data62", "n4", "n12", "n7", "norm37", "const3", "allna"];
+        let mut groups: Vec<(String, Vec<f64>)> = order
+            .iter()
+            .map(|g| {
+                let v = labels
+                    .iter()
+                    .zip(&values)
+                    .filter(|(l, _)| *l == Some(*g))
+                    .map(|(_, v)| v.unwrap_or(f64::NAN))
+                    .collect();
+                (g.to_string(), v)
+            })
+            .collect();
+        // The case JSON cannot hold Inf, so the outlier is asserted below.
+        groups.push((
+            "inf6".to_string(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, f64::INFINITY],
+        ));
+        let r = box_plot(&groups, small()).unwrap();
+        // the all-missing group keeps its slot, as in R
+        assert_eq!(r.statistics.len(), order.len() + 1);
+        let mut check = Check::new(&case);
+        for (g, s) in order.iter().zip(&r.statistics) {
+            assert_eq!(s.label, *g);
+            check
+                .scalar(&format!("{g}_n"), s.n as f64, Tol::exact())
+                .scalar(&format!("{g}_n_out"), s.outliers.len() as f64, Tol::exact());
+            if s.n > 0 {
+                check.vector(
+                    &format!("{g}_stats"),
+                    &[s.min, s.q1, s.median, s.q3, s.max],
+                    Tol::stat(s.n),
+                );
+            }
+            if !s.outliers.is_empty() {
+                check.vector(&format!("{g}_out"), &s.outliers, Tol::stat(s.n));
+            }
+        }
+        let inf = &r.statistics[7];
+        check
+            .scalar("inf6_n", inf.n as f64, Tol::exact())
+            .scalar("inf6_n_out", inf.outliers.len() as f64, Tol::exact())
+            .vector(
+                "inf6_stats",
+                &[inf.min, inf.q1, inf.median, inf.q3, inf.max],
+                Tol::stat(inf.n),
+            );
+        check.finish();
+        assert_eq!(inf.outliers, [f64::INFINITY]);
+        let empty = &r.statistics[6];
+        assert!(
+            empty.n == 0
+                && empty.median.is_nan()
+                && empty.min.is_nan()
+                && empty.outliers.is_empty()
+        );
+        assert!(format!("{r}").contains("allna: no values"));
+    }
+
+    #[test]
+    fn test_validate_histogram_sturges_and_counts() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_histogram_bins");
+        for (n, k) in case
+            .vector("sturges_n")
+            .iter()
+            .zip(case.vector("sturges_k"))
+        {
+            let h = histogram(&wavy(*n as usize), None, small()).unwrap();
+            assert_eq!(h.bins, k as usize, "n = {n}");
+        }
+        let labels = ds.df().column("sample").unwrap().str().unwrap().clone();
+        let values = crate::data::columns::numeric_options(ds.df(), "value").unwrap();
+        let mut check = Check::new(&case);
+        for s in ["norm100", "small50", "grid13"] {
+            let x: Vec<f64> = labels
+                .iter()
+                .zip(&values)
+                .filter(|(l, _)| *l == Some(s))
+                .map(|(_, v)| v.unwrap())
+                .collect();
+            let h = histogram(&x, None, small()).unwrap();
+            let counts: Vec<f64> = h.counts.iter().map(|&c| f64::from(c)).collect();
+            check
+                .scalar(&format!("{s}_k"), h.bins as f64, Tol::exact())
+                .vector(&format!("{s}_breaks"), &h.breaks, Tol::stat(x.len()))
+                .vector(&format!("{s}_counts"), &counts, Tol::exact());
+        }
+        check.finish();
+        // Constant data: Sturges bins of width 1 from the value (p2a's rule; R's hist() uses
+        // pretty() here).
+        let h = histogram(&[5.0; 10], None, small()).unwrap();
+        assert_eq!(
+            (h.bins, h.counts.clone(), h.breaks.clone()),
+            (5, vec![10, 0, 0, 0, 0], vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        );
+    }
+
+    #[test]
+    fn test_validate_cooks_distance_rstandard() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_residual_diag");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let n = case.scalar("n") as usize;
+        // three regressors, R's hat values given: p is their (rounded) sum, 4
+        let m3 = residual_diagnostics(&col("fitted3"), &col("resid3"), Some(&col("hat3")), small())
+            .unwrap();
+        assert_eq!(m3.n_params, case.scalar("p3") as usize);
+        assert!(m3.warnings.is_empty(), "{:?}", m3.warnings);
+        assert_eq!(m3.rows, (0..n).collect::<Vec<_>>());
+        let m3p = residual_diagnostics_with(
+            &col("fitted3"),
+            &col("resid3"),
+            Some(&col("hat3")),
+            Some(4),
+            small(),
+        )
+        .unwrap();
+        assert_eq!(
+            (&m3p.standardized_residuals, &m3p.cooks_distance),
+            (&m3.standardized_residuals, &m3.cooks_distance)
+        );
+        // one regressor, no leverage: the one-predictor hat values are exact here
+        let m1 = residual_diagnostics(&col("fitted1"), &col("resid1"), None, small()).unwrap();
+        assert_eq!(m1.n_params, case.scalar("p1") as usize);
+        assert!(
+            m1.warnings.iter().any(|w| w.contains("one predictor")),
+            "{:?}",
+            m1.warnings
+        );
+        for (a, b) in m1.leverage.iter().zip(col("hat1")) {
+            assert!((a - b).abs() < 1e-14, "{a} vs {b}");
+        }
+        // observation 0 has leverage one: NaN as R, not plotted, warned
+        let ml = residual_diagnostics(
+            &col("fitted_l1"),
+            &col("resid_l1"),
+            Some(&col("hat_l1")),
+            small(),
+        )
+        .unwrap();
+        assert_eq!(ml.n_params, case.scalar("p_l1") as usize);
+        assert!(
+            ml.warnings.iter().any(|w| w.contains("leverage one")),
+            "{:?}",
+            ml.warnings
+        );
+        assert!(format!("{ml}").contains("Warning: observations with leverage one"));
+        Check::new(&case)
+            .scalar("sigma3", m3.sigma, Tol::stat(n))
+            .vector("rstandard3", &m3.standardized_residuals, Tol::stat(n))
+            .vector("cooks3", &m3.cooks_distance, Tol::stat(n))
+            .scalar("sigma1", m1.sigma, Tol::stat(n))
+            .vector("rstandard1", &m1.standardized_residuals, Tol::stat(n))
+            .vector("cooks1", &m1.cooks_distance, Tol::stat(n))
+            .scalar("sigma_l1", ml.sigma, Tol::stat(n))
+            .vector("rstandard_l1", &ml.standardized_residuals, Tol::stat(n))
+            .vector("cooks_l1", &ml.cooks_distance, Tol::stat(n))
+            .finish();
+        // R flags nothing above 0.5 for the three-regressor model, and only observation 16
+        // for mpg ~ wt
+        assert_eq!(m3.cooks_distance.iter().filter(|d| **d > 0.5).count(), 0);
+        let flagged: Vec<usize> = m1
+            .cooks_distance
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d > 0.5)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(flagged, vec![16]);
+    }
+
+    #[test]
+    fn test_validate_qq_theoretical_quantiles() {
+        use p2a_validation::{Check, Tol};
+        let (case, _) = crate::test_support::load_case("viz_residual_diag");
+        let mut check = Check::new(&case);
+        for n in [1usize, 8, 11, 32] {
+            // statrs' normal quantile agrees with R's qnorm to a few ulp
+            check.vector(
+                &format!("qq_ppoints_{n}"),
+                &qq_theoretical_quantiles(n).unwrap(),
+                Tol::new(1e-11, 1e-15),
+            );
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_residual_diagnostics_rejects_bad_leverage() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let df = crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/viz_residual_diag.csv",
+        ))
+        .unwrap();
+        let col = |c: &str| numeric_column(&df, c, NaPolicy::Fail).unwrap().0;
+        let (f, e, h) = (col("fitted3"), col("resid3"), col("hat3"));
+        let refused = |fitted: &[f64],
+                       resid: &[f64],
+                       hat: Option<&[f64]>,
+                       n_params: Option<usize>,
+                       needles: &[&str]| {
+            match residual_diagnostics_with(fitted, resid, hat, n_params, small()) {
+                Err(VisualizationError::InvalidData(m)) => {
+                    for needle in needles {
+                        assert!(m.contains(needle), "{m}");
+                    }
+                }
+                Err(other) => panic!("{other:?}"),
+                Ok(_) => panic!("accepted: {needles:?}"),
+            }
+        };
+        let with = |i: usize, v: f64| {
+            let mut h = h.clone();
+            h[i] = v;
+            h
+        };
+        refused(
+            &f,
+            &e,
+            Some(&with(3, f64::NAN)),
+            None,
+            &["leverage at row 3 is NaN"],
+        );
+        refused(
+            &f,
+            &e,
+            Some(&with(0, 1.5)),
+            None,
+            &["row 0", "between 0 and 1"],
+        );
+        refused(&f, &e, Some(&with(5, -0.2)), None, &["row 5"]);
+        let scaled: Vec<f64> = h.iter().map(|v| v * 1.1).collect();
+        refused(&f, &e, Some(&scaled), None, &["sum to 4.4000"]);
+        refused(&f, &e, Some(&h), Some(0), &["the model has 0 coefficients"]);
+        refused(
+            &f,
+            &e,
+            Some(&h),
+            Some(32),
+            &["below the number of observations (32)"],
+        );
+        refused(&f, &e, None, Some(4), &["needs the model's hat values"]);
+        // Two rows and no n_params: the one-predictor fallback's two coefficients are the cause.
+        refused(
+            &[1.0, 2.0],
+            &[0.5, -0.4],
+            None,
+            None,
+            &[
+                "the model has 2 coefficients",
+                "below the number of observations (2)",
+            ],
+        );
+        refused(&f, &vec![0.0; 32], Some(&h), None, &["perfect fit"]);
+        refused(
+            &f,
+            &e,
+            Some(&[1.0; 32]),
+            Some(2),
+            &[
+                "every observation has leverage one",
+                "nothing can be plotted",
+            ],
+        );
+        // The warning about unit hat values stays short however many rows have them.
+        let (f60, e60) = (
+            wavy(60),
+            wavy(60).iter().rev().map(|v| v - 30.0).collect::<Vec<_>>(),
+        );
+        let h60: Vec<f64> = (0..60).map(|i| if i < 30 { 1.0 } else { 0.1 }).collect();
+        let r = residual_diagnostics_with(&f60, &e60, Some(&h60), Some(31), small()).unwrap();
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.contains("leverage one"))
+            .unwrap();
+        assert!(w.contains("30 observations, first rows [0, 1, "), "{w}");
+        assert!(w.contains(", 19]") && !w.contains("20"), "{w}");
+        // A row dropped for its fitted value is not checked for its leverage.
+        let mut f4 = f.clone();
+        f4[4] = f64::NAN;
+        let r =
+            residual_diagnostics_with(&f4, &e, Some(&with(4, f64::NAN)), None, small()).unwrap();
+        assert!(!r.rows.contains(&4));
+        assert_eq!(r.rows.len(), 31);
+        assert_eq!(r.n_params, 4);
+    }
+
+    /// Merge 0 joins samples 0 and 1; merge i joins the cluster built so far (n + i - 1) with
+    /// sample i + 1.
+    fn chain_linkage(n: usize) -> Vec<(usize, usize, f64, usize)> {
+        let mut l = vec![(0, 1, 1.0, 2)];
+        l.extend((1..n - 1).map(|i| (n + i - 1, i + 1, (i + 1) as f64, i + 2)));
+        l
+    }
+
+    #[test]
+    fn test_charts_accept_utf8_labels_and_reject_empty_inputs() {
+        let cfg = || ChartConfig {
+            title: Some("Größe_kg 収入合計額".into()),
+            x_label: Some("収入合計額".into()),
+            y_label: Some("R²".into()),
+            ..small()
+        };
+        let x = wavy(30);
+        let y: Vec<f64> = x.iter().rev().copied().collect();
+        assert!(histogram(&x, None, cfg()).is_ok());
+        assert!(scatter_plot(&x, &y, cfg()).is_ok());
+        assert!(line_chart(&[("収入".into(), x.clone(), y.clone())], cfg()).is_ok());
+        let b = box_plot(
+            &[
+                ("R²".into(), x.clone()),
+                ("Größe".into(), wavy(7)),
+                ("収入合計額".into(), wavy(12)),
+            ],
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(
+            b.statistics
+                .iter()
+                .map(|s| s.label.as_str())
+                .collect::<Vec<_>>(),
+            ["R²", "Größe", "収入合計額"]
+        );
+        let labels: Vec<String> = (0..25).map(|i| format!("収入合計額_ラベル{i}")).collect();
+        assert!(dendrogram(&chain_linkage(4), Some(&labels[..4]), cfg()).is_ok()); // whole labels
+        assert!(dendrogram(&chain_linkage(25), Some(&labels), cfg()).is_ok()); // > 20 leaves
+        assert!(
+            event_study_plot(
+                &[-1.0, 0.0, 1.0],
+                &[0.1, 0.0, 0.3],
+                &[-0.2, -0.1, 0.0],
+                &[0.4, 0.1, 0.6],
+                cfg()
+            )
+            .is_ok()
+        );
+        // empty or all-missing inputs are errors
+        assert!(histogram(&[f64::NAN; 3], None, cfg()).is_err());
+        assert!(scatter_plot(&[f64::NAN; 2], &[1.0, 2.0], cfg()).is_err());
+        assert!(box_plot(&[("a".into(), vec![f64::NAN])], cfg()).is_err());
+        assert!(residual_diagnostics(&[f64::NAN; 3], &[0.1, 0.2, 0.3], None, cfg()).is_err());
+    }
+
+    #[test]
+    fn test_dendrogram_leaf_order_chain_linear_memory() {
+        // A leaf list per merge would hold n^2 / 2 indices here.
+        let n = 100_000;
+        let link = chain_linkage(n);
+        validate_linkage(&link, n).unwrap();
+        let order = compute_leaf_order(&link, n);
+        assert_eq!(order, (0..n).collect::<Vec<_>>());
+        let r = dendrogram(&chain_linkage(1_000), None, small()).unwrap();
+        assert_eq!((r.n_samples, r.n_merges), (1_000, 999));
+        assert_eq!(r.max_distance, 999.0);
+    }
+
+    #[test]
+    fn test_dendrogram_rejects_bad_linkage() {
+        for (bad, needle) in [
+            (
+                vec![(0usize, 2usize, 1.0f64, 2usize)], // the cluster this row creates
+                "linkage row 0 refers to cluster 2",
+            ),
+            (
+                vec![(0, 1, 1.0, 2), (usize::MAX, 2, 2.0, 3)],
+                "linkage row 1 refers to cluster 18446744073709551615",
+            ),
+            (
+                vec![(0, 1, 1.0, 2), (2, 2, 2.0, 4)],
+                "linkage row 1 merges cluster 2 with itself",
+            ),
+            (
+                vec![(0, 1, f64::INFINITY, 2)],
+                "linkage row 0 has merge height inf",
+            ),
+        ] {
+            match dendrogram(&bad, None, small()) {
+                Err(VisualizationError::InvalidData(m)) => assert!(m.contains(needle), "{m}"),
+                Err(other) => panic!("{bad:?}: {other:?}"),
+                Ok(_) => panic!("{bad:?} was accepted"),
+            }
+        }
     }
 }

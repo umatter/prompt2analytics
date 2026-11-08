@@ -291,13 +291,8 @@ pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl Into
                     let is_dir = metadata.is_dir();
 
                     // Filter to only show directories and supported data files
-                    if !is_dir {
-                        let ext = name.split('.').next_back().unwrap_or("").to_lowercase();
-                        if !["csv", "parquet", "json", "xlsx", "xls", "dta", "sas7bdat"]
-                            .contains(&ext.as_str())
-                        {
-                            return None;
-                        }
+                    if !is_dir && !is_loadable_data_file(&name) {
+                        return None;
                     }
 
                     Some(FileEntry {
@@ -347,11 +342,40 @@ pub(crate) async fn list_files(Query(query): Query<ListFilesQuery>) -> impl Into
     )
 }
 
+/// Whether the file browser lists a file: exactly the extensions `DataLoader::load` reads.
+fn is_loadable_data_file(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        p2a_core::DataLoader::supported_extensions().contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
+
+    #[test]
+    fn test_file_browser_lists_loadable_extensions() {
+        for name in [
+            "a.jsonl",
+            "b.NDJSON",
+            "c.pq",
+            "d.csv",
+            "e.parquet",
+            "f.dta",
+            "g.sas7bdat",
+            "h.json",
+        ] {
+            assert!(super::is_loadable_data_file(name), "{name}");
+        }
+        for name in ["i.txt", "csv", "j.csv.bak", "k."] {
+            assert!(!super::is_loadable_data_file(name), "{name}");
+        }
+        for ext in p2a_core::DataLoader::supported_extensions() {
+            assert!(super::is_loadable_data_file(&format!("x.{ext}")), "{ext}");
+        }
+    }
 
     /// Deleting a session that does not exist answers 404 with the code
     /// `not_found` that `GET /api/sessions/{id}` uses, with persistence (the

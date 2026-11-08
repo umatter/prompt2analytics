@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "export_ols_grunfeld",
+  "area": "export",
+  "method": "Regression-table exporters: two Grunfeld OLS models (stats::lm, classical SEs)",
+  "reference": "stats::lm; summary.lm (classical SEs)",
+  "call": "lm(inv ~ value + capital, grunfeld); lm(inv ~ value, grunfeld)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n_obs": 200,
+    "m1_coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-42.714369436559359, 0.11556215636055213, 0.23067848873196961]
+    },
+    "m1_se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [9.5116760314238729, 0.0058357095572206296, 0.025475801476508932]
+    },
+    "m1_p": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [1.2073565413848341e-05, 9.542702685783289e-49, 1.3473701051203997e-16]
+    },
+    "m1_r2": 0.81240801254472839,
+    "m1_adj_r2": 0.8105035253624413,
+    "m1_f_stat": 426.57573130481285,
+    "m2_coef": {
+      "names": ["(Intercept)", "value"],
+      "values": [-6.9762843127456122, 0.1413859725502698]
+    },
+    "m2_se": {
+      "names": ["(Intercept)", "value"],
+      "values": [10.27272402512321, 0.0060435887875985696]
+    },
+    "m2_p": {
+      "names": ["(Intercept)", "value"],
+      "values": [0.49786278679125318, 6.7389635046256513e-59]
+    },
+    "m2_r2": 0.73433399254615428,
+    "m2_adj_r2": 0.73299224503376115,
+    "m2_f_stat": 547.29670505323713
+  }
+}
