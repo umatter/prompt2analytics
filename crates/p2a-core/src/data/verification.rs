@@ -1317,8 +1317,8 @@ mod tests {
 
     #[test]
     fn test_verify_cleaning_int_to_float_fill() {
-        // DATA-23 repro: a mean fill turns Int64 into Float64 and verify_cleaning panicked with
-        // "not implemented: scalar eq_missing for mixed dtypes Int64(1) and Float64(1.0) is not supported".
+        // DATA-23: a mean fill turns Int64 into Float64; verify_cleaning reports the type change and
+        // compares the cells by value across the two numeric types.
         let before =
             Dataset::new(df!("x" => [Some(1i64), None, Some(3)], "y" => ["a", "b", "c"]).unwrap());
         let after =

@@ -1779,10 +1779,8 @@ mod tests {
 
     #[test]
     fn test_join_suffix_collision() {
-        // DATA-14 repro (a): chained joins with the default suffix panicked in debug at polars-core
-        // frame/horizontal.rs:27 ("column with name 'value_right' has more than one occurrence") and gave
-        // two 'value_right' columns in release; (b) a right side holding value and value_right panicked in
-        // every profile at polars-ops frame/join/general.rs:42.
+        // DATA-14: (a) chained joins with the default suffix and (b) a right side that already holds
+        // both `value` and `value_right` give unique column names, suffixed again as dplyr does.
         let a = Dataset::new(df!("k" => [1i64, 2], "value" => [1.5, 2.5]).unwrap());
         let b = Dataset::new(df!("k" => [1i64, 2], "value" => [10.5, 20.5]).unwrap());
         let c = Dataset::new(df!("k" => [1i64, 2], "value" => [100.5, 200.25]).unwrap());
