@@ -411,6 +411,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Affinity propagation (apcluster::apcluster) | [affinity_propagation.md](ml/affinity_propagation.md) | R-pinned |
 | PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
+| Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
 
 ### Statistical Methods
 | Method | File | Status |
@@ -457,12 +458,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Spatial Econometrics
 | Method | File | Status |
 |--------|------|--------|
-| Moran's I Test | no validation document yet | not R-pinned |
-| SAR (Spatial Lag) | no validation document yet | not R-pinned |
-| SEM (Spatial Error) | no validation document yet | not R-pinned |
+| Moran's I (randomisation variance) and Geary's C, with islands | [moran.md](spatial/moran.md) | R-pinned, known deviations (SPAT-28) |
+| Spatial weight styles (W, B, C, U, minmax, S), k-nearest-neighbour ties; log-determinant, feasible rho interval and traces | [weights.md](spatial/weights.md) | R-pinned |
+| SAR, spatial Durbin (SDM), SEM and SAC by concentrated maximum likelihood; SAR and SDM impacts | [spatial.md](econometrics/spatial.md) | R-pinned, known deviations (SPAT-4) |
 | SAR Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
 | SEM Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
-| Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | not R-pinned |
+| Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | R-pinned, known deviations (SPAT-8) |
 | Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR; individual random effects without, with Baltagi and with KKP spatial error | [splm.md](econometrics/splm.md) | R-pinned |
 | Spatial panel GM/2SLS (spgm): w2sls, b2sls, ec2sls, g2sls spatial lag; within GM spatial error; within GS2SLS | [splm.md](econometrics/splm.md) | R-pinned |
 
@@ -485,6 +486,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Column extraction conventions | [README.md](README.md) | R-pinned |
 | CLI `data load` missing-value markers (default `NA` and empty, `--na-strings`) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Data quality profile (missing values as null or NaN, type-7 quartiles, IQR outliers) | [data_layer.md](data/data_layer.md) | R-pinned |
+| Stata .dta and SAS .sas7bdat readers (haven::read_dta, read_sas) | [readers.md](data/readers.md) | R-pinned, known deviations (DATA-50, DATA-51, DATA-74, DATA-75) |
 | Binning as base::cut (custom edges, right/left-closed, include.lowest, NA for missing and out-of-range values) | [data_layer.md](data/data_layer.md) | R-pinned |
 | Scatter-plot Pearson correlation | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
 | Box-plot hinges, whiskers and outliers | [charts.md](visualization/charts.md) | R-pinned, known deviations (DATA-61, DATA-85) |
