@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "cart_class_ties",
+  "area": "ml/trees",
+  "method": "rpart class ties: the lowest class label wins, probabilities in label order (ML-69)",
+  "reference": "rpart::rpart(method = 'class'): ginidev takes the first class of minimal loss",
+  "call": "rpart(factor(cls) ~ x + z, data = cart_ties, method = 'class', control = rpart.control(cp = 0.001, minsplit = 2, minbucket = 1, maxdepth = 1, xval = 0))",
+  "dataset": "validation/datasets/generated/cart_ties.csv",
+  "datasets": ["validation/datasets/generated/cart_ties.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "rpart": "4.1.23"
+  },
+  "values": {
+    "ties_frame_id": [1, 2, 3],
+    "ties_frame_var": [0, -1, -1],
+    "ties_frame_n": [30, 20, 10],
+    "ties_frame_dev": [20, 10, 0],
+    "ties_frame_yval": [4, 4, 9],
+    "ties_frame_complexity": [0.5, 0.001, 0.001],
+    "ties_split_index": [1.4225578026500001],
+    "ties_split_ncat": [1],
+    "ties_pred": [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4],
+    "ties_prob_row30": [0.5, 0.5, 0],
+    "ties_prob_row1": [0, 0, 1],
+    "ties_root_yval": 4,
+    "ties_root_dev": 20,
+    "ties_root_cp": [0.010000000000000002],
+    "ties_root_rel_error": [1]
+  }
+}

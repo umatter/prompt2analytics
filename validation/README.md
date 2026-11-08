@@ -105,7 +105,7 @@ looks like a validation failure but is not one.
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
-  randomForest, purrr.
+  randomForest, purrr, gbm.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -117,7 +117,8 @@ looks like a validation failure but is not one.
                      "fect", "gsynth", "tmle", "gmm", "bacondecomp", "did", "DRDID",
                      "CBPS", "etwfe", "marginaleffects", "mclust", "mixtools", "flexmix",
                      "apcluster", "e1071", "changepoint", "spatialreg",
-                     "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr"))
+                     "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr",
+                     "gbm"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -413,6 +414,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
+| CART (rpart: complexity table, V-fold cross-validation, prune, importance) | [cart.md](ml/cart.md) | R-pinned, known deviations (ML-125) |
+| Impurity importance of random forest, GBM and quantile forest (gbm::relative.influence, randomForest::importance) | [tree_importance.md](ml/tree_importance.md) | R-pinned |
 
 ### Statistical Methods
 | Method | File | Status |

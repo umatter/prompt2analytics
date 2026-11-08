@@ -256,6 +256,11 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/viz_boxplot_groups.csv` | 73 × 2 (group, value) | `viz_boxplot_groups` | `r/cases/data_viz_t3.R` | seed 5262; literal groups data62, n4, n12, n7, const3, allna (NA) and norm37 = round(rnorm(35, 50, 5), 2) plus two outliers |
 | `generated/viz_histogram_samples.csv` | 163 × 2 (sample, value) | `viz_histogram_bins` | `r/cases/data_viz_t3.R` | seed 5285; samples norm100, small50 (1e-11 scale) and the literal decimal grid grid13 |
 | `generated/viz_residual_diag.csv` | 32 × 9 (fitted3, resid3, hat3, fitted1, resid1, hat1, fitted_l1, resid_l1, hat_l1) | `viz_residual_diag` | `r/cases/data_viz_t3.R` | `datasets::mtcars`; fitted values, residuals and hat values of three `lm` fits; observation 1 of the third has leverage one |
+| `generated/cart_anova.csv` | 300 × 6 (y, x1, x2, x3, x4, folds) | `cart_cp_anova` | `r/cases/ml_cart_cp.R` | seed 20261107; 10 fixed folds; integer x4 |
+| `generated/cart_class.csv` | 300 × 5 (cls, x1, x2, x3, folds) | `cart_cp_class` | `r/cases/ml_cart_cp.R` | seed 20261108; classes coded 3 and 17; 10 fixed folds |
+| `generated/cart_ties.csv` | 30 × 3 (cls, x, z) | `cart_class_ties` | `r/cases/ml_cart_cp.R` | seed 20261110 |
+| `generated/cart_xor.csv` | 40 × 3 (y, x0, x1) | `cart_prune_xor` | `r/cases/ml_cart_cp.R` | seed 20261111 |
+| `generated/tree_importance.csv` | 200 × 4 (y, x0, x1, x2) | `tree_importance_rpart`, `gbm_stump_influence`, `rf_importance_purity` | `r/cases/ml_tree_importance.R` | seed 20261109 |
 
 ## Adding a dataset
 

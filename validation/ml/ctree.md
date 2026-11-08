@@ -10,7 +10,10 @@ Conditional inference trees use permutation-based statistical tests to select sp
 - **Function**: `ctree(formula, data, control = ctree_control())`
 - **CRAN**: https://cran.r-project.org/package=partykit
 
-## R Code for Expected Values
+## Illustrative R code (not run; no number is compared with partykit)
+
+partykit is installed on the validation machine, but p2a's node statistics are known to differ from it (ML-26,
+ML-27), so a pin would record those differences. party and coin are not installed.
 
 ```r
 library(partykit)
@@ -27,12 +30,25 @@ cat("R²:", 1 - sum((y - pred)^2) / sum((y - mean(y))^2), "\n")
 varimp(model)
 ```
 
-## Rust Test Reference
+## What is pinned
 
-- **File**: `crates/p2a-core/tests/validation_ml_advanced.rs`
-- **Tests**: `test_validate_ctree_regression`, `test_validate_ctree_classification`, `test_validate_ctree_predict`
+- The split point against rpart: `test_validate_ctree_split_matches_rpart` (`crates/p2a-core/src/ml/ctree.rs`).
+- Parameter validation: `test_ctree_rejects_minsplit_below_twice_minbucket`, `test_ctree_minbucket_zero_acts_as_one`,
+  `test_ctree_options_parse_aliases_and_reject_unknown`, `test_ctree_maximum_teststat_is_not_the_quadratic_one`.
+  `minsplit` below `2 * minbucket` is refused, because no node of that size can be split into two children of
+  `minbucket` rows. `teststat = maximum` with a classification target is refused until ML-26 and ML-27 fix the
+  statistic. The `MonteCarlo` and `Teststatistic` test types are not implemented and are refused.
 
-## Tolerance
+## What is not R parity
+
+- The node statistics and p-values (ML-26, ML-27). No statistic or p-value is compared with partykit output.
+- The importance definition: `Sum(1 - p)` over the splits on a feature, not partykit's `varimp`.
+
+## DGP property tests
+
+`test_validate_ctree_regression`, `test_validate_ctree_classification` and `test_validate_ctree_predict`
+(`crates/p2a-core/tests/validation_ml_advanced.rs`) check DGP recovery by thresholds, despite their names: they are
+property tests, not R parity, and they will be renamed (X-10).
 
 - Regression R²: > 0.50 (typically > 0.90)
 - Classification accuracy: > 0.75
@@ -42,11 +58,11 @@ varimp(model)
 
 - **Target.** `run_ctree` (and `ml_ctree`) takes a numeric target (integer and decimal
   columns): it fits a classification tree when the target has at most 10 distinct values
-  and fewer than half the rows, otherwise a regression tree (unchanged; an override is
+  and fewer than n / 2, rounded down, otherwise a regression tree (unchanged; an override is
   ML-87, Tier 4). A text, categorical or boolean target becomes the class codes 0..K-1 in
   R `factor()` order, reported in `CtreeResult::class_names` (JSON `class_names`) and a
   "Class labels:" line of the Display. A text target that the rule would fit as a
-  regression (more than 10 classes, or not fewer classes than half the rows) is refused
+  regression (more than 10 classes, or not fewer classes than n / 2, rounded down) is refused
   with an explicit error instead of fitting a regression on the codes.
 - **Missing values.** A missing value (null or NaN) in the target or a feature is an
   error naming the column (Fail; no surrogate splits). `±Inf` is refused as well.
