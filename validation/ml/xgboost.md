@@ -70,10 +70,11 @@ ratio of the minima.
 |  | 1,000 | 77.83 | 83.45 | 1.07 | 1.06 |
 |  | 10,000 | 201.3 | 182.4 | 0.91 | 0.92 |
 
-Exact XGBoost at n = 100 and 1,000 (1.21x, 1.13x) has not been signed off. The per-node sort compares with
-`total_cmp` and the split gain soft-thresholds its three sums; reverting the sort comparator alone leaves
-1.19x / 1.10x. With `alpha = 1` the split gain itself changes (alpha now enters it), so the trees differ and the
-row is not like-for-like:
+The exact XGBoost rows above were measured before the exact booster's split search changed: with
+`alpha = 0` it now computes the plain gain (bit for bit the soft-thresholded one at alpha 0) and sorts each
+node's rows on integer keys in `total_cmp` order. They will be re-measured; until then the 1.21x and 1.13x at
+n = 100 and 1,000 are not signed off. With `alpha = 1` the split gain itself changes (alpha now enters it), so
+the trees differ and the row is not like-for-like:
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
@@ -88,11 +89,11 @@ LightGBM has no page of its own; its rows, same conditions:
 |  | 10,000 | 2,934.2 | 3,388.7 | 1.16 | 1.15 |
 | LightGBM, Huber | 1,000 | 279.7 | 320.6 | 1.15 | 1.14 |
 
-The LightGBM rows (1.15-1.32x) have not been signed off. A build of this tree with the base's `lightgbm.rs`
-runs at 1.00x, and one with only the `total_cmp` comparisons reverted still at 1.31x, so the cost is in
-`lightgbm.rs` but not in a comparison; the L2 path does no new work per iteration (the remaining edits are the
-Huber unit hessians and the up-front finite check). The Huber row is not like-for-like: the base's loss
-oscillated with zero hessians.
+These LightGBM rows were measured before the split search stopped re-summing the node's row count at every
+bin (same splits, bit for bit); they will be re-measured. The 1.15-1.32x above was not a cost of this tree's
+`lightgbm.rs` edits: two release builds of the base's own source differed by about 20% on these rows, and a
+build of this tree ran within 1% of a build of the base made the same way. The Huber row is not like-for-like:
+the base's loss oscillated with zero hessians.
 
 ## Not pinned
 

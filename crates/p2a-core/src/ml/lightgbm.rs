@@ -724,6 +724,8 @@ fn find_best_split(
         let mut left_grad = 0.0;
         let mut left_hess = 0.0;
         let mut left_count = 0usize;
+        // The node's row count, summed once per feature rather than once per bin
+        let total_count: usize = hist.count.iter().sum();
 
         // Scan through bins, computing cumulative sums
         for bin in 0..num_bins - 1 {
@@ -731,7 +733,7 @@ fn find_best_split(
             left_hess += hist.hessian_sum[bin];
             left_count += hist.count[bin];
 
-            let right_count = hist.count.iter().sum::<usize>() - left_count;
+            let right_count = total_count - left_count;
 
             // Check min_data_in_leaf constraint
             if left_count < min_data_in_leaf || right_count < min_data_in_leaf {
@@ -1861,5 +1863,77 @@ mod tests {
         // With regularization, gain should be lower
         let gain_reg = compute_split_gain(-1.0, 2.0, 1.0, 2.0, 1.0);
         assert!(gain_reg < gain);
+    }
+
+    /// The split search before the row count was hoisted out of the bin loop: the reference
+    /// `find_best_split` must match exactly.
+    fn find_best_split_naive(
+        histograms: &[Histogram],
+        feature_subset: &[usize],
+        total_grad: f64,
+        total_hess: f64,
+        min_data_in_leaf: usize,
+        lambda_l2: f64,
+    ) -> Option<(usize, usize, f64)> {
+        let mut best_gain = 0.0;
+        let mut best_split = None;
+        for &feature in feature_subset {
+            let hist = &histograms[feature];
+            let num_bins = hist.gradient_sum.len();
+            if num_bins <= 1 {
+                continue;
+            }
+            let (mut lg, mut lh, mut lc) = (0.0, 0.0, 0usize);
+            for bin in 0..num_bins - 1 {
+                lg += hist.gradient_sum[bin];
+                lh += hist.hessian_sum[bin];
+                lc += hist.count[bin];
+                let rc = hist.count.iter().sum::<usize>() - lc;
+                if lc < min_data_in_leaf || rc < min_data_in_leaf {
+                    continue;
+                }
+                let gain = compute_split_gain(lg, lh, total_grad - lg, total_hess - lh, lambda_l2);
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_split = Some((feature, bin));
+                }
+            }
+        }
+        best_split.map(|(f, b)| (f, b, best_gain))
+    }
+
+    #[test]
+    fn find_best_split_matches_per_bin_count_reference() {
+        let mut state = 7u64;
+        for case in 0..200 {
+            let n_features = 1 + case % 4;
+            let hists: Vec<Histogram> = (0..n_features)
+                .map(|f| {
+                    let bins = 1 + (case * 7 + f * 13) % 40;
+                    let mut h = Histogram::new(bins);
+                    for b in 0..bins {
+                        let c = lcg_random(&mut state) % 6;
+                        h.count[b] = c;
+                        let g = (lcg_random(&mut state) % 2001) as f64 / 1000.0 - 1.0;
+                        h.gradient_sum[b] = g * c as f64;
+                        h.hessian_sum[b] = c as f64 * if case % 2 == 0 { 1.0 } else { 0.37 };
+                    }
+                    h
+                })
+                .collect();
+            // every feature histogram holds the same node: use feature 0's totals
+            let tg: f64 = hists[0].gradient_sum.iter().sum();
+            let th: f64 = hists[0].hessian_sum.iter().sum();
+            let subset: Vec<usize> = (0..n_features).collect();
+            for (min_leaf, lambda) in [(1, 0.0), (3, 1.0), (20, 0.5)] {
+                let a = find_best_split(&hists, &subset, tg, th, min_leaf, lambda);
+                let b = find_best_split_naive(&hists, &subset, tg, th, min_leaf, lambda);
+                assert_eq!(
+                    a.map(|(f, bin, g)| (f, bin, g.to_bits())),
+                    b.map(|(f, bin, g)| (f, bin, g.to_bits())),
+                    "case {case}, min_data_in_leaf {min_leaf}"
+                );
+            }
+        }
     }
 }

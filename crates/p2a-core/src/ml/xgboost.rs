@@ -507,6 +507,37 @@ fn split_gain(
         - gamma
 }
 
+/// `split_gain` at alpha = 0, where ThresholdL1 is the identity on finite sums: the same
+/// arithmetic without the three soft-thresholds per candidate.
+#[inline]
+fn split_gain_l2(
+    g_left: f64,
+    h_left: f64,
+    g_right: f64,
+    h_right: f64,
+    lambda: f64,
+    gamma: f64,
+) -> f64 {
+    let score = |g: f64, h: f64| if h > 0.0 { g * g / (h + lambda) } else { 0.0 };
+    0.5 * (score(g_left, h_left) + score(g_right, h_right)
+        - score(g_left + g_right, h_left + h_right))
+        - gamma
+}
+
+/// `f64::total_cmp`'s order as an integer key: sorting by it is sorting by `total_cmp`, one
+/// integer comparison per step instead of two bit transforms.
+#[inline]
+fn total_order_key(v: f64) -> i64 {
+    let b = v.to_bits() as i64;
+    b ^ (((b >> 63) as u64) >> 1) as i64
+}
+
+/// Inverse of `total_order_key` (the transform is its own inverse).
+#[inline]
+fn from_total_order_key(k: i64) -> f64 {
+    f64::from_bits((k ^ (((k >> 63) as u64) >> 1) as i64) as u64)
+}
+
 /// Build an XGBoost tree using exact greedy algorithm.
 fn build_tree(
     x: &ArrayView2<f64>,
@@ -546,11 +577,19 @@ fn build_tree(
     let mut best_split: Option<(usize, f64)> = None;
     let mut best_left_indices = Vec::new();
     let mut best_right_indices = Vec::new();
+    let l1 = config.alpha != 0.0;
 
     for &feature in levels.columns(depth, feature_indices, rng_state) {
-        // Sort indices by feature value
-        let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
-        sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Sort indices by feature value (stable, total_cmp order, via integer keys)
+        let mut keyed: Vec<(i64, usize)> = indices
+            .iter()
+            .map(|&i| (total_order_key(x[[i, feature]]), i))
+            .collect();
+        keyed.sort_by_key(|p| p.0);
+        let sorted: Vec<(f64, usize)> = keyed
+            .into_iter()
+            .map(|(k, i)| (from_total_order_key(k), i))
+            .collect();
 
         // Scan with incremental sums - O(n) after sorting
         let mut g_left = 0.0;
@@ -575,15 +614,26 @@ fn build_tree(
                 continue;
             }
 
-            let gain = split_gain(
-                g_left,
-                h_left,
-                g_right,
-                h_right,
-                config.lambda,
-                config.alpha,
-                config.gamma,
-            );
+            let gain = if l1 {
+                split_gain(
+                    g_left,
+                    h_left,
+                    g_right,
+                    h_right,
+                    config.lambda,
+                    config.alpha,
+                    config.gamma,
+                )
+            } else {
+                split_gain_l2(
+                    g_left,
+                    h_left,
+                    g_right,
+                    h_right,
+                    config.lambda,
+                    config.gamma,
+                )
+            };
 
             if gain > best_gain {
                 best_gain = gain;
@@ -1286,6 +1336,64 @@ mod tests {
         assert!(
             (split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.5) - (4.0 / 3.0 - 0.5)).abs() < 1e-14
         );
+    }
+
+    #[test]
+    fn split_gain_l2_is_split_gain_at_alpha_zero_bitwise() {
+        let gs = [
+            0.0, -0.0, 1.0, -1.0, 3.7, -8.25, 1e-300, -1e-300, 5e-324, 1e150, -1e150, 0.1, -0.3,
+        ];
+        let hs = [0.0, 1e-12, 0.5, 2.0, 17.3, 1e200];
+        for &gl in &gs {
+            for &gr in &gs {
+                for &hl in &hs {
+                    for &hr in &hs {
+                        for (lambda, gamma) in [(0.0, 0.0), (1.0, 0.0), (0.7, 0.25)] {
+                            let a = split_gain(gl, hl, gr, hr, lambda, 0.0, gamma);
+                            let b = split_gain_l2(gl, hl, gr, hr, lambda, gamma);
+                            assert!(
+                                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                                "{gl} {hl} {gr} {hr} {lambda} {gamma}: {a} vs {b}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn total_order_key_sorts_as_total_cmp() {
+        let vals = [
+            3.0,
+            -0.0,
+            0.0,
+            -1.5,
+            f64::INFINITY,
+            5e-324,
+            -5e-324,
+            f64::NEG_INFINITY,
+            0.0,
+            2.0,
+            -0.0,
+            -1.5,
+            f64::MAX,
+            f64::MIN,
+            1e-310,
+        ];
+        let mut by_cmp: Vec<(f64, usize)> = vals.iter().copied().zip(0..).collect();
+        by_cmp.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut keyed: Vec<(i64, usize)> =
+            vals.iter().map(|&v| total_order_key(v)).zip(0..).collect();
+        keyed.sort_by_key(|p| p.0);
+        let by_key: Vec<(f64, usize)> = keyed
+            .into_iter()
+            .map(|(k, i)| (from_total_order_key(k), i))
+            .collect();
+        assert_eq!(by_cmp.len(), by_key.len());
+        for (a, b) in by_cmp.iter().zip(&by_key) {
+            assert_eq!((a.0.to_bits(), a.1), (b.0.to_bits(), b.1));
+        }
     }
 
     #[test]
