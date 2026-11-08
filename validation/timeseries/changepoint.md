@@ -20,9 +20,11 @@ ln(m) added to each segment's cost. `penalty = Some(p)` is "Manual": p and the p
 >= 0, and the data finite (R: "NA is not allowed in the data"). `total_cost` is the sum of the segment costs without the
 penalties, so under MBIC it holds the ln(m) terms. The method label names the penalty ("; MBIC penalty", "; manual penalty").
 
-## Exact pruning
+## Pruning
 
-The result is the exact optimum, the one optimal partitioning finds. Two things differ from changepoint's C code:
+The search returns the optimum that optimal partitioning finds whenever the costs are sub-additive, which holds as
+long as no segment's variance sits at the `MeanAndVariance` floor (below). Under a small manual penalty it can stop
+above the optimum; see the floor bullet in "Deviations and conventions". Two things differ from changepoint's C code:
 
 1. **Pruning on the base cost.** changepoint prunes s at t when F[s] + C'(s, t) > F[t], with C' holding the ln term. With
    that term the PELT condition (Killick, Fearnhead and Eckley 2012, Theorem 3.1) fails for K = 0: two halves of a
@@ -33,7 +35,8 @@ The result is the exact optimum, the one optimal partitioning finds. Two things 
 
 Each cost is computed once per (s, t), and candidates are pruned in place. `test_pelt_matches_optimal_partitioning`
 compares changepoints and penalised cost with an O(n^2) reference: three seeded noisy series of n = 200, every cost,
-MBIC and manual penalties, minimum segments 2 and 7.
+MBIC and manual penalties, minimum segments 2 and 7. `test_pelt_matches_optimal_partitioning_with_one_large_value`
+covers the MBIC default only (Poisson counts with one value of 1e6 to 1e8).
 
 ## Pins
 
@@ -64,9 +67,38 @@ compares with R.
   ordinary segments under tau take tau, not a floor below it, and are not split off for it
   (`test_meanvar_one_large_value_adds_only_its_own_boundary`: N(0, 1) x 300, N(0, 20) x 300 and a last value of 1e6 or
   1e7 give the regime change and the value's boundary; `cpt.meanvar` gives the same on three seeds, checked by hand).
+  **Limit of the pruned search.** A segment whose variance takes the floor breaks the sub-additivity the pruning relies
+  on, so the search can then stop above the optimum. That was found only under small manual penalties, in a port of the
+  cost and the search (not a run of p2a): N(0, 1) x 200 with one value of 1e7 to 3e8 and manual penalty 1.0 missed the
+  optimal-partitioning objective in 57 of 267 series (gaps up to 11), and counts scaled by 1e-6 missed it under manual
+  penalties 1 and 10. Manual 8.0 and the MBIC default showed no mismatch in that search, nor did outliers of 1e3 to 1e6
+  or counts without an outlier.
 - **Limit of centring.** Centring by a mean that one value contaminates leaves the other regimes to rounding. On the same
   series a last value of 1e8 moves the regime change by 5 to 9 positions (305 to 309, three seeds), and 1e9 loses it: p2a
   finds only 598 where `cpt.meanvar` on raw sums finds 300 and 598 at every one of these sizes. Checked by hand against R
   (changepoint 2.3), not pinned, because the positions depend on rounding.
 - **Convention: minimum segment 2.** p2a's floor is 2 for every cost; `cpt.mean`'s default `minseglen` is 1. The pin calls
   R with `minseglen = 2`.
+
+## Wall-clock (signed off 2026-11-08)
+
+Medians over three interleaved rounds against the tree before this change (11db3f8e; changepoint.rs as at fe13b889),
+`release`, one core, load average 46-54; series of mean and variance shifts, minimum segment 2. Ratio is this tree over
+the base; `default` is MBIC, `manual` the penalty 3 ln n.
+
+| Row | n | base (ms) | this tree (ms) | ratio (median) | ratio (min) |
+|---|---|---:|---:|---:|---:|
+| `VarianceChange`, default | 100 | 0.111 | 0.134 | 1.20 | 1.00 |
+| `VarianceChange`, manual | 100 | 0.111 | 0.131 | 1.18 | 0.95 |
+| `VarianceChange`, default | 1,000 | 2.85 | 13.0 | 4.56 | 5.20 |
+| `VarianceChange`, manual | 1,000 | 2.85 | 12.9 | 4.52 | 3.52 |
+| `VarianceChange`, default | 10,000 | 174 | 1,416 | 8.13 | 7.97 |
+| `VarianceChange`, manual | 10,000 | 181 | 1,339 | 7.39 | 7.18 |
+
+`MeanChange` and `MeanAndVariance` are faster than the base at every size (0.46-0.84). The `VarianceChange` slowdown
+follows from the TS-7 cost: measured about the mean of the whole series, it finds no changepoint on these inputs, so
+the PELT test never prunes a candidate and the search is quadratic; the old cost about each segment's own mean rewarded
+short segments, which is what let it prune. R's `cpt.var` (changepoint 2.3, `minseglen = 2`) with a manual penalty takes
+about 990 ms on the same kind of series at n = 10,000, against 1.3-1.4 s here (about 1.4x); with MBIC R takes 4-5 ms
+because it prunes on the cost with ln(m), which is not a valid PELT bound (see "Pruning"). Signed off by the user
+as a correctness-driven slowdown.

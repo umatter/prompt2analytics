@@ -68,10 +68,12 @@ pub enum CostFunction {
 /// # Returns
 /// * `ChangepointResult` with detected changepoints and segment statistics
 ///
-/// The costs run on data centred by the mean of the series, so a large level does not cancel,
-/// and the result is the exact optimum: pruning uses the cost without the ln(segment length) term
-/// (see `pelt`). The pruned search returns what optimal partitioning returns; on a series at a
-/// large level `cpt.meanvar` and `cpt.mean`, which do not centre, can differ.
+/// The costs run on data centred by the mean of the series, so a large level does not cancel.
+/// Pruning uses the cost without the ln(segment length) term (see `pelt`), and the pruned search
+/// returns what optimal partitioning returns while the costs are sub-additive. A `MeanAndVariance`
+/// segment whose variance takes the floor of `segment_cost` can break that, and under a small
+/// manual penalty the search can then stop above the optimum (no mismatch was found with MBIC).
+/// On a series at a large level `cpt.meanvar` and `cpt.mean`, which do not centre, can differ.
 ///
 /// # Errors
 /// Fails on a series too short for the minimum segment length, on a non-finite value or penalty
@@ -225,7 +227,9 @@ fn checked_cumulative_sums(data: &[f64]) -> Result<(Vec<f64>, Vec<f64>), String>
 /// applies at the rounding level of the prefix sums, tau = 4 eps Q, with Q the sum of squares of the
 /// whole series. A variance at or under tau cannot be told from zero here, and takes tau, or 1e-11
 /// when tau is smaller. Noise that escaped the floor would make the cost of the segment depend on
-/// the rounding, and would break the sub-additivity that makes `pelt`'s pruning exact.
+/// the rounding, and would break the sub-additivity that `pelt`'s pruning relies on. The floor
+/// itself can break it too, for segments whose variance sits near tau: then, under a small manual
+/// penalty, `pelt` can stop above the optimum.
 ///
 /// One value far from the rest raises Q, and tau with it, above the variance of ordinary segments.
 /// A floor below tau would reward each of them for that, so they take tau, the variance nearest to
@@ -276,6 +280,10 @@ fn segment_cost(
 /// A candidate that fails the test at t stays eligible until t + min_seg: the argument for
 /// dropping it compares with the segmentation that ends at t, which a later T cannot extend
 /// before T >= t + min_seg.
+///
+/// The bound needs sub-additive costs. A `MeanAndVariance` segment at the variance floor of
+/// `segment_cost` can violate that, and the result can then sit above the optimum under a small
+/// manual penalty.
 ///
 /// When pruning removes no candidate (as with a large penalty), the work is
 /// quadratic in the length of the series, so the budget installed by the
@@ -745,10 +753,10 @@ mod tests {
         (cps, f[n])
     }
 
-    /// PELT returns the exact optimum for each cost, under MBIC (pruned on the base cost: the
-    /// ln(segment length) term breaks the PELT condition) and a manual penalty, for minimum
-    /// segments of 2 and 7. Compared with a naive reference on seeded noisy series with a mean
-    /// shift, a variance shift and both.
+    /// On seeded noisy series with a mean shift, a variance shift and both, PELT returns the
+    /// optimum for each cost, under MBIC (pruned on the base cost: the ln(segment length) term
+    /// breaks the PELT condition) and manual penalties, for minimum segments of 2 and 7. No segment
+    /// of these series reaches the variance floor, so the costs stay sub-additive.
     #[test]
     fn test_pelt_matches_optimal_partitioning() {
         let mut seed: u64 = 20261107;
@@ -933,7 +941,9 @@ mod tests {
     }
 
     /// With the rounding level raised by one large value, ordinary segments of whole numbers sit
-    /// at or near it, and the pruned search still reaches the reference's objective.
+    /// at or near it, and under the MBIC default the pruned search still reaches the reference's
+    /// objective. This covers the MBIC default only: under a small manual penalty the floor can
+    /// break sub-additivity there, and the search can stop above the optimum.
     #[test]
     fn test_pelt_matches_optimal_partitioning_with_one_large_value() {
         let n = 200;
