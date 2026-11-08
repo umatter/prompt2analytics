@@ -63,37 +63,37 @@ ratio of the minima.
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| exact XGBoost, defaults | 100 | 6.68 | 8.11 | 1.21 | 1.21 |
-|  | 1,000 | 76.98 | 86.94 | 1.13 | 1.13 |
-|  | 10,000 | 972.6 | 1,039.7 | 1.07 | 1.07 |
+| exact XGBoost, defaults | 100 | 6.66 | 6.81 | 1.02 | 1.03 |
+|  | 1,000 | 76.83 | 73.98 | 0.96 | 0.96 |
+|  | 10,000 | 968.6 | 915.4 | 0.95 | 0.94 |
 | fast (histogram) XGBoost, defaults | 100 | 34.97 | 35.81 | 1.02 | 1.05 |
 |  | 1,000 | 77.83 | 83.45 | 1.07 | 1.06 |
 |  | 10,000 | 201.3 | 182.4 | 0.91 | 0.92 |
 
-The exact XGBoost rows above were measured before the exact booster's split search changed: with
-`alpha = 0` it now computes the plain gain (bit for bit the soft-thresholded one at alpha 0) and sorts each
-node's rows on integer keys in `total_cmp` order. They will be re-measured; until then the 1.21x and 1.13x at
-n = 100 and 1,000 are not signed off. With `alpha = 1` the split gain itself changes (alpha now enters it), so
-the trees differ and the row is not like-for-like:
+The exact XGBoost rows were re-measured on 2026-11-09 (same conditions, load average 2.3-6.4, base rebuilt
+in the same run) after the exact booster's split search changed: with `alpha = 0` it computes the plain gain
+(bit for bit the soft-thresholded one at alpha 0) and sorts each node's rows on integer keys in `total_cmp`
+order. The fast XGBoost rows are those of 2026-11-08 (0.91-1.07 again on 2026-11-09). With `alpha = 1` the
+split gain itself changes (alpha now enters it), so the trees differ and the row is not like-for-like:
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| exact XGBoost, alpha = 1 | 1,000 | 78.58 | 32.08 | 0.41 | 0.41 |
+| exact XGBoost, alpha = 1 | 1,000 | 78.66 | 29.14 | 0.37 | 0.37 |
 
 LightGBM has no page of its own; its rows, same conditions:
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| LightGBM, L2, defaults | 100 | 4.77 | 6.29 | 1.32 | 1.31 |
-|  | 1,000 | 277.6 | 319.7 | 1.15 | 1.15 |
-|  | 10,000 | 2,934.2 | 3,388.7 | 1.16 | 1.15 |
-| LightGBM, Huber | 1,000 | 279.7 | 320.6 | 1.15 | 1.14 |
+| LightGBM, L2, defaults | 100 | 4.78 | 2.16 | 0.45 | 0.45 |
+|  | 1,000 | 277.1 | 48.40 | 0.17 | 0.17 |
+|  | 10,000 | 2,929.0 | 598.6 | 0.20 | 0.20 |
+| LightGBM, Huber | 1,000 | 279.7 | 48.70 | 0.17 | 0.17 |
 
-These LightGBM rows were measured before the split search stopped re-summing the node's row count at every
-bin (same splits, bit for bit); they will be re-measured. The 1.15-1.32x above was not a cost of this tree's
-`lightgbm.rs` edits: two release builds of the base's own source differed by about 20% on these rows, and a
-build of this tree ran within 1% of a build of the base made the same way. The Huber row is not like-for-like:
-the base's loss oscillated with zero hessians.
+Measured on 2026-11-09 with the exact XGBoost rows. The split search sums the node's row count once per
+feature instead of once per bin (same splits and gains, bit for bit). Before that change the same rows ran
+1.15-1.32x of the base; that gap was not a cost of this tree's `lightgbm.rs` edits (two release builds of the
+base's own source differed by about 20% on these rows, and a build of this tree ran within 1% of a build of the
+base made the same way). The Huber row is not like-for-like: the base's loss oscillated with zero hessians.
 
 ## Not pinned
 
