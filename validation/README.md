@@ -224,6 +224,37 @@ NaN; ±inf equals only itself. `Tol::iterative(rel)` and `Tol::new` need a comme
 reason. `Tol` (in `crates/p2a-validation/src/check.rs`) and this table must agree; change both
 or neither.
 
+**Rules that go with the table** (X-13):
+
+- The table applies to R-pinned tests. A test that needs a looser tolerance uses
+  `Tol::iterative(rel)` or `Tol::new(rel, abs)` with a comment giving the reason, and the
+  registry entry's `tolerance` repeats it. A tolerance is never widened to make a mismatch
+  pass: a mismatch is fixed, or recorded as a registry deviation with a `// deviation
+  <finding>` comment that keeps the quantity out of the pin.
+- Iterative estimators (IRLS, Newton, EM, MAP demeaning, numerical optimisers) are pinned to a
+  tight R refit (`glm.control(epsilon = 1e-14)`, `optim(control = list(reltol = 1e-15))`,
+  `uniroot(tol = 1e-15)`, or the package's own tolerance tightened) at `Tol::iterative(rel)`,
+  with `rel` stated in the test comment and in the registry entry's `tolerance`. The package's
+  default-tolerance output is recorded in the case (`*_pkg` keys) as a cross-check, never the
+  pin.
+- R values come from committed case files (`validation/expected/<case>.json`), which record the
+  R version and the package versions. A test comment never carries an R value that no case file
+  holds.
+- **Path quantities are never R-pinned**: iteration counts, intermediate iterates, optimiser
+  traces, the state after a fixed number of iterations, non-converged iterates. A case may keep
+  such keys as recorded R values; no `Check` reads them, and the test says so in a `// not
+  pinned: iteration path` comment.
+- Where the solution is not unique or depends on R's random numbers (degenerate LPs, local
+  optima of k-means or mixtures, tie order, CV folds, bootstrap draws), the test pins the
+  objective value or the optimality conditions, or gives both sides the same folds, draws or
+  starting values.
+- R is the test oracle and the default convention, not the algorithm template. A convention
+  kept as p2a's (a default, a df correction, a quantile type, tie handling, which collinear
+  column is dropped) is a registry deviation and a line in the method document.
+- When a pin is removed or loosened, the entry's `quantities` and `tolerance` say so (a
+  quantity checked only as a property is marked `(property)`), and the method document says
+  "not R-pinned" for it.
+
 ## Missing values, integer and logical columns
 
 R and Rust must compute on the same cells, so the harness and the loader read missing values
