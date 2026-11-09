@@ -3,11 +3,14 @@
 use clap::Subcommand;
 use p2a_core::econometrics::{KmConfType, KmConfig, run_kaplan_meier_with};
 use p2a_core::{
-    AftConfig, AftDistribution, CoxConfig, TiesMethod, log_rank_test, run_aft, run_competing_risks,
-    run_cox_ph,
+    AftConfig, AftDistribution, CoxConfig, CoxSeType, TiesMethod, log_rank_test, run_aft,
+    run_competing_risks, run_cox_ph,
 };
 
-use crate::output::{OutputFormat, missing_json, print_error, print_missing_note};
+use crate::output::{
+    OutputFormat, add_notes, add_result_notes, missing_json, parse_core_option, print_error,
+    print_missing_note, print_result_notes,
+};
 use crate::session::SessionManager;
 
 /// "95" for 0.95, "97.5" for 0.975.
@@ -27,6 +30,9 @@ fn na4(v: Option<f64>) -> String {
         _ => "NA".to_string(),
     }
 }
+
+/// How the competing-risks standard errors are computed.
+const CR_SE_METHOD: &str = "delta method (as survfit)";
 
 /// Adds `"missing"` to a JSON object when rows were dropped.
 fn with_missing(
@@ -128,13 +134,18 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Ties handling method: "breslow" (default), "efron"
-        #[arg(long, default_value = "breslow")]
-        ties: String,
+        /// Ties handling method, as coxph's ties: "efron" (default) or "breslow"
+        #[arg(long, default_value_t = TiesMethod::default(), value_parser = parse_core_option::<TiesMethod>)]
+        ties: TiesMethod,
 
-        /// Use robust (sandwich) standard errors
+        /// Use robust (Lin-Wei sandwich) standard errors, as coxph(robust = TRUE)
         #[arg(long)]
         robust: bool,
+
+        /// Cluster column for clustered sandwich standard errors, as coxph's cluster()
+        /// (implies --robust)
+        #[arg(long)]
+        cluster: Option<String>,
     },
 
     /// Accelerated Failure Time model
@@ -163,9 +174,10 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Distribution: "weibull" (default), "exponential", "lognormal", "loglogistic"
-        #[arg(long, default_value = "weibull")]
-        dist: String,
+        /// Distribution, as survreg's dist: "weibull" (default), "exponential", "lognormal",
+        /// "loglogistic"
+        #[arg(long, default_value_t = AftDistribution::default(), value_parser = parse_core_option::<AftDistribution>)]
+        dist: AftDistribution,
     },
 
     /// Competing risks analysis (cumulative incidence)
@@ -229,8 +241,17 @@ pub fn execute(
             covariates,
             ties,
             robust,
+            cluster,
         } => execute_cox(
-            dataset, time, event, covariates, ties, *robust, format, session,
+            dataset,
+            time,
+            event,
+            covariates,
+            *ties,
+            *robust,
+            cluster.as_deref(),
+            format,
+            session,
         ),
         SurvivalCommands::Aft {
             dataset,
@@ -238,7 +259,7 @@ pub fn execute(
             event,
             covariates,
             dist,
-        } => execute_aft(dataset, time, event, covariates, dist, format, session),
+        } => execute_aft(dataset, time, event, covariates, *dist, format, session),
         SurvivalCommands::CompetingRisks {
             dataset,
             time,
@@ -317,6 +338,8 @@ fn execute_km(
                     }),
                     &result.missing,
                 );
+                let mut json = json;
+                add_notes(&mut json, None, &[]);
                 println!("{}", serde_json::to_string_pretty(&json)?);
             }
             _ => {
@@ -407,6 +430,8 @@ fn execute_log_rank(
                         }),
                         &result.missing,
                     );
+                    let mut json = json;
+                    add_notes(&mut json, None, &[]);
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -469,8 +494,9 @@ fn execute_cox(
     time_col: &str,
     event_col: &str,
     covariates: &[String],
-    ties: &str,
+    ties: TiesMethod,
     robust: bool,
+    cluster: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -485,77 +511,94 @@ fn execute_cox(
         }
     };
 
-    match dataset {
-        Some(ds) => {
-            let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+    let mut config = CoxConfig::default();
+    config.ties = ties;
+    config.robust_se = robust;
+    config.cluster = cluster.map(str::to_string);
 
-            let ties_method = match ties.to_lowercase().as_str() {
-                "efron" => TiesMethod::Efron,
-                _ => TiesMethod::Breslow,
-            };
-
-            let mut config = CoxConfig::default();
-            config.ties = ties_method;
-            config.max_iter = 25;
-            config.tolerance = 1e-9;
-            config.robust_se = robust;
-
-            match run_cox_ph(ds, time_col, event_col, &cov_refs, Some(config)) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = with_missing(
-                            serde_json::json!({
-                                "method": "Cox Proportional Hazards",
-                                "n_obs": result.n_obs,
-                                "n_events": result.n_events,
-                                "variables": result.variables,
-                                "coefficients": result.coefficients,
-                                "std_errors": result.std_errors,
-                                "hazard_ratios": result.hazard_ratios,
-                                "z_stats": result.z_stats,
-                                "p_values": result.p_values,
-                                "log_likelihood": result.log_likelihood,
-                                "concordance": result.concordance,
-                            }),
-                            &result.missing,
-                        );
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nCox Proportional Hazards Model");
-                        println!("{}", "=".repeat(60));
-                        println!(
-                            "Observations: {}, Events: {}",
-                            result.n_obs, result.n_events
-                        );
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                        println!("Concordance: {:.4}", result.concordance);
-                        println!(
-                            "\n{:<15} {:<10} {:<10} {:<10} {:<10} {:<10}",
-                            "Variable", "Coef", "HR", "Std.Err", "z", "p-value"
-                        );
-                        println!("{}", "-".repeat(60));
-                        for i in 0..result.variables.len() {
-                            println!(
-                                "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
-                                result.variables[i],
-                                result.coefficients[i],
-                                result.hazard_ratios[i],
-                                result.std_errors[i],
-                                result.z_stats[i],
-                                result.p_values[i]
-                            );
-                        }
-                        print_missing_note(&result.missing, format);
-                    }
-                },
-                Err(e) => {
-                    print_error(&format!("Cox PH failed: {}", e), format);
-                }
-            }
+    let result = match run_cox_ph(ds, time_col, event_col, &cov_refs, Some(config)) {
+        Ok(result) => result,
+        Err(e) => {
+            print_error(&format!("Cox PH failed: {}", e), format);
+            return Ok(());
         }
-        None => {
-            print_error(&format!("Dataset '{}' not found", dataset_name), format);
+    };
+    let robust_se = result.se_type != CoxSeType::Model;
+    match format {
+        OutputFormat::Json => {
+            let mut json = with_missing(
+                serde_json::json!({
+                    "method": "Cox Proportional Hazards",
+                    "n_obs": result.n_obs,
+                    "n_events": result.n_events,
+                    "ties": TiesMethod::choices().canonical(result.ties_method),
+                    "se_type": result.se_type,
+                    "cluster": result.cluster,
+                    "n_clusters": result.n_clusters,
+                    "variables": result.variables,
+                    "coefficients": result.coefficients,
+                    "std_errors": result.std_errors,
+                    "naive_std_errors": result.naive_std_errors,
+                    "hazard_ratios": result.hazard_ratios,
+                    "z_stats": result.z_stats,
+                    "p_values": result.p_values,
+                    "log_likelihood": result.log_likelihood,
+                    "concordance": result.concordance,
+                    "robust_score_test": result.robust_score_test,
+                    "robust_score_p_value": result.robust_score_p_value,
+                    "aliased": result.aliased,
+                }),
+                &result.missing,
+            );
+            add_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nCox Proportional Hazards Model");
+            println!("{}", "=".repeat(60));
+            println!(
+                "Observations: {}, Events: {}",
+                result.n_obs, result.n_events
+            );
+            println!("Ties: {}", result.ties_method);
+            println!("Standard errors: {}", result.se_type);
+            if let (Some(c), Some(g)) = (&result.cluster, result.n_clusters) {
+                println!("Clusters: {g} (levels of {c})");
+            }
+            println!("Log-likelihood: {:.4}", result.log_likelihood);
+            println!("Concordance: {:.4}", result.concordance);
+            let se_header = if robust_se { "Robust SE" } else { "Std.Err" };
+            println!(
+                "\n{:<15} {:<10} {:<10} {:<10} {:<10} {:<10}",
+                "Variable", "Coef", "HR", se_header, "z", "p-value"
+            );
+            println!("{}", "-".repeat(60));
+            for i in 0..result.variables.len() {
+                println!(
+                    "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
+                    result.variables[i],
+                    result.coefficients[i],
+                    result.hazard_ratios[i],
+                    result.std_errors[i],
+                    result.z_stats[i],
+                    result.p_values[i]
+                );
+            }
+            if let (Some(t), Some(p)) = (result.robust_score_test, result.robust_score_p_value) {
+                println!(
+                    "\nRobust score test: {} on {} df, p = {}",
+                    na4(Some(t)),
+                    result.df(),
+                    na4(Some(p))
+                );
+            }
+            print_result_notes(&result, format);
+            print_missing_note(&result.missing, format);
         }
     }
     Ok(())
@@ -566,7 +609,7 @@ fn execute_aft(
     time_col: &str,
     event_col: &str,
     covariates: &[String],
-    dist: &str,
+    distribution: AftDistribution,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -581,79 +624,89 @@ fn execute_aft(
         }
     };
 
-    match dataset {
-        Some(ds) => {
-            let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+    let mut config = AftConfig::default();
+    config.distribution = distribution;
 
-            let distribution = match dist.to_lowercase().as_str() {
-                "exponential" => AftDistribution::Exponential,
-                "lognormal" => AftDistribution::LogNormal,
-                "loglogistic" => AftDistribution::LogLogistic,
-                _ => AftDistribution::Weibull,
-            };
-
-            let mut config = AftConfig::default();
-            config.distribution = distribution;
-            config.max_iter = 100;
-            config.tolerance = 1e-9;
-
-            match run_aft(ds, time_col, event_col, &cov_refs, Some(config)) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = with_missing(
-                            serde_json::json!({
-                                "method": "Accelerated Failure Time",
-                                "distribution": format!("{}", result.distribution),
-                                "n_obs": result.n_obs,
-                                "n_events": result.n_events,
-                                "variables": result.variables,
-                                "coefficients": result.coefficients,
-                                "std_errors": result.std_errors,
-                                "z_stats": result.z_stats,
-                                "p_values": result.p_values,
-                                "log_likelihood": result.log_likelihood,
-                                "aic": result.aic,
-                                "scale": result.scale,
-                            }),
-                            &result.missing,
-                        );
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nAccelerated Failure Time Model ({})", result.distribution);
-                        println!("{}", "=".repeat(60));
-                        println!(
-                            "Observations: {}, Events: {}",
-                            result.n_obs, result.n_events
-                        );
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                        println!("AIC: {:.4}", result.aic);
-                        println!("Scale parameter: {:.4}", result.scale);
-                        println!(
-                            "\n{:<15} {:<10} {:<10} {:<10} {:<10}",
-                            "Variable", "Coef", "Std.Err", "z", "p-value"
-                        );
-                        println!("{}", "-".repeat(55));
-                        for i in 0..result.variables.len() {
-                            println!(
-                                "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
-                                result.variables[i],
-                                result.coefficients[i],
-                                result.std_errors[i],
-                                result.z_stats[i],
-                                result.p_values[i]
-                            );
-                        }
-                        print_missing_note(&result.missing, format);
-                    }
-                },
-                Err(e) => {
-                    print_error(&format!("AFT failed: {}", e), format);
-                }
-            }
+    let result = match run_aft(ds, time_col, event_col, &cov_refs, Some(config)) {
+        Ok(result) => result,
+        Err(e) => {
+            print_error(&format!("AFT failed: {}", e), format);
+            return Ok(());
         }
-        None => {
-            print_error(&format!("Dataset '{}' not found", dataset_name), format);
+    };
+    match format {
+        OutputFormat::Json => {
+            let mut json = with_missing(
+                serde_json::json!({
+                    "method": "Accelerated Failure Time",
+                    "distribution": format!("{}", result.distribution),
+                    "n_obs": result.n_obs,
+                    "n_events": result.n_events,
+                    "variables": result.variables,
+                    "coefficients": result.coefficients,
+                    "std_errors": result.std_errors,
+                    "z_stats": result.z_stats,
+                    "p_values": result.p_values,
+                    "log_likelihood": result.log_likelihood,
+                    "aic": result.aic,
+                    "bic": result.bic,
+                    "scale": result.scale,
+                    "log_scale_se": result.log_scale_se,
+                    "scale_fixed": result.scale_fixed,
+                    "aliased": result.aliased,
+                }),
+                &result.missing,
+            );
+            add_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nAccelerated Failure Time Model ({})", result.distribution);
+            println!("{}", "=".repeat(60));
+            println!(
+                "Observations: {}, Events: {}",
+                result.n_obs, result.n_events
+            );
+            println!("Log-likelihood: {:.4}", result.log_likelihood);
+            println!("AIC: {:.4}", result.aic);
+            println!("BIC: {:.4}", result.bic);
+            if result.scale_fixed {
+                println!("Scale fixed at 1 (exponential)");
+            } else {
+                println!("Scale parameter: {:.4}", result.scale);
+            }
+            println!(
+                "\n{:<15} {:<10} {:<10} {:<10} {:<10}",
+                "Variable", "Coef", "Std.Err", "z", "p-value"
+            );
+            println!("{}", "-".repeat(55));
+            for i in 0..result.variables.len() {
+                println!(
+                    "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
+                    result.variables[i],
+                    result.coefficients[i],
+                    result.std_errors[i],
+                    result.z_stats[i],
+                    result.p_values[i]
+                );
+            }
+            if let (Some(se), Some((z, p))) = (result.log_scale_se, result.log_scale_test()) {
+                println!(
+                    "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
+                    "Log(scale)",
+                    result.scale.ln(),
+                    se,
+                    z,
+                    p
+                );
+            }
+            print_result_notes(&result, format);
+            print_missing_note(&result.missing, format);
         }
     }
     Ok(())
@@ -682,22 +735,37 @@ fn execute_competing_risks(
         Some(ds) => match run_competing_risks(ds, time_col, event_type_col, conf_level) {
             Ok(result) => match format {
                 OutputFormat::Json => {
-                    let json = with_missing(
+                    let n_events_by_type: serde_json::Map<String, serde_json::Value> = result
+                        .event_types
+                        .iter()
+                        .map(|k| {
+                            let n = result.n_events_by_type.get(k).copied().unwrap_or(0);
+                            (k.to_string(), serde_json::json!(n))
+                        })
+                        .collect();
+                    let mut json = with_missing(
                         serde_json::json!({
                             "method": "Competing Risks Analysis",
                             "n_obs": result.n_obs,
                             "n_censored": result.n_censored,
                             "event_types": result.event_types,
+                            "n_events_by_type": n_events_by_type,
+                            "conf_level": result.conf_level,
+                            "se_method": CR_SE_METHOD,
                             "cumulative_incidence": result.cifs.iter().map(|ci| {
                                 serde_json::json!({
                                     "event_type": ci.event_type,
                                     "times": ci.times,
                                     "incidence": ci.incidence,
+                                    "std_errors": ci.std_errors,
+                                    "ci_lower": ci.ci_lower,
+                                    "ci_upper": ci.ci_upper,
                                 })
                             }).collect::<Vec<_>>(),
                         }),
                         &result.missing,
                     );
+                    add_notes(&mut json, None, &[]);
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -706,13 +774,25 @@ fn execute_competing_risks(
                     println!("Observations: {}", result.n_obs);
                     println!("Censored: {}", result.n_censored);
                     println!("Event types: {:?}", result.event_types);
+                    println!("Confidence level: {}%", percent(result.conf_level));
+                    println!("Standard errors: {CR_SE_METHOD}; intervals on the log scale");
                     for ci in &result.cifs {
                         println!("\nEvent type {} cumulative incidence:", ci.event_type);
-                        println!("{:<12} {:<12}", "Time", "CIF");
-                        println!("{}", "-".repeat(24));
+                        println!(
+                            "{:<12} {:<12} {:<12} {:<12} {:<12}",
+                            "Time", "CIF", "SE", "Lower", "Upper"
+                        );
+                        println!("{}", "-".repeat(60));
                         let n = ci.times.len().min(10);
                         for i in 0..n {
-                            println!("{:<12.4} {:<12.4}", ci.times[i], ci.incidence[i]);
+                            println!(
+                                "{:<12.4} {:<12.4} {:<12} {:<12} {:<12}",
+                                ci.times[i],
+                                ci.incidence[i],
+                                na4(Some(ci.std_errors[i])),
+                                na4(Some(ci.ci_lower[i])),
+                                na4(Some(ci.ci_upper[i]))
+                            );
                         }
                     }
                     print_missing_note(&result.missing, format);

@@ -31,3 +31,46 @@ case("cli_discrete_poisson", "cli", "glm(family = poisson) on the count data of 
   list(values = v, reference = "stats::glm(family = poisson) at glm.control(epsilon = 1e-10, maxit = 100) (p2a's default control, registry deviation ECON-60; the fit is at the MLE either way); na.omit",
        call = "glm(y ~ x1 + x2, family = poisson, data = negbin)", packages = character(0))
 })
+
+case("cli_competing_risks", "cli", "Aalen-Johansen CIF of two competing causes; survfit's standard errors and log-scale limits at conf 0.95 and 0.5", function(ctx) {
+  suppressPackageStartupMessages(library(survival))
+  set.seed(20261023)
+  n <- 200
+  t1 <- rexp(n, 0.10); t2 <- rexp(n, 0.06); cens <- runif(n, 2, 18)
+  tt <- pmin(t1, t2, cens)
+  status <- ifelse(tt == cens, 0L, ifelse(tt == t1, 1L, 2L))
+  d <- ctx$gen_dataset("cr_sim", data.frame(time = round(tt, 6), event_type = status))
+  stopifnot(!anyDuplicated(d$time), all(d$time > 0))
+  fit <- survfit(Surv(time, factor(event_type, levels = 0:2)) ~ 1, data = d)
+  st <- fit$states                                        # "(s0)", "1", "2"
+  stopifnot(identical(st, c("(s0)", "1", "2")), fit$conf.type == "log")
+  times <- fit$time                                       # every distinct time, censored ones included
+  # the CIF identity: the cause-specific increments weighted by the overall KM S(t_j-)
+  ut <- sort(unique(d$time)); stopifnot(isTRUE(all.equal(ut, times, tolerance = 0)))
+  nrisk <- sapply(ut, function(u) sum(d$time >= u))
+  s_prev <- 1; cif <- matrix(0, length(ut), 2); cum <- c(0, 0)
+  for (j in seq_along(ut)) {
+    dk <- sapply(1:2, function(k) sum(d$time == ut[j] & d$event_type == k))
+    cum <- cum + s_prev * dk / nrisk[j]
+    s_prev <- s_prev * (1 - sum(dk) / nrisk[j])
+    cif[j, ] <- cum
+  }
+  stopifnot(max(abs(cif[, 1] - fit$pstate[, st == "1"])) < 1e-14, max(abs(cif[, 2] - fit$pstate[, st == "2"])) < 1e-14)
+  v <- list(n = n, n_censored = sum(d$event_type == 0), n_cause1 = sum(d$event_type == 1), n_cause2 = sum(d$event_type == 2),
+            times = vec(ut))
+  for (k in 1:2) {
+    v[[paste0("cif_", k)]] <- vec(fit$pstate[, st == as.character(k)])
+    v[[paste0("survfit_se_", k)]] <- vec(fit$std.err[, st == as.character(k)])
+  }
+  for (lev in c(0.95, 0.5)) {
+    f <- survfit(Surv(time, factor(event_type, levels = 0:2)) ~ 1, data = d, conf.int = lev)
+    stopifnot(identical(f$states, c("(s0)", "1", "2")), f$conf.type == "log")
+    tag <- sprintf("survfit_ci%d", round(100 * lev))
+    for (k in 1:2) {
+      v[[sprintf("%s_lower_%d", tag, k)]] <- vec(f$lower[, k + 1])
+      v[[sprintf("%s_upper_%d", tag, k)]] <- vec(f$upper[, k + 1])
+    }
+  }
+  list(values = v, reference = "survival::survfit(Surv(time, factor(event_type))): pstate, std.err and log-scale limits at conf.int 0.95 and 0.5 (multi-state Aalen-Johansen)",
+       call = "survfit(Surv(time, factor(event_type, levels = 0:2)) ~ 1, data = cr_sim, conf.int = level)", packages = "survival")
+})

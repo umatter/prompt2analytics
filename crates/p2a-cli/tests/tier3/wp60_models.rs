@@ -411,6 +411,327 @@ fn test_validate_cli_discrete_poisson() {
 }
 
 // =================================================================================================
+// Survival
+// =================================================================================================
+
+/// WP19 surface: --ties as coxph (Efron, Breslow), robust (Lin-Wei) and cluster(inst) SEs
+/// (surv_cox_robust, lung).
+#[test]
+fn test_validate_cli_cox_ties_robust_cluster() {
+    let case = Case::load("surv_cox_robust");
+    let n = case.scalar("n") as usize; // 227
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "survival",
+        "cox",
+        d.as_str(),
+        "-t",
+        "time",
+        "-e",
+        "status",
+        "-x",
+        "age",
+        "sex",
+        "ph.ecog",
+    ];
+    for ties in ["efron", "breslow"] {
+        let v = s.json(&argv(&base, &["--ties", ties]));
+        let names = strs(&v["variables"]);
+        assert_eq!(
+            (v["ties"].clone(), v["se_type"].clone()),
+            (json!(ties), json!("model"))
+        );
+        Check::new(&case)
+            .named(
+                &format!("{ties}_coef"),
+                &names,
+                &f64s(&v["coefficients"]),
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{ties}_se"),
+                &names,
+                &f64s(&v["std_errors"]),
+                Tol::se(n),
+            )
+            .named(
+                &format!("{ties}_z"),
+                &names,
+                &f64s(&v["z_stats"]),
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{ties}_p"),
+                &names,
+                &f64s(&v["p_values"]),
+                Tol::p_value(n),
+            )
+            .scalar(
+                &format!("{ties}_loglik"),
+                num(&v["log_likelihood"]),
+                Tol::stat(n),
+            )
+            .scalar("n", num(&v["n_obs"]), Tol::exact())
+            .finish();
+        assert_eq!(v["converged"], true);
+    }
+    // the default is coxph's (Efron)
+    assert_eq!(s.json(&base)["ties"], "efron");
+    let rob = argv(&base, &["--ties", "efron", "--robust"]);
+    let v = s.json(&rob);
+    let names = strs(&v["variables"]);
+    assert_eq!(v["se_type"], "robust");
+    Check::new(&case)
+        .named(
+            "efron_se_robust",
+            &names,
+            &f64s(&v["std_errors"]),
+            Tol::se(n),
+        )
+        .named(
+            "efron_se",
+            &names,
+            &f64s(&v["naive_std_errors"]),
+            Tol::se(n),
+        )
+        .named("efron_z_robust", &names, &f64s(&v["z_stats"]), Tol::stat(n))
+        .named(
+            "efron_p_robust",
+            &names,
+            &f64s(&v["p_values"]),
+            Tol::p_value(n),
+        )
+        .scalar(
+            "efron_rscore_robust",
+            num(&v["robust_score_test"]),
+            Tol::stat(n),
+        )
+        .scalar(
+            "efron_rscore_p_robust",
+            num(&v["robust_score_p_value"]),
+            Tol::p_value(n),
+        )
+        .finish();
+    let text = s.ok(&rob);
+    assert!(
+        text.contains("Standard errors: robust (Lin-Wei sandwich)"),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("Variable") && l.contains("Robust SE")),
+        "{text}"
+    );
+    let v = s.json(&argv(&base, &["--ties", "efron", "--cluster", "inst"]));
+    let names = strs(&v["variables"]);
+    assert_eq!(v["se_type"], "cluster");
+    Check::new(&case)
+        .named(
+            "efron_coef_cluster",
+            &names,
+            &f64s(&v["coefficients"]),
+            Tol::coef(n),
+        )
+        .named(
+            "efron_se_model_cluster",
+            &names,
+            &f64s(&v["naive_std_errors"]),
+            Tol::se(n),
+        )
+        .named(
+            "efron_se_cluster",
+            &names,
+            &f64s(&v["std_errors"]),
+            Tol::se(n),
+        )
+        .named(
+            "efron_z_cluster",
+            &names,
+            &f64s(&v["z_stats"]),
+            Tol::stat(n),
+        )
+        .named(
+            "efron_p_cluster",
+            &names,
+            &f64s(&v["p_values"]),
+            Tol::p_value(n),
+        )
+        .scalar(
+            "efron_rscore_cluster",
+            num(&v["robust_score_test"]),
+            Tol::stat(n),
+        )
+        .scalar("n_clusters", num(&v["n_clusters"]), Tol::exact())
+        .scalar("n_cluster_obs", num(&v["n_obs"]), Tol::exact())
+        .finish();
+}
+
+/// WP19 surface: --dist as survreg (surv_aft, lung): coefficients, SEs, scale, Log(scale), logLik,
+/// AIC, BIC.
+#[test]
+fn test_validate_cli_aft_distributions() {
+    let case = Case::load("surv_aft");
+    let n = case.scalar("n") as usize; // 227
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "survival",
+        "aft",
+        d.as_str(),
+        "-t",
+        "time",
+        "-e",
+        "status",
+        "-x",
+        "age",
+        "sex",
+        "ph.ecog",
+    ];
+    for dist in ["weibull", "exponential", "lognormal", "loglogistic"] {
+        let v = s.json(&argv(&base, &["--dist", dist]));
+        let names = strs(&v["variables"]);
+        let mut c = Check::new(&case);
+        c.named(
+            &format!("{dist}_coef"),
+            &names,
+            &f64s(&v["coefficients"]),
+            Tol::coef(n),
+        )
+        .named(
+            &format!("{dist}_se"),
+            &names,
+            &f64s(&v["std_errors"]),
+            Tol::se(n),
+        )
+        .named(
+            &format!("{dist}_z"),
+            &names,
+            &f64s(&v["z_stats"]),
+            Tol::stat(n),
+        )
+        .named(
+            &format!("{dist}_p"),
+            &names,
+            &f64s(&v["p_values"]),
+            Tol::p_value(n),
+        )
+        .scalar(&format!("{dist}_scale"), num(&v["scale"]), Tol::stat(n))
+        .scalar(
+            &format!("{dist}_loglik"),
+            num(&v["log_likelihood"]),
+            Tol::stat(n),
+        )
+        .scalar(&format!("{dist}_aic"), num(&v["aic"]), Tol::stat(n))
+        .scalar(&format!("{dist}_bic"), num(&v["bic"]), Tol::stat(n));
+        if dist == "exponential" {
+            assert_eq!(v["scale_fixed"], true);
+            assert!(v["log_scale_se"].is_null(), "{v}");
+        } else {
+            assert_eq!(v["scale_fixed"], false);
+            c.scalar(
+                &format!("{dist}_se_log_scale"),
+                num(&v["log_scale_se"]),
+                Tol::se(n),
+            );
+        }
+        c.finish();
+        assert_eq!(v["converged"], true);
+    }
+    assert!(
+        s.ok(&argv(&base, &["--dist", "exponential"]))
+            .contains("Scale fixed at 1")
+    );
+    let text = s.ok(&argv(&base, &["--dist", "weibull"]));
+    let row: Vec<&str> = text
+        .lines()
+        .find(|l| l.starts_with("Log(scale)"))
+        .unwrap_or_else(|| panic!("{text}"))
+        .split_whitespace()
+        .collect();
+    assert!(
+        Tol::printed(4).allows(row[1].parse().unwrap(), case.scalar("weibull_scale").ln()),
+        "{row:?}"
+    );
+    assert!(
+        Tol::printed(4).allows(row[3].parse().unwrap(), case.scalar("weibull_z_log_scale")),
+        "{row:?}"
+    );
+}
+
+/// CLI-23 (competing-risks part): CIF SEs and intervals at --conf, as survfit (cli_competing_risks).
+#[test]
+fn test_validate_cli_competing_risks_ci() {
+    let case = Case::load("cli_competing_risks");
+    let n = case.scalar("n") as usize; // 200
+    let s = temp_session();
+    let d = s.load(&case); // "cr_sim"
+    let base = [
+        "survival",
+        "competing-risks",
+        d.as_str(),
+        "-t",
+        "time",
+        "-e",
+        "event_type",
+    ];
+    for (extra, tag, level) in [(&[][..], "95", 0.95), (&["--conf", "0.5"][..], "50", 0.5)] {
+        let v = s.json(&argv(&base, extra));
+        assert_eq!(num(&v["conf_level"]), level);
+        assert_eq!(v["se_method"], "delta method (as survfit)");
+        let cifs = v["cumulative_incidence"].as_array().unwrap();
+        assert_eq!(cifs.len(), 2);
+        for (i, cif) in cifs.iter().enumerate() {
+            let k = i + 1;
+            assert_eq!(cif["event_type"], k);
+            Check::new(&case)
+                .vector("times", &f64s(&cif["times"]), Tol::new(1e-15, 0.0)) // JSON float parsing may move 1 ulp
+                .vector(&format!("cif_{k}"), &f64s(&cif["incidence"]), Tol::coef(n))
+                .vector(
+                    &format!("survfit_se_{k}"),
+                    &f64s(&cif["std_errors"]),
+                    Tol::se(n),
+                )
+                .vector(
+                    &format!("survfit_ci{tag}_lower_{k}"),
+                    &f64s(&cif["ci_lower"]),
+                    Tol::stat(n),
+                )
+                .vector(
+                    &format!("survfit_ci{tag}_upper_{k}"),
+                    &f64s(&cif["ci_upper"]),
+                    Tol::stat(n),
+                )
+                .finish();
+        }
+        assert_eq!(v["n_events_by_type"], json!({"1": 80, "2": 65}));
+    }
+    let text = s.ok(&base);
+    assert!(
+        text.contains("Standard errors: delta method (as survfit); intervals on the log scale"),
+        "{text}"
+    );
+    let mut lines = text.lines().skip_while(|l| !l.starts_with("Event type 1"));
+    // header, "Time CIF SE Lower Upper", dashes, then the first event time 0.033633
+    let first: Vec<f64> = lines
+        .nth(3)
+        .unwrap()
+        .split_whitespace()
+        .map(|x| x.parse().unwrap())
+        .collect();
+    let want = [
+        case.vector("times")[0],
+        case.vector("cif_1")[0],
+        case.vector("survfit_se_1")[0],
+        case.vector("survfit_ci95_lower_1")[0],
+        case.vector("survfit_ci95_upper_1")[0],
+    ];
+    for (a, e) in first.iter().zip(want) {
+        assert!(Tol::printed(4).allows(*a, e), "{first:?} vs {want:?}");
+    }
+}
+
+// =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
 // =================================================================================================
@@ -444,6 +765,8 @@ const DATASETS: &[&str] = &[
     "validation/datasets/generated/negbin.csv",
     "validation/datasets/generated/zeroinfl.csv",
     "validation/datasets/generated/mixed_logit.csv",
+    "validation/datasets/generated/lung.csv",
+    "validation/datasets/generated/cr_sim.csv",
 ];
 
 const DISCRETE: &[Cmd] = &[
@@ -613,9 +936,82 @@ const DISCRETE_REFUSED: &[(&[&str], &[&str])] = &[
     ),
 ];
 
-const ALL: &[&[Cmd]] = &[DISCRETE];
-const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK];
-const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[DISCRETE_REFUSED];
+const SURVIVAL: &[Cmd] = &[
+    c(
+        &["survival", "km", "lung", "-t", "time", "-e", "status"],
+        Pl,
+    ),
+    c(
+        &[
+            "survival", "log-rank", "lung", "-t", "time", "-e", "status", "-g", "sex",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "survival", "cox", "lung", "-t", "time", "-e", "status", "-x", "age", "sex", "ph.ecog",
+        ],
+        It,
+    ),
+    c(
+        &[
+            "survival", "aft", "lung", "-t", "time", "-e", "status", "-x", "age", "sex", "ph.ecog",
+        ],
+        It,
+    ),
+    c(
+        &[
+            "survival",
+            "competing-risks",
+            "cr_sim",
+            "-t",
+            "time",
+            "-e",
+            "event_type",
+        ],
+        Pl,
+    ),
+];
+
+const SURVIVAL_OK: &[&[&str]] = &[
+    &[
+        "survival", "cox", "lung", "-t", "time", "-e", "status", "-x", "age", "sex", "--ties",
+        "BRESLOW",
+    ],
+    &[
+        "survival",
+        "aft",
+        "lung",
+        "-t",
+        "time",
+        "-e",
+        "status",
+        "-x",
+        "age",
+        "sex",
+        "--dist",
+        "log-normal",
+    ],
+];
+
+const SURVIVAL_REFUSED: &[(&[&str], &[&str])] = &[
+    (
+        &[
+            "survival", "cox", "lung", "-t", "time", "-e", "status", "-x", "age", "--ties", "exact",
+        ],
+        &["efron", "breslow"],
+    ),
+    (
+        &[
+            "survival", "aft", "lung", "-t", "time", "-e", "status", "-x", "age", "--dist", "gamma",
+        ],
+        &["weibull", "exponential", "lognormal", "loglogistic"],
+    ),
+];
+
+const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL];
+const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK];
+const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[DISCRETE_REFUSED, SURVIVAL_REFUSED];
 
 /// A session with every dataset the table tests use, each named after its file stem.
 fn table_session() -> TempSession {
