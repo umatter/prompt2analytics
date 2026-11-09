@@ -393,22 +393,28 @@ p2a script export analysis.json -o analysis.sh
 p2a script run analysis.sh
 ```
 
-**Command categories:**
-- `data` - Load, list, describe, preview, generate, export datasets
-- `reg` - OLS, clustered SEs, HAC, bootstrap, quantile, diagnostics
-- `panel` - Fixed effects, random effects, Hausman, HDFE, FEGLM, GMM
-- `causal` - IV/2SLS, DiD, staggered DiD, RD, matching, IPW, synthetic control, TMLE
-- `discrete` - Logit, probit, ordered, multinomial, count models (Poisson, NegBin, ZIP)
-- `ts` - ARIMA, VAR, GARCH, Holt-Winters, STL, Granger causality
-- `stats` - T-tests, ANOVA, non-parametric tests, ACF/PACF, normality tests
-- `spatial` - SAR, SEM, SAC, Moran's I
-- `survival` - Kaplan-Meier, Cox PH, AFT, log-rank test
-- `ml` - K-means, DBSCAN, hierarchical, PCA, t-SNE, Random Forest, SVM
-- `munge` - Filter, select, join, reshape, aggregate, clean
-- `viz` - Static (PNG) and interactive (HTML) charts
-- `script` - Export/run reproducible scripts
+**Commands** (`p2a <command> -h` for each; every option is in the generated reference at the end of
+[docs/guides/CLI_REFERENCE.md](docs/guides/CLI_REFERENCE.md#command-reference)):
 
-**Output formats:** `--format text` (default), `--format json`, `--format table`
+<!-- BEGIN GENERATED: p2a command list (cargo run -p p2a-cli --example generate_cli_reference; do not edit by hand) -->
+- `data`: Data loading and inspection. Subcommands: `load`, `list`, `describe`, `head`, `generate`, `save`
+- `munge`: Data munging (filter, join, reshape, clean, aggregate). Subcommands: `filter`, `select`, `drop`, `rename`, `sort`, `mutate`, `sample`, `join`, `concat`, `group-by`, `value-counts`, `pivot`, `melt`, `drop-na`, `fill-na`, `deduplicate`, `lag`, `lead`, `diff`, `standardize`, `bin`, `cast`, `one-hot`
+- `regression` (alias `reg`): Regression analysis. Subcommands: `ols`, `clustered`, `diagnostics`, `quantreg`, `loess`, `nls`, `gls`, `step`, `smooth-spline`, `supsmu`, `line`, `hac`
+- `panel`: Panel data estimation. Subcommands: `fe`, `re`, `hausman`, `hdfe`, `feglm`, `gmm`, `pvcm`, `pmg`, `gls`, `unit-root`
+- `causal`: Causal inference methods. Subcommands: `iv`, `did`, `synth`, `ipw`, `doubly-robust`, `mediation`, `rd`, `fuzzy-rd`, `staggered-did`, `tmle`, `gsynth`, `matching`, `stdreg`
+- `discrete`: Discrete choice models. Subcommands: `logit`, `probit`, `o-logit`, `o-probit`, `mlogit`, `negbin`, `poisson`, `zip`, `zinb`, `hurdle`, `clogit`, `mixed-logit`
+- `stats`: Statistical tests and descriptive statistics. Subcommands: `t-test-one`, `t-test-two`, `t-test-paired`, `chisq-gof`, `chisq-indep`, `fisher`, `shapiro`, `wilcoxon`, `bartlett`, `kruskal`, `fivenum`, `iqr`, `mad`, `acf`, `anova`, `anova-two`, `tukey`, `friedman`, `pacf`, `ccf`, `box-test`, `ks-test`, `pp-test`, `power-t`
+- `timeseries` (alias `ts`): Time series analysis. Subcommands: `arima`, `mstl`, `var`, `varma`, `vecm`, `irf`, `changepoint`, `garch`, `holt-winters`, `granger`, `ar`, `stl`, `decompose`, `struct-ts`, `causal-impact`, `spectrum`
+- `survival`: Survival analysis. Subcommands: `km`, `log-rank`, `cox`, `aft`, `competing-risks`
+- `spatial`: Spatial econometrics. Subcommands: `sar`, `sem`, `sac`, `moran`
+- `machine-learning` (alias `ml`): Machine learning. Subcommands: `kmeans`, `pca`, `tsne`, `random-forest`, `dbscan`, `hierarchical`, `svm`
+- `visualize` (alias `viz`): Visualization (output to file). Subcommands: `histogram`, `scatter`, `line`, `box`, `heatmap`, `coefplot`, `residuals`, `dendrogram`, `event-study`, `irf`, `scatter-interactive`, `histogram-interactive`, `line-interactive`
+- `script`: Script generation and session management. Subcommands: `export`, `history`, `run`
+- `chat`: Interactive chat with a p2a-mcp server (natural language analytics)
+- `smoke-test`: Run a smoke test to verify the CLI works correctly
+<!-- END GENERATED: p2a command list -->
+
+**Output formats:** `-F text` (default), `-F json`, `-F table` (printed like `text` in this version)
 
 ### MCP Server
 
