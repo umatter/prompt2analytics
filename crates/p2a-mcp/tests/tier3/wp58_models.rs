@@ -1291,3 +1291,386 @@ async fn test_validate_mcp_regression_nls() {
         }
     }
 }
+
+/// disc_mlogit_fishing (discrete_mlogit_asc.R): mlogit(mode ~ price + catch | income) with
+/// J - 1 constants, the model without constants (asc = false) and reflevel = "pier"; pinned to
+/// the tight MLE (*_tight).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_mlogit_asc() {
+    let case = Case::load("disc_mlogit_fishing");
+    let (session, server) = session_with("disc_mlogit_fishing"); // dataset "mlogit_fishing"
+    let base = json!({"dataset": "mlogit_fishing", "choice_id": "id", "alt_id": "alt",
+                      "choice": "chosen", "alt_specific": ["price", "catch"],
+                      "ind_specific": ["income"]});
+    let t = text(&call(&server, &session, "mlogit", base.clone()).await);
+    assert!(t.contains("Alternative-specific constants: yes"), "{t}");
+    for v in ["price", "catch"] {
+        assert_row(
+            v,
+            row(&t, v),
+            &[
+                case.named("asc_coef_tight", v),
+                case.named("asc_se_tight", v),
+            ],
+            Tol::printed(4),
+        );
+    }
+    for alt in ["boat", "charter", "pier"] {
+        let block = section(&t, &format!("{alt} vs beach"));
+        let k = format!("(Intercept):{alt}");
+        assert_row(
+            &k,
+            row(block, "(Intercept)"),
+            &[
+                case.named("asc_coef_tight", &k),
+                case.named("asc_se_tight", &k),
+            ],
+            Tol::printed(4),
+        );
+    }
+    assert_shows(
+        "logLik",
+        after(&t, "Log-Likelihood:"),
+        case.scalar("asc_loglik"),
+        Tol::printed(4),
+    );
+    let mut a = base.clone();
+    a["asc"] = json!(false); // fails before: unknown field `asc`
+    let t = text(&call(&server, &session, "mlogit", a).await);
+    assert!(t.contains("Alternative-specific constants: no"), "{t}");
+    for v in ["price", "catch"] {
+        assert_row(
+            v,
+            row(&t, v),
+            &[
+                case.named("noasc_coef_tight", v),
+                case.named("noasc_se_tight", v),
+            ],
+            Tol::printed(4),
+        );
+    }
+    assert_shows(
+        "logLik",
+        after(&t, "Log-Likelihood:"),
+        case.scalar("noasc_loglik"),
+        Tol::printed(4),
+    );
+    let mut a = base.clone();
+    a["reflevel"] = json!("pier");
+    let t = text(&call(&server, &session, "mlogit", a).await);
+    let k = "(Intercept):beach";
+    assert_row(
+        k,
+        row(section(&t, "beach vs pier"), "(Intercept)"),
+        &[
+            case.named("pier_coef_tight", k),
+            case.named("pier_se_tight", k),
+        ],
+        Tol::printed(4),
+    );
+    let mut a = base.clone();
+    a["reflevel"] = json!("pier");
+    a["reference"] = json!("boat");
+    let e = tool_error(&call(&server, &session, "mlogit", a).await);
+    assert!(e.contains("reflevel") && e.contains("reference"), "{e}");
+}
+
+/// disc_binary_glm: glm logit and probit, an aliased regressor (NA) and an outcome outside
+/// {0, 1}. Logit pins the MLE to 1e-13 (logit_*); probit the tight MLE (probit_*_tight).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_logit_probit_binary_glm() {
+    let case = Case::load("disc_binary_glm");
+    let (session, server) = session_with("disc_binary_glm"); // dataset "binary_glm"; y, d Int64
+    let x = ["x1", "x2", "d"];
+    for (tool, coef, se) in [
+        ("logit", "logit_coef", "logit_se"),
+        ("probit", "probit_coef_tight", "probit_se_tight"),
+    ] {
+        let t = text(
+            &call(
+                &server,
+                &session,
+                tool,
+                json!({"dataset": "binary_glm", "y": "y", "x": x}),
+            )
+            .await,
+        );
+        for v in ["(Intercept)", "x1", "x2", "d"] {
+            assert_row(
+                &format!("{tool} {v}"),
+                row(&t, v),
+                &[case.named(coef, v), case.named(se, v)],
+                Tol::printed(4),
+            );
+        }
+        assert!(t.contains("Converged: yes ("), "{t}");
+    }
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "logit",
+            json!({"dataset": "binary_glm", "y": "y", "x": ["x1", "x1b", "x2", "d"]}),
+        )
+        .await,
+    );
+    assert!(printed(row(&t, "x1b")).is_empty(), "{t}");
+    assert!(
+        t.contains("Coefficients not defined because of singularities: x1b"),
+        "{t}"
+    );
+    assert_row(
+        "x1",
+        row(&t, "x1"),
+        &[case.named("aliased_coef", "x1")],
+        Tol::printed(4),
+    );
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "logit",
+            json!({"dataset": "binary_glm", "y": "y012", "x": ["x1"]}),
+        )
+        .await,
+    );
+    assert!(e.contains("0/1"), "{e}");
+}
+
+/// disc_multinom_overlap: nnet::multinom on three overlapping categories (tight MLE);
+/// reference A (default) and B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_multinom_overlap() {
+    let case = Case::load("disc_multinom_overlap");
+    let (session, server) = session_with("disc_multinom_overlap"); // dataset "multinom_overlap"
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "multinom",
+            json!({"dataset": "multinom_overlap", "y": "y", "x": ["x1", "x2"]}),
+        )
+        .await,
+    );
+    for cat in ["B", "C"] {
+        let block = section(&t, &format!("--- {cat} vs A ---"));
+        for v in ["(Intercept)", "x1", "x2"] {
+            let k = format!("{cat}:{v}");
+            assert_row(
+                &k,
+                row(block, v),
+                &[case.named("coef_tight", &k), case.named("se_tight", &k)],
+                Tol::printed(4),
+            );
+        }
+    }
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "multinom",
+            json!({"dataset": "multinom_overlap", "y": "y", "x": ["x1", "x2"], "reference": "B"}),
+        )
+        .await,
+    );
+    let k = "A:x1";
+    assert_row(
+        k,
+        row(section(&t, "--- A vs B ---"), "x1"),
+        &[
+            case.named("refB_coef_tight", k),
+            case.named("refB_se_tight", k),
+        ],
+        Tol::printed(4),
+    );
+}
+
+/// disc_hurdle_zero: the binary part of pscl::hurdle is glm(I(y > 0) ~ x1 + x2, binomial).
+/// The count part is ECON-16 (Tier 4) and is not pinned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_hurdle_zero_part() {
+    let case = Case::load("disc_hurdle_zero");
+    let (session, server) = session_with("disc_hurdle_zero"); // dataset "zeroinfl"
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "hurdle_model",
+            json!({"dataset": "zeroinfl", "y": "y", "x": ["x1", "x2"]}),
+        )
+        .await,
+    );
+    let binary = section(&t, "Binary Part");
+    for v in ["(Intercept)", "x1", "x2"] {
+        assert_row(
+            v,
+            row(binary, v),
+            &[case.named("zero_coef", v), case.named("zero_se_tight", v)],
+            Tol::printed(4),
+        );
+    }
+}
+
+/// feglm_families (econ_panel_t3.R): fixest::feglm gaussian with id and time effects
+/// (coefficients only; its SEs and deviance are ECON-20, Tier 4). The family is parsed
+/// case-insensitively (before: "Gaussian" was "Unknown GLM family").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_feglm_gaussian() {
+    let case = Case::load("feglm_families");
+    let (session, server) = session_with("feglm_families"); // dataset "feglm_panel"
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "feglm",
+            json!({"dataset": "feglm_panel", "y": "y_gauss", "x": ["x", "x2"],
+                   "fe": ["id", "time"], "family": "Gaussian"}),
+        )
+        .await,
+    );
+    for v in ["x", "x2"] {
+        assert_row(
+            v,
+            row(&t, v),
+            &[case.named("gauss_coef", v)],
+            Tol::printed(4),
+        );
+    }
+}
+
+/// Option strings and boundary parameters of the discrete tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_discrete_options_and_boundaries() {
+    let (ml, zi, bg, fe) = (
+        Case::load("disc_mixed_logit"),
+        Case::load("disc_zeroinfl"),
+        Case::load("disc_binary_glm"),
+        Case::load("feglm_families"),
+    );
+    let (session, server) = session_with_datasets(vec![
+        ("mixed_logit", dataset_of(&ml)),
+        ("zeroinfl", dataset_of(&zi)),
+        ("binary_glm", dataset_of(&bg)),
+        ("feglm_panel", dataset_of(&fe)),
+    ]);
+    let mixed = json!({"dataset": "mixed_logit", "choice_id": "id", "alt_id": "alt",
+                       "choice": "choice", "variables": ["x", "w"], "random_vars": ["x"],
+                       "n_draws": 50});
+    let with = |b: &Value, k: &str, v: Value| {
+        let mut a = b.clone();
+        a[k] = v;
+        a
+    };
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "mixed_logit",
+            with(&mixed, "n_draws", json!(0)),
+        )
+        .await,
+    );
+    assert!(e.contains("n_draws"), "{e}");
+    // before: normal
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "mixed_logit",
+            with(&mixed, "distribution", json!("gamma")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("gamma") && e.contains("normal, lognormal, triangular, uniform, fixed"),
+        "{e}"
+    );
+    let r = call(
+        &server,
+        &session,
+        "mixed_logit",
+        with(&mixed, "distribution", json!("Normal")),
+    )
+    .await;
+    assert!(r.success, "{}", text(&r));
+    let ord = json!({"dataset": "binary_glm", "y": "y", "x": ["x1"]});
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "ordered_model",
+            with(&ord, "model_type", json!("cloglog")),
+        )
+        .await,
+    );
+    assert!(e.contains("cloglog") && e.contains("logit, probit"), "{e}");
+    let zip = json!({"dataset": "zeroinfl", "y": "y", "x": ["x1", "x2"]});
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "zeroinfl",
+            with(&zip, "dist", json!("geometric")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("geometric") && e.contains("poisson, negbin"),
+        "{e}"
+    );
+    // "NB" is a new alias (before: "Invalid dist"); y_nb is the column of the pinned ZINB fit
+    let nb = json!({"dataset": "zeroinfl", "y": "y_nb", "x": ["x1", "x2"], "dist": "NB"});
+    let r = call(&server, &session, "zeroinfl", nb).await;
+    assert!(r.success, "{}", text(&r));
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "hurdle_model",
+            with(&zip, "dist", json!("binomial")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("binomial") && e.contains("poisson, negbin"),
+        "{e}"
+    );
+    let fg = json!({"dataset": "feglm_panel", "y": "y_bin", "x": ["x"], "fe": ["id"]});
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "feglm",
+            with(&fg, "family", json!("gamma")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("gamma") && e.contains("logit, probit, poisson, gaussian"),
+        "{e}"
+    );
+}
+
+/// Pseudo-random mixed-logit draws follow the session seed (before: always 42).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_mixed_logit_uses_session_seed() {
+    let case = Case::load("disc_mixed_logit");
+    let (session, server) = session_with("disc_mixed_logit"); // dataset "mixed_logit"
+    let a = json!({"dataset": "mixed_logit", "choice_id": "id", "alt_id": "alt",
+                   "choice": "choice", "variables": ["x", "w"], "random_vars": ["x"],
+                   "n_draws": 20, "halton": false});
+    let _ = &case;
+    let mut runs = Vec::new();
+    for seed in [5, 5, 6] {
+        assert!(
+            call(&server, &session, "set_seed", json!({"seed": seed}))
+                .await
+                .success
+        );
+        runs.push(text(
+            &call(&server, &session, "mixed_logit", a.clone()).await,
+        ));
+    }
+    assert_eq!(runs[0], runs[1]);
+    assert_ne!(runs[0], runs[2]);
+}

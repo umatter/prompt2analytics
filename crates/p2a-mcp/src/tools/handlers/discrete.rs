@@ -16,23 +16,83 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::regression::{append_unshown_notes, parse_choice};
 use crate::tools::requests::discrete::{
     FeglmRequest, HurdleModelRequest, LogitRequest, MixedLogitRequest, MlogitRequest,
     MultinomRequest, NegBinRequest, OrderedRequest, ProbitRequest, ZeroInflRequest,
 };
 
+use p2a_core::econometrics::discrete::conditional_logit::{MlogitConfig, run_mlogit_with};
 use p2a_core::econometrics::{OrderedConfig, run_ordered_model_with};
+use p2a_core::options::Choices;
 use p2a_core::{
     FeglmConfig, GlmFamily, HurdleType, MixedLogitConfig, OrderedModelType, RandomDistribution,
-    run_feglm, run_gmnl, run_hurdle, run_logit, run_mlogit, run_multinom, run_negbin, run_probit,
-    run_zinb, run_zip,
+    run_feglm, run_gmnl, run_hurdle, run_logit, run_multinom, run_negbin, run_probit, run_zinb,
+    run_zip,
+};
+
+const MIXED_DISTRIBUTION: Choices<RandomDistribution> = Choices {
+    option: "distribution",
+    values: &[
+        (&["normal", "n", "gaussian"], RandomDistribution::Normal),
+        (
+            &["lognormal", "log_normal", "ln"],
+            RandomDistribution::LogNormal,
+        ),
+        (&["triangular", "t"], RandomDistribution::Triangular),
+        (&["uniform", "u"], RandomDistribution::Uniform),
+        (&["fixed", "none"], RandomDistribution::Fixed),
+    ],
+};
+
+/// The link of ordered_model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrderedLink {
+    Logit,
+    Probit,
+}
+
+const ORDERED_MODEL: Choices<OrderedLink> = Choices {
+    option: "model_type",
+    values: &[
+        (&["logit", "logistic", "polr"], OrderedLink::Logit),
+        (&["probit"], OrderedLink::Probit),
+    ],
+};
+
+/// The count distribution of zeroinfl and hurdle_model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountDist {
+    Poisson,
+    NegBin,
+}
+
+const COUNT_DIST: Choices<CountDist> = Choices {
+    option: "dist",
+    values: &[
+        (&["poisson"], CountDist::Poisson),
+        (
+            &["negbin", "negbinom", "negative_binomial", "nb"],
+            CountDist::NegBin,
+        ),
+    ],
+};
+
+const FEGLM_FAMILY: Choices<GlmFamily> = Choices {
+    option: "family",
+    values: &[
+        (&["logit", "binomial", "logistic"], GlmFamily::Logit),
+        (&["probit"], GlmFamily::Probit),
+        (&["poisson"], GlmFamily::Poisson),
+        (&["gaussian", "normal", "linear"], GlmFamily::Gaussian),
+    ],
 };
 
 #[tool_router(router = discrete_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run Logit (logistic) regression for binary outcomes.
     #[tool(
-        description = "Run Logit (logistic) regression for binary outcomes by maximum likelihood (Newton-Raphson), as R's glm(family = binomial). The dependent variable must be numeric 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported."
+        description = "Logistic regression for a 0/1 outcome, as R glm(family = binomial(link = 'logit')): IRLS as glm.fit (epsilon 1e-10, maxit 100: p2a's defaults; R's glm.control uses 1e-8 and 25). Aliased regressors get NaN coefficients with R's warning; fitted probabilities numerically 0 or 1 (separation) are warned. Returns coefficients, SEs, z, p, marginal effects, log-likelihood, AIC/BIC and convergence. The outcome must be coded 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported."
     )]
     pub async fn logit(
         &self,
@@ -54,14 +114,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Probit regression.
     #[tool(
-        description = "Run Probit regression for binary outcomes by maximum likelihood (Newton-Raphson), as R's glm(family = binomial(link = \"probit\")). The dependent variable must be numeric 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported."
+        description = "Probit regression for a 0/1 outcome, as R glm(family = binomial(link = 'probit')): IRLS as glm.fit (epsilon 1e-10, maxit 100: p2a's defaults; R's glm.control uses 1e-8 and 25). Aliased regressors get NaN coefficients with R's warning; fitted probabilities numerically 0 or 1 (separation) are warned. Returns coefficients, SEs, z, p, marginal effects, log-likelihood, AIC/BIC and convergence. The outcome must be coded 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported."
     )]
     pub async fn probit(
         &self,
@@ -83,14 +143,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run multinomial logit regression for unordered categorical outcomes.
     #[tool(
-        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories (MLE, Newton-Raphson), as R's nnet::multinom(). Categories are ordered as R's factor() (numbers numerically, text by byte, as R under LC_COLLATE=C: uppercase before lowercase); the first is the reference unless 'reference' is given. Rows with a missing outcome or regressor are dropped and reported."
+        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories (MLE, Newton-Raphson), as R's nnet::multinom(). Categories are ordered as R's factor() (numbers numerically, text by byte, as R under LC_COLLATE=C: uppercase before lowercase); the first is the reference unless 'reference' is given. Rows with a missing outcome or regressor are dropped and reported. Aliased (linearly dependent) regressors are an error."
     )]
     pub async fn multinom(
         &self,
@@ -113,14 +173,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run McFadden's conditional logit (mlogit) for discrete choice analysis.
     #[tool(
-        description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit(). Missing values in the id, alternative, choice or attribute columns are refused, as in R's mlogit."
+        description = "McFadden's conditional logit as R mlogit::mlogit(choice ~ alt_specific | ind_specific): J - 1 alternative-specific constants by default (asc = false fits mlogit(... | 0 + ind_specific), the survival::clogit model); reflevel (or reference) names the base alternative, default the first in sorted order. Data in long format, one row per choice situation and alternative. Missing values in the id, alternative, choice or attribute columns are refused, as in R's mlogit."
     )]
     pub async fn mlogit(
         &self,
@@ -134,16 +194,28 @@ impl AnalyticsServer {
             request.alt_specific.iter().map(|s| s.as_str()).collect();
         let ind_specific_refs: Vec<&str> =
             request.ind_specific.iter().map(|s| s.as_str()).collect();
-        let reference = request.reference.as_deref();
+        let reflevel = match (&request.reflevel, &request.reference) {
+            (Some(a), Some(b)) if a != b => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "reflevel ('{}') and reference ('{}') name different alternatives",
+                    crate::tools::limits::echo(a),
+                    crate::tools::limits::echo(b)
+                ))]));
+            }
+            (a, b) => a.clone().or_else(|| b.clone()),
+        };
+        let mut config = MlogitConfig::default();
+        config.asc = request.asc.unwrap_or(true);
+        config.reflevel = reflevel;
 
-        let result = match run_mlogit(
+        let result = match run_mlogit_with(
             dataset,
             &request.choice_id,
             &request.alt_id,
             &request.choice,
             &alt_specific_refs,
             &ind_specific_refs,
-            reference,
+            &config,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -154,14 +226,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run mixed logit (random parameters logit) for discrete choice with preference heterogeneity.
     #[tool(
-        description = "Run mixed logit (random parameters logit) for discrete choice with heterogeneous preferences: coefficients vary across decision makers as normal, lognormal, triangular or uniform random parameters. Maximum simulated likelihood with mlogit's draw scheme (Halton sequences, one segment per decision maker, the first 100 points dropped), BFGS with the analytic gradient from the conditional-logit estimates, standard errors from the Hessian. Set individual_id when the same person makes several choices (mlogit panel = TRUE). Missing values are refused. Equivalent to R's mlogit::mlogit(rpar = ..., halton = NA)."
+        description = "Run mixed logit (random parameters logit) for discrete choice with heterogeneous preferences: coefficients vary across decision makers as normal, lognormal, triangular or uniform random parameters. Maximum simulated likelihood with mlogit's draw scheme (Halton sequences, one segment per decision maker, the first 100 points dropped), BFGS with the analytic gradient from the conditional-logit estimates, standard errors from the Hessian. Set individual_id when the same person makes several choices (mlogit panel = TRUE). Missing values are refused. Equivalent to R's mlogit::mlogit(rpar = ..., halton = NA). distribution 'normal' (default), 'lognormal', 'triangular', 'uniform' or 'fixed'. Pseudo-random draws (halton = false) are seeded by the session seed, else 42."
     )]
     pub async fn mixed_logit(
         &self,
@@ -174,12 +246,13 @@ impl AnalyticsServer {
         let var_refs: Vec<&str> = request.variables.iter().map(|s| s.as_str()).collect();
 
         // Parse distribution
-        let dist = match request.distribution.as_deref() {
-            Some("lognormal") | Some("log-normal") => RandomDistribution::LogNormal,
-            Some("triangular") => RandomDistribution::Triangular,
-            Some("uniform") => RandomDistribution::Uniform,
-            Some("fixed") => RandomDistribution::Fixed,
-            _ => RandomDistribution::Normal,
+        let dist = match parse_choice(
+            &MIXED_DISTRIBUTION,
+            request.distribution.as_deref(),
+            RandomDistribution::Normal,
+        ) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         // Convert random_vars to refs
@@ -189,12 +262,12 @@ impl AnalyticsServer {
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         // Build config
-        let config = MixedLogitConfig {
-            n_draws: request.n_draws.unwrap_or(500),
-            halton: request.halton.unwrap_or(true),
-            individual_col: request.individual_id.clone(),
-            ..Default::default()
-        };
+        let mut config = MixedLogitConfig::default();
+        config.n_draws = request.n_draws.unwrap_or(500);
+        config.halton = request.halton.unwrap_or(true);
+        config.individual_col = request.individual_id.clone();
+        // pseudo-random draws (halton = false) follow the session seed, else 42
+        config.seed = Some(self.global_seed.read().await.unwrap_or(42));
 
         let result = match run_gmnl(
             dataset,
@@ -222,7 +295,7 @@ impl AnalyticsServer {
 
     /// Run ordered logit/probit regression for ordinal outcomes.
     #[tool(
-        description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes, as R's MASS::polr(). Numeric outcomes are ordered numerically; a text outcome needs 'levels' (its categories, lowest first). Rows with missing values are dropped and reported. Estimates threshold (cut-point) parameters."
+        description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes, as R's MASS::polr(). Numeric outcomes are ordered numerically; a text outcome needs 'levels' (its categories, lowest first). Rows with missing values are dropped and reported. Estimates threshold (cut-point) parameters. model_type 'logit' (default) or 'probit'."
     )]
     pub async fn ordered_model(
         &self,
@@ -233,16 +306,14 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-        let model_type = request.model_type.as_deref().unwrap_or("logit");
-
-        let link = match model_type.to_lowercase().as_str() {
-            "logit" => OrderedModelType::Logit,
-            "probit" => OrderedModelType::Probit,
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Invalid model_type. Use 'logit' or 'probit'.".to_string(),
-                )]));
-            }
+        let (link, model_type) = match parse_choice(
+            &ORDERED_MODEL,
+            request.model_type.as_deref(),
+            OrderedLink::Logit,
+        ) {
+            Ok(OrderedLink::Logit) => (OrderedModelType::Logit, "logit"),
+            Ok(OrderedLink::Probit) => (OrderedModelType::Probit, "probit"),
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
         let config = OrderedConfig {
             link,
@@ -262,7 +333,7 @@ impl AnalyticsServer {
 
     /// Run negative binomial regression for count data with overdispersion.
     #[tool(
-        description = "Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb()."
+        description = "Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb(). The outcome must be non-negative counts."
     )]
     pub async fn negbin(
         &self,
@@ -284,14 +355,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run zero-inflated regression for count data with excess zeros.
     #[tool(
-        description = "Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl()."
+        description = "Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl(). The outcome must be non-negative counts. dist 'poisson' (default) or 'negbin'."
     )]
     pub async fn zeroinfl(
         &self,
@@ -307,20 +378,23 @@ impl AnalyticsServer {
             .as_ref()
             .map(|zz| zz.iter().map(|s| s.as_str()).collect());
         let z_slice: Option<&[&str]> = z_refs.as_deref();
-        let dist = request.dist.as_deref().unwrap_or("poisson");
-
-        let result = match dist.to_lowercase().as_str() {
-            "poisson" => run_zip(dataset, &request.y, &x_refs, z_slice),
-            "negbin" | "negbinom" => run_zinb(dataset, &request.y, &x_refs, z_slice),
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string(),
-                )]));
-            }
-        };
+        let (result, dist) =
+            match parse_choice(&COUNT_DIST, request.dist.as_deref(), CountDist::Poisson) {
+                Ok(CountDist::Poisson) => {
+                    (run_zip(dataset, &request.y, &x_refs, z_slice), "poisson")
+                }
+                Ok(CountDist::NegBin) => {
+                    (run_zinb(dataset, &request.y, &x_refs, z_slice), "negbin")
+                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         match result {
-            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Ok(r) => {
+                let mut text = r.to_string();
+                append_unshown_notes(&mut text, &r);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Zero-inflated {} estimation failed: {}",
                 dist, e
@@ -330,7 +404,7 @@ impl AnalyticsServer {
 
     /// Run hurdle model for count data with excess zeros.
     #[tool(
-        description = "Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle()."
+        description = "Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle(). The outcome must be non-negative counts. dist 'poisson' (default) or 'negbin'."
     )]
     pub async fn hurdle_model(
         &self,
@@ -346,20 +420,19 @@ impl AnalyticsServer {
             .as_ref()
             .map(|zz| zz.iter().map(|s| s.as_str()).collect());
         let z_slice: Option<&[&str]> = z_refs.as_deref();
-        let dist = request.dist.as_deref().unwrap_or("poisson");
-
-        let model_type = match dist.to_lowercase().as_str() {
-            "poisson" => HurdleType::Poisson,
-            "negbin" | "negbinom" => HurdleType::NegBin,
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string(),
-                )]));
-            }
-        };
+        let (model_type, dist) =
+            match parse_choice(&COUNT_DIST, request.dist.as_deref(), CountDist::Poisson) {
+                Ok(CountDist::Poisson) => (HurdleType::Poisson, "poisson"),
+                Ok(CountDist::NegBin) => (HurdleType::NegBin, "negbin"),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         match run_hurdle(dataset, &request.y, &x_refs, z_slice, model_type) {
-            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Ok(r) => {
+                let mut text = r.to_string();
+                append_unshown_notes(&mut text, &r);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Hurdle {} estimation failed: {}",
                 dist, e
@@ -369,7 +442,7 @@ impl AnalyticsServer {
 
     /// Run Generalized Linear Model with High-Dimensional Fixed Effects (FEGLM).
     #[tool(
-        description = "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm()."
+        description = "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm(). family 'logit' (default), 'probit', 'poisson' or 'gaussian'; tolerance is the relative deviance change |dev - dev_old| / (|dev| + 0.1), as fixest."
     )]
     pub async fn feglm(
         &self,
@@ -383,17 +456,10 @@ impl AnalyticsServer {
         let fe_refs: Vec<&str> = request.fe.iter().map(|s| s.as_str()).collect();
 
         // Parse family
-        let family = match request.family.as_deref() {
-            Some("logit") | None => GlmFamily::Logit,
-            Some("probit") => GlmFamily::Probit,
-            Some("poisson") => GlmFamily::Poisson,
-            Some("gaussian") => GlmFamily::Gaussian,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown GLM family '{}'. Use 'logit', 'probit', 'poisson', or 'gaussian'.",
-                    other
-                ))]));
-            }
+        let family = match parse_choice(&FEGLM_FAMILY, request.family.as_deref(), GlmFamily::Logit)
+        {
+            Ok(f) => f,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         // Build config from optional parameters
@@ -413,14 +479,22 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_discrete_option_tables_validate() {
+        assert_eq!(super::MIXED_DISTRIBUTION.validate(), Ok(()));
+        assert_eq!(super::ORDERED_MODEL.validate(), Ok(()));
+        assert_eq!(super::COUNT_DIST.validate(), Ok(()));
+        assert_eq!(super::FEGLM_FAMILY.validate(), Ok(()));
+    }
+
     use p2a_core::data::{DataLoader, Dataset};
     use p2a_core::econometrics::{OrderedConfig, OrderedModelType, run_ordered_model_with};
     use p2a_validation::{Case, Check, Tol};

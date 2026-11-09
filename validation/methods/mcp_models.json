@@ -73,6 +73,53 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_discrete_surface",
+      "name": "MCP discrete-choice tools: mlogit constants and reflevel, glm logit/probit, multinom, hurdle binary part, FEGLM gaussian, option parsing, seeds",
+      "category": "mcp",
+      "reference": "mlogit::mlogit (tight MLE), stats::glm, nnet::multinom (tight MLE), pscl::hurdle binary part, fixest::feglm",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "disc_mlogit_fishing",
+        "disc_binary_glm",
+        "disc_multinom_overlap",
+        "disc_hurdle_zero",
+        "feglm_families",
+        "disc_mixed_logit",
+        "disc_zeroinfl"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_mlogit_asc",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_logit_probit_binary_glm",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_multinom_overlap",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_hurdle_zero_part",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_feglm_gaussian",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_discrete_options_and_boundaries",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_mixed_logit_uses_session_seed"
+      ],
+      "quantities": [
+        "mlogit coefficients and SEs with and without ASCs and with reflevel (asc_*_tight, noasc_*_tight, pier_*_tight), log-likelihood",
+        "logit coefficients and SEs (logit_coef, logit_se), probit coefficients and SEs (probit_coef_tight, probit_se_tight), aliased row, outcome domain, convergence line",
+        "multinom coefficients and SEs (two references, tight MLE)",
+        "hurdle binary-part coefficients (zero_coef) and SEs (zero_se_tight)",
+        "FEGLM gaussian coefficients",
+        "option errors, n_draws = 0, seeds"
+      ],
+      "tolerance": "text at the printed precision (4 decimals, Tol::printed)",
+      "deviations": [
+        {
+          "finding": "ECON-16",
+          "quantity": "hurdle count part",
+          "note": "not pinned (Tier 4)"
+        },
+        {
+          "finding": "ECON-20",
+          "quantity": "FEGLM SEs, deviance",
+          "note": "not pinned (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
