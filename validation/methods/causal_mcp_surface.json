@@ -8,11 +8,13 @@
       "reference": "did::att_gt / DRDID (written out); etwfe::etwfe + emfx",
       "doc": "validation/mcp/causal_surface.md",
       "cases": [
-        "did_cs_covariates"
+        "did_cs_covariates",
+        "etwfe_staggered"
       ],
       "tests": [
         "p2a-mcp::tier3::wp55_causal::test_mcp_causal_option_aliases_and_unknown",
-        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did"
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_etwfe"
       ],
       "quantities": [
         "simple ATT and SE (DR, not-yet, anticipation 1)",

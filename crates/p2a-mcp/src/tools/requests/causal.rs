@@ -453,6 +453,30 @@ pub struct EtwfeRequest {
         description = "Control group, as etwfe `cgroup`: 'notyet' (default; 'not_yet_treated') or 'never' ('never_treated'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub cgroup: Option<String>,
+
+    /// Standard errors
+    #[schemars(
+        description = "Standard errors: 'cluster' (default; unit-clustered CR1 with fixest's small-sample factor; 'cr1') or 'iid' ('classical'). etwfe and fixest default to iid SEs, which vcov = 'iid' gives. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub vcov: Option<String>,
+
+    /// One emfx table instead of the whole result
+    #[schemars(
+        description = "Report one aggregation, as etwfe::emfx(type): 'simple' (the overall ATT), 'event' (by periods since treatment; 'dynamic'), 'group' (by cohort) or 'calendar' (by period). Default: the whole result with every table. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub aggregation: Option<String>,
+
+    /// Reference period
+    #[schemars(
+        description = "Reference period (etwfe `tref`): a period of time_col; default the first period."
+    )]
+    pub tref: Option<i64>,
+
+    /// Reference cohort
+    #[schemars(
+        description = "Reference cohort (etwfe `gref`): a value of first_treat; default the never-treated units, or the last cohort with cgroup 'notyet' when none exist."
+    )]
+    pub gref: Option<i64>,
 }
 
 /// Request for Inverse Probability Weighting (IPW) treatment effect estimation.

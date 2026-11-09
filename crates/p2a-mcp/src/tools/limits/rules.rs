@@ -1094,8 +1094,6 @@ pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 /// (tool, field) of T3 design 5.1 that wave-3 packages add; their rules above exist from wave 1.
 #[cfg(test)]
 pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
-    ("etwfe", "tref"),
-    ("etwfe", "gref"),
     ("ltmle", "dynamic_columns"),
     ("gsynth", "r_max"),
     ("gsynth", "bootstrap_reps"),

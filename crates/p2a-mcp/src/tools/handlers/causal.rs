@@ -620,7 +620,7 @@ impl AnalyticsServer {
 
     /// Run Extended Two-Way Fixed Effects (ETWFE) estimation.
     #[tool(
-        description = "Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time."
+        description = "Estimate staggered-adoption treatment effects by extended two-way fixed effects as R's etwfe::etwfe(ivar = unit) and etwfe::emfx: the saturated cohort x period design with unit and period fixed effects (unbalanced panels exact), not-yet-treated (default) or never-treated controls, time-invariant controls demeaned within cohort and interacted with the cells and the periods, unit-clustered SEs (default 'cluster': CR1 with fixest's small-sample factor; etwfe and fixest default to iid SEs, which vcov = 'iid' gives), and the emfx aggregations simple, event, group and calendar with delta-method SEs. The treatment column must equal 1(period >= first_treat > 0)."
     )]
     pub async fn etwfe(
         &self,
@@ -630,15 +630,24 @@ impl AnalyticsServer {
             request.cgroup.as_deref(),
             EtwfeControlGroup::NotYet
         ));
+        use p2a_core::econometrics::etwfe::{EtwfeAggregation, EtwfeVcov};
+        let vcov = tool_try!(parse_option(request.vcov.as_deref(), EtwfeVcov::Cluster));
+        let aggregation: Option<EtwfeAggregation> = match request.aggregation.as_deref() {
+            None => None,
+            Some(s) => Some(tool_try!(
+                s.parse::<EtwfeAggregation>().map_err(option_message)
+            )),
+        };
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Build config
         let mut config = EtwfeConfig::default();
-        config.tref = None;
-        config.gref = None;
+        config.tref = request.tref;
+        config.gref = request.gref;
         config.cgroup = cgroup;
+        config.vcov = vcov;
         config.anticipation = 0;
 
         // Parse controls
@@ -666,9 +675,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let text = match aggregation {
+            Some(which) => {
+                let mut s = result.aggregation_text(which);
+                crate::tools::common::append_notes(&mut s, None, &result.warnings);
+                s
+            }
+            None => result.to_string(),
+        };
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run IPW treatment effect estimation.

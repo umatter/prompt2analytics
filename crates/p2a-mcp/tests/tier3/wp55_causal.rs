@@ -81,6 +81,16 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["cgroup", "notyet", "never"],
         ),
         (
+            "etwfe",
+            with(&et, &[("vcov", json!("hc3"))]),
+            vec!["vcov", "cluster", "iid"],
+        ),
+        (
+            "etwfe",
+            with(&et, &[("aggregation", json!("cohort_period"))]),
+            vec!["aggregation", "simple", "calendar"],
+        ),
+        (
             "iv_mte",
             with(&mte, &[("propensity_model", json!("tobit"))]),
             vec!["probit", "logit"],
@@ -413,4 +423,103 @@ async fn test_validate_mcp_staggered_did() {
         e.contains("anticipation") && e.contains("smaller than the number of periods (8)"),
         "{e}"
     );
+}
+
+/// etwfe::etwfe(ivar = id, cgroup, vcov) + emfx (the etwfe_staggered case) through the MCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_etwfe() {
+    use p2a_core::econometrics::etwfe::{
+        ControlGroup, EtwfeAggregation, EtwfeConfig, EtwfeVcov, run_etwfe,
+    };
+    let case = Case::load("etwfe_staggered");
+    let (session, server) = session_with("etwfe_staggered");
+    let ds = case_ds(&case);
+    let base = json!({"dataset": "etwfe_panel", "outcome": "y", "unit_col": "id", "time_col": "year",
+                      "treatment": "treat", "first_treat": "first_treat"});
+    let lib = |cg: ControlGroup, v: EtwfeVcov| {
+        let mut c = EtwfeConfig::default();
+        c.cgroup = cg;
+        c.vcov = v;
+        run_etwfe(
+            &ds,
+            "y",
+            "id",
+            "year",
+            "treat",
+            "first_treat",
+            None,
+            Some(c),
+        )
+        .unwrap()
+    };
+    let dflt = lib(ControlGroup::NotYet, EtwfeVcov::Cluster);
+    assert_eq!(
+        ok(&server, &session, "etwfe", base.clone()).await,
+        dflt.to_string()
+    );
+    let never = lib(ControlGroup::Never, EtwfeVcov::Cluster);
+    let ev = never.aggregation(EtwfeAggregation::Event);
+    let t = ok(
+        &server,
+        &session,
+        "etwfe",
+        with(
+            &base,
+            &[
+                ("cgroup", json!("never_treated")),
+                ("aggregation", json!("event")),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        t.starts_with(&never.aggregation_text(EtwfeAggregation::Event)),
+        "{t}"
+    );
+    let iid = lib(ControlGroup::NotYet, EtwfeVcov::Iid);
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "etwfe",
+            with(&base, &[("vcov", json!("IID"))])
+        )
+        .await,
+        iid.to_string()
+    );
+    Check::new(&case)
+        .vector(
+            "notyet_emfx_simple_estimate",
+            &[dflt.overall.estimate],
+            Tol::coef(960),
+        ) // 1.563937356319881
+        .vector(
+            "notyet_delta_simple_se",
+            &[dflt.overall.std_error],
+            Tol::se(960),
+        ) // 0.1493020807661981
+        .vector(
+            "never_emfx_event_estimate",
+            &ev.iter().map(|a| a.estimate).collect::<Vec<_>>(),
+            Tol::coef(960),
+        )
+        .vector(
+            "never_delta_event_se",
+            &ev.iter().map(|a| a.std_error).collect::<Vec<_>>(),
+            Tol::se(960),
+        )
+        .vector(
+            "notyet_iid_delta_simple_se",
+            &[iid.overall.std_error],
+            Tol::se(960),
+        ) // 0.1266790513180721
+        .finish();
+    let e = refused(
+        &server,
+        &session,
+        "etwfe",
+        with(&base, &[("tref", json!(42))]),
+    )
+    .await;
+    assert!(e.contains("tref 42 is not a period of 'year'"), "{e}");
 }
