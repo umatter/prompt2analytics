@@ -11,7 +11,9 @@
   design)
 - **Durbin-Watson**: first-order autocorrelation, Σ(ûₜ − ûₜ₋₁)²/Σûₜ²
 - **VIF**: variance inflation factor of each regressor
-- **Condition number**: of the unscaled design matrix X (intercept column included)
+- **Condition number**: of the unscaled design matrix X (intercept column included), and of X
+  with every column, the intercept included, scaled to unit length (Belsley, Kuh & Welsch 1980);
+  the multicollinearity warning (above 30) and the text interpretation read the scaled number
 
 The Breusch-Godfrey, RESET, Harvey-Collier and Wald tests have their own pages
 ([bgtest.md](bgtest.md), [harvtest.md](harvtest.md)).
@@ -143,9 +145,11 @@ against a per-prefix least-squares refit within 1e-10.
 
 ## Known Differences
 
-1. **Condition number**: p2a reports the condition number of the unscaled X, which equals
-   `kappa(model.matrix(m), exact = TRUE)`; the Belsley interpretation labels attached to it
-   are REG-34 (Tier 4).
+1. **Condition number**: the unscaled number equals `kappa(model.matrix(m), exact = TRUE)`
+   (pinned above). The scaled number, on which Belsley's thresholds are judged, is
+   2.872962 on Grunfeld, as `kappa(sweep(X, 2, sqrt(colSums(X^2)), "/"), exact = TRUE)` gives
+   (quoted in `test_scaled_condition_number_ignores_units`, not R-pinned); no warning is
+   printed there. The Durbin-Watson wording (REG-34, Tier 4) is unchanged.
 2. **VIF of the intercept**: p2a lists an `(Intercept)` row with VIF NaN; `car::vif` has
    no such row, and the test compares the regressors only (T1-WP05 drops the row from the
    text output).
