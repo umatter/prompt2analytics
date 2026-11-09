@@ -12,6 +12,9 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
   bfill/nocb, most_frequent); the constant comes from `value`; unknown strategies are errors.
 - Tests: `test_validate_mcp_fill_na_mode` (exact); behaviour tests `test_mcp_fill_constant_keeps_case`,
   `test_mcp_fill_unknown_strategy_is_error`.
+- Cleaning sessions store their result only through `output_dataset` (`cleaning_session_apply`,
+  `cleaning_rollback`); no R reference (bookkeeping). Behaviour tests
+  `test_mcp_cleaning_session_output_dataset_is_stored`, `test_mcp_cleaning_rollback_output_dataset`.
 
 ## Value counts (`munge_value_counts`)
 - Reference: `dplyr::count(d, g, sort = TRUE)`, `n / sum(n)`; case `data_munging_value_counts`: values 2, 7,
@@ -32,8 +35,9 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
 - NaN cells are missing (R's `is.na`); Inf is a value (mean Inf, sd NaN), from Rust fixtures because the
   harness cannot write NaN or Inf.
 - Tests and tolerances: `test_validate_mcp_describe_dataset_summaries` (counts, min, max and level tables
-  exact; mean and quartiles 1e-6, sd 1e-5 relative, the validation/README.md tolerances for n < 100), `test_validate_mcp_describe_dataset_nan_inf`,
-  `test_validate_mcp_describe_dataset_statistics` (the MCP text, 7 significant digits).
+  exact; mean and quartiles 1e-6, sd 1e-5 relative, the validation/README.md tolerances for n < 100),
+  `test_validate_mcp_describe_dataset_nan_inf`, `test_validate_mcp_describe_dataset_statistics` (the MCP
+  text, 7 significant digits).
 
 ## viz_dendrogram
 - Reference: `hclust(dist(x))` (complete); case `viz_dendrogram_hclust`: merge rows (-6, -7), (-1, -2),
