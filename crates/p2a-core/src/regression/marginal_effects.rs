@@ -43,7 +43,7 @@
 //!
 //! where G_j is the gradient of AME_j with respect to beta.
 //!
-//! For Logit: G_j[k] = (1/n) * sum_i (d/dbeta_k)[beta_j * lambda(X_i'beta)]
+//! For Logit: G_j\[k\] = (1/n) * sum_i (d/dbeta_k)\[beta_j * lambda(X_i'beta)\]
 //!           = (1/n) * sum_i [I(j=k) * lambda(z_i) + beta_j * lambda'(z_i) * x_ik]
 //!
 //! where lambda'(z) = lambda(z) * (1 - 2*Lambda(z))
@@ -59,11 +59,11 @@
 //! - Greene, W.H. (2018). *Econometric Analysis* (8th ed.). Pearson. Chapter 14.
 //!
 //! - Leeper, T.J. (2021). Margins: Marginal effects for model objects. R package.
-//!   https://cran.r-project.org/package=margins
+//!   <https://cran.r-project.org/package=margins>
 //!
 //! - Arel-Bundock, V. (2023). marginaleffects: Predictions, Comparisons, Slopes,
 //!   Marginal Means, and Hypothesis Tests. R package.
-//!   https://vincentarelbundock.github.io/marginaleffects/
+//!   <https://vincentarelbundock.github.io/marginaleffects/>
 //!
 //! R equivalent: `marginaleffects::avg_slopes()`, `margins::margins()`
 
@@ -76,10 +76,12 @@ use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::econometrics::{DiscreteModelType, DiscreteResult, run_logit, run_probit};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
 use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{
-    SignificanceLevel, logistic_cdf, logistic_pdf, normal_cdf, normal_pdf,
+    SignificanceLevel, logistic_cdf, logistic_pdf, normal_cdf, normal_p_value_two_sided,
+    normal_pdf, z_critical,
 };
 
 /// Type of model for marginal effects computation.
@@ -149,6 +151,33 @@ impl fmt::Display for MarginalEffect {
     }
 }
 
+impl MarginalEffect {
+    /// The row of a regressor whose effect is not defined (aliased): every number NaN.
+    fn undefined(variable: &str) -> Self {
+        MarginalEffect {
+            variable: variable.to_string(),
+            estimate: f64::NAN,
+            std_error: f64::NAN,
+            z_value: f64::NAN,
+            p_value: f64::NAN,
+            ci_lower: f64::NAN,
+            ci_upper: f64::NAN,
+            dy_dx: f64::NAN,
+            significance: SignificanceLevel::from_p_value(f64::NAN),
+        }
+    }
+}
+
+/// "Marginal effects not defined for aliased regressors: x3", or `None` for none.
+fn aliased_warning(names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| {
+        format!(
+            "Marginal effects not defined for aliased regressors: {}",
+            names.join(", ")
+        )
+    })
+}
+
 /// Result from marginal effects computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarginalEffectsResult {
@@ -168,6 +197,15 @@ pub struct MarginalEffectsResult {
     pub variables: Vec<String>,
     /// Whether intercept was included
     pub has_intercept: bool,
+    /// Notes on the computation (aliased regressors whose effects are not defined)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for MarginalEffectsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for MarginalEffectsResult {
@@ -201,6 +239,7 @@ impl fmt::Display for MarginalEffectsResult {
 
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 + 0.1")?;
+        write!(f, "{}", notes_text(self))?;
 
         Ok(())
     }
@@ -284,6 +323,12 @@ pub fn marginal_effects_ols(ols_result: &OlsResult) -> EconResult<MarginalEffect
 
     // For OLS, MEM = AME (constant marginal effects)
     let at_means = Some(average_marginal.clone());
+    let aliased: Vec<String> = ols_result
+        .coefficients
+        .iter()
+        .filter(|c| !c.estimate.is_finite())
+        .map(|c| c.name.clone())
+        .collect();
 
     Ok(MarginalEffectsResult {
         average_marginal,
@@ -293,6 +338,7 @@ pub fn marginal_effects_ols(ols_result: &OlsResult) -> EconResult<MarginalEffect
         n_obs,
         variables,
         has_intercept,
+        warnings: aliased_warning(&aliased).into_iter().collect(),
     })
 }
 
@@ -349,10 +395,29 @@ pub fn marginal_effects_discrete(
         });
     }
     let dm = cols.matrix(x_cols, true)?;
-    let x = &dm.data;
-    let k = x.ncols();
+    let k_all = dm.data.ncols();
+    if discrete_result.coefficients.len() != k_all {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "marginal effects: the model has {} coefficients but the design has {k_all} \
+                 columns; pass the regressors the model was fitted with",
+                discrete_result.coefficients.len()
+            ),
+        });
+    }
+    // The identified columns: an aliased regressor (NaN coefficient, R's NA) has no effect,
+    // as marginaleffects drops NA coefficients; its rows are NaN and a warning names it.
+    let id: Vec<usize> = (0..k_all)
+        .filter(|&j| discrete_result.coefficients[j].is_finite())
+        .collect();
+    let x_id = dm.data.select(Axis(1), &id);
+    let x = &x_id;
+    let k = id.len();
 
-    let beta = Array1::from_vec(discrete_result.coefficients.clone());
+    let beta: Array1<f64> = id
+        .iter()
+        .map(|&j| discrete_result.coefficients[j])
+        .collect();
     let variables = discrete_result.variables.clone();
     let has_intercept = variables
         .first()
@@ -394,7 +459,7 @@ pub fn marginal_effects_discrete(
     // G_j[l] = d(AME_j)/d(beta_l)
     //        = (1/n) * sum_i [ I(j=l) * f(z_i) + beta_j * f'(z_i) * x_il ]
 
-    let vcov = compute_discrete_vcov(discrete_result, &dm)?;
+    let vcov = compute_discrete_vcov(discrete_result.model_type, x, &beta)?;
 
     // Compute gradient matrix G (k x k): G[j, l] = d(AME_j)/d(beta_l)
     let mut g = Array2::zeros((k, k));
@@ -461,7 +526,7 @@ pub fn marginal_effects_discrete(
     // =========================================================================
 
     // Z critical value for 95% CI (standard normal)
-    let z_crit = 1.96;
+    let z_crit = z_critical(0.95)?;
 
     let mut average_marginal = Vec::new();
     let mut at_means = Vec::new();
@@ -473,10 +538,10 @@ pub fn marginal_effects_discrete(
         } else {
             0.0
         };
-        let p_val = 2.0 * (1.0 - normal_cdf(z_val.abs()));
+        let p_val = normal_p_value_two_sided(z_val);
 
         average_marginal.push(MarginalEffect {
-            variable: variables[j].clone(),
+            variable: variables[id[j]].clone(),
             estimate: ame[j],
             std_error: ame_se[j],
             z_value: z_val,
@@ -493,10 +558,10 @@ pub fn marginal_effects_discrete(
         } else {
             0.0
         };
-        let p_val_mem = 2.0 * (1.0 - normal_cdf(z_val_mem.abs()));
+        let p_val_mem = normal_p_value_two_sided(z_val_mem);
 
         at_means.push(MarginalEffect {
-            variable: variables[j].clone(),
+            variable: variables[id[j]].clone(),
             estimate: mem[j],
             std_error: mem_se[j],
             z_value: z_val_mem,
@@ -508,40 +573,62 @@ pub fn marginal_effects_discrete(
         });
     }
 
-    // Store observation-level marginal effects
+    // Store observation-level marginal effects (NaN for an aliased regressor)
     let mut effects_by_observation = Vec::new();
     for j in 0..k {
         let me_j: Array1<f64> = f_z.mapv(|f| beta[j] * f);
         effects_by_observation.push(me_j);
     }
 
+    // Every regressor in model order, the aliased ones NaN
+    let aliased: Vec<usize> = (0..k_all).filter(|j| !id.contains(j)).collect();
+    let mut average_full = Vec::with_capacity(k_all);
+    let mut at_means_full = Vec::with_capacity(k_all);
+    let mut effects_full = Vec::with_capacity(k_all);
+    let (mut ame_rows, mut mem_rows, mut eff_rows) = (
+        average_marginal.into_iter(),
+        at_means.into_iter(),
+        effects_by_observation.into_iter(),
+    );
+    for j in 0..k_all {
+        if aliased.contains(&j) {
+            average_full.push(MarginalEffect::undefined(&variables[j]));
+            at_means_full.push(MarginalEffect::undefined(&variables[j]));
+            effects_full.push(Array1::from_elem(n_obs, f64::NAN));
+        } else {
+            average_full.extend(ame_rows.next());
+            at_means_full.extend(mem_rows.next());
+            effects_full.extend(eff_rows.next());
+        }
+    }
+    let aliased_names: Vec<String> = aliased.iter().map(|&j| variables[j].clone()).collect();
+
     Ok(MarginalEffectsResult {
-        average_marginal,
-        at_means: Some(at_means),
-        effects_by_observation: Some(effects_by_observation),
+        average_marginal: average_full,
+        at_means: Some(at_means_full),
+        effects_by_observation: Some(effects_full),
         model_type,
         n_obs,
         variables,
         has_intercept,
+        warnings: aliased_warning(&aliased_names).into_iter().collect(),
     })
 }
 
-/// Helper function to reconstruct variance-covariance matrix from discrete result.
+/// The inverse information matrix of a logit/probit fit on the identified columns `x` with
+/// coefficients `beta`: the variance-covariance of `beta`.
 fn compute_discrete_vcov(
-    discrete_result: &DiscreteResult,
-    dm: &DesignMatrix,
+    model_type: DiscreteModelType,
+    x: &Array2<f64>,
+    beta: &Array1<f64>,
 ) -> EconResult<Array2<f64>> {
-    let k = discrete_result.coefficients.len();
-    let n = discrete_result.n_obs;
-    let x = &dm.data;
-
-    let beta = Array1::from_vec(discrete_result.coefficients.clone());
+    let (n, k) = x.dim();
 
     // Compute linear predictor
-    let z: Array1<f64> = x.dot(&beta);
+    let z: Array1<f64> = x.dot(beta);
 
     // Compute probabilities
-    let (cdf_fn, pdf_fn): (fn(f64) -> f64, fn(f64) -> f64) = match discrete_result.model_type {
+    let (cdf_fn, pdf_fn): (fn(f64) -> f64, fn(f64) -> f64) = match model_type {
         DiscreteModelType::Logit => (logistic_cdf, logistic_pdf),
         DiscreteModelType::Probit => (normal_cdf, normal_pdf),
     };
@@ -550,7 +637,7 @@ fn compute_discrete_vcov(
     let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
 
     // Compute weights for information matrix
-    let weights: Array1<f64> = match discrete_result.model_type {
+    let weights: Array1<f64> = match model_type {
         DiscreteModelType::Logit => p_clipped.mapv(|pi| pi * (1.0 - pi)),
         DiscreteModelType::Probit => z
             .iter()
@@ -579,10 +666,16 @@ fn compute_discrete_vcov(
     }
 
     // Invert information matrix to get variance-covariance
-    let (vcov, _) = safe_inverse(&info_matrix.view()).map_err(|e| EconError::SingularMatrix {
+    let vcov = sym_inverse(
+        info_matrix.view(),
+        SingularPolicy::Error,
+        "information matrix for marginal effects",
+    )
+    .map_err(|e| EconError::SingularMatrix {
         context: "Information matrix for marginal effects".to_string(),
         suggestion: format!("Model may have separation or multicollinearity: {:?}", e),
-    })?;
+    })?
+    .inverse;
 
     Ok(vcov)
 }
@@ -615,7 +708,7 @@ fn compute_discrete_vcov(
 /// # References
 ///
 /// - Arel-Bundock, V. (2023). marginaleffects R package.
-///   https://vincentarelbundock.github.io/marginaleffects/
+///   <https://vincentarelbundock.github.io/marginaleffects/>
 pub fn marginal_effects(
     dataset: &Dataset,
     y_col: &str,
@@ -696,7 +789,7 @@ pub fn contrasts(
             } else {
                 0.0
             };
-            let p_value = 2.0 * (1.0 - normal_cdf(z_value.abs()));
+            let p_value = normal_p_value_two_sided(z_value);
 
             contrasts_vec.push(ContrastEffect {
                 value1: v1,
@@ -726,6 +819,102 @@ mod tests {
     use super::*;
     use p2a_validation::Tol;
     use polars::prelude::*;
+
+    #[test]
+    fn test_validate_marginal_effects_logit_tail() {
+        use p2a_validation::Check;
+        let (case, ds) = crate::test_support::load_case("tail_marginal_logit");
+        let fit = run_logit(&ds, "y", &["x1", "x2"]).unwrap();
+        let me = marginal_effects_discrete(&fit, &ds, &["x1", "x2"]).unwrap();
+        let names: Vec<String> = me
+            .average_marginal
+            .iter()
+            .map(|m| m.variable.clone())
+            .collect();
+        let col =
+            |f: fn(&MarginalEffect) -> f64| me.average_marginal.iter().map(f).collect::<Vec<_>>();
+        // glm at epsilon 1e-14; p2a's GLM stops at its own tolerance: the iterative row.
+        // d log p / d z = -z, so the relative p error is about z^2 times the relative z
+        // error: 5e-5 covers z = 27.85.
+        Check::new(&case)
+            .named(
+                "coef",
+                &fit.variables,
+                &fit.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .named("ame", &names, &col(|m| m.estimate), Tol::iterative(1e-8))
+            .named(
+                "ame_se",
+                &names,
+                &col(|m| m.std_error),
+                Tol::iterative(1e-8),
+            )
+            .named("ame_z", &names, &col(|m| m.z_value), Tol::iterative(1e-8))
+            .named("ame_p", &names, &col(|m| m.p_value), Tol::new(5e-5, 0.0))
+            .finish();
+        let z = crate::traits::estimator::z_critical(0.95).unwrap();
+        let m = &me.average_marginal[1];
+        assert!((m.ci_upper - (m.estimate + z * m.std_error)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_marginal_effects_aliased_regressor_is_nan() {
+        // x3 = 2 x1: glm reports NA for x3. Its effect is undefined (NaN in every column, with
+        // a warning); the other effects are those of the fit without x3.
+        use p2a_validation::Check;
+        let (case, ds) = crate::test_support::load_case("tail_marginal_logit");
+        let fit = run_logit(&ds, "y", &["x1", "x2", "x3"]).unwrap();
+        let me = marginal_effects_discrete(&fit, &ds, &["x1", "x2", "x3"]).unwrap();
+        let names: Vec<String> = me
+            .average_marginal
+            .iter()
+            .map(|m| m.variable.clone())
+            .collect();
+        let col =
+            |f: fn(&MarginalEffect) -> f64| me.average_marginal.iter().map(f).collect::<Vec<_>>();
+        let identified: Vec<String> = names.iter().filter(|n| *n != "x3").cloned().collect();
+        let pick = |v: Vec<f64>| -> Vec<f64> {
+            names
+                .iter()
+                .zip(v)
+                .filter(|(n, _)| *n != "x3")
+                .map(|(_, x)| x)
+                .collect()
+        };
+        Check::new(&case)
+            .named(
+                "coef_aliased",
+                &fit.variables,
+                &fit.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .named(
+                "ame",
+                &identified,
+                &pick(col(|m| m.estimate)),
+                Tol::iterative(1e-8),
+            )
+            .named(
+                "ame_se",
+                &identified,
+                &pick(col(|m| m.std_error)),
+                Tol::iterative(1e-8),
+            )
+            .finish();
+        let x3 = me
+            .average_marginal
+            .iter()
+            .find(|m| m.variable == "x3")
+            .unwrap();
+        assert!(x3.estimate.is_nan() && x3.std_error.is_nan() && x3.z_value.is_nan());
+        assert!(x3.p_value.is_nan() && x3.ci_lower.is_nan() && x3.ci_upper.is_nan());
+        assert_eq!(
+            me.warnings,
+            vec!["Marginal effects not defined for aliased regressors: x3".to_string()]
+        );
+        assert!(me.to_string().contains("aliased regressors: x3"));
+    }
 
     /// Case data for tests that compare no R value.
     fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {

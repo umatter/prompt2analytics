@@ -44,6 +44,36 @@
       "supersedes_legacy": []
     },
     {
+      "id": "marginal_effects_logit_ame",
+      "name": "Logit average marginal effects with delta-method SEs; aliased regressors",
+      "category": "regression",
+      "reference": "stats::glm(binomial); delta method written out in R; marginaleffects::avg_slopes cross-check",
+      "doc": "validation/regression/marginal_effects.md",
+      "cases": [
+        "tail_marginal_logit"
+      ],
+      "tests": [
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_logit_tail",
+        "p2a-core::regression::marginal_effects::tests::test_marginal_effects_aliased_regressor_is_nan"
+      ],
+      "quantities": [
+        "coefficients",
+        "AME",
+        "AME SE",
+        "z",
+        "p"
+      ],
+      "tolerance": "iterative 1e-8 (GLM stopping rule); p 5e-5 relative (z^2 x relative z error)",
+      "deviations": [
+        {
+          "finding": "REG-16",
+          "quantity": "MEM standard errors",
+          "note": "not pinned: the MEM SE approximation drops the gradient term (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "hettx_effect_summary_and_imputation",
       "name": "hettx effect summary (type-7 quantiles, IQR statistic) and regression imputation on an aliased arm",
       "category": "econometrics",

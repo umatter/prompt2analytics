@@ -227,6 +227,17 @@ Note: Some discrepancy is expected due to:
 
 - Arel-Bundock, V. (2023). marginaleffects: Predictions, Comparisons, Slopes, Marginal Means, and Hypothesis Tests. R package. https://vincentarelbundock.github.io/marginaleffects/
 
+## Logit AME at a tail, aliased regressors (`tail_marginal_logit`)
+
+Registry entry `marginal_effects_logit_ame` in `validation/methods/numeric_hygiene.json`. The case fits
+`glm(binomial)` on simulated data and writes out the delta-method AME, SE, z and p in R, with p below
+1e-16 for `x1`, so the p-values are pinned relative only. The 95% interval uses
+`z_critical(0.95)` = 1.959963984540054 instead of 1.96. A regressor the fit aliases (`x3`, a linear
+combination of the others; `coef_aliased` in the case) gets `NaN` effects, standard error, z and p and
+a warning, and the other effects equal those of the fit without it. Tests:
+`test_validate_marginal_effects_logit_tail`, `test_marginal_effects_aliased_regressor_is_nan`. The MEM
+standard errors are not pinned (their approximation drops a gradient term).
+
 ## Status
 
 - [x] Core implementation complete
