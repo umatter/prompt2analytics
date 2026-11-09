@@ -64,6 +64,133 @@ use p2a_core::{
     window as ts_window,
 };
 
+use crate::tools::handlers::stats::parse_choice;
+use p2a_core::options::Choices;
+
+/// Spectrum estimator of `timeseries_spectrum` (R's spectrum `method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpectrumMethod {
+    Pgram,
+    Ar,
+}
+
+static SPECTRUM_METHOD: Choices<SpectrumMethod> = Choices {
+    option: "method",
+    values: &[
+        (
+            &["pgram", "periodogram", "spec.pgram"],
+            SpectrumMethod::Pgram,
+        ),
+        (&["ar", "autoregressive", "spec.ar"], SpectrumMethod::Ar),
+    ],
+};
+
+/// `timeseries_box_test` type (R's Box.test `type`).
+static BOX_TEST_TYPE: Choices<BoxTestType> = Choices {
+    option: "test_type",
+    values: &[
+        (
+            &["Ljung-Box", "ljung", "lb", "ljungbox"],
+            BoxTestType::LjungBox,
+        ),
+        (
+            &["Box-Pierce", "box", "bp", "boxpierce"],
+            BoxTestType::BoxPierce,
+        ),
+    ],
+};
+
+/// `ts_changepoint` change type (changepoint's cpt.mean, cpt.var, cpt.meanvar).
+static CHANGE_TYPE: Choices<CostFunction> = Choices {
+    option: "change_type",
+    values: &[
+        (&["mean", "cpt.mean"], CostFunction::MeanChange),
+        (
+            &["variance", "var", "cpt.var"],
+            CostFunction::VarianceChange,
+        ),
+        (
+            &["meanvar", "both", "mean_and_variance", "cpt.meanvar"],
+            CostFunction::MeanAndVariance,
+        ),
+    ],
+};
+
+/// Search method of `ts_changepoint` (changepoint's `method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpMethod {
+    Pelt,
+    BinSeg,
+}
+
+static CP_METHOD: Choices<CpMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["pelt"], CpMethod::Pelt),
+        (
+            &["binary", "binseg", "binary_segmentation"],
+            CpMethod::BinSeg,
+        ),
+    ],
+};
+
+/// Seasonal component of `ts_holt_winters` (R's HoltWinters `seasonal`).
+static SEASONAL_TYPE: Choices<SeasonalType> = Choices {
+    option: "seasonal",
+    values: &[
+        (&["additive", "add"], SeasonalType::Additive),
+        (&["multiplicative", "mult"], SeasonalType::Multiplicative),
+    ],
+};
+
+/// Estimation method of `ts_ar` (R's ar `method`).
+static AR_METHOD: Choices<ArMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["yule-walker", "yw", "yulewalker"], ArMethod::YuleWalker),
+        (&["burg"], ArMethod::Burg),
+        (&["ols"], ArMethod::Ols),
+    ],
+};
+
+/// `ts_decompose` type (R's decompose `type`).
+static DECOMPOSE_TYPE: Choices<DecomposeType> = Choices {
+    option: "decompose_type",
+    values: &[
+        (&["additive", "add"], DecomposeType::Additive),
+        (&["multiplicative", "mult"], DecomposeType::Multiplicative),
+    ],
+};
+
+/// `ts_structts` model (R's StructTS `type`).
+static STRUCTTS_TYPE: Choices<StructTsType> = Choices {
+    option: "model_type",
+    values: &[
+        (&["level", "local_level"], StructTsType::Level),
+        (&["trend", "local_linear_trend"], StructTsType::Trend),
+        (&["bsm", "basic_structural_model"], StructTsType::BSM),
+    ],
+};
+
+/// `ts_filter` method (R's filter `method`).
+static FILTER_METHOD: Choices<FilterMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["convolution"], FilterMethod::Convolution),
+        (&["recursive"], FilterMethod::Recursive),
+    ],
+};
+
+/// `ts_runmed` end rule (R's runmed `endrule`).
+static END_RULE: Choices<EndRule> = Choices {
+    option: "endrule",
+    values: &[
+        (&["keep"], EndRule::Keep),
+        (&["constant"], EndRule::Constant),
+        (&["median"], EndRule::Median),
+    ],
+};
+
 #[tool_router(router = timeseries_router, vis = "pub")]
 impl AnalyticsServer {
     /// - R `stats::acf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
@@ -2007,6 +2134,51 @@ mod tests {
     use p2a_core::data::Dataset;
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
+
+    #[test]
+    fn test_timeseries_option_tables() {
+        let checks = [
+            SPECTRUM_METHOD.validate(),
+            BOX_TEST_TYPE.validate(),
+            CHANGE_TYPE.validate(),
+            CP_METHOD.validate(),
+            SEASONAL_TYPE.validate(),
+            AR_METHOD.validate(),
+            DECOMPOSE_TYPE.validate(),
+            STRUCTTS_TYPE.validate(),
+            FILTER_METHOD.validate(),
+            END_RULE.validate(),
+        ];
+        assert!(checks.iter().all(|r| r.is_ok()), "{checks:?}");
+        assert_eq!(
+            parse_choice(&BOX_TEST_TYPE, Some("box_pierce"), BoxTestType::LjungBox),
+            Ok(BoxTestType::BoxPierce)
+        );
+        assert_eq!(
+            parse_choice(&AR_METHOD, Some("YW"), ArMethod::Burg),
+            Ok(ArMethod::YuleWalker)
+        );
+        assert_eq!(
+            parse_choice(&AR_METHOD, Some("mle"), ArMethod::YuleWalker).unwrap_err(),
+            "unknown method 'mle'; expected one of: yule-walker, burg, ols"
+        );
+        assert_eq!(
+            parse_choice(&CHANGE_TYPE, Some("cpt.var"), CostFunction::MeanChange),
+            Ok(CostFunction::VarianceChange)
+        );
+        assert_eq!(
+            parse_choice(&STRUCTTS_TYPE, Some("BSM"), StructTsType::Level),
+            Ok(StructTsType::BSM)
+        );
+        assert_eq!(
+            parse_choice(&END_RULE, Some("Keep"), EndRule::Median),
+            Ok(EndRule::Keep)
+        );
+        assert_eq!(
+            parse_choice(&SPECTRUM_METHOD, Some("welch"), SpectrumMethod::Pgram).unwrap_err(),
+            "unknown method 'welch'; expected one of: pgram, ar"
+        );
+    }
 
     fn text_of(r: &CallToolResult) -> String {
         r.content

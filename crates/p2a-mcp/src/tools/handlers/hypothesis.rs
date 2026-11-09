@@ -28,6 +28,30 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
+use crate::tools::handlers::stats::parse_choice;
+use p2a_core::options::Choices;
+use p2a_core::stats::FisherAlternative;
+
+/// `hypothesis_fisher_test` alternative (R's fisher.test `alternative`).
+static FISHER_ALTERNATIVE: Choices<FisherAlternative> = Choices {
+    option: "alternative",
+    values: &[
+        (&["two.sided", "twosided"], FisherAlternative::TwoSided),
+        (&["greater", "right", "gt"], FisherAlternative::Greater),
+        (&["less", "left", "lt"], FisherAlternative::Less),
+    ],
+};
+
+/// `hypothesis_mantelhaen_test` alternative (R's mantelhaen.test `alternative`, 2 x 2 x K).
+static CMH_ALTERNATIVE: Choices<CmhAlternative> = Choices {
+    option: "alternative",
+    values: &[
+        (&["two.sided", "twosided"], CmhAlternative::TwoSided),
+        (&["greater", "right", "gt"], CmhAlternative::Greater),
+        (&["less", "left", "lt"], CmhAlternative::Less),
+    ],
+};
+
 #[tool_router(router = hypothesis_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run Bartlett's test for homogeneity of variances.
@@ -1749,6 +1773,26 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
     use p2a_validation::{Case, Check, Tol};
+
+    #[test]
+    fn test_hypothesis_option_tables() {
+        use p2a_core::stats::{CmhAlternative, fisher::FisherAlternative};
+        assert!(FISHER_ALTERNATIVE.validate().is_ok() && CMH_ALTERNATIVE.validate().is_ok());
+        for s in ["two.sided", "two-sided", "TWOSIDED"] {
+            assert_eq!(
+                parse_choice(&FISHER_ALTERNATIVE, Some(s), FisherAlternative::Less),
+                Ok(FisherAlternative::TwoSided)
+            );
+        }
+        assert_eq!(
+            parse_choice(&CMH_ALTERNATIVE, Some("Right"), CmhAlternative::TwoSided),
+            Ok(CmhAlternative::Greater)
+        );
+        assert_eq!(
+            parse_choice(&CMH_ALTERNATIVE, Some("bigger"), CmhAlternative::TwoSided).unwrap_err(),
+            "unknown alternative 'bigger'; expected one of: two.sided, greater, less"
+        );
+    }
 
     /// `r{i}`, `c{i}`: an n x n table
     fn pair_ids(n: usize) -> DataFrame {

@@ -43,6 +43,88 @@ use p2a_core::stats::{
     se_contrast, spline, weighted_mean,
 };
 
+use p2a_core::options::Choices;
+use p2a_core::stats::CovWtMethod;
+
+/// Parses an optional option string with a `Choices` table: None gives `default`; an unknown
+/// value gives the table's message ("unknown method 'biased'; expected one of: unbiased, ML").
+/// For p2a-core enums that have no `FromStr` (no `impl` is possible in this crate) and for
+/// handler-local choices; enums with one use `common::parse_option`.
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        None => Ok(default),
+        Some(s) => choices.parse(s).map_err(|e| match e {
+            p2a_core::EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
+        }),
+    }
+}
+
+/// Merges `common::notes_json(converged, warnings)` into a JSON tool output object; a
+/// non-object is left alone.
+pub(crate) fn insert_notes(
+    output: &mut serde_json::Value,
+    converged: Option<(bool, usize)>,
+    warnings: &[String],
+) {
+    if let (Some(o), serde_json::Value::Object(n)) = (
+        output.as_object_mut(),
+        crate::tools::common::notes_json(converged, warnings),
+    ) {
+        o.extend(n);
+    }
+}
+
+/// `stats_cov_wt` method (R's cov.wt `method`).
+pub(crate) static COV_WT_METHOD: Choices<CovWtMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["unbiased"], CovWtMethod::Unbiased),
+        (&["ML", "mle", "maximum_likelihood"], CovWtMethod::ML),
+    ],
+};
+
+/// Centre of `stats_mad` (R's mad `center`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MadCenter {
+    Median,
+    Mean,
+}
+
+static MAD_CENTER: Choices<MadCenter> = Choices {
+    option: "center",
+    values: &[
+        (&["median"], MadCenter::Median),
+        (&["mean"], MadCenter::Mean),
+    ],
+};
+
+/// Test statistic of `stats_manova` (R's summary.manova `test`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManovaTest {
+    Pillai,
+    Wilks,
+    HotellingLawley,
+    Roy,
+}
+
+static MANOVA_TEST: Choices<ManovaTest> = Choices {
+    option: "test",
+    values: &[
+        (&["pillai"], ManovaTest::Pillai),
+        (&["wilks"], ManovaTest::Wilks),
+        (
+            &["hotelling-lawley", "hotelling", "lawley"],
+            ManovaTest::HotellingLawley,
+        ),
+        (&["roy"], ManovaTest::Roy),
+    ],
+};
+
 #[tool_router(router = stats_router, vis = "pub")]
 impl AnalyticsServer {
     /// Log-linear model fitting for contingency tables.
@@ -2116,6 +2198,59 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
     use p2a_validation::{Case, Check, Tol};
+
+    #[test]
+    fn test_parse_choice_and_stats_option_tables() {
+        for (name, r) in [
+            ("cov_wt method", COV_WT_METHOD.validate()),
+            ("mad center", MAD_CENTER.validate()),
+            ("manova test", MANOVA_TEST.validate()),
+        ] {
+            assert!(r.is_ok(), "{name}: {r:?}");
+        }
+        use p2a_core::stats::CovWtMethod;
+        assert_eq!(
+            parse_choice(&COV_WT_METHOD, None, CovWtMethod::Unbiased),
+            Ok(CovWtMethod::Unbiased)
+        );
+        assert_eq!(
+            parse_choice(&COV_WT_METHOD, Some("mle"), CovWtMethod::Unbiased),
+            Ok(CovWtMethod::ML)
+        );
+        assert_eq!(
+            parse_choice(
+                &COV_WT_METHOD,
+                Some(" Maximum-Likelihood "),
+                CovWtMethod::Unbiased
+            ),
+            Ok(CovWtMethod::ML)
+        );
+        assert_eq!(
+            parse_choice(&COV_WT_METHOD, Some("biased"), CovWtMethod::Unbiased).unwrap_err(),
+            "unknown method 'biased'; expected one of: unbiased, ML"
+        );
+        assert_eq!(
+            parse_choice(&MANOVA_TEST, Some("Hotelling-Lawley"), ManovaTest::Pillai),
+            Ok(ManovaTest::HotellingLawley)
+        );
+        assert_eq!(
+            parse_choice(&MAD_CENTER, Some("trimmed"), MadCenter::Median).unwrap_err(),
+            "unknown center 'trimmed'; expected one of: median, mean"
+        );
+        let mut out = serde_json::json!({"a": 1});
+        insert_notes(
+            &mut out,
+            Some((false, 3)),
+            &["Warning: loglin did not converge".to_string()],
+        );
+        assert_eq!(
+            out,
+            serde_json::json!({"a": 1, "converged": false, "iterations": 3, "warnings": ["loglin did not converge"]})
+        );
+        let mut arr = serde_json::json!([1]);
+        insert_notes(&mut arr, None, &[]);
+        assert_eq!(arr, serde_json::json!([1]));
+    }
 
     /// One unique string level per row and column, and a count column `n` = 1.0.
     fn ids(n: usize, cols: &[&str]) -> DataFrame {
