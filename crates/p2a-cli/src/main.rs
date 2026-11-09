@@ -80,7 +80,11 @@ pub enum Commands {
     Data(data::DataCommands),
 
     /// Data munging (filter, join, reshape, clean, aggregate)
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        after_help = "With --session the result is stored next to the session file \
+                      (<session>.datasets/) and is available to later commands and exported scripts."
+    )]
     Munge(munge::MungeCommands),
 
     /// Regression analysis

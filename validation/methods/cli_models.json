@@ -239,6 +239,27 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_derived_datasets",
+      "name": "p2a munge and data generate with --session: results stored next to the session file and reloaded by later invocations (CLI-4)",
+      "category": "interfaces",
+      "reference": "stats::lm with sandwich::vcovHC(type = \"HC1\") on the Grunfeld subset select(inv, value); order() for the sorted rows",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "cli_munge_ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp60_models::test_cli_munge_persists_across_invocations",
+        "p2a-cli::tier3::wp60_models::test_cli_derived_dataset_names_replacement_and_errors"
+      ],
+      "quantities": [
+        "OLS coefficients, HC1 SEs, t, p, R^2, adjusted R^2 and n on the derived subset",
+        "first rows of the sorted derived dataset"
+      ],
+      "tolerance": "validation/README.md, n = 200: Tol::coef/se/stat/p_value(200); n and sorted rows exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

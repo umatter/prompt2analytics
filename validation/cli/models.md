@@ -27,6 +27,7 @@ The numbers come from the cores; the tests here pin them through the binary agai
 | `test_validate_cli_hac_aliased_df` | `cli_hac_aliased` | `coef`, `se_nw`, `t_nw`, `p_nw` (identified columns), `df_resid`, `r2` | `Tol::coef/se/stat/p_value(120)`; df exact |
 | `test_validate_cli_nls_expdecay` | `nls_expdecay` | `coef`, `se`, `rss` | `Tol::iterative(1e-6)` coefficients, `1e-5` SEs, `1e-8` RSS |
 | `test_validate_cli_pp_test_internals` | `stat_pp_t3` | `rw_short_gamma`, `rw_short_t`, `rw_short_sigma2`, `rw_short_lambda2`, `rw_short_lag` (Z(tau) and its p-value not pinned: STAT-6, STAT-35) | gamma `Tol::coef(200)`, the rest `Tol::stat(200)`; lag exact |
+| `test_cli_munge_persists_across_invocations`, `test_cli_derived_dataset_names_replacement_and_errors` | `cli_munge_ols_grunfeld` | `sel_coef`, `sel_se_hc1`, `sel_t_hc1`, `sel_p_hc1`, `sel_r2`, `sel_adj_r2`, `sel_n` on the subset `munge select` stored in one invocation and `reg ols` read in the next; `sorted_{inv,firm,year}_head` | `Tol::coef/se/stat/p_value(200)`; n and rows exact |
 
 `test_cli_smooth_spline_criterion` loads no case: it checks that `--criterion gcv|cv` gives the core's
 own fit (p2a's smoothing spline is not R's yet), so it is not in the registry.

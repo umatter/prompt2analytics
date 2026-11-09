@@ -67,6 +67,9 @@ EXAMPLES:
     p2a --session s.json data generate -n 1000 -d simdata \\
         --columns '[{\"name\":\"x\",\"distribution\":{\"type\":\"normal\",\"mean\":0,\"std\":1}},
                     {\"name\":\"e\",\"distribution\":{\"type\":\"uniform\",\"min\":-1,\"max\":1}}]'
+
+With --session the result is stored next to the session file (<session>.datasets/) and is
+available to later commands and exported scripts.
 ")]
     Generate {
         /// Number of rows to generate
@@ -528,9 +531,13 @@ fn execute_generate(
         ncols
     );
 
-    // Register with session if available
+    // With a session the dataset is written next to the session file, so later
+    // invocations find it
     if let Some(mgr) = session {
-        mgr.store_dataset(name.to_string(), dataset);
+        if let Err(e) = mgr.persist_dataset(name, dataset) {
+            print_error(&e.to_string(), format);
+            return Ok(());
+        }
     }
 
     // Output success message

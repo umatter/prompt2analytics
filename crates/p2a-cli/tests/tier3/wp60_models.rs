@@ -1211,6 +1211,218 @@ fn test_validate_cli_pp_test_internals() {
 }
 
 // =================================================================================================
+// Derived datasets
+// =================================================================================================
+
+/// CLI-4: every invocation is a new process; a munge result and a generated dataset are there in
+/// the next one.
+#[test]
+fn test_cli_munge_persists_across_invocations() {
+    let case = Case::load("cli_munge_ols_grunfeld");
+    let n = case.scalar("sel_n") as usize; // 200
+    let s = temp_session();
+    let g = s.load(&case); // "grunfeld"
+    s.ok(&[
+        "munge",
+        "select",
+        g.as_str(),
+        "--columns",
+        "inv",
+        "value",
+        "--name",
+        "sub",
+    ]);
+    let v = s.json(&["reg", "ols", "sub", "-y", "inv", "-x", "value"]);
+    let t = json_table(&v, "t_value");
+    Check::new(&case)
+        .named("sel_coef", &t.names, &t.coef, Tol::coef(n))
+        .named("sel_se_hc1", &t.names, &t.se, Tol::se(n))
+        .named("sel_t_hc1", &t.names, &t.stat, Tol::stat(n))
+        .named("sel_p_hc1", &t.names, &t.p, Tol::p_value(n))
+        .scalar("sel_r2", num(&v["r_squared"]), Tol::stat(n))
+        .scalar("sel_adj_r2", num(&v["adj_r_squared"]), Tol::stat(n))
+        .scalar("sel_n", num(&v["n_observations"]), Tol::exact())
+        .finish();
+    s.ok(&["munge", "sort", g.as_str(), "--by", "inv"]); // default name grunfeld_sorted
+    let rows = s.json(&["data", "head", "grunfeld_sorted", "-n", "5"]);
+    let col = |k: &str| -> Vec<f64> {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[k].to_string().trim_matches('"').parse().unwrap())
+            .collect()
+    };
+    assert_eq!(col("inv"), case.vector("sorted_inv_head"));
+    assert_eq!(col("firm"), case.vector("sorted_firm_head"));
+    assert_eq!(col("year"), case.vector("sorted_year_head"));
+    s.ok(&[
+        "data",
+        "generate",
+        "-n",
+        "50",
+        "-d",
+        "sim",
+        "-s",
+        "7",
+        "-c",
+        r#"[{"name": "x", "distribution": {"type": "normal", "mean": 0, "std": 1}}, {"name": "y", "distribution": {"type": "uniform", "min": 0, "max": 1}}]"#,
+    ]);
+    assert_eq!(s.json_docs(&["data", "describe", "sim"])[0]["rows"], 50);
+    s.ok(&["reg", "ols", "sim", "-y", "y", "-x", "x"]);
+    // in place: the munged version replaces the loaded one for later invocations
+    s.ok(&[
+        "munge",
+        "drop",
+        g.as_str(),
+        "--columns",
+        "capital",
+        "--name",
+        g.as_str(),
+    ]);
+    assert_eq!(
+        s.json_docs(&["data", "describe", g.as_str()])[0]["columns"],
+        4
+    );
+    let sess: Value = serde_json::from_str(&std::fs::read_to_string(s.path()).unwrap()).unwrap();
+    for (name, file) in [
+        ("sub", "sub.parquet"),
+        ("grunfeld_sorted", "grunfeld_sorted.parquet"),
+        ("sim", "sim.parquet"),
+        ("grunfeld", "grunfeld.parquet"),
+    ] {
+        let m = &sess["datasets"][name];
+        assert_eq!(
+            (m["derived"].clone(), m["format"].clone()),
+            (json!(true), json!("parquet")),
+            "{name}: {m}"
+        );
+        assert_eq!(m["source_path"], format!("session.json.datasets/{file}"));
+        assert!(
+            s.dir().join("session.json.datasets").join(file).exists(),
+            "{file}"
+        );
+    }
+    // the session directory moves with its sidecar
+    let other = tempfile::tempdir().unwrap();
+    std::fs::copy(s.path(), other.path().join("session.json")).unwrap();
+    std::fs::create_dir(other.path().join("session.json.datasets")).unwrap();
+    for e in std::fs::read_dir(s.dir().join("session.json.datasets")).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(
+            e.path(),
+            other
+                .path()
+                .join("session.json.datasets")
+                .join(e.file_name()),
+        )
+        .unwrap();
+    }
+    let out = p2a()
+        .arg("--session")
+        .arg(other.path().join("session.json"))
+        .args(["data", "describe", "sub"])
+        .current_dir(other.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("Rows: 200"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// CLI-4: odd names stay inside the sidecar; a dataset loaded over a derived one drops the stale
+/// file; a result that cannot be stored is an error, not "Created dataset".
+#[test]
+fn test_cli_derived_dataset_names_replacement_and_errors() {
+    let case = Case::load("cli_munge_ols_grunfeld");
+    let s = temp_session();
+    let g = s.load(&case);
+    s.ok(&[
+        "munge",
+        "select",
+        g.as_str(),
+        "--columns",
+        "inv",
+        "--name",
+        "my data/ü",
+    ]);
+    assert_eq!(
+        s.json_docs(&["data", "describe", "my data/ü"])[0]["rows"],
+        200
+    );
+    assert!(
+        s.dir()
+            .join("session.json.datasets/my%20data%2F%C3%BC.parquet")
+            .exists()
+    );
+    s.ok(&[
+        "munge",
+        "select",
+        g.as_str(),
+        "--columns",
+        "inv",
+        "--name",
+        "sub",
+    ]);
+    s.load_as(&case.dataset_path(), "sub", &[]);
+    assert!(!s.dir().join("session.json.datasets/sub.parquet").exists());
+    // a regular file where the sidecar directory should be: munge reports the failure
+    let t = temp_session();
+    let g = t.load(&case);
+    std::fs::write(t.dir().join("session.json.datasets"), "not a directory").unwrap();
+    let e = t.err(&[
+        "munge",
+        "select",
+        g.as_str(),
+        "--columns",
+        "inv",
+        "--name",
+        "sub",
+    ]);
+    assert!(
+        e.contains("Could not store dataset 'sub' in the session"),
+        "{e}"
+    );
+    let sess: Value = serde_json::from_str(&std::fs::read_to_string(t.path()).unwrap()).unwrap();
+    assert!(sess["datasets"].get("sub").is_none());
+}
+
+/// -F json munge bin / cast print one document (they printed the "Created dataset" object and a
+/// second message object).
+#[test]
+fn test_cli_munge_bin_and_cast_print_one_json_document() {
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/generated/bin_cut.csv"),
+        "b",
+        &[],
+    );
+    let docs = s.json_docs(&[
+        "munge", "bin", "b", "--column", "x", "--method", "custom", "--edges", "0,1,3,5",
+    ]);
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert!(
+        docs[0]["details"]
+            .as_str()
+            .is_some_and(|d| d.contains("Counts: ")),
+        "{docs:?}"
+    );
+    let c = s.dir().join("c.csv");
+    std::fs::write(&c, "v\n\"1,234\"\n7\nx\n").unwrap();
+    s.load_as(&c, "c", &[]);
+    let docs = s.json_docs(&["munge", "cast", "c", "--column", "v", "--dtype", "int"]);
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert!(
+        docs[0]["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("could not be converted"),
+        "{docs:?}"
+    );
+}
+
+// =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
 // =================================================================================================

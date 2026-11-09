@@ -90,3 +90,29 @@ case("cli_hac_aliased", "cli", "Newey-West (lag 4, Bartlett, no prewhitening) t 
        reference = "sandwich::NeweyWest(lm(y ~ x1 + x2 + x3), lag = 4, prewhite = FALSE) on the identified columns; t-based p on df.residual (n - rank); p_nw_df_n_minus_k (n - number of columns) is what the CLI printed before",
        call = "coeftest(lm(y ~ x1 + x2 + x3, ols_aliased), vcov = NeweyWest(m, lag = 4, prewhite = FALSE))", packages = "sandwich")
 })
+
+case("cli_munge_ols_grunfeld", "cli", "lm(HC1) on munge-derived Grunfeld datasets (select, filter) and the munge sort order", function(ctx) {
+  suppressPackageStartupMessages(library(sandwich))
+  g <- ctx$dataset("datasets/grunfeld.csv")
+  fit <- function(m) {
+    ct <- coef(m); se <- sqrt(diag(vcovHC(m, type = "HC1"))); t <- ct / se
+    p <- 2 * pt(abs(t), df.residual(m), lower.tail = FALSE)
+    s <- summary(m)
+    list(coef = named(ct), se_hc1 = named(se), t_hc1 = named(t), p_hc1 = named(p),
+         r2 = s$r.squared, adj_r2 = s$adj.r.squared, n = nobs(m), df_resid = df.residual(m))
+  }
+  sel <- fit(lm(inv ~ value, data = g[, c("inv", "value")]))
+  post_d <- g[g$year >= 1945, ]
+  post <- fit(lm(inv ~ value + capital, data = post_d))
+  v <- list()
+  for (k in names(sel)) v[[paste0("sel_", k)]] <- sel[[k]]
+  for (k in names(post)) v[[paste0("post_", k)]] <- post[[k]]
+  o <- order(g$inv)
+  stopifnot(!anyDuplicated(g$inv[o][1:6]))          # Grunfeld has five tied inv pairs, none among the 6 smallest
+  v$sorted_inv_head <- vec(g$inv[o][1:5])
+  v$sorted_firm_head <- vec(g$firm[o][1:5])
+  v$sorted_year_head <- vec(g$year[o][1:5])
+  v$n_rows <- nrow(g); v$post_rows <- nrow(post_d)
+  list(values = v, reference = "stats::lm on g[, c('inv','value')] and g[g$year >= 1945, ]; sandwich::vcovHC(type = 'HC1'); t-based p on df.residual; order(g$inv)",
+       call = "lm(inv ~ value + capital, data = subset(grunfeld, year >= 1945))", packages = "sandwich")
+})

@@ -10,7 +10,7 @@ use p2a_core::data::munging::{
     value_counts,
 };
 
-use crate::output::{OutputFormat, print_error, print_message};
+use crate::output::{OutputFormat, print_error};
 use crate::session::SessionManager;
 
 #[derive(Clone, ValueEnum)]
@@ -961,6 +961,35 @@ fn store_result(
     session: Option<&mut SessionManager>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    store_result_with(
+        result,
+        output_name,
+        source_name,
+        operation,
+        None,
+        &[],
+        session,
+        format,
+    )
+}
+
+/// Stores a munge result under `output_name` (default `<source>_<operation>`): with a
+/// session it is written next to the session file, so later invocations and exported
+/// scripts find it; a result that cannot be written is an error and is not registered.
+/// Then prints `Created dataset ..`, `details` on the next line and a `Warning:` line per
+/// warning; JSON prints one document `{"message", "details", "warnings"}` (the last two
+/// only when present).
+#[allow(clippy::too_many_arguments)]
+fn store_result_with(
+    result: Dataset,
+    output_name: Option<&str>,
+    source_name: &str,
+    operation: &str,
+    details: Option<String>,
+    warnings: &[String],
+    session: Option<&mut SessionManager>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
     let name = output_name
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}_{}", source_name, operation));
@@ -969,16 +998,37 @@ fn store_result(
     let ncols = result.ncols();
 
     if let Some(mgr) = session {
-        mgr.store_dataset(name.clone(), result);
+        if let Err(e) = mgr.persist_dataset(&name, result) {
+            print_error(&e.to_string(), format);
+            return Ok(());
+        }
     }
 
-    print_message(
-        &format!(
-            "Created dataset '{}' ({} rows x {} columns)",
-            name, nrows, ncols
-        ),
-        format,
+    let message = format!(
+        "Created dataset '{}' ({} rows x {} columns)",
+        name, nrows, ncols
     );
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({ "message": message });
+            if let Some(d) = &details {
+                json["details"] = serde_json::json!(d);
+            }
+            if !warnings.is_empty() {
+                json["warnings"] = serde_json::json!(warnings);
+            }
+            println!("{json}");
+        }
+        _ => {
+            println!("{message}");
+            if let Some(d) = &details {
+                println!("{d}");
+            }
+            for w in warnings {
+                println!("Warning: {w}");
+            }
+        }
+    }
 
     Ok(())
 }
@@ -1660,16 +1710,16 @@ fn execute_bin(
     match bin_with(&ds, column, strategy, None, &options) {
         Ok(outcome) => {
             let summary = outcome.summary();
-            store_result(
+            store_result_with(
                 outcome.dataset,
                 output_name,
                 dataset,
                 "binned",
+                Some(summary),
+                &[],
                 session,
                 format,
-            )?;
-            print_message(&summary, format);
-            Ok(())
+            )
         }
         Err(e) => {
             print_error(&format!("Bin failed: {}", e), format);
@@ -1691,11 +1741,17 @@ fn execute_cast(
 
     match cast_with(&ds, column, dtype, &options) {
         Ok((result, report)) => {
-            store_result(result, output_name, dataset, "cast", session, format)?;
-            if let Some(note) = report.note() {
-                print_message(&format!("Warning: {note}"), format);
-            }
-            Ok(())
+            let warnings: Vec<String> = report.note().into_iter().collect();
+            store_result_with(
+                result,
+                output_name,
+                dataset,
+                "cast",
+                None,
+                &warnings,
+                session,
+                format,
+            )
         }
         Err(e) => {
             print_error(&format!("Cast failed: {}", e), format);

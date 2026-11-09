@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "id": "cli_munge_ols_grunfeld",
+  "area": "cli",
+  "method": "lm(HC1) on munge-derived Grunfeld datasets (select, filter) and the munge sort order",
+  "reference": "stats::lm on g[, c('inv','value')] and g[g$year >= 1945, ]; sandwich::vcovHC(type = 'HC1'); t-based p on df.residual; order(g$inv)",
+  "call": "lm(inv ~ value + capital, data = subset(grunfeld, year >= 1945))",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "sel_coef": {
+      "names": ["(Intercept)", "value"],
+      "values": [-6.9762843127456122, 0.1413859725502698]
+    },
+    "sel_se_hc1": {
+      "names": ["(Intercept)", "value"],
+      "values": [9.8211440024160463, 0.013743180552592856]
+    },
+    "sel_t_hc1": {
+      "names": ["(Intercept)", "value"],
+      "values": [-0.71033316597632767, 10.287718480391733]
+    },
+    "sel_p_hc1": {
+      "names": ["(Intercept)", "value"],
+      "values": [0.47833335689861123, 3.6854888625954006e-20]
+    },
+    "sel_r2": 0.73433399254615428,
+    "sel_adj_r2": 0.73299224503376115,
+    "sel_n": 200,
+    "sel_df_resid": 198,
+    "post_coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-46.511985105368787, 0.1478629514251657, 0.15501019703753877]
+    },
+    "post_se_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [19.103107477860544, 0.0105823777517843, 0.061607301968919621]
+    },
+    "post_t_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-2.4347863382579842, 13.972564096026005, 2.5161010478228722]
+    },
+    "post_p_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.01672832802567319, 5.8004595064053537e-25, 0.013507629306059107]
+    },
+    "post_r2": 0.84414291988863044,
+    "post_adj_r2": 0.84092937184509708,
+    "post_n": 100,
+    "post_df_resid": 97,
+    "sorted_inv_head": [0.93000000000000005, 1.1799999999999999, 1.3600000000000001, 1.8100000000000001, 1.8600000000000001],
+    "sorted_firm_head": [10, 10, 10, 10, 10],
+    "sorted_year_head": [1943, 1944, 1945, 1940, 1942],
+    "n_rows": 200,
+    "post_rows": 100
+  }
+}
