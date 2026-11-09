@@ -1400,3 +1400,382 @@ async fn test_mcp_ml_seeds_follow_request_then_set_seed_then_default() {
         json!(3)
     );
 }
+
+// ----------------------------------------------------------------------------
+// output_column
+// ----------------------------------------------------------------------------
+
+/// R kmeans(algorithm = "Lloyd") optimum on hclust_60: tot.withinss and the partition
+/// km_unit_cluster (the global optimum). Before: output_column was an unknown field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_kmeans_output_column() {
+    let (s, server) = session_with("kmeans_lloyd_pca_mds");
+    let case = Case::load("kmeans_lloyd_pca_mds");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_kmeans",
+        json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "k": 3, "seed": 1, "output_column": "km"}),
+    )
+    .await);
+    let col: Vec<i64> = int_column(&s, "hclust_60", "km")
+        .into_iter()
+        .map(|v| v.expect("no nulls"))
+        .collect();
+    assert!(col.iter().all(|&c| (1..=3).contains(&c)), "{col:?}");
+    assert!(
+        same_partition(&col, &case.vector("km_unit_cluster")),
+        "{col:?}"
+    );
+    let j = json_block(&t);
+    close(
+        j["inertia"].as_f64().unwrap(),
+        case.scalar("km_unit_tot_withinss"),
+        Tol::coef(60),
+        "tot.withinss",
+    );
+    assert_eq!(
+        f64s(&j["cluster_assignments"]),
+        col.iter().map(|&c| c as f64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        (
+            j["output_column"].clone(),
+            j["converged"].clone(),
+            j["seed"].clone()
+        ),
+        (json!("km"), json!(true), json!(1))
+    );
+    assert!(
+        t.contains("Cluster 1: 20 points")
+            && !t.contains("Cluster 0:")
+            && t.contains("Converged: yes"),
+        "{t}"
+    );
+    assert!(t.contains("Wrote column 'km'"), "{t}");
+    // no seed -> 42 (the core used entropy), then the set_seed value
+    let unseeded = json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "k": 3});
+    assert_eq!(
+        json_block(&ok(&call(&server, &s, "ml_kmeans", unseeded.clone()).await))["seed"],
+        json!(42)
+    );
+    ok(&call(&server, &s, "set_seed", json!({"seed": 7})).await);
+    assert_eq!(
+        json_block(&ok(&call(&server, &s, "ml_kmeans", unseeded).await))["seed"],
+        json!(7)
+    );
+}
+
+/// R cutree(hclust(dist(X), method), 3): the column is R's labels exactly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_hierarchical_output_column() {
+    let (s, server) = session_with("hclust_methods");
+    let case = Case::load("hclust_methods");
+    for (linkage, key, r_name) in [
+        ("ward", "wardD2", "ward.D2"),
+        ("mcquitty", "mcquitty", "mcquitty"),
+        ("average", "average", "average"),
+    ] {
+        let t = ok(&call(
+            &server,
+            &s,
+            "ml_hierarchical",
+            json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "n_clusters": 3, "linkage": linkage, "output_column": "hc"}),
+        )
+        .await);
+        let col: Vec<f64> = int_column(&s, "hclust_60", "hc")
+            .into_iter()
+            .map(|v| v.unwrap() as f64)
+            .collect();
+        assert_eq!(col, case.vector(&format!("{key}_cutree3")), "{linkage}");
+        let j = json_block(&t);
+        assert_eq!(f64s(&j["cluster_assignments"]), col);
+        assert_eq!(j["linkage"], json!(r_name));
+        let text_part = t.split("JSON Summary:").next().unwrap();
+        let merge_rows = text_part
+            .lines()
+            .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .count();
+        assert_eq!(merge_rows, 50, "the last 50 of 59 merges:\n{text_part}");
+        assert!(
+            text_part.contains("the last 50 of 59 merges"),
+            "{text_part}"
+        );
+    }
+}
+
+/// prcomp(X)$x, one sign per component; explained variance = sdev^2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_pca_output_column() {
+    let (s, server) = session_with("mcp_pca_scores");
+    let case = Case::load("mcp_pca_scores");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_pca",
+        json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "output_column": "PC"}),
+    )
+    .await);
+    for j in 1..=3 {
+        let got: Vec<f64> = float_column(&s, "hclust_60", &format!("PC{j}"))
+            .into_iter()
+            .map(|v| v.unwrap())
+            .collect();
+        let want = case.vector(&format!("pca_x_pc{j}"));
+        let sign = (got[0] * want[0]).signum();
+        for (g, w) in got.iter().zip(&want) {
+            close(sign * g, *w, Tol::coef(60), &format!("PC{j}"));
+        }
+    }
+    let ev = f64s(&json_block(&t)["explained_variance"]);
+    assert_eq!(ev.len(), 3);
+    for (e, sd) in ev.iter().zip(case.vector("pca_sdev")) {
+        close(*e, sd * sd, Tol::coef(60), "variance");
+    }
+    let t2 = ok(&call(
+        &server,
+        &s,
+        "ml_pca",
+        json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "n_components": 2, "output_column": "Q"}),
+    )
+    .await);
+    assert_eq!(json_block(&t2)["output_columns"], json!(["Q1", "Q2"]));
+}
+
+/// No R value for the regression forest (RNG): the column equals the core's in-sample
+/// predictions for the same call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_random_forest_output_column() {
+    let (s, server) = session_with("shap_tree_rpart");
+    let (_, df) = case_df("shap_tree_rpart");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_random_forest",
+        json!({"dataset": "shap_tree_sim", "features": ["x0", "x1", "x2", "x3"], "target": "y",
+               "n_trees": 20, "max_depth": 5, "seed": 3, "output_column": "rf"}),
+    )
+    .await);
+    let xs: Vec<Vec<f64>> = (0..4).map(|j| col_f64(&df, &format!("x{j}"))).collect();
+    let x = ndarray::Array2::from_shape_fn((80, 4), |(i, j)| xs[j][i]);
+    let y = ndarray::Array1::from(col_f64(&df, "y"));
+    let names: Vec<String> = (0..4).map(|j| format!("x{j}")).collect();
+    let core = p2a_core::random_forest(
+        x.view(),
+        y.view(),
+        Some(20),
+        Some(5),
+        None,
+        None,
+        Some(3),
+        Some(names),
+    )
+    .unwrap();
+    let col: Vec<f64> = float_column(&s, "shap_tree_sim", "rf")
+        .into_iter()
+        .map(|v| v.unwrap())
+        .collect();
+    assert_eq!(col, core.predictions);
+    assert_eq!(
+        f64s(&json_block(&t)["predictions_sample"]),
+        core.predictions[..20].to_vec()
+    );
+}
+
+/// SVM drops incomplete rows: their predictions are null; the rest equal the core's
+/// predictions on the complete rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_svm_output_column_omit() {
+    let (_, mut df) = case_df("svm_libsvm");
+    let x1: Vec<Option<f64>> = col_f64(&df, "x1")
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| if i == 5 { None } else { Some(v) })
+        .collect();
+    let full = df.clone();
+    df.with_column(Series::new("x1".into(), x1)).unwrap();
+    let (s, server) = session_with_datasets(vec![("svm_sim", dataset(df))]);
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_svm",
+        json!({"dataset": "svm_sim", "features": ["x1", "x2"], "target": "cls_lin", "output_column": "pred"}),
+    )
+    .await);
+    let col = int_column(&s, "svm_sim", "pred");
+    assert_eq!(col.len(), 160);
+    assert_eq!(col[5], None);
+    let keep: Vec<usize> = (0..160).filter(|&i| i != 5).collect();
+    let (x1, x2, cls) = (
+        col_f64(&full, "x1"),
+        col_f64(&full, "x2"),
+        col_f64(&full, "cls_lin"),
+    );
+    let x =
+        ndarray::Array2::from_shape_fn(
+            (159, 2),
+            |(r, j)| {
+                if j == 0 { x1[keep[r]] } else { x2[keep[r]] }
+            },
+        );
+    let y = ndarray::Array1::from_iter(keep.iter().map(|&i| cls[i]));
+    let names = vec!["x1".to_string(), "x2".to_string()];
+    let core = p2a_core::linear_svm(x.view(), y.view(), None, None, None, Some(names)).unwrap();
+    let got: Vec<i64> = keep.iter().map(|&i| col[i].unwrap()).collect();
+    assert_eq!(
+        got,
+        core.predictions
+            .iter()
+            .map(|&p| i64::from(p))
+            .collect::<Vec<_>>()
+    );
+    let j = json_block(&t);
+    assert_eq!(j["missing"]["n_dropped"], json!(1), "{j}");
+    assert!(j["predictions_sample"][5].is_null(), "{j}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_output_column_refuses_input_columns() {
+    let (s, server) = session_with("hclust_methods");
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_kmeans",
+        json!({"dataset": "hclust_60", "columns": ["a", "b"], "k": 2, "output_column": "a"}),
+    )
+    .await);
+    assert!(
+        e.contains("output_column 'a' is a column this call reads (a, b)"),
+        "{e}"
+    );
+    assert!(
+        s.datasets.try_read().unwrap()["hclust_60"]
+            .df()
+            .column("a")
+            .unwrap()
+            .f64()
+            .is_ok()
+    );
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_random_forest",
+        json!({"dataset": "hclust_60", "features": ["a"], "target": "c", "output_column": "c"}),
+    )
+    .await);
+    assert!(e.contains("output_column 'c'"), "{e}");
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_pca",
+        json!({"dataset": "hclust_60", "columns": ["a", "b"], "output_column": " "}),
+    )
+    .await);
+    assert!(
+        e.contains("output_column must be a non-empty column name"),
+        "{e}"
+    );
+    ok(&call(
+        &server,
+        &s,
+        "ml_kmeans",
+        json!({"dataset": "hclust_60", "columns": ["a", "b"], "k": 2, "output_column": "cl", "seed": 1}),
+    )
+    .await);
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_kmeans",
+        json!({"dataset": "hclust_60", "columns": ["a", "b"], "k": 3, "output_column": "cl", "seed": 1}),
+    )
+    .await);
+    assert!(t.contains("Replaced column 'cl'"), "{t}");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_kmeans",
+        json!({"dataset": "hclust_60", "columns": ["a", "b"], "k": 2, "seed": 1}),
+    )
+    .await);
+    assert!(
+        json_block(&t)["output_column"].is_null() && !t.contains("Wrote column"),
+        "{t}"
+    );
+}
+
+/// dbscan::dbscan(X, eps = 1, minPts = 5) on hclust_60: cluster sizes and noise points (no MCP
+/// tool reaches HDBSCAN; ml_dbscan is pinned instead).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_dbscan() {
+    let (s, server) = session_with("kmeans_lloyd_pca_mds");
+    let case = Case::load("kmeans_lloyd_pca_mds");
+    let r = case.vector("dbscan_eps1_minpts5_cluster");
+    let count = |c: f64| r.iter().filter(|&&v| v == c).count() as f64;
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_dbscan",
+        json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "eps": 1.0, "min_samples": 5}),
+    )
+    .await);
+    assert_eq!(
+        num_after(line(&t, "Number of clusters:"), "Number of clusters:"),
+        3.0
+    );
+    assert_eq!(
+        num_after(
+            line(&t, "Number of noise points:"),
+            "Number of noise points:"
+        ),
+        count(0.0)
+    );
+    let mut sizes: Vec<f64> = t
+        .lines()
+        .filter(|l| l.trim_start().starts_with("Cluster ") && l.ends_with("points"))
+        .map(|l| num_after(l, ":"))
+        .collect();
+    sizes.sort_by(f64::total_cmp);
+    let mut want = vec![count(1.0), count(2.0), count(3.0)];
+    want.sort_by(f64::total_cmp);
+    assert_eq!(sizes, want);
+}
+
+/// The descriptions say what each tool returns, and the ones corrected earlier stay correct.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ml_descriptions_say_what_is_returned() {
+    let d = tool_description;
+    for n in [
+        "ml_kmeans",
+        "ml_hierarchical",
+        "ml_random_forest",
+        "ml_svm",
+        "ml_pca",
+    ] {
+        assert!(d(n).contains("output_column"), "{n}: {}", d(n));
+    }
+    assert!(
+        d("ml_kmeans").contains("1..k") && d("ml_hierarchical").contains("cutree"),
+        "cluster numbering"
+    );
+    assert!(
+        d("ml_dbscan").contains("no per-row labels")
+            && d("ml_tsne").contains("first 5 embedded points")
+    );
+    assert!(d("ml_pca").contains("loadings") && d("ml_pca").contains("prcomp"));
+    for sub in [
+        "regression",
+        "no classification mode",
+        "ntree 500",
+        "max(floor(p/3), 1)",
+        "nodesize 5",
+        "ceil(sqrt(p))",
+        "max_depth 10",
+        "in-sample predictions",
+    ] {
+        assert!(
+            d("ml_random_forest").contains(sub),
+            "ml_random_forest lacks {sub:?}"
+        );
+    }
+    assert!(d("ml_cutree").contains("1-based") || d("ml_cutree").contains("R's cutree numbering"));
+}

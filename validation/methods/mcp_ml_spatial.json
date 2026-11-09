@@ -164,6 +164,50 @@
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ml_clustering",
+      "name": "MCP ml_kmeans, ml_hierarchical and ml_dbscan",
+      "category": "interfaces",
+      "reference": "stats::kmeans(algorithm = 'Lloyd'), stats::hclust + cutree, dbscan::dbscan(eps = 1, minPts = 5)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods",
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_kmeans_output_column",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_hierarchical_output_column",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_dbscan"
+      ],
+      "quantities": [
+        "k-means partition and tot.withinss",
+        "cutree labels written through output_column",
+        "DBSCAN cluster sizes and noise points"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ml_pca_scores",
+      "name": "MCP ml_pca with output_column",
+      "category": "interfaces",
+      "reference": "stats::prcomp(center = TRUE, scale. = FALSE)$x and $sdev",
+      "doc": "validation/ml/pca.md",
+      "cases": [
+        "mcp_pca_scores"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_pca_output_column"
+      ],
+      "quantities": [
+        "scores (one sign per component)",
+        "explained variance"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

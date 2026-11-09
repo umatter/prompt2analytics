@@ -30,6 +30,13 @@ pub struct KMeansRequest {
     /// Random seed for reproducibility (optional)
     #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's cluster (Int64, 1..k as R's kmeans()$cluster / cutree()) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for DBSCAN clustering.
@@ -74,6 +81,13 @@ pub struct PCARequest {
         description = "Number of principal components to keep. If not specified, keeps all components."
     )]
     pub n_components: Option<usize>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "A prefix: writes the principal-component scores (prcomp()$x) as columns <prefix>1 .. <prefix>m (Float64); 'PC' gives PC1, PC2, .... None may be one of the columns used; existing columns of those names are replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for Hierarchical clustering.
@@ -105,6 +119,13 @@ pub struct HierarchicalRequest {
         description = "Agglomeration method as stats::hclust(method =): 'ward.D2' (default; also 'ward'), 'single', 'complete', 'average', 'mcquitty', 'ward.D', 'centroid' or 'median' (centroid and median on squared Euclidean distances, as R documents). Case-insensitive; anything else is an error."
     )]
     pub linkage: Option<String>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's cluster (Int64, 1..k as R's kmeans()$cluster / cutree()) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for t-SNE dimensionality reduction.
@@ -235,6 +256,13 @@ pub struct RandomForestRequest {
     /// Random seed for reproducibility
     #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's in-sample prediction (Float64, the mean over all trees) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for Linear SVM classification.
@@ -268,6 +296,13 @@ pub struct SvmRequest {
     /// Convergence tolerance (default: 1e-3)
     #[schemars(description = "Convergence tolerance. Default is 0.001.")]
     pub tolerance: Option<f64>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's predicted label (Int64, the target's labels; null for rows dropped for missing values) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for Projection Pursuit Regression (PPR).

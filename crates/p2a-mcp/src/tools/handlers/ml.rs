@@ -11,8 +11,8 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, append_missing_note, error_text, limit_refusal, missing_json,
-    numeric_columns, numeric_matrix, parse_option,
+    MissingSummary, NaPolicy, append_missing_note, append_notes, error_text, limit_refusal,
+    missing_json, notes_json, numeric_columns, numeric_matrix, parse_option,
 };
 use crate::tools::limits::{EnsembleChange, EnsembleTier};
 use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, HetTxRequest};
@@ -24,7 +24,7 @@ use p2a_core::ml::{
     run_causal_forest_config,
 };
 use p2a_core::options::Choices;
-use p2a_core::polars::prelude::Series;
+use p2a_core::polars::prelude::{NamedFrom, Series};
 use p2a_core::{
     C50Config,
     CartConfig,
@@ -94,13 +94,22 @@ fn ml_error(prefix: &str, e: impl std::fmt::Display) -> CallToolResult {
 /// Features (an n x k matrix in `features` order, allocated fallibly) and the target,
 /// through one row mask under `policy`. The target is requested first, so
 /// [`NaPolicy::Fail`] names it first when both have missing values. An empty `features` is
-/// "At least one feature column must be specified".
+/// "At least one feature column must be specified". The last value is the dataset rows
+/// kept, in order (all rows under [`NaPolicy::Fail`]).
 fn features_and_target(
     dataset: &Dataset,
     features: &[String],
     target: &str,
     policy: NaPolicy,
-) -> Result<(ndarray::Array2<f64>, ndarray::Array1<f64>, MissingSummary), String> {
+) -> Result<
+    (
+        ndarray::Array2<f64>,
+        ndarray::Array1<f64>,
+        MissingSummary,
+        Vec<usize>,
+    ),
+    String,
+> {
     if features.is_empty() {
         return Err("At least one feature column must be specified".to_string());
     }
@@ -115,7 +124,12 @@ fn features_and_target(
             *cell = v;
         }
     }
-    Ok((x, cols.numeric_array(target), cols.missing().clone()))
+    Ok((
+        x,
+        cols.numeric_array(target),
+        cols.missing().clone(),
+        cols.rows().to_vec(),
+    ))
 }
 
 /// The refusal of a tree-ensemble fit on `n_rows` rows whose memory bound (`bound`, for a
@@ -309,32 +323,36 @@ impl AnalyticsServer {
 
     /// Run K-means clustering.
     #[tool(
-        description = "Run K-means clustering to partition data into k clusters. Uses k-means++ initialization for better convergence. Returns cluster assignments, centroids, and inertia (within-cluster sum of squares)."
+        description = "K-means clustering (k-means++ starts, n_init restarts, Lloyd iterations until no assignment changes, as R's kmeans(algorithm = 'Lloyd')). Returns cluster sizes, centroids, inertia (R's tot.withinss), iterations and convergence, and a JSON block with each row's cluster (1..k, R's numbering; first 100 rows). With output_column, writes every row's cluster into the dataset. Seed: seed, else set_seed, else 42."
     )]
     pub async fn ml_kmeans(
         &self,
         Parameters(request): Parameters<KMeansRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let inputs: Vec<&str> = request.columns.iter().map(String::as_str).collect();
+        let out_names: Vec<String> = request.output_column.iter().cloned().collect();
+        if let Err(e) = check_output_names(&out_names, &inputs) {
+            return error_text(e);
+        }
+        let Some(dataset) = self.dataset_snapshot(&request.dataset).await else {
+            return dataset_not_found(&request.dataset);
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
+        let (data, _missing) = match numeric_matrix(&dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
-
+        // The core draws its starts from entropy without a seed: 42 keeps unseeded runs
+        // reproducible.
+        let seed = self.seed_for(request.seed).await;
         let result = match kmeans(
             data.view(),
             request.k,
             request.max_iterations,
             None, // tolerance
             request.n_init,
-            seed,
+            Some(seed),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -342,14 +360,67 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let k = result.centroids.nrows();
+        let n = result.labels.len();
+        let mut text = format!(
+            "K-Means Clustering Results\n\
+             ==========================\n\
+             Number of clusters: {k}\n\
+             Iterations: {}\n\
+             Inertia (WCSS): {:.4}\n\n\
+             Cluster sizes (clusters 1..k, as R's kmeans()$cluster):\n",
+            result.n_iterations, result.inertia
+        );
+        for (c, size) in result.cluster_sizes.iter().enumerate() {
+            text.push_str(&format!("  Cluster {}: {size} points\n", c + 1));
+        }
+        text.push_str("Centroids:\n");
+        for (c, row) in result.centroids.rows().into_iter().enumerate() {
+            let v: Vec<String> = row.iter().map(|x| format!("{x:.4}")).collect();
+            text.push_str(&format!("  Cluster {}: [{}]\n", c + 1, v.join(", ")));
+        }
+        let conv = Some((result.convergence.converged, result.convergence.iterations));
+        append_notes(&mut text, conv, &result.warnings);
+
+        let one_based: Vec<i64> = result.labels.iter().map(|&l| l as i64 + 1).collect();
+        if let Some(name) = &request.output_column {
+            let series = Series::new(name.as_str().into(), one_based.clone());
+            match self
+                .write_output_columns(&request.dataset, n, vec![series])
+                .await
+            {
+                Ok(replaced) => text.push_str(&wrote_lines(
+                    &out_names,
+                    &replaced,
+                    "Int64",
+                    n,
+                    &request.dataset,
+                )),
+                Err(e) => return error_text(e),
+            }
+        }
+
+        let mut json = serde_json::json!({
+            "n_observations": n,
+            "k": k,
+            "inertia": result.inertia,
+            "seed": seed,
+            "cluster_sizes": cluster_sizes_json(&result.labels, k),
+            "cluster_assignments": first(&one_based, LABELS_SHOWN),
+            "output_column": request.output_column,
+        });
+        merge_json(&mut json, notes_json(conv, &result.warnings));
+        if n > LABELS_SHOWN {
+            json["note"] = format!("Showing the first {LABELS_SHOWN} of {n} assignments").into();
+        }
+        text.push_str("\n\nJSON Summary:\n");
+        text.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run DBSCAN clustering.
     #[tool(
-        description = "Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters."
+        description = "Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters. Returns the number of clusters, noise points and core samples and the cluster sizes (no per-row labels). min_samples counts the point itself, as dbscan::dbscan's minPts."
     )]
     pub async fn ml_dbscan(
         &self,
@@ -378,24 +449,28 @@ impl AnalyticsServer {
 
     /// Run Hierarchical (Agglomerative) clustering.
     #[tool(
-        description = "Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods. Returns cluster assignments and dendrogram information."
+        description = "Agglomerative clustering as R's hclust() on Euclidean distances (eight linkages, see linkage), cut by n_clusters (cutree(k)) or distance_threshold (cutree(h)). Returns cluster sizes, the top 50 merges and a JSON block with each row's cluster (1..k, R's cutree numbering; first 100 rows). With output_column, writes every row's cluster."
     )]
     pub async fn ml_hierarchical(
         &self,
         Parameters(request): Parameters<HierarchicalRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
-            Ok(d) => d,
-            Err(e) => return Ok(ml_error("", e)),
-        };
-
+        let inputs: Vec<&str> = request.columns.iter().map(String::as_str).collect();
+        let out_names: Vec<String> = request.output_column.iter().cloned().collect();
+        if let Err(e) = check_output_names(&out_names, &inputs) {
+            return error_text(e);
+        }
         let linkage_method = match parse_option(request.linkage.as_deref(), Linkage::Ward) {
             Ok(l) => l,
             Err(e) => return error_text(e),
+        };
+        let Some(dataset) = self.dataset_snapshot(&request.dataset).await else {
+            return dataset_not_found(&request.dataset);
+        };
+
+        let (data, _missing) = match numeric_matrix(&dataset, &request.columns, NaPolicy::Fail) {
+            Ok(d) => d,
+            Err(e) => return Ok(ml_error("", e)),
         };
 
         let result = match hierarchical(
@@ -410,14 +485,84 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let k = result.n_clusters;
+        let n = result.labels.len();
+        let mut text = format!(
+            "Hierarchical Clustering Results\n\
+             ================================\n\
+             Number of clusters: {k}\n\
+             Linkage method: {}\n\n\
+             Cluster sizes (clusters 1..k, as R's cutree()):\n",
+            linkage_method.r_name()
+        );
+        let mut sizes = vec![0usize; k];
+        for &l in &result.labels {
+            if let Some(c) = sizes.get_mut(l) {
+                *c += 1;
+            }
+        }
+        for (c, size) in sizes.iter().enumerate() {
+            text.push_str(&format!("  Cluster {}: {size} points\n", c + 1));
+        }
+        let merges = result.linkage_matrix.len();
+        let skip = merges.saturating_sub(DENDROGRAM_ROWS);
+        if skip > 0 {
+            text.push_str(&format!(
+                "\nDendrogram (merge history; the last {DENDROGRAM_ROWS} of {merges} merges, the \
+                 top of the tree):\n"
+            ));
+        } else {
+            text.push_str("\nDendrogram (merge history):\n");
+        }
+        text.push_str("  Step  Cluster1  Cluster2  Distance    Size\n");
+        for (i, &(c1, c2, dist, size)) in result.linkage_matrix.iter().enumerate().skip(skip) {
+            text.push_str(&format!(
+                "  {:4}  {:8}  {:8}  {:10.4}  {:4}\n",
+                i + 1,
+                c1,
+                c2,
+                dist,
+                size
+            ));
+        }
+
+        let one_based: Vec<i64> = result.labels.iter().map(|&l| l as i64 + 1).collect();
+        if let Some(name) = &request.output_column {
+            let series = Series::new(name.as_str().into(), one_based.clone());
+            match self
+                .write_output_columns(&request.dataset, n, vec![series])
+                .await
+            {
+                Ok(replaced) => text.push_str(&wrote_lines(
+                    &out_names,
+                    &replaced,
+                    "Int64",
+                    n,
+                    &request.dataset,
+                )),
+                Err(e) => return error_text(e),
+            }
+        }
+
+        let mut json = serde_json::json!({
+            "n_observations": n,
+            "n_clusters": k,
+            "linkage": linkage_method.r_name(),
+            "cluster_sizes": cluster_sizes_json(&result.labels, k),
+            "cluster_assignments": first(&one_based, LABELS_SHOWN),
+            "output_column": request.output_column,
+        });
+        if n > LABELS_SHOWN {
+            json["note"] = format!("Showing the first {LABELS_SHOWN} of {n} assignments").into();
+        }
+        text.push_str("\n\nJSON Summary:\n");
+        text.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Cut a hierarchical clustering tree into groups.
     #[tool(
-        description = "Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering, then cuts the resulting tree at a specified number of clusters (k) or height. Returns cluster assignments for each observation. Useful for extracting cluster memberships from a dendrogram."
+        description = "Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering as R's hclust() (see linkage), then cuts the resulting tree at a specified number of clusters (k) or height. Returns each observation's cluster (1-based, R's cutree numbering; the first 100 in cluster_assignments) and the cluster sizes."
     )]
     pub async fn ml_cutree(
         &self,
@@ -464,7 +609,7 @@ impl AnalyticsServer {
             "n_observations": result.n,
             "n_clusters": result.k,
             "cut_height": result.cut_height,
-            "cluster_assignments": &result.labels[..result.n.min(100)],
+            "cluster_assignments": first(&result.labels, LABELS_SHOWN),
             "cluster_sizes": cluster_counts,
             "note": if result.n > 100 { Some(format!("Showing first 100 of {} assignments", result.n)) } else { None }
         });
@@ -480,36 +625,97 @@ impl AnalyticsServer {
 
     /// Run PCA (Principal Component Analysis).
     #[tool(
-        description = "Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings. Useful for understanding data structure and reducing feature dimensionality."
+        description = "Principal component analysis of the centred (not scaled) columns, as R's prcomp(). Returns explained variance, ratios and cumulative shares, and the loadings (rotation). With output_column = 'PC', writes the scores (prcomp()$x) as columns PC1..PCm."
     )]
     pub async fn ml_pca(
         &self,
         Parameters(request): Parameters<PCARequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
+        let inputs: Vec<&str> = request.columns.iter().map(String::as_str).collect();
+        if let Some(prefix) = &request.output_column {
+            if let Err(e) = check_output_names(std::slice::from_ref(prefix), &[]) {
+                return error_text(e);
+            }
+        }
+        let Some(dataset) = self.dataset_snapshot(&request.dataset).await else {
+            return dataset_not_found(&request.dataset);
+        };
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let (data, _missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
+        let (data, _missing) = match numeric_matrix(&dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        let result = match pca(data.view(), request.n_components, false) {
+        let result = match pca(
+            data.view(),
+            request.n_components,
+            request.output_column.is_some(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ml_error("PCA failed: ", e));
             }
         };
+        let m = result.n_components;
+        let out_names: Vec<String> = match &request.output_column {
+            Some(prefix) => (1..=m).map(|j| format!("{prefix}{j}")).collect(),
+            None => Vec::new(),
+        };
+        if let Err(e) = check_output_names(&out_names, &inputs) {
+            return error_text(e);
+        }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        let n = data.nrows();
+        if let (Some(scores), false) = (&result.transformed, out_names.is_empty()) {
+            let series: Vec<Series> = out_names
+                .iter()
+                .enumerate()
+                .map(|(j, name)| Series::new(name.as_str().into(), scores.column(j).to_vec()))
+                .collect();
+            match self.write_output_columns(&request.dataset, n, series).await {
+                Ok(replaced) => text.push_str(&wrote_lines(
+                    &out_names,
+                    &replaced,
+                    "Float64",
+                    n,
+                    &request.dataset,
+                )),
+                Err(e) => return error_text(e),
+            }
+        }
+
+        let loadings: Vec<Vec<f64>> = result
+            .components
+            .rows()
+            .into_iter()
+            .map(|r| r.to_vec())
+            .collect();
+        let mut json = serde_json::json!({
+            "n_observations": n,
+            "n_components": m,
+            "explained_variance": result.explained_variance.to_vec(),
+            "explained_variance_ratio": result.explained_variance_ratio.to_vec(),
+            "loadings": loadings,
+            "output_columns": if out_names.is_empty() { serde_json::Value::Null } else { serde_json::json!(out_names) },
+        });
+        if let Some(scores) = &result.transformed {
+            let sample: Vec<Vec<f64>> = scores
+                .rows()
+                .into_iter()
+                .take(5)
+                .map(|r| r.to_vec())
+                .collect();
+            json["scores_sample"] = serde_json::json!(sample);
+        }
+        text.push_str("\n\nJSON Summary:\n");
+        text.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run t-SNE dimensionality reduction.
     #[tool(
-        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization."
+        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization. Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed."
     )]
     pub async fn ml_tsne(
         &self,
@@ -592,8 +798,8 @@ impl AnalyticsServer {
                         "gof1_positive_eigenvalues": r.gof[0],
                         "gof2_k_eigenvalues": r.gof[1]
                     },
-                    "eigenvalues": &r.eig[..r.k.min(10)],
-                    "configuration": &r.points[..r.n.min(20)],
+                    "eigenvalues": first(&r.eig, r.k.min(10)),
+                    "configuration": first(&r.points, 20),
                     "note": if r.n > 20 { Some(format!("Showing first 20 of {} points", r.n)) } else { None }
                 });
                 Ok(CallToolResult::success(vec![Content::text(
@@ -610,25 +816,28 @@ impl AnalyticsServer {
 
     /// Run Random Forest regression (a regression forest only; ML-108).
     #[tool(
-        description = "Run Random Forest regression: variance-reduction (MSE) splits with leaf means. A class label coded as numbers is averaged, not voted: there is no classification mode. Defaults differ from R's randomForest::randomForest() for regression: n_trees 100 (R ntree 500), features per split ceil(sqrt(p)) (R mtry max(floor(p/3), 1)), max_depth 10 (R unlimited), min_samples_split 2 (R nodesize 5). Returns feature importances, out-of-bag score, and predictions."
+        description = "Run Random Forest regression: variance-reduction (MSE) splits with leaf means. A class label coded as numbers is averaged, not voted: there is no classification mode. Defaults differ from R's randomForest::randomForest() for regression: n_trees 100 (R ntree 500), features per split ceil(sqrt(p)) (R mtry max(floor(p/3), 1)), max_depth 10 (R unlimited), min_samples_split 2 (R nodesize 5). Returns the out-of-bag R², feature importances (shares of IncNodePurity, the summed squared-error decrease, as randomForest's importance type 2) and a JSON block with the first 20 in-sample predictions (the mean over all trees, R's predict(rf, newdata = data); not rf$predicted, which is out-of-bag). With output_column, writes every row's prediction."
     )]
     pub async fn ml_random_forest(
         &self,
         Parameters(request): Parameters<RandomForestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let (data, target, _missing) = match features_and_target(
-            dataset,
-            &request.features,
-            &request.target,
-            NaPolicy::Fail,
-        ) {
-            Ok(d) => d,
-            Err(e) => return Ok(ml_error("", e)),
+        let mut inputs: Vec<&str> = request.features.iter().map(String::as_str).collect();
+        inputs.push(&request.target);
+        let out_names: Vec<String> = request.output_column.iter().cloned().collect();
+        if let Err(e) = check_output_names(&out_names, &inputs) {
+            return error_text(e);
+        }
+        let Some(dataset) = self.dataset_snapshot(&request.dataset).await else {
+            return dataset_not_found(&request.dataset);
         };
+
+        let (data, target, _missing, _rows) =
+            match features_and_target(&dataset, &request.features, &request.target, NaPolicy::Fail)
+            {
+                Ok(d) => d,
+                Err(e) => return Ok(ml_error("", e)),
+            };
 
         let seed = self.seed_or_global(request.seed).await;
 
@@ -648,32 +857,77 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let n = result.predictions.len();
+        let mut text = result.to_string();
+        if let Some(name) = &request.output_column {
+            let series = Series::new(name.as_str().into(), result.predictions.clone());
+            match self
+                .write_output_columns(&request.dataset, n, vec![series])
+                .await
+            {
+                Ok(replaced) => text.push_str(&wrote_lines(
+                    &out_names,
+                    &replaced,
+                    "Float64",
+                    n,
+                    &request.dataset,
+                )),
+                Err(e) => return error_text(e),
+            }
+        }
+        let importance: Vec<serde_json::Value> = request
+            .features
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                serde_json::json!({
+                    "feature": f,
+                    "share": result.feature_importances.get(i),
+                    "inc_node_purity": result.inc_node_purity.get(i),
+                })
+            })
+            .collect();
+        let mut json = serde_json::json!({
+            "n_observations": n,
+            "n_trees": result.n_trees,
+            "oob_r2": result.oob_score,
+            "feature_importance": importance,
+            "predictions_sample": first(&result.predictions, PREDICTIONS_SHOWN),
+            "output_column": request.output_column,
+        });
+        if n > PREDICTIONS_SHOWN {
+            json["note"] =
+                format!("Showing the first {PREDICTIONS_SHOWN} of {n} predictions").into();
+        }
+        text.push_str("\n\nJSON Summary:\n");
+        text.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Linear SVM classification.
     #[tool(
-        description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions. Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported."
+        description = "Linear-kernel SVM for two classes (SMO; not pinned to e1071::svm). Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported. Returns the weights, bias, support-vector count, convergence and a JSON block with the first 20 predicted labels in the target's own labels. With output_column, writes each row's predicted label (null for dropped rows)."
     )]
     pub async fn ml_svm(
         &self,
         Parameters(request): Parameters<SvmRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let (data, target, missing) = match features_and_target(
-            dataset,
-            &request.features,
-            &request.target,
-            NaPolicy::Omit,
-        ) {
-            Ok(d) => d,
-            Err(e) => return Ok(ml_error("", e)),
+        let mut inputs: Vec<&str> = request.features.iter().map(String::as_str).collect();
+        inputs.push(&request.target);
+        let out_names: Vec<String> = request.output_column.iter().cloned().collect();
+        if let Err(e) = check_output_names(&out_names, &inputs) {
+            return error_text(e);
+        }
+        let Some(dataset) = self.dataset_snapshot(&request.dataset).await else {
+            return dataset_not_found(&request.dataset);
         };
+
+        let (data, target, missing, rows) =
+            match features_and_target(&dataset, &request.features, &request.target, NaPolicy::Omit)
+            {
+                Ok(d) => d,
+                Err(e) => return Ok(ml_error("", e)),
+            };
 
         let result = match linear_svm(
             data.view(),
@@ -689,8 +943,44 @@ impl AnalyticsServer {
             }
         };
 
+        // Predictions of the kept rows placed at their dataset rows; dropped rows are null.
+        let n_rows = dataset.nrows();
+        let mut per_row: Vec<Option<i64>> = vec![None; n_rows];
+        for (&r, &p) in rows.iter().zip(&result.predictions) {
+            if let Some(cell) = per_row.get_mut(r) {
+                *cell = Some(i64::from(p));
+            }
+        }
+
         let mut out = result.to_string();
         append_missing_note(&mut out, &missing);
+        if let Some(name) = &request.output_column {
+            let series = Series::new(name.as_str().into(), per_row.clone());
+            match self
+                .write_output_columns(&request.dataset, n_rows, vec![series])
+                .await
+            {
+                Ok(replaced) => out.push_str(&wrote_lines(
+                    &out_names,
+                    &replaced,
+                    "Int64",
+                    n_rows,
+                    &request.dataset,
+                )),
+                Err(e) => return error_text(e),
+            }
+        }
+        let json = serde_json::json!({
+            "n_observations": rows.len(),
+            "class_labels": result.class_labels,
+            "converged": result.converged,
+            "iterations": result.n_iterations,
+            "predictions_sample": first(&per_row, PREDICTIONS_SHOWN),
+            "missing": missing_json(&missing),
+            "output_column": request.output_column,
+        });
+        out.push_str("\n\nJSON Summary:\n");
+        out.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 
@@ -706,7 +996,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let (data, target, missing) = match features_and_target(
+        let (data, target, missing, _rows) = match features_and_target(
             dataset,
             &request.features,
             &request.target,
@@ -862,7 +1152,7 @@ impl AnalyticsServer {
                 "min_cases": request.min_cases.unwrap_or(2),
                 "cf": request.cf.unwrap_or(0.25)
             },
-            "predictions_sample": &result.predictions[..n_predictions.min(20)],
+            "predictions_sample": first(&result.predictions, 20),
             "note": if n_predictions > 20 {
                 Some(format!("Showing first 20 of {} predictions", n_predictions))
             } else {
@@ -1263,9 +1553,11 @@ impl AnalyticsServer {
                 .map(|(i, &imp)| (format!("X{}", i), imp))
                 .collect()
         };
-        let mut var_importance_sorted = var_importance;
-        var_importance_sorted
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut var_importance_sorted: Vec<(String, f64)> = var_importance
+            .into_iter()
+            .filter(|(_, v)| v.is_finite())
+            .collect();
+        var_importance_sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
         let top_importance: Vec<serde_json::Value> = var_importance_sorted
             .iter()
             .take(10)
@@ -1314,7 +1606,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let (data, target, _missing) = match features_and_target(
+        let (data, target, _missing, _rows) = match features_and_target(
             dataset,
             &request.features,
             &request.target,
@@ -1790,6 +2082,20 @@ fn wrote_lines(
             format!("\n{verb} column '{c}' ({dtype}, {rows} rows) in dataset '{dataset}'.")
         })
         .collect()
+}
+
+/// The refusal of a call naming a dataset that does not exist (as `get_dataset!`).
+fn dataset_not_found(name: &str) -> Result<CallToolResult, McpError> {
+    error_text(format!(
+        "Dataset '{name}' not found. Use 'list_datasets' to see available datasets."
+    ))
+}
+
+/// Adds the keys of the JSON object `extra` to the JSON object `into`.
+fn merge_json(into: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(a), serde_json::Value::Object(b)) = (into.as_object_mut(), extra) {
+        a.extend(b);
+    }
 }
 
 /// The first `n` values of `v` as JSON (never panics on a short vector).
@@ -2834,26 +3140,38 @@ mod tests {
         // null became NaN and Tier 0's linear_svm refuses it).
         let s = server().await;
         let svm = |ds: &str, target: &str| json!({"dataset": ds, "features": ["x1_na", "x2"], "target": target});
+        // The text before the JSON block, and the JSON block.
+        let split = |r: &CallToolResult| {
+            let t = text_of(r);
+            let (head, json) = t.split_once("\n\nJSON Summary:\n").expect("a JSON block");
+            (
+                head.to_string(),
+                serde_json::from_str::<Value>(json).unwrap(),
+            )
+        };
         let omit = s.ml_svm(req(svm("ml", "cls"))).await.unwrap();
         let clean = s.ml_svm(req(svm("ml_x1", "cls"))).await.unwrap();
         assert_ne!(omit.is_error, Some(true), "{}", text_of(&omit));
+        let ((omit_text, omit_json), (clean_text, _)) = (split(&omit), split(&clean));
         assert_eq!(
-            text_of(&omit),
+            omit_text,
             format!(
-                "{}\nMissing values: 1 of 30 rows dropped because of missing values (x1_na: 1)",
-                text_of(&clean)
+                "{clean_text}\nMissing values: 1 of 30 rows dropped because of missing values (x1_na: 1)"
             )
         );
+        assert_eq!(omit_json["missing"]["n_dropped"], json!(1), "{omit_json}");
+        assert_eq!(omit_json["n_observations"], json!(29));
         let omit = s.ml_svm(req(svm("ml", "cls_na"))).await.unwrap();
         let clean = s.ml_svm(req(svm("ml_clean", "cls_na"))).await.unwrap();
+        let ((omit_text, omit_json), (clean_text, _)) = (split(&omit), split(&clean));
         assert_eq!(
-            text_of(&omit),
+            omit_text,
             format!(
-                "{}\nMissing values: 2 of 30 rows dropped because of missing values \
-                 (cls_na: 1, x1_na: 1)",
-                text_of(&clean)
+                "{clean_text}\nMissing values: 2 of 30 rows dropped because of missing values \
+                 (cls_na: 1, x1_na: 1)"
             )
         );
+        assert_eq!(omit_json["missing"]["n_dropped"], json!(2), "{omit_json}");
     }
 
     #[tokio::test]
