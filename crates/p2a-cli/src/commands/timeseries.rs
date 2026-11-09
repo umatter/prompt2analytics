@@ -18,7 +18,6 @@ use p2a_core::{
     run_causal_impact,
     // Classical decomposition
     run_decompose,
-    run_garch,
     run_holt_winters,
     run_mstl,
     // STL decomposition
@@ -27,14 +26,134 @@ use p2a_core::{
     run_struct_ts,
     run_var,
     run_var_irf,
-    run_varma,
-    run_vecm,
 };
 #[cfg(feature = "spectral-analysis")]
 use p2a_core::{SpectrumConfig, run_spectrum};
 
+use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
+use p2a_core::econometrics::timeseries::vecm::{VecmConfig, VecmDeterministic, run_vecm_with};
+use p2a_core::forecasting::garch::GarchDistribution;
+use p2a_core::options::Choices;
+use p2a_core::{GarchConfig, garch as fit_garch, garch_forecast};
+
+use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, print_error};
 use crate::session::SessionManager;
+
+// The R names of the time-series options. The core enums have no FromStr, so the tables live
+// here; the first spelling of each entry is canonical.
+
+/// `--change-type`, as the changepoint package's cpt.mean / cpt.var / cpt.meanvar.
+pub(crate) static CHANGE_TYPES: Choices<CostFunction> = Choices {
+    option: "change type",
+    values: &[
+        (&["mean"], CostFunction::MeanChange),
+        (&["variance", "var"], CostFunction::VarianceChange),
+        (
+            &["meanvar", "both", "mean_and_variance", "mean_var"],
+            CostFunction::MeanAndVariance,
+        ),
+    ],
+};
+
+/// `--seasonal`, as HoltWinters(seasonal = ).
+pub(crate) static SEASONAL_TYPES: Choices<SeasonalType> = Choices {
+    option: "seasonal type",
+    values: &[
+        (&["additive", "add"], SeasonalType::Additive),
+        (
+            &["multiplicative", "mult", "multi"],
+            SeasonalType::Multiplicative,
+        ),
+    ],
+};
+
+/// `--method` of `ts ar`, as ar(method = ).
+pub(crate) static AR_METHODS: Choices<ArMethod> = Choices {
+    option: "AR method",
+    values: &[
+        (&["yule-walker", "yw"], ArMethod::YuleWalker),
+        (&["burg"], ArMethod::Burg),
+        (&["ols"], ArMethod::Ols),
+    ],
+};
+
+/// `--decompose-type`, as decompose(type = ).
+pub(crate) static DECOMPOSE_TYPES: Choices<DecomposeType> = Choices {
+    option: "decomposition type",
+    values: &[
+        (&["additive", "add"], DecomposeType::Additive),
+        (
+            &["multiplicative", "mult", "multi"],
+            DecomposeType::Multiplicative,
+        ),
+    ],
+};
+
+/// `--model-type`, as StructTS(type = ).
+pub(crate) static STRUCT_TS_TYPES: Choices<StructTsType> = Choices {
+    option: "StructTS type",
+    values: &[
+        (&["level", "local_level"], StructTsType::Level),
+        (&["trend", "local_trend", "llt"], StructTsType::Trend),
+        (&["BSM", "basic_structural"], StructTsType::BSM),
+    ],
+};
+
+fn table_arg<T: Copy + PartialEq>(table: &Choices<T>, s: &str) -> Result<T, String> {
+    table.parse(s).map_err(|e| match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    })
+}
+
+fn parse_change_type(s: &str) -> Result<CostFunction, String> {
+    table_arg(&CHANGE_TYPES, s)
+}
+
+fn parse_seasonal(s: &str) -> Result<SeasonalType, String> {
+    table_arg(&SEASONAL_TYPES, s)
+}
+
+fn parse_ar_method(s: &str) -> Result<ArMethod, String> {
+    table_arg(&AR_METHODS, s)
+}
+
+fn parse_decompose_type(s: &str) -> Result<DecomposeType, String> {
+    table_arg(&DECOMPOSE_TYPES, s)
+}
+
+fn parse_struct_ts_type(s: &str) -> Result<StructTsType, String> {
+    table_arg(&STRUCT_TS_TYPES, s)
+}
+
+/// (subcommand path, arg id, canonical names) of the CLI-local tables, for the help test.
+#[cfg(test)]
+pub(super) fn option_names() -> Vec<(Vec<&'static str>, &'static str, Vec<&'static str>)> {
+    vec![
+        (
+            vec!["timeseries", "changepoint"],
+            "change_type",
+            CHANGE_TYPES.names(),
+        ),
+        (
+            vec!["timeseries", "holt-winters"],
+            "seasonal",
+            SEASONAL_TYPES.names(),
+        ),
+        (vec!["timeseries", "ar"], "method", AR_METHODS.names()),
+        (
+            vec!["timeseries", "decompose"],
+            "decompose_type",
+            DECOMPOSE_TYPES.names(),
+        ),
+        (
+            vec!["timeseries", "struct-ts"],
+            "model_type",
+            STRUCT_TS_TYPES.names(),
+        ),
+    ]
+}
 
 #[derive(Subcommand)]
 pub enum TimeseriesCommands {
@@ -132,6 +251,11 @@ EXAMPLES:
         /// MA order (q)
         #[arg(short = 'q', long, default_value = "1")]
         ma: usize,
+
+        /// Order m of the step-1 long VAR (Hannan-Rissanen); default max(floor(2 ln n),
+        /// 2 max(p, q)), 0 when q = 0. Set it larger when an MA root is near the unit circle
+        #[arg(long)]
+        long_var_order: Option<usize>,
     },
 
     /// Vector Error Correction Model (cointegration)
@@ -143,13 +267,19 @@ EXAMPLES:
         #[arg(long, num_args = 2..)]
         cols: Vec<String>,
 
-        /// Lag order of the VAR in levels (urca::ca.jo's K, at least 2)
+        /// Lag order K of the VAR in levels (urca::ca.jo K; at least 2)
         #[arg(long, default_value = "2")]
         lags: usize,
 
-        /// Cointegration rank
-        #[arg(long, default_value = "1")]
-        rank: usize,
+        /// Cointegration rank r for the restricted VECM (1..k-1); default: the trace test's rank
+        /// at 5%
+        #[arg(long)]
+        rank: Option<usize>,
+
+        /// Deterministic term in the cointegration relation, as ca.jo ecdet: none (default),
+        /// const or trend
+        #[arg(long, default_value = "none", value_parser = super::causal::option_arg::<VecmDeterministic>)]
+        ecdet: VecmDeterministic,
     },
 
     /// Impulse Response Function from VAR model
@@ -165,7 +295,7 @@ EXAMPLES:
         #[arg(long, default_value = "1")]
         lags: usize,
 
-        /// Number of steps for IRF
+        /// Number of horizons including the impact h = 0 (vars::irf n.ahead = steps - 1)
         #[arg(long, default_value = "10")]
         steps: usize,
     },
@@ -179,7 +309,8 @@ EXAMPLES:
         #[arg(long)]
         col: String,
 
-        /// Penalty value (default: automatic BIC)
+        /// Penalty; default changepoint's MBIC: (k + 2) ln n plus ln(segment length) per segment
+        /// (k = 1 for mean or variance, 2 for meanvar)
         #[arg(long)]
         penalty: Option<f64>,
 
@@ -187,9 +318,10 @@ EXAMPLES:
         #[arg(long)]
         min_segment: Option<usize>,
 
-        /// Type of change: "mean" (default), "variance", "both"
-        #[arg(long, default_value = "mean")]
-        change_type: String,
+        /// Type of change, as the changepoint package: mean (cpt.mean, unit variance; default),
+        /// variance (cpt.var) or meanvar (cpt.meanvar; alias both)
+        #[arg(long, default_value = "mean", value_parser = parse_change_type)]
+        change_type: CostFunction,
     },
 
     /// GARCH volatility model
@@ -217,9 +349,14 @@ EXAMPLES:
         #[arg(short = 'q', long, default_value = "1")]
         garch: usize,
 
-        /// Forecast horizon (optional)
+        /// Forecast the conditional variance h steps ahead (GARCH recursion)
         #[arg(long)]
         horizon: Option<usize>,
+
+        /// Conditional distribution, as fGarch cond.dist: norm (default) or std (standardised
+        /// Student t; aliases t, student_t)
+        #[arg(long, default_value = "norm", value_parser = super::causal::option_arg::<GarchDistribution>)]
+        distribution: GarchDistribution,
     },
 
     /// Holt-Winters exponential smoothing
@@ -230,6 +367,9 @@ EXAMPLES:
 
     # Multiplicative seasonal
     p2a ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
+
+    # Fixed smoothing parameters and 12 forecasts with 95% prediction intervals
+    p2a ts holt-winters mydata --col sales --period 12 --alpha 0.3 --beta 0 --gamma 0.2 --horizon 12
 ")]
     HoltWinters {
         /// Dataset name
@@ -243,13 +383,31 @@ EXAMPLES:
         #[arg(long)]
         period: usize,
 
-        /// Seasonal type: "additive" (default) or "multiplicative"
-        #[arg(long, default_value = "additive")]
-        seasonal: String,
+        /// Seasonal component, as HoltWinters: additive (default) or multiplicative (alias mult)
+        #[arg(long, default_value = "additive", value_parser = parse_seasonal)]
+        seasonal: SeasonalType,
 
-        /// Forecast horizon (optional)
+        /// Level smoothing alpha in (0, 1]; default: optimised
+        #[arg(long)]
+        alpha: Option<f64>,
+
+        /// Trend smoothing beta in [0, 1]; 0 fits no trend (R beta = FALSE); default: optimised
+        #[arg(long)]
+        beta: Option<f64>,
+
+        /// Seasonal smoothing gamma in [0, 1]; 0 fits no seasonal component (R gamma = FALSE);
+        /// default: optimised
+        #[arg(long)]
+        gamma: Option<f64>,
+
+        /// Forecast h steps ahead with prediction intervals (predict.HoltWinters); a
+        /// multiplicative seasonal fit gets point forecasts only
         #[arg(long)]
         horizon: Option<usize>,
+
+        /// Level of the prediction intervals (predict.HoltWinters level)
+        #[arg(long, default_value_t = 0.95)]
+        level: f64,
     },
 
     /// Granger causality test
@@ -288,9 +446,9 @@ EXAMPLES:
         #[arg(long)]
         order: Option<usize>,
 
-        /// Method: "yule-walker" (default), "burg", or "ols"
-        #[arg(long, default_value = "yule-walker")]
-        method: String,
+        /// Method, as ar(): yule-walker (default; alias yw), burg or ols
+        #[arg(long, default_value = "yule-walker", value_parser = parse_ar_method)]
+        method: ArMethod,
 
         /// Select the order by AIC up to min(n - 1, floor(10 log10 n)) (true/false; default true);
         /// false fits that maximum order, as R's ar(aic = FALSE). --order fixes the order and
@@ -354,9 +512,9 @@ EXAMPLES:
         #[arg(long)]
         period: usize,
 
-        /// Decomposition type: "additive" (default) or "multiplicative"
-        #[arg(long, default_value = "additive")]
-        decompose_type: String,
+        /// Decomposition, as decompose(): additive (default) or multiplicative
+        #[arg(long, default_value = "additive", value_parser = parse_decompose_type)]
+        decompose_type: DecomposeType,
     },
 
     /// Structural time series (state space) model
@@ -368,9 +526,9 @@ EXAMPLES:
         #[arg(long)]
         col: String,
 
-        /// Model type: "level" (default), "trend", or "bsm"
-        #[arg(long, default_value = "level")]
-        model_type: String,
+        /// Model, as StructTS: level (default), trend or BSM (needs --period)
+        #[arg(long, default_value = "level", value_parser = parse_struct_ts_type)]
+        model_type: StructTsType,
 
         /// Seasonal period (required for "bsm" model type)
         #[arg(long)]
@@ -432,9 +590,9 @@ EXAMPLES:
         #[arg(long)]
         col: String,
 
-        /// Smoothing spans (comma-separated odd integers, e.g., "3,3")
-        #[arg(long)]
-        spans: Option<String>,
+        /// Modified Daniell smoothing spans, comma-separated odd integers, e.g. 3,3
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        spans: Vec<usize>,
 
         /// Taper proportion (0.0 to 0.5, default: 0.1)
         #[arg(long, default_value = "0.1")]
@@ -495,13 +653,27 @@ pub fn execute(
             cols,
             ar,
             ma,
-        } => execute_varma(dataset, cols, *ar, *ma, format, session),
+            long_var_order,
+        } => {
+            let mut config = VarmaConfig::default();
+            config.p = *ar;
+            config.q = *ma;
+            config.long_var_order = *long_var_order;
+            execute_varma(dataset, cols, &config, format, session)
+        }
         TimeseriesCommands::Vecm {
             dataset,
             cols,
             lags,
             rank,
-        } => execute_vecm(dataset, cols, *lags, *rank, format, session),
+            ecdet,
+        } => {
+            let mut config = VecmConfig::default();
+            config.lag_order = *lags;
+            config.ecdet = *ecdet;
+            config.rank = *rank;
+            execute_vecm(dataset, cols, &config, format, session)
+        }
         TimeseriesCommands::Irf {
             dataset,
             cols,
@@ -519,7 +691,7 @@ pub fn execute(
             col,
             *penalty,
             *min_segment,
-            change_type,
+            *change_type,
             format,
             session,
         ),
@@ -529,14 +701,37 @@ pub fn execute(
             arch,
             garch,
             horizon,
-        } => execute_garch(dataset, col, *arch, *garch, *horizon, format, session),
+            distribution,
+        } => execute_garch(
+            dataset,
+            col,
+            *arch,
+            *garch,
+            *horizon,
+            *distribution,
+            format,
+            session,
+        ),
         TimeseriesCommands::HoltWinters {
             dataset,
             col,
             period,
             seasonal,
+            alpha,
+            beta,
+            gamma,
             horizon,
-        } => execute_holt_winters(dataset, col, *period, seasonal, *horizon, format, session),
+            level,
+        } => execute_holt_winters(
+            dataset,
+            col,
+            *period,
+            *seasonal,
+            (*alpha, *beta, *gamma),
+            horizon.map(|h| (h, *level)),
+            format,
+            session,
+        ),
         TimeseriesCommands::Granger {
             dataset,
             x,
@@ -549,7 +744,7 @@ pub fn execute(
             order,
             method,
             aic,
-        } => execute_ar(dataset, col, *order, method, *aic, format, session),
+        } => execute_ar(dataset, col, *order, *method, *aic, format, session),
         TimeseriesCommands::Stl {
             dataset,
             col,
@@ -561,13 +756,13 @@ pub fn execute(
             col,
             period,
             decompose_type,
-        } => execute_decompose(dataset, col, *period, decompose_type, format, session),
+        } => execute_decompose(dataset, col, *period, *decompose_type, format, session),
         TimeseriesCommands::StructTs {
             dataset,
             col,
             model_type,
             period,
-        } => execute_struct_ts(dataset, col, model_type, *period, format, session),
+        } => execute_struct_ts(dataset, col, *model_type, *period, format, session),
         TimeseriesCommands::CausalImpact {
             dataset,
             response,
@@ -596,15 +791,7 @@ pub fn execute(
             spans,
             taper,
             detrend,
-        } => execute_spectrum(
-            dataset,
-            col,
-            spans.as_deref(),
-            *taper,
-            *detrend,
-            format,
-            session,
-        ),
+        } => execute_spectrum(dataset, col, spans, *taper, *detrend, format, session),
     }
 }
 
@@ -722,8 +909,9 @@ fn ts_error_message(prefix: &str, err: &dyn std::fmt::Display) -> String {
     if message.contains("missing value") {
         text.push_str(
             " For a time series, impute rather than drop: fill the gaps first (for example: p2a \
-             munge fill-na <dataset> --method forward --columns <column>); dropping a value \
-             would splice the series.",
+             munge fill-na <dataset> --method forward --columns <column> for empty cells; NaN \
+             values from arithmetic must be recomputed or replaced); dropping a value would \
+             splice the series.",
         );
     }
     text
@@ -822,19 +1010,17 @@ fn execute_var(
                             "aic": result.aic,
                             "bic": result.bic,
                             "log_likelihood": result.log_likelihood,
+                            "coef_names": result.coef_names,
+                            "std_errors": result.std_errors,
+                            "t_values": result.t_values,
+                            "p_values": result.p_values,
+                            "df_residual": result.df_residual,
+                            "sigma_u_ml": result.sigma_u_ml,
+                            "log_det_sigma_ml": result.log_det_sigma_ml,
                         });
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
-                    _ => {
-                        println!("\nVAR({}) Results", lags);
-                        println!("{}", "=".repeat(50));
-                        println!("Variables: {:?}", result.var_names);
-                        println!("Number of variables: {}", result.n_vars);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nAIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                    }
+                    _ => println!("\n{result}"),
                 },
                 Err(e) => {
                     print_error(&ts_error_message("VAR failed", &e), format);
@@ -851,8 +1037,7 @@ fn execute_var(
 fn execute_varma(
     dataset_name: &str,
     cols: &[String],
-    ar: usize,
-    ma: usize,
+    config: &VarmaConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -863,43 +1048,48 @@ fn execute_varma(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => {
-            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-
-            match run_varma(ds, &col_refs, ar, ma) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": format!("VARMA({},{})", ar, ma),
-                            "p_lags": result.p_lags,
-                            "q_lags": result.q_lags,
-                            "n_vars": result.n_vars,
-                            "n_obs": result.n_obs,
-                            "ar_params": result.ar_params,
-                            "ma_params": result.ma_params,
-                            "sigma_u": result.sigma_u,
-                            "aic": result.aic,
-                            "bic": result.bic,
-                            "log_likelihood": result.log_likelihood,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nVARMA({},{}) Results", ar, ma);
-                        println!("{}", "=".repeat(50));
-                        println!("Number of variables: {}", result.n_vars);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nAIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                    }
-                },
-                Err(e) => print_error(&ts_error_message("VARMA failed", &e), format),
-            }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+    let result = match run_varma_with(ds, &col_refs, config) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("VARMA failed", &e), format);
+            return Ok(());
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    };
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "method": format!("VARMA({},{})", config.p, config.q),
+                "estimator": result.method,
+                "var_names": result.var_names,
+                "p_lags": result.p_lags,
+                "q_lags": result.q_lags,
+                "n_vars": result.n_vars,
+                "n_obs": result.n_obs,
+                "long_var_order": result.long_var_order,
+                "ar_params": result.ar_params,
+                "ma_params": result.ma_params,
+                "regressor_names": result.regressor_names,
+                "coefficients": result.coefficients,
+                "std_errors": result.std_errors,
+                "t_values": result.t_values(),
+                "p_values": result.p_values(),
+                "df_residual": result.df_residual,
+                "n_params": result.n_params,
+                "aliased": result.aliased,
+                "sigma_u": result.sigma_u,
+                "aic": result.aic,
+                "bic": result.bic,
+                "log_likelihood": result.log_likelihood,
+            });
+            with_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => println!("\n{result}"),
     }
     Ok(())
 }
@@ -907,8 +1097,7 @@ fn execute_varma(
 fn execute_vecm(
     dataset_name: &str,
     cols: &[String],
-    lags: usize,
-    rank: usize,
+    config: &VecmConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -919,57 +1108,57 @@ fn execute_vecm(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => {
-            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-
-            match run_vecm(ds, &col_refs, lags, rank) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "VECM",
-                            "rank": result.rank,
-                            "lags": result.lags,
-                            "n_vars": result.n_vars,
-                            "n_obs": result.n_obs,
-                            "eigenvalues": result.eigenvalues,
-                            "trace_stats": result.trace_stats,
-                            "trace_crit_values": result.trace_crit_values,
-                            "beta": result.beta,
-                            "alpha": result.alpha,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nVECM Results (rank = {})", rank);
-                        println!("{}", "=".repeat(50));
-                        println!("Cointegration rank: {}", result.rank);
-                        println!("Lags: {}", result.lags);
-                        println!("Number of variables: {}", result.n_vars);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nJohansen Trace Test:");
-                        for (i, (stat, crit)) in result
-                            .trace_stats
-                            .iter()
-                            .zip(&result.trace_crit_values)
-                            .enumerate()
-                        {
-                            let sig = if *stat > *crit { "*" } else { "" };
-                            println!(
-                                "  r <= {}: stat={:.4}, crit(5%)={:.4} {}",
-                                i, stat, crit, sig
-                            );
-                        }
-                        println!("\nEigenvalues: {:?}", result.eigenvalues);
-                    }
-                },
-                Err(e) => print_error(&ts_error_message("VECM failed", &e), format),
-            }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+    let result = match run_vecm_with(ds, &col_refs, config) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("VECM failed", &e), format);
+            return Ok(());
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    };
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({ "method": "VECM" });
+            if let (Some(out), serde_json::Value::Object(fields)) =
+                (json.as_object_mut(), serde_json::to_value(&result)?)
+            {
+                out.extend(fields);
+            }
+            with_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => println!("\n{result}"),
     }
     Ok(())
+}
+
+/// `{impulse: {response: [irf[h][response][impulse] for each h]}}`; NaN (null) where the
+/// tensor is short.
+fn impulse_responses(result: &p2a_core::VarIrfResult) -> serde_json::Value {
+    let names = &result.var_names;
+    let mut by_impulse = serde_json::Map::new();
+    for (i, impulse) in names.iter().enumerate() {
+        let mut by_response = serde_json::Map::new();
+        for (r, response) in names.iter().enumerate() {
+            let path: Vec<f64> = result
+                .irf
+                .iter()
+                .map(|phi| {
+                    phi.get(r)
+                        .and_then(|row| row.get(i))
+                        .copied()
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            by_response.insert(response.clone(), serde_json::json!(path));
+        }
+        by_impulse.insert(impulse.clone(), serde_json::Value::Object(by_response));
+    }
+    serde_json::Value::Object(by_impulse)
 }
 
 fn execute_irf(
@@ -993,58 +1182,21 @@ fn execute_irf(
             let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
 
             match run_var_irf(ds, &col_refs, lags, steps) {
-                Ok(result) => {
-                    match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "method": "VAR IRF",
-                                "var_names": result.var_names,
-                                "steps": result.steps,
-                                "irf": result.irf,
-                                "orthogonalized": result.orthogonalized,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nImpulse Response Functions");
-                            println!("{}", "=".repeat(50));
-                            println!("Variables: {:?}", result.var_names);
-                            println!("Steps: {}", result.steps);
-                            println!("Orthogonalized: {}", result.orthogonalized);
-                            println!(
-                                "\nIRF matrix dimensions: {} x {} x {}",
-                                result.irf.len(),
-                                if !result.irf.is_empty() {
-                                    result.irf[0].len()
-                                } else {
-                                    0
-                                },
-                                if !result.irf.is_empty() && !result.irf[0].is_empty() {
-                                    result.irf[0][0].len()
-                                } else {
-                                    0
-                                }
-                            );
-
-                            // Print first few steps for each impulse-response pair
-                            let n_vars = result.var_names.len();
-                            for impulse in 0..n_vars.min(2) {
-                                for response in 0..n_vars.min(2) {
-                                    println!(
-                                        "\n{} -> {} (first 5 steps):",
-                                        result.var_names[impulse], result.var_names[response]
-                                    );
-                                    for step in 0..5.min(result.steps) {
-                                        println!(
-                                            "  t+{}: {:.6}",
-                                            step, result.irf[step][impulse][response]
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                Ok(result) => match format {
+                    OutputFormat::Json => {
+                        let json = serde_json::json!({
+                            "method": "VAR IRF",
+                            "var_names": result.var_names,
+                            "steps": result.steps,
+                            "axes": ["horizon", "response", "impulse"],
+                            "irf": result.irf,
+                            "impulse_responses": impulse_responses(&result),
+                            "orthogonalized": result.orthogonalized,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&json)?);
                     }
-                }
+                    _ => println!("\n{result}"),
+                },
                 Err(e) => print_error(&ts_error_message("IRF failed", &e), format),
             }
         }
@@ -1058,7 +1210,7 @@ fn execute_changepoint(
     col: &str,
     penalty: Option<f64>,
     min_segment: Option<usize>,
-    change_type: &str,
+    cost_fn: CostFunction,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1084,17 +1236,12 @@ fn execute_changepoint(
                 }
             };
 
-            let cost_fn = match change_type.to_lowercase().as_str() {
-                "variance" => CostFunction::VarianceChange,
-                "both" => CostFunction::MeanAndVariance,
-                _ => CostFunction::MeanChange,
-            };
-
             match detect_changepoints(&data, penalty, min_segment, cost_fn) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({
                             "method": result.method,
+                            "change_type": CHANGE_TYPES.canonical(cost_fn),
                             "n_changepoints": result.n_changepoints,
                             "changepoints": result.changepoints,
                             "penalty": result.penalty,
@@ -1151,6 +1298,7 @@ fn execute_garch(
     arch: usize,
     garch: usize,
     horizon: Option<usize>,
+    distribution: GarchDistribution,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1161,80 +1309,169 @@ fn execute_garch(
             return Ok(());
         }
     };
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
 
-    match dataset {
-        Some(ds) => {
-            // Extract column data: Int64 accepted, missing values and text refused by name
-            let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
-                Ok((values, _)) => values,
-                Err(e) => {
-                    print_error(&ts_error_message("GARCH failed", &e), format);
-                    return Ok(());
+    // Extract column data: Int64 accepted, missing values and text refused by name
+    let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
+        Ok((values, _)) => values,
+        Err(e) => {
+            print_error(&ts_error_message("GARCH failed", &e), format);
+            return Ok(());
+        }
+    };
+
+    let mut config = GarchConfig::default();
+    config.p = arch;
+    config.q = garch;
+    config.include_mean = true;
+    config.distribution = distribution;
+    let result = match fit_garch(&data, Some(config)) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("GARCH failed", &e), format);
+            return Ok(());
+        }
+    };
+    let forecast = match horizon {
+        Some(h) => match garch_forecast(&result, h) {
+            Ok(f) => Some((h, f)),
+            Err(e) => {
+                print_error(&ts_error_message("GARCH forecast failed", &e), format);
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "model": format!("GARCH({},{})", arch, garch),
+                "mu": result.mu,
+                "omega": result.omega,
+                "alpha": result.alpha,
+                "beta": result.beta,
+                "persistence": result.persistence,
+                "unconditional_variance": result.unconditional_variance,
+                "log_likelihood": result.log_likelihood,
+                "aic": result.aic,
+                "bic": result.bic,
+                "n_obs": result.n_obs,
+                "param_names": result.param_names,
+                "estimates": result.estimates(),
+                "std_errors": result.std_errors,
+                "p_values": result.p_values,
+                "shape": result.shape,
+                "distribution": result.distribution.to_string(),
+            });
+            if let Some((h, (variance, volatility, mean))) = &forecast {
+                json["forecast"] = serde_json::json!({
+                    "horizon": h,
+                    "variance": variance,
+                    "volatility": volatility,
+                    "mean": mean,
+                });
+            }
+            with_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("{result}");
+            if let Some((h, (variance, volatility, _))) = &forecast {
+                println!(
+                    "\nVariance forecasts (h = {h}; GARCH recursion from the last fitted variance):"
+                );
+                for (i, (v, s)) in variance.iter().zip(volatility).enumerate() {
+                    println!("  t+{}: variance {v:.6e}, volatility {s:.6e}", i + 1);
                 }
-            };
-
-            match run_garch(&data, Some(arch), Some(garch), Some(true)) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "model": format!("GARCH({},{})", arch, garch),
-                            "omega": result.omega,
-                            "alpha": result.alpha,
-                            "beta": result.beta,
-                            "persistence": result.persistence,
-                            "unconditional_variance": result.unconditional_variance,
-                            "log_likelihood": result.log_likelihood,
-                            "aic": result.aic,
-                            "bic": result.bic,
-                            "n_obs": result.n_obs,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nGARCH({},{}) Results", arch, garch);
-                        println!("{}", "=".repeat(50));
-                        println!("\nParameters:");
-                        println!("  Omega (constant): {:.8}", result.omega);
-                        for (i, a) in result.alpha.iter().enumerate() {
-                            println!("  Alpha{}: {:.6}", i + 1, a);
-                        }
-                        for (i, b) in result.beta.iter().enumerate() {
-                            println!("  Beta{}: {:.6}", i + 1, b);
-                        }
-                        println!("\nPersistence: {:.6}", result.persistence);
-                        println!(
-                            "Unconditional Variance: {:.6}",
-                            result.unconditional_variance
-                        );
-                        println!("\nLog-likelihood: {:.4}", result.log_likelihood);
-                        println!("AIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
-                        println!("Observations: {}", result.n_obs);
-
-                        if let Some(h) = horizon {
-                            println!("\nVariance forecasts (h={}):", h);
-                            for (i, sigma2) in
-                                result.conditional_variance.iter().rev().take(h).enumerate()
-                            {
-                                println!("  t+{}: {:.6}", i + 1, sigma2);
-                            }
-                        }
-                    }
-                },
-                Err(e) => print_error(&ts_error_message("GARCH failed", &e), format),
             }
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+/// Holt-Winters forecasts for the CLI: predict.HoltWinters's limits for additive and
+/// non-seasonal fits; point forecasts only for a multiplicative seasonal fit (its interval
+/// formula in R is wrong, and the core refuses it).
+struct HwForecast {
+    horizon: usize,
+    level: Option<f64>,
+    mean: Vec<f64>,
+    std_errors: Option<Vec<f64>>,
+    lower: Option<Vec<f64>>,
+    upper: Option<Vec<f64>>,
+    residual_variance: f64,
+    warning: Option<String>,
+}
+
+const HW_MULT_INTERVALS: &str =
+    "prediction intervals are implemented for additive and non-seasonal fits";
+
+fn hw_forecast(
+    result: &p2a_core::forecasting::HoltWintersResult,
+    h: usize,
+    level: f64,
+) -> p2a_core::EconResult<HwForecast> {
+    let multiplicative = result.coefficients.seasonal.is_some()
+        && result.seasonal_type == SeasonalType::Multiplicative;
+    if multiplicative {
+        let mean = p2a_core::holt_winters_forecast(result, h)?;
+        // var(residuals(fit)): sample variance of the one-step errors
+        let errors: Vec<f64> = result
+            .residuals
+            .iter()
+            .copied()
+            .filter(|e| e.is_finite())
+            .collect();
+        let m = errors.len() as f64;
+        let residual_variance = if errors.len() >= 2 {
+            let mu = errors.iter().sum::<f64>() / m;
+            errors.iter().map(|e| (e - mu).powi(2)).sum::<f64>() / (m - 1.0)
+        } else {
+            f64::NAN
+        };
+        return Ok(HwForecast {
+            horizon: h,
+            level: None,
+            mean,
+            std_errors: None,
+            lower: None,
+            upper: None,
+            residual_variance,
+            warning: Some(format!(
+                "{HW_MULT_INTERVALS}; a multiplicative seasonal fit gets point forecasts only"
+            )),
+        });
+    }
+    let p = result.predict(h, level)?;
+    Ok(HwForecast {
+        horizon: p.horizon,
+        level: Some(p.level),
+        mean: p.forecast,
+        std_errors: Some(p.std_errors),
+        lower: Some(p.lower),
+        upper: Some(p.upper),
+        residual_variance: p.residual_variance,
+        warning: None,
+    })
+}
+
+/// A level as a percentage the way it was typed: 0.95 -> "95", 0.975 -> "97.5".
+fn percent(level: f64) -> String {
+    let pct = (level * 100.0 * 1e9).round() / 1e9;
+    format!("{pct}")
 }
 
 fn execute_holt_winters(
     dataset_name: &str,
     col: &str,
     period: usize,
-    seasonal: &str,
-    _horizon: Option<usize>,
+    seasonal_type: SeasonalType,
+    (alpha, beta, gamma): (Option<f64>, Option<f64>, Option<f64>),
+    horizon: Option<(usize, f64)>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1245,50 +1482,104 @@ fn execute_holt_winters(
             return Ok(());
         }
     };
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
 
-    match dataset {
-        Some(ds) => {
-            let seasonal_type = match seasonal.to_lowercase().as_str() {
-                "multiplicative" | "mult" => SeasonalType::Multiplicative,
-                _ => SeasonalType::Additive,
-            };
+    // run_holt_winters(dataset, column, period, seasonal, alpha, beta, gamma)
+    let result = match run_holt_winters(ds, col, period, seasonal_type, alpha, beta, gamma) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("Holt-Winters failed", &e), format);
+            return Ok(());
+        }
+    };
+    let forecast = match horizon {
+        Some((h, level)) => match hw_forecast(&result, h, level) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                print_error(
+                    &ts_error_message("Holt-Winters forecast failed", &e),
+                    format,
+                );
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+    let warnings: Vec<String> = forecast
+        .as_ref()
+        .and_then(|f| f.warning.clone())
+        .into_iter()
+        .collect();
 
-            // run_holt_winters(dataset, column, period, seasonal, alpha, beta, gamma)
-            match run_holt_winters(ds, col, period, seasonal_type, None, None, None) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "model": "Holt-Winters",
-                            "seasonal_type": format!("{:?}", result.seasonal_type),
-                            "period": result.period,
-                            "alpha": result.alpha,
-                            "beta": result.beta,
-                            "gamma": result.gamma,
-                            "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
-                            "sse": result.sse,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "model": "Holt-Winters",
+                "seasonal_type": SEASONAL_TYPES.canonical(result.seasonal_type),
+                "period": result.period,
+                "alpha": result.alpha,
+                "beta": result.beta,
+                "gamma": result.gamma,
+                "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
+                "sse": result.sse,
+                "warnings": warnings,
+            });
+            if let Some(f) = &forecast {
+                json["forecast"] = serde_json::json!({
+                    "horizon": f.horizon,
+                    "level": f.level,
+                    "mean": f.mean,
+                    "std_errors": f.std_errors,
+                    "lower": f.lower,
+                    "upper": f.upper,
+                    "residual_variance": f.residual_variance,
+                });
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nHolt-Winters Exponential Smoothing");
+            println!("{}", "=".repeat(50));
+            println!(
+                "\nSeasonal type: {}",
+                SEASONAL_TYPES.canonical(result.seasonal_type)
+            );
+            println!("Period: {}", result.period);
+            println!("\nSmoothing parameters:");
+            println!("  Alpha (level): {:.4}", result.alpha);
+            if let Some(beta) = result.beta {
+                println!("  Beta (trend): {:.4}", beta);
+            }
+            if let Some(gamma) = result.gamma {
+                println!("  Gamma (seasonal): {:.4}", gamma);
+            }
+            println!("\nSSE: {:.4}", result.sse);
+            if let Some(f) = &forecast {
+                match (f.level, &f.lower, &f.upper) {
+                    (Some(level), Some(lower), Some(upper)) => {
+                        println!(
+                            "\nForecasts (h = {}, {}% prediction interval):",
+                            f.horizon,
+                            percent(level)
+                        );
+                        for (i, ((fit, lo), hi)) in f.mean.iter().zip(lower).zip(upper).enumerate()
+                        {
+                            println!("  t+{}: {fit:.4}  [{lo:.4}, {hi:.4}]", i + 1);
+                        }
                     }
                     _ => {
-                        println!("\nHolt-Winters Exponential Smoothing");
-                        println!("{}", "=".repeat(50));
-                        println!("\nSeasonal type: {:?}", result.seasonal_type);
-                        println!("Period: {}", result.period);
-                        println!("\nSmoothing parameters:");
-                        println!("  Alpha (level): {:.4}", result.alpha);
-                        if let Some(beta) = result.beta {
-                            println!("  Beta (trend): {:.4}", beta);
+                        println!("\nForecasts (h = {}; {HW_MULT_INTERVALS}):", f.horizon);
+                        for (i, fit) in f.mean.iter().enumerate() {
+                            println!("  t+{}: {fit:.4}", i + 1);
                         }
-                        if let Some(gamma) = result.gamma {
-                            println!("  Gamma (seasonal): {:.4}", gamma);
-                        }
-                        println!("\nSSE: {:.4}", result.sse);
                     }
-                },
-                Err(e) => print_error(&ts_error_message("Holt-Winters failed", &e), format),
+                }
             }
+            crate::output::print_notes(None, &warnings, format);
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
 }
@@ -1318,7 +1609,7 @@ fn execute_granger(
                     let granger_causes = result.p_value < 0.05;
                     match format {
                         OutputFormat::Json => {
-                            let json = serde_json::json!({
+                            let mut json = serde_json::json!({
                                 "test": "Granger Causality",
                                 "cause": result.cause,
                                 "dependent": result.dependent,
@@ -1330,6 +1621,7 @@ fn execute_granger(
                                 "df2": result.df2,
                                 "granger_causes": granger_causes,
                             });
+                            with_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -1361,6 +1653,7 @@ fn execute_granger(
                                     )
                                 }
                             );
+                            print_result_notes(&result, format);
                         }
                     }
                 }
@@ -1376,7 +1669,7 @@ fn execute_ar(
     dataset_name: &str,
     col: &str,
     order: Option<usize>,
-    method: &str,
+    ar_method: ArMethod,
     aic: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1400,12 +1693,6 @@ fn execute_ar(
                 }
             };
 
-            let ar_method = match method.to_lowercase().as_str() {
-                "burg" => ArMethod::Burg,
-                "ols" => ArMethod::Ols,
-                _ => ArMethod::YuleWalker,
-            };
-
             let config = ArConfig {
                 aic,
                 order,
@@ -1416,23 +1703,24 @@ fn execute_ar(
             match ar(&data, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "model": format!("AR({})", result.order),
                             "order": result.order,
                             "ar_coefficients": result.ar,
                             "var_pred": result.var_pred,
                             "x_mean": result.x_mean,
-                            "method": format!("{:?}", result.method),
+                            "method": AR_METHODS.canonical(result.method),
                             "n_obs": result.n_obs,
                             "aic": result.aic,
                             "partial_acf": result.partial_acf,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("\nAR({}) Model Results", result.order);
                         println!("{}", "=".repeat(50));
-                        println!("Method: {:?}", result.method);
+                        println!("Method: {}", AR_METHODS.canonical(result.method));
                         println!("Observations: {}", result.n_obs);
                         println!("\nCoefficients:");
                         for (i, coef) in result.ar.iter().enumerate() {
@@ -1448,6 +1736,7 @@ fn execute_ar(
                                 }
                             }
                         }
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&ts_error_message("AR model failed", &e), format),
@@ -1525,7 +1814,7 @@ fn execute_decompose(
     dataset_name: &str,
     col: &str,
     period: usize,
-    decompose_type: &str,
+    dtype: DecomposeType,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1538,46 +1827,39 @@ fn execute_decompose(
     };
 
     match dataset {
-        Some(ds) => {
-            let dtype = match decompose_type.to_lowercase().as_str() {
-                "multiplicative" | "mult" => DecomposeType::Multiplicative,
-                _ => DecomposeType::Additive,
-            };
-
-            match run_decompose(ds, col, period, dtype) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "Classical Decomposition",
-                            "decompose_type": format!("{:?}", result.decompose_type),
-                            "period": result.period,
-                            "n_obs": result.n_obs,
-                            "figure": result.figure,
-                            "trend_sample": result.trend.iter().take(10).collect::<Vec<_>>(),
-                            "seasonal_sample": result.seasonal.iter().take(10).collect::<Vec<_>>(),
-                            "random_sample": result.random.iter().take(10).collect::<Vec<_>>(),
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+        Some(ds) => match run_decompose(ds, col, period, dtype) {
+            Ok(result) => match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "method": "Classical Decomposition",
+                        "decompose_type": DECOMPOSE_TYPES.canonical(result.decompose_type),
+                        "period": result.period,
+                        "n_obs": result.n_obs,
+                        "figure": result.figure,
+                        "trend_sample": result.trend.iter().take(10).collect::<Vec<_>>(),
+                        "seasonal_sample": result.seasonal.iter().take(10).collect::<Vec<_>>(),
+                        "random_sample": result.random.iter().take(10).collect::<Vec<_>>(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!("\nClassical Decomposition Results");
+                    println!("{}", "=".repeat(50));
+                    println!("Type: {}", DECOMPOSE_TYPES.canonical(result.decompose_type));
+                    println!("Period: {}", result.period);
+                    println!("Observations: {}", result.n_obs);
+                    println!("\nSeasonal figure (one cycle):");
+                    for (i, f) in result.figure.iter().enumerate() {
+                        println!("  Position {}: {:.4}", i, f);
                     }
-                    _ => {
-                        println!("\nClassical Decomposition Results");
-                        println!("{}", "=".repeat(50));
-                        println!("Type: {:?}", result.decompose_type);
-                        println!("Period: {}", result.period);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nSeasonal figure (one cycle):");
-                        for (i, f) in result.figure.iter().enumerate() {
-                            println!("  Position {}: {:.4}", i, f);
-                        }
-                        println!("\nTrend (first 10 values, may contain NaN at boundaries):");
-                        for (i, t) in result.trend.iter().take(10).enumerate() {
-                            println!("  {}: {:.4}", i, t);
-                        }
+                    println!("\nTrend (first 10 values, may contain NaN at boundaries):");
+                    for (i, t) in result.trend.iter().take(10).enumerate() {
+                        println!("  {}: {:.4}", i, t);
                     }
-                },
-                Err(e) => print_error(&ts_error_message("Decomposition failed", &e), format),
-            }
-        }
+                }
+            },
+            Err(e) => print_error(&ts_error_message("Decomposition failed", &e), format),
+        },
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
@@ -1586,7 +1868,7 @@ fn execute_decompose(
 fn execute_struct_ts(
     dataset_name: &str,
     col: &str,
-    model_type: &str,
+    ts_type: StructTsType,
     period: Option<usize>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1600,59 +1882,56 @@ fn execute_struct_ts(
     };
 
     match dataset {
-        Some(ds) => {
-            let ts_type = match model_type.to_lowercase().as_str() {
-                "trend" => StructTsType::Trend,
-                "bsm" => StructTsType::BSM,
-                _ => StructTsType::Level,
-            };
-
-            match run_struct_ts(ds, col, ts_type, period) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "model": format!("StructTS {:?}", result.model_type),
-                            "model_type": format!("{:?}", result.model_type),
-                            "n_obs": result.n_obs,
-                            "n_params": result.n_params,
-                            "converged": result.converged,
-                            "log_likelihood": result.log_likelihood,
-                            "aic": result.aic,
-                            "bic": result.bic,
-                            "coefficients": {
-                                "level": result.coef.level,
-                                "slope": result.coef.slope,
-                                "seasonal": result.coef.seasonal,
-                                "epsilon": result.coef.epsilon,
-                            },
-                            "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+        Some(ds) => match run_struct_ts(ds, col, ts_type, period) {
+            Ok(result) => match format {
+                OutputFormat::Json => {
+                    let model_type = STRUCT_TS_TYPES.canonical(result.model_type);
+                    let mut json = serde_json::json!({
+                        "model": format!("StructTS {model_type}"),
+                        "model_type": model_type,
+                        "n_obs": result.n_obs,
+                        "n_params": result.n_params,
+                        "converged": result.converged,
+                        "log_likelihood": result.log_likelihood,
+                        "aic": result.aic,
+                        "bic": result.bic,
+                        "coefficients": {
+                            "level": result.coef.level,
+                            "slope": result.coef.slope,
+                            "seasonal": result.coef.seasonal,
+                            "epsilon": result.coef.epsilon,
+                        },
+                        "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
+                    });
+                    with_result_notes(&mut json, &result);
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!("\nStructural Time Series Model Results");
+                    println!("{}", "=".repeat(50));
+                    println!(
+                        "Model type: {}",
+                        STRUCT_TS_TYPES.canonical(result.model_type)
+                    );
+                    println!("Observations: {}", result.n_obs);
+                    println!("Parameters: {}", result.n_params);
+                    println!("\nVariance estimates:");
+                    println!("  Level: {:.6}", result.coef.level);
+                    if let Some(slope) = result.coef.slope {
+                        println!("  Slope: {:.6}", slope);
                     }
-                    _ => {
-                        println!("\nStructural Time Series Model Results");
-                        println!("{}", "=".repeat(50));
-                        println!("Model type: {:?}", result.model_type);
-                        println!("Observations: {}", result.n_obs);
-                        println!("Parameters: {}", result.n_params);
-                        println!("Converged: {}", result.converged);
-                        println!("\nVariance estimates:");
-                        println!("  Level: {:.6}", result.coef.level);
-                        if let Some(slope) = result.coef.slope {
-                            println!("  Slope: {:.6}", slope);
-                        }
-                        if let Some(seasonal) = result.coef.seasonal {
-                            println!("  Seasonal: {:.6}", seasonal);
-                        }
-                        println!("  Observation: {:.6}", result.coef.epsilon);
-                        println!("\nLog-likelihood: {:.4}", result.log_likelihood);
-                        println!("AIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
+                    if let Some(seasonal) = result.coef.seasonal {
+                        println!("  Seasonal: {:.6}", seasonal);
                     }
-                },
-                Err(e) => print_error(&ts_error_message("StructTS failed", &e), format),
-            }
-        }
+                    println!("  Observation: {:.6}", result.coef.epsilon);
+                    println!("\nLog-likelihood: {:.4}", result.log_likelihood);
+                    println!("AIC: {:.4}", result.aic);
+                    println!("BIC: {:.4}", result.bic);
+                    print_result_notes(&result, format);
+                }
+            },
+            Err(e) => print_error(&ts_error_message("StructTS failed", &e), format),
+        },
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
@@ -1693,7 +1972,7 @@ fn execute_causal_impact(
             ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "CausalImpact",
                             "summary": {
                                 "average_effect": result.summary.average_effect,
@@ -1721,6 +2000,7 @@ fn execute_causal_impact(
                                 "null_rejected": result.inference.null_rejected,
                             },
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1776,6 +2056,7 @@ fn execute_causal_impact(
                                 "No"
                             }
                         );
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&ts_error_message("CausalImpact failed", &e), format),
@@ -1790,7 +2071,7 @@ fn execute_causal_impact(
 fn execute_spectrum(
     dataset_name: &str,
     col: &str,
-    spans: Option<&str>,
+    spans: &[usize],
     taper: f64,
     detrend: bool,
     format: &OutputFormat,
@@ -1806,14 +2087,8 @@ fn execute_spectrum(
 
     match dataset {
         Some(ds) => {
-            let span_vec: Option<Vec<usize>> = spans.map(|s| {
-                s.split(',')
-                    .filter_map(|v| v.trim().parse::<usize>().ok())
-                    .collect()
-            });
-
             let mut config = SpectrumConfig::default();
-            config.spans = span_vec;
+            config.spans = (!spans.is_empty()).then(|| spans.to_vec());
             config.taper = taper;
             config.detrend = detrend;
             config.demean = false;
@@ -1876,4 +2151,85 @@ fn execute_spectrum(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_option_tables_parse_aliases_and_reject_unknown() {
+        for v in [
+            CHANGE_TYPES.validate(),
+            SEASONAL_TYPES.validate(),
+            AR_METHODS.validate(),
+            DECOMPOSE_TYPES.validate(),
+            STRUCT_TS_TYPES.validate(),
+        ] {
+            v.unwrap()
+        }
+        assert_eq!(
+            parse_change_type("both").unwrap(),
+            CostFunction::MeanAndVariance
+        );
+        assert_eq!(
+            parse_change_type("VAR").unwrap(),
+            CostFunction::VarianceChange
+        );
+        assert_eq!(
+            parse_seasonal("Mult").unwrap(),
+            SeasonalType::Multiplicative
+        );
+        assert_eq!(
+            parse_ar_method("Yule Walker").unwrap(),
+            ArMethod::YuleWalker
+        );
+        assert_eq!(parse_ar_method("yw").unwrap(), ArMethod::YuleWalker);
+        assert_eq!(
+            parse_decompose_type("multi").unwrap(),
+            DecomposeType::Multiplicative
+        );
+        assert_eq!(parse_struct_ts_type("bsm").unwrap(), StructTsType::BSM);
+        for (e, want) in [
+            (
+                parse_change_type("trend").unwrap_err(),
+                "unknown change type 'trend'; expected one of: mean, variance, meanvar",
+            ),
+            (
+                parse_ar_method("mle").unwrap_err(),
+                "unknown AR method 'mle'; expected one of: yule-walker, burg, ols",
+            ),
+            (
+                parse_struct_ts_type("arima").unwrap_err(),
+                "unknown StructTS type 'arima'; expected one of: level, trend, BSM",
+            ),
+        ] {
+            assert!(e.contains(want), "{e}")
+        }
+        assert_eq!(
+            CHANGE_TYPES.canonical(CostFunction::MeanAndVariance),
+            "meanvar"
+        );
+    }
+
+    /// The fill hint also covers NaN, which `munge fill-na --method forward` leaves.
+    #[test]
+    fn test_ts_error_message_hint_covers_nan() {
+        let m = ts_error_message(
+            "ARIMA failed",
+            &"Column 'y' contains 1 missing value(s) (null or NaN)",
+        );
+        assert!(
+            m.contains("impute rather than drop") && m.contains("munge fill-na"),
+            "{m}"
+        );
+        assert!(
+            m.contains("NaN values from arithmetic must be recomputed or replaced"),
+            "{m}"
+        );
+        assert_eq!(
+            ts_error_message("ARIMA failed", &"other"),
+            "ARIMA failed: other"
+        );
+    }
 }

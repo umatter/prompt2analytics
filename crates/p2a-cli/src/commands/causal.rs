@@ -34,8 +34,6 @@ use p2a_core::{
         WarningSeverity, did_diagnostics, ipw_diagnostics, iv_diagnostics, matching_diagnostics,
         rd_diagnostics, staggered_did_diagnostics,
     },
-    // Propensity Score Matching
-    match_it,
     run_did,
     run_doubly_robust,
     run_fuzzy_rd,
@@ -55,9 +53,86 @@ use p2a_core::{
 };
 
 use crate::output::{
-    OutputFormat, format_regression_results, missing_json, print_error, print_missing_note,
+    OutputFormat, format_regression_results, missing_json, notes_json, print_error,
+    print_missing_note, print_notes,
 };
 use crate::session::SessionManager;
+use p2a_core::diagnostics::IdentificationReport;
+use p2a_core::econometrics::matching::{MOrder, MatchMethodKind, MatchOptions, match_it_with};
+use p2a_core::traits::convergence::ResultNotes;
+
+/// Convergence and warnings of a core result in the form `output::print_notes` /
+/// `output::notes_json` take. Shared by the causal, time-series, ML, spatial and viz commands.
+pub(crate) fn result_notes(r: &dyn ResultNotes) -> (Option<(bool, usize)>, Vec<String>) {
+    (
+        r.notes_convergence().map(|c| (c.converged, c.iterations)),
+        r.notes_warnings(),
+    )
+}
+
+/// `output::print_notes` of a core result ("Converged: ..." and "Warning: ..." lines; nothing
+/// for JSON).
+pub(crate) fn print_result_notes(r: &dyn ResultNotes, format: &OutputFormat) {
+    let (converged, warnings) = result_notes(r);
+    print_notes(converged, &warnings, format);
+}
+
+/// Extends a JSON object with `output::notes_json` of `r`: "warnings" always (replacing an
+/// existing key), "converged" and "iterations" when the result reports them. A non-object
+/// value is left unchanged.
+pub(crate) fn with_result_notes(json: &mut serde_json::Value, r: &dyn ResultNotes) {
+    let (converged, warnings) = result_notes(r);
+    extend_json(json, notes_json(converged, &warnings));
+}
+
+/// Inserts every key of `map` into the JSON object `json` (no-op for a non-object).
+fn extend_json(json: &mut serde_json::Value, map: serde_json::Map<String, serde_json::Value>) {
+    if let Some(obj) = json.as_object_mut() {
+        obj.extend(map);
+    }
+}
+
+/// Identification warnings of severity Caution and above, as
+/// `[{"code", "severity", "title", "message"}]`.
+fn identification_json(report: &IdentificationReport) -> serde_json::Value {
+    report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .map(|w| {
+            serde_json::json!({
+                "code": w.code,
+                "severity": w.severity.to_string(),
+                "title": w.title,
+                "message": w.message,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// "Identification warnings:" and one "  [SEVERITY] title: message" line per warning of
+/// severity Caution and above; nothing when there is none.
+fn print_identification_warnings(report: &IdentificationReport) {
+    let warnings: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .collect();
+    if warnings.is_empty() {
+        return;
+    }
+    println!("\nIdentification warnings:");
+    for w in warnings {
+        let label = match w.severity {
+            WarningSeverity::Critical => "CRITICAL",
+            WarningSeverity::Warning => "WARNING",
+            WarningSeverity::Caution => "CAUTION",
+            WarningSeverity::Info => "INFO",
+        };
+        println!("  [{}] {}: {}", label, w.title, w.message);
+    }
+}
 
 #[derive(Subcommand)]
 pub enum CausalCommands {
@@ -157,9 +232,11 @@ EXAMPLES:
         #[arg(short = 'p', long, num_args = 1..)]
         predictors: Vec<String>,
 
-        /// V optimization method: "datadriven" (default), "equal"
-        #[arg(long, default_value = "datadriven")]
-        v_method: String,
+        /// V matrix: datadriven (nested optimisation, default; also data_driven, optimal,
+        /// nested) or equal (also uniform; equal weights on the standardised predictors);
+        /// custom V is MCP-only
+        #[arg(long, default_value = "datadriven", value_parser = parse_v_method)]
+        v_method: VOptimization,
 
         /// Run placebo tests for inference
         #[arg(long)]
@@ -191,16 +268,18 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Estimand: "ate" (default) or "att"
-        #[arg(long, default_value = "ate")]
-        estimand: String,
+        /// Estimand: ate (default) or att
+        #[arg(long, default_value = "ate", value_parser = option_arg::<Estimand>)]
+        estimand: Estimand,
 
-        /// Trimming threshold for propensity scores (default: 0.05)
+        /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
         #[arg(long, default_value = "0.05")]
         trim: f64,
 
-        /// Number of bootstrap replications (default: 999)
-        #[arg(long, default_value = "999")]
+        /// Standard errors: 0 (default) gives the M-estimation SE with the propensity score
+        /// estimated, as WeightIt; N >= 2 a bootstrap of the weighted means with the fitted
+        /// propensity scores held fixed (conservative)
+        #[arg(long, default_value = "0")]
         bootstrap: usize,
     },
 
@@ -229,19 +308,21 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Method: "aipw" (default), "ipw", or "regression"
-        #[arg(long, default_value = "aipw")]
-        method: String,
+        /// Method: aipw (default; also dr, doubly_robust), ipw or regression (also reg, ra,
+        /// outcome_regression)
+        #[arg(long, default_value = "aipw", value_parser = option_arg::<DRMethod>)]
+        method: DRMethod,
 
-        /// Estimand: "ate" (default) or "att"
-        #[arg(long, default_value = "ate")]
-        estimand: String,
+        /// Estimand: ate (default) or att
+        #[arg(long, default_value = "ate", value_parser = option_arg::<Estimand>)]
+        estimand: Estimand,
 
-        /// Trimming threshold (default: 0.05)
+        /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
         #[arg(long, default_value = "0.05")]
         trim: f64,
 
-        /// Number of bootstrap replications (default: 999)
+        /// Bootstrap replications for the SEs of --method ipw and regression (at least 2;
+        /// default: 999); aipw uses its analytic influence-function SE and ignores it
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },
@@ -260,7 +341,7 @@ EXAMPLES:
         #[arg(short = 'y', long)]
         outcome: String,
 
-        /// Treatment indicator column
+        /// Treatment indicator column (binary 0/1)
         #[arg(short = 't', long)]
         treatment: String,
 
@@ -309,13 +390,16 @@ EXAMPLES:
         #[arg(short = 'p', long, default_value = "1")]
         poly_order: usize,
 
-        /// Kernel: "triangular" (default), "uniform", "epanechnikov"
-        #[arg(long, default_value = "triangular")]
-        kernel: String,
+        /// Kernel, as rdrobust: triangular (default), epanechnikov or uniform (aliases tri,
+        /// epa, uni)
+        #[arg(long, default_value = "triangular", value_parser = parse_kernel_arg)]
+        kernel: KernelType,
 
-        /// Bandwidth selection: "mserd" (default), "msetwo", "cerrd", "certwo"
-        #[arg(long, default_value = "mserd")]
-        bwselect: String,
+        /// Bandwidth selector, as rdrobust::rdbwselect: mserd (default), msetwo, msesum,
+        /// msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1 or cercomb2; not used for h when
+        /// --h is given
+        #[arg(long, default_value = "mserd", value_parser = parse_bwselect_arg)]
+        bwselect: BandwidthMethod,
 
         /// Main bandwidth h (both sides); default: p2a's MSE-type selector
         #[arg(long = "h", visible_alias = "bandwidth")]
@@ -325,9 +409,9 @@ EXAMPLES:
         #[arg(long = "b", visible_alias = "bias-bandwidth")]
         b: Option<f64>,
 
-        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2, hc3
-        #[arg(long, default_value = "nn")]
-        vce: String,
+        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2 or hc3
+        #[arg(long, default_value = "nn", value_parser = parse_vce_arg)]
+        vce: VceType,
     },
 
     /// Fuzzy Regression Discontinuity
@@ -338,6 +422,9 @@ EXAMPLES:
 
     # One given bandwidth for both stages, bias bandwidth 0.5, HC1 variance
     p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
+
+    # CER-optimal bandwidths, separate left and right
+    p2a causal fuzzy-rd mydata -y y -r x -t d -c 0 --bwselect certwo
 ")]
     FuzzyRd {
         /// Dataset name
@@ -363,9 +450,16 @@ EXAMPLES:
         #[arg(short = 'p', long, default_value = "1")]
         poly_order: usize,
 
-        /// Kernel: "triangular" (default), "uniform", "epanechnikov"
-        #[arg(long, default_value = "triangular")]
-        kernel: String,
+        /// Kernel, as rdrobust: triangular (default), epanechnikov or uniform (aliases tri,
+        /// epa, uni)
+        #[arg(long, default_value = "triangular", value_parser = parse_kernel_arg)]
+        kernel: KernelType,
+
+        /// Bandwidth selector for both stages, as rdrobust::rdbwselect(fuzzy = ..): mserd
+        /// (default), msetwo, msesum, msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1 or
+        /// cercomb2; not used for h when --h is given
+        #[arg(long, default_value = "mserd", value_parser = parse_bwselect_arg)]
+        bwselect: BandwidthMethod,
 
         /// Main bandwidth h (both sides); default: p2a's MSE-type selector
         #[arg(long = "h", visible_alias = "bandwidth")]
@@ -375,9 +469,9 @@ EXAMPLES:
         #[arg(long = "b", visible_alias = "bias-bandwidth")]
         b: Option<f64>,
 
-        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2, hc3
-        #[arg(long, default_value = "nn")]
-        vce: String,
+        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2 or hc3
+        #[arg(long, default_value = "nn", value_parser = parse_vce_arg)]
+        vce: VceType,
     },
 
     /// Staggered Difference-in-Differences (Callaway-Sant'Anna)
@@ -387,7 +481,7 @@ EXAMPLES:
     p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state
 
-    # With doubly-robust estimation and covariates
+    # Doubly robust (DRDID) with covariates
     p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state -x population gdp --method dr
 ")]
@@ -399,33 +493,44 @@ EXAMPLES:
         #[arg(short = 'y', long)]
         outcome: String,
 
-        /// Treatment timing column (period when unit was first treated; 0 or negative = never treated)
+        /// Treatment timing column: the period a unit is first treated (0 or negative: never).
         #[arg(long)]
         treatment_time: String,
 
-        /// Time period column
+        /// Time period column.
         #[arg(long)]
         time: String,
 
-        /// Unit identifier column
+        /// Unit identifier column.
         #[arg(long)]
         unit: String,
 
-        /// Covariate columns for conditional parallel trends (optional)
+        /// Covariate columns for conditional parallel trends (optional).
         #[arg(short = 'x', long, num_args = 0..)]
         covariates: Vec<String>,
 
-        /// Comparison group: "nevertreated" (default) or "notyettreated"
-        #[arg(long, default_value = "nevertreated")]
-        comparison: String,
+        /// Comparison group, as did's control_group.
+        ///
+        /// never_treated (default) or not_yet_treated (also nevertreated, never, notyettreated,
+        /// notyet, nyt).
+        #[arg(long, default_value = "never_treated", value_parser = option_arg::<ComparisonGroup>)]
+        comparison: ComparisonGroup,
 
-        /// Estimation method: "or" (outcome regression, default), "ipw", or "dr" (doubly robust)
-        #[arg(long, default_value = "or")]
-        method: String,
+        /// Estimation method, as did's est_method (DRDID).
+        ///
+        /// or = outcome_regression (default; also reg), ipw = inverse probability weighting
+        /// (also std_ipw), dr = doubly_robust (also aipw, drdid).
+        #[arg(long, default_value = "or", value_parser = option_arg::<AttEstimationMethod>)]
+        method: AttEstimationMethod,
 
-        /// Bootstrap replications for SEs, at least 50 (a multiplier bootstrap of the
-        /// influence functions with covariates); 0 gives analytic influence-function SEs
-        /// (default: 999)
+        /// Periods before treatment in which units may anticipate it (did's anticipation).
+        #[arg(long, default_value_t = 0)]
+        anticipation: usize,
+
+        /// Unit-bootstrap replications for SEs (at least 50), or 0 for analytic SEs.
+        ///
+        /// The bootstrap is a multiplier bootstrap of the influence functions with covariates;
+        /// 0 gives analytic influence-function SEs (DRDID's with covariates).
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },
@@ -455,9 +560,11 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Outcome model: "logistic" (default) or "linear"
-        #[arg(long, default_value = "logistic")]
-        qmodel: String,
+        /// Outcome (Q) model: logistic (default; also logit, binomial, binary) or linear (also
+        /// gaussian, continuous, ols); logistic: Y outside [0, 1] is rescaled to [0, 1] first,
+        /// as the tmle package does
+        #[arg(long, default_value = "logistic", value_parser = option_arg::<QModel>)]
+        qmodel: QModel,
 
         /// Propensity score truncation lower bound (default: 0.01)
         #[arg(long, default_value = "0.01")]
@@ -506,13 +613,15 @@ EXAMPLES:
         #[arg(long, default_value = "0")]
         n_factors: usize,
 
-        /// Fixed effects: "unit", "time", "twoway" (default), or "none"
-        #[arg(long, default_value = "twoway")]
-        force: String,
+        /// Fixed effects (gsynth force): none, unit (also individual), time or two_way (default;
+        /// also twoway, two-way)
+        #[arg(long, default_value = "two_way", value_parser = option_arg::<GsynthForce>)]
+        force: GsynthForce,
 
-        /// Estimator: "ife" (interactive FE, default) or "mc" (matrix completion)
-        #[arg(long, default_value = "ife")]
-        estimator: String,
+        /// Estimator: ife (interactive fixed effects, default; also gsynth) or mc (matrix
+        /// completion; also matrix_completion)
+        #[arg(long, default_value = "ife", value_parser = option_arg::<GsynthEstimator>)]
+        estimator: GsynthEstimator,
 
         /// Compute bootstrap standard errors
         #[arg(long)]
@@ -547,13 +656,20 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Matching method: "nn" (nearest neighbor, default), "cem" (coarsened exact), "full", or "subclass"
-        #[arg(long, default_value = "nn")]
-        method: String,
+        /// Matching method, as MatchIt: nearest (default; also nn), cem (coarsened exact, Sturges
+        /// bins), full (optimal full matching; also optimal) or subclass (also subclassification)
+        #[arg(long, default_value = "nearest", value_parser = option_arg::<MatchMethodKind>)]
+        method: MatchMethodKind,
 
-        /// Distance metric: "logit" (default), "probit", "mahalanobis", or "euclidean"
-        #[arg(long, default_value = "logit")]
-        distance: String,
+        /// Distance: logit (default; also glm, logistic, ps), probit, mahalanobis or euclidean
+        #[arg(long, default_value = "logit", value_parser = option_arg::<DistanceMethod>)]
+        distance: DistanceMethod,
+
+        /// Order in which treated units are matched (MatchIt m.order): largest (also
+        /// descending), smallest (also ascending), data or random; default largest for
+        /// logit/probit, data otherwise
+        #[arg(long, value_parser = option_arg::<MOrder>)]
+        m_order: Option<MOrder>,
 
         /// Matching ratio for nearest neighbor (default: 1)
         #[arg(long, default_value = "1")]
@@ -598,17 +714,18 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Outcome model: "linear" (default), "logistic", or "poisson"
-        #[arg(long, default_value = "linear")]
-        model: String,
+        /// Outcome model: linear (default; also ols, gaussian), logistic (also logit, binomial)
+        /// or poisson (also count, log_linear)
+        #[arg(long, default_value = "linear", value_parser = option_arg::<StdRegModel>)]
+        model: StdRegModel,
 
-        /// Estimand: "ate" (default), "att", "atc", or "levels"
-        #[arg(long, default_value = "ate")]
-        estimand: String,
+        /// Estimand: ate (default), att, atc or levels (also potential_outcomes)
+        #[arg(long, default_value = "ate", value_parser = option_arg::<StdRegEstimand>)]
+        estimand: StdRegEstimand,
 
-        /// SE method: "bootstrap" (default), "delta", or "sandwich"
-        #[arg(long, default_value = "bootstrap")]
-        se_method: String,
+        /// SE method: bootstrap (default; also boot), delta or sandwich (also robust)
+        #[arg(long, default_value = "bootstrap", value_parser = option_arg::<SEMethod>)]
+        se_method: SEMethod,
 
         /// Number of bootstrap replications (default: 999)
         #[arg(long, default_value = "999")]
@@ -659,7 +776,7 @@ pub fn execute(
             treated,
             *treatment_time,
             predictors,
-            v_method,
+            v_method.clone(),
             *placebos,
             format,
             session,
@@ -673,7 +790,7 @@ pub fn execute(
             trim,
             bootstrap,
         } => execute_ipw(
-            dataset, outcome, treatment, covariates, estimand, *trim, *bootstrap, format, session,
+            dataset, outcome, treatment, covariates, *estimand, *trim, *bootstrap, format, session,
         ),
         CausalCommands::DoublyRobust {
             dataset,
@@ -685,7 +802,7 @@ pub fn execute(
             trim,
             bootstrap,
         } => execute_dr(
-            dataset, outcome, treatment, covariates, method, estimand, *trim, *bootstrap, format,
+            dataset, outcome, treatment, covariates, *method, *estimand, *trim, *bootstrap, format,
             session,
         ),
         CausalCommands::Mediation {
@@ -715,10 +832,13 @@ pub fn execute(
             running,
             *cutoff,
             *poly_order,
-            kernel,
-            bwselect,
-            RdBandwidths { h: *h, b: *b },
-            vce,
+            RdOptions {
+                kernel: *kernel,
+                bwselect: *bwselect,
+                vce: *vce,
+                h: *h,
+                b: *b,
+            },
             format,
             session,
         ),
@@ -730,6 +850,7 @@ pub fn execute(
             cutoff,
             poly_order,
             kernel,
+            bwselect,
             h,
             b,
             vce,
@@ -740,9 +861,13 @@ pub fn execute(
             treatment,
             *cutoff,
             *poly_order,
-            kernel,
-            RdBandwidths { h: *h, b: *b },
-            vce,
+            RdOptions {
+                kernel: *kernel,
+                bwselect: *bwselect,
+                vce: *vce,
+                h: *h,
+                b: *b,
+            },
             format,
             session,
         ),
@@ -755,6 +880,7 @@ pub fn execute(
             covariates,
             comparison,
             method,
+            anticipation,
             bootstrap,
         } => execute_staggered_did(
             dataset,
@@ -763,8 +889,9 @@ pub fn execute(
             time,
             unit,
             covariates,
-            comparison,
-            method,
+            *comparison,
+            *method,
+            *anticipation,
             *bootstrap,
             format,
             session,
@@ -782,7 +909,7 @@ pub fn execute(
             outcome,
             treatment,
             covariates,
-            qmodel,
+            *qmodel,
             *truncate_lower,
             *truncate_upper,
             format,
@@ -808,8 +935,8 @@ pub fn execute(
             time,
             covariates,
             *n_factors,
-            force,
-            estimator,
+            *force,
+            *estimator,
             *bootstrap_se,
             *n_bootstrap,
             format,
@@ -821,6 +948,7 @@ pub fn execute(
             covariates,
             method,
             distance,
+            m_order,
             ratio,
             caliper,
             replace,
@@ -829,8 +957,9 @@ pub fn execute(
             dataset,
             treatment,
             covariates,
-            method,
-            distance,
+            *method,
+            *distance,
+            *m_order,
             *ratio,
             caliper.as_ref().copied(),
             *replace,
@@ -853,9 +982,9 @@ pub fn execute(
             outcome,
             treatment,
             covariates,
-            model,
-            estimand,
-            se_method,
+            *model,
+            *estimand,
+            *se_method,
             *bootstrap,
             *interactions,
             format,
@@ -926,6 +1055,10 @@ fn execute_iv(
                                 "p_values": result.first_stage_p_values,
                                 "strong_instruments": result.strong_instruments,
                             });
+                            json["diagnostics"] = iv_diagnostics(ds, &result)
+                                .map(|r| identification_json(&r))
+                                .unwrap_or_else(|_| serde_json::json!([]));
+                            extend_json(&mut json, notes_json(None, &result.warnings));
                             if let Some(m) = missing_json(&result.missing) {
                                 json["missing"] = m;
                             }
@@ -961,29 +1094,11 @@ fn execute_iv(
                                 }
                             }
 
+                            print_notes(None, &result.warnings, format);
+
                             // Run identification diagnostics
                             if let Ok(diag_report) = iv_diagnostics(ds, &result) {
-                                let warnings: Vec<_> = diag_report
-                                    .warnings
-                                    .iter()
-                                    .filter(|w| w.severity >= WarningSeverity::Caution)
-                                    .collect();
-                                if !warnings.is_empty() {
-                                    println!("\nIdentification warnings:");
-                                    for w in warnings {
-                                        println!(
-                                            "  [{}] {}: {}",
-                                            match w.severity {
-                                                WarningSeverity::Critical => "CRITICAL",
-                                                WarningSeverity::Warning => "WARNING",
-                                                WarningSeverity::Caution => "CAUTION",
-                                                WarningSeverity::Info => "INFO",
-                                            },
-                                            w.title,
-                                            w.message
-                                        );
-                                    }
-                                }
+                                print_identification_warnings(&diag_report);
                             }
                             print_missing_note(&result.missing, format);
                         }
@@ -1033,7 +1148,7 @@ fn execute_did(
             match run_did(ds, outcome, treat, post, controls_opt, None) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Difference-in-Differences",
                             "att": result.att,
                             "std_error": result.std_error,
@@ -1044,9 +1159,11 @@ fn execute_did(
                             "treated_post_mean": result.treated_post_mean,
                             "control_pre_mean": result.control_pre_mean,
                             "control_post_mean": result.control_post_mean,
+                            "df": result.df,
                             "aliased": result.aliased,
-                            "warnings": result.warnings,
+                            "diagnostics": identification_json(&did_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1077,34 +1194,15 @@ fn execute_did(
                                 result.aliased.join(", ")
                             );
                         }
-                        let notes = p2a_core::traits::convergence::notes_text(&result);
-                        if !notes.is_empty() {
-                            print!("\n{notes}");
+                        let (converged, warnings) = result_notes(&result);
+                        if converged.is_some() || !warnings.is_empty() {
+                            println!();
                         }
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics
                         let diag_report = did_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => {
@@ -1127,7 +1225,7 @@ fn execute_synth(
     treated_unit: &str,
     treatment_time: i64,
     predictors: &[String],
-    v_method: &str,
+    v_opt: VOptimization,
     run_placebos: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1151,12 +1249,6 @@ fn execute_synth(
                 .map(|col| PredictorSpec::new(col))
                 .collect();
 
-            // Parse V optimization method
-            let v_opt = match v_method.to_lowercase().as_str() {
-                "equal" => VOptimization::Equal,
-                _ => VOptimization::DataDriven,
-            };
-
             let mut config = SynthConfig::default();
             config.treated_unit = treated_unit.to_string();
             config.treatment_time = treatment_time;
@@ -1170,11 +1262,13 @@ fn execute_synth(
             match run_synthetic_control(ds, outcome, unit_col, time_col, &predictor_specs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Synthetic Control",
                             "treated_unit": result.treated_unit,
                             "treatment_time": result.treatment_time,
                             "unit_weights": result.unit_weights,
+                            "all_unit_weights": result.all_unit_weights,
+                            "predictor_loss": result.predictor_loss,
                             "predictor_balance": result.predictor_balance.iter().map(|b| {
                                 serde_json::json!({
                                     "predictor": b.predictor,
@@ -1203,6 +1297,7 @@ fn execute_synth(
                                 })
                             }),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1226,7 +1321,7 @@ fn execute_ipw(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    estimand: &str,
+    est: Estimand,
     trim: f64,
     bootstrap: usize,
     format: &OutputFormat,
@@ -1243,10 +1338,6 @@ fn execute_ipw(
     match dataset {
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
-            let est = match estimand.to_lowercase().as_str() {
-                "att" => Estimand::ATT,
-                _ => Estimand::ATE,
-            };
             let mut config = IpwConfig::default();
             config.estimand = est;
             config.trim = trim;
@@ -1257,11 +1348,15 @@ fn execute_ipw(
             match run_ipw_treatment(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "IPW Treatment Effect",
                             "estimand": format!("{:?}", result.estimand),
                             "effect": result.effect,
                             "std_error": result.std_error,
+                            "se_method": result.se_method,
+                            "se_mest": result.se_mest,
+                            "se_naive": result.se_naive,
+                            "se_eif": result.se_eif,
                             "ci_lower": result.ci_lower,
                             "ci_upper": result.ci_upper,
                             "t_stat": result.t_stat,
@@ -1269,7 +1364,9 @@ fn execute_ipw(
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
+                            "diagnostics": identification_json(&ipw_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1277,6 +1374,7 @@ fn execute_ipw(
                         println!("{}", "=".repeat(50));
                         println!("Effect: {:.6}", result.effect);
                         println!("Std Error: {:.6}", result.std_error);
+                        println!("SE method: {}", result.se_method);
                         println!("95% CI: [{:.6}, {:.6}]", result.ci_lower, result.ci_upper);
                         println!(
                             "t-stat: {:.4}, p-value: {:.4}",
@@ -1286,30 +1384,11 @@ fn execute_ipw(
                             "N: {} (treated: {}, control: {})",
                             result.n_obs, result.n_treated, result.n_control
                         );
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics
                         let diag_report = ipw_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => print_error(&format!("IPW failed: {}", e), format),
@@ -1325,8 +1404,8 @@ fn execute_dr(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    method: &str,
-    estimand: &str,
+    dr_method: DRMethod,
+    est: Estimand,
     trim: f64,
     bootstrap: usize,
     format: &OutputFormat,
@@ -1343,15 +1422,6 @@ fn execute_dr(
     match dataset {
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
-            let est = match estimand.to_lowercase().as_str() {
-                "att" => Estimand::ATT,
-                _ => Estimand::ATE,
-            };
-            let dr_method = match method.to_lowercase().as_str() {
-                "ipw" => DRMethod::IPW,
-                "regression" => DRMethod::Regression,
-                _ => DRMethod::AIPW,
-            };
             let mut config = DoublyRobustConfig::default();
             config.method = dr_method;
             config.estimand = est;
@@ -1362,17 +1432,19 @@ fn execute_dr(
             match run_doubly_robust(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": format!("{:?}", result.method),
                             "estimand": format!("{:?}", result.estimand),
                             "effect": result.effect,
                             "std_error": result.std_error,
+                            "se_method": result.se_method,
                             "ci_lower": result.ci_lower,
                             "ci_upper": result.ci_upper,
                             "t_stat": result.t_stat,
                             "p_value": result.p_value,
                             "n_obs": result.n_obs,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1383,12 +1455,14 @@ fn execute_dr(
                         println!("{}", "=".repeat(50));
                         println!("Effect: {:.6}", result.effect);
                         println!("Std Error: {:.6}", result.std_error);
+                        println!("SE method: {}", result.se_method);
                         println!("95% CI: [{:.6}, {:.6}]", result.ci_lower, result.ci_upper);
                         println!(
                             "t-stat: {:.4}, p-value: {:.4}",
                             result.t_stat, result.p_value
                         );
                         println!("N: {}", result.n_obs);
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("Doubly robust failed: {}", e), format),
@@ -1442,6 +1516,7 @@ fn execute_mediation(
                             "p_indirect": result.p_indirect,
                             "n_obs": result.n_obs,
                         });
+                        with_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1467,6 +1542,7 @@ fn execute_mediation(
                             result.proportion_mediated * 100.0
                         );
                         println!("N: {}", result.n_obs);
+                        print_result_notes(&result, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1478,51 +1554,27 @@ fn execute_mediation(
     Ok(())
 }
 
-/// The `--h` and `--b` flags of `causal rd` and `causal fuzzy-rd`.
+/// The kernel, selector, variance and bandwidth flags of `causal rd` and `causal fuzzy-rd`.
 #[derive(Clone, Copy)]
-struct RdBandwidths {
+struct RdOptions {
+    kernel: KernelType,
+    bwselect: BandwidthMethod,
+    vce: VceType,
     h: Option<f64>,
     b: Option<f64>,
 }
 
-/// Print the identification warnings of an RD result (caution and above).
-fn print_rd_identification_warnings(result: &p2a_core::RdResult) {
-    let diag_report = rd_diagnostics(result);
-    let warnings: Vec<_> = diag_report
-        .warnings
-        .iter()
-        .filter(|w| w.severity >= WarningSeverity::Caution)
-        .collect();
-    if !warnings.is_empty() {
-        println!("\nIdentification warnings:");
-        for w in warnings {
-            println!(
-                "  [{}] {}: {}",
-                match w.severity {
-                    WarningSeverity::Critical => "CRITICAL",
-                    WarningSeverity::Warning => "WARNING",
-                    WarningSeverity::Caution => "CAUTION",
-                    WarningSeverity::Info => "INFO",
-                },
-                w.title,
-                w.message
-            );
-        }
-    }
-}
-
-/// Print the estimator's warnings, leaving out the missing-value note (printed last).
-fn print_rd_warnings(warnings: &[String], missing: &p2a_core::data::columns::MissingSummary) {
-    let note = missing.note();
-    let shown: Vec<&String> = warnings
-        .iter()
-        .filter(|w| Some(w.as_str()) != note.as_deref())
-        .collect();
-    if !shown.is_empty() {
-        println!("\nWarnings:");
-        for w in shown {
-            println!("  - {w}");
-        }
+impl RdOptions {
+    /// `RdConfig::default()` with polynomial order `p` and these options.
+    fn config(&self, p: usize) -> RdConfig {
+        let mut config = RdConfig::default();
+        config.p = p;
+        config.h = self.h;
+        config.b = self.b;
+        config.kernel = self.kernel;
+        config.bwselect = self.bwselect;
+        config.vce = self.vce;
+        config
     }
 }
 
@@ -1533,6 +1585,21 @@ fn rd_name_message(e: p2a_core::EconError) -> String {
         p2a_core::EconError::InvalidSpecification { message } => message,
         other => other.to_string(),
     }
+}
+
+/// clap value parser of an option enum (a core `option_enum!` table): the parsed value, or the
+/// core's message ("unknown <option> '<value>'; expected one of: ..."), which clap prints after
+/// "invalid value". Shared by the T3 CLI command files.
+pub(crate) fn option_arg<T: std::str::FromStr<Err = p2a_core::EconError>>(
+    s: &str,
+) -> Result<T, String> {
+    s.parse::<T>().map_err(rd_name_message)
+}
+
+/// `--v-method` of `causal synth`: `VOptimization::from_options(Some(s), None)`, or the core
+/// message.
+fn parse_v_method(s: &str) -> Result<VOptimization, String> {
+    VOptimization::from_options(Some(s), None).map_err(rd_name_message)
 }
 
 /// `--vce` as a `VceType`, or the core message.
@@ -1556,28 +1623,10 @@ fn execute_rd(
     running: &str,
     cutoff: f64,
     poly_order: usize,
-    kernel: &str,
-    bwselect: &str,
-    bandwidths: RdBandwidths,
-    vce: &str,
+    options: RdOptions,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    // --vce, --kernel and --bwselect are checked before the session and the dataset
-    let parsed = parse_vce_arg(vce).and_then(|vce| {
-        Ok((
-            vce,
-            parse_kernel_arg(kernel)?,
-            parse_bwselect_arg(bwselect)?,
-        ))
-    });
-    let (vce, kern, bw) = match parsed {
-        Ok(v) => v,
-        Err(message) => {
-            print_error(&message, format);
-            return Ok(());
-        }
-    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -1588,15 +1637,7 @@ fn execute_rd(
 
     match dataset {
         Some(ds) => {
-            let config = RdConfig {
-                p: poly_order,
-                h: bandwidths.h,
-                b: bandwidths.b,
-                kernel: kern,
-                bwselect: bw,
-                vce,
-                ..RdConfig::default()
-            };
+            let config = options.config(poly_order);
 
             match run_rd(ds, outcome, running, cutoff, config) {
                 Ok(result) => match format {
@@ -1627,12 +1668,16 @@ fn execute_rd(
                             "b_left": result.b_left,
                             "b_right": result.b_right,
                             "kernel": result.kernel.to_string(),
+                            "bwselect": result.bwselect.name(),
+                            "bandwidth_source": result.bandwidth_label(),
                             "vce": result.vce.to_string(),
                             "p": result.p,
                             "q": result.q,
                             "level": result.level,
-                            "warnings": result.warnings,
+                            "diagnostics": identification_json(&rd_diagnostics(&result)),
                         });
+                        // the notes leave out the missing-value note, which has its own key
+                        with_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1677,11 +1722,13 @@ fn execute_rd(
                             "Bandwidth b: left={:.4}, right={:.4}",
                             result.b_left, result.b_right
                         );
+                        println!("Kernel: {}", result.kernel);
+                        println!("Bandwidth source: {}", result.bandwidth_label());
                         println!("VCE: {}", result.vce);
-                        print_rd_warnings(&result.warnings, &result.missing);
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics
-                        print_rd_identification_warnings(&result);
+                        print_identification_warnings(&rd_diagnostics(&result));
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1700,21 +1747,10 @@ fn execute_fuzzy_rd(
     treatment: &str,
     cutoff: f64,
     poly_order: usize,
-    kernel: &str,
-    bandwidths: RdBandwidths,
-    vce: &str,
+    options: RdOptions,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    // --vce and --kernel are checked before the session and the dataset
-    let parsed = parse_vce_arg(vce).and_then(|vce| Ok((vce, parse_kernel_arg(kernel)?)));
-    let (vce, kern) = match parsed {
-        Ok(v) => v,
-        Err(message) => {
-            print_error(&message, format);
-            return Ok(());
-        }
-    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -1725,15 +1761,7 @@ fn execute_fuzzy_rd(
 
     match dataset {
         Some(ds) => {
-            let config = RdConfig {
-                p: poly_order,
-                h: bandwidths.h,
-                b: bandwidths.b,
-                kernel: kern,
-                bwselect: BandwidthMethod::MseRd,
-                vce,
-                ..RdConfig::default()
-            };
+            let config = options.config(poly_order);
 
             match run_fuzzy_rd(ds, outcome, running, treatment, cutoff, config) {
                 Ok(result) => match format {
@@ -1760,10 +1788,15 @@ fn execute_fuzzy_rd(
                             "b_right": rd.b_right,
                             "n_eff_left": rd.n_eff_left,
                             "n_eff_right": rd.n_eff_right,
+                            "kernel": rd.kernel.to_string(),
+                            "bwselect": rd.bwselect.name(),
+                            "bandwidth_source": rd.bandwidth_label(),
                             "vce": rd.vce.to_string(),
                             "level": result.level,
-                            "warnings": result.warnings,
+                            "diagnostics": identification_json(&rd_diagnostics(rd)),
                         });
+                        // the notes leave out the missing-value note, which has its own key
+                        with_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1803,11 +1836,13 @@ fn execute_fuzzy_rd(
                              (both stages)",
                             rd.h_left, rd.h_right, rd.b_left, rd.b_right
                         );
+                        println!("Kernel: {}", rd.kernel);
+                        println!("Bandwidth source: {}", rd.bandwidth_label());
                         println!("VCE: {}", rd.vce);
-                        print_rd_warnings(&result.warnings, &result.missing);
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics on the outcome RD
-                        print_rd_identification_warnings(rd);
+                        print_identification_warnings(&rd_diagnostics(rd));
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1826,8 +1861,9 @@ fn execute_staggered_did(
     time_col: &str,
     unit_col: &str,
     covariates: &[String],
-    comparison: &str,
-    method: &str,
+    comparison_group: ComparisonGroup,
+    estimation_method: AttEstimationMethod,
+    anticipation: usize,
     bootstrap: usize,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1849,23 +1885,11 @@ fn execute_staggered_did(
                 Some(cov_refs.as_slice())
             };
 
-            let comparison_group = match comparison.to_lowercase().as_str() {
-                "notyettreated" | "notyet" | "nyt" => ComparisonGroup::NotYetTreated,
-                _ => ComparisonGroup::NeverTreated,
-            };
-
-            let estimation_method = match method.to_lowercase().as_str() {
-                "ipw" => AttEstimationMethod::IPW,
-                "dr" | "doublyrobust" | "aipw" => AttEstimationMethod::DoublyRobust,
-                _ => AttEstimationMethod::OutcomeRegression,
-            };
-
-            let config = StaggeredDidConfig {
-                comparison_group,
-                estimation_method,
-                bootstrap,
-                ..Default::default()
-            };
+            let mut config = StaggeredDidConfig::default();
+            config.comparison_group = comparison_group;
+            config.estimation_method = estimation_method;
+            config.anticipation = anticipation;
+            config.bootstrap = bootstrap;
 
             match run_staggered_did(
                 ds,
@@ -1913,7 +1937,11 @@ fn execute_staggered_did(
                                     "method": pt.method,
                                 })
                             }),
+                            "covariates": result.covariates,
+                            "anticipation": result.config.anticipation,
+                            "diagnostics": identification_json(&staggered_did_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         // The text output's Display already ends with the missing-value note.
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
@@ -1925,27 +1953,7 @@ fn execute_staggered_did(
 
                         // Run identification diagnostics
                         let diag_report = staggered_did_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => print_error(&format!("Staggered DiD failed: {}", e), format),
@@ -1961,7 +1969,7 @@ fn execute_tmle(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    qmodel: &str,
+    q_model: QModel,
     truncate_lower: f64,
     truncate_upper: f64,
     format: &OutputFormat,
@@ -1979,22 +1987,15 @@ fn execute_tmle(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let q_model = match qmodel.to_lowercase().as_str() {
-                "linear" => QModel::Linear,
-                _ => QModel::Logistic,
-            };
-
-            let config = TmleConfig {
-                q_model,
-                g_model: GModel::Logistic,
-                truncate_ps: (truncate_lower, truncate_upper),
-                ..Default::default()
-            };
+            let mut config = TmleConfig::default();
+            config.q_model = q_model;
+            config.g_model = GModel::Logistic;
+            config.truncate_ps = (truncate_lower, truncate_upper);
 
             match tmle(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Targeted Maximum Likelihood Estimation (TMLE)",
                             "ate": result.ate,
                             "ate_se": result.ate_se,
@@ -2004,6 +2005,9 @@ fn execute_tmle(
                             "p_value": result.ate_p_value,
                             "significance": format!("{}", result.significance),
                             "fluctuation_coef": result.fluctuation_coef,
+                            "fluctuation_coef_control": result.fluctuation_coef_control,
+                            "targeting_iterations": result.targeting_iterations,
+                            "outcome_range": result.outcome_range,
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
@@ -2011,6 +2015,7 @@ fn execute_tmle(
                             "q_model_converged": result.q_model_converged,
                             "g_model_converged": result.g_model_converged,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2029,8 +2034,8 @@ fn execute_tmle(
                             result.significance.stars()
                         );
                         println!(
-                            "\nFluctuation coefficient (epsilon): {:.6}",
-                            result.fluctuation_coef
+                            "\nFluctuation coefficients (epsilon): {:.6} (treated), {:.6} (control)",
+                            result.fluctuation_coef, result.fluctuation_coef_control
                         );
                         println!(
                             "N: {} (treated: {}, control: {})",
@@ -2043,6 +2048,7 @@ fn execute_tmle(
                             "Q-model converged: {}, G-model converged: {}",
                             result.q_model_converged, result.g_model_converged
                         );
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("TMLE failed: {}", e), format),
@@ -2061,8 +2067,8 @@ fn execute_gsynth(
     time_col: &str,
     covariates: &[String],
     n_factors: usize,
-    force: &str,
-    estimator: &str,
+    gsynth_force: GsynthForce,
+    gsynth_estimator: GsynthEstimator,
     bootstrap_se: bool,
     n_bootstrap: usize,
     format: &OutputFormat,
@@ -2080,34 +2086,20 @@ fn execute_gsynth(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let gsynth_force = match force.to_lowercase().as_str() {
-                "unit" => GsynthForce::Unit,
-                "time" => GsynthForce::Time,
-                "none" => GsynthForce::None,
-                _ => GsynthForce::TwoWay,
-            };
-
-            let gsynth_estimator = match estimator.to_lowercase().as_str() {
-                "mc" | "matrixcompletion" => GsynthEstimator::MatrixCompletion,
-                _ => GsynthEstimator::Ife,
-            };
-
-            let config = GsynthConfig {
-                n_factors,
-                cross_validate: n_factors == 0,
-                force: gsynth_force,
-                estimator: gsynth_estimator,
-                bootstrap_se,
-                n_bootstrap,
-                ..Default::default()
-            };
+            let mut config = GsynthConfig::default();
+            config.n_factors = n_factors;
+            config.cross_validate = n_factors == 0;
+            config.force = gsynth_force;
+            config.estimator = gsynth_estimator;
+            config.bootstrap_se = bootstrap_se;
+            config.n_bootstrap = n_bootstrap;
 
             match run_gsynth(
                 ds, outcome, treatment, unit_col, time_col, &cov_refs, config,
             ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Generalized Synthetic Control (gsynth)",
                             "att": result.att,
                             "att_se": result.att_se,
@@ -2118,8 +2110,18 @@ fn execute_gsynth(
                             "n_pre_periods": result.n_pre_periods,
                             "n_post_periods": result.n_post_periods,
                             "n_factors": result.n_factors,
-                            "estimator": format!("{:?}", result.estimator),
-                            "force": format!("{:?}", result.force),
+                            "estimator": result.estimator.to_string(),
+                            "force": result.force.to_string(),
+                            "beta": result.beta,
+                            "covariate_names": result.covariate_names,
+                            "cv_mspe": result.cv_mspe,
+                            "cv_lambda": result.cv_lambda,
+                            "lambda": result.lambda,
+                            "sigma2": result.sigma2,
+                            "mu": result.mu,
+                            "dynamic_counts": result.dynamic_counts,
+                            "dynamic_se": result.dynamic_se,
+                            "bootstrap": result.bootstrap,
                             "dynamic_effects": result.dynamic_effects.iter().map(|(t, e)| {
                                 serde_json::json!({ "time": t, "effect": e })
                             }).collect::<Vec<_>>(),
@@ -2132,6 +2134,7 @@ fn execute_gsynth(
                                 })
                             }).collect::<Vec<_>>(),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2151,8 +2154,9 @@ fn execute_matching(
     dataset_name: &str,
     treatment: &str,
     covariates: &[String],
-    method: &str,
-    distance: &str,
+    method: MatchMethodKind,
+    distance_method: DistanceMethod,
+    m_order: Option<MOrder>,
     ratio: usize,
     caliper: Option<f64>,
     replace: bool,
@@ -2172,42 +2176,44 @@ fn execute_matching(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let match_method = match method.to_lowercase().as_str() {
-                "cem" | "coarsened" | "coarsenedexact" => MatchMethod::CoarsenedExact {
-                    cutpoints: None,
-                    n_bins: Some(4),
-                },
-                "full" | "optimal" => MatchMethod::Full {
-                    min_ratio: 0.5,
-                    max_ratio: 2.0,
-                },
-                "subclass" | "stratification" => MatchMethod::Subclass { n_subclasses },
-                _ => MatchMethod::NearestNeighbor {
+            let match_method = match method {
+                MatchMethodKind::Nearest => MatchMethod::NearestNeighbor {
                     ratio,
                     caliper,
                     replace,
                 },
+                // MatchIt's default bins (nclass.Sturges)
+                MatchMethodKind::Cem => MatchMethod::CoarsenedExact {
+                    cutpoints: None,
+                    n_bins: None,
+                },
+                MatchMethodKind::Full => MatchMethod::Full {
+                    min_ratio: 0.5,
+                    max_ratio: 2.0,
+                },
+                MatchMethodKind::Subclass => MatchMethod::Subclass { n_subclasses },
             };
+            let mut options = MatchOptions::default();
+            options.m_order = m_order;
 
-            let distance_method = match distance.to_lowercase().as_str() {
-                "probit" => DistanceMethod::Probit,
-                "mahalanobis" => DistanceMethod::Mahalanobis,
-                "euclidean" => DistanceMethod::Euclidean,
-                _ => DistanceMethod::Logit,
-            };
-
-            match match_it(
+            match match_it_with(
                 ds,
                 treatment,
                 &cov_refs,
                 match_method,
                 Some(distance_method),
+                &options,
             ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": format!("{}", result.method),
                             "distance": format!("{}", result.distance),
+                            "m_order": result.m_order.map(|m| m.to_string()),
+                            "ess_treated": result.ess_treated,
+                            "ess_control": result.ess_control,
+                            "total_distance": result.total_distance,
+                            "caliper_abs": result.caliper_abs,
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
@@ -2227,37 +2233,18 @@ fn execute_matching(
                                 "max_abs_std_diff": result.balance_after.max_abs_std_diff,
                                 "n_imbalanced": result.balance_after.n_imbalanced,
                             },
+                            "diagnostics": identification_json(&matching_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
+                        // the Display prints both balance tables and the notes
                         println!("{}", result);
-                        println!("\nDetailed Balance After Matching:");
-                        println!("{}", result.balance_after);
 
                         // Run identification diagnostics
                         let diag_report = matching_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => print_error(&format!("Matching failed: {}", e), format),
@@ -2274,9 +2261,9 @@ fn execute_stdreg(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    model: &str,
-    estimand: &str,
-    se_method: &str,
+    model_type: StdRegModel,
+    stdreg_estimand: StdRegEstimand,
+    se_meth: SEMethod,
     bootstrap: usize,
     interactions: bool,
     format: &OutputFormat,
@@ -2294,38 +2281,17 @@ fn execute_stdreg(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let model_type = match model.to_lowercase().as_str() {
-                "logistic" | "logit" => StdRegModel::Logistic,
-                "poisson" => StdRegModel::Poisson,
-                _ => StdRegModel::Linear,
-            };
-
-            let stdreg_estimand = match estimand.to_lowercase().as_str() {
-                "att" => StdRegEstimand::ATT,
-                "atc" => StdRegEstimand::ATC,
-                "levels" => StdRegEstimand::Levels,
-                _ => StdRegEstimand::ATE,
-            };
-
-            let se_meth = match se_method.to_lowercase().as_str() {
-                "delta" => SEMethod::Delta,
-                "sandwich" | "robust" => SEMethod::Sandwich,
-                _ => SEMethod::Bootstrap,
-            };
-
-            let config = StdRegConfig {
-                model_type,
-                estimand: stdreg_estimand,
-                se_method: se_meth,
-                n_bootstrap: bootstrap,
-                include_interactions: interactions,
-                ..Default::default()
-            };
+            let mut config = StdRegConfig::default();
+            config.model_type = model_type;
+            config.estimand = stdreg_estimand;
+            config.se_method = se_meth;
+            config.n_bootstrap = bootstrap;
+            config.include_interactions = interactions;
 
             match run_stdreg(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Regression Standardization (G-computation)",
                             "estimand": format!("{}", result.estimand),
                             "model_type": format!("{}", result.model_type),
@@ -2350,6 +2316,7 @@ fn execute_stdreg(
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2395,6 +2362,7 @@ fn execute_stdreg(
                             "N: {} (treated: {}, control: {})",
                             result.n_obs, result.n_treated, result.n_control
                         );
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("Regression standardization failed: {}", e), format),
@@ -2403,4 +2371,479 @@ fn execute_stdreg(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::traits::convergence::Convergence;
+    use serde_json::json;
+
+    /// CLI-14 closure: the --help text of every typed option names each canonical value (no drift
+    /// when an enum grows).
+    #[test]
+    fn test_option_help_lists_every_choice() {
+        use clap::CommandFactory;
+        use p2a_core::*;
+        let root = crate::Cli::command();
+        let help = |path: &[&str], id: &str| -> String {
+            let mut cmd = &root;
+            for p in path {
+                cmd = cmd
+                    .find_subcommand(p)
+                    .unwrap_or_else(|| panic!("no subcommand {p}"))
+            }
+            cmd.get_arguments()
+                .find(|a| a.get_id() == id)
+                // --help text: the long help where the doc has a short first paragraph
+                .and_then(|a| a.get_long_help().or(a.get_help()))
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| panic!("{path:?} has no documented --{id}"))
+        };
+        let ts = super::super::timeseries::option_names();
+        let rows: Vec<(Vec<&str>, &str, Vec<&str>)> = vec![
+            (
+                vec!["causal", "rd"],
+                "kernel",
+                KernelType::choices().names(),
+            ),
+            (
+                vec!["causal", "rd"],
+                "bwselect",
+                BandwidthMethod::choices().names(),
+            ),
+            (vec!["causal", "rd"], "vce", VceType::choices().names()),
+            (
+                vec!["causal", "fuzzy-rd"],
+                "kernel",
+                KernelType::choices().names(),
+            ),
+            (
+                vec!["causal", "fuzzy-rd"],
+                "bwselect",
+                BandwidthMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "staggered-did"],
+                "comparison",
+                ComparisonGroup::choices().names(),
+            ),
+            (
+                vec!["causal", "staggered-did"],
+                "method",
+                AttEstimationMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "ipw"],
+                "estimand",
+                Estimand::choices().names(),
+            ),
+            (
+                vec!["causal", "doubly-robust"],
+                "method",
+                DRMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "doubly-robust"],
+                "estimand",
+                Estimand::choices().names(),
+            ),
+            (vec!["causal", "tmle"], "qmodel", QModel::choices().names()),
+            (
+                vec!["causal", "stdreg"],
+                "model",
+                StdRegModel::choices().names(),
+            ),
+            (
+                vec!["causal", "stdreg"],
+                "estimand",
+                StdRegEstimand::choices().names(),
+            ),
+            (
+                vec!["causal", "stdreg"],
+                "se_method",
+                SEMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "gsynth"],
+                "force",
+                GsynthForce::choices().names(),
+            ),
+            (
+                vec!["causal", "gsynth"],
+                "estimator",
+                GsynthEstimator::choices().names(),
+            ),
+            (
+                vec!["causal", "matching"],
+                "method",
+                MatchMethodKind::choices().names(),
+            ),
+            (
+                vec!["causal", "matching"],
+                "distance",
+                DistanceMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "matching"],
+                "m_order",
+                MOrder::choices().names(),
+            ),
+            (
+                vec!["timeseries", "garch"],
+                "distribution",
+                forecasting::garch::GarchDistribution::choices().names(),
+            ),
+            (
+                vec!["timeseries", "vecm"],
+                "ecdet",
+                econometrics::timeseries::vecm::VecmDeterministic::choices().names(),
+            ),
+            (
+                vec!["spatial", "sar"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "sem"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "sac"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "moran"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "moran"],
+                "alternative",
+                MoranAlternative::choices().names(),
+            ),
+            (
+                vec!["ml", "hierarchical"],
+                "linkage",
+                Linkage::choices().names(),
+            ),
+            (
+                vec!["viz", "dendrogram"],
+                "linkage",
+                Linkage::choices().names(),
+            ),
+        ];
+        for (path, id, names) in rows.into_iter().chain(ts) {
+            let h = help(&path, id);
+            for n in names {
+                assert!(h.contains(n), "{path:?} --{id}: help {h:?} lacks {n:?}")
+            }
+        }
+    }
+
+    /// The R, CLI and MCP spellings of every newly typed option parse.
+    #[test]
+    fn test_options_accept_r_cli_and_mcp_spellings() {
+        use clap::Parser;
+        let ok =
+            |a: &[&str]| crate::Cli::try_parse_from(a).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+        let rd = ["p2a", "causal", "rd", "d", "-y", "y", "-r", "x", "-c", "0"];
+        for extra in [
+            ["--kernel", "EPA"],
+            ["--bwselect", "cer_two"],
+            ["--vce", "HC1"],
+        ] {
+            ok(&[&rd[..], &extra[..]].concat());
+        }
+        let sd = [
+            "p2a",
+            "causal",
+            "staggered-did",
+            "d",
+            "-y",
+            "y",
+            "--treatment-time",
+            "g",
+            "--time",
+            "t",
+            "--unit",
+            "u",
+        ];
+        for extra in [
+            ["--comparison", "notyet"],
+            ["--comparison", "Not Yet Treated"],
+            ["--method", "DR"],
+            ["--method", "outcome_regression"],
+        ] {
+            ok(&[&sd[..], &extra[..]].concat());
+        }
+        match ok(&[&sd[..], &["--comparison", "not_yet_treated"][..]].concat()).command {
+            crate::Commands::Causal(CausalCommands::StaggeredDid { comparison, .. }) => {
+                assert_eq!(comparison, p2a_core::ComparisonGroup::NotYetTreated)
+            }
+            _ => panic!("not staggered-did"),
+        }
+        let more: [&[&str]; 16] = [
+            &[
+                "p2a", "causal", "tmle", "d", "-y", "y", "-t", "t", "-x", "a", "--qmodel",
+                "gaussian",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "stdreg",
+                "d",
+                "-y",
+                "y",
+                "-t",
+                "t",
+                "-x",
+                "a",
+                "--model",
+                "binomial",
+                "--estimand",
+                "potential_outcomes",
+                "--se-method",
+                "boot",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "synth",
+                "d",
+                "-y",
+                "y",
+                "--unit",
+                "u",
+                "--time",
+                "t",
+                "--treated",
+                "T",
+                "--treatment-time",
+                "5",
+                "-p",
+                "a",
+                "--v-method",
+                "data_driven",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "gsynth",
+                "d",
+                "-y",
+                "y",
+                "-d",
+                "t",
+                "--unit",
+                "u",
+                "--time",
+                "t",
+                "--force",
+                "twoWay",
+                "--estimator",
+                "matrix_completion",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "matching",
+                "d",
+                "-t",
+                "t",
+                "-x",
+                "a",
+                "--method",
+                "nn",
+                "--distance",
+                "glm",
+                "--m-order",
+                "descending",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "changepoint",
+                "d",
+                "--col",
+                "y",
+                "--change-type",
+                "both",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "holt-winters",
+                "d",
+                "--col",
+                "y",
+                "--period",
+                "4",
+                "--seasonal",
+                "mult",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "ar",
+                "d",
+                "--col",
+                "y",
+                "--method",
+                "Yule-Walker",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "decompose",
+                "d",
+                "--col",
+                "y",
+                "--period",
+                "4",
+                "--decompose-type",
+                "Multiplicative",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "struct-ts",
+                "d",
+                "--col",
+                "y",
+                "--model-type",
+                "bsm",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "garch",
+                "d",
+                "--col",
+                "y",
+                "--distribution",
+                "student_t",
+            ],
+            &[
+                "p2a", "ts", "vecm", "d", "--cols", "a", "b", "--ecdet", "constant",
+            ],
+            &[
+                "p2a",
+                "spatial",
+                "sar",
+                "d",
+                "-y",
+                "y",
+                "-x",
+                "a",
+                "--coord-x",
+                "cx",
+                "--coord-y",
+                "cy",
+                "--weight-style",
+                "rowstd",
+            ],
+            &[
+                "p2a",
+                "spatial",
+                "moran",
+                "d",
+                "-y",
+                "y",
+                "--coord-x",
+                "cx",
+                "--coord-y",
+                "cy",
+                "--alternative",
+                "two-sided",
+            ],
+            &[
+                "p2a",
+                "ml",
+                "hierarchical",
+                "d",
+                "--cols",
+                "a",
+                "b",
+                "--linkage",
+                "ward",
+            ],
+            &[
+                "p2a",
+                "viz",
+                "dendrogram",
+                "d",
+                "--cols",
+                "a",
+                "b",
+                "--linkage",
+                "wpgmc",
+                "-f",
+                "t.png",
+            ],
+        ];
+        for a in more {
+            ok(a);
+        }
+    }
+
+    struct Notes(Option<Convergence>, Vec<String>);
+    impl ResultNotes for Notes {
+        fn notes_warnings(&self) -> Vec<String> {
+            self.1.clone()
+        }
+        fn notes_convergence(&self) -> Option<Convergence> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn test_result_notes_helpers() {
+        let c = Convergence::new(false, 100, 100, "relative change in deviance", 3.2e-4, 1e-8);
+        let r = Notes(Some(c), vec!["w1".into()]);
+        assert_eq!(
+            result_notes(&r),
+            (Some((false, 100)), vec!["w1".to_string()])
+        );
+        let mut v = json!({"method": "m"});
+        with_result_notes(&mut v, &r);
+        assert_eq!(
+            v,
+            json!({"method": "m", "converged": false, "iterations": 100, "warnings": ["w1"]})
+        );
+        let mut v = json!({"warnings": ["stale"]});
+        with_result_notes(&mut v, &Notes(None, vec![]));
+        assert_eq!(v, json!({"warnings": []}));
+        let mut arr = json!([1]);
+        with_result_notes(&mut arr, &r);
+        assert_eq!(arr, json!([1]));
+    }
+
+    #[test]
+    fn test_identification_json_keeps_caution_and_above() {
+        use p2a_core::diagnostics::{IdentificationReport, IdentificationWarning};
+        let w = |code: &str, s| IdentificationWarning {
+            code: code.into(),
+            severity: s,
+            title: format!("t {code}"),
+            message: format!("m {code}"),
+            assumption: String::new(),
+            remediation: vec![],
+            diagnostics: None,
+        };
+        let mut rep = IdentificationReport::new("IV");
+        rep.warnings = vec![
+            w("A", WarningSeverity::Info),
+            w("B", WarningSeverity::Caution),
+            w("C", WarningSeverity::Critical),
+        ];
+        assert_eq!(
+            identification_json(&rep),
+            json!([
+                {"code": "B", "severity": "Caution", "title": "t B", "message": "m B"},
+                {"code": "C", "severity": "Critical", "title": "t C", "message": "m C"}])
+        );
+    }
 }

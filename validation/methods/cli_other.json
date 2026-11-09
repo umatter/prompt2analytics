@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_causal_options",
+      "name": "p2a causal rd/fuzzy-rd/staggered-did/did/ipw/doubly-robust/tmle/stdreg/matching/synth/gsynth: typed options, R and MCP spellings, notes and wave-2 fields",
+      "category": "interfaces",
+      "reference": "rdrobust::rdbwselect (bwselect, kernel); did att_gt (control_group, est_method, anticipation; DRDID); lm + sandwich (2x2 DiD, aliased); WeightIt/glm IPW (M-estimation SE) and AIPW; TMLE as tmle_glm; stdReg as stdreg_glm; MatchIt::matchit (ratio, m.order); exact simplex QP (Synth, V = I); gsynth::gsynth 1.4",
+      "doc": "validation/cli/other.md",
+      "cases": [
+        "rd_bwselect_sharp",
+        "rd_bwselect_fuzzy",
+        "did_cs_analytic",
+        "did_cs_covariates",
+        "did_2x2_training",
+        "ipw_aipw_sim",
+        "tmle_glm",
+        "stdreg_glm",
+        "matchit_nearest",
+        "synth_weights_qp",
+        "gsynth_simdata"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp61_other::test_validate_cli_rd_bwselect_certwo",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_rd_kernel_alias",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_fuzzy_rd_bwselect",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_staggered_accepts_mcp_spelling",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_staggered_anticipation",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_did_aliased",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_ipw_dr_se_method",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_tmle_qmodel_alias",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_stdreg_r_spellings",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_matching_options",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_synth_v_method_alias",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_gsynth_r_spellings"
+      ],
+      "quantities": [
+        "selected bandwidths h and b (left, right) for certwo and the Epanechnikov mserd, sharp and fuzzy",
+        "staggered overall ATT and SE (not-yet-treated; DR with anticipation 1)",
+        "2x2 DiD ATT, HC1 SE, residual df and the aliased regressor",
+        "IPW Hajek ATE, M-estimation SE and EIF SE; AIPW ATE and SE",
+        "TMLE ATE and SE with a linear Q",
+        "stdreg logistic ATE, E[Y(1)], E[Y(0)]",
+        "MatchIt ratio-2 ESS",
+        "synthetic-control donor weights and predictor loss with V = I",
+        "gsynth ATT and covariate coefficients",
+        "presence of warnings, convergence, diagnostics and the new keys"
+      ],
+      "tolerance": "validation/README.md for each n (rd_sim 1000: 1e-8; cs_panel 720: ATT 1e-8, SE 1e-6; employee_training 1200: 1e-10 / 1e-8; weighting_sim and ctmle_sim 300: 1e-8 / 1e-6); stdreg Tol::iterative(1e-8) (glm IRLS); matching 240: 1e-8; synth n = 14 pre-periods: 1e-6, loss 1e-5; gsynth 5e-4 relative (p2a's default stopping rule against R's converged fit); DR with anticipation Tol::iterative(1e-8) (glm IRLS propensity); counts and df exact",
+      "deviations": [
+        {
+          "finding": "CAUS-39",
+          "quantity": "stdreg SEs",
+          "note": "Tier 4; only point estimates are pinned"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_timeseries_outputs",
+      "name": "p2a ts irf/var/granger/varma/vecm/garch/holt-winters/struct-ts/ar/changepoint: labels, forecasts, typed options and notes",
+      "category": "interfaces",
+      "reference": "vars::VAR, vars::irf(ortho = TRUE); lmtest::grangertest; Hannan-Rissanen VARMA (written out with lm.fit); urca::ca.jo, cajorls; GARCH likelihood optimum and variance recursion (written out; fGarch's standardised t); stats::HoltWinters + predict(prediction.interval = TRUE); stats::StructTS(type = 'BSM')",
+      "doc": "validation/cli/other.md",
+      "cases": [
+        "var_canada",
+        "granger_short",
+        "varma_hr",
+        "vecm_denmark",
+        "garch_normal_t",
+        "ts_holtwinters_forecast",
+        "structts_nile_ukgas"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp61_other::test_validate_cli_irf_labels_as_vars",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_var_json",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_granger_notes",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_varma_long_var_order",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_vecm_options",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_struct_ts_notes",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_holt_winters_horizon_prints_forecasts",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_garch_horizon_forecasts",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_garch_student_t"
+      ],
+      "quantities": [
+        "orthogonalised IRF by impulse and response, every horizon (text and JSON)",
+        "VAR coefficients, SEs, p-values, logLik, log det of the ML residual covariance, residual df",
+        "Granger F, p, df2",
+        "VARMA long-VAR order, sample, residual df, logLik, coefficients",
+        "Johansen trace statistics (ecdet none and const), beta, selected rank",
+        "StructTS BSM logLik and seasonal and observation variances",
+        "presence of warnings and convergence",
+        "Holt-Winters forecasts (multiplicative and additive) and 95% limits (additive), residual variance",
+        "GARCH variance forecasts (normal and standardised t), t shape"
+      ],
+      "tolerance": "validation/README.md for each n (Canada T = 82: coefficients 1e-6, SEs/logLik/IRF 1e-5, printed IRF at 6 decimals; denmark T = 55: 1e-6 / 1e-5; varma 391 and 388: 1e-8 / 1e-6; Granger n = 20: F 1e-5, p 1e-5 + 1e-12, df exact; StructTS logLik at n = 108); StructTS variances Tol::iterative(1e-6) (the tight optimum); Holt-Winters 144: forecasts 1e-8, limits and residual variance 1e-6; printed text at 4 decimals; GARCH 1e-8 relative (the estimator's tight-optimum tolerance), printed variances 1e-6 relative",
+      "deviations": [
+        {
+          "finding": "TS-22",
+          "quantity": "airpass_mult_lwr, airpass_mult_upr",
+          "note": "predict.HoltWinters' multiplicative interval formula is wrong; the core refuses multiplicative intervals and the CLI prints point forecasts with a warning"
+        },
+        {
+          "finding": "TS-24",
+          "quantity": "optimised Holt-Winters parameters",
+          "note": "Tier 4; the CLI pins fix alpha, beta, gamma; the optimised run is compared with the library in process"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_ml_spatial_viz_outputs",
+      "name": "p2a spatial sar/moran, ml and viz commands: weight styles, impact warnings, alternatives, scores, linkage names, model leverage",
+      "category": "interfaces",
+      "reference": "stats::prcomp (x); stats::hclust(method = 'average'), cutree; spatialreg lagsarlm and impacts, spdep nb2listw styles and moran.test (written out); stats::lm hatvalues, rstandard, cooks.distance",
+      "doc": "validation/cli/other.md",
+      "cases": [
+        "cli_pca_scores",
+        "hclust_methods",
+        "spatial_sar_sdm_sem",
+        "spatial_weights_moran",
+        "cli_viz_residuals"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp61_other::test_validate_cli_pca_transform",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_linkage_names",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_spatial_impacts_warnings_in_json",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_spatial_weight_style_b",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_moran_alternative",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_viz_residuals_hat_values"
+      ],
+      "quantities": [
+        "PCA scores (sign-aligned) and sdev",
+        "average-linkage partition (k = 3) and merge heights",
+        "SAR rho and impacts (style W); rho and logLik with styles B (rho_W / 4) and U (80 rho_W)",
+        "Moran's I and its two-sided and greater p-values",
+        "hat values, standardized residuals, Cook's distance, sigma and rank of a three-regressor lm"
+      ],
+      "tolerance": "validation/README.md for each n (hclust_60 60: 1e-6 / 1e-5; spatial_sim 80: 1e-6 / 1e-5, p 1e-5 + 1e-12; mtcars 32: 1e-6 / 1e-5); ranks and partitions exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -2,18 +2,20 @@
 
 use clap::Subcommand;
 use p2a_core::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy, numeric_column};
+use p2a_core::linalg::solve::least_squares;
 use p2a_core::regression::CovarianceType;
 use p2a_core::traits::LinearEstimator;
+use p2a_core::visualization::charts::residual_diagnostics_with;
 use p2a_core::visualization::{
     InteractiveConfig, histogram_interactive, line_interactive, scatter_interactive,
 };
 use p2a_core::{
     ChartConfig, Linkage, box_plot, coefficient_plot, correlation_heatmap, dendrogram,
-    event_study_plot, hierarchical, histogram, irf_plot, line_chart, residual_diagnostics, run_ols,
-    scatter_plot,
+    event_study_plot, hierarchical, histogram, irf_plot, line_chart, run_ols, scatter_plot,
 };
 use std::path::PathBuf;
 
+use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, missing_json, print_error, print_message, print_missing_note};
 use crate::session::SessionManager;
 
@@ -209,7 +211,7 @@ EXAMPLES:
     /// Create a dendrogram from hierarchical clustering
     #[command(after_help = "\
 EXAMPLES:
-    p2a --session s.json viz dendrogram mydata --cols x1 x2 x3 --linkage ward -f tree.png
+    p2a --session s.json viz dendrogram mydata --cols x1 x2 x3 --linkage ward.D2 -f tree.png
 ")]
     Dendrogram {
         /// Dataset name
@@ -219,9 +221,11 @@ EXAMPLES:
         #[arg(long, num_args = 1..)]
         cols: Vec<String>,
 
-        /// Linkage method: "single", "complete", "average", "ward"
-        #[arg(long, default_value = "ward")]
-        linkage: String,
+        /// Linkage, as stats::hclust: single, complete, average (also upgma), ward.D2 (default;
+        /// also ward), mcquitty (also weighted), ward.D, centroid or median. R's deprecated
+        /// hclust(method = "ward") is ward.D
+        #[arg(long, default_value = "ward.D2", value_parser = super::causal::option_arg::<Linkage>)]
+        linkage: Linkage,
 
         /// Output file path
         #[arg(short = 'f', long = "file")]
@@ -647,7 +651,7 @@ pub fn execute(
         } => execute_dendrogram(
             dataset,
             cols,
-            linkage,
+            *linkage,
             output,
             title.as_deref(),
             format,
@@ -1181,6 +1185,22 @@ fn execute_coefplot(
     Ok(())
 }
 
+/// Hat values h_i = x_i' (X'X)^{-1} x_i of a least-squares fit, over its identified columns.
+fn hat_values(x: &ndarray::Array2<f64>, ls: &p2a_core::linalg::solve::LeastSquares) -> Vec<f64> {
+    let keep: Vec<usize> = (0..x.ncols()).filter(|j| !ls.aliased.contains(j)).collect();
+    x.rows()
+        .into_iter()
+        .map(|row| {
+            keep.iter()
+                .map(|&j| {
+                    let cx: f64 = keep.iter().map(|&l| ls.unscaled_cov[[j, l]] * row[l]).sum();
+                    row[j] * cx
+                })
+                .sum()
+        })
+        .collect()
+}
+
 fn execute_residuals(
     dataset_name: &str,
     dep_var: &str,
@@ -1197,101 +1217,113 @@ fn execute_residuals(
             return Ok(());
         }
     };
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
 
-    match dataset {
-        Some(ds) => {
-            let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+    // The model's columns, refused on a missing value as run_ols does.
+    let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+    let columns = match ColumnRequest::new(ds.df())
+        .numeric(dep_var)
+        .numerics(&x_cols)
+        .na(NaPolicy::Fail)
+        .extract()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            print_error(&format!("Regression failed: {e}"), format);
+            return Ok(());
+        }
+    };
+    let x = match columns.matrix(&x_cols, true) {
+        Ok(m) => m.data,
+        Err(e) => {
+            print_error(&format!("Regression failed: {e}"), format);
+            return Ok(());
+        }
+    };
+    let y = columns.numeric_array(dep_var);
+    let ls = match least_squares(x.view(), y.view()) {
+        Ok(ls) => ls,
+        Err(e) => {
+            print_error(&format!("Regression failed: {e}"), format);
+            return Ok(());
+        }
+    };
+    let hat = hat_values(&x, &ls);
+    let fitted = ls.fitted.to_vec();
+    let residuals = ls.residuals.to_vec();
 
-            // Run OLS to get residuals
-            match run_ols(ds, dep_var, &x_cols, true, CovarianceType::HC1) {
-                Ok(result) => {
-                    // run_ols refuses missing values, so y is complete and aligned with the
-                    // residuals.
-                    let (y_values, _) = match numeric_column(ds.df(), dep_var, NaPolicy::Fail) {
-                        Ok(y) => y,
-                        Err(e) => {
-                            print_error(&e.to_string(), format);
-                            return Ok(());
-                        }
-                    };
-                    // Get residuals via LinearEstimator trait
-                    let resid = result.residuals();
-                    let residuals: Vec<f64> = resid.to_vec();
-                    // Compute fitted = y - residuals
-                    let fitted: Vec<f64> = y_values
-                        .iter()
-                        .zip(residuals.iter())
-                        .map(|(y, r)| y - r)
-                        .collect();
+    let chart_title = title
+        .map(|s| s.to_string())
+        .or_else(|| Some("Residual Diagnostics".to_string()));
+    let config = ChartConfig {
+        title: chart_title,
+        width: 500,
+        height: 400,
+        ..Default::default()
+    };
 
-                    let chart_title = title
-                        .map(|s| s.to_string())
-                        .or_else(|| Some("Residual Diagnostics".to_string()));
-                    let config = ChartConfig {
-                        title: chart_title,
-                        width: 500,
-                        height: 400,
-                        ..Default::default()
-                    };
-
-                    match residual_diagnostics(&fitted, &residuals, None, config) {
-                        Ok(plot_result) => {
-                            // ResidualDiagnosticsResult has 4 separate plots
-                            // Save residuals_vs_fitted as the main output
-                            match decode_base64_image(&plot_result.residuals_vs_fitted) {
-                                Ok(png_data) => {
-                                    // Save main plot with user-specified name
-                                    std::fs::write(output, &png_data)?;
-
-                                    // Save other plots with suffixes
-                                    let stem = output
-                                        .file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("residuals");
-                                    let parent =
-                                        output.parent().unwrap_or(std::path::Path::new("."));
-
-                                    // Save Q-Q plot
-                                    if let Ok(qq_data) = decode_base64_image(&plot_result.qq_plot) {
-                                        let qq_path = parent.join(format!("{}_qq.png", stem));
-                                        let _ = std::fs::write(&qq_path, &qq_data);
-                                    }
-                                    // Save scale-location plot
-                                    if let Ok(sl_data) =
-                                        decode_base64_image(&plot_result.scale_location)
-                                    {
-                                        let sl_path =
-                                            parent.join(format!("{}_scale_location.png", stem));
-                                        let _ = std::fs::write(&sl_path, &sl_data);
-                                    }
-                                    // Save leverage plot
-                                    if let Ok(lev_data) =
-                                        decode_base64_image(&plot_result.residuals_vs_leverage)
-                                    {
-                                        let lev_path =
-                                            parent.join(format!("{}_leverage.png", stem));
-                                        let _ = std::fs::write(&lev_path, &lev_data);
-                                    }
-
-                                    print_saved(
-                                        &format!(
-                                            "Residual diagnostics saved to: {} (+ _qq, _scale_location, _leverage)",
-                                            output.display()
-                                        ),
-                                        &MissingSummary::none(y_values.len()),
-                                        format,
-                                    );
-                                }
-                                Err(e) => print_error(&e, format),
-                            }
-                        }
-                        Err(e) => print_error(&format!("Residual plot failed: {}", e), format),
-                    }
-                }
-                Err(e) => print_error(&format!("Regression failed: {}", e), format),
+    let plot_result =
+        match residual_diagnostics_with(&fitted, &residuals, Some(&hat), Some(ls.rank), config) {
+            Ok(r) => r,
+            Err(e) => {
+                print_error(&format!("Residual plot failed: {}", e), format);
+                return Ok(());
+            }
+        };
+    // The four plots: residuals vs fitted under the given name, the others with suffixes.
+    let png_data = match decode_base64_image(&plot_result.residuals_vs_fitted) {
+        Ok(d) => d,
+        Err(e) => {
+            print_error(&e, format);
+            return Ok(());
+        }
+    };
+    std::fs::write(output, &png_data)?;
+    let mut files = vec![output.display().to_string()];
+    let stem = output
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("residuals");
+    let parent = output.parent().unwrap_or(std::path::Path::new("."));
+    for (suffix, image) in [
+        ("qq", &plot_result.qq_plot),
+        ("scale_location", &plot_result.scale_location),
+        ("leverage", &plot_result.residuals_vs_leverage),
+    ] {
+        if let Ok(data) = decode_base64_image(image) {
+            let path = parent.join(format!("{stem}_{suffix}.png"));
+            if std::fs::write(&path, &data).is_ok() {
+                files.push(path.display().to_string());
             }
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+
+    let msg = format!(
+        "Residual diagnostics saved to: {} (+ _qq, _scale_location, _leverage)",
+        output.display()
+    );
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "message": msg,
+                "files": files,
+                "n_obs": plot_result.n_observations,
+                "n_params": plot_result.n_params,
+                "sigma": plot_result.sigma,
+                "leverage": plot_result.leverage,
+                "standardized_residuals": plot_result.standardized_residuals,
+                "cooks_distance": plot_result.cooks_distance,
+            });
+            with_result_notes(&mut json, &plot_result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            print_saved(&msg, &MissingSummary::none(y.len()), format);
+            print_result_notes(&plot_result, format);
+        }
     }
     Ok(())
 }
@@ -1299,7 +1331,7 @@ fn execute_residuals(
 fn execute_dendrogram(
     dataset_name: &str,
     cols: &[String],
-    linkage_method: &str,
+    link: Linkage,
     output: &PathBuf,
     title: Option<&str>,
     format: &OutputFormat,
@@ -1317,9 +1349,11 @@ fn execute_dendrogram(
         Some(ds) => {
             // hclust of rows with a missing value is undefined: refuse them (Int64 accepted).
             let names: Vec<&str> = cols.iter().map(String::as_str).collect();
+            // hclust needs two objects
             let columns = match ColumnRequest::new(ds.df())
                 .numerics(&names)
                 .na(NaPolicy::Fail)
+                .min_rows(2, &extraction_context("dendrogram", &names))
                 .extract()
             {
                 Ok(c) => c,
@@ -1334,13 +1368,6 @@ fn execute_dendrogram(
                     print_error(&format!("Failed to extract data: {}", e), format);
                     return Ok(());
                 }
-            };
-
-            let link = match linkage_method.to_lowercase().as_str() {
-                "single" => Linkage::Single,
-                "complete" => Linkage::Complete,
-                "average" => Linkage::Average,
-                _ => Linkage::Ward,
             };
 
             // Run hierarchical clustering
@@ -1363,11 +1390,21 @@ fn execute_dendrogram(
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
                                 std::fs::write(output, &png_data)?;
-                                print_saved(
-                                    &format!("Dendrogram saved to: {}", output.display()),
-                                    columns.missing(),
-                                    format,
-                                );
+                                let msg = format!("Dendrogram saved to: {}", output.display());
+                                match format {
+                                    OutputFormat::Json => {
+                                        let mut json = serde_json::json!({
+                                            "message": msg,
+                                            "file": output.display().to_string(),
+                                            "linkage": link.to_string(),
+                                        });
+                                        if let Some(m) = missing_json(columns.missing()) {
+                                            json["missing"] = m;
+                                        }
+                                        println!("{json}");
+                                    }
+                                    _ => print_saved(&msg, columns.missing(), format),
+                                }
                             }
                             Err(e) => print_error(&e, format),
                         },
