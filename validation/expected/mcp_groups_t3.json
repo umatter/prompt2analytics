@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "mcp_groups_t3",
+  "area": "stats/mcp",
+  "method": "aov, TukeyHSD, pairwise.wilcox.test, model.tables and a contrast SE on an Int64 response with missing cells and a missing label; wilcox.test and mood.test on two sample columns",
+  "reference": "stats::aov, TukeyHSD, pairwise.wilcox.test(exact = FALSE), model.tables, se.contrast on complete.cases(vi, g); wilcox.test(exact = FALSE), mood.test with NA removed per sample",
+  "call": "aov(vi ~ g, data = d[complete.cases(d$vi, d$g), ]); TukeyHSD(fit); wilcox.test(s1, s2, exact = FALSE)",
+  "dataset": "validation/datasets/generated/mcp_groups_t3.csv",
+  "datasets": ["validation/datasets/generated/mcp_groups_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n_complete": 30,
+    "group_n": [9, 10, 11],
+    "aov_ss": [8942.7080808080827, 14965.958585858591],
+    "aov_df": [2, 27],
+    "aov_ms": [4471.3540404040414, 554.29476243920703],
+    "tukey_diff": [32.855555555555569, 40.737373737373744, 7.8818181818181756],
+    "tukey_lwr": [6.0345146433503984, 14.500173885062374, -17.623655152452073],
+    "tukey_upr": [59.676596467760739, 66.974573589685122, 33.387291516088425],
+    "tukey_padj": [0.014048555386471429, 0.0018437397222917928, 0.72655703755480738],
+    "pairwise_wilcox_holm": [0.049489344092797878, 0.0071221581754941409, 0.37873825188653026],
+    "means": {
+      "names": ["ctl", "trtA", "trtB"],
+      "values": [55.4444444444444, 88.299999999999969, 96.181818181818144]
+    },
+    "grand_mean": 81.3333333333333,
+    "effects": {
+      "names": ["ctl", "trtA", "trtB"],
+      "values": [-25.888888888888893, 6.966666666666665, 14.84848484848485]
+    },
+    "contrast_ctl_trtA_est": -32.855555555555554,
+    "contrast_ctl_trtA_se": 10.817475823019455,
+    "wilcox_W": 347,
+    "wilcox_p": 0.027190864383243162,
+    "wilcox_n1": 32,
+    "wilcox_n2": 32,
+    "mood_less_z": -0.029266061720005017,
+    "mood_less_p": 0.48832619706281299
+  }
+}

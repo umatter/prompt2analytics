@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "mcp_misc_t3",
+  "area": "stats/mcp",
+  "method": "cor and mad(center = mean) on robust_weighted_t3; mcnemar.test; qchisq(0.95, df)",
+  "reference": "stats::cor; stats::mad(center = mean(x)); stats::mcnemar.test (b = 15, c = 5); stats::qchisq",
+  "call": "cor(r[, c('x1','x2','w')]); mad(x1, center = mean(x1)); mcnemar.test(matrix(c(40, 5, 15, 30), 2))",
+  "dataset": "validation/datasets/generated/robust_weighted_t3.csv",
+  "datasets": ["validation/datasets/generated/robust_weighted_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "cor_x1_x2_w": [1, 0.58437278812391169, -0.17799107529673566, 0.58437278812391169, 1, 0.11575462315089226, -0.17799107529673566, 0.11575462315089226, 1],
+    "mad_x1_center_mean": 3.1093798848000005,
+    "mean_x1": 8.7182480000000009,
+    "mcnemar_b15_c5_stat": 4.0499999999999998,
+    "mcnemar_b15_c5_p": 0.044171344908442683,
+    "mcnemar_b15_c5_uncorrected_stat": 5,
+    "mcnemar_b15_c5_uncorrected_p": 0.025347318677468304,
+    "qchisq95_df1": 3.841458820694124,
+    "qchisq95_df2": 5.9914645471079799,
+    "qchisq95_df3": 7.8147279032511792
+  }
+}

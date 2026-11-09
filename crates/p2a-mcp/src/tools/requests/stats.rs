@@ -40,7 +40,9 @@ pub struct LoglinRequest {
     pub margins: Option<Vec<Vec<usize>>>,
 
     /// Convergence tolerance
-    #[schemars(description = "Convergence tolerance for IPF algorithm (default: 0.1).")]
+    #[schemars(
+        description = "Convergence tolerance of the IPF algorithm: the largest absolute deviation of the fitted margins from the observed ones (R's eps; default 0.1)."
+    )]
     pub eps: Option<f64>,
 
     /// Maximum iterations
@@ -69,7 +71,7 @@ pub struct ModelTablesRequest {
 
     /// Type of table
     #[schemars(
-        description = "Type of table: 'means' (default) or 'effects' (deviations from grand mean)."
+        description = "Type of table: 'means' (default; also 'mean') or 'effects' (deviations from the grand mean; also 'effect'). Other values are refused."
     )]
     pub table_type: Option<String>,
 
@@ -104,7 +106,7 @@ pub struct SeContrastRequest {
 
     /// Contrast type (if contrasts not provided)
     #[schemars(
-        description = "Type of contrasts to generate: 'treatment', 'helmert', 'sum', or 'poly'. Only used if contrasts not provided."
+        description = "Type of contrasts to generate: 'treatment' (default), 'helmert', 'sum' or 'poly' (also 'polynomial'); R's names 'contr.treatment', 'contr.helmert', 'contr.sum' and 'contr.poly' are accepted. Only used if contrasts not provided."
     )]
     pub contrast_type: Option<String>,
 }
@@ -159,7 +161,9 @@ pub struct CovWtRequest {
     pub center: Option<bool>,
 
     /// Covariance method
-    #[schemars(description = "Method for computing covariance: 'unbiased' (default) or 'ml'.")]
+    #[schemars(
+        description = "Method for computing covariance, R's cov.wt method: 'unbiased' (default) or 'ML' (also 'mle', 'maximum_likelihood'). Other values are refused."
+    )]
     pub method: Option<String>,
 }
 
@@ -176,6 +180,12 @@ pub struct MauchlyTestRequest {
         description = "Names of columns representing repeated measures (at least 3). Subjects (rows) with a missing value in any of them are dropped, as R's lm-based mauchly.test does, and reported."
     )]
     pub columns: Vec<String>,
+
+    /// Covariance structure under the null (R's Sigma)
+    #[schemars(
+        description = "Optional covariance structure Sigma under the null (R's mauchly.test Sigma), p x p in row-major order for the p columns; default the identity. The test then checks sphericity of the transformed measures relative to Sigma."
+    )]
+    pub sigma: Option<Vec<f64>>,
 }
 
 /// Request for Tukey's five-number summary.
@@ -227,7 +237,9 @@ pub struct MadRequest {
     pub column: String,
 
     /// Center (default: median)
-    #[schemars(description = "Center to use. Default is 'median'. Can also use 'mean'.")]
+    #[schemars(
+        description = "Center to use: 'median' (default) or 'mean'. Other values are refused."
+    )]
     pub center: Option<String>,
 
     /// Scaling constant (default: 1.4826 for normal consistency)
@@ -274,7 +286,7 @@ pub struct DensityRequest {
 
     /// Kernel type
     #[schemars(
-        description = "Kernel function: 'gaussian' (default), 'epanechnikov', 'rectangular', 'triangular', 'biweight', or 'cosine'."
+        description = "Kernel function: 'gaussian' (default; also 'normal'), 'epanechnikov', 'rectangular' (also 'uniform'), 'triangular', 'biweight' (also 'quartic') or 'cosine'. Other values are refused."
     )]
     pub kernel: Option<String>,
 
@@ -309,13 +321,19 @@ pub struct SplineRequest {
 
     /// Points at which to interpolate
     #[schemars(
-        description = "Points at which to interpolate. If omitted, returns the spline coefficients."
+        description = "Points at which to evaluate the spline. If omitted, the spline is evaluated at n equally spaced points over the range of x (default 3 times the number of complete (x, y) pairs, as R's spline(), capped at 200)."
     )]
     pub xout: Option<Vec<f64>>,
 
+    /// Number of evaluation points (R's n)
+    #[schemars(
+        description = "Number of equally spaced evaluation points over the range of x when xout is omitted (R's n). Default: 3 times the number of complete (x, y) pairs, as R's spline(), capped at 200; give n to get more. Ignored when xout is given."
+    )]
+    pub n: Option<usize>,
+
     /// Spline method
     #[schemars(
-        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic', or 'hyman' (monotone)."
+        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic' or 'monoH.FC' (monotone Fritsch-Carlson; also 'hyman', 'monotone'). Other values are refused."
     )]
     pub method: Option<String>,
 }
@@ -343,12 +361,14 @@ pub struct ApproxRequest {
     pub xout: Vec<f64>,
 
     /// Interpolation method
-    #[schemars(description = "Interpolation method: 'linear' (default) or 'constant'.")]
+    #[schemars(
+        description = "Interpolation method: 'linear' (default) or 'constant' (also 'step'). Other values are refused."
+    )]
     pub method: Option<String>,
 
     /// Rule for extrapolation
     #[schemars(
-        description = "Rule for handling points outside range: 'na' (default, return NA) or 'nearest' (use boundary value)."
+        description = "Rule for points outside the range of x, R's rule: 'na' (default, return NA; also '1') or 'nearest' (use the boundary value; also 'boundary', 'const', '2'). Other values are refused."
     )]
     pub rule: Option<String>,
 }
@@ -375,7 +395,7 @@ pub struct ManovaRequest {
 
     /// Which test statistic to emphasize (default: Pillai)
     #[schemars(
-        description = "Test statistic to use: 'pillai' (default, most robust), 'wilks' (most popular), 'hotelling' (Hotelling-Lawley), or 'roy' (Roy's largest root). All four are always computed."
+        description = "The test summarised in the interpretation (all four are always reported): 'pillai' (default), 'wilks', 'hotelling-lawley' (also 'hotelling'), or 'roy' (Roy's largest root)."
     )]
     pub test: Option<String>,
 }
@@ -402,15 +422,21 @@ pub struct FactorAnalysisRequest {
 
     /// Rotation method
     #[schemars(
-        description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors), or 'none'."
+        description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors) or 'none'. Other values are refused."
     )]
     pub rotation: Option<String>,
 
     /// Factor scores method
     #[schemars(
-        description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson's method), or 'bartlett' (weighted least squares)."
+        description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson; also 'thomson') or 'bartlett' (weighted least squares). The scores are returned (the first 50 rows, fewer with many factors) or stored for every row with output_name."
     )]
     pub scores: Option<String>,
+
+    /// Dataset that receives the scores
+    #[schemars(
+        description = "With scores = 'regression' or 'bartlett': name of a new dataset that receives the input dataset plus one column per factor (Factor1, Factor2, ...). Without it, the first 50 rows of scores (fewer with many factors) are returned in the output."
+    )]
+    pub output_name: Option<String>,
 }
 
 /// Request for median polish (robust two-way decomposition).
@@ -455,7 +481,7 @@ pub struct PowerPropTestRequest {
     pub n: Option<f64>,
 
     /// Proportion in group 1
-    #[schemars(description = "Proportion in first group (0-1).")]
+    #[schemars(description = "Proportion in first group (0-1). Leave None to solve for it.")]
     pub p1: Option<f64>,
 
     /// Proportion in group 2
@@ -475,8 +501,16 @@ pub struct PowerPropTestRequest {
     pub power: Option<f64>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'; spellings such as 'two-sided' and 'one-sided' are accepted."
+    )]
     pub alternative: Option<String>,
+
+    /// Parameter to solve for
+    #[schemars(
+        description = "Parameter to solve for when it is not the one omitted: 'n', 'p1', 'p2', 'sig.level' (or 'alpha') or 'power'. Needed only to solve for sig_level, which otherwise defaults to 0.05 (R's power.prop.test)."
+    )]
+    pub solve_for: Option<String>,
 }
 
 /// Request for isotonic regression.
@@ -506,7 +540,7 @@ pub struct IsoregRequest {
 pub struct PowerAnovaTestRequest {
     /// Number of groups
     #[schemars(
-        description = "Number of groups (at least 2; required). In the hosted profile at most the server's design_groups limit (100 by default)."
+        description = "Number of groups (at least 2). Leave None to solve for it (reported fractional, as R). In the hosted profile at most the server's design_groups limit (100 by default)."
     )]
     pub groups: Option<usize>,
 
@@ -517,11 +551,15 @@ pub struct PowerAnovaTestRequest {
     pub n: Option<f64>,
 
     /// Between-group variance
-    #[schemars(description = "Between-group variance (variance of group means).")]
+    #[schemars(
+        description = "Between-group variance (variance of the group means, divisor groups - 1). Leave None to solve for it."
+    )]
     pub between_var: Option<f64>,
 
     /// Within-group variance
-    #[schemars(description = "Within-group variance (variance within each group). Default: 1.")]
+    #[schemars(
+        description = "Within-group variance (variance within each group). Leave None to solve for it; there is no default (R's power.anova.test)."
+    )]
     pub within_var: Option<f64>,
 
     /// Significance level
@@ -533,6 +571,12 @@ pub struct PowerAnovaTestRequest {
         description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80."
     )]
     pub power: Option<f64>,
+
+    /// Parameter to solve for
+    #[schemars(
+        description = "Parameter to solve for when it is not the one omitted: 'groups', 'n', 'between.var', 'within.var', 'sig.level' (or 'alpha') or 'power'. Needed only to solve for sig_level, which otherwise defaults to 0.05 (R's power.anova.test)."
+    )]
+    pub solve_for: Option<String>,
 }
 
 /// Request for Tukey's HSD (Honest Significant Differences) test.
@@ -696,7 +740,7 @@ pub struct PowerTTestRequest {
 
     /// Standard deviation
     #[schemars(
-        description = "Standard deviation. Default: 1 (use d = delta/sd as standardized effect size)."
+        description = "Standard deviation. Default: 1 unless solve_for = 'sd' (use d = delta/sd as standardized effect size)."
     )]
     pub sd: Option<f64>,
 
@@ -711,10 +755,20 @@ pub struct PowerTTestRequest {
     pub power: Option<f64>,
 
     /// Type of t-test
-    #[schemars(description = "Type of t-test: 'two.sample' (default), 'one.sample', or 'paired'.")]
+    #[schemars(
+        description = "Type of t-test: 'two.sample' (default), 'one.sample' or 'paired'; spellings such as 'one-sample' and 'two_sample' are accepted."
+    )]
     pub test_type: Option<String>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'; spellings such as 'two-sided' and 'one-sided' are accepted."
+    )]
     pub alternative: Option<String>,
+
+    /// Parameter to solve for
+    #[schemars(
+        description = "Parameter to solve for when it is not the one omitted: 'n', 'delta', 'sd', 'sig.level' (or 'alpha') or 'power'. Needed only to solve for sd or sig_level, which otherwise default to 1 and 0.05 (R's power.t.test)."
+    )]
+    pub solve_for: Option<String>,
 }

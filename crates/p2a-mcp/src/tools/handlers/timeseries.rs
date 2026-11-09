@@ -10,9 +10,12 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column};
+use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column, parse_option};
 use crate::tools::requests::timeseries::*;
 
+use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
+use p2a_core::econometrics::timeseries::vecm::{VecmConfig, run_vecm_with};
+use p2a_core::forecasting::garch::GarchDistribution;
 use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
@@ -38,6 +41,7 @@ use p2a_core::{
     embed,
     filter as ts_filter,
     garch,
+    garch_forecast,
     granger_test,
     holt_winters_forecast,
     lag as ts_lag,
@@ -51,8 +55,6 @@ use p2a_core::{
     // Time series modeling
     run_var,
     run_var_irf,
-    run_varma,
-    run_vecm,
     runmed,
     stats::{
         AcfType, BoxTestType, CcfType, SpectrumConfig, run_acf, run_box_test, run_ccf, run_pacf,
@@ -62,6 +64,133 @@ use p2a_core::{
     toeplitz_asymmetric,
     toeplitz_to_vec,
     window as ts_window,
+};
+
+use crate::tools::handlers::stats::parse_choice;
+use p2a_core::options::Choices;
+
+/// Spectrum estimator of `timeseries_spectrum` (R's spectrum `method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpectrumMethod {
+    Pgram,
+    Ar,
+}
+
+static SPECTRUM_METHOD: Choices<SpectrumMethod> = Choices {
+    option: "method",
+    values: &[
+        (
+            &["pgram", "periodogram", "spec.pgram"],
+            SpectrumMethod::Pgram,
+        ),
+        (&["ar", "autoregressive", "spec.ar"], SpectrumMethod::Ar),
+    ],
+};
+
+/// `timeseries_box_test` type (R's Box.test `type`).
+static BOX_TEST_TYPE: Choices<BoxTestType> = Choices {
+    option: "test_type",
+    values: &[
+        (
+            &["Ljung-Box", "ljung", "lb", "ljungbox"],
+            BoxTestType::LjungBox,
+        ),
+        (
+            &["Box-Pierce", "box", "bp", "boxpierce"],
+            BoxTestType::BoxPierce,
+        ),
+    ],
+};
+
+/// `ts_changepoint` change type (changepoint's cpt.mean, cpt.var, cpt.meanvar).
+static CHANGE_TYPE: Choices<CostFunction> = Choices {
+    option: "change_type",
+    values: &[
+        (&["mean", "cpt.mean"], CostFunction::MeanChange),
+        (
+            &["variance", "var", "cpt.var"],
+            CostFunction::VarianceChange,
+        ),
+        (
+            &["meanvar", "both", "mean_and_variance", "cpt.meanvar"],
+            CostFunction::MeanAndVariance,
+        ),
+    ],
+};
+
+/// Search method of `ts_changepoint` (changepoint's `method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpMethod {
+    Pelt,
+    BinSeg,
+}
+
+static CP_METHOD: Choices<CpMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["pelt"], CpMethod::Pelt),
+        (
+            &["binary", "binseg", "binary_segmentation"],
+            CpMethod::BinSeg,
+        ),
+    ],
+};
+
+/// Seasonal component of `ts_holt_winters` (R's HoltWinters `seasonal`).
+static SEASONAL_TYPE: Choices<SeasonalType> = Choices {
+    option: "seasonal",
+    values: &[
+        (&["additive", "add"], SeasonalType::Additive),
+        (&["multiplicative", "mult"], SeasonalType::Multiplicative),
+    ],
+};
+
+/// Estimation method of `ts_ar` (R's ar `method`).
+static AR_METHOD: Choices<ArMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["yule-walker", "yw", "yulewalker"], ArMethod::YuleWalker),
+        (&["burg"], ArMethod::Burg),
+        (&["ols"], ArMethod::Ols),
+    ],
+};
+
+/// `ts_decompose` type (R's decompose `type`).
+static DECOMPOSE_TYPE: Choices<DecomposeType> = Choices {
+    option: "decompose_type",
+    values: &[
+        (&["additive", "add"], DecomposeType::Additive),
+        (&["multiplicative", "mult"], DecomposeType::Multiplicative),
+    ],
+};
+
+/// `ts_structts` model (R's StructTS `type`).
+static STRUCTTS_TYPE: Choices<StructTsType> = Choices {
+    option: "model_type",
+    values: &[
+        (&["level", "local_level"], StructTsType::Level),
+        (&["trend", "local_linear_trend"], StructTsType::Trend),
+        (&["bsm", "basic_structural_model"], StructTsType::BSM),
+    ],
+};
+
+/// `ts_filter` method (R's filter `method`).
+static FILTER_METHOD: Choices<FilterMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["convolution"], FilterMethod::Convolution),
+        (&["recursive"], FilterMethod::Recursive),
+    ],
+};
+
+/// `ts_runmed` end rule (R's runmed `endrule`).
+static END_RULE: Choices<EndRule> = Choices {
+    option: "endrule",
+    values: &[
+        (&["keep"], EndRule::Keep),
+        (&["constant"], EndRule::Constant),
+        (&["median"], EndRule::Median),
+    ],
 };
 
 #[tool_router(router = timeseries_router, vis = "pub")]
@@ -79,10 +208,9 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse ACF type
-        let acf_type = match request.acf_type.as_deref() {
-            Some("covariance") | Some("cov") => AcfType::Covariance,
-            Some("partial") | Some("pacf") => AcfType::Partial,
-            _ => AcfType::Correlation,
+        let acf_type = match parse_option(request.acf_type.as_deref(), AcfType::Correlation) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // For PACF, use the dedicated function
@@ -153,7 +281,7 @@ impl AnalyticsServer {
 
     /// - R `stats::ccf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
     #[tool(
-        description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables."
+        description = "Compute the cross-correlation function of two series, as R's ccf(x, y): the value at lag k estimates cor(x[t+k], y[t]), so a peak at a negative lag k means x leads y by |k| periods and a peak at a positive lag means y leads x. Missing or infinite values are refused (R: na.fail). Returns the values for lags -lag_max to lag_max, the white-noise bound qnorm(0.975)/sqrt(n) and the lag of the largest |correlation|."
     )]
     pub async fn timeseries_ccf(
         &self,
@@ -171,42 +299,29 @@ impl AnalyticsServer {
             CcfType::Correlation,
         ) {
             Ok(result) => {
-                // Find the lag with maximum absolute correlation
-                let max_idx = result
-                    .values
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let max_lag = result.lags[max_idx];
-                let max_ccf = result.values[max_idx];
-
-                let lead_lag_interpretation = if max_lag > 0 {
-                    format!("{} leads {} by {} periods", request.x, request.y, max_lag)
-                } else if max_lag < 0 {
-                    format!("{} leads {} by {} periods", request.y, request.x, -max_lag)
-                } else {
-                    format!(
-                        "{} and {} are contemporaneously correlated",
-                        request.x, request.y
-                    )
-                };
-
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "type": "Cross-Correlation (CCF)",
                     "x_series": request.x,
                     "y_series": request.y,
                     "n_obs": result.n_obs,
+                    "lag_convention": "value at lag k = cor(x[t+k], y[t]) (R's ccf(x, y))",
                     "lags": result.lags,
                     "values": result.values,
                     "confidence_bound_95": result.confidence_bound,
-                    "max_correlation": {
-                        "lag": max_lag,
-                        "value": max_ccf,
-                        "interpretation": lead_lag_interpretation
-                    }
                 });
+                match peak_lag(&result.lags, &result.values) {
+                    Some((k, v)) => {
+                        json_output["max_correlation"] = serde_json::json!({
+                            "lag": k,
+                            "value": v,
+                            "interpretation": lead_lag(&request.x, &request.y, k)
+                        });
+                    }
+                    None => {
+                        json_output["max_correlation"] = serde_json::Value::Null;
+                        json_output["note"] = serde_json::json!("no finite cross-correlation");
+                    }
+                }
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "{}\n\nJSON:\n{}",
                     result,
@@ -222,7 +337,7 @@ impl AnalyticsServer {
 
     /// - R `stats::spectrum`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/spectrum.html
     #[tool(
-        description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns."
+        description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns. The periodogram reports R's spec.ci 95% multipliers at its degrees of freedom; AR spectra have no confidence interval."
     )]
     pub async fn timeseries_spectrum(
         &self,
@@ -233,10 +348,17 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Determine method
-        let method = request.method.as_deref().unwrap_or("pgram");
+        let method = match parse_choice(
+            &SPECTRUM_METHOD,
+            request.method.as_deref(),
+            SpectrumMethod::Pgram,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
 
-        let result = match method.to_lowercase().as_str() {
-            "ar" | "autoregressive" => {
+        let result = match method {
+            SpectrumMethod::Ar => {
                 match run_spectrum_ar(dataset, &request.column, request.ar_order, None) {
                     Ok(r) => r,
                     Err(e) => {
@@ -247,7 +369,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            _ => {
+            SpectrumMethod::Pgram => {
                 // Periodogram method
                 let mut config = SpectrumConfig::default();
                 config.spans = request.spans.clone();
@@ -276,10 +398,17 @@ impl AnalyticsServer {
             f64::INFINITY
         };
 
-        // Compute confidence interval multipliers
-        let (ci_lower_mult, ci_upper_mult) = result.confidence_multipliers(0.95);
+        // R's spec.ci multipliers at the reported df; none for an AR spectrum (no df)
+        let ci = match result.confidence_interval_multipliers(0.95) {
+            Ok(ci) => ci,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spectral estimation failed: {e}"
+                ))]));
+            }
+        };
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "type": format!("Spectral Density ({})", result.method),
             "series": request.column,
             "n_obs": result.n_obs,
@@ -303,11 +432,12 @@ impl AnalyticsServer {
                     peak_freq, peak_period
                 )
             },
-            "confidence_interval_95": {
-                "multiplier_lower": ci_lower_mult,
-                "multiplier_upper": ci_upper_mult,
-                "interpretation": "Multiply spectral estimate by these values for 95% CI"
-            },
+            "confidence_interval_95": ci.map(|(lo, hi)| serde_json::json!({
+                "multiplier_lower": lo,
+                "multiplier_upper": hi,
+                "degrees_of_freedom": result.df,
+                "interpretation": "multiply a spectral estimate by these for a 95% interval (R's spec.ci at this df)"
+            })),
             // Include first/last few frequency-spectrum pairs
             "spectrum_sample": {
                 "first_5": result.freq.iter().take(5).zip(result.spec.iter().take(5))
@@ -318,6 +448,11 @@ impl AnalyticsServer {
                     .collect::<Vec<_>>()
             }
         });
+        if ci.is_none() {
+            json_output["confidence_interval_note"] = serde_json::json!(
+                "no chi-square interval for AR spectra (R's spec.ar has no degrees of freedom)"
+            );
+        }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}\n\nJSON:\n{}",
@@ -339,9 +474,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse test type
-        let test_type = match request.test_type.as_deref() {
-            Some("box-pierce") | Some("Box-Pierce") | Some("boxpierce") => BoxTestType::BoxPierce,
-            _ => BoxTestType::LjungBox, // Default
+        let test_type = match parse_choice(
+            &BOX_TEST_TYPE,
+            request.test_type.as_deref(),
+            BoxTestType::LjungBox,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let fitdf = request.fitdf.unwrap_or(0);
@@ -451,7 +590,7 @@ impl AnalyticsServer {
 
     /// Run VAR (Vector Autoregression) model.
     #[tool(
-        description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC."
+        description = "Vector autoregression VAR(p) with a constant, as vars::VAR(type = 'const'): per-equation coefficients, standard errors (df T - Kp - 1), t and p values, the residual covariance, logLik, AIC and BIC. Returns the summary as text followed by the full result as JSON."
     )]
     pub async fn ts_var(
         &self,
@@ -470,14 +609,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Granger causality test.
     #[tool(
-        description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models."
+        description = "Test Granger causality between two time series variables, as lmtest::grangertest: whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent' (F test of the restricted against the unrestricted model). Without lags, Schwert's order is used, capped so that the F test keeps at least one residual degree of freedom, with a warning. Returns text followed by the result as JSON (F, df1, df2, p, the order used and any warning)."
     )]
     pub async fn ts_granger(
         &self,
@@ -499,14 +636,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Run VARMA (Vector ARMA) model.
     #[tool(
-        description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series."
+        description = "VARMA(p, q) with a constant by Hannan & Rissanen (1982): a long VAR(m) by OLS, then OLS of y_t on its lags and the lagged step-1 residuals; long_var_order sets m. Returns the coefficient table (standard errors, t and p only for q = 0, where the second step is an exact OLS VAR), logLik, AIC and BIC, as text followed by JSON."
     )]
     pub async fn ts_varma(
         &self,
@@ -518,21 +653,35 @@ impl AnalyticsServer {
 
         let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_varma(dataset, &columns, request.p, request.q) {
+        let mut config = VarmaConfig::default();
+        config.p = request.p;
+        config.q = request.q;
+        config.long_var_order = request.long_var_order;
+        let result = match run_varma_with(dataset, &columns, &config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ts_error("VARMA estimation failed", &e));
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut json = match serde_json::to_value(&result) {
+            Ok(j) => j,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "the result could not be serialised: {e}"
+                ))]));
+            }
+        };
+        json["t_values"] = serde_json::json!(result.t_values());
+        json["p_values"] = serde_json::json!(result.p_values());
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{result}\n\nJSON:\n{json}"
+        ))]))
     }
 
     /// Run VECM (Vector Error Correction Model).
     #[tool(
-        description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues."
+        description = "Johansen procedure and restricted VECM as urca::ca.jo (spec = 'transitory'; trace and maximal-eigenvalue tests with urca's Osterwald-Lenum critical values) and urca::cajorls (beta, alpha, Gamma), for cointegrated I(1) series. ecdet as urca's; the rank is chosen by the trace test at 5% unless given. Refused: lags below 2, a rank outside 1..k-1, more than 11 variables. Returns text followed by the result as JSON."
     )]
     pub async fn ts_vecm(
         &self,
@@ -544,21 +693,26 @@ impl AnalyticsServer {
 
         let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_vecm(dataset, &columns, request.lags, request.rank) {
+        let mut config = VecmConfig::default();
+        config.lag_order = request.lags;
+        config.ecdet = match parse_option(request.ecdet.as_deref(), config.ecdet) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
+        config.rank = request.rank;
+        let result = match run_vecm_with(dataset, &columns, &config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ts_error("VECM estimation failed", &e));
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Compute VAR Impulse Response Functions.
     #[tool(
-        description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization."
+        description = "Compute impulse response functions from a VAR(p) with a constant, orthogonalised (lower Cholesky factor of Sigma_u) as vars::irf(ortho = TRUE). Returns text followed by every horizon as JSON: irf[h][response][impulse] for h = 0 .. steps - 1."
     )]
     pub async fn ts_var_irf(
         &self,
@@ -577,9 +731,7 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Fit an ARIMA model by conditional sum of squares.
@@ -648,7 +800,7 @@ impl AnalyticsServer {
 
     /// Fit a GARCH model for volatility modeling.
     #[tool(
-        description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks."
+        description = "GARCH(p, q) by conditional maximum likelihood with normal ('norm') or standardised Student-t ('std') errors, as fGarch::garchFit (mci start h_t = mean(e²)); SEs from the inverse observed information, z and normal p-values; omega is in the data's units; parameters on a bound are reported with a warning; optional variance forecasts."
     )]
     pub async fn ts_garch_fit(
         &self,
@@ -663,12 +815,17 @@ impl AnalyticsServer {
             Err(e) => return Ok(ts_error("GARCH fitting failed", &e)),
         };
 
-        let config = GarchConfig {
+        let mut config = GarchConfig {
             p: request.p.unwrap_or(1),
             q: request.q.unwrap_or(1),
             include_mean: request.include_mean.unwrap_or(true),
             ..Default::default()
         };
+        config.distribution =
+            match parse_option(request.distribution.as_deref(), GarchDistribution::Normal) {
+                Ok(v) => v,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
         let result = match garch(&data, Some(config)) {
             Ok(r) => r,
@@ -677,9 +834,46 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut output = serde_json::json!({
+            "model": result.model,
+            "distribution": result.distribution.to_string(),
+            "param_names": result.param_names,
+            "estimates": result.estimates(),
+            "std_errors": result.std_errors,
+            "z_values": result.t_stats,
+            "p_values": result.p_values,
+            "shape": result.shape,
+            "vcov": result.vcov,
+            "log_likelihood": result.log_likelihood,
+            "aic": result.aic,
+            "bic": result.bic,
+            "persistence": result.persistence,
+            "unconditional_variance": result.unconditional_variance,
+            "half_life": result.half_life,
+            "n_obs": result.n_obs,
+            "n_params": result.n_params,
+            "at_bound": result.at_bound,
+        });
+        if let Some(h) = request.horizon {
+            let (variance, volatility, _) = match garch_forecast(&result, h) {
+                Ok(v) => v,
+                Err(e) => return Ok(ts_error("GARCH forecast failed", &e)),
+            };
+            output["forecast"] = serde_json::json!({
+                "horizon": h,
+                "variance": variance,
+                "volatility": volatility,
+            });
+        }
+        crate::tools::handlers::stats::insert_notes(
+            &mut output,
+            Some((result.converged, result.iterations)),
+            &result.warnings,
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{result}\n\nJSON:\n{output}"
+        ))]))
     }
 
     /// Run MSTL decomposition.
@@ -755,7 +949,7 @@ impl AnalyticsServer {
 
     /// Detect changepoints (structural breaks) in a time series.
     #[tool(
-        description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
+        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default; the mean cost assumes unit variance) or Binary Segmentation (mean changes only). Identifies points where the mean or variance changes. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
     pub async fn ts_changepoint(
         &self,
@@ -766,15 +960,28 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Determine cost function
-        let cost_fn = match request.change_type.as_deref() {
-            Some("variance") => CostFunction::VarianceChange,
-            Some("both") => CostFunction::MeanAndVariance,
-            _ => CostFunction::MeanChange,
+        let cost_fn = match parse_choice(
+            &CHANGE_TYPE,
+            request.change_type.as_deref(),
+            CostFunction::MeanChange,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
+        let cp_method = match parse_choice(&CP_METHOD, request.method.as_deref(), CpMethod::Pelt) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
+        if cp_method == CpMethod::BinSeg && cost_fn != CostFunction::MeanChange {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "method 'binary' detects mean changes only (binary_segmentation has no variance cost); use method 'pelt' for change_type '{}'",
+                CHANGE_TYPE.canonical(cost_fn)
+            ))]));
+        }
 
         // Run detection based on method
-        let result = match request.method.as_deref() {
-            Some("binary") => {
+        let result = match cp_method {
+            CpMethod::BinSeg => {
                 match run_binary_segmentation(
                     dataset,
                     &request.column,
@@ -788,7 +995,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            _ => {
+            CpMethod::Pelt => {
                 match run_changepoint(
                     dataset,
                     &request.column,
@@ -848,7 +1055,7 @@ impl AnalyticsServer {
 
     ///   OTexts. https://otexts.com/fpp3/
     #[tool(
-        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
+        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods, with predict.HoltWinters' 95% prediction intervals for additive and non-seasonal fits (point forecasts only for multiplicative fits). Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
     )]
     pub async fn ts_holt_winters(
         &self,
@@ -859,11 +1066,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse seasonal type
-        let seasonal = match request.seasonal.as_deref() {
-            Some("multiplicative") | Some("Multiplicative") | Some("mult") => {
-                SeasonalType::Multiplicative
-            }
-            _ => SeasonalType::Additive,
+        let seasonal = match parse_choice(
+            &SEASONAL_TYPE,
+            request.seasonal.as_deref(),
+            SeasonalType::Additive,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Run Holt-Winters
@@ -930,13 +1139,37 @@ impl AnalyticsServer {
         // If forecast horizon was requested, generate forecasts
         if let Some(horizon) = request.horizon {
             if horizon > 0 {
-                match holt_winters_forecast(&result, horizon) {
-                    Ok(forecasts) => {
+                // predict.HoltWinters' interval formula is wrong for multiplicative
+                // seasonality, so those fits get point forecasts only.
+                let with_intervals =
+                    result.seasonal_type == SeasonalType::Additive || result.gamma.is_none();
+                let forecasts = if with_intervals {
+                    result.predict(horizon, 0.95).map(|fc| {
+                        output.push_str(&format!(
+                            "\nForecasts ({horizon} periods ahead; 95% prediction intervals as predict.HoltWinters):\n"
+                        ));
+                        for i in 1..=fc.forecast.len() {
+                            output.push_str(&format!(
+                                "  t+{i}: {:.4}  [{:.4}, {:.4}]\n",
+                                fc.forecast[i - 1],
+                                fc.lower[i - 1],
+                                fc.upper[i - 1]
+                            ));
+                        }
+                    })
+                } else {
+                    holt_winters_forecast(&result, horizon).map(|forecasts| {
                         output.push_str(&format!("\nForecasts ({} periods ahead):\n", horizon));
                         for (i, val) in forecasts.iter().enumerate() {
                             output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
                         }
-                    }
+                        output.push_str(
+                            "Note: prediction intervals are implemented for additive and non-seasonal fits only (predict.HoltWinters' multiplicative formula is wrong, TS-22)\n",
+                        );
+                    })
+                };
+                match forecasts {
+                    Ok(()) => {}
                     // A resource or deadline failure is a failure of the call, not a
                     // note on a successful fit: the governor maps an expired budget to 504.
                     Err(
@@ -996,10 +1229,10 @@ impl AnalyticsServer {
         };
 
         // Parse method
-        let method = match request.method.as_deref() {
-            Some("burg") | Some("Burg") => ArMethod::Burg,
-            Some("ols") | Some("OLS") => ArMethod::Ols,
-            _ => ArMethod::YuleWalker,
+        let method = match parse_choice(&AR_METHOD, request.method.as_deref(), ArMethod::YuleWalker)
+        {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Build config
@@ -1025,7 +1258,7 @@ impl AnalyticsServer {
             ArMethod::Ols => "OLS",
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": format!("AR({}) via {}", result.order, method_str),
             "order": result.order,
             "ar_coefficients": result.ar,
@@ -1050,6 +1283,7 @@ impl AnalyticsServer {
             },
             "references": "Brockwell & Davis (1991), Time Series: Theory and Methods"
         });
+        crate::tools::handlers::stats::insert_notes(&mut output, None, &result.warnings);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1069,9 +1303,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse decomposition type
-        let decompose_type = match request.decompose_type.as_deref() {
-            Some("multiplicative") | Some("mult") => DecomposeType::Multiplicative,
-            _ => DecomposeType::Additive,
+        let decompose_type = match parse_choice(
+            &DECOMPOSE_TYPE,
+            request.decompose_type.as_deref(),
+            DecomposeType::Additive,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Run decomposition (the core wrapper reads the column: Int64 accepted, a missing
@@ -1170,10 +1408,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse model type
-        let model_type = match request.model_type.as_deref() {
-            Some("trend") | Some("Trend") => StructTsType::Trend,
-            Some("bsm") | Some("BSM") => StructTsType::BSM,
-            _ => StructTsType::Level,
+        let model_type = match parse_choice(
+            &STRUCTTS_TYPE,
+            request.model_type.as_deref(),
+            StructTsType::Level,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Validate period for BSM
@@ -1194,15 +1435,15 @@ impl AnalyticsServer {
 
         // Build JSON output
         let mut coef_json = serde_json::json!({
-            "level_variance": format!("{:.6}", result.coef.level),
-            "observation_variance": format!("{:.6}", result.coef.epsilon),
+            "level_variance": result.coef.level,
+            "observation_variance": result.coef.epsilon,
         });
 
         if let Some(slope_var) = result.coef.slope {
-            coef_json["slope_variance"] = serde_json::json!(format!("{:.6}", slope_var));
+            coef_json["slope_variance"] = serde_json::json!(slope_var);
         }
         if let Some(seasonal_var) = result.coef.seasonal {
-            coef_json["seasonal_variance"] = serde_json::json!(format!("{:.6}", seasonal_var));
+            coef_json["seasonal_variance"] = serde_json::json!(seasonal_var);
         }
 
         let model_type_str = match result.model_type {
@@ -1211,7 +1452,7 @@ impl AnalyticsServer {
             StructTsType::BSM => "bsm",
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Structural Time Series Model",
             "model_type": model_type_str,
             "n_obs": result.n_obs,
@@ -1219,9 +1460,9 @@ impl AnalyticsServer {
             "converged": result.converged,
             "variance_coefficients": coef_json,
             "fit_statistics": {
-                "log_likelihood": format!("{:.4}", result.log_likelihood),
-                "aic": format!("{:.4}", result.aic),
-                "bic": format!("{:.4}", result.bic),
+                "log_likelihood": result.log_likelihood,
+                "aic": result.aic,
+                "bic": result.bic,
             },
             "components_sample": {
                 "first_5_level": result.level.iter().take(5)
@@ -1248,6 +1489,11 @@ impl AnalyticsServer {
             },
             "references": "Harvey, A. C. (1990). Forecasting, Structural Time Series Models and the Kalman Filter."
         });
+        crate::tools::handlers::stats::insert_notes(
+            &mut output,
+            Some((result.convergence.converged, result.convergence.iterations)),
+            &result.warnings,
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1287,7 +1533,7 @@ impl AnalyticsServer {
         };
 
         // Build output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "CausalImpact (Bayesian Structural Time Series)",
             "periods": {
                 "pre_period": {
@@ -1362,6 +1608,11 @@ impl AnalyticsServer {
             },
             "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274."
         });
+        crate::tools::handlers::stats::insert_notes(
+            &mut output,
+            Some((result.convergence.converged, result.convergence.iterations)),
+            &result.warnings,
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1370,7 +1621,7 @@ impl AnalyticsServer {
 
     /// Compute cumulative periodogram for white noise test.
     #[tool(
-        description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise."
+        description = "Cumulative periodogram as R's cpgram: centred, split-cosine tapered (taper 0.1), cumulative periodogram over the Fourier frequencies; band 1.358 / (sqrt(m) + 0.12 + 0.11/sqrt(m)); Stephens' statistic and the Kolmogorov p-value; missing values are dropped, as R. Tests whether a series is white noise."
     )]
     pub async fn timeseries_cpgram(
         &self,
@@ -1406,6 +1657,7 @@ impl AnalyticsServer {
             "taper": result.taper,
             "white_noise_test": {
                 "is_white_noise": result.is_white_noise,
+                "critical_value": result.critical_value,
                 "ks_statistic": result.ks_statistic,
                 "ks_p_value": result.ks_p_value,
                 "max_deviation": result.max_deviation
@@ -1642,15 +1894,13 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
-        let method = match request.method.as_deref() {
-            Some("recursive") => FilterMethod::Recursive,
-            Some("convolution") | None => FilterMethod::Convolution,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown method '{}'. Use 'convolution' or 'recursive'.",
-                    other
-                ))]));
-            }
+        let method = match parse_choice(
+            &FILTER_METHOD,
+            request.method.as_deref(),
+            FilterMethod::Convolution,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let sides = match request.sides {
@@ -1676,7 +1926,7 @@ impl AnalyticsServer {
 
         let output = serde_json::json!({
             "n": result.values.len(),
-            "method": format!("{:?}", method),
+            "method": FILTER_METHOD.canonical(method),
             "filter_length": request.filter.len(),
             "values_sample": &result.values[..result.values.len().min(20)],
             "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
@@ -1899,16 +2149,9 @@ impl AnalyticsServer {
             Err(e) => return Ok(ts_error("runmed failed", &e)),
         };
 
-        let endrule = match request.endrule.as_deref() {
-            Some("constant") => EndRule::Constant,
-            Some("median") => EndRule::Median,
-            Some("keep") | None => EndRule::Keep,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown endrule '{}'. Use 'keep', 'constant', or 'median'.",
-                    other
-                ))]));
-            }
+        let endrule = match parse_choice(&END_RULE, request.endrule.as_deref(), EndRule::Keep) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let result = match runmed(&values, request.k, endrule) {
@@ -1921,7 +2164,7 @@ impl AnalyticsServer {
         let output = serde_json::json!({
             "n": result.n_obs,
             "k": result.k,
-            "endrule": format!("{:?}", result.endrule),
+            "endrule": END_RULE.canonical(result.endrule),
             "values_sample": &result.values[..result.values.len().min(20)],
             "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
         });
@@ -1977,6 +2220,42 @@ fn arima_spec(
     }
 }
 
+/// A model result as its text summary followed by "JSON:" and the result as compact JSON
+/// (NaN and infinite values become null).
+fn text_and_json<T: serde::Serialize + std::fmt::Display>(result: &T) -> CallToolResult {
+    match serde_json::to_string(result) {
+        Ok(json) => {
+            CallToolResult::success(vec![Content::text(format!("{result}\n\nJSON:\n{json}"))])
+        }
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "the result could not be serialised: {e}"
+        ))]),
+    }
+}
+
+/// Lag of the largest |value| among the finite values (ties: the first in `lags` order); None
+/// when none is finite.
+fn peak_lag(lags: &[i32], values: &[f64]) -> Option<(i32, f64)> {
+    lags.iter().zip(values).filter(|(_, v)| v.is_finite()).fold(
+        None,
+        |best: Option<(i32, f64)>, (&k, &v)| match best {
+            Some((_, b)) if v.abs().total_cmp(&b.abs()) != std::cmp::Ordering::Greater => best,
+            _ => Some((k, v)),
+        },
+    )
+}
+
+/// R's reading of a ccf(x, y) peak at lag k: k < 0 means x leads y.
+fn lead_lag(x: &str, y: &str, k: i32) -> String {
+    let n = k.unsigned_abs();
+    let unit = if n == 1 { "period" } else { "periods" };
+    match k.cmp(&0) {
+        std::cmp::Ordering::Less => format!("{x} leads {y} by {n} {unit}"),
+        std::cmp::Ordering::Greater => format!("{y} leads {x} by {n} {unit}"),
+        std::cmp::Ordering::Equal => format!("{x} and {y} are contemporaneously correlated"),
+    }
+}
+
 /// A tool error `prefix: err`; for a missing value, with how to fill the gap. The hint
 /// narrows the generic "Drop or impute them first." of the missing-value error to imputing.
 fn ts_error(prefix: &str, err: &dyn std::fmt::Display) -> CallToolResult {
@@ -1986,7 +2265,8 @@ fn ts_error(prefix: &str, err: &dyn std::fmt::Display) -> CallToolResult {
         text.push_str(
             "\nHint: for a time series, impute rather than drop: p2a's time-series methods \
              need a complete series, and dropping a value would splice it. Fill the gaps first \
-             (for example munge_fill_na with strategy \"forward\").",
+             (for example munge_fill_na with strategy \"forward\" for empty cells; NaN values \
+             from arithmetic must be recomputed or replaced).",
         );
     }
     CallToolResult::error(vec![Content::text(text)])
@@ -2007,6 +2287,79 @@ mod tests {
     use p2a_core::data::Dataset;
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
+
+    #[test]
+    fn test_mcp_ts_error_hint_covers_nan_gaps() {
+        let r = ts_error(
+            "ACF failed",
+            &"Column 'x' contains 1 missing value(s) (null or NaN). Drop or impute them first.",
+        );
+        let t = match &r.content[0].raw {
+            RawContent::Text(t) => t.text.clone(),
+            _ => panic!("not text"),
+        };
+        assert!(t.contains("NaN values from arithmetic"), "{t}");
+        assert!(t.contains("impute rather than drop"), "{t}");
+    }
+
+    /// TOOL-11: the peak is taken over finite values by a total order; NaN never panics.
+    #[test]
+    fn test_ccf_peak_lag_total_order() {
+        assert_eq!(
+            peak_lag(&[-1, 0, 1], &[0.2, f64::NAN, -0.5]),
+            Some((1, -0.5))
+        );
+        // tie on |v|: first in lag order
+        assert_eq!(peak_lag(&[-1, 0, 1], &[0.4, -0.4, 0.1]), Some((-1, 0.4)));
+        assert_eq!(peak_lag(&[-1, 0], &[f64::NAN, f64::NAN]), None);
+        assert_eq!(peak_lag(&[], &[]), None);
+        assert_eq!(peak_lag(&[0], &[f64::INFINITY]), None);
+    }
+
+    #[test]
+    fn test_timeseries_option_tables() {
+        let checks = [
+            SPECTRUM_METHOD.validate(),
+            BOX_TEST_TYPE.validate(),
+            CHANGE_TYPE.validate(),
+            CP_METHOD.validate(),
+            SEASONAL_TYPE.validate(),
+            AR_METHOD.validate(),
+            DECOMPOSE_TYPE.validate(),
+            STRUCTTS_TYPE.validate(),
+            FILTER_METHOD.validate(),
+            END_RULE.validate(),
+        ];
+        assert!(checks.iter().all(|r| r.is_ok()), "{checks:?}");
+        assert_eq!(
+            parse_choice(&BOX_TEST_TYPE, Some("box_pierce"), BoxTestType::LjungBox),
+            Ok(BoxTestType::BoxPierce)
+        );
+        assert_eq!(
+            parse_choice(&AR_METHOD, Some("YW"), ArMethod::Burg),
+            Ok(ArMethod::YuleWalker)
+        );
+        assert_eq!(
+            parse_choice(&AR_METHOD, Some("mle"), ArMethod::YuleWalker).unwrap_err(),
+            "unknown method 'mle'; expected one of: yule-walker, burg, ols"
+        );
+        assert_eq!(
+            parse_choice(&CHANGE_TYPE, Some("cpt.var"), CostFunction::MeanChange),
+            Ok(CostFunction::VarianceChange)
+        );
+        assert_eq!(
+            parse_choice(&STRUCTTS_TYPE, Some("BSM"), StructTsType::Level),
+            Ok(StructTsType::BSM)
+        );
+        assert_eq!(
+            parse_choice(&END_RULE, Some("Keep"), EndRule::Median),
+            Ok(EndRule::Keep)
+        );
+        assert_eq!(
+            parse_choice(&SPECTRUM_METHOD, Some("welch"), SpectrumMethod::Pgram).unwrap_err(),
+            "unknown method 'welch'; expected one of: pgram, ar"
+        );
+    }
 
     fn text_of(r: &CallToolResult) -> String {
         r.content

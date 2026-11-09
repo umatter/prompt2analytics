@@ -21,7 +21,7 @@ pub struct AcfRequest {
 
     /// Type of ACF
     #[schemars(
-        description = "Type of autocorrelation: 'correlation' (default), 'covariance', or 'partial' (PACF)."
+        description = "Type of autocorrelation, R's acf type: 'correlation' (default; also 'acf'), 'covariance' (also 'autocovariance', 'acvf') or 'partial' (PACF; also 'pacf'). Other values are refused."
     )]
     pub acf_type: Option<String>,
 }
@@ -44,7 +44,7 @@ pub struct CcfRequest {
 
     /// Maximum lag
     #[schemars(
-        description = "Maximum lag to compute (in both directions). Default: min(10*log10(n), n-1)."
+        description = "Maximum lag to compute (in both directions). Default: floor(10 log10(n)), at most n - 1 (R's lag.max)."
     )]
     pub lag_max: Option<usize>,
 }
@@ -81,7 +81,7 @@ pub struct SpectrumRequest {
 
     /// Method for spectrum estimation
     #[schemars(
-        description = "Estimation method: 'pgram' (periodogram, default) or 'ar' (autoregressive). AR method fits an AR model and computes its theoretical spectrum."
+        description = "Estimation method: 'pgram' (periodogram, default; also 'spec.pgram') or 'ar' (autoregressive; also 'spec.ar'). AR method fits an AR model and computes its theoretical spectrum. Other values are refused."
     )]
     pub method: Option<String>,
 
@@ -114,7 +114,7 @@ pub struct BoxTestRequest {
 
     /// Test type
     #[schemars(
-        description = "Test type: 'ljung-box' (default, better finite-sample properties) or 'box-pierce' (simpler, classic version)."
+        description = "Test type, R's Box.test type: 'Ljung-Box' (default, better finite-sample properties; also 'ljung', 'lb') or 'Box-Pierce' (simpler, classic version; also 'box', 'bp'); case, hyphens and underscores do not matter. Other values are refused."
     )]
     pub test_type: Option<String>,
 
@@ -185,7 +185,7 @@ pub struct GrangerRequest {
 
     /// Number of lags (optional, default: automatic selection)
     #[schemars(
-        description = "Number of lags to include in the test. Default: automatic selection using Schwert's rule."
+        description = "Lag order p (needs n >= 3p + 2). Default: floor(12 (n/100)^(1/4)) (Schwert), capped at floor((n - 2)/3) with a warning."
     )]
     pub lags: Option<usize>,
 }
@@ -209,6 +209,12 @@ pub struct VarmaRequest {
     /// MA lags (q)
     #[schemars(description = "Number of moving average (MA) lags.")]
     pub q: usize,
+
+    /// Order of the step-1 long VAR
+    #[schemars(
+        description = "Order m of the step-1 long VAR (Hannan-Rissanen). Default: 0 when q = 0; otherwise max(floor(2 ln n), 2 max(p, q)), reduced with a warning when the sample is short. At least 1 when q > 0."
+    )]
+    pub long_var_order: Option<usize>,
 }
 
 /// Request for VECM (Vector Error Correction Model).
@@ -226,14 +232,20 @@ pub struct VecmRequest {
     pub columns: Vec<String>,
 
     /// Number of lags
-    #[schemars(description = "Number of lags for the VECM (must be at least 2).")]
+    #[schemars(description = "Lag order K of the VAR in levels (at least 2, urca's K).")]
     pub lags: usize,
 
     /// Cointegration rank
     #[schemars(
-        description = "Cointegration rank (number of cointegrating relationships). Must be between 1 and k-1 where k is the number of variables."
+        description = "Cointegration rank r of the restricted VECM (1 to k - 1). Default: chosen by the trace test at 5% (first r whose statistic is below its critical value); when that is 0 or k the restricted model is not estimated and a warning says so."
     )]
-    pub rank: usize,
+    pub rank: Option<usize>,
+
+    /// Deterministic term in the cointegration space
+    #[schemars(
+        description = "Deterministic term, urca's ecdet: 'none' (default; an unrestricted constant in the VECM), 'const' (also 'constant'; restricted to the cointegration space) or 'trend'."
+    )]
+    pub ecdet: Option<String>,
 }
 
 /// Request for VAR Impulse Response Functions.
@@ -253,7 +265,9 @@ pub struct VarIrfRequest {
     pub lags: usize,
 
     /// Number of IRF steps/periods
-    #[schemars(description = "Number of periods to compute impulse responses for.")]
+    #[schemars(
+        description = "Number of horizons including h = 0 (vars::irf n.ahead + 1): steps = 13 gives h = 0 .. 12."
+    )]
     pub steps: usize,
 }
 
@@ -364,6 +378,16 @@ pub struct GarchRequest {
     /// Include mean in model - default true
     #[schemars(description = "Whether to include a mean term in the model. Default: true.")]
     pub include_mean: Option<bool>,
+
+    #[schemars(
+        description = "Conditional distribution of the standardised errors, fGarch's cond.dist: 'norm' (default, also 'normal') or 'std' (standardised Student-t, also 't'; its shape is estimated)."
+    )]
+    pub distribution: Option<String>,
+
+    #[schemars(
+        description = "Optional number of periods for variance forecasts by the GARCH(p, q) recursion; returns the forecast variances and volatilities."
+    )]
+    pub horizon: Option<usize>,
 }
 
 /// Request for MSTL decomposition.
@@ -397,9 +421,9 @@ pub struct ChangepointRequest {
     #[schemars(description = "Name of the column containing the time series values.")]
     pub column: String,
 
-    /// Penalty for adding a changepoint (optional, uses BIC if not specified)
+    /// Penalty per changepoint (optional; MBIC if not specified)
     #[schemars(
-        description = "Penalty for adding a changepoint. Higher values = fewer changepoints. Default uses BIC (log(n))."
+        description = "Penalty per changepoint. Default: changepoint's MBIC, (k + 2) ln n with k = 1 (mean, variance) or 2 (meanvar), plus ln(segment length) per segment (cpt.* penalty = 'MBIC'); a value sets a manual penalty. Higher values give fewer changepoints."
     )]
     pub penalty: Option<f64>,
 
@@ -409,12 +433,14 @@ pub struct ChangepointRequest {
 
     /// Detection method: 'pelt' or 'binary'
     #[schemars(
-        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation)."
+        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation; also 'binseg'). Binary segmentation detects mean changes only, so it is refused with change_type 'variance' or 'meanvar'."
     )]
     pub method: Option<String>,
 
     /// Type of change to detect: 'mean', 'variance', or 'both'
-    #[schemars(description = "Type of change to detect: 'mean' (default), 'variance', or 'both'.")]
+    #[schemars(
+        description = "Type of change to detect, as changepoint's cpt.mean, cpt.var and cpt.meanvar: 'mean' (default; unit variance, as cpt.mean; also 'cpt.mean'), 'variance' (also 'var', 'cpt.var') or 'meanvar' (mean and variance; also 'both', 'cpt.meanvar'). Other values are refused."
+    )]
     pub change_type: Option<String>,
 }
 
@@ -438,7 +464,7 @@ pub struct HoltWintersRequest {
 
     /// Seasonal type
     #[schemars(
-        description = "Type of seasonality: 'additive' (default) for constant seasonal variation, 'multiplicative' for proportional variation."
+        description = "Type of seasonality: 'additive' (default; also 'add') for constant seasonal variation, 'multiplicative' (also 'mult') for proportional variation. Other values are refused."
     )]
     pub seasonal: Option<String>,
 
@@ -494,7 +520,9 @@ pub struct ArModelRequest {
     pub order: Option<usize>,
 
     /// Fitting method
-    #[schemars(description = "Method for fitting: 'yule-walker' (default), 'burg', or 'ols'.")]
+    #[schemars(
+        description = "Method for fitting: 'yule-walker' (default; also 'yw'), 'burg' or 'ols'. Other values (R's 'mle' among them) are refused."
+    )]
     pub method: Option<String>,
 
     /// Demean the series
@@ -522,7 +550,7 @@ pub struct DecomposeRequest {
 
     /// Decomposition type
     #[schemars(
-        description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random) or 'multiplicative' (Y = Trend × Seasonal × Random)."
+        description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random; also 'add') or 'multiplicative' (Y = Trend × Seasonal × Random; also 'mult'). Other values are refused."
     )]
     pub decompose_type: Option<String>,
 }
@@ -541,7 +569,7 @@ pub struct StructTsRequest {
 
     /// Model type
     #[schemars(
-        description = "Type of structural model: 'level' (local level/random walk + noise), 'trend' (local linear trend), or 'bsm' (basic structural model with seasonality)."
+        description = "Type of structural model, R's StructTS type: 'level' (default; local level/random walk + noise), 'trend' (local linear trend) or 'BSM' (basic structural model with seasonality). Other values are refused."
     )]
     pub model_type: Option<String>,
 
@@ -725,11 +753,15 @@ pub struct FilterRequest {
     pub filter: Vec<f64>,
 
     /// Filter method
-    #[schemars(description = "Method: 'convolution' (default) or 'recursive'.")]
+    #[schemars(
+        description = "Method, R's filter method: 'convolution' (default) or 'recursive'. Other values are refused."
+    )]
     pub method: Option<String>,
 
     /// Sides for convolution
-    #[schemars(description = "For convolution: 1 (past only) or 2 (centered, default).")]
+    #[schemars(
+        description = "For convolution: 2 (default): weights centred around lag 0, as R's filter (an even-length filter puts one more weight on the future); 1: past values only."
+    )]
     pub sides: Option<usize>,
 }
 
@@ -849,6 +881,8 @@ pub struct RunmedRequest {
     pub k: usize,
 
     /// End rule
-    #[schemars(description = "How to handle ends: 'keep' (default), 'constant', or 'median'.")]
+    #[schemars(
+        description = "How to handle ends: 'keep' (default), 'constant' or 'median' (R's runmed default is 'median'; p2a's median end rule is not R's smoothEnds). Other values are refused."
+    )]
     pub endrule: Option<String>,
 }

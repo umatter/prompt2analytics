@@ -14,7 +14,7 @@
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
     MissingSummary, NaPolicy, budget_group_count, budget_level_count, check_named_budget,
-    insert_missing, missing_json, numeric_columns,
+    insert_missing, missing_json, numeric_columns, parse_option,
 };
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
@@ -26,6 +26,30 @@ use p2a_core::stats::{
 };
 use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
+};
+
+use crate::tools::handlers::stats::parse_choice;
+use p2a_core::options::Choices;
+use p2a_core::stats::FisherAlternative;
+
+/// `hypothesis_fisher_test` alternative (R's fisher.test `alternative`).
+static FISHER_ALTERNATIVE: Choices<FisherAlternative> = Choices {
+    option: "alternative",
+    values: &[
+        (&["two.sided", "twosided"], FisherAlternative::TwoSided),
+        (&["greater", "right", "gt"], FisherAlternative::Greater),
+        (&["less", "left", "lt"], FisherAlternative::Less),
+    ],
+};
+
+/// `hypothesis_mantelhaen_test` alternative (R's mantelhaen.test `alternative`, 2 x 2 x K).
+static CMH_ALTERNATIVE: Choices<CmhAlternative> = Choices {
+    option: "alternative",
+    values: &[
+        (&["two.sided", "twosided"], CmhAlternative::TwoSided),
+        (&["greater", "right", "gt"], CmhAlternative::Greater),
+        (&["less", "left", "lt"], CmhAlternative::Less),
+    ],
 };
 
 #[tool_router(router = hypothesis_router, vis = "pub")]
@@ -332,7 +356,7 @@ impl AnalyticsServer {
                     "statistic": result.statistic,
                     "statistic_name": result.statistic_name,
                     "p_value": result.p_value,
-                    "alternative": format!("{:?}", result.alternative),
+                    "alternative": result.alternative.to_string(),
                     "n": result.n,
                     "null_value": result.null_value,
                     "conf_level": result.conf_level,
@@ -382,16 +406,13 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") => FisherAlternative::Greater,
-            Some("less") => FisherAlternative::Less,
-            Some("two.sided") | None => FisherAlternative::TwoSided,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid alternative '{}'. Must be 'two.sided', 'greater', or 'less'.",
-                    other
-                ))]));
-            }
+        let alternative = match parse_choice(
+            &FISHER_ALTERNATIVE,
+            request.alternative.as_deref(),
+            FisherAlternative::TwoSided,
+        ) {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         match run_fisher_test(
@@ -586,56 +607,69 @@ impl AnalyticsServer {
 
     /// Kolmogorov-Smirnov test for comparing distributions.
     #[tool(
-        description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ."
+        description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs), p-value and, for a one-sample test, the reference distribution tested in R's notation (e.g. punif(min = -1.5, max = 3)). A small p-value suggests the distributions differ."
     )]
     pub async fn hypothesis_ks_test(
         &self,
         Parameters(request): Parameters<KsTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::ks::{TheoreticalDistribution, ks_test};
+        use p2a_core::stats::ks::{KsDistribution, TheoreticalDistribution, ks_test};
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // The theoretical distribution of a one-sample test (none for two samples)
+        let params = [
+            ("mean", request.mean, KsDistribution::Normal),
+            ("sd", request.sd, KsDistribution::Normal),
+            ("a", request.a, KsDistribution::Uniform),
+            ("b", request.b, KsDistribution::Uniform),
+            ("rate", request.rate, KsDistribution::Exponential),
+        ];
         let distribution = if request.y.is_some() {
+            if request.distribution.is_some() || params.iter().any(|(_, v, _)| v.is_some()) {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "distribution and its parameters apply only to the one-sample test (omit y)",
+                )]));
+            }
             None
         } else {
-            Some(match request.distribution.as_deref() {
-                Some("uniform") => {
-                    let a = request.a.unwrap_or(0.0);
-                    let b = request.b.unwrap_or(1.0);
-                    TheoreticalDistribution::UniformParams { a, b }
+            let kind = match parse_option(request.distribution.as_deref(), KsDistribution::Normal) {
+                Ok(k) => k,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
+            if let Some((param, _, owner)) = params
+                .iter()
+                .find(|(_, v, owner)| v.is_some() && *owner != kind)
+            {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "{param} applies only to distribution = '{owner}'; drop it or change distribution"
+                ))]));
+            }
+            match TheoreticalDistribution::from_kind(
+                kind,
+                request.mean,
+                request.sd,
+                request.a,
+                request.b,
+                request.rate,
+            ) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "KS test failed: {e}"
+                    ))]));
                 }
-                Some("exponential") => {
-                    let rate = request.rate.unwrap_or(1.0);
-                    TheoreticalDistribution::Exponential { rate }
-                }
-                _ => {
-                    let mean = request.mean.unwrap_or(0.0);
-                    let sd = request.sd.unwrap_or(1.0);
-                    if (mean - 0.0).abs() < 1e-10 && (sd - 1.0).abs() < 1e-10 {
-                        TheoreticalDistribution::Normal
-                    } else {
-                        TheoreticalDistribution::NormalParams { mean, sd }
-                    }
-                }
-            })
+            }
         };
+        let distribution_label = distribution.as_ref().map(|d| d.label());
 
         match ks_test(
             dataset,
@@ -667,6 +701,9 @@ impl AnalyticsServer {
                     }
                 });
 
+                if let Some(label) = &distribution_label {
+                    json_output["distribution"] = serde_json::json!(label);
+                }
                 if let Some(n2) = result.n_2 {
                     json_output["n_2"] = serde_json::json!(n2);
                 }
@@ -697,10 +734,13 @@ impl AnalyticsServer {
 
         let correct = request.correct.unwrap_or(true);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") => CmhAlternative::Greater,
-            Some("less") => CmhAlternative::Less,
-            _ => CmhAlternative::TwoSided,
+        let alternative = match parse_choice(
+            &CMH_ALTERNATIVE,
+            request.alternative.as_deref(),
+            CmhAlternative::TwoSided,
+        ) {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let result = match run_mantelhaen_test(
@@ -720,9 +760,21 @@ impl AnalyticsServer {
             }
         };
 
+        // The per-stratum table is left out when it would not fit the response budget, as
+        // the GOF and independence tools do, rather than losing the whole result.
+        let labels: Vec<String> = result
+            .stratum_stats
+            .iter()
+            .map(|s| s.stratum.clone())
+            .collect();
+        let with_strata = fits_response_budget(
+            (result.n_strata as u64).saturating_mul(9),
+            label_budget_bytes(&labels),
+        );
         let stratum_stats: Vec<serde_json::Value> = result
             .stratum_stats
             .iter()
+            .take(if with_strata { usize::MAX } else { 0 })
             .map(|s| {
                 serde_json::json!({
                     "stratum": s.stratum,
@@ -761,7 +813,6 @@ impl AnalyticsServer {
                 "conf_level": 0.95
             },
             "continuity_correction": result.continuity_correction,
-            "stratum_statistics": stratum_stats,
             "hypothesis": {
                 "null": "Row and column variables are conditionally independent given stratum",
                 "alternative": alt_desc
@@ -778,6 +829,15 @@ impl AnalyticsServer {
             "row_levels": result.row_levels,
             "col_levels": result.col_levels,
         });
+        if with_strata {
+            output["stratum_statistics"] = serde_json::json!(stratum_stats);
+        } else {
+            output["per_stratum_statistics"] = serde_json::json!(format!(
+                "omitted: {} strata are too many to return; the statistic, p-value and common \
+                 odds ratio are complete",
+                result.n_strata
+            ));
+        }
         if let Some(missing) = missing_json(&result.missing) {
             output["missing"] = missing;
         }
@@ -855,10 +915,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") | Some("gt") => Alternative::Greater,
-            Some("less") | Some("lt") => Alternative::Less,
-            _ => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let result = match run_mood_test(dataset, &request.x, &request.y, Some(alternative)) {
@@ -999,30 +1059,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let p_adjust_method = match request.p_adjust_method.as_deref() {
-            Some(m) => match PValueAdjustMethod::from_str(m) {
-                Some(method) => method,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid p-value adjustment method '{}'. Use 'holm', 'bonferroni', 'hochberg', 'hommel', 'BH', 'BY', or 'none'.",
-                        m
-                    ))]));
-                }
-            },
-            None => PValueAdjustMethod::Holm,
-        };
+        let p_adjust_method =
+            match parse_option(request.p_adjust_method.as_deref(), PValueAdjustMethod::Holm) {
+                Ok(m) => m,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let pool_sd = request.pool_sd.unwrap_or(false);
@@ -1058,9 +1104,9 @@ impl AnalyticsServer {
 
                 let mut output = serde_json::json!({
                     "test": result.test_name,
-                    "p_adjust_method": result.p_adjust_method.name(),
+                    "p_adjust_method": result.p_adjust_method.to_string(),
                     "pool_sd": result.pool_sd,
-                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "alternative": result.alternative.to_string(),
                     "group_names": result.group_names,
                     "group_sizes": result.group_sizes,
                     "group_means": result.group_means,
@@ -1104,30 +1150,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let p_adjust_method = match request.p_adjust_method.as_deref() {
-            Some(m) => match PValueAdjustMethod::from_str(m) {
-                Some(method) => method,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid p-value adjustment method '{}'. Use 'holm', 'bonferroni', 'hochberg', 'hommel', 'BH', 'BY', or 'none'.",
-                        m
-                    ))]));
-                }
-            },
-            None => PValueAdjustMethod::Holm,
-        };
+        let p_adjust_method =
+            match parse_option(request.p_adjust_method.as_deref(), PValueAdjustMethod::Holm) {
+                Ok(m) => m,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         if let Err(msg) = check_pairwise_groups(
@@ -1161,8 +1193,8 @@ impl AnalyticsServer {
 
                 let mut output = serde_json::json!({
                     "test": result.test_name,
-                    "p_adjust_method": result.p_adjust_method.name(),
-                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "p_adjust_method": result.p_adjust_method.to_string(),
+                    "alternative": result.alternative.to_string(),
                     "group_names": result.group_names,
                     "group_sizes": result.group_sizes,
                     "group_medians": result.group_medians,
@@ -1205,11 +1237,11 @@ impl AnalyticsServer {
         let r = request.r.unwrap_or(1.0);
         let conf_level = request.conf_level.unwrap_or(0.95);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") => PoissonAlternative::Greater,
-            Some("less") => PoissonAlternative::Less,
-            _ => PoissonAlternative::TwoSided,
-        };
+        let alternative =
+            match parse_option(request.alternative.as_deref(), PoissonAlternative::TwoSided) {
+                Ok(a) => a,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
         let result = match poisson_test(&request.x, &request.t, r, alternative, conf_level) {
             Ok(r) => r,
@@ -1495,10 +1527,10 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let mu = request.mu.unwrap_or(0.0);
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") | Some("gt") => Alternative::Greater,
-            Some("less") | Some("lt") => Alternative::Less,
-            _ => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
         let paired = request.paired.unwrap_or(false);
         let var_equal = request.var_equal.unwrap_or(false);
@@ -1542,17 +1574,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let mu = request.mu.unwrap_or(0.0);
@@ -1578,7 +1603,7 @@ impl AnalyticsServer {
                     "statistic": result.statistic,
                     "p_value": result.p_value,
                     "significance": result.significance.to_string(),
-                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "alternative": result.alternative.to_string(),
                     "null_value": result.null_value,
                     "exact": result.exact,
                     "continuity_correction": result.continuity_correction,
@@ -1631,8 +1656,8 @@ impl AnalyticsServer {
 }
 
 /// The values of the count column `name` (the kept `rows` of the dataset, 0-based) as `usize`.
-/// Each must be a finite, non-negative whole number of at most 2^53, the largest integer an
-/// `f64` holds exactly, and their total must fit in a `usize`. The error names the column and
+/// Each must be a finite, non-negative whole number of at most 2^53, beyond which an f64 no
+/// longer represents every integer, and their total must fit in a `usize`. The error names the column and
 /// the first offending dataset row (1-based).
 fn whole_counts(name: &str, values: &[f64], rows: &[usize]) -> Result<Vec<usize>, String> {
     const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
@@ -1640,16 +1665,18 @@ fn whole_counts(name: &str, values: &[f64], rows: &[usize]) -> Result<Vec<usize>
         .map_err(|e| format!("Trend test failed: {e}"))?;
     let mut total = 0usize;
     for (&v, &row) in values.iter().zip(rows) {
+        let refusal = || {
+            format!(
+                "Trend test failed: Column '{name}' must hold non-negative whole numbers (counts); \
+                 row {} is {v}",
+                row + 1
+            )
+        };
         let whole = v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= MAX_EXACT;
-        let count = usize::try_from(v as u64)
-            .ok()
-            .filter(|_| whole)
-            .ok_or_else(|| {
-                format!(
-                    "Column '{name}' must hold non-negative whole numbers (counts); row {} is {v}",
-                    row + 1
-                )
-            })?;
+        if !whole {
+            return Err(refusal());
+        }
+        let count = usize::try_from(v as u64).map_err(|_| refusal())?;
         total = total.checked_add(count).ok_or_else(|| {
             format!(
                 "Trend test failed: the counts of column '{name}' sum past {}",
@@ -1749,6 +1776,26 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
     use p2a_validation::{Case, Check, Tol};
+
+    #[test]
+    fn test_hypothesis_option_tables() {
+        use p2a_core::stats::{CmhAlternative, fisher::FisherAlternative};
+        assert!(FISHER_ALTERNATIVE.validate().is_ok() && CMH_ALTERNATIVE.validate().is_ok());
+        for s in ["two.sided", "two-sided", "TWOSIDED"] {
+            assert_eq!(
+                parse_choice(&FISHER_ALTERNATIVE, Some(s), FisherAlternative::Less),
+                Ok(FisherAlternative::TwoSided)
+            );
+        }
+        assert_eq!(
+            parse_choice(&CMH_ALTERNATIVE, Some("Right"), CmhAlternative::TwoSided),
+            Ok(CmhAlternative::Greater)
+        );
+        assert_eq!(
+            parse_choice(&CMH_ALTERNATIVE, Some("bigger"), CmhAlternative::TwoSided).unwrap_err(),
+            "unknown alternative 'bigger'; expected one of: two.sided, greater, less"
+        );
+    }
 
     /// `r{i}`, `c{i}`: an n x n table
     fn pair_ids(n: usize) -> DataFrame {
@@ -2339,11 +2386,72 @@ mod tests {
         );
         assert_eq!(v["common_odds_ratio"], "Inf");
         assert_eq!(v["odds_ratio_ci"]["upper"], "Inf");
+        // 0 is p2a's fallback when sum(a d / n) or sum(b c / n) is 0; R's mantelhaen.test
+        // gives conf.int NaN NaN (and estimate Inf)
         assert_eq!(v["odds_ratio_ci"]["lower"], 0.0);
         assert_eq!(v["stratum_statistics"][0]["odds_ratio"], "Inf");
         assert_eq!(v["stratum_statistics"][1]["odds_ratio"], "Inf");
         assert_eq!(v["stratum_statistics"][0]["counts"]["a"], 3.0);
-        assert!(v["statistic"].as_f64().is_some_and(f64::is_finite), "{v}");
+        // R: mantelhaen.test(array(c(3, 2, 0, 4, 2, 0, 1, 5), c(2, 2, 2)))$statistic
+        let stat = v["statistic"].as_f64().unwrap_or(f64::NAN);
+        assert!(Tol::printed(6).allows(stat, 4.533679), "{v}");
+    }
+
+    /// 2 x 2 x `k` strata labelled s01, s02, ...: ctl/trt by no/yes, every cell non-empty so
+    /// each odds ratio is finite.
+    fn mantelhaen_strata(k: usize) -> DataFrame {
+        let (mut t, mut y, mut s): (Vec<&str>, Vec<&str>, Vec<String>) = Default::default();
+        for i in 0..k {
+            let cells = [2 + i % 3, 1 + i % 2, 1 + i % 4, 3];
+            let kinds = [("ctl", "no"), ("ctl", "yes"), ("trt", "no"), ("trt", "yes")];
+            for ((ti, yi), n) in kinds.into_iter().zip(cells) {
+                t.extend(std::iter::repeat_n(ti, n));
+                y.extend(std::iter::repeat_n(yi, n));
+                s.extend(std::iter::repeat_n(format!("s{:02}", i + 1), n));
+            }
+        }
+        df!("t" => t, "y" => y, "s" => s).unwrap()
+    }
+
+    #[test]
+    fn test_mcp_hypothesis_mantelhaen_omits_strata_over_the_response_budget() {
+        let (rt, server) = server_with(vec![("d", mantelhaen_strata(40))]);
+        let run = || {
+            let req: MantelhaenTestRequest = serde_json::from_value(serde_json::json!(
+                {"dataset": "d", "row_var": "t", "col_var": "y", "stratum_var": "s"}))
+            .unwrap();
+            json_of(
+                &rt.block_on(server.hypothesis_mantelhaen(Parameters(req)))
+                    .unwrap(),
+            )
+        };
+        let full = limits::with_limits(Limits::off(), run);
+        let small = limits::with_limits(hosted_with(&["response_bytes=2000"]), run);
+        assert_eq!(
+            full["stratum_statistics"].as_array().map(Vec::len),
+            Some(40)
+        );
+        assert!(small.get("stratum_statistics").is_none(), "{small}");
+        assert!(
+            small["per_stratum_statistics"]
+                .as_str()
+                .is_some_and(|m| m.contains("40 strata are too many to return")),
+            "{small}"
+        );
+        for key in ["statistic", "p_value", "common_odds_ratio"] {
+            assert_eq!(small[key], full[key], "{key}");
+        }
+    }
+
+    #[test]
+    fn test_mcp_prop_trend_whole_counts_message() {
+        let e = whole_counts("x", &[2.0, 1.5], &[0, 1]).unwrap_err();
+        assert!(
+            e.starts_with(
+                "Trend test failed: Column 'x' must hold non-negative whole numbers (counts); row 2 is 1.5"
+            ),
+            "{e}"
+        );
     }
 
     #[test]
@@ -2762,6 +2870,12 @@ mod tests {
             );
             Check::new(&case)
                 .scalar("na_n_blocks", num(&v["n_blocks"]), Tol::exact())
+                // the rows used: three treatments per kept block
+                .scalar(
+                    "na_n_blocks",
+                    num(&v["missing"]["n_used"]) / 3.0,
+                    Tol::exact(),
+                )
                 .finish();
             assert_eq!(
                 v["missing"],
