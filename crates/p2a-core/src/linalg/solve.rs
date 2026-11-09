@@ -633,8 +633,9 @@ impl SymInverse {
 }
 
 /// `(max |m_ij - m_ji|, max |m_ij|)` of a square matrix in one pass over its pairs, or
-/// `None` when an entry is not finite.
+/// `None` when an entry is not finite. The matrix must be square (both callers check first).
 pub(crate) fn finite_asymmetry(m: &ArrayView2<f64>) -> Option<(f64, f64)> {
+    debug_assert_eq!(m.nrows(), m.ncols(), "finite_asymmetry: square input");
     let d = m.nrows();
     let Some(sl) = m.as_slice() else {
         // Not row-major contiguous: indexed reads.
