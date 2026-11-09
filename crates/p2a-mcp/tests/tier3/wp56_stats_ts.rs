@@ -772,3 +772,93 @@ async fn test_mcp_ccf_nan_no_panic() {
     .expect("dispatch");
     assert!(!r.success && text(&r).contains("infinite"), "{}", text(&r));
 }
+
+/// TOOL-25: the default is R's n = 3 x (complete pairs), capped at 200; `n` is R's n; the
+/// description promises points, not coefficients. Before: `n` was an unknown field and the
+/// description said "returns the spline coefficients".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_stats_spline_default_n() {
+    let case = Case::load("stat_ts_acf_spline_t3");
+    let (se, s) = session_with("stat_ts_acf_spline_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "ts_acf_spline_t3", "x": "kx", "y": "ky", "method": "natural"}),
+        )
+        .await,
+    );
+    let one = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "ts_acf_spline_t3", "x": "kx", "y": "ky", "method": "natural", "n": 1}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .vector("spline_x", &fs(&j["x"]), Tol::coef(10))
+        .vector("spline_y", &fs(&j["y"]), Tol::coef(10))
+        .scalar("spline_n", f(&j["n_points"]), Tol::exact())
+        .scalar("spline1_x", fs(&one["x"])[0], Tol::coef(10))
+        .scalar("spline1_y", fs(&one["y"])[0], Tol::coef(10))
+        .finish();
+    assert_eq!(
+        (j["n_pairs"].as_u64(), j["missing"]["n_dropped"].as_u64()),
+        (Some(10), Some(54))
+    );
+    let tool = AnalyticsServer::new()
+        .router_tools()
+        .into_iter()
+        .find(|t| t.name == "stats_spline")
+        .unwrap();
+    let xout = tool.input_schema["properties"]["xout"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !xout.contains("coefficients") && xout.contains("3 times"),
+        "{xout}"
+    );
+    assert!(tool.input_schema["properties"]["n"].is_object());
+}
+
+/// The MCP default number of spline points is capped at 200 (R's 3 x pairs would be 300 here);
+/// an explicit n is honoured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_stats_spline_default_cap() {
+    use p2a_core::polars::prelude::*;
+    let x: Vec<f64> = (0..100).map(|i| i as f64 * 0.37).collect();
+    let y: Vec<f64> = x
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v.sin() + 0.01 * ((i * 7 % 11) as f64))
+        .collect();
+    let ds = p2a_core::data::Dataset::new(df!("x" => x, "y" => y).unwrap());
+    let (se, s) = session_with_datasets(vec![("pairs", ds)]);
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "pairs", "x": "x", "y": "y"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        (j["n_points"].as_u64(), j["n_pairs"].as_u64()),
+        (Some(200), Some(100))
+    );
+    let k = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "pairs", "x": "x", "y": "y", "n": 300}),
+        )
+        .await,
+    );
+    assert_eq!(k["n_points"].as_u64(), Some(300));
+}

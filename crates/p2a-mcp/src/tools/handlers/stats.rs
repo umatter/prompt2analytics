@@ -21,6 +21,10 @@ use rmcp::{
 /// Maximum number of elements allowed in a single matrix allocation.
 const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
+/// Cap on the default number of points `stats_spline` evaluates when neither xout nor n is
+/// given (R's default is 3 x the number of pairs, uncapped).
+const SPLINE_DEFAULT_MAX_POINTS: usize = 200;
+
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
     MissingSummary, NaPolicy, REFUSAL_NAMES, budget_level_count, check_named_budget, echo_list,
@@ -1006,7 +1010,7 @@ impl AnalyticsServer {
 
     /// Cubic spline interpolation.
     #[tool(
-        description = "Fit a cubic spline through data points for smooth interpolation. Supports natural, FMM (Forsythe-Malcolm-Moler), periodic, and monotone (Hyman) splines. Equivalent to R's spline()."
+        description = "Interpolating cubic spline through (x, y), as R's spline(): method 'fmm' (default), 'natural', 'periodic' or 'hyman' (monotone). Returns the evaluated points (x, y): at xout, or at n equally spaced points (default 3 times the number of complete pairs, as R, capped at 200). Rows with a missing x or y are dropped, as R does. No spline coefficients are returned."
     )]
     pub async fn stats_spline(
         &self,
@@ -1032,12 +1036,25 @@ impl AnalyticsServer {
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
-        match spline(x, y, request.xout.as_deref(), None, method) {
+        // R's default n is 3 x the number of distinct x after ties are collapsed; the MCP
+        // default is capped at SPLINE_DEFAULT_MAX_POINTS so that a large dataset does not
+        // return thousands of points nobody asked for (an explicit n is honoured).
+        let n = request.n.or_else(|| {
+            request.xout.is_none().then(|| {
+                let mut xs = x.to_vec();
+                xs.sort_by(f64::total_cmp);
+                xs.dedup();
+                (3 * xs.len()).min(SPLINE_DEFAULT_MAX_POINTS)
+            })
+        });
+        match spline(x, y, request.xout.as_deref(), n, method) {
             Ok(result) => {
                 let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "method": method.to_string(),
+                    "n_points": result.x.len(),
+                    "n_pairs": x.len(),
                     "n_knots": x.len()
                 });
                 insert_missing(&mut json_output, cols.missing());
