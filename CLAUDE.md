@@ -550,7 +550,7 @@ let missing = cols.missing().clone();           // what was dropped
   and on `.f64()` with no `cast`, `strict_cast` or `cast_with_options` call in the six lines above, in
   non-test code of the five product crates; comments, string literals and `#[cfg(test)]` items are
   skipped. `// na-ok: <reason>` on the line or the line above marks a site that is null-free by
-  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marks the 18
+  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marks the 14
   known carry-over sites, which later tiers migrate; the reason says what the site gets wrong, after the
   finding id of the October 2026 code review where there is one. Migrating a site means removing its
   marker and lowering `MAX_LEGACY_MARKERS`. A malformed marker, an `na-legacy` marker with no extraction
