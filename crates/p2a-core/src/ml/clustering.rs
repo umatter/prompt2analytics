@@ -1732,6 +1732,26 @@ mod tests {
     }
 
     #[test]
+    fn test_dbscan_rejects_nan() {
+        // n = 600, d = 2: past the small-n path, so the k-d tree would sort the NaN.
+        let n = 600;
+        let mut data = Array2::from_shape_fn((n, 2), |(i, j)| {
+            ((i * 7 + j * 13) % 97) as f64 * 0.1 + (i as f64 * 0.31 + j as f64).sin() * 0.05
+        });
+        assert!(
+            n >= DBSCAN_SMALL_N_THRESHOLD,
+            "the k-d path needs n >= {DBSCAN_SMALL_N_THRESHOLD}"
+        );
+        data[[123, 1]] = f64::NAN;
+        match dbscan(data.view(), 0.5, 5) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("row 123, column 1"), "{message}")
+            }
+            other => panic!("expected an error for the NaN, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_dbscan_kdtree_larger() {
         // Create a larger dataset to test KDTree-based DBSCAN
         // Two clusters of 50 points each, plus 5 noise points

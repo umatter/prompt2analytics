@@ -1455,6 +1455,26 @@ mod tests {
     }
 
     #[test]
+    fn test_random_forest_rejects_nan_feature() {
+        // A NaN feature is refused, naming the feature, before the presort orders it.
+        let (mut x, y) = noisy_regression(30, 2, 3);
+        x[[5, 1]] = f64::NAN;
+        let names = Some(vec!["size".to_string(), "age".to_string()]);
+        let err = random_forest(
+            x.view(),
+            y.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            names,
+        )
+        .unwrap_err();
+        assert!(err.contains("feature 'age'"), "{err}");
+    }
+
+    #[test]
     fn test_random_forest_rejects_bad_arguments() {
         let (x, y) = noisy_regression(30, 2, 3);
         let err = random_forest(x.view(), y.view(), Some(0), None, None, None, Some(1), None)
