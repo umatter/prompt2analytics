@@ -187,3 +187,18 @@ covariance U'U / (T - Kp - 1); `sigma_u_ml` is U'U / T.
 |---|---|---|
 | `test_validate_cli_irf_labels_as_vars` | `var_canada` `irf_ortho_e`, `_prod`, `_rw`, `_U` (13 horizons, text); `irf_ortho_e` (JSON, prod's response) | `Tol::printed(6)`; `Tol::stat(82)` |
 | `test_validate_cli_var_json` | `var_canada` `coef_e`, `se_e`, `p_U`, `loglik`, `sigma_ml_logdet`, `df_resid` | `Tol::coef(82)`, `Tol::se(82)`, `Tol::p_value(82)`, `Tol::stat(82)`, exact |
+
+### `ts garch --horizon`, `--distribution`
+
+The text branch printed the last h fitted in-sample variances in reverse time order labelled
+t+1..t+h, and the JSON ignored `--horizon`. Both now report `garch_forecast`, the GARCH(p, q)
+variance recursion from the last fitted variance: text `  t+i: variance v, volatility s`
+after the core GARCH report, JSON `forecast: {horizon, variance, volatility, mean}`. New
+`--distribution`: norm (normal, gaussian) or std (t, student_t, student, studentt), fGarch's
+`cond.dist`. The JSON adds `mu`, `param_names`, `estimates`, `std_errors`, `p_values`,
+`shape` (null for normal errors), `distribution` and the notes.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_garch_horizon_forecasts` | `garch_normal_t` `norm_forecast_var_tight` (JSON and text) | relative 1e-8 (JSON), 1e-6 (text, 7 significant digits) |
+| `test_validate_cli_garch_student_t` | `garch_normal_t` `std_par_tight` shape, `std_forecast_var_tight` | relative 1e-8 |

@@ -18,7 +18,6 @@ use p2a_core::{
     run_causal_impact,
     // Classical decomposition
     run_decompose,
-    run_garch,
     run_holt_winters,
     run_mstl,
     // STL decomposition
@@ -33,7 +32,9 @@ use p2a_core::{
 #[cfg(feature = "spectral-analysis")]
 use p2a_core::{SpectrumConfig, run_spectrum};
 
+use p2a_core::forecasting::garch::GarchDistribution;
 use p2a_core::options::Choices;
+use p2a_core::{GarchConfig, garch as fit_garch, garch_forecast};
 
 use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, print_error};
@@ -309,9 +310,14 @@ EXAMPLES:
         #[arg(short = 'q', long, default_value = "1")]
         garch: usize,
 
-        /// Forecast horizon (optional)
+        /// Forecast the conditional variance h steps ahead (GARCH recursion)
         #[arg(long)]
         horizon: Option<usize>,
+
+        /// Conditional distribution, as fGarch cond.dist: norm (default) or std (standardised
+        /// Student t; aliases t, student_t)
+        #[arg(long, default_value = "norm", value_parser = super::causal::option_arg::<GarchDistribution>)]
+        distribution: GarchDistribution,
     },
 
     /// Holt-Winters exponential smoothing
@@ -642,7 +648,17 @@ pub fn execute(
             arch,
             garch,
             horizon,
-        } => execute_garch(dataset, col, *arch, *garch, *horizon, format, session),
+            distribution,
+        } => execute_garch(
+            dataset,
+            col,
+            *arch,
+            *garch,
+            *horizon,
+            *distribution,
+            format,
+            session,
+        ),
         TimeseriesCommands::HoltWinters {
             dataset,
             col,
@@ -1250,6 +1266,7 @@ fn execute_garch(
     arch: usize,
     garch: usize,
     horizon: Option<usize>,
+    distribution: GarchDistribution,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1260,70 +1277,86 @@ fn execute_garch(
             return Ok(());
         }
     };
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
 
-    match dataset {
-        Some(ds) => {
-            // Extract column data: Int64 accepted, missing values and text refused by name
-            let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
-                Ok((values, _)) => values,
-                Err(e) => {
-                    print_error(&ts_error_message("GARCH failed", &e), format);
-                    return Ok(());
+    // Extract column data: Int64 accepted, missing values and text refused by name
+    let data = match numeric_column(ds.df(), col, NaPolicy::Fail) {
+        Ok((values, _)) => values,
+        Err(e) => {
+            print_error(&ts_error_message("GARCH failed", &e), format);
+            return Ok(());
+        }
+    };
+
+    let mut config = GarchConfig::default();
+    config.p = arch;
+    config.q = garch;
+    config.include_mean = true;
+    config.distribution = distribution;
+    let result = match fit_garch(&data, Some(config)) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("GARCH failed", &e), format);
+            return Ok(());
+        }
+    };
+    let forecast = match horizon {
+        Some(h) => match garch_forecast(&result, h) {
+            Ok(f) => Some((h, f)),
+            Err(e) => {
+                print_error(&ts_error_message("GARCH forecast failed", &e), format);
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "model": format!("GARCH({},{})", arch, garch),
+                "mu": result.mu,
+                "omega": result.omega,
+                "alpha": result.alpha,
+                "beta": result.beta,
+                "persistence": result.persistence,
+                "unconditional_variance": result.unconditional_variance,
+                "log_likelihood": result.log_likelihood,
+                "aic": result.aic,
+                "bic": result.bic,
+                "n_obs": result.n_obs,
+                "param_names": result.param_names,
+                "estimates": result.estimates(),
+                "std_errors": result.std_errors,
+                "p_values": result.p_values,
+                "shape": result.shape,
+                "distribution": result.distribution.to_string(),
+            });
+            if let Some((h, (variance, volatility, mean))) = &forecast {
+                json["forecast"] = serde_json::json!({
+                    "horizon": h,
+                    "variance": variance,
+                    "volatility": volatility,
+                    "mean": mean,
+                });
+            }
+            with_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("{result}");
+            if let Some((h, (variance, volatility, _))) = &forecast {
+                println!(
+                    "\nVariance forecasts (h = {h}; GARCH recursion from the last fitted variance):"
+                );
+                for (i, (v, s)) in variance.iter().zip(volatility).enumerate() {
+                    println!("  t+{}: variance {v:.6e}, volatility {s:.6e}", i + 1);
                 }
-            };
-
-            match run_garch(&data, Some(arch), Some(garch), Some(true)) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "model": format!("GARCH({},{})", arch, garch),
-                            "omega": result.omega,
-                            "alpha": result.alpha,
-                            "beta": result.beta,
-                            "persistence": result.persistence,
-                            "unconditional_variance": result.unconditional_variance,
-                            "log_likelihood": result.log_likelihood,
-                            "aic": result.aic,
-                            "bic": result.bic,
-                            "n_obs": result.n_obs,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nGARCH({},{}) Results", arch, garch);
-                        println!("{}", "=".repeat(50));
-                        println!("\nParameters:");
-                        println!("  Omega (constant): {:.8}", result.omega);
-                        for (i, a) in result.alpha.iter().enumerate() {
-                            println!("  Alpha{}: {:.6}", i + 1, a);
-                        }
-                        for (i, b) in result.beta.iter().enumerate() {
-                            println!("  Beta{}: {:.6}", i + 1, b);
-                        }
-                        println!("\nPersistence: {:.6}", result.persistence);
-                        println!(
-                            "Unconditional Variance: {:.6}",
-                            result.unconditional_variance
-                        );
-                        println!("\nLog-likelihood: {:.4}", result.log_likelihood);
-                        println!("AIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
-                        println!("Observations: {}", result.n_obs);
-
-                        if let Some(h) = horizon {
-                            println!("\nVariance forecasts (h={}):", h);
-                            for (i, sigma2) in
-                                result.conditional_variance.iter().rev().take(h).enumerate()
-                            {
-                                println!("  t+{}: {:.6}", i + 1, sigma2);
-                            }
-                        }
-                    }
-                },
-                Err(e) => print_error(&ts_error_message("GARCH failed", &e), format),
             }
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
 }

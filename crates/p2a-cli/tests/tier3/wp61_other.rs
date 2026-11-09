@@ -1278,3 +1278,114 @@ fn test_validate_cli_var_json() {
     assert_keys(&j, &["t_values", "sigma_u_ml"]);
     assert!(s.ok(&args).contains("Residual df per equation: 73"));
 }
+
+/// CLI-11: --horizon printed the last h in-sample variances in reverse order as t+1..t+h; the
+/// JSON ignored it. R: garch_normal_t norm_forecast_var_tight (GARCH(1,1), normal, with mean;
+/// the GARCH recursion from the likelihood optimum).
+#[test]
+fn test_validate_cli_garch_horizon_forecasts() {
+    let case = Case::load("garch_normal_t");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "ts",
+        "garch",
+        d.as_str(),
+        "--col",
+        "r_norm",
+        "-p",
+        "1",
+        "-q",
+        "1",
+        "--horizon",
+        "10",
+    ];
+    let j = s.json(&args);
+    let f = field(&j, "forecast");
+    let var = f64s(&f["variance"]);
+    Check::new(&case)
+        .vector("norm_forecast_var_tight", &var, Tol::new(1e-8, 0.0))
+        .finish();
+    for (v, vol) in var.iter().zip(f64s(&f["volatility"])) {
+        assert!(
+            (vol - v.sqrt()).abs() <= 1e-15 * v.sqrt(),
+            "{vol} vs sqrt({v})"
+        )
+    }
+    assert_eq!(num(&f["horizon"]), 10.0);
+    assert_keys(
+        &j,
+        &[
+            "param_names",
+            "estimates",
+            "std_errors",
+            "p_values",
+            "shape",
+            "distribution",
+            "converged",
+            "iterations",
+            "warnings",
+        ],
+    );
+    assert_eq!(field(&j, "distribution"), "norm");
+    let text = s.ok(&args);
+    let printed: Vec<f64> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("t+"))
+        .map(|l| {
+            l.split("variance ")
+                .nth(1)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    Check::new(&case)
+        .vector("norm_forecast_var_tight", &printed, Tol::new(1e-6, 0.0))
+        .finish();
+}
+
+/// --distribution std (fGarch's standardised t). R: garch_normal_t std_par_tight[shape],
+/// std_forecast_var_tight.
+#[test]
+fn test_validate_cli_garch_student_t() {
+    let case = Case::load("garch_normal_t");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "ts",
+        "garch",
+        &d,
+        "--col",
+        "r_t",
+        "-p",
+        "1",
+        "-q",
+        "1",
+        "--distribution",
+        "t",
+        "--horizon",
+        "10",
+    ]);
+    let shape = num(field(&j, "shape"));
+    assert!(
+        Tol::new(1e-8, 0.0).allows(shape, case.named("std_par_tight", "shape")),
+        "{shape}"
+    );
+    Check::new(&case)
+        .vector(
+            "std_forecast_var_tight",
+            &f64s(&field(&j, "forecast")["variance"]),
+            Tol::new(1e-8, 0.0),
+        )
+        .finish();
+    assert_eq!(field(&j, "distribution"), "std");
+    assert_usage_errors(&[(
+        vec!["ts", "garch", "d", "--col", "y", "--distribution", "ged"],
+        "std",
+    )]);
+}
