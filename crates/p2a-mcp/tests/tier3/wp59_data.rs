@@ -370,3 +370,124 @@ async fn test_validate_mcp_str_replace_value_null() {
     assert!(r.success, "{}", text(&r));
     assert_eq!(labels(&dataset(&session, "r4").await, "s")[8], "D");
 }
+
+/// The parts of a describe_dataset line: "missing" (the nulls count), "n", "distinct", "top" and every
+/// "key = value" statistic.
+fn describe_line(t: &str, col: &str) -> std::collections::HashMap<String, String> {
+    let prefix = format!("- {col} (");
+    let line = t
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no line for {col}:\n{t}"));
+    let (_, rest) = line.split_once("): ").expect("name (dtype): ...");
+    let mut parts = rest.split("; ");
+    let mut m = std::collections::HashMap::new();
+    m.insert(
+        "missing".to_string(),
+        parts
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string(),
+    );
+    for p in parts {
+        if let Some(top) = p.strip_prefix("top: ") {
+            m.insert("top".into(), top.into());
+        } else if let Some(d) = p.strip_suffix(" distinct") {
+            m.insert("distinct".into(), d.into());
+        } else {
+            for kv in p.split(", ") {
+                let (k, v) = kv
+                    .split_once(" = ")
+                    .unwrap_or_else(|| panic!("{kv:?} in {line}"));
+                m.insert(k.into(), v.into());
+            }
+        }
+    }
+    m
+}
+fn stat(m: &std::collections::HashMap<String, String>, k: &str) -> f64 {
+    match m.get(k).map(String::as_str) {
+        Some("NA") => f64::NAN,
+        Some(v) => v.parse().unwrap(),
+        None => panic!("no {k} in {m:?}"),
+    }
+}
+/// "'east' (4), 'west' (4), ..., and 2 more" -> (labels, counts)
+fn top_levels(m: &std::collections::HashMap<String, String>) -> (Vec<String>, Vec<f64>) {
+    m["top"]
+        .split(", ")
+        .filter(|e| !e.starts_with("and "))
+        .map(|e| {
+            let (label, count) = e.rsplit_once(" (").unwrap();
+            (
+                label.trim_matches('\'').to_string(),
+                count.trim_end_matches(')').parse::<f64>().unwrap(),
+            )
+        })
+        .unzip()
+}
+
+/// LLM-6: describe_dataset promised summary statistics (and the system prompt sends the model to it for a
+/// mean) but printed only types and null counts. R: summary(), sd(), table() (mcp_data_t3.R, case
+/// data_describe_columns); the text has 7 significant digits (relative 5e-7). (The architect's
+/// test_mcp_describe_dataset_statistics, named test_validate_* because it is R-pinned.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_describe_dataset_statistics() {
+    let case = Case::load("data_describe_columns");
+    let (session, server) = session_with("data_describe_columns"); // dataset "describe_columns"
+    let r = call(
+        &server,
+        &session,
+        "describe_dataset",
+        json!({"dataset": "describe_columns"}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(
+        r.success && t.contains("Dimensions: 15 rows x 7 columns"),
+        "{t}"
+    );
+    let names = [
+        "n", "missing", "mean", "sd", "min", "q1", "median", "q3", "max",
+    ];
+    let mut check = Check::new(&case);
+    for col in ["id", "income", "age"] {
+        let m = describe_line(&t, col);
+        let v: Vec<f64> = names.iter().map(|k| stat(&m, k)).collect(); // before: no "mean" (panics)
+        check
+            .named_subset(col, &["n", "missing"], &names, &v, Tol::exact())
+            .named_subset(
+                col,
+                &["mean", "sd", "min", "q1", "median", "q3", "max"],
+                &names,
+                &v,
+                Tol::new(5e-7, 0.0),
+            ); // 7 significant digits
+    }
+    for col in ["region", "grade", "member", "empty"] {
+        let m = describe_line(&t, col);
+        check.named(
+            &format!("{col}_counts"),
+            &["n", "missing", "distinct"],
+            &[stat(&m, "n"), stat(&m, "missing"), stat(&m, "distinct")],
+            Tol::exact(),
+        );
+        if col != "empty" {
+            let (l, c) = top_levels(&m);
+            assert_eq!(l, case.names(&format!("{col}_top")), "{col}");
+            check.named(&format!("{col}_top"), &l, &c, Tol::exact());
+        }
+    }
+    check.finish();
+    assert!(t.contains("  - grade (str): 0 nulls (0.0%); n = 15; 7 distinct; top: 'A' (3), 'B' (3), 'C' (2), 'D' (2), 'E' (2), and 2 more"), "{t}");
+    assert!(
+        t.contains(
+            "  - member (bool): 1 nulls (6.7%); n = 14; 2 distinct; top: TRUE (9), FALSE (5)"
+        ),
+        "{t}"
+    );
+}

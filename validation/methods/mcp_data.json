@@ -62,6 +62,30 @@
       "tolerance": "exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_describe_dataset",
+      "name": "MCP describe_dataset column summaries",
+      "category": "interfaces",
+      "reference": "summary(x); sd(x, na.rm = TRUE); quantile(x, type = 7, na.rm = TRUE); head(sort(table(x), decreasing = TRUE), 5)",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_describe_columns"
+      ],
+      "tests": [
+        "p2a-mcp::tools::handlers::data::tests::test_validate_mcp_describe_dataset_summaries",
+        "p2a-mcp::tools::handlers::data::tests::test_validate_mcp_describe_dataset_nan_inf",
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_describe_dataset_statistics"
+      ],
+      "quantities": [
+        "n and missing per column",
+        "mean, sd, min, quartiles, median, max of numeric columns",
+        "distinct values and the five most frequent (order and counts)",
+        "NaN counted as missing, Inf kept (Rust fixtures)"
+      ],
+      "tolerance": "counts, min, max and level tables exact; mean, quartiles 1e-6 and sd 1e-5 relative (validation/README.md, n < 100); MCP text at 7 significant digits",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

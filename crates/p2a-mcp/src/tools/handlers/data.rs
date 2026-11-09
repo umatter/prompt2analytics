@@ -61,6 +61,211 @@ pub(crate) fn format_significant(x: f64) -> String {
     }
 }
 
+/// One column of `describe_dataset`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ColumnSummary {
+    /// A numeric column (`columns::is_numeric_dtype(dtype, false)`): R's `summary()` and `sd()`
+    /// over the non-missing values (missing = null or NaN; Inf is a value); every statistic NaN
+    /// when n = 0, sd NaN when n = 1.
+    Numeric {
+        n: usize,
+        missing: usize,
+        mean: f64,
+        sd: f64,
+        min: f64,
+        q1: f64,
+        median: f64,
+        q3: f64,
+        max: f64,
+    },
+    /// String, Categorical, Enum, Boolean, Date and all-null columns: R's `table()`. `top` holds at
+    /// most [`TOP_LEVELS`] (label, count), counts descending, ties in R `factor()` level order.
+    Levels {
+        n: usize,
+        missing: usize,
+        distinct: usize,
+        top: Vec<(String, usize)>,
+        quoted: bool,
+    },
+    /// Any other dtype (datetime, time, duration, binary, nested): counts only.
+    Other { n: usize, missing: usize },
+}
+
+/// The most frequent values `describe_dataset` lists per column.
+pub(crate) const TOP_LEVELS: usize = 5;
+
+/// R's `mean.default` (the sum divided by n, then one refinement pass when finite) and `sd`
+/// (two-pass, n - 1; NaN for n < 2) of `x`.
+fn mean_sd(x: &[f64]) -> (f64, f64) {
+    let n = x.len() as f64;
+    if x.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut mean = x.iter().sum::<f64>() / n;
+    if mean.is_finite() {
+        mean += x.iter().map(|v| v - mean).sum::<f64>() / n;
+    }
+    let sd = if x.len() < 2 {
+        f64::NAN
+    } else {
+        (x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0)).sqrt()
+    };
+    (mean, sd)
+}
+
+/// The summary of column `name` (see [`ColumnSummary`]).
+pub(crate) fn summarize_column(df: &DataFrame, name: &str) -> Result<ColumnSummary, String> {
+    use p2a_core::data::columns;
+    use p2a_core::resource::{try_vec, try_with_capacity};
+    use p2a_core::stats::robust::{QuantileType, quantile_sorted};
+
+    let col = columns::column(df, name).map_err(|e| e.to_string())?;
+    let dtype = col.dtype();
+    if columns::is_numeric_dtype(dtype, false) {
+        // A numeric dtype casts to Float64 without inventing nulls; NaN is missing (R's is.na).
+        let cast = col.cast(&DataType::Float64).map_err(|e| e.to_string())?;
+        let ca = cast.f64().map_err(|e| e.to_string())?;
+        let mut present: Vec<f64> =
+            try_with_capacity(ca.len() - ca.null_count(), "describe_dataset values")
+                .map_err(|e| e.to_string())?;
+        present.extend(ca.iter().flatten().filter(|v| !v.is_nan()));
+        let missing = ca.len() - present.len();
+        let n = present.len();
+        if n == 0 {
+            let nan = f64::NAN;
+            return Ok(ColumnSummary::Numeric {
+                n,
+                missing,
+                mean: nan,
+                sd: nan,
+                min: nan,
+                q1: nan,
+                median: nan,
+                q3: nan,
+                max: nan,
+            });
+        }
+        let (mean, sd) = mean_sd(&present);
+        present.sort_unstable_by(f64::total_cmp);
+        let q = |p: f64| quantile_sorted(&present, p, QuantileType::T7);
+        return Ok(ColumnSummary::Numeric {
+            n,
+            missing,
+            mean,
+            sd,
+            min: present[0],
+            q1: q(0.25),
+            median: q(0.5),
+            q3: q(0.75),
+            max: present[n - 1],
+        });
+    }
+    let quoted = matches!(
+        dtype,
+        DataType::String | DataType::Categorical(..) | DataType::Enum(..)
+    );
+    if quoted || matches!(dtype, DataType::Boolean | DataType::Date | DataType::Null) {
+        let (codes, levels) = columns::factor_options(df, name).map_err(|e| e.to_string())?;
+        let mut counts: Vec<usize> = try_vec(levels.len(), 0usize, "describe_dataset level counts")
+            .map_err(|e| e.to_string())?;
+        let mut n = 0usize;
+        for code in codes.iter().flatten() {
+            if let Some(c) = counts.get_mut(*code as usize) {
+                *c += 1;
+                n += 1;
+            }
+        }
+        let mut order: Vec<usize> = try_with_capacity(levels.len(), "describe_dataset levels")
+            .map_err(|e| e.to_string())?;
+        order.extend(0..levels.len());
+        // Stable: tied counts keep the level order, as R's sort(table(x), decreasing = TRUE).
+        order.sort_by(|&a, &b| counts[b].cmp(&counts[a]));
+        let top = order
+            .iter()
+            .take(TOP_LEVELS)
+            .map(|&i| (levels[i].clone(), counts[i]))
+            .collect();
+        return Ok(ColumnSummary::Levels {
+            n,
+            missing: codes.len() - n,
+            distinct: levels.len(),
+            top,
+            quoted,
+        });
+    }
+    Ok(ColumnSummary::Other {
+        n: col.len() - col.null_count(),
+        missing: col.null_count(),
+    })
+}
+
+/// One `describe_dataset` line: "  - name (dtype): k nulls (p%); n = ..; ..".
+fn summary_line(name: &str, dtype: &DataType, rows: usize, s: &ColumnSummary) -> String {
+    let (n, missing) = match s {
+        ColumnSummary::Numeric { n, missing, .. }
+        | ColumnSummary::Levels { n, missing, .. }
+        | ColumnSummary::Other { n, missing } => (*n, *missing),
+    };
+    let pct = if rows > 0 {
+        missing as f64 / rows as f64 * 100.0
+    } else {
+        0.0
+    };
+    let mut line = format!("  - {name} ({dtype}): {missing} nulls ({pct:.1}%); n = {n}");
+    match s {
+        ColumnSummary::Numeric { n: 0, .. } => {}
+        ColumnSummary::Numeric {
+            mean,
+            sd,
+            min,
+            q1,
+            median,
+            q3,
+            max,
+            ..
+        } => {
+            let f = format_significant;
+            line.push_str(&format!(
+                "; mean = {}, sd = {}, min = {}, q1 = {}, median = {}, q3 = {}, max = {}",
+                f(*mean),
+                f(*sd),
+                f(*min),
+                f(*q1),
+                f(*median),
+                f(*q3),
+                f(*max)
+            ));
+        }
+        ColumnSummary::Levels {
+            distinct,
+            top,
+            quoted,
+            ..
+        } => {
+            line.push_str(&format!("; {distinct} distinct"));
+            if !top.is_empty() {
+                let shown: Vec<String> = top
+                    .iter()
+                    .map(|(label, count)| {
+                        if *quoted {
+                            format!("'{}' ({count})", p2a_text::ellipsize(label, 40))
+                        } else {
+                            format!("{label} ({count})")
+                        }
+                    })
+                    .collect();
+                line.push_str("; top: ");
+                line.push_str(&shown.join(", "));
+                if *distinct > top.len() {
+                    line.push_str(&format!(", and {} more", distinct - top.len()));
+                }
+            }
+        }
+        ColumnSummary::Other { .. } => line.push_str("; no summary statistics for this type"),
+    }
+    line
+}
+
 /// Rows serialised between two cancellation checkpoints in a JSON export.
 const CHECKPOINT_ROWS: usize = 1 << 16;
 
@@ -1921,40 +2126,47 @@ impl AnalyticsServer {
 
     /// Describe a loaded dataset with summary statistics.
     #[tool(
-        description = "Get summary statistics for a loaded dataset including column types, null counts, and basic statistics for numeric columns."
+        description = "Summarise every column of a loaded dataset, as R's summary(): for numeric columns the number of non-missing values and of missing ones (null or NaN), mean, standard deviation, minimum, quartiles (quantile type 7), median and maximum; for text, boolean, categorical and date columns the number of distinct values and the five most frequent with their counts. Also gives the dimensions and column types."
     )]
     pub async fn describe_dataset(
         &self,
         Parameters(request): Parameters<DescribeDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
+        let dataset = crate::get_dataset!(datasets, &request.dataset).clone();
+        drop(datasets);
 
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let info: DatasetInfo = dataset.into();
-        let result = format!(
+        let df = dataset.df();
+        let rows = df.height();
+        let mut result = format!(
             "Dataset: {}\n\
-             Dimensions: {} rows x {} columns\n\n\
-             Columns:\n{}",
+             Dimensions: {} rows x {} columns\n\
+             Missing values (shown as nulls): null cells, and NaN in float columns (R's is.na). \
+             Numeric columns: n, mean, sd (n - 1), min, quartiles (R quantile type 7) and max of \
+             the non-missing values, as R's summary() and sd(), to 7 significant digits. Other \
+             columns: the number of distinct values and the {TOP_LEVELS} most frequent (R's \
+             table()).\n\n\
+             Columns:",
             request.dataset,
-            info.nrows,
-            info.ncols,
-            info.columns
-                .iter()
-                .map(|c| format!(
-                    "  - {} ({}): {} nulls ({:.1}%)",
-                    c.name,
-                    c.dtype,
-                    c.null_count,
-                    if info.nrows > 0 {
-                        (c.null_count as f64 / info.nrows as f64) * 100.0
-                    } else {
-                        0.0
-                    }
-                ))
-                .collect::<Vec<_>>()
-                .join("\n")
+            rows,
+            df.width(),
         );
+        for col in df.get_columns() {
+            if let Err(e) = p2a_core::resource::checkpoint() {
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
+            let name = col.name().as_str();
+            let summary = match summarize_column(df, name) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "describe_dataset failed for column '{name}': {e}"
+                    ))]));
+                }
+            };
+            result.push('\n');
+            result.push_str(&summary_line(name, col.dtype(), rows, &summary));
+        }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -2002,8 +2214,169 @@ fn load_with_request_na(path: &Path, na_strings: Option<&[String]>) -> Result<Da
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p2a_core::polars::prelude::df;
+    use p2a_core::polars::prelude::*;
     use serde_json::json;
+
+    /// LLM-6, full precision: validation/r/cases/mcp_data_t3.R, case data_describe_columns (summary(), sd(),
+    /// table()). Counts, min, max and the level tables exact; mean and quartiles at the coefficient and sd
+    /// at the statistic tolerance of validation/README.md.
+    #[test]
+    fn test_validate_mcp_describe_dataset_summaries() {
+        use p2a_validation::{Case, Check, Tol};
+        let case = Case::load("data_describe_columns");
+        let df = DataLoader::load_csv(case.dataset_path()).unwrap();
+        let names = [
+            "n", "missing", "mean", "sd", "min", "q1", "median", "q3", "max",
+        ];
+        let mut check = Check::new(&case);
+        for col in ["id", "income", "age"] {
+            let ColumnSummary::Numeric {
+                n,
+                missing,
+                mean,
+                sd,
+                min,
+                q1,
+                median,
+                q3,
+                max,
+            } = summarize_column(&df, col).unwrap()
+            else {
+                panic!("{col} is numeric")
+            };
+            let v = [n as f64, missing as f64, mean, sd, min, q1, median, q3, max];
+            check
+                .named_subset(
+                    col,
+                    &["n", "missing", "min", "max"],
+                    &names,
+                    &v,
+                    Tol::exact(),
+                )
+                .named_subset(
+                    col,
+                    &["mean", "q1", "median", "q3"],
+                    &names,
+                    &v,
+                    Tol::coef(n),
+                )
+                .named_subset(col, &["sd"], &names, &v, Tol::stat(n));
+        }
+        for col in ["region", "grade", "member", "empty"] {
+            let ColumnSummary::Levels {
+                n,
+                missing,
+                distinct,
+                top,
+                ..
+            } = summarize_column(&df, col).unwrap()
+            else {
+                panic!("{col} has levels")
+            };
+            check.named(
+                &format!("{col}_counts"),
+                &["n", "missing", "distinct"],
+                &[n as f64, missing as f64, distinct as f64],
+                Tol::exact(),
+            );
+            if col == "empty" {
+                assert!(top.is_empty());
+                continue;
+            }
+            let (l, c): (Vec<String>, Vec<f64>) =
+                top.into_iter().map(|(l, c)| (l, c as f64)).unzip();
+            assert_eq!(
+                l,
+                case.names(&format!("{col}_top")),
+                "{col}: order (counts descending, ties in level order)"
+            );
+            check.named(&format!("{col}_top"), &l, &c, Tol::exact());
+        }
+        check.finish();
+    }
+
+    /// LLM-6 fixtures the harness cannot write: NaN cells are missing (R's is.na), and Inf stays a
+    /// value as in R: x <- d$income; x[1] <- Inf gives mean Inf, sd NaN, quantile(x, 0:4/4,
+    /// na.rm = TRUE) = 38507.029999999999, 43618.024999999994, 53764.875, 60101.169999999998, Inf;
+    /// sd(5) is NA.
+    #[test]
+    fn test_validate_mcp_describe_dataset_nan_inf() {
+        use p2a_validation::{Case, Tol};
+        let case = Case::load("data_describe_columns");
+        let df = DataLoader::load_csv(case.dataset_path()).unwrap();
+        let cells: Vec<Option<f64>> = df
+            .column("income")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .collect();
+        let nan: Float64Chunked = cells.iter().map(|v| Some(v.unwrap_or(f64::NAN))).collect();
+        let nan_df = DataFrame::new(vec![nan.with_name("income".into()).into_column()]).unwrap();
+        assert_eq!(
+            summarize_column(&nan_df, "income").unwrap(),
+            summarize_column(&df, "income").unwrap()
+        );
+        let inf: Float64Chunked = cells
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i == 0 { Some(f64::INFINITY) } else { *v })
+            .collect();
+        let inf_df = DataFrame::new(vec![inf.with_name("income".into()).into_column()]).unwrap();
+        let ColumnSummary::Numeric {
+            n,
+            mean,
+            sd,
+            min,
+            q1,
+            median,
+            q3,
+            max,
+            ..
+        } = summarize_column(&inf_df, "income").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (n, mean, max, min),
+            (12, f64::INFINITY, f64::INFINITY, 38507.029999999999)
+        );
+        assert!(sd.is_nan());
+        for (got, want) in [
+            (q1, 43618.024999999994),
+            (median, 53764.875),
+            (q3, 60101.169999999998),
+        ] {
+            assert!(Tol::coef(12).allows(got, want), "{got} vs {want}");
+        }
+        let one = DataFrame::new(vec![Column::new("x".into(), [5.0f64])]).unwrap();
+        let ColumnSummary::Numeric { sd, mean, .. } = summarize_column(&one, "x").unwrap() else {
+            panic!()
+        };
+        assert!(sd.is_nan() && mean == 5.0);
+    }
+
+    #[test]
+    fn describe_other_dtypes_report_counts_only() {
+        let ts = Column::new("t".into(), [Some(0i64), None, Some(86_400_000_000)])
+            .cast(&DataType::Datetime(TimeUnit::Microseconds, None))
+            .unwrap();
+        let df = DataFrame::new(vec![ts]).unwrap();
+        assert_eq!(
+            summarize_column(&df, "t").unwrap(),
+            ColumnSummary::Other { n: 2, missing: 1 }
+        );
+        let line = summary_line(
+            "t",
+            df.column("t").unwrap().dtype(),
+            3,
+            &summarize_column(&df, "t").unwrap(),
+        );
+        assert!(
+            line.ends_with("1 nulls (33.3%); n = 2; no summary statistics for this type"),
+            "{line}"
+        );
+    }
 
     #[test]
     fn format_significant_prints_seven_significant_digits() {

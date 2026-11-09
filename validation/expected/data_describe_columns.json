@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "id": "data_describe_columns",
+  "area": "data/describe",
+  "method": "describe_dataset: n, missing, summary() and sd() per numeric column; distinct values and the most frequent ones per text/logical column",
+  "reference": "summary(x); sd(x, na.rm = TRUE); quantile(x, type = 7, na.rm = TRUE); head(sort(table(x), decreasing = TRUE), 5)",
+  "call": "lapply(d[c('id', 'income', 'age')], function(v) c(sum(!is.na(v)), sum(is.na(v)), summary(v), sd(v, na.rm = TRUE))); head(sort(table(d$region), decreasing = TRUE), 5)",
+  "dataset": "validation/datasets/generated/describe_columns.csv",
+  "datasets": ["validation/datasets/generated/describe_columns.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "id": {
+      "names": ["n", "missing", "mean", "sd", "min", "q1", "median", "q3", "max"],
+      "values": [15, 0, 8, 4.4721359549995796, 1, 4.5, 8, 11.5, 15]
+    },
+    "income": {
+      "names": ["n", "missing", "mean", "sd", "min", "q1", "median", "q3", "max"],
+      "values": [12, 3, 51604.898333333331, 8933.5463495481035, 38507.029999999999, 43618.024999999994, 53723.68, 59312.740000000005, 62982.800000000003]
+    },
+    "age": {
+      "names": ["n", "missing", "mean", "sd", "min", "q1", "median", "q3", "max"],
+      "values": [14, 1, 40, 11.347653095210074, 26, 30.25, 39, 47.5, 62]
+    },
+    "region_counts": {
+      "names": ["n", "missing", "distinct"],
+      "values": [14, 1, 4]
+    },
+    "region_top": {
+      "names": ["east", "west", "north", "south"],
+      "values": [4, 4, 3, 3]
+    },
+    "grade_counts": {
+      "names": ["n", "missing", "distinct"],
+      "values": [15, 0, 7]
+    },
+    "grade_top": {
+      "names": ["A", "B", "C", "D", "E"],
+      "values": [3, 3, 2, 2, 2]
+    },
+    "member_counts": {
+      "names": ["n", "missing", "distinct"],
+      "values": [14, 1, 2]
+    },
+    "member_top": {
+      "names": ["TRUE", "FALSE"],
+      "values": [9, 5]
+    },
+    "empty_counts": {
+      "names": ["n", "missing", "distinct"],
+      "values": [0, 15, 0]
+    }
+  }
+}

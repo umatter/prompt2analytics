@@ -21,3 +21,16 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
 ## Replacing values with missing (`str_replace_value`)
 - Reference: `dplyr::na_if`; case `data_munging_na_if`.
 - Test: `test_validate_mcp_str_replace_value_null` (exact).
+
+## describe_dataset
+- Reference: `summary()`, `sd()`, `quantile(type = 7)`, `head(sort(table(x), decreasing = TRUE), 5)`
+  under `LC_COLLATE = C`; case `data_describe_columns` (15 rows: integer, double and integer columns with
+  NA; text with tied counts and more than five levels; logical; all-missing).
+- Decisive values: income n 12, missing 3, mean 51604.898333333331, sd 8933.5463495481035, quartiles
+  43618.024999999994, 53723.68, 59312.740000000005; age sd 11.347653095210074; region top east 4, west 4,
+  north 3, south 3; grade 7 distinct, top A 3, B 3, C 2, D 2, E 2.
+- NaN cells are missing (R's `is.na`); Inf is a value (mean Inf, sd NaN), from Rust fixtures because the
+  harness cannot write NaN or Inf.
+- Tests and tolerances: `test_validate_mcp_describe_dataset_summaries` (counts, min, max and level tables
+  exact; mean and quartiles 1e-6, sd 1e-5 relative, the validation/README.md tolerances for n < 100), `test_validate_mcp_describe_dataset_nan_inf`,
+  `test_validate_mcp_describe_dataset_statistics` (the MCP text, 7 significant digits).
