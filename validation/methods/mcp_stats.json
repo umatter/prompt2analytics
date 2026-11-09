@@ -155,9 +155,9 @@
       "doc": "validation/multivariate/mahalanobis.md",
       "cases": ["stat_pairwise_mahalanobis_na"],
       "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_multivariate_mahalanobis_rows"],
-      "quantities": ["first ten squared distances", "their 1-based row numbers", "missing"],
-      "tolerance": "distances at their 4 printed decimals (Tol::printed(4)); row numbers exact",
-      "deviations": [{"finding": "TOOL-10", "quantity": "chi_squared_threshold_95 and n_potential_outliers", "note": "the tool thresholds at 2.7 p instead of qchisq(0.95, p) (Tier 4); not pinned"}],
+      "quantities": ["first ten squared distances", "their 1-based row numbers", "missing", "chi_squared_threshold_95 = qchisq(0.95, 2) and its df"],
+      "tolerance": "distances at their 4 printed decimals (Tol::printed(4)); row numbers exact; threshold Tol::coef(29)",
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

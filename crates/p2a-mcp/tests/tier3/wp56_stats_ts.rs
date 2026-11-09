@@ -1233,3 +1233,106 @@ async fn test_validate_mcp_stats_loglin_nondecomposable() {
         "{k}"
     );
 }
+
+/// STAT-38's MCP surface: an AR spectrum has no chi-square interval; the periodogram's is R's
+/// spec.ci at the reported df. Before: confidence_interval_95 always carried two multipliers
+/// (a NaN pair for AR).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_timeseries_spectrum_ci() {
+    let case = Case::load("stat_spectrum_t3");
+    let (se, s) = session_with("stat_spectrum_t3");
+    let p = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_spectrum",
+            json!({"dataset": "spectrum_t3", "column": "x", "spans": [3, 3]}),
+        )
+        .await,
+    );
+    let ci = &p["confidence_interval_95"];
+    // deviation STAT-39: p2a's df for spans c(3, 3) is 18 where spec.pgram reports
+    // 6.552102376599634; the multipliers are pinned to R's spec.ci at p2a's df (ci_df[2] = 18)
+    assert_eq!(f(&ci["degrees_of_freedom"]), case.vector("ci_df")[2]);
+    let want = case.vector("ci95_at_df");
+    for (got, w) in [
+        (f(&ci["multiplier_lower"]), want[4]),
+        (f(&ci["multiplier_upper"]), want[5]),
+    ] {
+        // the core's spec.ci reproduces R to 1e-10 relative
+        assert!(Tol::new(1e-10, 0.0).allows(got, w), "rust={got} R={w}");
+    }
+    Check::new(&case)
+        .scalar("peak_freq", f(&p["peak"]["frequency"]), Tol::coef(96))
+        .finish();
+    let a = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_spectrum",
+            json!({"dataset": "spectrum_t3", "column": "x", "method": "ar"}),
+        )
+        .await,
+    );
+    assert!(
+        a["confidence_interval_95"].is_null()
+            && a["confidence_interval_note"]
+                .as_str()
+                .unwrap()
+                .contains("spec.ar"),
+        "{a}"
+    );
+}
+
+/// STAT-54's MCP half (closes TOOL-10): the outlier threshold is qchisq(0.95, rank), and a
+/// singular covariance is refused with its rank. Before: "8.1000" (2.7 p) as a string.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_mahalanobis_threshold() {
+    let case = Case::load("stat_mahalanobis_t3");
+    let misc = Case::load("mcp_misc_t3");
+    let (se, s) = session_with("stat_mahalanobis_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "multivariate_mahalanobis",
+            json!({"dataset": "mahalanobis_t3", "columns": ["f1", "f2", "f3"]}),
+        )
+        .await,
+    );
+    let od = &j["outlier_detection"];
+    Check::new(&misc)
+        .scalar(
+            "qchisq95_df3",
+            f(&od["chi_squared_threshold_95"]),
+            Tol::coef(30),
+        )
+        .finish();
+    let d10: Vec<f64> = j["first_10_distances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| f(&e["distance_squared"]))
+        .collect();
+    let want = case.vector("full_d2");
+    for (g, w) in d10.iter().zip(&want) {
+        assert!(Tol::printed(4).allows(*g, *w), "rust={g} R={w}");
+    }
+    assert_eq!(
+        (
+            j["rank"].as_u64(),
+            od["df"].as_u64(),
+            od["n_potential_outliers"].as_u64()
+        ),
+        (Some(3), Some(3), Some(0))
+    );
+    // b = 2 a: R's mahalanobis refuses (ab_r_error 1); rank 1 of 2
+    let e = refused(
+        &s,
+        &se,
+        "multivariate_mahalanobis",
+        json!({"dataset": "mahalanobis_t3", "columns": ["a", "b"]}),
+    )
+    .await;
+    assert!(e.contains("rank 1 of 2"), "{e}");
+}

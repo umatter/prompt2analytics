@@ -1919,7 +1919,7 @@ impl AnalyticsServer {
 
     /// Compute Mahalanobis distance.
     #[tool(
-        description = "Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²) which follow a chi-squared distribution with p degrees of freedom under multivariate normality."
+        description = "Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²), which follow a chi-squared distribution with rank (= p for a full-rank covariance) degrees of freedom under multivariate normality, and flags those above qchisq(0.95, rank). A singular covariance is refused (rank reported), as R's mahalanobis."
     )]
     pub async fn multivariate_mahalanobis(
         &self,
@@ -1956,13 +1956,22 @@ impl AnalyticsServer {
             .fold(f64::INFINITY, f64::min);
 
         let p = result.n_vars;
-        let chi_sq_95 = p as f64 * 2.7;
+        let rank = result.rank;
+        let chi_sq_95 = match result.outlier_threshold(0.95) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mahalanobis distance computation failed: {e}"
+                ))]));
+            }
+        };
 
         let n_outliers = result.distances.iter().filter(|&&d| d > chi_sq_95).count();
 
         let mut json_output = serde_json::json!({
             "n_obs": result.n_obs,
             "n_vars": result.n_vars,
+            "rank": rank,
             "center": result.center,
             "summary": {
                 "mean_distance": format!("{:.4}", mean_dist),
@@ -1970,9 +1979,10 @@ impl AnalyticsServer {
                 "max_distance": format!("{:.4}", max_dist),
             },
             "outlier_detection": {
-                "chi_squared_threshold_95": format!("{:.4}", chi_sq_95),
+                "chi_squared_threshold_95": chi_sq_95,
+                "df": rank,
                 "n_potential_outliers": n_outliers,
-                "note": format!("Under multivariate normality, D² ~ χ²({})", p)
+                "note": "under multivariate normality D² ~ χ²(rank); threshold qchisq(0.95, rank)"
             },
             "first_10_distances": result.distances.iter()
                 .zip(&result.rows)
@@ -1984,11 +1994,12 @@ impl AnalyticsServer {
                 }))
                 .collect::<Vec<_>>(),
             "interpretation": format!(
-                "Computed Mahalanobis distances for {} observations with {} variables. {} observations exceed the χ²({}) 95th percentile threshold of {:.2}, suggesting they may be multivariate outliers.",
-                n, p, n_outliers, p, chi_sq_95
+                "Computed Mahalanobis distances for {} observations with {} variables. {} observations exceed the χ²({}) 95th percentile threshold of {:.4}, suggesting they may be multivariate outliers.",
+                n, p, n_outliers, rank, chi_sq_95
             ),
             "references": "Mahalanobis, P. C. (1936). On the generalized distance in statistics."
         });
+        insert_notes(&mut json_output, None, &result.warnings);
         insert_missing(&mut json_output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -3106,11 +3117,8 @@ mod tests {
             .map(|r| r + 1.0)
             .collect();
         assert_eq!(rows, want_rows);
-        assert_eq!(
-            rows,
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 9.0, 10.0, 11.0]
-        );
         let r = case.vector("mahalanobis_complete");
+        // the case stores all 29 distances; Check compares whole keys only
         for (i, d) in first.iter().enumerate() {
             let got = str_num(&d["distance_squared"]);
             assert!(
@@ -3119,8 +3127,15 @@ mod tests {
                 r[i]
             );
         }
-        // deviation TOOL-10: chi_squared_threshold_95 and n_potential_outliers use 2.7 p, not
-        // qchisq(0.95, p); not pinned.
+        // qchisq(0.95, 2) = 5.991464547107979: the threshold at the covariance rank
+        assert_eq!(v["outlier_detection"]["df"], serde_json::json!(2));
+        let threshold = v["outlier_detection"]["chi_squared_threshold_95"]
+            .as_f64()
+            .expect("numeric threshold");
+        assert!(
+            Tol::coef(29).allows(threshold, 5.991464547107979),
+            "threshold {threshold}"
+        );
         Check::new(&case)
             .scalar("n_complete", num(&v["missing"]["n_used"]), Tol::exact())
             .finish();

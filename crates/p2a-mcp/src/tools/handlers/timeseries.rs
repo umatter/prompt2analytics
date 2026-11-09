@@ -335,7 +335,7 @@ impl AnalyticsServer {
 
     /// - R `stats::spectrum`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/spectrum.html
     #[tool(
-        description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns."
+        description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns. The periodogram reports R's spec.ci 95% multipliers at its degrees of freedom; AR spectra have no confidence interval."
     )]
     pub async fn timeseries_spectrum(
         &self,
@@ -396,10 +396,17 @@ impl AnalyticsServer {
             f64::INFINITY
         };
 
-        // Compute confidence interval multipliers
-        let (ci_lower_mult, ci_upper_mult) = result.confidence_multipliers(0.95);
+        // R's spec.ci multipliers at the reported df; none for an AR spectrum (no df)
+        let ci = match result.confidence_interval_multipliers(0.95) {
+            Ok(ci) => ci,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spectral estimation failed: {e}"
+                ))]));
+            }
+        };
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "type": format!("Spectral Density ({})", result.method),
             "series": request.column,
             "n_obs": result.n_obs,
@@ -423,11 +430,12 @@ impl AnalyticsServer {
                     peak_freq, peak_period
                 )
             },
-            "confidence_interval_95": {
-                "multiplier_lower": ci_lower_mult,
-                "multiplier_upper": ci_upper_mult,
-                "interpretation": "Multiply spectral estimate by these values for 95% CI"
-            },
+            "confidence_interval_95": ci.map(|(lo, hi)| serde_json::json!({
+                "multiplier_lower": lo,
+                "multiplier_upper": hi,
+                "degrees_of_freedom": result.df,
+                "interpretation": "multiply a spectral estimate by these for a 95% interval (R's spec.ci at this df)"
+            })),
             // Include first/last few frequency-spectrum pairs
             "spectrum_sample": {
                 "first_5": result.freq.iter().take(5).zip(result.spec.iter().take(5))
@@ -438,6 +446,11 @@ impl AnalyticsServer {
                     .collect::<Vec<_>>()
             }
         });
+        if ci.is_none() {
+            json_output["confidence_interval_note"] = serde_json::json!(
+                "no chi-square interval for AR spectra (R's spec.ar has no degrees of freedom)"
+            );
+        }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}\n\nJSON:\n{}",
