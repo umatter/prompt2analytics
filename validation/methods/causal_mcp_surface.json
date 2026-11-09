@@ -12,7 +12,7 @@
         "etwfe_staggered"
       ],
       "tests": [
-        "p2a-mcp::tier3::wp55_causal::test_mcp_causal_option_aliases_and_unknown",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_causal_option_aliases_and_unknown",
         "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did",
         "p2a-mcp::tier3::wp55_causal::test_validate_mcp_etwfe"
       ],
@@ -284,7 +284,7 @@
         "ltmle_two_period"
       ],
       "tests": [
-        "p2a-mcp::tier3::wp55_causal::test_mcp_causal_degenerate_parameters_are_tool_errors"
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_causal_degenerate_parameters_are_tool_errors"
       ],
       "quantities": [
         "tool errors naming the parameter",

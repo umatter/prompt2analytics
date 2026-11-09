@@ -22,12 +22,12 @@
         "stat_robust_weighted_t3"
       ],
       "tests": [
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_hypothesis_alternative_aliases",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_ks_distribution_aliases",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_power_option_spellings",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_stats_option_aliases",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_acf_type_aliases",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_timeseries_option_aliases"
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_hypothesis_alternative_aliases",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_ks_distribution_aliases",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_power_option_spellings",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_stats_option_aliases",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_acf_type_aliases",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_timeseries_option_aliases"
       ],
       "quantities": [
         "power at R's type/alternative",
@@ -117,8 +117,8 @@
         "mcp_factanal_t3"
       ],
       "tests": [
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_factanal_scores_returned",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_factanal_scores_output_name"
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_factanal_scores_returned",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_factanal_scores_output_name"
       ],
       "quantities": [
         "Bartlett scores at rows 1-3, 999-1001, 1199-1200",
@@ -142,7 +142,7 @@
         "stat_loglin_nodecomp"
       ],
       "tests": [
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_power_solve_defaults",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_power_solve_defaults",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_power_solve_for",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_stats_mauchly_sigma",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_stats_loglin_nondecomposable"
@@ -251,8 +251,8 @@
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_ts_holt_winters_forecast",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_timeseries_cpgram",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_timeseries_structts_bsm",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_causal_impact_reports_clipped_periods",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_timeseries_wp37_texts"
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_causal_impact_reports_clipped_periods",
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_timeseries_wp37_texts"
       ],
       "quantities": [
         "GARCH parameters, SEs, logLik, 10-step variance forecasts (norm, std)",
@@ -306,7 +306,7 @@
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_runmed_constant",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_series_utilities",
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_arma_acf",
-        "p2a-mcp::tier3::wp56_stats_ts::test_mcp_lag_mstl_arima_sim"
+        "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_lag_mstl_arima_sim"
       ],
       "quantities": [
         "see validation/stats/mcp_stats_ts.md, one row per test"

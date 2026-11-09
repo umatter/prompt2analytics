@@ -342,7 +342,7 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
 /// CAUS-97: the R (did, etwfe), CLI and MCP spellings give the same fit, and anything else is refused before
 /// the data are read, naming the option and the accepted values.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_causal_option_aliases_and_unknown() {
+async fn test_validate_mcp_causal_option_aliases_and_unknown() {
     let (session, server) = session_with("did_cs_covariates"); // dataset `cs_cov_panel`
     let base = json!({"dataset": "cs_cov_panel", "outcome": "y", "treatment_time": "first_treat", "time_col": "time",
                       "unit_col": "unit", "covariates": ["x1", "x2"], "bootstrap": 0});
@@ -1871,7 +1871,7 @@ async fn test_validate_mcp_sensemakr_contour_data() {
 /// TOOL-14: impossible parameter values are tool errors naming the parameter, never successful
 /// estimates. The core validates; the MCP returns the message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_causal_degenerate_parameters_are_tool_errors() {
+async fn test_validate_mcp_causal_degenerate_parameters_are_tool_errors() {
     let (rs, rv) = session_with("rd_bwselect_sharp"); // dataset `rd_sim`
     let rd = json!({"dataset": "rd_sim", "outcome": "y", "running_var": "x", "cutoff": 0.0});
     for (tool, extra, needle) in [

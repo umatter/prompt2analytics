@@ -67,7 +67,7 @@ async fn refused(s: &AnalyticsServer, se: &Session, tool: &str, args: Value) -> 
 /// "right"/"left" ran the two-sided test (t-test, Mood, Poisson), "Greater" was refused by
 /// Fisher and ran two-sided in CMH.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_hypothesis_alternative_aliases() {
+async fn test_validate_mcp_hypothesis_alternative_aliases() {
     // t.test(x, y, alternative = "greater", conf.level = 0.99) on ttest_levels_t3 (Welch)
     let tl = Case::load("stat_ttest_levels_t3");
     let (se, s) = session_with("stat_ttest_levels_t3");
@@ -203,7 +203,7 @@ async fn test_mcp_hypothesis_alternative_aliases() {
 /// TOOL-27: the KS reference distribution takes R's names and parameters and is named in the
 /// output. Before: distribution "punif" tested N(0, 1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_ks_distribution_aliases() {
+async fn test_validate_mcp_ks_distribution_aliases() {
     // ks.test(xu, "punif", -1.5, 3, exact = FALSE): D 0.24555555555555558,
     // p 0.09809220328878654 (n = 25); alternative "greater": D+ 0.15522222222222223,
     // p 0.29978284585485815
@@ -276,7 +276,7 @@ async fn test_mcp_ks_distribution_aliases() {
 /// TOOL-27: power options with the CLI's kebab-case and R's spellings. Before:
 /// 'one-sample'/'one-sided' ran the two-sample, two-sided calculation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_power_option_spellings() {
+async fn test_validate_mcp_power_option_spellings() {
     // power.t.test(n = 20, delta = 0.8, sd = 1.2, type = .., alternative = ..)$power
     // (stat_power_solve); the port reproduces pt/pnt to <= 1.8e-14 relative, so 1e-10 is the
     // documented margin.
@@ -328,7 +328,7 @@ async fn test_mcp_power_option_spellings() {
 /// silently used the median, cov.wt 'mle' and 'biased' silently used the unbiased divisor,
 /// MANOVA `test` was read nowhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_stats_option_aliases() {
+async fn test_validate_mcp_stats_option_aliases() {
     // mad(x1, center = mean(x1)) (mcp_misc_t3, n = 25); cov.wt(.., method = "ML")
     // (stat_robust_weighted_t3)
     let misc = Case::load("mcp_misc_t3");
@@ -475,7 +475,7 @@ async fn test_mcp_stats_option_aliases() {
 
 /// TOOL-27: ACF types. Before: acf_type 'autocovariance' returned correlations (lag 0 = 1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_acf_type_aliases() {
+async fn test_validate_mcp_acf_type_aliases() {
     // acf(x, type = "covariance") (19 lags, lag.max 18 = floor(10 log10 64)); acf(x); pacf(x)
     // (stat_ts_acf_spline_t3)
     let case = Case::load("stat_ts_acf_spline_t3");
@@ -516,7 +516,7 @@ async fn test_mcp_acf_type_aliases() {
 /// periodogram, an unknown StructTS model ran the local level, 'var' (changepoint) detected
 /// mean changes, and 'Recursive'/'Keep' were refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_timeseries_option_aliases() {
+async fn test_validate_mcp_timeseries_option_aliases() {
     let sc = Case::load("mcp_series_t3");
     let (se, s) = session_with("mcp_series_t3");
     // Box.test(w, lag = 10, type = "Box-Pierce", fitdf = 2)
@@ -900,7 +900,7 @@ fn check_prefix(case: &Case, key: &str, got: &[f64], tol: Tol) {
 /// TOOL-26: the scores are returned (the first rows, with a note) or stored as columns under
 /// output_name. Before: only scores_computed and scores_shape.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_factanal_scores_returned() {
+async fn test_validate_mcp_factanal_scores_returned() {
     let case = Case::load("mcp_factanal_t3");
     let (se, s) = session_with("mcp_factanal_t3");
     let cols = json!(["f1", "f2", "f3", "f4", "f5", "f6"]);
@@ -933,7 +933,7 @@ async fn test_mcp_factanal_scores_returned() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_factanal_scores_output_name() {
+async fn test_validate_mcp_factanal_scores_output_name() {
     let case = Case::load("mcp_factanal_t3");
     let (se, s) = session_with("mcp_factanal_t3");
     let cols = json!(["f1", "f2", "f3", "f4", "f5", "f6"]);
@@ -1014,7 +1014,7 @@ fn root_tol() -> Tol {
 /// Power surface (STAT-61's MCP half): sd and sig_level default to 1 and 0.05; the omitted
 /// parameter is solved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_power_solve_defaults() {
+async fn test_validate_mcp_power_solve_defaults() {
     let case = Case::load("stat_power_solve");
     let (se, s) = session_with_datasets(vec![]);
     let p = json_of(&ok(&s, &se, "power_t_test", json!({"n": 30.0, "delta": 0.5})).await);
@@ -1968,7 +1968,7 @@ async fn test_validate_mcp_timeseries_structts_bsm() {
 /// Clipped CausalImpact periods are reported. No R reference (CausalImpact is not
 /// installed): a property test. Before: no warnings key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_causal_impact_reports_clipped_periods() {
+async fn test_validate_mcp_causal_impact_reports_clipped_periods() {
     // holtwinters_series: t = 1..144, airpass
     let (se, s) = session_with("ts_holtwinters_forecast");
     let j = json_of(
@@ -2021,7 +2021,7 @@ async fn test_mcp_causal_impact_reports_clipped_periods() {
 
 /// AR warnings in the JSON; the changepoint penalty, cpgram and filter descriptions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_timeseries_wp37_texts() {
+async fn test_validate_mcp_timeseries_wp37_texts() {
     let (se, s) = session_with("mcp_series_t3");
     let j = json_of(
         &ok(
@@ -2674,7 +2674,7 @@ async fn test_validate_mcp_arma_acf() {
 /// STAT-46/STAT-77: timeseries_lag, ts_mstl and timeseries_arima_sim through the dispatch
 /// path. No values are pinned (deviations TS-29, TS-26, TOOL-28).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_mcp_lag_mstl_arima_sim() {
+async fn test_validate_mcp_lag_mstl_arima_sim() {
     let (se, s) = session_with("mcp_series_t3");
     // deviation TS-29: the values are x[t + 3]; R's dplyr::lag gives lag_dplyr3_head.
     let lag = json_of(
