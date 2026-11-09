@@ -2300,8 +2300,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_sysgmm_differs_from_difference() {
-        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+    fn test_sysgmm_differs_from_difference() {
+        let ds = repo_dataset(AB_BALANCED);
         let s = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, true, 2, None, false);
         let d = fit(
             &ds,
@@ -2352,8 +2352,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_sysgmm_onestep_classical_se_is_refused() {
-        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+    fn test_sysgmm_onestep_classical_se_is_refused() {
+        let ds = repo_dataset(AB_BALANCED);
         let mut cfg = GmmConfig::default();
         cfg.transform = GmmTransform::System;
         cfg.step = GmmStep::OneStep;
@@ -2372,8 +2372,8 @@ mod tests {
 
     /// x in millions: the same system estimates, scaled.
     #[test]
-    fn test_validate_sysgmm_scale_equivariance() {
-        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+    fn test_sysgmm_scale_equivariance() {
+        let ds = repo_dataset(AB_BALANCED);
         let x: Vec<f64> = ds
             .df()
             .column("x")
@@ -2403,8 +2403,8 @@ mod tests {
     /// X-7, panel/utils.rs:202 (d6a3a3b): guarded since T0-WP14, site removed by T2-WP19;
     /// regression guard for the System path.
     #[test]
-    fn test_validate_sysgmm_rejects_max_lag_below_min_lag() {
-        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+    fn test_sysgmm_rejects_max_lag_below_min_lag() {
+        let ds = repo_dataset(AB_BALANCED);
         for (min_lag, max_lag) in [(3, Some(2)), (2, Some(1)), (2, Some(0))] {
             let mut cfg = GmmConfig::default();
             cfg.transform = GmmTransform::System;

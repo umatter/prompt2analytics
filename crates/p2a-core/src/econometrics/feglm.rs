@@ -2409,16 +2409,18 @@ mod tests {
             let r = run_feglm(&ds, y, &["x", "x2"], &["id", "time"], family, None)
                 .unwrap_or_else(|e| panic!("{family:?}: {e}"));
             assert!(r.iterations <= r.max_iter, "{family:?}");
-            if !r.converged {
-                assert!(
-                    r.warnings
-                        .iter()
-                        .any(|w| w.starts_with("FEGLM IRLS did not converge after")),
-                    "{family:?} {:?}",
-                    r.warnings
-                );
-                assert!(r.to_string().contains("Converged: no"), "{family:?}");
-            }
+            // A fit that did not converge says so in its warnings and its Display; a fit
+            // that converged says neither.
+            let warned = r
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("FEGLM IRLS did not converge after"));
+            assert_eq!(warned, !r.converged, "{family:?} {:?}", r.warnings);
+            assert_eq!(
+                r.to_string().contains("Converged: no"),
+                !r.converged,
+                "{family:?}"
+            );
             assert!(
                 r.coefficients.iter().all(|b| b.is_finite()),
                 "{family:?} {:?}",

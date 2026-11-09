@@ -1584,32 +1584,24 @@ mod tests {
         let dataset = create_validation_bacon_dataset();
         let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
 
-        // If treated_vs_never weight > 0, the estimate should be defined
-        if result.treated_vs_never > 0.0 {
-            assert!(
-                result.estimate_by_type.treated_vs_never.is_some(),
-                "Should have TvN estimate when TvN weight > 0"
-            );
-            let tvn_est = result.estimate_by_type.treated_vs_never.unwrap();
-            assert!(
-                tvn_est.is_finite(),
-                "TvN estimate should be finite, got {}",
-                tvn_est
-            );
-        }
-
-        if result.treated_vs_not_yet > 0.0 {
-            assert!(
-                result.estimate_by_type.treated_vs_not_yet.is_some(),
-                "Should have TvNYT estimate when weight > 0"
-            );
-        }
-
-        if result.later_vs_earlier > 0.0 {
-            assert!(
-                result.estimate_by_type.later_vs_earlier.is_some(),
-                "Should have LvE estimate when weight > 0"
-            );
+        // Three timing groups and a never-treated group: every comparison type has weight.
+        assert!(result.treated_vs_never > 0.0, "{}", result.treated_vs_never);
+        assert!(
+            result.treated_vs_not_yet > 0.0,
+            "{}",
+            result.treated_vs_not_yet
+        );
+        assert!(result.later_vs_earlier > 0.0, "{}", result.later_vs_earlier);
+        for (label, est) in [
+            ("treated vs never", result.estimate_by_type.treated_vs_never),
+            (
+                "treated vs not yet",
+                result.estimate_by_type.treated_vs_not_yet,
+            ),
+            ("later vs earlier", result.estimate_by_type.later_vs_earlier),
+        ] {
+            let est = est.unwrap_or_else(|| panic!("no {label} estimate with a positive weight"));
+            assert!(est.is_finite(), "{label} estimate {est}");
         }
     }
 

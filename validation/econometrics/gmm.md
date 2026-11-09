@@ -382,21 +382,21 @@ Registered tests (`panel_gmm_system` in `validation/methods/econ_sysgmm.json`), 
   instrument counts); each fit also has full-rank weights, no warning, no homoskedastic
   Sargan, and two-step uncorrected and Windmeijer coefficients equal bit for bit;
 - `test_validate_sysgmm_spec_lags3_minlag4`: the `lags3_spec_*` and `minlag4_spec_*` keys;
-- `test_validate_sysgmm_differs_from_difference`: on `ab_balanced`, system and difference
-  GMM differ (0.81945 against 0.37752), with their equation and instrument counts and
-  output headers;
-- `test_validate_sysgmm_onestep_classical_se_is_refused`: one-step classical SEs are an
-  error for system GMM, two-step uncorrected SEs are not;
-- `test_validate_sysgmm_scale_equivariance`: x in millions gives the same lag estimate and
-  the x estimate and SE scaled by 1e-6 (to 1e-9), with full-rank weights;
-- `test_validate_sysgmm_rejects_max_lag_below_min_lag`: `max_lag` below `min_lag` is an
-  error on the system path (X-7's repro, `max_lag` 0 or 1);
-  The four tests above compare no value with R (they use the case's data only) and are listed
-  as `registered-property` in `validation/tools/validate_property_tests.txt`, so they do not
-  count as R-pinned;
 - `econometrics::panel::utils::tests::test_validate_system_equations_balanced_layout`,
   `test_validate_system_equations_gaps_layout`: the stacked equations (counts, row kinds,
   times, the level rows' instruments read from the CSV digits).
+
+Not registered (they compare no value with R and read `ab_balanced.csv` directly):
+
+- `test_sysgmm_differs_from_difference`: on `ab_balanced`, system and difference
+  GMM differ (0.81945 against 0.37752), with their equation and instrument counts and
+  output headers;
+- `test_sysgmm_onestep_classical_se_is_refused`: one-step classical SEs are an
+  error for system GMM, two-step uncorrected SEs are not;
+- `test_sysgmm_scale_equivariance`: x in millions gives the same lag estimate and
+  the x estimate and SE scaled by 1e-6 (to 1e-9), with full-rank weights;
+- `test_sysgmm_rejects_max_lag_below_min_lag`: `max_lag` below `min_lag` is an
+  error on the system path (X-7's repro, `max_lag` 0 or 1).
 
 Property tests, not registered: `utils::tests::test_system_h_weight_is_pgmm_fsm_full` (H
 against `plm:::FSM(4, "full")`), and `test_sysgmm_scaling_many_entities` (release only:

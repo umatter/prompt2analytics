@@ -795,16 +795,8 @@ class ValidateBodiesTest(unittest.TestCase):
 
 
 # Known test-code defects left to the owner of the .rs files; the list may only shrink (a fixed site
-# that stays listed fails the test). X-10 closes when it is empty.
-PENDING_TEST_CODE = {
-    ("crates/p2a-core/src/forecasting/decompose.rs", "test_validate_decompose_against_r", "guarded-assert"),
-    ("crates/p2a-core/src/econometrics/bacon.rs", "test_validate_bacon_estimates_by_type_aggregation",
-     "conditional-assert"),
-    ("crates/p2a-core/src/econometrics/feglm.rs", "test_validate_feglm_families_report_convergence",
-     "guarded-assert"),
-    ("crates/p2a-core/src/econometrics/staggered_did.rs", "test_validate_staggered_did_never_treated_comparison",
-     "guarded-assert"),
-}
+# that stays listed fails the test). Empty since the last four sites were fixed; keep it empty.
+PENDING_TEST_CODE: set[tuple[str, str, str]] = set()
 
 
 # The test functions the findings cite (name at d6a3a3b). Each is gone (deleted or renamed), or it is

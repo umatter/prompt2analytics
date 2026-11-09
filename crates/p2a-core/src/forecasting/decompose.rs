@@ -567,16 +567,11 @@ mod tests {
         }
     }
 
-    /// Validation test against R's decompose() function
+    /// A noiseless linear trend plus a sine season: the seasonal figure is the sine within 1.5
+    /// (averaging at the edges) and the moving-average trend has slope 0.5. No R value is
+    /// compared.
     #[test]
-    fn test_validate_decompose_against_r() {
-        // R code:
-        // set.seed(42)
-        // x <- 100 + 0.5*(1:48) + 10*sin(2*pi*(1:48)/12) + rnorm(48, sd=2)
-        // result <- decompose(ts(x, frequency=12), type="additive")
-        // result$figure  # seasonal pattern
-
-        // Generate the same data as R (without noise for deterministic test)
+    fn test_decompose_sine_trend_recovers_dgp() {
         let x: Vec<f64> = (1..=48)
             .map(|t| {
                 let trend = 100.0 + 0.5 * t as f64;
@@ -611,16 +606,15 @@ mod tests {
             .map(|(i, t)| (i, *t))
             .collect();
 
-        if valid_trend.len() >= 2 {
-            let (i1, t1) = valid_trend[0];
-            let (i2, t2) = valid_trend[valid_trend.len() - 1];
-            let slope = (t2 - t1) / (i2 - i1) as f64;
-            // Expected slope is 0.5
-            assert!(
-                (slope - 0.5).abs() < 0.1,
-                "Trend slope should be ~0.5, got {}",
-                slope
-            );
-        }
+        // The centred 2x12 moving average leaves six missing values at each end.
+        assert_eq!(valid_trend.len(), 48 - 12);
+        let (i1, t1) = valid_trend[0];
+        let (i2, t2) = valid_trend[valid_trend.len() - 1];
+        let slope = (t2 - t1) / (i2 - i1) as f64;
+        assert!(
+            (slope - 0.5).abs() < 0.1,
+            "Trend slope should be ~0.5, got {}",
+            slope
+        );
     }
 }

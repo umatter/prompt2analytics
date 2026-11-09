@@ -53,7 +53,9 @@ result$figure  # Seasonal pattern
 - Trend should have slope ~0.5
 - Figure should sum to approximately zero
 
-**Rust Test:** `crates/p2a-core/src/forecasting/decompose.rs::tests::test_validate_decompose_against_r`
+**Rust Test:** `crates/p2a-core/src/forecasting/decompose.rs::tests::test_decompose_sine_trend_recovers_dgp`
+(not R-pinned: it checks the noiseless DGP above, the figure within 1.5 of the sine and a trend slope
+within 0.1 of 0.5; no `decompose()` value is compared)
 
 ### Test 2: Multiplicative Decomposition
 
