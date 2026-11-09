@@ -56,7 +56,7 @@ use p2a_core::{
         did_diagnostics, ipw_diagnostics, iv_diagnostics, matching_diagnostics, rd_diagnostics,
         staggered_did_diagnostics,
     },
-    entropy_balance, match_it, run_bp_bounds, run_cbps, run_did, run_doubly_robust, run_etwfe,
+    match_it, run_bp_bounds, run_cbps, run_did, run_doubly_robust, run_etwfe,
     run_first_stage_diagnostics, run_fuzzy_rd, run_gformula, run_gmm_iv, run_gsynth,
     run_ipw_treatment, run_iv2sls, run_ivmte, run_medflex_dataset, run_mediation_analysis, run_rd,
     run_rd_multi_dataset, run_scpi, run_staggered_did, run_stdreg, run_synthetic_control, run_tmle,
@@ -701,7 +701,7 @@ impl AnalyticsServer {
 
     /// Run IPW treatment effect estimation.
     #[tool(
-        description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals. Returns a point estimate (ATE/ATT). For matched samples with balance diagnostics, use propensity_matching instead."
+        description = "Estimate the ATE or ATT by inverse probability weighting with a logistic propensity score (normalised Hajek weights, scores trimmed at trim and 1 - trim). Standard errors: the M-estimation SE with the propensity score estimated (default, bootstrap = 0); the efficient-influence-function value is also reported (se_eif); bootstrap > 0 gives the SD of seeded replicates that hold the fitted propensity scores fixed (the propensity is treated as known). The output names the SE method. For matched samples with balance diagnostics, use propensity_matching instead."
     )]
     pub async fn treatment_ipw(
         &self,
@@ -717,9 +717,9 @@ impl AnalyticsServer {
         let mut config = IpwConfig::default();
         config.trim = request.trim.unwrap_or(0.05);
         config.estimand = estimand;
-        config.bootstrap = request.bootstrap.unwrap_or(999);
+        config.bootstrap = request.bootstrap.unwrap_or(0);
         config.normalized = true;
-        config.seed = None;
+        config.seed = self.session_seed().await;
 
         let result = match run_ipw_treatment(
             dataset,
@@ -747,7 +747,7 @@ impl AnalyticsServer {
 
     /// Run Doubly Robust (AIPW) treatment effect estimation.
     #[tool(
-        description = "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics."
+        description = "Estimate the ATE or ATT by augmented IPW (doubly robust: consistent if either the logistic propensity model or the linear outcome model is correct), or by weighting ('ipw') or outcome regression ('regression') alone. AIPW reports the analytic influence-function SE (bootstrap is not used for it); 'ipw' and 'regression' use the seeded bootstrap, whose replicates reuse the fitted propensity scores or outcome predictions. Returns the effect, its SE and confidence interval, and model fit diagnostics."
     )]
     pub async fn treatment_doubly_robust(
         &self,
@@ -766,7 +766,7 @@ impl AnalyticsServer {
         config.trim = request.trim.unwrap_or(0.05);
         config.estimand = estimand;
         config.bootstrap = request.bootstrap.unwrap_or(999);
-        config.seed = None;
+        config.seed = self.session_seed().await;
 
         let result = match run_doubly_robust(
             dataset,
@@ -886,13 +886,17 @@ impl AnalyticsServer {
 
     /// Run Covariate Balancing Propensity Score (CBPS) estimation.
     #[tool(
-        description = "Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification."
+        description = "Estimate propensity scores by the covariate balancing propensity score (Imai & Ratkovic 2014) as R's CBPS::CBPS: method 'over' (default), 'exact' or 'logit'; estimand 'ATE' (default; R's default is ATT = 1) or 'ATT'. Returns coefficients with SEs, scores, inverse-probability weights, balance before and after weighting, CBPS's J = g'Wg (over and exact) and, for 'over', Hansen's test on n J; exact and logit fits carry no J test."
     )]
     pub async fn treatment_cbps(
         &self,
         Parameters(request): Parameters<CbpsRequest>,
     ) -> Result<CallToolResult, McpError> {
         let method = tool_try!(parse_option(request.method.as_deref(), CbpsMethod::Over));
+        let estimand = tool_try!(parse_option(
+            request.estimand.as_deref(),
+            p2a_core::econometrics::cbps::CbpsEstimand::Ate
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -901,6 +905,7 @@ impl AnalyticsServer {
 
         let mut config = CbpsConfig::default();
         config.method = method;
+        config.estimand = estimand;
         config.balance_threshold = request.balance_threshold.unwrap_or(0.1);
         config.tolerance = 1e-8;
         config.max_iter = 100;
@@ -922,7 +927,7 @@ impl AnalyticsServer {
 
     /// Compute flexible inverse probability weights using multiple methods.
     #[tool(
-        description = "Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability."
+        description = "Compute balancing weights as R's WeightIt: 'logistic' (glm propensity, default), 'entropy' (entropy balancing, exact dual), 'energy' (Huling & Mak energy-distance QP, exact; WeightIt energy at lambda = 0; at most 2000 reweighted units) or 'stable' (stable balancing weights QP with exact balance, as WeightIt optweight); estimand ATE (default), ATT or ATC. Returns weights, balance before and after, and the effective sample size (ESS); a low ESS means highly variable weights."
     )]
     pub async fn treatment_weightit(
         &self,
@@ -968,24 +973,27 @@ impl AnalyticsServer {
 
     /// Run entropy balancing for exact covariate mean balance.
     #[tool(
-        description = "Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size."
+        description = "Compute entropy balancing weights (Hainmueller 2012) by the exact dual: weights closest to uniform in entropy that balance the covariate means exactly; estimand ATT (default: controls to the treated means), ATE (both groups to the pooled means) or ATC; infeasible targets are an error. Returns weights, the balance table and the effective sample size per group."
     )]
     pub async fn treatment_entropy_balance(
         &self,
         Parameters(request): Parameters<EntropyBalanceRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::weightit::{EntropyBalanceConfig, entropy_balance_with};
+        let estimand = tool_try!(parse_option(
+            request.estimand.as_deref(),
+            WeightEstimand::ATT
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
-        let result = match entropy_balance(
-            dataset,
-            &request.treatment,
-            &cov_refs,
-            request.target_means.as_deref(),
-        ) {
+        let mut config = EntropyBalanceConfig::default();
+        config.estimand = estimand;
+        config.targets = request.target_means.clone();
+        let result = match entropy_balance_with(dataset, &request.treatment, &cov_refs, &config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1002,7 +1010,7 @@ impl AnalyticsServer {
 
     /// Compute stable balancing weights for causal inference.
     #[tool(
-        description = "Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details."
+        description = "Compute stable balancing weights (Zubizarreta 2015), the minimum-variance weights with exact or approximately balanced covariate means, solved exactly as a quadratic program; ATT (default), ATC, or ATE (one QP per group to the pooled means). Returns weights, balance before and after, the effective sample size and the solver record."
     )]
     pub async fn treatment_sbw(
         &self,

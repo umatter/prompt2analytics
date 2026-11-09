@@ -92,6 +92,32 @@
       "tolerance": "validation/README.md, n = 500; CUE Tol::iterative(1e-8)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_weighting",
+      "name": "MCP CBPS, entropy balancing, AIPW, IPW",
+      "category": "mcp",
+      "reference": "CBPS::CBPS (tight refit); WeightIt ebal exact dual; AIPW; IPW Hajek with the M-estimation SE",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "cbps_sim_methods",
+        "weights_ebal",
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_treatment_cbps",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_weighting"
+      ],
+      "quantities": [
+        "CBPS coefficients (over ATE, exact ATT)",
+        "entropy ESS per group",
+        "AIPW ATE and SE",
+        "IPW M-estimation SE",
+        "SBW balance_penalty refused"
+      ],
+      "tolerance": "CBPS Tol::iterative(1e-6); AIPW and IPW effect Tol::iterative(1e-8) (IRLS propensity); others validation/README.md, n = 300",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

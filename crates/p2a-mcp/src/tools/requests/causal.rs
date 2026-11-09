@@ -545,7 +545,7 @@ pub struct IpwRequest {
 
     /// Number of bootstrap replications for standard errors
     #[schemars(
-        description = "Number of bootstrap replications for standard error estimation. Default is 999."
+        description = "Standard errors: 0 (default) gives the M-estimation SE with the propensity score estimated; the efficient-influence-function value is also reported (se_eif). bootstrap > 0 gives the SD of that many replicates that hold the fitted propensity scores fixed (the propensity is treated as known), seeded by the session seed."
     )]
     pub bootstrap: Option<usize>,
 }
@@ -596,7 +596,7 @@ pub struct DoublyRobustRequest {
 
     /// Number of bootstrap replications for standard errors
     #[schemars(
-        description = "Number of bootstrap replications for standard error estimation. Default is 999."
+        description = "Bootstrap replicates for 'ipw' and 'regression' (default 999; seeded by the session seed): the replicates reuse the fitted propensity scores (ipw) or outcome predictions (regression), so the SE ignores their estimation. AIPW reports the analytic influence-function SE and runs no replicates."
     )]
     pub bootstrap: Option<usize>,
 }
@@ -671,7 +671,7 @@ pub struct CbpsRequest {
 
     /// CBPS method: 'over' (default), 'exact' or 'logit'
     #[schemars(
-        description = "CBPS method: 'over' (default, as CBPS::CBPS; score and balance conditions), 'exact' (balance conditions only) or 'logit' (score equations only, plain logistic regression). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "CBPS method: 'over' (default, R's default: the score and balance conditions, over-identified two-step GMM), 'exact' (the balance conditions only, just identified) or 'logit' (logistic regression, no balance conditions). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
@@ -680,6 +680,12 @@ pub struct CbpsRequest {
         description = "Threshold for standardized difference to consider a covariate balanced. Default is 0.1."
     )]
     pub balance_threshold: Option<f64>,
+
+    /// Estimand
+    #[schemars(
+        description = "Estimand of the weights: 'ATE' (default) or 'ATT'. CBPS::CBPS defaults to ATT = 1, WeightIt's CBPS to ATE. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub estimand: Option<String>,
 }
 
 /// Request for flexible inverse probability weighting (WeightIt).
@@ -703,7 +709,7 @@ pub struct WeightItRequest {
 
     /// Weighting method: 'logistic' (default), 'entropy', 'energy', or 'stable'
     #[schemars(
-        description = "Weighting method: 'logistic' (default, propensity score; 'glm', 'ps'), 'entropy' (entropy balancing; 'ebal'), 'energy' (energy distance) or 'stable' (stable balancing weights; 'sbw', 'optweight'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Weighting method: 'logistic' (glm propensity, default; 'glm', 'ps'), 'entropy' (entropy balancing, exact dual; 'ebal'), 'energy' (Huling & Mak energy-distance QP, exact; WeightIt energy at lambda = 0; at most 2000 reweighted units) or 'stable' (stable balancing weights QP with exact balance, as WeightIt optweight; 'sbw', 'optweight'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
@@ -715,13 +721,13 @@ pub struct WeightItRequest {
 
     /// Whether to stabilize weights
     #[schemars(
-        description = "Whether to stabilize weights by multiplying by marginal treatment probability. Default is false."
+        description = "Multiply the weights by the marginal treatment probability (default false): logistic only; other methods warn and leave the weights unchanged."
     )]
     pub stabilize: Option<bool>,
 
     /// Trimming quantile for extreme weights
     #[schemars(
-        description = "Quantile for trimming extreme weights (e.g., 0.99 trims at 1st and 99th percentile). Default is 1.0 (no trimming)."
+        description = "Quantile at which extreme weights are trimmed (e.g. 0.99 trims at the 1st and 99th percentiles). Default 1.0 (no trimming). Must be in (0.5, 1]."
     )]
     pub trim_quantile: Option<f64>,
 }
@@ -747,9 +753,15 @@ pub struct EntropyBalanceRequest {
 
     /// Optional target means (defaults to treated group means for ATT)
     #[schemars(
-        description = "Optional target means for covariates. If not provided, uses treated group means (ATT)."
+        description = "Target means of the covariates, one per covariate. Default: from the estimand (the treated means for ATT, the pooled means for ATE, the control means for ATC)."
     )]
     pub target_means: Option<Vec<f64>>,
+
+    /// Estimand
+    #[schemars(
+        description = "Estimand: 'att' (default: controls to the treated means), 'ate' (both groups to the pooled means) or 'atc' (treated to the control means). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub estimand: Option<String>,
 }
 
 /// Request for stable balancing weights (SBW).
@@ -779,7 +791,7 @@ pub struct SBWRequest {
 
     /// Balance tolerance for approximate balance (0 = exact balance)
     #[schemars(
-        description = "Tolerance for approximate balance. 0 means exact balance (default), positive values allow some deviation."
+        description = "Tolerance for approximate balance of each covariate mean, in the covariates' own units. 0 means exact balance (default)."
     )]
     pub balance_tol: Option<f64>,
 
@@ -789,7 +801,7 @@ pub struct SBWRequest {
 
     /// Penalty parameter for approximate balance (higher = stricter balance)
     #[schemars(
-        description = "Penalty parameter for approximate balance. Higher values enforce stricter balance. Default is 1000."
+        description = "Not used: approximate balance is solved exactly as a quadratic program. Only the default 1000 is accepted; omit it."
     )]
     pub balance_penalty: Option<f64>,
 }

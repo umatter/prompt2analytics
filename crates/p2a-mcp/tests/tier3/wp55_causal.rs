@@ -126,6 +126,16 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["over", "exact", "logit"],
         ),
         (
+            "treatment_cbps",
+            with(&tc, &[("estimand", json!("ATC"))]),
+            vec!["ATE", "ATT"],
+        ),
+        (
+            "treatment_entropy_balance",
+            with(&tc, &[("estimand", json!("ato"))]),
+            vec!["ate", "atc"],
+        ),
+        (
             "treatment_weightit",
             with(&tc, &[("method", json!("cbps"))]),
             vec!["logistic", "energy"],
@@ -945,4 +955,118 @@ async fn test_validate_mcp_gmm_iv() {
     )
     .await;
     assert!(e.contains("weight_matrix") && e.contains("5 x 5"), "{e}");
+}
+
+/// CBPS::CBPS(method, ATT) (the cbps_sim_methods tight refit) through the MCP; R's names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_treatment_cbps() {
+    use p2a_core::econometrics::cbps::{CbpsConfig, CbpsEstimand, CbpsMethod, run_cbps};
+    let case = Case::load("cbps_sim_methods");
+    let (session, server) = session_with("cbps_sim_methods"); // dataset `cbps_sim`
+    let ds = case_ds(&case);
+    let base =
+        json!({"dataset": "cbps_sim", "treatment": "treat", "covariates": ["x1", "x2", "x3"]});
+    let fit = |m: CbpsMethod, e: CbpsEstimand| {
+        let mut c = CbpsConfig::default();
+        c.method = m;
+        c.estimand = e;
+        c.balance_threshold = 0.1;
+        c.tolerance = 1e-8;
+        c.max_iter = 100;
+        run_cbps(&ds, "treat", &["x1", "x2", "x3"], Some(c)).unwrap()
+    };
+    let over = fit(CbpsMethod::Over, CbpsEstimand::Ate);
+    assert_eq!(
+        ok(&server, &session, "treatment_cbps", base.clone()).await,
+        over.to_string()
+    );
+    let exact = fit(CbpsMethod::Exact, CbpsEstimand::Att);
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "treatment_cbps",
+            with(
+                &base,
+                &[("method", json!("exact")), ("estimand", json!("att"))]
+            )
+        )
+        .await,
+        exact.to_string()
+    );
+    Check::new(&case)
+        .vector(
+            "over_ate_tight_coef",
+            &over.coefficients,
+            Tol::iterative(1e-6),
+        )
+        .vector(
+            "exact_att_tight_coef",
+            &exact.coefficients,
+            Tol::iterative(1e-6),
+        )
+        .finish();
+}
+
+/// Entropy balancing (exact dual), AIPW and the IPW M-estimation SE through the MCP; SBW refuses its unused
+/// penalty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_weighting() {
+    use p2a_core::econometrics::treatment::{
+        DoublyRobustConfig, IpwConfig, run_doubly_robust, run_ipw_treatment,
+    };
+    use p2a_core::econometrics::weightit::{
+        EntropyBalanceConfig, WeightEstimand, entropy_balance_with,
+    };
+    let ebal = Case::load("weights_ebal");
+    let aipw = Case::load("ipw_aipw_sim");
+    let (session, server) = session_with("weights_ebal"); // dataset `weighting_sim`
+    let ds = case_ds(&ebal);
+    let covs = ["x1", "x2", "x3"];
+    let mut ec = EntropyBalanceConfig::default();
+    ec.estimand = WeightEstimand::ATE;
+    let eb = entropy_balance_with(&ds, "treat", &covs, &ec).unwrap();
+    assert_eq!(ok(&server, &session, "treatment_entropy_balance",
+                  json!({"dataset": "weighting_sim", "treatment": "treat", "covariates": covs, "estimand": "ATE"})).await,
+               eb.to_string());
+    let mut dc = DoublyRobustConfig::default();
+    dc.trim = 0.0;
+    dc.bootstrap = 999;
+    dc.seed = None; // the tool's defaults
+    let dr = run_doubly_robust(&ds, "y", "treat", &covs, dc).unwrap();
+    let t = ok(&server, &session, "treatment_doubly_robust",
+               json!({"dataset": "weighting_sim", "outcome": "y", "treatment": "treat", "covariates": covs, "trim": 0.0})).await;
+    assert_eq!(t, dr.to_string());
+    assert!(t.contains("analytic influence function"), "{t}");
+    let mut ic = IpwConfig::default();
+    ic.trim = 0.0;
+    ic.bootstrap = 0;
+    ic.normalized = true;
+    let ipw = run_ipw_treatment(&ds, "y", "treat", &covs, ic).unwrap();
+    let ti = ok(&server, &session, "treatment_ipw",
+                json!({"dataset": "weighting_sim", "outcome": "y", "treatment": "treat", "covariates": covs, "trim": 0.0})).await;
+    assert!(ti.starts_with(&ipw.to_string()), "{ti}");
+    assert!(ti.contains("M-estimation"), "{ti}");
+    let s = refused(&server, &session, "treatment_sbw",
+                    json!({"dataset": "weighting_sim", "treatment": "treat", "covariates": covs, "balance_penalty": 50.0})).await;
+    assert!(s.contains("balance_penalty"), "{s}");
+    let s = ok(
+        &server,
+        &session,
+        "treatment_sbw",
+        json!({"dataset": "weighting_sim", "treatment": "treat", "covariates": covs}),
+    )
+    .await;
+    assert!(!s.contains("balance_penalty"), "{s}");
+    Check::new(&ebal)
+        .scalar("ate_exact_ess_t", eb.ess_treated, Tol::stat(300))
+        .scalar("ate_exact_ess_c", eb.ess_control, Tol::stat(300))
+        .finish();
+    // the propensity is an IRLS fit
+    Check::new(&aipw)
+        .scalar("aipw_ate", dr.effect, Tol::iterative(1e-8))
+        .scalar("aipw_ate_se", dr.std_error, Tol::iterative(1e-8))
+        .scalar("ipw_ate_hajek", ipw.effect, Tol::iterative(1e-8))
+        .scalar("ipw_ate_se_mest", ipw.std_error, Tol::se(300))
+        .finish();
 }
