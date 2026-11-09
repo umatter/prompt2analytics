@@ -75,7 +75,7 @@ case("mcp_series_t3", "timeseries/mcp", "Box.test, decompose, ar, runmed, embed,
   em <- embed(z, 3)
   f4 <- as.numeric(stats::filter(z, rep(0.25, 4), sides = 2)); fr <- as.numeric(stats::filter(z, c(0.5, -0.2), method = "recursive"))
   di <- diffinv(z, xi = 1.5)
-  tsym <- toeplitz(c(1, 0.5, 0.25)); tasym <- toeplitz(c(1, 2, 3), c(1, 4, 5))
+  tsym <- stats::toeplitz(c(1, 0.5, 0.25)); tasym <- stats::toeplitz(c(1, 2, 3), c(1, 4, 5))   # stats:: : a package attached by another case masks toeplitz
   psi <- ARMAtoMA(ar = c(0.5, -0.2), ma = 0.4, lag.max = 10)
   a2 <- acf2AR(c(1, 0.6, 0.3, 0.1))
   rm <- function(m) vec(as.numeric(t(m)))                                  # row-major

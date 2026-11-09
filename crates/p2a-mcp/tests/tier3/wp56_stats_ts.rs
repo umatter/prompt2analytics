@@ -2024,3 +2024,672 @@ async fn test_mcp_timeseries_wp37_texts() {
     assert!(desc("timeseries_cpgram").contains("1.358"));
     assert!(prop("timeseries_filter", "sides").contains("centred"));
 }
+
+/// Asserts `got` against element `i` of the case vector `key`.
+fn check_elem(case: &Case, key: &str, i: usize, got: f64, tol: Tol) {
+    let want = case.vector(key)[i];
+    assert!(
+        tol.allows(got, want),
+        "case {}: {key}[{i}] rust={got} R={want}",
+        case.id
+    );
+}
+
+/// The case value `key` as an integer count (exact comparison).
+fn case_count(case: &Case, key: &str) -> u64 {
+    let v = case.vector(key);
+    assert_eq!(v.len(), 1, "case {}: {key} is not a scalar", case.id);
+    v[0] as u64
+}
+
+/// STAT-46/STAT-77: anova_tukey_hsd through the dispatch path, pinned to TukeyHSD(aov())
+/// (mcp_groups_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_tukey_hsd() {
+    let case = Case::load("mcp_groups_t3");
+    let (se, s) = session_with("mcp_groups_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "anova_tukey_hsd",
+            json!({"dataset": "mcp_groups_t3", "response": "vi", "factor": "g"}),
+        )
+        .await,
+    );
+    let cmp = j["comparisons"].as_array().unwrap();
+    let pairs: Vec<(&str, &str)> = cmp
+        .iter()
+        .map(|c| (c["group1"].as_str().unwrap(), c["group2"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        pairs,
+        [("trtA", "ctl"), ("trtB", "ctl"), ("trtB", "trtA")],
+        "{j}"
+    );
+    let col = |k: &str| -> Vec<f64> { cmp.iter().map(|c| f(&c[k])).collect() };
+    Check::new(&case)
+        .vector("tukey_diff", &col("diff"), Tol::coef(30))
+        .vector("tukey_lwr", &col("ci_lower"), Tol::stat(30))
+        .vector("tukey_upr", &col("ci_upper"), Tol::stat(30))
+        .vector("tukey_padj", &col("p_adj"), Tol::p_value(30))
+        .finish();
+    check_elem(&case, "aov_ms", 1, f(&j["mse"]), Tol::stat(30));
+    assert_eq!(j["df"].as_u64(), Some(27));
+}
+
+/// STAT-46/STAT-77: hypothesis_pairwise_wilcox through the dispatch path, pinned to
+/// pairwise.wilcox.test(p.adjust.method = "holm", exact = FALSE) (mcp_groups_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_pairwise_wilcox() {
+    let case = Case::load("mcp_groups_t3");
+    let (se, s) = session_with("mcp_groups_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "hypothesis_pairwise_wilcox",
+            json!({"dataset": "mcp_groups_t3", "response": "vi", "factor": "g",
+                "p_adjust_method": "holm", "exact": false}),
+        )
+        .await,
+    );
+    let p = &j["p_values_adjusted"];
+    let got = [f(&p[1][0]), f(&p[2][0]), f(&p[2][1])];
+    Check::new(&case)
+        .vector("pairwise_wilcox_holm", &got, Tol::p_value(30))
+        .finish();
+    assert_eq!(j["group_names"], json!(["ctl", "trtA", "trtB"]));
+    assert_eq!(j["missing"]["n_dropped"].as_u64(), Some(3), "{j}");
+}
+
+/// STAT-46/STAT-77: hypothesis_wilcoxon (two samples) through the dispatch path, pinned to
+/// wilcox.test(x, y, exact = FALSE, correct = TRUE) (mcp_groups_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_wilcoxon_two_sample() {
+    let case = Case::load("mcp_groups_t3");
+    let (se, s) = session_with("mcp_groups_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "hypothesis_wilcoxon",
+            json!({"dataset": "mcp_groups_t3", "x": "s1", "y": "s2", "exact": false, "correct": true}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("wilcox_p", f(&j["p_value"]), Tol::p_value(64))
+        .finish();
+    let (n1, n2) = (j["n1"].as_u64().unwrap(), j["n2"].as_u64().unwrap());
+    assert_eq!(
+        (n1, n2),
+        (
+            case_count(&case, "wilcox_n1"),
+            case_count(&case, "wilcox_n2")
+        )
+    );
+    // deviation STAT-72: the tool reports the rank sum R1, R's W is R1 - n1 (n1 + 1) / 2
+    let w = f(&j["statistic"]) - (n1 * (n1 + 1) / 2) as f64;
+    assert_eq!(w, case.vector("wilcox_W")[0], "{j}");
+}
+
+/// STAT-46/STAT-77: hypothesis_mcnemar through the dispatch path, pinned to
+/// mcnemar.test(matrix(c(., 15, 5, .))) with and without the correction (mcp_misc_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_mcnemar() {
+    let case = Case::load("mcp_misc_t3");
+    let (se, s) = session_with("mcp_misc_t3");
+    let c = json_of(&ok(&s, &se, "hypothesis_mcnemar", json!({"b": 15, "c": 5})).await);
+    let u = json_of(
+        &ok(
+            &s,
+            &se,
+            "hypothesis_mcnemar",
+            json!({"b": 15, "c": 5, "correct": false}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("mcnemar_b15_c5_stat", f(&c["statistic"]), Tol::stat(20))
+        .scalar("mcnemar_b15_c5_p", f(&c["p_value"]), Tol::p_value(20))
+        .scalar(
+            "mcnemar_b15_c5_uncorrected_stat",
+            f(&u["statistic"]),
+            Tol::stat(20),
+        )
+        .scalar(
+            "mcnemar_b15_c5_uncorrected_p",
+            f(&u["p_value"]),
+            Tol::p_value(20),
+        )
+        .finish();
+}
+
+/// STAT-46/STAT-77: hypothesis_poisson one-sided through the dispatch path, pinned to
+/// poisson.test (stat_poisson_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_poisson_one_sided() {
+    let case = Case::load("stat_poisson_t3");
+    let (se, s) = session_with("mcp_misc_t3");
+    let g = json_of(
+        &ok(
+            &s,
+            &se,
+            "hypothesis_poisson",
+            json!({"x": [10], "t": [5], "alternative": "greater"}),
+        )
+        .await,
+    );
+    let l = json_of(
+        &ok(
+            &s,
+            &se,
+            "hypothesis_poisson",
+            json!({"x": [11, 21], "t": [800, 3011], "alternative": "less"}),
+        )
+        .await,
+    );
+    // deviation STAT-58: the two-sided p-value is not pinned here.
+    // deviation new observation (core): the one-sided calls report the two-sided interval
+    // (R: x10_greater_ci, rr_less_ci), so the interval bounds are not pinned.
+    Check::new(&case)
+        .scalar("x10_greater_p", f(&g["p_value"]), Tol::p_value(10))
+        .scalar("rr_less_p", f(&l["p_value"]), Tol::p_value(10))
+        .scalar("rr_est", f(&l["estimate"]["value"]), Tol::coef(10))
+        .finish();
+}
+
+/// STAT-46/STAT-77: stats_model_tables (one way, means) through the dispatch path, pinned
+/// to model.tables(aov(), "means") (mcp_groups_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_model_tables_one_way() {
+    let case = Case::load("mcp_groups_t3");
+    let (se, s) = session_with("mcp_groups_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_model_tables",
+            json!({"dataset": "mcp_groups_t3", "response": "vi", "factors": ["g"]}),
+        )
+        .await,
+    );
+    let t = &j["one_way_table"];
+    let levels: Vec<String> = t["levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    // deviation STAT-75: the standard errors are not pinned.
+    Check::new(&case)
+        .named("means", &levels, &fs(&t["values"]), Tol::coef(30))
+        .scalar("grand_mean", f(&j["grand_mean"]), Tol::coef(30))
+        .vector("group_n", &fs(&t["n"]), Tol::exact())
+        .finish();
+    assert_eq!(levels, ["ctl", "trtA", "trtB"]);
+}
+
+/// STAT-46/STAT-77: stats_se_contrast through the dispatch path, pinned to
+/// se.contrast(aov(), list(g == "ctl", g == "trtA")) (mcp_groups_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_se_contrast() {
+    let case = Case::load("mcp_groups_t3");
+    let (se, s) = session_with("mcp_groups_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_se_contrast",
+            json!({"dataset": "mcp_groups_t3", "response": "vi", "factor": "g", "contrasts": [[1, -1, 0]]}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar(
+            "contrast_ctl_trtA_se",
+            f(&j["standard_errors"][0]),
+            Tol::se(30),
+        )
+        .finish();
+    check_elem(&case, "aov_ms", 1, f(&j["mse"]), Tol::stat(30));
+    assert_eq!(f(&j["df_mse"]), 27.0, "{j}");
+}
+
+/// STAT-46/STAT-77: compute_correlation through the dispatch path, pinned to cor()
+/// (mcp_misc_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_compute_correlation() {
+    let case = Case::load("mcp_misc_t3");
+    let (se, s) = session_with("mcp_misc_t3");
+    let t = ok(
+        &s,
+        &se,
+        "compute_correlation",
+        json!({"dataset": "robust_weighted_t3"}),
+    )
+    .await;
+    let mut got = Vec::new();
+    for label in ["x1", "x2", "w"] {
+        // the data row, not the header (whose first token is a column name too)
+        let row: Vec<f64> = t
+            .lines()
+            .filter(|l| l.split_whitespace().next() == Some(label))
+            .find_map(|l| {
+                l.split_whitespace()
+                    .skip(1)
+                    .map(|x| x.parse().ok())
+                    .collect::<Option<Vec<f64>>>()
+            })
+            .unwrap_or_else(|| panic!("row {label} in\n{t}"));
+        assert_eq!(row.len(), 3, "{t}");
+        got.extend(row);
+    }
+    Check::new(&case)
+        .vector("cor_x1_x2_w", &got, Tol::printed(4))
+        .finish();
+}
+
+/// STAT-46/STAT-77: multivariate_cancor through the dispatch path, pinned to cancor()'s
+/// centres (stat_cancor_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cancor_centres() {
+    let case = Case::load("stat_cancor_t3");
+    let (se, s) = session_with("stat_cancor_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "multivariate_cancor",
+            json!({"dataset": "cancor_t3", "x_columns": ["x1", "x2", "x3"], "y_columns": ["y1", "y2"]}),
+        )
+        .await,
+    );
+    // deviation STAT-16: the correlations and coefficients are not pinned here.
+    Check::new(&case)
+        .named(
+            "xcenter",
+            &["x1", "x2", "x3"],
+            &fs(&j["x_center"]),
+            Tol::coef(100),
+        )
+        .named(
+            "ycenter",
+            &["y1", "y2"],
+            &fs(&j["y_center"]),
+            Tol::coef(100),
+        )
+        .finish();
+    assert_eq!(
+        (j["n_obs"].as_u64(), j["n_canonical"].as_u64()),
+        (Some(100), Some(2))
+    );
+}
+
+/// STAT-46/STAT-77: stats_iqr with quantile type 6 through the dispatch path, pinned to
+/// IQR(type = 6) (stat_quantile_types).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_stats_iqr_type6() {
+    let case = Case::load("stat_quantile_types");
+    let (se, s) = session_with("stat_quantile_types");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_iqr",
+            json!({"dataset": "quantile_sample", "column": "x", "qtype": 6}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("x_iqr_type6", f(&j["iqr"]), Tol::coef(28))
+        .finish();
+    assert_eq!(j["quantile_type"].as_u64(), Some(6));
+    let r = refused(
+        &s,
+        &se,
+        "stats_iqr",
+        json!({"dataset": "quantile_sample", "column": "x", "qtype": 12}),
+    )
+    .await;
+    assert!(r.contains("1 to 9"), "{r}");
+}
+
+/// STAT-46/STAT-77: timeseries_pp_test through the dispatch path, pinned to PP.test and
+/// its internals (stat_pp_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_pp_test() {
+    let case = Case::load("stat_pp_t3");
+    let (se, s) = session_with("stat_pp_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_pp_test",
+            json!({"dataset": "pp_t3", "column": "rw"}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("rw_short_gamma", f(&j["gamma_hat"]), Tol::stat(200))
+        .scalar("rw_short_t", f(&j["t_statistic"]), Tol::stat(200))
+        .scalar("rw_short_sigma2", f(&j["sigma_squared"]), Tol::stat(200))
+        .scalar("rw_short_lambda2", f(&j["lambda_squared"]), Tol::stat(200))
+        .scalar("rw_short_stat", f(&j["statistic"]), Tol::stat(200))
+        .scalar("rw_short_p", f(&j["p_value"]), Tol::p_value(200))
+        .finish();
+    assert_eq!(
+        j["truncation_lag"].as_u64(),
+        Some(case_count(&case, "rw_short_lag"))
+    );
+}
+
+/// STAT-46/STAT-77: timeseries_box_test (Ljung-Box) through the dispatch path, pinned to
+/// Box.test(type = "Ljung-Box") (mcp_series_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_box_test_ljung() {
+    let case = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_box_test",
+            json!({"dataset": "mcp_series_t3", "column": "w", "lag": 10, "test_type": "Ljung-Box"}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("lb_stat", f(&j["statistic"]), Tol::stat(96))
+        .scalar("lb_p", f(&j["p_value"]), Tol::p_value(96))
+        .finish();
+    assert_eq!(j["df"].as_u64(), Some(case_count(&case, "lb_df")));
+}
+
+/// STAT-46/STAT-77: timeseries_decompose (additive) through the dispatch path, pinned to
+/// decompose() (mcp_series_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_decompose_additive() {
+    let case = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_decompose",
+            json!({"dataset": "mcp_series_t3", "column": "y", "period": 12}),
+        )
+        .await,
+    );
+    let figure: Vec<f64> = j["seasonal_figure"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| f(&x["value"]))
+        .collect();
+    Check::new(&case)
+        .vector("add_figure", &figure, Tol::printed(4))
+        .scalar(
+            "add_trend_mean",
+            f(&j["summary"]["trend_mean"]),
+            Tol::printed(4),
+        )
+        .scalar(
+            "add_random_popvar",
+            f(&j["summary"]["random_variance"]),
+            Tol::printed(4),
+        )
+        .vector(
+            "add_seasonal_head",
+            &fs(&j["components_sample"]["first_5_seasonal"]),
+            Tol::printed(4),
+        )
+        .finish();
+    assert_eq!(
+        j["components_sample"]["first_5_trend"],
+        json!(["NA", "NA", "NA", "NA", "NA"])
+    );
+}
+
+/// STAT-46/STAT-77: timeseries_ar (Burg) through the dispatch path, pinned to
+/// ar(method = "burg") (mcp_series_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ar_burg() {
+    let case = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_ar",
+            json!({"dataset": "mcp_series_t3", "column": "z", "method": "burg"}),
+        )
+        .await,
+    );
+    assert_eq!(j["order"].as_u64(), Some(case_count(&case, "burg_order")));
+    Check::new(&case)
+        .vector("burg_ar", &fs(&j["ar_coefficients"]), Tol::coef(96))
+        .scalar("burg_var", f(&j["prediction_variance"]), Tol::stat(96))
+        .finish();
+}
+
+/// STAT-46/STAT-77: timeseries_runmed (constant end rule) through the dispatch path,
+/// pinned to runmed(endrule = "constant") (mcp_series_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_runmed_constant() {
+    let case = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_runmed",
+            json!({"dataset": "mcp_series_t3", "column": "z", "k": 5, "endrule": "constant"}),
+        )
+        .await,
+    );
+    // deviation TS-34: endrule 'median' is not pinned (R's runmed_median_head is recorded).
+    Check::new(&case)
+        .vector(
+            "runmed_constant_head",
+            &fs(&j["values_sample"]),
+            Tol::coef(96),
+        )
+        .finish();
+    assert_eq!(j["n"].as_u64(), Some(96));
+}
+
+/// STAT-46/STAT-77: embed, window, filter, diffinv, toeplitz, ARMAtoMA and acf2AR through
+/// the dispatch path, pinned to R's functions of the same names (mcp_series_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_series_utilities() {
+    let case = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    let z = |extra: Value| {
+        let mut a = json!({"dataset": "mcp_series_t3", "column": "z"});
+        a.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        a
+    };
+    let flat = |v: &Value, rows: usize| -> Vec<f64> {
+        v.as_array().unwrap()[..rows].iter().flat_map(fs).collect()
+    };
+    let em = json_of(&ok(&s, &se, "timeseries_embed", z(json!({"dimension": 3}))).await);
+    let wi = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_window",
+            z(json!({"start": 10, "end": 20})),
+        )
+        .await,
+    );
+    let fi = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_filter",
+            z(json!({"filter": [0.25, 0.25, 0.25, 0.25]})),
+        )
+        .await,
+    );
+    let di = json_of(&ok(&s, &se, "timeseries_diffinv", z(json!({"xi": [1.5]}))).await);
+    let ts = json_of(
+        &ok(
+            &s,
+            &se,
+            "linalg_toeplitz",
+            json!({"column": [1, 0.5, 0.25]}),
+        )
+        .await,
+    );
+    let ta = json_of(
+        &ok(
+            &s,
+            &se,
+            "linalg_toeplitz",
+            json!({"column": [1, 2, 3], "row": [1, 4, 5]}),
+        )
+        .await,
+    );
+    let ma = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_arma_to_ma",
+            json!({"ar": [0.5, -0.2], "ma": [0.4], "lag_max": 10}),
+        )
+        .await,
+    );
+    let ar = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_acf_to_ar",
+            json!({"acf": [1, 0.6, 0.3, 0.1]}),
+        )
+        .await,
+    );
+    assert!(fi["values_sample"][0].is_null(), "{fi}");
+    // acf2AR's rows, unpadded (R pads with zeros)
+    let rows = ar["ar_matrix"].as_array().unwrap();
+    let mut padded = Vec::new();
+    for r in rows {
+        let mut row = fs(r);
+        row.resize(rows.len(), 0.0);
+        padded.extend(row);
+    }
+    Check::new(&case)
+        .vector("embed3_head", &flat(&em["matrix_sample"], 10), Tol::exact())
+        .vector("window_11_20", &fs(&wi["values"]), Tol::exact())
+        .vector("filter4_head", &fs(&fi["values_sample"]), Tol::coef(96))
+        .vector("diffinv_head", &fs(&di["values_sample"]), Tol::coef(96))
+        .vector("toeplitz_sym", &flat(&ts["matrix"], 3), Tol::exact())
+        .vector("toeplitz_asym", &flat(&ta["matrix"], 3), Tol::exact())
+        .vector("arma_to_ma", &fs(&ma["psi_weights"]), Tol::coef(10))
+        .vector("acf2ar", &padded, Tol::coef(10))
+        .vector("acf2ar_pacf", &fs(&ar["partial_acf"]), Tol::coef(10))
+        .finish();
+    assert_eq!(
+        (em["n_rows"].as_u64(), di["n"].as_u64()),
+        (
+            Some(case_count(&case, "embed3_rows")),
+            Some(case_count(&case, "diffinv_n"))
+        )
+    );
+}
+
+/// STAT-46/STAT-77: timeseries_arma_acf through the dispatch path, pinned to ARMAacf()
+/// (ts_filter_ar_cpt).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_arma_acf() {
+    let case = Case::load("ts_filter_ar_cpt");
+    let (se, s) = session_with("ts_filter_ar_cpt");
+    let ar2 = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_arma_acf",
+            json!({"ar": [0.5, -0.3], "lag_max": 10}),
+        )
+        .await,
+    );
+    let pacf = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_arma_acf",
+            json!({"ar": [0.5, -0.3], "lag_max": 10, "pacf": true}),
+        )
+        .await,
+    );
+    let ma2 = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_arma_acf",
+            json!({"ma": [0.4, 0.25], "lag_max": 6}),
+        )
+        .await,
+    );
+    // The tool's PACF starts at lag 0 (1.0, as its ACF does); R's starts at lag 1.
+    let pacf_values = fs(&pacf["values"]);
+    assert_eq!((pacf_values[0], pacf["lags"][0].as_u64()), (1.0, Some(0)));
+    // deviation TS-14: ARMA(1, 1) is not pinned.
+    Check::new(&case)
+        .vector("armaacf_ar2", &fs(&ar2["values"]), Tol::coef(11))
+        .vector("armaacf_ar2_pacf", &pacf_values[1..], Tol::coef(11))
+        .vector("armaacf_ma2", &fs(&ma2["values"]), Tol::coef(11))
+        .finish();
+}
+
+/// STAT-46/STAT-77: timeseries_lag, ts_mstl and timeseries_arima_sim through the dispatch
+/// path. No values are pinned (deviations TS-29, TS-26, TOOL-28).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_lag_mstl_arima_sim() {
+    let (se, s) = session_with("mcp_series_t3");
+    // deviation TS-29: the values are x[t + 3]; R's dplyr::lag gives lag_dplyr3_head.
+    let lag = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_lag",
+            json!({"dataset": "mcp_series_t3", "column": "z", "k": 3}),
+        )
+        .await,
+    );
+    assert_eq!(
+        (lag["lag"].as_u64(), lag["n"].as_u64()),
+        (Some(3), Some(93))
+    );
+    // deviation TS-26: the MSTL components are not pinned.
+    let m = ok(
+        &s,
+        &se,
+        "ts_mstl",
+        json!({"dataset": "mcp_series_t3", "column": "y", "periods": [12]}),
+    )
+    .await;
+    assert!(
+        m.contains("Observations: 96") && m.contains("Seasonal Periods: [12]"),
+        "{m}"
+    );
+    let (ge, gs) = session_with("mcp_groups_t3");
+    let r = refused(
+        &gs,
+        &ge,
+        "ts_mstl",
+        json!({"dataset": "mcp_groups_t3", "column": "vi", "periods": [3]}),
+    )
+    .await;
+    assert!(r.contains("missing value"), "{r}");
+    // TOOL-28: sd is not asserted.
+    let args = json!({"n": 50, "ar": [0.5], "seed": 42});
+    let a = json_of(&ok(&s, &se, "timeseries_arima_sim", args.clone()).await);
+    let b = json_of(&ok(&s, &se, "timeseries_arima_sim", args).await);
+    assert_eq!(a["values_sample"], b["values_sample"]);
+    assert_eq!(a["n"].as_u64(), Some(50));
+    assert_eq!(fs(&a["values_sample"]).len(), 50);
+}
