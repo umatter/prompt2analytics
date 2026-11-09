@@ -250,8 +250,8 @@
         "cli_munge_ols_grunfeld"
       ],
       "tests": [
-        "p2a-cli::tier3::wp60_models::test_cli_munge_persists_across_invocations",
-        "p2a-cli::tier3::wp60_models::test_cli_derived_dataset_names_replacement_and_errors"
+        "p2a-cli::tier3::wp60_models::test_validate_cli_munge_persists_across_invocations",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_derived_dataset_names_replacement_and_errors"
       ],
       "quantities": [
         "OLS coefficients, HC1 SEs, t, p, R^2, adjusted R^2 and n on the derived subset",

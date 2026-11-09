@@ -1217,7 +1217,7 @@ fn test_validate_cli_pp_test_internals() {
 /// CLI-4: every invocation is a new process; a munge result and a generated dataset are there in
 /// the next one.
 #[test]
-fn test_cli_munge_persists_across_invocations() {
+fn test_validate_cli_munge_persists_across_invocations() {
     let case = Case::load("cli_munge_ols_grunfeld");
     let n = case.scalar("sel_n") as usize; // 200
     let s = temp_session();
@@ -1334,7 +1334,7 @@ fn test_cli_munge_persists_across_invocations() {
 /// CLI-4: odd names stay inside the sidecar; a dataset loaded over a derived one drops the stale
 /// file; a result that cannot be stored is an error, not "Created dataset".
 #[test]
-fn test_cli_derived_dataset_names_replacement_and_errors() {
+fn test_validate_cli_derived_dataset_names_replacement_and_errors() {
     let case = Case::load("cli_munge_ols_grunfeld");
     let s = temp_session();
     let g = s.load(&case);
