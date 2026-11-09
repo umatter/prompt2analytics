@@ -275,21 +275,36 @@ fn execute_load(
 fn execute_list(format: &OutputFormat, session: Option<&mut SessionManager>) -> anyhow::Result<()> {
     match session {
         Some(mgr) => {
-            let datasets = mgr.list_datasets();
-            if datasets.is_empty() {
+            // datasets load lazily: read each one so that a source that is gone is
+            // warned about (by get_dataset) and listed apart, not as loaded
+            let mut names: Vec<String> = mgr.list_datasets().into_iter().cloned().collect();
+            names.sort();
+            let (loaded, unavailable): (Vec<String>, Vec<String>) = names
+                .into_iter()
+                .partition(|name| mgr.get_dataset(name).is_some());
+            if loaded.is_empty() && unavailable.is_empty() {
                 print_message("No datasets loaded", format);
             } else {
                 match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "datasets": datasets
-                        });
+                        let mut json = serde_json::json!({ "datasets": loaded });
+                        if !unavailable.is_empty() {
+                            json["unavailable"] = serde_json::json!(unavailable);
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
-                        println!("Loaded datasets:");
-                        for name in datasets {
-                            println!("  - {}", name);
+                        if !loaded.is_empty() {
+                            println!("Loaded datasets:");
+                            for name in &loaded {
+                                println!("  - {}", name);
+                            }
+                        }
+                        if !unavailable.is_empty() {
+                            println!("Datasets whose source could not be read:");
+                            for name in &unavailable {
+                                println!("  - {}", name);
+                            }
                         }
                     }
                 }
