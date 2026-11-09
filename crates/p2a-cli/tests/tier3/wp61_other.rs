@@ -1854,3 +1854,89 @@ fn test_cli_kmeans_notes() {
     assert_keys(&j, &["converged", "iterations", "warnings"]);
     assert!(s.ok(&args).contains("Converged: "));
 }
+
+// ---------------------------------------------------------------------------------------------
+// viz
+// ---------------------------------------------------------------------------------------------
+
+/// DATA-24 CLI part: viz residuals passed no leverage, so the core used the one-predictor formula
+/// for a three-regressor model. R: cli_viz_residuals (lm(mpg ~ wt + hp + qsec): hatvalues,
+/// rstandard, cooks.distance).
+#[test]
+fn test_validate_cli_viz_residuals_hat_values() {
+    let case = Case::load("cli_viz_residuals");
+    let s = temp_session();
+    let d = s.load(&case);
+    let png = s.dir().join("r.png");
+    let j = s.json(&[
+        "viz",
+        "residuals",
+        &d,
+        "-y",
+        "mpg",
+        "-x",
+        "wt",
+        "hp",
+        "qsec",
+        "-f",
+        png.to_str().unwrap(),
+    ]);
+    Check::new(&case)
+        .vector("hat", &f64s(field(&j, "leverage")), Tol::coef(32))
+        .vector(
+            "rstandard",
+            &f64s(field(&j, "standardized_residuals")),
+            Tol::stat(32),
+        )
+        .vector("cooks", &f64s(field(&j, "cooks_distance")), Tol::stat(32))
+        .scalar("sigma", num(field(&j, "sigma")), Tol::stat(32))
+        .scalar("rank", num(field(&j, "n_params")), Tol::exact())
+        .scalar("n", num(field(&j, "n_obs")), Tol::exact())
+        .finish();
+    for suffix in ["", "_qq", "_scale_location", "_leverage"] {
+        assert!(
+            s.dir().join(format!("r{suffix}.png")).exists(),
+            "r{suffix}.png"
+        );
+    }
+    assert_eq!(strings(field(&j, "files")).len(), 4);
+    assert_keys(&j, &["warnings", "message"]);
+}
+
+/// CLI-14: viz dendrogram ran Ward for any linkage it did not know; its JSON names the linkage.
+#[test]
+fn test_cli_viz_dendrogram_linkage() {
+    let s = temp_session();
+    let d = load_repo_csv(&s, "validation/datasets/generated/hclust_60.csv", "h60");
+    let png = s.dir().join("tree.png");
+    let jd = s.json(&[
+        "viz",
+        "dendrogram",
+        &d,
+        "--cols",
+        "a",
+        "b",
+        "c",
+        "--linkage",
+        "upgmc",
+        "-f",
+        png.to_str().unwrap(),
+    ]);
+    assert_eq!(field(&jd, "linkage"), "centroid");
+    assert!(png.exists());
+    assert_usage_errors(&[(
+        vec![
+            "viz",
+            "dendrogram",
+            "d",
+            "--cols",
+            "a",
+            "b",
+            "--linkage",
+            "ward3",
+            "-f",
+            "t.png",
+        ],
+        "centroid",
+    )]);
+}

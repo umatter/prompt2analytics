@@ -264,3 +264,22 @@ warnings.
 |---|---|---|
 | `test_validate_cli_pca_transform` | `cli_pca_scores` `scores` (60 x 3, sign-aligned), `sdev` | `Tol::coef(60)`, `Tol::stat(60)` |
 | `test_validate_cli_linkage_names` | `hclust_methods` `average_cutree3` (same partition), `average_height` (`--linkage upgma`) | exact; `Tol::coef(60)` |
+
+### `viz residuals`, `viz dendrogram`
+
+`viz residuals` fitted the OLS model and passed no leverage to the residual diagnostics, so the
+standardized residuals and Cook's distance of a model with several regressors came from the
+one-predictor formula (Cook's D of the first mtcars row 0.037 instead of R's 0.019 for
+`mpg ~ wt + hp + qsec`). It now fits by pivoted QR (`lm.fit`), passes the hat values
+x_i' (X'X)^-1 x_i and the rank to the diagnostics, and in `-F json` prints them with the four
+files it wrote (`files`, `n_obs`, `n_params`, `sigma`, `leverage`, `standardized_residuals`,
+`cooks_distance`, notes). `viz dendrogram --linkage` takes hclust's eight names (it ran Ward
+for anything it did not know) and its JSON names the linkage it ran.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_viz_residuals_hat_values` | `cli_viz_residuals` `hat`, `rstandard`, `cooks`, `sigma`, `rank`, `n` | `Tol::coef(32)`, `Tol::stat(32)`, exact |
+
+`cli_viz_residuals` (`validation/r/cases/cli_other.R`) reads `cli_mtcars.csv`, the four model
+columns of mtcars, and checks that its hat values and fitted values equal the committed
+`viz_residual_diag.csv` model.
