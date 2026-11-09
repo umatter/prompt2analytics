@@ -347,9 +347,15 @@ pub struct FillNaRequest {
 
     /// Fill strategy
     #[schemars(
-        description = "Fill strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
+        description = "Fill strategy: 'mean' or 'median' of the observed values, 'mode' (the most frequent observed value), 'forward' or 'backward' (the last or next observed value), 'zero', or 'constant' (with 'value'). Case-insensitive; aliases 'ffill'/'locf', 'bfill'/'nocb', 'most_frequent'."
     )]
     pub strategy: String,
+
+    /// The fill value of strategy 'constant'
+    #[schemars(
+        description = "The fill value for strategy 'constant' (required then, refused with the other strategies). Kept exactly as given and read in each column's own type: a number for numeric columns, TRUE/FALSE for booleans, YYYY-MM-DD for dates, any text for text and categorical columns."
+    )]
+    pub value: Option<String>,
 
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]

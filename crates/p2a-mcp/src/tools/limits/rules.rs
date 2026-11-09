@@ -1106,7 +1106,6 @@ pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
     ("stats_spline", "n"),
     ("ts_varma", "long_var_order"),
     ("panel_unit_root", "pmax"),
-    ("munge_fill_na", "value"),
 ];
 
 #[cfg(test)]

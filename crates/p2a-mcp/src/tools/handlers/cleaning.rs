@@ -12,13 +12,15 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
+use p2a_core::data::munging::clean::fill_na_with;
 use p2a_core::data::{
-    CleaningOperation, CleaningSession, FillStrategy, SuggestionPriority, deduplicate, drop_na,
-    fill_na, filter, generate_quality_profile, generate_suggestions, preview_cleaning, replace,
-    to_lowercase, to_uppercase, trim, verify_cleaning,
+    CleaningOperation, CleaningSession, SuggestionPriority, deduplicate, drop_na, filter,
+    generate_quality_profile, generate_suggestions, preview_cleaning, replace, to_lowercase,
+    to_uppercase, trim, verify_cleaning,
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::munging::{fill_label, parse_fill_strategy};
 use crate::tools::requests::cleaning::{
     CleaningRollbackRequest, CleaningSessionApplyRequest, CleaningSessionCheckpointsRequest,
     CleaningSessionStartRequest, CleaningSessionStatusRequest, DataQualityProfileRequest,
@@ -107,7 +109,7 @@ impl AnalyticsServer {
 
     /// Preview what a cleaning operation would do before applying it.
     #[tool(
-        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter."
+        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant."
     )]
     pub async fn preview_cleaning(
         &self,
@@ -144,11 +146,20 @@ impl AnalyticsServer {
                     .clone();
                 CleaningOperation::ToUppercase { column }
             }
-            "fill_na" | "fillna" => CleaningOperation::FillNa {
-                columns: request.columns,
-                strategy: request.strategy.unwrap_or_else(|| "constant".to_string()),
-                value: request.value,
-            },
+            "fill_na" | "fillna" => {
+                let strategy = match parse_fill_strategy(
+                    request.strategy.as_deref(),
+                    request.value.as_deref(),
+                ) {
+                    Ok(strategy) => strategy,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
+                CleaningOperation::FillNa {
+                    columns: request.columns,
+                    strategy: strategy.kind().to_string(),
+                    value: request.value,
+                }
+            }
             "drop_na" | "dropna" => CleaningOperation::DropNa {
                 columns: request.columns,
                 how: request.how.unwrap_or_else(|| "any".to_string()),
@@ -339,7 +350,7 @@ impl AnalyticsServer {
 
     /// Apply a cleaning operation within a session.
     #[tool(
-        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed."
+        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant."
     )]
     pub async fn cleaning_session_apply(
         &self,
@@ -371,13 +382,17 @@ impl AnalyticsServer {
                     McpError::invalid_request(format!("{operation} requires a column"), None)
                 })
         };
-        type Apply = Box<
-            dyn FnOnce(&p2a_core::data::Dataset) -> Result<p2a_core::data::Dataset, String> + Send,
+        type Apply<'a> = Box<
+            dyn FnOnce(&p2a_core::data::Dataset) -> Result<p2a_core::data::Dataset, String>
+                + Send
+                + 'a,
         >;
+        // What a fill wrote, for the reply (the session's report counts cells, not values).
+        let mut fill_note = String::new();
 
         // The operation and its required parameters are resolved before the
         // session is touched, so a request that is refused copies nothing.
-        let (description, apply): (String, Apply) = match operation_type.as_str() {
+        let (description, apply): (String, Apply<'_>) = match operation_type.as_str() {
             "trim" => {
                 let cols = request.columns.clone();
                 (
@@ -402,23 +417,22 @@ impl AnalyticsServer {
                 )
             }
             "fill_na" | "fillna" => {
-                let strategy_str = request.strategy.as_deref().unwrap_or("constant");
-                let value = request.value.clone();
-                let cols = request.columns.clone();
-                let strategy = match strategy_str {
-                    "mean" => FillStrategy::Mean,
-                    "median" => FillStrategy::Median,
-                    "forward" => FillStrategy::Forward,
-                    "backward" => FillStrategy::Backward,
-                    "constant" | _ => {
-                        FillStrategy::Constant(value.unwrap_or_else(|| "0".to_string()))
-                    }
+                let strategy = match parse_fill_strategy(
+                    request.strategy.as_deref(),
+                    request.value.as_deref(),
+                ) {
+                    Ok(strategy) => strategy,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
                 };
+                let cols = request.columns.clone();
+                let note = &mut fill_note;
                 (
-                    format!("fill_na with {:?}", strategy),
+                    format!("fill_na ({})", fill_label(&strategy)),
                     Box::new(move |ds| {
-                        fill_na(ds, to_str_slice(&cols).as_deref(), strategy)
-                            .map_err(|e| e.to_string())
+                        let outcome = fill_na_with(ds, to_str_slice(&cols).as_deref(), &strategy)
+                            .map_err(|e| e.to_string())?;
+                        *note = outcome.summary();
+                        Ok(outcome.dataset)
                     }),
                 )
             }
@@ -490,10 +504,15 @@ impl AnalyticsServer {
             Arc::make_mut(shared).apply_operation(&operation_type, &description, params, apply);
 
         match result {
-            Ok(report) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Operation applied successfully!\n\n{}",
-                report.summary()
-            ))])),
+            Ok(report) => {
+                let mut reply = String::from("Operation applied successfully!\n\n");
+                if !fill_note.is_empty() {
+                    reply.push_str(&fill_note);
+                    reply.push_str("\n\n");
+                }
+                reply.push_str(&report.summary());
+                Ok(CallToolResult::success(vec![Content::text(reply)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Operation failed: {}",
                 e
@@ -691,7 +710,7 @@ impl AnalyticsServer {
                     s.estimated_impact.impact_description,
                     s.operation,
                     s.parameters.column.as_deref().unwrap_or("-"),
-                    s.parameters.value.as_deref().unwrap_or("-"),
+                    suggested_value(s.operation.as_str(), &s.parameters),
                     s.parameters.strategy.as_deref().unwrap_or("-"),
                 ));
 
@@ -709,6 +728,25 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+}
+
+/// The `- value:` of a suggestion. A computed fill value (the median or mode `suggest_cleaning`
+/// shows) is for reference only: `fill_na` computes it itself and refuses a value with any strategy
+/// but 'constant'.
+fn suggested_value(operation: &str, parameters: &p2a_core::data::SuggestionParameters) -> String {
+    let value = parameters.value.as_deref().unwrap_or("-");
+    match (
+        operation,
+        parameters.value.as_deref(),
+        parameters.strategy.as_deref(),
+    ) {
+        ("fill_na", Some(_), Some(strategy))
+            if !strategy.trim().eq_ignore_ascii_case("constant") =>
+        {
+            format!("{value} (shown for reference; pass only strategy '{strategy}' to fill_na)")
+        }
+        _ => value.to_string(),
     }
 }
 

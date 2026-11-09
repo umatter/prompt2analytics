@@ -34,13 +34,13 @@ pub struct PreviewCleaningRequest {
 
     /// Strategy for fill_na operations
     #[schemars(
-        description = "For fill_na: strategy to use ('mean', 'median', 'mode', 'forward', 'backward', 'constant')."
+        description = "For fill_na: 'mean', 'median', 'mode', 'forward', 'backward', 'zero' or 'constant' (case-insensitive). Omitted with a value: 'constant'. Omitted without a value: an error."
     )]
     pub strategy: Option<String>,
 
     /// Value for fill_na with constant, or replacement value
     #[schemars(
-        description = "For fill_na with constant: the fill value. For replace: the new value."
+        description = "For fill_na with strategy 'constant': the fill value, kept as given. For replace: the new value; 'NA', 'null' or '' write a missing value."
     )]
     pub value: Option<String>,
 
@@ -148,11 +148,15 @@ pub struct CleaningSessionApplyRequest {
     pub columns: Option<Vec<String>>,
 
     /// Strategy for fill_na operations
-    #[schemars(description = "For fill_na: strategy to use.")]
+    #[schemars(
+        description = "For fill_na: 'mean', 'median', 'mode', 'forward', 'backward', 'zero' or 'constant' (case-insensitive). Omitted with a value: 'constant'. Omitted without a value: an error."
+    )]
     pub strategy: Option<String>,
 
     /// Value for fill_na or replace
-    #[schemars(description = "For fill_na with constant or replace: the value.")]
+    #[schemars(
+        description = "For fill_na with strategy 'constant': the fill value, kept as given. For replace: the new value; 'NA', 'null' or '' write a missing value."
+    )]
     pub value: Option<String>,
 
     /// Old value for replace operation

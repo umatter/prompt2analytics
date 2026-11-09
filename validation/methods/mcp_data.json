@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_fill_na",
+      "name": "MCP munge_fill_na and the cleaning fill_na: mode fill, keyword parsing, constants from value",
+      "category": "interfaces",
+      "reference": "names(which.max(table(x))); tidyr::replace_na",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_munging_fill_mode"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_fill_na_mode"
+      ],
+      "quantities": [
+        "filled k, f, s through munge_fill_na (strategy 'mode' and 'MODE')",
+        "fill summary (cells and values per column)",
+        "preview_cleaning and cleaning_session_apply fill values for 'mode'"
+      ],
+      "tolerance": "exact (fills copy observed values)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

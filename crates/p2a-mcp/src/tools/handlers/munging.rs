@@ -30,7 +30,7 @@ use p2a_core::{
             MungeError,
             MutateExpr,
             bin_with,
-            clean::fill_na_with,
+            clean::{FillStrategyKind, fill_na_with},
             concat,
             deduplicate,
             diff,
@@ -81,6 +81,48 @@ use p2a_core::{
     regression::{CovarianceType, run_ols},
     stats::correlation_matrix,
 };
+
+/// The fill strategy of `munge_fill_na` and of the cleaning tools' `fill_na`: keywords are case-
+/// and separator-insensitive ([`FillStrategy::parse`]) and the constant comes from `value` with its
+/// case kept. No strategy with a value means 'constant'; neither is an error. An error is the text
+/// of a tool error; an unknown keyword adds how to pass a constant.
+pub(crate) fn parse_fill_strategy(
+    strategy: Option<&str>,
+    value: Option<&str>,
+) -> Result<FillStrategy, String> {
+    let keyword = match (strategy.map(str::trim).filter(|s| !s.is_empty()), value) {
+        (Some(keyword), _) => keyword,
+        (None, Some(_)) => "constant",
+        (None, None) => {
+            return Err(format!(
+                "fill_na needs a strategy ({}) or a fill value in 'value'",
+                FillStrategyKind::choices().help()
+            ));
+        }
+    };
+    FillStrategy::parse(keyword, value).map_err(|e| {
+        let mut message = match e {
+            MungeError::InvalidExpression(m) => m,
+            other => other.to_string(),
+        };
+        if keyword.parse::<FillStrategyKind>().is_err() {
+            message.push_str(
+                ". To fill with a constant, use strategy 'constant' and put the fill value in \
+                 'value'.",
+            );
+        }
+        message
+    })
+}
+
+/// How a cleaning log names a fill strategy: "mode", "constant 'Unknown'" (the value cut to 40
+/// characters).
+pub(crate) fn fill_label(strategy: &FillStrategy) -> String {
+    match strategy {
+        FillStrategy::Constant(v) => format!("constant '{}'", p2a_text::ellipsize(v, 40)),
+        other => other.kind().to_string(),
+    }
+}
 
 #[tool_router(router = munging_router, vis = "pub")]
 impl AnalyticsServer {
@@ -1252,7 +1294,7 @@ impl AnalyticsServer {
 
     /// Fill missing values using a strategy.
     #[tool(
-        description = "Fill missing values (null, and NaN in float columns) using a strategy: 'mean', 'median', 'forward', 'backward', 'zero', or a constant value. Mean and median use the observed values; a column with no observed value is an error."
+        description = "Fill missing values (null, and NaN in float columns). strategy: 'mean' or 'median' of the observed values (numeric columns; integer columns become float), 'mode' (the most frequent observed value; ties go to the first value in sorted order, as R's names(which.max(table(x)))), 'forward'/'backward' (the last or next observed value, as tidyr::fill), 'zero' (0, FALSE or an empty string), or 'constant' with the fill value in 'value' (kept as given and read in the column's type). Keywords are case-insensitive. Without 'columns' every column is filled, and a column whose type cannot take the strategy or the constant is skipped and listed. A column without observed values is an error for mean, median and mode."
     )]
     pub async fn munge_fill_na(
         &self,
@@ -1277,16 +1319,10 @@ impl AnalyticsServer {
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
-        let strategy = match request.strategy.to_lowercase().as_str() {
-            "mean" => FillStrategy::Mean,
-            "median" => FillStrategy::Median,
-            "forward" => FillStrategy::Forward,
-            "backward" => FillStrategy::Backward,
-            "zero" => FillStrategy::Zero,
-            val => {
-                // Try to use as a constant value string
-                FillStrategy::Constant(val.to_string())
-            }
+        let strategy = match parse_fill_strategy(Some(&request.strategy), request.value.as_deref())
+        {
+            Ok(strategy) => strategy,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let result_name = request
@@ -1325,17 +1361,17 @@ impl AnalyticsServer {
                     };
                     match &strategy {
                         FillStrategy::Constant(value) => format!(
-                            "filling {nulls} nulls with the {}-byte constant `strategy`",
+                            "filling {nulls} nulls with the {}-byte constant `value`",
                             value.len()
                         ),
                         FillStrategy::Mean | FillStrategy::Median => format!(
                             "filling {nulls} nulls with the `strategy` {}, which makes each \
                              numeric column Float64",
-                            request.strategy.to_lowercase()
+                            strategy.kind()
                         ),
                         _ => format!(
                             "filling {nulls} nulls with the `strategy` {}",
-                            request.strategy.to_lowercase()
+                            strategy.kind()
                         ),
                     }
                 },
@@ -1365,8 +1401,7 @@ impl AnalyticsServer {
         datasets.insert(result_name.clone(), outcome.dataset);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Filled null values with strategy '{}', saved as '{}'. {}.",
-            request.strategy, result_name, summary
+            "{summary}\nSaved as '{result_name}'."
         ))]))
     }
 
@@ -3619,10 +3654,11 @@ mod tests {
             .map(|i| (i % 10 == 0).then_some("kept"))
             .collect();
         let qs = QuotaSession::new(vec![("d", df!("s" => s, "x" => noise(2_000)).unwrap())]);
-        let req = |strategy: &str, result: &str| FillNaRequest {
+        let req = |value: &str, result: &str| FillNaRequest {
             dataset: "d".into(),
             columns: Some(vec!["s".into()]),
-            strategy: strategy.into(),
+            strategy: "constant".into(),
+            value: Some(value.into()),
             result_name: Some(result.into()),
         };
         // 1,800 nulls filled with 1,000 bytes each: about 1.8 MB.
@@ -3631,7 +3667,7 @@ mod tests {
             256 << 10,
             qs.server
                 .munge_fill_na(Parameters(req(&"z".repeat(1_000), "big"))),
-            &["1800 nulls", "`strategy`"],
+            &["1800 nulls", "`value`"],
             qs.server.munge_fill_na(Parameters(req("none", "small"))),
             "small",
         );
@@ -4099,7 +4135,8 @@ mod tests {
             server.munge_fill_na(Parameters(FillNaRequest {
                 dataset: "d".into(),
                 columns: None,
-                strategy: "none".into(),
+                strategy: "constant".into(),
+                value: Some("none".into()),
                 result_name: Some("f".into()),
             })),
         );
@@ -4140,6 +4177,7 @@ mod tests {
                         dataset: "d".into(),
                         columns: Some(vec!["s".into()]),
                         strategy: strategy.into(),
+                        value: None,
                         result_name: Some(strategy.into()),
                     })),
                 )
@@ -4496,6 +4534,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_fill_strategy_reads_keywords_and_values() {
+        // DATA-28 / LLM-12: keywords case-insensitive with aliases, constants from `value`, unknown refused
+        assert!(matches!(
+            parse_fill_strategy(Some("ffill"), None),
+            Ok(FillStrategy::Forward)
+        ));
+        assert!(matches!(
+            parse_fill_strategy(Some("Most Frequent"), None),
+            Ok(FillStrategy::Mode)
+        ));
+        assert!(
+            matches!(parse_fill_strategy(None, Some("Unknown")), Ok(FillStrategy::Constant(v)) if v == "Unknown")
+        );
+        assert!(
+            matches!(parse_fill_strategy(Some(" "), Some("x")), Ok(FillStrategy::Constant(v)) if v == "x")
+        );
+        let none = parse_fill_strategy(None, None).unwrap_err();
+        assert_eq!(
+            none,
+            "fill_na needs a strategy (mean | median | mode | forward | backward | zero | constant) or a fill value in 'value'"
+        );
+        let unknown = parse_fill_strategy(Some("Unknown"), None).unwrap_err();
+        assert_eq!(
+            unknown,
+            "unknown fill strategy 'Unknown'; expected one of: mean, median, mode, forward, backward, zero, constant. \
+                            To fill with a constant, use strategy 'constant' and put the fill value in 'value'."
+        );
+        let stray = parse_fill_strategy(Some("mean"), Some("3")).unwrap_err();
+        assert!(
+            stray.contains("only used with strategy 'constant', not 'mean'")
+                && !stray.contains("To fill with"),
+            "{stray}"
+        );
+        assert_eq!(
+            fill_label(&FillStrategy::Constant("Unknown".into())),
+            "constant 'Unknown'"
+        );
+        assert_eq!(fill_label(&FillStrategy::Mode), "mode");
+    }
+
+    #[test]
     fn result_bounds_never_undercount_what_the_quotas_charge() {
         // polars shares a String column's buffers when it gathers from one
         // array and copies each value it gathers from several.
@@ -4564,6 +4643,7 @@ mod tests {
             FillStrategy::Forward,
             FillStrategy::Backward,
             FillStrategy::Zero,
+            FillStrategy::Mode,
         ] {
             for columns in [None, Some(&["s", "x"][..])] {
                 let built = fill_na(&ds, columns, strategy.clone());
@@ -4577,6 +4657,24 @@ mod tests {
                 );
             }
         }
+        // A mode fill copies the most frequent value into every null: a long
+        // mode and many nulls.
+        let mut moded = df.clone();
+        let m = chunked_like(&df, "m", |i| match i % 10 {
+            0 => Some("M".repeat(100)),
+            1 => Some(format!("u{i}")),
+            _ => None,
+        });
+        moded.with_column(m.into_column()).unwrap();
+        covers(
+            "munge_fill_na mode of long text",
+            bound::fill_na(&moded, Some(&["m"]), &FillStrategy::Mode).unwrap(),
+            fill_na(
+                &Dataset::new(moded.clone()),
+                Some(&["m"]),
+                FillStrategy::Mode,
+            ),
+        );
         // Mostly nulls, two long values, a fill that crosses the arrays: the
         // filled text is counted exactly.
         let sparse = with_sparse_text(&df);
