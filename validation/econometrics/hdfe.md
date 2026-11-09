@@ -149,7 +149,10 @@ with `tolerance` the configured 1e-8. The rule is relative: before Tier 3 it was
 `||change|| < 1e-8`, so a column of order 1e9 could never satisfy it and raised
 `ConvergenceFailure` after 10000 sweeps, while a column of order 1e-6 stopped after one. The
 floor of 1e-6 of the column's own norm keeps a column that the fixed effects absorb (its
-demeaned norm tends to 0) from chasing rounding noise. An R transcription of the MAP stops
+demeaned norm tends to 0) from chasing rounding noise. The floor uses the column's uncentred
+norm, so it is loose for a column whose mean is large against its variation (values near 1e9
+that vary by 1, say): there `1e-6 ||column||` can exceed the demeaned norm, and the sweeps stop
+while the demeaned column is still accurate only to that floor rather than to the tolerance. An R transcription of the MAP stops
 after 10, 10 and 10 sweeps on `y` scaled by 1e-6, 1 and 1e6 under the relative rule, against
 11, 11 and 18 under the absolute one, and agrees with fixest to 1e-15 on both scales.
 
