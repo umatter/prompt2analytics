@@ -407,8 +407,13 @@ pub fn cov_wt_from_slice(
     })?;
 
     let method = match method.to_lowercase().as_str() {
+        "unbiased" => CovWtMethod::Unbiased,
         "ml" => CovWtMethod::ML,
-        _ => CovWtMethod::Unbiased,
+        _ => {
+            return Err(EconError::InvalidSpecification {
+                message: format!("unknown method '{method}'; expected one of: unbiased, ML"),
+            });
+        }
     };
 
     cov_wt(&x, weights, compute_cor, CovWtCenter::WeightedMean, method)
@@ -441,6 +446,19 @@ pub fn run_cov_wt(
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn test_cov_wt_rejects_unknown_method() {
+        // An unknown method used to fall back to the unbiased estimate.
+        let e = cov_wt_from_slice(&[1.0, 2.0, 3.5, 4.0], 2, 2, None, false, "biased").unwrap_err();
+        match e {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("unbiased, ML"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        assert!(cov_wt_from_slice(&[1.0, 2.0, 3.5, 4.0], 2, 2, None, false, "ML").is_ok());
+    }
 
     #[test]
     fn test_weighted_mean_equal_weights() {

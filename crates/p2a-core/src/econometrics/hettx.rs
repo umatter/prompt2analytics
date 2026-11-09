@@ -150,11 +150,15 @@ pub struct HetTxConfig {
     /// Number of nearest neighbors for matching (default: 3).
     /// Must be at least 1 with [`EffectEstimationMethod::Matching`].
     pub n_neighbors: usize,
-    /// Random seed for reproducibility
+    /// Random seed of the permutations (`None`: [`HETTX_DEFAULT_SEED`])
     pub seed: Option<u64>,
     /// Whether to compute variable importance in decomposition (default: true)
     pub compute_importance: bool,
 }
+
+/// The seed of the permutations when [`HetTxConfig::seed`] is `None`, so every run is
+/// reproducible (the MCP handler's default seed is the same value).
+pub const HETTX_DEFAULT_SEED: u64 = 42;
 
 impl Default for HetTxConfig {
     fn default() -> Self {
@@ -562,7 +566,7 @@ fn run_hettx_with_names(
     // Initialize RNG
     let mut rng: ChaCha8Rng = match config.seed {
         Some(s) => ChaCha8Rng::seed_from_u64(s),
-        None => ChaCha8Rng::from_entropy(),
+        None => ChaCha8Rng::seed_from_u64(HETTX_DEFAULT_SEED),
     };
 
     // The null distribution has one slot per permutation; refuse an impossible
