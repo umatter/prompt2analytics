@@ -637,6 +637,12 @@ pub struct GlmnetRequest {
         description = "Model family: 'gaussian' (default; also 'linear', 'normal') for linear regression, 'binomial' (also 'logistic', 'logit') for logistic regression. Other values are an error."
     )]
     pub family: Option<String>,
+
+    /// Coefficients at every lambda of the path
+    #[schemars(
+        description = "Include the intercept and the coefficients at every lambda of the path (default false). Without it each path entry lists lambda, df and the deviance ratio, and the coefficients are given once, at the last (smallest) lambda, which keeps the reply short."
+    )]
+    pub path_coefficients: Option<bool>,
 }
 
 /// Request for cross-validated glmnet.
@@ -707,6 +713,12 @@ pub struct RidgeRequest {
         description = "Optional sequence of lambda (regularization) values. If omitted, automatically generates a path."
     )]
     pub lambda: Option<Vec<f64>>,
+
+    /// Coefficients at every lambda of the path
+    #[schemars(
+        description = "Include the intercept and the coefficients at every lambda of the path (default false). Without it each path entry lists lambda, df and the deviance ratio, and the coefficients are given once, at the last (smallest) lambda, which keeps the reply short."
+    )]
+    pub path_coefficients: Option<bool>,
 }
 
 /// Request for lasso regression (shortcut for glmnet with alpha=1).
@@ -730,4 +742,10 @@ pub struct LassoRequest {
         description = "Optional sequence of lambda (regularization) values. If omitted, automatically generates a path."
     )]
     pub lambda: Option<Vec<f64>>,
+
+    /// Coefficients at every lambda of the path
+    #[schemars(
+        description = "Include the intercept and the coefficients at every lambda of the path (default false). Without it each path entry lists lambda, df and the deviance ratio, and the coefficients are given once, at the last (smallest) lambda, which keeps the reply short."
+    )]
+    pub path_coefficients: Option<bool>,
 }

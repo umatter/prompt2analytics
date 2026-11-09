@@ -46,7 +46,8 @@ async fn test_validate_mcp_glmnet_returns_coefficients() {
             &server,
             &session,
             "regression_glmnet",
-            json!({"dataset": "glmnet_sim", "y": "y", "x": X8, "lambda": lams}),
+            json!({"dataset": "glmnet_sim", "y": "y", "x": X8, "lambda": lams,
+                   "path_coefficients": true}),
         )
         .await,
     );
@@ -106,7 +107,8 @@ async fn test_validate_mcp_glmnet_returns_coefficients() {
             &server,
             &session,
             "regression_ridge",
-            json!({"dataset": "glmnet_sim", "y": "y", "x": X8, "lambda": lams}),
+            json!({"dataset": "glmnet_sim", "y": "y", "x": X8, "lambda": lams,
+                   "path_coefficients": true}),
         )
         .await,
     );
@@ -122,7 +124,7 @@ async fn test_validate_mcp_glmnet_returns_coefficients() {
             &session,
             "regression_glmnet",
             json!({"dataset": "glmnet_sim", "y": "yb", "x": X8, "family": "Logistic",
-                   "lambda": [0.1, 0.03, 0.01]}),
+                   "lambda": [0.1, 0.03, 0.01], "path_coefficients": true}),
         )
         .await,
     );
@@ -139,7 +141,7 @@ async fn test_validate_mcp_glmnet_returns_coefficients() {
             &session,
             "regression_glmnet",
             json!({"dataset": "glmnet_sim", "y": "yk", "x": k30,
-                   "lambda": [0.0009602538655657498]}),
+                   "lambda": [0.0009602538655657498], "path_coefficients": true}),
         )
         .await,
     );
@@ -200,10 +202,54 @@ async fn test_validate_mcp_lasso_default_path() {
         .vector("path_lambda", &lambda, Tol::coef(150))
         .vector("path_df", &df, Tol::exact())
         .finish();
+    // the default entries carry no coefficients; path_coefficients adds all 8 to each
+    assert!(path.iter().all(|f| f.get("coefficients").is_none()));
+    let full = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_lasso",
+            json!({"dataset": "glmnet_sim", "y": "y", "x": X8, "path_coefficients": true}),
+        )
+        .await,
+    );
+    let full_path = path_of(&full);
+    assert_eq!(
+        full_path.iter().map(|f| &f["lambda"]).collect::<Vec<_>>(),
+        path.iter().map(|f| &f["lambda"]).collect::<Vec<_>>()
+    );
     assert!(
-        path.iter()
+        full_path
+            .iter()
             .all(|f| f["coefficients"].as_array().unwrap().len() == 8)
     );
+    assert_eq!(&j["at_last_lambda"], full_path.last().unwrap());
+    assert!(full.get("at_last_lambda").is_none());
+}
+
+/// The default glmnet, lasso and ridge replies stay below the chat loop's 16 KB cut on the
+/// default 100-lambda path, with 8 and 30 predictors; path_coefficients is the long form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_glmnet_default_reply_fits_the_chat_budget() {
+    let (session, server) =
+        session_with_datasets(vec![("glmnet_sim", generated_dataset("glmnet_sim"))]);
+    let k30: Vec<String> = (1..=30).map(|j| format!("K{j}")).collect();
+    let x8: Vec<String> = X8.iter().map(|s| s.to_string()).collect();
+    for (y, x) in [("y", &x8), ("yk", &k30)] {
+        for tool in ["regression_glmnet", "regression_lasso", "regression_ridge"] {
+            let args = json!({"dataset": "glmnet_sim", "y": y, "x": x});
+            let t = text(&call(&server, &session, tool, args).await);
+            assert!(t.len() < 16_384, "{tool} {y}: {} bytes", t.len());
+            let j: Value = serde_json::from_str(&t).unwrap();
+            assert_eq!(j["path_coefficients"], false);
+            assert!(j["at_last_lambda"]["coefficients"].is_array(), "{tool} {y}");
+            let mut full_args = json!({"dataset": "glmnet_sim", "y": y, "x": x});
+            full_args["path_coefficients"] = json!(true);
+            let full = json_of(&call(&server, &session, tool, full_args).await);
+            assert_eq!(path_of(&full).len(), path_of(&j).len(), "{tool} {y}");
+            assert_eq!(&j["at_last_lambda"], path_of(&full).last().unwrap());
+        }
+    }
 }
 
 /// cv.glmnet: coefficients at lambda.min / lambda.1se equal the library's for the same seed;
@@ -278,8 +324,8 @@ async fn test_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed() {
 }
 
 /// The chat loop keeps only the head of a tool result (MAX_TOOL_RESULT_BYTES_IN_LOOP): the
-/// warnings and the selection summary come before the path, so the model sees which
-/// predictors the lasso keeps even when the full path is cut.
+/// default reply fits whole, and the warnings and the selection summary come before the path,
+/// so the model sees which predictors the lasso keeps even when a long path is cut.
 #[cfg(feature = "llm")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_mcp_glmnet_reply_survives_the_chat_loop_cut() {
@@ -308,8 +354,12 @@ async fn test_mcp_glmnet_reply_survives_the_chat_loop_cut() {
         assert!(cut.contains("\"warnings\":"), "{y}: no warnings in the cut");
         let more = t.find("\"more_selected\":").expect("more_selected");
         assert!(more < cut.len(), "{y}: the selection summary is cut");
+        // the default reply (no per-lambda coefficients) is not cut at all, and the path
+        // comes last
+        assert_eq!(cut, t, "{y}: the default reply is cut");
         let path_at = t.find("\"path\":").expect("path");
-        assert!(path_at < 4096, "{y}: the path starts at byte {path_at}");
+        let last_at = t.find("\"at_last_lambda\":").expect("at_last_lambda");
+        assert!(more < last_at && last_at < path_at, "{y}");
         // marshalling only: each listed entry index is the library's first non-zero fit
         let x_refs: Vec<&str> = x.iter().map(String::as_str).collect();
         let core = p2a_core::regression::run_lasso(&ds, y, &x_refs, None).unwrap();

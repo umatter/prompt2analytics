@@ -11,7 +11,11 @@ estimators are pinned in p2a-core; what the MCP path adds, and what these tests 
   `regression_cv_glmnet` return the coefficient path as compact JSON, with the warnings and a
   selection summary (order of entry, the lambda where each variable enters, its estimate at
   the smallest lambda) before the path, so the first 16 KB of a reply, which the chat loop
-  keeps, still answer which predictors are selected. `regression_gls` returns the
+  keeps, still answer which predictors are selected. By default the glmnet, lasso and ridge
+  path entries list lambda, df and the deviance ratio, and the coefficients are given once, at
+  the last lambda (`at_last_lambda`), which keeps a 100-lambda reply with 30 predictors under
+  16 KB; `path_coefficients: true` adds the intercept and coefficients at every lambda, and the
+  coefficient pins read that form. `regression_gls` returns the
   coefficients, the correlation parameter and whether it was estimated (REML or ML) or
   user-supplied, the method, group and number of groups, sigma, the log-likelihood, AIC and
   BIC as nlme, and convergence.
@@ -103,6 +107,7 @@ R-pinned.
 |---|---|---|---|
 | `test_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed` | regression_cv_glmnet | library equality for the same seed | REG-8 |
 | `test_mcp_glmnet_reply_survives_the_chat_loop_cut` | regression_lasso | entry order equals the library's | REG-8 |
+| `test_mcp_glmnet_default_reply_fits_the_chat_budget` | regression_glmnet, _lasso, _ridge | default reply under 16,384 bytes with 8 and 30 predictors; `at_last_lambda` equals the last `path_coefficients` entry | REG-8 |
 | `test_mcp_gls_options_and_errors` | regression_gls | refusals | TOOL-19 |
 | `test_mcp_quantreg_empty_taus_is_error` | regression_quantreg | refusals | TOOL-14 |
 | `test_mcp_regression_options_reject_unknown` | bgtest, resettest, bootstrap_cov, step, nls | refusals | TOOL-32 |

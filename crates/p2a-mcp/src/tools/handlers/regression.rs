@@ -189,8 +189,11 @@ fn glmnet_selection(r: &p2a_core::regression::GlmnetResult) -> (serde_json::Valu
     (serde_json::Value::from(list), more, never)
 }
 
-/// The JSON reply of regression_glmnet, regression_lasso and regression_ridge.
-fn glmnet_json(r: &p2a_core::regression::GlmnetResult) -> String {
+/// The JSON reply of regression_glmnet, regression_lasso and regression_ridge. With
+/// `path_coefficients` every path entry carries its intercept and coefficients; without it the
+/// entries list lambda, df and the deviance ratio, and `at_last_lambda` gives the coefficients
+/// at the last lambda, so a default 100-lambda path stays well inside the chat loop's cut.
+fn glmnet_json(r: &p2a_core::regression::GlmnetResult, path_coefficients: bool) -> String {
     use serde_json::json;
     let (selection, more, never) = glmnet_selection(r);
     let listed = if r.variable_names.len() <= GLMNET_LISTED_MAX {
@@ -201,9 +204,22 @@ fn glmnet_json(r: &p2a_core::regression::GlmnetResult) -> String {
     let path: Vec<serde_json::Value> = r
         .fits
         .iter()
-        .map(|f| glmnet_fit_json(&r.variable_names, f))
+        .map(|f| {
+            if path_coefficients {
+                glmnet_fit_json(&r.variable_names, f)
+            } else {
+                json!({"lambda": f.lambda, "df": f.df, "dev_ratio": f.dev_ratio})
+            }
+        })
         .collect();
-    ordered_json(&[
+    let at_last = if path_coefficients {
+        serde_json::Value::Null
+    } else {
+        r.fits.last().map_or(serde_json::Value::Null, |f| {
+            glmnet_fit_json(&r.variable_names, f)
+        })
+    };
+    let mut pairs = vec![
         ("model", json!("glmnet")),
         ("family", json!(r.family.to_string())),
         ("alpha", json!(r.alpha)),
@@ -223,8 +239,13 @@ fn glmnet_json(r: &p2a_core::regression::GlmnetResult) -> String {
         ("more_selected", json!(more)),
         ("never_selected", json!(never)),
         ("coefficients_listed", json!(listed)),
-        ("path", json!(path)),
-    ])
+        ("path_coefficients", json!(path_coefficients)),
+    ];
+    if !at_last.is_null() {
+        pairs.push(("at_last_lambda", at_last));
+    }
+    pairs.push(("path", json!(path)));
+    ordered_json(&pairs)
 }
 
 /// The JSON reply of regression_cv_glmnet; `seed` is the seed the folds were drawn from.
@@ -1374,7 +1395,7 @@ impl AnalyticsServer {
 
     /// Run elastic net/lasso/ridge regression (glmnet).
     #[tool(
-        description = "Elastic net, lasso or ridge regression as R glmnet::glmnet (coordinate descent, glmnet's standardisation and lambda path). alpha = 1 lasso (default), 0 ridge, in between elastic net; family 'gaussian' (default) or 'binomial'. Returns JSON with the coefficient path: for each lambda the intercept, df, deviance ratio and the coefficients (all of them for up to 20 predictors, otherwise the 20 largest in absolute value and the number of other non-zero ones). The selection summary (order of entry and the estimates at the smallest lambda) comes before the full path."
+        description = "Elastic net, lasso or ridge regression as R glmnet::glmnet (coordinate descent, glmnet's standardisation and lambda path). alpha = 1 lasso (default), 0 ridge, in between elastic net; family 'gaussian' (default) or 'binomial'. Returns JSON: the selection summary (order of entry and the estimates at the smallest lambda), the coefficients at the last lambda (at_last_lambda; all of them for up to 20 predictors, otherwise the 20 largest in absolute value and the number of other non-zero ones), and the path with lambda, df and deviance ratio per lambda. path_coefficients = true adds the intercept and coefficients at every lambda of the path."
     )]
     pub async fn regression_glmnet(
         &self,
@@ -1399,9 +1420,11 @@ impl AnalyticsServer {
         config.standardize = request.standardize.unwrap_or(true);
         config.family = family;
 
+        let path_coefficients = request.path_coefficients.unwrap_or(false);
         match run_glmnet(dataset, &request.y, &x_refs, &config) {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
                 &result,
+                path_coefficients,
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Glmnet failed: {}",
@@ -1467,9 +1490,11 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        let path_coefficients = request.path_coefficients.unwrap_or(false);
         match run_ridge(dataset, &request.y, &x_refs, request.lambda) {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
                 &result,
+                path_coefficients,
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Ridge regression failed: {}",
@@ -1492,9 +1517,11 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        let path_coefficients = request.path_coefficients.unwrap_or(false);
         match run_lasso(dataset, &request.y, &x_refs, request.lambda) {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
                 &result,
+                path_coefficients,
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Lasso regression failed: {}",
