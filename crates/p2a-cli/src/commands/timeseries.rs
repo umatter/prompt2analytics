@@ -127,6 +127,34 @@ fn parse_struct_ts_type(s: &str) -> Result<StructTsType, String> {
     table_arg(&STRUCT_TS_TYPES, s)
 }
 
+/// (subcommand path, arg id, canonical names) of the CLI-local tables, for the help test.
+#[cfg(test)]
+pub(super) fn option_names() -> Vec<(Vec<&'static str>, &'static str, Vec<&'static str>)> {
+    vec![
+        (
+            vec!["timeseries", "changepoint"],
+            "change_type",
+            CHANGE_TYPES.names(),
+        ),
+        (
+            vec!["timeseries", "holt-winters"],
+            "seasonal",
+            SEASONAL_TYPES.names(),
+        ),
+        (vec!["timeseries", "ar"], "method", AR_METHODS.names()),
+        (
+            vec!["timeseries", "decompose"],
+            "decompose_type",
+            DECOMPOSE_TYPES.names(),
+        ),
+        (
+            vec!["timeseries", "struct-ts"],
+            "model_type",
+            STRUCT_TS_TYPES.names(),
+        ),
+    ]
+}
+
 #[derive(Subcommand)]
 pub enum TimeseriesCommands {
     /// ARIMA model estimation and forecasting

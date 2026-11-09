@@ -283,3 +283,24 @@ for anything it did not know) and its JSON names the linkage it ran.
 `cli_viz_residuals` (`validation/r/cases/cli_other.R`) reads `cli_mtcars.csv`, the four model
 columns of mtcars, and checks that its hat values and fitted values equal the committed
 `viz_residual_diag.csv` model.
+
+## Help and spellings
+
+Two unit tests in `crates/p2a-cli/src/commands/causal.rs` hold the options to their tables:
+`test_option_help_lists_every_choice` requires the `--help` text of every typed option to name
+each canonical value of its table (so the help cannot drift when an enum grows), and
+`test_options_accept_r_cli_and_mcp_spellings` parses an R, CLI or MCP spelling of each option.
+
+## Deviations
+
+| Finding | Quantity | Note |
+|---|---|---|
+| CAUS-39 | stdreg SEs | Tier 4; only point estimates are pinned |
+| TS-22 | multiplicative Holt-Winters prediction intervals | R's interval formula for that branch is wrong; the core refuses it, the CLI prints point forecasts and a warning |
+| TS-24 | optimised Holt-Winters parameters | the optimiser is not pinned; the pins fix alpha, beta, gamma |
+| (none) | gsynth ATT and coefficients | compared at 5e-4 relative: p2a's default EM stopping rule against R's converged fit |
+| (none) | StructTS BSM level and slope variances | the level variance is 0 at R's optimum (a boundary); the estimator's validation pins all four |
+| (none) | `--linkage ward` | p2a's `ward` is ward.D2; R's deprecated `hclust(method = "ward")` is ward.D (`--linkage ward.D`) |
+
+Spatial weight style U is fitted on spatialreg's full search interval and pinned through its
+reparameterisation of the row-standardised fit (rho_U = 80 rho_W on the case's graph).

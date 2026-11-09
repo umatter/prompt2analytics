@@ -2379,6 +2379,416 @@ mod tests {
     use p2a_core::traits::convergence::Convergence;
     use serde_json::json;
 
+    /// CLI-14 closure: the --help text of every typed option names each canonical value (no drift
+    /// when an enum grows).
+    #[test]
+    fn test_option_help_lists_every_choice() {
+        use clap::CommandFactory;
+        use p2a_core::*;
+        let root = crate::Cli::command();
+        let help = |path: &[&str], id: &str| -> String {
+            let mut cmd = &root;
+            for p in path {
+                cmd = cmd
+                    .find_subcommand(p)
+                    .unwrap_or_else(|| panic!("no subcommand {p}"))
+            }
+            cmd.get_arguments()
+                .find(|a| a.get_id() == id)
+                // --help text: the long help where the doc has a short first paragraph
+                .and_then(|a| a.get_long_help().or(a.get_help()))
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| panic!("{path:?} has no documented --{id}"))
+        };
+        let ts = super::super::timeseries::option_names();
+        let rows: Vec<(Vec<&str>, &str, Vec<&str>)> = vec![
+            (
+                vec!["causal", "rd"],
+                "kernel",
+                KernelType::choices().names(),
+            ),
+            (
+                vec!["causal", "rd"],
+                "bwselect",
+                BandwidthMethod::choices().names(),
+            ),
+            (vec!["causal", "rd"], "vce", VceType::choices().names()),
+            (
+                vec!["causal", "fuzzy-rd"],
+                "kernel",
+                KernelType::choices().names(),
+            ),
+            (
+                vec!["causal", "fuzzy-rd"],
+                "bwselect",
+                BandwidthMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "staggered-did"],
+                "comparison",
+                ComparisonGroup::choices().names(),
+            ),
+            (
+                vec!["causal", "staggered-did"],
+                "method",
+                AttEstimationMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "ipw"],
+                "estimand",
+                Estimand::choices().names(),
+            ),
+            (
+                vec!["causal", "doubly-robust"],
+                "method",
+                DRMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "doubly-robust"],
+                "estimand",
+                Estimand::choices().names(),
+            ),
+            (vec!["causal", "tmle"], "qmodel", QModel::choices().names()),
+            (
+                vec!["causal", "stdreg"],
+                "model",
+                StdRegModel::choices().names(),
+            ),
+            (
+                vec!["causal", "stdreg"],
+                "estimand",
+                StdRegEstimand::choices().names(),
+            ),
+            (
+                vec!["causal", "stdreg"],
+                "se_method",
+                SEMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "gsynth"],
+                "force",
+                GsynthForce::choices().names(),
+            ),
+            (
+                vec!["causal", "gsynth"],
+                "estimator",
+                GsynthEstimator::choices().names(),
+            ),
+            (
+                vec!["causal", "matching"],
+                "method",
+                MatchMethodKind::choices().names(),
+            ),
+            (
+                vec!["causal", "matching"],
+                "distance",
+                DistanceMethod::choices().names(),
+            ),
+            (
+                vec!["causal", "matching"],
+                "m_order",
+                MOrder::choices().names(),
+            ),
+            (
+                vec!["timeseries", "garch"],
+                "distribution",
+                forecasting::garch::GarchDistribution::choices().names(),
+            ),
+            (
+                vec!["timeseries", "vecm"],
+                "ecdet",
+                econometrics::timeseries::vecm::VecmDeterministic::choices().names(),
+            ),
+            (
+                vec!["spatial", "sar"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "sem"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "sac"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "moran"],
+                "weight_style",
+                WeightStyle::choices().names(),
+            ),
+            (
+                vec!["spatial", "moran"],
+                "alternative",
+                MoranAlternative::choices().names(),
+            ),
+            (
+                vec!["ml", "hierarchical"],
+                "linkage",
+                Linkage::choices().names(),
+            ),
+            (
+                vec!["viz", "dendrogram"],
+                "linkage",
+                Linkage::choices().names(),
+            ),
+        ];
+        for (path, id, names) in rows.into_iter().chain(ts) {
+            let h = help(&path, id);
+            for n in names {
+                assert!(h.contains(n), "{path:?} --{id}: help {h:?} lacks {n:?}")
+            }
+        }
+    }
+
+    /// The R, CLI and MCP spellings of every newly typed option parse.
+    #[test]
+    fn test_options_accept_r_cli_and_mcp_spellings() {
+        use clap::Parser;
+        let ok =
+            |a: &[&str]| crate::Cli::try_parse_from(a).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+        let rd = ["p2a", "causal", "rd", "d", "-y", "y", "-r", "x", "-c", "0"];
+        for extra in [
+            ["--kernel", "EPA"],
+            ["--bwselect", "cer_two"],
+            ["--vce", "HC1"],
+        ] {
+            ok(&[&rd[..], &extra[..]].concat());
+        }
+        let sd = [
+            "p2a",
+            "causal",
+            "staggered-did",
+            "d",
+            "-y",
+            "y",
+            "--treatment-time",
+            "g",
+            "--time",
+            "t",
+            "--unit",
+            "u",
+        ];
+        for extra in [
+            ["--comparison", "notyet"],
+            ["--comparison", "Not Yet Treated"],
+            ["--method", "DR"],
+            ["--method", "outcome_regression"],
+        ] {
+            ok(&[&sd[..], &extra[..]].concat());
+        }
+        match ok(&[&sd[..], &["--comparison", "not_yet_treated"][..]].concat()).command {
+            crate::Commands::Causal(CausalCommands::StaggeredDid { comparison, .. }) => {
+                assert_eq!(comparison, p2a_core::ComparisonGroup::NotYetTreated)
+            }
+            _ => panic!("not staggered-did"),
+        }
+        let more: [&[&str]; 16] = [
+            &[
+                "p2a", "causal", "tmle", "d", "-y", "y", "-t", "t", "-x", "a", "--qmodel",
+                "gaussian",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "stdreg",
+                "d",
+                "-y",
+                "y",
+                "-t",
+                "t",
+                "-x",
+                "a",
+                "--model",
+                "binomial",
+                "--estimand",
+                "potential_outcomes",
+                "--se-method",
+                "boot",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "synth",
+                "d",
+                "-y",
+                "y",
+                "--unit",
+                "u",
+                "--time",
+                "t",
+                "--treated",
+                "T",
+                "--treatment-time",
+                "5",
+                "-p",
+                "a",
+                "--v-method",
+                "data_driven",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "gsynth",
+                "d",
+                "-y",
+                "y",
+                "-d",
+                "t",
+                "--unit",
+                "u",
+                "--time",
+                "t",
+                "--force",
+                "twoWay",
+                "--estimator",
+                "matrix_completion",
+            ],
+            &[
+                "p2a",
+                "causal",
+                "matching",
+                "d",
+                "-t",
+                "t",
+                "-x",
+                "a",
+                "--method",
+                "nn",
+                "--distance",
+                "glm",
+                "--m-order",
+                "descending",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "changepoint",
+                "d",
+                "--col",
+                "y",
+                "--change-type",
+                "both",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "holt-winters",
+                "d",
+                "--col",
+                "y",
+                "--period",
+                "4",
+                "--seasonal",
+                "mult",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "ar",
+                "d",
+                "--col",
+                "y",
+                "--method",
+                "Yule-Walker",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "decompose",
+                "d",
+                "--col",
+                "y",
+                "--period",
+                "4",
+                "--decompose-type",
+                "Multiplicative",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "struct-ts",
+                "d",
+                "--col",
+                "y",
+                "--model-type",
+                "bsm",
+            ],
+            &[
+                "p2a",
+                "ts",
+                "garch",
+                "d",
+                "--col",
+                "y",
+                "--distribution",
+                "student_t",
+            ],
+            &[
+                "p2a", "ts", "vecm", "d", "--cols", "a", "b", "--ecdet", "constant",
+            ],
+            &[
+                "p2a",
+                "spatial",
+                "sar",
+                "d",
+                "-y",
+                "y",
+                "-x",
+                "a",
+                "--coord-x",
+                "cx",
+                "--coord-y",
+                "cy",
+                "--weight-style",
+                "rowstd",
+            ],
+            &[
+                "p2a",
+                "spatial",
+                "moran",
+                "d",
+                "-y",
+                "y",
+                "--coord-x",
+                "cx",
+                "--coord-y",
+                "cy",
+                "--alternative",
+                "two-sided",
+            ],
+            &[
+                "p2a",
+                "ml",
+                "hierarchical",
+                "d",
+                "--cols",
+                "a",
+                "b",
+                "--linkage",
+                "ward",
+            ],
+            &[
+                "p2a",
+                "viz",
+                "dendrogram",
+                "d",
+                "--cols",
+                "a",
+                "b",
+                "--linkage",
+                "wpgmc",
+                "-f",
+                "t.png",
+            ],
+        ];
+        for a in more {
+            ok(a);
+        }
+    }
+
     struct Notes(Option<Convergence>, Vec<String>);
     impl ResultNotes for Notes {
         fn notes_warnings(&self) -> Vec<String> {
