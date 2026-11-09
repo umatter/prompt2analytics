@@ -862,3 +862,116 @@ async fn test_mcp_stats_spline_default_cap() {
     );
     assert_eq!(k["n_points"].as_u64(), Some(300));
 }
+
+/// The first `got.len()` entries of a case vector (`Check::vector` compares whole values only).
+fn check_prefix(case: &Case, key: &str, got: &[f64], tol: Tol) {
+    let want = case.vector(key);
+    assert!(
+        !got.is_empty() && got.len() <= want.len(),
+        "case {}: {key}: {} values against {}",
+        case.id,
+        got.len(),
+        want.len()
+    );
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            tol.allows(*g, *w),
+            "case {}: {key}[{i}] rust={g} R={w}",
+            case.id
+        );
+    }
+}
+
+/// TOOL-26: the scores are returned (the first rows, with a note) or stored as columns under
+/// output_name. Before: only scores_computed and scores_shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_factanal_scores_returned() {
+    let case = Case::load("mcp_factanal_t3");
+    let (se, s) = session_with("mcp_factanal_t3");
+    let cols = json!(["f1", "f2", "f3", "f4", "f5", "f6"]);
+    // factanal rule; the reference is the varimax optimum (tight L-BFGS-B and rotation)
+    let fa = Tol::iterative(1e-4);
+    for (method, key) in [
+        ("bartlett", "bartlett_rows"),
+        ("Thomson", "regression_rows"),
+    ] {
+        let args = json!({"dataset": "mcp_factanal_t3", "columns": cols.clone(), "n_factors": 2, "scores": method});
+        let j = json_of(&ok(&s, &se, "multivariate_factanal", args).await);
+        let sc = &j["scores"];
+        assert_eq!(
+            (
+                sc["n_rows"].as_u64(),
+                sc["rows_returned"].as_u64(),
+                sc["columns"].clone()
+            ),
+            (Some(1200), Some(50), json!(["Factor1", "Factor2"]))
+        );
+        assert!(sc["note"].as_str().unwrap().contains("50 of 1200"), "{sc}");
+        // R rows 1, 2, 3 = the first 6 entries of the row-major case vector (rows 999+ are not
+        // returned inline)
+        let got: Vec<f64> = [0usize, 1, 2]
+            .iter()
+            .flat_map(|&i| fs(&sc["rows"][i]))
+            .collect();
+        check_prefix(&case, key, &got, fa);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_factanal_scores_output_name() {
+    let case = Case::load("mcp_factanal_t3");
+    let (se, s) = session_with("mcp_factanal_t3");
+    let cols = json!(["f1", "f2", "f3", "f4", "f5", "f6"]);
+    for (method, key, name) in [
+        ("bartlett", "bartlett_rows", "fa_bartlett"),
+        ("regression", "regression_rows", "fa_regression"),
+    ] {
+        let args = json!({"dataset": "mcp_factanal_t3", "columns": cols.clone(), "n_factors": 2,
+                          "scores": method, "output_name": name});
+        let j = json_of(&ok(&s, &se, "multivariate_factanal", args).await);
+        assert_eq!(
+            (j["scores"]["saved_as"].as_str(), j["scores"].get("rows")),
+            (Some(name), None)
+        );
+        let ds = se.datasets.read().await[name].clone();
+        assert_eq!((ds.df().height(), ds.df().width()), (1200, 8));
+        // na-ok: columns the handler built from a finite score matrix
+        let col = |c: &str| {
+            ds.df()
+                .column(c)
+                .unwrap()
+                .as_materialized_series()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect::<Vec<f64>>()
+        };
+        let (f1, f2) = (col("Factor1"), col("Factor2"));
+        let got: Vec<f64> = [0usize, 1, 2, 998, 999, 1000, 1198, 1199]
+            .iter()
+            .flat_map(|&i| [f1[i], f2[i]])
+            .collect();
+        check_prefix(&case, key, &got, Tol::iterative(1e-4)); // all 8 rows, 16 values
+    }
+    // output_name without scores, and a name that collides with an input column, are refused
+    assert!(
+        refused(
+            &s,
+            &se,
+            "multivariate_factanal",
+            json!({"dataset": "mcp_factanal_t3", "columns": cols.clone(), "n_factors": 2, "output_name": "x"})
+        )
+        .await
+        .contains("scores")
+    );
+    assert!(
+        refused(
+            &s,
+            &se,
+            "multivariate_factanal",
+            json!({"dataset": "fa_bartlett", "columns": cols, "n_factors": 2, "scores": "bartlett", "output_name": "again"})
+        )
+        .await
+        .contains("already has a column 'Factor1'")
+    );
+}

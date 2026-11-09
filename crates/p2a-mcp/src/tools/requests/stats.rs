@@ -420,9 +420,15 @@ pub struct FactorAnalysisRequest {
 
     /// Factor scores method
     #[schemars(
-        description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson's method), or 'bartlett' (weighted least squares)."
+        description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson; also 'thomson') or 'bartlett' (weighted least squares). The scores are returned (the first 50 rows, fewer with many factors) or stored for every row with output_name."
     )]
     pub scores: Option<String>,
+
+    /// Dataset that receives the scores
+    #[schemars(
+        description = "With scores = 'regression' or 'bartlett': name of a new dataset that receives the input dataset plus one column per factor (Factor1, Factor2, ...). Without it, the first 50 rows of scores (fewer with many factors) are returned in the output."
+    )]
+    pub output_name: Option<String>,
 }
 
 /// Request for median polish (robust two-way decomposition).

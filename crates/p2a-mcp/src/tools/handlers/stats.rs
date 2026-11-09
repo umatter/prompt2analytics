@@ -21,6 +21,11 @@ use rmcp::{
 /// Maximum number of elements allowed in a single matrix allocation.
 const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
+/// Inline factor scores of `multivariate_factanal` without output_name: at most this many
+/// rows, and at most FACTANAL_INLINE_VALUES values in all.
+const FACTANAL_INLINE_ROWS: usize = 50;
+const FACTANAL_INLINE_VALUES: usize = 500;
+
 /// Cap on the default number of points `stats_spline` evaluates when neither xout nor n is
 /// given (R's default is 3 x the number of pairs, uncapped).
 const SPLINE_DEFAULT_MAX_POINTS: usize = 200;
@@ -1724,7 +1729,7 @@ impl AnalyticsServer {
 
     /// Maximum Likelihood Factor Analysis.
     #[tool(
-        description = "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test, and optionally factor scores. Supports varimax (orthogonal) and promax (oblique) rotation."
+        description = "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test and, with scores = 'regression' or 'bartlett', the factor scores (the first rows inline, or all of them as columns Factor1..Factork of a new dataset with output_name). Supports varimax (orthogonal) and promax (oblique) rotation."
     )]
     pub async fn multivariate_factanal(
         &self,
@@ -1745,6 +1750,12 @@ impl AnalyticsServer {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
+
+        if scores == ScoresMethod::None && request.output_name.is_some() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "output_name stores factor scores; set scores = 'regression' or 'bartlett'",
+            )]));
+        }
 
         let col_refs: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
 
@@ -1810,12 +1821,71 @@ impl AnalyticsServer {
             json_output["factor_correlations"] = serde_json::json!(factor_corr);
         }
 
-        if let Some(ref scores) = result.scores {
-            json_output["scores_computed"] = serde_json::json!(true);
-            json_output["scores_shape"] = serde_json::json!({
-                "n_obs": scores.nrows(),
-                "n_factors": scores.ncols()
+        if let Some(ref sc) = result.scores {
+            let (n, k) = (sc.nrows(), sc.ncols());
+            let columns: Vec<String> = (1..=k).map(|j| format!("Factor{j}")).collect();
+            let mut block = serde_json::json!({
+                "method": scores.to_string(),
+                "columns": columns,
+                "n_rows": n,
             });
+            if let Some(name) = request.output_name.as_deref() {
+                let df = dataset.df();
+                if let Some(c) = columns.iter().find(|c| {
+                    df.get_column_names()
+                        .iter()
+                        .any(|h| h.as_str() == c.as_str())
+                }) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "dataset '{}' already has a column '{c}'; the scores cannot be added",
+                        request.dataset
+                    ))]));
+                }
+                if df.height() != n {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "factor scores have {n} rows but dataset '{}' has {}",
+                        request.dataset,
+                        df.height()
+                    ))]));
+                }
+                let new_cols: Vec<p2a_core::polars::prelude::Column> = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(j, c)| {
+                        p2a_core::polars::prelude::Column::new(
+                            c.as_str().into(),
+                            sc.column(j).to_vec(),
+                        )
+                    })
+                    .collect();
+                let out = match df.hstack(&new_cols) {
+                    Ok(out) => out,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Factor analysis failed: cannot add the score columns: {e}"
+                        ))]));
+                    }
+                };
+                block["saved_as"] = serde_json::json!(name);
+                drop(datasets);
+                self.datasets
+                    .write()
+                    .await
+                    .insert(name.to_string(), p2a_core::data::Dataset::new(out));
+            } else {
+                let r = n
+                    .min(FACTANAL_INLINE_ROWS)
+                    .min((FACTANAL_INLINE_VALUES / k.max(1)).max(1));
+                let rows: Vec<Vec<f64>> = (0..r).map(|i| sc.row(i).to_vec()).collect();
+                block["rows_returned"] = serde_json::json!(r);
+                block["rows"] = serde_json::json!(rows);
+                if r < n {
+                    block["note"] = serde_json::json!(format!(
+                        "showing rows 1-{r} ({r} of {n}); set output_name to store all scores as dataset columns"
+                    ));
+                }
+            }
+            json_output["scores"] = block;
         }
 
         Ok(CallToolResult::success(vec![Content::text(
