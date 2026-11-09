@@ -1430,19 +1430,7 @@ fn hw_forecast(
     if multiplicative {
         let mean = p2a_core::holt_winters_forecast(result, h)?;
         // var(residuals(fit)): sample variance of the one-step errors
-        let errors: Vec<f64> = result
-            .residuals
-            .iter()
-            .copied()
-            .filter(|e| e.is_finite())
-            .collect();
-        let m = errors.len() as f64;
-        let residual_variance = if errors.len() >= 2 {
-            let mu = errors.iter().sum::<f64>() / m;
-            errors.iter().map(|e| (e - mu).powi(2)).sum::<f64>() / (m - 1.0)
-        } else {
-            f64::NAN
-        };
+        let residual_variance = result.residual_variance().unwrap_or(f64::NAN);
         return Ok(HwForecast {
             horizon: h,
             level: None,
