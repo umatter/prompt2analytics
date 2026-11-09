@@ -36,8 +36,8 @@ use p2a_core::forecasting::garch::GarchDistribution;
 use p2a_core::options::Choices;
 use p2a_core::{GarchConfig, garch as fit_garch, garch_forecast};
 
-use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, print_error};
+use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
 
 // The R names of the time-series options. The core enums have no FromStr, so the tables live
@@ -278,7 +278,7 @@ EXAMPLES:
 
         /// Deterministic term in the cointegration relation, as ca.jo ecdet: none (default),
         /// const or trend
-        #[arg(long, default_value = "none", value_parser = super::causal::option_arg::<VecmDeterministic>)]
+        #[arg(long, default_value = "none", value_parser = crate::output::parse_core_option::<VecmDeterministic>)]
         ecdet: VecmDeterministic,
     },
 
@@ -355,7 +355,7 @@ EXAMPLES:
 
         /// Conditional distribution, as fGarch cond.dist: norm (default) or std (standardised
         /// Student t; aliases t, student_t)
-        #[arg(long, default_value = "norm", value_parser = super::causal::option_arg::<GarchDistribution>)]
+        #[arg(long, default_value = "norm", value_parser = crate::output::parse_core_option::<GarchDistribution>)]
         distribution: GarchDistribution,
     },
 
@@ -1096,7 +1096,7 @@ fn execute_varma(
                 "bic": result.bic,
                 "log_likelihood": result.log_likelihood,
             });
-            with_result_notes(&mut json, &result);
+            add_result_notes(&mut json, &result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => println!("\n{result}"),
@@ -1138,7 +1138,7 @@ fn execute_vecm(
             {
                 out.extend(fields);
             }
-            with_result_notes(&mut json, &result);
+            add_result_notes(&mut json, &result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => println!("\n{result}"),
@@ -1385,7 +1385,7 @@ fn execute_garch(
                     "mean": mean,
                 });
             }
-            with_result_notes(&mut json, &result);
+            add_result_notes(&mut json, &result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
@@ -1643,7 +1643,7 @@ fn execute_granger(
                                 "df2": result.df2,
                                 "granger_causes": granger_causes,
                             });
-                            with_result_notes(&mut json, &result);
+                            add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -1736,7 +1736,7 @@ fn execute_ar(
                             "aic": result.aic,
                             "partial_acf": result.partial_acf,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1925,7 +1925,7 @@ fn execute_struct_ts(
                         },
                         "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
                     });
-                    with_result_notes(&mut json, &result);
+                    add_result_notes(&mut json, &result);
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -2022,7 +2022,7 @@ fn execute_causal_impact(
                                 "null_rejected": result.inference.null_rejected,
                             },
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {

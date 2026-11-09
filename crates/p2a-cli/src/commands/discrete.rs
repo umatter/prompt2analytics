@@ -491,19 +491,6 @@ fn print_convergence(converged: bool, iterations: usize, warnings: &[String]) {
     }
 }
 
-/// Insert `missing` (when rows were dropped) and `warnings` (when there are any) into a
-/// JSON object.
-fn insert_notes(json: &mut serde_json::Value, missing: &MissingSummary, warnings: &[String]) {
-    if let Some(object) = json.as_object_mut() {
-        if let Some(m) = missing_json(missing) {
-            object.insert("missing".to_string(), m);
-        }
-        if !warnings.is_empty() {
-            object.insert("warnings".to_string(), serde_json::json!(warnings));
-        }
-    }
-}
-
 /// The logit/probit report: the coefficient table (aliased rows `NaN` in text, `null` in JSON),
 /// the log-likelihoods, the convergence line and every core warning, then T2's missing-value note.
 /// JSON adds `log_likelihood`, `log_likelihood_null`, `aic`, `separation`, `aliased`, `missing`
@@ -718,7 +705,7 @@ fn execute_ordered(
                 "converged": result.converged,
                 "iterations": result.iterations,
             });
-            insert_notes(&mut json, &result.missing, &result.warnings);
+            crate::output::add_missing_and_warnings(&mut json, &result.missing, &result.warnings);
             add_notes(
                 &mut json,
                 Some((result.converged, result.iterations)),
@@ -823,7 +810,11 @@ fn execute_mlogit(
                                 "aic": result.aic,
                                 "separation": result.separation,
                             });
-                            insert_notes(&mut json, &result.missing, &[]);
+                            crate::output::add_missing_and_warnings(
+                                &mut json,
+                                &result.missing,
+                                &[],
+                            );
                             add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
@@ -927,7 +918,11 @@ fn execute_negbin(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1067,7 +1062,7 @@ fn execute_poisson(
                 "df_residual": fit.df_residual,
                 "aliased": aliased,
             });
-            insert_notes(&mut json, &missing, &[]);
+            crate::output::add_missing_and_warnings(&mut json, &missing, &[]);
             add_notes(&mut json, converged, &warnings);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
@@ -1158,7 +1153,11 @@ fn execute_zip(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1290,7 +1289,11 @@ fn execute_zinb(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1439,7 +1442,11 @@ fn execute_hurdle(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1746,7 +1753,11 @@ fn execute_mixed_logit(
                             "iterations": result.iterations,
                             "max_abs_gradient": result.max_abs_gradient,
                         });
-                        insert_notes(&mut json, &MissingSummary::default(), &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &MissingSummary::default(),
+                            &result.warnings,
+                        );
                         add_notes(
                             &mut json,
                             Some((result.converged, result.iterations)),

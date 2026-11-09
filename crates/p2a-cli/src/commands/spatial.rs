@@ -22,8 +22,8 @@ use p2a_core::data::columns::{ColumnRequest, NaPolicy, numeric_column};
 
 use p2a_core::SpatialImpacts;
 
-use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, print_error};
+use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -68,7 +68,7 @@ EXAMPLES:
         /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
         /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
         /// binary accepted
-        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        #[arg(long, default_value = "W", value_parser = crate::output::parse_core_option::<WeightStyle>)]
         weight_style: WeightStyle,
 
         /// Estimate Spatial Durbin Model (include spatially lagged X)
@@ -115,7 +115,7 @@ EXAMPLES:
         /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
         /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
         /// binary accepted
-        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        #[arg(long, default_value = "W", value_parser = crate::output::parse_core_option::<WeightStyle>)]
         weight_style: WeightStyle,
     },
 
@@ -154,7 +154,7 @@ EXAMPLES:
         /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
         /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
         /// binary accepted
-        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        #[arg(long, default_value = "W", value_parser = crate::output::parse_core_option::<WeightStyle>)]
         weight_style: WeightStyle,
     },
 
@@ -188,11 +188,11 @@ EXAMPLES:
         /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
         /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
         /// binary accepted
-        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        #[arg(long, default_value = "W", value_parser = crate::output::parse_core_option::<WeightStyle>)]
         weight_style: WeightStyle,
 
         /// Alternative hypothesis, as spdep::moran.test: two.sided (default), greater or less
-        #[arg(long, default_value = "two.sided", value_parser = super::causal::option_arg::<MoranAlternative>)]
+        #[arg(long, default_value = "two.sided", value_parser = crate::output::parse_core_option::<MoranAlternative>)]
         alternative: MoranAlternative,
     },
 }
@@ -421,7 +421,7 @@ fn execute_sar(
                             "weight_style": style.to_string(),
                             "k_neighbors": k_neighbors,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -548,7 +548,7 @@ fn execute_sem(
                             "weight_style": style.to_string(),
                             "k_neighbors": k_neighbors,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -671,7 +671,7 @@ fn execute_sac(
                             "weight_style": style.to_string(),
                             "k_neighbors": k_neighbors,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {

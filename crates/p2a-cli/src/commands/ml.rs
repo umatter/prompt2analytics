@@ -7,8 +7,8 @@ use p2a_core::{Linkage, dbscan, hierarchical, kmeans, linear_svm, pca, random_fo
 
 use std::path::{Path, PathBuf};
 
-use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, missing_json, print_error, print_missing_note};
+use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -204,7 +204,7 @@ EXAMPLES:
         /// Linkage, as stats::hclust: single, complete, average (also upgma), ward.D2 (default;
         /// also ward), mcquitty (also weighted), ward.D, centroid or median. R's deprecated
         /// hclust(method = "ward") is ward.D
-        #[arg(long, default_value = "ward.D2", value_parser = crate::commands::causal::option_arg::<Linkage>)]
+        #[arg(long, default_value = "ward.D2", value_parser = crate::output::parse_core_option::<Linkage>)]
         linkage: Linkage,
 
         /// Distance threshold for cutting the dendrogram
@@ -491,7 +491,7 @@ fn execute_kmeans(
                                 "cluster_sizes": result.cluster_sizes,
                                 "labels": result.labels,
                             });
-                            with_result_notes(&mut json, &result);
+                            add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
