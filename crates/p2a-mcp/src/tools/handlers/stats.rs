@@ -281,7 +281,8 @@ impl AnalyticsServer {
             },
             "convergence": {
                 "converged": result.converged,
-                "iterations": result.n_iter
+                "iterations": result.n_iter,
+                "max_deviation": result.max_deviation
             },
             "interpretation": format!(
                 "Log-linear model with margins {:?} on a {} table. G²={:.2}, df={}, p={:.4}. {}",
@@ -296,6 +297,7 @@ impl AnalyticsServer {
             ),
             "references": "Haberman (1972). Algorithm AS 51; Agresti (2002). Categorical Data Analysis."
         });
+        insert_notes(&mut json_output, None, &result.warnings);
         insert_missing(&mut json_output, cols.missing());
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -716,7 +718,7 @@ impl AnalyticsServer {
 
     /// Mauchly's sphericity test.
     #[tool(
-        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(). The p-value includes Anderson's second-order correction (as R's mauchly.test, with R's typo in one coefficient corrected; see validation/stats/mauchly.md); p_value_first_order is the first-order chi-square tail. Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed."
+        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(); sigma (optional) is R's mauchly.test Sigma, the covariance structure under the null (identity by default). The p-value includes Anderson's second-order correction (as R's mauchly.test, with R's typo in one coefficient corrected; see validation/stats/mauchly.md); p_value_first_order is the first-order chi-square tail. Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed."
     )]
     pub async fn stats_mauchly_test(
         &self,
@@ -742,6 +744,16 @@ impl AnalyticsServer {
 
         // A subject with a missing value in any condition is dropped, as R's
         // lm(cbind(...) ~ 1) drops it
+        if let Some(sigma) = &request.sigma
+            && sigma.len() != p * p
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "sigma must have p x p = {} values in row-major order (p = {p} columns), got {}",
+                p * p,
+                sigma.len()
+            ))]));
+        }
+
         let (data, missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Omit) {
             Ok(d) => d,
             Err(e) => {
@@ -756,7 +768,13 @@ impl AnalyticsServer {
         let n_cols = data.ncols();
         let flat_data = into_row_major(data);
 
-        let result = match run_mauchly_test(&flat_data, n_rows, n_cols) {
+        let run = match request.sigma.as_deref() {
+            Some(sigma) => p2a_core::stats::mauchly::run_mauchly_test_with_sigma(
+                &flat_data, n_rows, n_cols, sigma,
+            ),
+            None => run_mauchly_test(&flat_data, n_rows, n_cols),
+        };
+        let result = match run {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -779,7 +797,13 @@ impl AnalyticsServer {
                 "lower_bound": result.epsilon_lb
             },
             "n_subjects": result.n,
-            "n_conditions": result.p_levels
+            "n_conditions": result.p_levels,
+            "transformation": result.transform,
+            "sigma": if request.sigma.is_some() {
+                format!("user-supplied ({p} x {p}, row-major)")
+            } else {
+                "identity".to_string()
+            }
         });
         insert_missing(&mut output, &missing);
 
@@ -1974,52 +1998,33 @@ impl AnalyticsServer {
 
     /// Power analysis for one-way ANOVA.
     #[tool(
-        description = "Compute power or sample size for balanced one-way ANOVA. Given 4 of {groups, n, between_var, within_var, sig_level, power}, computes the 5th. Use for study design comparing means across multiple groups."
+        description = "Power calculations for a balanced one-way ANOVA, as R's power.anova.test: give all but one of groups, n, between_var, within_var and power, and that one is solved (groups and n are reported fractional, as R); sig_level defaults to 0.05 unless solve_for names it. between_var is the variance of the group means. Returns the parameters, the one solved for, the root search when a parameter other than the power was solved, Cohen's f and any warning."
     )]
     pub async fn power_anova_test(
         &self,
         Parameters(request): Parameters<PowerAnovaTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::power_anova_test;
+        use p2a_core::stats::power::{PowerAnovaParam, PowerAnovaTestSpec, power_anova_test_with};
 
-        let groups = match request.groups {
-            Some(g) if g >= 2 => g,
-            Some(g) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "groups must be at least 2, got {}",
-                    g
-                ))]));
-            }
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "groups (number of groups) is required".to_string(),
-                )]));
-            }
+        let solve_for = match request.solve_for.as_deref() {
+            None => None,
+            Some(s) => match parse_option(Some(s), PowerAnovaParam::Power) {
+                Ok(v) => Some(v),
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            },
         };
+        let mut spec = PowerAnovaTestSpec::default();
+        spec.groups = request.groups.map(|g| g as f64);
+        spec.n = request.n;
+        spec.between_var = request.between_var;
+        spec.within_var = request.within_var;
+        spec.sig_level = request.sig_level;
+        spec.power = request.power;
+        spec.solve_for = solve_for;
 
-        let between_var = match request.between_var {
-            Some(v) => v,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "between_var (between-group variance) is required".to_string(),
-                )]));
-            }
-        };
-
-        let within_var = request.within_var.unwrap_or(1.0);
-
-        match power_anova_test(
-            groups,
-            request.n,
-            between_var,
-            within_var,
-            request.sig_level,
-            request.power,
-        ) {
+        match power_anova_test_with(&spec) {
             Ok(result) => {
-                let f = (result.between_var / result.within_var).sqrt();
-
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "method": result.method,
                     "groups": result.groups,
                     "n": result.n,
@@ -2027,13 +2032,18 @@ impl AnalyticsServer {
                     "within_var": result.within_var,
                     "sig_level": result.sig_level,
                     "power": result.power,
-                    "effect_size_f": f,
+                    "solved_for": result.solved_for.to_string(),
+                    "effect_size_f": result.effect_size_f,
                     "note": result.note,
                     "interpretation": format!(
-                        "With {} groups, n={:.0} per group, and f={:.3}, power is {:.1}%",
-                        result.groups, result.n, f, result.power * 100.0
+                        "With {:.2} groups, n={:.2} per group, and f={:.3}, power is {:.1}%",
+                        result.groups, result.n, result.effect_size_f, result.power * 100.0
                     )
                 });
+                if let Some(root) = &result.root {
+                    json_output["root"] = root_json(root);
+                }
+                insert_notes(&mut json_output, None, &result.warnings);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -2048,41 +2058,42 @@ impl AnalyticsServer {
 
     /// Power analysis for proportion tests.
     #[tool(
-        description = "Compute power or sample size for two-sample proportion tests. Given 4 of {n, p1, p2, sig_level, power}, computes the 5th. Use for study design comparing proportions between two groups."
+        description = "Power calculations for a two-sample test of proportions, as R's power.prop.test: give all but one of n, p1, p2 and power, and that one is solved (n is reported fractional, as R); sig_level defaults to 0.05 unless solve_for names it. Returns the parameters, the one solved for, the root search when a parameter other than the power was solved, Cohen's h and any warning."
     )]
     pub async fn power_prop_test(
         &self,
         Parameters(request): Parameters<PowerPropTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::{PowerAlternative, power_prop_test};
+        use p2a_core::stats::power::{
+            PowerAlternative, PowerPropParam, PowerPropTestSpec, power_prop_test_with,
+        };
 
         let alternative =
             match parse_option(request.alternative.as_deref(), PowerAlternative::TwoSided) {
                 Ok(v) => v,
                 Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
             };
-
-        let p1 = match request.p1 {
-            Some(p) => p,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "p1 (proportion in first group) is required".to_string(),
-                )]));
-            }
+        let solve_for = match request.solve_for.as_deref() {
+            None => None,
+            Some(s) => match parse_option(Some(s), PowerPropParam::Power) {
+                Ok(v) => Some(v),
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            },
         };
+        let mut spec = PowerPropTestSpec::default();
+        spec.n = request.n;
+        spec.p1 = request.p1;
+        spec.p2 = request.p2;
+        spec.sig_level = request.sig_level;
+        spec.power = request.power;
+        spec.alternative = alternative;
+        spec.solve_for = solve_for;
 
-        match power_prop_test(
-            request.n,
-            p1,
-            request.p2,
-            request.sig_level,
-            request.power,
-            alternative,
-        ) {
+        match power_prop_test_with(&spec) {
             Ok(result) => {
                 let h = 2.0 * (result.p1.sqrt().asin() - result.p2.sqrt().asin());
 
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "method": result.method,
                     "n": result.n,
                     "p1": result.p1,
@@ -2090,13 +2101,19 @@ impl AnalyticsServer {
                     "sig_level": result.sig_level,
                     "power": result.power,
                     "alternative": result.alternative.to_string(),
+                    "strict": result.strict,
+                    "solved_for": result.solved_for.to_string(),
                     "effect_size_h": h,
                     "note": result.note,
                     "interpretation": format!(
-                        "With n={:.0} per group, comparing p1={:.3} vs p2={:.3}, power is {:.1}%",
+                        "With n={:.2} per group, comparing p1={:.3} vs p2={:.3}, power is {:.1}%",
                         result.n, result.p1, result.p2, result.power * 100.0
                     )
                 });
+                if let Some(root) = &result.root {
+                    json_output["root"] = root_json(root);
+                }
+                insert_notes(&mut json_output, None, &result.warnings);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -2111,36 +2128,45 @@ impl AnalyticsServer {
 
     /// Power analysis for t-tests.
     #[tool(
-        description = "Compute power or sample size for t-tests. Given 4 of {n, delta, sd, sig_level, power}, computes the 5th. Use for study design to determine required sample size for desired power, or to compute power for a given sample size. Supports one-sample, two-sample, and paired t-tests."
+        description = "Power calculations for one- and two-sample t tests, as R's power.t.test. Give all but one of n, delta and power and that one is solved (n is reported fractional, as R); sd and sig_level default to 1 and 0.05 unless solve_for names one of them, which is then solved. test_type 'two.sample' (default), 'one.sample' or 'paired'; alternative 'two.sided' (default) or 'one.sided'. Returns the parameters, the one solved for, the root search when a parameter other than the power was solved, Cohen's d and any warning."
     )]
     pub async fn power_t_test(
         &self,
         Parameters(request): Parameters<PowerTTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::{PowerAlternative, TTestType, power_t_test};
+        use p2a_core::stats::power::{
+            PowerAlternative, PowerTParam, PowerTTestSpec, TTestType, power_t_test_with,
+        };
 
         let test_type = match parse_option(request.test_type.as_deref(), TTestType::TwoSample) {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
-
         let alternative =
             match parse_option(request.alternative.as_deref(), PowerAlternative::TwoSided) {
                 Ok(v) => v,
                 Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
             };
+        let solve_for = match request.solve_for.as_deref() {
+            None => None,
+            Some(s) => match parse_option(Some(s), PowerTParam::Power) {
+                Ok(v) => Some(v),
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            },
+        };
+        let mut spec = PowerTTestSpec::default();
+        spec.n = request.n;
+        spec.delta = request.delta;
+        spec.sd = request.sd;
+        spec.sig_level = request.sig_level;
+        spec.power = request.power;
+        spec.test_type = test_type;
+        spec.alternative = alternative;
+        spec.solve_for = solve_for;
 
-        match power_t_test(
-            request.n,
-            request.delta,
-            request.sd,
-            request.sig_level,
-            request.power,
-            test_type,
-            alternative,
-        ) {
+        match power_t_test_with(&spec) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "method": result.method,
                     "n": result.n,
                     "delta": result.delta,
@@ -2149,13 +2175,19 @@ impl AnalyticsServer {
                     "power": result.power,
                     "alternative": result.alternative.to_string(),
                     "test_type": result.test_type.to_string(),
+                    "strict": result.strict,
+                    "solved_for": result.solved_for.to_string(),
                     "note": result.note,
                     "effect_size_d": result.delta / result.sd,
                     "interpretation": format!(
-                        "With n={:.0} per group, effect d={:.3}, and α={:.3}, power is {:.1}%",
+                        "With n={:.2} per group, effect d={:.3}, and α={:.3}, power is {:.1}%",
                         result.n, result.delta / result.sd, result.sig_level, result.power * 100.0
                     )
                 });
+                if let Some(root) = &result.root {
+                    json_output["root"] = root_json(root);
+                }
+                insert_notes(&mut json_output, None, &result.warnings);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -2167,6 +2199,18 @@ impl AnalyticsServer {
             ))])),
         }
     }
+}
+
+/// The root-search summary of a solved power calculation.
+fn root_json(root: &p2a_core::stats::power::RootInfo) -> serde_json::Value {
+    serde_json::json!({
+        "iterations": root.iterations,
+        "extension_steps": root.extension_steps,
+        "estimated_precision": root.estimated_precision,
+        "lower": root.lower,
+        "upper": root.upper,
+        "converged": root.converged,
+    })
 }
 
 /// `true`/`false` from p < 0.05 when p is finite, JSON null otherwise: a p-value that could not
@@ -2574,6 +2618,7 @@ mod tests {
         let req = MauchlyTestRequest {
             dataset: "d".into(),
             columns: vec!["x1".into(), "x2".into(), "x3".into()],
+            sigma: None,
         };
         let r = limits::with_limits(hosted_with(&["table_cells=8"]), || {
             rt.block_on(server.stats_mauchly_test(Parameters(req)))

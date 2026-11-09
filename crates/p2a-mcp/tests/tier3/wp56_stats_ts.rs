@@ -975,3 +975,261 @@ async fn test_mcp_factanal_scores_output_name() {
         .contains("already has a column 'Factor1'")
     );
 }
+
+/// Root tolerance against R's power.*.test with its default uniroot tolerance: the core's
+/// zeroin follows R's iteration, so the roots agree to a few ulps plus the root tolerance.
+fn root_tol() -> Tol {
+    Tol::new(
+        8.0 * f64::EPSILON,
+        2.0 * p2a_core::stats::power::R_UNIROOT_TOL,
+    )
+}
+
+/// Power surface (STAT-61's MCP half): sd and sig_level default to 1 and 0.05; the omitted
+/// parameter is solved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_power_solve_defaults() {
+    let case = Case::load("stat_power_solve");
+    let (se, s) = session_with_datasets(vec![]);
+    let p = json_of(&ok(&s, &se, "power_t_test", json!({"n": 30.0, "delta": 0.5})).await);
+    let n = json_of(&ok(&s, &se, "power_t_test", json!({"delta": 0.5, "power": 0.8})).await);
+    Check::new(&case)
+        .scalar("t_n30_d05_power", f(&p["power"]), Tol::new(1e-10, 0.0))
+        .scalar("t_d05_p08_n_pkg", f(&n["n"]), root_tol())
+        .finish();
+    assert_eq!(
+        (n["solved_for"].as_str(), p["solved_for"].as_str()),
+        (Some("n"), Some("power"))
+    );
+    assert!(n["root"]["iterations"].as_u64().unwrap() >= 1);
+}
+
+/// Power surface: solve_for and the anova/prop solvers. Before: solve_for was an unknown
+/// field, power_anova_test assumed within_var = 1 when it was omitted, and required
+/// between_var and groups.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_power_solve_for() {
+    let case = Case::load("stat_power_solve");
+    let (se, s) = session_with_datasets(vec![]);
+    let root = root_tol();
+    let power = Tol::new(1e-10, 0.0);
+    let sd = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_t_test",
+            json!({"n": 20.0, "delta": 0.8, "power": 0.9, "solve_for": "sd"}),
+        )
+        .await,
+    );
+    let sd2 = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_t_test",
+            json!({"n": 20.0, "delta": 0.8, "power": 0.9, "sig_level": 0.05}),
+        )
+        .await,
+    );
+    let pn = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_prop_test",
+            json!({"p1": 0.3, "p2": 0.5, "power": 0.8}),
+        )
+        .await,
+    );
+    let pp = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_prop_test",
+            json!({"n": 100.0, "p1": 0.3, "p2": 0.5}),
+        )
+        .await,
+    );
+    let ap = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_anova_test",
+            json!({"groups": 4, "n": 5.0, "between_var": 1.0, "within_var": 3.0}),
+        )
+        .await,
+    );
+    let ag = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_anova_test",
+            json!({"n": 5.0, "between_var": 1.0, "within_var": 3.0, "power": 0.8}),
+        )
+        .await,
+    );
+    let aw = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_anova_test",
+            json!({"groups": 4, "n": 5.0, "between_var": 1.0, "power": 0.8}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("t_twosample_twosided_sd_pkg", f(&sd["sd"]), root)
+        .scalar("t_twosample_twosided_sd_pkg", f(&sd2["sd"]), root)
+        .scalar("prop_p03_p05_n_pkg", f(&pn["n"]), root)
+        .scalar("prop_n100_power", f(&pp["power"]), power)
+        .scalar("anova_power", f(&ap["power"]), power)
+        .scalar("anova_groups_pkg", f(&ag["groups"]), root)
+        .scalar("anova_within_pkg", f(&aw["within_var"]), root)
+        .finish();
+    assert_eq!(
+        (sd["solved_for"].as_str(), aw["solved_for"].as_str()),
+        (Some("sd"), Some("within.var"))
+    );
+    // Cohen's f from the core: sqrt((groups - 1) / groups * between / within) = sqrt(3/4 * 1/3)
+    assert!((f(&ap["effect_size_f"]) - 0.5).abs() < 1e-12, "{ap}");
+    for (tool, args, needle) in [
+        (
+            "power_t_test",
+            json!({"n": 20.0, "delta": 0.8, "sd": 1.0, "power": 0.9, "solve_for": "sd"}),
+            "omit it",
+        ),
+        (
+            "power_t_test",
+            json!({"n": 20.0}),
+            "exactly one of n, delta, power",
+        ),
+        (
+            "power_t_test",
+            json!({"n": 20.0, "delta": 0.8, "power": 0.9, "solve_for": "effect"}),
+            "expected one of",
+        ),
+        (
+            "power_anova_test",
+            json!({"groups": 4, "n": 5.0}),
+            "exactly one of",
+        ),
+    ] {
+        assert!(
+            refused(&s, &se, tool, args).await.contains(needle),
+            "{tool}: {needle}"
+        );
+    }
+}
+
+/// Mauchly's test against a user Sigma (R's mauchly.test(Sigma = ..)). The p-value is
+/// Anderson's second-order p with the corrected coefficient, pinned to the case's
+/// `*_p_anderson`; R's p (with its typo, STAT-82) is a cross-check. Before: sigma was an
+/// unknown field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_stats_mauchly_sigma() {
+    let case = Case::load("stat_mauchly_sigma");
+    let (se, s) = session_with("stat_mauchly_sigma");
+    let cols = json!(["V1", "V2", "V3", "V4"]);
+    // diag(1, 2, 3, 4)
+    let sigma = json!([
+        1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0
+    ]);
+    let w = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_mauchly_test",
+            json!({"dataset": "mauchly_sigma", "columns": cols, "sigma": sigma}),
+        )
+        .await,
+    );
+    let i = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_mauchly_test",
+            json!({"dataset": "mauchly_sigma", "columns": cols}),
+        )
+        .await,
+    );
+    let cross = Tol::new(1e-3, 1e-12); // deviation STAT-82: R's p is a cross-check only
+    Check::new(&case)
+        .scalar("psi_contrasts_W", f(&w["w_statistic"]), Tol::stat(15))
+        .scalar("psi_contrasts_chisq", f(&w["chi_squared"]), Tol::stat(15))
+        .scalar("psi_contrasts_df", f(&w["df"]), Tol::exact())
+        .scalar(
+            "psi_contrasts_p_anderson",
+            f(&w["p_value"]),
+            Tol::p_value(15),
+        )
+        .scalar("psi_contrasts_p", f(&w["p_value"]), cross)
+        .scalar(
+            "psi_contrasts_p_first_order",
+            f(&w["p_value_first_order"]),
+            Tol::p_value(15),
+        )
+        .scalar(
+            "psi_contrasts_gg",
+            f(&w["epsilon_corrections"]["greenhouse_geisser"]),
+            Tol::stat(15),
+        )
+        .scalar("contrasts_W", f(&i["w_statistic"]), Tol::stat(15))
+        .scalar("contrasts_p_anderson", f(&i["p_value"]), Tol::p_value(15))
+        .scalar("contrasts_p", f(&i["p_value"]), cross)
+        .finish();
+    assert_eq!(
+        (w["sigma"].as_str(), i["sigma"].as_str()),
+        (Some("user-supplied (4 x 4, row-major)"), Some("identity"))
+    );
+    let bad = json!({"dataset": "mauchly_sigma", "columns": cols, "sigma": [1.0, 0.0, 0.0, 1.0]});
+    assert!(
+        refused(&s, &se, "stats_mauchly_test", bad)
+            .await
+            .contains("16")
+    );
+}
+
+/// STAT-28's MCP half: the non-decomposable loglin model iterates to eps and reports
+/// non-convergence. Before: no warnings key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_stats_loglin_nondecomposable() {
+    let case = Case::load("stat_loglin_nodecomp");
+    let (se, s) = session_with("stat_loglin_nodecomp");
+    let base = json!({"dataset": "loglin_2x3x4", "count_column": "Freq", "factor_columns": ["Var1", "Var2", "Var3"],
+                      "margins": [[0, 1], [0, 2], [1, 2]], "eps": 1e-12, "max_iter": 1000});
+    let j = json_of(&ok(&s, &se, "stats_loglin", base.clone()).await);
+    let mut short = base.clone();
+    short["max_iter"] = json!(3);
+    let k = json_of(&ok(&s, &se, "stats_loglin", short).await);
+    let gof = &j["goodness_of_fit"];
+    // The iteration count and the 3-iteration statistic are not pinned: they depend on the
+    // rounding of each IPF step near eps.
+    Check::new(&case)
+        .scalar(
+            "lrt",
+            f(&gof["likelihood_ratio_test"]["statistic"]),
+            Tol::stat(720),
+        )
+        .scalar(
+            "pearson",
+            f(&gof["pearson_chi_squared"]["statistic"]),
+            Tol::stat(720),
+        )
+        .scalar("df", f(&gof["likelihood_ratio_test"]["df"]), Tol::exact())
+        .finish();
+    assert_eq!(
+        (
+            j["convergence"]["converged"].as_bool(),
+            j["warnings"].as_array().map(Vec::len)
+        ),
+        (Some(true), Some(0))
+    );
+    assert!(j["convergence"]["max_deviation"].as_f64().unwrap() <= 1e-12);
+    assert_eq!(k["convergence"]["converged"].as_bool(), Some(false));
+    assert!(
+        k["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("did not converge"),
+        "{k}"
+    );
+}

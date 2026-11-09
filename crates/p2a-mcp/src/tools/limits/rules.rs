@@ -919,6 +919,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("ts_varma", "long_var_order", Max(Lags)),
         p("panel_unit_root", "pmax", Max(Lags)),
         p("munge_fill_na", "value", Max(StringBytes)),
+        p("stats_mauchly_test", "sigma[]", Exempt(ARRAY_VALUE)),
     ]
 };
 
@@ -1102,7 +1103,6 @@ pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
     ("iv_mte", "bootstrap_reps"),
     ("iv_mte", "prte_weights"),
     ("gmm_iv", "weight_matrix"),
-    ("stats_mauchly_test", "sigma"),
     ("ts_varma", "long_var_order"),
     ("panel_unit_root", "pmax"),
     ("munge_fill_na", "value"),

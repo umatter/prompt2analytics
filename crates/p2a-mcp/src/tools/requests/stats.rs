@@ -40,7 +40,9 @@ pub struct LoglinRequest {
     pub margins: Option<Vec<Vec<usize>>>,
 
     /// Convergence tolerance
-    #[schemars(description = "Convergence tolerance for IPF algorithm (default: 0.1).")]
+    #[schemars(
+        description = "Convergence tolerance of the IPF algorithm: the largest absolute deviation of the fitted margins from the observed ones (R's eps; default 0.1)."
+    )]
     pub eps: Option<f64>,
 
     /// Maximum iterations
@@ -178,6 +180,12 @@ pub struct MauchlyTestRequest {
         description = "Names of columns representing repeated measures (at least 3). Subjects (rows) with a missing value in any of them are dropped, as R's lm-based mauchly.test does, and reported."
     )]
     pub columns: Vec<String>,
+
+    /// Covariance structure under the null (R's Sigma)
+    #[schemars(
+        description = "Optional covariance structure Sigma under the null (R's mauchly.test Sigma), p x p in row-major order for the p columns; default the identity. The test then checks sphericity of the transformed measures relative to Sigma."
+    )]
+    pub sigma: Option<Vec<f64>>,
 }
 
 /// Request for Tukey's five-number summary.
@@ -473,7 +481,7 @@ pub struct PowerPropTestRequest {
     pub n: Option<f64>,
 
     /// Proportion in group 1
-    #[schemars(description = "Proportion in first group (0-1).")]
+    #[schemars(description = "Proportion in first group (0-1). Leave None to solve for it.")]
     pub p1: Option<f64>,
 
     /// Proportion in group 2
@@ -497,6 +505,12 @@ pub struct PowerPropTestRequest {
         description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'; spellings such as 'two-sided' and 'one-sided' are accepted."
     )]
     pub alternative: Option<String>,
+
+    /// Parameter to solve for
+    #[schemars(
+        description = "Parameter to solve for when it is not the one omitted: 'n', 'p1', 'p2', 'sig.level' (or 'alpha') or 'power'. Needed only to solve for sig_level, which otherwise defaults to 0.05 (R's power.prop.test)."
+    )]
+    pub solve_for: Option<String>,
 }
 
 /// Request for isotonic regression.
@@ -526,7 +540,7 @@ pub struct IsoregRequest {
 pub struct PowerAnovaTestRequest {
     /// Number of groups
     #[schemars(
-        description = "Number of groups (at least 2; required). In the hosted profile at most the server's design_groups limit (100 by default)."
+        description = "Number of groups (at least 2). Leave None to solve for it (reported fractional, as R). In the hosted profile at most the server's design_groups limit (100 by default)."
     )]
     pub groups: Option<usize>,
 
@@ -537,11 +551,15 @@ pub struct PowerAnovaTestRequest {
     pub n: Option<f64>,
 
     /// Between-group variance
-    #[schemars(description = "Between-group variance (variance of group means).")]
+    #[schemars(
+        description = "Between-group variance (variance of the group means, divisor groups - 1). Leave None to solve for it."
+    )]
     pub between_var: Option<f64>,
 
     /// Within-group variance
-    #[schemars(description = "Within-group variance (variance within each group). Default: 1.")]
+    #[schemars(
+        description = "Within-group variance (variance within each group). Leave None to solve for it; there is no default (R's power.anova.test)."
+    )]
     pub within_var: Option<f64>,
 
     /// Significance level
@@ -553,6 +571,12 @@ pub struct PowerAnovaTestRequest {
         description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80."
     )]
     pub power: Option<f64>,
+
+    /// Parameter to solve for
+    #[schemars(
+        description = "Parameter to solve for when it is not the one omitted: 'groups', 'n', 'between.var', 'within.var', 'sig.level' (or 'alpha') or 'power'. Needed only to solve for sig_level, which otherwise defaults to 0.05 (R's power.anova.test)."
+    )]
+    pub solve_for: Option<String>,
 }
 
 /// Request for Tukey's HSD (Honest Significant Differences) test.
@@ -716,7 +740,7 @@ pub struct PowerTTestRequest {
 
     /// Standard deviation
     #[schemars(
-        description = "Standard deviation. Default: 1 (use d = delta/sd as standardized effect size)."
+        description = "Standard deviation. Default: 1 unless solve_for = 'sd' (use d = delta/sd as standardized effect size)."
     )]
     pub sd: Option<f64>,
 
@@ -741,4 +765,10 @@ pub struct PowerTTestRequest {
         description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'; spellings such as 'two-sided' and 'one-sided' are accepted."
     )]
     pub alternative: Option<String>,
+
+    /// Parameter to solve for
+    #[schemars(
+        description = "Parameter to solve for when it is not the one omitted: 'n', 'delta', 'sd', 'sig.level' (or 'alpha') or 'power'. Needed only to solve for sd or sig_level, which otherwise default to 1 and 0.05 (R's power.t.test)."
+    )]
+    pub solve_for: Option<String>,
 }
