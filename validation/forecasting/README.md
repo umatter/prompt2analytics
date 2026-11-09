@@ -8,7 +8,14 @@ This directory contains validation documentation for forecasting methods.
 |--------|------|--------------|-----------|
 | ARIMA | [arima.md](arima.md) | `run_arima()`, `forecast_arima()` | R `forecast::Arima()` |
 | MSTL | [mstl.md](mstl.md) | `run_mstl()` | R `forecast::mstl()` |
-| Changepoint | no validation document yet | `run_changepoint()` | R `changepoint`, Python `ruptures` |
+| GARCH(p, q) | [garch.md](garch.md) | `garch()`, `run_garch()` | conditional likelihood written out in R (fGarch and rugarch not installed) |
+| Holt-Winters | [holtwinters.md](holtwinters.md) | `run_holt_winters()` | R `stats::HoltWinters()` |
+| Kalman filter, smoother and forecast | [kalman.md](kalman.md) | `kalman_filter()` | R `stats::KalmanRun()`, `KalmanSmooth()`, `KalmanForecast()` |
+| Structural time series | [structts.md](structts.md) | `run_struct_ts()` | R `stats::StructTS()` |
+| CausalImpact | [causal_impact.md](causal_impact.md) | `run_causal_impact()` | R `stats::StructTS(type = "level")` and `KalmanForecast()` |
+| Changepoint | [../timeseries/changepoint.md](../timeseries/changepoint.md) | `run_changepoint()` | R `changepoint::cpt.mean()`, `cpt.var()`, `cpt.meanvar()` |
+
+Whether each is pinned to R is in the method index of [../README.md](../README.md).
 
 ## Key Test Cases
 

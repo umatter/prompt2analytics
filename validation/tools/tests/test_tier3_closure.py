@@ -590,5 +590,69 @@ class DeferredClaimsTest(unittest.TestCase):
         self.assertEqual(hits, [], "\n" + "\n".join(hits))
 
 
+# ---------------------------------------------------------------- Task 6: indexes (README, categories, datasets)
+
+class IndexTest(unittest.TestCase):
+    def test_registered_docs_are_in_their_category_index(self):
+        missing = []
+        for doc in sorted({os.path.normpath(e["doc"]) for e in registry_entries()}):
+            d = (REPO / doc).parent
+            idx = d / "README.md"
+            if d != VALIDATION and idx.is_file() and f"]({Path(doc).name})" not in idx.read_text(encoding="utf-8"):
+                missing.append(f"{idx.relative_to(REPO)} lacks {Path(doc).name}")
+        self.assertEqual(missing, [], "\n" + "\n".join(missing))
+
+    def test_econometrics_index_lists_every_doc(self):
+        idx = (VALIDATION / "econometrics" / "README.md").read_text(encoding="utf-8")
+        docs = sorted(p.name for p in (VALIDATION / "econometrics").glob("*.md") if p.name != "README.md")
+        self.assertEqual([d for d in docs if f"]({d})" not in idx], [])
+        self.assertIn("](timeseries/README.md)", idx)
+        self.assertNotIn("econometrics::tests::test_validate", idx)
+
+    def test_every_generated_dataset_is_documented(self):
+        readme = (VALIDATION / "datasets" / "README.md").read_text(encoding="utf-8")
+        rows = {}
+        for cells in table_rows(section(readme, "Generated datasets")):
+            m = re.search(r"generated/([A-Za-z0-9_.-]+\.csv)", cells[0])
+            if m:
+                rows[m.group(1)] = cells
+        cases = {}
+        for p in (VALIDATION / "expected").glob("*.json"):
+            c = json.loads(p.read_text(encoding="utf-8"))
+            for ds in c.get("datasets", []):
+                cases.setdefault(Path(ds).name, set()).add(c["id"])
+        problems = []
+        for csv_path in sorted((VALIDATION / "datasets" / "generated").glob("*.csv")):
+            name = csv_path.name
+            cells = rows.pop(name, None)
+            if cells is None or len(cells) < 5:
+                problems.append(f"{name}: no row (| File | Rows | Case(s) | R file | Source |)")
+                continue
+            with csv_path.open(newline="", encoding="utf-8") as fh:
+                records = list(csv.reader(fh))
+            want = (len(records) - 1, len(records[0]))
+            m = re.match(r"^\s*([0-9][0-9,]*)\s*×\s*([0-9]+)", cells[1])
+            if not m or (int(m.group(1).replace(",", "")), int(m.group(2))) != want:
+                problems.append(f"{name}: rows cell {cells[1]!r}, file has {want[0]} × {want[1]}")
+            listed = set(re.findall(r"`([a-z0-9_]+)`", cells[2]))
+            if not listed or not listed <= cases.get(name, set()):
+                problems.append(f"{name}: cases {sorted(listed)} vs case files {sorted(cases.get(name, set()))}")
+            rfile = re.search(r"`(?:validation/)?(?:r/cases/)?([a-z0-9_]+\.R)`", cells[3])
+            if not rfile or not (VALIDATION / "r" / "cases" / rfile.group(1)).is_file():
+                problems.append(f"{name}: R file cell {cells[3]!r}")
+            if not cells[4]:
+                problems.append(f"{name}: empty source")
+        problems += [f"{name}: row for a file that does not exist" for name in rows]
+        self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+    def test_harness_packages_are_listed(self):
+        packages = set()
+        for p in (VALIDATION / "expected").glob("*.json"):
+            packages |= set(json.loads(p.read_text(encoding="utf-8")).get("packages", {}))
+        prereq = section((VALIDATION / "README.md").read_text(encoding="utf-8"), "Prerequisites")
+        missing = sorted(pk for pk in packages if not re.search(rf"(?<![\w.]){re.escape(pk)}(?![\w.])", prereq))
+        self.assertEqual(missing, [])
+
+
 if __name__ == "__main__":
     unittest.main()

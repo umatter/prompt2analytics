@@ -4,13 +4,13 @@ This directory contains validation documentation for regression diagnostic tests
 
 ## Methods
 
-| Diagnostic | p2a Function | Reference |
-|------------|--------------|-----------|
-| Jarque-Bera | `run_diagnostics()` | R `tseries::jarque.bera.test()` |
-| Breusch-Pagan | `run_diagnostics()` | R `lmtest::bptest()` |
-| Durbin-Watson | `run_diagnostics()` | R `lmtest::dwtest()` |
-| VIF | `run_diagnostics()` | R `car::vif()` |
-| Condition Number | `run_diagnostics()` | R `kappa()` |
+| Diagnostic | File | p2a Function | Reference |
+|------------|------|--------------|-----------|
+| Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF, condition number, RESET | [regression_diagnostics.md](regression_diagnostics.md) | `run_diagnostics()`, `reset_test()` | R `tseries::jarque.bera.test()`, `lmtest::bptest()`, `lmtest::dwtest()`, `car::vif()`, `kappa()`, `lmtest::resettest()` |
+| Breusch-Godfrey | [bgtest.md](bgtest.md) | `bg_test()` | R `lmtest::bgtest()` |
+| Harvey-Collier | [harvtest.md](harvtest.md) | `harvey_collier_test()` | R `lmtest::harvtest()` |
+
+Whether each is pinned to R is in the method index of [../README.md](../README.md).
 
 ## Validation Approach
 
@@ -29,5 +29,5 @@ Each diagnostic test validates:
 ## Running Tests
 
 ```bash
-cargo test -p p2a-core -- regression::diagnostics::tests::test_validate
+cargo test -p p2a-core --lib --no-default-features --features ci -- regression::diagnostics::tests::test_validate
 ```

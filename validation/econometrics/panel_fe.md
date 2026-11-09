@@ -28,9 +28,9 @@ y_it - ybar_i = (x_it - xbar_i)' beta + (e_it - ebar_i)
   test is not computed. `f_stat` and its p-value are then NaN, a warning says why, and the
   text output has no F line; plm's `pwaldtest` stops with "system is computationally
   singular" there.
-- Refused: a non-finite value in `y` or a regressor, and regressors that are exactly
-  collinear after removing the entity means (also a regressor that is exactly zero after
-  demeaning), whose coefficients are not identified.
+- Refused: a non-finite value in `y` or a regressor.
+- Regressors that the fixed effects absorb are dropped and reported: see
+  [hdfe.md](hdfe.md#regressors-absorbed-by-the-fixed-effects).
 
 ## R reference
 

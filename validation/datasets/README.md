@@ -222,7 +222,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
 | `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
 | `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
-| `generated/medflex_sim.csv` | 500 × 12 (a, m, c1, c2, yc, yb, yp, yi, yo, m_lin, y_lin, c1dup; a, c2, yb and yp Int64) | `medflex_scales`; read by `mediation_ipw_t3` | `r/cases/causal_medflex.R` | seed 20261130; binary a, gaussian m, yc (gaussian), yb (binary), yp (Poisson), yi (A:M interaction), yo (NDE and NIE of opposite sign), m_lin = 0.1 + 0.3 c1 exactly, c1dup a copy of c1 |
+| `generated/medflex_sim.csv` | 500 × 12 (a, m, c1, c2, yc, yb, yp, yi, yo, m_lin, y_lin, c1dup; a, c2, yb and yp Int64) | `medflex_scales` | `r/cases/causal_medflex.R` | read by `mediation_ipw_t3` too (its case lists no dataset); seed 20261130; binary a, gaussian m, yc (gaussian), yb (binary), yp (Poisson), yi (A:M interaction), yo (NDE and NIE of opposite sign), m_lin = 0.1 + 0.3 c1 exactly, c1dup a copy of c1 |
 | `generated/mlogit_fishing.csv` | 4728 × 6 (id, alt, chosen, price, catch, income) | `disc_mlogit_fishing` | `r/cases/discrete_mlogit_asc.R` | `mlogit::Fishing` in long form (`dfidx`), 1182 choice situations × 4 modes |
 | `generated/multinom_overlap.csv` | 300 × 3 (y, x1, x2) | `disc_multinom_overlap` | `r/cases/discrete_mlogit_asc.R` | seed 20261022 |
 | `generated/nls_expdecay.csv` | 11 × 2 (x, y) | `nls_expdecay` | `r/cases/regression_smoothers_t3.R` | literal values: the old nls test's exponential-decay data, x = 0, 0.5, ..., 5 |
@@ -282,6 +282,10 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/bart_probit_sim.csv` | 300 × 4 (x1, x2, x3, y) | `ml_bart_probit_glm` | `r/cases/ml_boosting_t3.R` | seed 4640 |
 | `generated/cr_small.csv` | 40 × 3 (id, time, event) | `mcp_competing_risks` | `r/cases/mcp_dispatch.R` | seed 20261023; integer times with ties; event 0 censored, 1 and 2 competing events |
 | `generated/mcp_dispatch.csv` | 48 × 19 (id, k, xn, a, b, gx, gy, v, s, u, w, seas, y1, y2, f1-f4, txt) | `mcp_dispatch_smoke` | `r/cases/mcp_dispatch.R` | seed 20261024; k integer counts, xn with 3 empty cells, (a, b) three separated blobs, (gx, gy) an 8 × 6 grid with v, s one mean shift, u and w correlated, seas trend plus season, y1/y2 a VAR(1), f1-f4 one factor, txt strings |
+| `generated/pdp_lm.csv` | 60 × 4 (x1, x2, x3, y) | `pdp_lm` | `r/cases/ml_pdp.R` | seed 20261022; x1 ~ U(-2, 2), x2 ~ N(0, 1), x3 on four levels; y quadratic in x1 with an x1:x2 interaction plus N(0, 0.4^2) noise |
+| `generated/pdp_small_scale.csv` | 40 × 3 (x, z, y) | `pdp_small_scale` | `r/cases/ml_pdp.R` | seed 20261023; x = 1e-12 U(1, 3) (a feature on a tiny scale), z ~ N(0, 1), y = 2 + 4e11 x - 0.5 z + N(0, 0.3^2) |
+| `generated/spatial_sim.csv` | 80 × 6 (id, cx, cy, x1, x2, y) | `spatial_weights_moran`, `spatial_sar_sdm_sem` | `r/cases/spatial_ml_weights.R` | seeds 20261202 and 20261203; uniform coordinates, W = 4 nearest neighbours row-standardised; y an SDM with rho 0.4 and a lagged x1 |
+| `generated/sphet_sim.csv` | 150 × 8 (id, cx, cy, x1, x2, y_sar, y_sem, y_sarar) | `sphet_gmm_hac` | `r/cases/spatial_sphet.R` | seed 20261208; uniform coordinates, W = 5 nearest neighbours; heteroskedastic, spatially correlated errors; SAR (rho 0.4), SEM (lambda 0.5) and SARAR outcomes |
 
 ## Adding a dataset
 

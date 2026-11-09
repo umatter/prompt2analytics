@@ -34,9 +34,11 @@ theta_i = 1 - sqrt(sigma2_nu / (T_i sigma2_eta + sigma2_nu))
   of freedom.
 - `theta` is the observation-weighted mean `sum T_i theta_i / n` (plm's mean theta);
   `theta_by_group` holds the `theta_i` on unbalanced panels.
-- Refused: a non-finite value in `y` or a regressor, regressors that are exactly collinear
-  with each other or with the intercept (not identified), `n <= N + K` (no within degrees
-  of freedom) and `N <= K + 1` (the between regression is not estimable, as plm).
+- Refused: a non-finite value in `y` or a regressor, `n <= N + K` (no within degrees of
+  freedom) and `N <= K + 1` (the between regression is not estimable, as plm).
+- A time-invariant regressor is kept (the between variation identifies it); the later of
+  exactly collinear columns of `[1, X]` is dropped and reported, as plm's aliased
+  coefficients: see [hdfe.md](hdfe.md#regressors-absorbed-by-the-fixed-effects).
 
 ## R reference
 

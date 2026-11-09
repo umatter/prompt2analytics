@@ -105,7 +105,9 @@ looks like a validation failure but is not one.
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
-  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost.
+  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost. Some case files also record the base
+  packages base, stats and datasets and the recommended packages boot and Matrix, which ship
+  with R.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
