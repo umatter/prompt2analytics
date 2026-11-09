@@ -279,7 +279,7 @@ impl AnalyticsServer {
 
     /// - R `stats::ccf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
     #[tool(
-        description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables."
+        description = "Compute the cross-correlation function of two series, as R's ccf(x, y): the value at lag k estimates cor(x[t+k], y[t]), so a peak at a negative lag k means x leads y by |k| periods and a peak at a positive lag means y leads x. Missing or infinite values are refused (R: na.fail). Returns the values for lags -lag_max to lag_max, the white-noise bound qnorm(0.975)/sqrt(n) and the lag of the largest |correlation|."
     )]
     pub async fn timeseries_ccf(
         &self,
@@ -297,42 +297,29 @@ impl AnalyticsServer {
             CcfType::Correlation,
         ) {
             Ok(result) => {
-                // Find the lag with maximum absolute correlation
-                let max_idx = result
-                    .values
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let max_lag = result.lags[max_idx];
-                let max_ccf = result.values[max_idx];
-
-                let lead_lag_interpretation = if max_lag > 0 {
-                    format!("{} leads {} by {} periods", request.x, request.y, max_lag)
-                } else if max_lag < 0 {
-                    format!("{} leads {} by {} periods", request.y, request.x, -max_lag)
-                } else {
-                    format!(
-                        "{} and {} are contemporaneously correlated",
-                        request.x, request.y
-                    )
-                };
-
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "type": "Cross-Correlation (CCF)",
                     "x_series": request.x,
                     "y_series": request.y,
                     "n_obs": result.n_obs,
+                    "lag_convention": "value at lag k = cor(x[t+k], y[t]) (R's ccf(x, y))",
                     "lags": result.lags,
                     "values": result.values,
                     "confidence_bound_95": result.confidence_bound,
-                    "max_correlation": {
-                        "lag": max_lag,
-                        "value": max_ccf,
-                        "interpretation": lead_lag_interpretation
-                    }
                 });
+                match peak_lag(&result.lags, &result.values) {
+                    Some((k, v)) => {
+                        json_output["max_correlation"] = serde_json::json!({
+                            "lag": k,
+                            "value": v,
+                            "interpretation": lead_lag(&request.x, &request.y, k)
+                        });
+                    }
+                    None => {
+                        json_output["max_correlation"] = serde_json::Value::Null;
+                        json_output["note"] = serde_json::json!("no finite cross-correlation");
+                    }
+                }
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "{}\n\nJSON:\n{}",
                     result,
@@ -2127,6 +2114,29 @@ fn arima_spec(
     }
 }
 
+/// Lag of the largest |value| among the finite values (ties: the first in `lags` order); None
+/// when none is finite.
+fn peak_lag(lags: &[i32], values: &[f64]) -> Option<(i32, f64)> {
+    lags.iter().zip(values).filter(|(_, v)| v.is_finite()).fold(
+        None,
+        |best: Option<(i32, f64)>, (&k, &v)| match best {
+            Some((_, b)) if v.abs().total_cmp(&b.abs()) != std::cmp::Ordering::Greater => best,
+            _ => Some((k, v)),
+        },
+    )
+}
+
+/// R's reading of a ccf(x, y) peak at lag k: k < 0 means x leads y.
+fn lead_lag(x: &str, y: &str, k: i32) -> String {
+    let n = k.unsigned_abs();
+    let unit = if n == 1 { "period" } else { "periods" };
+    match k.cmp(&0) {
+        std::cmp::Ordering::Less => format!("{x} leads {y} by {n} {unit}"),
+        std::cmp::Ordering::Greater => format!("{y} leads {x} by {n} {unit}"),
+        std::cmp::Ordering::Equal => format!("{x} and {y} are contemporaneously correlated"),
+    }
+}
+
 /// A tool error `prefix: err`; for a missing value, with how to fill the gap. The hint
 /// narrows the generic "Drop or impute them first." of the missing-value error to imputing.
 fn ts_error(prefix: &str, err: &dyn std::fmt::Display) -> CallToolResult {
@@ -2157,6 +2167,20 @@ mod tests {
     use p2a_core::data::Dataset;
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
+
+    /// TOOL-11: the peak is taken over finite values by a total order; NaN never panics.
+    #[test]
+    fn test_ccf_peak_lag_total_order() {
+        assert_eq!(
+            peak_lag(&[-1, 0, 1], &[0.2, f64::NAN, -0.5]),
+            Some((1, -0.5))
+        );
+        // tie on |v|: first in lag order
+        assert_eq!(peak_lag(&[-1, 0, 1], &[0.4, -0.4, 0.1]), Some((-1, 0.4)));
+        assert_eq!(peak_lag(&[-1, 0], &[f64::NAN, f64::NAN]), None);
+        assert_eq!(peak_lag(&[], &[]), None);
+        assert_eq!(peak_lag(&[0], &[f64::INFINITY]), None);
+    }
 
     #[test]
     fn test_timeseries_option_tables() {

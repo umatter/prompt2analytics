@@ -680,3 +680,95 @@ async fn test_mcp_timeseries_option_aliases() {
         );
     }
 }
+
+/// TOOL-12: R's ccf(x, y): the value at lag k is cor(x[t+k], y[t]); a peak at k < 0 means x
+/// leads y. Before: "y leads x by 1 periods".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ccf_direction() {
+    let case = Case::load("stat_ts_acf_spline_t3");
+    let (se, s) = session_with("stat_ts_acf_spline_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_ccf",
+            json!({"dataset": "ts_acf_spline_t3", "x": "x", "y": "y", "lag_max": 5}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .vector("ccf", &fs(&j["values"]), Tol::stat(64))
+        .vector("ccf_lags", &fs(&j["lags"]), Tol::exact())
+        .scalar("acf_ci_bound", f(&j["confidence_bound_95"]), Tol::coef(64))
+        .finish();
+    assert_eq!(j["max_correlation"]["lag"], -1);
+    assert_eq!(
+        j["max_correlation"]["interpretation"],
+        "x leads y by 1 period"
+    );
+    // swapping the series swaps the reading: ccf(y, x) peaks at +1
+    let r = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_ccf",
+            json!({"dataset": "ts_acf_spline_t3", "x": "y", "y": "x", "lag_max": 5}),
+        )
+        .await,
+    );
+    assert_eq!(
+        (
+            r["max_correlation"]["lag"].as_i64(),
+            r["max_correlation"]["interpretation"].as_str()
+        ),
+        (Some(1), Some("x leads y by 1 period"))
+    );
+    let desc = AnalyticsServer::new()
+        .router_tools()
+        .into_iter()
+        .find(|t| t.name == "timeseries_ccf")
+        .unwrap()
+        .description
+        .unwrap()
+        .to_string();
+    assert!(
+        desc.contains("a peak at a negative lag k means x leads y")
+            && !desc.contains("Positive lag k means x leads y"),
+        "{desc}"
+    );
+}
+
+/// TOOL-11: NaN or ±Inf input is a tool error naming the column (R: na.fail); before, the
+/// handler panicked at `partial_cmp(..).unwrap()`. (This is the one inline fixture with a NaN
+/// cell.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_ccf_nan_no_panic() {
+    use p2a_core::polars::prelude::*;
+    let x = [1.1, 2.3, f64::NAN, 3.2, 2.0, 1.4, 0.9, 1.7, 2.6, 1.2];
+    let y = [0.4, 1.0, 2.1, 1.9, 3.1, 1.8, 1.3, 0.8, 1.9, 2.4];
+    let inf = [1.1, 2.3, f64::INFINITY, 3.2, 2.0, 1.4, 0.9, 1.7, 2.6, 1.2];
+    let ds = p2a_core::data::Dataset::new(df!("x" => x, "y" => y, "xi" => inf).unwrap());
+    let (se, s) = session_with_datasets(vec![("nan", ds)]);
+    let r = try_call(
+        &s,
+        &se,
+        "timeseries_ccf",
+        json!({"dataset": "nan", "x": "x", "y": "y"}),
+    )
+    .await
+    .expect("dispatch");
+    assert!(
+        !r.success && text(&r).contains("missing value"),
+        "{}",
+        text(&r)
+    );
+    let r = try_call(
+        &s,
+        &se,
+        "timeseries_ccf",
+        json!({"dataset": "nan", "x": "xi", "y": "y"}),
+    )
+    .await
+    .expect("dispatch");
+    assert!(!r.success && text(&r).contains("infinite"), "{}", text(&r));
+}
