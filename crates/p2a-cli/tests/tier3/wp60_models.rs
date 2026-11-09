@@ -40,7 +40,7 @@ fn multinom_named(v: &Value, key: &str) -> (Vec<String>, Vec<f64>) {
 /// CLI-17: logit/probit print glm.fit's convergence and every core warning, in text and JSON
 /// (disc_binary_glm: ysep is separated by x1 + x2 and by neither alone; x1b = 2 x1 is aliased).
 #[test]
-fn test_cli_logit_prints_converged_and_warnings() {
+fn test_validate_cli_logit_prints_converged_and_warnings() {
     let case = Case::load("disc_binary_glm");
     let s = temp_session();
     let d = s.load(&case);
@@ -2861,4 +2861,99 @@ fn test_cli_option_values_parse_aliases_and_reject_unknown() {
             assert!(e.contains(n), "{}: {n} not listed in {e}", args.join(" "));
         }
     }
+}
+
+/// An option the chosen settings would ignore is refused, the message naming both flags: --rho
+/// with ar1_auto (rho estimated) or identity, --seed without --se boot, --pmax without a lag
+/// criterion.
+#[test]
+fn test_cli_ignored_options_are_refused() {
+    let s = temp_session();
+    for stem in ["gls_ar1", "quantreg_hetero", "purtest_panel"] {
+        let p = repo_path(&format!("validation/datasets/generated/{stem}.csv"));
+        s.load_as(&p, stem, &[]);
+    }
+    let gls = ["reg", "gls", "gls_ar1", "-y", "y", "-x", "x"];
+    let qr = ["reg", "quantreg", "quantreg_hetero", "-y", "y", "-x", "x"];
+    let ur = [
+        "panel",
+        "unit-root",
+        "purtest_panel",
+        "-v",
+        "y",
+        "--unit",
+        "id",
+        "--time",
+        "t",
+    ];
+    let refused: &[(Vec<&str>, [&str; 2])] = &[
+        (argv(&gls, &["--rho", "0.3"]), ["--rho", "ar1"]),
+        (
+            argv(&gls, &["--correlation", "ar1_auto", "--rho", "0.3"]),
+            ["--rho", "ar1_auto"],
+        ),
+        (
+            argv(&gls, &["--correlation", "identity", "--rho", "0.3"]),
+            ["--rho", "identity"],
+        ),
+        (argv(&qr, &["--seed", "7"]), ["--seed", "--se boot"]),
+        (
+            argv(&qr, &["--se", "ker", "--seed", "7"]),
+            ["--seed", "--se boot"],
+        ),
+        (argv(&ur, &["--pmax", "4"]), ["--pmax", "--lag-selection"]),
+        (
+            argv(
+                &ur,
+                &["--lags", "1", "--lag-selection", "fixed", "--pmax", "4"],
+            ),
+            ["--pmax", "--lag-selection"],
+        ),
+    ];
+    for (args, names) in refused {
+        let e = s.err(args);
+        for n in names {
+            assert!(e.contains(n), "{}: {n} not named in {e}", args.join(" "));
+        }
+    }
+    // the combinations the options apply to still run
+    for args in [
+        argv(&gls, &["--correlation", "ar1", "--rho", "0.3"]),
+        argv(&qr, &["--se", "boot", "--seed", "7"]),
+        argv(&ur, &["--lag-selection", "sic", "--pmax", "4"]),
+    ] {
+        s.ok(&args);
+    }
+}
+
+/// Datasets load lazily; `data list` reads each one, so a dataset whose source file is gone is
+/// warned about and listed apart from the loaded ones (JSON key "unavailable").
+#[test]
+fn test_cli_data_list_marks_unreadable_datasets() {
+    let s = temp_session();
+    let a = s.dir().join("a.csv");
+    let b = s.dir().join("b.csv");
+    std::fs::write(&a, "x,y\n1,2.5\n2,3.5\n").unwrap();
+    std::fs::write(&b, "x\n1\n").unwrap();
+    s.load_as(&a, "a", &[]);
+    s.load_as(&b, "b", &[]);
+    assert_eq!(s.json(&["data", "list"]), json!({ "datasets": ["a", "b"] }));
+    std::fs::remove_file(&b).unwrap();
+    let out = s.run(&["data", "list"]);
+    assert_no_panic(&out, "data list");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (loaded, rest) = text.split_once("could not be read").expect(&text);
+    assert!(loaded.contains("Loaded datasets:\n  - a\n"), "{text}");
+    assert!(!loaded.contains("- b"), "{text}");
+    assert!(rest.contains("- b"), "{text}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("Could not reload dataset 'b'"),
+        "the failed reload is warned about: {err}"
+    );
+    assert_eq!(
+        s.json(&["data", "list"]),
+        json!({ "datasets": ["a"], "unavailable": ["b"] })
+    );
 }

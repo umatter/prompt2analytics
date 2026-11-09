@@ -11,7 +11,7 @@ The numbers come from the cores; the tests here pin them through the binary agai
 
 | Test | Case(s) | Keys | Tolerance |
 |---|---|---|---|
-| `test_cli_logit_prints_converged_and_warnings` | `disc_binary_glm` | `aliased_coef`; the separation and glm.fit warnings in text and JSON | coefficients `Tol::coef(400)` |
+| `test_validate_cli_logit_prints_converged_and_warnings` | `disc_binary_glm` | `aliased_coef`; the separation and glm.fit warnings in text and JSON | coefficients `Tol::coef(400)` |
 | `test_validate_cli_logit_probit_glm` | `disc_binary_glm` | `logit_coef/se/z/p/loglik/aic/null_loglik`; `probit_coef_tight`, `probit_se_tight`, `probit_loglik_tight`, `probit_aic_tight` | logit `Tol::coef/se/stat/p_value(400)`; probit coefficients and SEs `Tol::iterative(1e-6)` (p2a's default control), log-likelihood and AIC `Tol::stat(400)` |
 | `test_validate_cli_mlogit_base` | `disc_multinom_overlap` | `refB_coef_tight`, `refB_se_tight`, `coef_tight`, `loglik` | `Tol::iterative(1e-8)` coefficients, `1e-6` SEs |
 | `test_validate_cli_clogit_asc_reflevel` | `disc_mlogit_fishing` | `generic_asc_*_tight`, `generic_noasc_*_tight`, the reflevel-pier reparametrisation | `Tol::iterative(1e-9)` coefficients, `1e-8` SEs |

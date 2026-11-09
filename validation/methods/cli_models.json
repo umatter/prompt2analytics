@@ -13,7 +13,7 @@
         "disc_mlogit_fishing"
       ],
       "tests": [
-        "p2a-cli::tier3::wp60_models::test_cli_logit_prints_converged_and_warnings",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_logit_prints_converged_and_warnings",
         "p2a-cli::tier3::wp60_models::test_validate_cli_logit_probit_glm",
         "p2a-cli::tier3::wp60_models::test_validate_cli_mlogit_base",
         "p2a-cli::tier3::wp60_models::test_validate_cli_clogit_asc_reflevel"
