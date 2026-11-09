@@ -59,8 +59,8 @@ pub fn sidecar_dir(session_path: &Path) -> PathBuf {
 /// and stays injective under case-insensitive comparison (the encoded name has no
 /// uppercase letter outside the hex digits of an escape, whose case never varies), so
 /// two names never share a file on a case-insensitive filesystem; no name leaves the
-/// directory. A name that would encode to a Windows device name (`con`, `nul`, `com1`,
-/// ...) has its first byte escaped too.
+/// directory. A name that would encode to a Windows device name (`con`, `nul`, `com0` to
+/// `com9`, `lpt0` to `lpt9`, ...) has its first byte escaped too.
 fn sidecar_file_name(name: &str) -> anyhow::Result<String> {
     if name.is_empty() {
         anyhow::bail!("a dataset name cannot be empty");
@@ -92,7 +92,7 @@ fn is_windows_device_name(stem: &str) -> bool {
     matches!(stem, "con" | "prn" | "aux" | "nul")
         || ((stem.starts_with("com") || stem.starts_with("lpt"))
             && stem.len() == 4
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            && stem.as_bytes()[3].is_ascii_digit())
 }
 
 /// The file of a derived dataset entry, checked: its `source_path` must be exactly
@@ -757,6 +757,8 @@ mod derived_dataset_tests {
         }
         assert_eq!(sidecar_file_name("con").unwrap(), "%63on.parquet");
         assert_eq!(sidecar_file_name("com1").unwrap(), "%63om1.parquet");
+        assert_eq!(sidecar_file_name("com0").unwrap(), "%63om0.parquet");
+        assert_eq!(sidecar_file_name("lpt0").unwrap(), "%6Cpt0.parquet");
         assert_eq!(sidecar_file_name("com").unwrap(), "com.parquet");
         assert_eq!(sidecar_file_name("console").unwrap(), "console.parquet");
         assert_ne!(
