@@ -1715,3 +1715,77 @@ async fn test_validate_mcp_ts_vecm() {
         );
     }
 }
+
+/// GARCH with Student-t errors and variance forecasts on the MCP surface. Before:
+/// distribution and horizon were unknown fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_garch_fit_t() {
+    const PAR: Tol = Tol::new(1e-8, 0.0);
+    const SE: Tol = Tol::new(1e-6, 0.0);
+    let case = Case::load("garch_normal_t");
+    let (se, s) = session_with("garch_normal_t");
+    let names = |v: &Value| -> Vec<String> {
+        v["param_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect()
+    };
+    let n = json_of(
+        &ok(
+            &s,
+            &se,
+            "ts_garch_fit",
+            json!({"dataset": "garch_returns", "column": "r_norm", "horizon": 10}),
+        )
+        .await,
+    );
+    let t = json_of(
+        &ok(
+            &s,
+            &se,
+            "ts_garch_fit",
+            json!({"dataset": "garch_returns", "column": "r_t", "distribution": "t", "horizon": 10}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .named("norm_par_tight", &names(&n), &fs(&n["estimates"]), PAR)
+        .named("norm_se_tight", &names(&n), &fs(&n["std_errors"]), SE)
+        .scalar(
+            "norm_loglik_tight",
+            f(&n["log_likelihood"]),
+            Tol::stat(1500),
+        )
+        .vector(
+            "norm_forecast_var_tight",
+            &fs(&n["forecast"]["variance"]),
+            PAR,
+        )
+        .named("std_par_tight", &names(&t), &fs(&t["estimates"]), PAR)
+        .named("std_se_tight", &names(&t), &fs(&t["std_errors"]), SE)
+        .scalar("std_loglik_tight", f(&t["log_likelihood"]), Tol::stat(1500))
+        .vector(
+            "std_forecast_var_tight",
+            &fs(&t["forecast"]["variance"]),
+            PAR,
+        )
+        .finish();
+    assert_eq!(
+        (n["distribution"].as_str(), t["distribution"].as_str()),
+        (Some("norm"), Some("std"))
+    );
+    let vol = fs(&t["forecast"]["volatility"]);
+    assert!((vol[0] - fs(&t["forecast"]["variance"])[0].sqrt()).abs() < 1e-15);
+    assert!(
+        refused(
+            &s,
+            &se,
+            "ts_garch_fit",
+            json!({"dataset": "garch_returns", "column": "r_t", "distribution": "ged"})
+        )
+        .await
+        .contains("expected one of: norm, std")
+    );
+}

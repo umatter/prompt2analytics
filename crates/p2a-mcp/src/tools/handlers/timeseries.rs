@@ -15,6 +15,7 @@ use crate::tools::requests::timeseries::*;
 
 use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
 use p2a_core::econometrics::timeseries::vecm::{VecmConfig, run_vecm_with};
+use p2a_core::forecasting::garch::GarchDistribution;
 use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
@@ -40,6 +41,7 @@ use p2a_core::{
     embed,
     filter as ts_filter,
     garch,
+    garch_forecast,
     granger_test,
     holt_winters_forecast,
     lag as ts_lag,
@@ -798,7 +800,7 @@ impl AnalyticsServer {
 
     /// Fit a GARCH model for volatility modeling.
     #[tool(
-        description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks."
+        description = "GARCH(p, q) by conditional maximum likelihood with normal ('norm') or standardised Student-t ('std') errors, as fGarch::garchFit (mci start h_t = mean(e²)); SEs from the inverse observed information, z and normal p-values; omega is in the data's units; parameters on a bound are reported with a warning; optional variance forecasts."
     )]
     pub async fn ts_garch_fit(
         &self,
@@ -813,12 +815,17 @@ impl AnalyticsServer {
             Err(e) => return Ok(ts_error("GARCH fitting failed", &e)),
         };
 
-        let config = GarchConfig {
+        let mut config = GarchConfig {
             p: request.p.unwrap_or(1),
             q: request.q.unwrap_or(1),
             include_mean: request.include_mean.unwrap_or(true),
             ..Default::default()
         };
+        config.distribution =
+            match parse_option(request.distribution.as_deref(), GarchDistribution::Normal) {
+                Ok(v) => v,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
         let result = match garch(&data, Some(config)) {
             Ok(r) => r,
@@ -827,9 +834,46 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut output = serde_json::json!({
+            "model": result.model,
+            "distribution": result.distribution.to_string(),
+            "param_names": result.param_names,
+            "estimates": result.estimates(),
+            "std_errors": result.std_errors,
+            "z_values": result.t_stats,
+            "p_values": result.p_values,
+            "shape": result.shape,
+            "vcov": result.vcov,
+            "log_likelihood": result.log_likelihood,
+            "aic": result.aic,
+            "bic": result.bic,
+            "persistence": result.persistence,
+            "unconditional_variance": result.unconditional_variance,
+            "half_life": result.half_life,
+            "n_obs": result.n_obs,
+            "n_params": result.n_params,
+            "at_bound": result.at_bound,
+        });
+        if let Some(h) = request.horizon {
+            let (variance, volatility, _) = match garch_forecast(&result, h) {
+                Ok(v) => v,
+                Err(e) => return Ok(ts_error("GARCH forecast failed", &e)),
+            };
+            output["forecast"] = serde_json::json!({
+                "horizon": h,
+                "variance": variance,
+                "volatility": volatility,
+            });
+        }
+        crate::tools::handlers::stats::insert_notes(
+            &mut output,
+            Some((result.converged, result.iterations)),
+            &result.warnings,
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{result}\n\nJSON:\n{output}"
+        ))]))
     }
 
     /// Run MSTL decomposition.

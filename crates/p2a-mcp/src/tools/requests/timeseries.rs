@@ -378,6 +378,16 @@ pub struct GarchRequest {
     /// Include mean in model - default true
     #[schemars(description = "Whether to include a mean term in the model. Default: true.")]
     pub include_mean: Option<bool>,
+
+    #[schemars(
+        description = "Conditional distribution of the standardised errors, fGarch's cond.dist: 'norm' (default, also 'normal') or 'std' (standardised Student-t, also 't'; its shape is estimated)."
+    )]
+    pub distribution: Option<String>,
+
+    #[schemars(
+        description = "Optional number of periods for variance forecasts by the GARCH(p, q) recursion; returns the forecast variances and volatilities."
+    )]
+    pub horizon: Option<usize>,
 }
 
 /// Request for MSTL decomposition.
