@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn test_marginal_effects_aliased_regressor_is_nan() {
+    fn test_validate_marginal_effects_aliased_regressor_is_nan() {
         // x3 = 2 x1: glm reports NA for x3. Its effect is undefined (NaN in every column, with
         // a warning); the other effects are those of the fit without x3.
         use p2a_validation::Check;

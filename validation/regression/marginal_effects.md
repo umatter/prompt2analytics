@@ -235,7 +235,7 @@ Registry entry `marginal_effects_logit_ame` in `validation/methods/numeric_hygie
 `z_critical(0.95)` = 1.959963984540054 instead of 1.96. A regressor the fit aliases (`x3`, a linear
 combination of the others; `coef_aliased` in the case) gets `NaN` effects, standard error, z and p and
 a warning, and the other effects equal those of the fit without it. Tests:
-`test_validate_marginal_effects_logit_tail`, `test_marginal_effects_aliased_regressor_is_nan`. The MEM
+`test_validate_marginal_effects_logit_tail`, `test_validate_marginal_effects_aliased_regressor_is_nan`. The MEM
 standard errors are not pinned (their approximation drops a gradient term).
 
 ## Status

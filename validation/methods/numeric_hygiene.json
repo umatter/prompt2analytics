@@ -54,7 +54,7 @@
       ],
       "tests": [
         "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_logit_tail",
-        "p2a-core::regression::marginal_effects::tests::test_marginal_effects_aliased_regressor_is_nan"
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_aliased_regressor_is_nan"
       ],
       "quantities": [
         "coefficients",
