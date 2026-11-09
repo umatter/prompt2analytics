@@ -202,3 +202,21 @@ after the core GARCH report, JSON `forecast: {horizon, variance, volatility, mea
 |---|---|---|
 | `test_validate_cli_garch_horizon_forecasts` | `garch_normal_t` `norm_forecast_var_tight` (JSON and text) | relative 1e-8 (JSON), 1e-6 (text, 7 significant digits) |
 | `test_validate_cli_garch_student_t` | `garch_normal_t` `std_par_tight` shape, `std_forecast_var_tight` | relative 1e-8 |
+
+### `ts varma --long-var-order`, `ts vecm --ecdet`, `--rank`
+
+`ts varma` takes the order m of Hannan-Rissanen's step-1 long VAR (`--long-var-order`; default
+max(floor(2 ln n), 2 max(p, q)), 0 when q = 0) and prints the core VARMA report with its step-2
+table. The JSON adds `estimator`, `var_names`, `long_var_order`, `regressor_names`,
+`coefficients`, `std_errors` (empty for q > 0, where the step-2 OLS SEs are not valid),
+`t_values`, `p_values`, `df_residual`, `n_params`, `aliased` and the notes.
+
+`ts vecm` defaults to K = 2 (urca refuses K = 1), takes `--ecdet` (none (default), const
+(constant), trend), and chooses the rank by the trace test at 5% unless `--rank` is given. It
+prints urca's tables with the Osterwald-Lenum critical values and serialises every field of
+the Johansen result (`"method": "VECM"` first). Only the transitory form is estimated.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_varma_long_var_order` | `varma_hr` `long_var_order`, `n_eff`, `df_residual`, `loglik`, `coef_y1` (m = 8); `default_long_var_order`, `default_loglik` | exact; `Tol::stat(391)`, `Tol::coef(391)`; `Tol::stat(388)` |
+| `test_validate_cli_vecm_options` | `vecm_denmark` `none_trace_stat`, `none_beta` (ecdet none, rank chosen 1); `trace_stat` (ecdet const, rank chosen 0) | `Tol::stat(55)`, `Tol::coef(55)` |

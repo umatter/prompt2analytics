@@ -1389,3 +1389,137 @@ fn test_validate_cli_garch_student_t() {
         "std",
     )]);
 }
+
+/// `ts varma --long-var-order`; the JSON carries the step-2 table. R: varma_hr (Hannan-Rissanen
+/// VARMA(1,1), long VAR m = 8 and the default m).
+#[test]
+fn test_validate_cli_varma_long_var_order() {
+    let case = Case::load("varma_hr");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "ts",
+        "varma",
+        &d,
+        "--cols",
+        "y1",
+        "y2",
+        "-p",
+        "1",
+        "-q",
+        "1",
+        "--long-var-order",
+        "8",
+    ]);
+    let names = strings(field(&j, "regressor_names"));
+    Check::new(&case)
+        .scalar(
+            "long_var_order",
+            num(field(&j, "long_var_order")),
+            Tol::exact(),
+        )
+        .scalar("n_eff", num(field(&j, "n_obs")), Tol::exact())
+        .scalar("loglik", num(field(&j, "log_likelihood")), Tol::stat(391))
+        .scalar("df_residual", num(field(&j, "df_residual")), Tol::exact())
+        .named(
+            "coef_y1",
+            &names,
+            &f64s(&field(&j, "coefficients")[0]),
+            Tol::coef(391),
+        )
+        .finish();
+    let args = [
+        "ts", "varma", &d, "--cols", "y1", "y2", "-p", "1", "-q", "1",
+    ];
+    let j = s.json(&args);
+    Check::new(&case)
+        .scalar(
+            "default_long_var_order",
+            num(field(&j, "long_var_order")),
+            Tol::exact(),
+        )
+        .scalar(
+            "default_loglik",
+            num(field(&j, "log_likelihood")),
+            Tol::stat(388),
+        )
+        .finish();
+    assert_keys(&j, &["warnings", "std_errors", "df_residual", "estimator"]);
+    assert!(
+        s.ok(&args).contains("e.y1.l1"),
+        "the text prints the step-2 table"
+    );
+}
+
+/// `ts vecm` defaults to K = 2 and the trace-test rank; --ecdet as ca.jo. R: vecm_denmark
+/// (urca::ca.jo(K = 2), ecdet none and const; rank by the trace test at 5%).
+#[test]
+fn test_validate_cli_vecm_options() {
+    let case = Case::load("vecm_denmark");
+    let s = temp_session();
+    let d = s.load(&case);
+    let cols = ["--cols", "LRM", "LRY", "IBO", "IDE"];
+    // default --lags 2, no --rank
+    let j = s.json(&argv(
+        &["ts", "vecm", &d],
+        &argv(&cols, &["--ecdet", "none"]),
+    ));
+    let mut trace = f64s(field(&j, "trace_stat"));
+    trace.reverse(); // urca order
+    let beta: Vec<f64> = field(&j, "beta")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| num(&r[0]))
+        .collect();
+    Check::new(&case)
+        .vector("none_trace_stat", &trace, Tol::stat(55))
+        .vector("none_beta", &beta, Tol::coef(55))
+        .finish();
+    assert_eq!(
+        (
+            num(field(&j, "selected_rank")),
+            num(field(&j, "rank")),
+            num(field(&j, "lags"))
+        ),
+        (1.0, 1.0, 2.0)
+    );
+    assert_eq!(field(&j, "method"), "VECM");
+    let j0 = s.json(&argv(
+        &["ts", "vecm", &d],
+        &argv(&cols, &["--ecdet", "constant"]),
+    ));
+    let mut trace0 = f64s(field(&j0, "trace_stat"));
+    trace0.reverse();
+    Check::new(&case)
+        .vector("trace_stat", &trace0, Tol::stat(55))
+        .finish();
+    assert_eq!(num(field(&j0, "selected_rank")), 0.0);
+    assert!(
+        field(&j0, "warnings")
+            .to_string()
+            .contains("does not reject rank 0"),
+        "{j0:#}"
+    );
+    let text = s.ok(&argv(
+        &["ts", "vecm", &d],
+        &argv(&cols, &["--ecdet", "const", "--rank", "1"]),
+    ));
+    assert!(
+        text.contains("Rank chosen by the trace test at 5%: 0"),
+        "{text}"
+    );
+    assert_usage_errors(&[(
+        vec![
+            "ts",
+            "vecm",
+            "d",
+            "--cols",
+            "a",
+            "b",
+            "--ecdet",
+            "quadratic",
+        ],
+        "trend",
+    )]);
+}

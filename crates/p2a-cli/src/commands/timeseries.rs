@@ -26,12 +26,12 @@ use p2a_core::{
     run_struct_ts,
     run_var,
     run_var_irf,
-    run_varma,
-    run_vecm,
 };
 #[cfg(feature = "spectral-analysis")]
 use p2a_core::{SpectrumConfig, run_spectrum};
 
+use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
+use p2a_core::econometrics::timeseries::vecm::{VecmConfig, VecmDeterministic, run_vecm_with};
 use p2a_core::forecasting::garch::GarchDistribution;
 use p2a_core::options::Choices;
 use p2a_core::{GarchConfig, garch as fit_garch, garch_forecast};
@@ -223,6 +223,11 @@ EXAMPLES:
         /// MA order (q)
         #[arg(short = 'q', long, default_value = "1")]
         ma: usize,
+
+        /// Order m of the step-1 long VAR (Hannan-Rissanen); default max(floor(2 ln n),
+        /// 2 max(p, q)), 0 when q = 0. Set it larger when an MA root is near the unit circle
+        #[arg(long)]
+        long_var_order: Option<usize>,
     },
 
     /// Vector Error Correction Model (cointegration)
@@ -234,13 +239,19 @@ EXAMPLES:
         #[arg(long, num_args = 2..)]
         cols: Vec<String>,
 
-        /// Lag order of the VAR in levels (urca::ca.jo's K, at least 2)
+        /// Lag order K of the VAR in levels (urca::ca.jo K; at least 2)
         #[arg(long, default_value = "2")]
         lags: usize,
 
-        /// Cointegration rank
-        #[arg(long, default_value = "1")]
-        rank: usize,
+        /// Cointegration rank r for the restricted VECM (1..k-1); default: the trace test's rank
+        /// at 5%
+        #[arg(long)]
+        rank: Option<usize>,
+
+        /// Deterministic term in the cointegration relation, as ca.jo ecdet: none (default),
+        /// const or trend
+        #[arg(long, default_value = "none", value_parser = super::causal::option_arg::<VecmDeterministic>)]
+        ecdet: VecmDeterministic,
     },
 
     /// Impulse Response Function from VAR model
@@ -614,13 +625,27 @@ pub fn execute(
             cols,
             ar,
             ma,
-        } => execute_varma(dataset, cols, *ar, *ma, format, session),
+            long_var_order,
+        } => {
+            let mut config = VarmaConfig::default();
+            config.p = *ar;
+            config.q = *ma;
+            config.long_var_order = *long_var_order;
+            execute_varma(dataset, cols, &config, format, session)
+        }
         TimeseriesCommands::Vecm {
             dataset,
             cols,
             lags,
             rank,
-        } => execute_vecm(dataset, cols, *lags, *rank, format, session),
+            ecdet,
+        } => {
+            let mut config = VecmConfig::default();
+            config.lag_order = *lags;
+            config.ecdet = *ecdet;
+            config.rank = *rank;
+            execute_vecm(dataset, cols, &config, format, session)
+        }
         TimeseriesCommands::Irf {
             dataset,
             cols,
@@ -983,8 +1008,7 @@ fn execute_var(
 fn execute_varma(
     dataset_name: &str,
     cols: &[String],
-    ar: usize,
-    ma: usize,
+    config: &VarmaConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -995,43 +1019,48 @@ fn execute_varma(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => {
-            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-
-            match run_varma(ds, &col_refs, ar, ma) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": format!("VARMA({},{})", ar, ma),
-                            "p_lags": result.p_lags,
-                            "q_lags": result.q_lags,
-                            "n_vars": result.n_vars,
-                            "n_obs": result.n_obs,
-                            "ar_params": result.ar_params,
-                            "ma_params": result.ma_params,
-                            "sigma_u": result.sigma_u,
-                            "aic": result.aic,
-                            "bic": result.bic,
-                            "log_likelihood": result.log_likelihood,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nVARMA({},{}) Results", ar, ma);
-                        println!("{}", "=".repeat(50));
-                        println!("Number of variables: {}", result.n_vars);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nAIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                    }
-                },
-                Err(e) => print_error(&ts_error_message("VARMA failed", &e), format),
-            }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+    let result = match run_varma_with(ds, &col_refs, config) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("VARMA failed", &e), format);
+            return Ok(());
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    };
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "method": format!("VARMA({},{})", config.p, config.q),
+                "estimator": result.method,
+                "var_names": result.var_names,
+                "p_lags": result.p_lags,
+                "q_lags": result.q_lags,
+                "n_vars": result.n_vars,
+                "n_obs": result.n_obs,
+                "long_var_order": result.long_var_order,
+                "ar_params": result.ar_params,
+                "ma_params": result.ma_params,
+                "regressor_names": result.regressor_names,
+                "coefficients": result.coefficients,
+                "std_errors": result.std_errors,
+                "t_values": result.t_values(),
+                "p_values": result.p_values(),
+                "df_residual": result.df_residual,
+                "n_params": result.n_params,
+                "aliased": result.aliased,
+                "sigma_u": result.sigma_u,
+                "aic": result.aic,
+                "bic": result.bic,
+                "log_likelihood": result.log_likelihood,
+            });
+            with_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => println!("\n{result}"),
     }
     Ok(())
 }
@@ -1039,8 +1068,7 @@ fn execute_varma(
 fn execute_vecm(
     dataset_name: &str,
     cols: &[String],
-    lags: usize,
-    rank: usize,
+    config: &VecmConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1051,55 +1079,30 @@ fn execute_vecm(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => {
-            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-
-            match run_vecm(ds, &col_refs, lags, rank) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "VECM",
-                            "rank": result.rank,
-                            "lags": result.lags,
-                            "n_vars": result.n_vars,
-                            "n_obs": result.n_obs,
-                            "eigenvalues": result.eigenvalues,
-                            "trace_stats": result.trace_stats,
-                            "trace_crit_values": result.trace_crit_values,
-                            "beta": result.beta,
-                            "alpha": result.alpha,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nVECM Results (rank = {})", rank);
-                        println!("{}", "=".repeat(50));
-                        println!("Cointegration rank: {}", result.rank);
-                        println!("Lags: {}", result.lags);
-                        println!("Number of variables: {}", result.n_vars);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nJohansen Trace Test:");
-                        for (i, (stat, crit)) in result
-                            .trace_stats
-                            .iter()
-                            .zip(&result.trace_crit_values)
-                            .enumerate()
-                        {
-                            let sig = if *stat > *crit { "*" } else { "" };
-                            println!(
-                                "  r <= {}: stat={:.4}, crit(5%)={:.4} {}",
-                                i, stat, crit, sig
-                            );
-                        }
-                        println!("\nEigenvalues: {:?}", result.eigenvalues);
-                    }
-                },
-                Err(e) => print_error(&ts_error_message("VECM failed", &e), format),
-            }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+    let result = match run_vecm_with(ds, &col_refs, config) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("VECM failed", &e), format);
+            return Ok(());
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    };
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({ "method": "VECM" });
+            if let (Some(out), serde_json::Value::Object(fields)) =
+                (json.as_object_mut(), serde_json::to_value(&result)?)
+            {
+                out.extend(fields);
+            }
+            with_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => println!("\n{result}"),
     }
     Ok(())
 }

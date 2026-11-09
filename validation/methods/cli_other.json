@@ -58,21 +58,25 @@
     },
     {
       "id": "cli_timeseries_outputs",
-      "name": "p2a ts irf/var/granger/garch/struct-ts/holt-winters and the other time-series commands: typed options, labels, forecasts and notes",
+      "name": "p2a ts irf/var/granger/varma/vecm/garch/holt-winters/struct-ts/ar/changepoint: labels, forecasts, typed options and notes",
       "category": "interfaces",
-      "reference": "vars::VAR, vars::irf(ortho = TRUE); lmtest::grangertest; stats::StructTS(type = 'BSM'); stats::HoltWinters + predict(prediction.interval = TRUE); GARCH likelihood optimum and variance recursion (written out; fGarch's standardised t)",
+      "reference": "vars::VAR, vars::irf(ortho = TRUE); lmtest::grangertest; Hannan-Rissanen VARMA (written out with lm.fit); urca::ca.jo, cajorls; GARCH likelihood optimum and variance recursion (written out; fGarch's standardised t); stats::HoltWinters + predict(prediction.interval = TRUE); stats::StructTS(type = 'BSM')",
       "doc": "validation/cli/other.md",
       "cases": [
         "var_canada",
         "granger_short",
-        "structts_nile_ukgas",
+        "varma_hr",
+        "vecm_denmark",
+        "garch_normal_t",
         "ts_holtwinters_forecast",
-        "garch_normal_t"
+        "structts_nile_ukgas"
       ],
       "tests": [
         "p2a-cli::tier3::wp61_other::test_validate_cli_irf_labels_as_vars",
         "p2a-cli::tier3::wp61_other::test_validate_cli_var_json",
         "p2a-cli::tier3::wp61_other::test_validate_cli_granger_notes",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_varma_long_var_order",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_vecm_options",
         "p2a-cli::tier3::wp61_other::test_validate_cli_struct_ts_notes",
         "p2a-cli::tier3::wp61_other::test_validate_cli_holt_winters_horizon_prints_forecasts",
         "p2a-cli::tier3::wp61_other::test_validate_cli_garch_horizon_forecasts",
@@ -82,12 +86,14 @@
         "orthogonalised IRF by impulse and response, every horizon (text and JSON)",
         "VAR coefficients, SEs, p-values, logLik, log det of the ML residual covariance, residual df",
         "Granger F, p, df2",
+        "VARMA long-VAR order, sample, residual df, logLik, coefficients",
+        "Johansen trace statistics (ecdet none and const), beta, selected rank",
         "StructTS BSM logLik and seasonal and observation variances",
         "presence of warnings and convergence",
         "Holt-Winters forecasts (multiplicative and additive) and 95% limits (additive), residual variance",
         "GARCH variance forecasts (normal and standardised t), t shape"
       ],
-      "tolerance": "validation/README.md for each n (Canada T = 82: coefficients 1e-6, SEs/logLik/IRF 1e-5, printed IRF at 6 decimals; Granger n = 20: F 1e-5, p 1e-5 + 1e-12, df exact; StructTS logLik at n = 108); StructTS variances Tol::iterative(1e-6) (the tight optimum); Holt-Winters 144: forecasts 1e-8, limits and residual variance 1e-6; printed text at 4 decimals; GARCH 1e-8 relative (the estimator's tight-optimum tolerance), printed variances 1e-6 relative",
+      "tolerance": "validation/README.md for each n (Canada T = 82: coefficients 1e-6, SEs/logLik/IRF 1e-5, printed IRF at 6 decimals; denmark T = 55: 1e-6 / 1e-5; varma 391 and 388: 1e-8 / 1e-6; Granger n = 20: F 1e-5, p 1e-5 + 1e-12, df exact; StructTS logLik at n = 108); StructTS variances Tol::iterative(1e-6) (the tight optimum); Holt-Winters 144: forecasts 1e-8, limits and residual variance 1e-6; printed text at 4 decimals; GARCH 1e-8 relative (the estimator's tight-optimum tolerance), printed variances 1e-6 relative",
       "deviations": [
         {
           "finding": "TS-22",
