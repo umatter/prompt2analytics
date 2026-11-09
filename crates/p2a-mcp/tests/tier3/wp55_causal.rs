@@ -1843,3 +1843,270 @@ async fn test_validate_mcp_sensemakr_contour_data() {
     .await;
     assert!(!off.contains("Contour data"), "{off}");
 }
+
+/// TOOL-14: impossible parameter values are tool errors naming the parameter, never successful
+/// estimates. The core validates; the MCP returns the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_causal_degenerate_parameters_are_tool_errors() {
+    let (rs, rv) = session_with("rd_bwselect_sharp"); // dataset `rd_sim`
+    let rd = json!({"dataset": "rd_sim", "outcome": "y", "running_var": "x", "cutoff": 0.0});
+    for (tool, extra, needle) in [
+        (
+            "rd_estimate",
+            json!({"h": -1.0}),
+            "Main bandwidth h must be a finite number greater than 0",
+        ),
+        (
+            "rd_estimate",
+            json!({"h": 0.3, "b": 0.0}),
+            "Bias bandwidth b must be a finite number greater than 0",
+        ),
+        (
+            "rd_estimate",
+            json!({"scaleregul": -1.0}),
+            "scaleregul (the regularisation scale of the bandwidth selector) must be a finite",
+        ),
+        (
+            "rd_fuzzy",
+            json!({"treatment": "d", "h": -0.5}),
+            "Main bandwidth h must be",
+        ),
+        (
+            "rd_multi",
+            json!({"cutoffs": [0.0, 0.5], "bandwidths": [0.3, -1.0]}),
+            "The bandwidth for cutoff 2 must be",
+        ),
+        (
+            "rd_multi",
+            json!({"cutoffs": [0.0], "bandwidth": 0.0}),
+            "The global bandwidth must be",
+        ),
+        ("rd_multi", json!({"cutoffs": []}), "cutoff"),
+        (
+            "rd_estimate",
+            json!({"level": 1.5}),
+            "Confidence level must be strictly between 0 and 1",
+        ),
+    ] {
+        let mut a = rd.clone();
+        if tool == "rd_multi" {
+            // rd_multi takes `cutoffs` only
+            a.as_object_mut().unwrap().remove("cutoff");
+        }
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        let t = refused(&rv, &rs, tool, a).await;
+        assert!(t.contains(needle), "{tool}: {needle:?} not in {t:?}");
+    }
+    let (ms, mv) = session_with("mte_local_iv"); // dataset `mte_sim`
+    for g in [0, 1] {
+        let t = refused(
+            &mv,
+            &ms,
+            "iv_mte",
+            json!({"dataset": "mte_sim", "y": "y", "d": "d", "z": "z1", "n_grid": g}),
+        )
+        .await;
+        assert!(t.contains("n_grid"), "n_grid = {g}: {t}");
+    }
+    let (es, ev) = session_with("etwfe_staggered");
+    let t = refused(
+        &ev,
+        &es,
+        "etwfe",
+        json!({"dataset": "etwfe_panel", "outcome": "y", "unit_col": "id", "time_col": "year",
+               "treatment": "treat", "first_treat": "first_treat", "gref": 5}),
+    )
+    .await;
+    assert!(t.contains("gref"), "{t}");
+    let (ls, lv) = session_with("ltmle_two_period");
+    let t = refused(
+        &lv,
+        &ls,
+        "ltmle",
+        json!({"dataset": "ltmle_sim", "outcomes": ["Y", "Y"], "treatments": ["A1", "A2"],
+               "covariates": ["L0", "L1"], "ps_lower": 0.5, "ps_upper": 0.4}),
+    )
+    .await;
+    assert!(t.contains("gbounds") || t.contains("ps_lower"), "{t}");
+    // no dataset: a missing baseline risk is a tool error, not a protocol error
+    let t = refused(
+        &lv,
+        &ls,
+        "evalue",
+        json!({"effect_type": "rd", "point": 0.1, "se": 0.02}),
+    )
+    .await;
+    assert!(t.contains("baseline_risk"), "{t}");
+}
+
+/// Drift guard: every option field's schema description lists each canonical spelling of the core
+/// table it is parsed with, quoted as 'name'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_causal_option_descriptions_list_accepted_values() {
+    use p2a_core::econometrics::*;
+    let (_session, server) = session_with_datasets(vec![]);
+    let tools = server.router_tools();
+    let desc = |tool: &str, field: &str| -> String {
+        let t = tools
+            .iter()
+            .find(|t| t.name == tool)
+            .unwrap_or_else(|| panic!("{tool}"));
+        t.input_schema["properties"][field]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool}.{field}"))
+            .to_string()
+    };
+    let rows: Vec<(&str, &str, Vec<&str>)> = vec![
+        (
+            "staggered_did",
+            "comparison_group",
+            staggered_did::ComparisonGroup::choices().names(),
+        ),
+        (
+            "staggered_did",
+            "estimation_method",
+            staggered_did::AttEstimationMethod::choices().names(),
+        ),
+        ("etwfe", "cgroup", etwfe::ControlGroup::choices().names()),
+        ("etwfe", "vcov", etwfe::EtwfeVcov::choices().names()),
+        (
+            "etwfe",
+            "aggregation",
+            etwfe::EtwfeAggregation::choices().names(),
+        ),
+        (
+            "rd_estimate",
+            "bwselect",
+            rd::BandwidthMethod::choices().names(),
+        ),
+        (
+            "rd_multi",
+            "bwselect",
+            rd::BandwidthMethod::choices().names(),
+        ),
+        ("rd_estimate", "kernel", rd::KernelType::choices().names()),
+        ("iv_mte", "estimand", ivmte::MTEEstimand::choices().names()),
+        (
+            "iv_mte",
+            "propensity_model",
+            ivmte::PropensityModel::choices().names(),
+        ),
+        ("gmm_iv", "vcov", general_gmm::GmmVcov::choices().names()),
+        (
+            "treatment_cbps",
+            "method",
+            cbps::CbpsMethod::choices().names(),
+        ),
+        (
+            "treatment_cbps",
+            "estimand",
+            cbps::CbpsEstimand::choices().names(),
+        ),
+        (
+            "treatment_weightit",
+            "method",
+            weightit::WeightMethod::choices().names(),
+        ),
+        (
+            "treatment_doubly_robust",
+            "method",
+            treatment::DRMethod::choices().names(),
+        ),
+        (
+            "propensity_matching",
+            "method",
+            matching::MatchMethodKind::choices().names(),
+        ),
+        (
+            "propensity_matching",
+            "distance",
+            matching::DistanceMethod::choices().names(),
+        ),
+        (
+            "propensity_matching",
+            "m_order",
+            matching::MOrder::choices().names(),
+        ),
+        (
+            "natural_effects_mediation",
+            "scale",
+            medflex::EffectScale::choices().names(),
+        ),
+        (
+            "natural_effects_mediation",
+            "family",
+            medflex::MedflexFamily::choices().names(),
+        ),
+        ("ltmle", "regime", ltmle::RegimeKind::choices().names()),
+        (
+            "gformula",
+            "outcome_type",
+            gformula::GFormulaOutcomeType::choices().names(),
+        ),
+        (
+            "gformula",
+            "intervention",
+            gformula::GFormulaRegime::choices().names(),
+        ),
+        (
+            "collaborative_tmle",
+            "cv_criterion",
+            ctmle::CVCriterion::choices().names(),
+        ),
+        (
+            "collaborative_tmle",
+            "q_model",
+            ctmle::CTmleQModel::choices().names(),
+        ),
+        (
+            "treatment_double_ml",
+            "model",
+            doubleml::DMLModelType::choices().names(),
+        ),
+        (
+            "treatment_double_ml",
+            "ml_method",
+            doubleml::MLMethod::choices().names(),
+        ),
+        (
+            "gsynth",
+            "estimator",
+            synth::GsynthEstimator::choices().names(),
+        ),
+        ("gsynth", "force", synth::GsynthForce::choices().names()),
+        (
+            "scpi",
+            "variance_method",
+            scpi::VarianceMethod::choices().names(),
+        ),
+    ];
+    let mut missing = Vec::new();
+    for (tool, field, names) in rows {
+        let d = desc(tool, field);
+        for n in names {
+            if !d.contains(&format!("'{n}'")) {
+                missing.push(format!("{tool}.{field}: '{n}' missing in {d:?}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+    let pm = tools
+        .iter()
+        .find(|t| t.name == "propensity_matching")
+        .unwrap();
+    assert!(
+        !pm.description
+            .as_deref()
+            .unwrap_or("")
+            .contains("KS statistics")
+    );
+    let cb = tools.iter().find(|t| t.name == "treatment_cbps").unwrap();
+    assert!(
+        !cb.description
+            .as_deref()
+            .unwrap_or("")
+            .contains("overidentified)")
+    );
+}

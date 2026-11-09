@@ -270,6 +270,30 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_parameters",
+      "name": "MCP causal parameter validation",
+      "category": "mcp",
+      "reference": "R's own refusals (rdrobust, ltmle gbounds, etwfe gref) and the core bounds",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "rd_bwselect_sharp",
+        "mte_local_iv",
+        "etwfe_staggered",
+        "ltmle_two_period"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_mcp_causal_degenerate_parameters_are_tool_errors"
+      ],
+      "quantities": [
+        "tool errors naming the parameter",
+        "descriptions list every canonical option value (p2a-mcp::tier3::wp55_causal::test_mcp_causal_option_descriptions_list_accepted_values, loads no case)",
+        "local option tables (unit test p2a-mcp::tools::handlers::causal::tests::test_local_option_tables_parse_aliases_and_reject_unknown, no case)"
+      ],
+      "tolerance": "not numeric",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -2506,9 +2506,11 @@ impl AnalyticsServer {
             }
             EffectMeasure::Smd => evalue_smd(request.point, request.se),
             EffectMeasure::Rd => {
-                let baseline = request.baseline_risk.ok_or_else(|| {
-                    McpError::invalid_params("baseline_risk is required for risk difference", None)
-                })?;
+                let Some(baseline) = request.baseline_risk else {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "effect_type 'rd' needs baseline_risk (the outcome risk among the unexposed)",
+                    )]));
+                };
                 evalue_rd(request.point, baseline, request.se)
             }
         };
