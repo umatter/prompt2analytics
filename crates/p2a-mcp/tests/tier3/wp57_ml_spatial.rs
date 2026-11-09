@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 fn case_df(id: &str) -> (Case, DataFrame) {
     let case = Case::load(id);
-    let df = p2a_core::DataLoader::load_csv(&case.dataset_path()).expect("case dataset loads");
+    let df = p2a_core::DataLoader::load_csv(case.dataset_path()).expect("case dataset loads");
     (case, df)
 }
 
@@ -816,10 +816,10 @@ async fn test_ml_option_descriptions_list_every_value() {
 // Spatial panels
 // ----------------------------------------------------------------------------
 
-/// splm_sim with its unit-coordinate dataset (period 1, sorted by id: W row i = the i-th id)
+/// Case `id` (splm_sim) with its unit-coordinate dataset (period 1, sorted by id: W row i = the i-th id)
 /// and a 4-NN W.
-async fn splm_session() -> (Case, Session, AnalyticsServer) {
-    let (case, df) = case_df("splm_spml_spgm");
+async fn splm_session(id: &str) -> (Case, Session, AnalyticsServer) {
+    let (case, df) = case_df(id);
     let units = df
         .clone()
         .lazy()
@@ -854,7 +854,7 @@ fn panel(y: &str, extra: Value) -> Value {
 /// model. Before: lag = false and spatial_error = None ran the plain within estimator.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_spatial_panel_ml_default_is_spatial() {
-    let (case, s, server) = splm_session().await;
+    let (case, s, server) = splm_session("splm_spml_spgm").await;
     let t = ok(&call(&server, &s, "spatial_panel_ml", panel("y_err", json!({}))).await);
     let lam = line_after(&t, "Spatial error coefficient (lambda)");
     printed(
@@ -889,7 +889,7 @@ async fn test_validate_mcp_spatial_panel_ml_default_is_spatial() {
 /// model (phi, sigma_mu).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_spml() {
-    let (case, s, server) = splm_session().await;
+    let (case, s, server) = splm_session("splm_spml_spgm").await;
     let sarar = ok(&call(
         &server,
         &s,
@@ -989,7 +989,7 @@ async fn test_validate_mcp_spml() {
 /// random-effects methods default to the lag model and refuse the error model, naming w2sls.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_spgm() {
-    let (case, s, server) = splm_session().await;
+    let (case, s, server) = splm_session("splm_spml_spgm").await;
     let gm = ok(&call(&server, &s, "spatial_panel_gmm", panel("y_err", json!({}))).await);
     printed(
         num_after(line(&gm, "Spatial error coefficient (lambda"), "):"),

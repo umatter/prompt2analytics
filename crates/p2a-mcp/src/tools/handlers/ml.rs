@@ -1679,14 +1679,12 @@ impl AnalyticsServer {
         };
 
         // Compute SHAP values
-        let defaults = ShapConfig::default();
         let shap_config = ShapConfig {
             n_samples: request.n_samples,
             feature_perturbation: perturbation,
             compute_interactions: false,
-            seed: seed.or(defaults.seed),
+            seed: seed.or(ShapConfig::default().seed),
             check_additivity: true,
-            ..defaults
         };
         // Kernel SHAP's background: the training rows, all of them up to 100, else 100 evenly
         // spaced in row order (deterministic; shap.sample's size).
