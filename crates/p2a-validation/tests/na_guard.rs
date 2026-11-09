@@ -41,7 +41,7 @@ use std::path::Path;
 const CAST_LOOKBACK: usize = 6;
 /// The `na-legacy` markers placed on the carry-over sites. Lower it when a package migrates a
 /// site and removes its marker; never raise it.
-const MAX_LEGACY_MARKERS: usize = 18;
+const MAX_LEGACY_MARKERS: usize = 14;
 /// The removed p2a-mcp helpers that read a null as NaN.
 const LEGACY_HELPERS: [&str; 2] = ["extract_column_f64", "extract_numeric_matrix"];
 /// Identifiers that count as a cast call before `.f64()`.
