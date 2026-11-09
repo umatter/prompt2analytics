@@ -1141,4 +1141,82 @@ mod tests {
         );
         assert_eq!(session_label("abc"), "abc");
     }
+
+    #[test]
+    fn parse_sse_line_reads_data_events() {
+        match parse_sse_line(
+            r#"data: {"type":"tool_start","tool":"regression_ols","arguments":{"dataset":"g"}}"#,
+        ) {
+            Some(StreamEvent::ToolStart { tool, arguments }) => {
+                assert_eq!(tool, "regression_ols");
+                assert_eq!(arguments["dataset"], "g");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse_sse_line("  data: {\"type\":\"content\",\"text\":\"Größe ²\"}  "),
+            Some(StreamEvent::Content { text }) if text == "Größe ²"
+        ));
+        assert!(matches!(
+            parse_sse_line(
+                r#"data: {"type":"done","message":{"role":"assistant","content":"ok"}}"#
+            ),
+            Some(StreamEvent::Done { .. })
+        ));
+        assert!(matches!(
+            parse_sse_line(r#"data: {"type":"error","error":"boom"}"#),
+            Some(StreamEvent::Error { error }) if error == "boom"
+        ));
+        assert!(matches!(
+            parse_sse_line(r#"data: {"type":"tool_end","tool":"t","elapsed_ms":12}"#),
+            Some(StreamEvent::ToolEnd { elapsed_ms: 12, .. })
+        ));
+    }
+
+    #[test]
+    fn parse_sse_line_skips_comments_other_fields_and_bad_json() {
+        for line in [
+            "",
+            "   ",
+            ":",
+            ": keep-alive",
+            "event: message",
+            "id: 3",
+            "retry: 100",
+            "data: not json",
+            r#"data: {"type":"unknown_kind"}"#,
+            r#"data: {"type":"content"}"#,
+        ] {
+            assert!(parse_sse_line(line).is_none(), "{line:?}");
+        }
+    }
+
+    fn script_file(tag: &str, body: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "p2a_chat_read_script_{}_{tag}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn read_script_splits_prompts_on_blank_lines() {
+        let p = script_file(
+            "blank",
+            "first prompt\n\nsecond prompt\n  \t \n  padded  \n\n\nlast",
+        );
+        assert_eq!(
+            read_script(&p).unwrap(),
+            ["first prompt", "second prompt", "padded", "last"]
+        );
+        std::fs::remove_file(&p).unwrap();
+        let p = script_file("crlf", "a\r\n\r\nGröße of x?\r\n");
+        assert_eq!(read_script(&p).unwrap(), ["a", "Größe of x?"]);
+        std::fs::remove_file(&p).unwrap();
+        let p = script_file("empty", "");
+        assert!(read_script(&p).unwrap().is_empty());
+        std::fs::remove_file(&p).unwrap();
+        assert!(read_script(&std::env::temp_dir().join("p2a_chat_no_such_script.txt")).is_err());
+    }
 }
