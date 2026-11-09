@@ -1674,3 +1674,187 @@ async fn test_validate_mcp_mixed_logit_uses_session_seed() {
     assert_eq!(runs[0], runs[1]);
     assert_ne!(runs[0], runs[2]);
 }
+
+const COX_X: [&str; 3] = ["age", "sex", "ph.ecog"];
+
+/// surv_cox_robust (surv_cox_aft.R): coxph Efron with robust (Lin-Wei) SEs, cluster(inst), and
+/// Breslow ties, on lung (integer time, status 1/2, one missing ph.ecog and one missing inst).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cox_robust() {
+    let case = Case::load("surv_cox_robust");
+    let (session, server) = session_with("surv_cox_robust"); // dataset "lung"
+    let base = json!({"dataset": "lung", "time": "time", "event": "status", "covariates": COX_X});
+    let with = |k: &str, v: Value| {
+        let mut a = base.clone();
+        a[k] = v;
+        a
+    };
+    // fails before: unknown field `robust_se`
+    let t = text(&call(&server, &session, "cox_ph", with("robust_se", json!(true))).await);
+    for v in COX_X {
+        assert_row(
+            v,
+            row(&t, v),
+            &[
+                case.named("efron_coef", v),
+                case.named("efron_se", v),
+                case.named("efron_se_robust", v),
+            ],
+            Tol::printed(4),
+        );
+    }
+    assert!(
+        t.contains("Standard errors: robust (Lin-Wei sandwich)"),
+        "{t}"
+    );
+    assert_shows(
+        "rscore",
+        after(&t, "Robust score test ="),
+        case.scalar("efron_rscore_robust"),
+        Tol::printed(2),
+    );
+    let t = text(&call(&server, &session, "cox_ph", with("cluster", json!("inst"))).await);
+    for v in COX_X {
+        assert_row(
+            v,
+            row(&t, v),
+            &[
+                case.named("efron_coef_cluster", v),
+                case.named("efron_se_model_cluster", v),
+                case.named("efron_se_cluster", v),
+            ],
+            Tol::printed(4),
+        );
+    }
+    assert!(t.contains("clustered by inst (18 clusters"), "{t}");
+    // before: Efron
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "cox_ph",
+            with("ties_method", json!("Breslow")),
+        )
+        .await,
+    );
+    for v in COX_X {
+        assert_row(
+            v,
+            row(&t, v),
+            &[case.named("breslow_coef", v), case.named("breslow_se", v)],
+            Tol::printed(4),
+        );
+    }
+}
+
+/// Contradictory or invalid Cox settings are tool errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cox_options_are_checked() {
+    let case = Case::load("surv_cox_robust");
+    let _ = &case;
+    let (session, server) = session_with("surv_cox_robust");
+    let base = json!({"dataset": "lung", "time": "time", "event": "status", "covariates": COX_X});
+    let with = |pairs: &[(&str, Value)]| {
+        let mut a = base.clone();
+        for (k, v) in pairs {
+            a[*k] = v.clone();
+        }
+        a
+    };
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "cox_ph",
+            with(&[("robust_se", json!(false)), ("cluster", json!("inst"))]),
+        )
+        .await,
+    );
+    assert!(e.contains("cluster") && e.contains("robust"), "{e}");
+    // before: Efron
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "cox_ph",
+            with(&[("ties_method", json!("exact"))]),
+        )
+        .await,
+    );
+    assert!(e.contains("exact") && e.contains("efron, breslow"), "{e}");
+    let e = tool_error(&call(&server, &session, "cox_ph", with(&[("max_iter", json!(0))])).await);
+    assert!(e.contains("max_iter"), "{e}");
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "cox_ph",
+            with(&[("cluster", json!("nope"))]),
+        )
+        .await,
+    );
+    assert!(e.contains("nope"), "{e}");
+}
+
+/// surv_aft: survreg weibull, exponential (scale fixed), lognormal and loglogistic on lung
+/// (227 complete rows).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_aft() {
+    let case = Case::load("surv_aft");
+    let (session, server) = session_with("surv_aft"); // dataset "lung"
+    for (dist, tag) in [
+        (None, "weibull"),
+        (Some("exponential"), "exponential"),
+        (Some("Log-Normal"), "lognormal"),
+        (Some("log_logistic"), "loglogistic"),
+    ] {
+        let mut a =
+            json!({"dataset": "lung", "time": "time", "event": "status", "covariates": COX_X});
+        if let Some(d) = dist {
+            a["distribution"] = json!(d);
+        }
+        let t = text(&call(&server, &session, "aft", a).await);
+        for v in ["(Intercept)", "age", "sex", "ph.ecog"] {
+            assert_row(
+                &format!("{tag} {v}"),
+                row(&t, v),
+                &[
+                    case.named(&format!("{tag}_coef"), v),
+                    case.named(&format!("{tag}_se"), v),
+                ],
+                Tol::printed(4),
+            );
+        }
+        assert_shows(
+            "logLik",
+            after(&t, "Log-Likelihood:"),
+            case.scalar(&format!("{tag}_loglik")),
+            Tol::printed(4),
+        );
+        if tag == "exponential" {
+            assert!(t.contains("Scale fixed at 1"), "{t}");
+        } else {
+            assert_shows(
+                "scale",
+                after(&t, "Scale ="),
+                case.scalar(&format!("{tag}_scale")),
+                Tol::printed(4),
+            );
+        }
+    }
+    // before: Weibull
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "aft",
+            json!({"dataset": "lung", "time": "time", "event": "status", "covariates": COX_X,
+                   "distribution": "gaussian"}),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("gaussian") && e.contains("weibull, exponential, lognormal, loglogistic"),
+        "{e}"
+    );
+}

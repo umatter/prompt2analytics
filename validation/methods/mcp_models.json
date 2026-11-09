@@ -120,6 +120,29 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_survival_surface",
+      "name": "MCP survival tools: Cox robust, clustered and Breslow fits; AFT distributions",
+      "category": "mcp",
+      "reference": "survival::coxph(robust, cluster, ties), survival::survreg(dist)",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "surv_cox_robust",
+        "surv_aft"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_cox_robust",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_cox_options_are_checked",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_aft"
+      ],
+      "quantities": [
+        "Cox coefficients, model, robust and clustered SEs, robust score test",
+        "AFT coefficients, SEs, scale, log-likelihood"
+      ],
+      "tolerance": "text at the printed precision (4 decimals; the robust score test 2)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

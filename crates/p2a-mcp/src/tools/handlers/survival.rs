@@ -11,6 +11,7 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
+use p2a_core::data::columns::MissingSummary;
 use p2a_core::econometrics::{KmConfType, KmConfig, run_kaplan_meier_with};
 use p2a_core::{
     AftConfig, AftDistribution, CoxConfig, TiesMethod, log_rank_test, run_aft, run_competing_risks,
@@ -18,6 +19,8 @@ use p2a_core::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_option;
+use crate::tools::handlers::regression::append_unshown_notes;
 use crate::tools::requests::survival::{
     AftRequest, CompetingRisksRequest, CoxPhRequest, KaplanMeierRequest, LogRankRequest,
 };
@@ -69,11 +72,30 @@ impl AnalyticsServer {
             }
         };
 
-        // Format all results
-        let output: Vec<String> = results.iter().map(|r| r.to_string()).collect();
-        Ok(CallToolResult::success(vec![Content::text(
-            output.join("\n\n"),
-        )]))
+        // Format all results; every group carries the whole call's dropped-row summary, so
+        // a grouped fit prints the note once, after the last group
+        let output: Vec<String> = if results.len() > 1 {
+            results
+                .iter()
+                .map(|r| {
+                    let mut shown = r.clone();
+                    shown.missing = MissingSummary::none(r.missing.n_total);
+                    shown.to_string()
+                })
+                .collect()
+        } else {
+            results.iter().map(|r| r.to_string()).collect()
+        };
+        let mut text = output.join("\n\n");
+        if results.len() > 1
+            && let Some(note) = results.first().and_then(|r| r.missing.note())
+        {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&format!("Missing values: {note}"));
+        }
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Log-Rank test comparing survival curves.
@@ -109,7 +131,7 @@ impl AnalyticsServer {
 
     /// Run Cox Proportional Hazards model.
     #[tool(
-        description = "Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate without assuming a baseline hazard form. Uses Newton-Raphson optimization. Returns hazard ratios, coefficients, standard errors, confidence intervals, and concordance (C-index). Status coded as R's Surv(): 0/1, 1/2 or TRUE/FALSE. Rows with a missing value in any used column are dropped and reported."
+        description = "Cox proportional hazards as R survival::coxph: Efron ties (default, as coxph) or Breslow; model-based standard errors, robust (Lin-Wei) ones with robust_se = true, or clustered ones with cluster = <column> (implies robust). Status coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event) or TRUE/FALSE. Returns hazard ratios with intervals, coefficients, SEs, the likelihood-ratio, Wald and score tests (and the robust score test), concordance and convergence. Rows with a missing value in any used column are dropped and reported."
     )]
     pub async fn cox_ph(
         &self,
@@ -119,19 +141,31 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Parse ties method
-        let ties = match request.ties_method.as_deref() {
-            Some("breslow") => TiesMethod::Breslow,
-            _ => TiesMethod::Efron, // default
-        };
+        let ties =
+            match parse_option::<TiesMethod>(request.ties_method.as_deref(), TiesMethod::Efron) {
+                Ok(t) => t,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
+        if request.robust_se == Some(false) && request.cluster.is_some() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "cluster gives clustered robust standard errors; it cannot be combined with \
+                 robust_se = false"
+                    .to_string(),
+            )]));
+        }
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
         let mut config = CoxConfig::default();
         config.ties = ties;
-        config.tolerance = request.tolerance.unwrap_or(1e-9);
-        config.max_iter = request.max_iter.unwrap_or(100);
-        config.robust_se = false;
+        config.robust_se = request.robust_se.unwrap_or(false) || request.cluster.is_some();
+        config.cluster = request.cluster.clone();
+        if let Some(m) = request.max_iter {
+            config.max_iter = m;
+        }
+        if let Some(t) = request.tolerance {
+            config.tolerance = t;
+        }
 
         let result = match run_cox_ph(
             dataset,
@@ -149,14 +183,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Accelerated Failure Time (AFT) model.
     #[tool(
-        description = "Run Accelerated Failure Time (AFT) parametric survival model. Models log(T) as a linear function of covariates. Supports Weibull, Exponential, Log-Normal, and Log-Logistic distributions. Returns regression coefficients (as acceleration factors), standard errors, shape parameters, and AIC/BIC. Status coded as R's Surv(): 0/1, 1/2 or TRUE/FALSE. Times must be positive, as R survreg requires. Rows with a missing value in any used column are dropped and reported."
+        description = "Accelerated failure time model as R survival::survreg: distribution 'weibull' (default), 'exponential' (scale fixed at 1), 'lognormal' or 'loglogistic'. Returns coefficients on log(T) with SEs, the scale and Log(scale), the log-likelihood on the time scale (as survreg), AIC/BIC and convergence. Status coded as R's Surv(): 0/1, 1/2 or TRUE/FALSE. Times must be positive, as R survreg requires. Rows with a missing value in any used column are dropped and reported."
     )]
     pub async fn aft(
         &self,
@@ -166,20 +200,24 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Parse distribution
-        let distribution = match request.distribution.as_deref() {
-            Some("exponential") => AftDistribution::Exponential,
-            Some("lognormal") => AftDistribution::LogNormal,
-            Some("loglogistic") => AftDistribution::LogLogistic,
-            _ => AftDistribution::Weibull, // default
+        let distribution = match parse_option::<AftDistribution>(
+            request.distribution.as_deref(),
+            AftDistribution::Weibull,
+        ) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
         let mut config = AftConfig::default();
         config.distribution = distribution;
-        config.tolerance = request.tolerance.unwrap_or(1e-9);
-        config.max_iter = request.max_iter.unwrap_or(100);
+        if let Some(t) = request.tolerance {
+            config.tolerance = t;
+        }
+        if let Some(m) = request.max_iter {
+            config.max_iter = m;
+        }
 
         let result = match run_aft(
             dataset,
@@ -197,14 +235,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Competing Risks analysis (Aalen-Johansen estimator).
     #[tool(
-        description = "Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type. Event codes: 0 = censored, 1, 2, ... = event types. Rows with a missing time or code are dropped and reported."
+        description = "Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type. Event codes: 0 = censored, 1, 2, ... = event types. Rows with a missing time or code are dropped and reported. The cumulative incidence point estimates are the Aalen-Johansen estimator (R survfit multi-state); standard errors as survfit (delta method); log-scale intervals."
     )]
     pub async fn competing_risks(
         &self,
@@ -263,6 +301,31 @@ mod tests {
     use crate::tools::common::test_support::{server_with, text};
     use p2a_validation::Case;
     use serde_json::{Value, json};
+
+    /// The dropped-row note of a grouped fit is printed once, after the last group.
+    #[test]
+    fn test_mcp_kaplan_meier_grouped_missing_note_once() {
+        let df = p2a_core::data::DataLoader::load_csv(&format!(
+            "{}/../../validation/datasets/generated/lung.csv",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let (rt, server) = server_with(vec![("lung", df)]);
+        let r = rt
+            .block_on(server.kaplan_meier(Parameters(km_request(json!({"group": "ph.ecog"})))))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert_eq!(t.matches("Missing values:").count(), 1, "{t}");
+        assert!(
+            t.trim_end()
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with("Missing values: 1 of 228 rows dropped"),
+            "{t}"
+        );
+    }
 
     /// The case and a server holding its dataset as `name`.
     fn case_server(id: &str, name: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {

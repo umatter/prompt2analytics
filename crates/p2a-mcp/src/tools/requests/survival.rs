@@ -96,21 +96,32 @@ pub struct CoxPhRequest {
 
     /// Method for handling ties
     #[schemars(
-        description = "Method for handling tied event times: 'efron' (default) or 'breslow'."
+        description = "Method for handling tied event times: 'efron' (default, as coxph) or 'breslow'. Other values are an error."
     )]
     pub ties_method: Option<String>,
 
     /// Convergence tolerance
     #[schemars(
-        description = "Convergence tolerance for Newton-Raphson optimization. Default is 1e-9."
+        description = "Relative change in the log partial likelihood (coxph's eps). Default 1e-9."
     )]
     pub tolerance: Option<f64>,
 
     /// Maximum iterations
-    #[schemars(
-        description = "Maximum iterations for Newton-Raphson optimization. Default is 100."
-    )]
+    #[schemars(description = "Maximum Newton-Raphson iterations. Default 25.")]
     pub max_iter: Option<usize>,
+
+    /// Robust (Lin-Wei sandwich) standard errors
+    #[schemars(
+        description = "Robust (Lin-Wei sandwich) standard errors, as coxph(robust = TRUE). Default false; implied by cluster."
+    )]
+    #[serde(alias = "robust")]
+    pub robust_se: Option<bool>,
+
+    /// Cluster column
+    #[schemars(
+        description = "Column whose values define clusters for clustered robust standard errors, as coxph(... + cluster(column)). Rows with a missing cluster label are dropped and reported."
+    )]
+    pub cluster: Option<String>,
 }
 
 /// Request for Accelerated Failure Time (AFT) model.
@@ -139,12 +150,14 @@ pub struct AftRequest {
 
     /// Distribution for the AFT model
     #[schemars(
-        description = "Distribution assumption: 'weibull' (default), 'exponential', 'lognormal', or 'loglogistic'."
+        description = "'weibull' (default), 'exponential' (scale fixed at 1), 'lognormal' or 'loglogistic', as survreg(dist =). Other values are an error."
     )]
     pub distribution: Option<String>,
 
     /// Convergence tolerance
-    #[schemars(description = "Convergence tolerance for optimization. Default is 1e-9.")]
+    #[schemars(
+        description = "Relative change in the log-likelihood (default 1e-9), as survreg's rel.tolerance."
+    )]
     pub tolerance: Option<f64>,
 
     /// Maximum iterations
