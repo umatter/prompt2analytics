@@ -1,7 +1,7 @@
 # Multi-cutoff regression discontinuity (`run_rd_multi`)
 
-**Status:** R-pinned (registry `validation/methods/causal_rdbw.json`, id `rd_multi_selected`;
-one cutoff at a given bandwidth: `validation/methods/causal_rd.json`, id `rd_multi`). The
+**Status**: R-pinned, known deviations (CAUS-78) (registry `validation/methods/causal_rdbw.json`, id
+`rd_multi_selected`; one cutoff at a given bandwidth: `validation/methods/causal_rd.json`, id `rd_multi`). The
 per-cutoff estimates are pinned to rdrobust with rdbwselect bandwidths; the pooling is p2a's own
 estimator, pinned to its formula written out in R (a registry deviation, see "Relation to
 rdmulti::rdmc").
@@ -42,7 +42,7 @@ which p2a reproduces. `rdmc`'s pooled estimate runs rdrobust on the normalised s
 all observations; p2a does not implement it. p2a's pooled estimate is the weighted average above,
 a different estimator. `rdmulti` is not installed in the validation environment, so the pooling
 and the heterogeneity test are pinned to their formulas written out in R in
-`validation/r/cases/causal_rdbw.R` (registry deviation CAUS-77; see also CAUS-78).
+`validation/r/cases/causal_rdbw.R` (registry deviation CAUS-78).
 
 ## Reference cases
 

@@ -1,6 +1,6 @@
 # Targeted Maximum Likelihood Estimation (TMLE) Validation
 
-Status: R-pinned (registry `validation/methods/causal_ctmle_stdreg.json`, method `causal_tmle`).
+**Status**: R-pinned (registry `validation/methods/causal_ctmle_stdreg.json`, id `causal_tmle`).
 
 ## Method Summary
 

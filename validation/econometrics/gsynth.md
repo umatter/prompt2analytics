@@ -1,5 +1,8 @@
 # Validation: Generalized Synthetic Control (gsynth)
 
+**Status**: R-pinned, known deviations (CAUS-41, CAUS-43, CAUS-44) (registry
+`validation/methods/causal_gsynth.json`, id `causal_gsynth`).
+
 ## What p2a computes
 
 `run_gsynth` (`crates/p2a-core/src/econometrics/synth.rs`) reproduces gsynth 1.4.0 (`gsynth::gsynth`,

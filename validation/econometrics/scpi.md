@@ -1,5 +1,8 @@
 # Synthetic Control with Prediction Intervals (SCPI) Validation
 
+**Status**: R-pinned, known deviations (CAUS-32) (registry `validation/methods/causal_gsynth.json`, id
+`causal_scpi`): the interval is pinned to p2a's own formula, not to scpi's construction.
+
 ## What p2a computes
 
 `run_scpi` (`crates/p2a-core/src/econometrics/scpi.rs`) fits donor weights on the pre-treatment

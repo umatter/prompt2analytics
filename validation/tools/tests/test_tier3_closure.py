@@ -451,5 +451,66 @@ class RegistryDeviationTest(unittest.TestCase):
         self.assertEqual(sorted(set(problems)), [], "\n" + "\n".join(sorted(set(problems))))
 
 
+# ---------------------------------------------------------------- Task 3: method docs WP64 owns (CAUS-98, CAUS-99; ECON-80 docs)
+
+OWNED_DOCS = ["validation/econometrics/gsynth.md", "validation/econometrics/scpi.md",
+              "validation/econometrics/rdmulti.md", "validation/econometrics/tmle.md",
+              "validation/econometrics/bpbounds.md", "validation/econometrics/ivmte.md"]
+
+
+class OwnedDocsTest(unittest.TestCase):
+    def test_status_line_matches_registry(self):
+        entries = registry_entries()
+        for doc in OWNED_DOCS:
+            with self.subTest(doc=doc):
+                lines = [l for l in (REPO / doc).read_text(encoding="utf-8").splitlines() if l.startswith("**Status**: ")]
+                self.assertEqual(len(lines), 1, "exactly one **Status**: line")
+                want = "**Status**: " + expected_status(doc, entries)
+                self.assertTrue(lines[0].startswith(want) and (lines[0] == want or lines[0][len(want)] in ".;( "),
+                                f"{lines[0]!r} does not start with {want!r}")
+
+    def test_no_approximate_or_missing_values(self):
+        for doc in OWNED_DOCS:
+            text = (REPO / doc).read_text(encoding="utf-8")
+            with self.subTest(doc=doc):
+                self.assertNotIn("TBD", text)
+                self.assertIsNone(re.search(r"\|\s*~\s*[0-9]", text), "approximate parity cell")
+
+
+def read_doc(rel):
+    return (VALIDATION / rel).read_text(encoding="utf-8")
+
+
+class Caus98Test(unittest.TestCase):
+    """CAUS-98: gsynth, SCPI and rdmulti pages no longer claim parity they do not have."""
+
+    def test_caus98_gsynth_scpi_rdmulti(self):
+        g = read_doc("econometrics/gsynth.md")
+        self.assertNotIn("Within 1.0 of R", g)
+        self.assertNotIn("~4.0", g)
+        s = read_doc("econometrics/scpi.md")
+        self.assertNotIn("Intervals are constructed as (Cattaneo et al. 2021, Eq. 3.5)", s)
+        self.assertIn("CAUS-32", s)
+        r = read_doc("econometrics/rdmulti.md")
+        self.assertNotIn("slightly different tuning parameters", r)
+        self.assertNotIn("Test Results Summary", r)
+        self.assertIn("rdmc", r)
+        self.assertIn("not installed", r)
+
+
+class Caus99Test(unittest.TestCase):
+    """CAUS-99: no pending TMLE claim; CLAUDE.md lists only the DoubleML models that exist."""
+
+    def test_caus99_tmle_doc_and_doubleml_line(self):
+        self.assertNotIn("pending real data comparison", read_doc("econometrics/tmle.md"))
+        claude = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        line = next(l for l in claude.splitlines() if "doubleml.rs" in l)
+        listed = re.findall(r"\b(PLR|PLIV|IRM|IIVM)\b", line)
+        src = (CRATES / "p2a-core/src/econometrics/doubleml.rs").read_text(encoding="utf-8")
+        enum = re.search(r"pub enum DMLModelType\s*\{(.*?)\}", blank(src), re.S).group(1)
+        variants = set(re.findall(r"\b([A-Z][A-Za-z]*)\b", enum))
+        self.assertTrue(listed and set(listed) <= variants, f"CLAUDE.md lists {listed}; DMLModelType has {sorted(variants)}")
+
+
 if __name__ == "__main__":
     unittest.main()
