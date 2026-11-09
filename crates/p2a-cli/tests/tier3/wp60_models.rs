@@ -1422,6 +1422,97 @@ fn test_cli_munge_bin_and_cast_print_one_json_document() {
     );
 }
 
+/// CLI-29 / CLI-4: a session with a munge step exports a script that replays from another working
+/// directory and fits the same model; the replay leaves nothing behind there.
+#[cfg(unix)]
+#[test]
+fn test_validate_cli_exported_script_with_munge_runs() {
+    let case = Case::load("cli_munge_ols_grunfeld");
+    let n = case.scalar("post_n") as usize; // 100
+    let s = temp_session();
+    let g = s.load(&case); // absolute path recorded
+    s.ok(&[
+        "munge",
+        "filter",
+        g.as_str(),
+        "-c",
+        "year",
+        "-o",
+        "ge",
+        "-v",
+        "1945",
+        "-n",
+        "post",
+    ]);
+    let fit = s.ok(&["reg", "ols", "post", "-y", "inv", "-x", "value", "capital"]);
+    let t = text_table(&fit);
+    Check::new(&case)
+        .named("post_coef", &t.names, &t.coef, Tol::printed(6))
+        .named("post_se_hc1", &t.names, &t.se, Tol::printed(6))
+        .named("post_t_hc1", &t.names, &t.stat, Tol::printed(3))
+        .named("post_p_hc1", &t.names, &t.p, Tol::printed(4))
+        .finish();
+    assert_eq!(case.scalar("post_rows") as usize, n);
+    let script = s.dir().join("replay.sh");
+    let out = p2a()
+        .args([
+            "script",
+            "export",
+            s.path().to_str().unwrap(),
+            "-o",
+            script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(&script)
+            .unwrap()
+            .contains("rm -rf -- \"$SESSION_FILE.datasets\"")
+    );
+    let other = tempfile::tempdir().unwrap();
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_p2a"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .current_dir(other.path())
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "replay failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(&format!("Created dataset 'post' ({n} rows x 5 columns)"))
+            && stdout.contains("Script completed successfully"),
+        "{stdout}"
+    );
+    assert_eq!(
+        coefficient_rows(&stdout),
+        coefficient_rows(&fit),
+        "the replay fits the same model"
+    );
+    let left: Vec<_> = std::fs::read_dir(other.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+}
+
 /// fill-na --method mode (R's names(which.max(table(x))): ties go to the first level), a text
 /// constant, the strategy rules; value-counts --normalize (dplyr::count, then n / sum(n)).
 #[test]
