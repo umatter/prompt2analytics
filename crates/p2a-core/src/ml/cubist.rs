@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::xty;
 use crate::linalg::solve::least_squares;
 use crate::regression::ols::normal_equations_inverse;
 
@@ -475,9 +476,12 @@ impl CubistTree {
 
         // Fit OLS: the normal equations when the design is of full rank and well conditioned,
         // otherwise lm's pivoted QR; an aliased attribute is eliminated (coefficient 0), as
-        // Cubist does.
+        // Cubist does. The normal-equations solve skips OLS's refinement step, which would
+        // add two passes over the design at every node: unrefined, the coefficients' relative
+        // error is of order eps / rcond, at most about 1e-8 where the normal equations are
+        // accepted.
         let fit = match normal_equations_inverse(design.view()) {
-            Ok(Some(ne)) => Ok(ne.coefficients(design.view(), &y_sub)),
+            Ok(Some(ne)) => Ok(ne.inverse.dot(&xty(&design.view(), &y_sub))),
             Ok(None) => least_squares(design.view(), y_sub.view()).map(|ls| {
                 ls.coefficients
                     .mapv(|b| if b.is_finite() { b } else { 0.0 })
