@@ -649,7 +649,7 @@ p2a data [OPTIONS] <COMMAND>
 |---|---|---|
 | `load` |  | Load a dataset from a file |
 | `list` |  | List all loaded datasets |
-| `describe` |  | Show dataset summary and statistics |
+| `describe` |  | Show the row and column counts, column names and types |
 | `head` |  | Show first N rows of a dataset |
 | `generate` |  | Generate random data with specified distributions |
 | `save` |  | Save/export a dataset to a file |
@@ -678,7 +678,7 @@ p2a data list [OPTIONS]
 
 #### `p2a data describe`
 
-Show dataset summary and statistics
+Show the row and column counts, column names and types
 
 ```text
 p2a data describe [OPTIONS] <DATASET>
