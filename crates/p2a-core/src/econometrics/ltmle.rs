@@ -2002,7 +2002,7 @@ fn estimate_regime(
         q_models[t] = model.clone();
         if let Some(c) = model.constant_prediction {
             constant_q_nodes.push(t);
-            let (lo, hi) = q_next
+            let (rmin, rmax) = q_next
                 .iter()
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
                     (a.min(v), b.max(v))
@@ -2011,7 +2011,7 @@ fn estimate_regime(
                 "LTMLE: {label}: Q response at {} has range {:.1e} < {CONSTANT_Q_RANGE:e}; \
                  predicted as the constant {c:.6} (ltmle's no-variation rule)",
                 data.treatment_names[t],
-                hi - lo
+                rmax - rmin
             ));
         }
         let eta = identified_linear_predictor(
@@ -2037,12 +2037,14 @@ fn estimate_regime(
                 // about 0 over the subjects; otherwise the score equation is solved directly.
                 let mut qs = eta.mapv(|e| linkinv(e + eps[t]));
                 let score: f64 = (0..n).map(|i| ht[i] * (q_next[i] - qs[i])).sum();
+                let mut resolved_here = false;
                 if score.is_nan() || score.abs() > TARGETING_SCORE_MAX {
                     let r = resolve_fluctuation(q_next.view(), eta.view(), ht)?;
                     eps[t] = r.epsilon;
-                    let (lo, hi) = offset_bounds(r.offset_bound);
-                    qs = eta.mapv(|e| linkinv(e.max(lo).min(hi) + r.epsilon));
+                    let (olo, ohi) = offset_bounds(r.offset_bound);
+                    qs = eta.mapv(|e| linkinv(e.max(olo).min(ohi) + r.epsilon));
                     resolved_targeting.push((t, r.offset_bound));
+                    resolved_here = true;
                     let lb = r.offset_bound;
                     notes.warnings.push(format!(
                         "LTMLE: {label}: the targeting step at {} left the score at {score:.1e}; \
@@ -2051,12 +2053,19 @@ fn estimate_regime(
                         if r.finite_root {
                             ""
                         } else {
-                            " (no finite root: every follower is predicted at 0 or 1)"
+                            " (no finite root: the score is solved only at the link's clamp)"
                         }
                     ));
                 }
                 if paths.warm && config.max_iter >= WARM_MIN_MAX_ITER && t > 0 {
-                    start = warm_start(designs, coef.view(), t, eps[t], &d[t]);
+                    // A re-solved eps was found with the offsets bounded, which warm_start does
+                    // not apply, and without a finite root it sits at the link's clamp: the next
+                    // node would start deep in the clamp, so it takes glm.fit's start instead.
+                    start = if resolved_here {
+                        None
+                    } else {
+                        warm_start(designs, coef.view(), t, eps[t], &d[t])
+                    };
                 }
                 qs
             }
@@ -2272,8 +2281,9 @@ struct Resolved {
     epsilon: f64,
     /// The `lb` of the offset bounds `logit([lb, 1 - lb])` it was solved with.
     offset_bound: f64,
-    /// False when `S` has no root (every follower's response at 0, or every one at 1): epsilon
-    /// then puts every follower at linkinv's clamp, where `S` is at rounding.
+    /// False when `S` has no root (every follower's response at 0, or every one at 1), or when
+    /// the bracket reached rounding without a sign change: in both cases the score is solved
+    /// only at linkinv's clamp.
     finite_root: bool,
 }
 
@@ -3909,6 +3919,9 @@ mod tests {
             r.saturation.constant_q_nodes
         );
         let cold_never = cold.contrast_estimate.as_ref().unwrap();
+        // Not bitwise: each constant is the maximum of a later node's Q*, and the two paths fit
+        // the later nodes within the shared GLM's tolerances (assert_same_as_shared_glm), so the
+        // responses, and their maxima, differ in the last digits.
         for &t in constant {
             let (a, b) = (
                 never.q_models[t].constant_prediction.unwrap(),
@@ -4044,7 +4057,7 @@ mod tests {
     #[test]
     fn test_ltmle_saturating_fixtures_agree_with_ltmle() {
         // Quoted from ltmle 1.3-0 on the exported fixtures (glm, stratify = FALSE,
-        // variance.method = "ic"), plan T3-LTMLE-TOL Task 1. Before ltmle's no-variation rule the
+        // variance.method = "ic"). Before ltmle's no-variation rule the
         // default tolerance gave an ATE of -1 and 0.737 here.
         for (data, always, never) in [
             (
@@ -4084,6 +4097,44 @@ mod tests {
                 ates.push(r.ate);
             }
             assert!((ates[0] - ates[2]).abs() <= 1e-8, "{ates:?}");
+        }
+    }
+
+    #[test]
+    fn test_ltmle_node_after_a_resolve_matches_the_cold_path() {
+        // After a re-solved targeting step the next node takes glm.fit's start rather than a warm
+        // start built from the re-solved epsilon; the fast path then agrees with the cold one.
+        let data = sparse_followers(4000, 10, 3);
+        let fast = run_ltmle(&data, LtmleConfig::default()).unwrap();
+        let cold = run_ltmle_with(
+            &data,
+            LtmleConfig::default(),
+            FitPaths {
+                lean: false,
+                warm: false,
+            },
+        )
+        .unwrap();
+        let t_max = data.time_points();
+        assert!(
+            fast.saturation
+                .resolved_targeting
+                .iter()
+                .flatten()
+                .any(|(t, _)| *t > 0 && *t < t_max),
+            "{:?}",
+            fast.saturation.resolved_targeting
+        );
+        assert_eq!(
+            fast.saturation.resolved_targeting.len(),
+            cold.saturation.resolved_targeting.len()
+        );
+        for (a, b) in [
+            (fast.psi_treated, cold.psi_treated),
+            (fast.psi_control, cold.psi_control),
+            (fast.ate, cold.ate),
+        ] {
+            assert!((a - b).abs() <= 1e-8, "{a} vs {b}");
         }
     }
 

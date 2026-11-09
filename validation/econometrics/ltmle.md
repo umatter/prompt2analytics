@@ -295,7 +295,9 @@ those scores without a re-solve.
   Q* is on the outcome's own scale); propensities numerically 0 or 1 (glm.fit's `10 * eps`
   threshold), named by the treatment columns.
 
-**Default tolerance.** It stays 1e-8, ltmle's glm epsilon. With the rules, 1e-10 changes no count
+**Default tolerance.** It is 1e-8, ltmle's glm epsilon, pending a decision: agreement with
+ltmle within 1e-6 on every data set where ltmle succeeds is not met on the quasi-separated five at
+any tolerance tried (1e-8, 1e-10, 1e-14). With the rules, 1e-10 changes no count
 in the table above beyond the quasi-separated five and does not remove them, and costs up to 1.15x
 on the T = 10 rows ("Saturating regimes: before and after").
 
@@ -353,7 +355,8 @@ uniform covariates per node, `A_t ~ plogis(0.3 L_t1 + 0.2 A_{t-1})`, a Bernoulli
 treatments), seed 3, the first seed in 1..200 whose never regime has a no-variation node in
 ltmle, whose written-out never mean moves by more than 1e-3 between glm epsilon 1e-8 and 1e-14,
 and where ltmle succeeds. Its reference is `ltmle::ltmle` 1.3-0 itself (seeded before each call,
-as its re-solve restarts from `rnorm`):
+as its re-solve restarts from `rnorm`). The followers and the subjects below the g bound come from
+the written-out estimator's g fits (the same glm g models as ltmle), not from `ltmle::ltmle`:
 
 | Quantity | Value |
 |---|---|

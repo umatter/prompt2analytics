@@ -201,7 +201,7 @@ case("ltmle_two_period", "causal/tmle", "LTMLE as ltmle's defaults (written out,
 # tests: two uniform covariates per node, A_t ~ plogis(0.3 L_t1 + 0.2 A_{t-1}), Y ~ plogis(latent -
 # mean(latent)) with latent = 1 + 0.2 L_11 + U(-0.5, 0.5) + sum_t (0.5 - 0.2 (t - 1) / 8) A_t) whose
 # never regime has a handful of followers at the last node.
-# Seed search (T3-LTMLE-TOL, 2026-11-09): the first seed in 1..200 such that ltmle::ltmle's never
+# Seed search (2026-11-09): the first seed in 1..200 such that ltmle::ltmle's never
 # regime has at least one no-variation Q node, the written-out estimator's never mean moves by more
 # than 1e-3 between glm epsilon 1e-8 and 1e-14, and ltmle succeeds. Seed 1: no no-variation node;
 # seed 2: the written-out never mean moves by 1e-5 only; seed 3 meets all three (9 never followers,
@@ -271,7 +271,7 @@ case("ltmle_saturation", "causal/tmle", "LTMLE on a regime with few followers: l
     writtenout_psi_never_1e8 = w8$psi, writtenout_psi_never_1e14 = w14$psi, writtenout_icmean_never_1e14 = mean(w14$ic),
     truth_always = est(1 + sum(0.5 - 0.2 * (0:(TT - 1)) / TT) - m, 0.2), truth_never = est(1 - m, 0.2))
   list(values = v,
-       reference = "ltmle::ltmle 1.3-0 (glm, stratify = FALSE, gbounds = c(0.01, 1), variance.method = 'ic'): regime means and SEs from single-regime calls, the ATE and its SE from the two-regime call, its no-variation Q nodes (class no.Y.variation), its score re-solves (ltmle.msg) and its positivity warning; the written-out glm estimator of ltmle_two_period does not solve the EIC equation on this design and is recorded for documentation only; the analytic estimands are context, not pins",
+       reference = "ltmle::ltmle 1.3-0 (glm, stratify = FALSE, gbounds = c(0.01, 1), variance.method = 'ic'): regime means and SEs from single-regime calls, the ATE and its SE from the two-regime call, its no-variation Q nodes (class no.Y.variation), its score re-solves (ltmle.msg) and its positivity warning; the followers by node and the subjects below the g bound come from the written-out estimator's g fits (the same glm g models as ltmle), not from ltmle::ltmle; the written-out glm estimator of ltmle_two_period does not solve the EIC equation on this design and is recorded for documentation only; the analytic estimands are context, not pins",
        call = "ltmle(d, Anodes = A1..A8, Lnodes = L2a..L8b, Ynodes = 'Y', abar = rep(1, 8) / rep(0, 8) / list(rep(1, 8), rep(0, 8)), SL.library = 'glm', stratify = FALSE, variance.method = 'ic'), set.seed(20261109) before each call",
        packages = c("ltmle"))
 })
