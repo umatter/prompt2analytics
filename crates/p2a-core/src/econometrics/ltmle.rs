@@ -1586,7 +1586,7 @@ fn outcome_scale(y: &Array1<f64>, q_model: LtmleQModel) -> EconResult<OutcomeSca
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
             (lo.min(v), hi.max(v))
         });
-    if q_model == LtmleQModel::Logistic && !(max > min) {
+    if q_model == LtmleQModel::Logistic && max <= min {
         return Err(spec_err(format!(
             "LTMLE: the outcome is constant ({min}); nothing to estimate"
         )));
@@ -1925,7 +1925,7 @@ fn estimate_regime(
     let t_max = data.time_points();
     let (lo, hi) = config.gbounds;
     let mut constant_q_nodes: Vec<usize> = Vec::new();
-    let resolved_targeting: Vec<(usize, f64)> = Vec::new();
+    let mut resolved_targeting: Vec<(usize, f64)> = Vec::new();
 
     // Cumulative probability of following the regime, g predicted with SetA.
     let mut cum = vec![1.0f64; n];
@@ -2026,10 +2026,32 @@ fn estimate_regime(
                     ));
                 }
                 eps[t] = f.epsilon;
+                // ltmle's score check (ltmle:::FixedTimeTMLE): the node's EIC term must sum to
+                // about 0 over the subjects; otherwise the score equation is solved directly.
+                let mut qs = eta.mapv(|e| linkinv(e + eps[t]));
+                let score: f64 = (0..n).map(|i| ht[i] * (q_next[i] - qs[i])).sum();
+                if score.is_nan() || score.abs() > TARGETING_SCORE_MAX {
+                    let r = resolve_fluctuation(q_next.view(), eta.view(), ht)?;
+                    eps[t] = r.epsilon;
+                    let (lo, hi) = offset_bounds(r.offset_bound);
+                    qs = eta.mapv(|e| linkinv(e.max(lo).min(hi) + r.epsilon));
+                    resolved_targeting.push((t, r.offset_bound));
+                    let lb = r.offset_bound;
+                    notes.warnings.push(format!(
+                        "LTMLE: {label}: the targeting step at {} left the score at {score:.1e}; \
+                         re-solved with offsets bounded to [{lb:e}, 1 - {lb:e}]{}",
+                        data.treatment_names[t],
+                        if r.finite_root {
+                            ""
+                        } else {
+                            " (no finite root: every follower is predicted at 0 or 1)"
+                        }
+                    ));
+                }
                 if paths.warm && config.max_iter >= WARM_MIN_MAX_ITER && t > 0 {
                     start = warm_start(designs, coef.view(), t, eps[t], &d[t]);
                 }
-                eta.mapv(|e| linkinv(e + eps[t]))
+                qs
             }
             LtmleQModel::Linear => {
                 let (mut num, mut den) = (0.0, 0.0);
@@ -2208,6 +2230,137 @@ fn fit_fluctuation(
         epsilon: eps,
         converged: false,
         iterations: config.max_iter,
+    })
+}
+
+/// ltmle's trigger for re-solving a targeting step: `|sum_i H_i (Q*_{t+1,i} - Q*_{t,i})|` above
+/// this (absolute, on the fitted [0, 1] scale).
+const TARGETING_SCORE_MAX: f64 = 1e-3;
+/// The offset bounds ltmle's `FixScoreEquation` tries in turn: offsets bounded to
+/// `logit([lb, 1 - lb])`.
+const OFFSET_BOUNDS: [f64; 4] = [1e-8, 1e-4, 1e-3, 0.01];
+/// The re-solve's target: `|S(eps)| <= RESOLVE_REL_SCORE * sum_i h_i`.
+const RESOLVE_REL_SCORE: f64 = 1e-12;
+/// The re-solve's iteration limit.
+const RESOLVE_MAX_ITER: usize = 200;
+/// `linkinv` is constant beyond this `|eta|`.
+const LINK_CLAMP: f64 = 30.0;
+
+/// `(logit(lb), logit(1 - lb))`.
+fn offset_bounds(lb: f64) -> (f64, f64) {
+    let lo = (lb / (1.0 - lb)).ln();
+    (lo, -lo)
+}
+
+/// A re-solved targeting step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Resolved {
+    /// The fluctuation coefficient.
+    epsilon: f64,
+    /// The `lb` of the offset bounds `logit([lb, 1 - lb])` it was solved with.
+    offset_bound: f64,
+    /// False when `S` has no root (every follower's response at 0, or every one at 1): epsilon
+    /// then puts every follower at linkinv's clamp, where `S` is at rounding.
+    finite_root: bool,
+}
+
+/// Solves the targeting step's score equation `S(eps) = sum_i h_i (y_i - linkinv(o_i + eps)) = 0`
+/// directly, as ltmle's `FixScoreEquation` does when the fluctuation glm leaves the score above
+/// [`TARGETING_SCORE_MAX`]: the offsets are bounded to `logit([lb, 1 - lb])` for `lb` in
+/// [`OFFSET_BOUNDS`] in turn. `S` is non-increasing in eps, so this is a bracketed one-dimensional
+/// root search (bisection with Newton steps inside the bracket) to
+/// `|S| <= 1e-12 * sum_i h_i`, not a port of ltmle's nlminb on `S^2`, which stops at
+/// `|S| < 1e-4`. Rows with `h_i = 0` do not enter.
+fn resolve_fluctuation(
+    y: ArrayView1<f64>,
+    offset: ArrayView1<f64>,
+    h: ArrayView1<f64>,
+) -> EconResult<Resolved> {
+    let mut rows: Vec<[f64; 3]> = resource::try_with_capacity(h.len(), "LTMLE re-solve")?;
+    for (&hi, (&yi, &oi)) in h.iter().zip(y.iter().zip(offset.iter())) {
+        if !(hi.is_finite() && yi.is_finite() && !oi.is_nan()) {
+            return Err(EconError::Computation(
+                "LTMLE: non-finite input to the targeting step's re-solve".into(),
+            ));
+        }
+        if hi > 0.0 {
+            rows.push([yi, oi, hi]);
+        }
+    }
+    let sum_h: f64 = rows.iter().map(|r| r[2]).sum();
+    if !(sum_h > 0.0 && sum_h.is_finite()) {
+        return Err(EconError::Computation(
+            "LTMLE: the targeting step's re-solve has no follower".into(),
+        ));
+    }
+    let target = RESOLVE_REL_SCORE * sum_h;
+    for lb in OFFSET_BOUNDS {
+        let (blo, bhi) = offset_bounds(lb);
+        let off: Vec<f64> = rows.iter().map(|r| r[1].max(blo).min(bhi)).collect();
+        // (score, information) at eps
+        let eval = |eps: f64| -> (f64, f64) {
+            let (mut score, mut info) = (0.0, 0.0);
+            for (r, o) in rows.iter().zip(&off) {
+                let p = linkinv(o + eps);
+                score += r[2] * (r[0] - p);
+                info += r[2] * p * (1.0 - p);
+            }
+            (score, info)
+        };
+        let (omin, omax) = off
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                (a.min(v), b.max(v))
+            });
+        // Beyond this bracket every follower is at linkinv's clamp, where S no longer changes.
+        let (mut lo, mut hi) = (-LINK_CLAMP - omax, LINK_CLAMP - omin);
+        // S tends to sum h (y - 1) and sum h y at the two ends: with every response at 1 (or 0)
+        // it has no root, and every follower goes to the clamp. The limits do not depend on the
+        // offsets, so no other bound would help.
+        if rows.iter().all(|r| r[0] >= 1.0) || rows.iter().all(|r| r[0] <= 0.0) {
+            return Ok(Resolved {
+                epsilon: if rows[0][0] >= 1.0 { hi } else { lo },
+                offset_bound: lb,
+                finite_root: false,
+            });
+        }
+        let mut eps = 0.0f64.max(lo).min(hi);
+        for _ in 0..RESOLVE_MAX_ITER {
+            resource::checkpoint()?;
+            let (score, info) = eval(eps);
+            if score.abs() <= target {
+                return Ok(Resolved {
+                    epsilon: eps,
+                    offset_bound: lb,
+                    finite_root: true,
+                });
+            }
+            if score > 0.0 {
+                lo = eps;
+            } else {
+                hi = eps;
+            }
+            let newton = eps + score / info;
+            eps = if info > 0.0 && newton > lo && newton < hi {
+                newton
+            } else {
+                0.5 * (lo + hi)
+            };
+            if hi - lo <= 4.0 * f64::EPSILON * (1.0 + eps.abs()) {
+                // the bracket is at rounding: S steps across 0 between two adjacent doubles
+                return Ok(Resolved {
+                    epsilon: eps,
+                    offset_bound: lb,
+                    finite_root: true,
+                });
+            }
+        }
+    }
+    // ltmle stops with "minimizer failed" when no bound works.
+    Err(EconError::ConvergenceFailure {
+        iterations: RESOLVE_MAX_ITER,
+        last_change: f64::NAN,
+        suggestion: "LTMLE: the targeting step's score equation was not solved".into(),
     })
 }
 
@@ -3438,11 +3591,16 @@ mod tests {
     #[test]
     fn test_ltmle_fast_paths_report_a_saturated_regime_through_the_shared_glm() {
         // An extreme fluctuation at a later node leaves the earlier Q responses of a regime
-        // without variation. ltmle's no-variation rule predicts those as constants before any fit
-        // path is chosen, so the fast and cold paths apply it alike; a response that keeps a range
-        // of at least 1e-4 with its mean within SATURATED_MEAN of 0 or 1 still goes to the shared
-        // GLM. sparse_followers(4000, 10, 3) is the timing harness's saturating case.
-        for data in [long_horizon(2500, 10, 21), sparse_followers(4000, 10, 3)] {
+        // without variation (long_horizon(2500, 10, 21)). ltmle's no-variation rule predicts those
+        // as constants before any fit path is chosen, so the fast and cold paths apply it alike; a
+        // response that keeps a range of at least 1e-4 with its mean within SATURATED_MEAN of 0 or
+        // 1 still goes to the shared GLM. sparse_followers(4000, 10, 3), the timing harness's
+        // saturating case, saturated through a last fluctuation that left its score unsolved; the
+        // re-solve keeps its regime off 0 and 1 (ltmle 1.3-0: no constant node either).
+        for (data, constant) in [
+            (long_horizon(2500, 10, 21), true),
+            (sparse_followers(4000, 10, 3), false),
+        ] {
             assert_same_as_shared_glm(
                 &data,
                 &LtmleConfig::default(),
@@ -3451,16 +3609,18 @@ mod tests {
             );
             assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-10);
             let r = run_ltmle(&data, LtmleConfig::default()).unwrap();
-            assert!(r.saturation.flagged(), "{:?}", r.saturation);
+            let s = &r.saturation;
+            assert!(s.flagged(), "{s:?}");
+            let has_constant = s.constant_q_nodes.iter().any(|c| !c.is_empty());
+            let resolved = s.resolved_targeting.iter().any(|c| !c.is_empty());
+            assert_eq!((has_constant, resolved), (constant, !constant), "{s:?}");
+            let marker = if constant {
+                "(ltmle's no-variation rule)"
+            } else {
+                "re-solved with offsets bounded to [1e-8, 1 - 1e-8]"
+            };
             assert!(
-                r.saturation.constant_q_nodes.iter().any(|c| !c.is_empty()),
-                "{:?}",
-                r.saturation
-            );
-            assert!(
-                r.warnings
-                    .iter()
-                    .any(|w| w.ends_with("(ltmle's no-variation rule)")),
+                r.warnings.iter().any(|w| w.ends_with(marker)),
                 "{:?}",
                 r.warnings
             );
@@ -3761,6 +3921,13 @@ mod tests {
                 0.746_485_824_266_510_2,
                 4.028_270_621_033_234e-11,
             ),
+            // the timing harness's saturating case: before the score re-solve the never mean
+            // was 1 at every tolerance
+            (
+                sparse_followers(4000, 10, 3),
+                0.890_525_501_726_346_2,
+                0.494_019_949_650_668_3,
+            ),
         ] {
             let mut ates = Vec::new();
             for tol in [1e-8, 1e-10, 1e-14] {
@@ -3781,6 +3948,126 @@ mod tests {
                 ates.push(r.ate);
             }
             assert!((ates[0] - ates[2]).abs() <= 1e-8, "{ates:?}");
+        }
+    }
+
+    #[test]
+    fn test_ltmle_targeting_solves_the_score_at_every_node() {
+        // ltmle's criterion: each node's EIC term sums to at most 1e-3 over the subjects. On
+        // sparse_followers(4000, 10, 3) the never regime's last fluctuation stopped with the score
+        // at -200 before the re-solve.
+        let shifted = |s, shift, strong| shifted_outcome(s, shift, false, strong);
+        for data in [
+            sparse_followers(4000, 10, 3),
+            shifted((5000, 10, 4), 3.0, 2.0),
+            sparse_followers(2500, 8, 20),
+            sparse_followers(1200, 10, 12),
+            shifted((150, 4, 2), 3.0, 2.0),
+            sparse_followers(150, 8, 5),
+            long_horizon(300, 6, 17),
+        ] {
+            let y = data.outcomes[data.time_points() - 1].clone();
+            for tol in [1e-8, 1e-14] {
+                let mut c = LtmleConfig::default();
+                c.tolerance = tol;
+                let r = run_ltmle(&data, c).unwrap();
+                for (k, e) in regime_estimates(&r).into_iter().enumerate() {
+                    let resolved = &r.saturation.resolved_targeting[k];
+                    for t in 0..e.targeted_predictions.len() {
+                        let next = q_response(e, &y, t);
+                        let (h, q) = (&e.clever_covariates[t], &e.targeted_predictions[t]);
+                        let score: f64 = (0..q.len()).map(|i| h[i] * (next[i] - q[i])).sum();
+                        let sum_h: f64 = h.iter().sum();
+                        let bound = if resolved.iter().any(|(s, _)| *s == t) {
+                            1e-10 * sum_h
+                        } else {
+                            1e-3
+                        };
+                        assert!(
+                            score.abs() <= bound,
+                            "{tol}, {}, node {t}: score {score:e}",
+                            e.label
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_fluctuation_monotone_root() {
+        let score = |y: &[f64], o: &[f64], h: &[f64], lb: f64, eps: f64| -> f64 {
+            let (lo, hi) = offset_bounds(lb);
+            (0..y.len())
+                .map(|i| h[i] * (y[i] - linkinv(o[i].max(lo).min(hi) + eps)))
+                .sum()
+        };
+        // a root inside the bracket, with a zero-weight row that does not enter
+        let y = [0.9, 0.2, 0.7, 0.95, 0.4, 0.5];
+        let o = [0.3, -1.2, 2.0, 0.8, -0.4, 50.0];
+        let h = [3.0, 1.5, 40.0, 2.0, 7.5, 0.0];
+        let r = resolve_fluctuation(
+            ArrayView1::from(&y[..]),
+            ArrayView1::from(&o[..]),
+            ArrayView1::from(&h[..]),
+        )
+        .unwrap();
+        assert!(r.finite_root && r.offset_bound == 1e-8, "{r:?}");
+        let sum_h: f64 = h.iter().sum();
+        assert!(
+            score(&y, &o, &h, 1e-8, r.epsilon).abs() <= 1e-12 * sum_h,
+            "{r:?}"
+        );
+
+        // every follower's response at 1: no finite root, every follower at the link's clamp
+        let y1 = [1.0, 1.0, 1.0, 0.3];
+        let o1 = [2.0, -3.0, 0.5, 1.0];
+        let h1 = [5.0, 1.0, 20.0, 0.0];
+        let r = resolve_fluctuation(
+            ArrayView1::from(&y1[..]),
+            ArrayView1::from(&o1[..]),
+            ArrayView1::from(&h1[..]),
+        )
+        .unwrap();
+        assert!(!r.finite_root, "{r:?}");
+        assert!(o1[..3].iter().all(|o| o + r.epsilon >= 30.0), "{r:?}");
+        // and at 0
+        let y0 = [0.0, 0.0];
+        let r = resolve_fluctuation(
+            ArrayView1::from(&y0[..]),
+            ArrayView1::from(&o1[..2]),
+            ArrayView1::from(&h1[..2]),
+        )
+        .unwrap();
+        assert!(!r.finite_root && o1[..2].iter().all(|o| o + r.epsilon <= -30.0));
+
+        // offsets at +-1e3 are bounded in ltmle's order, and the first bound with a root is used
+        let yb = [0.6, 0.3, 0.8];
+        let ob = [1e3, -1e3, 0.0];
+        let hb = [2.0, 2.0, 1.0];
+        let r = resolve_fluctuation(
+            ArrayView1::from(&yb[..]),
+            ArrayView1::from(&ob[..]),
+            ArrayView1::from(&hb[..]),
+        )
+        .unwrap();
+        assert!(r.finite_root && r.offset_bound == OFFSET_BOUNDS[0], "{r:?}");
+        assert!(score(&yb, &ob, &hb, r.offset_bound, r.epsilon).abs() <= 1e-12 * 5.0);
+
+        // non-finite input is an error
+        for (y, o, h) in [
+            ([0.5, f64::NAN], [0.0, 0.0], [1.0, 1.0]),
+            ([0.5, 0.5], [0.0, f64::NAN], [1.0, 1.0]),
+            ([0.5, 0.5], [0.0, 0.0], [1.0, f64::INFINITY]),
+        ] {
+            assert!(
+                resolve_fluctuation(
+                    ArrayView1::from(&y[..]),
+                    ArrayView1::from(&o[..]),
+                    ArrayView1::from(&h[..]),
+                )
+                .is_err()
+            );
         }
     }
 
