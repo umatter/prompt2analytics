@@ -55,9 +55,85 @@ use p2a_core::{
 };
 
 use crate::output::{
-    OutputFormat, format_regression_results, missing_json, print_error, print_missing_note,
+    OutputFormat, format_regression_results, missing_json, notes_json, print_error,
+    print_missing_note, print_notes,
 };
 use crate::session::SessionManager;
+use p2a_core::diagnostics::IdentificationReport;
+use p2a_core::traits::convergence::ResultNotes;
+
+/// Convergence and warnings of a core result in the form `output::print_notes` /
+/// `output::notes_json` take. Shared by the causal, time-series, ML, spatial and viz commands.
+pub(crate) fn result_notes(r: &dyn ResultNotes) -> (Option<(bool, usize)>, Vec<String>) {
+    (
+        r.notes_convergence().map(|c| (c.converged, c.iterations)),
+        r.notes_warnings(),
+    )
+}
+
+/// `output::print_notes` of a core result ("Converged: ..." and "Warning: ..." lines; nothing
+/// for JSON).
+pub(crate) fn print_result_notes(r: &dyn ResultNotes, format: &OutputFormat) {
+    let (converged, warnings) = result_notes(r);
+    print_notes(converged, &warnings, format);
+}
+
+/// Extends a JSON object with `output::notes_json` of `r`: "warnings" always (replacing an
+/// existing key), "converged" and "iterations" when the result reports them. A non-object
+/// value is left unchanged.
+pub(crate) fn with_result_notes(json: &mut serde_json::Value, r: &dyn ResultNotes) {
+    let (converged, warnings) = result_notes(r);
+    extend_json(json, notes_json(converged, &warnings));
+}
+
+/// Inserts every key of `map` into the JSON object `json` (no-op for a non-object).
+fn extend_json(json: &mut serde_json::Value, map: serde_json::Map<String, serde_json::Value>) {
+    if let Some(obj) = json.as_object_mut() {
+        obj.extend(map);
+    }
+}
+
+/// Identification warnings of severity Caution and above, as
+/// `[{"code", "severity", "title", "message"}]`.
+fn identification_json(report: &IdentificationReport) -> serde_json::Value {
+    report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .map(|w| {
+            serde_json::json!({
+                "code": w.code,
+                "severity": w.severity.to_string(),
+                "title": w.title,
+                "message": w.message,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// "Identification warnings:" and one "  [SEVERITY] title: message" line per warning of
+/// severity Caution and above; nothing when there is none.
+fn print_identification_warnings(report: &IdentificationReport) {
+    let warnings: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .collect();
+    if warnings.is_empty() {
+        return;
+    }
+    println!("\nIdentification warnings:");
+    for w in warnings {
+        let label = match w.severity {
+            WarningSeverity::Critical => "CRITICAL",
+            WarningSeverity::Warning => "WARNING",
+            WarningSeverity::Caution => "CAUTION",
+            WarningSeverity::Info => "INFO",
+        };
+        println!("  [{}] {}: {}", label, w.title, w.message);
+    }
+}
 
 #[derive(Subcommand)]
 pub enum CausalCommands {
@@ -963,27 +1039,7 @@ fn execute_iv(
 
                             // Run identification diagnostics
                             if let Ok(diag_report) = iv_diagnostics(ds, &result) {
-                                let warnings: Vec<_> = diag_report
-                                    .warnings
-                                    .iter()
-                                    .filter(|w| w.severity >= WarningSeverity::Caution)
-                                    .collect();
-                                if !warnings.is_empty() {
-                                    println!("\nIdentification warnings:");
-                                    for w in warnings {
-                                        println!(
-                                            "  [{}] {}: {}",
-                                            match w.severity {
-                                                WarningSeverity::Critical => "CRITICAL",
-                                                WarningSeverity::Warning => "WARNING",
-                                                WarningSeverity::Caution => "CAUTION",
-                                                WarningSeverity::Info => "INFO",
-                                            },
-                                            w.title,
-                                            w.message
-                                        );
-                                    }
-                                }
+                                print_identification_warnings(&diag_report);
                             }
                             print_missing_note(&result.missing, format);
                         }
@@ -1084,27 +1140,7 @@ fn execute_did(
 
                         // Run identification diagnostics
                         let diag_report = did_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => {
@@ -1289,27 +1325,7 @@ fn execute_ipw(
 
                         // Run identification diagnostics
                         let diag_report = ipw_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => print_error(&format!("IPW failed: {}", e), format),
@@ -1485,32 +1501,6 @@ struct RdBandwidths {
     b: Option<f64>,
 }
 
-/// Print the identification warnings of an RD result (caution and above).
-fn print_rd_identification_warnings(result: &p2a_core::RdResult) {
-    let diag_report = rd_diagnostics(result);
-    let warnings: Vec<_> = diag_report
-        .warnings
-        .iter()
-        .filter(|w| w.severity >= WarningSeverity::Caution)
-        .collect();
-    if !warnings.is_empty() {
-        println!("\nIdentification warnings:");
-        for w in warnings {
-            println!(
-                "  [{}] {}: {}",
-                match w.severity {
-                    WarningSeverity::Critical => "CRITICAL",
-                    WarningSeverity::Warning => "WARNING",
-                    WarningSeverity::Caution => "CAUTION",
-                    WarningSeverity::Info => "INFO",
-                },
-                w.title,
-                w.message
-            );
-        }
-    }
-}
-
 /// Print the estimator's warnings, leaving out the missing-value note (printed last).
 fn print_rd_warnings(warnings: &[String], missing: &p2a_core::data::columns::MissingSummary) {
     let note = missing.note();
@@ -1681,7 +1671,7 @@ fn execute_rd(
                         print_rd_warnings(&result.warnings, &result.missing);
 
                         // Run identification diagnostics
-                        print_rd_identification_warnings(&result);
+                        print_identification_warnings(&rd_diagnostics(&result));
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1807,7 +1797,7 @@ fn execute_fuzzy_rd(
                         print_rd_warnings(&result.warnings, &result.missing);
 
                         // Run identification diagnostics on the outcome RD
-                        print_rd_identification_warnings(rd);
+                        print_identification_warnings(&rd_diagnostics(rd));
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1925,27 +1915,7 @@ fn execute_staggered_did(
 
                         // Run identification diagnostics
                         let diag_report = staggered_did_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => print_error(&format!("Staggered DiD failed: {}", e), format),
@@ -2237,27 +2207,7 @@ fn execute_matching(
 
                         // Run identification diagnostics
                         let diag_report = matching_diagnostics(&result);
-                        let warnings: Vec<_> = diag_report
-                            .warnings
-                            .iter()
-                            .filter(|w| w.severity >= WarningSeverity::Caution)
-                            .collect();
-                        if !warnings.is_empty() {
-                            println!("\nIdentification warnings:");
-                            for w in warnings {
-                                println!(
-                                    "  [{}] {}: {}",
-                                    match w.severity {
-                                        WarningSeverity::Critical => "CRITICAL",
-                                        WarningSeverity::Warning => "WARNING",
-                                        WarningSeverity::Caution => "CAUTION",
-                                        WarningSeverity::Info => "INFO",
-                                    },
-                                    w.title,
-                                    w.message
-                                );
-                            }
-                        }
+                        print_identification_warnings(&diag_report);
                     }
                 },
                 Err(e) => print_error(&format!("Matching failed: {}", e), format),
@@ -2403,4 +2353,69 @@ fn execute_stdreg(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::traits::convergence::Convergence;
+    use serde_json::json;
+
+    struct Notes(Option<Convergence>, Vec<String>);
+    impl ResultNotes for Notes {
+        fn notes_warnings(&self) -> Vec<String> {
+            self.1.clone()
+        }
+        fn notes_convergence(&self) -> Option<Convergence> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn test_result_notes_helpers() {
+        let c = Convergence::new(false, 100, 100, "relative change in deviance", 3.2e-4, 1e-8);
+        let r = Notes(Some(c), vec!["w1".into()]);
+        assert_eq!(
+            result_notes(&r),
+            (Some((false, 100)), vec!["w1".to_string()])
+        );
+        let mut v = json!({"method": "m"});
+        with_result_notes(&mut v, &r);
+        assert_eq!(
+            v,
+            json!({"method": "m", "converged": false, "iterations": 100, "warnings": ["w1"]})
+        );
+        let mut v = json!({"warnings": ["stale"]});
+        with_result_notes(&mut v, &Notes(None, vec![]));
+        assert_eq!(v, json!({"warnings": []}));
+        let mut arr = json!([1]);
+        with_result_notes(&mut arr, &r);
+        assert_eq!(arr, json!([1]));
+    }
+
+    #[test]
+    fn test_identification_json_keeps_caution_and_above() {
+        use p2a_core::diagnostics::{IdentificationReport, IdentificationWarning};
+        let w = |code: &str, s| IdentificationWarning {
+            code: code.into(),
+            severity: s,
+            title: format!("t {code}"),
+            message: format!("m {code}"),
+            assumption: String::new(),
+            remediation: vec![],
+            diagnostics: None,
+        };
+        let mut rep = IdentificationReport::new("IV");
+        rep.warnings = vec![
+            w("A", WarningSeverity::Info),
+            w("B", WarningSeverity::Caution),
+            w("C", WarningSeverity::Critical),
+        ];
+        assert_eq!(
+            identification_json(&rep),
+            json!([
+                {"code": "B", "severity": "Caution", "title": "t B", "message": "m B"},
+                {"code": "C", "severity": "Critical", "title": "t C", "message": "m C"}])
+        );
+    }
 }
