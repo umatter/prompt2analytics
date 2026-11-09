@@ -752,6 +752,18 @@ fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize, guarded: bool) -> EconRes
     Ok(g)
 }
 
+/// Restate a `SingularMatrix` from [`sym_inverse`] (whose context names the matrix and its
+/// rank) with the place it occurred and a suggestion; other errors pass through.
+pub(crate) fn singular_in(e: EconError, place: &str, suggestion: &str) -> EconError {
+    match e {
+        EconError::SingularMatrix { context, .. } => EconError::SingularMatrix {
+            context: format!("{context}; {place}"),
+            suggestion: suggestion.to_string(),
+        },
+        other => other,
+    }
+}
+
 /// Inverse of a symmetric matrix with its numerical rank.
 ///
 /// * Refused: a non-square matrix (`LinalgError::NotSquare`), a non-finite entry, and an

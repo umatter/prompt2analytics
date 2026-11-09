@@ -76,7 +76,7 @@ use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::econometrics::{DiscreteModelType, DiscreteResult, run_logit, run_probit};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::solve::{SingularPolicy, sym_inverse};
+use crate::linalg::solve::{SingularPolicy, singular_in, sym_inverse};
 use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{
@@ -671,9 +671,12 @@ fn compute_discrete_vcov(
         SingularPolicy::Error,
         "information matrix for marginal effects",
     )
-    .map_err(|e| EconError::SingularMatrix {
-        context: "Information matrix for marginal effects".to_string(),
-        suggestion: format!("Model may have separation or multicollinearity: {:?}", e),
+    .map_err(|e| {
+        singular_in(
+            e,
+            "marginal effects",
+            "Model may have separation or multicollinearity",
+        )
     })?
     .inverse;
 
@@ -819,6 +822,34 @@ mod tests {
     use super::*;
     use p2a_validation::Tol;
     use polars::prelude::*;
+
+    #[test]
+    fn test_discrete_vcov_singular_error_names_matrix_and_rank() {
+        // A duplicated regressor: the error keeps sym_inverse's context (matrix and rank)
+        // and adds where it occurred, instead of a Debug dump in the suggestion.
+        let n = 40;
+        let mut x = Array2::zeros((n, 3));
+        for i in 0..n {
+            let v = (i as f64 * 0.37).sin() + 0.01 * i as f64;
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = v;
+            x[[i, 2]] = v;
+        }
+        let beta = Array1::from(vec![0.2, 0.5, 0.0]);
+        match compute_discrete_vcov(DiscreteModelType::Logit, &x, &beta) {
+            Err(EconError::SingularMatrix {
+                context,
+                suggestion,
+            }) => {
+                assert_eq!(
+                    context,
+                    "information matrix for marginal effects: rank 2 of 3; marginal effects"
+                );
+                assert_eq!(suggestion, "Model may have separation or multicollinearity");
+            }
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_validate_marginal_effects_logit_tail() {

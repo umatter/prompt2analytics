@@ -62,7 +62,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::linalg::solve::{SingularPolicy, sym_inverse};
+use crate::linalg::solve::{SingularPolicy, singular_in, sym_inverse};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
 
@@ -271,18 +271,6 @@ fn partial_f(rss0: f64, rss1: f64, l: usize, df2: usize) -> f64 {
         f64::INFINITY
     } else {
         f64::NAN
-    }
-}
-
-/// Restate a `SingularMatrix` from `sym_inverse` (whose context names the matrix and its
-/// rank) with the place it occurred and a suggestion; other errors pass through.
-fn singular_in(e: EconError, place: &str, suggestion: &str) -> EconError {
-    match e {
-        EconError::SingularMatrix { context, .. } => EconError::SingularMatrix {
-            context: format!("{context}; {place}"),
-            suggestion: suggestion.to_string(),
-        },
-        other => other,
     }
 }
 
