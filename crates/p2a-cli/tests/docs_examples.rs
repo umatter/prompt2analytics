@@ -683,3 +683,34 @@ fn test_refused_option_values_are_caught() {
     let args = args_of("p2a reg quantreg d -y y -x x --se nid").expect("args");
     assert!(refused_value(&args).is_none());
 }
+
+// ---------------------------------------------------------------- Task 3
+
+/// INF-3: the EXAMPLES block of every command's help parses. Before T2-WP03 and T3-WP06 nine helps
+/// panicked, `data save` panicked and `--intercept false`, `--cluster2`, `--robust true` were usage
+/// errors; it guards the in-binary examples from now on.
+#[test]
+fn test_in_binary_examples_parse() {
+    let (mut problems, mut jobs) = (Vec::new(), Vec::new());
+    for c in commands() {
+        for ex in &c.examples {
+            let label = format!("`p2a {} -h` EXAMPLES: {ex}", c.path.join(" "));
+            match args_of(ex) {
+                Ok(a) => jobs.push((label, a)),
+                Err(e) => problems.push(format!("{label}: {e}")),
+            }
+        }
+    }
+    assert!(
+        jobs.len() >= 150,
+        "only {} in-binary examples found",
+        jobs.len()
+    );
+    problems.extend(run_all(&jobs));
+    assert!(
+        problems.is_empty(),
+        "{} in-binary examples do not parse:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
