@@ -26,6 +26,29 @@
       "tolerance": "OR validation/README.md; DR Tol::iterative(1e-8); etwfe validation/README.md (960 rows)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_rd",
+      "name": "MCP RD bandwidth selection",
+      "category": "mcp",
+      "reference": "rdrobust::rdbwselect, rdrobust 4.0.0",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "rd_bwselect_sharp",
+        "rd_bwselect_fuzzy"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_rd_bandwidth_selection"
+      ],
+      "quantities": [
+        "h, b",
+        "conventional and bias-corrected estimates",
+        "conventional and robust SEs",
+        "fuzzy Wald ratio"
+      ],
+      "tolerance": "validation/README.md, n = 1000",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

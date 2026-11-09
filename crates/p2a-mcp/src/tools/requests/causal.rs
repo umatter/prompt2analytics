@@ -1515,18 +1515,20 @@ pub struct RdEstimateRequest {
 
     /// Bandwidth selection method
     #[schemars(
-        description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo' (separate left/right), 'cerrd', or 'certwo'."
+        description = "Bandwidth selector, as rdrobust::rdbwselect `bwselect`: 'mserd' (default; MSE-optimal, one common bandwidth), 'msetwo' (MSE-optimal, separate left and right), 'msesum' (MSE-optimal for the sum of the two regression estimates, one common bandwidth), 'msecomb1' (smaller of mserd and msesum), 'msecomb2' (median of mserd, msesum and msetwo, per side), 'cerrd' (CER-optimal, one common bandwidth), 'certwo' (CER-optimal, separate left and right), 'cersum' (CER-optimal for the sum of the two regression estimates, one common bandwidth), 'cercomb1' (smaller of cerrd and cersum) or 'cercomb2' (median of cerrd, cersum and certwo, per side). Case is ignored ('mse' and 'cer' are accepted for mserd and cerrd); other values are an error."
     )]
     pub bwselect: Option<String>,
 
     /// Main bandwidth (overrides automatic selection)
     #[schemars(
-        description = "Main bandwidth h for estimation. If not specified, uses automatic MSE-optimal selection."
+        description = "Main bandwidth h. If not specified, h and b are selected as rdrobust::rdbwselect (bwselect)."
     )]
     pub h: Option<f64>,
 
     /// Bias bandwidth (overrides automatic selection)
-    #[schemars(description = "Bias bandwidth b. Default is rho * h where rho = 1.")]
+    #[schemars(
+        description = "Bias bandwidth b. Default: selected with h, or h itself (rho = 1) when only h is given, as rdrobust. b is also used when h is selected (rdrobust ignores it there)."
+    )]
     pub b: Option<f64>,
 
     /// Confidence level
@@ -1539,6 +1541,12 @@ pub struct RdEstimateRequest {
     )]
     #[serde(default)]
     pub vce: Option<String>,
+
+    /// rdbwselect regularisation weight
+    #[schemars(
+        description = "Weight of the regularisation term of rdbwselect (`scaleregul`, default 1; 0 switches it off); must be finite and >= 0. Used only when bandwidths are selected."
+    )]
+    pub scaleregul: Option<f64>,
 }
 
 /// Request for RD bandwidth selection only.
@@ -1575,9 +1583,15 @@ pub struct RdBandwidthRequest {
 
     /// Bandwidth selection method
     #[schemars(
-        description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo', 'cerrd', or 'certwo'."
+        description = "Bandwidth selector, as rdrobust::rdbwselect `bwselect`: 'mserd' (default; MSE-optimal, one common bandwidth), 'msetwo' (MSE-optimal, separate left and right), 'msesum' (MSE-optimal for the sum of the two regression estimates, one common bandwidth), 'msecomb1' (smaller of mserd and msesum), 'msecomb2' (median of mserd, msesum and msetwo, per side), 'cerrd' (CER-optimal, one common bandwidth), 'certwo' (CER-optimal, separate left and right), 'cersum' (CER-optimal for the sum of the two regression estimates, one common bandwidth), 'cercomb1' (smaller of cerrd and cersum) or 'cercomb2' (median of cerrd, cersum and certwo, per side). Case is ignored ('mse' and 'cer' are accepted for mserd and cerrd); other values are an error."
     )]
     pub bwselect: Option<String>,
+
+    /// rdbwselect regularisation weight
+    #[schemars(
+        description = "Weight of the regularisation term of rdbwselect (`scaleregul`, default 1; 0 switches it off); must be finite and >= 0. Used only when bandwidths are selected."
+    )]
+    pub scaleregul: Option<f64>,
 }
 
 /// Request for Fuzzy Regression Discontinuity estimation.
@@ -1621,19 +1635,19 @@ pub struct FuzzyRdRequest {
 
     /// Bandwidth selection method
     #[schemars(
-        description = "Bandwidth selection: 'mserd' (default), 'msetwo', 'cerrd', or 'certwo'."
+        description = "Bandwidth selector, as rdrobust::rdbwselect `bwselect`: 'mserd' (default; MSE-optimal, one common bandwidth), 'msetwo' (MSE-optimal, separate left and right), 'msesum' (MSE-optimal for the sum of the two regression estimates, one common bandwidth), 'msecomb1' (smaller of mserd and msesum), 'msecomb2' (median of mserd, msesum and msetwo, per side), 'cerrd' (CER-optimal, one common bandwidth), 'certwo' (CER-optimal, separate left and right), 'cersum' (CER-optimal for the sum of the two regression estimates, one common bandwidth), 'cercomb1' (smaller of cerrd and cersum) or 'cercomb2' (median of cerrd, cersum and certwo, per side). Case is ignored ('mse' and 'cer' are accepted for mserd and cerrd); other values are an error."
     )]
     pub bwselect: Option<String>,
 
     /// Main bandwidth
     #[schemars(
-        description = "Main bandwidth h. If not specified, p2a's own MSE-type selector chooses it from the outcome."
+        description = "Main bandwidth h. If not specified, h and b are selected as rdrobust::rdbwselect (bwselect) on the outcome."
     )]
     pub h: Option<f64>,
 
     /// Bias bandwidth
     #[schemars(
-        description = "Bias bandwidth b, used for both stages. Default is h (rho = 1), as rdrobust when only h is given."
+        description = "Bias bandwidth b, used for both stages. Default: selected with h, or h itself (rho = 1) when only h is given, as rdrobust. b is also used when h is selected (rdrobust ignores it there)."
     )]
     #[serde(default)]
     pub b: Option<f64>,
@@ -1648,6 +1662,12 @@ pub struct FuzzyRdRequest {
     )]
     #[serde(default)]
     pub vce: Option<String>,
+
+    /// rdbwselect regularisation weight
+    #[schemars(
+        description = "Weight of the regularisation term of rdbwselect (`scaleregul`, default 1; 0 switches it off); must be finite and >= 0. Used only when bandwidths are selected."
+    )]
+    pub scaleregul: Option<f64>,
 }
 
 /// Request for Multi-Cutoff Regression Discontinuity estimation.
@@ -1730,6 +1750,18 @@ pub struct RdMultiRequest {
     )]
     #[serde(default)]
     pub vce: Option<String>,
+
+    /// rdbwselect regularisation weight
+    #[schemars(
+        description = "Weight of the regularisation term of rdbwselect (`scaleregul`, default 1; 0 switches it off); must be finite and >= 0. Used only when bandwidths are selected."
+    )]
+    pub scaleregul: Option<f64>,
+
+    /// rdbwselect selector
+    #[schemars(
+        description = "Bandwidth selector, as rdrobust::rdbwselect `bwselect`: 'mserd' (default; MSE-optimal, one common bandwidth), 'msetwo' (MSE-optimal, separate left and right), 'msesum' (MSE-optimal for the sum of the two regression estimates, one common bandwidth), 'msecomb1' (smaller of mserd and msesum), 'msecomb2' (median of mserd, msesum and msetwo, per side), 'cerrd' (CER-optimal, one common bandwidth), 'certwo' (CER-optimal, separate left and right), 'cersum' (CER-optimal for the sum of the two regression estimates, one common bandwidth), 'cercomb1' (smaller of cerrd and cersum) or 'cercomb2' (median of cerrd, cersum and certwo, per side). Case is ignored ('mse' and 'cer' are accepted for mserd and cerrd); other values are an error."
+    )]
+    pub bwselect: Option<String>,
 }
 
 /// Request for Causal Forest estimation (Wager & Athey 2018).

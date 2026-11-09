@@ -52,6 +52,8 @@ const SMOOTHING: &str = "smoothing weight of each recursion step; a given value 
                          optimisation";
 const DISTRIBUTION: &str = "parameter of the reference distribution; it enters its CDF only";
 const NULL_VALUE: &str = "null-hypothesis value; it shifts the data or the statistic";
+const SCALEREGUL: &str =
+    "rdbwselect regularisation weight: the core checks it is finite and >= 0; not a cost";
 const CUTOFF: &str = "threshold value; it splits or selects rows";
 const RD_BANDWIDTH: &str = "kernel bandwidth in units of the running variable; it selects rows";
 const DISPLAY: &str = "display threshold; it filters the reported weights";
@@ -913,6 +915,12 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("iv_mte", "bootstrap_reps", Max(Replications)),
         p("iv_mte", "prte_weights", ArrayLen(ArrayLength)),
         p("gmm_iv", "weight_matrix", ArrayLen(ArrayLength)),
+        // ---- MCP causal surface: fields added with the causal tool options. ----
+        p("rd_estimate", "scaleregul", Exempt(SCALEREGUL)),
+        p("rd_bw", "scaleregul", Exempt(SCALEREGUL)),
+        p("rd_fuzzy", "scaleregul", Exempt(SCALEREGUL)),
+        p("rd_multi", "scaleregul", Exempt(SCALEREGUL)),
+        // ---- end of the MCP causal surface block. ----
         p("stats_mauchly_test", "sigma", ArrayLen(ArrayLength)),
         p("stats_spline", "n", Max(GridPoints)),
         p("ts_vecm", "rank", Max(ModelOrder)),

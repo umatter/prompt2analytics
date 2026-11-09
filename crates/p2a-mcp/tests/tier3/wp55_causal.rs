@@ -247,6 +247,11 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["pooling_weights", "sample_size", "inverse_variance"],
         ),
         (
+            "rd_multi",
+            with(&rdm, &[("bwselect", json!("ik"))]),
+            vec!["bwselect", "mserd"],
+        ),
+        (
             "gmm_iv",
             with(&gmm, &[("method", json!("gel"))]),
             vec!["twostep", "cue"],
@@ -522,4 +527,178 @@ async fn test_validate_mcp_etwfe() {
     )
     .await;
     assert!(e.contains("tref 42 is not a period of 'year'"), "{e}");
+}
+
+/// rdrobust::rdbwselect / rdrobust with selected bandwidths (the rd_bwselect cases) through rd_estimate, rd_bw,
+/// rd_fuzzy and rd_multi; rdrobust's spellings and p2a's aliases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_rd_bandwidth_selection() {
+    use p2a_core::econometrics::rd::{
+        BandwidthMethod, KernelType, RdConfig, rd_bandwidth_with, run_fuzzy_rd, run_rd,
+    };
+    let sharp = Case::load("rd_bwselect_sharp");
+    let fuzzy = Case::load("rd_bwselect_fuzzy");
+    let (session, server) = session_with("rd_bwselect_sharp"); // dataset `rd_sim`
+    let ds = case_ds(&sharp);
+    let base = json!({"dataset": "rd_sim", "outcome": "y", "running_var": "x", "cutoff": 0.0});
+    let cfg = |m: BandwidthMethod, k: KernelType, sr: f64| {
+        let mut c = RdConfig::default();
+        c.bwselect = m;
+        c.kernel = k;
+        c.scaleregul = sr;
+        c
+    };
+    let auto = run_rd(
+        &ds,
+        "y",
+        "x",
+        0.0,
+        cfg(BandwidthMethod::MseRd, KernelType::Triangular, 1.0),
+    )
+    .unwrap();
+    assert!(
+        ok(&server, &session, "rd_estimate", base.clone())
+            .await
+            .starts_with(&auto.to_string())
+    );
+    let cer = run_rd(
+        &ds,
+        "y",
+        "x",
+        0.0,
+        cfg(BandwidthMethod::CerRd, KernelType::Triangular, 1.0),
+    )
+    .unwrap();
+    assert!(
+        ok(
+            &server,
+            &session,
+            "rd_estimate",
+            with(&base, &[("bwselect", json!("CER"))])
+        )
+        .await
+        .starts_with(&cer.to_string())
+    );
+    let noreg = run_rd(
+        &ds,
+        "y",
+        "x",
+        0.0,
+        cfg(BandwidthMethod::MseRd, KernelType::Triangular, 0.0),
+    )
+    .unwrap();
+    assert!(
+        ok(
+            &server,
+            &session,
+            "rd_estimate",
+            with(&base, &[("scaleregul", json!(0.0))])
+        )
+        .await
+        .starts_with(&noreg.to_string())
+    );
+    let two = rd_bandwidth_with(
+        &ds,
+        "y",
+        "x",
+        None,
+        0.0,
+        &cfg(BandwidthMethod::MseTwo, KernelType::Triangular, 1.0),
+    )
+    .unwrap();
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "rd_bw",
+            with(
+                &base,
+                &[("bwselect", json!("mse-two")), ("kernel", json!("TRI"))]
+            )
+        )
+        .await,
+        two.to_string()
+    );
+    let epa = rd_bandwidth_with(
+        &ds,
+        "y",
+        "x",
+        None,
+        0.0,
+        &cfg(BandwidthMethod::CerRd, KernelType::Epanechnikov, 1.0),
+    )
+    .unwrap();
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "rd_bw",
+            with(
+                &base,
+                &[("bwselect", json!("cerrd")), ("kernel", json!("epa"))]
+            )
+        )
+        .await,
+        epa.to_string()
+    );
+    let fz = run_fuzzy_rd(&ds, "yf", "x", "d", 0.0, RdConfig::default()).unwrap();
+    assert!(
+        ok(
+            &server,
+            &session,
+            "rd_fuzzy",
+            json!({"dataset": "rd_sim", "outcome": "yf", "running_var": "x", "treatment": "d"})
+        )
+        .await
+        .starts_with(&fz.to_string())
+    );
+    let m = ok(&server, &session, "rd_multi",
+               json!({"dataset": "rd_sim", "outcome": "y", "running_var": "x", "cutoffs": [0.0], "bwselect": "cerrd"})).await;
+    assert!(
+        m.contains(&format!(
+            "{:>10.4} {:>10.4}",
+            sharp.scalar("cerrd_coef_bc"),
+            sharp.scalar("cerrd_se_robust")
+        )),
+        "{m}"
+    );
+    let n = 1000;
+    Check::new(&sharp)
+        .vector("auto_h", &[auto.h_left, auto.h_right], Tol::coef(n))
+        .vector("auto_b", &[auto.b_left, auto.b_right], Tol::coef(n))
+        .scalar("auto_coef_conv", auto.tau_conventional, Tol::coef(n))
+        .scalar("auto_coef_bc", auto.tau_bc, Tol::coef(n))
+        .scalar("auto_se_conv", auto.se_conventional, Tol::se(n))
+        .scalar("auto_se_robust", auto.se_robust, Tol::se(n))
+        .vector("cerrd_h", &[cer.h_left, cer.h_right], Tol::coef(n))
+        .scalar("cerrd_coef_bc", cer.tau_bc, Tol::coef(n))
+        .scalar("cerrd_se_robust", cer.se_robust, Tol::se(n))
+        .vector("noreg_auto_h", &[noreg.h_left, noreg.h_right], Tol::coef(n))
+        .scalar("noreg_auto_coef_bc", noreg.tau_bc, Tol::coef(n))
+        .vector(
+            "tri_p1_nn_msetwo",
+            &[two.h_left, two.h_right, two.b_left, two.b_right],
+            Tol::coef(n),
+        )
+        .vector(
+            "epa_p1_nn_cerrd",
+            &[epa.h_left, epa.h_right, epa.b_left, epa.b_right],
+            Tol::coef(n),
+        )
+        .finish();
+    Check::new(&fuzzy)
+        .vector(
+            "fuzzy_auto_h",
+            &[fz.outcome_rd.h_left, fz.outcome_rd.h_right],
+            Tol::coef(n),
+        )
+        .vector(
+            "fuzzy_auto_b",
+            &[fz.outcome_rd.b_left, fz.outcome_rd.b_right],
+            Tol::coef(n),
+        )
+        .scalar("fuzzy_auto_coef_conv", fz.tau_fuzzy, Tol::coef(n))
+        .scalar("fuzzy_auto_coef_bc", fz.tau_fuzzy_bc, Tol::coef(n))
+        .scalar("fuzzy_auto_se_robust", fz.se_fuzzy_robust, Tol::se(n))
+        .finish();
 }

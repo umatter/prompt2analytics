@@ -34,6 +34,7 @@ use crate::tools::requests::causal::{
 };
 
 use crate::tools::common::parse_option;
+use p2a_core::econometrics::rd::rd_bandwidth_with;
 use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::options::Choices;
 use p2a_core::regression::HacKernel;
@@ -55,8 +56,8 @@ use p2a_core::{
         did_diagnostics, ipw_diagnostics, iv_diagnostics, matching_diagnostics, rd_diagnostics,
         staggered_did_diagnostics,
     },
-    entropy_balance, match_it, rd_bandwidth, run_bp_bounds, run_cbps, run_did, run_doubly_robust,
-    run_etwfe, run_first_stage_diagnostics, run_fuzzy_rd, run_gformula, run_gmm_iv, run_gsynth,
+    entropy_balance, match_it, run_bp_bounds, run_cbps, run_did, run_doubly_robust, run_etwfe,
+    run_first_stage_diagnostics, run_fuzzy_rd, run_gformula, run_gmm_iv, run_gsynth,
     run_ipw_treatment, run_iv2sls, run_ivmte, run_medflex_dataset, run_mediation_analysis, run_rd,
     run_rd_multi_dataset, run_scpi, run_staggered_did, run_stdreg, run_synthetic_control, run_tmle,
     run_twang, sargan_test, sbw, tmle, weightit,
@@ -1841,7 +1842,7 @@ impl AnalyticsServer {
 
     /// Run Sharp Regression Discontinuity estimation.
     #[tool(
-        description = "Run Sharp Regression Discontinuity (RD) estimation by local polynomial regression, with the bias-corrected robust inference of Calonico, Cattaneo & Titiunik (2014) as in R's rdrobust: conventional, bias-corrected and robust estimates, standard errors, p-values and confidence intervals. Bandwidths come from p2a's own MSE-type selector unless h (and b) are given; vce selects the variance estimator (nearest-neighbour by default, as rdrobust). Rows with missing values are dropped and reported."
+        description = "Run Sharp Regression Discontinuity (RD) estimation by local polynomial regression, with the bias-corrected robust inference of Calonico, Cattaneo & Titiunik (2014) as in R's rdrobust: conventional, bias-corrected and robust estimates, standard errors, p-values and confidence intervals. Without h, h and b are selected as rdrobust::rdbwselect (bwselect: mserd by default, msetwo, msesum, msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1, cercomb2); the output names the source of each bandwidth; vce selects the variance estimator (nearest-neighbour by default, as rdrobust). Rows with missing values are dropped and reported."
     )]
     pub async fn rd_estimate(
         &self,
@@ -1885,6 +1886,7 @@ impl AnalyticsServer {
             bwselect,
             vce,
             level: request.level.unwrap_or(0.95),
+            scaleregul: request.scaleregul.unwrap_or(1.0),
             ..Default::default()
         };
 
@@ -1914,7 +1916,7 @@ impl AnalyticsServer {
 
     /// Compute RD bandwidth only.
     #[tool(
-        description = "Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation."
+        description = "Select RD bandwidths h and b as rdrobust::rdbwselect (the ten bwselect methods, kernel, p, scaleregul) without estimating; returns h and b left and right, the observations inside h, the pilot bandwidth and mass-point information."
     )]
     pub async fn rd_bw(
         &self,
@@ -1943,16 +1945,21 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cutoff = request.cutoff.unwrap_or(0.0);
-        let p = request.p.unwrap_or(1);
+        let config = RdConfig {
+            p: request.p.unwrap_or(1),
+            kernel,
+            bwselect,
+            scaleregul: request.scaleregul.unwrap_or(1.0),
+            ..Default::default()
+        };
 
-        let result = match rd_bandwidth(
+        let result = match rd_bandwidth_with(
             dataset,
             &request.outcome,
             &request.running_var,
+            None,
             cutoff,
-            p,
-            kernel,
-            bwselect,
+            &config,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1970,7 +1977,7 @@ impl AnalyticsServer {
 
     /// Run Fuzzy Regression Discontinuity estimation.
     #[tool(
-        description = "Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10). Bandwidths come from p2a's own MSE-type selector (run on the outcome), not rdrobust's rdbwselect, unless h (and b) are given."
+        description = "Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10). Without h, h and b are selected on the outcome as rdrobust::rdbwselect (bwselect: mserd by default, msetwo, msesum, msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1, cercomb2); the output names the source of each bandwidth."
     )]
     pub async fn rd_fuzzy(
         &self,
@@ -2014,6 +2021,7 @@ impl AnalyticsServer {
             bwselect,
             vce,
             level: request.level.unwrap_or(0.95),
+            scaleregul: request.scaleregul.unwrap_or(1.0),
             ..Default::default()
         };
 
@@ -2044,7 +2052,7 @@ impl AnalyticsServer {
 
     /// Run Multi-Cutoff Regression Discontinuity estimation.
     #[tool(
-        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator. Per-cutoff bandwidths come from p2a's own MSE-type selector, not rdrobust's rdbwselect, unless a bandwidth is given."
+        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator. Without a bandwidth, each cutoff's h and b are selected as rdrobust::rdbwselect (bwselect: mserd by default, msetwo, msesum, msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1, cercomb2)."
     )]
     pub async fn rd_multi(
         &self,
@@ -2069,6 +2077,11 @@ impl AnalyticsServer {
             Ok(k) => k,
             Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
+        let bwselect = tool_try!(rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse
+        ));
 
         let datasets = self.datasets.read().await;
 
@@ -2104,7 +2117,8 @@ impl AnalyticsServer {
         config.q = None;
         config.pooled = request.pooled.unwrap_or(true);
         config.pooling_weights = pooling_weights;
-        config.bwselect = BandwidthMethod::MseRd;
+        config.bwselect = bwselect;
+        config.scaleregul = request.scaleregul.unwrap_or(1.0);
         config.vce = vce;
         config.level = request.level.unwrap_or(0.95);
         config.test_heterogeneity = request.test_heterogeneity.unwrap_or(true);
@@ -2807,11 +2821,9 @@ mod tests {
             let out = text(&r);
             assert_ne!(r.is_error, Some(true), "{out}");
             assert!(out.contains(kernel_shown), "{kernel}: {out}");
-            // rd_multi takes cutoffs (not cutoff) and a given bandwidth (no bwselect), so
-            // neither is sent
+            // rd_multi takes cutoffs (not cutoff); the selector name is accepted there too
             let mut multi_args = merged(args, json!({"cutoffs": [0.0], "bandwidth": 0.3}));
             let multi = multi_args.as_object_mut().unwrap();
-            multi.remove("bwselect");
             multi.remove("cutoff");
             let req: RdMultiRequest = serde_json::from_value(multi_args).unwrap();
             let r = rt.block_on(server.rd_multi(Parameters(req))).unwrap();
