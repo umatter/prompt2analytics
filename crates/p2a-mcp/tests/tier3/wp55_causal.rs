@@ -359,3 +359,58 @@ async fn test_mcp_causal_option_aliases_and_unknown() {
         }
     }
 }
+
+/// did::att_gt(xformla = ~ x1 + x2, control_group = "notyettreated", est_method = "dr", anticipation = 1,
+/// bstrap = FALSE) as written out in the did_cs_covariates case, through the MCP spellings of R.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_staggered_did() {
+    use p2a_core::econometrics::staggered_did::{
+        AttEstimationMethod, ComparisonGroup, StaggeredDidConfig, run_staggered_did,
+    };
+    let case = Case::load("did_cs_covariates");
+    let (session, server) = session_with("did_cs_covariates");
+    let t = ok(&server, &session, "staggered_did", json!({"dataset": "cs_cov_panel", "outcome": "y",
+        "treatment_time": "first_treat", "time_col": "time", "unit_col": "unit", "covariates": ["x1", "x2"],
+        "comparison_group": "notyettreated", "estimation_method": "DR", "anticipation": 1, "bootstrap": 0})).await;
+    let ds = case_ds(&case);
+    let mut c = StaggeredDidConfig::default();
+    c.comparison_group = ComparisonGroup::NotYetTreated;
+    c.estimation_method = AttEstimationMethod::DoublyRobust;
+    c.anticipation = 1;
+    c.bootstrap = 0;
+    c.base_period = -1;
+    let lib = run_staggered_did(
+        &ds,
+        "y",
+        "first_treat",
+        "time",
+        "unit",
+        Some(&["x1", "x2"]),
+        c,
+    )
+    .unwrap();
+    // The DR estimate contains a propensity IRLS: the written-out transcription is the tight reference.
+    Check::new(&case)
+        .scalar(
+            "notyet_ant1_simple_att_dr",
+            lib.overall_att.att,
+            Tol::iterative(1e-8),
+        ) // 1.9729398081306126
+        .scalar(
+            "notyet_ant1_simple_se_dr",
+            lib.overall_att.std_error,
+            Tol::iterative(1e-8),
+        ) // 0.16520145652426557
+        .finish();
+    assert!(
+        t.starts_with(&lib.to_string()),
+        "tool text is not the result's Display:\n{t}"
+    );
+    assert!(t.contains("Anticipation:       1 period(s)"), "{t}");
+    let e = refused(&server, &session, "staggered_did", json!({"dataset": "cs_cov_panel", "outcome": "y",
+        "treatment_time": "first_treat", "time_col": "time", "unit_col": "unit", "anticipation": 8, "bootstrap": 0})).await;
+    assert!(
+        e.contains("anticipation") && e.contains("smaller than the number of periods (8)"),
+        "{e}"
+    );
+}

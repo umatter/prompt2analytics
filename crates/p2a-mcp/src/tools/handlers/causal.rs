@@ -524,7 +524,7 @@ impl AnalyticsServer {
 
     /// Run Callaway-Sant'Anna staggered difference-in-differences.
     #[tool(
-        description = "Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests."
+        description = "Estimate group-time average treatment effects with staggered adoption as Callaway & Sant'Anna (2021) and R's did::att_gt with did::aggte aggregations (simple, dynamic/event, group). Without covariates every method is the difference in mean outcome changes; with covariates, 'outcome_regression' is DRDID reg_did_panel, 'ipw' std_ipw_did_panel and 'doubly_robust' drdid_panel, with covariates taken from the earlier of the two periods of each cell, as did. Comparison units: never treated (default) or not yet treated; anticipation shifts the base period. bootstrap = 0 gives analytic influence-function standard errors for every method. Returns ATT(g,t), the aggregations, a pre-trend test and identification diagnostics."
     )]
     pub async fn staggered_did(
         &self,
@@ -548,6 +548,8 @@ impl AnalyticsServer {
             estimation_method,
             base_period: request.base_period.unwrap_or(-1),
             bootstrap: request.bootstrap.unwrap_or(999),
+            anticipation: request.anticipation.unwrap_or(0),
+            seed: self.session_seed().await,
             ..Default::default()
         };
 

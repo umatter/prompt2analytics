@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_causal_did",
+      "name": "MCP staggered_did and etwfe",
+      "category": "mcp",
+      "reference": "did::att_gt / DRDID (written out); etwfe::etwfe + emfx",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "did_cs_covariates"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_mcp_causal_option_aliases_and_unknown",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did"
+      ],
+      "quantities": [
+        "simple ATT and SE (DR, not-yet, anticipation 1)",
+        "emfx simple/event estimates and delta SEs",
+        "iid SE",
+        "text equals the library Display",
+        "option aliases"
+      ],
+      "tolerance": "OR validation/README.md; DR Tol::iterative(1e-8); etwfe validation/README.md (960 rows)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

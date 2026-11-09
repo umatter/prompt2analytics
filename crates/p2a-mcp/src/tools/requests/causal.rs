@@ -357,9 +357,15 @@ pub struct StaggeredDiDRequest {
 
     /// Number of bootstrap replications
     #[schemars(
-        description = "0 = analytic influence-function standard errors (did's bstrap = FALSE), otherwise at least 50 bootstrap replicates (unit bootstrap; with covariates a multiplier bootstrap of the influence functions; 1-49 are refused). Default 999."
+        description = "0 = analytic influence-function standard errors (did's bstrap = FALSE), otherwise at least 50 bootstrap replicates (unit bootstrap; with covariates a multiplier bootstrap of the influence functions; 1-49 are refused). Default 999. With covariates each replicate perturbs the cells' influence functions with the resampled unit counts (did's multiplier bootstrap); without covariates units are resampled. Seeded by the session seed."
     )]
     pub bootstrap: Option<usize>,
+
+    /// Periods of anticipation
+    #[schemars(
+        description = "Number of periods before treatment in which units may anticipate it, as did::att_gt `anticipation` (default 0): the base period becomes g - 1 - anticipation, not-yet-treated comparison units must be first treated after max(t, base) + anticipation, and the anticipation cells are reported (and pre-tested) as pre-treatment cells. Must be smaller than the number of periods."
+    )]
+    pub anticipation: Option<usize>,
 }
 
 /// Request for Goodman-Bacon decomposition of staggered DiD.
