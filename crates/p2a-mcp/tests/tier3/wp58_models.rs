@@ -2213,3 +2213,28 @@ async fn test_validate_mcp_competing_risks_cif() {
         }
     }
 }
+
+/// panel_pmg's model option: a misspelled value is an error that lists the accepted spellings
+/// (before: treated like 'random'); 'random' points to panel_pvcm. A property test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_panel_pmg_model_spellings() {
+    let (session, server) =
+        session_with_datasets(vec![("pvcm_panel", generated_dataset("pvcm_panel"))]);
+    let pmg = |model: &str| {
+        json!({"dataset": "pvcm_panel", "y": "y", "x": ["x1", "x2"], "entity_var": "id",
+               "model": model})
+    };
+    let e = tool_error(&call(&server, &session, "panel_pmg", pmg("withn")).await);
+    assert!(
+        e.contains("withn") && e.contains("within") && e.contains("random"),
+        "{e}"
+    );
+    assert!(!e.contains("panel_pvcm"), "{e}");
+    let e = tool_error(&call(&server, &session, "panel_pmg", pmg("swamy")).await);
+    assert!(e.contains("panel_pvcm"), "{e}");
+    assert!(
+        call(&server, &session, "panel_pmg", pmg("individual"))
+            .await
+            .success
+    );
+}

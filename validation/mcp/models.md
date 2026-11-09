@@ -111,6 +111,7 @@ R-pinned.
 | `test_mcp_discrete_options_and_boundaries` | mixed_logit, ordered_model, zeroinfl, hurdle_model, feglm | refusals | TOOL-14, TOOL-32 |
 | `test_mcp_mixed_logit_uses_session_seed` | mixed_logit | equal text for equal seeds | TOOL-32 |
 | `test_mcp_cox_options_are_checked` | cox_ph | refusals | TOOL-32 |
+| `test_mcp_panel_pmg_model_spellings` | panel_pmg | refusals list the accepted models | TOOL-32 |
 
 ## Tolerances
 

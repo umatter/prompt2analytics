@@ -31,6 +31,10 @@ use p2a_core::{
     run_zip,
 };
 
+/// mixed_logit's seed for pseudo-random draws when the session sets none (MixedLogitConfig's
+/// default seed).
+const MIXED_LOGIT_DEFAULT_SEED: u64 = 42;
+
 const MIXED_DISTRIBUTION: Choices<RandomDistribution> = Choices {
     option: "distribution",
     values: &[
@@ -266,8 +270,13 @@ impl AnalyticsServer {
         config.n_draws = request.n_draws.unwrap_or(500);
         config.halton = request.halton.unwrap_or(true);
         config.individual_col = request.individual_id.clone();
-        // pseudo-random draws (halton = false) follow the session seed, else 42
-        config.seed = Some(self.global_seed.read().await.unwrap_or(42));
+        // pseudo-random draws (halton = false) follow the session seed, else the default
+        config.seed = Some(
+            self.global_seed
+                .read()
+                .await
+                .unwrap_or(MIXED_LOGIT_DEFAULT_SEED),
+        );
 
         let result = match run_gmnl(
             dataset,

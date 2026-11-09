@@ -282,14 +282,16 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         // panel_pmg shares panel_pvcm's request; it runs only the within (mean-group) model
-        if parse_choice(&PVCM_MODEL, request.model.as_deref(), PvcmType::Within)
-            != Ok(PvcmType::Within)
-        {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "panel_pmg is the mean-group estimator, which is panel_pvcm with model 'within'; \
-                 for Swamy's random-coefficients model use panel_pvcm with model = 'random'"
-                    .to_string(),
-            )]));
+        match parse_choice(&PVCM_MODEL, request.model.as_deref(), PvcmType::Within) {
+            Ok(PvcmType::Within) => {}
+            Ok(PvcmType::Random) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "panel_pmg is the mean-group estimator, which is panel_pvcm with model 'within'; \
+                     for Swamy's random-coefficients model use panel_pvcm with model = 'random'"
+                        .to_string(),
+                )]));
+            }
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         }
 
         let result = match run_pmg(dataset, &request.y, &x_refs, &request.entity_var) {

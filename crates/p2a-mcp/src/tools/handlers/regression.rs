@@ -116,6 +116,9 @@ fn ordered_json(pairs: &[(&str, serde_json::Value)]) -> String {
 /// Predictors listed per glmnet fit before the listing switches to the largest |estimate|.
 const GLMNET_LISTED_MAX: usize = 20;
 
+/// regression_bootstrap_cov's seed when neither the request nor the session sets one.
+const BOOTSTRAP_DEFAULT_SEED: u64 = 42;
+
 /// One glmnet fit as JSON: lambda, df, deviance ratio, intercept and the coefficients (all of
 /// them for up to 20 predictors, in column order; otherwise the 20 largest by |estimate| and
 /// `more_nonzero`, the number of other non-zero ones).
@@ -191,9 +194,9 @@ fn glmnet_json(r: &p2a_core::regression::GlmnetResult) -> String {
     use serde_json::json;
     let (selection, more, never) = glmnet_selection(r);
     let listed = if r.variable_names.len() <= GLMNET_LISTED_MAX {
-        "all"
+        "all".to_string()
     } else {
-        "the 20 largest |estimate| per lambda"
+        format!("the {GLMNET_LISTED_MAX} largest |estimate| per lambda")
     };
     let path: Vec<serde_json::Value> = r
         .fits
@@ -623,7 +626,7 @@ impl AnalyticsServer {
                 request
                     .seed
                     .or(*self.global_seed.read().await)
-                    .unwrap_or(42),
+                    .unwrap_or(BOOTSTRAP_DEFAULT_SEED),
             ),
         ) {
             Ok(r) => r,

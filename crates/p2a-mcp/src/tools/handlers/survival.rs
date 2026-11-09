@@ -305,7 +305,7 @@ mod tests {
     /// The dropped-row note of a grouped fit is printed once, after the last group.
     #[test]
     fn test_mcp_kaplan_meier_grouped_missing_note_once() {
-        let df = p2a_core::data::DataLoader::load_csv(&format!(
+        let df = p2a_core::data::DataLoader::load_csv(format!(
             "{}/../../validation/datasets/generated/lung.csv",
             env!("CARGO_MANIFEST_DIR")
         ))
