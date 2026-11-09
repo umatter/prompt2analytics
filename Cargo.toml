@@ -102,9 +102,6 @@ rand_chacha = "0.3"
 # SIMD-optimized string operations
 bytecount = { version = "0.6", features = ["runtime-dispatch-simd"] }
 
-# Quadratic programming solver (pure Rust, Goldfarb-Idnani algorithm)
-quadprog = "0.0.1"
-
 # FFT for spectral analysis (O(n log n) instead of O(n²))
 rustfft = "6.2"
 
@@ -201,3 +198,13 @@ broken_intra_doc_links = "allow"
 private_intra_doc_links = "allow"
 # Allow invalid HTML tags (e.g., <f64> in type signatures)
 invalid_html_tags = "allow"
+
+# Release builds (the deployed server, `p2a` binaries, `cargo test --release`) keep integer overflow
+# checks: an overflow is a panic, which the HTTP governor answers with 500 `internal`, instead of a
+# wrapped value. `cargo bench` uses the bench profile, which turns them off so the timings the
+# paper reports keep the configuration they were measured with.
+[profile.release]
+overflow-checks = true
+
+[profile.bench]
+overflow-checks = false
