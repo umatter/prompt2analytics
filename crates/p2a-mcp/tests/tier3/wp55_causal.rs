@@ -216,6 +216,11 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["difference", "odds_ratio"],
         ),
         (
+            "natural_effects_mediation",
+            with(&ne, &[("family", json!("gamma"))]),
+            vec!["family", "binomial"],
+        ),
+        (
             "synthetic_control",
             with(&sc, &[("v_method", json!("random"))]),
             vec!["datadriven", "equal"],
@@ -1241,4 +1246,58 @@ async fn test_validate_mcp_matching_output_dataset() {
     )
     .await;
     assert!(e.contains("output_name"), "{e}");
+}
+
+/// medflex::neImpute + neModel on the odds-ratio scale with A:M (the medflex_scales case, odds_int), robust
+/// sandwich SEs (n_bootstrap = 0).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_natural_effects_mediation() {
+    use p2a_core::econometrics::medflex::{
+        EffectScale, MedflexConfig, MedflexFamily, run_medflex_dataset,
+    };
+    let case = Case::load("medflex_scales");
+    let (session, server) = session_with("medflex_scales"); // dataset `medflex_sim`
+    let ds = case_ds(&case);
+    let t = ok(
+        &server,
+        &session,
+        "natural_effects_mediation",
+        json!({"dataset": "medflex_sim", "outcome": "yb",
+        "treatment": "a", "mediator": "m", "confounders": ["c1", "c2"], "allow_interaction": true,
+        "scale": "OR", "family": "binomial", "n_bootstrap": 0}),
+    )
+    .await;
+    let mut c = MedflexConfig::default();
+    c.allow_interaction = true;
+    c.bootstrap_ci = false;
+    c.n_bootstrap = 0;
+    c.scale = EffectScale::OddsRatio;
+    c.family = Some(MedflexFamily::Binomial);
+    c.confidence_level = 0.95;
+    let lib = run_medflex_dataset(&ds, "yb", "a", "m", &["c1", "c2"], c).unwrap();
+    assert_eq!(t, lib.to_string());
+    // IRLS working model and quasi-GLM natural effect model
+    Check::new(&case)
+        .scalar(
+            "odds_int_nde",
+            lib.natural_direct_effect,
+            Tol::iterative(1e-8),
+        )
+        .scalar(
+            "odds_int_nie",
+            lib.natural_indirect_effect,
+            Tol::iterative(1e-8),
+        )
+        .scalar("odds_int_te", lib.total_effect, Tol::iterative(1e-8))
+        .finish();
+    assert!(t.contains("robust"), "{t}");
+    let args = |k: &str| {
+        json!({"dataset": "medflex_sim", "outcome": "yc", "treatment": "a", "mediator": "m",
+                                "covariates": ["c1", "c2"], k: 60})
+    };
+    let w = ok(&server, &session, "mediation_analysis", args("bootstrap")).await;
+    assert_eq!(
+        w,
+        ok(&server, &session, "mediation_analysis", args("n_bootstrap")).await
+    ); // alias, same seed
 }

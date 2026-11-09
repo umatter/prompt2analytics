@@ -1246,8 +1246,9 @@ pub struct MediationRequest {
 
     /// Number of bootstrap replications for standard errors
     #[schemars(
-        description = "Number of bootstrap replications for standard error estimation. Default is 999."
+        description = "Bootstrap replications (default 999), seeded by the session seed; the estimate fails unless at least min(50, n_bootstrap) replicates are usable."
     )]
+    #[serde(rename = "n_bootstrap", alias = "bootstrap")]
     pub bootstrap: Option<usize>,
 }
 
@@ -1265,9 +1266,7 @@ pub struct NaturalEffectsRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(
-        description = "Column indicating treatment status (1 = treated, 0 = control). Typically binary."
-    )]
+    #[schemars(description = "Treatment column; must be coded 0/1.")]
     #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
@@ -1291,7 +1290,7 @@ pub struct NaturalEffectsRequest {
 
     /// Number of bootstrap replications for standard errors
     #[schemars(
-        description = "Number of bootstrap replications for confidence intervals. Default is 1000. Set to 0 to use delta method instead."
+        description = "0 = robust sandwich SEs (medflex se = 'robust'); otherwise that many bootstrap replicates (default 1000, seeded by the session seed): bootstrap SE and bias-corrected normal intervals, as medflex confint(type = 'norm'). Effects are on the link scale for the ratio scales."
     )]
     pub n_bootstrap: Option<usize>,
 
@@ -1303,9 +1302,15 @@ pub struct NaturalEffectsRequest {
 
     /// Effect scale (difference, ratio, odds_ratio)
     #[schemars(
-        description = "Scale of the natural effects: 'difference' (default), 'ratio' or 'odds_ratio'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Scale of the natural effect model: 'difference' (default), 'ratio' (log link) or 'odds_ratio' (logit link). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub scale: Option<String>,
+
+    /// Outcome working-model family
+    #[schemars(
+        description = "Outcome working-model family: 'gaussian' (least squares), 'poisson' (log) or 'binomial' (logit); default from scale: difference -> gaussian, ratio -> poisson, odds_ratio -> binomial. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub family: Option<String>,
 }
 
 /// Request for Synthetic Control Method.

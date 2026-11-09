@@ -142,6 +142,25 @@
       "tolerance": "Tol::iterative(1e-8) (optimum, PS); exact counts; Tol::coef(240) weights",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_mediation",
+      "name": "MCP natural effect models",
+      "category": "mcp",
+      "reference": "medflex neImpute + neModel, written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "medflex_scales"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_natural_effects_mediation"
+      ],
+      "quantities": [
+        "NDE, NIE, TE on the odds-ratio scale"
+      ],
+      "tolerance": "Tol::iterative(1e-8) (IRLS working model; R at epsilon 1e-14)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

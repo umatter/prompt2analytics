@@ -1551,7 +1551,7 @@ impl AnalyticsServer {
 
     /// Run causal mediation analysis.
     #[tool(
-        description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference."
+        description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference. Bootstrap draws are seeded by the session seed."
     )]
     pub async fn mediation_analysis(
         &self,
@@ -1566,7 +1566,7 @@ impl AnalyticsServer {
         let mut config = MediationConfig::default();
         config.bootstrap = request.bootstrap.unwrap_or(999);
         config.trim = request.trim.unwrap_or(0.05);
-        config.seed = None;
+        config.seed = self.session_seed().await;
 
         let result = match run_mediation_analysis(
             dataset,
@@ -1592,11 +1592,7 @@ impl AnalyticsServer {
 
     /// Run Natural Effect Models for mediation analysis with treatment-mediator interactions.
     #[tool(
-        description = "Perform Natural Effect Models (medflex) mediation analysis that allows for \
-        treatment-mediator interactions. Decomposes total effect into Natural Direct Effect (NDE) and \
-        Natural Indirect Effect (NIE) using the regression-based approach of Lange, Vansteelandt, & Bekaert (2012). \
-        Unlike IPW-based mediation, this method uses regression models for both mediator and outcome, \
-        with optional A*M interaction terms. Returns effect estimates, bootstrap CIs, and model diagnostics."
+        description = "Natural direct and indirect effects by natural effect models (Vansteelandt, Bekaert & Lange 2012) with the imputation estimator of R's medflex (neImpute + neModel): an outcome working model (gaussian, poisson or binomial, optionally with A x M), imputed nested counterfactuals, and a natural effect model on the difference, ratio or odds-ratio scale; effects at the confounder means, robust sandwich SEs (n_bootstrap = 0) or seeded bootstrap SEs with bias-corrected normal intervals. The treatment must be 0/1."
     )]
     pub async fn natural_effects_mediation(
         &self,
@@ -1606,6 +1602,11 @@ impl AnalyticsServer {
             request.scale.as_deref(),
             EffectScale::Difference
         ));
+        let family: Option<p2a_core::econometrics::medflex::MedflexFamily> =
+            match request.family.as_deref() {
+                None => None,
+                Some(s) => Some(tool_try!(s.parse().map_err(option_message))),
+            };
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -1623,7 +1624,8 @@ impl AnalyticsServer {
         config.n_bootstrap = n_bootstrap;
         config.confidence_level = request.confidence_level.unwrap_or(0.95);
         config.scale = scale;
-        config.seed = None;
+        config.family = family;
+        config.seed = self.session_seed().await;
 
         let result: MedflexResult = match run_medflex_dataset(
             dataset,

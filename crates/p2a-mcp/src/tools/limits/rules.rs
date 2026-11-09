@@ -1795,7 +1795,7 @@ mod tests {
             ("treatment_ipw", "bootstrap", 999),
             ("treatment_doubly_robust", "bootstrap", 999),
             ("staggered_did", "bootstrap", 999),
-            ("mediation_analysis", "bootstrap", 999),
+            ("mediation_analysis", "n_bootstrap", 999),
             ("regression_standardization", "n_bootstrap", 999),
             ("natural_effects_mediation", "n_bootstrap", 1000),
             ("bp_bounds", "n_bootstrap", 1000),
