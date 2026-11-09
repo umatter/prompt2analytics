@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "tail_var_test",
+  "area": "stats/var_test",
+  "method": "var.test with an extreme variance ratio; F quantiles at large df",
+  "reference": "stats::var.test; stats::pf(lower.tail = FALSE); stats::qf; stats::qbeta",
+  "call": "var.test(x, y, alternative = 'two.sided' | 'greater' | 'less'); qf(c(0.025, 0.975), 2e7, 2e7); qbeta(c(0.025, 0.975), 1e7, 1e7)",
+  "dataset": "validation/datasets/generated/tail_var_test.csv",
+  "datasets": ["validation/datasets/generated/tail_var_test.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "statistic": 1153.5576817424992,
+    "df": [39, 44],
+    "var_test_p_two_sided": 0,
+    "var_test_p_greater": 0,
+    "var_test_p_less": 1,
+    "p_upper": 9.860655910834909e-56,
+    "p_lower": 1,
+    "p_two_sided_accurate": 1.9721311821669818e-55,
+    "conf_int_two_sided": [625.34949683606305, 2152.7869159595539],
+    "conf_int_greater": [690.71809366310913],
+    "conf_int_less": [1944.5924914860936],
+    "qf_big": [0.99938029968842679, 1.0006198897421601],
+    "ci_big_estimate_1": [0.99938049428307907, 1.0006200845781794],
+    "qf_big_exact": [0.99912386146812826, 1.0008769068237289],
+    "ci_big_exact_estimate_1": [0.99912386146812826, 1.0008769068237289]
+  }
+}

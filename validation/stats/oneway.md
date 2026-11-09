@@ -144,3 +144,9 @@ Benchmarked on 2026-01-20.
 
 - Welch, B. L. (1951). "On the Comparison of Several Mean Values: An Alternative Approach". Biometrika, 38(3/4), 330-336.
 - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/oneway.test.html
+
+## Tail accuracy
+
+Both the equal-variance and the Welch p-values are F upper tails computed directly (`f_test_p_value`), not
+`1 - cdf`, so tails below 1e-16 are reported as R reports them (6.39e-23 and 5.69e-18 on case `tail_oneway`,
+not 0). See [upper_tails.md](upper_tails.md).

@@ -13,6 +13,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::stats::anova::values_by_level;
+use crate::traits::estimator::f_test_p_value;
 use serde::{Deserialize, Serialize};
 
 /// Result of Welch's one-way ANOVA test
@@ -225,22 +226,6 @@ pub fn oneway_test(groups: &[(String, Vec<f64>)], var_equal: bool) -> EconResult
     })
 }
 
-/// Compute p-value from F distribution
-fn f_test_p_value(statistic: f64, df1: f64, df2: f64) -> f64 {
-    use statrs::distribution::{ContinuousCDF, FisherSnedecor};
-
-    if df1 <= 0.0 || df2 <= 0.0 || statistic.is_nan() || statistic.is_infinite() {
-        return f64::NAN;
-    }
-
-    let f_dist = match FisherSnedecor::new(df1, df2) {
-        Ok(d) => d,
-        Err(_) => return f64::NAN,
-    };
-
-    1.0 - f_dist.cdf(statistic)
-}
-
 /// Run Welch's one-way ANOVA test on a Dataset with grouping variable (R
 /// `oneway.test(value ~ group)`).
 ///
@@ -278,7 +263,45 @@ pub fn run_oneway_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{factor_options, numeric_column};
     use polars::prelude::*;
+
+    /// Relative-only tolerance for an upper tail: Tol::p_value's absolute floor would accept
+    /// 0 for a tail far below 1e-16.
+    fn tail(n: usize) -> Tol {
+        Tol::new(Tol::p_value(n).rel, 0.0)
+    }
+
+    #[test]
+    fn test_validate_oneway_tail_below_1e16() {
+        // X-17: 1 - cdf gave exactly 0 for both variance assumptions.
+        let (case, ds) = crate::test_support::load_case("tail_oneway");
+        let (codes, levels) = factor_options(ds.df(), "g").unwrap();
+        let y = numeric_column(ds.df(), "y", NaPolicy::Fail).unwrap().0;
+        let groups: Vec<(String, Vec<f64>)> = levels
+            .iter()
+            .enumerate()
+            .map(|(l, name)| {
+                let v = (0..y.len())
+                    .filter(|&i| codes[i] == Some(l as u32))
+                    .map(|i| y[i])
+                    .collect();
+                (name.clone(), v)
+            })
+            .collect();
+        let (e, w) = (
+            oneway_test(&groups, true).unwrap(),
+            oneway_test(&groups, false).unwrap(),
+        );
+        Check::new(&case)
+            .scalar("equal_f", e.statistic, Tol::stat(36))
+            .vector("equal_df", &[e.df_num, e.df_denom], Tol::exact())
+            .scalar("equal_p", e.p_value, tail(36))
+            .scalar("welch_f", w.statistic, Tol::stat(36))
+            .vector("welch_df", &[w.df_num, w.df_denom], Tol::stat(36))
+            .scalar("welch_p", w.p_value, tail(36))
+            .finish();
+    }
 
     #[test]
     fn test_oneway_basic_welch() {

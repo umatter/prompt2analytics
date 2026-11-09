@@ -37,8 +37,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use statrs::distribution::{ContinuousCDF, FisherSnedecor};
-
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
@@ -919,10 +917,7 @@ fn f_upper_tail(f: f64, df1: f64, df2: f64) -> f64 {
     if f == f64::INFINITY {
         return 0.0;
     }
-    match FisherSnedecor::new(df1, df2) {
-        Ok(dist) => dist.sf(f),
-        Err(_) => f64::NAN,
-    }
+    crate::traits::estimator::f_test_p_value(f, df1, df2)
 }
 
 /// R's `lm` tolerance for aliased design columns (`dqrdc2`, `tol = 1e-7`).

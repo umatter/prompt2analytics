@@ -14,6 +14,7 @@
 //! - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/mcnemar.test.html
 
 use crate::errors::{EconError, EconResult};
+use crate::traits::estimator::chi_squared_p_value;
 use serde::{Deserialize, Serialize};
 
 /// Result of McNemar's chi-squared test
@@ -64,7 +65,11 @@ pub struct McnemarResult {
 /// ```
 pub fn mcnemar_test(b: u64, c: u64, correct: bool) -> EconResult<McnemarResult> {
     // Need at least one discordant pair
-    let n_discordant = b + c;
+    let n_discordant = b
+        .checked_add(c)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: "McNemar test: b + c exceeds the largest count".to_string(),
+        })?;
     if n_discordant == 0 {
         return Err(EconError::InsufficientData {
             required: 1,
@@ -94,7 +99,7 @@ pub fn mcnemar_test(b: u64, c: u64, correct: bool) -> EconResult<McnemarResult> 
     let df = 1;
 
     // P-value from chi-squared distribution
-    let p_value = chi_squared_p_value(statistic, df);
+    let p_value = chi_squared_p_value(statistic, df as f64);
 
     Ok(McnemarResult {
         statistic,
@@ -123,21 +128,32 @@ pub fn mcnemar_test_matrix(table: &[[u64; 2]; 2], correct: bool) -> EconResult<M
     mcnemar_test(b, c, correct)
 }
 
-/// Compute p-value from chi-squared distribution
-fn chi_squared_p_value(statistic: f64, df: usize) -> f64 {
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
-
-    if df == 0 || statistic.is_nan() || statistic.is_infinite() {
-        return f64::NAN;
-    }
-
-    let chi2 = ChiSquared::new(df as f64).unwrap();
-    1.0 - chi2.cdf(statistic)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    /// Relative-only tolerance for an upper tail: Tol::p_value's absolute floor would accept
+    /// 0 for a tail of 1e-82.
+    fn tail(n: usize) -> Tol {
+        Tol::new(Tol::p_value(n).rel, 0.0)
+    }
+
+    #[test]
+    fn test_validate_mcnemar_tail_below_1e16() {
+        // X-17: 1 - cdf gave exactly 0 here.
+        let (case, ds) = crate::test_support::load_case("tail_mcnemar");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0[0] as u64;
+        let corr = mcnemar_test(col("b"), col("c"), true).unwrap();
+        let plain = mcnemar_test(col("b"), col("c"), false).unwrap();
+        Check::new(&case)
+            .scalar("stat_correct", corr.statistic, Tol::stat(465))
+            .scalar("p_correct", corr.p_value, tail(465))
+            .scalar("stat_plain", plain.statistic, Tol::stat(465))
+            .scalar("p_plain", plain.p_value, tail(465))
+            .finish();
+    }
 
     #[test]
     fn test_mcnemar_basic() {

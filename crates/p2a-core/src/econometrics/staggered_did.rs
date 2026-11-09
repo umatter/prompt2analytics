@@ -2344,7 +2344,7 @@ fn hotelling_f(w: f64, rank: usize, used: usize) -> Option<(f64, usize, f64)> {
     }
     let df2 = used - rank;
     let f = df2 as f64 * w / (rank as f64 * (used - 1) as f64);
-    let p = FisherSnedecor::new(rank as f64, df2 as f64).map_or(f64::NAN, |d| d.sf(f));
+    let p = crate::traits::estimator::f_test_p_value(f, rank as f64, df2 as f64);
     Some((f, df2, p))
 }
 

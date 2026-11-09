@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "stats_upper_tails",
+      "name": "Upper-tail p-values below 1e-16 (mcnemar.test, oneway.test, prop.trend.test, var.test) and var.test limits at large df",
+      "category": "stats",
+      "reference": "stats::mcnemar.test; stats::oneway.test; stats::prop.trend.test; stats::var.test; stats::pf(lower.tail = FALSE); stats::qbeta",
+      "doc": "validation/stats/upper_tails.md",
+      "cases": [
+        "tail_mcnemar",
+        "tail_oneway",
+        "tail_prop_trend",
+        "tail_var_test"
+      ],
+      "tests": [
+        "p2a-core::stats::mcnemar::tests::test_validate_mcnemar_tail_below_1e16",
+        "p2a-core::stats::oneway::tests::test_validate_oneway_tail_below_1e16",
+        "p2a-core::stats::proptrendtest::tests::test_validate_prop_trend_tail_below_1e16",
+        "p2a-core::stats::vartest::tests::test_validate_var_test_extreme_ratio",
+        "p2a-core::stats::vartest::tests::test_validate_var_test_ci_quantiles_at_large_df"
+      ],
+      "quantities": [
+        "statistic",
+        "df",
+        "p (relative, no absolute floor)",
+        "var.test p as R prints it",
+        "confidence limits",
+        "var.test limits at df 2e7 (exact F quantile from qbeta)"
+      ],
+      "tolerance": "validation/README.md by n for statistics and limits; p-values relative only (X-17); limits at df 2e7 1e-10 relative",
+      "deviations": [
+        {
+          "finding": "X-17",
+          "quantity": "var.test p-value at an extreme ratio",
+          "note": "R's var.test computes 1 - pf and reports 0; p2a reports pf(lower.tail = FALSE) (keys p_upper, p_two_sided_accurate), equal to R's printed value within Tol::p_value's absolute 1e-12"
+        },
+        {
+          "finding": "X-14",
+          "quantity": "var.test confidence limits above df 4e5",
+          "note": "R's qf returns qchisq(p, df1) / df1 above df 4e5, 2.6e-4 off at df 2e7; p2a keeps the exact F quantile (statrs FisherSnedecor::inverse_cdf, within 3e-12 of qbeta's) and is pinned to qbeta (key ci_big_exact_estimate_1), not to qf (keys qf_big, ci_big_estimate_1)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
