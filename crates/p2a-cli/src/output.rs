@@ -3,6 +3,7 @@
 use clap::ValueEnum;
 use p2a_core::Dataset;
 use p2a_core::data::columns::MissingSummary;
+use p2a_core::traits::convergence::ResultNotes;
 use serde::Serialize;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -190,6 +191,95 @@ pub fn notes_json(
     map
 }
 
+/// `(converged, iterations)` of a core result's convergence record, and its warnings, in
+/// the form [`print_notes`] and [`notes_json`] take.
+pub fn result_notes(r: &dyn ResultNotes) -> (Option<(bool, usize)>, Vec<String>) {
+    (
+        r.notes_convergence().map(|c| (c.converged, c.iterations)),
+        r.notes_warnings(),
+    )
+}
+
+/// [`print_notes`] of a core result: call it after the command's own text output and
+/// before [`print_missing_note`]. Prints nothing for JSON (use [`add_result_notes`]).
+pub fn print_result_notes(r: &dyn ResultNotes, format: &OutputFormat) {
+    let (converged, warnings) = result_notes(r);
+    print_notes(converged, &warnings, format);
+}
+
+/// Inserts [`notes_json`] into a JSON object payload. Keys the payload already has (an
+/// earlier tier's `warnings` or `converged`) are kept, never overwritten. A payload that
+/// is not an object is left unchanged.
+pub fn add_notes(
+    json: &mut serde_json::Value,
+    converged: Option<(bool, usize)>,
+    warnings: &[String],
+) {
+    debug_assert!(json.is_object(), "add_notes needs a JSON object payload");
+    if let Some(map) = json.as_object_mut() {
+        for (k, v) in notes_json(converged, warnings) {
+            map.entry(k).or_insert(v);
+        }
+    }
+}
+
+/// [`add_notes`] with a core result's convergence record and warnings.
+pub fn add_result_notes(json: &mut serde_json::Value, r: &dyn ResultNotes) {
+    let (converged, warnings) = result_notes(r);
+    add_notes(json, converged, &warnings);
+}
+
+/// clap value parser for a p2a-core option enum (`FromStr` with `Err = EconError`): the
+/// core's "unknown <option> '<value>'; expected one of: ..." message becomes clap's error,
+/// so an unknown value exits 2 at parse time and names the accepted spellings.
+pub fn parse_core_option<T: std::str::FromStr<Err = p2a_core::EconError>>(
+    s: &str,
+) -> Result<T, String> {
+    s.parse::<T>().map_err(|e| match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    })
+}
+
+/// The check of [`parse_core_option`], returning the string unchanged, for core entry
+/// points that take the option as `&str`.
+pub fn check_core_option<T: std::str::FromStr<Err = p2a_core::EconError>>(
+    s: &str,
+) -> Result<String, String> {
+    parse_core_option::<T>(s).map(|_| s.to_string())
+}
+
+/// The JSON object [`format_regression_results`] prints (`method`, `coefficients` rows
+/// `{name, coefficient, std_error, t_value, p_value}`, `r_squared`, `adj_r_squared`,
+/// `n_observations`), for commands that add keys to it. NaN values serialise as `null`.
+pub fn regression_results_json(
+    method: &str,
+    coefficients: &[(String, f64, f64, f64, f64)],
+    r_squared: f64,
+    adj_r_squared: f64,
+    n_obs: usize,
+) -> serde_json::Value {
+    let coef_json: Vec<_> = coefficients
+        .iter()
+        .map(|(name, coef, se, t, p)| {
+            serde_json::json!({
+                "name": name,
+                "coefficient": coef,
+                "std_error": se,
+                "t_value": t,
+                "p_value": p,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "method": method,
+        "coefficients": coef_json,
+        "r_squared": r_squared,
+        "adj_r_squared": adj_r_squared,
+        "n_observations": n_obs,
+    })
+}
+
 /// Format dataset summary for display
 pub fn format_dataset_summary(
     name: &str,
@@ -227,29 +317,14 @@ pub fn format_regression_results(
     format: &OutputFormat,
 ) -> String {
     match format {
-        OutputFormat::Json => {
-            let coef_json: Vec<_> = coefficients
-                .iter()
-                .map(|(name, coef, se, t, p)| {
-                    serde_json::json!({
-                        "name": name,
-                        "coefficient": coef,
-                        "std_error": se,
-                        "t_value": t,
-                        "p_value": p,
-                    })
-                })
-                .collect();
-
-            serde_json::to_string_pretty(&serde_json::json!({
-                "method": method,
-                "coefficients": coef_json,
-                "r_squared": r_squared,
-                "adj_r_squared": adj_r_squared,
-                "n_observations": n_obs,
-            }))
-            .unwrap()
-        }
+        OutputFormat::Json => serde_json::to_string_pretty(&regression_results_json(
+            method,
+            coefficients,
+            r_squared,
+            adj_r_squared,
+            n_obs,
+        ))
+        .unwrap_or_default(),
         OutputFormat::Table | OutputFormat::Text => {
             let mut out = String::new();
             out.push_str(&format!("\n{} Results\n", method));
@@ -1001,5 +1076,105 @@ mod notes_tests {
             Value::Object(notes_json(None, &[])),
             json!({"warnings": []})
         );
+    }
+}
+
+#[cfg(test)]
+mod notes_helper_tests {
+    use super::*;
+    use p2a_core::traits::convergence::{Convergence, ResultNotes};
+    use serde_json::{Value, json};
+
+    struct Fake(Option<Convergence>, Vec<String>);
+    impl ResultNotes for Fake {
+        fn notes_warnings(&self) -> Vec<String> {
+            self.1.clone()
+        }
+        fn notes_convergence(&self) -> Option<Convergence> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn result_notes_maps_convergence_and_warnings() {
+        let f = Fake(
+            Some(Convergence::new(
+                false,
+                100,
+                100,
+                "relative change",
+                1e-3,
+                1e-8,
+            )),
+            vec!["w".into()],
+        );
+        assert_eq!(
+            result_notes(&f),
+            (Some((false, 100)), vec!["w".to_string()])
+        );
+        assert_eq!(result_notes(&Fake(None, vec![])), (None, vec![]));
+    }
+
+    #[test]
+    fn add_notes_inserts_missing_keys_and_keeps_existing_ones() {
+        let mut v = json!({"method": "x"});
+        add_notes(&mut v, Some((true, 4)), &["a".into()]);
+        assert_eq!(
+            v,
+            json!({"method": "x", "converged": true, "iterations": 4, "warnings": ["a"]})
+        );
+        let mut kept = json!({"warnings": ["from tier 2"], "converged": false});
+        add_result_notes(
+            &mut kept,
+            &Fake(
+                Some(Convergence::new(true, 3, 25, "c", 0.0, 1e-9)),
+                vec!["new".into()],
+            ),
+        );
+        assert_eq!(
+            kept,
+            json!({"warnings": ["from tier 2"], "converged": false, "iterations": 3})
+        );
+        let mut empty = json!({});
+        add_notes(&mut empty, None, &[]);
+        assert_eq!(empty, json!({"warnings": []}));
+    }
+
+    #[test]
+    fn core_option_parsers_use_the_core_message() {
+        use p2a_core::econometrics::survival::TiesMethod;
+        assert_eq!(
+            parse_core_option::<TiesMethod>("BRESLOW"),
+            Ok(TiesMethod::Breslow)
+        );
+        let e = parse_core_option::<TiesMethod>("exact").unwrap_err();
+        assert!(
+            e.contains("exact") && e.contains("efron") && e.contains("breslow"),
+            "{e}"
+        );
+        assert!(!e.starts_with("Invalid model specification"), "{e}");
+        assert_eq!(
+            check_core_option::<TiesMethod>("Efron"),
+            Ok("Efron".to_string())
+        );
+    }
+
+    #[test]
+    fn regression_results_json_is_what_format_regression_results_prints() {
+        let rows = vec![
+            ("(Intercept)".to_string(), 1.5, 0.5, 3.0, 0.004),
+            ("x".to_string(), f64::NAN, f64::NAN, f64::NAN, f64::NAN),
+        ];
+        let printed: Value = serde_json::from_str(&format_regression_results(
+            "M",
+            &rows,
+            0.4,
+            0.3,
+            50,
+            &OutputFormat::Json,
+        ))
+        .unwrap();
+        assert_eq!(printed, regression_results_json("M", &rows, 0.4, 0.3, 50));
+        assert!(printed["coefficients"][1]["coefficient"].is_null());
     }
 }
