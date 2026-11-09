@@ -573,13 +573,13 @@ pub struct SmoothSplineRequest {
 
     /// Smoothing parameter (spar)
     #[schemars(
-        description = "Smoothing parameter (0 to 1). If omitted, uses generalized cross-validation (GCV) to select automatically."
+        description = "Smoothing parameter (0 to 1). If omitted (with df), criterion chooses the smoothing."
     )]
     pub spar: Option<f64>,
 
     /// Degrees of freedom
     #[schemars(
-        description = "Equivalent degrees of freedom. Alternative to spar. If both omitted, uses GCV."
+        description = "Equivalent degrees of freedom. Alternative to spar. If omitted (with spar), criterion chooses the smoothing."
     )]
     pub df: Option<f64>,
 
@@ -588,6 +588,12 @@ pub struct SmoothSplineRequest {
         description = "Optional points at which to evaluate the fitted spline. If omitted, returns fit at data points."
     )]
     pub xout: Option<Vec<f64>>,
+
+    /// Criterion that chooses the smoothing
+    #[schemars(
+        description = "Criterion that chooses the smoothing when neither spar nor df is given: 'gcv' (generalized cross-validation, default, R smooth.spline(cv = FALSE)) or 'cv' (ordinary leave-one-out, cv = TRUE)."
+    )]
+    pub criterion: Option<String>,
 }
 
 /// Request for glmnet (elastic net, lasso, ridge) regression.

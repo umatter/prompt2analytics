@@ -3,9 +3,9 @@
   "methods": [
     {
       "id": "mcp_regression_surface",
-      "name": "MCP regression tools through call_tool_with_session: glmnet JSON, GLS rho, quantreg, OLS aliasing, diagnostics, HAC/DK",
+      "name": "MCP regression tools through call_tool_with_session: glmnet JSON, GLS rho, quantreg, OLS aliasing, diagnostics, HAC/DK, smoothers, step, NLS",
       "category": "mcp",
-      "reference": "glmnet::glmnet, glmnet::cv.glmnet, nlme::gls, quantreg::rq/summary.rq, lm, lmtest, sandwich (the R cases of each method)",
+      "reference": "glmnet::glmnet, glmnet::cv.glmnet, nlme::gls, quantreg::rq/summary.rq, lm, lmtest, sandwich, loess, supsmu, smooth.spline, step, nls (the R cases of each method)",
       "doc": "validation/mcp/models.md",
       "cases": [
         "glmnet_paths",
@@ -22,7 +22,10 @@
         "dk_panel",
         "step_legacy",
         "nls_expdecay",
-        "ols_mtcars"
+        "ols_mtcars",
+        "loess_x10_direct",
+        "smoothers_gcv_periodic_loess",
+        "supsmu_sine"
       ],
       "tests": [
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_returns_coefficients",
@@ -38,7 +41,12 @@
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_diagnostics_tests",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_hac_dk",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_options_reject_unknown",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_bootstrap_cov_is_seeded"
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_bootstrap_cov_is_seeded",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_loess_x10_and_mass_point",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_supsmu_span_and_periodic",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_smooth_spline_criterion",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_step",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_nls"
       ],
       "quantities": [
         "glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df; cv coefficients equal the library's; the selection summary precedes the path in the reply",
@@ -47,14 +55,21 @@
         "aliased OLS rows",
         "JB, BP, DW, condition number, bgtest F, RESET princomp, Wald F, Harvey-Collier",
         "HAC Parzen SEs, DK coefficients",
-        "option parsing, bootstrap seeds"
+        "option parsing, bootstrap seeds",
+        "loess fitted values, supsmu smooths, step criteria, nls estimates and SEs",
+        "smooth.spline criterion (library equality, GCV differs from CV)"
       ],
-      "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative; text at the printed precision (Tol::printed: half a unit of the last printed digit)",
+      "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative; text at the printed precision (Tol::printed: half a unit of the last printed digit); loess Tol::coef(10) / Tol::coef(100), supsmu Tol::coef(100), step Tol::stat(n)",
       "deviations": [
         {
           "finding": "REG-24",
           "quantity": "Driscoll-Kraay SEs",
           "note": "not pinned through MCP (Tier 4)"
+        },
+        {
+          "finding": "REG-29",
+          "quantity": "smooth.spline fit, df, lambda, criterion",
+          "note": "not R-pinned (REG-29, REG-30, Tier 4): the MCP test compares with the library and checks GCV and CV differ"
         }
       ],
       "supersedes_legacy": []

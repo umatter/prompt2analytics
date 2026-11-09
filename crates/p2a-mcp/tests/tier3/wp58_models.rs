@@ -1041,3 +1041,253 @@ async fn test_validate_mcp_bootstrap_cov_is_seeded() {
     );
     assert_ne!(five, first);
 }
+
+/// loess_x10_direct and smoothers_gcv_periodic_loess (regression_smoothers_t3.R):
+/// loess(surface = "direct") on x = 1:10; the 60% mass point at 0 gives lowess's tie mean with
+/// a zero-width warning in the JSON.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_loess_x10_and_mass_point() {
+    let (x10, sm) = (
+        Case::load("loess_x10_direct"),
+        Case::load("smoothers_gcv_periodic_loess"),
+    );
+    let (session, server) = session_with_datasets(vec![
+        ("loess_x10", dataset_of(&x10)),
+        ("smoothers_t3", dataset_of(&sm)),
+    ]);
+    for (span, degree, key) in [
+        (0.75, 2, "fit_s075_d2"),
+        (0.75, 1, "fit_s075_d1"),
+        (1.2, 2, "fit_s12_d2"),
+    ] {
+        let j = json_of(
+            &call(
+                &server,
+                &session,
+                "regression_loess",
+                json!({"dataset": "loess_x10", "y": "y", "x": "x", "span": span, "degree": degree}),
+            )
+            .await,
+        );
+        Check::new(&x10)
+            .vector(key, &nums(&j["fitted_values"]), Tol::coef(10))
+            .finish();
+    }
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_loess",
+            json!({"dataset": "smoothers_t3", "y": "ym", "x": "xm", "span": 0.5, "degree": 1}),
+        )
+        .await,
+    );
+    Check::new(&sm)
+        .vector(
+            "loess_masspoint_expected",
+            &nums(&j["fitted_values"]),
+            Tol::coef(100),
+        )
+        .finish();
+    let w = j["warnings"].as_array().expect("warnings"); // fails before: no "warnings" key
+    assert!(
+        w.iter().any(|s| s.as_str().unwrap().contains("zero-width")),
+        "{w:?}"
+    );
+}
+
+/// supsmu_sine and smoothers_gcv_periodic_loess: fixed span, weights and periodic = TRUE as
+/// R's supsmu.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_supsmu_span_and_periodic() {
+    let (ss, sm) = (
+        Case::load("supsmu_sine"),
+        Case::load("smoothers_gcv_periodic_loess"),
+    );
+    let (session, server) = session_with_datasets(vec![
+        ("supsmu_sine", dataset_of(&ss)),
+        ("smoothers_t3", dataset_of(&sm)),
+    ]);
+    let head = |c: &Case, k: &str| c.vector(k).into_iter().take(20).collect::<Vec<f64>>();
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_supsmu",
+            json!({"dataset": "supsmu_sine", "x": "x", "y": "y", "span": 0.3}),
+        )
+        .await,
+    );
+    assert_eq!(nums(&j["x_sample"]), head(&ss, "cv_x")); // the sorted unique x, exactly
+    assert_eq!(nums(&j["y_smoothed_sample"]).len(), 20);
+    for (i, (a, e)) in nums(&j["y_smoothed_sample"])
+        .iter()
+        .zip(head(&ss, "span03_y"))
+        .enumerate()
+    {
+        assert!(
+            Tol::coef(100).allows(*a, e),
+            "span 0.3 point {i}: {a} vs {e}"
+        );
+    }
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_supsmu",
+            json!({"dataset": "supsmu_sine", "x": "x", "y": "y", "weights": "w"}),
+        )
+        .await,
+    );
+    for (a, e) in nums(&j["y_smoothed_sample"])
+        .iter()
+        .zip(head(&ss, "weighted_y"))
+    {
+        assert!(Tol::coef(100).allows(*a, e), "weighted: {a} vs {e}");
+    }
+    for (periodic, key) in [(true, "supsmu_periodic_y"), (false, "supsmu_plain_y")] {
+        let j = json_of(
+            &call(
+                &server,
+                &session,
+                "regression_supsmu",
+                json!({"dataset": "smoothers_t3", "x": "x", "y": "y", "periodic": periodic}),
+            )
+            .await,
+        );
+        for (a, e) in nums(&j["y_smoothed_sample"]).iter().zip(head(&sm, key)) {
+            assert!(Tol::coef(100).allows(*a, e), "{key}: {a} vs {e}");
+        }
+    }
+    // periodic smoothing needs x in [0, 1] (R stops); supsmu_sine's x runs to 2 pi
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_supsmu",
+            json!({"dataset": "supsmu_sine", "x": "x", "y": "y", "periodic": true}),
+        )
+        .await,
+    );
+    assert!(e.contains("periodic"), "{e}");
+}
+
+/// smooth.spline's criterion through MCP. Its numbers are REG-29/REG-30 (Tier 4) and are not
+/// R-pinned: the tool must equal the library with the same criterion, and GCV and CV must give
+/// different fits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_smooth_spline_criterion() {
+    use p2a_core::regression::{SmoothSplineConfig, smooth_spline, smooth_spline::SplineCriterion};
+    let case = Case::load("smoothers_gcv_periodic_loess");
+    let ds = dataset_of(&case);
+    let col = |n: &str| {
+        p2a_core::data::columns::numeric_column(ds.df(), n, p2a_core::data::columns::NaPolicy::Fail)
+            .unwrap()
+            .0
+    };
+    let (x, y) = (col("x"), col("y"));
+    let (session, server) = session_with_datasets(vec![("smoothers_t3", ds.clone())]);
+    let mut fits = Vec::new();
+    for (c, crit, label) in [
+        (None, SplineCriterion::Gcv, "gcv"),
+        (Some("cv"), SplineCriterion::Cv, "cv"),
+        (Some("LOOCV"), SplineCriterion::Cv, "cv"),
+    ] {
+        let mut a = json!({"dataset": "smoothers_t3", "x": "x", "y": "y"});
+        if let Some(s) = c {
+            a["criterion"] = json!(s); // fails before: unknown field `criterion`
+        }
+        let j = json_of(&call(&server, &session, "regression_smooth_spline", a).await);
+        let lib = smooth_spline(&x, &y, SmoothSplineConfig::with_criterion(crit)).unwrap();
+        assert_eq!(j["criterion"], label);
+        assert_eq!(
+            (
+                j["df"].as_f64(),
+                j["lambda"].as_f64(),
+                j["cv_crit"].as_f64()
+            ),
+            (Some(lib.df), Some(lib.lambda), lib.cv_crit)
+        );
+        fits.push(j["df"].as_f64().unwrap());
+    }
+    assert_ne!(fits[0], fits[1], "GCV and CV choose different smoothing");
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_smooth_spline",
+            json!({"dataset": "smoothers_t3", "x": "x", "y": "y", "df": 6.0}),
+        )
+        .await,
+    );
+    assert!(j["criterion"].is_null(), "{j}");
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_smooth_spline",
+            json!({"dataset": "smoothers_t3", "x": "x", "y": "y", "criterion": "aic"}),
+        )
+        .await,
+    );
+    assert!(e.contains("aic") && e.contains("gcv, cv"), "{e}");
+}
+
+/// step_legacy (regression.R): R's step() selections and printed criteria through MCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_regression_step() {
+    let case = Case::load("step_legacy");
+    let n = 100;
+    let (session, server) = session_with("step_legacy");
+    for (direction, criterion, key) in [
+        ("forward", "aic", "forward_aic"),
+        ("backward", "BIC", "backward_bic"),
+    ] {
+        let j = json_of(
+            &call(
+                &server,
+                &session,
+                "regression_step",
+                json!({"dataset": "step_legacy", "response": "y", "predictors": ["x1", "x2", "x3"],
+                       "direction": direction, "criterion": criterion}),
+            )
+            .await,
+        );
+        assert_eq!(
+            j["final_model"]["variables"],
+            json!(["x1", "x2"]),
+            "{direction}"
+        );
+        let last = j["steps"].as_array().unwrap().last().unwrap()["criterion"]
+            .as_f64()
+            .unwrap();
+        Check::new(&case).scalar(key, last, Tol::stat(n)).finish();
+    }
+}
+
+/// nls_expdecay (regression_smoothers_t3.R): stats::nls(y ~ a exp(-b x) + c), start (8, 0.3, 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_regression_nls() {
+    let case = Case::load("nls_expdecay");
+    let (session, server) = session_with("nls_expdecay");
+    for algorithm in ["LM", "gauss_newton"] {
+        let t = text(
+            &call(
+                &server,
+                &session,
+                "regression_nls",
+                json!({"dataset": "nls_expdecay", "x": "x", "y": "y", "model": "exponential_decay",
+                       "start": [8.0, 0.3, 1.0], "algorithm": algorithm}),
+            )
+            .await,
+        );
+        for p in ["a", "b", "c"] {
+            assert_row(
+                &format!("{algorithm} {p}"),
+                row(&t, p),
+                &[case.named("coef", p), case.named("se", p)],
+                Tol::printed(4),
+            );
+        }
+    }
+}

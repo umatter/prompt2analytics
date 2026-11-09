@@ -627,14 +627,12 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "regression_supsmu",
             "bass",
-            Exempt(
-                "bass tone of the super smoother; core clamps the span it gives to the row count",
-            ),
+            Exempt("bass tone of the super smoother, in [0, 10] (core refuses other values)"),
         ),
         p(
             "regression_supsmu",
             "span",
-            Exempt("span fraction; core clamps the span to (0, 1] of the row count"),
+            Exempt("span fraction in [0, 1] (core refuses other values; 0 = cross-validated)"),
         ),
         p(
             "scpi",

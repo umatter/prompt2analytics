@@ -899,7 +899,7 @@ impl AnalyticsServer {
 
     /// Run LOESS (local polynomial regression) smoothing.
     #[tool(
-        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters."
+        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters. Neighbourhoods as R's loess with surface = 'direct'; a tied predictor value shared by more points than the span gives the tie mean with a warning (lowess's rule; R's loess returns 0 there). The JSON lists the warnings."
     )]
     pub async fn regression_loess(
         &self,
@@ -953,6 +953,7 @@ impl AnalyticsServer {
         if let Some(m) = missing_json(&result.missing) {
             output["missing"] = m;
         }
+        output["warnings"] = notes_json(None, &result.warnings)["warnings"].clone();
 
         Ok(CallToolResult::success(vec![Content::text(json_text(
             &output,
@@ -961,7 +962,7 @@ impl AnalyticsServer {
 
     /// Fit Friedman's SuperSmoother.
     #[tool(
-        description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data."
+        description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data. periodic = true needs x in [0, 1], as R."
     )]
     pub async fn regression_supsmu(
         &self,
@@ -982,7 +983,13 @@ impl AnalyticsServer {
             .na(NaPolicy::Omit)
             .min_rows(
                 4,
-                &format!("SuperSmoother of '{}' on '{}'", request.y, request.x),
+                &match request.weights.as_deref() {
+                    Some(w) => format!(
+                        "SuperSmoother of '{}' on '{}' with weights '{}'",
+                        request.y, request.x, w
+                    ),
+                    None => format!("SuperSmoother of '{}' on '{}'", request.y, request.x),
+                },
             )
             .extract()
         {
@@ -1285,7 +1292,7 @@ impl AnalyticsServer {
 
     /// Fit a smoothing spline.
     #[tool(
-        description = "Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score."
+        description = "Cubic smoothing spline. spar or df fix the smoothing; otherwise lambda is chosen by criterion: 'gcv' (default, R smooth.spline(cv = FALSE)) or 'cv' (leave-one-out, cv = TRUE). Returns JSON with the fitted values (or predictions at xout), df, lambda, the criterion used (null when spar or df was given), its value and warnings."
     )]
     pub async fn regression_smooth_spline(
         &self,
@@ -1309,10 +1316,15 @@ impl AnalyticsServer {
             }
         };
 
-        let config = SmoothSplineConfig {
-            spar: request.spar,
-            df: request.df,
-            ..Default::default()
+        let mut config = SmoothSplineConfig::default();
+        config.spar = request.spar;
+        config.df = request.df;
+        config.criterion = match parse_option::<p2a_core::regression::smooth_spline::SplineCriterion>(
+            request.criterion.as_deref(),
+            p2a_core::regression::smooth_spline::SplineCriterion::Gcv,
+        ) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         match smooth_spline(cols.numeric(&request.x), cols.numeric(&request.y), config) {
@@ -1340,8 +1352,10 @@ impl AnalyticsServer {
                     "df": result.df,
                     "lambda": result.lambda,
                     "cv_crit": result.cv_crit,
+                    "criterion": result.criterion.map(|c| c.to_string()),
                     "n_obs": result.n_obs,
-                    "n_knots": result.n_knots
+                    "n_knots": result.n_knots,
+                    "warnings": notes_json(None, &result.warnings)["warnings"].clone()
                 });
 
                 Ok(CallToolResult::success(vec![Content::text(json_text(
@@ -1549,6 +1563,33 @@ mod tests {
         let mut quiet = "Model".to_string();
         super::append_unshown_notes(&mut quiet, &Notes(None, vec![]));
         assert_eq!(quiet, "Model");
+    }
+
+    /// When the weights column removes the rows, the row-count error names it.
+    #[test]
+    fn test_mcp_regression_supsmu_error_names_weights() {
+        use p2a_core::polars::prelude::*;
+        let df = df! {
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 6.2],
+            "w" => [Some(1.0), None, None, None, Some(1.0), Some(1.0)],
+        }
+        .unwrap();
+        let (rt, server) = server_with(vec![("sw", df)]);
+        let req: SupsmuRequest =
+            serde_json::from_value(json!({"dataset": "sw", "x": "x", "y": "y", "weights": "w"}))
+                .unwrap();
+        let r = rt
+            .block_on(server.regression_supsmu(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains(
+                "SuperSmoother of 'y' on 'x' with weights 'w': 3 of 6 rows have no missing value"
+            ),
+            "{t}"
+        );
     }
 
     #[test]
