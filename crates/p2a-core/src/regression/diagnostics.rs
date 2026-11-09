@@ -90,8 +90,8 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult, EstimationWarning};
+use crate::linalg::DesignMatrix;
 use crate::linalg::solve::{LM_QR_TOL, least_squares};
-use crate::linalg::{DesignMatrix, condition_number};
 use crate::options::Choices;
 use crate::regression::ols::{OlsSolve, solve_ols};
 use crate::regression::{CovarianceType, run_ols};
@@ -565,8 +565,7 @@ pub fn run_diagnostics(
 
     // Condition number: the raw one is R's kappa; Belsley's threshold of 30 applies to the
     // column-scaled one, which a change of units in a regressor cannot move.
-    let cond_num = condition_number(&x.view()).ok();
-    let scaled_cond_num = scaled_condition_number(&x.view());
+    let (cond_num, scaled_cond_num) = condition_numbers(&x.view());
     if let Some(scaled) = scaled_cond_num
         && scaled > SCALED_CONDITION_THRESHOLD
     {
@@ -599,24 +598,53 @@ pub fn run_diagnostics(
 /// moderate to strong dependencies among the columns.
 const SCALED_CONDITION_THRESHOLD: f64 = 30.0;
 
-/// Condition number of `x` after scaling every column to unit Euclidean length, without
-/// centring (Belsley, Kuh & Welsch 1980, ch. 3; the intercept column is kept and scaled
-/// like the others). `None` when the SVD fails; infinite when a column is all zeros or the
-/// columns are linearly dependent.
-fn scaled_condition_number(x: &ndarray::ArrayView2<f64>) -> Option<f64> {
-    let mut scaled = x.to_owned();
-    for mut col in scaled.columns_mut() {
-        let norm = col.dot(&col).sqrt();
-        if !(norm.is_finite() && norm > 0.0) {
-            return if norm == 0.0 {
-                Some(f64::INFINITY)
-            } else {
-                None
-            };
-        }
-        col /= norm;
+/// The raw and the column-scaled condition numbers of `x`, from one thin QR factorisation.
+///
+/// `x = QR` with orthonormal `Q`, so `x` and its triangular factor `R` have the same singular
+/// values (R's `kappa.lm` reads the condition number off `qr.R` the same way), and scaling the
+/// columns of `x` by `D` scales those of `R`: `xD = Q(RD)`. Both numbers therefore come from
+/// singular values of the small `min(n, k) x k` factor instead of two SVDs of the `n x k` design.
+///
+/// * raw: as R's `kappa(model.matrix(fit), exact = TRUE)`; `None` when the SVD fails.
+/// * scaled: every column, the intercept included, scaled to unit Euclidean length without
+///   centring (Belsley, Kuh & Welsch 1980, ch. 3); infinite when a column is all zeros,
+///   `None` when a column norm is not finite or the SVD fails.
+///
+/// Both are infinite when the smallest singular value is zero.
+fn condition_numbers(x: &ndarray::ArrayView2<f64>) -> (Option<f64>, Option<f64>) {
+    let (n, k) = x.dim();
+    if n == 0 || k == 0 {
+        return (None, None);
     }
-    condition_number(&scaled.view()).ok()
+    let qr = crate::linalg::ndarray_to_faer(x).qr();
+    let r = qr.thin_R();
+    let kappa = |m: faer::MatRef<'_, f64>| -> Option<f64> {
+        let s = m.singular_values().ok()?;
+        let max_s = s.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let min_s = s.iter().map(|v| v.abs()).fold(f64::INFINITY, f64::min);
+        if !(max_s.is_finite() && min_s.is_finite()) {
+            return None;
+        }
+        Some(if min_s == 0.0 {
+            f64::INFINITY
+        } else {
+            max_s / min_s
+        })
+    };
+    let raw = kappa(r);
+    let mut norms = Vec::with_capacity(k);
+    for col in x.columns() {
+        let norm = col.dot(&col).sqrt();
+        if norm == 0.0 {
+            return (raw, Some(f64::INFINITY));
+        }
+        if !norm.is_finite() {
+            return (raw, None);
+        }
+        norms.push(norm);
+    }
+    let scaled_r = faer::Mat::from_fn(r.nrows(), k, |i, j| r[(i, j)] / norms[j]);
+    (raw, kappa(scaled_r.as_ref()))
 }
 
 /// Compute Jarque-Bera test for normality of residuals.
@@ -2478,6 +2506,71 @@ mod tests {
         // implied), durbin_watson_p_greater (p2a computes no DW p-value),
         // breusch_pagan_nonstudentized (not offered), bgtest*/reset*/harvey_collier*/wald*
         // (T1-WP04 pins them).
+    }
+
+    /// `condition_numbers` (one QR, SVDs of the triangular factor) agrees with the direct
+    /// reference (SVD of the design, and of the design with unit-length columns) on noisy
+    /// designs: tall and wide, well and badly conditioned, in mixed units, with an all-zero
+    /// column.
+    #[test]
+    fn test_condition_numbers_equal_direct_svd_reference() {
+        fn reference(x: &Array2<f64>) -> (Option<f64>, Option<f64>) {
+            let raw = condition_number(&x.view()).ok();
+            let mut scaled = x.clone();
+            for mut col in scaled.columns_mut() {
+                let norm = col.dot(&col).sqrt();
+                if norm == 0.0 {
+                    return (raw, Some(f64::INFINITY));
+                }
+                col /= norm;
+            }
+            (raw, condition_number(&scaled.view()).ok())
+        }
+        use crate::linalg::condition_number;
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut unif = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for &(n, k, collinear, unit) in &[
+            (12usize, 3usize, 0.0, 1.0),
+            (200, 4, 0.0, 1e4),
+            (500, 6, 1e-3, 1e-3),
+            (2_000, 5, 1e-6, 1e6),
+            (3, 5, 0.0, 1.0),
+        ] {
+            let mut x = Array2::<f64>::zeros((n, k));
+            for i in 0..n {
+                x[[i, 0]] = 1.0;
+                for j in 1..k {
+                    x[[i, j]] = unit * (j as f64) * (3.0 + unif());
+                }
+                if collinear > 0.0 && k > 2 {
+                    x[[i, k - 1]] = x[[i, 1]] * 2.0 + unit * collinear * unif();
+                }
+            }
+            let (raw, scaled) = condition_numbers(&x.view());
+            let (raw_ref, scaled_ref) = reference(&x);
+            for (got, want) in [(raw, raw_ref), (scaled, scaled_ref)] {
+                let (got, want) = (got.unwrap(), want.unwrap());
+                // The smallest singular value carries a relative error of order
+                // eps * kappa in either method, so the agreement is relative to kappa.
+                let rel = (1e-14 * want).max(1e-10);
+                assert!(
+                    (got - want).abs() <= rel * want,
+                    "n={n} k={k}: {got} vs {want}"
+                );
+            }
+            // An all-zero column: scaled is infinite, as in the reference.
+            if n > k {
+                let mut z = x.clone();
+                z.column_mut(k - 1).fill(0.0);
+                assert_eq!(condition_numbers(&z.view()).1, Some(f64::INFINITY));
+                assert_eq!(reference(&z).1, Some(f64::INFINITY));
+            }
+        }
     }
 
     /// Regressors in large units with an offset: the raw condition number is in the

@@ -13,7 +13,12 @@
 - **VIF**: variance inflation factor of each regressor
 - **Condition number**: of the unscaled design matrix X (intercept column included), and of X
   with every column, the intercept included, scaled to unit length (Belsley, Kuh & Welsch 1980);
-  the multicollinearity warning (above 30) and the text interpretation read the scaled number
+  the multicollinearity warning (above 30) and the text interpretation read the scaled number.
+  Both come from one thin QR factorisation of X: the singular values of X are those of its
+  triangular factor R (R's `kappa.lm` reads them off `qr.R`), and scaling the columns of X scales
+  those of R, so two small k x k SVDs replace two SVDs of the n x k design
+  (`test_condition_numbers_equal_direct_svd_reference` checks both numbers against the direct SVDs
+  on noisy tall, wide, mixed-unit and near-collinear designs)
 
 The Breusch-Godfrey, RESET, Harvey-Collier and Wald tests have their own pages
 ([bgtest.md](bgtest.md), [harvtest.md](harvtest.md)).
@@ -142,6 +147,12 @@ d² = d³ = d) checks df1 = 2 of 4 terms. `recursive_residuals` (Harvey-Collier)
 the first prefix of full rank and updates a QR factor of the prefix by Givens rotations,
 O(k²) per observation; `test_recursive_residuals_match_prefix_refits` checks every residual
 against a per-prefix least-squares refit within 1e-10.
+
+Wall-clock of MCP `regression_diagnostics` (y on three regressors; 2026-11-09, against fe13b889:
+release builds, one core, twelve interleaved rounds, load average 1.6-1.8): 0.13, 0.26 and 1.51 ms at
+100, 1,000 and 10,000 rows (0.94, 1.03 and 1.00x of the base), 0.13 ms on Grunfeld (0.97x). With two
+SVDs of the design for the raw and the scaled number it had been 1.26 and 1.43x at 1,000 and 10,000
+rows.
 
 ## Known Differences
 
