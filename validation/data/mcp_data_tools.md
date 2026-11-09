@@ -13,11 +13,13 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
 - Tests: `test_validate_mcp_fill_na_mode` (exact); behaviour tests `test_mcp_fill_constant_keeps_case`,
   `test_mcp_fill_unknown_strategy_is_error`.
 - Wall-clock of `munge_fill_na` with `strategy = "mode"` on a text column with 10% missing cells
-  (2026-11-09, against fe13b889: release builds, one core, eight interleaved rounds, load average 1.4-2.1):
-  with 12 levels 0.09, 0.12 and 0.41 ms at 100, 1,000 and 10,000 rows (0.94, 1.01 and 1.21x of the base),
-  with a distinct value in most rows 0.09, 0.14 and 0.56 ms (0.97, 1.21 and 1.83x). The mode counts the
-  values in a hash map; it had sorted every distinct value (1.94 and 5.46x at 1,000 and 10,000 rows). The
-  12-level rows are accepted by the maintainer (2026-11-09).
+  (2026-11-09, against fe13b889: release builds, one core, twelve interleaved rounds, load average
+  1.6-1.8): with 12 levels 0.09, 0.11 and 0.38 ms at 100, 1,000 and 10,000 rows (0.96, 0.99 and 1.10x of
+  the base), with a distinct value in most rows 0.09, 0.12 and 0.39 ms (0.97, 1.03 and 1.26x). The base
+  has no mode strategy: it fills the column with the literal text "mode", so the ratio is the cost of
+  counting the values against no count at all. The mode counts them in a presized foldhash map; it had
+  sorted every distinct value (1.94 and 5.46x at 1,000 and 10,000 rows), then counted them in a SipHash
+  map (1.21 and 1.78x). The 12-level rows are accepted by the maintainer (2026-11-09).
 - Cleaning sessions store their result only through `output_dataset` (`cleaning_session_apply`,
   `cleaning_rollback`); no R reference (bookkeeping). Behaviour tests
   `test_mcp_cleaning_session_output_dataset_is_stored`, `test_mcp_cleaning_rollback_output_dataset`.

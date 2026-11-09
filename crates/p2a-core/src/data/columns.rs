@@ -971,10 +971,15 @@ pub fn factor_mode(df: &DataFrame, name: &str) -> EconResult<Option<String>> {
 
 /// The most frequent key of `values` (`None` missing), ties to the smallest under `cmp`.
 fn mode_of_keys<K: Copy + Eq + Hash>(
-    values: impl Iterator<Item = Option<K>>,
+    values: impl ExactSizeIterator<Item = Option<K>>,
     cmp: impl Fn(&K, &K) -> Ordering,
 ) -> EconResult<Option<K>> {
-    let mut counts: HashMap<K, usize> = HashMap::new();
+    use polars::prelude::{InitHashMaps, PlHashMap};
+    // polars' hash map: foldhash, randomly seeded per map like the standard one, and much
+    // cheaper than SipHash on the short strings and integers a column holds. Sized for up to
+    // 4,096 distinct values up front, so a high-cardinality column rehashes a few times
+    // rather than a dozen.
+    let mut counts: PlHashMap<K, usize> = PlHashMap::with_capacity(values.len().min(1 << 12));
     for (i, key) in values.enumerate() {
         if i % (1 << 16) == 0 {
             crate::resource::checkpoint()?;
