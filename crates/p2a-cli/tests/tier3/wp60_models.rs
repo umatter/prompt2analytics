@@ -1184,6 +1184,33 @@ fn test_validate_cli_nls_expdecay() {
 }
 
 // =================================================================================================
+// Stats
+// =================================================================================================
+
+/// STAT-77 (CLI pp-test): `p2a stats pp-test` through the binary on pp_t3 (n = 200), pinned to R's
+/// PP.test internals (case stat_pp_t3, rw_short_*: lshort = TRUE, lag trunc(4 (n/100)^0.25) = 4).
+/// `--lshort` is passed because the CLI's default is lshort = false. The Z(tau) statistic and its
+/// p-value are not pinned (registry deviations).
+#[test]
+fn test_validate_cli_pp_test_internals() {
+    let case = Case::load("stat_pp_t3");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&["stats", "pp-test", d.as_str(), "--col", "rw", "--lshort"]);
+    Check::new(&case)
+        .scalar("rw_short_gamma", num(&j["gamma_hat"]), Tol::coef(200))
+        .scalar("rw_short_t", num(&j["t_statistic"]), Tol::stat(200))
+        .scalar("rw_short_sigma2", num(&j["sigma_squared"]), Tol::stat(200))
+        .scalar(
+            "rw_short_lambda2",
+            num(&j["lambda_squared"]),
+            Tol::stat(200),
+        )
+        .scalar("rw_short_lag", num(&j["truncation_lag"]), Tol::exact())
+        .finish();
+}
+
+// =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
 // =================================================================================================
@@ -2057,13 +2084,145 @@ const REGRESSION_REFUSED: &[(&[&str], &[&str])] = &[
     ),
 ];
 
-const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL, PANEL, REGRESSION];
+const STATS: &[Cmd] = &[
+    c(&["stats", "t-test-one", "grunfeld", "-c", "inv"], Pl),
+    c(
+        &[
+            "stats",
+            "t-test-two",
+            "grunfeld",
+            "--col1",
+            "inv",
+            "--col2",
+            "capital",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "stats",
+            "t-test-paired",
+            "grunfeld",
+            "--col1",
+            "inv",
+            "--col2",
+            "capital",
+        ],
+        Pl,
+    ),
+    c(&["stats", "chisq-gof", "binary_glm", "-o", "d"], Pl),
+    c(
+        &[
+            "stats",
+            "chisq-indep",
+            "binary_glm",
+            "--row-var",
+            "y",
+            "--col-var",
+            "d",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "stats",
+            "fisher",
+            "binary_glm",
+            "--row-var",
+            "y",
+            "--col-var",
+            "d",
+        ],
+        Pl,
+    ),
+    c(&["stats", "shapiro", "grunfeld", "-c", "inv"], Pl),
+    c(
+        &[
+            "stats", "wilcoxon", "grunfeld", "--col1", "inv", "--col2", "capital",
+        ],
+        Pl,
+    ),
+    c(
+        &["stats", "bartlett", "grunfeld", "-c", "inv", "-g", "firm"],
+        Pl,
+    ),
+    c(
+        &["stats", "kruskal", "grunfeld", "-c", "inv", "-g", "firm"],
+        Pl,
+    ),
+    c(&["stats", "fivenum", "grunfeld", "-c", "inv"], Pl),
+    c(&["stats", "iqr", "grunfeld", "-c", "inv"], Pl),
+    c(&["stats", "mad", "grunfeld", "-c", "inv"], Pl),
+    c(&["stats", "acf", "grunfeld", "-c", "inv"], Pl),
+    c(
+        &["stats", "anova", "grunfeld", "-r", "inv", "-f", "firm"],
+        Pl,
+    ),
+    c(
+        &[
+            "stats",
+            "anova-two",
+            "grunfeld",
+            "-r",
+            "inv",
+            "--factor-a",
+            "firm",
+            "--factor-b",
+            "year",
+        ],
+        Pl,
+    ),
+    c(
+        &["stats", "tukey", "grunfeld", "-r", "inv", "-f", "firm"],
+        Pl,
+    ),
+    c(
+        &[
+            "stats", "friedman", "grunfeld", "-v", "inv", "-g", "firm", "-b", "year",
+        ],
+        Pl,
+    ),
+    c(&["stats", "pacf", "grunfeld", "-c", "inv"], Pl),
+    c(
+        &["stats", "ccf", "grunfeld", "--x", "inv", "--y", "value"],
+        Pl,
+    ),
+    c(&["stats", "box-test", "grunfeld", "-c", "inv"], Pl),
+    c(
+        &[
+            "stats", "ks-test", "grunfeld", "--x", "inv", "--y", "capital",
+        ],
+        Pl,
+    ),
+    c(&["stats", "pp-test", "grunfeld", "-c", "inv"], Pl),
+    c(&["stats", "power-t", "--n", "50", "--delta", "0.5"], Pl),
+];
+
+const STATS_REFUSED: &[(&[&str], &[&str])] = &[(
+    &[
+        "stats",
+        "anova-two",
+        "grunfeld",
+        "-r",
+        "inv",
+        "--factor-a",
+        "firm",
+        "--factor-b",
+        "year",
+        "--ss-type",
+        "IV",
+    ],
+    &["'IV'", "I", "II", "III"],
+)];
+
+const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL, PANEL, REGRESSION, STATS];
 const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK, PANEL_OK, REGRESSION_OK];
 const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[
     DISCRETE_REFUSED,
     SURVIVAL_REFUSED,
     PANEL_REFUSED,
     REGRESSION_REFUSED,
+    STATS_REFUSED,
 ];
 
 /// A session with every dataset the table tests use, each named after its file stem.

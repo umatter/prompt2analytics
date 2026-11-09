@@ -205,6 +205,40 @@
       "tolerance": "validation/README.md, n = 120: coefficients 1e-8, SE and statistics 1e-6; df exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_pp_test",
+      "name": "p2a stats pp-test: the Phillips-Perron regression and Newey-West internals (STAT-77 CLI item)",
+      "category": "interfaces",
+      "reference": "stats::PP.test(lshort = TRUE) internals recomputed with its own code (embed, lm, C_pp_sum): T3-WP40's case stat_pp_t3",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "stat_pp_t3"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp60_models::test_validate_cli_pp_test_internals"
+      ],
+      "quantities": [
+        "gamma",
+        "OLS t of gamma",
+        "residual variance sigma^2",
+        "long-run variance lambda^2",
+        "truncation lag"
+      ],
+      "tolerance": "validation/README.md, n = 200: gamma 1e-8, t, sigma^2 and lambda^2 1e-6 relative; lag exact",
+      "deviations": [
+        {
+          "finding": "STAT-6",
+          "quantity": "Z(tau) statistic and p-value",
+          "note": "not pinned: the Z(tau) correction and the lag rule from length(x) are Tier 4 (STAT-6, STAT-35), as in T3-WP40's registry"
+        },
+        {
+          "finding": "CLI-21",
+          "quantity": "default truncation lag",
+          "note": "the CLI defaults to lshort = false (R: TRUE); the test passes --lshort (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -1269,7 +1269,10 @@ fn test_validate_cli_anova_two_ss_type() {
         .finish();
     assert_eq!(j2["ss_type"], json!("II"));
     let bad: Vec<&str> = base.iter().copied().chain(["--ss-type", "IV"]).collect();
-    assert!(s.err(&bad).contains("Unknown sum-of-squares type 'IV'"));
+    // refused when the arguments are parsed (a usage error, exit 2)
+    let out = s.run(&bad);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Unknown sum-of-squares type 'IV'"));
     // Not pinned: Type III is refused when the model has aliased coefficients (the empty
     // (C, L) cell of y3 ~ fa3 * fb3), as car::Anova(type = 3) is.
     let iii = [
