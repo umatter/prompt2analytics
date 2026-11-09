@@ -255,7 +255,7 @@ EXAMPLES:
         #[arg(long, default_value = "1")]
         lags: usize,
 
-        /// Number of steps for IRF
+        /// Number of horizons including the impact h = 0 (vars::irf n.ahead = steps - 1)
         #[arg(long, default_value = "10")]
         steps: usize,
     },
@@ -940,19 +940,17 @@ fn execute_var(
                             "aic": result.aic,
                             "bic": result.bic,
                             "log_likelihood": result.log_likelihood,
+                            "coef_names": result.coef_names,
+                            "std_errors": result.std_errors,
+                            "t_values": result.t_values,
+                            "p_values": result.p_values,
+                            "df_residual": result.df_residual,
+                            "sigma_u_ml": result.sigma_u_ml,
+                            "log_det_sigma_ml": result.log_det_sigma_ml,
                         });
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
-                    _ => {
-                        println!("\nVAR({}) Results", lags);
-                        println!("{}", "=".repeat(50));
-                        println!("Variables: {:?}", result.var_names);
-                        println!("Number of variables: {}", result.n_vars);
-                        println!("Observations: {}", result.n_obs);
-                        println!("\nAIC: {:.4}", result.aic);
-                        println!("BIC: {:.4}", result.bic);
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                    }
+                    _ => println!("\n{result}"),
                 },
                 Err(e) => {
                     print_error(&ts_error_message("VAR failed", &e), format);
@@ -1090,6 +1088,31 @@ fn execute_vecm(
     Ok(())
 }
 
+/// `{impulse: {response: [irf[h][response][impulse] for each h]}}`; NaN (null) where the
+/// tensor is short.
+fn impulse_responses(result: &p2a_core::VarIrfResult) -> serde_json::Value {
+    let names = &result.var_names;
+    let mut by_impulse = serde_json::Map::new();
+    for (i, impulse) in names.iter().enumerate() {
+        let mut by_response = serde_json::Map::new();
+        for (r, response) in names.iter().enumerate() {
+            let path: Vec<f64> = result
+                .irf
+                .iter()
+                .map(|phi| {
+                    phi.get(r)
+                        .and_then(|row| row.get(i))
+                        .copied()
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            by_response.insert(response.clone(), serde_json::json!(path));
+        }
+        by_impulse.insert(impulse.clone(), serde_json::Value::Object(by_response));
+    }
+    serde_json::Value::Object(by_impulse)
+}
+
 fn execute_irf(
     dataset_name: &str,
     cols: &[String],
@@ -1111,58 +1134,21 @@ fn execute_irf(
             let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
 
             match run_var_irf(ds, &col_refs, lags, steps) {
-                Ok(result) => {
-                    match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "method": "VAR IRF",
-                                "var_names": result.var_names,
-                                "steps": result.steps,
-                                "irf": result.irf,
-                                "orthogonalized": result.orthogonalized,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nImpulse Response Functions");
-                            println!("{}", "=".repeat(50));
-                            println!("Variables: {:?}", result.var_names);
-                            println!("Steps: {}", result.steps);
-                            println!("Orthogonalized: {}", result.orthogonalized);
-                            println!(
-                                "\nIRF matrix dimensions: {} x {} x {}",
-                                result.irf.len(),
-                                if !result.irf.is_empty() {
-                                    result.irf[0].len()
-                                } else {
-                                    0
-                                },
-                                if !result.irf.is_empty() && !result.irf[0].is_empty() {
-                                    result.irf[0][0].len()
-                                } else {
-                                    0
-                                }
-                            );
-
-                            // Print first few steps for each impulse-response pair
-                            let n_vars = result.var_names.len();
-                            for impulse in 0..n_vars.min(2) {
-                                for response in 0..n_vars.min(2) {
-                                    println!(
-                                        "\n{} -> {} (first 5 steps):",
-                                        result.var_names[impulse], result.var_names[response]
-                                    );
-                                    for step in 0..5.min(result.steps) {
-                                        println!(
-                                            "  t+{}: {:.6}",
-                                            step, result.irf[step][impulse][response]
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                Ok(result) => match format {
+                    OutputFormat::Json => {
+                        let json = serde_json::json!({
+                            "method": "VAR IRF",
+                            "var_names": result.var_names,
+                            "steps": result.steps,
+                            "axes": ["horizon", "response", "impulse"],
+                            "irf": result.irf,
+                            "impulse_responses": impulse_responses(&result),
+                            "orthogonalized": result.orthogonalized,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&json)?);
                     }
-                }
+                    _ => println!("\n{result}"),
+                },
                 Err(e) => print_error(&ts_error_message("IRF failed", &e), format),
             }
         }

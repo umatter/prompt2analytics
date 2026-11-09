@@ -1166,3 +1166,115 @@ fn test_validate_cli_holt_winters_horizon_prints_forecasts() {
         .contains("Forecasts (h = 2, 97.5% prediction interval):")
     );
 }
+
+/// CLI-10: "a -> b" printed irf[h][a][b], the response of a to a shock in b (the Cholesky zero
+/// for a -> b), for two variables and five horizons. R: var_canada irf_ortho_<impulse>
+/// (vars::irf(VAR(Canada, p = 2), n.ahead = 12, ortho = TRUE)), 13 x 4 column-major.
+#[test]
+fn test_validate_cli_irf_labels_as_vars() {
+    let case = Case::load("var_canada");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "ts",
+        "irf",
+        d.as_str(),
+        "--cols",
+        "e",
+        "prod",
+        "rw",
+        "U",
+        "--lags",
+        "2",
+        "--steps",
+        "13",
+    ];
+    let text = s.ok(&args);
+    let mut c = Check::new(&case);
+    for imp in ["e", "prod", "rw", "U"] {
+        let rows = table_rows(&text, &format!("Impulse: {imp}"), 1);
+        assert_eq!(rows.len(), 13, "Impulse: {imp} table in\n{text}");
+        let col_major: Vec<f64> = (1..=4)
+            .flat_map(|r| rows.iter().map(move |row| row[r]))
+            .collect();
+        c.vector(&format!("irf_ortho_{imp}"), &col_major, Tol::printed(6));
+    }
+    c.finish();
+    let j = s.json(&args);
+    assert_eq!(
+        field(&j, "axes"),
+        &serde_json::json!(["horizon", "response", "impulse"])
+    );
+    let irf = field(&j, "irf");
+    let r = case.vector("irf_ortho_e");
+    assert!(
+        Tol::stat(82).allows(num(&irf[0][1][0]), r[13]),
+        "response prod, impulse e, h = 0"
+    );
+    assert_eq!(
+        num(&irf[0][0][1]),
+        0.0,
+        "response e to an impulse in prod at h = 0 is the Cholesky zero"
+    );
+    let prod_on_e = f64s(&field(&j, "impulse_responses")["e"]["prod"]);
+    assert_eq!(prod_on_e.len(), 13);
+    for (h, v) in prod_on_e.iter().enumerate() {
+        assert!(
+            Tol::stat(82).allows(*v, r[13 + h]),
+            "h = {h}: {v} vs {}",
+            r[13 + h]
+        )
+    }
+}
+
+/// `ts var` JSON gains the coefficient table, SEs and residual df; the text is the core report.
+/// R: var_canada (VAR(Canada, p = 2, type = "const")).
+#[test]
+fn test_validate_cli_var_json() {
+    let case = Case::load("var_canada");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "ts",
+        "var",
+        d.as_str(),
+        "--cols",
+        "e",
+        "prod",
+        "rw",
+        "U",
+        "--lags",
+        "2",
+    ];
+    let j = s.json(&args);
+    let names = strings(field(&j, "coef_names"));
+    Check::new(&case)
+        .named(
+            "coef_e",
+            &names,
+            &f64s(&field(&j, "coefficients")[0]),
+            Tol::coef(82),
+        )
+        .named(
+            "se_e",
+            &names,
+            &f64s(&field(&j, "std_errors")[0]),
+            Tol::se(82),
+        )
+        .named(
+            "p_U",
+            &names,
+            &f64s(&field(&j, "p_values")[3]),
+            Tol::p_value(82),
+        )
+        .scalar("loglik", num(field(&j, "log_likelihood")), Tol::stat(82))
+        .scalar(
+            "sigma_ml_logdet",
+            num(field(&j, "log_det_sigma_ml")),
+            Tol::stat(82),
+        )
+        .scalar("df_resid", num(field(&j, "df_residual")), Tol::exact())
+        .finish();
+    assert_keys(&j, &["t_values", "sigma_u_ml"]);
+    assert!(s.ok(&args).contains("Residual df per equation: 73"));
+}

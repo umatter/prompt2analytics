@@ -168,3 +168,22 @@ fits):`, the JSON has `level`, `std_errors`, `lower` and `upper` null and a line
 
 Deviations: TS-22 (`airpass_mult_lwr`, `airpass_mult_upr` not compared); TS-24 (the optimiser
 is not pinned; the optimised run's forecasts are compared with the library in process).
+
+### `ts irf`, `ts var`
+
+`ts irf` printed `a -> b` over `irf[h][a][b]`, which is the response of `a` to a shock in `b`,
+so every off-diagonal series was attributed to the wrong shock, and it showed two variables
+and five horizons. It now prints the core report: one table per impulse, rows the horizons
+0..steps-1, columns the responses (`--steps` counts the impact, vars' `n.ahead = steps - 1`).
+The JSON keeps `irf` (`[horizon][response][impulse]`), names its axes (`axes`) and adds
+`impulse_responses` (`{impulse: {response: [h = 0, 1, ...]}}`).
+
+`ts var` prints the core VAR report (coefficient tables with SEs, t and p values per equation,
+residual df, residual covariance). Its JSON adds `coef_names`, `std_errors`, `t_values`,
+`p_values`, `df_residual`, `sigma_u_ml` and `log_det_sigma_ml`. `sigma_u` is vars' residual
+covariance U'U / (T - Kp - 1); `sigma_u_ml` is U'U / T.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_irf_labels_as_vars` | `var_canada` `irf_ortho_e`, `_prod`, `_rw`, `_U` (13 horizons, text); `irf_ortho_e` (JSON, prod's response) | `Tol::printed(6)`; `Tol::stat(82)` |
+| `test_validate_cli_var_json` | `var_canada` `coef_e`, `se_e`, `p_U`, `loglik`, `sigma_ml_logdet`, `df_resid` | `Tol::coef(82)`, `Tol::se(82)`, `Tol::p_value(82)`, `Tol::stat(82)`, exact |
