@@ -10,6 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_choice;
 use crate::tools::common::{
     MissingSummary, NaPolicy, append_missing_note, append_notes, error_text, limit_refusal,
     missing_json, notes_json, numeric_columns, numeric_matrix, parse_option,
@@ -2130,11 +2131,6 @@ static HETTX_EFFECT: Choices<EffectEstimationMethod> = Choices {
     ],
 };
 
-/// Seed of the randomized handlers whose core would otherwise fall back to entropy, when
-/// neither the request nor `set_seed` gives one, so every run is reproducible. The tool
-/// descriptions name it.
-pub(crate) const MCP_DEFAULT_SEED: u64 = 42;
-
 /// Rows of the Kernel SHAP background: all training rows up to this many, else this many rows
 /// evenly spaced in row order (shap.sample's size).
 pub(crate) const KERNEL_BACKGROUND_MAX: usize = 100;
@@ -2148,23 +2144,6 @@ const LABELS_SHOWN: usize = 100;
 
 /// Per-row values shown in a JSON block: predictions.
 const PREDICTIONS_SHOWN: usize = 20;
-
-/// [`crate::tools::common::parse_option`] for a local [`Choices`] table (a core enum without an
-/// `option_enum!`): `None` gives `default`; any given string, blank included, is parsed; an
-/// unknown value is the table's message ("unknown <option> '<value>'; expected one of: ...").
-pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
-    choices: &Choices<T>,
-    value: Option<&str>,
-    default: T,
-) -> Result<T, String> {
-    match value {
-        Some(v) => choices.parse(v).map_err(|e| match e {
-            p2a_core::EconError::InvalidSpecification { message } => message,
-            other => other.to_string(),
-        }),
-        None => Ok(default),
-    }
-}
 
 /// Checks the names a tool would write into its dataset: none blank, none one of the columns
 /// the call reads (`inputs`), none twice.
@@ -2244,86 +2223,16 @@ fn cluster_sizes_json(labels: &[usize], k: usize) -> serde_json::Value {
 }
 
 impl AnalyticsServer {
-    /// The request seed, else the session's `set_seed` value; the read guard is released
-    /// before returning, so no lock is held while a tool computes.
-    pub(crate) async fn seed_or_global(&self, request: Option<u64>) -> Option<u64> {
-        match request {
-            Some(s) => Some(s),
-            None => *self.global_seed.read().await,
-        }
-    }
-
-    /// [`Self::seed_or_global`], else [`MCP_DEFAULT_SEED`].
-    pub(crate) async fn seed_for(&self, request: Option<u64>) -> u64 {
-        self.seed_or_global(request)
-            .await
-            .unwrap_or(MCP_DEFAULT_SEED)
-    }
-
     /// A snapshot (O(1) clone) of dataset `name`; the read lock is released before returning.
     async fn dataset_snapshot(&self, name: &str) -> Option<Dataset> {
         self.datasets.read().await.get(name).cloned()
-    }
-
-    /// Writes `columns` into dataset `dataset` under a short write lock. `snapshot` is the
-    /// dataset the tool read and `inputs` the columns it read from it. Refuses a dataset that
-    /// is gone, whose height is no longer the snapshot's, or in which an input column is
-    /// missing or no longer equal to the snapshot's (missing values compared as equal): a
-    /// concurrent call in the same session replaced, sorted or filtered it while the tool
-    /// ran, and the new column would not line up with the rows it was computed from. Returns
-    /// the names that replaced an existing column.
-    pub(crate) async fn write_output_columns(
-        &self,
-        dataset: &str,
-        snapshot: &Dataset,
-        inputs: &[&str],
-        columns: Vec<Series>,
-    ) -> Result<Vec<String>, String> {
-        let n_rows = snapshot.nrows();
-        let mut map = self.datasets.write().await;
-        let current = map
-            .get(dataset)
-            .ok_or_else(|| format!("Dataset '{dataset}' not found; the column was not written."))?;
-        if current.nrows() != n_rows {
-            return Err(format!(
-                "Dataset '{dataset}' changed while the tool ran (it has {} rows, the fit used \
-                 {n_rows}); the column was not written. Run the tool again.",
-                current.nrows()
-            ));
-        }
-        for &name in inputs {
-            let unchanged = match (current.df().column(name), snapshot.df().column(name)) {
-                (Ok(now), Ok(then)) => now.equals_missing(then),
-                _ => false,
-            };
-            if !unchanged {
-                return Err(format!(
-                    "Dataset '{dataset}' changed while the tool ran (column '{name}' is no \
-                     longer the one the fit used); the column was not written. Run the tool \
-                     again."
-                ));
-            }
-        }
-        let mut updated = current.clone();
-        let mut replaced = Vec::new();
-        for s in columns {
-            let name = s.name().to_string();
-            if updated.df().column(&name).is_ok() {
-                replaced.push(name.clone());
-            }
-            updated
-                .df_mut()
-                .with_column(s)
-                .map_err(|e| format!("could not write column '{name}': {e}"))?;
-        }
-        map.insert(dataset.to_string(), updated);
-        Ok(replaced)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::common::MCP_DEFAULT_SEED;
     use crate::tools::limits::{Limits, with_limits};
     use p2a_core::DataLoader;
     use p2a_core::data::Dataset;

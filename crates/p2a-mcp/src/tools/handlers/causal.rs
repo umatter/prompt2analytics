@@ -26,6 +26,7 @@ const MAX_TIME_POINTS: usize = 1_000;
 const GSYNTH_DEFAULT_BOOTSTRAP: usize = 200;
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::{option_message, parse_choice};
 use crate::tools::requests::causal::{
     BPBoundsRequest, BaconDecompRequest, CTmleRequest, CbpsRequest, DiDRequest, DoubleMLRequest,
     DoublyRobustRequest, EValueRequest, EntropyBalanceRequest, EtwfeRequest, FirstStageRequest,
@@ -80,28 +81,6 @@ fn rd_option<T>(
             p2a_core::EconError::InvalidSpecification { message } => message,
             other => other.to_string(),
         }),
-    }
-}
-
-/// The bare message of an option error (the option and the accepted values), else the error's
-/// Display.
-fn option_message(e: p2a_core::EconError) -> String {
-    match e {
-        p2a_core::EconError::InvalidSpecification { message } => message,
-        other => other.to_string(),
-    }
-}
-
-/// `None` gives `default`; `Some(s)` parses `s` with a local table, an unknown value giving the
-/// bare message (the local twin of `common::parse_option`).
-fn choice<T: Copy + PartialEq + 'static>(
-    table: &'static Choices<T>,
-    value: Option<&str>,
-    default: T,
-) -> Result<T, String> {
-    match value {
-        None => Ok(default),
-        Some(s) => table.parse(s).map_err(option_message),
     }
 }
 
@@ -284,12 +263,7 @@ fn matched_sample(
     Ok(p2a_core::data::Dataset::new(out))
 }
 
-impl AnalyticsServer {
-    /// The session's global seed, used when a request sets none.
-    async fn session_seed(&self) -> Option<u64> {
-        *self.global_seed.read().await
-    }
-}
+impl AnalyticsServer {}
 
 // Helper function for formatting diagnostic warnings
 fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationReport) -> String {
@@ -530,7 +504,7 @@ impl AnalyticsServer {
             )]));
         }
         let reps = request.bootstrap_reps.unwrap_or(0);
-        let seed = self.session_seed().await;
+        let seed = self.seed_or_global(None).await;
 
         let datasets = self.datasets.read().await;
 
@@ -625,7 +599,7 @@ impl AnalyticsServer {
             base_period: request.base_period.unwrap_or(-1),
             bootstrap: request.bootstrap.unwrap_or(999),
             anticipation: request.anticipation.unwrap_or(0),
-            seed: self.session_seed().await,
+            seed: self.seed_or_global(None).await,
             ..Default::default()
         };
 
@@ -782,7 +756,7 @@ impl AnalyticsServer {
         config.estimand = estimand;
         config.bootstrap = request.bootstrap.unwrap_or(0);
         config.normalized = true;
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result = match run_ipw_treatment(
             dataset,
@@ -829,7 +803,7 @@ impl AnalyticsServer {
         config.trim = request.trim.unwrap_or(0.05);
         config.estimand = estimand;
         config.bootstrap = request.bootstrap.unwrap_or(999);
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result = match run_doubly_robust(
             dataset,
@@ -962,7 +936,7 @@ impl AnalyticsServer {
             n_folds: request.n_folds.unwrap_or(5),
             model_type,
             ml_method,
-            seed: request.seed.or(self.session_seed().await),
+            seed: request.seed.or(self.seed_or_global(None).await),
             trim: request.trim.unwrap_or(0.01),
             lambda: request.lambda.unwrap_or(DML_DEFAULT_LAMBDA),
             folds,
@@ -1161,12 +1135,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<TwangRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let stop_method = tool_try!(choice(
+        let stop_method = tool_try!(parse_choice(
             &STOP_METHOD,
             request.stop_method.as_deref(),
             StopMethod::ESMean
         ));
-        let estimand = tool_try!(choice(
+        let estimand = tool_try!(parse_choice(
             &TWANG_ESTIMAND,
             request.estimand.as_deref(),
             TwangEstimand::ATT
@@ -1286,7 +1260,7 @@ impl AnalyticsServer {
         };
         let mut opts = MatchOptions::default();
         opts.m_order = m_order;
-        opts.seed = self.session_seed().await;
+        opts.seed = self.seed_or_global(None).await;
 
         let datasets = self.datasets.read().await;
 
@@ -1726,7 +1700,7 @@ impl AnalyticsServer {
         let mut config = MediationConfig::default();
         config.bootstrap = request.bootstrap.unwrap_or(999);
         config.trim = request.trim.unwrap_or(0.05);
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result = match run_mediation_analysis(
             dataset,
@@ -1785,7 +1759,7 @@ impl AnalyticsServer {
         config.confidence_level = request.confidence_level.unwrap_or(0.95);
         config.scale = scale;
         config.family = family;
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result: MedflexResult = match run_medflex_dataset(
             dataset,
@@ -1925,7 +1899,7 @@ impl AnalyticsServer {
             force,
             bootstrap_se,
             n_bootstrap,
-            seed: self.session_seed().await,
+            seed: self.seed_or_global(None).await,
             ..Default::default()
         };
 
@@ -2380,7 +2354,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let pooling_weights = tool_try!(choice(
+        let pooling_weights = tool_try!(parse_choice(
             &POOLING_WEIGHTS,
             request.pooling_weights.as_deref(),
             PoolingWeights::SampleSize
@@ -2513,7 +2487,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::regression::{evalue_hr, evalue_or, evalue_rd, evalue_rr_ci, evalue_smd};
 
-        let effect_type = tool_try!(choice(
+        let effect_type = tool_try!(parse_choice(
             &EFFECT_MEASURE,
             Some(request.effect_type.as_str()),
             EffectMeasure::Rr
@@ -2624,7 +2598,7 @@ impl AnalyticsServer {
             LtmleQModel::Logistic
         ));
         let regime_kind = tool_try!(parse_option(request.regime.as_deref(), RegimeKind::Always));
-        let contrast_kind = tool_try!(choice(
+        let contrast_kind = tool_try!(parse_choice(
             &LTMLE_CONTRAST,
             request.contrast.as_deref(),
             ContrastKind::Never
@@ -2789,7 +2763,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<MarginalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let model_type = tool_try!(choice(
+        let model_type = tool_try!(parse_choice(
             &MARGINAL_MODEL,
             request.model.as_deref(),
             MarginalModel::Ols

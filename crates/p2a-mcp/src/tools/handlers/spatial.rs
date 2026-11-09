@@ -9,8 +9,8 @@ use rmcp::{
     tool, tool_router,
 };
 
-use super::ml::parse_choice;
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_choice;
 use crate::tools::common::{self, NaPolicy, error_text, parse_option};
 use crate::tools::requests::spatial::*;
 use p2a_core::econometrics::spatialprobit::SPATIAL_PROBIT_DEFAULT_SEED;

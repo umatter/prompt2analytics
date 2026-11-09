@@ -11,6 +11,7 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column, parse_option};
+use crate::tools::common::{insert_notes, parse_choice};
 use crate::tools::requests::timeseries::*;
 
 use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
@@ -66,7 +67,6 @@ use p2a_core::{
     window as ts_window,
 };
 
-use crate::tools::handlers::stats::parse_choice;
 use p2a_core::options::Choices;
 
 /// Spectrum estimator of `timeseries_spectrum` (R's spectrum `method`).
@@ -865,7 +865,7 @@ impl AnalyticsServer {
                 "volatility": volatility,
             });
         }
-        crate::tools::handlers::stats::insert_notes(
+        insert_notes(
             &mut output,
             Some((result.converged, result.iterations)),
             &result.warnings,
@@ -1283,7 +1283,7 @@ impl AnalyticsServer {
             },
             "references": "Brockwell & Davis (1991), Time Series: Theory and Methods"
         });
-        crate::tools::handlers::stats::insert_notes(&mut output, None, &result.warnings);
+        insert_notes(&mut output, None, &result.warnings);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1489,7 +1489,7 @@ impl AnalyticsServer {
             },
             "references": "Harvey, A. C. (1990). Forecasting, Structural Time Series Models and the Kalman Filter."
         });
-        crate::tools::handlers::stats::insert_notes(
+        insert_notes(
             &mut output,
             Some((result.convergence.converged, result.convergence.iterations)),
             &result.warnings,
@@ -1608,7 +1608,7 @@ impl AnalyticsServer {
             },
             "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274."
         });
-        crate::tools::handlers::stats::insert_notes(
+        insert_notes(
             &mut output,
             Some((result.convergence.converged, result.convergence.iterations)),
             &result.warnings,

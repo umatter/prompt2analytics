@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_choice_value;
 use crate::tools::handlers::data::format_significant;
 use crate::tools::limits::{self, Family, LimitViolation};
 use crate::tools::requests::munging::*;
@@ -136,18 +137,6 @@ fn cell_label(v: &p2a_core::polars::prelude::AnyValue, quoted: bool) -> String {
     }
 }
 
-/// A handler-local option parsed with [`Choices`]: the canonical value, or the bare message of an
-/// unknown spelling ("unknown how 'some'; expected one of: any, all").
-pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
-    choices: &Choices<T>,
-    value: &str,
-) -> Result<T, String> {
-    choices.parse(value).map_err(|e| match e {
-        p2a_core::EconError::InvalidSpecification { message } => message,
-        other => other.to_string(),
-    })
-}
-
 /// The `how` of `drop_na`, as the core takes it.
 pub(crate) const DROP_HOW: Choices<&'static str> = Choices {
     option: "how",
@@ -206,7 +195,7 @@ impl AnalyticsServer {
             )]));
         }
 
-        let operation = match parse_choice(&BATCH_OPERATIONS, &request.operation) {
+        let operation = match parse_choice_value(&BATCH_OPERATIONS, &request.operation) {
             Ok(op) => op,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -392,7 +381,7 @@ impl AnalyticsServer {
         }
 
         let comparison_type = request.comparison_type.as_deref().unwrap_or("summary");
-        let comparison = match parse_choice(&COMPARISONS, comparison_type) {
+        let comparison = match parse_choice_value(&COMPARISONS, comparison_type) {
             Ok(c) => c,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -1351,7 +1340,7 @@ impl AnalyticsServer {
             .columns
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+        let how = match parse_choice_value(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
             Ok(how) => how,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -4632,7 +4621,7 @@ mod tests {
         DROP_HOW.validate().unwrap();
         BATCH_OPERATIONS.validate().unwrap();
         COMPARISONS.validate().unwrap();
-        assert_eq!(parse_choice(&DROP_HOW, " ALL "), Ok("all"));
+        assert_eq!(parse_choice_value(&DROP_HOW, " ALL "), Ok("all"));
     }
 
     #[test]

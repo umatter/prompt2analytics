@@ -495,6 +495,177 @@ pub fn notes_json(converged: Option<(bool, usize)>, warnings: &[String]) -> serd
 }
 
 /// Shared helpers for handler unit tests.
+// ============================================================================
+// Option tables, result notes, JSON replies and seeds shared by the handlers
+// ============================================================================
+use p2a_core::options::Choices;
+use p2a_core::stats::CovWtMethod;
+use p2a_core::traits::convergence::ResultNotes;
+
+/// The bare message of an option error (the option and the accepted values), else the error's
+/// Display.
+pub(crate) fn option_message(e: p2a_core::EconError) -> String {
+    match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    }
+}
+
+/// Parses an optional option string with a local [`Choices`] table (for p2a-core enums that
+/// have no `FromStr` and for handler-local choices; enums with one use [`parse_option`]):
+/// `None` gives `default`; any given string, blank included, is parsed; an unknown value is
+/// the table's message ("unknown method 'biased'; expected one of: unbiased, ML").
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        None => Ok(default),
+        Some(s) => parse_choice_value(choices, s),
+    }
+}
+
+/// [`parse_choice`] for a value that is always given: the canonical value, or the bare message
+/// of an unknown spelling ("unknown how 'some'; expected one of: any, all").
+pub(crate) fn parse_choice_value<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: &str,
+) -> Result<T, String> {
+    choices.parse(value).map_err(option_message)
+}
+
+/// `stats_cov_wt` method (R's cov.wt `method`).
+pub(crate) static COV_WT_METHOD: Choices<CovWtMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["unbiased"], CovWtMethod::Unbiased),
+        (&["ML", "mle", "maximum_likelihood"], CovWtMethod::ML),
+    ],
+};
+
+/// Merges `common::notes_json(converged, warnings)` into a JSON tool output object; a
+/// non-object is left alone.
+pub(crate) fn insert_notes(
+    output: &mut serde_json::Value,
+    converged: Option<(bool, usize)>,
+    warnings: &[String],
+) {
+    if let (Some(o), serde_json::Value::Object(n)) =
+        (output.as_object_mut(), notes_json(converged, warnings))
+    {
+        o.extend(n);
+    }
+}
+
+/// Appends the convergence line and the warnings of `result` that `text` does not show yet.
+pub(crate) fn append_unshown_notes(text: &mut String, result: &dyn ResultNotes) {
+    let converged = result
+        .notes_convergence()
+        .filter(|_| !text.contains("Converged:"))
+        .map(|c| (c.converged, c.iterations));
+    let warnings: Vec<String> = result
+        .notes_warnings()
+        .into_iter()
+        .map(|w| {
+            let w = w.trim();
+            w.strip_prefix("Warning:").map_or(w, str::trim).to_string()
+        })
+        .filter(|w| !w.is_empty() && !text.contains(w.as_str()))
+        .collect();
+    append_notes(text, converged, &warnings);
+}
+
+/// Pretty JSON of a tool result; never panics.
+pub(crate) fn json_text(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
+/// Compact JSON of a tool result (one line, for replies the chat loop may cut); never panics.
+pub(crate) fn json_compact(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
+/// Seed of the randomized handlers whose core would otherwise fall back to entropy, when
+/// neither the request nor `set_seed` gives one, so every run is reproducible. The tool
+/// descriptions name it.
+pub(crate) const MCP_DEFAULT_SEED: u64 = 42;
+
+impl crate::server::AnalyticsServer {
+    /// The request seed, else the session's `set_seed` value; the read guard is released
+    /// before returning, so no lock is held while a tool computes.
+    pub(crate) async fn seed_or_global(&self, request: Option<u64>) -> Option<u64> {
+        match request {
+            Some(s) => Some(s),
+            None => *self.global_seed.read().await,
+        }
+    }
+
+    /// [`Self::seed_or_global`], else [`MCP_DEFAULT_SEED`].
+    pub(crate) async fn seed_for(&self, request: Option<u64>) -> u64 {
+        self.seed_or_global(request)
+            .await
+            .unwrap_or(MCP_DEFAULT_SEED)
+    }
+
+    /// Writes `columns` into dataset `dataset` under a short write lock. `snapshot` is the
+    /// dataset the tool read and `inputs` the columns it read from it. Refuses a dataset that
+    /// is gone, whose height is no longer the snapshot's, or in which an input column is
+    /// missing or no longer equal to the snapshot's (missing values compared as equal): a
+    /// concurrent call in the same session replaced, sorted or filtered it while the tool
+    /// ran, and the new column would not line up with the rows it was computed from. Returns
+    /// the names that replaced an existing column.
+    pub(crate) async fn write_output_columns(
+        &self,
+        dataset: &str,
+        snapshot: &p2a_core::data::Dataset,
+        inputs: &[&str],
+        columns: Vec<p2a_core::polars::prelude::Series>,
+    ) -> Result<Vec<String>, String> {
+        let n_rows = snapshot.nrows();
+        let mut map = self.datasets.write().await;
+        let current = map
+            .get(dataset)
+            .ok_or_else(|| format!("Dataset '{dataset}' not found; the column was not written."))?;
+        if current.nrows() != n_rows {
+            return Err(format!(
+                "Dataset '{dataset}' changed while the tool ran (it has {} rows, the fit used \
+                 {n_rows}); the column was not written. Run the tool again.",
+                current.nrows()
+            ));
+        }
+        for &name in inputs {
+            let unchanged = match (current.df().column(name), snapshot.df().column(name)) {
+                (Ok(now), Ok(then)) => now.equals_missing(then),
+                _ => false,
+            };
+            if !unchanged {
+                return Err(format!(
+                    "Dataset '{dataset}' changed while the tool ran (column '{name}' is no \
+                     longer the one the fit used); the column was not written. Run the tool \
+                     again."
+                ));
+            }
+        }
+        let mut updated = current.clone();
+        let mut replaced = Vec::new();
+        for s in columns {
+            let name = s.name().to_string();
+            if updated.df().column(&name).is_ok() {
+                replaced.push(name.clone());
+            }
+            updated
+                .df_mut()
+                .with_column(s)
+                .map_err(|e| format!("could not write column '{name}': {e}"))?;
+        }
+        map.insert(dataset.to_string(), updated);
+        Ok(replaced)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::server::AnalyticsServer;
@@ -540,6 +711,24 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_choice_none_default_and_blank_refused() {
+        static CRIT: Choices<u8> = Choices {
+            option: "criterion",
+            values: &[(&["AIC"], 1), (&["BIC", "schwarz"], 2)],
+        };
+        assert_eq!(parse_choice(&CRIT, None, 1), Ok(1));
+        assert_eq!(parse_choice(&CRIT, Some(" Schwarz "), 1), Ok(2));
+        for bad in ["  ", "cp"] {
+            let e = parse_choice(&CRIT, Some(bad), 1).unwrap_err();
+            assert!(
+                e.starts_with("unknown criterion '") && e.contains("expected one of: AIC, BIC"),
+                "{e}"
+            );
+        }
+        assert_eq!(parse_choice_value(&CRIT, "bic"), Ok(2));
+    }
 
     #[test]
     fn test_append_notes_lines() {

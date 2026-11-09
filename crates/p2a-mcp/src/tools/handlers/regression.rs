@@ -26,6 +26,9 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
+    MCP_DEFAULT_SEED, append_unshown_notes, json_compact, json_text, parse_choice,
+};
+use crate::tools::common::{
     NaPolicy, missing_json, notes_json, numeric_column, numeric_columns, parse_option,
 };
 use crate::tools::requests::regression::{
@@ -49,53 +52,6 @@ use p2a_core::EconError;
 use p2a_core::options::Choices;
 use p2a_core::traits::convergence::ResultNotes;
 
-/// Parses an option string through a `Choices` table (for core enums without `FromStr`):
-/// `None` gives `default`; an unknown value is an error naming the option and the accepted
-/// spellings.
-pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
-    choices: &Choices<T>,
-    value: Option<&str>,
-    default: T,
-) -> Result<T, String> {
-    match value {
-        None => Ok(default),
-        Some(s) => choices.parse(s).map_err(|e| match e {
-            EconError::InvalidSpecification { message } => message,
-            other => other.to_string(),
-        }),
-    }
-}
-
-/// Appends the convergence line and the warnings of `result` that `text` does not show yet.
-pub(crate) fn append_unshown_notes(text: &mut String, result: &dyn ResultNotes) {
-    let converged = result
-        .notes_convergence()
-        .filter(|_| !text.contains("Converged:"))
-        .map(|c| (c.converged, c.iterations));
-    let warnings: Vec<String> = result
-        .notes_warnings()
-        .into_iter()
-        .map(|w| {
-            let w = w.trim();
-            w.strip_prefix("Warning:").map_or(w, str::trim).to_string()
-        })
-        .filter(|w| !w.is_empty() && !text.contains(w.as_str()))
-        .collect();
-    crate::tools::common::append_notes(text, converged, &warnings);
-}
-
-/// Pretty JSON of a tool result; never panics.
-pub(crate) fn json_text(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value)
-        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
-}
-
-/// Compact JSON of a tool result (one line, for replies the chat loop may cut); never panics.
-pub(crate) fn json_compact(value: &serde_json::Value) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
-}
-
 /// A JSON object written with its keys in the given order (serde_json's `Map` sorts keys), in
 /// compact form. The glmnet tools put their summary before the long path this way, so the
 /// part of a reply the chat loop keeps holds the warnings and the selection.
@@ -115,9 +71,6 @@ fn ordered_json(pairs: &[(&str, serde_json::Value)]) -> String {
 
 /// Predictors listed per glmnet fit before the listing switches to the largest |estimate|.
 const GLMNET_LISTED_MAX: usize = 20;
-
-/// regression_bootstrap_cov's seed when neither the request nor the session sets one.
-const BOOTSTRAP_DEFAULT_SEED: u64 = 42;
 
 /// One glmnet fit as JSON: lambda, df, deviance ratio, intercept and the coefficients (all of
 /// them for up to 20 predictors, in column order; otherwise the 20 largest by |estimate| and
@@ -647,7 +600,7 @@ impl AnalyticsServer {
                 request
                     .seed
                     .or(*self.global_seed.read().await)
-                    .unwrap_or(BOOTSTRAP_DEFAULT_SEED),
+                    .unwrap_or(MCP_DEFAULT_SEED),
             ),
         ) {
             Ok(r) => r,

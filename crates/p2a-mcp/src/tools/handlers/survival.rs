@@ -19,8 +19,8 @@ use p2a_core::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::append_unshown_notes;
 use crate::tools::common::parse_option;
-use crate::tools::handlers::regression::append_unshown_notes;
 use crate::tools::requests::survival::{
     AftRequest, CompetingRisksRequest, CoxPhRequest, KaplanMeierRequest, LogRankRequest,
 };
