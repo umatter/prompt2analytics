@@ -837,7 +837,14 @@ async fn test_mcp_stats_spline_default_cap() {
         .map(|(i, v)| v.sin() + 0.01 * ((i * 7 % 11) as f64))
         .collect();
     let ds = p2a_core::data::Dataset::new(df!("x" => x, "y" => y).unwrap());
-    let (se, s) = session_with_datasets(vec![("pairs", ds)]);
+    // Tied x values: R's spline averages them (regularize.values) before counting n; here they
+    // are refused, so the default n counts distinct x values whenever the call runs.
+    let tx: Vec<f64> = (0..30).map(|i| (i % 10) as f64).collect();
+    let ty: Vec<f64> = (0..30)
+        .map(|i| (i % 10) as f64 * 0.5 + 0.03 * ((i * 7 % 11) as f64))
+        .collect();
+    let tied = p2a_core::data::Dataset::new(df!("x" => tx, "y" => ty).unwrap());
+    let (se, s) = session_with_datasets(vec![("pairs", ds), ("tied", tied)]);
     let j = json_of(
         &ok(
             &s,
@@ -861,6 +868,14 @@ async fn test_mcp_stats_spline_default_cap() {
         .await,
     );
     assert_eq!(k["n_points"].as_u64(), Some(300));
+    let e = refused(
+        &s,
+        &se,
+        "stats_spline",
+        json!({"dataset": "tied", "x": "x", "y": "y"}),
+    )
+    .await;
+    assert!(e.contains("Duplicate x values"), "{e}");
 }
 
 /// The first `got.len()` entries of a case vector (`Check::vector` compares whole values only).
@@ -969,7 +984,18 @@ async fn test_mcp_factanal_scores_output_name() {
             &s,
             &se,
             "multivariate_factanal",
-            json!({"dataset": "fa_bartlett", "columns": cols, "n_factors": 2, "scores": "bartlett", "output_name": "again"})
+            json!({"dataset": "fa_bartlett", "columns": cols.clone(), "n_factors": 2, "scores": "bartlett", "output_name": "again"})
+        )
+        .await
+        .contains("already has a column 'Factor1'")
+    );
+    // The clash is found before the fit: a factor count no fit accepts still gets the clash.
+    assert!(
+        refused(
+            &s,
+            &se,
+            "multivariate_factanal",
+            json!({"dataset": "fa_bartlett", "columns": cols, "n_factors": 50, "scores": "bartlett", "output_name": "again"})
         )
         .await
         .contains("already has a column 'Factor1'")

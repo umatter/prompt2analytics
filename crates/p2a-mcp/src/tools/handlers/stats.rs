@@ -27,7 +27,7 @@ const FACTANAL_INLINE_ROWS: usize = 50;
 const FACTANAL_INLINE_VALUES: usize = 500;
 
 /// Cap on the default number of points `stats_spline` evaluates when neither xout nor n is
-/// given (R's default is 3 x the number of pairs, uncapped).
+/// given (R's default is 3 x the number of distinct x values, uncapped).
 const SPLINE_DEFAULT_MAX_POINTS: usize = 200;
 
 use crate::server::AnalyticsServer;
@@ -738,8 +738,7 @@ impl AnalyticsServer {
             ))]));
         }
 
-        // A subject with a missing value in any condition is dropped, as R's
-        // lm(cbind(...) ~ 1) drops it
+        // The core checks sigma's length too; refusing here comes before the extraction.
         if let Some(sigma) = &request.sigma
             && sigma.len() != p * p
         {
@@ -750,6 +749,8 @@ impl AnalyticsServer {
             ))]));
         }
 
+        // A subject with a missing value in any condition is dropped, as R's
+        // lm(cbind(...) ~ 1) drops it
         let (data, missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Omit) {
             Ok(d) => d,
             Err(e) => {
@@ -1035,7 +1036,7 @@ impl AnalyticsServer {
 
     /// Cubic spline interpolation.
     #[tool(
-        description = "Interpolating cubic spline through (x, y), as R's spline(): method 'fmm' (default), 'natural', 'periodic' or 'hyman' (monotone). Returns the evaluated points (x, y): at xout, or at n equally spaced points (default 3 times the number of complete pairs, as R, capped at 200). Rows with a missing x or y are dropped, as R does. No spline coefficients are returned."
+        description = "Interpolating cubic spline through (x, y), as R's spline(): method 'fmm' (default), 'natural', 'periodic' or 'hyman' (monotone). Returns the evaluated points (x, y): at xout, or at n equally spaced points (default 3 times the number of distinct x values, as R, capped at 200). Rows with a missing x or y are dropped, as R does; tied x values are refused (R averages them first). No spline coefficients are returned."
     )]
     pub async fn stats_spline(
         &self,
@@ -1779,6 +1780,20 @@ impl AnalyticsServer {
             return Ok(CallToolResult::error(vec![Content::text(
                 "output_name stores factor scores; set scores = 'regression' or 'bartlett'",
             )]));
+        }
+        // The score columns are Factor1..Factor{n_factors}: a clash is refused before the fit
+        // (the check after the fit stays as a safety net).
+        if request.output_name.is_some() {
+            let names = dataset.df().get_column_names();
+            if let Some(c) = (1..=request.n_factors)
+                .map(|j| format!("Factor{j}"))
+                .find(|c| names.iter().any(|h| h.as_str() == c.as_str()))
+            {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "dataset '{}' already has a column '{c}'; the scores cannot be added",
+                    request.dataset
+                ))]));
+            }
         }
 
         let col_refs: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();

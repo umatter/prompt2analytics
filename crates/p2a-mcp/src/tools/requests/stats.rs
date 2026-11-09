@@ -321,13 +321,13 @@ pub struct SplineRequest {
 
     /// Points at which to interpolate
     #[schemars(
-        description = "Points at which to evaluate the spline. If omitted, the spline is evaluated at n equally spaced points over the range of x (default 3 times the number of complete (x, y) pairs, as R's spline(), capped at 200)."
+        description = "Points at which to evaluate the spline. If omitted, the spline is evaluated at n equally spaced points over the range of x (default 3 times the number of distinct x values among the complete (x, y) pairs, as R's spline(), capped at 200; tied x values are refused, where R averages them)."
     )]
     pub xout: Option<Vec<f64>>,
 
     /// Number of evaluation points (R's n)
     #[schemars(
-        description = "Number of equally spaced evaluation points over the range of x when xout is omitted (R's n). Default: 3 times the number of complete (x, y) pairs, as R's spline(), capped at 200; give n to get more. Ignored when xout is given."
+        description = "Number of equally spaced evaluation points over the range of x when xout is omitted (R's n). Default: 3 times the number of distinct x values among the complete (x, y) pairs, as R's spline(), capped at 200; give n to get more. Ignored when xout is given."
     )]
     pub n: Option<usize>,
 
