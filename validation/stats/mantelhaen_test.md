@@ -126,7 +126,8 @@ method `mantelhaen`.
 2. **Odds ratio CI**: Both use Robins, Breslow, Greenland (1986) variance formula for the log
    odds ratio, two-sided at 95%. Open: the one-sided intervals of `alternative = "less"` /
    `"greater"` and a `conf_level` other than 0.95 (STAT-59), and the method label when
-   |DELTA| < 0.5 (STAT-81).
+   |DELTA| < 0.5 (STAT-81). When sum(a d / n) or sum(b c / n) is 0, p2a reports the
+   interval (0, Inf) where R reports (NaN, NaN).
 
 3. **Small strata**: a stratum with one observation contributes nothing, where R refuses the
    table ("sample size in each stratum must be > 1").

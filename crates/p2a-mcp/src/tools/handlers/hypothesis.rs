@@ -760,9 +760,21 @@ impl AnalyticsServer {
             }
         };
 
+        // The per-stratum table is left out when it would not fit the response budget, as
+        // the GOF and independence tools do, rather than losing the whole result.
+        let labels: Vec<String> = result
+            .stratum_stats
+            .iter()
+            .map(|s| s.stratum.clone())
+            .collect();
+        let with_strata = fits_response_budget(
+            (result.n_strata as u64).saturating_mul(9),
+            label_budget_bytes(&labels),
+        );
         let stratum_stats: Vec<serde_json::Value> = result
             .stratum_stats
             .iter()
+            .take(if with_strata { usize::MAX } else { 0 })
             .map(|s| {
                 serde_json::json!({
                     "stratum": s.stratum,
@@ -801,7 +813,6 @@ impl AnalyticsServer {
                 "conf_level": 0.95
             },
             "continuity_correction": result.continuity_correction,
-            "stratum_statistics": stratum_stats,
             "hypothesis": {
                 "null": "Row and column variables are conditionally independent given stratum",
                 "alternative": alt_desc
@@ -818,6 +829,15 @@ impl AnalyticsServer {
             "row_levels": result.row_levels,
             "col_levels": result.col_levels,
         });
+        if with_strata {
+            output["stratum_statistics"] = serde_json::json!(stratum_stats);
+        } else {
+            output["per_stratum_statistics"] = serde_json::json!(format!(
+                "omitted: {} strata are too many to return; the statistic, p-value and common \
+                 odds ratio are complete",
+                result.n_strata
+            ));
+        }
         if let Some(missing) = missing_json(&result.missing) {
             output["missing"] = missing;
         }
@@ -1636,8 +1656,8 @@ impl AnalyticsServer {
 }
 
 /// The values of the count column `name` (the kept `rows` of the dataset, 0-based) as `usize`.
-/// Each must be a finite, non-negative whole number of at most 2^53, the largest integer an
-/// `f64` holds exactly, and their total must fit in a `usize`. The error names the column and
+/// Each must be a finite, non-negative whole number of at most 2^53, beyond which an f64 no
+/// longer represents every integer, and their total must fit in a `usize`. The error names the column and
 /// the first offending dataset row (1-based).
 fn whole_counts(name: &str, values: &[f64], rows: &[usize]) -> Result<Vec<usize>, String> {
     const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
@@ -1645,16 +1665,18 @@ fn whole_counts(name: &str, values: &[f64], rows: &[usize]) -> Result<Vec<usize>
         .map_err(|e| format!("Trend test failed: {e}"))?;
     let mut total = 0usize;
     for (&v, &row) in values.iter().zip(rows) {
+        let refusal = || {
+            format!(
+                "Trend test failed: Column '{name}' must hold non-negative whole numbers (counts); \
+                 row {} is {v}",
+                row + 1
+            )
+        };
         let whole = v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= MAX_EXACT;
-        let count = usize::try_from(v as u64)
-            .ok()
-            .filter(|_| whole)
-            .ok_or_else(|| {
-                format!(
-                    "Column '{name}' must hold non-negative whole numbers (counts); row {} is {v}",
-                    row + 1
-                )
-            })?;
+        if !whole {
+            return Err(refusal());
+        }
+        let count = usize::try_from(v as u64).map_err(|_| refusal())?;
         total = total.checked_add(count).ok_or_else(|| {
             format!(
                 "Trend test failed: the counts of column '{name}' sum past {}",
@@ -2364,11 +2386,72 @@ mod tests {
         );
         assert_eq!(v["common_odds_ratio"], "Inf");
         assert_eq!(v["odds_ratio_ci"]["upper"], "Inf");
+        // 0 is p2a's fallback when sum(a d / n) or sum(b c / n) is 0; R's mantelhaen.test
+        // gives conf.int NaN NaN (and estimate Inf)
         assert_eq!(v["odds_ratio_ci"]["lower"], 0.0);
         assert_eq!(v["stratum_statistics"][0]["odds_ratio"], "Inf");
         assert_eq!(v["stratum_statistics"][1]["odds_ratio"], "Inf");
         assert_eq!(v["stratum_statistics"][0]["counts"]["a"], 3.0);
-        assert!(v["statistic"].as_f64().is_some_and(f64::is_finite), "{v}");
+        // R: mantelhaen.test(array(c(3, 2, 0, 4, 2, 0, 1, 5), c(2, 2, 2)))$statistic
+        let stat = v["statistic"].as_f64().unwrap_or(f64::NAN);
+        assert!(Tol::printed(6).allows(stat, 4.533679), "{v}");
+    }
+
+    /// 2 x 2 x `k` strata labelled s01, s02, ...: ctl/trt by no/yes, every cell non-empty so
+    /// each odds ratio is finite.
+    fn mantelhaen_strata(k: usize) -> DataFrame {
+        let (mut t, mut y, mut s): (Vec<&str>, Vec<&str>, Vec<String>) = Default::default();
+        for i in 0..k {
+            let cells = [2 + i % 3, 1 + i % 2, 1 + i % 4, 3];
+            let kinds = [("ctl", "no"), ("ctl", "yes"), ("trt", "no"), ("trt", "yes")];
+            for ((ti, yi), n) in kinds.into_iter().zip(cells) {
+                t.extend(std::iter::repeat_n(ti, n));
+                y.extend(std::iter::repeat_n(yi, n));
+                s.extend(std::iter::repeat_n(format!("s{:02}", i + 1), n));
+            }
+        }
+        df!("t" => t, "y" => y, "s" => s).unwrap()
+    }
+
+    #[test]
+    fn test_mcp_hypothesis_mantelhaen_omits_strata_over_the_response_budget() {
+        let (rt, server) = server_with(vec![("d", mantelhaen_strata(40))]);
+        let run = || {
+            let req: MantelhaenTestRequest = serde_json::from_value(serde_json::json!(
+                {"dataset": "d", "row_var": "t", "col_var": "y", "stratum_var": "s"}))
+            .unwrap();
+            json_of(
+                &rt.block_on(server.hypothesis_mantelhaen(Parameters(req)))
+                    .unwrap(),
+            )
+        };
+        let full = limits::with_limits(Limits::off(), run);
+        let small = limits::with_limits(hosted_with(&["response_bytes=2000"]), run);
+        assert_eq!(
+            full["stratum_statistics"].as_array().map(Vec::len),
+            Some(40)
+        );
+        assert!(small.get("stratum_statistics").is_none(), "{small}");
+        assert!(
+            small["per_stratum_statistics"]
+                .as_str()
+                .is_some_and(|m| m.contains("40 strata are too many to return")),
+            "{small}"
+        );
+        for key in ["statistic", "p_value", "common_odds_ratio"] {
+            assert_eq!(small[key], full[key], "{key}");
+        }
+    }
+
+    #[test]
+    fn test_mcp_prop_trend_whole_counts_message() {
+        let e = whole_counts("x", &[2.0, 1.5], &[0, 1]).unwrap_err();
+        assert!(
+            e.starts_with(
+                "Trend test failed: Column 'x' must hold non-negative whole numbers (counts); row 2 is 1.5"
+            ),
+            "{e}"
+        );
     }
 
     #[test]
@@ -2787,6 +2870,12 @@ mod tests {
             );
             Check::new(&case)
                 .scalar("na_n_blocks", num(&v["n_blocks"]), Tol::exact())
+                // the rows used: three treatments per kept block
+                .scalar(
+                    "na_n_blocks",
+                    num(&v["missing"]["n_used"]) / 3.0,
+                    Tol::exact(),
+                )
                 .finish();
             assert_eq!(
                 v["missing"],

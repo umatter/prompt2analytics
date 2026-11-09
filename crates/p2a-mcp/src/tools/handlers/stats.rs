@@ -164,10 +164,6 @@ impl AnalyticsServer {
             .extract()
         {
             Ok(c) => c,
-            // "Computation stopped: ...", said once
-            Err(e @ p2a_core::EconError::Cancelled(_)) => {
-                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
-            }
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Log-linear model failed: {e}"
@@ -1576,7 +1572,11 @@ impl AnalyticsServer {
         for name in &request.columns {
             match p2a_core::data::columns::numeric_options(df, name) {
                 Ok(values) => columns.push(values),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Median polish failed: {e}"
+                    ))]));
+                }
             }
         }
         let mut matrix: Vec<Vec<f64>> =
@@ -2483,6 +2483,37 @@ mod tests {
     }
 
     #[test]
+    fn test_mcp_stats_loglin_extraction_errors_are_prefixed() {
+        let d = df!("n" => ["1", "2", "3", "4"], "a" => ["x", "x", "y", "y"]).unwrap();
+        let (rt, server) = server_with(vec![("d", d)]);
+        let r = rt
+            .block_on(server.stats_loglin(Parameters(loglin_req(&["a"]))))
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).starts_with("Log-linear model failed: "),
+            "{}",
+            text(&r)
+        );
+    }
+
+    #[test]
+    fn test_mcp_medpolish_column_error_is_prefixed() {
+        let d = df!("c1" => [1.0, 2.0, 3.0], "c2" => [2.5, 3.5, 1.0]).unwrap();
+        let (rt, server) = server_with(vec![("d", d)]);
+        let r = rt
+            .block_on(server.descriptive_medpolish(req(serde_json::json!(
+                    {"dataset": "d", "columns": ["c1", "nope"]}))))
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).starts_with("Median polish failed: "),
+            "{}",
+            text(&r)
+        );
+    }
+
+    #[test]
     fn loglin_refuses_table_above_table_cells() {
         // 120 x 120 x 120 = 1,728,000 cells > 1,000,000 (hosted). Pre-fix: allocates and fits it.
         let (rt, server) = server_with(vec![("d", ids(120, &["a", "b", "c"]))]);
@@ -3195,8 +3226,6 @@ mod tests {
                 serde_json::json!({"column": col, "at": [15, 20, 25]}),
             ));
             let d = json_of(&call("density", c.clone()));
-            // deviation STAT-36: IQR types other than 7 are computed as type 7; only the
-            // default is pinned.
             // deviation STAT-37: the density grid is mislabelled when n is not a power of
             // two.
             // deviation STAT-65: the default bandwidth is not bw.nrd0; only the density's n

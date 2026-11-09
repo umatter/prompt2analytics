@@ -2265,7 +2265,8 @@ fn ts_error(prefix: &str, err: &dyn std::fmt::Display) -> CallToolResult {
         text.push_str(
             "\nHint: for a time series, impute rather than drop: p2a's time-series methods \
              need a complete series, and dropping a value would splice it. Fill the gaps first \
-             (for example munge_fill_na with strategy \"forward\").",
+             (for example munge_fill_na with strategy \"forward\" for empty cells; NaN values \
+             from arithmetic must be recomputed or replaced).",
         );
     }
     CallToolResult::error(vec![Content::text(text)])
@@ -2286,6 +2287,20 @@ mod tests {
     use p2a_core::data::Dataset;
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
+
+    #[test]
+    fn test_mcp_ts_error_hint_covers_nan_gaps() {
+        let r = ts_error(
+            "ACF failed",
+            &"Column 'x' contains 1 missing value(s) (null or NaN). Drop or impute them first.",
+        );
+        let t = match &r.content[0].raw {
+            RawContent::Text(t) => t.text.clone(),
+            _ => panic!("not text"),
+        };
+        assert!(t.contains("NaN values from arithmetic"), "{t}");
+        assert!(t.contains("impute rather than drop"), "{t}");
+    }
 
     /// TOOL-11: the peak is taken over finite values by a total order; NaN never panics.
     #[test]
