@@ -23,6 +23,8 @@ use p2a_core::ml::{
     BartCausalConfig, CausalForestConfig, bart_causal, causal_forest, run_bart_causal_config,
     run_causal_forest_config,
 };
+use p2a_core::options::Choices;
+use p2a_core::polars::prelude::Series;
 use p2a_core::{
     C50Config,
     CartConfig,
@@ -1711,6 +1713,168 @@ impl AnalyticsServer {
     }
 }
 
+// ============================================================================
+// Helpers shared by the ML and spatial handlers (seeds, option tables, output columns)
+// ============================================================================
+
+/// Seed of the randomized handlers whose core would otherwise fall back to entropy, when
+/// neither the request nor `set_seed` gives one, so every run is reproducible. The tool
+/// descriptions name it.
+pub(crate) const MCP_DEFAULT_SEED: u64 = 42;
+
+/// Rows of the Kernel SHAP background: all training rows up to this many, else this many rows
+/// evenly spaced in row order (shap.sample's size).
+pub(crate) const KERNEL_BACKGROUND_MAX: usize = 100;
+
+/// Rows of the hierarchical-clustering merge table shown in the MCP text (the top of the
+/// dendrogram).
+pub(crate) const DENDROGRAM_ROWS: usize = 50;
+
+/// Per-row values shown in a JSON block: cluster labels.
+const LABELS_SHOWN: usize = 100;
+
+/// Per-row values shown in a JSON block: predictions.
+const PREDICTIONS_SHOWN: usize = 20;
+
+/// [`crate::tools::common::parse_option`] for a local [`Choices`] table (a core enum without an
+/// `option_enum!`): `None` gives `default`; any given string, blank included, is parsed; an
+/// unknown value is the table's message ("unknown <option> '<value>'; expected one of: ...").
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        Some(v) => choices.parse(v).map_err(|e| match e {
+            p2a_core::EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
+        }),
+        None => Ok(default),
+    }
+}
+
+/// Checks the names a tool would write into its dataset: none blank, none one of the columns
+/// the call reads (`inputs`), none twice.
+pub(crate) fn check_output_names(names: &[String], inputs: &[&str]) -> Result<(), String> {
+    for (i, n) in names.iter().enumerate() {
+        if n.trim().is_empty() {
+            return Err("output_column must be a non-empty column name".into());
+        }
+        if inputs.contains(&n.as_str()) {
+            return Err(format!(
+                "output_column '{n}' is a column this call reads ({}); choose a new name, or \
+                 omit output_column",
+                inputs.join(", ")
+            ));
+        }
+        if names[..i].contains(n) {
+            return Err(format!("output column '{n}' would be written twice"));
+        }
+    }
+    Ok(())
+}
+
+/// The "Wrote column" / "Replaced column" lines of a call that wrote `names`.
+fn wrote_lines(
+    names: &[String],
+    replaced: &[String],
+    dtype: &str,
+    rows: usize,
+    dataset: &str,
+) -> String {
+    names
+        .iter()
+        .map(|c| {
+            let verb = if replaced.contains(c) {
+                "Replaced"
+            } else {
+                "Wrote"
+            };
+            format!("\n{verb} column '{c}' ({dtype}, {rows} rows) in dataset '{dataset}'.")
+        })
+        .collect()
+}
+
+/// The first `n` values of `v` as JSON (never panics on a short vector).
+fn first<T: serde::Serialize + Clone>(v: &[T], n: usize) -> serde_json::Value {
+    serde_json::json!(v.iter().take(n).cloned().collect::<Vec<T>>())
+}
+
+/// Cluster sizes keyed "1".."k" (R's numbering) from 0-based `labels` of `k` clusters.
+fn cluster_sizes_json(labels: &[usize], k: usize) -> serde_json::Value {
+    let mut sizes = vec![0usize; k];
+    for &l in labels {
+        if let Some(s) = sizes.get_mut(l) {
+            *s += 1;
+        }
+    }
+    let map: serde_json::Map<String, serde_json::Value> = sizes
+        .iter()
+        .enumerate()
+        .map(|(c, &n)| ((c + 1).to_string(), n.into()))
+        .collect();
+    serde_json::Value::Object(map)
+}
+
+impl AnalyticsServer {
+    /// The request seed, else the session's `set_seed` value; the read guard is released
+    /// before returning, so no lock is held while a tool computes.
+    pub(crate) async fn seed_or_global(&self, request: Option<u64>) -> Option<u64> {
+        match request {
+            Some(s) => Some(s),
+            None => *self.global_seed.read().await,
+        }
+    }
+
+    /// [`Self::seed_or_global`], else [`MCP_DEFAULT_SEED`].
+    pub(crate) async fn seed_for(&self, request: Option<u64>) -> u64 {
+        self.seed_or_global(request)
+            .await
+            .unwrap_or(MCP_DEFAULT_SEED)
+    }
+
+    /// A snapshot (O(1) clone) of dataset `name`; the read lock is released before returning.
+    async fn dataset_snapshot(&self, name: &str) -> Option<Dataset> {
+        self.datasets.read().await.get(name).cloned()
+    }
+
+    /// Writes `columns` into dataset `dataset` under a short write lock. Refuses a dataset that
+    /// is gone or whose height is no longer `n_rows` (it changed while the tool ran). Returns
+    /// the names that replaced an existing column.
+    pub(crate) async fn write_output_columns(
+        &self,
+        dataset: &str,
+        n_rows: usize,
+        columns: Vec<Series>,
+    ) -> Result<Vec<String>, String> {
+        let mut map = self.datasets.write().await;
+        let current = map
+            .get(dataset)
+            .ok_or_else(|| format!("Dataset '{dataset}' not found; the column was not written."))?;
+        if current.nrows() != n_rows {
+            return Err(format!(
+                "Dataset '{dataset}' changed while the tool ran (it has {} rows, the fit used \
+                 {n_rows}); the column was not written. Run the tool again.",
+                current.nrows()
+            ));
+        }
+        let mut updated = current.clone();
+        let mut replaced = Vec::new();
+        for s in columns {
+            let name = s.name().to_string();
+            if updated.df().column(&name).is_ok() {
+                replaced.push(name.clone());
+            }
+            updated
+                .df_mut()
+                .with_column(s)
+                .map_err(|e| format!("could not write column '{name}': {e}"))?;
+        }
+        map.insert(dataset.to_string(), updated);
+        Ok(replaced)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1732,6 +1896,113 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn test_parse_choice_matches_parse_option_conventions() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum M {
+            Knn,
+            Distance,
+        }
+        static T: Choices<M> = Choices {
+            option: "method",
+            values: &[
+                (&["knn", "k_nearest"], M::Knn),
+                (&["distance", "band"], M::Distance),
+            ],
+        };
+        T.validate().unwrap();
+        assert_eq!(parse_choice(&T, None, M::Knn), Ok(M::Knn));
+        // a blank string is a value, refused as common::parse_option refuses it
+        assert!(
+            parse_choice(&T, Some("  "), M::Distance)
+                .unwrap_err()
+                .starts_with("unknown method")
+        );
+        assert_eq!(parse_choice(&T, Some("K-Nearest"), M::Distance), Ok(M::Knn));
+        assert_eq!(parse_choice(&T, Some("BAND"), M::Knn), Ok(M::Distance));
+        assert_eq!(
+            parse_choice(&T, Some("radius"), M::Knn),
+            Err("unknown method 'radius'; expected one of: knn, distance".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_output_names() {
+        assert_eq!(check_output_names(&[], &["a"]), Ok(()));
+        assert_eq!(check_output_names(&["cl".into()], &["a", "b"]), Ok(()));
+        assert_eq!(
+            check_output_names(&["".into()], &["a"]).unwrap_err(),
+            "output_column must be a non-empty column name"
+        );
+        assert_eq!(
+            check_output_names(&["b".into()], &["a", "b"]).unwrap_err(),
+            "output_column 'b' is a column this call reads (a, b); choose a new name, or omit \
+             output_column"
+        );
+        assert!(
+            check_output_names(&["PC1".into(), "PC1".into()], &["a"])
+                .unwrap_err()
+                .contains("twice")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seed_helpers_and_output_writes() {
+        let s = AnalyticsServer::new();
+        assert_eq!(s.seed_or_global(None).await, None);
+        assert_eq!(s.seed_for(None).await, MCP_DEFAULT_SEED);
+        *s.global_seed.write().await = Some(7);
+        assert_eq!(
+            (
+                s.seed_or_global(None).await,
+                s.seed_or_global(Some(3)).await,
+                s.seed_for(None).await
+            ),
+            (Some(7), Some(3), 7)
+        );
+        assert!(s.global_seed.try_write().is_ok(), "no read guard is kept");
+        s.datasets.write().await.insert(
+            "d".into(),
+            Dataset::new(df!("a" => [1.1, 2.0, 2.9], "old" => [0i64, 0, 0]).unwrap()),
+        );
+        let replaced = s
+            .write_output_columns(
+                "d",
+                3,
+                vec![
+                    Series::new("cl".into(), vec![1i64, 2, 1]),
+                    Series::new("old".into(), vec![5i64, 6, 7]),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced, vec!["old".to_string()]);
+        let d = s.datasets.read().await["d"].clone();
+        let ints = |c: &str| -> Vec<Option<i64>> {
+            d.df()
+                .column(c)
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(ints("cl"), vec![Some(1), Some(2), Some(1)]);
+        assert_eq!(ints("old"), vec![Some(5), Some(6), Some(7)]);
+        assert!(
+            s.write_output_columns("d", 4, vec![Series::new("x".into(), vec![1i64; 4])])
+                .await
+                .unwrap_err()
+                .contains("changed while the tool ran")
+        );
+        assert!(
+            s.write_output_columns("gone", 3, vec![])
+                .await
+                .unwrap_err()
+                .contains("not found")
+        );
     }
 
     /// A server holding dataset "d" of `n` rows: a noisy outcome `y`, an alternating
