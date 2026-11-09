@@ -1,0 +1,299 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_causal_did",
+      "name": "MCP staggered_did and etwfe",
+      "category": "mcp",
+      "reference": "did::att_gt / DRDID (written out); etwfe::etwfe + emfx",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "did_cs_covariates",
+        "etwfe_staggered"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_mcp_causal_option_aliases_and_unknown",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_etwfe"
+      ],
+      "quantities": [
+        "simple ATT and SE (DR, not-yet, anticipation 1)",
+        "emfx simple/event estimates and delta SEs",
+        "iid SE",
+        "text equals the library Display",
+        "option aliases"
+      ],
+      "tolerance": "OR validation/README.md; DR Tol::iterative(1e-8); etwfe validation/README.md (960 rows)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_rd",
+      "name": "MCP RD bandwidth selection",
+      "category": "mcp",
+      "reference": "rdrobust::rdbwselect, rdrobust 4.0.0",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "rd_bwselect_sharp",
+        "rd_bwselect_fuzzy"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_rd_bandwidth_selection"
+      ],
+      "quantities": [
+        "h, b",
+        "conventional and bias-corrected estimates",
+        "conventional and robust SEs",
+        "fuzzy Wald ratio"
+      ],
+      "tolerance": "validation/README.md, n = 1000",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_mte",
+      "name": "MCP iv_mte with covariates",
+      "category": "mcp",
+      "reference": "local IV MTE with Heckman-Vytlacil weights, written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "mte_mcp_covariate"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_iv_mte_uses_covariates"
+      ],
+      "quantities": [
+        "probit coefficients (tight fit)",
+        "second-stage coefficients (tight fit)",
+        "ATE, ATT, ATU, LATE and delta SEs (HC1)",
+        "the call without covariates",
+        "default configuration within Tol::iterative(1e-6) of the tight fit (estimands)"
+      ],
+      "tolerance": "validation/README.md at n = 2000 for the tight estimands; first stage Tol::iterative(1e-10); second-stage coefficients Tol::iterative(1e-8) (the near-collinear cubic in P amplifies the 2e-11 first-stage gap)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_gmm",
+      "name": "MCP gmm_iv",
+      "category": "mcp",
+      "reference": "gmm::gmm",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "gmm_linear_iv"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_gmm_iv"
+      ],
+      "quantities": [
+        "coefficients and SEs (HAC Bartlett, MDS, CUE, fixed W)",
+        "J"
+      ],
+      "tolerance": "validation/README.md, n = 500; CUE Tol::iterative(1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_weighting",
+      "name": "MCP CBPS, entropy balancing, AIPW, IPW",
+      "category": "mcp",
+      "reference": "CBPS::CBPS (tight refit); WeightIt ebal exact dual; AIPW; IPW Hajek with the M-estimation SE",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "cbps_sim_methods",
+        "weights_ebal",
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_treatment_cbps",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_weighting"
+      ],
+      "quantities": [
+        "CBPS coefficients (over ATE, exact ATT)",
+        "entropy ESS per group",
+        "AIPW ATE and SE",
+        "IPW M-estimation SE",
+        "SBW balance_penalty refused"
+      ],
+      "tolerance": "CBPS Tol::iterative(1e-6); AIPW and IPW effect Tol::iterative(1e-8) (IRLS propensity); others validation/README.md, n = 300",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_matching",
+      "name": "MCP propensity_matching and the matched sample",
+      "category": "mcp",
+      "reference": "MatchIt::matchit, match.data; optmatch::fullmatch",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "matchit_full_cem",
+        "matchit_nearest",
+        "matchit_mcp_output"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_propensity_matching",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_matching_output_dataset"
+      ],
+      "quantities": [
+        "full-matching total distance",
+        "CEM counts",
+        "registered weights, subclass, distance"
+      ],
+      "tolerance": "Tol::iterative(1e-8) (optimum, PS); exact counts; Tol::coef(240) weights",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_mediation",
+      "name": "MCP natural effect models",
+      "category": "mcp",
+      "reference": "medflex neImpute + neModel, written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "medflex_scales"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_natural_effects_mediation"
+      ],
+      "quantities": [
+        "NDE, NIE, TE on the odds-ratio scale"
+      ],
+      "tolerance": "Tol::iterative(1e-8) (IRLS working model; R at epsilon 1e-14)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_tmle",
+      "name": "MCP ltmle and collaborative_tmle",
+      "category": "mcp",
+      "reference": "ltmle (written out); C-TMLE criteria of Gruber & van der Laan (2010), written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "ltmle_two_period",
+        "ctmle_cv"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_ltmle",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_collaborative_tmle"
+      ],
+      "quantities": [
+        "psi always/never/dynamic",
+        "ATE and EIC SE",
+        "C-TMLE ATE and SE under the RSS and VarIC criteria",
+        "C-TMLE selected covariates"
+      ],
+      "tolerance": "default ltmle configuration against the tight values at Tol::iterative(1e-8); dynamic Tol::iterative(1e-8); C-TMLE at the default glm control against the epsilon-1e-14 fit: ATE Tol::iterative(1e-7), SE Tol::iterative(1e-6)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_gformula",
+      "name": "MCP gformula survival",
+      "category": "mcp",
+      "reference": "pooled logistic hazard g-formula, written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "gformula_hazard"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_gformula"
+      ],
+      "quantities": [
+        "risk curves under always and never treat and the hazard coefficients (tight fit)"
+      ],
+      "tolerance": "Tol::iterative(1e-8) against the tight fit",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_doubleml",
+      "name": "MCP treatment_double_ml",
+      "category": "mcp",
+      "reference": "DoubleML scores with fixed folds, written out; glmnet",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "doubleml_models"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_treatment_double_ml"
+      ],
+      "quantities": [
+        "PLIV theta and SE",
+        "PLR lasso theta and SE"
+      ],
+      "tolerance": "validation/README.md, n = 400; lasso Tol::new(1e-9, 1e-12) against the exact minimiser",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_gsynth",
+      "name": "MCP gsynth",
+      "category": "mcp",
+      "reference": "gsynth 1.4.0 (IFE closed form at r = 2); fect cv.method = \"loo\" for the cross-validated rank",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "gsynth_simdata"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_gsynth"
+      ],
+      "quantities": [
+        "ATT at r = 2 (force two_way and unit)",
+        "leave-one-out CV choice of r with covariates"
+      ],
+      "tolerance": "ATT Tol::coef(1500); r exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_sensemakr",
+      "name": "MCP sensemakr contour data",
+      "category": "mcp",
+      "reference": "sensemakr::adjusted_estimate on classical lm (reduce = TRUE)",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "sensemakr_mcp_contour"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_sensemakr_contour_data"
+      ],
+      "quantities": [
+        "contour grid",
+        "20 x 20 adjusted estimates"
+      ],
+      "tolerance": "Tol::coef(1276)",
+      "deviations": [
+        {
+          "finding": "REG-27",
+          "quantity": "adjusted t-statistic grid",
+          "note": "not returned by the tool: the core adjusted SE differs from sensemakr"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_parameters",
+      "name": "MCP causal parameter validation",
+      "category": "mcp",
+      "reference": "R's own refusals (rdrobust, ltmle gbounds, etwfe gref) and the core bounds",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "rd_bwselect_sharp",
+        "mte_local_iv",
+        "etwfe_staggered",
+        "ltmle_two_period"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_mcp_causal_degenerate_parameters_are_tool_errors"
+      ],
+      "quantities": [
+        "tool errors naming the parameter",
+        "descriptions list every canonical option value (p2a-mcp::tier3::wp55_causal::test_mcp_causal_option_descriptions_list_accepted_values, loads no case)",
+        "local option tables (unit test p2a-mcp::tools::handlers::causal::tests::test_local_option_tables_parse_aliases_and_reject_unknown, no case)"
+      ],
+      "tolerance": "not numeric",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

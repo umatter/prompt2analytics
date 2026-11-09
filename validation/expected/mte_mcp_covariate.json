@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "id": "mte_mcp_covariate",
+  "area": "econometrics/mte",
+  "method": "MTE by local IV through the MCP tool: instrument z1, covariate z2 in the probit propensity and the second stage; and the same call with the covariate ignored",
+  "reference": "local IV MTE (Brinch, Mogstad & Wiswall 2017), probit propensity with the covariate, cubic in P plus the covariate by OLS; Heckman & Vytlacil (2005) weights; delta method with the full HC1 covariance (sandwich::vcovHC(type = 'HC1')); written out. Pins: the probit solution (*_tight: epsilon 1e-14, restarted until the coefficients stop changing); glm.control() defaults recorded",
+  "call": "glm(d ~ z1 + z2, binomial('probit')); lm(y ~ P + P^2 + P^3 + z2); sandwich::vcovHC(type = 'HC1')",
+  "dataset": "validation/datasets/generated/mte_sim.csv",
+  "datasets": ["validation/datasets/generated/mte_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "n": 2000,
+    "n_grid": 1001,
+    "fs_iter": 5,
+    "fs_coef": {
+      "names": ["(Intercept)", "z1", "z2"],
+      "values": [-0.17198309318663216, 0.88681413590537217, 0.64269749657259112]
+    },
+    "mte_coef": {
+      "names": ["(Intercept)", "P", "I(P^2)", "I(P^3)", "z2"],
+      "values": [1.2845579621562828, 2.8623148710674151, -1.4672552920410498, 0.019532658410100809, -0.041220874155362353]
+    },
+    "p_min": 0.00091767890684364261,
+    "p_max": 0.99990606003345095,
+    "ate": {
+      "names": ["est", "se"],
+      "values": [1.4145922325630533, 0.16855459337128384]
+    },
+    "att": {
+      "names": ["est", "se"],
+      "values": [1.8560736170273064, 0.20982773211660641]
+    },
+    "atu": {
+      "names": ["est", "se"],
+      "values": [0.88916565702595485, 0.20521039401470195]
+    },
+    "late_support": {
+      "names": ["est", "se"],
+      "values": [1.4131459756994309, 0.16789645617110036]
+    },
+    "fs_coef_tight": {
+      "names": ["(Intercept)", "z1", "z2"],
+      "values": [-0.17198324492726269, 0.88681431207833894, 0.64269768920808312]
+    },
+    "mte_coef_tight": {
+      "names": ["(Intercept)", "P", "I(P^2)", "I(P^3)", "z2"],
+      "values": [1.2845580615699557, 2.8623156367194453, -1.4672577857763112, 0.019534357861698409, -0.041220900961592866]
+    },
+    "ate_tight": {
+      "names": ["est", "se"],
+      "values": [1.4145922039309957, 0.16855454680723833]
+    },
+    "att_tight": {
+      "names": ["est", "se"],
+      "values": [1.8560735591928101, 0.20982767257568005]
+    },
+    "atu_tight": {
+      "names": ["est", "se"],
+      "values": [0.88916566314901546, 0.20521036226952175]
+    },
+    "late_support_tight": {
+      "names": ["est", "se"],
+      "values": [1.4131459462755793, 0.1678964097976996]
+    },
+    "nox_fs_iter": 4,
+    "nox_fs_coef": {
+      "names": ["(Intercept)", "z1"],
+      "values": [0.13734359344714844, 0.84820310278461686]
+    },
+    "nox_mte_coef": {
+      "names": ["(Intercept)", "P", "I(P^2)", "I(P^3)"],
+      "values": [1.391164492070279, 1.4227050974817093, 1.8569787847597898, -2.0938200821925337]
+    },
+    "nox_ate": {
+      "names": ["est", "se"],
+      "values": [1.185864322458644, 0.19636463938591023]
+    },
+    "nox_att": {
+      "names": ["est", "se"],
+      "values": [1.6216210306817653, 0.24996331755303178]
+    },
+    "nox_atu": {
+      "names": ["est", "se"],
+      "values": [0.66661677242912387, 0.23414215076400505]
+    },
+    "nox_late_support": {
+      "names": ["est", "se"],
+      "values": [1.1874682139559967, 0.19346865281479039]
+    },
+    "nox_fs_coef_tight": {
+      "names": ["(Intercept)", "z1"],
+      "values": [0.13734320240342557, 0.84820358265738149]
+    },
+    "nox_mte_coef_tight": {
+      "names": ["(Intercept)", "P", "I(P^2)", "I(P^3)"],
+      "values": [1.3911645728814439, 1.4227087973829919, 1.85696961579297, -2.0938145809400042]
+    },
+    "nox_ate_tight": {
+      "names": ["est", "se"],
+      "values": [1.1858643546442638, 0.19636447362801535]
+    },
+    "nox_att_tight": {
+      "names": ["est", "se"],
+      "values": [1.6216213150077226, 0.24996306188054943]
+    },
+    "nox_atu_tight": {
+      "names": ["est", "se"],
+      "values": [0.66661650416440188, 0.23414208289731994]
+    },
+    "nox_late_support_tight": {
+      "names": ["est", "se"],
+      "values": [1.1874682333561914, 0.19346848921538698]
+    }
+  }
+}

@@ -52,6 +52,8 @@ const SMOOTHING: &str = "smoothing weight of each recursion step; a given value 
                          optimisation";
 const DISTRIBUTION: &str = "parameter of the reference distribution; it enters its CDF only";
 const NULL_VALUE: &str = "null-hypothesis value; it shifts the data or the statistic";
+const SCALEREGUL: &str =
+    "rdbwselect regularisation weight: the core checks it is finite and >= 0; not a cost";
 const CUTOFF: &str = "threshold value; it splits or selects rows";
 const RD_BANDWIDTH: &str = "kernel bandwidth in units of the running variable; it selects rows";
 const DISPLAY: &str = "display threshold; it filters the reported weights";
@@ -911,6 +913,26 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("iv_mte", "bootstrap_reps", Max(Replications)),
         p("iv_mte", "prte_weights", ArrayLen(ArrayLength)),
         p("gmm_iv", "weight_matrix", ArrayLen(ArrayLength)),
+        // ---- MCP causal surface: fields added with the causal tool options. ----
+        p("rd_estimate", "scaleregul", Exempt(SCALEREGUL)),
+        p("rd_bw", "scaleregul", Exempt(SCALEREGUL)),
+        p("rd_fuzzy", "scaleregul", Exempt(SCALEREGUL)),
+        p("rd_multi", "scaleregul", Exempt(SCALEREGUL)),
+        p("iv_mte", "prte_weights[]", Exempt(ARRAY_VALUE)),
+        p("gmm_iv", "weight_matrix[]", Exempt(ARRAY_VALUE)),
+        p(
+            "ltmle",
+            "dynamic_threshold",
+            Exempt("threshold value of the rule; it splits rows"),
+        ),
+        p(
+            "treatment_double_ml",
+            "lambda",
+            Exempt(
+                "glmnet penalty of the nuisance fits; it changes the penalty, not the number of fits",
+            ),
+        ),
+        // ---- end of the MCP causal surface block. ----
         p("stats_mauchly_test", "sigma", ArrayLen(ArrayLength)),
         p("stats_spline", "n", Max(GridPoints)),
         p("ts_vecm", "rank", Max(ModelOrder)),
@@ -1091,18 +1113,7 @@ pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 
 /// (tool, field) of T3 design 5.1 that wave-3 packages add; their rules above exist from wave 1.
 #[cfg(test)]
-pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
-    ("staggered_did", "anticipation"),
-    ("etwfe", "tref"),
-    ("etwfe", "gref"),
-    ("ltmle", "dynamic_columns"),
-    ("gsynth", "r_max"),
-    ("gsynth", "bootstrap_reps"),
-    ("iv_mte", "bootstrap_reps"),
-    ("iv_mte", "prte_weights"),
-    ("gmm_iv", "weight_matrix"),
-    ("munge_fill_na", "value"),
-];
+pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[("munge_fill_na", "value")];
 
 #[cfg(test)]
 mod tests {
@@ -1788,13 +1799,13 @@ mod tests {
             ("treatment_ipw", "bootstrap", 999),
             ("treatment_doubly_robust", "bootstrap", 999),
             ("staggered_did", "bootstrap", 999),
-            ("mediation_analysis", "bootstrap", 999),
+            ("mediation_analysis", "n_bootstrap", 999),
             ("regression_standardization", "n_bootstrap", 999),
             ("natural_effects_mediation", "n_bootstrap", 1000),
             ("bp_bounds", "n_bootstrap", 1000),
-            ("gsynth", "n_bootstrap", 500),
+            ("gsynth", "bootstrap_reps", 200),
             ("gsynth", "n_factors", 2),
-            ("gsynth", "max_factors", 5),
+            ("gsynth", "r_max", 5),
             ("gformula", "n_bootstrap", 200),
             ("gformula", "n_simulations", 1000),
             ("heterogeneity_test", "n_permutations", 1000),
