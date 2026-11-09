@@ -2701,7 +2701,18 @@ mod tests {
 
     #[test]
     fn test_ltmle_from_dataset_refuses_overlapping_roles() {
-        let (_, ds) = crate::test_support::load_case("ltmle_two_period");
+        let n = 24;
+        let noise = |i: usize, s: f64| ((i as f64 * s).sin() * 1000.0).fract();
+        let ds = crate::data::Dataset::new(
+            polars::df! {
+                "Y" => (0..n).map(|i| 1.0 + noise(i, 1.7)).collect::<Vec<f64>>(),
+                "A1" => (0..n).map(|i| (i % 2) as f64).collect::<Vec<f64>>(),
+                "A2" => (0..n).map(|i| ((i / 2) % 2) as f64).collect::<Vec<f64>>(),
+                "L0" => (0..n).map(|i| noise(i, 2.3)).collect::<Vec<f64>>(),
+                "L1" => (0..n).map(|i| noise(i, 3.1)).collect::<Vec<f64>>(),
+            }
+            .unwrap(),
+        );
         let msg = |r: EconResult<LtmleData>| match r {
             Err(EconError::InvalidSpecification { message }) => message,
             other => panic!("expected InvalidSpecification, got {other:?}"),
