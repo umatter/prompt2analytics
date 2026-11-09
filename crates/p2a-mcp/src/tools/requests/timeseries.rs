@@ -421,9 +421,9 @@ pub struct ChangepointRequest {
     #[schemars(description = "Name of the column containing the time series values.")]
     pub column: String,
 
-    /// Penalty for adding a changepoint (optional, uses BIC if not specified)
+    /// Penalty per changepoint (optional; MBIC if not specified)
     #[schemars(
-        description = "Penalty for adding a changepoint. Higher values = fewer changepoints. Default uses BIC (log(n))."
+        description = "Penalty per changepoint. Default: changepoint's MBIC, (k + 2) ln n with k = 1 (mean, variance) or 2 (meanvar), plus ln(segment length) per segment (cpt.* penalty = 'MBIC'); a value sets a manual penalty. Higher values give fewer changepoints."
     )]
     pub penalty: Option<f64>,
 
@@ -439,7 +439,7 @@ pub struct ChangepointRequest {
 
     /// Type of change to detect: 'mean', 'variance', or 'both'
     #[schemars(
-        description = "Type of change to detect, as changepoint's cpt.mean, cpt.var and cpt.meanvar: 'mean' (default; also 'cpt.mean'), 'variance' (also 'var', 'cpt.var') or 'meanvar' (mean and variance; also 'both', 'cpt.meanvar'). Other values are refused."
+        description = "Type of change to detect, as changepoint's cpt.mean, cpt.var and cpt.meanvar: 'mean' (default; unit variance, as cpt.mean; also 'cpt.mean'), 'variance' (also 'var', 'cpt.var') or 'meanvar' (mean and variance; also 'both', 'cpt.meanvar'). Other values are refused."
     )]
     pub change_type: Option<String>,
 }
@@ -759,7 +759,9 @@ pub struct FilterRequest {
     pub method: Option<String>,
 
     /// Sides for convolution
-    #[schemars(description = "For convolution: 1 (past only) or 2 (centered, default).")]
+    #[schemars(
+        description = "For convolution: 2 (default): weights centred around lag 0, as R's filter (an even-length filter puts one more weight on the future); 1: past values only."
+    )]
     pub sides: Option<usize>,
 }
 

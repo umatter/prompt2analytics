@@ -949,7 +949,7 @@ impl AnalyticsServer {
 
     /// Detect changepoints (structural breaks) in a time series.
     #[tool(
-        description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
+        description = "Detect changepoints (structural breaks) in a time series using PELT (changepoint's cpt.mean / cpt.var / cpt.meanvar with the MBIC penalty by default; the mean cost assumes unit variance) or Binary Segmentation (mean changes only). Identifies points where the mean or variance changes. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
     pub async fn ts_changepoint(
         &self,
@@ -1055,7 +1055,7 @@ impl AnalyticsServer {
 
     ///   OTexts. https://otexts.com/fpp3/
     #[tool(
-        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
+        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods, with predict.HoltWinters' 95% prediction intervals for additive and non-seasonal fits (point forecasts only for multiplicative fits). Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
     )]
     pub async fn ts_holt_winters(
         &self,
@@ -1139,13 +1139,37 @@ impl AnalyticsServer {
         // If forecast horizon was requested, generate forecasts
         if let Some(horizon) = request.horizon {
             if horizon > 0 {
-                match holt_winters_forecast(&result, horizon) {
-                    Ok(forecasts) => {
+                // predict.HoltWinters' interval formula is wrong for multiplicative
+                // seasonality, so those fits get point forecasts only.
+                let with_intervals =
+                    result.seasonal_type == SeasonalType::Additive || result.gamma.is_none();
+                let forecasts = if with_intervals {
+                    result.predict(horizon, 0.95).map(|fc| {
+                        output.push_str(&format!(
+                            "\nForecasts ({horizon} periods ahead; 95% prediction intervals as predict.HoltWinters):\n"
+                        ));
+                        for i in 1..=fc.forecast.len() {
+                            output.push_str(&format!(
+                                "  t+{i}: {:.4}  [{:.4}, {:.4}]\n",
+                                fc.forecast[i - 1],
+                                fc.lower[i - 1],
+                                fc.upper[i - 1]
+                            ));
+                        }
+                    })
+                } else {
+                    holt_winters_forecast(&result, horizon).map(|forecasts| {
                         output.push_str(&format!("\nForecasts ({} periods ahead):\n", horizon));
                         for (i, val) in forecasts.iter().enumerate() {
                             output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
                         }
-                    }
+                        output.push_str(
+                            "Note: prediction intervals are implemented for additive and non-seasonal fits only (predict.HoltWinters' multiplicative formula is wrong, TS-22)\n",
+                        );
+                    })
+                };
+                match forecasts {
+                    Ok(()) => {}
                     // A resource or deadline failure is a failure of the call, not a
                     // note on a successful fit: the governor maps an expired budget to 504.
                     Err(
@@ -1234,7 +1258,7 @@ impl AnalyticsServer {
             ArMethod::Ols => "OLS",
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": format!("AR({}) via {}", result.order, method_str),
             "order": result.order,
             "ar_coefficients": result.ar,
@@ -1259,6 +1283,7 @@ impl AnalyticsServer {
             },
             "references": "Brockwell & Davis (1991), Time Series: Theory and Methods"
         });
+        crate::tools::handlers::stats::insert_notes(&mut output, None, &result.warnings);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1410,15 +1435,15 @@ impl AnalyticsServer {
 
         // Build JSON output
         let mut coef_json = serde_json::json!({
-            "level_variance": format!("{:.6}", result.coef.level),
-            "observation_variance": format!("{:.6}", result.coef.epsilon),
+            "level_variance": result.coef.level,
+            "observation_variance": result.coef.epsilon,
         });
 
         if let Some(slope_var) = result.coef.slope {
-            coef_json["slope_variance"] = serde_json::json!(format!("{:.6}", slope_var));
+            coef_json["slope_variance"] = serde_json::json!(slope_var);
         }
         if let Some(seasonal_var) = result.coef.seasonal {
-            coef_json["seasonal_variance"] = serde_json::json!(format!("{:.6}", seasonal_var));
+            coef_json["seasonal_variance"] = serde_json::json!(seasonal_var);
         }
 
         let model_type_str = match result.model_type {
@@ -1427,7 +1452,7 @@ impl AnalyticsServer {
             StructTsType::BSM => "bsm",
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Structural Time Series Model",
             "model_type": model_type_str,
             "n_obs": result.n_obs,
@@ -1435,9 +1460,9 @@ impl AnalyticsServer {
             "converged": result.converged,
             "variance_coefficients": coef_json,
             "fit_statistics": {
-                "log_likelihood": format!("{:.4}", result.log_likelihood),
-                "aic": format!("{:.4}", result.aic),
-                "bic": format!("{:.4}", result.bic),
+                "log_likelihood": result.log_likelihood,
+                "aic": result.aic,
+                "bic": result.bic,
             },
             "components_sample": {
                 "first_5_level": result.level.iter().take(5)
@@ -1464,6 +1489,11 @@ impl AnalyticsServer {
             },
             "references": "Harvey, A. C. (1990). Forecasting, Structural Time Series Models and the Kalman Filter."
         });
+        crate::tools::handlers::stats::insert_notes(
+            &mut output,
+            Some((result.convergence.converged, result.convergence.iterations)),
+            &result.warnings,
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1503,7 +1533,7 @@ impl AnalyticsServer {
         };
 
         // Build output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "CausalImpact (Bayesian Structural Time Series)",
             "periods": {
                 "pre_period": {
@@ -1578,6 +1608,11 @@ impl AnalyticsServer {
             },
             "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274."
         });
+        crate::tools::handlers::stats::insert_notes(
+            &mut output,
+            Some((result.convergence.converged, result.convergence.iterations)),
+            &result.warnings,
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1586,7 +1621,7 @@ impl AnalyticsServer {
 
     /// Compute cumulative periodogram for white noise test.
     #[tool(
-        description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise."
+        description = "Cumulative periodogram as R's cpgram: centred, split-cosine tapered (taper 0.1), cumulative periodogram over the Fourier frequencies; band 1.358 / (sqrt(m) + 0.12 + 0.11/sqrt(m)); Stephens' statistic and the Kolmogorov p-value; missing values are dropped, as R. Tests whether a series is white noise."
     )]
     pub async fn timeseries_cpgram(
         &self,
@@ -1622,6 +1657,7 @@ impl AnalyticsServer {
             "taper": result.taper,
             "white_noise_test": {
                 "is_white_noise": result.is_white_noise,
+                "critical_value": result.critical_value,
                 "ks_statistic": result.ks_statistic,
                 "ks_p_value": result.ks_p_value,
                 "max_deviation": result.max_deviation

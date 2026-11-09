@@ -1789,3 +1789,238 @@ async fn test_validate_mcp_ts_garch_fit_t() {
         .contains("expected one of: norm, std")
     );
 }
+
+/// Reads the `t+h:` forecast rows of `ts_holt_winters`: the point forecast, then the
+/// interval limits when the row has them.
+fn hw_rows(t: &str, horizon: usize) -> Vec<Vec<f64>> {
+    (1..=horizon)
+        .map(|h| {
+            let line = t
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("t+{h}:")))
+                .unwrap_or_else(|| panic!("t+{h} in\n{t}"));
+            line.split([':', '[', ']', ','])
+                .skip(1)
+                .filter_map(|x| x.trim().parse().ok())
+                .collect()
+        })
+        .collect()
+}
+
+/// Holt-Winters forecasts: predict.HoltWinters' 95% intervals for an additive fit, point
+/// forecasts and a note for a multiplicative one (R's multiplicative interval formula is
+/// wrong). Before: point forecasts only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_holt_winters_forecast() {
+    let mult_case = Case::load("ts_holtwinters_forecast");
+    let add_case = Case::load("mcp_hw_additive_t3");
+    let (se, s) = session_with("ts_holtwinters_forecast");
+    let call = |seasonal: &str| {
+        json!({"dataset": "holtwinters_series", "column": "airpass", "period": 12,
+            "seasonal": seasonal, "alpha": 0.3, "beta": 0.05, "gamma": 0.4, "horizon": 12})
+    };
+    let m = ok(&s, &se, "ts_holt_winters", call("multiplicative")).await;
+    let rows = hw_rows(&m, 12);
+    assert!(rows.iter().all(|r| r.len() == 1), "{m}");
+    let fit: Vec<f64> = rows.iter().map(|r| r[0]).collect();
+    Check::new(&mult_case)
+        .vector("airpass_mult_fit", &fit, Tol::printed(4))
+        .scalar(
+            "airpass_mult_sse",
+            number_after(&m, "Sum of Squared Errors:"),
+            Tol::printed(4),
+        )
+        .finish();
+    assert!(
+        m.contains("prediction intervals are implemented for additive and non-seasonal fits only"),
+        "{m}"
+    );
+
+    let a = ok(&s, &se, "ts_holt_winters", call("additive")).await;
+    let rows = hw_rows(&a, 12);
+    assert!(rows.iter().all(|r| r.len() == 3), "{a}");
+    let col = |i: usize| -> Vec<f64> { rows.iter().map(|r| r[i]).collect() };
+    Check::new(&add_case)
+        .vector("hw_add_fit", &col(0), Tol::printed(4))
+        .vector("hw_add_lwr", &col(1), Tol::printed(4))
+        .vector("hw_add_upr", &col(2), Tol::printed(4))
+        .scalar(
+            "hw_add_sse",
+            number_after(&a, "Sum of Squared Errors:"),
+            Tol::printed(4),
+        )
+        .finish();
+    assert!(a.contains("95% prediction intervals"), "{a}");
+}
+
+/// cpgram's band and the Stephens statistic on a white-noise series (missing rows
+/// dropped, as R's cpgram). Before: no critical_value key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_timeseries_cpgram() {
+    let case = Case::load("ts_filter_ar_cpt");
+    let (se, s) = session_with("ts_filter_ar_cpt");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_cpgram",
+            json!({"dataset": "ts_utils", "column": "wn"}),
+        )
+        .await,
+    );
+    let wn = &j["white_noise_test"];
+    let freq = case.vector("cpgram_wn_freq");
+    let cum = case.vector("cpgram_wn_cpgram");
+    for (got, want) in [
+        (fs(&j["freq_sample"]), &freq[..20]),
+        (fs(&j["cpgram_sample"]), &cum[..20]),
+    ] {
+        assert_eq!(got.len(), 20);
+        for (g, w) in got.iter().zip(want) {
+            assert!(Tol::stat(100).allows(*g, *w), "rust={g} R={w}");
+        }
+    }
+    Check::new(&case)
+        .scalar("cpgram_wn_crit", f(&wn["critical_value"]), Tol::stat(100))
+        .scalar("cpgram_wn_stat", f(&wn["ks_statistic"]), Tol::stat(100))
+        .scalar("cpgram_wn_p", f(&wn["ks_p_value"]), Tol::p_value(100))
+        .scalar("cpgram_wn_max_dev", f(&wn["max_deviation"]), Tol::stat(100))
+        .finish();
+    assert_eq!(
+        (
+            wn["is_white_noise"].as_bool(),
+            j["missing"]["n_dropped"].as_u64()
+        ),
+        (Some(true), Some(110))
+    );
+}
+
+/// StructTS variances as numbers, with the convergence notes. Before: 6-decimal strings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_timeseries_structts_bsm() {
+    let case = Case::load("structts_nile_ukgas");
+    let (se, s) = session_with("structts_nile_ukgas");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_structts",
+            json!({"dataset": "structts_series", "column": "ukgas", "model_type": "BSM", "period": 4}),
+        )
+        .await,
+    );
+    let v = &j["variance_coefficients"];
+    assert!(v["level_variance"].is_number(), "{v}");
+    let got = [
+        f(&v["level_variance"]),
+        f(&v["slope_variance"]),
+        f(&v["seasonal_variance"]),
+        f(&v["observation_variance"]),
+    ];
+    Check::new(&case)
+        .named(
+            "ukgas_coef_tight",
+            &["level", "slope", "seas", "epsilon"],
+            &got,
+            Tol::iterative(1e-6),
+        )
+        .scalar(
+            "ukgas_loglik_tight",
+            f(&j["fit_statistics"]["log_likelihood"]),
+            Tol::stat(108),
+        )
+        .finish();
+    assert_eq!(
+        (
+            j["converged"].as_bool(),
+            j["warnings"].as_array().map(Vec::len)
+        ),
+        (Some(true), Some(0))
+    );
+}
+
+/// Clipped CausalImpact periods are reported. No R reference (CausalImpact is not
+/// installed): a property test. Before: no warnings key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_causal_impact_reports_clipped_periods() {
+    // holtwinters_series: t = 1..144, airpass
+    let (se, s) = session_with("ts_holtwinters_forecast");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "causal_impact_analysis",
+            json!({"dataset": "holtwinters_series", "response_col": "airpass", "time_col": "t",
+                "pre_period_start": -5, "pre_period_end": 100,
+                "post_period_start": 101, "post_period_end": 500}),
+        )
+        .await,
+    );
+    let w: Vec<&str> = j["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert!(
+        w.iter()
+            .any(|x| x.contains("pre_period start -5 is before the first time value 1")),
+        "{w:?}"
+    );
+    assert!(
+        w.iter()
+            .any(|x| x.contains("post_period end 500 is after the last time value 144")),
+        "{w:?}"
+    );
+    assert_eq!(
+        (
+            j["periods"]["pre_period"]["n_obs"].as_u64(),
+            j["periods"]["post_period"]["n_obs"].as_u64()
+        ),
+        (Some(100), Some(44))
+    );
+    assert!(
+        refused(
+            &s,
+            &se,
+            "causal_impact_analysis",
+            json!({"dataset": "holtwinters_series", "response_col": "airpass", "time_col": "t",
+                "pre_period_start": 1, "pre_period_end": 100,
+                "post_period_start": 120, "post_period_end": 110})
+        )
+        .await
+        .contains("post_period")
+    );
+}
+
+/// AR warnings in the JSON; the changepoint penalty, cpgram and filter descriptions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_timeseries_wp37_texts() {
+    let (se, s) = session_with("mcp_series_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_ar",
+            json!({"dataset": "mcp_series_t3", "column": "z", "method": "burg"}),
+        )
+        .await,
+    );
+    assert!(j["warnings"].is_array(), "{j}");
+    let tools = s.router_tools();
+    let tool = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+    let desc = |name: &str| tool(name).description.clone().unwrap().to_string();
+    let prop = |name: &str, p: &str| {
+        tool(name).input_schema["properties"][p]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let penalty = prop("ts_changepoint", "penalty");
+    assert!(
+        penalty.contains("MBIC") && !penalty.contains("BIC (log(n))"),
+        "{penalty}"
+    );
+    assert!(desc("timeseries_cpgram").contains("1.358"));
+    assert!(prop("timeseries_filter", "sides").contains("centred"));
+}
