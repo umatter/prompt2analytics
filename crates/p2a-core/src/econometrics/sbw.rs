@@ -1084,6 +1084,8 @@ fn solve_sbw_exact(
     if gram_all.iter().any(|v| !v.is_finite()) {
         return Err(overflow());
     }
+    // Redundant balance constraints make the Gram matrix rank-deficient.
+    // inverse-ok: the weights use mu only through X'mu, equal for every generalized-inverse solution
     let (m_all_inv, _) = safe_inverse(&gram_all.view()).map_err(|e| EconError::SingularMatrix {
         context: "SBW balance constraints".to_string(),
         suggestion: format!(
@@ -1135,6 +1137,7 @@ fn solve_sbw_exact(
 
         // Newton direction on the current piece (pseudo-inverse when |S| < k + 1 or the
         // free units' covariates are collinear).
+        // inverse-ok: a Newton direction of the dual ascent; the slope check below rejects a non-ascent one
         let (m_inv, _) = safe_inverse(&dual.gram(Some(&free)).view()).map_err(|_| infeasible())?;
         let delta = m_inv.dot(&r);
         let slope = r.dot(&delta);

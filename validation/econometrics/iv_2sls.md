@@ -115,6 +115,15 @@ Registered as `iv_2sls` in `validation/methods/econ_iv_panel_na.json`:
   `test_validate_mcp_iv_first_stage_weak_controls`, `test_validate_mcp_iv_sargan_na_rows`
   (the tool texts at print precision).
 
+## Aliased designs
+
+An aliased instrument or regressor set is refused with `SingularMatrix`, naming the matrix and its rank
+(for example "first-stage design X'X: rank 3 of 4"), instead of a generalized-inverse fit. R's
+`AER::ivreg` reports `NA` for the aliased column; dropping columns in 2SLS is not implemented.
+A first-stage partial F of 0/0 (no identifying variation) is `NaN`, which the weak-instrument
+diagnostic reports as critical. Tests: `test_iv_refuses_aliased_designs`,
+`test_partial_f_zero_over_zero_is_nan`.
+
 ## Tolerance
 
 `validation/README.md`, n = 294-500: coefficients 1e-8 relative, standard errors and

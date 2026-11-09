@@ -70,6 +70,26 @@
       "supersedes_legacy": []
     },
     {
+      "id": "cubist_leaf_model",
+      "name": "Cubist leaf linear model with collinear attributes",
+      "category": "ml",
+      "reference": "stats::lm (aliased column NA, eliminated); Cubist itself is not installed",
+      "doc": "validation/ml/cubist.md",
+      "cases": [
+        "inv_cubist_leaf_model"
+      ],
+      "tests": [
+        "p2a-core::ml::cubist::tests::test_validate_cubist_leaf_model_duplicated_column"
+      ],
+      "quantities": [
+        "intercept",
+        "coefficients (aliased 0)"
+      ],
+      "tolerance": "validation/README.md, n = 30",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "affinity_propagation_optimized",
       "name": "affinity_propagation_optimized (delegates to the apcluster port)",
       "category": "ml",

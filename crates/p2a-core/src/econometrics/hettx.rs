@@ -68,7 +68,9 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::{xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::estimator::SignificanceLevel;
@@ -577,6 +579,8 @@ fn run_hettx_with_names(
         &control_idx,
         config.effect_method,
         config.n_neighbors,
+        &covariate_names,
+        &mut warnings,
     )?;
 
     // Compute ATE and SE
@@ -590,8 +594,9 @@ fn run_hettx_with_names(
     // Step 2: Compute observed test statistic
     let observed_stat = compute_test_statistic(&tau_hat, config.test_statistic);
 
-    // Step 3: Permutation test
+    // Step 3: Permutation test (the aliasing notes of permuted fits are not the data's)
     let mut treatment_perm = treatment.to_owned();
+    let mut permutation_warnings = Vec::new();
 
     for _ in 0..config.n_permutations {
         resource::checkpoint()?;
@@ -620,6 +625,8 @@ fn run_hettx_with_names(
             &control_perm,
             config.effect_method,
             config.n_neighbors,
+            &covariate_names,
+            &mut permutation_warnings,
         ) {
             Ok(t) => t,
             Err(e) if is_resource_stop(&e) => return Err(e),
@@ -662,6 +669,7 @@ fn run_hettx_with_names(
             config.n_permutations,
             &mut rng,
             config.compute_importance,
+            &mut warnings,
         )?)
     } else {
         if config.decompose && covariates.is_none() {
@@ -738,6 +746,7 @@ fn validate_config(
 }
 
 /// Estimate individual treatment effects using the specified method.
+#[allow(clippy::too_many_arguments)]
 fn estimate_individual_effects(
     y: &ArrayView1<f64>,
     treatment: &ArrayView1<f64>,
@@ -746,6 +755,8 @@ fn estimate_individual_effects(
     control_idx: &[usize],
     method: EffectEstimationMethod,
     n_neighbors: usize,
+    covariate_names: &[String],
+    warnings: &mut Vec<String>,
 ) -> EconResult<Array1<f64>> {
     let n = y.len();
     let mut tau_hat = Array1::zeros(n);
@@ -783,18 +794,23 @@ fn estimate_individual_effects(
 
             // Add intercept
             let x_with_int = add_intercept(x);
+            let names = design_names(covariate_names, x.ncols());
 
             // Fit model on treated: Y(1) = X * beta_1
-            let (mu_1, _) = fit_outcome_model_on_subset(&x_with_int, y, treated_idx)?;
+            let mu_1 = fit_outcome_model_on_subset(&x_with_int, y, treated_idx, &names)?;
 
             // Fit model on control: Y(0) = X * beta_0
-            let (mu_0, _) = fit_outcome_model_on_subset(&x_with_int, y, control_idx)?;
+            let mu_0 = fit_outcome_model_on_subset(&x_with_int, y, control_idx, &names)?;
+            for (arm, fit) in [("treated", &mu_1), ("control", &mu_0)] {
+                if let Some(w) = &fit.warning {
+                    push_once(warnings, format!("Outcome model ({arm} arm): {w}"));
+                }
+            }
 
             // tau_hat_i = mu_1(X_i) - mu_0(X_i)
             for i in 0..n {
-                let y_hat_1 = x_with_int.row(i).dot(&mu_1);
-                let y_hat_0 = x_with_int.row(i).dot(&mu_0);
-                tau_hat[i] = y_hat_1 - y_hat_0;
+                let row = x_with_int.row(i);
+                tau_hat[i] = mu_1.predict(&row) - mu_0.predict(&row);
             }
         }
         EffectEstimationMethod::Stratified => {
@@ -856,6 +872,26 @@ fn euclidean_distance(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
         .sqrt()
 }
 
+/// The names of the design columns: "(Intercept)", then the covariates (`x1`, `x2`, ... for
+/// unnamed ones, as R's default names).
+fn design_names(covariate_names: &[String], k: usize) -> Vec<String> {
+    std::iter::once("(Intercept)".to_string())
+        .chain((0..k).map(|j| {
+            covariate_names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("x{}", j + 1))
+        }))
+        .collect()
+}
+
+/// Push `w` unless `warnings` already holds it.
+fn push_once(warnings: &mut Vec<String>, w: String) {
+    if !warnings.contains(&w) {
+        warnings.push(w);
+    }
+}
+
 /// Add intercept column to design matrix.
 fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
     let n = x.nrows();
@@ -872,12 +908,35 @@ fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
     x_with_int
 }
 
-/// Fit OLS model on a subset of observations, return coefficients.
+/// An outcome model fitted on a subset of rows, as R's `lm`: aliased coefficients are NaN
+/// (R's NA) and the fit records R's "Coefficients not defined because of singularities".
+#[derive(Debug, Clone)]
+struct OutcomeFit {
+    coefficients: Array1<f64>,
+    r2: f64,
+    warning: Option<String>,
+}
+
+impl OutcomeFit {
+    /// The prediction for one design row, as `predict.lm`: aliased coefficients count as 0.
+    fn predict(&self, row: &ArrayView1<f64>) -> f64 {
+        row.iter()
+            .zip(self.coefficients.iter())
+            .filter(|(_, b)| b.is_finite())
+            .map(|(x, b)| x * b)
+            .sum()
+    }
+}
+
+/// Fit OLS on a subset of observations: the normal equations when the design is of full rank
+/// and well conditioned, otherwise lm's pivoted QR (aliased columns NaN, with R's warning).
+/// `names` names the columns of `x` for the warning.
 fn fit_outcome_model_on_subset(
     x: &Array2<f64>,
     y: &ArrayView1<f64>,
     subset_idx: &[usize],
-) -> EconResult<(Array1<f64>, f64)> {
+    names: &[String],
+) -> EconResult<OutcomeFit> {
     let n_sub = subset_idx.len();
     let k = x.ncols();
 
@@ -898,21 +957,22 @@ fn fit_outcome_model_on_subset(
         y_sub[new_i] = y[old_i];
     }
 
-    // OLS: beta = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x_sub.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Outcome model fitting".to_string(),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x_sub.view(), &y_sub);
-    let beta = xtx_inv.dot(&xty_vec);
+    let (beta, y_hat, warning) = match normal_equations_inverse(x_sub.view())? {
+        Some(ne) => {
+            let beta = ne.coefficients(x_sub.view(), &y_sub);
+            let y_hat = x_sub.dot(&beta);
+            (beta, y_hat, None)
+        }
+        None => {
+            let ls = least_squares(x_sub.view(), y_sub.view())?;
+            let warning = ls.aliasing_warning(names);
+            (ls.coefficients, ls.fitted, warning)
+        }
+    };
 
     // Compute R-squared
     let y_mean = y_sub.mean().unwrap_or(0.0);
     let sst: f64 = y_sub.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
-    let y_hat = x_sub.dot(&beta);
     let ssr: f64 = y_sub
         .iter()
         .zip(y_hat.iter())
@@ -921,7 +981,11 @@ fn fit_outcome_model_on_subset(
 
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
-    Ok((beta, r2))
+    Ok(OutcomeFit {
+        coefficients: beta,
+        r2,
+        warning,
+    })
 }
 
 /// Compute the test statistic for heterogeneity.
@@ -1007,6 +1071,7 @@ fn compute_heterogeneity_decomposition(
     n_perm: usize,
     rng: &mut ChaCha8Rng,
     compute_importance: bool,
+    warnings: &mut Vec<String>,
 ) -> EconResult<HetDecomposition> {
     let n = tau.len();
     let k = x.ncols();
@@ -1020,10 +1085,22 @@ fn compute_heterogeneity_decomposition(
     // This estimates E[tau|X] = X * gamma
     let x_with_int = add_intercept(x);
     let all_idx: Vec<usize> = (0..n).collect();
-    let (gamma, _r2) = fit_outcome_model_on_subset(&x_with_int, &tau.view(), &all_idx)?;
+    let names = design_names(covariate_names, k);
+    let fit = fit_outcome_model_on_subset(&x_with_int, &tau.view(), &all_idx, &names)?;
+    if let Some(w) = &fit.warning {
+        warnings.push(format!("Outcome model (effects): {w}"));
+    }
+    // Aliased coefficients count as 0, as predict.lm
+    let gamma = fit
+        .coefficients
+        .mapv(|b| if b.is_finite() { b } else { 0.0 });
 
     // Predicted effects: E[tau|X]
     let tau_fitted = x_with_int.dot(&gamma);
+    // The permutation fits share the design: one pivoted QR, and each permuted fit's
+    // systematic variance is the squared length of its projection on the column space.
+    let qr = Qr::decompose(x_with_int.view(), LM_QR_TOL)?;
+    let rank = qr.rank();
 
     // Systematic variance: Var(E[tau|X]) = Var(X * gamma)
     let tau_fitted_mean = tau_fitted.mean().unwrap_or(0.0);
@@ -1067,22 +1144,17 @@ fn compute_heterogeneity_decomposition(
         // Create permuted tau
         let tau_perm: Array1<f64> = perm.iter().map(|&i| tau[i]).collect();
 
-        // Fit on permuted data
-        if let Ok((gamma_perm, _)) =
-            fit_outcome_model_on_subset(&x_with_int, &tau_perm.view(), &all_idx)
+        // Fit on permuted data: the fitted values are the projection Q_r Q_r' tau_perm, and
+        // the intercept makes their mean that of tau_perm, so their sum of squares about the
+        // mean is ||Q_r' tau_perm||^2 - n mean^2.
         {
-            let tau_fitted_perm = x_with_int.dot(&gamma_perm);
-
-            // Compute permuted systematic variance
-            let fitted_mean_perm = tau_fitted_perm.mean().unwrap_or(0.0);
-            let sys_var_perm = tau_fitted_perm
-                .iter()
-                .map(|&t| (t - fitted_mean_perm).powi(2))
-                .sum::<f64>()
+            let effects = qr.qty(tau_perm.view())?;
+            let tau_perm_mean = tau_perm.mean().unwrap_or(0.0);
+            let projected: f64 = effects.iter().take(rank).map(|e| e * e).sum();
+            let sys_var_perm = (projected - n as f64 * tau_perm_mean * tau_perm_mean).max(0.0)
                 / (n - 1).max(1) as f64;
 
             // Compute permuted tau variance for idiosyncratic
-            let tau_perm_mean = tau_perm.mean().unwrap_or(0.0);
             let total_var_perm = tau_perm
                 .iter()
                 .map(|&t| (t - tau_perm_mean).powi(2))
@@ -1215,13 +1287,18 @@ mod tests {
             .view(),
         );
         let treated: Vec<usize> = (0..y.len()).filter(|&i| treat[i] == 1.0).collect();
-        let (beta, r2) = fit_outcome_model_on_subset(&x, &y.view(), &treated).unwrap();
-        let pred: Vec<f64> = (0..y.len()).map(|i| x.row(i).dot(&beta)).collect();
+        let names = design_names(&["x1".to_string(), "x2".to_string()], 2);
+        let fit = fit_outcome_model_on_subset(&x, &y.view(), &treated, &names).unwrap();
+        let pred: Vec<f64> = (0..y.len()).map(|i| fit.predict(&x.row(i))).collect();
         Check::new(&case)
-            .vector("coef", beta.as_slice().unwrap(), Tol::coef(20))
+            .vector("coef", fit.coefficients.as_slice().unwrap(), Tol::coef(20))
             .vector("predictions", &pred, Tol::coef(40))
-            .scalar("r2", r2, Tol::stat(20))
+            .scalar("r2", fit.r2, Tol::stat(20))
             .finish();
+        assert_eq!(
+            fit.warning.as_deref(),
+            Some("Coefficients not defined because of singularities: x2")
+        );
     }
 
     #[test]
@@ -1878,6 +1955,7 @@ mod tests {
                 20,
                 &mut ChaCha8Rng::seed_from_u64(1),
                 false,
+                &mut Vec::new(),
             )
         };
         assert!(decompose().is_ok());

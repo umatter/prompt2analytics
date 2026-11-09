@@ -67,7 +67,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::least_squares;
+use crate::regression::ols::normal_equations_inverse;
 
 /// Configuration for Cubist regression trees.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,14 +473,20 @@ impl CubistTree {
         // Build y vector
         let y_sub: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
 
-        // Fit OLS: beta = (X'X)^-1 X'y
-        let xtx_mat = xtx(&design.view());
-        let xty_vec = xty(&design.view(), &y_sub);
+        // Fit OLS: the normal equations when the design is of full rank and well conditioned,
+        // otherwise lm's pivoted QR; an aliased attribute is eliminated (coefficient 0), as
+        // Cubist does.
+        let fit = match normal_equations_inverse(design.view()) {
+            Ok(Some(ne)) => Ok(ne.coefficients(design.view(), &y_sub)),
+            Ok(None) => least_squares(design.view(), y_sub.view()).map(|ls| {
+                ls.coefficients
+                    .mapv(|b| if b.is_finite() { b } else { 0.0 })
+            }),
+            Err(e) => Err(e),
+        };
 
-        match safe_inverse(&xtx_mat.view()) {
-            Ok((inv, _cond)) => {
-                let beta = inv.dot(&xty_vec);
-
+        match fit {
+            Ok(beta) => {
                 let intercept = beta[0];
                 let mut coefficients = vec![0.0; self.n_features];
                 for (i, &feat_idx) in features_to_use.iter().enumerate() {

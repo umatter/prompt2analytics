@@ -348,6 +348,30 @@ mod tests {
             .finish();
     }
 
+    /// A first-stage F that could not be computed (NaN, e.g. 0/0) is a critical
+    /// weak-instrument warning, not a pass.
+    #[test]
+    fn test_nan_first_stage_f_is_a_critical_weak_instrument() {
+        use crate::econometrics::run_iv2sls;
+        let dataset = create_strong_iv_dataset();
+        let mut iv = run_iv2sls(&dataset, "y", &[], &["x_endog"], &["z"], false).unwrap();
+        iv.first_stage_f_stats = vec![f64::NAN];
+        let rep = iv_diagnostics(&dataset, &iv).unwrap();
+        let w = rep
+            .warnings
+            .iter()
+            .find(|w| w.code == "WEAK_INSTRUMENT")
+            .expect("a NaN first-stage F must warn");
+        assert_eq!(w.severity, WarningSeverity::Critical);
+        let rel = rep
+            .assumptions
+            .iter()
+            .find(|a| a.name == "Instrument relevance")
+            .unwrap();
+        assert_eq!(rel.status, AssumptionStatus::LikelyViolation);
+        assert!(!iv.first_stage_f_stats.iter().all(|&f| f >= 10.0));
+    }
+
     #[test]
     fn test_report_summary() {
         use crate::econometrics::run_iv2sls;
