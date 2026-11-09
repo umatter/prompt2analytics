@@ -34,8 +34,6 @@ use p2a_core::{
         WarningSeverity, did_diagnostics, ipw_diagnostics, iv_diagnostics, matching_diagnostics,
         rd_diagnostics, staggered_did_diagnostics,
     },
-    // Propensity Score Matching
-    match_it,
     run_did,
     run_doubly_robust,
     run_fuzzy_rd,
@@ -60,6 +58,7 @@ use crate::output::{
 };
 use crate::session::SessionManager;
 use p2a_core::diagnostics::IdentificationReport;
+use p2a_core::econometrics::matching::{MOrder, MatchMethodKind, MatchOptions, match_it_with};
 use p2a_core::traits::convergence::ResultNotes;
 
 /// Convergence and warnings of a core result in the form `output::print_notes` /
@@ -233,9 +232,11 @@ EXAMPLES:
         #[arg(short = 'p', long, num_args = 1..)]
         predictors: Vec<String>,
 
-        /// V optimization method: "datadriven" (default), "equal"
-        #[arg(long, default_value = "datadriven")]
-        v_method: String,
+        /// V matrix: datadriven (nested optimisation, default; also data_driven, optimal,
+        /// nested) or equal (also uniform; equal weights on the standardised predictors);
+        /// custom V is MCP-only
+        #[arg(long, default_value = "datadriven", value_parser = parse_v_method)]
+        v_method: VOptimization,
 
         /// Run placebo tests for inference
         #[arg(long)]
@@ -612,13 +613,15 @@ EXAMPLES:
         #[arg(long, default_value = "0")]
         n_factors: usize,
 
-        /// Fixed effects: "unit", "time", "twoway" (default), or "none"
-        #[arg(long, default_value = "twoway")]
-        force: String,
+        /// Fixed effects (gsynth force): none, unit (also individual), time or two_way (default;
+        /// also twoway, two-way)
+        #[arg(long, default_value = "two_way", value_parser = option_arg::<GsynthForce>)]
+        force: GsynthForce,
 
-        /// Estimator: "ife" (interactive FE, default) or "mc" (matrix completion)
-        #[arg(long, default_value = "ife")]
-        estimator: String,
+        /// Estimator: ife (interactive fixed effects, default; also gsynth) or mc (matrix
+        /// completion; also matrix_completion)
+        #[arg(long, default_value = "ife", value_parser = option_arg::<GsynthEstimator>)]
+        estimator: GsynthEstimator,
 
         /// Compute bootstrap standard errors
         #[arg(long)]
@@ -653,13 +656,20 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Matching method: "nn" (nearest neighbor, default), "cem" (coarsened exact), "full", or "subclass"
-        #[arg(long, default_value = "nn")]
-        method: String,
+        /// Matching method, as MatchIt: nearest (default; also nn), cem (coarsened exact, Sturges
+        /// bins), full (optimal full matching; also optimal) or subclass (also subclassification)
+        #[arg(long, default_value = "nearest", value_parser = option_arg::<MatchMethodKind>)]
+        method: MatchMethodKind,
 
-        /// Distance metric: "logit" (default), "probit", "mahalanobis", or "euclidean"
-        #[arg(long, default_value = "logit")]
-        distance: String,
+        /// Distance: logit (default; also glm, logistic, ps), probit, mahalanobis or euclidean
+        #[arg(long, default_value = "logit", value_parser = option_arg::<DistanceMethod>)]
+        distance: DistanceMethod,
+
+        /// Order in which treated units are matched (MatchIt m.order): largest (also
+        /// descending), smallest (also ascending), data or random; default largest for
+        /// logit/probit, data otherwise
+        #[arg(long, value_parser = option_arg::<MOrder>)]
+        m_order: Option<MOrder>,
 
         /// Matching ratio for nearest neighbor (default: 1)
         #[arg(long, default_value = "1")]
@@ -766,7 +776,7 @@ pub fn execute(
             treated,
             *treatment_time,
             predictors,
-            v_method,
+            v_method.clone(),
             *placebos,
             format,
             session,
@@ -925,8 +935,8 @@ pub fn execute(
             time,
             covariates,
             *n_factors,
-            force,
-            estimator,
+            *force,
+            *estimator,
             *bootstrap_se,
             *n_bootstrap,
             format,
@@ -938,6 +948,7 @@ pub fn execute(
             covariates,
             method,
             distance,
+            m_order,
             ratio,
             caliper,
             replace,
@@ -946,8 +957,9 @@ pub fn execute(
             dataset,
             treatment,
             covariates,
-            method,
-            distance,
+            *method,
+            *distance,
+            *m_order,
             *ratio,
             caliper.as_ref().copied(),
             *replace,
@@ -1213,7 +1225,7 @@ fn execute_synth(
     treated_unit: &str,
     treatment_time: i64,
     predictors: &[String],
-    v_method: &str,
+    v_opt: VOptimization,
     run_placebos: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1237,12 +1249,6 @@ fn execute_synth(
                 .map(|col| PredictorSpec::new(col))
                 .collect();
 
-            // Parse V optimization method
-            let v_opt = match v_method.to_lowercase().as_str() {
-                "equal" => VOptimization::Equal,
-                _ => VOptimization::DataDriven,
-            };
-
             let mut config = SynthConfig::default();
             config.treated_unit = treated_unit.to_string();
             config.treatment_time = treatment_time;
@@ -1256,11 +1262,13 @@ fn execute_synth(
             match run_synthetic_control(ds, outcome, unit_col, time_col, &predictor_specs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Synthetic Control",
                             "treated_unit": result.treated_unit,
                             "treatment_time": result.treatment_time,
                             "unit_weights": result.unit_weights,
+                            "all_unit_weights": result.all_unit_weights,
+                            "predictor_loss": result.predictor_loss,
                             "predictor_balance": result.predictor_balance.iter().map(|b| {
                                 serde_json::json!({
                                     "predictor": b.predictor,
@@ -1289,6 +1297,7 @@ fn execute_synth(
                                 })
                             }),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1585,6 +1594,12 @@ pub(crate) fn option_arg<T: std::str::FromStr<Err = p2a_core::EconError>>(
     s: &str,
 ) -> Result<T, String> {
     s.parse::<T>().map_err(rd_name_message)
+}
+
+/// `--v-method` of `causal synth`: `VOptimization::from_options(Some(s), None)`, or the core
+/// message.
+fn parse_v_method(s: &str) -> Result<VOptimization, String> {
+    VOptimization::from_options(Some(s), None).map_err(rd_name_message)
 }
 
 /// `--vce` as a `VceType`, or the core message.
@@ -2052,8 +2067,8 @@ fn execute_gsynth(
     time_col: &str,
     covariates: &[String],
     n_factors: usize,
-    force: &str,
-    estimator: &str,
+    gsynth_force: GsynthForce,
+    gsynth_estimator: GsynthEstimator,
     bootstrap_se: bool,
     n_bootstrap: usize,
     format: &OutputFormat,
@@ -2071,34 +2086,20 @@ fn execute_gsynth(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let gsynth_force = match force.to_lowercase().as_str() {
-                "unit" => GsynthForce::Unit,
-                "time" => GsynthForce::Time,
-                "none" => GsynthForce::None,
-                _ => GsynthForce::TwoWay,
-            };
-
-            let gsynth_estimator = match estimator.to_lowercase().as_str() {
-                "mc" | "matrixcompletion" => GsynthEstimator::MatrixCompletion,
-                _ => GsynthEstimator::Ife,
-            };
-
-            let config = GsynthConfig {
-                n_factors,
-                cross_validate: n_factors == 0,
-                force: gsynth_force,
-                estimator: gsynth_estimator,
-                bootstrap_se,
-                n_bootstrap,
-                ..Default::default()
-            };
+            let mut config = GsynthConfig::default();
+            config.n_factors = n_factors;
+            config.cross_validate = n_factors == 0;
+            config.force = gsynth_force;
+            config.estimator = gsynth_estimator;
+            config.bootstrap_se = bootstrap_se;
+            config.n_bootstrap = n_bootstrap;
 
             match run_gsynth(
                 ds, outcome, treatment, unit_col, time_col, &cov_refs, config,
             ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Generalized Synthetic Control (gsynth)",
                             "att": result.att,
                             "att_se": result.att_se,
@@ -2109,8 +2110,18 @@ fn execute_gsynth(
                             "n_pre_periods": result.n_pre_periods,
                             "n_post_periods": result.n_post_periods,
                             "n_factors": result.n_factors,
-                            "estimator": format!("{:?}", result.estimator),
-                            "force": format!("{:?}", result.force),
+                            "estimator": result.estimator.to_string(),
+                            "force": result.force.to_string(),
+                            "beta": result.beta,
+                            "covariate_names": result.covariate_names,
+                            "cv_mspe": result.cv_mspe,
+                            "cv_lambda": result.cv_lambda,
+                            "lambda": result.lambda,
+                            "sigma2": result.sigma2,
+                            "mu": result.mu,
+                            "dynamic_counts": result.dynamic_counts,
+                            "dynamic_se": result.dynamic_se,
+                            "bootstrap": result.bootstrap,
                             "dynamic_effects": result.dynamic_effects.iter().map(|(t, e)| {
                                 serde_json::json!({ "time": t, "effect": e })
                             }).collect::<Vec<_>>(),
@@ -2123,6 +2134,7 @@ fn execute_gsynth(
                                 })
                             }).collect::<Vec<_>>(),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2142,8 +2154,9 @@ fn execute_matching(
     dataset_name: &str,
     treatment: &str,
     covariates: &[String],
-    method: &str,
-    distance: &str,
+    method: MatchMethodKind,
+    distance_method: DistanceMethod,
+    m_order: Option<MOrder>,
     ratio: usize,
     caliper: Option<f64>,
     replace: bool,
@@ -2163,42 +2176,44 @@ fn execute_matching(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let match_method = match method.to_lowercase().as_str() {
-                "cem" | "coarsened" | "coarsenedexact" => MatchMethod::CoarsenedExact {
-                    cutpoints: None,
-                    n_bins: Some(4),
-                },
-                "full" | "optimal" => MatchMethod::Full {
-                    min_ratio: 0.5,
-                    max_ratio: 2.0,
-                },
-                "subclass" | "stratification" => MatchMethod::Subclass { n_subclasses },
-                _ => MatchMethod::NearestNeighbor {
+            let match_method = match method {
+                MatchMethodKind::Nearest => MatchMethod::NearestNeighbor {
                     ratio,
                     caliper,
                     replace,
                 },
+                // MatchIt's default bins (nclass.Sturges)
+                MatchMethodKind::Cem => MatchMethod::CoarsenedExact {
+                    cutpoints: None,
+                    n_bins: None,
+                },
+                MatchMethodKind::Full => MatchMethod::Full {
+                    min_ratio: 0.5,
+                    max_ratio: 2.0,
+                },
+                MatchMethodKind::Subclass => MatchMethod::Subclass { n_subclasses },
             };
+            let mut options = MatchOptions::default();
+            options.m_order = m_order;
 
-            let distance_method = match distance.to_lowercase().as_str() {
-                "probit" => DistanceMethod::Probit,
-                "mahalanobis" => DistanceMethod::Mahalanobis,
-                "euclidean" => DistanceMethod::Euclidean,
-                _ => DistanceMethod::Logit,
-            };
-
-            match match_it(
+            match match_it_with(
                 ds,
                 treatment,
                 &cov_refs,
                 match_method,
                 Some(distance_method),
+                &options,
             ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": format!("{}", result.method),
                             "distance": format!("{}", result.distance),
+                            "m_order": result.m_order.map(|m| m.to_string()),
+                            "ess_treated": result.ess_treated,
+                            "ess_control": result.ess_control,
+                            "total_distance": result.total_distance,
+                            "caliper_abs": result.caliper_abs,
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
@@ -2218,13 +2233,14 @@ fn execute_matching(
                                 "max_abs_std_diff": result.balance_after.max_abs_std_diff,
                                 "n_imbalanced": result.balance_after.n_imbalanced,
                             },
+                            "diagnostics": identification_json(&matching_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
+                        // the Display prints both balance tables and the notes
                         println!("{}", result);
-                        println!("\nDetailed Balance After Matching:");
-                        println!("{}", result.balance_after);
 
                         // Run identification diagnostics
                         let diag_report = matching_diagnostics(&result);

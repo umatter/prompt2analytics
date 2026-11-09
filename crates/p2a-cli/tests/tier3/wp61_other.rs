@@ -664,3 +664,181 @@ fn test_cli_causal_json_carries_notes() {
     ]);
     assert_keys(&j, &["warnings", "missing"]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// causal matching, synth, gsynth
+// ---------------------------------------------------------------------------------------------
+
+/// MatchIt spellings (nearest, glm), m.order and ESS. R: matchit_nearest ratio2_ess
+/// (matchit(ratio = 2), m.order "largest"): control ESS 136.5689655172414, treated 89.
+#[test]
+fn test_validate_cli_matching_options() {
+    let case = Case::load("matchit_nearest");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "causal",
+        "matching",
+        d.as_str(),
+        "-t",
+        "treat",
+        "-x",
+        "x1",
+        "x2",
+        "x3",
+        "--method",
+        "nearest",
+        "--ratio",
+        "2",
+        "--distance",
+        "glm",
+    ];
+    let j = s.json(&args);
+    Check::new(&case)
+        .vector(
+            "ratio2_ess",
+            &[num(field(&j, "ess_control")), num(field(&j, "ess_treated"))],
+            Tol::coef(240),
+        )
+        .finish();
+    assert_eq!(field(&j, "m_order"), "largest");
+    assert_keys(
+        &j,
+        &["warnings", "diagnostics", "total_distance", "caliper_abs"],
+    );
+    let text = s.ok(&args);
+    assert!(!text.contains("Detailed Balance After Matching"), "{text}");
+    let b = ["causal", "matching", "d", "-t", "t", "-x", "a"];
+    assert_usage_errors(&[
+        (argv(&b, &["--method", "genetic"]), "nearest"),
+        (argv(&b, &["--distance", "rf"]), "mahalanobis"),
+        (argv(&b, &["--m-order", "closest"]), "largest"),
+    ]);
+}
+
+/// CLI-14: `--v-method uniform` (an alias of equal V) ran the data-driven V search.
+/// R: synth_weights_qp equal_w and equal_predictor_loss (the exact simplex QP with V = I on the
+/// standardised predictors).
+#[test]
+fn test_validate_cli_synth_v_method_alias() {
+    let case = Case::load("synth_weights_qp");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "causal",
+        "synth",
+        &d,
+        "-y",
+        "y",
+        "--unit",
+        "unit",
+        "--time",
+        "time",
+        "--treated",
+        "TR",
+        "--treatment-time",
+        "15",
+        "-p",
+        "x1",
+        "x2",
+        "x3",
+        "--v-method",
+        "uniform",
+    ]);
+    let (names, w) = pairs(field(&j, "all_unit_weights"));
+    Check::new(&case)
+        .named("equal_w", &names, &w, Tol::coef(14))
+        .scalar(
+            "equal_predictor_loss",
+            num(field(&j, "predictor_loss")),
+            Tol::stat(14),
+        )
+        .finish();
+    assert_keys(&j, &["warnings"]);
+    assert_usage_errors(&[(
+        vec![
+            "causal",
+            "synth",
+            "d",
+            "-y",
+            "y",
+            "--unit",
+            "u",
+            "--time",
+            "t",
+            "--treated",
+            "T",
+            "--treatment-time",
+            "5",
+            "-p",
+            "a",
+            "--v-method",
+            "ml",
+        ],
+        "equal",
+    )]);
+}
+
+/// CLI-14: gsynth spellings, Display names in JSON, the covariate coefficients.
+/// R: gsynth_simdata ife_r2_cov_att_avg and ife_r2_cov_beta (gsynth 1.4, r = 2, X1 X2, converged);
+/// 5e-4 relative, p2a's default stopping rule.
+#[test]
+fn test_validate_cli_gsynth_r_spellings() {
+    let case = Case::load("gsynth_simdata");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "causal",
+        "gsynth",
+        &d,
+        "-y",
+        "Y",
+        "-d",
+        "D",
+        "--unit",
+        "id",
+        "--time",
+        "time",
+        "-x",
+        "X1",
+        "X2",
+        "--n-factors",
+        "2",
+        "--estimator",
+        "gsynth",
+        "--force",
+        "two-way",
+    ]);
+    Check::new(&case)
+        .scalar(
+            "ife_r2_cov_att_avg",
+            num(field(&j, "att")),
+            Tol::new(5e-4, 0.0),
+        )
+        .vector(
+            "ife_r2_cov_beta",
+            &f64s(field(&j, "beta")),
+            Tol::new(5e-4, 0.0),
+        )
+        .finish();
+    assert_eq!(field(&j, "estimator"), "ife");
+    assert_eq!(field(&j, "force"), "two_way");
+    assert_keys(
+        &j,
+        &[
+            "warnings",
+            "covariate_names",
+            "cv_mspe",
+            "sigma2",
+            "dynamic_counts",
+            "bootstrap",
+        ],
+    );
+    let b = [
+        "causal", "gsynth", "d", "-y", "y", "-d", "t", "--unit", "u", "--time", "t",
+    ];
+    assert_usage_errors(&[
+        (argv(&b, &["--force", "both"]), "two_way"),
+        (argv(&b, &["--estimator", "em"]), "mc"),
+    ]);
+}

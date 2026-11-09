@@ -89,3 +89,31 @@ identification diagnostics, TMLE both fluctuation coefficients.
 Deviation: the stdreg SEs are not pinned (CAUS-39). `test_cli_causal_json_carries_notes` checks
 that the IV and mediation JSON carry `warnings` (IV also `diagnostics` and `first_stage`,
 mediation `missing`); it pins no value.
+
+### `causal matching`, `causal synth`, `causal gsynth`
+
+| Command, option | Values (canonical first; aliases) | R argument |
+|---|---|---|
+| `matching --method` | nearest (nn, nearest_neighbor), cem (coarsened, coarsened_exact), full (optimal, full_matching), subclass (subclassification, stratify) | `matchit(method = )` |
+| `matching --distance` | logit (glm, logistic, ps), probit, mahalanobis, euclidean | `matchit(distance = )` |
+| `matching --m-order` (new) | largest (descending), smallest (ascending), data (data_order), random; default largest for logit/probit, data otherwise | `matchit(m.order = )` |
+| `synth --v-method` | datadriven (data_driven, optimal, nested), equal (uniform); custom V is MCP-only | `synth(custom.v = )` |
+| `gsynth --force` | none, unit (individual), time, two_way (twoway) | `gsynth(force = )` |
+| `gsynth --estimator` | ife (gsynth, interactive_fixed_effects), mc (matrix_completion) | `gsynth(estimator = )` |
+
+`--method cem` uses MatchIt's default Sturges bins (it used four quantile bins). Matching prints
+its Display (both balance tables and the notes) once; its JSON gains `m_order`, `ess_treated`,
+`ess_control`, `total_distance`, `caliper_abs`, `diagnostics` and the notes. Synth's JSON gains
+`all_unit_weights` (every donor) and `predictor_loss`; gsynth's names the estimator and the
+fixed effects by their table names (`ife`, `mc`; `two_way`; they were Rust Debug names) and
+gains `beta`, `covariate_names`, `cv_mspe`, `cv_lambda`, `lambda`, `sigma2`, `mu`,
+`dynamic_counts`, `dynamic_se` and `bootstrap`.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_matching_options` | `matchit_nearest` `ratio2_ess` (control, treated; `--ratio 2 --distance glm`) | `Tol::coef(240)` |
+| `test_validate_cli_synth_v_method_alias` | `synth_weights_qp` `equal_w` (by donor), `equal_predictor_loss` (`--v-method uniform`) | `Tol::coef(14)`, `Tol::stat(14)` |
+| `test_validate_cli_gsynth_r_spellings` | `gsynth_simdata` `ife_r2_cov_att_avg`, `ife_r2_cov_beta` (`--n-factors 2 -x X1 X2`) | relative 5e-4 |
+
+Deviation: gsynth is compared at 5e-4 relative, the gap between p2a's default EM stopping rule
+and R's converged fit, as in the estimator's own validation.

@@ -5,7 +5,7 @@
       "id": "cli_causal_options",
       "name": "p2a causal rd/fuzzy-rd/staggered-did/did/ipw/doubly-robust/tmle/stdreg/matching/synth/gsynth: typed options, R and MCP spellings, notes and wave-2 fields",
       "category": "interfaces",
-      "reference": "rdrobust::rdbwselect (bwselect, kernel); did att_gt (control_group, est_method, anticipation; DRDID); lm + sandwich (2x2 DiD, aliased); WeightIt/glm IPW (M-estimation SE) and AIPW; TMLE as tmle_glm; stdReg as stdreg_glm",
+      "reference": "rdrobust::rdbwselect (bwselect, kernel); did att_gt (control_group, est_method, anticipation; DRDID); lm + sandwich (2x2 DiD, aliased); WeightIt/glm IPW (M-estimation SE) and AIPW; TMLE as tmle_glm; stdReg as stdreg_glm; MatchIt::matchit (ratio, m.order); exact simplex QP (Synth, V = I); gsynth::gsynth 1.4",
       "doc": "validation/cli/other.md",
       "cases": [
         "rd_bwselect_sharp",
@@ -15,7 +15,10 @@
         "did_2x2_training",
         "ipw_aipw_sim",
         "tmle_glm",
-        "stdreg_glm"
+        "stdreg_glm",
+        "matchit_nearest",
+        "synth_weights_qp",
+        "gsynth_simdata"
       ],
       "tests": [
         "p2a-cli::tier3::wp61_other::test_validate_cli_rd_bwselect_certwo",
@@ -26,7 +29,10 @@
         "p2a-cli::tier3::wp61_other::test_validate_cli_did_aliased",
         "p2a-cli::tier3::wp61_other::test_validate_cli_ipw_dr_se_method",
         "p2a-cli::tier3::wp61_other::test_validate_cli_tmle_qmodel_alias",
-        "p2a-cli::tier3::wp61_other::test_validate_cli_stdreg_r_spellings"
+        "p2a-cli::tier3::wp61_other::test_validate_cli_stdreg_r_spellings",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_matching_options",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_synth_v_method_alias",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_gsynth_r_spellings"
       ],
       "quantities": [
         "selected bandwidths h and b (left, right) for certwo and the Epanechnikov mserd, sharp and fuzzy",
@@ -34,9 +40,13 @@
         "2x2 DiD ATT, HC1 SE, residual df and the aliased regressor",
         "IPW Hajek ATE, M-estimation SE and EIF SE; AIPW ATE and SE",
         "TMLE ATE and SE with a linear Q",
-        "stdreg logistic ATE, E[Y(1)], E[Y(0)]"
+        "stdreg logistic ATE, E[Y(1)], E[Y(0)]",
+        "MatchIt ratio-2 ESS",
+        "synthetic-control donor weights and predictor loss with V = I",
+        "gsynth ATT and covariate coefficients",
+        "presence of warnings, convergence, diagnostics and the new keys"
       ],
-      "tolerance": "validation/README.md for each n (rd_sim 1000: 1e-8; cs_panel 720: ATT 1e-8, SE 1e-6; employee_training 1200: 1e-10 / 1e-8; weighting_sim and ctmle_sim 300: 1e-8 / 1e-6); stdreg Tol::iterative(1e-8) (glm IRLS); DR with anticipation Tol::iterative(1e-8) (glm IRLS propensity); counts and df exact",
+      "tolerance": "validation/README.md for each n (rd_sim 1000: 1e-8; cs_panel 720: ATT 1e-8, SE 1e-6; employee_training 1200: 1e-10 / 1e-8; weighting_sim and ctmle_sim 300: 1e-8 / 1e-6); stdreg Tol::iterative(1e-8) (glm IRLS); matching 240: 1e-8; synth n = 14 pre-periods: 1e-6, loss 1e-5; gsynth 5e-4 relative (p2a's default stopping rule against R's converged fit); DR with anticipation Tol::iterative(1e-8) (glm IRLS propensity); counts and df exact",
       "deviations": [
         {
           "finding": "CAUS-39",
