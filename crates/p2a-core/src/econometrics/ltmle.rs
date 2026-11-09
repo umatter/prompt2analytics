@@ -1586,6 +1586,11 @@ fn outcome_scale(y: &Array1<f64>, q_model: LtmleQModel) -> EconResult<OutcomeSca
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
             (lo.min(v), hi.max(v))
         });
+    if q_model == LtmleQModel::Logistic && !(max > min) {
+        return Err(spec_err(format!(
+            "LTMLE: the outcome is constant ({min}); nothing to estimate"
+        )));
+    }
     if q_model == LtmleQModel::Logistic && (min < 0.0 || max > 1.0) {
         let width = max - min;
         if width.is_nan() || width <= 0.0 {
@@ -1651,6 +1656,12 @@ pub struct NodeModel {
     /// starts from the later node's coefficients, so its count is not comparable with
     /// glm.fit's from glm.fit's own start.
     pub iterations: usize,
+    /// Set when the Q response had a range below 1e-4 and was not regressed (ltmle's
+    /// no-variation rule): the constant prediction on the fitted [0, 1] scale, the response's
+    /// maximum. The intercept is then its logit, bounded to `[1e-4, 0.9999]` first as ltmle does,
+    /// the other coefficients are NaN and `iterations` is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constant_prediction: Option<f64>,
 }
 
 /// The g models: coefficients, records and fitted (observed-history) propensities.
@@ -1669,6 +1680,13 @@ fn glm_spec<'a>(family: GlmFamily, config: &LtmleConfig) -> GlmSpec<'a> {
 
 /// A response whose mean is this close to 0 or 1 goes straight to the shared GLM.
 const SATURATED_MEAN: f64 = 1e-6;
+
+/// ltmle's no-variation rule (`ltmle:::Estimate`): a Q response whose range over the fitted
+/// subjects is below this is not regressed but predicted as the constant `max(response)`, on the
+/// link scale `qlogis` of it bounded to [`CONSTANT_Q_BOUNDS`].
+const CONSTANT_Q_RANGE: f64 = 1e-4;
+/// The bounds ltmle applies to a constant Q prediction before taking its logit.
+const CONSTANT_Q_BOUNDS: (f64, f64) = (1e-4, 0.9999);
 
 /// Below this `max_iter` the Q regressions keep glm.fit's start. The limit decides whether a fit
 /// is reported as not converged, on the step count from that start, which a warm start would
@@ -1769,6 +1787,7 @@ fn fit_treatment_models(
             coefficients: fit.coefficients.to_vec(),
             converged: fit.converged,
             iterations: fit.iterations,
+            constant_prediction: None,
         });
         out.coefficients.push(fit.coefficients);
         out.fitted.push(fit.fitted);
@@ -1794,6 +1813,29 @@ fn fit_q(
     let what = format!("Q model at {}", treatment_names[t]);
     match config.q_model {
         LtmleQModel::Logistic => {
+            let (min, max) = q_next
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                    (lo.min(v), hi.max(v))
+                });
+            if max - min < CONSTANT_Q_RANGE {
+                // No regression: every subject's linear predictor is the bounded logit of the
+                // maximum. The NaN coefficients drop their columns from the prediction, and the
+                // next node's warm start (all coefficients finite) falls back to glm.fit's start.
+                let (lo, hi) = CONSTANT_Q_BOUNDS;
+                let c = max.max(lo).min(hi);
+                let mut coefficients = Array1::from_elem(x.ncols(), f64::NAN);
+                coefficients[0] = (c / (1.0 - c)).ln();
+                let model = NodeModel {
+                    node: t,
+                    names: names.clone(),
+                    coefficients: coefficients.to_vec(),
+                    converged: true,
+                    iterations: 0,
+                    constant_prediction: Some(max),
+                };
+                return Ok((coefficients, model));
+            }
             let fit = fit_logit_node(
                 x,
                 q_next,
@@ -1811,6 +1853,7 @@ fn fit_q(
                 coefficients: fit.coefficients.to_vec(),
                 converged: fit.converged,
                 iterations: fit.iterations,
+                constant_prediction: None,
             };
             Ok((fit.coefficients, model))
         }
@@ -1827,6 +1870,7 @@ fn fit_q(
                 coefficients: fit.beta.to_vec(),
                 converged: true,
                 iterations: 0,
+                constant_prediction: None,
             };
             Ok((fit.beta, model))
         }
@@ -1880,7 +1924,7 @@ fn estimate_regime(
     let n = data.n_obs();
     let t_max = data.time_points();
     let (lo, hi) = config.gbounds;
-    let constant_q_nodes: Vec<usize> = Vec::new();
+    let mut constant_q_nodes: Vec<usize> = Vec::new();
     let resolved_targeting: Vec<(usize, f64)> = Vec::new();
 
     // Cumulative probability of following the regime, g predicted with SetA.
@@ -1949,6 +1993,20 @@ fn estimate_regime(
             (&fitted.0, &fitted.1)
         };
         q_models[t] = model.clone();
+        if let Some(c) = model.constant_prediction {
+            constant_q_nodes.push(t);
+            let (lo, hi) = q_next
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                    (a.min(v), b.max(v))
+                });
+            notes.warnings.push(format!(
+                "LTMLE: {label}: Q response at {} has range {:.1e} < {CONSTANT_Q_RANGE:e}; \
+                 predicted as the constant {c:.6} (ltmle's no-variation rule)",
+                data.treatment_names[t],
+                hi - lo
+            ));
+        }
         let eta = identified_linear_predictor(
             designs.q[t].view(),
             coef.view(),
@@ -3379,12 +3437,11 @@ mod tests {
 
     #[test]
     fn test_ltmle_fast_paths_report_a_saturated_regime_through_the_shared_glm() {
-        // An extreme fluctuation at a later node leaves an earlier Q response with its mean
-        // within SATURATED_MEAN of 0 or 1 and a flat likelihood, where the coefficients and the
-        // standard error depend on the start. long_horizon(2500, 10, 21) depends on that guard:
-        // from a warm start its numbers differ. sparse_followers(4000, 10, 3) is the harness's
-        // saturating case; it has the same warnings, leaves the lean path at the link's clamp as
-        // well, and passes without the guard.
+        // An extreme fluctuation at a later node leaves the earlier Q responses of a regime
+        // without variation. ltmle's no-variation rule predicts those as constants before any fit
+        // path is chosen, so the fast and cold paths apply it alike; a response that keeps a range
+        // of at least 1e-4 with its mean within SATURATED_MEAN of 0 or 1 still goes to the shared
+        // GLM. sparse_followers(4000, 10, 3) is the timing harness's saturating case.
         for data in [long_horizon(2500, 10, 21), sparse_followers(4000, 10, 3)] {
             assert_same_as_shared_glm(
                 &data,
@@ -3394,8 +3451,16 @@ mod tests {
             );
             assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-10);
             let r = run_ltmle(&data, LtmleConfig::default()).unwrap();
+            assert!(r.saturation.flagged(), "{:?}", r.saturation);
             assert!(
-                r.warnings.iter().any(|w| w.starts_with("Q model at")),
+                r.saturation.constant_q_nodes.iter().any(|c| !c.is_empty()),
+                "{:?}",
+                r.saturation
+            );
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.ends_with("(ltmle's no-variation rule)")),
                 "{:?}",
                 r.warnings
             );
@@ -3505,6 +3570,218 @@ mod tests {
         assert_eq!(near(&a).psi.to_bits(), near(&b).psi.to_bits());
         assert_eq!(near(&a).fluctuation_coefs, near(&b).fluctuation_coefs);
         assert_relative("ate", &[a.ate], &[c.ate], 1e-13);
+    }
+
+    /// Every regime's estimate of a result, the intervention first.
+    fn regime_estimates(r: &LtmleResult) -> Vec<&RegimeEstimate> {
+        std::iter::once(&r.regime_estimate)
+            .chain(r.contrast_estimate.iter())
+            .collect()
+    }
+
+    /// The node's Q response: the outcome at the last node, else the later node's Q*.
+    fn q_response(e: &RegimeEstimate, y: &Array1<f64>, t: usize) -> Vec<f64> {
+        if t + 1 == e.targeted_predictions.len() {
+            y.to_vec()
+        } else {
+            e.targeted_predictions[t + 1].clone()
+        }
+    }
+
+    #[test]
+    fn test_ltmle_constant_q_response_is_not_regressed() {
+        // The never regime of sparse_followers(1200, 10, 12) has one follower at the last node:
+        // the targeting there leaves every earlier Q response without variation, and ltmle
+        // predicts each as a constant instead of regressing it.
+        let data = sparse_followers(1200, 10, 12);
+        let y = data.outcomes[9].clone();
+        let r = ltmle(&data).unwrap();
+        let never = r.contrast_estimate.as_ref().unwrap();
+        let constant = &r.saturation.constant_q_nodes[1];
+        assert!(!constant.is_empty(), "{:?}", r.saturation);
+        assert!(!constant.contains(&9), "the last node is never constant");
+        for &t in constant {
+            let m = &never.q_models[t];
+            let response = q_response(never, &y, t);
+            let (lo, hi) = response
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                    (a.min(v), b.max(v))
+                });
+            assert!(hi - lo < 1e-4, "node {t}: range {}", hi - lo);
+            assert_eq!(m.constant_prediction, Some(hi), "node {t}");
+            assert_eq!(m.iterations, 0);
+            assert!(m.converged);
+            let c = hi.clamp(1e-4, 0.9999);
+            let logit = (c / (1.0 - c)).ln();
+            assert_eq!(m.coefficients[0], logit);
+            assert!(m.coefficients[1..].iter().all(|b| b.is_nan()));
+            // Q*_t of every subject is the constant's logit moved by the node's fluctuation
+            let eps = never.fluctuation_coefs[t];
+            for q in &never.targeted_predictions[t] {
+                assert_eq!(*q, linkinv(logit + eps), "node {t}");
+            }
+            assert!(
+                r.warnings.iter().any(|w| w.starts_with(&format!(
+                    "LTMLE: never treat: Q response at A{} has range",
+                    t + 1
+                )) && w.ends_with("(ltmle's no-variation rule)")),
+                "{:?}",
+                r.warnings
+            );
+        }
+        // the rule sits before the choice of fit path, so the cold path applies it alike
+        let cold = run_ltmle_with(
+            &data,
+            LtmleConfig::default(),
+            FitPaths {
+                lean: false,
+                warm: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cold.saturation.constant_q_nodes,
+            r.saturation.constant_q_nodes
+        );
+        let cold_never = cold.contrast_estimate.as_ref().unwrap();
+        for &t in constant {
+            let (a, b) = (
+                never.q_models[t].constant_prediction.unwrap(),
+                cold_never.q_models[t].constant_prediction.unwrap(),
+            );
+            assert!(
+                (a - b).abs() <= 1e-9 * b.abs().max(1e-300),
+                "node {t}: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ltmle_constant_outcome_is_refused() {
+        let mut data = long_horizon(300, 3, 5);
+        for v in [0.0, 1.0, 0.25] {
+            data.outcomes[2] = Array1::from_elem(300, v);
+            let err = ltmle(&data).unwrap_err();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { ref message } if message.contains("constant")),
+                "{err:?}"
+            );
+        }
+    }
+
+    /// ltmle_saturation.csv as LtmleData.
+    fn saturation_case_data(ds: &crate::data::Dataset) -> LtmleData {
+        let a: Vec<String> = (1..=8).map(|t| format!("A{t}")).collect();
+        let l: Vec<[String; 2]> = (1..=8)
+            .map(|t| [format!("L{t}a"), format!("L{t}b")])
+            .collect();
+        let a_ref: Vec<&str> = a.iter().map(String::as_str).collect();
+        let l_ref: Vec<Vec<&str>> = l
+            .iter()
+            .map(|p| vec![p[0].as_str(), p[1].as_str()])
+            .collect();
+        let l_sl: Vec<&[&str]> = l_ref.iter().map(Vec::as_slice).collect();
+        case_data(ds, "Y", &a_ref, &l_sl)
+    }
+
+    #[test]
+    fn test_validate_ltmle_saturation_matches_ltmle() {
+        // ltmle::ltmle 1.3-0 itself is the reference (case ltmle_saturation): its glms stop at
+        // epsilon 1e-8, so its numbers carry that slack. Quantities off 0 and 1 are held to
+        // 1e-6 relative; those within 1e-6 of 0 (the never regime's mean and SE, about 4e-11
+        // and 5e-12) to 1e-8 absolute: they are the distance of a clamped prediction from 0,
+        // which ltmle's nlminb-free path and p2a reach by different rounding.
+        let (case, ds) = crate::test_support::load_case("ltmle_saturation");
+        let r = ltmle(&saturation_case_data(&ds)).unwrap();
+        let near_zero = Tol::new(0.0, 1e-8);
+        let indicator = |nodes: &[usize]| -> Vec<f64> {
+            (0..8)
+                .map(|t| f64::from(u8::from(nodes.contains(&t))))
+                .collect()
+        };
+        Check::new(&case)
+            .scalar("psi_always_sat", r.psi_treated, Tol::iterative(1e-6))
+            .scalar("se_always_sat", r.psi_treated_se, Tol::iterative(1e-6))
+            .scalar("psi_never_sat", r.psi_control, near_zero)
+            .scalar("se_never_sat", r.psi_control_se, near_zero)
+            .scalar("ate_sat", r.ate, Tol::iterative(1e-6))
+            .scalar("ate_se_sat", r.se, Tol::iterative(1e-6))
+            .vector(
+                "constant_q_always",
+                &indicator(&r.saturation.constant_q_nodes[0]),
+                Tol::exact(),
+            )
+            .vector(
+                "constant_q_never",
+                &indicator(&r.saturation.constant_q_nodes[1]),
+                Tol::exact(),
+            )
+            .scalar(
+                "positivity_warning",
+                f64::from(u8::from(r.saturation.positivity())),
+                Tol::exact(),
+            )
+            .scalar(
+                "rare_warning",
+                f64::from(u8::from(r.saturation.rare_outcome)),
+                Tol::exact(),
+            )
+            .vector(
+                "n_follow_always",
+                &counts(&r.regime_estimate.n_following),
+                Tol::exact(),
+            )
+            .vector(
+                "n_follow_never",
+                &counts(&r.contrast_estimate.as_ref().unwrap().n_following),
+                Tol::exact(),
+            )
+            .finish();
+        let below = |k: usize| (r.saturation.share_below_gbound[k] * r.n_obs as f64).round();
+        Check::new(&case)
+            .scalar("n_below_gbound_always", below(0), Tol::exact())
+            .scalar("n_below_gbound_never", below(1), Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_ltmle_saturating_fixtures_agree_with_ltmle() {
+        // Quoted from ltmle 1.3-0 on the exported fixtures (glm, stratify = FALSE,
+        // variance.method = "ic"), plan T3-LTMLE-TOL Task 1. Before ltmle's no-variation rule the
+        // default tolerance gave an ATE of -1 and 0.737 here.
+        for (data, always, never) in [
+            (
+                shifted_outcome((5000, 10, 4), 3.0, false, 2.0),
+                0.999_999_999_950_950_8,
+                0.999_999_999_943_640_9,
+            ),
+            (
+                sparse_followers(2500, 8, 20),
+                0.746_485_824_266_510_2,
+                4.028_270_621_033_234e-11,
+            ),
+        ] {
+            let mut ates = Vec::new();
+            for tol in [1e-8, 1e-10, 1e-14] {
+                let mut c = LtmleConfig::default();
+                c.tolerance = tol;
+                let r = run_ltmle(&data, c).unwrap();
+                assert!(
+                    (r.psi_treated - always).abs() <= 1e-8,
+                    "{tol}: {}",
+                    r.psi_treated
+                );
+                assert!(
+                    (r.psi_control - never).abs() <= 1e-8,
+                    "{tol}: {}",
+                    r.psi_control
+                );
+                assert!((r.ate - (always - never)).abs() <= 1e-8, "{tol}: {}", r.ate);
+                ates.push(r.ate);
+            }
+            assert!((ates[0] - ates[2]).abs() <= 1e-8, "{ates:?}");
+        }
     }
 
     /// `base` with one more column in the third node's covariates: the first column of the
