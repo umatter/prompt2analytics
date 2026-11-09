@@ -74,12 +74,16 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/ap_blobs.csv` | 115 × 2 (x, y) | `apcluster_blobs`; read by `pam_clara_blobs`, `fuzzy_reference_blobs` | `r/cases/ml_mixtures.R` | seed 20261109; the same blobs and noise as `blobs_noise.csv` |
 | `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/cli_mtcars.csv` | 32 × 4 (mpg, wt, hp, qsec) | `cli_viz_residuals` | `r/cases/cli_other.R` | `datasets::mtcars`, the four columns of `lm(mpg ~ wt + hp + qsec)` |
+| `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/kalman_intercepts.csv` | 50 × 2 (t, y) | `kalman_intercepts` | `r/cases/ts_statespace.R` | seed 20261124 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
 | `generated/mahalanobis_t3.csv` | 30 × 9 (id, f1, f2, f3, a, b, p1, p2, total) | `stat_mahalanobis_t3` | `r/cases/stats_misc_t3.R` | full-rank and collinear columns, padded with NA |
+| `generated/mcp_factanal_t3.csv` | 1200 × 6 (f1, f2, f3, f4, f5, f6) | `mcp_factanal_t3` | `r/cases/mcp_stats_ts.R` | seed 20261204; two correlated factors |
+| `generated/mcp_groups_t3.csv` | 33 × 6 (id, g, vi, v, s1, s2) | `mcp_groups_t3` | `r/cases/mcp_stats_ts.R` | seed 20261201; three groups, Int64 response with missing cells and a missing label |
+| `generated/mcp_series_t3.csv` | 96 × 4 (t, y, z, w) | `mcp_series_t3` | `r/cases/mcp_stats_ts.R` | seed 20261203; seasonal series, AR(1) series and white noise |
 | `generated/mixture_3d.csv` | 300 × 3 (x1, x2, x3) | `gmm_mclust_3d`; read by `mixtools_em` | `r/cases/ml_mixtures.R` | seed 20261111 |
 | `generated/modeltables_t3.csv` | 23 × 3 (y, fa, fb) | `stat_modeltables_t3` | `r/cases/stats_misc_t3.R` | 3 x 3 layout with the cell A3:B2 empty |
 | `generated/mtcars.csv` | 32 × 12 (model, mpg, cyl, disp, hp, drat, wt, qsec, vs, am, gear, carb) | `ols_mtcars` | `r/cases/regression.R` | `datasets::mtcars`, row names as `model` |

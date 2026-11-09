@@ -446,7 +446,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
 | Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
-| Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned, known deviations (TOOL-10) |
+| Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned |
 | Canonical correlation (cancor) | [cancor.md](multivariate/cancor.md) | R-pinned, known deviations (STAT-16) |
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
@@ -514,6 +514,11 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CLI causal iv, mediation and staggered-did (rows dropped, first-stage HC1 Wald F, units kept after trimming, pre-trend Wald test) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
 | MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, ECON-33, ECON-34, ECON-41, REG-24, REG-29, STAT-23, TS-23) |
+| MCP causal tools (option tables and aliases, MatchIt defaults and the matched sample, IPW, ltmle, gformula, gsynth and mediation fields) | [causal_surface.md](mcp/causal_surface.md) | R-pinned, known deviations (REG-27) |
+| MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-16, STAT-27, STAT-39, STAT-58, STAT-68, STAT-69, STAT-72, STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
+| MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned |
+| CLI model commands (`reg`, `discrete`, `panel`, `survival`, `stats`), persisted datasets and notes | [models.md](cli/models.md) | R-pinned, known deviations (CLI-21, STAT-6) |
+| CLI causal, time-series, ML, spatial and viz commands (typed options, forecasts, PCA scores, impacts) | [other.md](cli/other.md) | R-pinned, known deviations (CAUS-39, TS-22, TS-24) |
 
 ## Reference datasets
 
