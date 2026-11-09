@@ -22,6 +22,9 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 /// Maximum number of time points allowed for longitudinal methods.
 const MAX_TIME_POINTS: usize = 1_000;
 
+/// gsynth replicates when the bootstrap is on and `bootstrap_reps` is unset: gsynth's `nboots`.
+const GSYNTH_DEFAULT_BOOTSTRAP: usize = 200;
+
 use crate::server::AnalyticsServer;
 use crate::tools::requests::causal::{
     BPBoundsRequest, BaconDecompRequest, CTmleRequest, CbpsRequest, DiDRequest, DoubleMLRequest,
@@ -1850,11 +1853,7 @@ impl AnalyticsServer {
 
     /// Run Generalized Synthetic Control (gsynth) for panel data with multiple treated units.
     #[tool(
-        description = "Run Generalized Synthetic Control Method for causal inference with interactive fixed effects. \
-        Unlike traditional synthetic control (single treated unit), gsynth handles multiple treated units with staggered adoption. \
-        Uses Interactive Fixed Effects (IFE) to model: Y_it = α_i + λ_i'f_t + X_it'β + τ_it·D_it + ε_it. \
-        Factors f_t and loadings λ_i capture unobserved confounders. Developed by Xu (2017). \
-        Returns ATT (average treatment effect on treated), unit-level effects, factor structure, and optional bootstrap inference."
+        description = "Xu (2017) generalized synthetic control as R's gsynth 1.4: estimator 'ife' (gsynth's default 'gsynth' estimator: interactive fixed effects estimated on the never-treated units) or 'mc' (matrix completion, Athey et al. 2021); force 'unit' (default), 'time', 'two_way' or 'none'; cv chooses the number of factors in [n_factors, r_max] by leave-one-out CV (ife) or lambda by k-fold CV (mc); bootstrap_reps > 0 gives gsynth's parametric bootstrap (ife) or the unit bootstrap (mc), seeded by the session seed. Handles several treated units with staggered adoption; returns the ATT, unit-level effects and the factor structure. Without cv the number of factors is 2 (gsynth defaults to CV over 0..5)."
     )]
     pub async fn gsynth(
         &self,
@@ -1869,14 +1868,39 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
+        let (bootstrap_se, n_bootstrap) = match (request.bootstrap_reps, request.bootstrap_se) {
+            (Some(b), Some(false)) if b > 0 => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "bootstrap_se = false contradicts bootstrap_reps = {b}"
+                ))]));
+            }
+            (Some(0), Some(true)) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "bootstrap_se = true contradicts bootstrap_reps = 0",
+                )]));
+            }
+            (Some(b), _) => (b > 0, b),
+            (None, se) => (se.unwrap_or(false), GSYNTH_DEFAULT_BOOTSTRAP),
+        };
+        // `max_factors` is the field's former name (a separate field, not a serde alias, so that
+        // the request limits see it under both names)
+        let r_max = match (request.r_max, request.max_factors) {
+            (Some(a), Some(b)) if a != b => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "r_max = {a} and max_factors = {b} disagree; max_factors is the former name of r_max, give one"
+                ))]));
+            }
+            (r, m) => r.or(m).unwrap_or(5),
+        };
         let config = GsynthConfig {
             n_factors: request.n_factors.unwrap_or(2),
-            cross_validate: request.cross_validate.unwrap_or(false),
-            max_factors: request.max_factors.unwrap_or(5),
+            cross_validate: request.cv.unwrap_or(false),
+            max_factors: r_max,
             estimator,
             force,
-            bootstrap_se: request.bootstrap_se.unwrap_or(false),
-            n_bootstrap: request.n_bootstrap.unwrap_or(500),
+            bootstrap_se,
+            n_bootstrap,
+            seed: self.session_seed().await,
             ..Default::default()
         };
 

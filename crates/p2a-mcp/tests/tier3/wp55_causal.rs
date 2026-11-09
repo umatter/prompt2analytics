@@ -1711,3 +1711,90 @@ async fn test_validate_mcp_treatment_double_ml() {
         "{e}"
     );
 }
+
+/// gsynth 1.4.0 (causal_gsynth.R, gsynth_simdata): IFE r = 2 without covariates (closed form), the MCP
+/// default force 'unit', and the leave-one-out CV choice of r with covariates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_gsynth() {
+    use p2a_core::econometrics::synth::{GsynthConfig, GsynthForce, run_gsynth};
+    let case = Case::load("gsynth_simdata");
+    let (session, server) = session_with("gsynth_simdata"); // dataset `gsynth_simdata`
+    let ds = case_ds(&case);
+    let base = json!({"dataset": "gsynth_simdata", "outcome": "Y", "treatment": "D", "unit_col": "id", "time_col": "time"});
+    let fit = |f: GsynthForce, x: &[&str], cv: bool| {
+        let mut c = GsynthConfig::default();
+        c.n_factors = if cv { 0 } else { 2 };
+        c.max_factors = 5;
+        c.cross_validate = cv;
+        c.force = f;
+        run_gsynth(&ds, "Y", "D", "id", "time", x, c).unwrap()
+    };
+    let tw = fit(GsynthForce::TwoWay, &[], false);
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "gsynth",
+            with(&base, &[("force", json!("two-way"))])
+        )
+        .await,
+        tw.to_string()
+    );
+    let unit = fit(GsynthForce::Unit, &[], false);
+    assert_eq!(
+        ok(&server, &session, "gsynth", base.clone()).await,
+        unit.to_string()
+    );
+    let cv = fit(GsynthForce::TwoWay, &["X1", "X2"], true);
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "gsynth",
+            with(
+                &base,
+                &[
+                    ("force", json!("twoWay")),
+                    ("covariates", json!(["X1", "X2"])),
+                    ("n_factors", json!(0)),
+                    ("cv", json!(true)),
+                    ("r_max", json!(5))
+                ]
+            )
+        )
+        .await,
+        cv.to_string()
+    );
+    Check::new(&case)
+        .scalar("ife_r2_nocov_att_avg", tw.att, Tol::coef(1500)) // 4.639592652031497
+        .scalar("ife_r2_unit_att_avg", unit.att, Tol::coef(1500)) // 4.87256592159725
+        // the core cross-validates leave-one-out (fect cv.method = "loo"); gsynth 1.4's random-fold
+        // choice (`ife_cv_cov_r`, 1) is recorded in the case, not pinned
+        .scalar("ife_loo_cov_r", cv.n_factors as f64, Tol::exact()) // 2
+        .finish();
+    let e = refused(
+        &server,
+        &session,
+        "gsynth",
+        with(
+            &base,
+            &[
+                ("bootstrap_se", json!(false)),
+                ("bootstrap_reps", json!(20)),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        e.contains("bootstrap_se = false contradicts bootstrap_reps = 20"),
+        "{e}"
+    );
+    let e = refused(
+        &server,
+        &session,
+        "gsynth",
+        with(&base, &[("r_max", json!(5)), ("max_factors", json!(4))]),
+    )
+    .await;
+    assert!(e.contains("former name of r_max"), "{e}");
+}

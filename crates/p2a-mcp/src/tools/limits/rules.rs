@@ -1115,12 +1115,8 @@ pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 
 /// (tool, field) of T3 design 5.1 that wave-3 packages add; their rules above exist from wave 1.
 #[cfg(test)]
-pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
-    ("gsynth", "r_max"),
-    ("gsynth", "bootstrap_reps"),
-    ("panel_unit_root", "pmax"),
-    ("munge_fill_na", "value"),
-];
+pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] =
+    &[("panel_unit_root", "pmax"), ("munge_fill_na", "value")];
 
 #[cfg(test)]
 mod tests {
@@ -1810,9 +1806,9 @@ mod tests {
             ("regression_standardization", "n_bootstrap", 999),
             ("natural_effects_mediation", "n_bootstrap", 1000),
             ("bp_bounds", "n_bootstrap", 1000),
-            ("gsynth", "n_bootstrap", 500),
+            ("gsynth", "bootstrap_reps", 200),
             ("gsynth", "n_factors", 2),
-            ("gsynth", "max_factors", 5),
+            ("gsynth", "r_max", 5),
             ("gformula", "n_bootstrap", 200),
             ("gformula", "n_simulations", 1000),
             ("heterogeneity_test", "n_permutations", 1000),

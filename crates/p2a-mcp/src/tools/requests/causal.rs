@@ -1431,7 +1431,7 @@ pub struct SyntheticControlRequest {
 
     /// Custom V weights (if v_method is 'custom')
     #[schemars(
-        description = "Custom predictor weights (only used if v_method is 'custom'). Must sum to 1."
+        description = "Custom predictor weights V (only used if v_method is 'custom'): non-negative, not all zero, normalised by the core; they weight the predictors standardised by their SD, as Synth."
     )]
     pub custom_v_weights: Option<Vec<f64>>,
 
@@ -1496,45 +1496,53 @@ pub struct GsynthRequest {
     #[schemars(description = "Optional list of covariate column names to include in the model.")]
     pub covariates: Option<Vec<String>>,
 
-    /// Number of factors (0 for auto-selection via CV)
+    /// Number of factors
     #[schemars(
-        description = "Number of latent factors. Use 0 with cross_validate=true for automatic selection. Default is 2."
+        description = "Number of latent factors r; with cv = true the smallest rank tried. Default is 2 without cross-validation (p2a's MCP default; R's gsynth defaults to CV = TRUE over r = 0..5, which costs a leave-one-out fit per rank on every call)."
     )]
     pub n_factors: Option<usize>,
 
-    /// Whether to cross-validate factor selection
+    /// Whether to cross-validate
     #[schemars(
-        description = "Whether to select number of factors via cross-validation. Default is false."
+        description = "Cross-validation: for 'ife', choose the number of factors in [n_factors, r_max] by leave-one-out CV over the pre-treatment periods; for 'mc', choose lambda by k-fold CV ('mc' needs cv = true). Default is false (see n_factors). Also accepted as cross_validate."
     )]
-    pub cross_validate: Option<bool>,
+    #[serde(alias = "cross_validate")]
+    pub cv: Option<bool>,
 
-    /// Maximum factors to consider in CV
+    /// Largest rank tried by CV
     #[schemars(
-        description = "Maximum number of factors to consider during cross-validation. Default is 5."
+        description = "Largest number of factors tried by cross-validation. Default is 5 (gsynth's r = c(0, 5))."
     )]
+    pub r_max: Option<usize>,
+
+    /// Former name of r_max
+    #[schemars(description = "Former name of r_max; give at most one of the two.")]
     pub max_factors: Option<usize>,
 
     /// Estimator type
     #[schemars(
-        description = "Estimator: 'ife' (default, interactive fixed effects) or 'mc' (matrix completion). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Estimator: 'ife' (default; gsynth's 'gsynth' estimator: interactive fixed effects estimated on the never-treated units) or 'mc' (matrix completion, Athey et al. 2021; needs cv = true, lambda is chosen by k-fold CV). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimator: Option<String>,
 
     /// Fixed effects specification
     #[schemars(
-        description = "Additive fixed effects: 'none', 'unit' (default), 'time' or 'two_way' ('twoway'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Additive fixed effects: 'none', 'unit' (default, as gsynth), 'time' or 'two_way' ('twoway'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub force: Option<String>,
 
     /// Whether to compute bootstrap standard errors
-    #[schemars(description = "Whether to compute bootstrap standard errors. Default is false.")]
+    #[schemars(
+        description = "Bootstrap standard errors and intervals: gsynth's parametric bootstrap (ife) or the unit bootstrap (mc), seeded by the session seed. With bootstrap_reps unset, 200 replicates (gsynth's nboots). Default is false."
+    )]
     pub bootstrap_se: Option<bool>,
 
-    /// Number of bootstrap iterations
+    /// Number of bootstrap replicates
     #[schemars(
-        description = "Number of bootstrap iterations for standard errors. Default is 500."
+        description = "Number of bootstrap replicates; a value > 0 turns the bootstrap on (bootstrap_se = false with bootstrap_reps > 0 is an error). Also accepted as n_bootstrap."
     )]
-    pub n_bootstrap: Option<usize>,
+    #[serde(alias = "n_bootstrap")]
+    pub bootstrap_reps: Option<usize>,
 }
 
 /// Request for Synthetic Control with Prediction Intervals (SCPI).
