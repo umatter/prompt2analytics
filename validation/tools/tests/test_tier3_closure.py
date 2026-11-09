@@ -44,7 +44,7 @@ def expected_status(doc, entries=None):
 def md_files():
     for path in sorted(VALIDATION.rglob("*.md")):
         rel = path.relative_to(VALIDATION).as_posix()
-        if rel.startswith("reports/") or rel.startswith("tools/tests/fixtures/"):
+        if rel.startswith(("reports/", "tools/tests/fixtures/")):
             continue
         yield path
 
@@ -190,6 +190,53 @@ def match_brace(code, start):
     return len(code) - 1
 
 
+
+_SPANS = {}
+
+
+def _fn_spans(src):
+    """{name: (start, end)} of every fn in the source (any attribute: #[test], #[tokio::test], helpers)."""
+    if src not in _SPANS:
+        _SPANS[src] = _fn_spans_uncached(src)
+    return _SPANS[src]
+
+
+def _fn_spans_uncached(src):
+    code = blank(src)
+    spans = {}
+    for m in re.finditer(r"\bfn\s+([A-Za-z0-9_]+)\s*(?:<[^>{]*>)?\s*\(", code):
+        depth, j = 0, m.end() - 1
+        while j < len(code):
+            depth += {"(": 1, ")": -1}.get(code[j], 0)
+            if depth == 0:
+                break
+            j += 1
+        brace = code.find("{", j)
+        semi = code.find(";", j)
+        if brace == -1 or (semi != -1 and semi < brace):
+            continue
+        end = match_brace(code, brace)
+        spans.setdefault(m.group(1), (m.start(), end + 1))
+    return spans
+
+
+_CRATE_FNS = {}
+
+
+def _crate_fns(package):
+    """{name: source} of the fns defined exactly once in the crate (for helpers shared across files)."""
+    if package not in _CRATE_FNS:
+        seen, out = {}, {}
+        for path in sorted((CRATES / package).rglob("*.rs")):
+            if "target" in path.parts:
+                continue
+            src = path.read_text(encoding="utf-8")
+            for name, (s, e) in _fn_spans(src).items():
+                seen[name] = seen.get(name, 0) + 1
+                out[name] = src[s:e]
+        _CRATE_FNS[package] = {k: v for k, v in out.items() if seen[k] == 1}
+    return _CRATE_FNS[package]
+
 ASSERTION = re.compile(r"\b(?:debug_)?assert(?:_eq|_ne)?!|\bassert_[a-z_]+!|\bpanic!|\bunreachable!|\bCheck::new\b|\.finish\(\)|\bassert_[a-z_]+\(")
 # Assertions that compare something (a panic! inside a guard is a failure path, not a guarded comparison).
 COMPARISON = re.compile(r"\b(?:debug_)?assert(?:_eq|_ne)?!|\bassert_[a-z_]+!|\bCheck::new\b|\.finish\(\)|\bassert_[a-z_]+\(")
@@ -253,12 +300,13 @@ def else_fails(body, pos):
     return eb >= 0 and re.search(r"panic!|unreachable!|assert", body[eb:match_brace(body, eb) + 1]) is not None
 
 
-def body_rules(name, attrs, body, scope):
-    """Rule names violated by one test. `scope` adds the X-10 rules beyond print-only."""
+def body_rules(name, attrs, body, scope, helper_calls=()):
+    """Rule names violated by one test. `scope` adds the X-10 rules beyond print-only. `helper_calls`
+    are the offsets of calls to helpers that assert (they count as assertions at the call)."""
     if re.search(r"#\[ignore\b", attrs):
         return []
     should_panic = "should_panic" in attrs
-    asserts = [a.start() for a in ASSERTION.finditer(body)]
+    asserts = sorted({a.start() for a in ASSERTION.finditer(body)} | set(helper_calls))
     out = []
     if re.search(r"\b(e?println|dbg)!", body) and not asserts and not should_panic:
         out.append("print-only")
@@ -313,11 +361,56 @@ def scan_source(rel, src, extra_names=()):
     hits = []
     for name, line, attrs, body, _ in rust_tests(src):
         scope = "test_validate" in name or validation_file or name in extra_names
-        for rule in dict.fromkeys(body_rules(name, attrs, body, scope)):
+        calls = asserting_helper_calls(rel, src, body)
+        for rule in dict.fromkeys(body_rules(name, attrs, body, scope, calls)):
             hits.append((line, name, rule))
     return hits
 
 
+CALL = re.compile(r"\b([a-z_][a-z0-9_]*)\s*(?:::<[^>]*>)?\(")
+
+
+_ASSERTS = {}
+
+
+def asserting_helper_calls(rel, src, body, depth=3):
+    """Offsets in `body` of calls to fns that assert: same file first, else defined once in the crate,
+    judged transitively up to `depth` levels (a test that delegates its comparison to a helper)."""
+    parts = rel.split("/")
+    package = parts[1] if len(parts) > 2 and parts[0] == "crates" else None
+    key = (rel, src)
+    if key not in _ASSERTS:
+        spans = _fn_spans(src)
+        crate = _crate_fns(package) if package else {}
+        code_of = {}
+
+        def code(fn):
+            if fn not in code_of:
+                if fn in spans:
+                    s, e = spans[fn]
+                    code_of[fn] = blank(src[s:e])
+                elif fn in crate:
+                    code_of[fn] = blank(crate[fn])
+                else:
+                    code_of[fn] = None
+            return code_of[fn]
+
+        memo = {}
+
+        def asserts(fn, level, stack):
+            if fn in memo:
+                return memo[fn]
+            c = code(fn)
+            if c is None or level > depth or fn in stack:
+                return False
+            hit = bool(ASSERTION.search(c)) or any(
+                asserts(x, level + 1, stack | {fn}) for x in set(CALL.findall(c)) if x != fn)
+            memo[fn] = hit
+            return hit
+
+        _ASSERTS[key] = lambda name: asserts(name, 1, frozenset())
+    check = _ASSERTS[key]
+    return [m.start() for m in CALL.finditer(body) if check(m.group(1))]
 # ---------------------------------------------------------------- Task 1: X-13 (quoted R values, tolerance rules)
 
 WRONG_QUOTES = [
@@ -507,7 +600,7 @@ class Caus99Test(unittest.TestCase):
         line = next(l for l in claude.splitlines() if "doubleml.rs" in l)
         listed = re.findall(r"\b(PLR|PLIV|IRM|IIVM)\b", line)
         src = (CRATES / "p2a-core/src/econometrics/doubleml.rs").read_text(encoding="utf-8")
-        enum = re.search(r"pub enum DMLModelType\s*\{(.*?)\}", blank(src), re.S).group(1)
+        enum = re.search(r"pub enum DMLModelType\s*\{(.*?)\}", blank(src), re.DOTALL).group(1)
         variants = set(re.findall(r"\b([A-Z][A-Za-z]*)\b", enum))
         self.assertTrue(listed and set(listed) <= variants, f"CLAUDE.md lists {listed}; DMLModelType has {sorted(variants)}")
 
@@ -571,7 +664,7 @@ class Econ81Test(unittest.TestCase):
                 continue
             for p in md_files():
                 for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
-                    if name in line and not re.search(r"not asserted|legacy", line, re.I):
+                    if name in line and not re.search(r"not asserted|legacy", line, re.IGNORECASE):
                         claims.append(f"{p.relative_to(REPO)}:{n}: {line.strip()}")
         self.assertEqual(claims, [], "\n" + "\n".join(claims))
 
@@ -652,6 +745,238 @@ class IndexTest(unittest.TestCase):
         prereq = section((VALIDATION / "README.md").read_text(encoding="utf-8"), "Prerequisites")
         missing = sorted(pk for pk in packages if not re.search(rf"(?<![\w.]){re.escape(pk)}(?![\w.])", prereq))
         self.assertEqual(missing, [])
+
+
+# ---------------------------------------------------------------- Task 8: X-10 and X-11 (validation tests can fail; test_validate selects pinned tests)
+
+FIXTURES = {
+    "if_let_ok": ("#[test]\nfn test_validate_a() {\n    if let Ok(r) = run() {\n        assert!(r > 0.0);\n    }\n}\n",
+                  {"swallowed-err", "conditional-assert", "guarded-assert"}),
+    "err_arm_prints": ("#[test]\nfn test_validate_b() {\n    match run() {\n        Ok(r) => assert!(r > 0.0),\n        Err(e) => eprintln!(\"{e}\"),\n    }\n}\n",
+                       {"swallowed-err"}),
+    "err_arm_panics": ("#[test]\nfn test_validate_c() {\n    match run() {\n        Ok(r) => assert!(r > 0.0),\n        Err(e) => panic!(\"{e}\"),\n    }\n}\n", set()),
+    "guard_that_panics": ("#[test]\nfn test_validate_c2() {\n    let r = run().unwrap();\n    if !r.converged {\n        panic!(\"not converged\");\n    }\n    assert!(r.b > 0.0);\n}\n", set()),
+    "print_only": ("#[test]\nfn test_validate_d() {\n    let r = run().unwrap();\n    println!(\"{r}\");\n}\n", {"print-only"}),
+    "no_assertion": ("#[test]\nfn test_validate_e() {\n    let _ = run().unwrap();\n}\n", {"no-assertion"}),
+    "guarded": ("#[test]\nfn test_validate_f() {\n    let r = run().unwrap();\n    assert_eq!(r.n, 3);\n    if let Some(i) = r.find(1.0) {\n        assert!(r.v[i] > 0.0);\n    }\n}\n",
+                {"guarded-assert"}),
+    "len_guard": ("#[test]\nfn test_validate_g() {\n    let r = run().unwrap();\n    if r.segments.len() == 2 {\n        assert!(r.segments[0] > 1.0);\n    }\n}\n",
+                  {"conditional-assert", "guarded-assert"}),
+    "if_let_ok_else_panics": ("#[test]\nfn test_validate_l() {\n    if let Ok(r) = run() {\n        assert!(r > 0.0);\n    } else {\n        panic!(\"run failed\");\n    }\n}\n", set()),
+    "expected_error_variant": ("#[test]\nfn test_validate_m() {\n    match run() {\n        Err(EconError::InvalidSpecification { .. }) => {}\n        other => panic!(\"{other:?}\"),\n    }\n}\n", set()),
+    "pinned": ("#[test]\nfn test_validate_h() {\n    let (case, ds) = load_case(\"x\");\n    let r = run(&ds).unwrap();\n    Check::new(&case).scalar(\"b\", r.b, Tol::coef(10)).finish();\n}\n", set()),
+    "should_panic": ("#[test]\n#[should_panic(expected = \"boom\")]\nfn test_validate_i() {\n    run().unwrap();\n}\n", set()),
+    "ignored_benchmark": ("#[test]\n#[ignore = \"benchmark\"]\nfn benchmark_j() {\n    println!(\"{:?}\", run());\n}\n", set()),
+    "comment_and_string": ("#[test]\nfn test_validate_k() {\n    // if let Ok(r) = run() { }\n    let s = \"if let Ok(x) = y { println!() }\";\n    assert_eq!(s.len(), 33);\n}\n", set()),
+    "print_only_anywhere": ("#[test]\nfn test_other() {\n    println!(\"{:?}\", run());\n}\n", {"print-only"}),
+}
+
+
+class ValidateBodiesTest(unittest.TestCase):
+    """X-10: no validation test passes on Err, prints instead of asserting, or guards its assertions."""
+
+    def test_rules_on_fixtures(self):
+        for label, (src, want) in FIXTURES.items():
+            with self.subTest(fixture=label):
+                got = {rule for _, _, rule in scan_source("crates/x/src/lib.rs", src)}
+                self.assertEqual(got, want)
+
+    def test_validation_tests_can_fail(self):
+        hits, pending = [], set()
+        for rel, path in rust_files():
+            for line, name, rule in scan_source(rel, path.read_text(encoding="utf-8"), CITED_OTHER_NAMES):
+                if (rel, name, rule) in PENDING_TEST_CODE:
+                    pending.add((rel, name, rule))
+                    continue
+                hits.append(f"{rel}:{line}: {rule}: {name}")
+        self.assertEqual(hits, [], "\n" + "\n".join(hits))
+        stale = sorted(PENDING_TEST_CODE - pending)
+        self.assertEqual(stale, [], "fixed sites: remove them from PENDING_TEST_CODE")
+
+
+# Known test-code defects left to the owner of the .rs files; the list may only shrink (a fixed site
+# that stays listed fails the test). X-10 closes when it is empty.
+PENDING_TEST_CODE = {
+    ("crates/p2a-core/src/forecasting/decompose.rs", "test_validate_decompose_against_r", "guarded-assert"),
+    ("crates/p2a-core/src/econometrics/bacon.rs", "test_validate_bacon_estimates_by_type_aggregation",
+     "conditional-assert"),
+    ("crates/p2a-core/src/econometrics/feglm.rs", "test_validate_feglm_families_report_convergence",
+     "guarded-assert"),
+    ("crates/p2a-core/src/econometrics/staggered_did.rs", "test_validate_staggered_did_never_treated_comparison",
+     "guarded-assert"),
+}
+
+
+# The test functions the findings cite (name at d6a3a3b). Each is gone (deleted or renamed), or it is
+# registered in validation/methods/*.json (R-pinned) or labelled in validate_property_tests.txt.
+# (finding, module hint in the libtest path, name)
+CITED = [
+    ("X-10", "regression::ols", "test_validate_robust_se_hc0"),
+    ("X-10", "regression::ols", "test_validate_robust_se_hc1"),
+    ("X-10", "regression::ols", "test_validate_robust_se_hc2_hc3"),
+    ("X-10", "regression::ols", "test_validate_clustered_se_one_way"),
+    ("X-10", "regression::ols", "test_validate_clustered_se_two_way"),
+    ("X-10", "regression::ols", "test_validate_hac_vs_r"),
+    ("X-10", "regression::ols", "test_validate_bootstrap_vs_r"),
+    ("X-10", "regression::ols", "test_validate_driscoll_kraay_vs_r"),
+    ("X-10", "regression::diagnostics", "test_validate_bgtest_vs_r"),
+    ("X-10", "regression::diagnostics", "test_validate_reset_vs_r"),
+    ("X-10", "regression::diagnostics", "test_validate_harvey_collier_vs_r"),
+    ("X-10", "regression::diagnostics", "test_validate_wald_vs_r"),
+    ("X-10", "econometrics::iv", "test_validate_iv2sls_basic"),
+    ("X-10", "binary_choice", "test_validate_logit_simple"),
+    ("X-10", "econometrics::did", "test_validate_did_classic_2x2"),
+    ("X-10", "econometrics::spatial", "test_validate_sar_vs_r"),
+    ("X-10", "econometrics::spatial", "test_validate_sem_vs_r"),
+    ("X-10", "econometrics::spatial", "test_validate_sac_vs_r"),
+    ("X-10", "econometrics::spatial", "test_validate_sar_coefficient_signs"),
+    ("X-10", "forecasting::garch", "test_validate_garch_parameter_constraints"),
+    ("X-10", "ml::clustering", "test_validate_kmeans_vs_r"),
+    ("X-10", "ml::reduction", "test_validate_pca_vs_r"),
+    ("X-10", "econometrics::tmle", "test_validate_tmle_vs_r"),
+    ("X-10", "econometrics::tmle", "test_validate_tmle_continuous_outcome"),
+    ("X-10", "econometrics::treatment", "test_validate_ipw_ate_vs_r"),
+    ("X-10", "econometrics::matching", "test_validate_matching_vs_r"),
+    ("X-10", "econometrics::mediation", "test_validate_mediation_vs_r"),
+    ("X-10", "timeseries", "test_validate_var_vs_r"),
+    ("X-10", "econometrics::feglm", "test_validate_feglm_logit_against_alpaca"),
+    ("X-10", "forecasting::changepoint", "test_validate_pelt_two_changepoints"),
+    ("X-10", "forecasting::changepoint", "test_validate_pelt_segment_means"),
+    ("X-10", "econometrics::rd", "test_validate_fuzzy_rd_structure"),
+    ("X-10", "econometrics::panel", "test_validate_arellano_bond_full_grunfeld"),
+    ("X-10", "econometrics::panel", "test_validate_gmm_twostep_full_grunfeld"),
+    ("X-10", "econometrics::survival", "test_validate_km_against_r"),
+    ("X-11", "ordered_models", "test_validate_ordered_logit_vs_r"),
+    ("X-11", "ordered_models", "test_validate_ordered_probit_vs_r"),
+    ("X-11", "ordered_models", "test_validate_ordered_logit_multiple_predictors"),
+    ("X-11", "econometrics::survival", "test_validate_cox_ties_against_r"),
+    ("X-11", "forecasting::garch", "test_validate_garch_persistence_calculation"),
+    ("X-11", "forecasting::garch", "test_validate_garch_unconditional_variance"),
+    ("X-11", "forecasting::garch", "test_validate_garch_half_life"),
+    ("X-11", "forecasting::garch", "test_validate_garch_conditional_variance"),
+    ("X-11", "regression::smooth_spline", "test_validate_smooth_spline_against_r"),
+    ("X-11", "regression::ols", "test_validate_ols_longley"),
+    ("ECON-80", "timeseries", "test_validate_var_coefficient_estimation"),
+    ("ECON-80", "timeseries", "test_validate_var_irf_structure"),
+    ("ECON-80", "timeseries", "test_validate_var_non_orthogonalized_irf"),
+    ("ECON-80", "timeseries", "test_validate_varma_structure"),
+    ("ECON-80", "timeseries", "test_validate_vecm_structure"),
+    ("ECON-80", "econometrics::bpbounds", "test_validate_against_r"),
+    ("ECON-81", "econometrics::survival", "test_validate_logrank_against_r"),
+    ("ECON-81", "count_models", "test_validate_negbin_vs_r"),
+    ("ECON-81", "mixed_logit", "test_validate_gmnl_vs_r"),
+    ("ECON-81", "conditional_logit", "test_validate_mlogit_vs_r"),
+]
+# Ordinary tests X-10 cites (they swallowed errors or asserted nothing): scanned with the X-10 rules too.
+CITED_OTHER_NAMES = ("test_llc_unit_root", "test_fuzzy_rd", "test_rd_multi_dataset", "test_granger_causality")
+
+
+def defined_tests(hint, name):
+    """Files that define `fn name(` inside a #[test] and whose path matches the module hint."""
+    parts = [p for p in hint.split("::") if p]
+    found = []
+    for rel, path in rust_files():
+        if not all(p in rel for p in parts):
+            continue
+        src = path.read_text(encoding="utf-8")
+        if any(t == name for t, *_ in rust_tests(src)):
+            found.append(rel)
+    return found
+
+
+class CitedTestsTest(unittest.TestCase):
+    """X-10, X-11, ECON-80, ECON-81: every cited test is gone, R-pinned or labelled."""
+
+    def test_cited_tests_are_registered_labelled_or_gone(self):
+        registered = {t for e in registry_entries() for t in e["tests"]}
+        labelled = set(read_labels())
+        problems = []
+        for finding, hint, name in CITED:
+            files = defined_tests(hint, name)
+            if not files:
+                continue
+            ok = [t for t in registered | labelled if t.endswith("::" + name) and hint.split("::")[-1] in t]
+            if not ok:
+                problems.append(f"{finding}: {name} still exists ({', '.join(files)}) and is neither registered nor labelled")
+        self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+
+# A comparison with a committed case value: a Check, or a case accessor with a key literal.
+CASE_VALUE = re.compile(r'Check::new\(|\.(?:scalar|vector|named|named_subset|names|by_names)\(\s*&?(?:"|format!|[A-Za-z_])')
+
+
+def _test_files(test_id):
+    package, rest = test_id.split("::", 1)
+    segs = rest.split("::")
+    mods = segs[:-1]
+    crate = CRATES / package
+    for k in range(len(mods), 0, -1):
+        base = "/".join(mods[:k])
+        found = [p for root in ("src", "tests")
+                 for p in (crate / root / f"{base}.rs", crate / root / base / "mod.rs", crate / root / base / "main.rs")
+                 if p.is_file()]
+        if found:
+            return found
+    return [crate / "src" / "lib.rs"]
+
+
+def test_sources_with_helpers(test_id, depth=3):
+    """Source of the test fn, plus the fns it calls (transitively, up to `depth` levels): same-file fns
+    first, otherwise a fn defined once in the crate."""
+    package = test_id.split("::", 1)[0]
+    name = test_id.rsplit("::", 1)[-1]
+    out = []
+    for p in _test_files(test_id):
+        src = p.read_text(encoding="utf-8")
+        local = {k: src[s:e] for k, (s, e) in _fn_spans(src).items()}
+        if name not in local:
+            continue
+        seen, frontier = {name}, [local[name]]
+        for _ in range(depth + 1):
+            nxt = []
+            for body in frontier:
+                out.append(body)
+                for call in set(re.findall(r"\b([a-z_][a-z0-9_]*)\s*(?:::<[^>]*>)?\(", blank(body))):
+                    if call in seen:
+                        continue
+                    found = local.get(call) or _crate_fns(package).get(call)
+                    if found:
+                        seen.add(call)
+                        nxt.append(found)
+            frontier = nxt
+    return out
+
+
+class ValidateFilterTest(unittest.TestCase):
+    """X-10: the filter `test_validate` selects only R-pinned (registered) or explicitly labelled tests."""
+
+    def test_label_file_is_consistent(self):
+        labels = read_labels()
+        registered = {t for e in registry_entries() for t in e["tests"]}
+        for test_id, (kind, reason) in labels.items():
+            with self.subTest(test=test_id):
+                self.assertIn("test_validate", test_id.rsplit("::", 1)[-1])
+                if kind == "registered-property":
+                    self.assertIn(test_id, registered, "kind registered-property needs a registry entry")
+                else:
+                    self.assertNotIn(test_id, registered, "a registered test is R-pinned; do not label it")
+                self.assertGreaterEqual(len(reason), 20, "give the reason the test keeps its name")
+
+    def test_registered_tests_compare_a_case_value(self):
+        """A registered test compares a value of its case (Check, or a case accessor), or is labelled
+        registered-property: it then checks properties on R's data and does not count as R-pinned."""
+        labels = read_labels()
+        missing = []
+        for test_id in sorted({t for e in registry_entries() for t in e["tests"]}):
+            if "test_validate" not in test_id.rsplit("::", 1)[-1]:
+                continue
+            if labels.get(test_id, ("",))[0] == "registered-property":
+                continue
+            sources = test_sources_with_helpers(test_id)
+            if not any(CASE_VALUE.search(s) for s in sources):
+                missing.append(test_id + ("" if sources else " (source not found)"))
+        self.assertEqual(missing, [], "\n" + "\n".join(missing))
+
 
 
 if __name__ == "__main__":
