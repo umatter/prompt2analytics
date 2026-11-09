@@ -1478,3 +1478,240 @@ async fn test_validate_mcp_ts_granger() {
         .finish();
     assert!(!d["warnings"].as_array().unwrap().is_empty(), "{d}");
 }
+
+/// Hannan-Rissanen VARMA(1, 1) at a given and at the default long-VAR order, and VARMA(1, 0)
+/// with its exact OLS standard errors. Before: long_var_order was an unknown field and the
+/// output was text only. The second step of a q > 0 fit regresses on estimated residuals, so
+/// no standard errors are reported for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_varma() {
+    let case = Case::load("varma_hr");
+    let (se, s) = session_with("varma_hr");
+    let run = |p: usize, q: usize, m: Option<usize>| {
+        let mut a = json!({"dataset": "varma_sim", "columns": ["y1", "y2"], "p": p, "q": q});
+        if let Some(m) = m {
+            a["long_var_order"] = json!(m);
+        }
+        a
+    };
+    let j = json_of(&ok(&s, &se, "ts_varma", run(1, 1, Some(8))).await);
+    let d = json_of(&ok(&s, &se, "ts_varma", run(1, 1, None)).await);
+    let a = json_of(&ok(&s, &se, "ts_varma", run(1, 0, Some(8))).await);
+    let names = |v: &Value| -> Vec<String> {
+        v["regressor_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect()
+    };
+    let n = case.scalar("n_eff") as usize;
+    let nd = case.scalar("default_n_eff") as usize;
+    let na = case.scalar("p1q0_lv8_n_eff") as usize;
+    let mut c = Check::new(&case);
+    for (k, eq) in ["y1", "y2"].iter().enumerate() {
+        c.named(
+            &format!("coef_{eq}"),
+            &names(&j),
+            &fs(&j["coefficients"][k]),
+            Tol::coef(n),
+        )
+        .named(
+            &format!("p1q0_lv8_coef_{eq}"),
+            &names(&a),
+            &fs(&a["coefficients"][k]),
+            Tol::coef(na),
+        )
+        .named(
+            &format!("p1q0_lv8_se_{eq}"),
+            &names(&a),
+            &fs(&a["std_errors"][k]),
+            Tol::se(na),
+        )
+        .named(
+            &format!("p1q0_lv8_p_{eq}"),
+            &names(&a),
+            &fs(&a["p_values"][k]),
+            Tol::p_value(na),
+        );
+    }
+    c.scalar("loglik", f(&j["log_likelihood"]), Tol::stat(n))
+        .scalar("aic", f(&j["aic"]), Tol::stat(n))
+        .scalar("bic", f(&j["bic"]), Tol::stat(n))
+        .scalar("n_eff", f(&j["n_obs"]), Tol::exact())
+        .scalar("df_residual", f(&j["df_residual"]), Tol::exact())
+        .scalar("n_params", f(&j["n_params"]), Tol::exact())
+        .scalar("long_var_order", f(&j["long_var_order"]), Tol::exact())
+        .named(
+            "default_coef_y1",
+            &names(&d),
+            &fs(&d["coefficients"][0]),
+            Tol::coef(nd),
+        )
+        .scalar(
+            "default_long_var_order",
+            f(&d["long_var_order"]),
+            Tol::exact(),
+        )
+        .scalar("default_loglik", f(&d["log_likelihood"]), Tol::stat(nd))
+        .scalar("p1q0_lv8_loglik", f(&a["log_likelihood"]), Tol::stat(na))
+        .scalar("p1q0_lv8_n_eff", f(&a["n_obs"]), Tol::exact())
+        .finish();
+    assert!(
+        j["std_errors"].as_array().is_none_or(|v| v.is_empty()),
+        "{}",
+        j["std_errors"]
+    );
+}
+
+/// Johansen VECM options. Before: ecdet was an unknown field, rank was required and the
+/// output was text only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_vecm() {
+    let case = Case::load("vecm_denmark");
+    let (se, s) = session_with("vecm_denmark");
+    let cols = json!(["LRM", "LRY", "IBO", "IDE"]);
+    let run = |extra: Value| {
+        let mut a = json!({"dataset": "vecm_denmark", "columns": cols, "lags": 2});
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        a
+    };
+    // urca lists H0 r <= k-1 first; p2a r = 0 first
+    let rev = |key: &str| {
+        let mut v = case.vector(key);
+        v.reverse();
+        v
+    };
+    let close = |got: &[f64], want: &[f64], tol: Tol, what: &str| {
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(tol.allows(*g, *w), "{what}: rust={g} R={w}");
+        }
+    };
+    let n = 53;
+    let c = json_of(
+        &ok(
+            &s,
+            &se,
+            "ts_vecm",
+            run(json!({"ecdet": "Constant", "rank": 1})),
+        )
+        .await,
+    );
+    close(
+        &fs(&c["trace_stat"]),
+        &rev("trace_stat"),
+        Tol::stat(n),
+        "trace_stat",
+    );
+    close(
+        &c["trace_cv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| f(&r[1]))
+            .collect::<Vec<_>>(),
+        &rev("trace_cv5"),
+        Tol::exact(),
+        "trace cv 5%",
+    );
+    close(
+        &fs(&c["eigen_stat"]),
+        &rev("eigen_stat"),
+        Tol::stat(n),
+        "eigen_stat",
+    );
+    close(
+        &fs(&c["eigenvalues"])[..4],
+        &case.vector("eigenvalues")[..4],
+        Tol::stat(n),
+        "eigenvalues",
+    );
+    close(
+        &c["beta"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| f(&r[0]))
+            .collect::<Vec<_>>(),
+        &case.vector("beta"),
+        Tol::coef(n),
+        "beta",
+    );
+    // coef(cajorls(..)$rlm): 5 rows (ect1, 4 x .dl1) x 4 equations, column-major
+    let r = case.vector("rlm_coef");
+    close(
+        &c["alpha"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| f(&a[0]))
+            .collect::<Vec<_>>(),
+        &[r[0], r[5], r[10], r[15]],
+        Tol::coef(n),
+        "alpha",
+    );
+    for i in 0..4 {
+        close(
+            &fs(&c["gamma"][i]),
+            &r[5 * i + 1..5 * i + 5],
+            Tol::coef(n),
+            "gamma",
+        );
+    }
+    assert_eq!(
+        (
+            c["deterministic"].as_str(),
+            c["selected_rank"].as_u64(),
+            c["rank"].as_u64()
+        ),
+        (Some("const"), Some(0), Some(1))
+    );
+    // ecdet none: the trace test selects r = 1 when rank is omitted
+    let none = json_of(&ok(&s, &se, "ts_vecm", run(json!({}))).await);
+    close(
+        &fs(&none["trace_stat"]),
+        &rev("none_trace_stat"),
+        Tol::stat(n),
+        "none trace",
+    );
+    assert_eq!(
+        (none["selected_rank"].as_u64(), none["rank"].as_u64()),
+        (Some(1), Some(1))
+    );
+    close(
+        &none["beta"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| f(&r[0]))
+            .collect::<Vec<_>>(),
+        &case.vector("none_beta"),
+        Tol::coef(n),
+        "none beta",
+    );
+    // const without a rank: the trace test selects 0, the restricted VECM is not estimated, a
+    // warning says so
+    let zero = json_of(&ok(&s, &se, "ts_vecm", run(json!({"ecdet": "const"}))).await);
+    assert!(
+        zero["beta"].as_array().unwrap().is_empty()
+            && !zero["warnings"].as_array().unwrap().is_empty(),
+        "{zero}"
+    );
+    for (extra, needle) in [
+        (
+            json!({"ecdet": "linear"}),
+            "expected one of: none, const, trend",
+        ),
+        (json!({"lags": 1}), "at least 2"),
+    ] {
+        assert!(
+            refused(&s, &se, "ts_vecm", run(extra))
+                .await
+                .contains(needle),
+            "{needle}"
+        );
+    }
+}

@@ -209,6 +209,12 @@ pub struct VarmaRequest {
     /// MA lags (q)
     #[schemars(description = "Number of moving average (MA) lags.")]
     pub q: usize,
+
+    /// Order of the step-1 long VAR
+    #[schemars(
+        description = "Order m of the step-1 long VAR (Hannan-Rissanen). Default: 0 when q = 0; otherwise max(floor(2 ln n), 2 max(p, q)), reduced with a warning when the sample is short. At least 1 when q > 0."
+    )]
+    pub long_var_order: Option<usize>,
 }
 
 /// Request for VECM (Vector Error Correction Model).
@@ -226,14 +232,20 @@ pub struct VecmRequest {
     pub columns: Vec<String>,
 
     /// Number of lags
-    #[schemars(description = "Number of lags for the VECM (must be at least 2).")]
+    #[schemars(description = "Lag order K of the VAR in levels (at least 2, urca's K).")]
     pub lags: usize,
 
     /// Cointegration rank
     #[schemars(
-        description = "Cointegration rank (number of cointegrating relationships). Must be between 1 and k-1 where k is the number of variables."
+        description = "Cointegration rank r of the restricted VECM (1 to k - 1). Default: chosen by the trace test at 5% (first r whose statistic is below its critical value); when that is 0 or k the restricted model is not estimated and a warning says so."
     )]
-    pub rank: usize,
+    pub rank: Option<usize>,
+
+    /// Deterministic term in the cointegration space
+    #[schemars(
+        description = "Deterministic term, urca's ecdet: 'none' (default; an unrestricted constant in the VECM), 'const' (also 'constant'; restricted to the cointegration space) or 'trend'."
+    )]
+    pub ecdet: Option<String>,
 }
 
 /// Request for VAR Impulse Response Functions.

@@ -13,6 +13,8 @@ use crate::server::AnalyticsServer;
 use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column, parse_option};
 use crate::tools::requests::timeseries::*;
 
+use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
+use p2a_core::econometrics::timeseries::vecm::{VecmConfig, run_vecm_with};
 use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
 use p2a_core::{
     ArConfig,
@@ -51,8 +53,6 @@ use p2a_core::{
     // Time series modeling
     run_var,
     run_var_irf,
-    run_varma,
-    run_vecm,
     runmed,
     stats::{
         AcfType, BoxTestType, CcfType, SpectrumConfig, run_acf, run_box_test, run_ccf, run_pacf,
@@ -639,7 +639,7 @@ impl AnalyticsServer {
 
     /// Run VARMA (Vector ARMA) model.
     #[tool(
-        description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series."
+        description = "VARMA(p, q) with a constant by Hannan & Rissanen (1982): a long VAR(m) by OLS, then OLS of y_t on its lags and the lagged step-1 residuals; long_var_order sets m. Returns the coefficient table (standard errors, t and p only for q = 0, where the second step is an exact OLS VAR), logLik, AIC and BIC, as text followed by JSON."
     )]
     pub async fn ts_varma(
         &self,
@@ -651,21 +651,35 @@ impl AnalyticsServer {
 
         let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_varma(dataset, &columns, request.p, request.q) {
+        let mut config = VarmaConfig::default();
+        config.p = request.p;
+        config.q = request.q;
+        config.long_var_order = request.long_var_order;
+        let result = match run_varma_with(dataset, &columns, &config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ts_error("VARMA estimation failed", &e));
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut json = match serde_json::to_value(&result) {
+            Ok(j) => j,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "the result could not be serialised: {e}"
+                ))]));
+            }
+        };
+        json["t_values"] = serde_json::json!(result.t_values());
+        json["p_values"] = serde_json::json!(result.p_values());
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{result}\n\nJSON:\n{json}"
+        ))]))
     }
 
     /// Run VECM (Vector Error Correction Model).
     #[tool(
-        description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues."
+        description = "Johansen procedure and restricted VECM as urca::ca.jo (spec = 'transitory'; trace and maximal-eigenvalue tests with urca's Osterwald-Lenum critical values) and urca::cajorls (beta, alpha, Gamma), for cointegrated I(1) series. ecdet as urca's; the rank is chosen by the trace test at 5% unless given. Refused: lags below 2, a rank outside 1..k-1, more than 11 variables. Returns text followed by the result as JSON."
     )]
     pub async fn ts_vecm(
         &self,
@@ -677,16 +691,21 @@ impl AnalyticsServer {
 
         let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_vecm(dataset, &columns, request.lags, request.rank) {
+        let mut config = VecmConfig::default();
+        config.lag_order = request.lags;
+        config.ecdet = match parse_option(request.ecdet.as_deref(), config.ecdet) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
+        config.rank = request.rank;
+        let result = match run_vecm_with(dataset, &columns, &config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ts_error("VECM estimation failed", &e));
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Compute VAR Impulse Response Functions.

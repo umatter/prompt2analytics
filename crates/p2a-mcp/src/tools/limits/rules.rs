@@ -1103,7 +1103,6 @@ pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
     ("iv_mte", "bootstrap_reps"),
     ("iv_mte", "prte_weights"),
     ("gmm_iv", "weight_matrix"),
-    ("ts_varma", "long_var_order"),
     ("panel_unit_root", "pmax"),
     ("munge_fill_na", "value"),
 ];
