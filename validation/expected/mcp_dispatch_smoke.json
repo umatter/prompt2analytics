@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "mcp_dispatch_smoke",
+  "area": "mcp",
+  "method": "One computation per MCP handler module: kmeans, Moran's I, cpt.mean, ccf lag 0, string operations",
+  "reference": "stats::kmeans(nstart = 50); Moran's I written out (rook, style W); changepoint::cpt.mean(PELT); cor; regmatches/nchar",
+  "call": "kmeans(cbind(a, b), 3, nstart = 50); cpt.mean(s, method = 'PELT'); cor(u, w)",
+  "dataset": "validation/datasets/generated/mcp_dispatch.csv",
+  "datasets": ["validation/datasets/generated/mcp_dispatch.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "changepoint": "2.3"
+  },
+  "values": {
+    "kmeans_tot_withinss": 22.835186238278379,
+    "kmeans_sizes": [16, 16, 16],
+    "moran_i": 0.77650501625069268,
+    "moran_expected": -0.021276595744680851,
+    "n_rook_links": 164,
+    "cpt_mean_location": [24],
+    "ccf_lag0": 0.64373208838469553,
+    "vowel_count": [2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2],
+    "txt_length": [7, 9, 9, 4, 8, 9, 9, 4, 8, 9, 9, 4, 8, 9, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4, 9, 10, 10, 4],
+    "xn_missing": 3,
+    "n": 48
+  }
+}

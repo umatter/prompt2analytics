@@ -25,7 +25,9 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{NaPolicy, missing_json, numeric_column, numeric_columns};
+use crate::tools::common::{
+    NaPolicy, missing_json, notes_json, numeric_column, numeric_columns, parse_option,
+};
 use crate::tools::requests::regression::{
     BgTestRequest, BootstrapCovRequest, CvGlmnetRequest, DiagnosticsRequest, DriscollKraayRequest,
     GlmnetRequest, GlsRequest, HacRequest, HarveyCollierRequest, LassoRequest, LineRequest,
@@ -37,11 +39,298 @@ use p2a_core::data::Dataset;
 use p2a_core::data::columns::ColumnRequest;
 use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
-    BgTestType, CorrelationStructure, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType,
-    SmoothSplineConfig, bg_test, gls, harvey_collier_test, quantreg_multi, reset_test,
-    run_cv_glmnet, run_diagnostics, run_glmnet, run_lasso, run_line, run_loess, run_ols,
-    run_ols_clustered, run_quantreg, run_ridge, run_step, run_vcov_bootstrap,
+    BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType, SmoothSplineConfig, bg_test,
+    harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics, run_glmnet, run_lasso,
+    run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step, run_vcov_bootstrap,
     run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
+};
+
+use p2a_core::EconError;
+use p2a_core::options::Choices;
+use p2a_core::traits::convergence::ResultNotes;
+
+/// Parses an option string through a `Choices` table (for core enums without `FromStr`):
+/// `None` gives `default`; an unknown value is an error naming the option and the accepted
+/// spellings.
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        None => Ok(default),
+        Some(s) => choices.parse(s).map_err(|e| match e {
+            EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
+        }),
+    }
+}
+
+/// Appends the convergence line and the warnings of `result` that `text` does not show yet.
+pub(crate) fn append_unshown_notes(text: &mut String, result: &dyn ResultNotes) {
+    let converged = result
+        .notes_convergence()
+        .filter(|_| !text.contains("Converged:"))
+        .map(|c| (c.converged, c.iterations));
+    let warnings: Vec<String> = result
+        .notes_warnings()
+        .into_iter()
+        .map(|w| {
+            let w = w.trim();
+            w.strip_prefix("Warning:").map_or(w, str::trim).to_string()
+        })
+        .filter(|w| !w.is_empty() && !text.contains(w.as_str()))
+        .collect();
+    crate::tools::common::append_notes(text, converged, &warnings);
+}
+
+/// Pretty JSON of a tool result; never panics.
+pub(crate) fn json_text(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
+/// Compact JSON of a tool result (one line, for replies the chat loop may cut); never panics.
+pub(crate) fn json_compact(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
+/// A JSON object written with its keys in the given order (serde_json's `Map` sorts keys), in
+/// compact form. The glmnet tools put their summary before the long path this way, so the
+/// part of a reply the chat loop keeps holds the warnings and the selection.
+fn ordered_json(pairs: &[(&str, serde_json::Value)]) -> String {
+    let body: Vec<String> = pairs
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}:{}",
+                json_compact(&serde_json::Value::from(*k)),
+                json_compact(v)
+            )
+        })
+        .collect();
+    format!("{{{}}}", body.join(","))
+}
+
+/// Predictors listed per glmnet fit before the listing switches to the largest |estimate|.
+const GLMNET_LISTED_MAX: usize = 20;
+
+/// regression_bootstrap_cov's seed when neither the request nor the session sets one.
+const BOOTSTRAP_DEFAULT_SEED: u64 = 42;
+
+/// One glmnet fit as JSON: lambda, df, deviance ratio, intercept and the coefficients (all of
+/// them for up to 20 predictors, in column order; otherwise the 20 largest by |estimate| and
+/// `more_nonzero`, the number of other non-zero ones).
+fn glmnet_fit_json(
+    names: &[String],
+    fit: &p2a_core::regression::GlmnetCoefficients,
+) -> serde_json::Value {
+    let p = names.len().min(fit.coefficients.len());
+    let mut entry = serde_json::json!({
+        "lambda": fit.lambda, "df": fit.df, "dev_ratio": fit.dev_ratio, "intercept": fit.intercept,
+    });
+    let listed: Vec<usize> = if p <= GLMNET_LISTED_MAX {
+        (0..p).collect()
+    } else {
+        let mut nz: Vec<usize> = (0..p).filter(|&j| fit.coefficients[j] != 0.0).collect();
+        nz.sort_by(|&a, &b| {
+            fit.coefficients[b]
+                .abs()
+                .total_cmp(&fit.coefficients[a].abs())
+                .then(a.cmp(&b))
+        });
+        entry["more_nonzero"] = serde_json::json!(nz.len().saturating_sub(GLMNET_LISTED_MAX));
+        nz.truncate(GLMNET_LISTED_MAX);
+        nz
+    };
+    entry["coefficients"] = listed
+        .iter()
+        .map(|&j| serde_json::json!({"variable": names[j], "estimate": fit.coefficients[j]}))
+        .collect();
+    entry
+}
+
+/// The order in which variables enter a glmnet path: each variable that is non-zero at some
+/// lambda (first non-zero fit, ties in column order), at most 20 listed, with its entry index
+/// (1-based), the lambda there and its estimate at the last lambda; then the number of further
+/// variables that enter and the number that never do.
+fn glmnet_selection(r: &p2a_core::regression::GlmnetResult) -> (serde_json::Value, usize, usize) {
+    let p = r.variable_names.len();
+    let mut first: Vec<Option<usize>> = vec![None; p];
+    for (i, fit) in r.fits.iter().enumerate() {
+        for (j, c) in fit.coefficients.iter().take(p).enumerate() {
+            if first[j].is_none() && *c != 0.0 {
+                first[j] = Some(i);
+            }
+        }
+    }
+    let mut entered: Vec<(usize, usize)> = first
+        .iter()
+        .enumerate()
+        .filter_map(|(j, f)| f.map(|i| (i, j)))
+        .collect();
+    entered.sort();
+    let never = p - entered.len();
+    let more = entered.len().saturating_sub(GLMNET_LISTED_MAX);
+    let last = r.fits.last();
+    let list: Vec<serde_json::Value> = entered
+        .iter()
+        .take(GLMNET_LISTED_MAX)
+        .map(|&(i, j)| {
+            serde_json::json!({
+                "variable": r.variable_names[j],
+                "enters_at_index": i + 1,
+                "enters_at_lambda": r.fits[i].lambda,
+                "estimate_at_last_lambda": last.and_then(|f| f.coefficients.get(j)).copied(),
+            })
+        })
+        .collect();
+    (serde_json::Value::from(list), more, never)
+}
+
+/// The JSON reply of regression_glmnet, regression_lasso and regression_ridge.
+fn glmnet_json(r: &p2a_core::regression::GlmnetResult) -> String {
+    use serde_json::json;
+    let (selection, more, never) = glmnet_selection(r);
+    let listed = if r.variable_names.len() <= GLMNET_LISTED_MAX {
+        "all".to_string()
+    } else {
+        format!("the {GLMNET_LISTED_MAX} largest |estimate| per lambda")
+    };
+    let path: Vec<serde_json::Value> = r
+        .fits
+        .iter()
+        .map(|f| glmnet_fit_json(&r.variable_names, f))
+        .collect();
+    ordered_json(&[
+        ("model", json!("glmnet")),
+        ("family", json!(r.family.to_string())),
+        ("alpha", json!(r.alpha)),
+        ("standardize", json!(r.standardize)),
+        ("intercept", json!(r.intercept)),
+        ("dependent_var", json!(r.dependent_var)),
+        ("variables", json!(r.variable_names)),
+        ("n_obs", json!(r.n_obs)),
+        ("n_lambda", json!(r.fits.len())),
+        ("npasses", json!(r.npasses)),
+        ("null_deviance", json!(r.null_deviance)),
+        (
+            "warnings",
+            notes_json(None, &r.warnings)["warnings"].clone(),
+        ),
+        ("selection", selection),
+        ("more_selected", json!(more)),
+        ("never_selected", json!(never)),
+        ("coefficients_listed", json!(listed)),
+        ("path", json!(path)),
+    ])
+}
+
+/// The JSON reply of regression_cv_glmnet; `seed` is the seed the folds were drawn from.
+fn cv_glmnet_json(r: &p2a_core::regression::GlmnetCvResult, seed: u64) -> String {
+    use serde_json::json;
+    let names = &r.fit.variable_names;
+    let at = |i: usize| {
+        let mut e = r
+            .fit
+            .fits
+            .get(i)
+            .map(|f| glmnet_fit_json(names, f))
+            .unwrap_or_else(|| json!({}));
+        e["cvm"] = json!(r.cvm.get(i));
+        e["cvsd"] = json!(r.cvsd.get(i));
+        e
+    };
+    let curve: Vec<serde_json::Value> = (0..r.lambda.len())
+        .map(|i| {
+            json!({
+                "lambda": r.lambda[i],
+                "cvm": r.cvm.get(i),
+                "cvsd": r.cvsd.get(i),
+                "df": r.fit.fits.get(i).map(|f| f.df),
+            })
+        })
+        .collect();
+    let mut warnings = r.fit.warnings.clone();
+    warnings.extend(
+        r.warnings
+            .iter()
+            .filter(|w| !r.fit.warnings.contains(w))
+            .cloned(),
+    );
+    ordered_json(&[
+        ("model", json!("cv.glmnet")),
+        ("family", json!(r.fit.family.to_string())),
+        ("alpha", json!(r.fit.alpha)),
+        ("standardize", json!(r.fit.standardize)),
+        ("dependent_var", json!(r.fit.dependent_var)),
+        ("variables", json!(names)),
+        ("n_obs", json!(r.fit.n_obs)),
+        ("nfolds", json!(r.nfolds)),
+        ("seed", json!(seed)),
+        ("lambda_min", json!(r.lambda_min)),
+        ("index_min", json!(r.lambda_min_index + 1)),
+        ("lambda_1se", json!(r.lambda_1se)),
+        ("index_1se", json!(r.lambda_1se_index + 1)),
+        ("warnings", notes_json(None, &warnings)["warnings"].clone()),
+        ("at_lambda_min", at(r.lambda_min_index)),
+        ("at_lambda_1se", at(r.lambda_1se_index)),
+        ("cv_curve", json!(curve)),
+        ("fold_path_lengths", json!(r.fold_path_lengths)),
+    ])
+}
+
+/// The selection criterion of regression_step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepCriterion {
+    Aic,
+    Bic,
+}
+
+const STEP_CRITERION: Choices<StepCriterion> = Choices {
+    option: "criterion",
+    values: &[
+        (&["aic"], StepCriterion::Aic),
+        (&["bic", "sbc", "schwarz"], StepCriterion::Bic),
+    ],
+};
+
+/// The model families of regression_nls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NlsModel {
+    ExpDecay,
+    ExpGrowth,
+    MichaelisMenten,
+    Logistic,
+    Power,
+    Asymptotic,
+}
+
+const NLS_MODEL: Choices<NlsModel> = Choices {
+    option: "model",
+    values: &[
+        (&["exponential_decay", "exp_decay"], NlsModel::ExpDecay),
+        (&["exponential_growth", "exp_growth"], NlsModel::ExpGrowth),
+        (&["michaelis_menten", "mm"], NlsModel::MichaelisMenten),
+        (&["logistic", "logistic_growth"], NlsModel::Logistic),
+        (&["power", "power_law"], NlsModel::Power),
+        (&["asymptotic"], NlsModel::Asymptotic),
+    ],
+};
+
+const NLS_ALGORITHM: Choices<p2a_core::regression::NlsAlgorithm> = Choices {
+    option: "algorithm",
+    values: &[
+        (
+            &["levenberg_marquardt", "lm", "marquardt"],
+            p2a_core::regression::NlsAlgorithm::LevenbergMarquardt,
+        ),
+        (
+            &["gauss_newton", "gn"],
+            p2a_core::regression::NlsAlgorithm::GaussNewton,
+        ),
+    ],
 };
 
 /// The intercept flag and covariance type of an OLS request: `intercept`
@@ -91,9 +380,17 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         match run_ols_request(dataset, &request) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => {
+                let mut text = result.to_string();
+                if !request.intercept.unwrap_or(true) {
+                    // without an intercept R-squared is the uncentred one (summary.lm)
+                    text = text
+                        .replace("\nR-squared: ", "\nR-squared (uncentered): ")
+                        .replace("\nAdj. R-squared: ", "\nAdj. R-squared (uncentered): ");
+                }
+                append_unshown_notes(&mut text, &result);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             Err(msg) => Ok(CallToolResult::error(vec![Content::text(msg)])),
         }
     }
@@ -129,7 +426,7 @@ impl AnalyticsServer {
 
     /// Run Breusch-Godfrey test for serial correlation.
     #[tool(
-        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value."
+        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. test_type 'chisq' (LM, default) or 'f', as lmtest::bgtest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
     )]
     pub async fn regression_bgtest(
         &self,
@@ -143,10 +440,11 @@ impl AnalyticsServer {
         let order = request.order.unwrap_or(1);
         let fill = request.fill.unwrap_or(0.0);
 
-        let test_type = match request.test_type.as_deref() {
-            Some(t) => BgTestType::from_str(t).unwrap_or(BgTestType::Chisq),
-            None => BgTestType::Chisq,
-        };
+        let test_type =
+            match parse_option::<BgTestType>(request.test_type.as_deref(), BgTestType::Chisq) {
+                Ok(t) => t,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         let result = match bg_test(dataset, &request.y, &x_refs, order, test_type, fill) {
             Ok(r) => r,
@@ -165,7 +463,7 @@ impl AnalyticsServer {
 
     /// Run Ramsey's RESET test for functional form.
     #[tool(
-        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed."
+        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. reset_type 'fitted' (default), 'regressor' or 'princomp' (powers of the first principal component of the regressors), as lmtest::resettest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
     )]
     pub async fn regression_resettest(
         &self,
@@ -178,10 +476,11 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let powers = request.powers.unwrap_or_else(|| vec![2, 3]);
 
-        let reset_type_enum = match request.reset_type.as_deref() {
-            Some(t) => ResetType::from_str(t).unwrap_or(ResetType::Fitted),
-            None => ResetType::Fitted,
-        };
+        let reset_type_enum =
+            match parse_option::<ResetType>(request.reset_type.as_deref(), ResetType::Fitted) {
+                Ok(t) => t,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         let result = match reset_test(dataset, &request.y, &x_refs, &powers, reset_type_enum) {
             Ok(r) => r,
@@ -193,9 +492,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Wald test for comparing nested linear models.
@@ -232,9 +531,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Harvey-Collier test for linearity using recursive residuals.
@@ -268,7 +567,7 @@ impl AnalyticsServer {
 
     /// HAC (Newey-West) standard errors for time series regression.
     #[tool(
-        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection."
+        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
     )]
     pub async fn regression_hac(
         &self,
@@ -298,14 +597,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Bootstrap covariance estimation (vcovBS).
     #[tool(
-        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable."
+        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. As sandwich::vcovBS with type 'pairs' (default), 'residual', 'wild' (Rademacher), 'mammen' or 'webb'. Seeded: seed, else the session seed (set_seed), else 42."
     )]
     pub async fn regression_bootstrap_cov(
         &self,
@@ -323,7 +622,12 @@ impl AnalyticsServer {
             &x_refs,
             request.n_boot,
             request.bootstrap_type.as_deref(),
-            request.seed,
+            Some(
+                request
+                    .seed
+                    .or(*self.global_seed.read().await)
+                    .unwrap_or(BOOTSTRAP_DEFAULT_SEED),
+            ),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -334,14 +638,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Driscoll-Kraay panel-robust standard errors.
     #[tool(
-        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output)."
+        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
     )]
     pub async fn regression_driscoll_kraay(
         &self,
@@ -370,63 +674,79 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Quantile regression.
     #[tool(
-        description = "Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously."
+        description = "Quantile regression as R quantreg::rq: method 'auto' (default: 'br' up to 5,000 rows, 'fn' above; rq's own default is 'br' at every n), 'br' (Barrodale-Roberts simplex), 'fn' (Frisch-Newton interior point) or 'irls' (an approximation, not an R method); standard errors as summary.rq with se 'nid' (default), 'iid', 'ker' or 'boot'. Give one quantile tau (default 0.5) or a list taus, not both. Returns coefficients, standard errors, t, p and 95% intervals from t(n - k) for each quantile."
     )]
     pub async fn regression_quantreg(
         &self,
         Parameters(request): Parameters<QuantRegRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::quantreg::{
+            QuantRegConfig, QuantRegMethod, QuantRegSe, quantreg, quantreg_multi_with,
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Handle multiple quantiles or single quantile
-        if let Some(taus) = &request.taus {
-            // Multiple quantiles
-            let results = match quantreg_multi(dataset, &request.y, &x_refs, taus) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Quantile regression failed: {}",
-                        e
-                    ))]));
-                }
+        let mut config = QuantRegConfig::default();
+        config.algorithm =
+            match parse_option::<QuantRegMethod>(request.method.as_deref(), QuantRegMethod::Auto) {
+                Ok(m) => m,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
+        config.se = match parse_option::<QuantRegSe>(request.se.as_deref(), QuantRegSe::Nid) {
+            Ok(s) => s,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        // the bootstrap's seed (se = boot only); None = QUANTREG_BOOT_DEFAULT_SEED
+        config.seed = *self.global_seed.read().await;
 
-            // Format all results
-            let output: String = results
-                .iter()
-                .map(|r| format!("{}", r))
-                .collect::<Vec<_>>()
-                .join("\n---\n");
-
-            Ok(CallToolResult::success(vec![Content::text(output)]))
-        } else {
-            // Single quantile
-            let tau = request.tau.unwrap_or(0.5);
-            let result = match run_quantreg(dataset, &request.y, &x_refs, tau) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Quantile regression failed: {}",
-                        e
-                    ))]));
+        let fail = |e: p2a_core::EconError| {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Quantile regression failed: {e}"
+            ))]))
+        };
+        let results = match (request.tau, &request.taus) {
+            (Some(_), Some(_)) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "give either tau or taus, not both".to_string(),
+                )]));
+            }
+            (_, Some(taus)) => {
+                match quantreg_multi_with(dataset, &request.y, &x_refs, taus, &config) {
+                    Ok(r) => r,
+                    Err(e) => return fail(e),
                 }
-            };
+            }
+            (tau, None) => {
+                config.tau = tau.unwrap_or(0.5);
+                match quantreg(dataset, &request.y, &x_refs, &config) {
+                    Ok(r) => vec![r],
+                    Err(e) => return fail(e),
+                }
+            }
+        };
 
-            Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )]))
-        }
+        let output: String = results
+            .iter()
+            .map(|r| {
+                let mut block = r.to_string();
+                append_unshown_notes(&mut block, r);
+                block
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run OLS with clustered standard errors.
@@ -459,14 +779,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run nonlinear least squares regression.
     #[tool(
-        description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info."
+        description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info. algorithm 'levenberg_marquardt' (default; also 'lm') or 'gauss_newton' (also 'gn'); model names are matched ignoring case and separators."
     )]
     pub async fn regression_nls(
         &self,
@@ -506,74 +826,56 @@ impl AnalyticsServer {
         };
 
         // Parse model type and get function + param names
-        let (model_fn, param_names): (fn(&Array1<f64>, &Array1<f64>) -> f64, Vec<&str>) =
-            match request.model.to_lowercase().as_str() {
-                "exponential_decay" | "exp_decay" => {
-                    if request.start.len() != 3 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c",
-                        )]));
-                    }
-                    (model_exponential_decay, vec!["a", "b", "c"])
-                }
-                "exponential_growth" | "exp_growth" => {
-                    if request.start.len() != 2 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)",
-                        )]));
-                    }
-                    (model_exponential_growth, vec!["a", "b"])
-                }
-                "michaelis_menten" | "mm" => {
-                    if request.start.len() != 2 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)",
-                        )]));
-                    }
-                    (model_michaelis_menten, vec!["Vmax", "Km"])
-                }
-                "logistic" | "logistic_growth" => {
-                    if request.start.len() != 3 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))",
-                        )]));
-                    }
-                    (model_logistic_growth, vec!["K", "r", "x0"])
-                }
-                "power" => {
-                    if request.start.len() != 2 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "power requires 2 starting values: [a, b] for y = a*x^b",
-                        )]));
-                    }
-                    (model_power, vec!["a", "b"])
-                }
-                "asymptotic" => {
-                    if request.start.len() != 3 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)",
-                        )]));
-                    }
-                    (model_asymptotic, vec!["a", "b", "c"])
-                }
-                _ => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Unknown model '{}'. Supported: exponential_decay, exponential_growth, michaelis_menten, logistic, power, asymptotic",
-                        request.model
-                    ))]));
-                }
-            };
+        let model = match parse_choice(&NLS_MODEL, Some(&request.model), NlsModel::ExpDecay) {
+            Ok(m) => m,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        type ModelFn = fn(&Array1<f64>, &Array1<f64>) -> f64;
+        let (model_fn, param_names, usage): (ModelFn, Vec<&str>, &str) = match model {
+            NlsModel::ExpDecay => (
+                model_exponential_decay,
+                vec!["a", "b", "c"],
+                "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c",
+            ),
+            NlsModel::ExpGrowth => (
+                model_exponential_growth,
+                vec!["a", "b"],
+                "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)",
+            ),
+            NlsModel::MichaelisMenten => (
+                model_michaelis_menten,
+                vec!["Vmax", "Km"],
+                "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)",
+            ),
+            NlsModel::Logistic => (
+                model_logistic_growth,
+                vec!["K", "r", "x0"],
+                "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))",
+            ),
+            NlsModel::Power => (
+                model_power,
+                vec!["a", "b"],
+                "power requires 2 starting values: [a, b] for y = a*x^b",
+            ),
+            NlsModel::Asymptotic => (
+                model_asymptotic,
+                vec!["a", "b", "c"],
+                "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)",
+            ),
+        };
+        if request.start.len() != param_names.len() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                usage.to_string(),
+            )]));
+        }
 
-        // Parse algorithm
-        let algorithm = match request.algorithm.as_deref() {
-            Some("gauss_newton") | Some("gn") => NlsAlgorithm::GaussNewton,
-            Some("levenberg_marquardt") | Some("lm") | None => NlsAlgorithm::LevenbergMarquardt,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown algorithm '{}'. Supported: levenberg_marquardt (default), gauss_newton",
-                    other
-                ))]));
-            }
+        let algorithm = match parse_choice(
+            &NLS_ALGORITHM,
+            request.algorithm.as_deref(),
+            NlsAlgorithm::LevenbergMarquardt,
+        ) {
+            Ok(a) => a,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let config = NlsConfig {
@@ -600,7 +902,7 @@ impl AnalyticsServer {
 
     /// Run LOESS (local polynomial regression) smoothing.
     #[tool(
-        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters."
+        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters. Neighbourhoods as R's loess with surface = 'direct'; a tied predictor value shared by more points than the span gives the tie mean with a warning (lowess's rule; R's loess returns 0 there). The JSON lists the warnings."
     )]
     pub async fn regression_loess(
         &self,
@@ -654,15 +956,16 @@ impl AnalyticsServer {
         if let Some(m) = missing_json(&result.missing) {
             output["missing"] = m;
         }
+        output["warnings"] = notes_json(None, &result.warnings)["warnings"].clone();
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Fit Friedman's SuperSmoother.
     #[tool(
-        description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data."
+        description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data. periodic = true needs x in [0, 1], as R."
     )]
     pub async fn regression_supsmu(
         &self,
@@ -683,7 +986,13 @@ impl AnalyticsServer {
             .na(NaPolicy::Omit)
             .min_rows(
                 4,
-                &format!("SuperSmoother of '{}' on '{}'", request.y, request.x),
+                &match request.weights.as_deref() {
+                    Some(w) => format!(
+                        "SuperSmoother of '{}' on '{}' with weights '{}'",
+                        request.y, request.x, w
+                    ),
+                    None => format!("SuperSmoother of '{}' on '{}'", request.y, request.x),
+                },
             )
             .extract()
         {
@@ -717,17 +1026,17 @@ impl AnalyticsServer {
             "n_unique_points": result.n,
             "bass": result.bass,
             "periodic": result.periodic,
-            "x_sample": &result.x[..result.n.min(20)],
-            "y_smoothed_sample": &result.y[..result.n.min(20)],
+            "x_sample": result.x.iter().take(20).collect::<Vec<_>>(),
+            "y_smoothed_sample": result.y.iter().take(20).collect::<Vec<_>>(),
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} points", result.n)) } else { None::<String> }
         });
         if let Some(m) = missing_json(cols.missing()) {
             output["missing"] = m;
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Fit Tukey's resistant line.
@@ -787,22 +1096,22 @@ impl AnalyticsServer {
                 "intercept": result.intercept,
                 "slope": result.slope
             },
-            "fitted_sample": &result.fitted[..result.n.min(20)],
-            "residuals_sample": &result.residuals[..result.n.min(20)],
+            "fitted_sample": result.fitted.iter().take(20).collect::<Vec<_>>(),
+            "residuals_sample": result.residuals.iter().take(20).collect::<Vec<_>>(),
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} values", result.n)) } else { None::<String> }
         });
         if let Some(m) = missing_json(cols.missing()) {
             output["missing"] = m;
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Stepwise regression model selection.
     #[tool(
-        description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history."
+        description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history. criterion 'aic' (default) or 'bic'; direction 'both' (default), 'forward' or 'backward'. The criterion values are those R's step() prints (extractAIC)."
     )]
     pub async fn regression_step(
         &self,
@@ -821,7 +1130,14 @@ impl AnalyticsServer {
         };
 
         let direction_str = request.direction.as_deref().unwrap_or("both");
-        let use_bic = request.criterion.as_deref() == Some("bic");
+        let use_bic = match parse_choice(
+            &STEP_CRITERION,
+            request.criterion.as_deref(),
+            StepCriterion::Aic,
+        ) {
+            Ok(c) => c == StepCriterion::Bic,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         // For stepwise, scope_lower is empty (no forced variables), scope_upper is all predictors
         let scope_lower: Vec<&str> = vec![];
@@ -864,29 +1180,48 @@ impl AnalyticsServer {
             })).collect::<Vec<_>>()
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Fit a Generalized Least Squares model.
     #[tool(
-        description = "Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics."
+        description = "Generalized least squares as R nlme::gls. correlation 'ar1' (default, a p2a convention: nlme's default is no correlation; within each group, in row order), 'compound_symmetry' (exchangeable within each group, nlme corCompSymm) or 'identity'. Unless rho is given it is estimated by REML (default) or ML (method), as nlme; group names the grouping column (nlme form = ~ 1 | group) and is required for compound symmetry. Returns JSON with the coefficients, the correlation parameter and whether it was estimated or user-supplied, sigma, log-likelihood, AIC and BIC as nlme, and convergence."
     )]
     pub async fn regression_gls(
         &self,
         Parameters(request): Parameters<GlsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use ndarray::Array1;
-        use p2a_core::linalg::design::DesignMatrix;
+        use p2a_core::regression::{GlsCorrelation, GlsMethod, GlsOptions, run_gls_with};
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract y column (a missing value is an error, as nlme::gls's na.fail)
-        let y = match numeric_column(dataset, &request.y, NaPolicy::Fail) {
-            Ok((v, _)) => Array1::from_vec(v),
+        let correlation = match parse_option::<GlsCorrelation>(
+            request.correlation.as_deref(),
+            GlsCorrelation::Ar1,
+        ) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let method = match parse_option::<GlsMethod>(request.method.as_deref(), GlsMethod::Reml) {
+            Ok(m) => m,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let intercept = request.intercept.unwrap_or(true);
+
+        let mut options = GlsOptions::default();
+        options.correlation = correlation;
+        options.rho = request.rho;
+        options.group_col = request.group.clone();
+        options.method = method;
+
+        let result = match run_gls_with(dataset, &request.y, &x_refs, intercept, &options) {
+            Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "GLS regression failed: {e}"
@@ -894,117 +1229,73 @@ impl AnalyticsServer {
             }
         };
 
-        // Build design matrix
-        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-        let intercept = request.intercept.unwrap_or(true);
+        let mut coef_names: Vec<String> = if intercept {
+            vec!["(Intercept)".to_string()]
+        } else {
+            vec![]
+        };
+        coef_names.extend(request.x.iter().cloned());
 
-        let dm = match DesignMatrix::from_dataframe(dataset.df(), &x_refs, intercept) {
-            Ok(dm) => dm,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to build design matrix: {}",
-                    e
-                ))]));
-            }
+        let coef_table: Vec<serde_json::Value> = coef_names
+            .iter()
+            .enumerate()
+            .take(result.coefficients.len())
+            .map(|(i, name)| {
+                serde_json::json!({
+                    "term": name,
+                    "estimate": result.coefficients[i],
+                    "std_error": result.std_errors.get(i),
+                    "t_value": result.t_values.get(i),
+                    "p_value": result.p_values.get(i)
+                })
+            })
+            .collect();
+
+        let source = if result.correlation_param.is_none() {
+            "not applicable".to_string()
+        } else if !result.rho_estimated {
+            "user-supplied".to_string()
+        } else {
+            format!("estimated ({})", result.method.label())
         };
 
-        let x = dm.view();
-
-        // Determine correlation structure
-        let corr_type = request.correlation.as_deref().unwrap_or("ar1");
-
-        let correlation = match corr_type {
-            "identity" | "ols" => CorrelationStructure::Identity,
-            "compound_symmetry" | "cs" => {
-                let rho = request.rho.unwrap_or(0.5);
-                CorrelationStructure::CompoundSymmetry { rho }
-            }
-            "ar1" | "ar" => {
-                // If rho not provided, auto-estimate from OLS residuals
-                let rho = if let Some(r) = request.rho {
-                    r
-                } else {
-                    // Run OLS to get residuals for AR(1) estimation
-                    match gls(&y.view(), &x, CorrelationStructure::Identity) {
-                        Ok(ols_result) => {
-                            // Estimate rho from residuals
-                            let residuals = &ols_result.residuals;
-                            let n = residuals.len();
-                            if n > 1 {
-                                let mut sum_prod = 0.0;
-                                let mut sum_sq = 0.0;
-                                for i in 1..n {
-                                    sum_prod += residuals[i] * residuals[i - 1];
-                                    sum_sq += residuals[i - 1].powi(2);
-                                }
-                                (sum_prod / sum_sq).clamp(-0.99, 0.99)
-                            } else {
-                                0.0
-                            }
-                        }
-                        Err(_) => 0.5, // fallback
-                    }
-                };
-                CorrelationStructure::AR1 { rho }
-            }
-            other => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown correlation structure '{}'. Supported: ar1, compound_symmetry, identity.",
-                    other
-                ))]));
-            }
-        };
-
-        match gls(&y.view(), &x, correlation) {
-            Ok(result) => {
-                // Build coefficient names
-                let mut coef_names: Vec<String> = if intercept {
-                    vec!["(Intercept)".to_string()]
-                } else {
-                    vec![]
-                };
-                coef_names.extend(request.x.iter().cloned());
-
-                let mut coef_table: Vec<serde_json::Value> = Vec::new();
-                for (i, name) in coef_names.iter().enumerate() {
-                    coef_table.push(serde_json::json!({
-                        "term": name,
-                        "estimate": result.coefficients[i],
-                        "std_error": result.std_errors[i],
-                        "t_value": result.t_values[i],
-                        "p_value": result.p_values[i]
-                    }));
-                }
-
-                let json_output = serde_json::json!({
-                    "model": "Generalized Least Squares",
-                    "correlation": result.correlation,
-                    "correlation_param": result.correlation_param,
-                    "coefficients": coef_table,
-                    "sigma": result.sigma,
-                    "r_squared": result.r_squared,
-                    "adj_r_squared": result.adj_r_squared,
-                    "log_likelihood": result.log_likelihood,
-                    "aic": result.aic,
-                    "bic": result.bic,
-                    "n_obs": result.n_obs,
-                    "df_residual": result.df_residual
-                });
-
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json_output).unwrap(),
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "GLS regression failed: {}",
-                e
-            ))])),
+        let mut json_output = serde_json::json!({
+            "model": "Generalized Least Squares",
+            "method": result.method.label(),
+            "correlation": result.correlation,
+            "correlation_param": result.correlation_param,
+            "correlation_param_source": source,
+            "group": request.group,
+            "n_groups": result.n_groups,
+            "coefficients": coef_table,
+            "sigma": result.sigma,
+            "r_squared": result.r_squared,
+            "adj_r_squared": result.adj_r_squared,
+            "log_likelihood": result.log_likelihood,
+            "aic": result.aic,
+            "bic": result.bic,
+            "n_obs": result.n_obs,
+            "df_residual": result.df_residual
+        });
+        let notes = notes_json(
+            result
+                .convergence
+                .as_ref()
+                .map(|c| (c.converged, c.iterations)),
+            &result.warnings,
+        );
+        if let (Some(out), Some(n)) = (json_output.as_object_mut(), notes.as_object()) {
+            out.extend(n.clone());
         }
+
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &json_output,
+        ))]))
     }
 
     /// Fit a smoothing spline.
     #[tool(
-        description = "Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score."
+        description = "Cubic smoothing spline. spar or df fix the smoothing; otherwise lambda is chosen by criterion: 'gcv' (default, R smooth.spline(cv = FALSE)) or 'cv' (leave-one-out, cv = TRUE). Returns JSON with the fitted values (or predictions at xout), df, lambda, the criterion used (null when spar or df was given), its value and warnings."
     )]
     pub async fn regression_smooth_spline(
         &self,
@@ -1028,10 +1319,15 @@ impl AnalyticsServer {
             }
         };
 
-        let config = SmoothSplineConfig {
-            spar: request.spar,
-            df: request.df,
-            ..Default::default()
+        let mut config = SmoothSplineConfig::default();
+        config.spar = request.spar;
+        config.df = request.df;
+        config.criterion = match parse_option::<p2a_core::regression::smooth_spline::SplineCriterion>(
+            request.criterion.as_deref(),
+            p2a_core::regression::smooth_spline::SplineCriterion::Gcv,
+        ) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         match smooth_spline(cols.numeric(&request.x), cols.numeric(&request.y), config) {
@@ -1059,13 +1355,15 @@ impl AnalyticsServer {
                     "df": result.df,
                     "lambda": result.lambda,
                     "cv_crit": result.cv_crit,
+                    "criterion": result.criterion.map(|c| c.to_string()),
                     "n_obs": result.n_obs,
-                    "n_knots": result.n_knots
+                    "n_knots": result.n_knots,
+                    "warnings": notes_json(None, &result.warnings)["warnings"].clone()
                 });
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json_output).unwrap(),
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(json_text(
+                    &json_output,
+                ))]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Smooth spline failed: {}",
@@ -1076,7 +1374,7 @@ impl AnalyticsServer {
 
     /// Run elastic net/lasso/ridge regression (glmnet).
     #[tool(
-        description = "Run regularized regression with elastic net penalty (glmnet). Combines L1 (lasso) and L2 (ridge) penalties. Set alpha=1 for lasso, alpha=0 for ridge, or 0<alpha<1 for elastic net. Returns coefficient path along lambda sequence."
+        description = "Elastic net, lasso or ridge regression as R glmnet::glmnet (coordinate descent, glmnet's standardisation and lambda path). alpha = 1 lasso (default), 0 ridge, in between elastic net; family 'gaussian' (default) or 'binomial'. Returns JSON with the coefficient path: for each lambda the intercept, df, deviance ratio and the coefficients (all of them for up to 20 predictors, otherwise the 20 largest in absolute value and the number of other non-zero ones). The selection summary (order of entry and the estimates at the smallest lambda) comes before the full path."
     )]
     pub async fn regression_glmnet(
         &self,
@@ -1088,24 +1386,23 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let family = match request.family.as_deref() {
-            Some("binomial") => GlmnetFamily::Binomial,
-            _ => GlmnetFamily::Gaussian,
-        };
+        let family =
+            match parse_option::<GlmnetFamily>(request.family.as_deref(), GlmnetFamily::Gaussian) {
+                Ok(f) => f,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
-        let config = GlmnetConfig {
-            alpha: request.alpha.unwrap_or(1.0),
-            lambda: request.lambda,
-            nlambda: request.nlambda.unwrap_or(100),
-            standardize: request.standardize.unwrap_or(true),
-            family,
-            ..Default::default()
-        };
+        let mut config = GlmnetConfig::default();
+        config.alpha = request.alpha.unwrap_or(1.0);
+        config.lambda = request.lambda;
+        config.nlambda = request.nlambda.unwrap_or(100);
+        config.standardize = request.standardize.unwrap_or(true);
+        config.family = family;
 
         match run_glmnet(dataset, &request.y, &x_refs, &config) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
+                &result,
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Glmnet failed: {}",
                 e
@@ -1115,7 +1412,7 @@ impl AnalyticsServer {
 
     /// Run cross-validated glmnet for optimal lambda selection.
     #[tool(
-        description = "Run cross-validated elastic net/lasso/ridge regression to select optimal lambda. Returns lambda.min (minimum CV error) and lambda.1se (most regularized within 1 SE of minimum)."
+        description = "Cross-validated elastic net as R glmnet::cv.glmnet: observations are assigned to nfolds folds (default 10) at random from seed (default: the session seed set by set_seed, else 42); each fold is fitted on its own lambda path. Returns JSON with lambda.min and lambda.1se and their 1-based indices, the coefficients at both, the CV curve (lambda, cvm, cvsd, df) and the seed used."
     )]
     pub async fn regression_cv_glmnet(
         &self,
@@ -1127,24 +1424,27 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let family = match request.family.as_deref() {
-            Some("binomial") => GlmnetFamily::Binomial,
-            _ => GlmnetFamily::Gaussian,
-        };
+        let family =
+            match parse_option::<GlmnetFamily>(request.family.as_deref(), GlmnetFamily::Gaussian) {
+                Ok(f) => f,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
-        let config = GlmnetConfig {
-            alpha: request.alpha.unwrap_or(1.0),
-            nlambda: request.nlambda.unwrap_or(100),
-            standardize: request.standardize.unwrap_or(true),
-            family,
-            ..Default::default()
-        };
+        let mut config = GlmnetConfig::default();
+        config.alpha = request.alpha.unwrap_or(1.0);
+        config.nlambda = request.nlambda.unwrap_or(100);
+        config.standardize = request.standardize.unwrap_or(true);
+        config.family = family;
 
         let nfolds = request.nfolds.unwrap_or(10);
+        let seed = request.seed.or(*self.global_seed.read().await);
 
-        match run_cv_glmnet(dataset, &request.y, &x_refs, &config, nfolds, request.seed) {
+        match run_cv_glmnet(dataset, &request.y, &x_refs, &config, nfolds, seed) {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
+                cv_glmnet_json(
+                    &result,
+                    seed.unwrap_or(p2a_core::regression::glmnet::CV_GLMNET_DEFAULT_SEED),
+                ),
             )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "CV Glmnet failed: {}",
@@ -1155,7 +1455,7 @@ impl AnalyticsServer {
 
     /// Run ridge regression (L2 penalty).
     #[tool(
-        description = "Run ridge regression (L2-penalized linear regression). Shortcut for glmnet with alpha=0. Useful when predictors are highly correlated."
+        description = "Ridge regression: glmnet with alpha = 0, as R glmnet::glmnet(alpha = 0). Returns the coefficient path as JSON (see regression_glmnet)."
     )]
     pub async fn regression_ridge(
         &self,
@@ -1168,9 +1468,9 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         match run_ridge(dataset, &request.y, &x_refs, request.lambda) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
+                &result,
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Ridge regression failed: {}",
                 e
@@ -1180,7 +1480,7 @@ impl AnalyticsServer {
 
     /// Run lasso regression (L1 penalty).
     #[tool(
-        description = "Run lasso regression (L1-penalized linear regression). Shortcut for glmnet with alpha=1. Performs automatic feature selection by shrinking some coefficients to zero."
+        description = "Lasso regression: glmnet with alpha = 1, as R glmnet::glmnet(alpha = 1); coefficients shrunk exactly to zero are not selected. Returns the coefficient path as JSON (see regression_glmnet)."
     )]
     pub async fn regression_lasso(
         &self,
@@ -1193,9 +1493,9 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         match run_lasso(dataset, &request.y, &x_refs, request.lambda) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
+                &result,
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Lasso regression failed: {}",
                 e
@@ -1211,6 +1511,109 @@ mod tests {
     use p2a_core::data::{DataLoader, Dataset};
     use p2a_validation::{Case, Check, Tol};
     use serde_json::{Value, json};
+
+    #[test]
+    fn test_parse_choice_parses_and_reports_the_option() {
+        use p2a_core::options::Choices;
+        const T: Choices<u8> = Choices {
+            option: "criterion",
+            values: &[(&["aic"], 1), (&["bic", "schwarz"], 2)],
+        };
+        assert_eq!(super::parse_choice(&T, None, 1), Ok(1));
+        assert_eq!(super::parse_choice(&T, Some(" Schwarz "), 1), Ok(2));
+        let e = super::parse_choice(&T, Some("cp"), 1).unwrap_err();
+        assert!(
+            e.contains("unknown criterion 'cp'") && e.contains("aic, bic"),
+            "{e}"
+        );
+    }
+
+    struct Notes(Option<(bool, usize)>, Vec<String>);
+    impl p2a_core::traits::convergence::ResultNotes for Notes {
+        fn notes_warnings(&self) -> Vec<String> {
+            self.1.clone()
+        }
+        fn notes_convergence(&self) -> Option<p2a_core::traits::convergence::Convergence> {
+            self.0.map(|(c, i)| {
+                p2a_core::traits::convergence::Convergence::new(
+                    c,
+                    i,
+                    100,
+                    "relative change",
+                    f64::NAN,
+                    1e-8,
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn test_append_unshown_notes_adds_only_what_is_missing() {
+        let r = Notes(
+            Some((true, 4)),
+            vec!["Warning: x dropped".into(), "rows dropped (y: 2)".into()],
+        );
+        let mut t = "Model\nMissing values: 2 rows dropped (y: 2)\n".to_string();
+        super::append_unshown_notes(&mut t, &r);
+        assert!(
+            t.ends_with("Converged: yes (4 iterations)\nWarning: x dropped"),
+            "{t}"
+        );
+        assert_eq!(t.matches("rows dropped").count(), 1, "{t}");
+        let before = t.clone();
+        super::append_unshown_notes(&mut t, &r);
+        assert_eq!(t, before);
+        let mut quiet = "Model".to_string();
+        super::append_unshown_notes(&mut quiet, &Notes(None, vec![]));
+        assert_eq!(quiet, "Model");
+    }
+
+    /// When the weights column removes the rows, the row-count error names it.
+    #[test]
+    fn test_mcp_regression_supsmu_error_names_weights() {
+        use p2a_core::polars::prelude::*;
+        let df = df! {
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 6.2],
+            "w" => [Some(1.0), None, None, None, Some(1.0), Some(1.0)],
+        }
+        .unwrap();
+        let (rt, server) = server_with(vec![("sw", df)]);
+        let req: SupsmuRequest =
+            serde_json::from_value(json!({"dataset": "sw", "x": "x", "y": "y", "weights": "w"}))
+                .unwrap();
+        let r = rt
+            .block_on(server.regression_supsmu(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains(
+                "SuperSmoother of 'y' on 'x' with weights 'w': 3 of 6 rows have no missing value"
+            ),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn test_regression_option_tables_validate() {
+        assert_eq!(super::STEP_CRITERION.validate(), Ok(()));
+        assert_eq!(super::NLS_MODEL.validate(), Ok(()));
+        assert_eq!(super::NLS_ALGORITHM.validate(), Ok(()));
+    }
+
+    #[test]
+    fn test_json_text_never_panics() {
+        assert_eq!(
+            super::json_text(&serde_json::json!({"a": 1})),
+            "{\n  \"a\": 1\n}"
+        );
+        assert!(super::json_text(&serde_json::json!({"x": f64::NAN})).contains("null"));
+        assert_eq!(
+            super::json_compact(&serde_json::json!({"a": [1, 2]})),
+            "{\"a\":[1,2]}"
+        );
+    }
 
     /// `inv ~ value + capital` on `grunfeld`, plus `extra` keys.
     fn request(extra: Value) -> OlsRequest {
@@ -1367,6 +1770,11 @@ mod tests {
         let rows = rows(&t);
         assert!(rows.iter().all(|(name, _)| name != "(Intercept)"), "{t}");
         assert_eq!(rows.len(), 2, "{t}");
+        assert!(
+            t.contains("\nR-squared (uncentered): ")
+                && t.contains("\nAdj. R-squared (uncentered): "),
+            "{t}"
+        );
         let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
         let expected = run_ols(
             &ds,

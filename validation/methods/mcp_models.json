@@ -1,0 +1,236 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_regression_surface",
+      "name": "MCP regression tools through call_tool_with_session: glmnet JSON, GLS rho, quantreg, OLS aliasing, diagnostics, HAC/DK, smoothers, step, NLS",
+      "category": "mcp",
+      "reference": "glmnet::glmnet, glmnet::cv.glmnet, nlme::gls, quantreg::rq/summary.rq, lm, lmtest, sandwich, loess, supsmu, smooth.spline, step, nls (the R cases of each method)",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "glmnet_paths",
+        "gls_compsymm",
+        "gls_ar1",
+        "rq_br_se",
+        "ols_aliased",
+        "ols_diagnostics_grunfeld",
+        "diag_bgtest_ar1",
+        "reset_princomp",
+        "diag_wald_sim",
+        "diag_harvtest_nonlin",
+        "hac_ar1",
+        "dk_panel",
+        "step_legacy",
+        "nls_expdecay",
+        "loess_x10_direct",
+        "smoothers_gcv_periodic_loess",
+        "supsmu_sine"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_returns_coefficients",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_lasso_default_path",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_compsymm",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_ar1_reml",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_quantreg_br_se",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_ols_aliased",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_diagnostics_tests",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_hac_dk",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_loess_x10_and_mass_point",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_supsmu_span_and_periodic",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_step",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_nls"
+      ],
+      "quantities": [
+        "glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df",
+        "GLS rho, coefficients, SEs, sigma, log-likelihood, AIC, BIC (REML, ML, fixed rho; CS within groups, AR(1))",
+        "quantreg coefficients and nid/iid/ker SEs at tau 0.25, 0.5, 0.75",
+        "aliased OLS rows",
+        "JB, BP, DW, condition number, bgtest F, RESET princomp, Wald F, Harvey-Collier",
+        "HAC Parzen SEs, DK coefficients",
+        "loess fitted values, supsmu smooths, step criteria, nls estimates and SEs"
+      ],
+      "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative; text at the printed precision (Tol::printed: half a unit of the last printed digit); loess Tol::coef(10) / Tol::coef(100), supsmu Tol::coef(100), step Tol::stat(n)",
+      "deviations": [
+        {
+          "finding": "REG-24",
+          "quantity": "Driscoll-Kraay SEs",
+          "note": "not pinned through MCP (Tier 4)"
+        },
+        {
+          "finding": "REG-29",
+          "quantity": "smooth.spline fit, df, lambda, criterion",
+          "note": "not R-pinned (REG-29, REG-30, Tier 4): the property test test_mcp_smooth_spline_criterion (unregistered) compares with the library and checks GCV and CV differ"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_discrete_surface",
+      "name": "MCP discrete-choice tools: mlogit constants and reflevel, glm logit/probit, multinom, hurdle binary part, FEGLM gaussian, option parsing, seeds",
+      "category": "mcp",
+      "reference": "mlogit::mlogit (tight MLE), stats::glm, nnet::multinom (tight MLE), pscl::hurdle binary part, fixest::feglm",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "disc_mlogit_fishing",
+        "disc_binary_glm",
+        "disc_multinom_overlap",
+        "disc_hurdle_zero",
+        "feglm_families"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_mlogit_asc",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_logit_probit_binary_glm",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_multinom_overlap",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_hurdle_zero_part",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_feglm_gaussian"
+      ],
+      "quantities": [
+        "mlogit coefficients and SEs with and without ASCs and with reflevel (asc_*_tight, noasc_*_tight, pier_*_tight), log-likelihood",
+        "logit coefficients and SEs (logit_coef, logit_se), probit coefficients and SEs (probit_coef_tight, probit_se_tight), aliased row, outcome domain, convergence line",
+        "multinom coefficients and SEs (two references, tight MLE)",
+        "hurdle binary-part coefficients (zero_coef) and SEs (zero_se_tight)",
+        "FEGLM gaussian coefficients"
+      ],
+      "tolerance": "text at the printed precision (4 decimals, Tol::printed)",
+      "deviations": [
+        {
+          "finding": "ECON-16",
+          "quantity": "hurdle count part",
+          "note": "not pinned (Tier 4)"
+        },
+        {
+          "finding": "ECON-20",
+          "quantity": "FEGLM SEs, deviance",
+          "note": "not pinned (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_survival_surface",
+      "name": "MCP survival tools: Cox robust, clustered and Breslow fits; AFT distributions; competing-risks CIF",
+      "category": "mcp",
+      "reference": "survival::coxph(robust, cluster, ties), survival::survreg(dist), survival::survfit multi-state (Aalen-Johansen)",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "surv_cox_robust",
+        "surv_aft",
+        "mcp_competing_risks"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_cox_robust",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_aft",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_competing_risks_cif"
+      ],
+      "quantities": [
+        "Cox coefficients, model, robust and clustered SEs, robust score test",
+        "AFT coefficients, SEs, scale, log-likelihood",
+        "CIF point estimates of two event types"
+      ],
+      "tolerance": "text at the printed precision (4 decimals; the robust score test 2)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_panel_surface",
+      "name": "MCP panel tools: system GMM, unit-root lag selection, PVCM/PMG/pooled GLS, FE with absorbed regressors",
+      "category": "mcp",
+      "reference": "plm::pgmm(transformation = 'ld'), plm::purtest(lags = 'AIC' | 'SIC'), plm::pvcm, plm::pmg, plm::pggls, plm::plm(model = 'within')",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "dpd_sys_balanced",
+        "purtest_lag_selection",
+        "pvcm_pmg_sim",
+        "pggls_sim",
+        "panel_absorbed_regressors"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_panel_gmm_system",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_panel_unit_root_aic",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_panel_heterogeneous_and_gls",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_panel_fe_drops_absorbed"
+      ],
+      "quantities": [
+        "system GMM two-step and one-step coefficients and robust SEs, equation counts, Sargan",
+        "per-unit AIC/SIC lag summary",
+        "Swamy coefficients and SEs, MG and pooled FGLS coefficients",
+        "FE coefficients and SEs with a dropped regressor"
+      ],
+      "tolerance": "text at the printed precision (4 decimals; lag means 2)",
+      "deviations": [
+        {
+          "finding": "ECON-41",
+          "quantity": "LLC / IPS / Maddala-Wu statistics",
+          "note": "not pinned (ECON-41, ECON-43, ECON-44, Tier 4)"
+        },
+        {
+          "finding": "ECON-33",
+          "quantity": "pooled-GLS SEs",
+          "note": "not pinned (Tier 4)"
+        },
+        {
+          "finding": "ECON-34",
+          "quantity": "mean-group SEs",
+          "note": "not pinned (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_dispatch",
+      "name": "One tool per MCP handler module through call_tool_with_session (integration tests)",
+      "category": "mcp",
+      "reference": "the R cases named in each test; mcp_dispatch_smoke (kmeans, Moran's I written out, cpt.mean, cor, string operations)",
+      "doc": "validation/mcp/models.md",
+      "cases": [
+        "ols_grunfeld",
+        "panel_re_grunfeld",
+        "disc_binary_glm",
+        "surv_logrank_lung",
+        "iv_two_endog",
+        "stat_anova_two_way_unbalanced",
+        "stat_manova_na",
+        "stat_fisher_rows_2000",
+        "stat_chisq_small_expected",
+        "stat_chisq_gof",
+        "cli_stat_acf_int",
+        "mcp_dispatch_smoke"
+      ],
+      "tests": [
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_regression_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_panel_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_discrete_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_survival_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_causal_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_stats_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_hypothesis_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_timeseries_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_ml_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_spatial_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_munging_module",
+        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_cleaning_module"
+      ],
+      "quantities": [
+        "OLS HC1, RE, probit (probit_coef_tight, probit_se_tight), log-rank, 2SLS coefficients",
+        "two-way ANOVA with misaligned missing cells, MANOVA Pillai, Fisher, chi-square independence and GOF",
+        "PACF, lag-0 CCF, changepoint location",
+        "k-means WCSS and sizes, Moran's I",
+        "regex/string results, missing counts"
+      ],
+      "tolerance": "text at the printed precision; JSON (pacf, ccf) validation/README.md coefficient row",
+      "deviations": [
+        {
+          "finding": "TS-23",
+          "quantity": "Holt-Winters forecasts",
+          "note": "smoke test only through MCP (pinned in core)"
+        },
+        {
+          "finding": "STAT-23",
+          "quantity": "factanal",
+          "note": "smoke test only (STAT-23, STAT-49, Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

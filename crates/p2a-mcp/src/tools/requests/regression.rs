@@ -93,7 +93,7 @@ pub struct BgTestRequest {
 
     /// Test statistic type: 'chisq' (default) or 'f'
     #[schemars(
-        description = "Type of test statistic: 'chisq' for chi-squared (asymptotic) or 'f' for F-test (finite sample correction). Default: 'chisq'."
+        description = "Type of test statistic, as lmtest::bgtest(type =): 'chisq' (LM, asymptotic; default) or 'f' (F test). Other values are an error."
     )]
     pub test_type: Option<String>,
 
@@ -128,7 +128,7 @@ pub struct ResetTestRequest {
 
     /// Type of augmentation: 'fitted' (default), 'regressor', or 'princomp'
     #[schemars(
-        description = "Type of augmentation: 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors), or 'princomp' (powers of first principal component)."
+        description = "Type of augmentation, as lmtest::resettest(type =): 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors) or 'princomp' (powers of the first principal component). Other values are an error."
     )]
     pub reset_type: Option<String>,
 }
@@ -205,7 +205,7 @@ pub struct HacRequest {
 
     /// Kernel type: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'
     #[schemars(
-        description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated', or 'tukey-hanning'."
+        description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Other values are an error."
     )]
     pub kernel: Option<String>,
 
@@ -238,12 +238,14 @@ pub struct BootstrapCovRequest {
 
     /// Bootstrap type: 'pairs' (default), 'residual', or 'wild'
     #[schemars(
-        description = "Bootstrap method: 'pairs' (xy, most robust), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights, robust to heteroskedasticity)."
+        description = "Bootstrap method, as sandwich::vcovBS(type =): 'pairs' (xy, default), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights), 'mammen' or 'webb'. Other values are an error."
     )]
     pub bootstrap_type: Option<String>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Random seed for reproducibility. If not provided, uses entropy.")]
+    #[schemars(
+        description = "Random seed of the resampling. Default: the session seed set by set_seed, else 42."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -305,7 +307,7 @@ pub struct DriscollKraayRequest {
 
     /// Kernel type for HAC
     #[schemars(
-        description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'."
+        description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs' (quadratic spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Other values are an error."
     )]
     pub kernel: Option<String>,
 }
@@ -334,9 +336,21 @@ pub struct QuantRegRequest {
 
     /// Multiple quantiles to estimate
     #[schemars(
-        description = "Optional: estimate multiple quantiles at once (e.g., [0.25, 0.5, 0.75] for quartiles). If provided, 'tau' is ignored."
+        description = "A list of quantiles (each in (0, 1)), e.g. [0.25, 0.5, 0.75]; give tau or taus, not both."
     )]
     pub taus: Option<Vec<f64>>,
+
+    /// Fitting algorithm
+    #[schemars(
+        description = "'auto' (default: 'br' up to 5,000 rows, 'fn' above; rq's own default is 'br' at every n), 'br' (Barrodale-Roberts simplex), 'fn' (Frisch-Newton interior point) or 'irls' (an approximation, not an R method)."
+    )]
+    pub method: Option<String>,
+
+    /// Standard errors
+    #[schemars(
+        description = "Standard errors as summary.rq(se =): 'nid' (Hendricks-Koenker sandwich, default at every n; R uses 'rank' below n = 1001, which p2a does not offer), 'iid', 'ker' (Powell kernel) or 'boot' (xy-pair bootstrap, 200 replications, seeded by the session seed, else 42)."
+    )]
+    pub se: Option<String>,
 }
 
 /// Request for nonlinear least squares (NLS).
@@ -369,7 +383,7 @@ pub struct NlsRequest {
 
     /// Algorithm to use
     #[schemars(
-        description = "Optimization algorithm: 'levenberg_marquardt' (default, more robust) or 'gauss_newton' (faster but may not converge)."
+        description = "Optimization algorithm: 'levenberg_marquardt' (default; also 'lm', 'marquardt') or 'gauss_newton' (also 'gn'; faster but may not converge). Other values are an error."
     )]
     pub algorithm: Option<String>,
 }
@@ -484,11 +498,15 @@ pub struct StepRequest {
     pub predictors: Vec<String>,
 
     /// Direction of stepwise selection
-    #[schemars(description = "Direction: 'both' (default), 'forward', or 'backward'.")]
+    #[schemars(
+        description = "Direction: 'both' (default), 'forward' or 'backward'. Other values are an error."
+    )]
     pub direction: Option<String>,
 
     /// Selection criterion
-    #[schemars(description = "Selection criterion: 'aic' (default) or 'bic'.")]
+    #[schemars(
+        description = "Selection criterion: 'aic' (default) or 'bic' (also 'sbc', 'schwarz'). Other values are an error."
+    )]
     pub criterion: Option<String>,
 }
 
@@ -514,15 +532,27 @@ pub struct GlsRequest {
 
     /// Correlation structure type
     #[schemars(
-        description = "Correlation structure: 'ar1' (default), 'compound_symmetry', or 'identity' (OLS)."
+        description = "'ar1' (default; within each group in row order), 'compound_symmetry' (also 'cs', 'exchangeable'; needs group) or 'identity'."
     )]
     pub correlation: Option<String>,
 
     /// Correlation parameter (rho)
     #[schemars(
-        description = "Correlation parameter rho for AR(1) or compound symmetry. If omitted with 'ar1', auto-estimated from OLS residuals."
+        description = "Correlation parameter. If omitted it is estimated (method) for 'ar1' and 'compound_symmetry'; if given it is used as fixed (nlme fixed = TRUE)."
     )]
     pub rho: Option<f64>,
+
+    /// How rho is estimated
+    #[schemars(
+        description = "How rho is estimated when it is not given: 'REML' (default, as nlme::gls) or 'ML'."
+    )]
+    pub method: Option<String>,
+
+    /// Grouping column of the correlation structure
+    #[schemars(
+        description = "Column whose values define independent groups (nlme correlation form = ~ 1 | group): the correlation acts within each group, in row order. Compound symmetry needs it: with one group and an intercept rho is not identified."
+    )]
+    pub group: Option<String>,
 }
 
 /// Request for smooth spline fitting.
@@ -543,13 +573,13 @@ pub struct SmoothSplineRequest {
 
     /// Smoothing parameter (spar)
     #[schemars(
-        description = "Smoothing parameter (0 to 1). If omitted, uses generalized cross-validation (GCV) to select automatically."
+        description = "Smoothing parameter (0 to 1). If omitted (with df), criterion chooses the smoothing."
     )]
     pub spar: Option<f64>,
 
     /// Degrees of freedom
     #[schemars(
-        description = "Equivalent degrees of freedom. Alternative to spar. If both omitted, uses GCV."
+        description = "Equivalent degrees of freedom. Alternative to spar. If omitted (with spar), criterion chooses the smoothing."
     )]
     pub df: Option<f64>,
 
@@ -558,6 +588,12 @@ pub struct SmoothSplineRequest {
         description = "Optional points at which to evaluate the fitted spline. If omitted, returns fit at data points."
     )]
     pub xout: Option<Vec<f64>>,
+
+    /// Criterion that chooses the smoothing
+    #[schemars(
+        description = "Criterion that chooses the smoothing when neither spar nor df is given: 'gcv' (generalized cross-validation, default, R smooth.spline(cv = FALSE)) or 'cv' (ordinary leave-one-out, cv = TRUE)."
+    )]
+    pub criterion: Option<String>,
 }
 
 /// Request for glmnet (elastic net, lasso, ridge) regression.
@@ -598,7 +634,7 @@ pub struct GlmnetRequest {
 
     /// Model family: gaussian (linear) or binomial (logistic)
     #[schemars(
-        description = "Model family: 'gaussian' (default) for linear regression, 'binomial' for logistic regression."
+        description = "Model family: 'gaussian' (default; also 'linear', 'normal') for linear regression, 'binomial' (also 'logistic', 'logit') for logistic regression. Other values are an error."
     )]
     pub family: Option<String>,
 }
@@ -630,7 +666,9 @@ pub struct CvGlmnetRequest {
     pub nfolds: Option<usize>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Random seed for fold assignment reproducibility.")]
+    #[schemars(
+        description = "Seed of the random fold assignment. Default: the session seed set by set_seed, else 42. The seed used is reported."
+    )]
     pub seed: Option<u64>,
 
     /// Number of lambda values in path
@@ -643,7 +681,7 @@ pub struct CvGlmnetRequest {
 
     /// Model family: gaussian (linear) or binomial (logistic)
     #[schemars(
-        description = "Model family: 'gaussian' (default) for linear regression, 'binomial' for logistic regression."
+        description = "Model family: 'gaussian' (default; also 'linear', 'normal') for linear regression, 'binomial' (also 'logistic', 'logit') for logistic regression. Other values are an error."
     )]
     pub family: Option<String>,
 }

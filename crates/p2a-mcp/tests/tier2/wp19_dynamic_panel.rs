@@ -161,19 +161,3 @@ async fn test_mcp_panel_gmm_duplicate_row_is_a_tool_error() {
     assert!(!r.success, "{t}");
     assert!(t.contains("has 2 rows for time 2002"), "{t}");
 }
-
-#[tokio::test]
-async fn test_mcp_panel_gmm_system_warns() {
-    let path = repo_path("validation/datasets/generated/ab_balanced.csv");
-    let ds = Dataset::new(DataLoader::load_csv(&path).unwrap());
-    let (session, server) = session_with_datasets(vec![("ab_balanced", ds)]);
-    let args = gmm_args("ab_balanced", json!({"transform": "system"}));
-    let r = call(&server, &session, "panel_gmm", args).await;
-    let t = text(&r);
-    // T3-WP15 implemented system GMM; T3-WP58 renames/moves this test with the panel_gmm description
-    assert!(r.success, "{t}");
-    assert!(t.contains("System GMM (Blundell-Bond) (Two-step)"), "{t}");
-    assert!(!t.contains("ECON-30"), "{t}");
-    assert!(!t.contains("Difference GMM (Arellano-Bond)"), "{t}");
-    assert!(t.contains("No. Observations: 1300"), "{t}");
-}

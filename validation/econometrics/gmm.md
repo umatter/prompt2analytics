@@ -236,9 +236,10 @@ Property tests, not registered as R-pinned (no value is compared with R; they lo
 - `test_gmm_fractional_time_is_an_error`: a fractional time is refused;
 - `test_gmm_scale_equivariance`: x in millions gives the same lag coefficient and the x
   coefficient and SE scaled by 1e-6 (to 1e-9), with no rank warning;
-- `tier2::wp19_dynamic_panel::test_mcp_panel_gmm_system_warns`: `panel_gmm` with
-  `transform = "system"` prints the system-GMM header and equation counts, without the old
-  ECON-30 warning;
+- `tier3::wp58_models::test_validate_mcp_panel_gmm_system`: `panel_gmm` with
+  `transform = "system"` (and `"ld"`) pins the two-step and one-step system-GMM rows of
+  `dpd_sys_balanced` through MCP, prints the equation counts without the old ECON-30
+  warning, and refuses unknown transforms and steps;
 - `utils::tests::test_gmm_equations_date_time_hint`: yearly dates (365 or 366 days apart)
   form no equation, and the error says to recode them as consecutive period numbers;
 - `test_gmm_onestep_rank_warning_names_the_sargan_weight`: on Grunfeld, one-step fits name

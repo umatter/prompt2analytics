@@ -114,9 +114,21 @@ pub struct MlogitRequest {
 
     /// Reference alternative (optional)
     #[schemars(
-        description = "Reference alternative for identification. Default: the first alternative in R factor() order (numbers numerically, text by byte: uppercase before lowercase)."
+        description = "Reference alternative for identification; same as reflevel. Default: the first alternative in R factor() order (numbers numerically, text by byte: uppercase before lowercase)."
     )]
     pub reference: Option<String>,
+
+    /// Alternative-specific constants
+    #[schemars(
+        description = "Alternative-specific constants (J - 1, as mlogit's default). false fits mlogit(choice ~ alt_specific | 0 + ind_specific), the survival::clogit model. Default true."
+    )]
+    pub asc: Option<bool>,
+
+    /// Reference alternative (mlogit's reflevel)
+    #[schemars(
+        description = "Reference alternative (mlogit's reflevel); same as reference. Default: the first alternative in sorted order."
+    )]
+    pub reflevel: Option<String>,
 }
 
 /// Request for mixed logit (random parameters logit) estimation.
@@ -158,7 +170,7 @@ pub struct MixedLogitRequest {
 
     /// Distribution for random parameters
     #[schemars(
-        description = "Distribution for random parameters: 'normal' (default), 'lognormal', 'triangular', 'uniform'."
+        description = "Distribution for random parameters: 'normal' (default), 'lognormal', 'triangular', 'uniform' or 'fixed'. Other values are an error."
     )]
     pub distribution: Option<String>,
 
@@ -170,7 +182,7 @@ pub struct MixedLogitRequest {
 
     /// Use Halton sequences (quasi-random)
     #[schemars(
-        description = "Use Halton quasi-random sequences instead of pseudo-random draws. Default: true. Improves accuracy."
+        description = "Use Halton quasi-random sequences instead of pseudo-random draws. Default: true. Pseudo-random draws (false) are seeded by the session seed (set_seed), else 42."
     )]
     pub halton: Option<bool>,
 
@@ -199,7 +211,9 @@ pub struct OrderedRequest {
     pub x: Vec<String>,
 
     /// Model type: "logit" (default) or "probit"
-    #[schemars(description = "Model type: 'logit' (default) or 'probit'.")]
+    #[schemars(
+        description = "Model type: 'logit' (default; also 'logistic', 'polr') or 'probit'. Other values are an error."
+    )]
     pub model_type: Option<String>,
 
     /// Category order of a text outcome, lowest first
@@ -256,7 +270,9 @@ pub struct ZeroInflRequest {
     pub z: Option<Vec<String>>,
 
     /// Model type: "poisson" (default) or "negbin"
-    #[schemars(description = "Distribution for count model: 'poisson' (default) or 'negbin'.")]
+    #[schemars(
+        description = "Distribution for count model: 'poisson' (default) or 'negbin' (also 'negbinom', 'negative_binomial', 'nb'). Other values are an error."
+    )]
     pub dist: Option<String>,
 }
 
@@ -283,7 +299,9 @@ pub struct HurdleModelRequest {
     pub z: Option<Vec<String>>,
 
     /// Model type: "poisson" (default) or "negbin"
-    #[schemars(description = "Distribution for count model: 'poisson' (default) or 'negbin'.")]
+    #[schemars(
+        description = "Distribution for count model: 'poisson' (default) or 'negbin' (also 'negbinom', 'negative_binomial', 'nb'). Other values are an error."
+    )]
     pub dist: Option<String>,
 }
 
@@ -313,7 +331,7 @@ pub struct FeglmRequest {
 
     /// GLM family
     #[schemars(
-        description = "GLM family: 'logit' (binomial logit, default), 'probit' (binomial probit), 'poisson' (count data), or 'gaussian' (continuous, equivalent to linear HDFE)."
+        description = "GLM family: 'logit' (binomial logit, default; also 'binomial', 'logistic'), 'probit' (binomial probit), 'poisson' (count data) or 'gaussian' (also 'normal', 'linear'; continuous, equivalent to linear HDFE). Case is ignored; other values are an error."
     )]
     pub family: Option<String>,
 
@@ -322,6 +340,8 @@ pub struct FeglmRequest {
     pub max_iter: Option<usize>,
 
     /// Convergence tolerance
-    #[schemars(description = "Convergence tolerance for coefficient changes. Default is 1e-8.")]
+    #[schemars(
+        description = "Convergence tolerance: the relative deviance change |dev - dev_old| / (|dev| + 0.1), as fixest. Default is 1e-8."
+    )]
     pub tolerance: Option<f64>,
 }

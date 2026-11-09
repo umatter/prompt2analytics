@@ -513,6 +513,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | CLI causal iv, mediation and staggered-did (rows dropped, first-stage HC1 Wald F, units kept after trimming, pre-trend Wald test) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
+| MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, ECON-33, ECON-34, ECON-41, REG-24, REG-29, STAT-23, TS-23) |
 
 ## Reference datasets
 
