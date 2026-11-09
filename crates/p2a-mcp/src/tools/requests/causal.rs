@@ -652,7 +652,7 @@ pub struct DoubleMLRequest {
 
     /// Number of cross-fitting folds (default: 5)
     #[schemars(
-        description = "Number of folds for cross-fitting. Default is 5. Must be at least 2."
+        description = "Number of folds for cross-fitting. Default is 5. Must be at least 2. Refused together with fold_column, whose labels give the folds."
     )]
     pub n_folds: Option<usize>,
 

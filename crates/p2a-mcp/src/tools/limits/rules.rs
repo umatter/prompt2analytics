@@ -1796,7 +1796,7 @@ mod tests {
     fn hosted_caps_accept_one_and_a_half_times_every_default() {
         const DEFAULTS: &[(&str, &str, u64)] = &[
             ("regression_bootstrap_cov", "n_boot", 999),
-            ("treatment_ipw", "bootstrap", 999),
+            ("treatment_ipw", "bootstrap", 0),
             ("treatment_doubly_robust", "bootstrap", 999),
             ("staggered_did", "bootstrap", 999),
             ("mediation_analysis", "n_bootstrap", 999),

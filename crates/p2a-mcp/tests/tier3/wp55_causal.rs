@@ -1276,6 +1276,13 @@ async fn test_validate_mcp_matching_output_dataset() {
     )
     .await;
     assert!(e.contains("output_name"), "{e}");
+    // Another dataset under the output name is replaced, and the reply says so.
+    assert!(!t.contains("replacing the existing dataset"), "{t}");
+    let t = ok(&server, &session, "propensity_matching", base.clone()).await;
+    assert!(
+        t.contains("(replacing the existing dataset 'matching_sim_matched')"),
+        "{t}"
+    );
 }
 
 /// medflex::neImpute + neModel on the odds-ratio scale with A:M (the medflex_scales case, odds_int), robust
@@ -1710,6 +1717,23 @@ async fn test_validate_mcp_treatment_double_ml() {
         e.contains("fold_column 'X1' must hold non-negative whole numbers"),
         "{e}"
     );
+    // The fold labels give the folds: a fold count beside them would be ignored, so it is refused.
+    let e = refused(
+        &server,
+        &session,
+        "treatment_double_ml",
+        with(
+            &base,
+            &[
+                ("model", json!("pliv")),
+                ("instrument", json!("z")),
+                ("fold_column", json!("fold")),
+                ("n_folds", json!(3)),
+            ],
+        ),
+    )
+    .await;
+    assert!(e.contains("n_folds is not used with fold_column"), "{e}");
 }
 
 /// gsynth 1.4.0 (causal_gsynth.R, gsynth_simdata): IFE r = 2 without covariates (closed form), the MCP

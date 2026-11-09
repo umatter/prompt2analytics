@@ -241,7 +241,16 @@ fn matched_sample(
             result.subclass.len()
         ));
     }
-    let ps = result.propensity_scores.as_ref().filter(|p| p.len() == n);
+    // A score vector of another length cannot be aligned with the rows: refused, never dropped.
+    let ps = match result.propensity_scores.as_ref() {
+        Some(p) if p.len() != n => {
+            return Err(format!(
+                "the matching result has {} propensity scores for {n} rows",
+                p.len()
+            ));
+        }
+        p => p,
+    };
     let mut added: Vec<&str> = Vec::new();
     if ps.is_some() {
         added.push("distance");
@@ -890,6 +899,13 @@ impl AnalyticsServer {
                 n, p, MAX_MATRIX_ELEMENTS
             ))]));
         }
+        if request.fold_column.is_some() && request.n_folds.is_some() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "n_folds is not used with fold_column: the folds are the column's distinct labels. \
+                 Set one of the two."
+                    .to_string(),
+            )]));
+        }
         let mut names: Vec<&str> = vec![request.outcome.as_str(), request.treatment.as_str()];
         names.extend(request.covariates.iter().map(String::as_str));
         names.extend(request.instrument.as_deref());
@@ -1298,7 +1314,13 @@ impl AnalyticsServer {
         let sample = tool_try!(matched_sample(dataset, &result));
         drop(datasets);
         let k = sample.df().height();
-        self.datasets.write().await.insert(name.clone(), sample);
+        // Another dataset under the output name is replaced; the reply says so.
+        let replaced = self
+            .datasets
+            .write()
+            .await
+            .insert(name.clone(), sample)
+            .is_some();
 
         let mut output = result.to_string();
         let diag_report = matching_diagnostics(&result);
@@ -1312,6 +1334,9 @@ impl AnalyticsServer {
         output.push_str(&format!(
             "\nMatched sample saved as '{name}': {k} of {n} rows (units with positive weight, as MatchIt::match.data); added columns: {added}"
         ));
+        if replaced {
+            output.push_str(&format!(" (replacing the existing dataset '{name}')"));
+        }
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -3508,5 +3533,45 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The matched sample carries the propensity score as `distance`; a score vector whose
+    /// length differs from the rows is refused instead of the column being dropped.
+    #[test]
+    fn test_matched_sample_refuses_misaligned_propensity_scores() {
+        use p2a_core::econometrics::matching::{MatchOptions, match_it_with};
+        let t: Vec<f64> = (0..24u32)
+            .map(|i| f64::from(u8::from(i % 3 == 0)))
+            .collect();
+        let x: Vec<f64> = (0..24u32)
+            .map(|i| f64::from(i) * 0.37 + f64::from(i % 5) * 0.21 + t[i as usize] * 0.8)
+            .collect();
+        let df = DataFrame::new(vec![
+            Series::new("t".into(), t).into(),
+            Series::new("x".into(), x).into(),
+        ])
+        .unwrap();
+        let ds = p2a_core::data::Dataset::new(df);
+        let mut result = match_it_with(
+            &ds,
+            "t",
+            &["x"],
+            MatchMethod::NearestNeighbor {
+                ratio: 1,
+                caliper: None,
+                replace: false,
+            },
+            None,
+            &MatchOptions::default(),
+        )
+        .unwrap();
+        let sample = matched_sample(&ds, &result).unwrap();
+        assert!(sample.df().column("distance").is_ok());
+        result.propensity_scores.as_mut().unwrap().pop();
+        let e = match matched_sample(&ds, &result) {
+            Ok(_) => panic!("a misaligned score vector was accepted"),
+            Err(e) => e,
+        };
+        assert!(e.contains("23 propensity scores for 24 rows"), "{e}");
     }
 }
