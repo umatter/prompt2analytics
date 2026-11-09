@@ -1,4 +1,4 @@
-//! The CLI documentation is checked against the `p2a` binary and the source tree (T3-WP63).
+//! The CLI documentation is checked against the `p2a` binary and the source tree.
 //!
 //! - Every `p2a ...` command in a shell fence (```bash, ```sh, ```console or unlabelled) or inline code
 //!   of README.md, docs/cookbook.md, docs/guides/CLI_REFERENCE.md and CLAUDE.md runs through the binary
@@ -605,7 +605,7 @@ fn test_placeholders_are_recognised() {
 
 /// INF-3: every documented `p2a` command parses. Shell fences hold examples only (concrete values,
 /// with `--session` unless the command is script/chat/smoke-test); table cells name real subcommands.
-/// Fails before (d6a3a3b binary): 40 usage errors, 10 panics (fixed by T2-WP03 before this package),
+/// Failed on the older binary: 40 usage errors, 10 panics (fixed earlier),
 /// placeholder synopses in shell fences, 33 CLI_REFERENCE examples without a session and two CLAUDE.md
 /// table cells naming no subcommand.
 #[test]
@@ -686,7 +686,7 @@ fn test_refused_option_values_are_caught() {
 
 // ---------------------------------------------------------------- Task 3
 
-/// INF-3: the EXAMPLES block of every command's help parses. Before T2-WP03 and T3-WP06 nine helps
+/// INF-3: the EXAMPLES block of every command's help parses. Earlier, nine helps
 /// panicked, `data save` panicked and `--intercept false`, `--cluster2`, `--robust true` were usage
 /// errors; it guards the in-binary examples from now on.
 #[test]
@@ -828,7 +828,7 @@ fn test_tree_entries_are_parsed() {
 /// WT-17 (CLAUDE.md listed the never-compiled ml/interpretability.rs) and INF-10 (cache.rs; panel.rs
 /// and discrete.rs are directories): every source path CLAUDE.md names exists. Fails before: the
 /// p2a-core tree's root line is `src/`; then cache.rs, econometrics/panel.rs, econometrics/discrete.rs,
-/// econometrics/timeseries.rs (a directory since T3-WP04) and ml/interpretability.rs (deleted by T3-WP04).
+/// econometrics/timeseries.rs (now a directory) and ml/interpretability.rs (since deleted).
 #[test]
 fn test_claude_md_names_existing_source_files() {
     let paths = claude_md_paths(&read("CLAUDE.md"));

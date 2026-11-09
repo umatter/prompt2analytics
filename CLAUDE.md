@@ -226,7 +226,7 @@ cargo build -p p2a-core --features cuda                 # GPU acceleration
 The `cuda` feature enables transparent GPU dispatch for core linear algebra operations via cuBLAS and cuSOLVER. GPU paths are selected automatically when problem sizes exceed calibrated thresholds.
 
 **GPU-accelerated operations** (via `linalg/gpu/` module):
-- **xtx (X'X)**: 2-7x speedup for k>=30 via cuBLAS DGEMM; used by PCA and the sandwich estimators. OLS solves by pivoted QR and never dispatches it (decision D1)
+- **xtx (X'X)**: 2-7x speedup for k>=30 via cuBLAS DGEMM; used by PCA, the sandwich estimators and OLS's normal-equations fast path (a well-conditioned, full-rank X'X is solved by checked Cholesky, any other design by the pivoted QR of `linalg::solve`)
 - **PCA**: 4-13x speedup via GPU covariance eigendecomposition
 - **K-means distances**: 2-3x speedup for d>=20 via DGEMM reformulation
 - **matmul**: 1.4-2.4x speedup for near-square matrices
@@ -257,11 +257,11 @@ crates/p2a-core/src/
 ├── memory.rs              # Memory monitoring, pressure detection, cleanup
 ├── resource.rs            # try_* fallible allocation, alloc ceiling, CancelToken/Budget, checkpoint()
 ├── options.rs             # Option strings -> enums (Choices, option_enum!): case- and separator-insensitive,
-│                          #   errors list the accepted values (R1)
+│                          #   errors list the accepted values
 ├── linalg/
 │   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer), GPU dispatch
 │   ├── solve.rs           # Rank-revealing least squares (pivoted QR with R's dqrdc2 aliasing rule);
-│   │                      #   sym_inverse reporting rank and reciprocal condition (R9)
+│   │                      #   sym_inverse reporting rank and reciprocal condition
 │   └── gpu/               # Optional CUDA acceleration (#[cfg(feature = "cuda")])
 │       ├── mod.rs          # GpuContext singleton (OnceLock)
 │       ├── context.rs      # CUDA device init, capability detection
@@ -272,7 +272,7 @@ crates/p2a-core/src/
 │       └── kernels.rs      # Custom: pairwise_distances (K-means)
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
-│   ├── convergence.rs     # Convergence, ResultNotes, notes_text/notes_json (R10)
+│   ├── convergence.rs     # Convergence, ResultNotes, notes_text/notes_json
 │   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value and quantile helpers
 │
 ├── diagnostics/           # Identification warnings (non-blocking) for IV, DiD, matching/IPW, RD
@@ -330,7 +330,7 @@ crates/p2a-core/src/
 │   ├── discrete/          # Logit/probit on the shared GLM, multinomial, conditional logit (with ASCs),
 │   │                      #   ordered, NegBin, ZIP, ZINB, hurdle, mixed logit
 │   ├── glm.rs             # Shared GLM: IRLS with glm.fit's safeguards (step halving, aliasing at 1e-11),
-│   │                      #   propensity scores, TMLE fluctuation (R12)
+│   │                      #   propensity scores, TMLE fluctuation
 │   ├── feglm.rs           # GLM with HDFE (IRLS + weighted MAP)
 │   ├── hdfe.rs            # High-dimensional fixed effects
 │   ├── rd.rs              # Sharp/Fuzzy RD with CCT robust inference
@@ -558,7 +558,7 @@ let missing = cols.missing().clone();           // what was dropped
   `test_na_guard_tree_is_clean`, and `test_na_guard_legacy_mcp_helpers_are_gone` keeps the removed
   null-to-NaN MCP helpers out.
 - **The numeric guard.** `cargo test -p p2a-validation --test numeric_guard` (in CI) fails on the numeric
-  patterns of rules R5-R7 and R9 in non-test product code, printing `file:line` for each. Its five rules:
+  patterns listed below in non-test product code, printing `file:line` for each. Its five rules:
   `partial-cmp-unwrap` (sort and compare floats with `f64::total_cmp`), `one-minus-cdf` (use the direct
   upper-tail helpers of `traits::estimator`), `abramowitz-stegun` (approximation constants instead of an
   exact quantile), `critical-value-literal` (`1.96`, `2.576`, `1.645` as literals) and
@@ -566,7 +566,7 @@ let missing = cols.missing().clone();           // what was dropped
   exceptions carry `// numeric-ok: <reason>` or, for an inverse, `// inverse-ok: <reason>` on the line or the
   line above; the guard's module docs are the reference.
 
-### Least squares and inverses (R9)
+### Least squares and inverses
 
 ```rust
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
@@ -580,9 +580,11 @@ let inv = sym_inverse(info.view(), SingularPolicy::Error, "information matrix")?
 
 `linalg::matrix_ops::{xtx, xty}` stay for cross-products. `safe_inverse` keeps its signature for older
 call sites, but its second element (the condition warning) must be used, and the numeric guard rejects code that
-drops it. OLS never uses the GPU `xtx` path (decision D1).
+drops it. OLS solves a well-conditioned, full-rank X'X by checked Cholesky (`regression::ols::normal_inverse_from_gram`,
+X'X from `xtx`, so the GPU dispatch applies) and falls back to `least_squares` for rank-deficient or
+ill-conditioned designs, where R's column dropping applies.
 
-### P-values, quantiles and levels (R6, R7, R11)
+### P-values, quantiles and levels
 
 - p-values: `traits::estimator::{t_test_p_value, f_test_p_value, chi_squared_p_value,
   normal_p_value_two_sided}`. Upper tails are computed directly by `traits::estimator`; statrs
@@ -610,11 +612,12 @@ Additional variance estimators in `regression/ols.rs`:
 - `vcov_bootstrap()` - Bootstrap covariance (pairs, residual, wild)
 - `vcov_driscoll_kraay()` - Panel-robust SEs (cross-sectional dependence)
 
-### GLM fits (R12)
+### GLM fits
 
 - Logistic, probit, Poisson and quasi-likelihood fits inside estimators go through
   `econometrics::glm::{fit_glm, GlmSpec, fit_propensity}`: IRLS with glm.fit's safeguards (step halving, the
-  pivoted-QR aliasing rule at 1e-11) on the pivoted-QR solve, converging on
+  pivoted-QR aliasing rule at 1e-11) on the OLS solve (checked Cholesky of X'WX, with the pivoted QR as the
+  fallback), converging on
   |dev - devold| / (|dev| + 0.1 D0/n) with D0 the null deviance.
 - `MleSettings` (discrete models) defaults to `max_iter` 100, `tolerance` 1e-10, tighter than glm.control's
   25 and 1e-8; recorded as a registry deviation.
@@ -622,7 +625,7 @@ Additional variance estimators in `regression/ols.rs`:
   the complete/quasi-complete checks of `discrete/binary_choice.rs`; aliased regressors get NaN coefficients
   and SEs.
 
-### Options, convergence, text (R1, R8, R10)
+### Options, convergence, text
 
 - `p2a_core::options` (`Choices`, `option_enum!`): option strings become enums, case- and
   separator-insensitive, and an unknown value is an `InvalidSpecification` listing the accepted ones. The CLI
@@ -742,7 +745,7 @@ async fn my_tool(
    call the core dataset wrapper), and report dropped rows with `append_missing_note`/`missing_json`
    (see "Reading user columns").
 
-1a. Put `#[serde(deny_unknown_fields)]` under the derive (decision D2; a source guard in
+1a. Put `#[serde(deny_unknown_fields)]` under the derive (an unknown field is refused; a source guard in
    `tools/requests/mod.rs` fails without it). Parse option strings with `tools::common::parse_option` and append
    convergence and warnings with `append_notes`/`notes_json`.
 
@@ -801,7 +804,7 @@ let tool_router = tool_router + Self::database_router();
 routed tool by keyword and read its parameters and input schema. Their registry (`tools/registry.rs`) is generated
 from the router plus one hand-kept `CATEGORY_TABLE` row per tool (category, related tools, R equivalent); the
 registry tests fail when a routed tool has no row or a row names no routed tool, so a new handler needs its row.
-The server's own LLM chat does not offer these meta-tools (design D3: they are in `llm::INTERNAL_TOOLS`, which the
+The server's own LLM chat does not offer these meta-tools (they are in `llm::INTERNAL_TOOLS`, which the
 chat loop also refuses). The chat model gets the curated `TIER1_TOOLS` subset of `llm/tools.rs`, which stays under
 the 128-tool request cap of most LLM APIs; a registered tool outside the subset still runs when the model names
 it. A tool the chat model should see must be added to `TIER1_TOOLS`.
@@ -902,8 +905,8 @@ R is the test oracle and the default convention, not the algorithm template. Con
 that is cheap, otherwise a registry deviation and a method-doc line. No ports of R/Fortran/C code for R's
 digits unless the estimator is defined by its algorithm or the port is the cheapest correct route; never
 reproduce an R bug. A method rewrite includes a timing comparison with the current code (and R where timed)
-at n = 100, 1,000 and 10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.5x slower
-needs a written reason and the user's sign-off.
+at n = 100, 1,000 and 10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.1x slower
+than the current code at n = 100, 1,000 and 10,000 needs the user's sign-off.
 
 Never widen a tolerance. A mismatch outside the package's findings is a registry deviation
 (`{"finding", "quantity", "note"}`) with a `// deviation <id>` comment that keeps the quantity

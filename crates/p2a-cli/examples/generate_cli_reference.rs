@@ -6,7 +6,7 @@
 //! - `README.md`: the command list (each top-level command with its subcommands).
 //!
 //! `crates/p2a-cli/tests/docs_examples.rs` fails when a section differs from what this renders
-//! (T3-WP63, INF-3). Rewrite both with either of
+//! (INF-3). Rewrite both with either of
 //!
 //! ```text
 //! cargo build -p p2a-cli && cargo run -p p2a-cli --example generate_cli_reference [path/to/p2a]
@@ -20,7 +20,7 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 /// A generated section: the file it lives in and the name its marker lines carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +112,7 @@ pub fn split_aliases(help: &str) -> (String, Vec<String>) {
     (help.trim().to_string(), Vec::new())
 }
 
-/// Runs `p2a <path> -h` with a cleared environment.
+/// Runs `p2a <path> -h` with a cleared environment and stdin closed (EOF), so no help path can block on it.
 pub fn help_text(bin: &Path, path: &[String]) -> Result<String, String> {
     let shown = format!("p2a {} -h", path.join(" "));
     let out = Command::new(bin)
@@ -122,6 +122,7 @@ pub fn help_text(bin: &Path, path: &[String]) -> Result<String, String> {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("NO_COLOR", "1")
         .env("COLUMNS", "100")
+        .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run {}: {e}", bin.display()))?;
     if !out.status.success() {
@@ -564,7 +565,8 @@ pub fn update(cmds: &[CommandHelp]) -> Result<Vec<&'static str>, String> {
         let doc = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", s.file))?;
         let new = splice(&doc, s, &body)?;
         if new != doc {
-            let tmp = path.with_extension("md.tmp");
+            // A name of its own: the MCP generator also rewrites README.md.
+            let tmp = path.with_extension(format!("md.{}.cli.tmp", std::process::id()));
             std::fs::write(&tmp, &new).map_err(|e| format!("{}: {e}", tmp.display()))?;
             std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
             written.push(s.file);

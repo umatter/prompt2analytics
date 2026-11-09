@@ -145,8 +145,9 @@ Two test binaries hold the documentation to the code. Both run in CI's test step
 | `crates/p2a-mcp/tests/tool_examples_doc.rs` | every `/tool key:value` example in `docs/guides/MCP_TOOL_EXAMPLES.md` and `README.md` names a registered tool, only its fields and every required field, with values of the field's type, and no refused option value; the guide's headings and parameter bullets; README's generated tool table and the tool names in its MCP sections; `docs/mcp/tools-reference.md`; every "N tools" count in the docs | none (the `database` tools' examples are skipped and the reference compared row by row without that feature) | `cargo run -p p2a-mcp --example generate_tool_docs` (default features; it refuses to write the reference without `database`), or `P2A_UPDATE_DOCS=1` with the test |
 
 - Edit only outside the `BEGIN GENERATED`/`END GENERATED` lines; the text between them is rewritten.
-- Regenerate with plain `cargo test` (one test binary at a time), not a parallel runner: two binaries
-  rewriting `README.md` at once would race.
+- Run the two regenerations one after the other, not in parallel, and with plain `cargo test` (one test
+  binary at a time) rather than a parallel runner: both rewrite `README.md`, and two rewrites at once
+  would lose one of the sections.
 - The CLI reference is rendered from the `p2a` binary of the CI feature set. A CLI command behind a feature
   other than `spectral-analysis` would make it build-dependent; none exists.
 
@@ -242,7 +243,7 @@ A test that checks only an error variant, a text or a property is named `test_na
 ### The numeric guard
 
 `crates/p2a-validation/tests/numeric_guard.rs` walks the product crates' `src` (skipping `#[cfg(test)]`
-items) for the numeric patterns rules R5-R7 and R9 forbid, five rules in all: `partial-cmp-unwrap`
+items) for five forbidden numeric patterns: `partial-cmp-unwrap`
 (`partial_cmp(..).unwrap*` comparators), `one-minus-cdf` (`1 - cdf` p-values), `abramowitz-stegun` (local
 approximation constants), `critical-value-literal` (`1.96`, `2.576`, `1.645` as literals) and
 `discarded-inverse-condition` (a `safe_inverse` result whose condition element is dropped). It prints
@@ -496,10 +497,10 @@ every change to `Cargo.lock`, any `Cargo.toml` or the workflow itself.
 Benchmark-only tests are `#[ignore]`d, so the Test job reports them as ignored (see
 [Benchmark tests](#benchmark-tests-ignored-by-default)). No workflow measures code coverage.
 
-## Timing comparisons (rule 5)
+## Timing comparisons
 
 A method rewrite is timed against the code it replaces (and against R where R is timed) before it merges;
-more than about 1.5x slower needs a written reason and the user's sign-off. No timing assertion is committed.
+more than about 1.1x slower than the current code at n = 100, 1,000 and 10,000 needs the user's sign-off. No timing assertion is committed.
 
 - Build the base commit in a separate worktree (`git worktree add ../p2a-base <commit>`) with `--release` and
   the CI feature set (`--no-default-features --features ci` for p2a-core), so both sides share flags.

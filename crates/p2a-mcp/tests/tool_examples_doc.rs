@@ -1,9 +1,9 @@
-//! The MCP documentation is checked against the tool router (T3-WP63: INF-5, INF-12).
+//! The MCP documentation is checked against the tool router (INF-5, INF-12).
 //!
 //! - Every `/tool key:value ...` chat example inside a fence of docs/guides/MCP_TOOL_EXAMPLES.md and
 //!   README.md names a registered tool, only fields of its input schema and every required field, with
 //!   values of the field's JSON type. The guide's `### tool` headings and `**Parameters:**` bullets name
-//!   real tools and fields (INF-5). Since T3-WP05 (D2) an unknown field is refused, so a drifted
+//!   real tools and fields (INF-5). Request structs refuse an unknown field, so a drifted
 //!   example fails for its reader.
 //! - README.md's tool table is generated from the category table and its MCP sections name real tools;
 //!   docs/mcp/tools-reference.md is what `generate_markdown_docs()` renders; every "N tools" in the docs
@@ -330,7 +330,7 @@ fn test_refused_option_values_are_caught() {
 }
 
 /// INF-5: every chat-shorthand tool example names a registered tool and only its fields, gives every
-/// required field, and each value fits the field's type. Fails before (d6a3a3b schemas): `log_rank_test`,
+/// required field, and each value fits the field's type. Failed on the older schemas: `log_rank_test`,
 /// 84 unknown-field uses in 63 tool/field pairs (`kaplan_meier strata:`, `cox_ph x:`, `rd_estimate
 /// bandwidth:`, ...) and 57 missing required fields.
 #[test]
@@ -569,7 +569,56 @@ fn test_tools_reference_is_generated() {
             absent.is_empty(),
             "{path} lacks {absent:?}: regenerate it with the default features"
         );
+        // The rest of the page: the total and every category heading's count are those of the
+        // default build (the category table), and the categories are this build's.
+        let total = format!("Total tools: {}\n", CATEGORY_TABLE.len());
+        assert!(
+            have.contains(&total),
+            "{path} does not say `{}`: regenerate it with the default features",
+            total.trim_end()
+        );
+        let committed_sections = reference_sections(&have);
+        let miscounted: Vec<&(String, usize, usize)> = committed_sections
+            .iter()
+            .filter(|(_, declared, rows)| declared != rows)
+            .collect();
+        assert!(
+            miscounted.is_empty(),
+            "{path}: category headings whose count is not their number of rows (name, heading, rows): {miscounted:?}"
+        );
+        let rows_total: usize = committed_sections.iter().map(|s| s.2).sum();
+        assert_eq!(rows_total, CATEGORY_TABLE.len(), "{path}: tool rows");
+        let names =
+            |v: &[(String, usize, usize)]| v.iter().map(|s| s.0.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names(&committed_sections),
+            names(&reference_sections(&want)),
+            "{path}: categories"
+        );
     }
+}
+
+/// `(category, count in its heading, tool rows under it)` of every `## Category (N tools)` section
+/// of the tools reference.
+fn reference_sections(md: &str) -> Vec<(String, usize, usize)> {
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+    for line in md.lines() {
+        if let Some(head) = line.strip_prefix("## ") {
+            let (name, count) = head
+                .strip_suffix(" tools)")
+                .and_then(|h| h.rsplit_once(" ("))
+                .unwrap_or_else(|| panic!("unexpected heading in the tools reference: {line}"));
+            let declared = count
+                .parse()
+                .unwrap_or_else(|_| panic!("unexpected heading in the tools reference: {line}"));
+            out.push((name.to_string(), declared, 0));
+        } else if line.starts_with("| `")
+            && let Some(last) = out.last_mut()
+        {
+            last.2 += 1;
+        }
+    }
+    out
 }
 
 /// `(line, number)` of every "N tools", "N MCP tools", "N analytics tools", "N more tools", "N handlers"
@@ -618,7 +667,7 @@ fn test_tool_counts_are_found() {
 
 /// INF-12: every tool count in the docs is the default build's (270, the category table) or the count
 /// without the database tools; the router agrees with the table. Fails before: MCP_TOOL_EXAMPLES.md's
-/// "60+ tools" (and API_ENDPOINTS.md's "268 more tools" until T3-WP53 removed it).
+/// "60+ tools" (and API_ENDPOINTS.md's "268 more tools", since removed).
 #[test]
 fn test_documented_tool_counts_match_the_router() {
     let full = CATEGORY_TABLE.len();
@@ -630,7 +679,7 @@ fn test_documented_tool_counts_match_the_router() {
     assert_eq!(
         schemas().len() + lacking,
         full,
-        "the router and the category table disagree (T3-WP05's registry tests say where)"
+        "the router and the category table disagree (the registry tests in tools/registry.rs say where)"
     );
     let mut problems = Vec::new();
     for file in COUNT_DOCS {
