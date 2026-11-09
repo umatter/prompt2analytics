@@ -119,6 +119,11 @@ jobs:
         # WebKit/GTK deps dominate compile time and its web target is checked
         # in its own job.
         #
+        # The p2a-cli and p2a-mcp steps include the documentation tests
+        # (docs_examples, tool_examples_doc): a documented command, flag, tool
+        # or field that does not exist, or a stale generated reference, fails
+        # them.
+        #
         # --tests runs unit + integration tests only; doctests are gated
         # separately in the step below so a failing example is distinguishable
         # from a failing unit test in the log.
@@ -145,14 +150,15 @@ jobs:
         # and should fail the build. This reuses the build from the step above,
         # so it costs little beyond the doctest link+run itself.
         #
-        # Measured 2026-09-04: p2a-core 79 pass / 0 fail / 189 ignored,
-        # p2a-mcp 1 pass / 0 fail / 2 ignored. p2a-cli is intentionally absent:
+        # Measured 2026-11-09: p2a-core 111 pass / 0 fail / 181 ignored,
+        # p2a-mcp 2 pass / 0 fail / 2 ignored. p2a-cli is intentionally absent:
         # it is a binary-only crate, so `cargo test --doc` there fails outright
         # with "no library targets found in package `p2a-cli`".
         #
-        # The 189 ignored p2a-core examples are incomplete fragments that
-        # reference an undefined `dataset`; they are NOT compiled and so cannot
-        # be caught here. Converting them to runnable examples with hidden
+        # The 181 ignored p2a-core examples are fragments that need context:
+        # about half (99) use an undefined `dataset`, the rest file paths,
+        # DataFrames or fitted models from earlier lines. They are NOT
+        # compiled and so cannot be caught here. Converting them to runnable examples with hidden
         # `# ` setup lines is tracked separately.
         run: |
           cargo test -p p2a-core --doc --no-default-features --features ci

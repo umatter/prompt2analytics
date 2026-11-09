@@ -28,12 +28,24 @@ cargo test -p p2a-core                  # Core library tests only
 cargo test -p p2a-mcp                   # MCP server tests only
 cargo test test_name                    # Run specific test by name
 cargo test -p p2a-core -- test_validate # Run validation tests only
-cargo test -p p2a-validation               # R reference case loader (test-only crate) and its self-tests
+cargo test -p p2a-validation               # R reference case loader (test-only crate), its self-tests, the source guards
+cargo test -p p2a-text                     # char-boundary text helpers
 validation/run_validation.sh               # test_validate tests in the CI feature sets + R drift check
 Rscript validation/r/run.R --check         # R reference values still reproduce (needs R + packages)
 
-# Linting
-cargo clippy --all-targets --all-features
+# Documentation tests (both run in CI) and the generated docs they check
+cargo test -p p2a-cli --test docs_examples      # every documented p2a command; the generated CLI reference
+cargo test -p p2a-mcp --test tool_examples_doc  # every MCP tool example; README tool table; tools reference; counts
+P2A_UPDATE_DOCS=1 cargo test -p p2a-cli --test docs_examples   # regenerate the CLI reference and README command list
+cargo run -p p2a-mcp --example generate_tool_docs              # regenerate README's tool table and docs/mcp/tools-reference.md
+
+# Linting (the clippy lines CI runs; --all-features would turn on cuda)
+cargo clippy -p p2a-core --no-default-features --features ci
+cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
+cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
+cargo clippy -p p2a-chat
+cargo clippy -p p2a-text
+cargo clippy -p p2a-validation --all-targets
 cargo fmt --all -- --check               # What CI gates on
 cargo fmt                                # Apply formatting
 
@@ -115,14 +127,15 @@ opt-level = 1
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.88+) exposing 270 econometrics, statistics, ML, and visualization methods through multiple interfaces:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.88+) exposing its econometrics, statistics, ML and visualization methods as 270 MCP tools (263 without the `database` feature) and through the `p2a` CLI, in these crates:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output
 - **p2a-mcp**: MCP server exposing 270 tools with LLM integration, plus an HTTP API documented in `API_ENDPOINTS.md`
 - **p2a-chat**: Lightweight terminal REPL that speaks to a running `p2a-mcp` HTTP server (no direct p2a-core dependency). Reach for it when you want to exercise the MCP tool-call path end-to-end from a shell without the Dioxus UI.
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
-- **p2a-validation**: test-only crate (`publish = false`) that loads the R reference cases in `validation/expected/*.json` and compares values (`Case`, `Check`, `Tol`); a dev-dependency of p2a-core, p2a-cli and p2a-mcp.
+- **p2a-validation**: test-only crate (`publish = false`) that loads the R reference cases in `validation/expected/*.json` and compares values (`Case`, `Check`, `Tol`); a dev-dependency of p2a-core, p2a-cli and p2a-mcp; its tests also hold the source guards `na_guard` and `numeric_guard`.
+- **p2a-text**: zero-dependency char-boundary text helpers (`floor_char_boundary`, `truncate_bytes`, `truncate_chars`, `ellipsize`, `ellipsize_bytes`) used by every crate, wasm-safe; publish it before p2a-core.
 
 Out-of-scope directories (ignore when searching unless specifically asked): `archive/`, `_resources/`, `target/`, `crates/p2a-dioxus/node_modules/`.
 
@@ -151,24 +164,26 @@ p2a script run analysis.sh
 | Category | Description | Examples |
 |----------|-------------|----------|
 | `data` | Load, describe, generate, export | `data load`, `data describe`, `data head` |
-| `reg` | OLS, clustered SEs, HAC, bootstrap, quantile | `reg ols`, `reg clustered`, `reg hac` |
+| `reg` | OLS, clustered and HAC SEs, quantile regression, GLS, LOESS, NLS, stepwise, splines | `reg ols`, `reg quantreg`, `reg hac` |
 | `panel` | FE, RE, Hausman, HDFE, FEGLM, GMM | `panel fe`, `panel re`, `panel hdfe` |
 | `causal` | IV, DiD, RD, matching, IPW, synth | `causal iv`, `causal did`, `causal rd` |
 | `discrete` | Logit, probit, ordered, multinomial, count | `discrete logit`, `discrete mlogit` |
 | `ts` | ARIMA, VAR, GARCH, Holt-Winters, STL | `ts arima`, `ts var`, `ts garch` |
 | `stats` | T-tests, ANOVA, non-parametric, ACF/PACF | `stats t-test-two`, `stats anova` |
 | `spatial` | SAR, SEM, SAC, Moran's I | `spatial sar`, `spatial moran` |
-| `survival` | Kaplan-Meier, Cox PH, log-rank | `survival km`, `survival cox` |
+| `survival` | Kaplan-Meier, log-rank, Cox PH, AFT, competing risks | `survival km`, `survival cox` |
 | `ml` | K-means, DBSCAN, PCA, t-SNE, RF, SVM | `ml kmeans`, `ml pca` |
 | `munge` | Filter, join, reshape, aggregate, clean | `munge filter`, `munge join` |
 | `viz` | Static (PNG) and interactive (HTML) charts | `viz scatter`, `viz histogram` |
 
+Every command, argument and option: the generated reference at the end of `docs/guides/CLI_REFERENCE.md`.
+
 ### Output Formats
 
 ```bash
-p2a --format text ...   # Human-readable (default)
-p2a --format json ...   # Programmatic use
-p2a --format table ...  # Tabular display
+p2a --session analysis.json reg ols sales -y price -x sqft              # text (default)
+p2a --session analysis.json -F json reg ols sales -y price -x sqft      # JSON for programs
+p2a --session analysis.json -F table reg ols sales -y price -x sqft     # table (printed like text today)
 ```
 
 ## Architecture Principles
@@ -211,7 +226,7 @@ cargo build -p p2a-core --features cuda                 # GPU acceleration
 The `cuda` feature enables transparent GPU dispatch for core linear algebra operations via cuBLAS and cuSOLVER. GPU paths are selected automatically when problem sizes exceed calibrated thresholds.
 
 **GPU-accelerated operations** (via `linalg/gpu/` module):
-- **xtx (X'X)**: 2-7x speedup for k>=30 via cuBLAS DGEMM
+- **xtx (X'X)**: 2-7x speedup for k>=30 via cuBLAS DGEMM; used by PCA, the sandwich estimators and OLS's normal-equations fast path (a well-conditioned, full-rank X'X is solved by checked Cholesky, any other design by the pivoted QR of `linalg::solve`)
 - **PCA**: 4-13x speedup via GPU covariance eigendecomposition
 - **K-means distances**: 2-3x speedup for d>=20 via DGEMM reformulation
 - **matmul**: 1.4-2.4x speedup for near-square matrices
@@ -237,13 +252,16 @@ P2A_GPU_XTX_MIN_NKK=999999999999 P2A_GPU_XTX_MIN_K=999999 \
 ### Module Organization (p2a-core)
 
 ```
-src/
+crates/p2a-core/src/
 ├── errors.rs              # EconError, EconResult types
-├── cache.rs               # Thread-safe LRU cache with memory limits and TTL
 ├── memory.rs              # Memory monitoring, pressure detection, cleanup
 ├── resource.rs            # try_* fallible allocation, alloc ceiling, CancelToken/Budget, checkpoint()
+├── options.rs             # Option strings -> enums (Choices, option_enum!): case- and separator-insensitive,
+│                          #   errors list the accepted values
 ├── linalg/
 │   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer), GPU dispatch
+│   ├── solve.rs           # Rank-revealing least squares (pivoted QR with R's dqrdc2 aliasing rule);
+│   │                      #   sym_inverse reporting rank and reciprocal condition
 │   └── gpu/               # Optional CUDA acceleration (#[cfg(feature = "cuda")])
 │       ├── mod.rs          # GpuContext singleton (OnceLock)
 │       ├── context.rs      # CUDA device init, capability detection
@@ -254,7 +272,8 @@ src/
 │       └── kernels.rs      # Custom: pairwise_distances (K-means)
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
-│   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value helpers
+│   ├── convergence.rs     # Convergence, ResultNotes, notes_text/notes_json
+│   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value and quantile helpers
 │
 ├── diagnostics/           # Identification warnings (non-blocking) for IV, DiD, matching/IPW, RD
 │                          #   design: docs/design/IDENTIFICATION_WARNINGS.md
@@ -269,7 +288,8 @@ src/
 │   ├── gls.rs             # Generalized least squares (AR1, custom correlation)
 │   ├── smooth_spline.rs   # Smoothing splines with GCV
 │   ├── step.rs            # Stepwise selection (forward, backward, both)
-│   ├── quantreg.rs        # Quantile regression (interior point, simplex)
+│   ├── quantreg.rs        # Quantile regression: Barrodale-Roberts up to 5,000 rows, Frisch-Newton above
+│   │                      #   (`auto`, default); summary.rq SEs
 │   ├── marginal_effects.rs # Marginal effects and contrasts
 │   ├── sensemakr.rs       # Sensitivity analysis (Cinelli & Hazlett)
 │   └── evalue.rs          # E-values for unmeasured confounding
@@ -296,20 +316,26 @@ src/
 │   ├── robust.rs          # Robust statistics (fivenum, IQR, MAD, ECDF, density)
 │   ├── spline.rs          # Spline interpolation and approximation
 │   ├── weighted.rs        # Weighted mean and covariance
+│   ├── ranks.rs           # Exact midranks shared by the rank tests
 │   └── ...                # 30+ more statistical tests
 │
 ├── econometrics/          # Econometric methods (60+ methods)
-│   ├── panel.rs           # FE, RE, Hausman, Panel GLS, Arellano-Bond GMM, PVCM, PMG
+│   ├── panel/             # FE, RE, Hausman, panel GLS, Arellano-Bond and Blundell-Bond (system) GMM,
+│   │                      #   PVCM, PMG
 │   ├── iv.rs              # 2SLS, first-stage diagnostics, Sargan test
 │   ├── did.rs             # Canonical 2x2 DiD
 │   ├── staggered_did.rs   # Callaway-Sant'Anna staggered DiD
 │   ├── etwfe.rs           # Extended two-way fixed effects (Wooldridge)
 │   ├── bacon.rs           # Goodman-Bacon decomposition
-│   ├── discrete.rs        # Logit, Probit, Multinomial, Ordered, NegBin, ZIP, ZINB, Hurdle, Mixed logit
+│   ├── discrete/          # Logit/probit on the shared GLM, multinomial, conditional logit (with ASCs),
+│   │                      #   ordered, NegBin, ZIP, ZINB, hurdle, mixed logit
+│   ├── glm.rs             # Shared GLM: IRLS with glm.fit's safeguards (step halving, aliasing at 1e-11),
+│   │                      #   propensity scores, TMLE fluctuation
 │   ├── feglm.rs           # GLM with HDFE (IRLS + weighted MAP)
 │   ├── hdfe.rs            # High-dimensional fixed effects
 │   ├── rd.rs              # Sharp/Fuzzy RD with CCT robust inference
 │   ├── rdmulti.rs         # Multi-cutoff RD
+│   ├── rd_bwselect.rs     # rdrobust::rdbwselect bandwidths, all ten selectors
 │   ├── synth.rs           # Synthetic control (classic + gsynth)
 │   ├── scpi.rs            # Synthetic control with prediction intervals
 │   ├── treatment.rs       # IPW, doubly robust estimation
@@ -318,6 +344,7 @@ src/
 │   ├── ltmle.rs           # Longitudinal TMLE
 │   ├── doubleml.rs        # Double/Debiased ML (PLR, PLIV, IRM, IIVM)
 │   ├── matching.rs        # Propensity score matching (MatchIt)
+│   ├── min_cost_flow.rs   # Network simplex for optimal full matching
 │   ├── weightit.rs        # Flexible IPW (entropy balancing)
 │   ├── cbps.rs            # Covariate balancing propensity scores
 │   ├── twang.rs           # GBM propensity scores
@@ -328,7 +355,7 @@ src/
 │   ├── spatialprobit.rs   # Spatial probit models
 │   ├── splm.rs            # Spatial panel models (SPML, SPGM)
 │   ├── sphet.rs           # Spatial GMM with heteroskedasticity
-│   ├── timeseries.rs      # VAR, VARMA, VECM, IRF, Granger causality
+│   ├── timeseries/        # mod, common, var (VAR, IRF), varma (Hannan-Rissanen), vecm (Johansen), granger
 │   ├── panel_unit_root.rs # LLC, IPS, Hadri panel unit root tests
 │   └── ...                # ivmte, hettx, stdreg, gformula, bpbounds, sbw
 │
@@ -342,7 +369,7 @@ src/
 │   ├── kalman.rs          # Kalman filter and smoother
 │   ├── structts.rs        # Structural time series (local level, trend, BSM)
 │   ├── changepoint.rs     # PELT and binary segmentation
-│   ├── garch.rs           # GARCH(p,q) volatility modeling
+│   ├── garch.rs           # GARCH(p,q) by conditional ML, normal or Student-t errors
 │   ├── causal_impact.rs   # Bayesian structural time series causal inference
 │   └── tsutils.rs         # lag, embed, diffinv, filter, window, arima_sim, runmed
 │
@@ -353,7 +380,10 @@ src/
 │   ├── svm.rs             # Linear SVM (SMO)
 │   ├── gbm.rs, xgboost.rs, lightgbm.rs, adaboost.rs, mboost.rs   # Boosting family
 │   ├── bart.rs, bart_causal.rs, causal_forest.rs                 # Bayesian trees, heterogeneous effects
-│   ├── shap.rs, pdp.rs, ice.rs, interpretability.rs              # Model interpretation
+│   ├── shap.rs, pdp.rs, ice.rs   # Model interpretation (exact TreeSHAP, Kernel SHAP; one PDP/ICE engine)
+│   ├── hclust.rs          # One hierarchical-clustering core, as stats::hclust
+│   ├── advanced_clustering_mod/  # One file per family: common, kmedoids, spectral, affinity, optics, hdbscan,
+│   │                      #   gmm, fuzzy, kmeans_variants, hierarchical, mixtures, dynamic_tree_cut, other
 │   └── *_fast.rs          # Optimized variants of svm/xgboost/mboost/evaluation kept alongside originals
 │
 ├── simulation/            # Data simulation
@@ -527,26 +557,43 @@ let missing = cols.missing().clone();           // what was dropped
   on its line or the next, and a new `na-legacy` marker all fail the guard. The real-tree test is
   `test_na_guard_tree_is_clean`, and `test_na_guard_legacy_mcp_helpers_are_gone` keeps the removed
   null-to-NaN MCP helpers out.
+- **The numeric guard.** `cargo test -p p2a-validation --test numeric_guard` (in CI) fails on the numeric
+  patterns listed below in non-test product code, printing `file:line` for each. Its five rules:
+  `partial-cmp-unwrap` (sort and compare floats with `f64::total_cmp`), `one-minus-cdf` (use the direct
+  upper-tail helpers of `traits::estimator`), `abramowitz-stegun` (approximation constants instead of an
+  exact quantile), `critical-value-literal` (`1.96`, `2.576`, `1.645` as literals) and
+  `discarded-inverse-condition` (a `safe_inverse` call whose condition element is dropped). Deliberate
+  exceptions carry `// numeric-ok: <reason>` or, for an inverse, `// inverse-ok: <reason>` on the line or the
+  line above; the guard's module docs are the reference.
 
-### Matrix Operations
+### Least squares and inverses
 
-Use functions from `linalg/matrix_ops.rs`:
 ```rust
-use crate::linalg::matrix_ops::{xtx, xty, safe_inverse};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 
-let xtx = xtx(&x);           // X'X
-let xty = xty(&x, &y);       // X'y
-let inv = safe_inverse(&m)?;  // Safe matrix inverse via Cholesky
+let fit = least_squares(x.view(), y.view())?;      // R's lm.fit: pivoted QR (dqrdc2), rank, aliased columns
+if let Some(w) = fit.aliasing_warning(&names) {    // "Coefficients not defined because of singularities: x2"
+    warnings.push(w);
+}
+let inv = sym_inverse(info.view(), SingularPolicy::Error, "information matrix")?;   // SEs: a singular matrix is an error
 ```
 
-### P-Value Calculation
+`linalg::matrix_ops::{xtx, xty}` stay for cross-products. `safe_inverse` keeps its signature for older
+call sites, but its second element (the condition warning) must be used, and the numeric guard rejects code that
+drops it. OLS solves a well-conditioned, full-rank X'X by checked Cholesky (`regression::ols::normal_inverse_from_gram`,
+X'X from `xtx`, so the GPU dispatch applies) and falls back to `least_squares` for rank-deficient or
+ill-conditioned designs, where R's column dropping applies.
 
-Use helpers from `traits/estimator.rs`:
-```rust
-use crate::traits::estimator::{t_test_p_value, f_test_p_value, chi_squared_p_value};
+### P-values, quantiles and levels
 
-let p = t_test_p_value(t_stat, df);  // handles NaN, Inf gracefully
-```
+- p-values: `traits::estimator::{t_test_p_value, f_test_p_value, chi_squared_p_value,
+  normal_p_value_two_sided}`. Upper tails are computed directly by `traits::estimator`; statrs
+  `ChiSquared::sf` and `FisherSnedecor::sf` are inaccurate in the tails and are not used, and `Normal::sf`
+  only for one-sided normal tails. Never `1 - cdf`.
+- quantiles and levels: `normal_quantile`, `z_critical`, `t_quantile`, `chi_squared_quantile`,
+  `validate_level` (same module), never a literal critical value.
+- sample quantiles: `stats::robust::{quantile_sorted, quantiles, percentile_interval, boxplot_stats}` with
+  `QuantileType` (type 7 unless the R reference uses another).
 
 ### Robust Standard Errors
 
@@ -565,37 +612,42 @@ Additional variance estimators in `regression/ols.rs`:
 - `vcov_bootstrap()` - Bootstrap covariance (pairs, residual, wild)
 - `vcov_driscoll_kraay()` - Panel-robust SEs (cross-sectional dependence)
 
-### MLE Settings (Discrete Models)
+### GLM fits
 
-Logit/Probit use Newton-Raphson with optional backtracking line search:
-```rust
-pub struct MleSettings {
-    pub max_iter: usize,        // Default: 100
-    pub tolerance: f64,         // Default: 1e-8
-    pub step_size: f64,         // Default: 1.0
-    pub use_line_search: bool,  // Default: true (Armijo backtracking)
-    pub armijo_c: f64,          // Default: 1e-4 (sufficient decrease)
-    pub step_reduction: f64,    // Default: 0.5
-    pub max_line_search: usize, // Default: 20
-}
-```
+- Logistic, probit, Poisson and quasi-likelihood fits inside estimators go through
+  `econometrics::glm::{fit_glm, GlmSpec, fit_propensity}`: IRLS with glm.fit's safeguards (step halving, the
+  pivoted-QR aliasing rule at 1e-11) on the OLS solve (checked Cholesky of X'WX, with the pivoted QR as the
+  fallback), converging on
+  |dev - devold| / (|dev| + 0.1 D0/n) with D0 the null deviance.
+- `MleSettings` (discrete models) defaults to `max_iter` 100, `tolerance` 1e-10, tighter than glm.control's
+  25 and 1e-8; recorded as a registry deviation.
+- Separation is reported, not hidden: glm's warning "fitted probabilities numerically 0 or 1 occurred" plus
+  the complete/quasi-complete checks of `discrete/binary_choice.rs`; aliased regressors get NaN coefficients
+  and SEs.
 
-The line search improves convergence for difficult problems (near-separation).
-Multivariate separation is detected via coefficient explosion monitoring.
+### Options, convergence, text
+
+- `p2a_core::options` (`Choices`, `option_enum!`): option strings become enums, case- and
+  separator-insensitive, and an unknown value is an `InvalidSpecification` listing the accepted ones. The CLI
+  parses with `value_parser` on the enum's `FromStr`; MCP with `tools::common::parse_option`.
+- Iterative estimators report `traits::convergence::Convergence` and implement `ResultNotes`; `Display` ends
+  with `notes_text(self)`; the CLI prints `output::print_notes`, MCP appends `append_notes`/`notes_json`.
+- Text that can hold user, dataset or LLM content is cut with `p2a_text::{truncate_bytes, truncate_chars,
+  ellipsize, ellipsize_bytes, floor_char_boundary}`, never `&s[..n]`.
 
 ### Config Pattern for Complex Methods
 
-Complex methods use a builder-style config:
+Complex methods take a config struct with a `Default`:
 ```rust
-let config = StaggeredDidConfig {
-    comparison_group: ComparisonGroup::NeverTreated,
-    estimation_method: AttEstimationMethod::Ipw,
-    anticipation: 0,
-    aggregation: Aggregation::Simple,
-    ..Default::default()
-};
-let result = run_staggered_did(dataset, &config)?;
+let mut config = StaggeredDidConfig::default();
+config.comparison_group = ComparisonGroup::NotYetTreated;
+config.estimation_method = AttEstimationMethod::DoublyRobust;
+config.anticipation = 1;
+let result = run_staggered_did(&dataset, "y", "first_treat", "year", "unit", Some(&["x1"]), config)?;
 ```
+
+Literals are written default-then-assign (`field_reassign_with_default` is allowed) so a new field
+with a `Default` never breaks other crates.
 
 ## MCP Server (p2a-mcp)
 
@@ -630,7 +682,8 @@ crates/p2a-mcp/src/
 │                          #   llm_routes.rs (chat, SSE, tool executors), conversation.rs, websocket.rs
 ├── tools/
 │   ├── mod.rs             # Re-exports
-│   ├── registry.rs        # Tool metadata for documentation
+│   ├── registry.rs        # Search registry: generated from the router plus one CATEGORY_TABLE row per tool
+│   ├── common.rs          # Column readers, parse_option, append_notes/notes_json, file-type checks
 │   ├── limits/            # Request limits: mod.rs (Limits, hosted()/off(), overrides, LimitViolation),
 │   │                      #   rules.rs (PARAM_RULES per request field, ROW_RULES per tool)
 │   ├── requests/          # Request structs by category
@@ -692,6 +745,10 @@ async fn my_tool(
    call the core dataset wrapper), and report dropped rows with `append_missing_note`/`missing_json`
    (see "Reading user columns").
 
+1a. Put `#[serde(deny_unknown_fields)]` under the derive (an unknown field is refused; a source guard in
+   `tools/requests/mod.rs` fails without it). Parse option strings with `tools::common::parse_option` and append
+   convergence and warnings with `append_notes`/`notes_json`.
+
 3. Import the request type in the handler module and ensure it's re-exported from `tools/requests/mod.rs`
 
 4. Classify every integer, float and array field of the request struct, and the numeric elements
@@ -703,6 +760,13 @@ async fn my_tool(
 
 5. Add a `ROW_RULES` entry when the method needs O(n²) memory or O(n²) or O(n³) time in the
    dataset's rows.
+
+6. Add the HTTP dispatch arm in `server.rs` (`dispatch!("name" => Request => method)`; a test calls every routed
+   tool through `call_tool_with_session`) and a `CATEGORY_TABLE` row in `tools/registry.rs`.
+
+7. Document it: an example in `docs/guides/MCP_TOOL_EXAMPLES.md` (checked by `tool_examples_doc`), then
+   `cargo run -p p2a-mcp --example generate_tool_docs` to regenerate `docs/mcp/tools-reference.md` and README's
+   table.
 
 HTTP-side code never calls `call_tool_with_session` directly: it goes through `ToolGovernor::call`
 (or `ToolGovernor::run_blocking` for non-tool blocking work), which is where deadlines, slots,
@@ -735,13 +799,15 @@ let tool_router = Self::tool_router()
 let tool_router = tool_router + Self::database_router();
 ```
 
-`search_router` (`handlers/search.rs`) is a meta-layer, not an analytics category: it exposes
-`search_tools`, `list_tool_categories`, and `tool_info` so an LLM can discover any of the 270 tools by natural-language query.
-It exists because most LLM APIs cap a request at 128 tool definitions, so `llm/tools.rs` sends only a
-curated subset and relies on search for the rest. A new tool is reachable through search automatically
-once its handler is registered; if it should be in the always-visible subset, add it to `llm/tools.rs` too.
-The server's own chat loop does not offer the search meta-tools to its model (they are in `INTERNAL_TOOLS`,
-which the loop refuses along with unknown names); registered tools outside the subset stay callable by name.
+`search_router` (`handlers/search.rs`) is a meta-layer, not an analytics category. `search_tools`,
+`list_tool_categories` and `tool_info` let MCP clients (stdio clients and `/api/tools` callers) search every
+routed tool by keyword and read its parameters and input schema. Their registry (`tools/registry.rs`) is generated
+from the router plus one hand-kept `CATEGORY_TABLE` row per tool (category, related tools, R equivalent); the
+registry tests fail when a routed tool has no row or a row names no routed tool, so a new handler needs its row.
+The server's own LLM chat does not offer these meta-tools (they are in `llm::INTERNAL_TOOLS`, which the
+chat loop also refuses). The chat model gets the curated `TIER1_TOOLS` subset of `llm/tools.rs`, which stays under
+the 128-tool request cap of most LLM APIs; a registered tool outside the subset still runs when the model names
+it. A tool the chat model should see must be added to `TIER1_TOOLS`.
 
 ### Database Layer (SurrealDB)
 
@@ -813,7 +879,10 @@ cd crates/p2a-dioxus && dx serve
 (`validation/expected/<case>.json`) through `crate::test_support::load_case` (p2a-core) or
 `p2a_validation::Case::load` (p2a-cli, p2a-mcp), and compare every reported number with
 `p2a_validation::{Check, Tol}`. The others check properties, known DGPs or quoted values.
-Only the first kind may be described as matching R. `validation/README.md` explains both, the
+Only the first kind may be described as matching R, and only for the quantities its registry entry lists as
+pinned (a `registered-property` test compares none). A test named `test_validate_*` is R-pinned and registered
+in `validation/methods/*.json`, or listed with its reason in `validation/tools/validate_property_tests.txt`;
+`validation/tools/tests/test_tier3_closure.py` enforces it. `validation/README.md` explains both, the
 layout and the workflow.
 
 **Adding or fixing a method's validation** (the rules for Tiers 2-4):
@@ -821,7 +890,8 @@ layout and the workflow.
    `set.seed()` and `ctx$gen_dataset()` for simulated data, which must have noise).
 2. `Rscript validation/r/run.R --write <id>`, then `--check`.
 3. Write `test_validate_<method>_<dataset>[_<variant>]` in the module it tests, pinning every
-   number the method reports for that call (no `if let Ok`, no print-only checks).
+   number the method reports at the solution (no `if let Ok`, no print-only checks); iteration counts,
+   traces and other path quantities are checked as properties, never against R.
 4. Add the registry entry in `validation/methods/<area>.json` (cases, tests, quantities,
    tolerance, deviations).
 5. Update the method doc and the `validation/README.md` index row (its status follows the
@@ -830,6 +900,13 @@ layout and the workflow.
    regenerate `validation/VALIDATION_STATUS.md` with `validation/run_validation.sh
    --write-status` before the change reaches main (during the review campaign: at the wave
    integration, not in a lane).
+
+R is the test oracle and the default convention, not the algorithm template. Conventions follow R when
+that is cheap, otherwise a registry deviation and a method-doc line. No ports of R/Fortran/C code for R's
+digits unless the estimator is defined by its algorithm or the port is the cheapest correct route; never
+reproduce an R bug. A method rewrite includes a timing comparison with the current code (and R where timed)
+at n = 100, 1,000 and 10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.1x slower
+than the current code needs the user's sign-off.
 
 Never widen a tolerance. A mismatch outside the package's findings is a registry deviation
 (`{"finding", "quantity", "note"}`) with a `// deviation <id>` comment that keeps the quantity
@@ -940,8 +1017,8 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 | `bench_utils.rs` JSON schema and method names emitted by `comprehensive_benchmarks`, `unified_benchmarks`, `benchmark_n10000` | `performance/results/rust_*.json` → `merge_results.R` (name normalization across R/Rust) | Renaming a benchmark or a JSON field drops the method from the speed/memory comparison |
 | MCP **tool names** (270 handlers) | `paper/code/e2e_eval/test_cases.json` expects exact names for the 96 single-turn prompts (`regression_ols`, `panel_fixed_effects`, `rd_estimate`, `ts_arima_fit`, ...); `rescore.py` scores them with an alias table | Renaming a tool turns every single-turn prompt targeting it into a scored miss. Multi-turn (MT1–MT8) scoring only checks that *some* tool was called, so names there are documentation |
 | HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
-| `p2a` **text output format** for `data describe/head`, `reg ols` (text and `--format json`), `panel fe/re/hausman/hdfe`, diagnostics | `paper/archive/code/generate_outputs.sh` → `paper/archive/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build). The paper Makefile does not re-run it | Output formatter changes alter exhibits. Golden copies in `crates/p2a-cli/tests/golden/cli_*.txt` fail the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`) on any output change; update them with `P2A_UPDATE_GOLDEN=1` only after the R checks in the same test pass |
-| `validation/datasets/` (Grunfeld etc.) | CLI captures above, `rust_validation/scripts/run_validation.sh`, several R benchmark DGPs | Moving a dataset breaks `make generate` |
+| `p2a` **text output format** for `data describe`, `data head`, `reg ols` (text and `-F json`), `panel fe`, `panel re`, `panel hausman`, `panel hdfe`, diagnostics | No paper exhibit includes `p2a` text output any more: the CLI captures moved to the paper repo's untracked `paper/archive/` (paper commit `0b849be`) and no section includes them. The golden copies (`crates/p2a-cli/tests/golden/cli_*.txt`) still pin the output | An output change fails the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`); update the goldens with `P2A_UPDATE_GOLDEN=1` only after their R checks pass |
+| `validation/datasets/` (Grunfeld etc.) | `paper/code/rust_validation/scripts/run_validation.sh` (copies `grunfeld.csv` and `longley.csv`), `paper/code/validate_examples.sh`, several R benchmark DGPs | Moving a dataset breaks `make rust-validation` |
 | The LLM system prompt and dataset-context format (`llm/context.rs`, `llm/tools.rs`) | e2e evaluation accuracy (`run_evaluation.py` results) | Tier 0 bounded and delimited the dataset block (JSON-quoted names and values, byte and column caps), so re-running the evaluation against a newer `SOFTWARE_VERSION` can shift the accuracy numbers. Tool names and SSE events are unchanged |
 | `validation/expected/*.json`, `validation/methods/*.json` | the paper's validation claims (supplementary appendix "numerical validation", introduction footnote, discussion) | A changed reference value or registry entry changes what the paper may claim as R-pinned |
 | Counts and claims stated as prose in `paper/sections/*.tex`: "over 200 methods", test-function and validation-test counts, ~62% line coverage, version, Rust version, and the description of what CI runs | none (hand-written) | They drift silently; re-derive them when re-pinning `SOFTWARE_VERSION`, and re-derive validation counts from the generated `validation/VALIDATION_STATUS.md` |
@@ -951,11 +1028,13 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 - `paper/code/mc_validation/` and `paper/code/rust_validation/rust_runner/` are nested Cargo crates with a
   **path dependency on this checkout** (`../prompt2analytics/crates/p2a-core` relative to the paper root).
   They build against whatever is checked out here, not the pinned tag, so check out `SOFTWARE_VERSION`'s
-  commit (or a worktree of it) before regenerating paper numbers. Their `Cargo.lock` files are gitignored.
+  commit (or a worktree of it) before regenerating paper numbers. `mc_validation`'s `Cargo.lock` is gitignored;
+  `rust_runner`'s is tracked, so a `cargo update` there is a paper commit.
 - `paper/Makefile` `validate*`/`benchmark*` targets `cd` into this repo via `SW_REPO` (default sibling);
   `paper/Dockerfile.reproduce` clones this repo from GitHub at `--build-arg P2A_REF` (default `v0.1.0`).
-- `build_replication_archive.sh` runs `git -C ../prompt2analytics archive` at the pinned commit, so the
-  sibling checkout must contain that commit (fetch tags before packaging).
+- `build_replication_archive.sh` runs `git -C ../prompt2analytics archive` at the pinned commit. If the sibling
+  checkout lacks that commit, the script silently archives `HEAD` instead (`build_replication_archive.sh:39-41`),
+  so fetch tags and check `git -C ../prompt2analytics cat-file -e <commit>^{commit}` before packaging.
 - The `/implement_metrics`, `/implement_next`, and `/validate-method` commands and the
   `econometrics-implementer` agent **write R benchmark scripts into**
   `../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_<method>.R` and update
@@ -1002,15 +1081,18 @@ Auto-discovered guidance:
   (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`); `cargo test -p p2a-text` and `cargo test -p p2a-chat --lib`; a step that fails when a CI
   feature set reaches libduckdb-sys; doctests for p2a-core (`ci`) and p2a-mcp
   (`http,llm,auth,websocket`) in their own step; then the validation step: `cargo test -p p2a-validation`
-  (includes the NA guard, `tests/na_guard.rs`),
+  (includes the NA guard, `tests/na_guard.rs`, and the numeric guard, `tests/numeric_guard.rs`),
   the strict validation lint (`validation_status.py lint --strict` on the three `--list` outputs), the Python
   unittests in `validation/tools/tests` (including the status-page check, run with `P2A_CHECK_STATUS_PAGE=1`)
   and the runner self-test `bash validation/tools/tests/test_run_validation.sh`; plus a wasm32 `cargo check` +
   host tests for p2a-dioxus (`web`). CI does not install R: the R drift check (`Rscript validation/r/run.R
-  --check`) runs in `validation/run_validation.sh` locally.
-- **Doctests are gated** and, as of Oct 2026, p2a-core runs 87 passed / 0 failed / 190 ignored. A doc example
+  --check`) runs in `validation/run_validation.sh` locally. The documentation tests run in the same test
+  steps: `docs_examples` (p2a-cli) runs every documented `p2a` command and checks the generated CLI reference;
+  `tool_examples_doc` (p2a-mcp) checks every MCP tool example, the README tool table, the tools reference and
+  the tool counts. Regenerate with `P2A_UPDATE_DOCS=1` (`docs/guides/TESTING.md`).
+- **Doctests are gated** and, as of Nov 2026, p2a-core runs 111 passed / 0 failed / 181 ignored (p2a-mcp 2 / 0 / 2). A doc example
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
-  what `mod.rs` actually re-exports. The 190 examples fenced as ignore are NOT compiled and can still rot silently.
+  what `mod.rs` actually re-exports. The 181 examples fenced as ignore are NOT compiled and can still rot silently.
 - **p2a-mcp integration tests** are one file per topic in `crates/p2a-mcp/tests/` (`governor.rs`,
   `limits_e2e.rs`, `sessions.rs`, `llm_egress.rs`, `isolation.rs`, `integration_tests.rs`,
   `dataset_quotas.rs`, `serve_limits.rs`, `serve_limits_hold.rs`, `uploads.rs`, `orphan_sweep_memory.rs`);
@@ -1047,7 +1129,11 @@ Auto-discovered guidance:
   build `benchmark_ml_rust` alone took 1792.67 s before it was ignored (Aug 2026). Run one with
   `cargo test -p p2a-core --release --no-default-features --features ci --test benchmark_ml_rust -- --ignored --nocapture`.
   A new timing-only test gets the same attribute or goes in `benches/`. `--lib` is still the fast
-  correctness loop; `docs/guides/TESTING.md` lists runtimes and memory needs.
+  correctness loop; `docs/guides/TESTING.md` lists runtimes and memory needs. Two more are ignored for
+  other reasons: the LaTeX compile test in `export/latex.rs` needs `pdflatex`
+  (`cargo test -p p2a-core --lib -- --ignored export::latex`), and the causal forest's calibration over 50
+  seeded replications, `test_causal_forest_ate_ci_coverage_over_replications`, is ignored in debug builds
+  only (run it with `--release`).
 - **Wall-clock assertions**: seven exist, all release-only (`cfg!(debug_assertions)` guards), so a
   debug `cargo test` skips them and `cargo test --release` on a slow or loaded machine can fail them.
   In p2a-core: `test_fast_mboost_componentwise_speed` (1 s), `test_fast_xgboost_speed` (10 s), the
@@ -1101,6 +1187,7 @@ let df = df! {
   only be built in a Rust fixture (`f64::NAN`), the one allowed inline fixture.
 - Tier 2 MCP-path and CLI tests live in the `tier2` test binaries (`crates/p2a-mcp/tests/tier2/`,
   `crates/p2a-cli/tests/tier2/`; see `docs/guides/TESTING.md`).
+- Tier 3 MCP and CLI tests live in the `tier3` test binaries (see `docs/guides/TESTING.md`).
 
 ## Important Notes
 
@@ -1161,7 +1248,7 @@ let df = df! {
 - `crates/p2a-mcp/src/llm/egress.rs` - LLM host allowlist and resolve-check-pin resolver
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
 - `crates/p2a-mcp/src/path_jail.rs` - Filesystem path validation (P2A_DATA_ROOT, per-session directories)
-- `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools (128-tool API limit workaround)
+- `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools for MCP clients (not offered to the LLM chat; see Router Composition)
 - `crates/p2a-mcp/src/llm/tools.rs` - Curated LLM-facing tool subset and few-shot examples
 
 **Dioxus App:**

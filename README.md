@@ -166,17 +166,16 @@ p2a --session s.json reg ols mydata -y price -x sqft bedrooms --robust hc1
 p2a --session s.json reg clustered mydata -y revenue -x employees --cluster firm_id
 
 # HAC (Newey-West) standard errors for time series
-p2a --session s.json reg hac mydata -y returns -x mkt_rf smb hml --lag 4
-
-# Bootstrap standard errors
-p2a --session s.json reg bootstrap mydata -y outcome -x treatment -B 1000
+p2a --session s.json reg hac mydata -y returns -x mkt_rf smb hml --lags 4
 
 # Quantile regression
-p2a --session s.json reg quantile mydata -y wage -x education experience --tau 0.5
+p2a --session s.json reg quantreg mydata -y wage -x education experience --tau 0.5
 
 # Diagnostics (VIF, Breusch-Pagan, Durbin-Watson)
 p2a --session s.json reg diagnostics mydata -y price -x sqft bedrooms bathrooms
 ```
+
+Bootstrap covariances are an MCP tool (`regression_bootstrap_cov`), not a CLI command.
 
 #### Panel Data
 
@@ -185,10 +184,10 @@ p2a --session s.json reg diagnostics mydata -y price -x sqft bedrooms bathrooms
 p2a --session s.json panel fe mydata -y revenue -x employees capital --entity firm_id
 
 # Random effects
-p2a --session s.json panel re mydata -y gdp -x investment --entity country --time year
+p2a --session s.json panel re mydata -y gdp -x investment --entity country
 
 # Hausman specification test
-p2a --session s.json panel hausman mydata -y outcome -x treatment --entity id --time period
+p2a --session s.json panel hausman mydata -y outcome -x treatment --entity id
 
 # High-dimensional fixed effects
 p2a --session s.json panel hdfe mydata -y sales -x price --fe firm_id year
@@ -204,29 +203,29 @@ p2a --session s.json panel gmm mydata -y growth -x investment --entity country -
 
 ```bash
 # Instrumental Variables (2SLS)
-p2a --session s.json causal iv mydata -y wage -x education --instruments distance
+p2a --session s.json causal iv mydata -y wage --endog education --instruments distance
 
 # Difference-in-Differences
 p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period
 
 # Staggered DiD (Callaway-Sant'Anna)
-p2a --session s.json causal staggered-did mydata -y outcome --unit id --time period --treat first_treat
+p2a --session s.json causal staggered-did mydata -y outcome --unit id --time period --treatment-time first_treat
 
 # Regression Discontinuity (Sharp)
 p2a --session s.json causal rd mydata -y outcome --running score --cutoff 0
 
 # Fuzzy RD
-p2a --session s.json causal fuzzy-rd mydata -y outcome --running score --treat treatment --cutoff 0
+p2a --session s.json causal fuzzy-rd mydata -y outcome --running score --treatment treatment --cutoff 0
 
 # Propensity Score Matching
-p2a --session s.json causal matching mydata -y outcome --treat treatment -x age income education
+p2a --session s.json causal matching mydata --treatment treatment -x age income education
 
 # IPW and Doubly Robust
-p2a --session s.json causal ipw mydata -y outcome --treat treatment -x age income
-p2a --session s.json causal doubly-robust mydata -y outcome --treat treatment -x age income
+p2a --session s.json causal ipw mydata -y outcome --treatment treatment -x age income
+p2a --session s.json causal doubly-robust mydata -y outcome --treatment treatment -x age income
 
 # Synthetic Control
-p2a --session s.json causal synth mydata -y gdp --unit state --time year --treat california --treat-time 2000
+p2a --session s.json causal synth mydata -y gdp --unit state --time year --treated california --treatment-time 2000
 ```
 
 #### Discrete Choice
@@ -237,7 +236,7 @@ p2a --session s.json discrete logit mydata -y hired -x education experience age
 p2a --session s.json discrete probit mydata -y default -x income debt_ratio
 
 # Ordered models
-p2a --session s.json discrete ologit mydata -y satisfaction -x service_quality price
+p2a --session s.json discrete o-logit mydata -y satisfaction -x service_quality price
 
 # Multinomial logit
 p2a --session s.json discrete mlogit mydata -y transport_mode -x income distance
@@ -260,13 +259,13 @@ p2a --session s.json ts var mydata --cols gdp inflation unemployment --lags 2
 p2a --session s.json ts garch mydata --col returns -p 1 -q 1
 
 # Holt-Winters forecasting
-p2a --session s.json ts holt-winters mydata --col sales --seasonal 12
+p2a --session s.json ts holt-winters mydata --col sales --period 12
 
 # STL decomposition
 p2a --session s.json ts stl mydata --col sales --period 12
 
 # Granger causality
-p2a --session s.json ts granger mydata --cause money_supply --effect inflation --lags 4
+p2a --session s.json ts granger mydata --x money_supply --y inflation --lags 4
 ```
 
 #### Statistics
@@ -393,22 +392,28 @@ p2a script export analysis.json -o analysis.sh
 p2a script run analysis.sh
 ```
 
-**Command categories:**
-- `data` - Load, list, describe, preview, generate, export datasets
-- `reg` - OLS, clustered SEs, HAC, bootstrap, quantile, diagnostics
-- `panel` - Fixed effects, random effects, Hausman, HDFE, FEGLM, GMM
-- `causal` - IV/2SLS, DiD, staggered DiD, RD, matching, IPW, synthetic control, TMLE
-- `discrete` - Logit, probit, ordered, multinomial, count models (Poisson, NegBin, ZIP)
-- `ts` - ARIMA, VAR, GARCH, Holt-Winters, STL, Granger causality
-- `stats` - T-tests, ANOVA, non-parametric tests, ACF/PACF, normality tests
-- `spatial` - SAR, SEM, SAC, Moran's I
-- `survival` - Kaplan-Meier, Cox PH, AFT, log-rank test
-- `ml` - K-means, DBSCAN, hierarchical, PCA, t-SNE, Random Forest, SVM
-- `munge` - Filter, select, join, reshape, aggregate, clean
-- `viz` - Static (PNG) and interactive (HTML) charts
-- `script` - Export/run reproducible scripts
+**Commands** (`p2a <command> -h` for each; every option is in the generated reference at the end of
+[docs/guides/CLI_REFERENCE.md](docs/guides/CLI_REFERENCE.md#command-reference)):
 
-**Output formats:** `--format text` (default), `--format json`, `--format table`
+<!-- BEGIN GENERATED: p2a command list (cargo run -p p2a-cli --example generate_cli_reference; do not edit by hand) -->
+- `data`: Data loading and inspection. Subcommands: `load`, `list`, `describe`, `head`, `generate`, `save`
+- `munge`: Data munging (filter, join, reshape, clean, aggregate). Subcommands: `filter`, `select`, `drop`, `rename`, `sort`, `mutate`, `sample`, `join`, `concat`, `group-by`, `value-counts`, `pivot`, `melt`, `drop-na`, `fill-na`, `deduplicate`, `lag`, `lead`, `diff`, `standardize`, `bin`, `cast`, `one-hot`
+- `regression` (alias `reg`): Regression analysis. Subcommands: `ols`, `clustered`, `diagnostics`, `quantreg`, `loess`, `nls`, `gls`, `step`, `smooth-spline`, `supsmu`, `line`, `hac`
+- `panel`: Panel data estimation. Subcommands: `fe`, `re`, `hausman`, `hdfe`, `feglm`, `gmm`, `pvcm`, `pmg`, `gls`, `unit-root`
+- `causal`: Causal inference methods. Subcommands: `iv`, `did`, `synth`, `ipw`, `doubly-robust`, `mediation`, `rd`, `fuzzy-rd`, `staggered-did`, `tmle`, `gsynth`, `matching`, `stdreg`
+- `discrete`: Discrete choice models. Subcommands: `logit`, `probit`, `o-logit`, `o-probit`, `mlogit`, `negbin`, `poisson`, `zip`, `zinb`, `hurdle`, `clogit`, `mixed-logit`
+- `stats`: Statistical tests and descriptive statistics. Subcommands: `t-test-one`, `t-test-two`, `t-test-paired`, `chisq-gof`, `chisq-indep`, `fisher`, `shapiro`, `wilcoxon`, `bartlett`, `kruskal`, `fivenum`, `iqr`, `mad`, `acf`, `anova`, `anova-two`, `tukey`, `friedman`, `pacf`, `ccf`, `box-test`, `ks-test`, `pp-test`, `power-t`
+- `timeseries` (alias `ts`): Time series analysis. Subcommands: `arima`, `mstl`, `var`, `varma`, `vecm`, `irf`, `changepoint`, `garch`, `holt-winters`, `granger`, `ar`, `stl`, `decompose`, `struct-ts`, `causal-impact`, `spectrum`
+- `survival`: Survival analysis. Subcommands: `km`, `log-rank`, `cox`, `aft`, `competing-risks`
+- `spatial`: Spatial econometrics. Subcommands: `sar`, `sem`, `sac`, `moran`
+- `machine-learning` (alias `ml`): Machine learning. Subcommands: `kmeans`, `pca`, `tsne`, `random-forest`, `dbscan`, `hierarchical`, `svm`
+- `visualize` (alias `viz`): Visualization (output to file). Subcommands: `histogram`, `scatter`, `line`, `box`, `heatmap`, `coefplot`, `residuals`, `dendrogram`, `event-study`, `irf`, `scatter-interactive`, `histogram-interactive`, `line-interactive`
+- `script`: Script generation and session management. Subcommands: `export`, `history`, `run`
+- `chat`: Interactive chat with a p2a-mcp server (natural language analytics)
+- `smoke-test`: Run a smoke test to verify the CLI works correctly
+<!-- END GENERATED: p2a command list -->
+
+**Output formats:** `-F text` (default), `-F json`, `-F table` (printed like `text` in this version)
 
 ### MCP Server
 
@@ -457,24 +462,15 @@ Open the URL printed by `dx serve` in your browser (web), or use the native wind
 
 ### Example MCP Tool Calls
 
-```
-# Load a dataset
-load_dataset path:/path/to/data.csv
+Chat shorthand (see `docs/guides/MCP_TOOL_EXAMPLES.md`):
 
-# Create an inline dataset
-create_dataset name:test_data csv_content:"x,y\n1,2\n2,4\n3,6"
-
-# Run OLS regression
-regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
-
-# Generate a scatter plot
-viz_scatter dataset:mydata x_column:sqft y_column:price
-
-# Run panel fixed effects
-panel_fixed_effects dataset:panel y:outcome x:treatment entity_col:firm time_col:year
-
-# Data quality profiling (for LLM-assisted cleaning)
-data_quality_profile dataset:mydata
+```text
+/load_dataset path:data.csv
+/create_dataset name:test_data csv_content:"x,y\n1,2.1\n2,3.9\n3,6.2"
+/regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
+/viz_scatter dataset:mydata x_column:sqft y_column:price
+/panel_fixed_effects dataset:panel y:outcome x:treatment entity_var:firm
+/data_quality_profile dataset:mydata
 ```
 
 ## Architecture
@@ -512,30 +508,41 @@ prompt2analytics/
 └── docs/                  # Guides, design notes, security docs
 ```
 
-## MCP Tools (270 total)
+## MCP Tools
 
-The MCP server exposes 270 analytics tools. Key categories include:
+<!-- BEGIN GENERATED: MCP tool table (cargo run -p p2a-mcp --example generate_tool_docs; do not edit by hand) -->
+The server registers 270 tools in a default build (263 without the `database` feature, which CI's feature set leaves out). [docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes each one and names its R equivalent.
 
-| Category | Example Tools |
-|----------|---------------|
-| Data Management | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset`, `export_dataset` |
-| Data Quality | `data_quality_profile`, `preview_cleaning`, `verify_cleaning`, `suggest_cleaning` |
-| Cleaning Sessions | `cleaning_session_start`, `cleaning_session_apply`, `cleaning_rollback` |
-| Statistics | `compute_correlation`, `hypothesis_t_test`, `hypothesis_chisq_*`, `hypothesis_wilcoxon`, `anova_*` |
-| Regression | `regression_ols`, `regression_gls`, `regression_clustered`, `regression_quantile`, `regression_nls` |
-| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test`, `panel_gmm`, `feglm` |
-| IV/2SLS | `iv_2sls`, `iv_first_stage`, `iv_diagnostics` |
-| Causal Inference | `diff_in_diff`, `staggered_did`, `rd_estimate`, `rd_fuzzy`, `synth_control`, `matching_*`, `ipw_*` |
-| Discrete Choice | `logit`, `probit`, `multinomial_logit`, `ordered_probit`, `poisson`, `negbin`, `zip`, `zinb` |
-| Time Series | `ts_arima_*`, `ts_var*`, `ts_vecm`, `ts_mstl`, `ts_changepoint`, `ts_garch`, `ts_kalman_*` |
-| Spatial | `spatial_neighbors`, `spatial_sar`, `spatial_sem`, `spatial_sac`, `moran_test` |
-| ML | `ml_kmeans`, `ml_dbscan`, `ml_hierarchical`, `ml_pca`, `ml_tsne`, `ml_random_forest`, `ml_svm` |
-| Database | `db_sqlite_query`, `db_duckdb_query`, `db_*_tables`, `db_*_schema` |
-| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_*_interactive` |
-| Power Analysis | `power_t_test`, `power_prop_test`, `power_anova_test` |
-| Utilities | `generate_random_data`, `set_seed`, `generate_report` |
+| Category | Tools | Names |
+|---|---|---|
+| Data | 8 | `compare_datasets`, `create_dataset`, `describe_dataset`, `export_dataset`, `head_dataset`, `list_datasets`, `load_dataset`, `upload_dataset` |
+| Cleaning | 10 | `cleaning_rollback`, `cleaning_session_apply`, `cleaning_session_checkpoints`, `cleaning_session_start`, `cleaning_session_status`, `data_quality_profile`, `list_cleaning_sessions`, `preview_cleaning`, `suggest_cleaning`, `verify_cleaning` |
+| Munging | 34 | `batch_process`, `munge_bin`, `munge_cast`, `munge_concat`, `munge_deduplicate`, `munge_diff`, `munge_drop_columns`, `munge_drop_na`, `munge_fill_na`, `munge_filter`, `munge_group_by`, `munge_join`, `munge_lag_lead`, `munge_melt`, `munge_mutate`, `munge_one_hot_encode`, `munge_pivot`, `munge_rename`, `munge_sample`, `munge_select`, `munge_sort`, `munge_standardize`, `munge_value_counts`, `str_concat`, `str_length`, `str_regex_count`, `str_regex_extract`, `str_regex_replace`, `str_replace_value`, `str_split`, `str_substring`, `str_to_lowercase`, `str_to_uppercase`, `str_trim` |
+| Descriptive | 12 | `compute_correlation`, `descriptive_isoreg`, `descriptive_medpolish`, `stats_approx`, `stats_cov_wt`, `stats_density`, `stats_ecdf`, `stats_fivenum`, `stats_iqr`, `stats_mad`, `stats_spline`, `stats_weighted_mean` |
+| Statistics | 34 | `anova_manova`, `anova_one_way`, `anova_tukey_hsd`, `anova_two_way`, `hypothesis_bartlett_test`, `hypothesis_chisq_gof`, `hypothesis_chisq_independence`, `hypothesis_cor_test`, `hypothesis_fisher_exact`, `hypothesis_friedman`, `hypothesis_kruskal_wallis`, `hypothesis_ks_test`, `hypothesis_mantelhaen`, `hypothesis_mcnemar`, `hypothesis_mood_test`, `hypothesis_oneway`, `hypothesis_pairwise_t_test`, `hypothesis_pairwise_wilcox`, `hypothesis_poisson`, `hypothesis_prop_trend_test`, `hypothesis_quade`, `hypothesis_shapiro_wilk`, `hypothesis_t_test`, `hypothesis_wilcoxon`, `multivariate_cancor`, `multivariate_factanal`, `multivariate_mahalanobis`, `power_anova_test`, `power_prop_test`, `power_t_test`, `stats_loglin`, `stats_mauchly_test`, `stats_model_tables`, `stats_se_contrast` |
+| Regression | 25 | `evalue`, `marginal_effects`, `regression_bgtest`, `regression_bootstrap_cov`, `regression_clustered`, `regression_cv_glmnet`, `regression_diagnostics`, `regression_driscoll_kraay`, `regression_glmnet`, `regression_gls`, `regression_hac`, `regression_harvtest`, `regression_lasso`, `regression_line`, `regression_loess`, `regression_nls`, `regression_ols`, `regression_quantreg`, `regression_resettest`, `regression_ridge`, `regression_smooth_spline`, `regression_step`, `regression_supsmu`, `regression_waldtest`, `sensemakr` |
+| Panel | 9 | `hausman_test`, `panel_fixed_effects`, `panel_gls`, `panel_gmm`, `panel_hdfe`, `panel_pmg`, `panel_pvcm`, `panel_random_effects`, `panel_unit_root` |
+| IV | 6 | `bp_bounds`, `gmm_iv`, `iv_2sls`, `iv_first_stage`, `iv_mte`, `iv_sargan_test` |
+| DiD | 7 | `bacon_decomp`, `diff_in_diff`, `etwfe`, `gsynth`, `scpi`, `staggered_did`, `synthetic_control` |
+| RD | 4 | `rd_bw`, `rd_estimate`, `rd_fuzzy`, `rd_multi` |
+| Matching | 1 | `propensity_matching` |
+| Treatment | 14 | `collaborative_tmle`, `gformula`, `heterogeneity_test`, `ltmle`, `regression_standardization`, `treatment_cbps`, `treatment_double_ml`, `treatment_doubly_robust`, `treatment_entropy_balance`, `treatment_ipw`, `treatment_sbw`, `treatment_tmle`, `treatment_twang`, `treatment_weightit` |
+| Mediation | 2 | `mediation_analysis`, `natural_effects_mediation` |
+| Discrete | 10 | `feglm`, `hurdle_model`, `logit`, `mixed_logit`, `mlogit`, `multinom`, `negbin`, `ordered_model`, `probit`, `zeroinfl` |
+| TimeSeries | 32 | `causal_impact_analysis`, `linalg_toeplitz`, `timeseries_acf`, `timeseries_acf_to_ar`, `timeseries_ar`, `timeseries_arima_sim`, `timeseries_arma_acf`, `timeseries_arma_to_ma`, `timeseries_box_test`, `timeseries_ccf`, `timeseries_cpgram`, `timeseries_decompose`, `timeseries_diffinv`, `timeseries_embed`, `timeseries_filter`, `timeseries_lag`, `timeseries_pp_test`, `timeseries_runmed`, `timeseries_spectrum`, `timeseries_structts`, `timeseries_window`, `ts_arima_fit`, `ts_arima_forecast`, `ts_changepoint`, `ts_garch_fit`, `ts_granger`, `ts_holt_winters`, `ts_mstl`, `ts_var`, `ts_var_irf`, `ts_varma`, `ts_vecm` |
+| Spatial | 10 | `moran_test`, `sar_model`, `sar_probit_model`, `sem_model`, `sem_probit_model`, `spatial_lm_tests_tool`, `spatial_neighbors`, `spatial_panel_gmm`, `spatial_panel_ml`, `sphet_model` |
+| Survival | 5 | `aft`, `competing_risks`, `cox_ph`, `kaplan_meier`, `log_rank` |
+| MachineLearning | 17 | `ml_bart_causal`, `ml_c50`, `ml_causal_forest`, `ml_cmdscale`, `ml_ctree`, `ml_cubist`, `ml_cutree`, `ml_dbscan`, `ml_hierarchical`, `ml_kmeans`, `ml_mboost`, `ml_pca`, `ml_ppr`, `ml_random_forest`, `ml_shap_values`, `ml_svm`, `ml_tsne` |
+| Visualization | 13 | `viz_boxplot`, `viz_coefficient`, `viz_dendrogram`, `viz_event_study`, `viz_heatmap`, `viz_histogram`, `viz_histogram_interactive`, `viz_irf`, `viz_line`, `viz_line_interactive`, `viz_residual_diagnostics`, `viz_scatter`, `viz_scatter_interactive` |
+| Database | 7 | `db_duckdb_query`, `db_duckdb_schema`, `db_duckdb_tables`, `db_query_file`, `db_sqlite_query`, `db_sqlite_schema`, `db_sqlite_tables` |
+| Utility | 10 | `export_session`, `generate_random_data`, `generate_report`, `get_seed`, `import_session`, `list_tool_categories`, `search_tools`, `server_stats`, `set_seed`, `tool_info` |
+| **Total** | **270** | |
+<!-- END GENERATED: MCP tool table -->
 
-For a complete list, see the tool definitions in `crates/p2a-mcp/src/tools/handlers/`.
+[docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes every tool, and
+[docs/guides/MCP_TOOL_EXAMPLES.md](docs/guides/MCP_TOOL_EXAMPLES.md) shows how to call them. Where a tool's default
+differs from R's, [Where p2a's defaults differ from R](docs/guides/CLI_REFERENCE.md#where-p2as-defaults-differ-from-r)
+lists it.
 
 ## Validation
 
@@ -627,9 +634,16 @@ cargo test -p p2a-core --release --no-default-features --features ci --test benc
 
 ### Linting
 
+The clippy lines CI runs (`--all-features` would turn on `cuda`):
+
 ```bash
-cargo clippy --all-targets --all-features
-cargo fmt --check
+cargo clippy -p p2a-core --no-default-features --features ci
+cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
+cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
+cargo clippy -p p2a-chat
+cargo clippy -p p2a-text
+cargo clippy -p p2a-validation --all-targets
+cargo fmt --all -- --check
 ```
 
 ### Building Documentation

@@ -474,7 +474,7 @@ pub struct ShapValuesRequest {
     #[schemars(description = "Maximum depth of each tree. Default is 6.")]
     pub max_depth: Option<usize>,
 
-    /// Maximum observations to compute SHAP for (default: all)
+    /// Maximum observations to compute SHAP for. Default: all rows for method 'tree', 100 (or all, when fewer) for 'kernel'.
     #[schemars(
         description = "Explain the first max_obs rows. Default: all rows for method 'tree', 100 (or all, when fewer) for 'kernel'."
     )]

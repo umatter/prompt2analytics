@@ -1,6 +1,14 @@
 # MCP Tool Usage Examples
 
-This guide provides usage examples for MCP tools available in prompt2analytics (60+ tools).
+Chat-shorthand examples for many of the server's 270 tools
+([docs/mcp/tools-reference.md](../mcp/tools-reference.md) lists all of them, with descriptions generated from the
+tool router). A line `/tool key:value ...` is what you type in the web app's chat box: typing `/` autocompletes a
+tool name, and the message, with the tool and its arguments, goes to the model, which calls the tool. Lists are
+comma-separated (`x:sqft,bedrooms`); a value with spaces is quoted (`title:"Sales Analysis"`). Over HTTP the same
+call is `POST /api/tools/<tool>` with a JSON object of the same keys. A key the tool does not take is refused
+(400 `invalid_arguments`), so every example here is checked against the tools' input schemas by
+`cargo test -p p2a-mcp --test tool_examples_doc`. Where a default differs from R's, the CLI reference lists it:
+[Where p2a's defaults differ from R](CLI_REFERENCE.md#where-p2as-defaults-differ-from-r).
 
 ## Table of Contents
 - [Data Management](#data-management)
@@ -86,8 +94,9 @@ Generate a comprehensive quality profile for a dataset.
 
 ```
 /data_quality_profile dataset:mydata
-/data_quality_profile dataset:mydata columns:name,age,salary
 ```
+
+The profile covers every column of the dataset.
 
 **Output includes:**
 - Missing value counts and percentages per column
@@ -100,17 +109,19 @@ Generate a comprehensive quality profile for a dataset.
 Preview the effect of a cleaning operation without applying it.
 
 ```
-/preview_cleaning dataset:mydata operation:trim column:name
-/preview_cleaning dataset:mydata operation:lowercase column:category sample_size:10
-/preview_cleaning dataset:mydata operation:fill_missing column:age fill_value:0
+/preview_cleaning dataset:mydata operation:trim columns:name
+/preview_cleaning dataset:mydata operation:lowercase columns:category sample_size:10
+/preview_cleaning dataset:mydata operation:fill_na columns:age strategy:constant value:0
 ```
 
-**Operations:**
+**Operations** (`operation`):
 - `trim`: Remove leading/trailing whitespace
 - `lowercase` / `uppercase`: Case normalization
-- `fill_missing`: Fill missing values with specified value
-- `drop_missing`: Remove rows with missing values in column
-- `replace`: Replace specific values
+- `fill_na`: Fill missing values; `strategy` is `mean`, `median`, `mode`, `forward`, `backward`, `zero` or `constant` (with `value`)
+- `drop_na`: Remove rows with missing values in `columns` (`how:any`, the default, or `how:all`)
+- `deduplicate`: Remove duplicate rows (`keep:first`, `last` or `none`)
+- `replace`: Replace `old_value` with `value`
+- `filter`: Keep rows where the column compares to `filter_value` with `operator` (`>`, `<`, `>=`, `<=`, `==`, `!=`, `contains`)
 
 **Output includes:**
 - Before/after samples
@@ -130,11 +141,11 @@ Start a new cleaning session for a dataset with checkpoint/rollback support.
 Apply a cleaning operation within a session (creates checkpoint).
 
 ```
-/cleaning_session_apply session_id:abc123 operation:trim column:name
-/cleaning_session_apply session_id:abc123 operation:fill_missing column:age fill_value:0
+/cleaning_session_apply session_id:abc123 operation:trim columns:name
+/cleaning_session_apply session_id:abc123 operation:fill_na columns:age strategy:constant value:0
 ```
 
-**Note:** Each operation creates a checkpoint that can be rolled back.
+**Note:** Each operation creates a checkpoint that can be rolled back. The cleaned data stays in the session until a step names `output_dataset`, which stores it as a dataset analysis tools can use.
 
 ### cleaning_session_status
 Check the current status of a cleaning session.
@@ -159,8 +170,10 @@ List all checkpoints in a cleaning session.
 Rollback to a specific checkpoint in the session.
 
 ```
-/cleaning_rollback session_id:abc123 checkpoint:2
+/cleaning_rollback session_id:abc123 checkpoint_index:2
 ```
+
+Without `checkpoint_index` the session rolls back to the previous checkpoint.
 
 ### list_cleaning_sessions
 List all active cleaning sessions.
@@ -174,16 +187,14 @@ List all active cleaning sessions.
 ## Descriptive Statistics
 
 ### compute_correlation
-Calculate the Pearson correlation matrix.
+Calculate the Pearson correlation matrix of every numeric column.
 
 ```
 /compute_correlation dataset:mydata
-/compute_correlation dataset:mydata columns:price,sqft,bedrooms
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
-- `columns` (optional): Specific columns to include
 
 ---
 
@@ -555,7 +566,6 @@ Fit a nonlinear regression model using Levenberg-Marquardt.
   - `asymptotic`: y = a - b·exp(-cx) → start: [a, b, c]
 - `start` (required): Initial parameter values as JSON array
 - `algorithm` (optional): `levenberg_marquardt` (default) or `gauss_newton`
-- `max_iter` (optional): Maximum iterations (default: 200)
 
 **Output includes:**
 - Parameter estimates with standard errors, t-values, p-values
@@ -617,11 +627,11 @@ Fit a LOESS (local polynomial regression) smoothing model.
 Fixed Effects (within) estimation for panel data.
 
 ```
-/panel_fixed_effects dataset:panel y:wage x:education,experience entity_col:person_id
+/panel_fixed_effects dataset:panel y:wage x:education,experience entity_var:person_id
 ```
 
 **Parameters:**
-- `entity_col` (required): Column identifying panel entities (firms, individuals, etc.)
+- `entity_var` (required): Column identifying panel entities (firms, individuals, etc.)
 
 **Interpretation:**
 - Coefficients represent within-entity effects
@@ -631,7 +641,7 @@ Fixed Effects (within) estimation for panel data.
 Random Effects (GLS) estimation for panel data.
 
 ```
-/panel_random_effects dataset:panel y:wage x:education,experience entity_col:person_id
+/panel_random_effects dataset:panel y:wage x:education,experience entity_var:person_id
 ```
 
 **When to use:**
@@ -642,7 +652,7 @@ Random Effects (GLS) estimation for panel data.
 Specification test to choose between Fixed and Random Effects.
 
 ```
-/hausman_test dataset:panel y:wage x:education,experience entity_col:person_id
+/hausman_test dataset:panel y:wage x:education,experience entity_var:person_id
 ```
 
 **Interpretation:**
@@ -676,7 +686,7 @@ Two-Stage Least Squares for endogeneity.
 First-stage diagnostics for instrumental variables.
 
 ```
-/iv_first_stage dataset:data endogenous:work_experience instruments:distance_to_college
+/iv_first_stage dataset:data endogenous_var:work_experience instruments:distance_to_college
 ```
 
 **Output includes:**
@@ -692,13 +702,15 @@ First-stage diagnostics for instrumental variables.
 Difference-in-Differences estimation.
 
 ```
-/diff_in_diff dataset:policy y:outcome treatment:treated post:after_policy
+/diff_in_diff dataset:policy dep_var:outcome treatment_var:treated post_var:after_policy
+/diff_in_diff dataset:policy dep_var:outcome treatment_var:treated post_var:after_policy cluster_var:state
 ```
 
 **Parameters:**
-- `treatment`: Binary indicator (1 = treated group, 0 = control)
-- `post`: Binary indicator (1 = after treatment, 0 = before)
-- `controls` (optional): Additional control variables
+- `dep_var` (required): Outcome column
+- `treatment_var` (required): Binary indicator (1 = treated group, 0 = control)
+- `post_var` (required): Binary indicator (1 = after treatment, 0 = before)
+- `cluster_var` (optional): Column to cluster standard errors on; without it HC1 robust standard errors are used
 
 **Output includes:**
 - ATT (Average Treatment Effect on Treated)
@@ -713,19 +725,22 @@ Difference-in-Differences estimation.
 Sharp Regression Discontinuity estimation with robust bias-corrected inference.
 
 ```
-/rd_estimate dataset:mydata y:test_score running:age cutoff:65
-/rd_estimate dataset:mydata y:outcome running:score cutoff:0 bandwidth:5 kernel:triangular
-/rd_estimate dataset:mydata y:earnings running:age cutoff:65 polynomial:1 level:0.95
+/rd_estimate dataset:mydata outcome:test_score running_var:age cutoff:65
+/rd_estimate dataset:mydata outcome:outcome running_var:score cutoff:0 h:5 kernel:triangular
+/rd_estimate dataset:mydata outcome:earnings running_var:age cutoff:65 p:1 level:0.95
+/rd_estimate dataset:mydata outcome:earnings running_var:age cutoff:65 bwselect:cerrd
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
-- `y` (required): Outcome variable
-- `running` (required): Running/forcing variable
-- `cutoff` (required): Cutoff value for treatment assignment
-- `bandwidth` (optional): Main bandwidth (auto-selected if not specified)
-- `kernel` (optional): Kernel function (`triangular`, `epanechnikov`, `uniform`)
-- `polynomial` (optional): Polynomial order (default: 1 for local linear)
+- `outcome` (required): Outcome variable
+- `running_var` (required): Running/forcing variable
+- `cutoff` (optional): Cutoff value for treatment assignment (default: 0)
+- `h` (optional): Main bandwidth (selected as `rdrobust::rdbwselect` does if not specified)
+- `b` (optional): Bias bandwidth (selected with `h`, or `h` itself when only `h` is given)
+- `bwselect` (optional): Bandwidth selector when `h` is not given (see `rd_bw`)
+- `kernel` (optional): Kernel function (`triangular`, the default, `epanechnikov`, `uniform`)
+- `p` (optional): Polynomial order (default: 1 for local linear)
 - `level` (optional): Confidence level (default: 0.95)
 
 **Output includes:**
@@ -738,16 +753,20 @@ Sharp Regression Discontinuity estimation with robust bias-corrected inference.
 Bandwidth selection for Regression Discontinuity.
 
 ```
-/rd_bw dataset:mydata y:outcome running:score cutoff:0
-/rd_bw dataset:mydata y:outcome running:score cutoff:0 method:mserd
+/rd_bw dataset:mydata outcome:outcome running_var:score cutoff:0
+/rd_bw dataset:mydata outcome:outcome running_var:score cutoff:0 bwselect:msetwo
 ```
 
 **Parameters:**
-- `method` (optional): Bandwidth selection method
-  - `mserd` (default): MSE-optimal for RD estimate
-  - `msetwo`: MSE-optimal, two bandwidths
-  - `cerrd`: Coverage error rate optimal
-  - `certwo`: CER optimal, two bandwidths
+- `bwselect` (optional): Bandwidth selector, as `rdrobust::rdbwselect`
+  - `mserd` (default): MSE-optimal, one common bandwidth
+  - `msetwo`: MSE-optimal, separate left and right bandwidths
+  - `msesum`: MSE-optimal for the sum of the two regression estimates
+  - `msecomb1`, `msecomb2`: combinations of the MSE selectors
+  - `cerrd`: Coverage-error-rate optimal, one common bandwidth
+  - `certwo`: CER-optimal, separate left and right bandwidths
+  - `cersum`, `cercomb1`, `cercomb2`: the CER counterparts
+- `scaleregul` (optional): Scaling factor for the regularization term
 
 **Output includes:**
 - Optimal bandwidth(s)
@@ -757,8 +776,8 @@ Bandwidth selection for Regression Discontinuity.
 Fuzzy Regression Discontinuity (LATE estimation via Wald estimator).
 
 ```
-/rd_fuzzy dataset:mydata y:earnings treatment:enrolled running:score cutoff:50
-/rd_fuzzy dataset:mydata y:wage treatment:trained running:test_score cutoff:70 bandwidth:10
+/rd_fuzzy dataset:mydata outcome:earnings treatment:enrolled running_var:score cutoff:50
+/rd_fuzzy dataset:mydata outcome:wage treatment:trained running_var:test_score cutoff:70 h:10
 ```
 
 **Parameters:**
@@ -807,11 +826,11 @@ Estimate non-parametric survival curves.
 - Number at risk at each time point
 - Rows with a missing time, status or group are dropped and reported
 
-### log_rank_test
+### log_rank
 Compare survival curves between groups.
 
 ```
-/log_rank_test dataset:trial time:days event:death group:treatment
+/log_rank dataset:trial time:days event:death group:treatment
 ```
 
 **Parameters:**
@@ -830,18 +849,20 @@ Compare survival curves between groups.
 Fit Cox Proportional Hazards regression model.
 
 ```
-/cox_ph dataset:patients time:survival_time event:death x:age,stage,treatment
-/cox_ph dataset:patients time:survival_time event:death x:age,stage ties:efron
-/cox_ph dataset:patients time:survival_time event:death x:age,stage robust_se:true
+/cox_ph dataset:patients time:survival_time event:death covariates:age,stage,treatment
+/cox_ph dataset:patients time:survival_time event:death covariates:age,stage ties_method:breslow
+/cox_ph dataset:patients time:survival_time event:death covariates:age,stage robust_se:true
+/cox_ph dataset:patients time:survival_time event:death covariates:age,stage cluster:center
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
 - `time` (required): Column with survival times
 - `event` (required): Binary event indicator (1=event, 0=censored)
-- `x` (required): Comma-separated covariate columns
-- `ties` (optional): Tie handling method (`breslow` or `efron`, default: breslow)
-- `robust_se` (optional): Use robust standard errors (default: false)
+- `covariates` (required): Comma-separated covariate columns
+- `ties_method` (optional): Tie handling method (`efron`, the default as in R's `coxph`, or `breslow`)
+- `robust_se` (optional): Robust (Lin-Wei sandwich) standard errors (default: false; implied by `cluster`)
+- `cluster` (optional): Column defining clusters for clustered robust standard errors
 - `max_iter` (optional): Maximum Newton-Raphson iterations (default: 25)
 - `tolerance` (optional): Convergence tolerance (default: 1e-9)
 
@@ -861,20 +882,20 @@ Fit Cox Proportional Hazards regression model.
 Fit Accelerated Failure Time parametric survival model.
 
 ```
-/aft dataset:patients time:survival_time event:death x:age,treatment dist:weibull
-/aft dataset:patients time:survival_time event:death x:age,treatment dist:lognormal
-/aft dataset:patients time:survival_time event:death x:age,treatment dist:exponential
-/aft dataset:patients time:survival_time event:death x:age,treatment dist:loglogistic
+/aft dataset:patients time:survival_time event:death covariates:age,treatment distribution:weibull
+/aft dataset:patients time:survival_time event:death covariates:age,treatment distribution:lognormal
+/aft dataset:patients time:survival_time event:death covariates:age,treatment distribution:exponential
+/aft dataset:patients time:survival_time event:death covariates:age,treatment distribution:loglogistic
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
 - `time` (required): Column with survival times
 - `event` (required): Binary event indicator (1=event, 0=censored)
-- `x` (required): Comma-separated covariate columns
-- `dist` (optional): Distribution (`weibull`, `lognormal`, `exponential`, `loglogistic`; default: weibull)
+- `covariates` (required): Comma-separated covariate columns
+- `distribution` (optional): Distribution (`weibull`, `lognormal`, `exponential`, `loglogistic`; default: weibull)
 - `max_iter` (optional): Maximum iterations (default: 100)
-- `tolerance` (optional): Convergence tolerance (default: 1e-8)
+- `tolerance` (optional): Relative change in the log-likelihood (default: 1e-9, as `survreg`)
 
 **Output includes:**
 - Coefficients for log(survival time)
@@ -891,14 +912,14 @@ Fit Accelerated Failure Time parametric survival model.
 Estimate cumulative incidence functions with competing events.
 
 ```
-/competing_risks dataset:patients time:time event_type:cause_of_death
-/competing_risks dataset:patients time:time event_type:cause_of_death confidence_level:0.95
+/competing_risks dataset:patients time:time event:cause_of_death
+/competing_risks dataset:patients time:time event:cause_of_death confidence_level:0.95
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
 - `time` (required): Column with event/censoring times
-- `event_type` (required): Column with event type (0=censored, 1=event type 1, 2=event type 2, etc.)
+- `event` (required): Column with event type (0=censored, 1=event type 1, 2=event type 2, etc.)
 - `confidence_level` (optional): CI level (default: 0.95)
 
 **Output includes:**
@@ -1004,28 +1025,34 @@ VARMA(p,q) model via Hannan-Rissanen.
 
 ```
 /ts_varma dataset:macro columns:gdp,inflation p:1 q:1
+/ts_varma dataset:macro columns:gdp,inflation p:1 q:1 long_var_order:8
 ```
+
+**Parameters:**
+- `long_var_order` (optional): Order of the step-1 long VAR (Hannan-Rissanen); chosen from the sample size by default
 
 ### ts_vecm
 Vector Error Correction Model for cointegrated series.
 
 ```
 /ts_vecm dataset:macro columns:gdp,consumption,investment lags:2 rank:1
+/ts_vecm dataset:macro columns:gdp,consumption,investment lags:2 rank:1 ecdet:const
 ```
 
 **Parameters:**
-- `rank`: Cointegration rank (number of cointegrating relationships)
+- `lags`: Lag order of the VAR in levels (at least 2, urca's `K`)
+- `rank` (optional): Cointegration rank (number of cointegrating relationships); chosen by the trace test at 5% by default
+- `ecdet` (optional): Deterministic term, as urca's `ecdet`: `none` (default), `const` (restricted to the cointegration space) or `trend`
 
 ### ts_var_irf
 Impulse Response Functions from a VAR model.
 
 ```
-/ts_var_irf dataset:macro columns:gdp,inflation,unemployment lags:2 horizons:20 shock:inflation
+/ts_var_irf dataset:macro columns:gdp,inflation,unemployment lags:2 steps:21
 ```
 
 **Parameters:**
-- `horizons`: Number of periods to trace the response
-- `shock`: Variable receiving the shock
+- `steps`: Number of horizons including h = 0 (as `vars::irf` with `n.ahead` = steps - 1); responses to a shock in every column are returned
 
 ### ts_changepoint
 Detect structural breaks in time series.
@@ -1256,6 +1283,7 @@ Maximum Likelihood Factor Analysis with optional rotation.
 /multivariate_factanal dataset:survey columns:q1,q2,q3,q4,q5,q6 n_factors:2
 /multivariate_factanal dataset:survey columns:q1,q2,q3,q4,q5,q6 n_factors:2 rotation:varimax
 /multivariate_factanal dataset:survey columns:q1,q2,q3,q4,q5,q6 n_factors:3 rotation:promax scores:regression
+/multivariate_factanal dataset:survey columns:q1,q2,q3,q4,q5,q6 n_factors:2 scores:bartlett output_name:survey_scores
 ```
 
 **Parameters:**
@@ -1264,6 +1292,7 @@ Maximum Likelihood Factor Analysis with optional rotation.
 - `n_factors` (required): Number of latent factors to extract
 - `rotation` (optional): Rotation method - "none", "varimax" (default), or "promax"
 - `scores` (optional): Factor score method - "none" (default), "regression", or "bartlett"
+- `output_name` (optional): With scores, a new dataset holding the input columns plus one column per factor (`Factor1`, `Factor2`, ...)
 
 **Output includes:**
 - Factor loadings matrix (p × k)
@@ -1308,7 +1337,7 @@ K-means clustering with k-means++ initialization.
 
 **Parameters:**
 - `k`: Number of clusters
-- `max_iter` (optional): Maximum iterations (default: 100)
+- `max_iterations` (optional): Maximum iterations (default: 300)
 - `n_init` (optional): Number of random initializations (default: 10)
 
 **Output includes:**
@@ -1370,7 +1399,7 @@ t-SNE for visualization of high-dimensional data.
 Random Forest regression.
 
 ```
-/ml_random_forest dataset:housing y:price x:sqft,bedrooms,bathrooms n_trees:100
+/ml_random_forest dataset:housing target:price features:sqft,bedrooms,bathrooms n_trees:100
 ```
 
 **Output includes:**
@@ -1382,11 +1411,11 @@ Random Forest regression.
 Linear Support Vector Machine classification.
 
 ```
-/ml_svm dataset:binary_data y:class x:feature1,feature2 C:1.0
+/ml_svm dataset:binary_data target:class features:feature1,feature2 c:1.0
 ```
 
 **Parameters:**
-- `C`: Regularization parameter (higher = less regularization)
+- `c`: Regularization parameter C (higher = less regularization)
 
 ---
 
@@ -1396,33 +1425,33 @@ Linear Support Vector Machine classification.
 Execute SQL query on SQLite database.
 
 ```
-/db_sqlite_query path:/data/database.db query:SELECT * FROM customers WHERE age > 30
+/db_sqlite_query db_path:/data/database.db query:SELECT * FROM customers WHERE age > 30
 ```
 
 ### db_sqlite_tables
 List all tables in SQLite database.
 
 ```
-/db_sqlite_tables path:/data/database.db
+/db_sqlite_tables db_path:/data/database.db
 ```
 
 ### db_sqlite_schema
 Get schema for a specific table.
 
 ```
-/db_sqlite_schema path:/data/database.db table:customers
+/db_sqlite_schema db_path:/data/database.db table_name:customers
 ```
 
 ### db_duckdb_query
 Execute SQL query on DuckDB database.
 
 ```
-/db_duckdb_query path:/data/analytics.duckdb query:SELECT AVG(revenue) FROM sales GROUP BY region
+/db_duckdb_query db_path:/data/analytics.duckdb query:SELECT AVG(revenue) FROM sales GROUP BY region
 ```
 
-DuckDB can also query files directly:
+A CSV or Parquet file is queried with `db_query_file`, `{file}` standing for the file:
 ```
-/db_duckdb_query path::memory: query:SELECT * FROM '/data/sales.parquet' WHERE year = 2024
+/db_query_file file_path:/data/sales.parquet query:"SELECT * FROM {file} WHERE year = 2024"
 ```
 
 ### db_duckdb_tables / db_duckdb_schema
@@ -1471,36 +1500,40 @@ Correlation heatmap.
 Event study plot for DiD or dynamic treatment effects.
 
 ```
-/viz_event_study dataset:event_data estimates:coefs std_errors:ses periods:periods
+/viz_event_study dataset:event_data time_column:rel_time estimate_column:coef ci_lower_column:ci_low ci_upper_column:ci_high
 ```
 
 ### viz_coefficient
 Coefficient plot with confidence intervals.
 
 ```
-/viz_coefficient dataset:results variables:var1,var2,var3 coefficients:coef_col std_errors:se_col
+/viz_coefficient dataset:results name_column:term estimate_column:estimate ci_lower_column:ci_low ci_upper_column:ci_high
 ```
 
 ### viz_irf
 Impulse Response Function plot from VAR.
 
 ```
-/viz_irf dataset:irf_results horizons:horizon_col response:response_col
+/viz_irf dataset:irf_results horizon_column:horizon response_column:response ci_lower_column:lower ci_upper_column:upper
 ```
 
 ### viz_residual_diagnostics
 Four diagnostic plots: Residuals vs Fitted, Q-Q, Scale-Location, Leverage.
 
 ```
-/viz_residual_diagnostics dataset:housing y:price x:sqft,bedrooms
+/viz_residual_diagnostics dataset:fitted_housing fitted_column:fitted residuals_column:resid leverage_column:hat
 ```
+
+The dataset holds a fitted model's fitted values and residuals (and, optionally, its hat values).
 
 ### viz_dendrogram
 Tree diagram for hierarchical clustering.
 
 ```
-/viz_dendrogram dataset:customers columns:income,spending
+/viz_dendrogram linkage_matrix:[[0,1,0.5,2],[2,3,0.8,2],[4,5,1.6,4]] labels:a,b,c,d
 ```
+
+`linkage_matrix` has one `[cluster1, cluster2, height, size]` row per merge (scipy format), as `ml_hierarchical` returns it.
 
 ---
 
@@ -1510,21 +1543,23 @@ Tree diagram for hierarchical clustering.
 Create a self-contained HTML report.
 
 ```
-/generate_report title:Sales Analysis sections:summary,regression,charts output:/path/to/report.html
+/generate_report title:"Sales Analysis" sections:[{"title":"Summary","content":[{"content_type":"text","text":"Revenue rose in every region."}]}]
 ```
 
 ### batch_process
 Run the same analysis across multiple datasets.
 
 ```
-/batch_process datasets:data1,data2,data3 tool:regression_ols y:outcome x:treatment
+/batch_process datasets:data1,data2,data3 operation:ols columns:outcome,treatment
 ```
+
+`operation` is `describe`, `correlation` or `ols` (the first column is the dependent variable).
 
 ### compare_datasets
 Compare columns across datasets.
 
 ```
-/compare_datasets datasets:train,test columns:price,sqft comparison:summary
+/compare_datasets datasets:train,test columns:price,sqft comparison_type:summary
 ```
 
 **Comparison types:**
@@ -1536,14 +1571,14 @@ Compare columns across datasets.
 Save current session (loaded datasets) to JSON.
 
 ```
-/export_session path:/path/to/session.json
+/export_session file_path:/path/to/session.json
 ```
 
 ### import_session
 Restore a previously saved session.
 
 ```
-/import_session path:/path/to/session.json
+/import_session file_path:/path/to/session.json
 ```
 
 ### set_seed

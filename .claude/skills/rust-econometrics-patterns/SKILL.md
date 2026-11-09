@@ -47,12 +47,28 @@ New methods go in the appropriate module under `crates/p2a-core/src/`:
 |--------|---------|
 | `regression/ols.rs` | OLS, robust SEs, clustered SEs |
 | `regression/diagnostics.rs` | JB, BP, DW, VIF, condition number |
-| `econometrics/panel.rs` | Fixed Effects, Random Effects, Hausman |
+| `econometrics/panel/` | Fixed Effects, Random Effects, Hausman, GLS, GMM |
 | `econometrics/iv.rs` | 2SLS with first-stage diagnostics |
 | `econometrics/did.rs` | Difference-in-Differences |
-| `econometrics/discrete.rs` | Logit, Probit (Newton-Raphson MLE) |
+| `econometrics/discrete/` | Logit, Probit, ordered, multinomial, count models |
 | `econometrics/rd.rs` | Regression Discontinuity (Sharp/Fuzzy RD) |
-| `econometrics/timeseries.rs` | VAR, VARMA, VECM, IRF |
+| `econometrics/timeseries/` | VAR, VARMA, VECM, IRF, Granger |
+
+## R is the test oracle, not the template
+
+Methods must be correct and efficient; R checks them and sets the default conventions.
+
+- Pin values at the solution (coefficients, standard errors, statistics), never iteration counts, traces or
+  other path quantities; check those as properties.
+- When the solution is not unique (ties, flat objectives, random starts), compare by the objective or the
+  optimality conditions, or give both sides the same folds, starts or seeds.
+- No ports of R/Fortran/C code for R's digits, unless the estimator is defined by its algorithm or the port is
+  the cheapest correct route; never reproduce an R bug.
+- Conventions (defaults, degrees-of-freedom corrections, option names) follow R when that is cheap; otherwise keep
+  p2a's, record a registry deviation and add a line to the method doc.
+- Before merging a new method or a rewrite, time it against the current code and against R at n = 100, 1,000 and
+  10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.1x slower than the current code
+  needs the user's sign-off. No timing assertion is committed.
 
 ## API Pattern (Column-Based)
 
