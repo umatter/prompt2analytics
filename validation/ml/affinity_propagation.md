@@ -67,6 +67,11 @@ the input at a fixed exemplar set.
 
 R-pinned: `test_validate_apcluster_lam9`, `test_validate_apcluster_lam9_defaults`.
 
+`ml::cluster_optimized::affinity_propagation_optimized` delegates to this port and returns its labels,
+exemplars, iteration count and convergence flag; `test_validate_affinity_propagation_optimized_lam9_defaults`
+pins it to the same case (registry entry `affinity_propagation_optimized` in
+`validation/methods/numeric_hygiene.json`).
+
 Properties: `test_affinity_propagation_basic`, `test_affinity_propagation_reports_the_iteration_limit`, `test_affinity_propagation_no_exemplar_is_an_error`,
 `test_affinity_propagation_display_without_clusters_does_not_panic`,
 `test_median_similarity_equals_the_sorted_type_7_median`, `test_affinity_propagation_rejects_bad_parameters`.

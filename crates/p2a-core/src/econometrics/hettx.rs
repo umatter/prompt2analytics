@@ -70,6 +70,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::resource;
+use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::estimator::SignificanceLevel;
 
 // ===============================================================================
@@ -941,11 +942,11 @@ fn compute_test_statistic(tau: &Array1<f64>, stat_type: HetTestStat) -> f64 {
             max - min
         }
         HetTestStat::IQR => {
+            // R's IQR(): type-7 quantiles (tau is computed from finite, checked inputs)
             let mut sorted: Vec<f64> = tau.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let q1 = sorted[n / 4];
-            let q3 = sorted[3 * n / 4];
-            q3 - q1
+            sorted.sort_by(f64::total_cmp);
+            let q = |p| quantile_sorted(&sorted, p, QuantileType::T7);
+            q(0.75) - q(0.25)
         }
         HetTestStat::MeanAbsDeviation => {
             let mean = tau.mean().unwrap_or(0.0);
@@ -970,19 +971,21 @@ fn compute_effect_summary(tau: &Array1<f64>) -> EffectSummary {
         };
     }
 
+    // R's quantile() (type 7); tau is computed from finite, checked inputs
     let mut sorted: Vec<f64> = tau.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
+    let q = |p| quantile_sorted(&sorted, p, QuantileType::T7);
 
     let mean = tau.mean().unwrap_or(0.0);
     let var = tau.iter().map(|&t| (t - mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
 
     EffectSummary {
         min: sorted[0],
-        p10: sorted[(n as f64 * 0.10).floor() as usize],
-        p25: sorted[n / 4],
-        median: sorted[n / 2],
-        p75: sorted[3 * n / 4],
-        p90: sorted[((n as f64 * 0.90).floor() as usize).min(n - 1)],
+        p10: q(0.10),
+        p25: q(0.25),
+        median: q(0.5),
+        p75: q(0.75),
+        p90: q(0.90),
         max: sorted[n - 1],
         std_dev: var.sqrt(),
     }

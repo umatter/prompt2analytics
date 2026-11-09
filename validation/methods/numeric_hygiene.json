@@ -42,6 +42,54 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "hettx_effect_summary_and_imputation",
+      "name": "hettx effect summary (type-7 quantiles, IQR statistic) and regression imputation on an aliased arm",
+      "category": "econometrics",
+      "reference": "stats::quantile(type = 7); stats::IQR; stats::lm; predict.lm (rank-deficient); hettx itself is not installed",
+      "doc": "validation/econometrics/hettx.md",
+      "cases": [
+        "qtl_hettx_summary",
+        "inv_hettx_outcome_model"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_effect_summary_type7",
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_outcome_model_aliased_subset"
+      ],
+      "quantities": [
+        "p10, p25, median, p75, p90",
+        "IQR",
+        "min, max, sd",
+        "outcome-model coefficients (NA aliased)",
+        "predictions",
+        "R2"
+      ],
+      "tolerance": "validation/README.md, n = 20-40",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "affinity_propagation_optimized",
+      "name": "affinity_propagation_optimized (delegates to the apcluster port)",
+      "category": "ml",
+      "reference": "apcluster::apcluster (WP43's case)",
+      "doc": "validation/ml/affinity_propagation.md",
+      "cases": [
+        "apcluster_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::cluster_optimized::tests::test_validate_affinity_propagation_optimized_lam9_defaults"
+      ],
+      "quantities": [
+        "exemplars",
+        "number of clusters",
+        "cluster of each point",
+        "converged"
+      ],
+      "tolerance": "exact; the iteration count is not pinned",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

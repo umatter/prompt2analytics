@@ -608,34 +608,10 @@ fn check_quantiles(quantiles: &[f64]) -> Result<(), String> {
     }
 }
 
-/// Compute empirical quantile from a set of values.
-///
-/// Uses linear interpolation between order statistics (Type 7 quantile, R default).
+/// Compute empirical quantile from a set of values: R's `quantile(type = 7)`, the default.
 fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
-    if values.is_empty() {
-        return f64::NAN;
-    }
-    if values.len() == 1 {
-        return values[0];
-    }
-
     values.sort_by(f64::total_cmp);
-
-    let n = values.len() as f64;
-    // Type 7 quantile (R's default): h = (n-1)*p + 1
-    let h = (n - 1.0) * quantile;
-    let h_floor = h.floor() as usize;
-    let h_ceil = h.ceil() as usize;
-
-    if h_floor >= values.len() {
-        return values[values.len() - 1];
-    }
-    if h_ceil >= values.len() {
-        return values[values.len() - 1];
-    }
-
-    let frac = h - h_floor as f64;
-    values[h_floor] * (1.0 - frac) + values[h_ceil] * frac
+    crate::stats::robust::quantile_sorted(values, quantile, crate::stats::robust::QuantileType::T7)
 }
 
 /// Fit a Quantile Regression Forest.
