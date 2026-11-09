@@ -20,6 +20,9 @@ cargo build --release -p p2a-cli
 - **Global options** (`-F/--format`, `--session`, `--quiet`, `--verbose`, `--max-memory`) can come before or after
   the subcommand. `-q` and `-v` are not global: inside subcommands they are the subcommand's own options
   (`ts arima -q` is the MA order, `panel unit-root -v` the variable).
+- **Memory warning.** The session's datasets can be large, so a global option warns about them:
+  `--max-memory <MB>` warns at most once per command, on stderr; no effect without --session.
+  It compares the estimated memory of the session's datasets with MB MiB (0 = no limit, the default).
 - **Output formats.** `-F text` (default), `-F json`, `-F table` (printed like `text` in this version).
 - **Boolean options with a value.** Options such as `--intercept`, `--asc` or `ts stl --robust` take
   `true`/`false` (also y/yes/t/on/1 and n/no/f/off/0, any case); a bare `--intercept` means true. A bare boolean
