@@ -121,6 +121,9 @@ pub use serde::Deserialize;
 pub use p2a_core::data::columns::{Columns, MissingSummary, NaPolicy};
 
 use p2a_core::data::columns::ColumnRequest;
+use p2a_core::options::Choices;
+use p2a_core::stats::CovWtMethod;
+use p2a_core::traits::convergence::ResultNotes;
 
 /// One numeric column under `policy`: the kept values and what was dropped. The error is
 /// the core rule's LLM-readable text ("Column 'x' contains 3 missing value(s) (null or
@@ -494,13 +497,9 @@ pub fn notes_json(converged: Option<(bool, usize)>, warnings: &[String]) -> serd
     serde_json::Value::Object(out)
 }
 
-/// Shared helpers for handler unit tests.
 // ============================================================================
 // Option tables, result notes, JSON replies and seeds shared by the handlers
 // ============================================================================
-use p2a_core::options::Choices;
-use p2a_core::stats::CovWtMethod;
-use p2a_core::traits::convergence::ResultNotes;
 
 /// The bare message of an option error (the option and the accepted values), else the error's
 /// Display.
@@ -666,6 +665,7 @@ impl crate::server::AnalyticsServer {
     }
 }
 
+/// Shared helpers for handler unit tests.
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::server::AnalyticsServer;

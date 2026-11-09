@@ -722,7 +722,7 @@ impl AnalyticsServer {
 
     /// List tools filtered for LLM function calling (Tier 1 only).
     /// Auto-generates definitions from the router's JsonSchema derives.
-    #[cfg(feature = "http")]
+    #[cfg(all(feature = "http", feature = "llm"))]
     pub fn list_tools_for_llm(&self) -> Vec<crate::llm::ToolDefinition> {
         /// Convert `prefixItems` (JSON Schema draft 2020-12, used by schemars for tuples)
         /// to `items` (draft 7, required by OpenAI). Recurses through the entire schema.
