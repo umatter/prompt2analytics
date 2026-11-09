@@ -508,30 +508,41 @@ prompt2analytics/
 └── docs/                  # Guides, design notes, security docs
 ```
 
-## MCP Tools (270 total)
+## MCP Tools
 
-The MCP server exposes 270 analytics tools. Key categories include:
+<!-- BEGIN GENERATED: MCP tool table (cargo run -p p2a-mcp --example generate_tool_docs; do not edit by hand) -->
+The server registers 270 tools in a default build (263 without the `database` feature, which CI's feature set leaves out). [docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes each one and names its R equivalent.
 
-| Category | Example Tools |
-|----------|---------------|
-| Data Management | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset`, `export_dataset` |
-| Data Quality | `data_quality_profile`, `preview_cleaning`, `verify_cleaning`, `suggest_cleaning` |
-| Cleaning Sessions | `cleaning_session_start`, `cleaning_session_apply`, `cleaning_rollback` |
-| Statistics | `compute_correlation`, `hypothesis_t_test`, `hypothesis_chisq_*`, `hypothesis_wilcoxon`, `anova_*` |
-| Regression | `regression_ols`, `regression_gls`, `regression_clustered`, `regression_quantile`, `regression_nls` |
-| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test`, `panel_gmm`, `feglm` |
-| IV/2SLS | `iv_2sls`, `iv_first_stage`, `iv_diagnostics` |
-| Causal Inference | `diff_in_diff`, `staggered_did`, `rd_estimate`, `rd_fuzzy`, `synth_control`, `matching_*`, `ipw_*` |
-| Discrete Choice | `logit`, `probit`, `multinomial_logit`, `ordered_probit`, `poisson`, `negbin`, `zip`, `zinb` |
-| Time Series | `ts_arima_*`, `ts_var*`, `ts_vecm`, `ts_mstl`, `ts_changepoint`, `ts_garch`, `ts_kalman_*` |
-| Spatial | `spatial_neighbors`, `spatial_sar`, `spatial_sem`, `spatial_sac`, `moran_test` |
-| ML | `ml_kmeans`, `ml_dbscan`, `ml_hierarchical`, `ml_pca`, `ml_tsne`, `ml_random_forest`, `ml_svm` |
-| Database | `db_sqlite_query`, `db_duckdb_query`, `db_*_tables`, `db_*_schema` |
-| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_*_interactive` |
-| Power Analysis | `power_t_test`, `power_prop_test`, `power_anova_test` |
-| Utilities | `generate_random_data`, `set_seed`, `generate_report` |
+| Category | Tools | Names |
+|---|---|---|
+| Data | 8 | `compare_datasets`, `create_dataset`, `describe_dataset`, `export_dataset`, `head_dataset`, `list_datasets`, `load_dataset`, `upload_dataset` |
+| Cleaning | 10 | `cleaning_rollback`, `cleaning_session_apply`, `cleaning_session_checkpoints`, `cleaning_session_start`, `cleaning_session_status`, `data_quality_profile`, `list_cleaning_sessions`, `preview_cleaning`, `suggest_cleaning`, `verify_cleaning` |
+| Munging | 34 | `batch_process`, `munge_bin`, `munge_cast`, `munge_concat`, `munge_deduplicate`, `munge_diff`, `munge_drop_columns`, `munge_drop_na`, `munge_fill_na`, `munge_filter`, `munge_group_by`, `munge_join`, `munge_lag_lead`, `munge_melt`, `munge_mutate`, `munge_one_hot_encode`, `munge_pivot`, `munge_rename`, `munge_sample`, `munge_select`, `munge_sort`, `munge_standardize`, `munge_value_counts`, `str_concat`, `str_length`, `str_regex_count`, `str_regex_extract`, `str_regex_replace`, `str_replace_value`, `str_split`, `str_substring`, `str_to_lowercase`, `str_to_uppercase`, `str_trim` |
+| Descriptive | 12 | `compute_correlation`, `descriptive_isoreg`, `descriptive_medpolish`, `stats_approx`, `stats_cov_wt`, `stats_density`, `stats_ecdf`, `stats_fivenum`, `stats_iqr`, `stats_mad`, `stats_spline`, `stats_weighted_mean` |
+| Statistics | 34 | `anova_manova`, `anova_one_way`, `anova_tukey_hsd`, `anova_two_way`, `hypothesis_bartlett_test`, `hypothesis_chisq_gof`, `hypothesis_chisq_independence`, `hypothesis_cor_test`, `hypothesis_fisher_exact`, `hypothesis_friedman`, `hypothesis_kruskal_wallis`, `hypothesis_ks_test`, `hypothesis_mantelhaen`, `hypothesis_mcnemar`, `hypothesis_mood_test`, `hypothesis_oneway`, `hypothesis_pairwise_t_test`, `hypothesis_pairwise_wilcox`, `hypothesis_poisson`, `hypothesis_prop_trend_test`, `hypothesis_quade`, `hypothesis_shapiro_wilk`, `hypothesis_t_test`, `hypothesis_wilcoxon`, `multivariate_cancor`, `multivariate_factanal`, `multivariate_mahalanobis`, `power_anova_test`, `power_prop_test`, `power_t_test`, `stats_loglin`, `stats_mauchly_test`, `stats_model_tables`, `stats_se_contrast` |
+| Regression | 25 | `evalue`, `marginal_effects`, `regression_bgtest`, `regression_bootstrap_cov`, `regression_clustered`, `regression_cv_glmnet`, `regression_diagnostics`, `regression_driscoll_kraay`, `regression_glmnet`, `regression_gls`, `regression_hac`, `regression_harvtest`, `regression_lasso`, `regression_line`, `regression_loess`, `regression_nls`, `regression_ols`, `regression_quantreg`, `regression_resettest`, `regression_ridge`, `regression_smooth_spline`, `regression_step`, `regression_supsmu`, `regression_waldtest`, `sensemakr` |
+| Panel | 9 | `hausman_test`, `panel_fixed_effects`, `panel_gls`, `panel_gmm`, `panel_hdfe`, `panel_pmg`, `panel_pvcm`, `panel_random_effects`, `panel_unit_root` |
+| IV | 6 | `bp_bounds`, `gmm_iv`, `iv_2sls`, `iv_first_stage`, `iv_mte`, `iv_sargan_test` |
+| DiD | 7 | `bacon_decomp`, `diff_in_diff`, `etwfe`, `gsynth`, `scpi`, `staggered_did`, `synthetic_control` |
+| RD | 4 | `rd_bw`, `rd_estimate`, `rd_fuzzy`, `rd_multi` |
+| Matching | 1 | `propensity_matching` |
+| Treatment | 14 | `collaborative_tmle`, `gformula`, `heterogeneity_test`, `ltmle`, `regression_standardization`, `treatment_cbps`, `treatment_double_ml`, `treatment_doubly_robust`, `treatment_entropy_balance`, `treatment_ipw`, `treatment_sbw`, `treatment_tmle`, `treatment_twang`, `treatment_weightit` |
+| Mediation | 2 | `mediation_analysis`, `natural_effects_mediation` |
+| Discrete | 10 | `feglm`, `hurdle_model`, `logit`, `mixed_logit`, `mlogit`, `multinom`, `negbin`, `ordered_model`, `probit`, `zeroinfl` |
+| TimeSeries | 32 | `causal_impact_analysis`, `linalg_toeplitz`, `timeseries_acf`, `timeseries_acf_to_ar`, `timeseries_ar`, `timeseries_arima_sim`, `timeseries_arma_acf`, `timeseries_arma_to_ma`, `timeseries_box_test`, `timeseries_ccf`, `timeseries_cpgram`, `timeseries_decompose`, `timeseries_diffinv`, `timeseries_embed`, `timeseries_filter`, `timeseries_lag`, `timeseries_pp_test`, `timeseries_runmed`, `timeseries_spectrum`, `timeseries_structts`, `timeseries_window`, `ts_arima_fit`, `ts_arima_forecast`, `ts_changepoint`, `ts_garch_fit`, `ts_granger`, `ts_holt_winters`, `ts_mstl`, `ts_var`, `ts_var_irf`, `ts_varma`, `ts_vecm` |
+| Spatial | 10 | `moran_test`, `sar_model`, `sar_probit_model`, `sem_model`, `sem_probit_model`, `spatial_lm_tests_tool`, `spatial_neighbors`, `spatial_panel_gmm`, `spatial_panel_ml`, `sphet_model` |
+| Survival | 5 | `aft`, `competing_risks`, `cox_ph`, `kaplan_meier`, `log_rank` |
+| MachineLearning | 17 | `ml_bart_causal`, `ml_c50`, `ml_causal_forest`, `ml_cmdscale`, `ml_ctree`, `ml_cubist`, `ml_cutree`, `ml_dbscan`, `ml_hierarchical`, `ml_kmeans`, `ml_mboost`, `ml_pca`, `ml_ppr`, `ml_random_forest`, `ml_shap_values`, `ml_svm`, `ml_tsne` |
+| Visualization | 13 | `viz_boxplot`, `viz_coefficient`, `viz_dendrogram`, `viz_event_study`, `viz_heatmap`, `viz_histogram`, `viz_histogram_interactive`, `viz_irf`, `viz_line`, `viz_line_interactive`, `viz_residual_diagnostics`, `viz_scatter`, `viz_scatter_interactive` |
+| Database | 7 | `db_duckdb_query`, `db_duckdb_schema`, `db_duckdb_tables`, `db_query_file`, `db_sqlite_query`, `db_sqlite_schema`, `db_sqlite_tables` |
+| Utility | 10 | `export_session`, `generate_random_data`, `generate_report`, `get_seed`, `import_session`, `list_tool_categories`, `search_tools`, `server_stats`, `set_seed`, `tool_info` |
+| **Total** | **270** | |
+<!-- END GENERATED: MCP tool table -->
 
-For a complete list, see the tool definitions in `crates/p2a-mcp/src/tools/handlers/`.
+[docs/mcp/tools-reference.md](docs/mcp/tools-reference.md) describes every tool, and
+[docs/guides/MCP_TOOL_EXAMPLES.md](docs/guides/MCP_TOOL_EXAMPLES.md) shows how to call them. Where a tool's default
+differs from R's, [Where p2a's defaults differ from R](docs/guides/CLI_REFERENCE.md#where-p2as-defaults-differ-from-r)
+lists it.
 
 ## Validation
 

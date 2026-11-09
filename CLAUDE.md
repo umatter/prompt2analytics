@@ -115,7 +115,7 @@ opt-level = 1
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.88+) exposing 270 econometrics, statistics, ML, and visualization methods through multiple interfaces:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.88+) exposing its econometrics, statistics, ML and visualization methods as 270 MCP tools (263 without the `database` feature) and through the `p2a` CLI, in these crates:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output

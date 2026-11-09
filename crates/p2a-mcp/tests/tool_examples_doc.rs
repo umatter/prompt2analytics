@@ -417,3 +417,236 @@ fn test_documented_tool_headings_and_parameter_lists_are_real() {
         problems.join("\n")
     );
 }
+
+/// INF-12: README.md's tool table is generated from the category table. Fails before: the markers are
+/// missing (the hand-written table named 12 nonexistent tools and three empty wildcards).
+#[test]
+fn test_readme_tool_table_is_generated() {
+    let readme = read("README.md");
+    let want = generator::wrap_body(&generator::readme_tool_table());
+    let have = generator::section_body(
+        &readme,
+        generator::README_TABLE_BEGIN,
+        generator::README_TABLE_END,
+    )
+    .unwrap_or_else(|e| panic!("README.md: {e}"));
+    if have != want && update_requested() {
+        let new = generator::splice(
+            &readme,
+            generator::README_TABLE_BEGIN,
+            generator::README_TABLE_END,
+            &generator::readme_tool_table(),
+        )
+        .unwrap_or_else(|e| panic!("README.md: {e}"));
+        generator::write_atomically(&generator::repo_root().join("README.md"), &new)
+            .unwrap_or_else(|e| panic!("{e}"));
+        return;
+    }
+    assert!(
+        have == want,
+        "README.md's tool table is stale: run `cargo run -p p2a-mcp --example generate_tool_docs`"
+    );
+}
+
+fn glob(pattern: &str, name: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !name.starts_with(first) || !name.ends_with(last) || name.len() < first.len() + last.len() {
+        return false;
+    }
+    let mut rest = &name[first.len()..name.len() - last.len()];
+    for p in &parts[1..parts.len() - 1] {
+        match rest.find(p) {
+            Some(k) => rest = &rest[k + p.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// INF-12: in README.md's sections whose heading names MCP, every backticked snake_case or wildcard
+/// token, and every lowercase identifier in a table row, is a tool or matches one. Fails before:
+/// regression_quantile, iv_diagnostics, synth_control, matching_*, ipw_*, multinomial_logit,
+/// ordered_probit, poisson, zip, zinb, ts_garch, ts_kalman_*, spatial_sar, spatial_sem, spatial_sac.
+#[test]
+fn test_readme_mcp_sections_name_real_tools() {
+    let readme = read("README.md");
+    let names: Vec<&str> = CATEGORY_TABLE.iter().map(|row| row.0).collect();
+    let (mut level, mut in_fence, mut problems) = (None::<usize>, false, Vec::new());
+    for (i, line) in readme.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if line.starts_with('#') {
+            let depth = line.chars().take_while(|c| *c == '#').count();
+            if line.contains("MCP") {
+                level = Some(depth);
+            } else if level.is_some_and(|l| depth <= l) {
+                level = None;
+            }
+            continue;
+        }
+        if level.is_none() {
+            continue;
+        }
+        let row = line.trim_start().starts_with('|');
+        for span in line.split('`').skip(1).step_by(2) {
+            let ident = span.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                && span
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '*');
+            if !ident || !(span.contains('_') || row) {
+                continue;
+            }
+            let known = if span.contains('*') {
+                names.iter().any(|n| glob(span, n))
+            } else {
+                names.contains(&span)
+            };
+            if !known {
+                problems.push(format!("README.md:{}: `{span}` is not a tool", i + 1));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} README names are not tools:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// The committed docs/mcp/tools-reference.md is what `generate_markdown_docs()` renders: equal with the
+/// `database` feature (default); without it (CI's set), this build's rows plus exactly the optional ones.
+#[test]
+fn test_tools_reference_is_generated() {
+    let path = "docs/mcp/tools-reference.md";
+    let want = generate_markdown_docs();
+    let have = read(path);
+    if cfg!(feature = "database") {
+        if have != want && update_requested() {
+            generator::write_atomically(&generator::repo_root().join(path), &want)
+                .unwrap_or_else(|e| panic!("{e}"));
+            return;
+        }
+        assert!(
+            have == want,
+            "{path} is stale: run `cargo run -p p2a-mcp --example generate_tool_docs` (default features)"
+        );
+    } else {
+        let rows = |md: &str| -> BTreeSet<String> {
+            md.lines()
+                .filter(|l| l.starts_with("| `"))
+                .map(str::to_string)
+                .collect()
+        };
+        let is_optional = |l: &String| {
+            OPTIONAL_TOOLS
+                .iter()
+                .any(|t| l.starts_with(&format!("| `{t}` |")))
+        };
+        let committed: BTreeSet<String> = rows(&have)
+            .into_iter()
+            .filter(|l| !is_optional(l))
+            .collect();
+        let built = rows(&want);
+        assert!(
+            committed == built,
+            "{path} is stale (regenerate with the default features): missing {:?}; not in this build {:?}",
+            built.difference(&committed).collect::<Vec<_>>(),
+            committed.difference(&built).collect::<Vec<_>>()
+        );
+        let absent: Vec<&str> = OPTIONAL_TOOLS
+            .iter()
+            .copied()
+            .filter(|t| !have.contains(&format!("| `{t}` |")))
+            .collect();
+        assert!(
+            absent.is_empty(),
+            "{path} lacks {absent:?}: regenerate it with the default features"
+        );
+    }
+}
+
+/// `(line, number)` of every "N tools", "N MCP tools", "N analytics tools", "N more tools", "N handlers"
+/// and "(N total)"; N may carry a `+`.
+fn tool_counts(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let words: Vec<String> = line
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | '.' | ';' | ':' | '*' | '`'))
+                    .to_string()
+            })
+            .collect();
+        for (k, w) in words.iter().enumerate() {
+            let digits = w.trim_end_matches('+');
+            if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let mut j = k + 1;
+            if words
+                .get(j)
+                .is_some_and(|x| matches!(x.as_str(), "MCP" | "analytics" | "more"))
+            {
+                j += 1;
+            }
+            if words
+                .get(j)
+                .is_some_and(|x| matches!(x.as_str(), "tools" | "handlers" | "total"))
+            {
+                out.push((i + 1, w.clone()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn test_tool_counts_are_found() {
+    let found = tool_counts(
+        "exposes 270 tools.\n## MCP Tools (270 total)\nabout (60+ tools)\n... 268 more tools\n17 handlers\n7 database tools",
+    );
+    let numbers: Vec<&str> = found.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(numbers, ["270", "270", "60+", "268", "17"]);
+}
+
+/// INF-12: every tool count in the docs is the default build's (270, the category table) or the count
+/// without the database tools; the router agrees with the table. Fails before: MCP_TOOL_EXAMPLES.md's
+/// "60+ tools" (and API_ENDPOINTS.md's "268 more tools" until T3-WP53 removed it).
+#[test]
+fn test_documented_tool_counts_match_the_router() {
+    let full = CATEGORY_TABLE.len();
+    let without_db = full - OPTIONAL_TOOLS.len();
+    let lacking = OPTIONAL_TOOLS
+        .iter()
+        .filter(|t| !schemas().contains_key(**t))
+        .count();
+    assert_eq!(
+        schemas().len() + lacking,
+        full,
+        "the router and the category table disagree (T3-WP05's registry tests say where)"
+    );
+    let mut problems = Vec::new();
+    for file in COUNT_DOCS {
+        for (line, n) in tool_counts(&read(file)) {
+            if !n
+                .parse::<usize>()
+                .is_ok_and(|v| v == full || v == without_db)
+            {
+                problems.push(format!("{file}:{line}: \"{n}\" tools; the server has {full} ({without_db} without the database feature)"));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} tool counts are wrong:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}

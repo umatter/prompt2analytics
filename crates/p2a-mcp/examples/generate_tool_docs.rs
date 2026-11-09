@@ -11,6 +11,7 @@ use p2a_mcp::tools::{
     tool_count,
 };
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 /// Marker lines of README.md's generated tool table.
 pub const README_TABLE_BEGIN: &str = "<!-- BEGIN GENERATED: MCP tool table (cargo run -p p2a-mcp --example generate_tool_docs; do not edit by hand) -->";
@@ -129,7 +130,7 @@ pub fn update() -> Result<Vec<&'static str>, String> {
     Ok(written)
 }
 
-fn main() {
+fn main() -> ExitCode {
     println!("MCP Tools Registry Summary");
     println!("==========================\n");
 
@@ -147,14 +148,14 @@ fn main() {
     }
     println!();
 
-    let docs = generate_markdown_docs();
-    let output_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/mcp/tools-reference.md");
-    if let Err(e) = std::fs::write(&output_path, &docs) {
-        eprintln!("Failed to write {}: {e}", output_path.display());
-        std::process::exit(1);
+    match update() {
+        Ok(written) if written.is_empty() => println!("generated files are current"),
+        Ok(written) => written.iter().for_each(|f| println!("rewrote {f}")),
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
     }
-    println!("Documentation written to: {}", output_path.display());
 
     println!("\nSearch Demo: top 5 for 'panel'");
     for r in search_tools_scored("panel", None, 5) {
@@ -172,4 +173,5 @@ fn main() {
             tool.r_equivalent.unwrap_or("-")
         );
     }
+    ExitCode::SUCCESS
 }
