@@ -188,18 +188,15 @@ fn reload_dataset(meta: &DatasetMeta, session_dir: &Path) -> anyhow::Result<Data
         let df = DataLoader::load_parquet(session_dir.join(&meta.source_path))?;
         return Ok(Dataset::new(df));
     }
-    let df = match meta.format.as_str() {
-        "csv" => crate::commands::data::load_csv_with_markers(
-            &meta.source_path,
-            meta.na_strings.as_deref(),
-        )?,
-        "parquet" => DataLoader::load_parquet(&meta.source_path)?,
-        "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(&meta.source_path, None)?,
-        "dta" => DataLoader::load_stata(&meta.source_path)?,
-        "sas7bdat" => DataLoader::load_sas(&meta.source_path)?,
-        fmt => anyhow::bail!("Unsupported format for reload: {}", fmt),
+    // the markers apply to CSV only; `data load` refuses them for any other format
+    let na = match meta.format.as_str() {
+        "csv" => meta.na_strings.as_deref(),
+        _ => None,
     };
-    Ok(Dataset::new(df))
+    Ok(crate::commands::data::load_with_markers(
+        &meta.source_path,
+        na,
+    )?)
 }
 
 /// Estimated memory of the datasets in memory, against `--max-memory`.

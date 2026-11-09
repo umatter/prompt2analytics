@@ -159,19 +159,17 @@ pub fn execute(
     }
 }
 
-/// Read a CSV file with the `--na-strings` markers of a load (`None`: the loader's
-/// default, `NA` and the empty field). `data load` and the session's reload share it, so
-/// a reload reads the file as the load did.
-pub(crate) fn load_csv_with_markers(
-    path: &Path,
-    na: Option<&[String]>,
-) -> Result<DataFrame, LoadError> {
+/// Read a data file of any format [`DataLoader::load`] reads, with the `--na-strings`
+/// markers of a CSV load (`None`: the loader's default, `NA` and the empty field).
+/// `data load` and the session's reload share it, so a reload reads the file as the load
+/// did.
+pub(crate) fn load_with_markers(path: &Path, na: Option<&[String]>) -> Result<Dataset, LoadError> {
     match na {
         Some(na) => {
             let na: Vec<&str> = na.iter().map(String::as_str).collect();
-            DataLoader::load_csv_with_na(path, &na)
+            DataLoader::load_with_na(path, &na)
         }
-        None => DataLoader::load_csv(path),
+        None => DataLoader::load(path),
     }
 }
 
@@ -233,22 +231,10 @@ fn execute_load(
         return Ok(());
     }
 
-    // Load the dataset
-    let df = match extension.as_str() {
-        "csv" => load_csv_with_markers(path, na_strings)?,
-        "parquet" => DataLoader::load_parquet(path)?,
-        "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
-        "dta" => DataLoader::load_stata(path)?,
-        "sas7bdat" => DataLoader::load_sas(path)?,
-        _ => {
-            progress.finish_and_clear();
-            print_error(&format!("Unsupported file format: {}", extension), format);
-            return Ok(());
-        }
-    };
-
+    // Load the dataset (an unknown extension is an error listing the readable ones)
+    let loaded = load_with_markers(path, na_strings);
     progress.finish_and_clear();
-    let dataset = Dataset::new(df);
+    let dataset = loaded?;
 
     let df = dataset.df();
     let nrows = df.height();

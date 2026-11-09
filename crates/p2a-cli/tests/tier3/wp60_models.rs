@@ -1535,6 +1535,49 @@ fn test_cli_munge_fill_na_mode_and_value_counts_normalize() {
     }
 }
 
+/// INF-9: data load reads JSON Lines through DataLoader::load, and the next invocation reloads it.
+#[test]
+fn test_cli_data_load_jsonl_persists() {
+    let s = temp_session();
+    let body = "{\"a\": 1, \"b\": 2.5, \"c\": \"x\"}\n{\"a\": 2, \"b\": null, \"c\": \"y\"}\n{\"a\": 3, \"b\": -1, \"c\": null}\n";
+    for ext in ["jsonl", "ndjson"] {
+        let p = s.dir().join(format!("t.{ext}"));
+        std::fs::write(&p, body).unwrap();
+        s.load_as(&p, ext, &[]);
+        let types: Vec<(String, String)> = s.json_docs(&["data", "describe", ext])[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap().to_string(),
+                    c["dtype"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            types,
+            [
+                ("a".to_string(), "Int64".to_string()),
+                ("b".into(), "Float64".into()),
+                ("c".into(), "String".into())
+            ]
+        );
+        let rows = s.json(&["data", "head", ext, "-n", "3"]);
+        assert_eq!(
+            (rows[1]["b"].clone(), rows[2]["c"].clone()),
+            (json!("null"), json!("null"))
+        );
+    }
+    let p = s.dir().join("t.xyz");
+    std::fs::write(&p, body).unwrap();
+    let e = s.err(&["data", "load", p.to_str().unwrap(), "--name", "bad"]);
+    assert!(
+        e.contains("jsonl"),
+        "the message lists the readable extensions: {e}"
+    );
+}
+
 // =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
