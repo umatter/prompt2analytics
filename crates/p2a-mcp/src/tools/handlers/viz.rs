@@ -22,6 +22,88 @@ use p2a_core::{
     },
 };
 
+/// 2^53: above it a JSON number does not hold every integer exactly.
+const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+
+/// How the cluster ids of a linkage row are numbered, and how to convert R's.
+const ID_RULE: &str = "Cluster ids are 0-based: 0..n-1 are the n samples and row i creates cluster \
+                       n + i (scipy's linkage format). R's hclust()$merge numbers samples -1..-n \
+                       and merges 1..n-1: use j - 1 for -j and n + k - 1 for k.";
+
+/// A request number as an error message shows it ("1e300", not 301 digits).
+fn shown(v: f64) -> String {
+    if v.is_finite() && v.abs() < 1e15 {
+        format!("{v}")
+    } else {
+        format!("{v:e}")
+    }
+}
+
+/// The request's linkage rows as the core takes them: four numbers per row, the two cluster ids
+/// finite non-negative whole numbers, the size a whole number from 2 to the number of samples.
+/// The core checks the rest (ids that exist and were not merged before, heights).
+fn linkage_rows(matrix: &[Vec<f64>]) -> Result<Vec<(usize, usize, f64, usize)>, String> {
+    if matrix.is_empty() {
+        return Err(
+            "linkage_matrix is empty: give one [cluster1, cluster2, height, size] row per merge"
+                .to_string(),
+        );
+    }
+    let n_samples = matrix.len() + 1;
+    let mut rows = p2a_core::resource::try_with_capacity(matrix.len(), "linkage rows")
+        .map_err(|e| e.to_string())?;
+    let id = |i: usize, what: &str, v: f64| -> Result<usize, String> {
+        if !v.is_finite() {
+            return Err(format!(
+                "linkage_matrix row {i}: {what} must be a finite number, not {}",
+                shown(v)
+            ));
+        }
+        if v < 0.0 {
+            return Err(format!(
+                "linkage_matrix row {i}: {what} {} is negative. {ID_RULE}",
+                shown(v)
+            ));
+        }
+        if v.fract() != 0.0 {
+            return Err(format!(
+                "linkage_matrix row {i}: {what} {} is not a whole number. {ID_RULE}",
+                shown(v)
+            ));
+        }
+        if v > MAX_EXACT_INTEGER {
+            return Err(format!(
+                "linkage_matrix row {i}: {what} {} is too large",
+                shown(v)
+            ));
+        }
+        // A whole number in 0..=2^53.
+        usize::try_from(v as u64)
+            .map_err(|_| format!("linkage_matrix row {i}: {what} {} is too large", shown(v)))
+    };
+    for (i, row) in matrix.iter().enumerate() {
+        let &[c1, c2, height, size] = row.as_slice() else {
+            return Err(format!(
+                "linkage_matrix row {i} has {} numbers; every row is [cluster1, cluster2, height, \
+                 size]",
+                row.len()
+            ));
+        };
+        let c1 = id(i, "cluster1", c1)?;
+        let c2 = id(i, "cluster2", c2)?;
+        let whole_size = size.is_finite() && size.fract() == 0.0;
+        if !whole_size || size < 2.0 || size > n_samples as f64 {
+            return Err(format!(
+                "linkage_matrix row {i}: size {} must be a whole number from 2 to {n_samples} (the \
+                 number of samples in the new cluster)",
+                shown(size)
+            ));
+        }
+        rows.push((c1, c2, height, size as usize));
+    }
+    Ok(rows)
+}
+
 #[tool_router(router = viz_router, vis = "pub")]
 impl AnalyticsServer {
     // ========================================================================
@@ -1050,29 +1132,26 @@ impl AnalyticsServer {
 
     /// Generate a dendrogram visualization from hierarchical clustering results.
     #[tool(
-        description = "Generate a dendrogram (tree diagram) from hierarchical clustering results. Shows how clusters are merged at each level with merge distances. Takes a linkage matrix from hierarchical clustering output."
+        description = "Draw a dendrogram (tree diagram) of a hierarchical clustering from its linkage matrix in scipy's format: one row [cluster1, cluster2, height, size] per merge, in merge order; a matrix with r rows has r + 1 samples. Cluster ids are 0-based: 0..n-1 are the samples and row i creates cluster n + i; size is the number of samples in the new cluster. ml_hierarchical prints its merge history in this format. For R's hclust() use row i = [m(merge[i, 1]), m(merge[i, 2]), height[i], size] with m(-j) = j - 1 and m(k) = n + k - 1. Malformed rows are refused."
     )]
     pub async fn viz_dendrogram(
         &self,
         Parameters(request): Parameters<DendrogramRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // Convert linkage matrix from Vec<Vec<f64>> to Vec<(usize, usize, f64, usize)>
-        let linkage: Vec<(usize, usize, f64, usize)> = request
-            .linkage_matrix
-            .iter()
-            .filter_map(|row| {
-                if row.len() >= 4 {
-                    Some((row[0] as usize, row[1] as usize, row[2], row[3] as usize))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if linkage.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid linkage matrix: must be array of [cluster1, cluster2, distance, size] tuples".to_string()
-            )]));
+        let linkage = match linkage_rows(&request.linkage_matrix) {
+            Ok(rows) => rows,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        if let Some(labels) = &request.labels
+            && labels.len() != linkage.len() + 1
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "labels has {} entries, but a linkage matrix with {} rows has {} samples; give one \
+                 label per sample, in sample order (R's plot.hclust refuses this too)",
+                labels.len(),
+                linkage.len(),
+                linkage.len() + 1
+            ))]));
         }
 
         let width = request.width.unwrap_or(800);
@@ -1154,6 +1233,58 @@ mod tests {
 
     fn hosted_with(o: &str) -> Limits {
         Limits::hosted().with_overrides(&[o.to_string()]).unwrap()
+    }
+
+    #[test]
+    fn linkage_rows_refuses_malformed_rows() {
+        // DATA-25: `row[i] as usize` turned -1 and NaN into 0 and 0.5 into 0, and short rows were dropped.
+        assert_eq!(
+            linkage_rows(&[vec![0.0, 1.0, 1.5, 2.0], vec![2.0, 3.0, 2.5, 3.0]]).unwrap(),
+            vec![(0, 1, 1.5, 2), (2, 3, 2.5, 3)]
+        );
+        for (m, needle) in [
+            (vec![], "linkage_matrix is empty"),
+            (
+                vec![vec![-1.0, 1.0, 1.0, 2.0]],
+                "linkage_matrix row 0: cluster1 -1 is negative",
+            ),
+            (
+                vec![vec![0.0, 0.5, 1.0, 2.0]],
+                "linkage_matrix row 0: cluster2 0.5 is not a whole number",
+            ),
+            (
+                vec![vec![0.0, 1.0, 1.0, 2.0], vec![2.0, 3.0]],
+                "linkage_matrix row 1 has 2 numbers",
+            ),
+            (
+                vec![vec![0.0, 1.0, 1.0, 2.0, 7.0]],
+                "linkage_matrix row 0 has 5 numbers",
+            ),
+            (
+                vec![vec![0.0, f64::NAN, 1.0, 2.0]],
+                "linkage_matrix row 0: cluster2 must be a finite number, not NaN",
+            ),
+            (
+                vec![vec![1e300, 1.0, 1.0, 2.0]],
+                "linkage_matrix row 0: cluster1 1e300 is too large",
+            ),
+            (
+                vec![vec![0.0, 1.0, 1.0, 1.5]],
+                "linkage_matrix row 0: size 1.5 must be a whole number from 2 to 2",
+            ),
+            (
+                vec![vec![0.0, 1.0, 1.0, 3.0]],
+                "linkage_matrix row 0: size 3 must be a whole number from 2 to 2",
+            ),
+        ] {
+            let e = linkage_rows(&m).unwrap_err();
+            assert!(e.contains(needle), "{needle}: {e}");
+        }
+        assert!(
+            linkage_rows(&[vec![-1.0, 1.0, 1.0, 2.0]])
+                .unwrap_err()
+                .contains("R's hclust()$merge")
+        );
     }
 
     #[test]

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "viz_dendrogram_hclust",
+  "area": "visualization/dendrogram",
+  "method": "stats::hclust(dist(x)) merge matrix, heights and cluster sizes (complete linkage), for the 0-based linkage conversion",
+  "reference": "stats::hclust(stats::dist(x), method = 'complete'): merge, height; sizes from the merge matrix",
+  "call": "hclust(dist(d$x))",
+  "dataset": "validation/datasets/generated/dendrogram_points.csv",
+  "datasets": ["validation/datasets/generated/dendrogram_points.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n": 7,
+    "merge_left": [-6, -1, -4, -3, 1, 4],
+    "merge_right": [-7, -2, -5, 2, 3, 5],
+    "height": [0.83000000000000007, 1.0489999999999999, 1.4250000000000007, 2.1819999999999999, 4.1990000000000007, 8.6739999999999995],
+    "size": [2, 2, 2, 3, 4, 7]
+  }
+}

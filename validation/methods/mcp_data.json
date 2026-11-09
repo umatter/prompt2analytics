@@ -86,6 +86,27 @@
       "tolerance": "counts, min, max and level tables exact; mean, quartiles 1e-6 and sd 1e-5 relative (validation/README.md, n < 100); MCP text at 7 significant digits",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_dendrogram",
+      "name": "MCP viz_dendrogram: R hclust() merge matrix converted to the 0-based linkage",
+      "category": "interfaces",
+      "reference": "stats::hclust(stats::dist(x), method = 'complete'): merge, height",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "viz_dendrogram_hclust"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_dendrogram_hclust"
+      ],
+      "quantities": [
+        "samples and merge steps",
+        "maximum merge height",
+        "refusal of the unconverted R matrix"
+      ],
+      "tolerance": "counts exact; maximum height as printed with 4 decimals (Tol::printed(4))",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

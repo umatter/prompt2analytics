@@ -491,3 +491,123 @@ async fn test_validate_mcp_describe_dataset_statistics() {
         "{t}"
     );
 }
+
+/// DATA-25: viz_dendrogram cast JSON numbers with `as usize` (negative and NaN became 0, 0.5 became 0) and
+/// dropped short rows, so malformed linkages drew a wrong tree and reported success. (The out-of-range id
+/// panic of the finding was fixed by T0-WP20, 812a148; its error is checked here as a regression guard.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_dendrogram_bad_linkage() {
+    let (session, server) = session_with_datasets(vec![]);
+    for (args, needle) in [
+        (
+            json!({"linkage_matrix": [[-1, 1, 1.0, 2]]}),
+            "cluster1 -1 is negative",
+        ),
+        (
+            json!({"linkage_matrix": [[0.5, 1, 1.0, 2]]}),
+            "cluster1 0.5 is not a whole number",
+        ),
+        (
+            json!({"linkage_matrix": [[0, 1, 1.0, 2], [2, 3]]}),
+            "row 1 has 2 numbers",
+        ),
+        (
+            json!({"linkage_matrix": [[0, 1, 1.0, 2, 9]]}),
+            "row 0 has 5 numbers",
+        ),
+        (
+            json!({"linkage_matrix": [[0, 1, 1.0, 1.5]]}),
+            "size 1.5 must be a whole number",
+        ),
+        (
+            json!({"linkage_matrix": [[5, 6, 1.0, 2]]}),
+            "refers to cluster 5, which does not exist yet",
+        ), // core, T0-WP20
+        (
+            json!({"linkage_matrix": [[0, 1, 1.0, 2], [2, 3, 1.5, 3]], "labels": ["a", "b"]}),
+            "labels has 2 entries, but a linkage matrix with 2 rows has 3 samples",
+        ),
+    ] {
+        let r = call(&server, &session, "viz_dendrogram", args.clone()).await;
+        assert!(
+            !r.success && text(&r).contains(needle),
+            "{args}: {}",
+            text(&r)
+        );
+    }
+    let ok = call(
+        &server,
+        &session,
+        "viz_dendrogram",
+        json!({"linkage_matrix": [[0, 1, 1.0, 2], [2, 3, 1.5, 3]], "labels": ["a", "b", "c"]}),
+    )
+    .await;
+    assert!(
+        ok.success && text(&ok).contains("Samples: 3"),
+        "{}",
+        text(&ok)
+    );
+}
+
+/// DATA-25: the documented conversion of R's hclust()$merge (negative = sample, 1-based merges) gives a
+/// linkage the tool accepts, with R's sample count and maximum height; the raw R matrix is refused with
+/// the conversion rule. R: hclust(dist(x)) (mcp_data_t3.R, case viz_dendrogram_hclust).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_dendrogram_hclust() {
+    let case = Case::load("viz_dendrogram_hclust");
+    let (session, server) = session_with("viz_dendrogram_hclust");
+    let n = case.scalar("n");
+    let conv = |m: f64| if m < 0.0 { -m - 1.0 } else { n + m - 1.0 };
+    let (l, r, h, s) = (
+        case.vector("merge_left"),
+        case.vector("merge_right"),
+        case.vector("height"),
+        case.vector("size"),
+    );
+    let rows: Vec<[f64; 4]> = (0..h.len())
+        .map(|i| [conv(l[i]), conv(r[i]), h[i], s[i]])
+        .collect();
+    let labels: Vec<String> = (1..=7usize).map(|i| i.to_string()).collect();
+    let res = call(
+        &server,
+        &session,
+        "viz_dendrogram",
+        json!({"linkage_matrix": rows, "labels": labels}),
+    )
+    .await;
+    let t = text(&res);
+    assert!(
+        res.success && t.contains(&format!("Merge steps: {}", h.len())),
+        "{t}"
+    );
+    let samples: f64 = t
+        .lines()
+        .find_map(|x| x.strip_prefix("Samples: "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let max: f64 = t
+        .lines()
+        .find_map(|x| x.strip_prefix("Max distance: "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    Check::new(&case)
+        .scalar("n", samples, Tol::exact())
+        .finish();
+    assert!(Tol::printed(4).allows(max, h[h.len() - 1]), "{max}"); // "8.6740" vs 8.6739999999999995
+    // the unconverted R matrix (negative samples, 1-based merges) is refused with the conversion rule
+    let raw: Vec<[f64; 4]> = (0..h.len()).map(|i| [l[i], r[i], h[i], s[i]]).collect();
+    let bad = call(
+        &server,
+        &session,
+        "viz_dendrogram",
+        json!({"linkage_matrix": raw}),
+    )
+    .await;
+    assert!(
+        !bad.success && text(&bad).contains("R's hclust()$merge"),
+        "{}",
+        text(&bad)
+    );
+}

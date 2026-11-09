@@ -69,3 +69,27 @@ case("data_describe_columns", "data/describe",
        call = "lapply(d[c('id', 'income', 'age')], function(v) c(sum(!is.na(v)), sum(is.na(v)), summary(v), sd(v, na.rm = TRUE))); head(sort(table(d$region), decreasing = TRUE), 5)",
        packages = character(0))
 })
+
+case("viz_dendrogram_hclust", "visualization/dendrogram",
+     "stats::hclust(dist(x)) merge matrix, heights and cluster sizes (complete linkage), for the 0-based linkage conversion",
+     function(ctx) {
+  set.seed(5902)
+  d <- ctx$gen_dataset("dendrogram_points", data.frame(id = 1:7, x = round(cumsum(runif(7, 0.5, 3)), 3)))
+  hc <- stats::hclust(stats::dist(d$x), method = "complete")
+  n <- nrow(d)
+  size <- integer(n - 1L)
+  for (i in seq_len(n - 1L)) {
+    s <- vapply(hc$merge[i, ], function(m) if (m < 0) 1L else size[m], 1L)
+    size[i] <- sum(s)
+  }
+  stopifnot(size[n - 1L] == n, all(diff(hc$height) >= 0))
+  list(values = list(
+         n = n,
+         merge_left = vec(hc$merge[, 1]),
+         merge_right = vec(hc$merge[, 2]),
+         height = vec(hc$height),
+         size = vec(size)),
+       reference = "stats::hclust(stats::dist(x), method = 'complete'): merge, height; sizes from the merge matrix",
+       call = "hclust(dist(d$x))",
+       packages = character(0))
+})

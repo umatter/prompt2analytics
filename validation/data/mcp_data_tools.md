@@ -34,3 +34,10 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
 - Tests and tolerances: `test_validate_mcp_describe_dataset_summaries` (counts, min, max and level tables
   exact; mean and quartiles 1e-6, sd 1e-5 relative, the validation/README.md tolerances for n < 100), `test_validate_mcp_describe_dataset_nan_inf`,
   `test_validate_mcp_describe_dataset_statistics` (the MCP text, 7 significant digits).
+
+## viz_dendrogram
+- Reference: `hclust(dist(x))` (complete); case `viz_dendrogram_hclust`: merge rows (-6, -7), (-1, -2),
+  (-4, -5), (-3, 2), (1, 3), (4, 5); maximum height 8.6739999999999995; sizes 2, 2, 2, 3, 4, 7.
+- Conversion to the tool's 0-based rows: -j -> j - 1, k -> n + k - 1.
+- Test: `test_validate_mcp_dendrogram_hclust` (counts exact, height at 4 printed decimals); behaviour test
+  `test_mcp_dendrogram_bad_linkage`.

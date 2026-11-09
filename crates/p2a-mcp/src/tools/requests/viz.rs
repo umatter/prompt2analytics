@@ -323,13 +323,13 @@ pub struct ResidualDiagnosticsRequest {
 pub struct DendrogramRequest {
     /// Linkage matrix from hierarchical clustering (JSON array of arrays)
     #[schemars(
-        description = "Linkage matrix from hierarchical clustering. Array of [cluster1, cluster2, distance, size] tuples."
+        description = "One [cluster1, cluster2, height, size] row per merge (scipy linkage format, 0-based ids: samples 0..n-1, row i creates cluster n + i)."
     )]
     pub linkage_matrix: Vec<Vec<f64>>,
 
     /// Optional labels for leaf nodes
     #[schemars(
-        description = "Optional labels for leaf nodes (original samples). If not provided, uses indices."
+        description = "One label per sample (rows + 1), in sample order. Default: the sample indices."
     )]
     pub labels: Option<Vec<String>>,
 
