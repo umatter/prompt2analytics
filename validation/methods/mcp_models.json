@@ -3,15 +3,26 @@
   "methods": [
     {
       "id": "mcp_regression_surface",
-      "name": "MCP regression tools through call_tool_with_session: glmnet JSON, GLS rho, quantreg",
+      "name": "MCP regression tools through call_tool_with_session: glmnet JSON, GLS rho, quantreg, OLS aliasing, diagnostics, HAC/DK",
       "category": "mcp",
-      "reference": "glmnet::glmnet, glmnet::cv.glmnet, nlme::gls, quantreg::rq/summary.rq (the R cases of each method)",
+      "reference": "glmnet::glmnet, glmnet::cv.glmnet, nlme::gls, quantreg::rq/summary.rq, lm, lmtest, sandwich (the R cases of each method)",
       "doc": "validation/mcp/models.md",
       "cases": [
         "glmnet_paths",
         "gls_compsymm",
         "gls_ar1",
-        "rq_br_se"
+        "rq_br_se",
+        "ols_aliased",
+        "ols_diagnostics_grunfeld",
+        "diag_bgtest_ar1",
+        "reset_princomp",
+        "diag_wald_sim",
+        "diag_harvtest_nonlin",
+        "hac_ar1",
+        "dk_panel",
+        "step_legacy",
+        "nls_expdecay",
+        "ols_mtcars"
       ],
       "tests": [
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_returns_coefficients",
@@ -22,15 +33,30 @@
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_ar1_reml",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_options_and_errors",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_quantreg_br_se",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_quantreg_empty_taus_is_error"
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_quantreg_empty_taus_is_error",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_ols_aliased",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_diagnostics_tests",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_hac_dk",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_options_reject_unknown",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_bootstrap_cov_is_seeded"
       ],
       "quantities": [
         "glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df; cv coefficients equal the library's; the selection summary precedes the path in the reply",
         "GLS rho, coefficients, SEs, sigma, log-likelihood, AIC, BIC (REML, ML, fixed rho; CS within groups, AR(1))",
-        "quantreg coefficients and nid/iid/ker SEs at tau 0.25, 0.5, 0.75; tau/taus refusals"
+        "quantreg coefficients and nid/iid/ker SEs at tau 0.25, 0.5, 0.75; tau/taus refusals",
+        "aliased OLS rows",
+        "JB, BP, DW, condition number, bgtest F, RESET princomp, Wald F, Harvey-Collier",
+        "HAC Parzen SEs, DK coefficients",
+        "option parsing, bootstrap seeds"
       ],
       "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative; text at the printed precision (Tol::printed: half a unit of the last printed digit)",
-      "deviations": [],
+      "deviations": [
+        {
+          "finding": "REG-24",
+          "quantity": "Driscoll-Kraay SEs",
+          "note": "not pinned through MCP (Tier 4)"
+        }
+      ],
       "supersedes_legacy": []
     }
   ]

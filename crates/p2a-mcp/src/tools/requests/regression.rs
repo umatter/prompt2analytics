@@ -93,7 +93,7 @@ pub struct BgTestRequest {
 
     /// Test statistic type: 'chisq' (default) or 'f'
     #[schemars(
-        description = "Type of test statistic: 'chisq' for chi-squared (asymptotic) or 'f' for F-test (finite sample correction). Default: 'chisq'."
+        description = "Type of test statistic, as lmtest::bgtest(type =): 'chisq' (LM, asymptotic; default) or 'f' (F test). Other values are an error."
     )]
     pub test_type: Option<String>,
 
@@ -128,7 +128,7 @@ pub struct ResetTestRequest {
 
     /// Type of augmentation: 'fitted' (default), 'regressor', or 'princomp'
     #[schemars(
-        description = "Type of augmentation: 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors), or 'princomp' (powers of first principal component)."
+        description = "Type of augmentation, as lmtest::resettest(type =): 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors) or 'princomp' (powers of the first principal component). Other values are an error."
     )]
     pub reset_type: Option<String>,
 }
@@ -205,7 +205,7 @@ pub struct HacRequest {
 
     /// Kernel type: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'
     #[schemars(
-        description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated', or 'tukey-hanning'."
+        description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Other values are an error."
     )]
     pub kernel: Option<String>,
 
@@ -238,12 +238,14 @@ pub struct BootstrapCovRequest {
 
     /// Bootstrap type: 'pairs' (default), 'residual', or 'wild'
     #[schemars(
-        description = "Bootstrap method: 'pairs' (xy, most robust), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights, robust to heteroskedasticity)."
+        description = "Bootstrap method, as sandwich::vcovBS(type =): 'pairs' (xy, default), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights), 'mammen' or 'webb'. Other values are an error."
     )]
     pub bootstrap_type: Option<String>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Random seed for reproducibility. If not provided, uses entropy.")]
+    #[schemars(
+        description = "Random seed of the resampling. Default: the session seed set by set_seed, else 42."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -305,7 +307,7 @@ pub struct DriscollKraayRequest {
 
     /// Kernel type for HAC
     #[schemars(
-        description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'."
+        description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs' (quadratic spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted). Other values are an error."
     )]
     pub kernel: Option<String>,
 }
@@ -381,7 +383,7 @@ pub struct NlsRequest {
 
     /// Algorithm to use
     #[schemars(
-        description = "Optimization algorithm: 'levenberg_marquardt' (default, more robust) or 'gauss_newton' (faster but may not converge)."
+        description = "Optimization algorithm: 'levenberg_marquardt' (default; also 'lm', 'marquardt') or 'gauss_newton' (also 'gn'; faster but may not converge). Other values are an error."
     )]
     pub algorithm: Option<String>,
 }
@@ -496,11 +498,15 @@ pub struct StepRequest {
     pub predictors: Vec<String>,
 
     /// Direction of stepwise selection
-    #[schemars(description = "Direction: 'both' (default), 'forward', or 'backward'.")]
+    #[schemars(
+        description = "Direction: 'both' (default), 'forward' or 'backward'. Other values are an error."
+    )]
     pub direction: Option<String>,
 
     /// Selection criterion
-    #[schemars(description = "Selection criterion: 'aic' (default) or 'bic'.")]
+    #[schemars(
+        description = "Selection criterion: 'aic' (default) or 'bic' (also 'sbc', 'schwarz'). Other values are an error."
+    )]
     pub criterion: Option<String>,
 }
 

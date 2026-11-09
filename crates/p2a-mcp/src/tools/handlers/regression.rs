@@ -278,6 +278,58 @@ fn cv_glmnet_json(r: &p2a_core::regression::GlmnetCvResult, seed: u64) -> String
     ])
 }
 
+/// The selection criterion of regression_step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepCriterion {
+    Aic,
+    Bic,
+}
+
+const STEP_CRITERION: Choices<StepCriterion> = Choices {
+    option: "criterion",
+    values: &[
+        (&["aic"], StepCriterion::Aic),
+        (&["bic", "sbc", "schwarz"], StepCriterion::Bic),
+    ],
+};
+
+/// The model families of regression_nls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NlsModel {
+    ExpDecay,
+    ExpGrowth,
+    MichaelisMenten,
+    Logistic,
+    Power,
+    Asymptotic,
+}
+
+const NLS_MODEL: Choices<NlsModel> = Choices {
+    option: "model",
+    values: &[
+        (&["exponential_decay", "exp_decay"], NlsModel::ExpDecay),
+        (&["exponential_growth", "exp_growth"], NlsModel::ExpGrowth),
+        (&["michaelis_menten", "mm"], NlsModel::MichaelisMenten),
+        (&["logistic", "logistic_growth"], NlsModel::Logistic),
+        (&["power", "power_law"], NlsModel::Power),
+        (&["asymptotic"], NlsModel::Asymptotic),
+    ],
+};
+
+const NLS_ALGORITHM: Choices<p2a_core::regression::NlsAlgorithm> = Choices {
+    option: "algorithm",
+    values: &[
+        (
+            &["levenberg_marquardt", "lm", "marquardt"],
+            p2a_core::regression::NlsAlgorithm::LevenbergMarquardt,
+        ),
+        (
+            &["gauss_newton", "gn"],
+            p2a_core::regression::NlsAlgorithm::GaussNewton,
+        ),
+    ],
+};
+
 /// The intercept flag and covariance type of an OLS request: `intercept`
 /// defaults to true and `cov_type` to HC1 (parsed case-insensitively by
 /// `CovarianceType::from_str`). An unknown `cov_type` is an error naming the
@@ -325,9 +377,17 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         match run_ols_request(dataset, &request) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => {
+                let mut text = result.to_string();
+                if !request.intercept.unwrap_or(true) {
+                    // without an intercept R-squared is the uncentred one (summary.lm)
+                    text = text
+                        .replace("\nR-squared: ", "\nR-squared (uncentered): ")
+                        .replace("\nAdj. R-squared: ", "\nAdj. R-squared (uncentered): ");
+                }
+                append_unshown_notes(&mut text, &result);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             Err(msg) => Ok(CallToolResult::error(vec![Content::text(msg)])),
         }
     }
@@ -363,7 +423,7 @@ impl AnalyticsServer {
 
     /// Run Breusch-Godfrey test for serial correlation.
     #[tool(
-        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value."
+        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. test_type 'chisq' (LM, default) or 'f', as lmtest::bgtest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
     )]
     pub async fn regression_bgtest(
         &self,
@@ -377,10 +437,11 @@ impl AnalyticsServer {
         let order = request.order.unwrap_or(1);
         let fill = request.fill.unwrap_or(0.0);
 
-        let test_type = match request.test_type.as_deref() {
-            Some(t) => BgTestType::from_str(t).unwrap_or(BgTestType::Chisq),
-            None => BgTestType::Chisq,
-        };
+        let test_type =
+            match parse_option::<BgTestType>(request.test_type.as_deref(), BgTestType::Chisq) {
+                Ok(t) => t,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         let result = match bg_test(dataset, &request.y, &x_refs, order, test_type, fill) {
             Ok(r) => r,
@@ -399,7 +460,7 @@ impl AnalyticsServer {
 
     /// Run Ramsey's RESET test for functional form.
     #[tool(
-        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed."
+        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. reset_type 'fitted' (default), 'regressor' or 'princomp' (powers of the first principal component of the regressors), as lmtest::resettest(type =); df from the rank of the augmented design (lmtest counts columns; they differ only when a term aliases)."
     )]
     pub async fn regression_resettest(
         &self,
@@ -412,10 +473,11 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let powers = request.powers.unwrap_or_else(|| vec![2, 3]);
 
-        let reset_type_enum = match request.reset_type.as_deref() {
-            Some(t) => ResetType::from_str(t).unwrap_or(ResetType::Fitted),
-            None => ResetType::Fitted,
-        };
+        let reset_type_enum =
+            match parse_option::<ResetType>(request.reset_type.as_deref(), ResetType::Fitted) {
+                Ok(t) => t,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         let result = match reset_test(dataset, &request.y, &x_refs, &powers, reset_type_enum) {
             Ok(r) => r,
@@ -427,9 +489,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Wald test for comparing nested linear models.
@@ -466,9 +528,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Harvey-Collier test for linearity using recursive residuals.
@@ -502,7 +564,7 @@ impl AnalyticsServer {
 
     /// HAC (Newey-West) standard errors for time series regression.
     #[tool(
-        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection."
+        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
     )]
     pub async fn regression_hac(
         &self,
@@ -532,14 +594,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Bootstrap covariance estimation (vcovBS).
     #[tool(
-        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable."
+        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. As sandwich::vcovBS with type 'pairs' (default), 'residual', 'wild' (Rademacher), 'mammen' or 'webb'. Seeded: seed, else the session seed (set_seed), else 42."
     )]
     pub async fn regression_bootstrap_cov(
         &self,
@@ -557,7 +619,12 @@ impl AnalyticsServer {
             &x_refs,
             request.n_boot,
             request.bootstrap_type.as_deref(),
-            request.seed,
+            Some(
+                request
+                    .seed
+                    .or(*self.global_seed.read().await)
+                    .unwrap_or(42),
+            ),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -568,14 +635,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Driscoll-Kraay panel-robust standard errors.
     #[tool(
-        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output)."
+        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). kernel 'bartlett' (default), 'parzen', 'qs' (Quadratic Spectral), 'truncated' or 'tukey-hanning' (sandwich's spellings are accepted)."
     )]
     pub async fn regression_driscoll_kraay(
         &self,
@@ -604,9 +671,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Quantile regression.
@@ -709,14 +776,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run nonlinear least squares regression.
     #[tool(
-        description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info."
+        description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info. algorithm 'levenberg_marquardt' (default; also 'lm') or 'gauss_newton' (also 'gn'); model names are matched ignoring case and separators."
     )]
     pub async fn regression_nls(
         &self,
@@ -756,74 +823,56 @@ impl AnalyticsServer {
         };
 
         // Parse model type and get function + param names
-        let (model_fn, param_names): (fn(&Array1<f64>, &Array1<f64>) -> f64, Vec<&str>) =
-            match request.model.to_lowercase().as_str() {
-                "exponential_decay" | "exp_decay" => {
-                    if request.start.len() != 3 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c",
-                        )]));
-                    }
-                    (model_exponential_decay, vec!["a", "b", "c"])
-                }
-                "exponential_growth" | "exp_growth" => {
-                    if request.start.len() != 2 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)",
-                        )]));
-                    }
-                    (model_exponential_growth, vec!["a", "b"])
-                }
-                "michaelis_menten" | "mm" => {
-                    if request.start.len() != 2 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)",
-                        )]));
-                    }
-                    (model_michaelis_menten, vec!["Vmax", "Km"])
-                }
-                "logistic" | "logistic_growth" => {
-                    if request.start.len() != 3 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))",
-                        )]));
-                    }
-                    (model_logistic_growth, vec!["K", "r", "x0"])
-                }
-                "power" => {
-                    if request.start.len() != 2 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "power requires 2 starting values: [a, b] for y = a*x^b",
-                        )]));
-                    }
-                    (model_power, vec!["a", "b"])
-                }
-                "asymptotic" => {
-                    if request.start.len() != 3 {
-                        return Ok(CallToolResult::error(vec![Content::text(
-                            "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)",
-                        )]));
-                    }
-                    (model_asymptotic, vec!["a", "b", "c"])
-                }
-                _ => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Unknown model '{}'. Supported: exponential_decay, exponential_growth, michaelis_menten, logistic, power, asymptotic",
-                        request.model
-                    ))]));
-                }
-            };
+        let model = match parse_choice(&NLS_MODEL, Some(&request.model), NlsModel::ExpDecay) {
+            Ok(m) => m,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        type ModelFn = fn(&Array1<f64>, &Array1<f64>) -> f64;
+        let (model_fn, param_names, usage): (ModelFn, Vec<&str>, &str) = match model {
+            NlsModel::ExpDecay => (
+                model_exponential_decay,
+                vec!["a", "b", "c"],
+                "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c",
+            ),
+            NlsModel::ExpGrowth => (
+                model_exponential_growth,
+                vec!["a", "b"],
+                "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)",
+            ),
+            NlsModel::MichaelisMenten => (
+                model_michaelis_menten,
+                vec!["Vmax", "Km"],
+                "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)",
+            ),
+            NlsModel::Logistic => (
+                model_logistic_growth,
+                vec!["K", "r", "x0"],
+                "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))",
+            ),
+            NlsModel::Power => (
+                model_power,
+                vec!["a", "b"],
+                "power requires 2 starting values: [a, b] for y = a*x^b",
+            ),
+            NlsModel::Asymptotic => (
+                model_asymptotic,
+                vec!["a", "b", "c"],
+                "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)",
+            ),
+        };
+        if request.start.len() != param_names.len() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                usage.to_string(),
+            )]));
+        }
 
-        // Parse algorithm
-        let algorithm = match request.algorithm.as_deref() {
-            Some("gauss_newton") | Some("gn") => NlsAlgorithm::GaussNewton,
-            Some("levenberg_marquardt") | Some("lm") | None => NlsAlgorithm::LevenbergMarquardt,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown algorithm '{}'. Supported: levenberg_marquardt (default), gauss_newton",
-                    other
-                ))]));
-            }
+        let algorithm = match parse_choice(
+            &NLS_ALGORITHM,
+            request.algorithm.as_deref(),
+            NlsAlgorithm::LevenbergMarquardt,
+        ) {
+            Ok(a) => a,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let config = NlsConfig {
@@ -1052,7 +1101,7 @@ impl AnalyticsServer {
 
     /// Stepwise regression model selection.
     #[tool(
-        description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history."
+        description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history. criterion 'aic' (default) or 'bic'; direction 'both' (default), 'forward' or 'backward'. The criterion values are those R's step() prints (extractAIC)."
     )]
     pub async fn regression_step(
         &self,
@@ -1071,7 +1120,14 @@ impl AnalyticsServer {
         };
 
         let direction_str = request.direction.as_deref().unwrap_or("both");
-        let use_bic = request.criterion.as_deref() == Some("bic");
+        let use_bic = match parse_choice(
+            &STEP_CRITERION,
+            request.criterion.as_deref(),
+            StepCriterion::Aic,
+        ) {
+            Ok(c) => c == StepCriterion::Bic,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         // For stepwise, scope_lower is empty (no forced variables), scope_upper is all predictors
         let scope_lower: Vec<&str> = vec![];
@@ -1496,6 +1552,13 @@ mod tests {
     }
 
     #[test]
+    fn test_regression_option_tables_validate() {
+        assert_eq!(super::STEP_CRITERION.validate(), Ok(()));
+        assert_eq!(super::NLS_MODEL.validate(), Ok(()));
+        assert_eq!(super::NLS_ALGORITHM.validate(), Ok(()));
+    }
+
+    #[test]
     fn test_json_text_never_panics() {
         assert_eq!(
             super::json_text(&serde_json::json!({"a": 1})),
@@ -1663,6 +1726,11 @@ mod tests {
         let rows = rows(&t);
         assert!(rows.iter().all(|(name, _)| name != "(Intercept)"), "{t}");
         assert_eq!(rows.len(), 2, "{t}");
+        assert!(
+            t.contains("\nR-squared (uncentered): ")
+                && t.contains("\nAdj. R-squared (uncentered): "),
+            "{t}"
+        );
         let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
         let expected = run_ols(
             &ds,

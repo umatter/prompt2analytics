@@ -671,3 +671,373 @@ async fn test_validate_mcp_quantreg_empty_taus_is_error() {
         assert!(e.contains("tau"), "tau = {tau}: {e}");
     }
 }
+
+/// ols_aliased (reg_rank_qr.R): the dummy trap y ~ x1 + da + db + dc; lm reports dc as NA
+/// (rank 4 of 5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_regression_ols_aliased() {
+    let case = Case::load("ols_aliased");
+    let (session, server) = session_with("ols_aliased");
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_ols",
+            json!({"dataset": "ols_aliased", "y": "y", "x": ["x1", "da", "db", "dc"],
+                   "cov_type": "standard"}),
+        )
+        .await,
+    );
+    for v in ["(Intercept)", "x1", "da", "db"] {
+        assert_row(
+            v,
+            row(&t, v),
+            &[case.named("trap_coef", v), case.named("trap_se", v)],
+            Tol::printed(4),
+        );
+    }
+    assert!(
+        printed(row(&t, "dc")).is_empty(),
+        "the aliased row shows no number:\n{t}"
+    );
+    assert!(
+        t.contains("Coefficients not defined because of singularities: dc"),
+        "{t}"
+    );
+}
+
+/// lmtest cases and reset_princomp through the MCP diagnostics tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_regression_diagnostics_tests() {
+    let (dg, bg, rp, wd, hv) = (
+        Case::load("ols_diagnostics_grunfeld"),
+        Case::load("diag_bgtest_ar1"),
+        Case::load("reset_princomp"),
+        Case::load("diag_wald_sim"),
+        Case::load("diag_harvtest_nonlin"),
+    );
+    let (session, server) = session_with_datasets(vec![
+        ("grunfeld", dataset_of(&dg)),
+        ("bgtest_ar1", dataset_of(&bg)),
+        ("reset_two", dataset_of(&rp)),
+        ("wald_sim", dataset_of(&wd)),
+        ("harvtest_nonlin", dataset_of(&hv)),
+    ]);
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_diagnostics",
+            json!({"dataset": "grunfeld", "y": "inv", "x": ["value", "capital"]}),
+        )
+        .await,
+    );
+    let printed4 = Tol::printed(4);
+    assert_shows(
+        "JB",
+        after(section(&t, "Jarque-Bera"), "Statistic:"),
+        dg.scalar("jarque_bera"),
+        printed4,
+    );
+    assert_shows(
+        "BP",
+        after(section(&t, "Breusch-Pagan"), "Statistic:"),
+        dg.scalar("breusch_pagan"),
+        printed4,
+    );
+    assert_shows(
+        "DW",
+        after(section(&t, "Durbin-Watson"), "Statistic:"),
+        dg.scalar("durbin_watson"),
+        printed4,
+    );
+    assert_shows(
+        "kappa",
+        after(section(&t, "Condition Number"), "Value:"),
+        dg.scalar("condition_number"),
+        Tol::printed(2),
+    );
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_bgtest",
+            json!({"dataset": "bgtest_ar1", "y": "y", "x": ["x"], "order": 4, "test_type": "F"}),
+        )
+        .await,
+    );
+    assert_shows(
+        "bgtest F",
+        after(&t, "F Statistic:"),
+        bg.scalar("bgtest4_f"),
+        printed4,
+    );
+    assert_row("bgtest df", after(&t, "df:"), &[4.0, 94.0], Tol::exact());
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_resettest",
+            json!({"dataset": "reset_two", "y": "y", "x": ["x1", "x2"], "reset_type": "princomp"}),
+        )
+        .await,
+    );
+    assert_shows(
+        "RESET princomp",
+        after(&t, "F Statistic:"),
+        rp.scalar("princomp_stat"),
+        printed4,
+    );
+    assert_row(
+        "RESET df",
+        after(&t, "df:"),
+        &rp.vector("princomp_df"),
+        Tol::exact(),
+    );
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_waldtest",
+            json!({"dataset": "wald_sim", "y": "y", "x_unrestricted": ["x1", "x2", "x3"],
+                   "x_restricted": ["x1"]}),
+        )
+        .await,
+    );
+    assert_shows(
+        "Wald F",
+        after(&t, "F Statistic:"),
+        wd.scalar("wald_drop_x2_x3_f"),
+        printed4,
+    );
+    assert_row("Wald df", after(&t, "df:"), &[2.0, 96.0], Tol::exact());
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_harvtest",
+            json!({"dataset": "harvtest_nonlin", "y": "y", "x": ["x"]}),
+        )
+        .await,
+    );
+    // lmtest::harvtest reports |t|; p2a keeps the sign of the mean recursive residual
+    let signed = hv.scalar("harvey_collier") * hv.scalar("recresid_mean").signum();
+    assert_shows(
+        "Harvey-Collier",
+        after(&t, "Test statistic (t):"),
+        signed,
+        printed4,
+    );
+    assert_shows(
+        "HC df",
+        after(&t, "Degrees of freedom:"),
+        hv.scalar("harvey_collier_df"),
+        Tol::exact(),
+    );
+}
+
+/// hac_ar1 and dk_panel: Parzen kernel at bandwidth 4 as sandwich::kernHAC; Driscoll-Kraay
+/// coefficients and the number of periods (its SEs are REG-24, Tier 4: not pinned).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_regression_hac_dk() {
+    let (hac, dk) = (Case::load("hac_ar1"), Case::load("dk_panel"));
+    let (session, server) = session_with_datasets(vec![
+        ("hac_ar1", dataset_of(&hac)),
+        ("dk_panel", dataset_of(&dk)),
+    ]);
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_hac",
+            json!({"dataset": "hac_ar1", "y": "y", "x": ["x"], "kernel": "parzen", "bandwidth": 4}),
+        )
+        .await,
+    );
+    for v in ["(Intercept)", "x"] {
+        assert_row(
+            v,
+            row(&t, v),
+            &[hac.named("coef", v), hac.named("kernhac_parzen_bw4", v)],
+            Tol::printed(4),
+        );
+    }
+    assert!(
+        call(
+            &server,
+            &session,
+            "regression_hac",
+            json!({"dataset": "hac_ar1", "y": "y", "x": ["x"], "kernel": "Quadratic Spectral"}),
+        )
+        .await
+        .success
+    );
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_hac",
+            json!({"dataset": "hac_ar1", "y": "y", "x": ["x"], "kernel": "gaussian"}),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("gaussian") && e.to_lowercase().contains("bartlett"),
+        "{e}"
+    );
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_driscoll_kraay",
+            json!({"dataset": "dk_panel", "y": "y", "x": ["x"], "time_col": "time"}),
+        )
+        .await,
+    );
+    for v in ["(Intercept)", "x"] {
+        assert_row(v, row(&t, v), &[dk.named("coef", v)], Tol::printed(4));
+    }
+    assert_shows("T", after(&t, "T ="), dk.scalar("n_periods"), Tol::exact());
+}
+
+/// Option strings of the regression tools are parsed; unknown values are errors that list
+/// the accepted ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_regression_options_reject_unknown() {
+    let (bg, st, nl) = (
+        Case::load("diag_bgtest_ar1"),
+        Case::load("step_legacy"),
+        Case::load("nls_expdecay"),
+    );
+    let (session, server) = session_with_datasets(vec![
+        ("bgtest_ar1", dataset_of(&bg)),
+        ("step_legacy", dataset_of(&st)),
+        ("nls_expdecay", dataset_of(&nl)),
+    ]);
+    let reg = json!({"dataset": "bgtest_ar1", "y": "y", "x": ["x"]});
+    let with = |base: &Value, k: &str, v: Value| {
+        let mut a = base.clone();
+        a[k] = v;
+        a
+    };
+    // before: chisq
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_bgtest",
+            with(&reg, "test_type", json!("wald")),
+        )
+        .await,
+    );
+    assert!(e.contains("'wald'") && e.contains("chisq, f"), "{e}");
+    // before: fitted
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_resettest",
+            with(&reg, "reset_type", json!("squares")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("squares") && e.contains("fitted, regressor, princomp"),
+        "{e}"
+    );
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_bootstrap_cov",
+            with(&reg, "bootstrap_type", json!("jackknife")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("jackknife") && e.to_lowercase().contains("pairs"),
+        "{e}"
+    );
+    let step = json!({"dataset": "step_legacy", "response": "y", "predictors": ["x1", "x2", "x3"]});
+    // before: AIC
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_step",
+            with(&step, "criterion", json!("cp")),
+        )
+        .await,
+    );
+    assert!(e.contains("'cp'") && e.contains("aic, bic"), "{e}");
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_step",
+            with(&step, "direction", json!("sideways")),
+        )
+        .await,
+    );
+    assert!(e.contains("sideways"), "{e}");
+    let nls = json!({"dataset": "nls_expdecay", "x": "x", "y": "y", "model": "Exp-Decay",
+                     "start": [8.0, 0.3, 1.0]});
+    // before: "Unknown model 'Exp-Decay'"
+    let r = call(
+        &server,
+        &session,
+        "regression_nls",
+        with(&nls, "algorithm", json!("LM")),
+    )
+    .await;
+    assert!(r.success, "{}", text(&r));
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_nls",
+            with(&nls, "algorithm", json!("newton")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("newton") && e.contains("levenberg_marquardt, gauss_newton"),
+        "{e}"
+    );
+}
+
+/// The bootstrap is seeded by the request, else the session seed, else 42 (before: entropy).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_bootstrap_cov_is_seeded() {
+    let case = Case::load("ols_mtcars");
+    let (session, server) = session_with_datasets(vec![("mtcars", dataset_of(&case))]);
+    let a = json!({"dataset": "mtcars", "y": "mpg", "x": ["wt"], "n_boot": 200});
+    let run = |extra: Option<u64>| {
+        let mut x = a.clone();
+        if let Some(s) = extra {
+            x["seed"] = json!(s);
+        }
+        x
+    };
+    let first = text(&call(&server, &session, "regression_bootstrap_cov", run(None)).await);
+    // fails before: two unseeded calls differ
+    assert_eq!(
+        first,
+        text(&call(&server, &session, "regression_bootstrap_cov", run(None)).await)
+    );
+    assert_eq!(
+        first,
+        text(&call(&server, &session, "regression_bootstrap_cov", run(Some(42))).await)
+    );
+    assert!(
+        call(&server, &session, "set_seed", json!({"seed": 5}))
+            .await
+            .success
+    );
+    let five = text(&call(&server, &session, "regression_bootstrap_cov", run(None)).await);
+    assert_eq!(
+        five,
+        text(&call(&server, &session, "regression_bootstrap_cov", run(Some(5))).await)
+    );
+    assert_ne!(five, first);
+}
