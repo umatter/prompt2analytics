@@ -1715,3 +1715,142 @@ fn test_validate_cli_moran_alternative() {
     assert_eq!(field(&gt, "alternative"), "greater");
     assert_keys(&two, &["n_islands", "weight_style"]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ml
+// ---------------------------------------------------------------------------------------------
+
+/// CLI-23: --transform computed the scores and never printed them. R: cli_pca_scores
+/// (prcomp(hclust_60)$x, centred, unscaled).
+#[test]
+fn test_validate_cli_pca_transform() {
+    let case = Case::load("cli_pca_scores");
+    let s = temp_session();
+    let d = s.load(&case);
+    let csv = s.dir().join("scores.csv");
+    let j = s.json(&[
+        "ml",
+        "pca",
+        &d,
+        "--cols",
+        "a",
+        "b",
+        "c",
+        "--scores-file",
+        csv.to_str().unwrap(),
+    ]);
+    let rows: Vec<Vec<f64>> = field(&j, "scores")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(f64s)
+        .collect();
+    assert_eq!((rows.len(), rows[0].len()), (60, 3));
+    let r = case.vector("scores"); // column-major 60 x 3
+    let mut aligned = Vec::new();
+    for k in 0..3 {
+        let dot: f64 = (0..60).map(|i| rows[i][k] * r[k * 60 + i]).sum();
+        // a component's sign is arbitrary
+        aligned.extend((0..60).map(|i| rows[i][k] * dot.signum()));
+    }
+    let sdev: Vec<f64> = f64s(field(&j, "explained_variance"))
+        .iter()
+        .map(|v| v.sqrt())
+        .collect();
+    Check::new(&case)
+        .vector("scores", &aligned, Tol::coef(60))
+        .vector("sdev", &sdev, Tol::stat(60))
+        .finish();
+    let file = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(file.lines().next(), Some("PC1,PC2,PC3"));
+    assert_eq!(file.lines().count(), 61);
+    let first: Vec<f64> = file
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .map(|t| t.parse().unwrap())
+        .collect();
+    assert_eq!(first, rows[0], "the file holds the JSON scores");
+    let text = s.ok(&["ml", "pca", &d, "--cols", "a", "b", "c", "--transform"]);
+    assert!(
+        text.contains("Scores (first 10 of 60 observations"),
+        "{text}"
+    );
+}
+
+/// CLI-14: ml hierarchical knew four linkages (exit 1 otherwise). R: hclust_methods
+/// average_cutree3 and average_height (hclust(dist(hclust_60), "average")).
+#[test]
+fn test_validate_cli_linkage_names() {
+    let case = Case::load("hclust_methods");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "ml",
+        "hierarchical",
+        &d,
+        "--cols",
+        "a",
+        "b",
+        "c",
+        "-n",
+        "3",
+        "--linkage",
+        "upgma",
+    ]);
+    assert!(
+        same_partition(&f64s(field(&j, "labels")), &case.vector("average_cutree3")),
+        "{j:#}"
+    );
+    Check::new(&case)
+        .vector(
+            "average_height",
+            &f64s(field(&j, "merge_distances")),
+            Tol::coef(60),
+        )
+        .finish();
+    assert_eq!(field(&j, "linkage"), "average");
+    assert_usage_errors(&[
+        (
+            vec![
+                "ml",
+                "hierarchical",
+                "d",
+                "--cols",
+                "a",
+                "b",
+                "--linkage",
+                "ward3",
+            ],
+            "mcquitty",
+        ),
+        (
+            vec![
+                "ml",
+                "random-forest",
+                "d",
+                "--cols",
+                "a",
+                "-y",
+                "y",
+                "--max-features",
+                "0.33",
+            ],
+            "log2",
+        ),
+    ]);
+}
+
+/// k-means reports its convergence (Lloyd's stop rule) and warnings.
+#[test]
+fn test_cli_kmeans_notes() {
+    let s = temp_session();
+    let d = load_repo_csv(&s, "validation/datasets/generated/hclust_60.csv", "h60");
+    let args = [
+        "ml", "kmeans", &d, "--cols", "a", "b", "c", "-k", "3", "--seed", "1",
+    ];
+    let j = s.json(&args);
+    assert_keys(&j, &["converged", "iterations", "warnings"]);
+    assert!(s.ok(&args).contains("Converged: "));
+}

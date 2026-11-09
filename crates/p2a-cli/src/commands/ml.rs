@@ -5,6 +5,9 @@ use ndarray::{Array1, Array2};
 use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use p2a_core::{Linkage, dbscan, hierarchical, kmeans, linear_svm, pca, random_forest, tsne};
 
+use std::path::{Path, PathBuf};
+
+use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, missing_json, print_error, print_missing_note};
 use crate::session::SessionManager;
 
@@ -46,8 +49,11 @@ EXAMPLES:
     # Keep top 3 components
     p2a --session s.json ml pca mydata --cols x1 x2 x3 x4 x5 -n 3
 
-    # All components with transformed data
+    # All components with the scores (first 10 rows in text, all in -F json)
     p2a --session s.json ml pca mydata --cols x1 x2 x3 --transform
+
+    # Every score written to a CSV file
+    p2a --session s.json ml pca mydata --cols x1 x2 x3 --scores-file scores.csv
 ")]
     Pca {
         /// Dataset name
@@ -61,9 +67,13 @@ EXAMPLES:
         #[arg(short, long)]
         n_components: Option<usize>,
 
-        /// Whether to compute transformed data
+        /// Compute the principal-component scores (prcomp x): first 10 rows in text, all in -F json
         #[arg(long, default_value = "false")]
         transform: bool,
+
+        /// Write every score to this CSV file (columns PC1..PCk); implies --transform
+        #[arg(long, value_name = "CSV")]
+        scores_file: Option<PathBuf>,
     },
 
     /// t-SNE dimensionality reduction
@@ -139,8 +149,8 @@ EXAMPLES:
         #[arg(long, default_value = "2")]
         min_samples_split: usize,
 
-        /// Max features per split: "sqrt", "log2", "all", or number
-        #[arg(long, default_value = "sqrt")]
+        /// Features tried per split: sqrt (default), log2, all, or a number >= 1
+        #[arg(long, default_value = "sqrt", value_parser = parse_max_features)]
         max_features: String,
 
         /// Random seed
@@ -173,8 +183,8 @@ EXAMPLES:
     /// Hierarchical (agglomerative) clustering
     #[command(after_help = "\
 EXAMPLES:
-    # Ward linkage with 4 clusters
-    p2a --session s.json ml hierarchical mydata --cols x1 x2 x3 -n 4 --linkage ward
+    # Ward linkage (ward.D2) with 4 clusters
+    p2a --session s.json ml hierarchical mydata --cols x1 x2 x3 -n 4 --linkage ward.D2
 
     # Cut by distance threshold
     p2a --session s.json ml hierarchical mydata --cols x1 x2 --distance-threshold 2.5
@@ -191,9 +201,11 @@ EXAMPLES:
         #[arg(short, long)]
         n_clusters: Option<usize>,
 
-        /// Linkage method: single, complete, average, ward
-        #[arg(long, default_value = "ward")]
-        linkage: String,
+        /// Linkage, as stats::hclust: single, complete, average (also upgma), ward.D2 (default;
+        /// also ward), mcquitty (also weighted), ward.D, centroid or median. R's deprecated
+        /// hclust(method = "ward") is ward.D
+        #[arg(long, default_value = "ward.D2", value_parser = crate::commands::causal::option_arg::<Linkage>)]
+        linkage: Linkage,
 
         /// Distance threshold for cutting the dendrogram
         #[arg(long)]
@@ -251,7 +263,16 @@ pub fn execute(
             cols,
             n_components,
             transform,
-        } => execute_pca(dataset, cols, *n_components, *transform, format, session),
+            scores_file,
+        } => execute_pca(
+            dataset,
+            cols,
+            *n_components,
+            *transform,
+            scores_file.as_deref(),
+            format,
+            session,
+        ),
         MlCommands::Tsne {
             dataset,
             cols,
@@ -308,7 +329,7 @@ pub fn execute(
             dataset,
             cols,
             *n_clusters,
-            linkage,
+            *linkage,
             *distance_threshold,
             format,
             session,
@@ -330,6 +351,48 @@ pub fn execute(
 /// through the shared extractor under `policy` (Fail for every ML command
 /// except `ml svm`, which drops incomplete rows as e1071's formula interface does).
 /// Integer and boolean columns are numeric; text is refused by name.
+/// `--max-features` of `ml random-forest`: sqrt, log2, all (any case) or an integer >= 1. The
+/// core reads anything else as sqrt, so it is refused here.
+fn parse_max_features(s: &str) -> Result<String, String> {
+    let t = s.trim().to_ascii_lowercase();
+    match t.as_str() {
+        "sqrt" | "log2" | "all" => Ok(t),
+        _ => match t.parse::<usize>() {
+            Ok(n) if n >= 1 => Ok(n.to_string()),
+            _ => Err(format!(
+                "unknown max features '{s}'; expected one of: sqrt, log2, all, or an integer >= 1"
+            )),
+        },
+    }
+}
+
+/// SVM weights for display: finite weights by decreasing magnitude, then non-finite ones in
+/// index order.
+fn sort_by_magnitude(w: &mut [(usize, f64)]) {
+    w.sort_by(|a, b| match (a.1.is_finite(), b.1.is_finite()) {
+        (true, true) => b.1.abs().total_cmp(&a.1.abs()),
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => a.0.cmp(&b.0),
+    });
+}
+
+/// The scores as CSV: header PC1..PCk, values in their shortest round-trip form.
+fn scores_csv(scores: &Array2<f64>) -> String {
+    let k = scores.ncols();
+    let mut out = (1..=k)
+        .map(|i| format!("PC{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    out.push('\n');
+    for row in scores.rows() {
+        let line: Vec<String> = row.iter().map(|v| format!("{v}")).collect();
+        out.push_str(&line.join(","));
+        out.push('\n');
+    }
+    out
+}
+
 fn ml_columns(
     ds: &p2a_core::Dataset,
     cols: &[String],
@@ -400,7 +463,7 @@ fn execute_kmeans(
 
                     match format {
                         OutputFormat::Json => {
-                            let json = serde_json::json!({
+                            let mut json = serde_json::json!({
                                 "method": "K-means",
                                 "k": k,
                                 "features": cols,
@@ -410,6 +473,7 @@ fn execute_kmeans(
                                 "cluster_sizes": result.cluster_sizes,
                                 "labels": result.labels,
                             });
+                            with_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -431,6 +495,7 @@ fn execute_kmeans(
                                     centroid.iter().map(|v| format!("{:.4}", v)).collect();
                                 println!("  Cluster {}: [{}]", i, centroid_str.join(", "));
                             }
+                            print_result_notes(&result, format);
                         }
                     }
                 }
@@ -451,6 +516,7 @@ fn execute_pca(
     cols: &[String],
     n_components: Option<usize>,
     transform: bool,
+    scores_file: Option<&Path>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -477,8 +543,25 @@ fn execute_pca(
             };
 
             // pca(data, n_components, transform)
-            match pca(data.view(), n_components, transform) {
+            match pca(
+                data.view(),
+                n_components,
+                transform || scores_file.is_some(),
+            ) {
                 Ok(result) => {
+                    if let (Some(path), Some(scores)) = (scores_file, &result.transformed) {
+                        if let Err(e) = std::fs::write(path, scores_csv(scores)) {
+                            print_error(
+                                &format!("Could not write the scores to {}: {e}", path.display()),
+                                format,
+                            );
+                            return Ok(());
+                        }
+                    }
+                    let scores_vec: Option<Vec<Vec<f64>>> = result
+                        .transformed
+                        .as_ref()
+                        .map(|t| t.rows().into_iter().map(|r| r.to_vec()).collect());
                     // Convert arrays to Vec for JSON serialization
                     let explained_variance: Vec<f64> = result.explained_variance.to_vec();
                     let explained_variance_ratio: Vec<f64> =
@@ -513,6 +596,8 @@ fn execute_pca(
                                 "cumulative_variance_ratio": cumulative_variance_ratio,
                                 "total_variance": result.total_variance,
                                 "components": components_vec,
+                                "scores": scores_vec,
+                                "scores_file": scores_file.map(|p| p.display().to_string()),
                             });
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
@@ -546,6 +631,20 @@ fn execute_pca(
                                 let comp_str: Vec<String> =
                                     component.iter().map(|v| format!("{:.4}", v)).collect();
                                 println!("  PC{}: [{}]", i + 1, comp_str.join(", "));
+                            }
+                            if let Some(scores) = &scores_vec {
+                                println!(
+                                    "\nScores (first 10 of {} observations; all rows with -F json or --scores-file):",
+                                    scores.len()
+                                );
+                                for (i, row) in scores.iter().take(10).enumerate() {
+                                    let cells: Vec<String> =
+                                        row.iter().map(|v| format!("{v:.4}")).collect();
+                                    println!("  {}: [{}]", i + 1, cells.join(", "));
+                                }
+                            }
+                            if let Some(path) = scores_file {
+                                println!("Scores written to: {}", path.display());
                             }
                         }
                     }
@@ -822,7 +921,7 @@ fn execute_hierarchical(
     dataset_name: &str,
     cols: &[String],
     n_clusters: Option<usize>,
-    linkage_str: &str,
+    linkage: Linkage,
     distance_threshold: Option<f64>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -841,15 +940,6 @@ fn execute_hierarchical(
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
-                    return Ok(());
-                }
-            };
-
-            // Parse linkage method
-            let linkage: Linkage = match linkage_str.parse() {
-                Ok(l) => l,
-                Err(e) => {
-                    print_error(&format!("Invalid linkage method: {}", e), format);
                     return Ok(());
                 }
             };
@@ -995,11 +1085,7 @@ fn execute_svm(
                                 .enumerate()
                                 .map(|(i, &v)| (i, v))
                                 .collect();
-                            indexed.sort_by(|a, b| {
-                                b.1.abs()
-                                    .partial_cmp(&a.1.abs())
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            });
+                            sort_by_magnitude(&mut indexed);
                             for (idx, weight) in indexed.iter().take(10) {
                                 println!("  {}: {:.6}", feature_names[*idx], weight);
                             }
@@ -1035,5 +1121,24 @@ mod tests {
             about.contains("regression") && !about.contains("classification/"),
             "{about}"
         );
+    }
+
+    #[test]
+    fn test_parse_max_features() {
+        assert_eq!(parse_max_features("SQRT").unwrap(), "sqrt");
+        assert_eq!(parse_max_features(" 3 ").unwrap(), "3");
+        for bad in ["0", "0.33", "sqr", "-1", ""] {
+            assert!(
+                parse_max_features(bad).unwrap_err().contains("log2"),
+                "{bad}"
+            )
+        }
+    }
+
+    #[test]
+    fn test_svm_weight_order_is_total() {
+        let mut w = vec![(0, 0.5), (1, f64::NAN), (2, -2.0), (3, 1.0)];
+        sort_by_magnitude(&mut w);
+        assert_eq!(w.iter().map(|p| p.0).collect::<Vec<_>>(), [2, 3, 0, 1]);
     }
 }

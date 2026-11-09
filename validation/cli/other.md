@@ -243,3 +243,24 @@ the alternative by its R name and `n_islands`.
 
 Styles B and U reparameterise rho: on a k-nearest-neighbour graph every row of B sums to k, so
 W = B / k and U = B / (n k) = W / n, and the fit is W's with rho scaled.
+
+### `ml pca`, `ml hierarchical`, `ml random-forest`, `ml svm`, `ml kmeans`
+
+`ml pca --transform` computed the scores and printed none of them. The scores (prcomp's `x`,
+centred and unscaled) now appear in text (first 10 rows) and JSON (`scores`, every row), and
+`--scores-file <CSV>` writes all of them (header `PC1,..,PCk`; implies `--transform`). The
+sign of a component is arbitrary, so the test aligns each score column to R's by the sign of
+their inner product.
+
+`ml hierarchical --linkage` takes hclust's eight names: single, complete, average (upgma),
+ward.D2 (ward, ward2; the default), mcquitty (weighted, wpgma), ward.D (ward1), centroid
+(upgmc), median (wpgmc, gower). R's deprecated `hclust(method = "ward")` is ward.D; p2a's `ward`
+is ward.D2. `ml random-forest --max-features` accepts sqrt, log2, all or an integer >= 1 and
+refuses anything else (the core read it as sqrt). `ml svm` sorts its weight table on a total
+order (non-finite weights last). `ml kmeans` prints and serialises its convergence and
+warnings.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_pca_transform` | `cli_pca_scores` `scores` (60 x 3, sign-aligned), `sdev` | `Tol::coef(60)`, `Tol::stat(60)` |
+| `test_validate_cli_linkage_names` | `hclust_methods` `average_cutree3` (same partition), `average_height` (`--linkage upgma`) | exact; `Tol::coef(60)` |
