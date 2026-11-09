@@ -350,7 +350,8 @@ EXAMPLES:
         #[arg(long, value_parser = lag_selection_arg)]
         lag_selection: Option<String>,
 
-        /// Largest lag the criteria try (default 10, purtest's pmax)
+        /// Largest lag the criteria try (default 10, purtest's pmax); needs --lag-selection
+        /// aic, sic or hall
         #[arg(long, value_name = "N")]
         pmax: Option<usize>,
     },
@@ -490,6 +491,13 @@ pub fn execute(
                     }
                 },
             };
+            if pmax.is_some() && matches!(lag_selection, None | Some(LagSelection::Fixed(_))) {
+                print_error(
+                    "--pmax applies to --lag-selection aic, sic or hall only",
+                    format,
+                );
+                return Ok(());
+            }
             let mut config = PanelUnitRootConfig::default();
             config.test_type = *test;
             config.model = *model;

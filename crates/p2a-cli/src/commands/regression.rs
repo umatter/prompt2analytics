@@ -191,7 +191,7 @@ EXAMPLES:
         #[arg(long, value_parser = parse_core_option::<QuantRegSe>, default_value = "nid")]
         se: QuantRegSe,
 
-        /// Seed of the xy-pair bootstrap (--se boot)
+        /// Seed of the xy-pair bootstrap (--se boot only)
         #[arg(long)]
         seed: Option<u64>,
 
@@ -300,8 +300,8 @@ EXAMPLES:
         #[arg(long, value_parser = gls_correlation_arg, default_value = "ar1_auto")]
         correlation: GlsCorrelationArg,
 
-        /// Correlation parameter (rho for ar1/cs; estimated when not given; ignored for
-        /// ar1_auto)
+        /// Correlation parameter (rho for ar1/cs; estimated when not given; refused with
+        /// ar1_auto and identity)
         #[arg(long)]
         rho: Option<f64>,
 
@@ -564,6 +564,13 @@ pub fn execute(
             seed,
             intercept,
         } => {
+            if seed.is_some() && *se != QuantRegSe::Boot {
+                print_error(
+                    "--seed applies to --se boot only (the other standard errors draw nothing)",
+                    format,
+                );
+                return Ok(());
+            }
             let mut config = QuantRegConfig::default();
             config.tau = *tau;
             config.intercept = *intercept;
@@ -596,6 +603,20 @@ pub fn execute(
             group,
             intercept,
         } => {
+            if rho.is_some()
+                && matches!(
+                    correlation,
+                    GlsCorrelationArg::Ar1Auto
+                        | GlsCorrelationArg::Structure(GlsCorrelation::Identity)
+                )
+            {
+                print_error(
+                    "--rho applies to --correlation ar1 and compound_symmetry only (ar1_auto \
+                     estimates rho; identity has none)",
+                    format,
+                );
+                return Ok(());
+            }
             let mut options = GlsOptions::default();
             match correlation {
                 GlsCorrelationArg::Ar1Auto => {
