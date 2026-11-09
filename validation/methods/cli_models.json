@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_discrete_t3",
+      "name": "p2a discrete logit/probit/mlogit/clogit: convergence, warnings, aliasing, --base, --asc, --reflevel",
+      "category": "interfaces",
+      "reference": "stats::glm(binomial) at glm.control(epsilon = 1e-10, maxit = 100); nnet::multinom re-solved by Newton (reference A and B); mlogit::mlogit(chosen ~ price + catch) with and without constants, Newton-polished",
+      "doc": "validation/cli/models.md",
+      "cases": ["disc_binary_glm", "disc_multinom_overlap", "disc_mlogit_fishing"],
+      "tests": [
+        "p2a-cli::tier3::wp60_models::test_cli_logit_prints_converged_and_warnings",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_logit_probit_glm",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_mlogit_base",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_clogit_asc_reflevel"
+      ],
+      "quantities": ["coefficients", "SE", "z", "p", "log-likelihood", "AIC", "separation warnings", "aliased coefficient", "reference category", "alternative-specific constants"],
+      "tolerance": "validation/README.md, n = 300-1182 (coefficients 1e-8, SE 1e-6); the probit at the tight MLE (default control within 1e-6); Newton-polished optima Tol::iterative(1e-8 / 1e-9 coefficients, 1e-6 / 1e-8 SE), as T3-WP18",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_discrete_poisson",
+      "name": "p2a discrete poisson: Poisson GLM",
+      "category": "interfaces",
+      "reference": "stats::glm(family = poisson), glm.control(epsilon = 1e-10, maxit = 100); na.omit",
+      "doc": "validation/cli/models.md",
+      "cases": ["cli_discrete_poisson"],
+      "tests": ["p2a-cli::tier3::wp60_models::test_validate_cli_discrete_poisson"],
+      "quantities": ["coefficients", "SE", "z", "p", "log-likelihood", "AIC", "deviance", "null deviance", "n", "rows dropped"],
+      "tolerance": "validation/README.md, n = 400: coefficients 1e-8, SE and statistics 1e-6 relative; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
