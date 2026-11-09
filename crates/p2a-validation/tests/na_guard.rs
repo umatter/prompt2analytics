@@ -448,6 +448,23 @@ fn test_na_guard_skips_cfg_test_items_but_not_the_code_after_them() {
         ]
     );
     assert_eq!(s.test_items, 3);
+
+    // A `#[cfg(test)]` struct field or enum variant ends at its comma (or at the brace that
+    // closes the enclosing block); the code after it is product code.
+    let fields = "struct S {\n    #[cfg(test)]\n    calls: usize,\n    n: usize,\n}\n\
+                  impl S {\n    fn f(c: &Column) { let _ = c.f64(); }\n}\n\
+                  enum E {\n    A,\n    #[cfg(test)]\n    B\n}\n\
+                  #[cfg(test)]\nfn helper<A, B>(c: &Column) -> Result<A, B> {\n    let _ = c.f64();\n}\n\
+                  fn g(c: &Column) { let _ = c.f64(); }\n";
+    fx.file("crates/p2a-core/src/fields.rs", fields);
+    let s = fx.scan();
+    assert_eq!(
+        found(&s, "crates/p2a-core/src/fields.rs"),
+        [
+            (line_of(fields, "fn f("), Kind::F64WithoutCast),
+            (line_of(fields, "fn g("), Kind::F64WithoutCast)
+        ]
+    );
 }
 
 #[test]

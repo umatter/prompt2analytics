@@ -331,14 +331,27 @@ pub fn test_lines(code: &[String]) -> (Vec<bool>, Vec<String>, usize) {
         let start = (line, col);
         let mut depth = 0usize;
         let mut nested = 0usize;
+        // Angle brackets of generics (`HashMap<u8, u8>`), so that their commas do not end a
+        // field; `->` and `=>` are not brackets.
+        let mut angle = 0usize;
+        let mut prev = ' ';
         let mut opened = false;
         let mut end = None;
         'outer: while line < code.len() {
             for (k, ch) in code[line].char_indices().skip_while(|&(k, _)| k < col) {
+                let before = std::mem::replace(&mut prev, ch);
                 match ch {
+                    '<' => angle += 1,
+                    '>' if before != '-' && before != '=' => angle = angle.saturating_sub(1),
                     '{' => {
                         depth += 1;
                         opened = true;
+                    }
+                    // A `}` before the item opened a block closes the enclosing block: the item
+                    // was a field or variant without a trailing comma and ends before it.
+                    '}' if !opened && depth == 0 => {
+                        end = Some((line, k.saturating_sub(1)));
+                        break 'outer;
                     }
                     '}' => {
                         depth = depth.saturating_sub(1);
@@ -349,6 +362,11 @@ pub fn test_lines(code: &[String]) -> (Vec<bool>, Vec<String>, usize) {
                     }
                     '(' | '[' => nested += 1,
                     ')' | ']' => nested = nested.saturating_sub(1),
+                    // A struct field or enum variant ends at its comma.
+                    ',' if !opened && depth == 0 && nested == 0 && angle == 0 => {
+                        end = Some((line, k));
+                        break 'outer;
+                    }
                     ';' if !opened && depth == 0 && nested == 0 => {
                         end = Some((line, k));
                         break 'outer;
@@ -361,6 +379,7 @@ pub fn test_lines(code: &[String]) -> (Vec<bool>, Vec<String>, usize) {
         }
         let (end_line, end_col) = end.unwrap_or((code.len().saturating_sub(1), 0));
         if start.0 == end_line
+            && end_col >= start.1
             && let Some(name) = out_of_line_module(&code[end_line][start.1..=end_col])
         {
             modules.push(name);
