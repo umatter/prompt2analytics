@@ -50,7 +50,7 @@ pub struct PreviewCleaningRequest {
 
     /// How to handle drop_na: 'any' or 'all'
     #[schemars(
-        description = "For drop_na: 'any' (drop if any null) or 'all' (drop only if all null)."
+        description = "For drop_na: 'any' (default: drop a row with any missing value) or 'all' (only rows missing in every checked column); case-insensitive; anything else is an error."
     )]
     pub how: Option<String>,
 
@@ -164,7 +164,9 @@ pub struct CleaningSessionApplyRequest {
     pub old_value: Option<String>,
 
     /// How to handle drop_na
-    #[schemars(description = "For drop_na: 'any' or 'all'.")]
+    #[schemars(
+        description = "For drop_na: 'any' (default: drop a row with any missing value) or 'all' (only rows missing in every checked column); case-insensitive; anything else is an error."
+    )]
     pub how: Option<String>,
 
     /// Keep strategy for deduplicate

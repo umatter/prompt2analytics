@@ -611,3 +611,82 @@ async fn test_validate_mcp_dendrogram_hclust() {
         text(&bad)
     );
 }
+
+/// T3 rule R1 in this package's handler files: an unknown option string must be an error that lists the
+/// accepted values. Before: drop_na with one column treated any `how` as 'any'; batch_process and
+/// compare_datasets reported "Unknown ..." inside a success; suggest_cleaning ignored an unknown
+/// min_priority (all suggestions).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_unknown_options_are_errors() {
+    let d = Dataset::new(df!("x" => [Some(1.0), None, Some(3.0), Some(4.5)], "y" => [Some(2.1), Some(3.9), None, Some(8.2)]).unwrap());
+    let (session, server) = session_with_datasets(vec![("d", d)]);
+    for (tool, args, needle) in [
+        (
+            "munge_drop_na",
+            json!({"dataset": "d", "columns": ["x"], "how": "some", "result_name": "e"}),
+            "unknown how 'some'; expected one of: any, all",
+        ),
+        (
+            "preview_cleaning",
+            json!({"dataset": "d", "operation": "drop_na", "columns": ["x"], "how": "some"}),
+            "unknown how 'some'",
+        ),
+        (
+            "batch_process",
+            json!({"datasets": ["d"], "operation": "summarise"}),
+            "unknown operation 'summarise'; expected one of: describe, correlation, ols",
+        ),
+        (
+            "compare_datasets",
+            json!({"datasets": ["d", "d"], "columns": ["x"], "comparison_type": "means"}),
+            "unknown comparison_type 'means'; expected one of: summary, distribution, correlation",
+        ),
+        (
+            "suggest_cleaning",
+            json!({"dataset": "d", "min_priority": "urgent"}),
+            "unknown min_priority 'urgent'; expected one of: low, medium, high, critical",
+        ),
+    ] {
+        let r = call(&server, &session, tool, args).await;
+        assert!(
+            !r.success && text(&r).contains(needle),
+            "{tool}: {}",
+            text(&r)
+        );
+    }
+    assert!(session.datasets.read().await.get("e").is_none());
+    // case-insensitive, as before for drop_na
+    let r = call(
+        &server,
+        &session,
+        "munge_drop_na",
+        json!({"dataset": "d", "columns": ["x"], "how": "ALL", "result_name": "e"}),
+    )
+    .await;
+    assert!(
+        r.success && text(&r).contains("Dropped 1 rows"),
+        "{}",
+        text(&r)
+    );
+    let sid = session_id(&text(
+        &call(
+            &server,
+            &session,
+            "cleaning_session_start",
+            json!({"dataset": "d"}),
+        )
+        .await,
+    ));
+    let r = call(
+        &server,
+        &session,
+        "cleaning_session_apply",
+        json!({"session_id": sid, "operation": "drop_na", "how": "sometimes"}),
+    )
+    .await;
+    assert!(
+        !r.success && text(&r).contains("unknown how 'sometimes'"),
+        "{}",
+        text(&r)
+    );
+}

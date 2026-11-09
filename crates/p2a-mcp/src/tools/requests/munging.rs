@@ -13,7 +13,7 @@ pub struct BatchProcessRequest {
 
     /// Operation to perform on each dataset
     #[schemars(
-        description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression)."
+        description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression); case-insensitive; anything else is an error."
     )]
     pub operation: String,
 
@@ -42,7 +42,7 @@ pub struct CompareDatasetRequest {
 
     /// Type of comparison
     #[schemars(
-        description = "Comparison type: 'summary' (side-by-side stats), 'correlation' (correlation differences), or 'distribution' (distribution comparison)."
+        description = "Comparison type: 'summary' (side-by-side stats, the default), 'correlation' (correlation differences), or 'distribution' (distribution comparison); case-insensitive; anything else is an error."
     )]
     pub comparison_type: Option<String>,
 }
@@ -326,7 +326,7 @@ pub struct DropNaRequest {
 
     /// How to drop rows
     #[schemars(
-        description = "How to drop: 'any' (drop if any null) or 'all' (drop only if all null). Default is 'any'."
+        description = "How to drop: 'any' (default: drop a row with any missing value) or 'all' (only rows missing in every checked column); case-insensitive; anything else is an error."
     )]
     pub how: Option<String>,
 

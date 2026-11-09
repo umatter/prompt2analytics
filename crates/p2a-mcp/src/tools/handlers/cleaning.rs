@@ -20,13 +20,14 @@ use p2a_core::data::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::handlers::munging::{fill_label, parse_fill_strategy};
+use crate::tools::handlers::munging::{DROP_HOW, fill_label, parse_choice, parse_fill_strategy};
 use crate::tools::requests::cleaning::{
     CleaningRollbackRequest, CleaningSessionApplyRequest, CleaningSessionCheckpointsRequest,
     CleaningSessionStartRequest, CleaningSessionStatusRequest, DataQualityProfileRequest,
     ListCleaningSessionsRequest, PreviewCleaningRequest, SuggestCleaningRequest,
     VerifyCleaningRequest,
 };
+use p2a_core::options::Choices;
 
 #[tool_router(router = cleaning_router, vis = "pub")]
 impl AnalyticsServer {
@@ -160,10 +161,16 @@ impl AnalyticsServer {
                     value: request.value,
                 }
             }
-            "drop_na" | "dropna" => CleaningOperation::DropNa {
-                columns: request.columns,
-                how: request.how.unwrap_or_else(|| "any".to_string()),
-            },
+            "drop_na" | "dropna" => {
+                let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+                    Ok(how) => how,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
+                CleaningOperation::DropNa {
+                    columns: request.columns,
+                    how: how.to_string(),
+                }
+            }
             "deduplicate" | "dedup" => CleaningOperation::Deduplicate {
                 columns: request.columns,
                 keep: request.keep.unwrap_or_else(|| "first".to_string()),
@@ -437,12 +444,15 @@ impl AnalyticsServer {
                 )
             }
             "drop_na" | "dropna" => {
-                let how = request.how.as_deref().unwrap_or("any").to_string();
+                let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+                    Ok(how) => how,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
                 let cols = request.columns.clone();
                 (
                     format!("drop_na ({})", how),
                     Box::new(move |ds| {
-                        drop_na(ds, to_str_slice(&cols).as_deref(), &how).map_err(|e| e.to_string())
+                        drop_na(ds, to_str_slice(&cols).as_deref(), how).map_err(|e| e.to_string())
                     }),
                 )
             }
@@ -637,17 +647,13 @@ impl AnalyticsServer {
         let report = generate_suggestions(&profile);
 
         // Parse minimum priority filter
-        let min_priority =
-            request
-                .min_priority
-                .as_ref()
-                .and_then(|p| match p.to_lowercase().as_str() {
-                    "low" => Some(SuggestionPriority::Low),
-                    "medium" => Some(SuggestionPriority::Medium),
-                    "high" => Some(SuggestionPriority::High),
-                    "critical" => Some(SuggestionPriority::Critical),
-                    _ => None,
-                });
+        let min_priority = match request.min_priority.as_deref() {
+            None => None,
+            Some(p) => match parse_choice(&MIN_PRIORITY, p) {
+                Ok(p) => Some(p),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            },
+        };
 
         // Filter suggestions
         let mut suggestions: Vec<_> = report
@@ -730,6 +736,17 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 }
+
+/// The `min_priority` of `suggest_cleaning`.
+const MIN_PRIORITY: Choices<SuggestionPriority> = Choices {
+    option: "min_priority",
+    values: &[
+        (&["low"], SuggestionPriority::Low),
+        (&["medium"], SuggestionPriority::Medium),
+        (&["high"], SuggestionPriority::High),
+        (&["critical"], SuggestionPriority::Critical),
+    ],
+};
 
 /// The `- value:` of a suggestion. A computed fill value (the median or mode `suggest_cleaning`
 /// shows) is for reference only: `fill_na` computes it itself and refuses a value with any strategy

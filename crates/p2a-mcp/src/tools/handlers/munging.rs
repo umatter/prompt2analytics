@@ -15,6 +15,7 @@ use crate::server::AnalyticsServer;
 use crate::tools::handlers::data::format_significant;
 use crate::tools::limits::{self, Family, LimitViolation};
 use crate::tools::requests::munging::*;
+use p2a_core::options::Choices;
 
 use p2a_core::{
     data::{
@@ -135,6 +136,58 @@ fn cell_label(v: &p2a_core::polars::prelude::AnyValue, quoted: bool) -> String {
     }
 }
 
+/// A handler-local option parsed with [`Choices`]: the canonical value, or the bare message of an
+/// unknown spelling ("unknown how 'some'; expected one of: any, all").
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: &str,
+) -> Result<T, String> {
+    choices.parse(value).map_err(|e| match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    })
+}
+
+/// The `how` of `drop_na`, as the core takes it.
+pub(crate) const DROP_HOW: Choices<&'static str> = Choices {
+    option: "how",
+    values: &[(&["any"], "any"), (&["all"], "all")],
+};
+
+/// The operations of `batch_process`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchOperation {
+    Describe,
+    Correlation,
+    Ols,
+}
+
+const BATCH_OPERATIONS: Choices<BatchOperation> = Choices {
+    option: "operation",
+    values: &[
+        (&["describe"], BatchOperation::Describe),
+        (&["correlation"], BatchOperation::Correlation),
+        (&["ols"], BatchOperation::Ols),
+    ],
+};
+
+/// The comparisons of `compare_datasets`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comparison {
+    Summary,
+    Distribution,
+    Correlation,
+}
+
+const COMPARISONS: Choices<Comparison> = Choices {
+    option: "comparison_type",
+    values: &[
+        (&["summary"], Comparison::Summary),
+        (&["distribution"], Comparison::Distribution),
+        (&["correlation"], Comparison::Correlation),
+    ],
+};
+
 #[tool_router(router = munging_router, vis = "pub")]
 impl AnalyticsServer {
     /// Batch process multiple datasets with the same operation.
@@ -152,6 +205,11 @@ impl AnalyticsServer {
                 "At least one dataset must be specified".to_string(),
             )]));
         }
+
+        let operation = match parse_choice(&BATCH_OPERATIONS, &request.operation) {
+            Ok(op) => op,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         let datasets = self.datasets.read().await;
         let mut results = Vec::new();
@@ -172,8 +230,8 @@ impl AnalyticsServer {
             };
 
             let df = dataset.df();
-            let result = match request.operation.to_lowercase().as_str() {
-                "describe" => {
+            let result = match operation {
+                BatchOperation::Describe => {
                     // Get summary statistics
                     let columns: Vec<String> = if let Some(ref cols) = request.columns {
                         cols.clone()
@@ -227,7 +285,7 @@ impl AnalyticsServer {
                     }
                     stats_output
                 }
-                "correlation" => {
+                BatchOperation::Correlation => {
                     // Get correlation matrix
                     match correlation_matrix(dataset) {
                         Ok(corr) => {
@@ -236,7 +294,7 @@ impl AnalyticsServer {
                         Err(e) => format!("Dataset '{}': Error - {}", ds_name, e),
                     }
                 }
-                "ols" => {
+                BatchOperation::Ols => {
                     // Run OLS regression
                     if let Some(ref cols) = request.columns {
                         if cols.len() < 2 {
@@ -281,10 +339,6 @@ impl AnalyticsServer {
                         )
                     }
                 }
-                other => format!(
-                    "Unknown operation: '{}'. Use 'describe', 'correlation', or 'ols'.",
-                    other
-                ),
             };
 
             results.push(result);
@@ -337,8 +391,12 @@ impl AnalyticsServer {
             )]));
         }
 
-        let datasets = self.datasets.read().await;
         let comparison_type = request.comparison_type.as_deref().unwrap_or("summary");
+        let comparison = match parse_choice(&COMPARISONS, comparison_type) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let datasets = self.datasets.read().await;
 
         let mut output = format!("Dataset Comparison\n{}\n\n", "=".repeat(40));
         output.push_str(&format!("Datasets: {:?}\n", request.datasets));
@@ -386,8 +444,8 @@ impl AnalyticsServer {
             all_stats.insert(ds_name.clone(), ds_stats);
         }
 
-        match comparison_type {
-            "summary" => {
+        match comparison {
+            Comparison::Summary => {
                 // Side-by-side comparison table
                 for col_name in &request.columns {
                     output.push_str(&format!("\nColumn: {}\n{}\n", col_name, "-".repeat(60)));
@@ -435,7 +493,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            "distribution" => {
+            Comparison::Distribution => {
                 // Distribution comparison (basic)
                 for col_name in &request.columns {
                     output.push_str(&format!(
@@ -462,7 +520,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            "correlation" => {
+            Comparison::Correlation => {
                 // Correlation comparison (if multiple columns)
                 if request.columns.len() < 2 {
                     output.push_str("Correlation comparison requires at least 2 columns\n");
@@ -480,9 +538,6 @@ impl AnalyticsServer {
                         }
                     }
                 }
-            }
-            _ => {
-                output.push_str(&format!("Unknown comparison type: '{}'. Use 'summary', 'distribution', or 'correlation'.\n", comparison_type));
             }
         }
 
@@ -1274,7 +1329,7 @@ impl AnalyticsServer {
 
     /// Drop rows with null values.
     #[tool(
-        description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null."
+        description = "Drop rows containing missing values. how: 'any' (default; drop a row with any missing value in the checked columns) or 'all' (only rows missing in every checked column); case-insensitive, anything else is an error."
     )]
     pub async fn munge_drop_na(
         &self,
@@ -1296,7 +1351,10 @@ impl AnalyticsServer {
             .columns
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        let how = request.how.as_deref().unwrap_or("any");
+        let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+            Ok(how) => how,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         let orig_rows = dataset.nrows();
         let result = match drop_na(dataset, columns.as_deref(), how) {
@@ -4567,6 +4625,14 @@ mod tests {
             "{what}: bound {bound} < charged {charged} ({})",
             columns.join(", ")
         );
+    }
+
+    #[test]
+    fn option_tables_are_consistent() {
+        DROP_HOW.validate().unwrap();
+        BATCH_OPERATIONS.validate().unwrap();
+        COMPARISONS.validate().unwrap();
+        assert_eq!(parse_choice(&DROP_HOW, " ALL "), Ok("all"));
     }
 
     #[test]
