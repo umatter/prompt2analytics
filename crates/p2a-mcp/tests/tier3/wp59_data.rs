@@ -690,3 +690,204 @@ async fn test_mcp_unknown_options_are_errors() {
         text(&r)
     );
 }
+
+/// T3-WP52 hand-off (DATA-24, handler part): the reply now gives the residual standard error, the dataset
+/// rows of influential points and the core's warning when the hat values were not given. R:
+/// cooks.distance and summary.lm sigma (data_viz_t3.R, case viz_residual_diag, T3-WP52).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_residual_diagnostics_cooks() {
+    let case = Case::load("viz_residual_diag");
+    let (session, server) = session_with("viz_residual_diag");
+    let flagged = |key: &str| -> String {
+        let rows: Vec<usize> = case
+            .vector(key)
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d > 0.5)
+            .map(|(i, _)| i)
+            .collect();
+        if rows.is_empty() {
+            "None".to_string()
+        } else {
+            format!("{rows:?}")
+        }
+    };
+    let sigma_of = |t: &str| -> f64 {
+        t.lines()
+            .find_map(|l| l.strip_prefix("Residual standard error: "))
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let r = call(&server, &session, "viz_residual_diagnostics",
+        json!({"dataset": "viz_residual_diag", "fitted_column": "fitted1", "residuals_column": "resid1"})).await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    assert!(
+        t.contains(&format!(
+            "High influence points (Cook's D > 0.5; dataset rows, 0-based): {}",
+            flagged("cooks1")
+        )),
+        "{t}"
+    ); // [16]
+    assert!(t.contains("Warning: leverage not supplied"), "{t}");
+    let r3 = call(&server, &session, "viz_residual_diagnostics",
+        json!({"dataset": "viz_residual_diag", "fitted_column": "fitted3", "residuals_column": "resid3", "leverage_column": "hat3"})).await;
+    let t3 = text(&r3);
+    assert!(
+        r3.success
+            && t3.contains(&format!("0-based): {}", flagged("cooks3")))
+            && !t3.contains("Warning:"),
+        "{t3}"
+    ); // None
+    Check::new(&case)
+        .scalar("sigma1", sigma_of(&t), Tol::new(5e-7, 0.0)) // 7 significant digits
+        .scalar("sigma3", sigma_of(&t3), Tol::new(5e-7, 0.0))
+        .finish();
+}
+
+/// T3-WP52 hand-off: the histogram reply lists the bin counts. R: nclass.Sturges and hist() counts on
+/// equal-width breaks (data_viz_t3.R, case viz_histogram_bins, T3-WP52).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_histogram_counts() {
+    let case = Case::load("viz_histogram_bins");
+    let (session, server) = session_with("viz_histogram_bins"); // dataset "viz_histogram_samples" (long)
+    let f = call(&server, &session, "munge_filter",
+        json!({"dataset": "viz_histogram_samples", "column": "sample", "op": "eq", "value": "norm100", "result_name": "norm100"})).await;
+    assert!(f.success, "{}", text(&f));
+    let r = call(
+        &server,
+        &session,
+        "viz_histogram",
+        json!({"dataset": "norm100", "column": "value"}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    let bins: f64 = t
+        .lines()
+        .find_map(|l| l.strip_prefix("Bins: "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let counts: Vec<f64> = t
+        .lines()
+        .find_map(|l| l.strip_prefix("Counts per bin: "))
+        .unwrap_or_else(|| panic!("{t}"))
+        .split(", ")
+        .map(|c| c.parse().unwrap())
+        .collect();
+    Check::new(&case)
+        .scalar("norm100_k", bins, Tol::exact())
+        .vector("norm100_counts", &counts, Tol::exact())
+        .finish();
+}
+
+/// T3-WP52 hand-off (DATA-62 surface): the box plot names whiskers and hinges, prints n, and says so for
+/// a column without finite values. R: boxplot.stats(c(1, 7, 12, 15, 15, 16, 18, 18)) = 1, 9.5, 15, 17, 18
+/// (n 8, no outliers); boxplot.stats(c(2.5, 9.75, 4, 4, 6.5, 1, 30)) = 1, 3.25, 4, 8.125, 9.75 (n 7, out 30).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_boxplot_reports_whiskers_and_n() {
+    let d = Dataset::new(df!(
+        "a" => [1.0, 7.0, 12.0, 15.0, 15.0, 16.0, 18.0, 18.0],
+        "b" => [Some(2.5), Some(9.75), Some(4.0), Some(4.0), Some(6.5), Some(1.0), Some(30.0), None],
+        "z" => [None::<f64>; 8]).unwrap());
+    let (session, server) = session_with_datasets(vec![("d", d)]);
+    let r = call(
+        &server,
+        &session,
+        "viz_boxplot",
+        json!({"dataset": "d", "columns": ["a", "b", "z"]}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(
+        r.success && t.starts_with("Box plot generated successfully"),
+        "{t}"
+    );
+    for line in [
+        "a (n = 8):\n  Lower whisker: 1.0000, Q1 (lower hinge): 9.5000, Median: 15.0000, Q3 (upper hinge): 17.0000, Upper whisker: 18.0000\n  Outliers: none",
+        "b (n = 7):\n  Lower whisker: 1.0000, Q1 (lower hinge): 3.2500, Median: 4.0000, Q3 (upper hinge): 8.1250, Upper whisker: 9.7500\n  Outliers: 30.0000",
+        "z (n = 0): no values",
+    ] {
+        assert!(t.contains(line), "{line:?} missing:\n{t}");
+    }
+}
+
+/// T3-WP52 hand-off (INF-9, upload half): upload_dataset reads JSON Lines and JSON record arrays (it
+/// refused them: "Unsupported file format 'jsonl'"). Types as WP52's loader infers them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_upload_dataset_jsonl() {
+    use base64::Engine as _;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let (session, server) = session_with_datasets(vec![]);
+    let r = call(&server, &session, "upload_dataset", json!({"filename": "u.jsonl", "name": "u",
+        "content": b64("{\"id\": 1, \"x\": 2.5, \"g\": \"a\"}\n{\"id\": 2, \"x\": null, \"g\": \"b\"}\n")})).await;
+    assert!(
+        r.success && text(&r).contains("Dimensions: 2 rows x 3 columns"),
+        "{}",
+        text(&r)
+    );
+    let u = dataset(&session, "u").await;
+    assert_eq!(
+        (
+            u.df().column("id").unwrap().dtype(),
+            u.df().column("x").unwrap().dtype()
+        ),
+        (&DataType::Int64, &DataType::Float64)
+    );
+    assert_eq!(
+        (
+            nums(&u, "x")[0],
+            u.df().column("x").unwrap().null_count(),
+            labels(&u, "g")
+        ),
+        (2.5, 1, vec!["a".to_string(), "b".to_string()])
+    );
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"filename": "r.json", "name": "r", "content": b64("[{\"id\": 1}, {\"id\": 2}]")}),
+    )
+    .await;
+    assert!(r.success, "{}", text(&r));
+    assert_eq!(nums(&dataset(&session, "r").await, "id"), [1.0, 2.0]);
+    let bad = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"filename": "n.ndjson", "content": b64("{\"a\": 1}\n{\"a\": {\"b\": 2}}\n")}),
+    )
+    .await;
+    assert!(
+        !bad.success && text(&bad).contains("line 2"),
+        "{}",
+        text(&bad)
+    );
+}
+
+/// upload_dataset reads CSV, Parquet, JSON Lines and JSON only: a declared Excel, Stata or SAS
+/// file_type passed the extension check and failed later with a format error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_upload_dataset_refuses_declared_types_it_cannot_read() {
+    use base64::Engine as _;
+    let (session, server) = session_with_datasets(vec![]);
+    let content = base64::engine::general_purpose::STANDARD.encode("not a spreadsheet");
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"filename": "u.xlsx", "file_type": "excel", "content": content}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(
+        !r.success && t.contains("file_type 'excel'") && t.contains("auto, csv, parquet"),
+        "{t}"
+    );
+    assert!(session.datasets.read().await.get("u").is_none());
+}

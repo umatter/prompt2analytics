@@ -107,6 +107,47 @@
       "tolerance": "counts exact; maximum height as printed with 4 decimals (Tol::printed(4))",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_residual_diagnostics",
+      "name": "MCP viz_residual_diagnostics: influential rows and residual standard error",
+      "category": "interfaces",
+      "reference": "stats::cooks.distance; summary.lm sigma",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "viz_residual_diag"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_residual_diagnostics_cooks"
+      ],
+      "quantities": [
+        "rows with Cook's distance > 0.5 (with and without hat values)",
+        "residual standard error",
+        "warning without hat values"
+      ],
+      "tolerance": "rows exact; sigma 7 significant digits (5e-7 relative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_histogram",
+      "name": "MCP viz_histogram: Sturges bin count and bin counts",
+      "category": "interfaces",
+      "reference": "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1), right = FALSE, include.lowest = TRUE)",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "viz_histogram_bins"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_histogram_counts"
+      ],
+      "quantities": [
+        "number of bins",
+        "count per bin"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

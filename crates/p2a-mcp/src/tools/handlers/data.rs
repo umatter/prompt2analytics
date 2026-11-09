@@ -1752,7 +1752,7 @@ impl AnalyticsServer {
 
     /// Load a dataset from a file.
     #[tool(
-        description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. CSV text \"NA\" and empty fields are read as missing (set na_strings to change this). Returns dataset information including dimensions and column types. A declared file_type must match the extension."
+        description = "Load a dataset from a file. Supports CSV, Parquet (.parquet, .pq), Excel (xlsx, xls, xlsb, ods), Stata (dta), SAS (sas7bdat), JSON Lines (.jsonl, .ndjson) and JSON record arrays (.json). CSV text \"NA\" and empty fields are read as missing (set na_strings to change this). Returns dataset information including dimensions and column types. A declared file_type must match the extension."
     )]
     pub async fn load_dataset(
         &self,
@@ -1952,7 +1952,7 @@ impl AnalyticsServer {
 
     /// Upload and load a dataset from base64-encoded content.
     #[tool(
-        description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV and Parquet formats. A declared file_type must match the extension."
+        description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson) and JSON record arrays (.json), chosen by the extension. A declared file_type must match the extension and be auto, csv or parquet."
     )]
     pub async fn upload_dataset(
         &self,
@@ -1963,6 +1963,25 @@ impl AnalyticsServer {
             &request.filename,
         ) {
             return Ok(CallToolResult::error(vec![Content::text(e)]));
+        }
+        // The extension check passed; the tool itself reads only some of the declared types.
+        let declared = crate::tools::common::parse_option(
+            request.file_type.as_deref(),
+            crate::tools::common::DeclaredFileType::Auto,
+        )
+        .unwrap_or(crate::tools::common::DeclaredFileType::Auto);
+        if !matches!(
+            declared,
+            crate::tools::common::DeclaredFileType::Auto
+                | crate::tools::common::DeclaredFileType::Csv
+                | crate::tools::common::DeclaredFileType::Parquet
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "upload_dataset cannot read file_type '{}': it reads CSV, Parquet, JSON Lines and \
+                 JSON uploads (load_dataset reads the other types from the data directory). \
+                 Accepted file_type values here: auto, csv, parquet",
+                declared.canonical()
+            ))]));
         }
         use base64::Engine;
 
@@ -2012,7 +2031,32 @@ impl AnalyticsServer {
                     }
                 }
             }
-            "parquet" => {
+            "jsonl" | "ndjson" | "json" => {
+                let lines = matches!(extension.to_lowercase().as_str(), "jsonl" | "ndjson");
+                let what = if lines { "JSON Lines" } else { "JSON" };
+                let text = match std::str::from_utf8(&decoded) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to decode {what} as UTF-8: {e}"
+                        ))]));
+                    }
+                };
+                let parsed = if lines {
+                    DataLoader::from_jsonl_string(text)
+                } else {
+                    DataLoader::from_json_string(text)
+                };
+                match parsed {
+                    Ok(df) => Dataset::new(df),
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to parse {what}: {e}"
+                        ))]));
+                    }
+                }
+            }
+            "parquet" | "pq" => {
                 // Checked and loaded from the request's bytes in memory
                 // (see load_parquet_upload): nothing is written to disk.
                 // Refused before decoding when the quotas would refuse the
@@ -2038,7 +2082,7 @@ impl AnalyticsServer {
             }
             other => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unsupported file format '{}'. Upload supports CSV and Parquet only.",
+                    "Unsupported file format '{}'. Upload supports CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson) and JSON record arrays (.json).",
                     other
                 ))]));
             }

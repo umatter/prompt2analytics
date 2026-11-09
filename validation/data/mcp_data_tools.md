@@ -41,3 +41,11 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
 - Conversion to the tool's 0-based rows: -j -> j - 1, k -> n + k - 1.
 - Test: `test_validate_mcp_dendrogram_hclust` (counts exact, height at 4 printed decimals); behaviour test
   `test_mcp_dendrogram_bad_linkage`.
+
+## Chart replies (`viz_residual_diagnostics`, `viz_histogram`)
+- `viz_residual_diag` (T3-WP52): `lm(mpg ~ wt)` without hat values flags row 16 (Cook's D
+  0.53190562559976873) and sigma 3.0458821247893773; with the hat values of `lm(mpg ~ wt + hp + qsec)`
+  none (max 0.3328494305479045), sigma 2.5777848825208176. Test
+  `test_validate_mcp_residual_diagnostics_cooks` (rows exact, sigma 7 significant digits).
+- `viz_histogram_bins` (T3-WP52): 100 normal draws, 8 Sturges bins, counts 4 7 9 13 31 17 12 7. Test
+  `test_validate_mcp_histogram_counts` (exact).

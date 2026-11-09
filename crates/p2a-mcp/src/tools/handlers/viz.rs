@@ -10,7 +10,8 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::limit_refusal;
+use crate::tools::common::{append_notes, limit_refusal};
+use crate::tools::handlers::data::format_significant;
 use crate::tools::limits;
 use crate::tools::requests::viz::*;
 
@@ -112,7 +113,7 @@ impl AnalyticsServer {
 
     /// Generate a histogram for a numeric column.
     #[tool(
-        description = "Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image along with bin statistics."
+        description = "Histogram of a numeric column (missing and non-finite values left out): equal-width bins from the minimum to the maximum, right-closed with the lowest value included, values within 1e-7 bin widths of a break assigned as R's hist() does; the bin count defaults to R's nclass.Sturges, ceiling(log2(n) + 1) (R's own hist() default also rounds the breaks with pretty(), which p2a does not). Returns a PNG image, the number of bins and the count per bin."
     )]
     pub async fn viz_histogram(
         &self,
@@ -177,10 +178,12 @@ impl AnalyticsServer {
 
         match histogram(&values, request.bins, config) {
             Ok(result) => {
+                let counts: Vec<String> = result.counts.iter().map(u32::to_string).collect();
                 let description = format!(
-                    "Histogram of '{}' generated successfully.\nBins: {}\nData points: {}",
+                    "Histogram of '{}' generated successfully.\nBins: {}\nCounts per bin: {}\nData points: {}",
                     request.column,
                     result.bins,
+                    counts.join(", "),
                     values.len()
                 );
                 Ok(CallToolResult::success(vec![
@@ -419,7 +422,7 @@ impl AnalyticsServer {
 
     /// Generate a box plot for comparing distributions.
     #[tool(
-        description = "Generate a box plot visualization comparing the distributions of one or more numeric columns. Shows median, quartiles, and outliers. Returns a base64-encoded PNG image."
+        description = "Box plots of one or more numeric columns with Tukey hinges and whiskers to the most extreme values within 1.5 IQR, as R's boxplot.stats; values beyond them are listed as outliers. Missing values are left out; ±Inf count as values and are listed as outliers but not drawn. Returns a PNG image and the statistics with n per column."
     )]
     pub async fn viz_boxplot(
         &self,
@@ -456,7 +459,8 @@ impl AnalyticsServer {
             let values: Vec<f64> = match col.cast(&DataType::Float64) {
                 // na-legacy(T4): per-column read (nulls dropped or NaN, no missing-value note)
                 Ok(c) => match c.f64() {
-                    Ok(f) => f.into_iter().flatten().filter(|v| v.is_finite()).collect(),
+                    // NaN is missing; ±Inf are values, as in R's boxplot.stats.
+                    Ok(f) => f.into_iter().flatten().filter(|v| !v.is_nan()).collect(),
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
                             "Column '{}' not numeric: {}",
@@ -486,12 +490,28 @@ impl AnalyticsServer {
 
         match box_plot(&groups, config) {
             Ok(result) => {
-                let mut description =
-                    String::from("Box plot generated successfully.\n\nStatistics:");
+                let mut description = String::from(
+                    "Box plot generated successfully (Tukey hinges, whiskers to the most extreme \
+                     values within 1.5 IQR, as R's boxplot.stats).\n\nStatistics:",
+                );
                 for stat in &result.statistics {
+                    if stat.n == 0 {
+                        description.push_str(&format!("\n{} (n = 0): no values", stat.label));
+                        continue;
+                    }
+                    let outliers = if stat.outliers.is_empty() {
+                        "none".to_string()
+                    } else {
+                        stat.outliers
+                            .iter()
+                            .map(|v| format!("{v:.4}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
                     description.push_str(&format!(
-                        "\n{}:\n  Min: {:.4}, Q1: {:.4}, Median: {:.4}, Q3: {:.4}, Max: {:.4}",
-                        stat.label, stat.min, stat.q1, stat.median, stat.q3, stat.max
+                        "\n{} (n = {}):\n  Lower whisker: {:.4}, Q1 (lower hinge): {:.4}, Median: {:.4}, \
+                         Q3 (upper hinge): {:.4}, Upper whisker: {:.4}\n  Outliers: {outliers}",
+                        stat.label, stat.n, stat.min, stat.q1, stat.median, stat.q3, stat.max
                     ));
                 }
                 Ok(CallToolResult::success(vec![
@@ -1035,7 +1055,7 @@ impl AnalyticsServer {
 
     /// Generate residual diagnostic plots for regression model validation.
     #[tool(
-        description = "Generate four diagnostic plots for regression analysis: (1) Residuals vs Fitted, (2) Normal Q-Q plot, (3) Scale-Location, (4) Residuals vs Leverage. Also calculates Cook's distance for identifying influential observations. Returns four base64-encoded PNG images."
+        description = "Four diagnostic plots of a fitted regression (Residuals vs Fitted, Normal Q-Q, Scale-Location, Residuals vs Leverage), with standardized residuals and Cook's distance as R's rstandard() and cooks.distance(). Exact when the model's hat values are given (leverage_column; R: hatvalues(model)); without them the hat values of a regression on one predictor are used and a warning says so. Rows with a missing fitted value or residual are left out. Reports the residual standard error and the dataset rows with Cook's distance above 0.5. Returns four PNG images."
     )]
     pub async fn viz_residual_diagnostics(
         &self,
@@ -1094,27 +1114,31 @@ impl AnalyticsServer {
 
         match residual_diagnostics(&fitted, &residuals, leverage.as_deref(), config) {
             Ok(result) => {
-                // Find observations with high Cook's distance
+                // Observations with high Cook's distance, as dataset rows.
                 let high_influence: Vec<usize> = result
                     .cooks_distance
                     .iter()
-                    .enumerate()
-                    .filter(|(_, d)| **d > 0.5)
-                    .map(|(i, _)| i)
+                    .zip(&result.rows)
+                    .filter(|(d, _)| **d > 0.5)
+                    .map(|(_, &row)| row)
                     .collect();
 
-                let description = format!(
+                let mut description = format!(
                     "Residual diagnostics generated (4 plots).\n\
                      Observations: {}\n\
-                     High influence points (Cook's D > 0.5): {}\n\
+                     Residual standard error: {} ({} coefficients)\n\
+                     High influence points (Cook's D > 0.5; dataset rows, 0-based): {}\n\
                      Plots: Residuals vs Fitted, Normal Q-Q, Scale-Location, Residuals vs Leverage",
                     result.n_observations,
+                    format_significant(result.sigma),
+                    result.n_params,
                     if high_influence.is_empty() {
                         "None".to_string()
                     } else {
                         format!("{:?}", high_influence)
                     }
                 );
+                append_notes(&mut description, None, &result.warnings);
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
                     Content::image(result.residuals_vs_fitted, "image/png"),
