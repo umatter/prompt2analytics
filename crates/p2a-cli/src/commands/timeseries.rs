@@ -909,8 +909,9 @@ fn ts_error_message(prefix: &str, err: &dyn std::fmt::Display) -> String {
     if message.contains("missing value") {
         text.push_str(
             " For a time series, impute rather than drop: fill the gaps first (for example: p2a \
-             munge fill-na <dataset> --method forward --columns <column>); dropping a value \
-             would splice the series.",
+             munge fill-na <dataset> --method forward --columns <column> for empty cells; NaN \
+             values from arithmetic must be recomputed or replaced); dropping a value would \
+             splice the series.",
         );
     }
     text
@@ -2208,6 +2209,27 @@ mod tests {
         assert_eq!(
             CHANGE_TYPES.canonical(CostFunction::MeanAndVariance),
             "meanvar"
+        );
+    }
+
+    /// The fill hint also covers NaN, which `munge fill-na --method forward` leaves.
+    #[test]
+    fn test_ts_error_message_hint_covers_nan() {
+        let m = ts_error_message(
+            "ARIMA failed",
+            &"Column 'y' contains 1 missing value(s) (null or NaN)",
+        );
+        assert!(
+            m.contains("impute rather than drop") && m.contains("munge fill-na"),
+            "{m}"
+        );
+        assert!(
+            m.contains("NaN values from arithmetic must be recomputed or replaced"),
+            "{m}"
+        );
+        assert_eq!(
+            ts_error_message("ARIMA failed", &"other"),
+            "ARIMA failed: other"
         );
     }
 }

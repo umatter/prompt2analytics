@@ -1940,3 +1940,57 @@ fn test_cli_viz_dendrogram_linkage() {
         "centroid",
     )]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// leftover minors
+// ---------------------------------------------------------------------------------------------
+
+/// A target error was reported as "Failed to extract feature data".
+#[test]
+fn test_cli_ml_target_error_names_data() {
+    let s = temp_session();
+    let path = s.dir().join("t.csv");
+    std::fs::write(
+        &path,
+        "x1,x2,y,c\n1.5,2.0,3.1,0\n2.5,1.0,,1\n3.5,5.0,4.2,0\n4.5,3.0,6.3,1\n5.5,4.0,7.9,0\n6.5,2.5,9.4,1\n",
+    )
+    .unwrap();
+    s.load_as(&path, "t", &[]);
+    let e = s.err(&["ml", "random-forest", "t", "--cols", "x1", "x2", "-y", "y"]);
+    assert!(
+        e.contains("Failed to extract data: Column 'y' contains 1 missing value(s)")
+            && !e.contains("feature data"),
+        "{e}"
+    );
+    // svm omits incomplete rows (e1071's formula interface); a text target is the error here
+    let e = s.err(&["ml", "svm", "t", "--cols", "x1", "x2", "-y", "nope"]);
+    assert!(
+        e.contains("Failed to extract data:") && !e.contains("feature data"),
+        "{e}"
+    );
+}
+
+/// viz dendrogram of one row reached the core ("Linkage matrix is empty").
+#[test]
+fn test_cli_dendrogram_refuses_one_row() {
+    let s = temp_session();
+    let path = s.dir().join("one.csv");
+    std::fs::write(&path, "a,b\n1.5,2.5\n").unwrap();
+    s.load_as(&path, "one", &[]);
+    let png = s.dir().join("t.png");
+    let e = s.err(&[
+        "viz",
+        "dendrogram",
+        "one",
+        "--cols",
+        "a",
+        "b",
+        "-f",
+        png.to_str().unwrap(),
+    ]);
+    assert!(
+        e.contains("need at least 2 observations")
+            && e.contains("viz dendrogram, columns 'a', 'b'"),
+        "{e}"
+    );
+}

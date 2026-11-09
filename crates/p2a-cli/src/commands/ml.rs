@@ -347,10 +347,6 @@ pub fn execute(
     }
 }
 
-/// Features (and the target, requested first, so that [`NaPolicy::Fail`] names it first)
-/// through the shared extractor under `policy` (Fail for every ML command
-/// except `ml svm`, which drops incomplete rows as e1071's formula interface does).
-/// Integer and boolean columns are numeric; text is refused by name.
 /// `--max-features` of `ml random-forest`: sqrt, log2, all (any case) or an integer >= 1. The
 /// core reads anything else as sqrt, so it is refused here.
 fn parse_max_features(s: &str) -> Result<String, String> {
@@ -393,28 +389,50 @@ fn scores_csv(scores: &Array2<f64>) -> String {
     out
 }
 
-fn ml_columns(
+/// Features through the shared extractor under `policy` (Fail for every ML command except
+/// `ml svm`, which drops incomplete rows as e1071's formula interface does). Integer and boolean
+/// columns are numeric; text is refused by name.
+fn ml_matrix(
     ds: &p2a_core::Dataset,
     cols: &[String],
-    target: Option<&str>,
     policy: NaPolicy,
-) -> Result<(Array2<f64>, Option<Array1<f64>>, MissingSummary), String> {
+) -> Result<(Array2<f64>, MissingSummary), String> {
     if cols.is_empty() {
         return Err("No columns specified".to_string());
     }
     let feats: Vec<&str> = cols.iter().map(String::as_str).collect();
-    let mut request = ColumnRequest::new(ds.df());
-    if let Some(t) = target {
-        request = request.numeric(t);
-    }
-    let c = request
+    let c = ColumnRequest::new(ds.df())
         .numerics(&feats)
         .na(policy)
         .extract()
         .map_err(|e| e.to_string())?;
     Ok((
         c.matrix(&feats, false).map_err(|e| e.to_string())?.data,
-        target.map(|t| c.numeric_array(t)),
+        c.missing().clone(),
+    ))
+}
+
+/// Features and the target (requested first, so that [`NaPolicy::Fail`] names it first), as
+/// [`ml_matrix`].
+fn ml_xy(
+    ds: &p2a_core::Dataset,
+    cols: &[String],
+    target: &str,
+    policy: NaPolicy,
+) -> Result<(Array2<f64>, Array1<f64>, MissingSummary), String> {
+    if cols.is_empty() {
+        return Err("No columns specified".to_string());
+    }
+    let feats: Vec<&str> = cols.iter().map(String::as_str).collect();
+    let c = ColumnRequest::new(ds.df())
+        .numeric(target)
+        .numerics(&feats)
+        .na(policy)
+        .extract()
+        .map_err(|e| e.to_string())?;
+    Ok((
+        c.matrix(&feats, false).map_err(|e| e.to_string())?.data,
+        c.numeric_array(target),
         c.missing().clone(),
     ))
 }
@@ -442,7 +460,7 @@ fn execute_kmeans(
     match dataset {
         Some(ds) => {
             // Extract columns as Array2
-            let (data, _, _) = match ml_columns(ds, cols, None, NaPolicy::Fail) {
+            let (data, _) = match ml_matrix(ds, cols, NaPolicy::Fail) {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
@@ -534,7 +552,7 @@ fn execute_pca(
     match dataset {
         Some(ds) => {
             // Extract columns as Array2
-            let (data, _, _) = match ml_columns(ds, cols, None, NaPolicy::Fail) {
+            let (data, _) = match ml_matrix(ds, cols, NaPolicy::Fail) {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
@@ -682,7 +700,7 @@ fn execute_tsne(
 
     match dataset {
         Some(ds) => {
-            let (data, _, _) = match ml_columns(ds, cols, None, NaPolicy::Fail) {
+            let (data, _) = match ml_matrix(ds, cols, NaPolicy::Fail) {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
@@ -766,14 +784,13 @@ fn execute_random_forest(
 
     match dataset {
         Some(ds) => {
-            let (data, target, _missing) =
-                match ml_columns(ds, cols, Some(target_col), NaPolicy::Fail) {
-                    Ok((x, y, m)) => (x, y.unwrap_or_default(), m),
-                    Err(e) => {
-                        print_error(&format!("Failed to extract feature data: {}", e), format);
-                        return Ok(());
-                    }
-                };
+            let (data, target, _missing) = match ml_xy(ds, cols, target_col, NaPolicy::Fail) {
+                Ok(c) => c,
+                Err(e) => {
+                    print_error(&format!("Failed to extract data: {}", e), format);
+                    return Ok(());
+                }
+            };
 
             let feature_names: Vec<String> = cols.to_vec();
 
@@ -849,7 +866,7 @@ fn execute_dbscan(
 
     match dataset {
         Some(ds) => {
-            let (data, _, _) = match ml_columns(ds, cols, None, NaPolicy::Fail) {
+            let (data, _) = match ml_matrix(ds, cols, NaPolicy::Fail) {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
@@ -936,7 +953,7 @@ fn execute_hierarchical(
 
     match dataset {
         Some(ds) => {
-            let (data, _, _) = match ml_columns(ds, cols, None, NaPolicy::Fail) {
+            let (data, _) = match ml_matrix(ds, cols, NaPolicy::Fail) {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
@@ -1021,14 +1038,13 @@ fn execute_svm(
 
     match dataset {
         Some(ds) => {
-            let (data, target, missing) =
-                match ml_columns(ds, cols, Some(target_col), NaPolicy::Omit) {
-                    Ok((x, y, m)) => (x, y.unwrap_or_default(), m),
-                    Err(e) => {
-                        print_error(&format!("Failed to extract feature data: {}", e), format);
-                        return Ok(());
-                    }
-                };
+            let (data, target, missing) = match ml_xy(ds, cols, target_col, NaPolicy::Omit) {
+                Ok(c) => c,
+                Err(e) => {
+                    print_error(&format!("Failed to extract data: {}", e), format);
+                    return Ok(());
+                }
+            };
 
             let feature_names: Vec<String> = cols.to_vec();
 

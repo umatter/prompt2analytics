@@ -1349,9 +1349,11 @@ fn execute_dendrogram(
         Some(ds) => {
             // hclust of rows with a missing value is undefined: refuse them (Int64 accepted).
             let names: Vec<&str> = cols.iter().map(String::as_str).collect();
+            // hclust needs two objects
             let columns = match ColumnRequest::new(ds.df())
                 .numerics(&names)
                 .na(NaPolicy::Fail)
+                .min_rows(2, &extraction_context("dendrogram", &names))
                 .extract()
             {
                 Ok(c) => c,
