@@ -357,7 +357,7 @@ impl AnalyticsServer {
 
     /// Apply a cleaning operation within a session.
     #[tool(
-        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant."
+        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant. Pass output_dataset to store the session's current data as a dataset that analysis tools can read."
     )]
     pub async fn cleaning_session_apply(
         &self,
@@ -521,6 +521,20 @@ impl AnalyticsServer {
                     reply.push_str("\n\n");
                 }
                 reply.push_str(&report.summary());
+                let current = request
+                    .output_dataset
+                    .is_some()
+                    .then(|| shared.current_dataset().clone());
+                drop(sessions);
+                reply.push_str(
+                    &self
+                        .store_session_result(
+                            "cleaning_session_apply",
+                            request.output_dataset,
+                            current,
+                        )
+                        .await?,
+                );
                 Ok(CallToolResult::success(vec![Content::text(reply)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -532,7 +546,7 @@ impl AnalyticsServer {
 
     /// Rollback a cleaning session to a previous checkpoint.
     #[tool(
-        description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation)."
+        description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation). Pass output_dataset to store the session's current data as a dataset that analysis tools can read."
     )]
     pub async fn cleaning_rollback(
         &self,
@@ -565,7 +579,7 @@ impl AnalyticsServer {
         match result {
             Ok(()) => {
                 let status = session.status();
-                Ok(CallToolResult::success(vec![Content::text(format!(
+                let mut reply = format!(
                     "Rollback successful!\n\n\
                      Current checkpoint: {}\n\
                      Rows: {}\n\
@@ -573,7 +587,18 @@ impl AnalyticsServer {
                     status.current_checkpoint,
                     status.current_row_count,
                     status.current_completeness * 100.0
-                ))]))
+                );
+                let current = request
+                    .output_dataset
+                    .is_some()
+                    .then(|| session.current_dataset().clone());
+                drop(sessions);
+                reply.push_str(
+                    &self
+                        .store_session_result("cleaning_rollback", request.output_dataset, current)
+                        .await?,
+                );
+                Ok(CallToolResult::success(vec![Content::text(reply)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Rollback failed: {}",
@@ -764,6 +789,50 @@ fn suggested_value(operation: &str, parameters: &p2a_core::data::SuggestionParam
             format!("{value} (shown for reference; pass only strategy '{strategy}' to fill_na)")
         }
         _ => value.to_string(),
+    }
+}
+
+impl AnalyticsServer {
+    /// The end of a cleaning step's reply: stores `current` (the session's
+    /// dataset after the step, cloned with the session lock released) under
+    /// `output_dataset` and says so, or says how to keep the result. With
+    /// quotas on, the stored copy is charged as a dataset first; a shortfall
+    /// is the quota refusal, and the step stays applied in the session.
+    async fn store_session_result(
+        &self,
+        tool: &str,
+        output_dataset: Option<String>,
+        current: Option<p2a_core::data::Dataset>,
+    ) -> Result<String, McpError> {
+        let (Some(name), Some(dataset)) = (output_dataset, current) else {
+            return Ok(
+                "\nThe result is in the cleaning session only; pass output_dataset to \
+                 store it as a dataset."
+                    .to_string(),
+            );
+        };
+        if crate::session::dataset_admission_active() {
+            let bytes: u64 = dataset
+                .df()
+                .get_columns()
+                .iter()
+                .map(|c| crate::session::series_bytes(c.as_materialized_series()))
+                .fold(0, u64::saturating_add);
+            if let Err(shortfall) = crate::session::admit_charge(&name, bytes).await {
+                return Err(crate::session::quota_refusal(format!(
+                    "{tool} applied its step in the cleaning session, but storing the result as \
+                     '{name}' would take {}, so {}. The step stays applied \
+                     in the cleaning session; nothing was stored.",
+                    crate::session::fmt_bytes(bytes),
+                    shortfall.outcome()
+                )));
+            }
+        }
+        let (rows, cols) = (dataset.nrows(), dataset.ncols());
+        self.datasets.write().await.insert(name.clone(), dataset);
+        Ok(format!(
+            "\nSaved as '{name}' ({rows} rows x {cols} columns)."
+        ))
     }
 }
 

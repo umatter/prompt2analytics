@@ -891,3 +891,106 @@ async fn test_mcp_upload_dataset_refuses_declared_types_it_cannot_read() {
     );
     assert!(session.datasets.read().await.get("u").is_none());
 }
+
+/// LLM-5: a cleaning session's result reaches the dataset store only through output_dataset; the original is untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_cleaning_session_output_dataset_is_stored() {
+    let s = Dataset::new(
+        df!("y" => [Some(1.0), None, Some(3.0), Some(4.5), None, Some(6.0)],
+                             "x" => [Some(1i64), Some(2), None, Some(4), Some(5), Some(6)])
+        .unwrap(),
+    );
+    let (session, server) = session_with_datasets(vec![("survey", s)]);
+    let sid = session_id(&text(
+        &call(
+            &server,
+            &session,
+            "cleaning_session_start",
+            json!({"dataset": "survey"}),
+        )
+        .await,
+    ));
+    // without output_dataset: applied in the session only, and the reply says how to keep it
+    let a = call(
+        &server,
+        &session,
+        "cleaning_session_apply",
+        json!({"session_id": sid, "operation": "drop_na"}),
+    )
+    .await;
+    assert!(
+        a.success && text(&a).contains("output_dataset"),
+        "{}",
+        text(&a)
+    );
+    assert_eq!(dataset(&session, "survey").await.df().height(), 6);
+    // with output_dataset: stored under that name (fails before: unknown field `output_dataset`, D2)
+    let a = call(
+        &server,
+        &session,
+        "cleaning_session_apply",
+        json!({"session_id": sid, "operation": "deduplicate", "output_dataset": "survey_clean"}),
+    )
+    .await;
+    let t = text(&a);
+    assert!(
+        a.success && t.contains("Saved as 'survey_clean' (3 rows x 2 columns)."),
+        "{t}"
+    );
+    let clean = dataset(&session, "survey_clean").await;
+    // core deduplicate does not keep the row order, so the values are compared as a set
+    let mut y = nums(&clean, "y");
+    y.sort_by(f64::total_cmp);
+    assert_eq!(y, [1.0, 4.5, 6.0]);
+    assert_eq!(dataset(&session, "survey").await.df().height(), 6); // the source dataset is not overwritten
+    // an analysis tool now reads the cleaned data
+    let d = text(
+        &call(
+            &server,
+            &session,
+            "describe_dataset",
+            json!({"dataset": "survey_clean"}),
+        )
+        .await,
+    );
+    assert!(d.contains("3 rows"), "{d}");
+}
+
+/// LLM-5: a rollback can store the state it returns to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_cleaning_rollback_output_dataset() {
+    let s = Dataset::new(df!("y" => [Some(1.0), None, Some(3.0)]).unwrap());
+    let (session, server) = session_with_datasets(vec![("s", s)]);
+    let sid = session_id(&text(
+        &call(
+            &server,
+            &session,
+            "cleaning_session_start",
+            json!({"dataset": "s"}),
+        )
+        .await,
+    ));
+    assert!(
+        call(
+            &server,
+            &session,
+            "cleaning_session_apply",
+            json!({"session_id": sid, "operation": "drop_na"})
+        )
+        .await
+        .success
+    );
+    let r = call(
+        &server,
+        &session,
+        "cleaning_rollback",
+        json!({"session_id": sid, "output_dataset": "s_back"}),
+    )
+    .await;
+    assert!(
+        r.success && text(&r).contains("Saved as 's_back' (3 rows x 1 columns)."),
+        "{}",
+        text(&r)
+    );
+    assert_eq!(dataset(&session, "s_back").await.df().height(), 3);
+}

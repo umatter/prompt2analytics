@@ -127,6 +127,12 @@ pub struct CleaningRollbackRequest {
         description = "Checkpoint index to rollback to. If not provided, rolls back to the previous checkpoint."
     )]
     pub checkpoint_index: Option<usize>,
+
+    /// Name to store the session's dataset under after this step
+    #[schemars(
+        description = "Store the session's dataset after this step under this name, so that analysis tools can use it (an existing dataset of that name is replaced). Without it the result stays in the cleaning session only."
+    )]
+    pub output_dataset: Option<String>,
 }
 
 /// Request to apply a cleaning operation within a session.
@@ -180,6 +186,12 @@ pub struct CleaningSessionApplyRequest {
     /// Value for filter comparison
     #[schemars(description = "For filter: value to compare against.")]
     pub filter_value: Option<String>,
+
+    /// Name to store the session's dataset under after this step
+    #[schemars(
+        description = "Store the session's dataset after this step under this name, so that analysis tools can use it (an existing dataset of that name is replaced). Without it the result stays in the cleaning session only."
+    )]
+    pub output_dataset: Option<String>,
 }
 
 /// Request to list all checkpoints in a session.
