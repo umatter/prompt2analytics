@@ -534,5 +534,61 @@ class Econ80Test(unittest.TestCase):
                 self.assertTrue(any(e["doc"].endswith("econometrics/timeseries/" + name) for e in entries))
 
 
+# ---------------------------------------------------------------- Task 5: ECON-81 and deferred-pin clauses
+
+# Each family of the old "Survival ... / Discrete ..." status lines (ECON-81) and a pattern its registry
+# entry matches in id, name or reference.
+ECON81_FAMILIES = [
+    ("Kaplan-Meier", r"kaplan|\bkm\b|_km_|survfit"), ("log-rank", r"log.?rank|survdiff"), ("Cox PH", r"\bcox"),
+    ("AFT", r"\baft\b|accelerated failure|survreg"), ("logit", r"logit"), ("probit", r"probit"),
+    ("multinomial logit", r"multinom"), ("ordered logit/probit", r"ordered"),
+    ("negative binomial", r"negbin|negative binomial|glm\.nb"), ("ZIP", r"\bzip\b|zero-inflated poisson"),
+    ("ZINB", r"\bzinb\b|zero-inflated negative"), ("hurdle (zero part)", r"hurdle"),
+    ("conditional logit", r"conditional.logit|mlogit"), ("mixed logit", r"mixed.logit|gmnl|rpar"),
+]
+ECON81_LEGACY = ["ordered_logit_test.csv", "zip_test.csv", "hurdle_poisson_test.csv", "negbin_test.csv", "logit_simple.csv"]
+
+
+class Econ81Test(unittest.TestCase):
+    def test_every_family_is_registered(self):
+        entries = registry_entries()
+        text = [f"{e['id']} {e['name']} {e['reference']}".lower() for e in entries]
+        missing = [fam for fam, pat in ECON81_FAMILIES if not any(re.search(pat, t) for t in text)]
+        self.assertEqual(missing, [])
+
+    def test_competing_risks_is_pinned_or_says_not(self):
+        entries = registry_entries()
+        if any(re.search(r"competing|cuminc", f"{e['id']} {e['name']}".lower()) for e in entries):
+            return
+        surv = (VALIDATION / "econometrics/survival.md").read_text(encoding="utf-8")
+        self.assertRegex(surv, r"(?im)^.*competing risks.*\bnot R-pinned \([A-Z]+-\d+")
+
+    def test_named_legacy_csvs_are_superseded_or_unclaimed(self):
+        superseded = {os.path.basename(p) for e in registry_entries() for p in e.get("supersedes_legacy", [])}
+        claims = []
+        for name in ECON81_LEGACY:
+            if name in superseded:
+                continue
+            for p in md_files():
+                for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                    if name in line and not re.search(r"not asserted|legacy", line, re.I):
+                        claims.append(f"{p.relative_to(REPO)}:{n}: {line.strip()}")
+        self.assertEqual(claims, [], "\n" + "\n".join(claims))
+
+
+class DeferredClaimsTest(unittest.TestCase):
+    """No validation doc still defers its R pin to one of the seven findings WP64 closes."""
+
+    DEFER = re.compile(r"\b(?:comes? with|arrives? with|added (?:later )?by|adds? the (?:R-pinned )?case|left (?:open )?for|pending|waits? for|deferred to)\b[^.\n|]{0,100}?\b(" + "|".join(re.escape(s) for s in SEVEN) + r")\b")
+
+    def test_no_doc_defers_to_a_closed_finding(self):
+        hits = []
+        for p in md_files():
+            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                if self.DEFER.search(line):
+                    hits.append(f"{p.relative_to(REPO)}:{n}: {line.strip()[:160]}")
+        self.assertEqual(hits, [], "\n" + "\n".join(hits))
+
+
 if __name__ == "__main__":
     unittest.main()

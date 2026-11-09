@@ -140,7 +140,8 @@ fixest::fepois(count ~ x | firm + year, data = cp, vcov = "iid")
 **R results** (n = 12): alpaca β(x) 1.160068290949554 (SE 2.803479169540262); fixest
 1.160073314420888 (SE iid 4.158232662532352, logLik -19.56317883072528).
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with X-10):
+**Rust tests** (not R-pinned: structure only on these 12 rows; the Poisson coefficients of Case E are a
+registry deviation, ECON-20, Tier 4):
 - `econometrics::feglm::tests::test_feglm_poisson_basic` (`crates/p2a-core/src/econometrics/feglm.rs`): structure only (family, a coefficient, positive dispersion).
 
 ### Case C: Binary panel (`create_binary_panel()`)
