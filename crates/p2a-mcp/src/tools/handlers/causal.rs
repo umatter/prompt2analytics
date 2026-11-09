@@ -33,8 +33,11 @@ use crate::tools::requests::causal::{
     StdRegRequest, SyntheticControlRequest, TmleRequest, TwangRequest, WeightItRequest,
 };
 
+use crate::tools::common::parse_option;
 use p2a_core::linalg::design::DesignMatrix;
+use p2a_core::options::Choices;
 use p2a_core::regression::HacKernel;
+use p2a_core::regression::ModelType as MarginalModel;
 use p2a_core::{
     AttEstimationMethod, BPBoundsConfig, BandwidthMethod, CTmleConfig, CTmleQModel, CbpsConfig,
     CbpsMethod, ComparisonGroup, ControlGroup as EtwfeControlGroup, DRMethod, DistanceMethod,
@@ -73,6 +76,154 @@ fn rd_option<T>(
             p2a_core::EconError::InvalidSpecification { message } => message,
             other => other.to_string(),
         }),
+    }
+}
+
+/// The bare message of an option error (the option and the accepted values), else the error's
+/// Display.
+fn option_message(e: p2a_core::EconError) -> String {
+    match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    }
+}
+
+/// `None` gives `default`; `Some(s)` parses `s` with a local table, an unknown value giving the
+/// bare message (the local twin of `common::parse_option`).
+fn choice<T: Copy + PartialEq + 'static>(
+    table: &'static Choices<T>,
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        None => Ok(default),
+        Some(s) => table.parse(s).map_err(option_message),
+    }
+}
+
+/// Unwraps a `Result<T, String>`, or returns the message as a tool error from the handler.
+macro_rules! tool_try {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        }
+    };
+}
+
+/// twang's stopping rules (`stop.method`).
+static STOP_METHOD: Choices<StopMethod> = Choices {
+    option: "stop_method",
+    values: &[
+        (&["es.mean", "esmean"], StopMethod::ESMean),
+        (&["es.max", "esmax"], StopMethod::ESMax),
+        (&["ks.mean", "ksmean"], StopMethod::KSMean),
+        (&["ks.max", "ksmax"], StopMethod::KSMax),
+    ],
+};
+
+/// twang's estimands.
+static TWANG_ESTIMAND: Choices<TwangEstimand> = Choices {
+    option: "estimand",
+    values: &[
+        (&["att"], TwangEstimand::ATT),
+        (&["ate"], TwangEstimand::ATE),
+        (&["atc"], TwangEstimand::ATC),
+    ],
+};
+
+/// rd_multi's pooling weights across cutoffs.
+static POOLING_WEIGHTS: Choices<PoolingWeights> = Choices {
+    option: "pooling_weights",
+    values: &[
+        (
+            &["sample_size", "samplesize", "n"],
+            PoolingWeights::SampleSize,
+        ),
+        (
+            &["inverse_variance", "iv", "precision"],
+            PoolingWeights::InverseVariance,
+        ),
+        (&["equal", "uniform"], PoolingWeights::Equal),
+    ],
+};
+
+/// The models marginal_effects fits.
+static MARGINAL_MODEL: Choices<MarginalModel> = Choices {
+    option: "model",
+    values: &[
+        (&["ols", "linear", "lm"], MarginalModel::Ols),
+        (&["logit", "logistic"], MarginalModel::Logit),
+        (&["probit"], MarginalModel::Probit),
+    ],
+};
+
+/// The effect measures the E-value takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectMeasure {
+    Rr,
+    Or,
+    Hr,
+    Smd,
+    Rd,
+}
+
+static EFFECT_MEASURE: Choices<EffectMeasure> = Choices {
+    option: "effect_type",
+    values: &[
+        (
+            &["rr", "risk_ratio", "riskratio", "relative_risk"],
+            EffectMeasure::Rr,
+        ),
+        (&["or", "odds_ratio", "oddsratio"], EffectMeasure::Or),
+        (&["hr", "hazard_ratio", "hazardratio"], EffectMeasure::Hr),
+        (
+            &[
+                "smd",
+                "standardized_mean_difference",
+                "standardised_mean_difference",
+            ],
+            EffectMeasure::Smd,
+        ),
+        (
+            &["rd", "risk_difference", "riskdifference"],
+            EffectMeasure::Rd,
+        ),
+    ],
+};
+
+/// The regime an LTMLE estimate is contrasted with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContrastKind {
+    Never,
+    Always,
+    Dynamic,
+    None,
+}
+
+static LTMLE_CONTRAST: Choices<ContrastKind> = Choices {
+    option: "contrast",
+    values: &[
+        (
+            &["never", "never_treat", "control", "untreated"],
+            ContrastKind::Never,
+        ),
+        (
+            &["always", "always_treat", "treat", "treated"],
+            ContrastKind::Always,
+        ),
+        (
+            &["dynamic", "rule", "threshold_rule"],
+            ContrastKind::Dynamic,
+        ),
+        (&["none", "no_contrast"], ContrastKind::None),
+    ],
+};
+
+impl AnalyticsServer {
+    /// The session's global seed, used when a request sets none.
+    async fn session_seed(&self) -> Option<u64> {
+        *self.global_seed.read().await
     }
 }
 
@@ -296,6 +447,10 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<IVMTERequest>,
     ) -> Result<CallToolResult, McpError> {
+        let propensity_model = tool_try!(parse_option(
+            request.propensity_model.as_deref(),
+            PropensityModel::Probit
+        ));
         use p2a_core::linalg::design::DesignMatrix;
 
         let datasets = self.datasets.read().await;
@@ -333,13 +488,6 @@ impl AnalyticsServer {
                     request.z, e
                 ))]));
             }
-        };
-
-        // Parse propensity model
-        let propensity_model = match request.propensity_model.as_deref() {
-            Some("logit") => PropensityModel::Logit,
-            Some("linear") => PropensityModel::Linear,
-            _ => PropensityModel::Probit, // default
         };
 
         // Build config
@@ -382,22 +530,17 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<StaggeredDiDRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let comparison_group = tool_try!(parse_option(
+            request.comparison_group.as_deref(),
+            ComparisonGroup::NeverTreated
+        ));
+        let estimation_method = tool_try!(parse_option(
+            request.estimation_method.as_deref(),
+            AttEstimationMethod::OutcomeRegression
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        // Parse comparison group
-        let comparison_group = match request.comparison_group.as_deref() {
-            Some("not_yet_treated") | Some("notyet") => ComparisonGroup::NotYetTreated,
-            _ => ComparisonGroup::NeverTreated,
-        };
-
-        // Parse estimation method
-        let estimation_method = match request.estimation_method.as_deref() {
-            Some("ipw") => AttEstimationMethod::IPW,
-            Some("doubly_robust") | Some("dr") | Some("aipw") => AttEstimationMethod::DoublyRobust,
-            _ => AttEstimationMethod::OutcomeRegression,
-        };
 
         // Build config
         let config = StaggeredDidConfig {
@@ -481,15 +624,13 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<EtwfeRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let cgroup = tool_try!(parse_option(
+            request.cgroup.as_deref(),
+            EtwfeControlGroup::NotYet
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        // Parse control group
-        let cgroup = match request.cgroup.as_deref() {
-            Some("never") => EtwfeControlGroup::Never,
-            _ => EtwfeControlGroup::NotYet,
-        };
 
         // Build config
         let mut config = EtwfeConfig::default();
@@ -536,17 +677,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<IpwRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let estimand = tool_try!(parse_option(request.estimand.as_deref(), Estimand::ATE));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse estimand
-        let estimand = match request.estimand.as_deref() {
-            Some("att") | Some("ATT") => Estimand::ATT,
-            _ => Estimand::ATE,
-        };
 
         let mut config = IpwConfig::default();
         config.trim = request.trim.unwrap_or(0.05);
@@ -587,24 +723,13 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<DoublyRobustRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let method = tool_try!(parse_option(request.method.as_deref(), DRMethod::AIPW));
+        let estimand = tool_try!(parse_option(request.estimand.as_deref(), Estimand::ATE));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse method
-        let method = match request.method.as_deref() {
-            Some("ipw") | Some("IPW") => DRMethod::IPW,
-            Some("regression") | Some("reg") => DRMethod::Regression,
-            _ => DRMethod::AIPW,
-        };
-
-        // Parse estimand
-        let estimand = match request.estimand.as_deref() {
-            Some("att") | Some("ATT") => Estimand::ATT,
-            _ => Estimand::ATE,
-        };
 
         let mut config = DoublyRobustConfig::default();
         config.method = method;
@@ -643,6 +768,11 @@ impl AnalyticsServer {
         Parameters(request): Parameters<DoubleMLRequest>,
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::econometrics::{DMLModelType, DoubleMLConfig, TreatmentType, run_double_ml};
+
+        let model_type = tool_try!(parse_option(
+            request.model_type.as_deref(),
+            DMLModelType::PLR
+        ));
 
         let datasets = self.datasets.read().await;
 
@@ -690,12 +820,6 @@ impl AnalyticsServer {
             }
         };
 
-        // Parse model type
-        let model_type = match request.model_type.as_deref() {
-            Some("irm") | Some("IRM") | Some("interactive") => DMLModelType::IRM,
-            _ => DMLModelType::PLR,
-        };
-
         // Determine treatment type for IRM
         let is_binary = d
             .iter()
@@ -738,18 +862,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<CbpsRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let method = tool_try!(parse_option(request.method.as_deref(), CbpsMethod::Over));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse method
-        let method = match request.method.as_deref() {
-            Some("over") | Some("overbalance") => CbpsMethod::OverBalance,
-            Some("just") | Some("justified") | Some("logit") => CbpsMethod::JustIdentified,
-            _ => CbpsMethod::ExactBalance,
-        };
 
         let mut config = CbpsConfig::default();
         config.method = method;
@@ -780,26 +898,19 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<WeightItRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let method = tool_try!(parse_option(
+            request.method.as_deref(),
+            WeightMethod::Logistic
+        ));
+        let estimand = tool_try!(parse_option(
+            request.estimand.as_deref(),
+            WeightEstimand::ATE
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse weighting method
-        let method = match request.method.as_deref() {
-            Some("entropy") | Some("ebal") => WeightMethod::Entropy,
-            Some("energy") => WeightMethod::Energy,
-            Some("stable") | Some("sbw") => WeightMethod::Stable,
-            _ => WeightMethod::Logistic,
-        };
-
-        // Parse estimand
-        let estimand = match request.estimand.as_deref() {
-            Some("att") | Some("ATT") => WeightEstimand::ATT,
-            Some("atc") | Some("ATC") => WeightEstimand::ATC,
-            _ => WeightEstimand::ATE,
-        };
 
         let mut config = WeightItConfig::default();
         config.method = method;
@@ -867,18 +978,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SBWRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let estimand = tool_try!(parse_option(request.estimand.as_deref(), SBWEstimand::ATT));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse estimand
-        let estimand = match request.estimand.as_deref() {
-            Some("ate") | Some("ATE") => SBWEstimand::ATE,
-            Some("atc") | Some("ATC") => SBWEstimand::ATC,
-            _ => SBWEstimand::ATT,
-        };
 
         let mut config = SBWConfig::default();
         config.estimand = estimand;
@@ -912,26 +1017,21 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<TwangRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let stop_method = tool_try!(choice(
+            &STOP_METHOD,
+            request.stop_method.as_deref(),
+            StopMethod::ESMean
+        ));
+        let estimand = tool_try!(choice(
+            &TWANG_ESTIMAND,
+            request.estimand.as_deref(),
+            TwangEstimand::ATT
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse stopping rule
-        let stop_method = match request.stop_method.as_deref() {
-            Some("es.max") | Some("esmax") | Some("ESMax") => StopMethod::ESMax,
-            Some("ks.mean") | Some("ksmean") | Some("KSMean") => StopMethod::KSMean,
-            Some("ks.max") | Some("ksmax") | Some("KSMax") => StopMethod::KSMax,
-            _ => StopMethod::ESMean,
-        };
-
-        // Parse estimand
-        let estimand = match request.estimand.as_deref() {
-            Some("ate") | Some("ATE") => TwangEstimand::ATE,
-            Some("atc") | Some("ATC") => TwangEstimand::ATC,
-            _ => TwangEstimand::ATT,
-        };
 
         let mut config = TwangConfig::default();
         config.n_trees = request.n_trees.unwrap_or(3000);
@@ -966,38 +1066,38 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<MatchItRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::matching::MatchMethodKind;
+        let method_kind = tool_try!(parse_option(
+            request.method.as_deref(),
+            MatchMethodKind::Nearest
+        ));
+        let distance = Some(tool_try!(parse_option(
+            request.distance.as_deref(),
+            DistanceMethod::Logit
+        )));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
-        // Parse matching method
-        let method = match request.method.as_deref() {
-            Some("cem") | Some("CEM") | Some("coarsened") => MatchMethod::CoarsenedExact {
+        let method = match method_kind {
+            MatchMethodKind::Cem => MatchMethod::CoarsenedExact {
                 cutpoints: None,
                 n_bins: Some(4),
             },
-            Some("full") | Some("optimal") => MatchMethod::Full {
+            MatchMethodKind::Full => MatchMethod::Full {
                 min_ratio: 0.5,
                 max_ratio: 2.0,
             },
-            Some("subclass") | Some("stratify") => MatchMethod::Subclass {
+            MatchMethodKind::Subclass => MatchMethod::Subclass {
                 n_subclasses: request.n_subclasses.unwrap_or(5),
             },
-            _ => MatchMethod::NearestNeighbor {
+            MatchMethodKind::Nearest => MatchMethod::NearestNeighbor {
                 ratio: request.ratio.unwrap_or(1),
                 caliper: request.caliper,
                 replace: request.replace.unwrap_or(false),
             },
-        };
-
-        // Parse distance metric
-        let distance = match request.distance.as_deref() {
-            Some("probit") | Some("Probit") => Some(DistanceMethod::Probit),
-            Some("mahalanobis") | Some("Mahalanobis") => Some(DistanceMethod::Mahalanobis),
-            Some("euclidean") | Some("Euclidean") => Some(DistanceMethod::Euclidean),
-            _ => Some(DistanceMethod::Logit),
         };
 
         let result: MatchResult =
@@ -1027,17 +1127,12 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<TmleRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let q_model = tool_try!(parse_option(request.q_model.as_deref(), QModel::Logistic));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse outcome model type
-        let q_model = match request.q_model.as_deref() {
-            Some("linear") | Some("Linear") | Some("continuous") => QModel::Linear,
-            _ => QModel::Logistic,
-        };
 
         // Propensity score truncation bounds
         let ps_lower = request.ps_lower.unwrap_or(0.01);
@@ -1079,26 +1174,21 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<CTmleRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let q_model = tool_try!(parse_option(
+            request.q_model.as_deref(),
+            CTmleQModel::Logistic
+        ));
+        let stopping_rule = match request.stopping_rule.as_deref() {
+            None => StoppingRule::CVMinimum,
+            Some(s) => tool_try!(
+                StoppingRule::parse_with(s, request.max_covariates).map_err(option_message)
+            ),
+        };
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse outcome model type
-        let q_model = match request.q_model.as_deref() {
-            Some("linear") | Some("Linear") | Some("continuous") => CTmleQModel::Linear,
-            _ => CTmleQModel::Logistic,
-        };
-
-        // Parse stopping rule
-        let stopping_rule = match request.stopping_rule.as_deref() {
-            Some("one_se") | Some("OneSE") | Some("1se") => StoppingRule::OneSE,
-            Some("max_covariates") | Some("MaxCovariates") => {
-                StoppingRule::MaxCovariates(request.max_covariates.unwrap_or(10))
-            }
-            _ => StoppingRule::CVMinimum, // default
-        };
 
         // Propensity score truncation bounds
         let ps_lower = request.ps_lower.unwrap_or(0.025);
@@ -1143,6 +1233,24 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<GFormulaRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::gformula::GFormulaRegime;
+        let regime = tool_try!(parse_option(
+            request.intervention.as_deref(),
+            GFormulaRegime::AlwaysTreat
+        ));
+        let intervention = tool_try!(
+            GFormulaIntervention::from_regime(
+                regime,
+                request.threshold_variable,
+                request.threshold_cutoff,
+                request.threshold_above,
+            )
+            .map_err(option_message)
+        );
+        let outcome_type = tool_try!(parse_option(
+            request.outcome_type.as_deref(),
+            GFormulaOutcomeType::Continuous
+        ));
         use ndarray::{Array1, Array2};
         use p2a_core::linalg::design::DesignMatrix;
 
@@ -1252,34 +1360,6 @@ impl AnalyticsServer {
             }
         };
 
-        // Parse intervention type
-        let intervention = match request.intervention.as_deref() {
-            Some("never_treat") | Some("never") | Some("control") => {
-                GFormulaIntervention::Static { treat_all: false }
-            }
-            Some("natural") | Some("natural_course") | Some("observed") => {
-                GFormulaIntervention::NaturalCourse
-            }
-            Some("threshold") => {
-                let variable_idx = request.threshold_variable.unwrap_or(0);
-                let cutoff = request.threshold_cutoff.unwrap_or(0.5);
-                let above = request.threshold_above.unwrap_or(true);
-                GFormulaIntervention::Threshold {
-                    variable_idx,
-                    cutoff,
-                    above,
-                }
-            }
-            _ => GFormulaIntervention::Static { treat_all: true }, // default: always treat
-        };
-
-        // Parse outcome type
-        let outcome_type = match request.outcome_type.as_deref() {
-            Some("binary") | Some("Binary") | Some("logistic") => GFormulaOutcomeType::Binary,
-            Some("survival") | Some("Survival") | Some("hazard") => GFormulaOutcomeType::Survival,
-            _ => GFormulaOutcomeType::Continuous,
-        };
-
         // Use per-tool seed if provided, otherwise fall back to global seed
         let global_seed = self.global_seed.read().await;
         let seed = request.seed.or(*global_seed);
@@ -1365,6 +1445,10 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<NaturalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let scale = tool_try!(parse_option(
+            request.scale.as_deref(),
+            EffectScale::Difference
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -1374,13 +1458,6 @@ impl AnalyticsServer {
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
-
-        // Parse effect scale
-        let scale = match request.scale.as_deref() {
-            Some("ratio") => EffectScale::Ratio,
-            Some("odds_ratio") | Some("odds") => EffectScale::OddsRatio,
-            _ => EffectScale::Difference,
-        };
 
         let n_bootstrap = request.n_bootstrap.unwrap_or(1000);
         let mut config = MedflexConfig::default();
@@ -1425,43 +1502,28 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SyntheticControlRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let mut predictors: Vec<PredictorSpec> = Vec::with_capacity(request.predictors.len());
+        for spec in &request.predictors {
+            predictors.push(PredictorSpec {
+                column: spec.column.clone(),
+                aggregation: tool_try!(parse_option(
+                    spec.aggregation.as_deref(),
+                    TimeAggregation::Mean
+                )),
+                time_window: spec.time_window,
+            });
+        }
+        let v_method = tool_try!(
+            VOptimization::from_options(
+                request.v_method.as_deref(),
+                request.custom_v_weights.clone()
+            )
+            .map_err(option_message)
+        );
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        // Convert predictor specs
-        let predictors: Vec<PredictorSpec> = request
-            .predictors
-            .iter()
-            .map(|spec| {
-                let aggregation = match spec.aggregation.as_deref() {
-                    Some("first") => TimeAggregation::First,
-                    Some("last") => TimeAggregation::Last,
-                    Some("sum") => TimeAggregation::Sum,
-                    _ => TimeAggregation::Mean, // default
-                };
-                PredictorSpec {
-                    column: spec.column.clone(),
-                    aggregation,
-                    time_window: spec.time_window,
-                }
-            })
-            .collect();
-
-        // Convert V optimization method
-        let v_method = match request.v_method.as_deref() {
-            Some("equal") => VOptimization::Equal,
-            Some("custom") => {
-                if let Some(weights) = &request.custom_v_weights {
-                    VOptimization::Custom(weights.clone())
-                } else {
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        "custom_v_weights must be provided when v_method is 'custom'".to_string(),
-                    )]));
-                }
-            }
-            _ => VOptimization::DataDriven, // default
-        };
 
         let mut config = SynthConfig::default();
         config.treatment_time = request.treatment_time;
@@ -1507,23 +1569,14 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<GsynthRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let estimator = tool_try!(parse_option(
+            request.estimator.as_deref(),
+            GsynthEstimator::Ife
+        ));
+        let force = tool_try!(parse_option(request.force.as_deref(), GsynthForce::Unit));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        // Parse estimator
-        let estimator = match request.estimator.as_deref() {
-            Some("mc") => GsynthEstimator::MatrixCompletion,
-            _ => GsynthEstimator::Ife, // default
-        };
-
-        // Parse force (fixed effects)
-        let force = match request.force.as_deref() {
-            Some("none") => GsynthForce::None,
-            Some("time") => GsynthForce::Time,
-            Some("twoWay") | Some("twoway") | Some("two_way") => GsynthForce::TwoWay,
-            _ => GsynthForce::Unit, // default
-        };
 
         let config = GsynthConfig {
             n_factors: request.n_factors.unwrap_or(2),
@@ -1579,6 +1632,14 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ScpiRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let constraint = tool_try!(
+            SCPIConstraint::from_options(request.constraint.as_deref(), request.lambda)
+                .map_err(option_message)
+        );
+        let variance_method = tool_try!(parse_option(
+            request.variance_method.as_deref(),
+            VarianceMethod::Subgaussian
+        ));
         use ndarray::{Array1, Array2};
         use p2a_core::data::columns::{ColumnRequest, NaPolicy};
 
@@ -1610,10 +1671,17 @@ impl AnalyticsServer {
         // Validate treated unit exists
         let Some(treated) = units.levels.iter().position(|u| u == &request.treated_unit) else {
             let shown: Vec<&str> = units.levels.iter().take(10).map(String::as_str).collect();
+            let n_units = units.levels.len();
+            let label = if n_units > 10 {
+                format!("Available units (first 10 of {n_units})")
+            } else {
+                "Available units".to_string()
+            };
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Treated unit '{}' not found in '{}'. Available units: {}",
+                "Treated unit '{}' not found in '{}'. {}: {}",
                 request.treated_unit,
                 request.unit_col,
+                label,
                 shown.join(", ")
             ))]));
         };
@@ -1717,23 +1785,6 @@ impl AnalyticsServer {
                 donor_matrix[[t, d_idx]] = value(u, t);
             }
         }
-
-        // Parse constraint type
-        let lambda = request.lambda.unwrap_or(0.1);
-        let constraint = match request.constraint.as_deref() {
-            Some("lasso") => SCPIConstraint::Lasso { lambda },
-            Some("ridge") => SCPIConstraint::Ridge { lambda },
-            Some("lasso_simplex") => SCPIConstraint::LassoSimplex { lambda },
-            _ => SCPIConstraint::Simplex, // default
-        };
-
-        // Parse variance method
-        let variance_method = match request.variance_method.as_deref() {
-            Some("gaussian") => VarianceMethod::Gaussian,
-            Some("loo_cv") => VarianceMethod::LooCv,
-            Some("kfold_cv") => VarianceMethod::KFoldCv,
-            _ => VarianceMethod::Subgaussian, // default
-        };
 
         let config = SCPIConfig {
             constraint,
@@ -1982,6 +2033,11 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let pooling_weights = tool_try!(choice(
+            &POOLING_WEIGHTS,
+            request.pooling_weights.as_deref(),
+            PoolingWeights::SampleSize
+        ));
         // the option names are checked before the dataset lookup, so a bad name never
         // costs a data read
         let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
@@ -2006,13 +2062,6 @@ impl AnalyticsServer {
                 "At least one cutoff value must be specified in 'cutoffs'.",
             )]));
         }
-
-        // Parse pooling weights
-        let pooling_weights = match request.pooling_weights.as_deref() {
-            Some("inverse_variance") | Some("iv") => PoolingWeights::InverseVariance,
-            Some("equal") => PoolingWeights::Equal,
-            _ => PoolingWeights::SampleSize,
-        };
 
         // Determine bandwidth specification
         let bandwidth = if let Some(bws) = &request.bandwidths {
@@ -2111,32 +2160,28 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::regression::{evalue_hr, evalue_or, evalue_rd, evalue_rr_ci, evalue_smd};
 
-        let effect_type = request.effect_type.to_lowercase();
+        let effect_type = tool_try!(choice(
+            &EFFECT_MEASURE,
+            Some(request.effect_type.as_str()),
+            EffectMeasure::Rr
+        ));
 
-        let result = match effect_type.as_str() {
-            "rr" | "risk_ratio" | "riskratio" => {
-                evalue_rr_ci(request.point, request.ci_lower, request.ci_upper)
-            }
-            "or" | "odds_ratio" | "oddsratio" => {
+        let result = match effect_type {
+            EffectMeasure::Rr => evalue_rr_ci(request.point, request.ci_lower, request.ci_upper),
+            EffectMeasure::Or => {
                 let rare = request.rare.unwrap_or(true);
                 evalue_or(request.point, request.ci_lower, request.ci_upper, rare)
             }
-            "hr" | "hazard_ratio" | "hazardratio" => {
+            EffectMeasure::Hr => {
                 let rare = request.rare.unwrap_or(true);
                 evalue_hr(request.point, request.ci_lower, request.ci_upper, rare)
             }
-            "smd" | "standardized_mean_difference" => evalue_smd(request.point, request.se),
-            "rd" | "risk_difference" | "riskdifference" => {
+            EffectMeasure::Smd => evalue_smd(request.point, request.se),
+            EffectMeasure::Rd => {
                 let baseline = request.baseline_risk.ok_or_else(|| {
                     McpError::invalid_params("baseline_risk is required for risk difference", None)
                 })?;
                 evalue_rd(request.point, baseline, request.se)
-            }
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown effect type '{}'. Valid types: rr, or, hr, smd, rd",
-                    request.effect_type
-                ))]));
             }
         };
 
@@ -2157,35 +2202,15 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<GeneralGmmIvRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let method = tool_try!(parse_option(request.method.as_deref(), GmmMethod::TwoStep));
+        let vcov = tool_try!(parse_option(request.vcov.as_deref(), GmmVcov::HAC));
+        let kernel = tool_try!(parse_option(request.kernel.as_deref(), HacKernel::Bartlett));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let z_refs: Vec<&str> = request.z.iter().map(|s| s.as_str()).collect();
-
-        // Parse method
-        let method = match request.method.as_deref() {
-            Some("iterative") | Some("Iterative") => GmmMethod::Iterative,
-            Some("cue") | Some("CUE") => GmmMethod::CUE,
-            _ => GmmMethod::TwoStep, // Default
-        };
-
-        // Parse vcov type
-        let vcov = match request.vcov.as_deref() {
-            Some("iid") | Some("IID") => GmmVcov::IID,
-            Some("fixed") | Some("Fixed") => GmmVcov::Fixed,
-            _ => GmmVcov::HAC, // Default
-        };
-
-        // Parse kernel
-        let kernel = match request.kernel.as_deref() {
-            Some("parzen") | Some("Parzen") => HacKernel::Parzen,
-            Some("qs") | Some("quadratic_spectral") => HacKernel::QuadraticSpectral,
-            Some("truncated") | Some("Truncated") => HacKernel::Truncated,
-            Some("tukey") | Some("tukey_hanning") => HacKernel::TukeyHanning,
-            _ => HacKernel::Bartlett, // Default
-        };
 
         let config = GeneralGmmConfig {
             method,
@@ -2218,6 +2243,10 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<LtmleRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let q_model = tool_try!(parse_option(
+            request.q_model.as_deref(),
+            p2a_core::econometrics::LtmleQModel::Linear
+        ));
         use p2a_core::econometrics::{LtmleConfig, LtmleData, LtmleQModel, run_ltmle};
 
         let datasets = self.datasets.read().await;
@@ -2309,12 +2338,6 @@ impl AnalyticsServer {
             }
         };
 
-        // Parse configuration
-        let q_model = match request.q_model.as_deref() {
-            Some("logistic") | Some("Logistic") | Some("binary") => LtmleQModel::Logistic,
-            _ => LtmleQModel::Linear,
-        };
-
         let ps_lower = request.ps_lower.unwrap_or(0.01);
         let ps_upper = request.ps_upper.unwrap_or(0.99);
 
@@ -2347,25 +2370,18 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<MarginalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{ModelType, marginal_effects};
+        let model_type = tool_try!(choice(
+            &MARGINAL_MODEL,
+            request.model.as_deref(),
+            MarginalModel::Ols
+        ));
+        use p2a_core::regression::marginal_effects;
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-
-        let model_type = match request.model.as_deref().unwrap_or("ols") {
-            "ols" | "linear" => ModelType::Ols,
-            "logit" | "logistic" => ModelType::Logit,
-            "probit" => ModelType::Probit,
-            other => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown model type '{}'. Supported: 'ols', 'logit', 'probit'.",
-                    other
-                ))]));
-            }
-        };
 
         let result = match marginal_effects(dataset, &request.y, &x_refs, model_type) {
             Ok(r) => r,
@@ -2390,33 +2406,23 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<StdRegRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let model_type = tool_try!(parse_option(
+            request.model_type.as_deref(),
+            StdRegModel::Linear
+        ));
+        let estimand = tool_try!(parse_option(
+            request.estimand.as_deref(),
+            StdRegEstimand::ATE
+        ));
+        let se_method = tool_try!(parse_option(
+            request.se_method.as_deref(),
+            SEMethod::Bootstrap
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
-        // Parse model type
-        let model_type = match request.model_type.as_deref() {
-            Some("logistic") | Some("Logistic") | Some("binary") => StdRegModel::Logistic,
-            Some("poisson") | Some("Poisson") | Some("count") => StdRegModel::Poisson,
-            _ => StdRegModel::Linear,
-        };
-
-        // Parse estimand
-        let estimand = match request.estimand.as_deref() {
-            Some("att") | Some("ATT") => StdRegEstimand::ATT,
-            Some("atc") | Some("ATC") => StdRegEstimand::ATC,
-            Some("levels") | Some("Levels") => StdRegEstimand::Levels,
-            _ => StdRegEstimand::ATE,
-        };
-
-        // Parse SE method
-        let se_method = match request.se_method.as_deref() {
-            Some("delta") | Some("Delta") => SEMethod::Delta,
-            Some("sandwich") | Some("Sandwich") | Some("robust") => SEMethod::Sandwich,
-            _ => SEMethod::Bootstrap,
-        };
 
         let mut config = StdRegConfig::default();
         config.model_type = model_type;
@@ -3036,5 +3042,69 @@ mod tests {
             out.contains("one row per (unit, time): unit 1 appears twice at time 1935"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn test_mcp_scpi_says_the_unit_list_is_cut() {
+        use polars::prelude::*;
+        let df = grunfeld();
+        let mut shifted = df.clone();
+        let firm = shifted
+            .column("firm")
+            .unwrap()
+            .as_materialized_series()
+            .clone()
+            + 10;
+        shifted.with_column(firm.with_name("firm".into())).unwrap();
+        let stacked = df.vstack(&shifted).unwrap();
+        let r = run_scpi_on(stacked, json!({"treated_unit": "99"}));
+        assert_eq!(r.is_error, Some(true), "{}", text(&r));
+        let out = text(&r);
+        assert!(
+            out.contains("Available units (first 10 of 20): 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_local_option_tables_parse_aliases_and_reject_unknown() {
+        STOP_METHOD.validate().unwrap();
+        TWANG_ESTIMAND.validate().unwrap();
+        POOLING_WEIGHTS.validate().unwrap();
+        MARGINAL_MODEL.validate().unwrap();
+        EFFECT_MEASURE.validate().unwrap();
+        LTMLE_CONTRAST.validate().unwrap();
+        assert_eq!(STOP_METHOD.parse("ES.Mean").unwrap(), StopMethod::ESMean);
+        assert_eq!(STOP_METHOD.parse("ksmax").unwrap(), StopMethod::KSMax);
+        assert_eq!(STOP_METHOD.parse("es-max").unwrap(), StopMethod::ESMax);
+        assert_eq!(TWANG_ESTIMAND.parse("ATT").unwrap(), TwangEstimand::ATT);
+        assert_eq!(
+            POOLING_WEIGHTS.parse("iv").unwrap(),
+            PoolingWeights::InverseVariance
+        );
+        assert_eq!(
+            POOLING_WEIGHTS.parse("Sample Size").unwrap(),
+            PoolingWeights::SampleSize
+        );
+        assert_eq!(
+            MARGINAL_MODEL.parse("logistic").unwrap(),
+            MarginalModel::Logit
+        );
+        assert_eq!(
+            EFFECT_MEASURE.parse("Risk Ratio").unwrap(),
+            EffectMeasure::Rr
+        );
+        assert_eq!(
+            EFFECT_MEASURE.parse("hazard-ratio").unwrap(),
+            EffectMeasure::Hr
+        );
+        assert_eq!(LTMLE_CONTRAST.parse("none").unwrap(), ContrastKind::None);
+        match EFFECT_MEASURE.parse("hr2") {
+            Err(p2a_core::EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown effect_type 'hr2'; expected one of: rr, or, hr, smd, rd"
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 }

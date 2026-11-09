@@ -24,7 +24,9 @@ pub struct SynthPredictorSpec {
     pub column: String,
 
     /// How to aggregate the predictor over time
-    #[schemars(description = "Aggregation method: 'mean' (default), 'first', 'last', or 'sum'.")]
+    #[schemars(
+        description = "How the predictor is aggregated over its window: 'mean' (default; 'average'), 'first', 'last' or 'sum' ('total'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
     pub aggregation: Option<String>,
 
     /// Optional time window (start, end) for aggregation
@@ -58,19 +60,19 @@ pub struct GeneralGmmIvRequest {
 
     /// GMM estimation method
     #[schemars(
-        description = "Estimation method: 'twostep' (default), 'iterative', or 'cue' (continuously updated)."
+        description = "Estimation method, as gmm::gmm type: 'twostep' (default), 'iterative', 'cue' (continuously updated) or 'onestep'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
     /// Variance-covariance type
     #[schemars(
-        description = "Vcov type: 'hac' (default, robust to serial correlation), 'iid', or 'fixed'."
+        description = "Weighting and covariance: 'hac' (default), 'iid', 'fixed' (weight_matrix) or 'mds' (heteroskedasticity-robust; 'robust'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub vcov: Option<String>,
 
     /// HAC kernel type
     #[schemars(
-        description = "Kernel for HAC weighting: 'bartlett' (default), 'parzen', 'qs', 'truncated'."
+        description = "HAC kernel: 'bartlett' (default; 'newey_west'), 'parzen', 'quadratic_spectral' ('qs'), 'truncated' or 'tukey_hanning'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub kernel: Option<String>,
 
@@ -258,7 +260,7 @@ pub struct IVMTERequest {
 
     /// Propensity score model type
     #[schemars(
-        description = "Propensity score model: 'probit' (default), 'logit', or 'linear'. Probit is standard in the MTE literature."
+        description = "Propensity score model: 'probit' (default, standard in the MTE literature), 'logit' or 'linear' (linear probability model). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub propensity_model: Option<String>,
 
@@ -337,13 +339,13 @@ pub struct StaggeredDiDRequest {
 
     /// Comparison group strategy
     #[schemars(
-        description = "Comparison group: 'never_treated' (default) uses only never-treated units, 'not_yet_treated' uses units not yet treated by that period."
+        description = "Comparison group, as did::att_gt `control_group`: 'never_treated' (default; did 'nevertreated') or 'not_yet_treated' (did 'notyettreated'; 'notyet' and 'nyt' are accepted). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub comparison_group: Option<String>,
 
     /// Estimation method
     #[schemars(
-        description = "Estimation method: 'outcome_regression' (default), 'ipw', or 'doubly_robust'."
+        description = "Estimation method, as did::att_gt `est_method`: 'outcome_regression' (default; did 'reg'), 'ipw' or 'doubly_robust' (did 'dr'; 'aipw' and 'drdid' are accepted). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimation_method: Option<String>,
 
@@ -442,7 +444,7 @@ pub struct EtwfeRequest {
 
     /// Control group strategy
     #[schemars(
-        description = "Control group: 'notyet' (default) uses not-yet-treated units, 'never' uses only never-treated units."
+        description = "Control group, as etwfe `cgroup`: 'notyet' (default; 'not_yet_treated') or 'never' ('never_treated'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub cgroup: Option<String>,
 }
@@ -473,7 +475,7 @@ pub struct IpwRequest {
 
     /// Estimand: 'ate' (Average Treatment Effect) or 'att' (Average Treatment Effect on Treated)
     #[schemars(
-        description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated."
+        description = "Treatment effect estimand: 'ate' (default) or 'att'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimand: Option<String>,
 
@@ -518,13 +520,13 @@ pub struct DoublyRobustRequest {
 
     /// Estimation method: 'aipw' (default), 'ipw', or 'regression'
     #[schemars(
-        description = "Estimation method: 'aipw' for Augmented IPW (default, doubly robust), 'ipw' for IPW only, 'regression' for outcome regression only."
+        description = "Estimation method: 'aipw' (default, augmented IPW, doubly robust; 'dr'), 'ipw' (weighting only) or 'regression' (outcome regression only). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
     /// Estimand: 'ate' (Average Treatment Effect) or 'att' (Average Treatment Effect on Treated)
     #[schemars(
-        description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated."
+        description = "Treatment effect estimand: 'ate' (default) or 'att'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimand: Option<String>,
 
@@ -567,7 +569,7 @@ pub struct DoubleMLRequest {
 
     /// Model type: 'plr' (Partially Linear Regression, default) or 'irm' (Interactive Regression Model)
     #[schemars(
-        description = "DML model type: 'plr' for Partially Linear Regression (default, Y = theta*D + g(X) + eps), 'irm' for Interactive Regression Model (binary treatment, heterogeneous effects)."
+        description = "DML model: 'plr' (default, partially linear: Y = theta*D + g(X) + eps) or 'irm' (interactive, binary treatment, heterogeneous effects). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub model_type: Option<String>,
 
@@ -609,9 +611,9 @@ pub struct CbpsRequest {
     #[schemars(description = "Names of covariate columns to include in propensity score model.")]
     pub covariates: Vec<String>,
 
-    /// CBPS method: 'exact' (default), 'over', or 'just'
+    /// CBPS method: 'over' (default), 'exact' or 'logit'
     #[schemars(
-        description = "CBPS method: 'exact' for exact balance (default, overidentified), 'over' for over-balanced, 'just' for just-identified (standard logit)."
+        description = "CBPS method: 'over' (default, as CBPS::CBPS; score and balance conditions), 'exact' (balance conditions only) or 'logit' (score equations only, plain logistic regression). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
@@ -643,13 +645,13 @@ pub struct WeightItRequest {
 
     /// Weighting method: 'logistic' (default), 'entropy', 'energy', or 'stable'
     #[schemars(
-        description = "Weighting method: 'logistic' (standard PS, default), 'entropy' (entropy balancing), 'energy' (energy distance), 'stable' (stable weights)."
+        description = "Weighting method: 'logistic' (default, propensity score; 'glm', 'ps'), 'entropy' (entropy balancing; 'ebal'), 'energy' (energy distance) or 'stable' (stable balancing weights; 'sbw', 'optweight'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
     /// Target estimand: 'ate' (default), 'att', or 'atc'
     #[schemars(
-        description = "Target estimand: 'ate' (average treatment effect, default), 'att' (on treated), 'atc' (on control)."
+        description = "Estimand: 'ate' (default), 'att' or 'atc'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimand: Option<String>,
 
@@ -713,7 +715,7 @@ pub struct SBWRequest {
 
     /// Target estimand: 'att' (default), 'ate', or 'atc'
     #[schemars(
-        description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control)."
+        description = "Estimand: 'att' (default), 'ate' or 'atc'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimand: Option<String>,
 
@@ -757,13 +759,13 @@ pub struct TwangRequest {
 
     /// Stopping rule: 'es.mean' (default), 'es.max', 'ks.mean', 'ks.max'
     #[schemars(
-        description = "Stopping rule for selecting optimal iterations: 'es.mean' (mean standardized effect size, default), 'es.max' (max effect size), 'ks.mean' (mean KS statistic), 'ks.max' (max KS statistic)."
+        description = "Stopping rule for the number of boosting iterations: 'es.mean' (default, mean standardized effect size), 'es.max', 'ks.mean' or 'ks.max' (Kolmogorov-Smirnov statistics). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub stop_method: Option<String>,
 
     /// Target estimand: 'att' (default), 'ate', or 'atc'
     #[schemars(
-        description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control)."
+        description = "Estimand: 'att' (default), 'ate' or 'atc'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimand: Option<String>,
 
@@ -803,13 +805,13 @@ pub struct MatchItRequest {
 
     /// Matching method: 'nearest' (default), 'cem', 'full', or 'subclass'
     #[schemars(
-        description = "Matching method: 'nearest' (nearest neighbor, default), 'cem' (coarsened exact matching), 'full' (full/optimal matching), 'subclass' (propensity score subclassification)."
+        description = "Matching method: 'nearest' (default, nearest neighbour), 'cem' (coarsened exact matching), 'full' (optimal full matching) or 'subclass' (propensity-score subclassification). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
     /// Distance metric: 'logit' (default), 'probit', 'mahalanobis', or 'euclidean'
     #[schemars(
-        description = "Distance metric: 'logit' (propensity score via logit, default), 'probit', 'mahalanobis', 'euclidean'."
+        description = "Distance: 'logit' (default, propensity score by logistic regression; 'glm'), 'probit', 'mahalanobis' or 'euclidean'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub distance: Option<String>,
 
@@ -866,7 +868,7 @@ pub struct TmleRequest {
 
     /// Outcome model type: 'logistic' (default) or 'linear'
     #[schemars(
-        description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes."
+        description = "Outcome model: 'logistic' (default; a continuous outcome is rescaled to [0, 1] by its range, as R's tmle; estimates are on the original scale) or 'linear'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub q_model: Option<String>,
 
@@ -907,7 +909,7 @@ pub struct CTmleRequest {
 
     /// Outcome model type: 'logistic' (default) or 'linear'
     #[schemars(
-        description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes."
+        description = "Outcome model: 'logistic' (default; a logistic Q rescales a continuous outcome to [0, 1] by its range, as R's tmle) or 'linear'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub q_model: Option<String>,
 
@@ -925,7 +927,7 @@ pub struct CTmleRequest {
 
     /// Stopping rule: 'cv_minimum' (default), 'one_se', or 'max_covariates'
     #[schemars(
-        description = "Stopping rule for selection: 'cv_minimum' (stop at minimum CV risk, default), 'one_se' (one-standard-error rule for parsimony), 'max_covariates' (use max_covariates parameter)."
+        description = "Stopping rule of the covariate selection: 'cv_minimum' (default, minimum cross-validated risk), 'one_se' (one-standard-error rule) or 'max_covariates' (needs max_covariates). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub stopping_rule: Option<String>,
 
@@ -966,7 +968,7 @@ pub struct LtmleRequest {
 
     /// Outcome model type: 'linear' (default) or 'logistic'
     #[schemars(
-        description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes."
+        description = "Outcome model: 'linear' (default) or 'logistic'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub q_model: Option<String>,
 
@@ -1005,19 +1007,19 @@ pub struct StdRegRequest {
 
     /// Outcome model type: 'linear' (default), 'logistic', or 'poisson'
     #[schemars(
-        description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes, 'poisson' for count outcomes."
+        description = "Outcome model: 'linear' (default), 'logistic' or 'poisson'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub model_type: Option<String>,
 
     /// Estimand: 'ate' (default), 'att', 'atc', or 'levels'
     #[schemars(
-        description = "Target estimand: 'ate' (Average Treatment Effect, default), 'att' (ATT on Treated), 'atc' (ATC on Controls), 'levels' (E[Y(1)] and E[Y(0)] separately)."
+        description = "Estimand: 'ate' (default), 'att', 'atc' or 'levels' (the standardized means only). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimand: Option<String>,
 
     /// SE method: 'bootstrap' (default), 'delta', or 'sandwich'
     #[schemars(
-        description = "Standard error method: 'bootstrap' (default, recommended), 'delta' (analytical), 'sandwich' (robust)."
+        description = "Standard errors: 'bootstrap' (default), 'delta' or 'sandwich' ('robust'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub se_method: Option<String>,
 
@@ -1075,7 +1077,7 @@ pub struct GFormulaRequest {
 
     /// Intervention type: 'always_treat', 'never_treat', 'natural', or 'threshold'
     #[schemars(
-        description = "Intervention type: 'always_treat' (default), 'never_treat', 'natural' (observed patterns), or 'threshold'."
+        description = "Intervention: 'always_treat' (default; 'always'), 'never_treat' ('never'), 'natural_course' (the observed treatment; 'natural') or 'threshold' (needs threshold_variable and threshold_cutoff). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub intervention: Option<String>,
 
@@ -1099,7 +1101,7 @@ pub struct GFormulaRequest {
 
     /// Outcome type: 'continuous' (default), 'binary', or 'survival'
     #[schemars(
-        description = "Outcome type: 'continuous' for linear model (default), 'binary' for logistic model, 'survival' for discrete hazard model."
+        description = "Outcome model: 'continuous' (default, linear model), 'binary' (logistic model) or 'survival' (discrete-time hazard model). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub outcome_type: Option<String>,
 
@@ -1219,7 +1221,7 @@ pub struct NaturalEffectsRequest {
 
     /// Effect scale (difference, ratio, odds_ratio)
     #[schemars(
-        description = "Scale for reporting effects: 'difference' (default for continuous outcomes), 'ratio' (for log-link), 'odds_ratio' (for logit)."
+        description = "Scale of the natural effects: 'difference' (default), 'ratio' or 'odds_ratio'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub scale: Option<String>,
 }
@@ -1267,7 +1269,7 @@ pub struct SyntheticControlRequest {
 
     /// V matrix optimization method
     #[schemars(
-        description = "Method for predictor importance weights: 'datadriven' (default), 'equal', or 'custom'."
+        description = "Predictor importance weights V: 'datadriven' (default), 'equal' or 'custom' (needs custom_v_weights). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub v_method: Option<String>,
 
@@ -1358,12 +1360,14 @@ pub struct GsynthRequest {
 
     /// Estimator type
     #[schemars(
-        description = "Estimator: 'ife' (interactive fixed effects, default) or 'mc' (matrix completion)."
+        description = "Estimator: 'ife' (default, interactive fixed effects) or 'mc' (matrix completion). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub estimator: Option<String>,
 
     /// Fixed effects specification
-    #[schemars(description = "Fixed effects: 'none', 'unit' (default), 'time', or 'twoWay'.")]
+    #[schemars(
+        description = "Additive fixed effects: 'none', 'unit' (default), 'time' or 'two_way' ('twoway'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
     pub force: Option<String>,
 
     /// Whether to compute bootstrap standard errors
@@ -1410,7 +1414,7 @@ pub struct ScpiRequest {
 
     /// Constraint type
     #[schemars(
-        description = "Weight constraint: 'simplex' (default, sum=1, non-negative), 'lasso', 'ridge', or 'lasso_simplex'."
+        description = "Weight constraint: 'simplex' (default, non-negative weights summing to 1), 'lasso', 'ridge' or 'lasso_simplex'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub constraint: Option<String>,
 
@@ -1428,7 +1432,7 @@ pub struct ScpiRequest {
 
     /// Variance estimation method
     #[schemars(
-        description = "Out-of-sample variance method: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv', or 'kfold_cv'."
+        description = "Out-of-sample variance: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv' or 'kfold_cv'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub variance_method: Option<String>,
 
@@ -1652,7 +1656,7 @@ pub struct RdMultiRequest {
 
     /// Pooling weight scheme
     #[schemars(
-        description = "Weighting scheme for pooling: 'sample_size' (default), 'inverse_variance', or 'equal'."
+        description = "Weights that pool the cutoff effects: 'sample_size' (default), 'inverse_variance' ('iv') or 'equal'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub pooling_weights: Option<String>,
 
@@ -1925,7 +1929,7 @@ pub struct MarginalEffectsRequest {
 
     /// Model type
     #[schemars(
-        description = "Model type for marginal effects: 'ols' (linear regression), 'logit' (logistic regression), 'probit' (probit regression). Default: 'ols'."
+        description = "Model: 'ols' (default; 'linear'), 'logit' ('logistic') or 'probit'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub model: Option<String>,
 }
@@ -1936,7 +1940,7 @@ pub struct MarginalEffectsRequest {
 pub struct EValueRequest {
     /// Type of effect measure
     #[schemars(
-        description = "Type of effect measure: 'rr' (risk ratio), 'or' (odds ratio), 'hr' (hazard ratio), 'smd' (standardized mean difference), 'rd' (risk difference)."
+        description = "Effect measure: 'rr' (risk ratio), 'or' (odds ratio), 'hr' (hazard ratio), 'smd' (standardized mean difference) or 'rd' (risk difference; needs baseline_risk). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub effect_type: String,
 
