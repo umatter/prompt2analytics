@@ -1728,11 +1728,9 @@ mod tests {
         }
         let got_k: Vec<i64> = opt_i64(df, "k").into_iter().map(Option::unwrap).collect();
         assert_eq!(got_k, k);
-        // to_json_string wraps strings in literal quotes, so only the null positions of the
-        // string column are compared until it writes plain JSON strings.
-        for (i, v) in opt_str(df, "s").iter().enumerate() {
-            assert_eq!(v.is_none(), i % 9 == 0, "row {i}");
-        }
+        let got_s: Vec<Option<String>> = opt_str(df, "s");
+        let want_s: Vec<Option<String>> = t.iter().map(|v| v.map(str::to_string)).collect();
+        assert_eq!(got_s, want_s);
         let df = DataLoader::from_json_string("[{\"s\": \"é\\\"t\"}, {\"s\": null}]").unwrap();
         assert_eq!(opt_str(&df, "s"), [some("é\"t"), None]);
 

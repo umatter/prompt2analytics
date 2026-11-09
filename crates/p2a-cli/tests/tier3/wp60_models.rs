@@ -1578,6 +1578,73 @@ fn test_cli_data_load_jsonl_persists() {
     );
 }
 
+/// data save --output x.json writes text cells as plain JSON strings, so data load reads back the
+/// text itself (quotes, non-ASCII and missing cells included) and the numbers bit for bit.
+#[test]
+fn test_cli_data_save_json_round_trip() {
+    let s = temp_session();
+    let csv = s.dir().join("t.csv");
+    // the last row has a comma in a quoted field
+    std::fs::write(
+        &csv,
+        "x,k,s\n0.1,1,plain\n-2.718281828459045,-7,\"say \"\"hi\"\"\"\n1e-300,3,\n33.3,4,\"é,ü\"\n",
+    )
+    .unwrap();
+    s.load_as(&csv, "t", &[]);
+    let out = s.dir().join("t.json");
+    s.ok(&["data", "save", "t", "--output", out.to_str().unwrap()]);
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let col = |k: &str| -> Vec<Value> {
+        written
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[k].clone())
+            .collect()
+    };
+    assert_eq!(
+        col("s"),
+        [
+            json!("plain"),
+            json!("say \"hi\""),
+            json!(null),
+            json!("é,ü")
+        ]
+    );
+    assert_eq!(col("k"), [json!(1), json!(-7), json!(3), json!(4)]);
+    let x: Vec<f64> = col("x").iter().map(|v| v.as_f64().unwrap()).collect();
+    let want = [0.1, -std::f64::consts::E, 1e-300, 33.3];
+    for (g, w) in x.iter().zip(want) {
+        assert_eq!(g.to_bits(), w.to_bits());
+    }
+    s.load_as(&out, "back", &[]);
+    let mut types: Vec<(String, String)> = s.json_docs(&["data", "describe", "back"])[1]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap().to_string(),
+                c["dtype"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    types.sort();
+    assert_eq!(
+        types,
+        [
+            ("k".to_string(), "Int64".to_string()),
+            ("s".into(), "String".into()),
+            ("x".into(), "Float64".into())
+        ]
+    );
+    // the reloaded copy saves to the same JSON
+    let again = s.dir().join("again.json");
+    s.ok(&["data", "save", "back", "--output", again.to_str().unwrap()]);
+    let reread: Value = serde_json::from_str(&std::fs::read_to_string(&again).unwrap()).unwrap();
+    assert_eq!(reread, written);
+}
+
 // =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
