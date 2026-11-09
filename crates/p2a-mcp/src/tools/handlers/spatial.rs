@@ -504,7 +504,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Autoregressive Lag (SAR) model.
     #[tool(
-        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Standard errors of the coefficients and rho are the inverse observed information of the full log-likelihood. With durbin = true (SDM), the direct, indirect and total impacts are spatialreg's (exact). The output ends with the optimiser's convergence and any warnings."
+        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Standard errors of the coefficients and rho are the inverse observed information of the full log-likelihood. With durbin = true (SDM), the direct, indirect and total impacts are spatialreg's (exact). The output ends with the optimiser's convergence and any warnings. A weights style other than W changes the scale of W, and so of rho."
     )]
     pub async fn sar_model(
         &self,
@@ -624,7 +624,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Error Model (SEM).
     #[tool(
-        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). The output ends with the optimiser's convergence and any warnings."
+        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). The output ends with the optimiser's convergence and any warnings. A weights style other than W changes the scale of W, and so of lambda."
     )]
     pub async fn sem_model(
         &self,
@@ -754,6 +754,15 @@ impl AnalyticsServer {
         // takes sphet's variable bandwidth (each unit's farthest neighbour in the weights).
         let mut hac_kernel = SpatialHacKernel::default();
         let mut coords = None;
+        // No standard error type takes a bandwidth: refused whatever se_type is, never ignored.
+        if request.bandwidth.is_some() {
+            return error_text(
+                "bandwidth is not used: no se_type takes one, and the spatial HAC (se_type = 'hac') \
+                 takes each unit's bandwidth as its largest distance to its neighbours in the \
+                 weights. Leave bandwidth unset."
+                    .to_string(),
+            );
+        }
         if se_type != SphetSE::HAC
             && (request.kernel.is_some() || request.coord_x.is_some() || request.coord_y.is_some())
         {
@@ -764,13 +773,6 @@ impl AnalyticsServer {
             );
         }
         if se_type == SphetSE::HAC {
-            if request.bandwidth.is_some() {
-                return error_text(
-                    "bandwidth is not used by the spatial HAC: each unit's bandwidth is its largest \
-                     distance to its neighbours in the weights. Leave bandwidth unset."
-                        .to_string(),
-                );
-            }
             hac_kernel = match p2a_core::options::parse_or(
                 request.kernel.as_deref(),
                 SpatialHacKernel::default(),
@@ -1068,7 +1070,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel ML model (spml).
     #[tool(
-        description = "Run a spatial panel data model by maximum likelihood, as splm::spml: default model within, effect individual, lag false, spatial_error 'b' (the Baltagi spatial error model). Supported: with model within or pooling, the spatial lag model (lag = true, spatial_error = 'none'), the spatial error model (the default) and the SARAR model (lag = true with a spatial error), with any effect for within; with model random, individual effects with spatial_error 'b', 'kkp' or 'none' and an optional lag. lag = false with spatial_error = 'none' has no spatial parameter and is refused. Standard errors are the inverse observed information of the full log-likelihood. Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
+        description = "Run a spatial panel data model by maximum likelihood, as splm::spml: default model within, effect individual, lag false, spatial_error 'b' (the Baltagi spatial error model). Supported: with model within or pooling, the spatial lag model (lag = true, spatial_error = 'none'), the spatial error model (the default) and the SARAR model (lag = true with a spatial error), with any effect for within; with model random, individual effects with spatial_error 'b', 'kkp' or 'none' and an optional lag. lag = false with spatial_error = 'none' has no spatial parameter and is refused. Standard errors are the inverse observed information of the full log-likelihood. Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. A weights style other than W changes the scale of W, and so of rho and lambda."
     )]
     pub async fn spatial_panel_ml(
         &self,
@@ -1142,7 +1144,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel GMM model (spgm).
     #[tool(
-        description = "Run a spatial panel data model by generalized method of moments, as splm::spgm. Models: the spatial lag model by 2SLS with method w2sls (within), b2sls (between), ec2sls (Baltagi's EC2SLS) or g2sls (GLS random effects); the within GM spatial error model of Kapoor, Kelejian & Prucha (2007) (w2sls, the default call); and, with w2sls only, lag plus spatial error (within GS2SLS). The spatial error model with b2sls, ec2sls or g2sls is refused. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
+        description = "Run a spatial panel data model by generalized method of moments, as splm::spgm. Models: the spatial lag model by 2SLS with method w2sls (within), b2sls (between), ec2sls (Baltagi's EC2SLS) or g2sls (GLS random effects); the within GM spatial error model of Kapoor, Kelejian & Prucha (2007) (w2sls, the default call); and, with w2sls only, lag plus spatial error (within GS2SLS). The spatial error model with b2sls, ec2sls or g2sls is refused. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. A weights style other than W changes the scale of W, and so of rho and lambda."
     )]
     pub async fn spatial_panel_gmm(
         &self,

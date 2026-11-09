@@ -198,9 +198,9 @@ pub struct SphetRequest {
     )]
     pub kernel: Option<String>,
 
-    /// No longer used with se_type='hac'
+    /// Not used by any se_type (refused when set)
     #[schemars(
-        description = "Not used: the spatial HAC takes each unit's bandwidth as its largest distance to its neighbours in the weights (sphet's variable bandwidth). Leave unset; a value with se_type='hac' is refused."
+        description = "Not used: the spatial HAC takes each unit's bandwidth as its largest distance to its neighbours in the weights (sphet's variable bandwidth). No se_type takes a bandwidth: leave unset; a set value is refused with every se_type."
     )]
     pub bandwidth: Option<usize>,
 

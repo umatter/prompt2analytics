@@ -525,6 +525,19 @@ async fn test_spatial_option_descriptions_list_every_value() {
         "method",
         p2a_core::SpgmMethod::choices().names(),
     );
+    // A non-W style rescales W and so the spatial parameters: every tool that estimates them says so.
+    for tool in [
+        "sar_model",
+        "sem_model",
+        "spatial_panel_ml",
+        "spatial_panel_gmm",
+    ] {
+        let d = tool_description(tool);
+        assert!(
+            d.contains("A weights style other than W changes the scale of W"),
+            "{tool}: {d}"
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1189,8 +1202,8 @@ async fn test_validate_mcp_sphet_sem_het() {
     }
 }
 
-/// The HAC fields need se_type = "hac" and each other; the removed lag bandwidth is refused;
-/// an unknown kernel names the MCP field; sphet's seven kernels are reachable.
+/// The HAC fields need se_type = "hac" and each other; the removed lag bandwidth is refused
+/// with every se_type; an unknown kernel names the MCP field; sphet's seven kernels are reachable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_mcp_sphet_hac_field_rules() {
     let (s, server) = session_with("sphet_gmm_hac");
@@ -1214,6 +1227,12 @@ async fn test_mcp_sphet_hac_field_rules() {
         ),
         (
             json!({"se_type": "hac", "coord_x": "cx", "coord_y": "cy", "bandwidth": 4}),
+            "bandwidth is not used",
+        ),
+        // No other se_type takes a bandwidth either: refused, not ignored.
+        (json!({"bandwidth": 4}), "bandwidth is not used"),
+        (
+            json!({"se_type": "standard", "bandwidth": 4}),
             "bandwidth is not used",
         ),
     ] {
