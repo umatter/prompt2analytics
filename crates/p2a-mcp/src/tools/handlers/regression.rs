@@ -25,7 +25,9 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{NaPolicy, missing_json, numeric_column, numeric_columns};
+use crate::tools::common::{
+    NaPolicy, missing_json, notes_json, numeric_column, numeric_columns, parse_option,
+};
 use crate::tools::requests::regression::{
     BgTestRequest, BootstrapCovRequest, CvGlmnetRequest, DiagnosticsRequest, DriscollKraayRequest,
     GlmnetRequest, GlsRequest, HacRequest, HarveyCollierRequest, LassoRequest, LineRequest,
@@ -93,6 +95,188 @@ pub(crate) fn json_text(value: &serde_json::Value) -> String {
 pub(crate) fn json_compact(value: &serde_json::Value) -> String {
     serde_json::to_string(value)
         .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
+/// A JSON object written with its keys in the given order (serde_json's `Map` sorts keys), in
+/// compact form. The glmnet tools put their summary before the long path this way, so the
+/// part of a reply the chat loop keeps holds the warnings and the selection.
+fn ordered_json(pairs: &[(&str, serde_json::Value)]) -> String {
+    let body: Vec<String> = pairs
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}:{}",
+                json_compact(&serde_json::Value::from(*k)),
+                json_compact(v)
+            )
+        })
+        .collect();
+    format!("{{{}}}", body.join(","))
+}
+
+/// Predictors listed per glmnet fit before the listing switches to the largest |estimate|.
+const GLMNET_LISTED_MAX: usize = 20;
+
+/// One glmnet fit as JSON: lambda, df, deviance ratio, intercept and the coefficients (all of
+/// them for up to 20 predictors, in column order; otherwise the 20 largest by |estimate| and
+/// `more_nonzero`, the number of other non-zero ones).
+fn glmnet_fit_json(
+    names: &[String],
+    fit: &p2a_core::regression::GlmnetCoefficients,
+) -> serde_json::Value {
+    let p = names.len().min(fit.coefficients.len());
+    let mut entry = serde_json::json!({
+        "lambda": fit.lambda, "df": fit.df, "dev_ratio": fit.dev_ratio, "intercept": fit.intercept,
+    });
+    let listed: Vec<usize> = if p <= GLMNET_LISTED_MAX {
+        (0..p).collect()
+    } else {
+        let mut nz: Vec<usize> = (0..p).filter(|&j| fit.coefficients[j] != 0.0).collect();
+        nz.sort_by(|&a, &b| {
+            fit.coefficients[b]
+                .abs()
+                .total_cmp(&fit.coefficients[a].abs())
+                .then(a.cmp(&b))
+        });
+        entry["more_nonzero"] = serde_json::json!(nz.len().saturating_sub(GLMNET_LISTED_MAX));
+        nz.truncate(GLMNET_LISTED_MAX);
+        nz
+    };
+    entry["coefficients"] = listed
+        .iter()
+        .map(|&j| serde_json::json!({"variable": names[j], "estimate": fit.coefficients[j]}))
+        .collect();
+    entry
+}
+
+/// The order in which variables enter a glmnet path: each variable that is non-zero at some
+/// lambda (first non-zero fit, ties in column order), at most 20 listed, with its entry index
+/// (1-based), the lambda there and its estimate at the last lambda; then the number of further
+/// variables that enter and the number that never do.
+fn glmnet_selection(r: &p2a_core::regression::GlmnetResult) -> (serde_json::Value, usize, usize) {
+    let p = r.variable_names.len();
+    let mut first: Vec<Option<usize>> = vec![None; p];
+    for (i, fit) in r.fits.iter().enumerate() {
+        for (j, c) in fit.coefficients.iter().take(p).enumerate() {
+            if first[j].is_none() && *c != 0.0 {
+                first[j] = Some(i);
+            }
+        }
+    }
+    let mut entered: Vec<(usize, usize)> = first
+        .iter()
+        .enumerate()
+        .filter_map(|(j, f)| f.map(|i| (i, j)))
+        .collect();
+    entered.sort();
+    let never = p - entered.len();
+    let more = entered.len().saturating_sub(GLMNET_LISTED_MAX);
+    let last = r.fits.last();
+    let list: Vec<serde_json::Value> = entered
+        .iter()
+        .take(GLMNET_LISTED_MAX)
+        .map(|&(i, j)| {
+            serde_json::json!({
+                "variable": r.variable_names[j],
+                "enters_at_index": i + 1,
+                "enters_at_lambda": r.fits[i].lambda,
+                "estimate_at_last_lambda": last.and_then(|f| f.coefficients.get(j)).copied(),
+            })
+        })
+        .collect();
+    (serde_json::Value::from(list), more, never)
+}
+
+/// The JSON reply of regression_glmnet, regression_lasso and regression_ridge.
+fn glmnet_json(r: &p2a_core::regression::GlmnetResult) -> String {
+    use serde_json::json;
+    let (selection, more, never) = glmnet_selection(r);
+    let listed = if r.variable_names.len() <= GLMNET_LISTED_MAX {
+        "all"
+    } else {
+        "the 20 largest |estimate| per lambda"
+    };
+    let path: Vec<serde_json::Value> = r
+        .fits
+        .iter()
+        .map(|f| glmnet_fit_json(&r.variable_names, f))
+        .collect();
+    ordered_json(&[
+        ("model", json!("glmnet")),
+        ("family", json!(r.family.to_string())),
+        ("alpha", json!(r.alpha)),
+        ("standardize", json!(r.standardize)),
+        ("intercept", json!(r.intercept)),
+        ("dependent_var", json!(r.dependent_var)),
+        ("variables", json!(r.variable_names)),
+        ("n_obs", json!(r.n_obs)),
+        ("n_lambda", json!(r.fits.len())),
+        ("npasses", json!(r.npasses)),
+        ("null_deviance", json!(r.null_deviance)),
+        (
+            "warnings",
+            notes_json(None, &r.warnings)["warnings"].clone(),
+        ),
+        ("selection", selection),
+        ("more_selected", json!(more)),
+        ("never_selected", json!(never)),
+        ("coefficients_listed", json!(listed)),
+        ("path", json!(path)),
+    ])
+}
+
+/// The JSON reply of regression_cv_glmnet; `seed` is the seed the folds were drawn from.
+fn cv_glmnet_json(r: &p2a_core::regression::GlmnetCvResult, seed: u64) -> String {
+    use serde_json::json;
+    let names = &r.fit.variable_names;
+    let at = |i: usize| {
+        let mut e = r
+            .fit
+            .fits
+            .get(i)
+            .map(|f| glmnet_fit_json(names, f))
+            .unwrap_or_else(|| json!({}));
+        e["cvm"] = json!(r.cvm.get(i));
+        e["cvsd"] = json!(r.cvsd.get(i));
+        e
+    };
+    let curve: Vec<serde_json::Value> = (0..r.lambda.len())
+        .map(|i| {
+            json!({
+                "lambda": r.lambda[i],
+                "cvm": r.cvm.get(i),
+                "cvsd": r.cvsd.get(i),
+                "df": r.fit.fits.get(i).map(|f| f.df),
+            })
+        })
+        .collect();
+    let mut warnings = r.fit.warnings.clone();
+    warnings.extend(
+        r.warnings
+            .iter()
+            .filter(|w| !r.fit.warnings.contains(w))
+            .cloned(),
+    );
+    ordered_json(&[
+        ("model", json!("cv.glmnet")),
+        ("family", json!(r.fit.family.to_string())),
+        ("alpha", json!(r.fit.alpha)),
+        ("standardize", json!(r.fit.standardize)),
+        ("dependent_var", json!(r.fit.dependent_var)),
+        ("variables", json!(names)),
+        ("n_obs", json!(r.fit.n_obs)),
+        ("nfolds", json!(r.nfolds)),
+        ("seed", json!(seed)),
+        ("lambda_min", json!(r.lambda_min)),
+        ("index_min", json!(r.lambda_min_index + 1)),
+        ("lambda_1se", json!(r.lambda_1se)),
+        ("index_1se", json!(r.lambda_1se_index + 1)),
+        ("warnings", notes_json(None, &warnings)["warnings"].clone()),
+        ("at_lambda_min", at(r.lambda_min_index)),
+        ("at_lambda_1se", at(r.lambda_1se_index)),
+        ("cv_curve", json!(curve)),
+        ("fold_path_lengths", json!(r.fold_path_lengths)),
+    ])
 }
 
 /// The intercept flag and covariance type of an OLS request: `intercept`
@@ -1127,7 +1311,7 @@ impl AnalyticsServer {
 
     /// Run elastic net/lasso/ridge regression (glmnet).
     #[tool(
-        description = "Run regularized regression with elastic net penalty (glmnet). Combines L1 (lasso) and L2 (ridge) penalties. Set alpha=1 for lasso, alpha=0 for ridge, or 0<alpha<1 for elastic net. Returns coefficient path along lambda sequence."
+        description = "Elastic net, lasso or ridge regression as R glmnet::glmnet (coordinate descent, glmnet's standardisation and lambda path). alpha = 1 lasso (default), 0 ridge, in between elastic net; family 'gaussian' (default) or 'binomial'. Returns JSON with the coefficient path: for each lambda the intercept, df, deviance ratio and the coefficients (all of them for up to 20 predictors, otherwise the 20 largest in absolute value and the number of other non-zero ones). The selection summary (order of entry and the estimates at the smallest lambda) comes before the full path."
     )]
     pub async fn regression_glmnet(
         &self,
@@ -1139,24 +1323,23 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let family = match request.family.as_deref() {
-            Some("binomial") => GlmnetFamily::Binomial,
-            _ => GlmnetFamily::Gaussian,
-        };
+        let family =
+            match parse_option::<GlmnetFamily>(request.family.as_deref(), GlmnetFamily::Gaussian) {
+                Ok(f) => f,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
-        let config = GlmnetConfig {
-            alpha: request.alpha.unwrap_or(1.0),
-            lambda: request.lambda,
-            nlambda: request.nlambda.unwrap_or(100),
-            standardize: request.standardize.unwrap_or(true),
-            family,
-            ..Default::default()
-        };
+        let mut config = GlmnetConfig::default();
+        config.alpha = request.alpha.unwrap_or(1.0);
+        config.lambda = request.lambda;
+        config.nlambda = request.nlambda.unwrap_or(100);
+        config.standardize = request.standardize.unwrap_or(true);
+        config.family = family;
 
         match run_glmnet(dataset, &request.y, &x_refs, &config) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
+                &result,
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Glmnet failed: {}",
                 e
@@ -1166,7 +1349,7 @@ impl AnalyticsServer {
 
     /// Run cross-validated glmnet for optimal lambda selection.
     #[tool(
-        description = "Run cross-validated elastic net/lasso/ridge regression to select optimal lambda. Returns lambda.min (minimum CV error) and lambda.1se (most regularized within 1 SE of minimum)."
+        description = "Cross-validated elastic net as R glmnet::cv.glmnet: observations are assigned to nfolds folds (default 10) at random from seed (default: the session seed set by set_seed, else 42); each fold is fitted on its own lambda path. Returns JSON with lambda.min and lambda.1se and their 1-based indices, the coefficients at both, the CV curve (lambda, cvm, cvsd, df) and the seed used."
     )]
     pub async fn regression_cv_glmnet(
         &self,
@@ -1178,24 +1361,27 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let family = match request.family.as_deref() {
-            Some("binomial") => GlmnetFamily::Binomial,
-            _ => GlmnetFamily::Gaussian,
-        };
+        let family =
+            match parse_option::<GlmnetFamily>(request.family.as_deref(), GlmnetFamily::Gaussian) {
+                Ok(f) => f,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
-        let config = GlmnetConfig {
-            alpha: request.alpha.unwrap_or(1.0),
-            nlambda: request.nlambda.unwrap_or(100),
-            standardize: request.standardize.unwrap_or(true),
-            family,
-            ..Default::default()
-        };
+        let mut config = GlmnetConfig::default();
+        config.alpha = request.alpha.unwrap_or(1.0);
+        config.nlambda = request.nlambda.unwrap_or(100);
+        config.standardize = request.standardize.unwrap_or(true);
+        config.family = family;
 
         let nfolds = request.nfolds.unwrap_or(10);
+        let seed = request.seed.or(*self.global_seed.read().await);
 
-        match run_cv_glmnet(dataset, &request.y, &x_refs, &config, nfolds, request.seed) {
+        match run_cv_glmnet(dataset, &request.y, &x_refs, &config, nfolds, seed) {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
+                cv_glmnet_json(
+                    &result,
+                    seed.unwrap_or(p2a_core::regression::glmnet::CV_GLMNET_DEFAULT_SEED),
+                ),
             )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "CV Glmnet failed: {}",
@@ -1206,7 +1392,7 @@ impl AnalyticsServer {
 
     /// Run ridge regression (L2 penalty).
     #[tool(
-        description = "Run ridge regression (L2-penalized linear regression). Shortcut for glmnet with alpha=0. Useful when predictors are highly correlated."
+        description = "Ridge regression: glmnet with alpha = 0, as R glmnet::glmnet(alpha = 0). Returns the coefficient path as JSON (see regression_glmnet)."
     )]
     pub async fn regression_ridge(
         &self,
@@ -1219,9 +1405,9 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         match run_ridge(dataset, &request.y, &x_refs, request.lambda) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
+                &result,
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Ridge regression failed: {}",
                 e
@@ -1231,7 +1417,7 @@ impl AnalyticsServer {
 
     /// Run lasso regression (L1 penalty).
     #[tool(
-        description = "Run lasso regression (L1-penalized linear regression). Shortcut for glmnet with alpha=1. Performs automatic feature selection by shrinking some coefficients to zero."
+        description = "Lasso regression: glmnet with alpha = 1, as R glmnet::glmnet(alpha = 1); coefficients shrunk exactly to zero are not selected. Returns the coefficient path as JSON (see regression_glmnet)."
     )]
     pub async fn regression_lasso(
         &self,
@@ -1244,9 +1430,9 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         match run_lasso(dataset, &request.y, &x_refs, request.lambda) {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )])),
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(glmnet_json(
+                &result,
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Lasso regression failed: {}",
                 e

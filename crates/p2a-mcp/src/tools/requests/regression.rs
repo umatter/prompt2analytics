@@ -598,7 +598,7 @@ pub struct GlmnetRequest {
 
     /// Model family: gaussian (linear) or binomial (logistic)
     #[schemars(
-        description = "Model family: 'gaussian' (default) for linear regression, 'binomial' for logistic regression."
+        description = "Model family: 'gaussian' (default; also 'linear', 'normal') for linear regression, 'binomial' (also 'logistic', 'logit') for logistic regression. Other values are an error."
     )]
     pub family: Option<String>,
 }
@@ -630,7 +630,9 @@ pub struct CvGlmnetRequest {
     pub nfolds: Option<usize>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Random seed for fold assignment reproducibility.")]
+    #[schemars(
+        description = "Seed of the random fold assignment. Default: the session seed set by set_seed, else 42. The seed used is reported."
+    )]
     pub seed: Option<u64>,
 
     /// Number of lambda values in path
@@ -643,7 +645,7 @@ pub struct CvGlmnetRequest {
 
     /// Model family: gaussian (linear) or binomial (logistic)
     #[schemars(
-        description = "Model family: 'gaussian' (default) for linear regression, 'binomial' for logistic regression."
+        description = "Model family: 'gaussian' (default; also 'linear', 'normal') for linear regression, 'binomial' (also 'logistic', 'logit') for logistic regression. Other values are an error."
     )]
     pub family: Option<String>,
 }
