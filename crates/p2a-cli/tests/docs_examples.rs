@@ -714,3 +714,143 @@ fn test_in_binary_examples_parse() {
         problems.join("\n")
     );
 }
+
+// ---------------------------------------------------------------- Task 4
+
+/// `(depth, names, is_dir)` of a tree line such as `│   ├── shap.rs, pdp.rs   # ...`.
+fn tree_entry(line: &str) -> Option<(usize, Vec<String>, bool)> {
+    let chars: Vec<char> = line.chars().collect();
+    let pos = chars.iter().position(|c| *c == '├' || *c == '└')?;
+    if chars[..pos].iter().any(|c| *c != '│' && *c != ' ') {
+        return None;
+    }
+    let rest: String = chars[pos..].iter().collect();
+    let rest = rest
+        .trim_start_matches(|c| matches!(c, '├' | '└' | '─'))
+        .trim_start();
+    let entry = rest.split('#').next().unwrap_or("").trim();
+    let is_dir = entry.ends_with('/');
+    let names = entry
+        .split(',')
+        .map(|n| n.trim().trim_end_matches('/').to_string())
+        .filter(|n| !n.is_empty() && !n.contains('*') && !n.contains("..."))
+        .collect();
+    Some((pos / 4, names, is_dir))
+}
+
+/// Source paths CLAUDE.md names: the entries of its module trees (fences whose first line is
+/// `crates/<crate>/src/`) and every backticked `crates/<crate>/src/...` path.
+fn claude_md_paths(md: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = md.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if fence(lines[i].trim_start()).is_some() {
+            let root = lines.get(i + 1).map_or("", |l| l.trim());
+            let tree = root.starts_with("crates/") && root.ends_with("/src/");
+            let mut stack: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() && fence(lines[j].trim_start()).is_none() {
+                if tree
+                    && j > i + 1
+                    && let Some((depth, names, is_dir)) = tree_entry(lines[j])
+                {
+                    stack.truncate(depth);
+                    let base: String = stack.iter().map(|d| format!("{d}/")).collect();
+                    for n in &names {
+                        out.push((j + 1, format!("{root}{base}{n}")));
+                    }
+                    if is_dir && let [only] = names.as_slice() {
+                        stack.push(only.clone());
+                    }
+                }
+                j += 1;
+            }
+            i = j + 1;
+            continue;
+        }
+        for span in lines[i].split('`').skip(1).step_by(2) {
+            if span.starts_with("crates/")
+                && span.contains("/src/")
+                && !span.contains(|c: char| matches!(c, '*' | '<' | '{' | ' '))
+            {
+                out.push((i + 1, span.trim_end_matches('/').to_string()));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+#[test]
+fn test_tree_entries_are_parsed() {
+    assert_eq!(
+        tree_entry("├── linalg/"),
+        Some((0, vec!["linalg".to_string()], true))
+    );
+    assert_eq!(
+        tree_entry("│   ├── shap.rs, pdp.rs, ice.rs              # Model interpretation"),
+        Some((
+            1,
+            vec![
+                "shap.rs".to_string(),
+                "pdp.rs".to_string(),
+                "ice.rs".to_string()
+            ],
+            false
+        ))
+    );
+    assert_eq!(
+        tree_entry("│       ├── mod.rs          # GpuContext"),
+        Some((2, vec!["mod.rs".to_string()], false))
+    );
+    assert_eq!(
+        tree_entry("│   └── ...                # 30+ more"),
+        Some((1, Vec::new(), false))
+    );
+    assert_eq!(
+        tree_entry("│                          #   design: docs/design/X.md"),
+        None
+    );
+    let md = "```\ncrates/x/src/\n├── a/\n│   ├── b.rs\n│   └── c/\n│       └── d.rs\n└── e.rs\n```\nsee `crates/x/src/e.rs`\n";
+    let paths: Vec<String> = claude_md_paths(md).into_iter().map(|(_, p)| p).collect();
+    assert_eq!(
+        paths,
+        [
+            "crates/x/src/a",
+            "crates/x/src/a/b.rs",
+            "crates/x/src/a/c",
+            "crates/x/src/a/c/d.rs",
+            "crates/x/src/e.rs",
+            "crates/x/src/e.rs"
+        ]
+    );
+}
+
+/// WT-17 (CLAUDE.md listed the never-compiled ml/interpretability.rs) and INF-10 (cache.rs; panel.rs
+/// and discrete.rs are directories): every source path CLAUDE.md names exists. Fails before: the
+/// p2a-core tree's root line is `src/`; then cache.rs, econometrics/panel.rs, econometrics/discrete.rs,
+/// econometrics/timeseries.rs (a directory since T3-WP04) and ml/interpretability.rs (deleted by T3-WP04).
+#[test]
+fn test_claude_md_names_existing_source_files() {
+    let paths = claude_md_paths(&read("CLAUDE.md"));
+    let core = paths
+        .iter()
+        .filter(|(_, p)| p.starts_with("crates/p2a-core/src/"))
+        .count();
+    assert!(
+        core >= 80,
+        "the p2a-core module tree was not found ({core} paths): its fence must start with `crates/p2a-core/src/`"
+    );
+    let root = generator::repo_root();
+    let missing: Vec<String> = paths
+        .iter()
+        .filter(|(_, p)| !root.join(p).exists())
+        .map(|(line, p)| format!("CLAUDE.md:{line}: {p}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "CLAUDE.md names source files that do not exist:\n{}",
+        missing.join("\n")
+    );
+}

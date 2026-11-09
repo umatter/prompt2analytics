@@ -239,13 +239,16 @@ P2A_GPU_XTX_MIN_NKK=999999999999 P2A_GPU_XTX_MIN_K=999999 \
 ### Module Organization (p2a-core)
 
 ```
-src/
+crates/p2a-core/src/
 ├── errors.rs              # EconError, EconResult types
-├── cache.rs               # Thread-safe LRU cache with memory limits and TTL
 ├── memory.rs              # Memory monitoring, pressure detection, cleanup
 ├── resource.rs            # try_* fallible allocation, alloc ceiling, CancelToken/Budget, checkpoint()
+├── options.rs             # Option strings -> enums (Choices, option_enum!): case- and separator-insensitive,
+│                          #   errors list the accepted values (R1)
 ├── linalg/
 │   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer), GPU dispatch
+│   ├── solve.rs           # Rank-revealing least squares (pivoted QR with R's dqrdc2 aliasing rule);
+│   │                      #   sym_inverse reporting rank and reciprocal condition (R9)
 │   └── gpu/               # Optional CUDA acceleration (#[cfg(feature = "cuda")])
 │       ├── mod.rs          # GpuContext singleton (OnceLock)
 │       ├── context.rs      # CUDA device init, capability detection
@@ -256,7 +259,8 @@ src/
 │       └── kernels.rs      # Custom: pairwise_distances (K-means)
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
-│   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value helpers
+│   ├── convergence.rs     # Convergence, ResultNotes, notes_text/notes_json (R10)
+│   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value and quantile helpers
 │
 ├── diagnostics/           # Identification warnings (non-blocking) for IV, DiD, matching/IPW, RD
 │                          #   design: docs/design/IDENTIFICATION_WARNINGS.md
@@ -271,7 +275,8 @@ src/
 │   ├── gls.rs             # Generalized least squares (AR1, custom correlation)
 │   ├── smooth_spline.rs   # Smoothing splines with GCV
 │   ├── step.rs            # Stepwise selection (forward, backward, both)
-│   ├── quantreg.rs        # Quantile regression (interior point, simplex)
+│   ├── quantreg.rs        # Quantile regression: Barrodale-Roberts up to 5,000 rows, Frisch-Newton above
+│   │                      #   (`auto`, default); summary.rq SEs
 │   ├── marginal_effects.rs # Marginal effects and contrasts
 │   ├── sensemakr.rs       # Sensitivity analysis (Cinelli & Hazlett)
 │   └── evalue.rs          # E-values for unmeasured confounding
@@ -298,20 +303,26 @@ src/
 │   ├── robust.rs          # Robust statistics (fivenum, IQR, MAD, ECDF, density)
 │   ├── spline.rs          # Spline interpolation and approximation
 │   ├── weighted.rs        # Weighted mean and covariance
+│   ├── ranks.rs           # Exact midranks shared by the rank tests
 │   └── ...                # 30+ more statistical tests
 │
 ├── econometrics/          # Econometric methods (60+ methods)
-│   ├── panel.rs           # FE, RE, Hausman, Panel GLS, Arellano-Bond GMM, PVCM, PMG
+│   ├── panel/             # FE, RE, Hausman, panel GLS, Arellano-Bond and Blundell-Bond (system) GMM,
+│   │                      #   PVCM, PMG
 │   ├── iv.rs              # 2SLS, first-stage diagnostics, Sargan test
 │   ├── did.rs             # Canonical 2x2 DiD
 │   ├── staggered_did.rs   # Callaway-Sant'Anna staggered DiD
 │   ├── etwfe.rs           # Extended two-way fixed effects (Wooldridge)
 │   ├── bacon.rs           # Goodman-Bacon decomposition
-│   ├── discrete.rs        # Logit, Probit, Multinomial, Ordered, NegBin, ZIP, ZINB, Hurdle, Mixed logit
+│   ├── discrete/          # Logit/probit on the shared GLM, multinomial, conditional logit (with ASCs),
+│   │                      #   ordered, NegBin, ZIP, ZINB, hurdle, mixed logit
+│   ├── glm.rs             # Shared GLM: IRLS with glm.fit's safeguards (step halving, aliasing at 1e-11),
+│   │                      #   propensity scores, TMLE fluctuation (R12)
 │   ├── feglm.rs           # GLM with HDFE (IRLS + weighted MAP)
 │   ├── hdfe.rs            # High-dimensional fixed effects
 │   ├── rd.rs              # Sharp/Fuzzy RD with CCT robust inference
 │   ├── rdmulti.rs         # Multi-cutoff RD
+│   ├── rd_bwselect.rs     # rdrobust::rdbwselect bandwidths, all ten selectors
 │   ├── synth.rs           # Synthetic control (classic + gsynth)
 │   ├── scpi.rs            # Synthetic control with prediction intervals
 │   ├── treatment.rs       # IPW, doubly robust estimation
@@ -320,6 +331,7 @@ src/
 │   ├── ltmle.rs           # Longitudinal TMLE
 │   ├── doubleml.rs        # Double/Debiased ML (PLR, PLIV, IRM, IIVM)
 │   ├── matching.rs        # Propensity score matching (MatchIt)
+│   ├── min_cost_flow.rs   # Network simplex for optimal full matching
 │   ├── weightit.rs        # Flexible IPW (entropy balancing)
 │   ├── cbps.rs            # Covariate balancing propensity scores
 │   ├── twang.rs           # GBM propensity scores
@@ -330,7 +342,7 @@ src/
 │   ├── spatialprobit.rs   # Spatial probit models
 │   ├── splm.rs            # Spatial panel models (SPML, SPGM)
 │   ├── sphet.rs           # Spatial GMM with heteroskedasticity
-│   ├── timeseries.rs      # VAR, VARMA, VECM, IRF, Granger causality
+│   ├── timeseries/        # mod, common, var (VAR, IRF), varma (Hannan-Rissanen), vecm (Johansen), granger
 │   ├── panel_unit_root.rs # LLC, IPS, Hadri panel unit root tests
 │   └── ...                # ivmte, hettx, stdreg, gformula, bpbounds, sbw
 │
@@ -344,7 +356,7 @@ src/
 │   ├── kalman.rs          # Kalman filter and smoother
 │   ├── structts.rs        # Structural time series (local level, trend, BSM)
 │   ├── changepoint.rs     # PELT and binary segmentation
-│   ├── garch.rs           # GARCH(p,q) volatility modeling
+│   ├── garch.rs           # GARCH(p,q) by conditional ML, normal or Student-t errors
 │   ├── causal_impact.rs   # Bayesian structural time series causal inference
 │   └── tsutils.rs         # lag, embed, diffinv, filter, window, arima_sim, runmed
 │
@@ -355,7 +367,10 @@ src/
 │   ├── svm.rs             # Linear SVM (SMO)
 │   ├── gbm.rs, xgboost.rs, lightgbm.rs, adaboost.rs, mboost.rs   # Boosting family
 │   ├── bart.rs, bart_causal.rs, causal_forest.rs                 # Bayesian trees, heterogeneous effects
-│   ├── shap.rs, pdp.rs, ice.rs, interpretability.rs              # Model interpretation
+│   ├── shap.rs, pdp.rs, ice.rs   # Model interpretation (exact TreeSHAP, Kernel SHAP; one PDP/ICE engine)
+│   ├── hclust.rs          # One hierarchical-clustering core, as stats::hclust
+│   ├── advanced_clustering_mod/  # One file per family: common, kmedoids, spectral, affinity, optics, hdbscan,
+│   │                      #   gmm, fuzzy, kmeans_variants, hierarchical, mixtures, dynamic_tree_cut, other
 │   └── *_fast.rs          # Optimized variants of svm/xgboost/mboost/evaluation kept alongside originals
 │
 ├── simulation/            # Data simulation
@@ -632,7 +647,8 @@ crates/p2a-mcp/src/
 │                          #   llm_routes.rs (chat, SSE, tool executors), conversation.rs, websocket.rs
 ├── tools/
 │   ├── mod.rs             # Re-exports
-│   ├── registry.rs        # Tool metadata for documentation
+│   ├── registry.rs        # Search registry: generated from the router plus one CATEGORY_TABLE row per tool
+│   ├── common.rs          # Column readers, parse_option, append_notes/notes_json, file-type checks
 │   ├── limits/            # Request limits: mod.rs (Limits, hosted()/off(), overrides, LimitViolation),
 │   │                      #   rules.rs (PARAM_RULES per request field, ROW_RULES per tool)
 │   ├── requests/          # Request structs by category
