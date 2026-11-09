@@ -20,7 +20,9 @@ the three-period case (always, never, dynamic, (1, 0, 1)) must agree to 1e-8 rel
 case stops (`ltmle(.., SL.library = "glm", stratify = FALSE, variance.method = "ic")`; ltmle
 fits at glm's default control, about 1e-11 from the tight fits). R 4.3.3; `packages = {ltmle}`.
 The linear Q model is p2a's own variant and has no ltmle counterpart: it is pinned to the
-written-out reference only.
+written-out reference only. On a regime with a handful of followers the written-out estimator
+stops solving the EIC equation, and the case `ltmle_saturation` pins `ltmle::ltmle` itself
+("Saturating regimes" below).
 
 ## 3. Algorithm as implemented
 
@@ -44,6 +46,15 @@ Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-base
    intercept-only quasibinomial fit with offset `logit Q_t(d)` and weights `H_t` (zero weights
    drop the non-followers); `Q*_t = plogis(logit Q_t(d) + eps_t)` for every subject. The last
    node's Q regression has the same response and design for every regime and is fitted once.
+   A Q response whose range over the subjects is below 1e-4 is not regressed: as
+   `ltmle:::Estimate`, the node predicts `max(response)` for every subject, on the link scale
+   `qlogis` of it bounded to `[1e-4, 0.9999]` (ltmle's no-variation rule;
+   `NodeModel::constant_prediction`). The fluctuation is LTMLE's own scalar Newton solver of the
+   score equation with glm.fit's deviance rule (CAUS-101); after it the node's EIC term
+   `sum_i H_t,i (Q*_{t+1,i} - Q*_t,i)` is checked against ltmle's trigger of 1e-3 (absolute, on the
+   fitted [0, 1] scale), and above it the score equation is re-solved with the offsets bounded to
+   `logit([lb, 1 - lb])`, lb in 1e-8, 1e-4, 1e-3, 0.01 in turn (`ltmle:::FixScoreEquation`), by a
+   bracketed monotone root search to `1e-12 * sum_i H_t,i` instead of ltmle's nlminb to 1e-4.
 6. **Estimate and EIC (`CalcIC`).** `psi = mean(Q*_1)`,
    `EIC = sum_t H_t (Q*_{t+1} - Q*_t) + Q*_1 - psi`.
 
@@ -66,8 +77,12 @@ that no longer meets the rule once refined. A converged fit also leaves with a r
 `fit_glm` loses the digits of `1 - mu` there and can report the fit differently. The check is the
 same for a fractional Q response, where `1 - 1e-8` at `eta = 18` leaves although it is well fitted;
 the bound was calibrated on 0/1 responses only, and on the sweep below no fast-path fit of 23,104
-left through it at 1e-8 and 2 of 23,102 at 1e-10. A response whose mean is within 1e-6 of 0 or 1
-goes to `fit_glm` directly.
+left through it at 1e-8 and 2 of 23,102 at 1e-10. A Q response with a range below 1e-4 is not
+fitted at all (ltmle's no-variation rule, step 5 above), on every path alike. A response whose
+mean is within 1e-6 of 0 or 1 and whose range is at least 1e-4 goes to `fit_glm` directly. On the
+sweep below, at the default tolerance, the rule takes 5,449 Q fits of 520 data sets off the shared
+GLM; the shared-GLM warnings of Q fits fall from 4,556 to 22, the data sets reported as not
+converged from 371 to 0, and the iterative fits from 48,934 to 43,466 ("Saturating regimes").
 
 The Q regression of node `t - 1` starts from node t's coefficients on the shared history, with
 `L_t`, `A_t` and `eps_t` moved into the intercept at their means (`warm_start`); its response is
@@ -84,7 +99,8 @@ fits took more steps from it, the most being 86 where glm.fit's start took 12
 lean fit leaves for `fit_glm` from glm.fit's start. At `max_iter` 50, 60 and 75 the warnings and
 convergence status are equal on all 1,716 data sets.
 
-The gap table and figures below were measured at bd5068dd.
+The gap table and figures below were measured at bd5068dd, before the no-variation rule and the
+score re-solve; the columns with a regime near 0 or 1 describe fits that the rule now skips.
 
 Two reported things change, and both are accepted. `NodeModel::iterations` of a warm-started node
 counts the steps from its warm start (2 where glm.fit's start takes 4 or 5), so it is not comparable
@@ -163,20 +179,120 @@ At `max_iter` 2 to 6 and 49 they are equal by construction. At 1e-14, where roun
 deviance rule, the status differs on 158 of the 1,716 and the warnings on 305, with the numbers
 within the 1e-14 column. No data set fits on one path and errors on the other.
 
-The sweep also shows something the fast paths do not change: on a regime that saturates, the
-estimate itself can depend on the tolerance, on both paths alike. `shifted_outcome((5000, 10, 4),
-3.0, false, 2.0)` has an always-treat mean of 2e-16 at 1e-8, reported as not converged, and of 1
-at 1e-10. At `sparse_followers(2500, 8, 20)` the never regime's mean is 9.4e-3 at 1e-8, with a
-converged fit, and 2e-16 at 1e-10, so the ATE moves by 9.4e-3; the two paths' ATEs are 6e-13 apart
-at 1e-8. `fit_glm`'s ATE at 1e-8 against 1e-14 moves by more than 1e-3 on 9 of the 1,716 data sets,
-3 of them reported as converged at 1e-8, and by more than 0.1 on 3, none of them reported as
-converged. The dependence belongs to the estimator and its deviance rule, not to the fast paths. It
-is open: a follow-up will settle which answer is right.
+The sweep also showed something the fast paths did not change: on a regime that saturated, the
+estimate itself depended on the tolerance, on both paths alike (`shifted_outcome((5000, 10, 4),
+3.0, false, 2.0)`: always-treat mean 2e-16 at 1e-8 and 1 at 1e-10; `sparse_followers(2500, 8, 20)`:
+never-treat mean 9.4e-3 at 1e-8 and 2e-16 at 1e-10). The follow-up settled it against
+`ltmle::ltmle` 1.3-0: ltmle's no-variation rule and score check, which p2a lacked, are what keep
+ltmle stable at its own glm epsilon of 1e-8. With both in place the two data sets agree with ltmle
+within 1e-8 at every tolerance; "Saturating regimes" has the measurements.
 
 There is no warm start across regimes. The last node's Q regression is fitted once for all
 regimes, and every earlier one already starts from its own regime's later node and takes about
 two steps, so a start from the other regime has few steps left to save. The fits that stay
 expensive are the saturated ones, which keep glm.fit's start ("Wall-clock against fe13b889").
+
+### Saturating regimes
+
+A regime with a handful of followers at the last node (10 or fewer of thousands) has a
+targeting step that drives the later Q* towards 0 or 1. Measured on the sweep's 2,160 data sets
+(the fast-path grid above) at tolerances 1e-8, 1e-9, 1e-10, 1e-12 and 1e-14, before (3a7bc841)
+and after the two rules below, with `ltmle::ltmle` 1.3-0 (`SL.library = "glm"`, `stratify =
+FALSE`, `variance.method = "ic"`) run on the exported data sets as the oracle. Means on the
+probability scale:
+
+| Data set (followers of always / never at the last node) | always | never | ATE |
+|---|---:|---:|---:|
+| `shifted_outcome((5000, 10, 4), 3, false, 2)` (10 / 7): ltmle | 0.99999999995095079 | 0.99999999994364086 | 7e-12 |
+| p2a before, tolerance 1e-8 (not converged) / 1e-14 | 2.2e-16 / 1 | 1 / 1 | -1 / 0 |
+| p2a after, 1e-8 / 1e-14 | 0.9999999999999998 / 0.9999999999999998 | 0.99999999999984 / 0.9999999999999998 | 1.6e-13 / 0 |
+| written-out glm estimator, epsilon 1e-8 / 1e-14 | 0.99999999999925 / 0.99896149 | 0.99999999999912 / 0.99998683 | |
+| analytic estimand of the DGP | 0.999036 | 0.950235 | 0.048802 |
+| `sparse_followers(2500, 8, 20)` (19 / 10): ltmle | 0.74648582426651022 | 4.0282706210332339e-11 | 0.746485824226 |
+| p2a before, 1e-8 / 1e-14 | 0.746485824267 / 0.746485824248 | 0.0093744942864 / 2.2e-16 | 0.737111329980 / 0.746485824248 |
+| p2a after, 1e-8 / 1e-14 | 0.746485824267 / 0.746485824248 | 2.2e-16 / 2.2e-16 | 0.746485824267 / 0.746485824248 |
+| written-out, epsilon 1e-8 / 1e-14 | 0.74648582426656 / 0.74648582424775 | 7.9e-13 / 0.0048317 | |
+| analytic estimand | 0.826621 | 0.157888 | 0.668733 |
+| `sparse_followers(4000, 10, 3)` (9 / 4), the timing harness's saturating case: ltmle | 0.89052550172634615 | 0.49401994965066831 | 0.39650555207568 |
+| p2a before, every tolerance | 0.8905255021 | 1 | -0.1094744979 |
+| p2a after, 1e-8 / 1e-14 | 0.890525502108 / 0.890525502108 | 0.494019949648 / 0.494019949647 | 0.396505552461 / 0.396505552461 |
+
+What the runs show:
+
+1. **A tight tolerance is not a reference on these data.** The written-out glm estimator (the
+   reference of `ltmle_two_period`) stops being monotone in epsilon: at epsilon 1e-14 its
+   fluctuation coefficients reach 4.5e15 (on the three data sets named here), and its EIC mean at epsilon 1e-14 is -0.0053 (sparse 2500, never), -0.069
+   (`shifted_outcome((150, 4, 2), 3, false, 2)`, never) and 0.063 (`sparse_followers(150, 8, 5)`,
+   never): its targeting does not solve the EIC equation there. The criterion is that every
+   node's score equation is solved, not a tolerance.
+2. **ltmle stays stable because of two rules, which p2a now applies** (step 5 above): the
+   no-variation rule (a Q response with a range below 1e-4 is predicted as a constant, before
+   the choice of fit path) and the score check with its re-solve. Without the first, the fit of
+   such a response ran to the link's clamp and its regime predictions depended on where the
+   deviance rule stopped. Without the second, the scalar fluctuation could stop on its deviance
+   rule far from the root: on `sparse_followers(4000, 10, 3)` the never regime's last step left
+   the score at -200 and the mean at 1, at every tolerance.
+3. **No estimator recovers the analytic estimand with about 10 followers** (never: 0.158 against
+   about 0 for all of them). With so few followers the regime's mean is not identified in
+   practice. ltmle warns that the influence-curve variance "may be significantly
+   anticonservative because your data appears to contain positivity violations", and p2a now
+   does too (warnings below). "Right" here means the ltmle oracle's value plus that warning.
+
+**Tolerance dependence after the rules** (ATE at each tolerance against 1e-14, absolute, over the
+1,715 data sets that fit; a constant outcome is now refused, which removes one):
+
+| ATE moved by more than | 1e-6 | 1e-3 | 1e-2 | 0.1 | 0.5 |
+|---|---:|---:|---:|---:|---:|
+| before, tolerance 1e-8 | 17 | 9 | 6 | 3 | 2 |
+| before, 1e-10 | 13 | 8 | 5 | 0 | 0 |
+| after, 1e-8: flagged (914) / unflagged (801) | 5 / 0 | 2 / 0 | 1 / 0 | 0 / 0 | 0 / 0 |
+| after, 1e-9: flagged / unflagged | 4 / 0 | 2 / 0 | 1 / 0 | 0 / 0 | 0 / 0 |
+| after, 1e-10: flagged / unflagged | 4 / 0 | 3 / 0 | 2 / 0 | 0 / 0 | 0 / 0 |
+
+"Flagged" is a data set with any saturation warning (mostly ltmle's positivity check). On the
+unflagged ones the largest move between 1e-8 and 1e-14 is 9.4e-10. Of the 17 data sets that moved
+before, 12 had a regime with a Q response of range below 1e-4 (three of them also an unsolved
+score); the no-variation rule settles all 12. The other five still move, at all tolerances alike
+(largest 0.023, `shifted_outcome((150, 4, 2), 3, false, 2)`): their last node's Q regression is
+quasi-separated on a 0/1 outcome (30 to 35 IRLS steps, one with 12), and the regime prediction
+from it depends on where the deviance rule stops. Neither rule addresses that, and a tighter
+default does not either (the same five at 1e-10 and 1e-12).
+
+**Agreement with ltmle after the rules** (|p2a - ltmle| on the regime means and the ATE):
+
+| Oracle set | data sets | before, 1e-8 | after, 1e-8 | after, 1e-14 |
+|---|---:|---:|---:|---:|
+| regular (no regime near 0 or 1, no move; 30 drawn with seed 20261109) | 30 | 7.6e-10 (largest) | 7.6e-10 | 2.9e-9 |
+| the 17 that moved before, `sparse_followers(4000, 10, 3)`, `long_horizon(2500, 10, 21)`, `long_horizon(300, 6, 17)`, `long_horizon(600, 3, 5)` | 21 | off by up to 1 | 16 within 1.8e-9, 5 off by 5e-5 to 0.018 | the same 5 |
+| re-solved after (every data set where p2a re-solves at 1e-8) | 29 | 17 off by more than 1e-6, up to 0.68 | 1.5e-9 (largest) | 1.5e-9 |
+
+The regular set's 2.9e-9 (p2a at 1e-14) is the oracle's own slack (ltmle fits at glm epsilon 1e-8, and its re-solve
+stops at a score of 1e-4); the case pins use 1e-6. Eight of the 30 regular data sets have
+positivity warnings in ltmle and in p2a, and on none of them does either estimator apply a rule.
+The five that still disagree are the quasi-separated ones above. On three of them ltmle re-solves
+its last or third node, because its glm fluctuation (with the weights scaled by their root mean
+square, and glm.fit's deviance rule) leaves the score above 1e-3 where p2a's scalar solver does
+not, and ltmle's re-solve bounds the offsets to `logit([1e-8, 1 - 1e-8])`, which moves the
+prediction of the subjects beyond that bound; on the other two a regime's mean is within 0.02 of 0
+and the two fluctuations stop at different points of a nearly flat score. The 29 re-solved data sets were wrong before at every tolerance (the
+sweep measured only the tolerance dependence and did not show them); ltmle's glm fluctuation solves
+those scores without a re-solve.
+
+**Warnings** (in `LtmleResult::warnings` and the `saturation` record; the Display prints a
+"Saturation" block only when a check fires, so unflagged output is unchanged):
+- positivity: more than 1% of the subjects, pooled over the estimated regimes, with an unbounded
+  cumulative probability of following the regime at the last node below the lower g bound
+  (`ltmle:::CheckForVarianceWarning`; one line per regime with its share). On
+  `long_horizon(300, 6, 17)` the counts are 10 and 137, as ltmle's;
+- rare outcome: a 0/1 outcome with a mean below 0.03 (the same ltmle check);
+- each constant Q node, with its range and constant (ltmle's no-variation rule);
+- each re-solved targeting step, with the score it left and the offset bound;
+- Q*_1 within 1e-8 of 0 or 1 for more than 1% of the subjects; propensities numerically 0 or 1
+  (glm.fit's `10 * eps` threshold).
+
+**Default tolerance.** It stays 1e-8, ltmle's glm epsilon. With the rules, 1e-10 changes no count
+in the table above beyond the quasi-separated five and does not remove them, and costs up to 1.15x
+on the T = 10 rows ("Wall-clock against fe13b889").
 
 ## 4. Regimes and contrasts
 
@@ -226,6 +342,25 @@ effect of 5.5, `L2, A3, Y3` the third time point). Key values:
 | randomized: ATE (SE), truth 5.5 | 5.647189491841183 (0.14222217207100085) |
 | three periods: ATE (SE) | 0.3953563630362491 (0.07074698162059881) |
 
+Case `ltmle_saturation`, dataset `validation/datasets/generated/ltmle_saturation.csv` (2,500
+rows; `L1a, L1b, A1, ..., L8a, L8b, A8, Y`): an R port of the `sparse_followers` fixture (two
+uniform covariates per node, `A_t ~ plogis(0.3 L_t1 + 0.2 A_{t-1})`, a Bernoulli outcome in the
+treatments), seed 3, the first seed in 1..200 whose never regime has a no-variation node in
+ltmle, whose written-out never mean moves by more than 1e-3 between glm epsilon 1e-8 and 1e-14,
+and where ltmle succeeds. Its reference is `ltmle::ltmle` 1.3-0 itself (seeded before each call,
+as its re-solve restarts from `rnorm`):
+
+| Quantity | Value |
+|---|---|
+| followers at the last node, always / never | 18 / 9 |
+| psi always (SE) | 0.71327639856105862 (0.073041017618869344) |
+| psi never (SE) | 4.0059606610570884e-11 (4.8057881059090657e-12) |
+| ATE (SE), two-regime call | 0.71327639536478815 (0.073041017618861018) |
+| no-variation Q nodes, never | A1 to A7 (none for always); no re-solve |
+| positivity warning; subjects below the g bound, always / never | yes; 2,221 / 2,500 |
+| written-out never mean at epsilon 1e-8 / 1e-14 (EIC mean at 1e-14) | 7.35e-13 / 0.0169 (-0.040) |
+| analytic estimand, always / never (context only) | 0.82463 / 0.15605 |
+
 ## 8. Tests and tolerances
 
 The registry entry is `validation/methods/causal_ltmle.json` (method `causal_ltmle`). At
@@ -234,6 +369,16 @@ n = 600: coefficients, means, epsilons, H and cumulative g 1e-8 relative; SEs, z
 the case's `glm.control(epsilon = 1e-14)`; the default tolerance 1e-8 is checked against the
 same tight values at `Tol::iterative(1e-8)` (measured gaps: 2.8e-13, 1.1e-11, 6.0e-15 and
 4.1e-10 for psi always, psi never, the ATE SE and the never epsilons).
+
+`test_validate_ltmle_saturation_matches_ltmle` (registry entry `causal_ltmle_saturation`, case
+`ltmle_saturation`) runs the default tolerance against ltmle itself: the always mean, its SE, the
+ATE and its SE at 1e-6 relative, the never mean and its SE (about 4e-11 and 5e-12) at 1e-8
+absolute; the no-variation nodes of both regimes, the positivity and rare-events flags, the
+followers and the counts below the g bound exact. The oracle's own slack, measured on 30 regular
+data sets, is 2.9e-9 on the means and the ATE and 5.6e-10 on the SEs (ltmle fits at glm epsilon
+1e-8). Measured gaps on the case: 1.8e-13 on the always mean, 3.2e-9 on the ATE (against ltmle's
+two-regime call, whose ATE differs from the difference of its single-regime means by as much),
+4.0e-11 and 4.8e-12 absolute on the never mean and SE, below 1e-14 on the other SEs.
 
 ## 9. Planning checks (plan T3-WP27)
 
@@ -278,6 +423,13 @@ not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_re
 - No SuperLearner: main-term logistic (or linear) models only, no `Qform`/`gform` override.
 - No `stratify = TRUE`.
 - No `variance.method = "tmle"` (section 6).
+- The no-variation rule applies to Q regressions only. ltmle applies it to g as well, but in p2a a
+  constant treatment at a node is either refused (no follower of a regime) or followed by every
+  subject, so a g fit never sees a constant response that matters.
+- A last-node Q regression that is quasi-separated on a 0/1 outcome (30 or more IRLS steps) still
+  gives a regime prediction that depends on where the deviance rule stops; on five of the sweep's
+  1,715 data sets the ATE moves by 3.7e-6 to 0.023 between tolerances 1e-8 and 1e-14, and p2a and
+  ltmle differ there by 5e-5 to 0.018 ("Saturating regimes").
 - The full-history designs grow with the number of time points: node t has
   `1 + sum_{s <= t} k_s + t` columns, so the cost per regime grows as `T^3` (as in ltmle).
   See "Wall-clock against fe13b889" for the cost when a fluctuation saturates a regime.
@@ -308,7 +460,8 @@ Binary Y at n = 100 costs 1.86x because one Q fit takes 33 steps at that sample 
 regime's first (Q and g steps 4, 4, 6, 5, 33, 5). This is accepted.
 
 **Growth T = 10 costs about 5.5x on a saturating regime and about 1.46x otherwise; both are
-accepted.** The row's dataset has about 20 followers of each regime at the last node, and the
+accepted.** (Measured at 811c26bb, before ltmle's no-variation rule; the saturating rows have
+since dropped to about a fifth, see "Saturating regimes: lane-local before and after" below.) The row's dataset has about 20 followers of each regime at the last node, and the
 always-treat fluctuation there reaches `eps = 29.2`. Every earlier Q response of that regime is then
 within about `exp(-29)` of 1, and each of those nine fits takes 30 IRLS steps in `fit_glm` as its
 linear predictor climbs to the clamp, where the other regime's take 2. Of six data seeds at
@@ -332,6 +485,35 @@ likelihood is flat.
 A fit with a row past the `|eta| = 15` bound pays for the lean fit and then `fit_glm`, and reports
 `fit_glm`'s numbers and warnings. No fit in the rows above leaves that way. The bound's cost on such
 designs is measured on IPW (`treatment_ipw.md`) and C-TMLE (`ctmle.md`).
+
+### Saturating regimes: lane-local before and after (T3-LTMLE-TOL)
+
+Medians in ms over five interleaved rounds of the same harness (`wp27` plus a row for the three
+saturating fixtures), one core, one rayon thread, `release`, load average 2.5 to 3.4; "before" is
+3a7bc841 (no Rust change since bf130c8f), "after" the lane head. fe13b889 ratios are the
+integration's to measure; the last column projects them as the ratio above times after/before
+times the cost of a tolerance of 1e-10.
+
+| Row | n | before | after | after/before | after at 1e-10 / after | projected vs fe13b889 at 1e-10 |
+|---|---|---:|---:|---:|---:|---:|
+| bench | 100 / 1,000 / 10,000 | 0.092 / 0.748 / 7.31 | 0.090 / 0.739 / 7.41 | 0.98 / 0.99 / 1.01 | 1.02 / 1.04 / 1.07 | 0.39 / 0.42 / 0.45 |
+| linear Q | 100 / 1,000 / 10,000 | 0.050 / 0.365 / 3.67 | 0.049 / 0.375 / 3.67 | 0.98 / 1.03 / 1.00 | 1.00 / 0.99 / 1.01 | 0.71 / 0.72 / 0.75 |
+| binary Y | 100 | 0.285 | 0.105 | 0.37 | 1.07 | 0.73 |
+| binary Y | 1,000 / 10,000 | 0.831 / 8.09 | 0.830 / 8.14 | 1.00 / 1.01 | 1.01 / 1.03 | 0.67 / 0.69 |
+| growth T = 2 / 3 / 5 | 10,000 | 7.12 / 13.6 / 23.4 | 7.14 / 13.6 / 23.7 | 1.00 / 1.00 / 1.01 | 1.02 / 1.02 / 1.02 | 0.70 / 0.97 / 1.00 |
+| growth T = 10 (seed 42) | 10,000 | 260.8 | 56.0 | 0.21 | 1.08 | 1.25 |
+| T = 10, seed 3 (saturates) | 10,000 | 264.7 | 57.7 | 0.22 | 1.09 | 1.31 |
+| T = 10, seeds 1 / 2 / 5 / 7 | 10,000 | 67.2 / 68.4 / 68.0 / 67.5 | 67.5 / 68.6 / 68.0 / 68.3 | 1.00 / 1.00 / 1.00 / 1.01 | 1.09 / 1.07 / 1.13 / 1.15 | 1.59 / 1.57 / 1.67 / 1.68 |
+| `shifted_outcome((5000, 10, 4), 3, false, 2)` | 5,000 | 528.5 | 24.4 | 0.05 | 1.07 | |
+| `sparse_followers(2500, 8, 20)` | 2,500 | 38.4 | 9.9 | 0.26 | 1.07 | |
+| `sparse_followers(4000, 10, 3)` | 4,000 | 101.0 | 28.2 | 0.28 | 1.05 | |
+
+At the default tolerance no row is slower, and the saturating rows lose the IRLS runs of their
+constant nodes: the T = 10 saturating seeds now cost about 1.2x of fe13b889 instead of the
+signed-off 5.5x (projected; the ATEs of those rows are unchanged to six digits). Binary Y at
+n = 100 drops to 0.37x because its 33-step Q fit had a response without variation. A default of
+1e-10 would cost 1.07x to 1.15x on the T = 10 non-saturating seeds, projected 1.57x to 1.68x of
+fe13b889 against their signed-off 1.45x to 1.47x.
 
 ## 13. References
 
@@ -360,7 +542,8 @@ R-pinned (registered under `causal_ltmle`; case `ltmle_two_period`):
 `test_validate_ltmle_intervention_changes_estimate`, `test_validate_ltmle_always`,
 `test_validate_ltmle_never`, `test_validate_ltmle_dynamic`, `test_validate_ltmle_static_mixed`,
 `test_validate_ltmle_three_period_regimes`, `test_validate_ltmle_nuisance_models`,
-`test_validate_ltmle_duplicated_history_column_is_aliased`.
+`test_validate_ltmle_duplicated_history_column_is_aliased`. Case `ltmle_saturation` (entry
+`causal_ltmle_saturation`, reference `ltmle::ltmle` itself): `test_validate_ltmle_saturation_matches_ltmle`.
 
 Property and error tests (on `ltmle_sim.csv` without loading the case, or on inline data; not
 registered): `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_an_error`,
@@ -376,9 +559,15 @@ registered): `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_a
 `test_ltmle_fast_paths_keep_the_outcome_at_a_low_max_iter`,
 `test_ltmle_fast_paths_report_a_saturated_regime_through_the_shared_glm`,
 `test_ltmle_fast_paths_hold_the_gaps_measured_off_the_fixtures`,
-`test_ltmle_linear_q_matches_after_the_row_predictions`.
+`test_ltmle_linear_q_matches_after_the_row_predictions`, `test_ltmle_saturation_is_reported_and_warned`,
+`test_ltmle_no_saturation_on_regular_data`, `test_ltmle_rare_outcome_is_warned`,
+`test_ltmle_constant_q_response_is_not_regressed`, `test_ltmle_constant_outcome_is_refused`,
+`test_ltmle_saturating_fixtures_agree_with_ltmle` (values quoted from ltmle 1.3-0 on the exported
+fixtures), `test_ltmle_targeting_solves_the_score_at_every_node`,
+`test_resolve_fluctuation_monotone_root`.
 
 ## 15. Status
 
 R-pinned: the logistic-Q quantities to the written-out ltmle algorithm, cross-checked against
-ltmle 1.3-0; the linear-Q quantities to a written-out reference.
+ltmle 1.3-0; the linear-Q quantities to a written-out reference; a saturating regime
+(`ltmle_saturation`) to ltmle 1.3-0 itself.

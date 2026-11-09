@@ -43,6 +43,29 @@
       "tolerance": "validation/README.md, n = 600: coefficients, means, epsilons, H and cumulative g 1e-8 relative; SEs, z and CI bounds 1e-6; p-values 1e-6 relative / 1e-12 absolute; counts exact. p2a runs at tolerance = 1e-14, the case's glm.control(epsilon = 1e-14); the default tolerance 1e-8 is checked against the same tight values at Tol::iterative(1e-8)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "causal_ltmle_saturation",
+      "name": "Longitudinal TMLE on a regime with few followers: ltmle's no-variation rule, score check and positivity warning",
+      "category": "econometrics",
+      "reference": "ltmle::ltmle 1.3-0 (glm, stratify = FALSE, gbounds = c(0.01, 1), variance.method = 'ic'), called once per regime and once for the two-regime ATE, seeded before each call; the written-out estimator of causal_ltmle does not solve the EIC equation on this design and is recorded for documentation only",
+      "doc": "validation/econometrics/ltmle.md",
+      "cases": [
+        "ltmle_saturation"
+      ],
+      "tests": [
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_saturation_matches_ltmle"
+      ],
+      "quantities": [
+        "counterfactual means (always, never) and their EIC standard errors",
+        "ATE and its standard error",
+        "no-variation Q nodes per regime",
+        "positivity and rare-events warnings",
+        "followers by node and subjects below the lower g bound at the last node"
+      ],
+      "tolerance": "default tolerance (1e-8) against ltmle itself: the always mean, its SE, the ATE and its SE 1e-6 relative (ltmle fits at glm epsilon 1e-8; its slack measured on 30 regular data sets is 2.9e-9 on means and ATE); the never mean and SE (about 4e-11 and 5e-12, a clamped prediction's distance from 0) 1e-8 absolute; nodes, flags and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
