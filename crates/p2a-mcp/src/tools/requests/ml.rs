@@ -476,13 +476,13 @@ pub struct ShapValuesRequest {
 
     /// Maximum observations to compute SHAP for (default: all)
     #[schemars(
-        description = "Maximum observations to compute SHAP values for. Default is all observations."
+        description = "Explain the first max_obs rows. Default: all rows for method 'tree', 100 (or all, when fewer) for 'kernel'."
     )]
     pub max_obs: Option<usize>,
 
     /// Number of background samples for approximation (default: use all training data)
     #[schemars(
-        description = "Number of background samples for SHAP approximation. If not specified, uses TreeSHAP exact computation."
+        description = "Coalition budget of Kernel SHAP (method 'kernel'; shap's nsamples, default 2M + 2048). Every coalition is evaluated, and the values are exact, when 2^M - 2 <= n_samples (with the default: M <= 11 features); otherwise shap's sampled design uses exactly n_samples coalitions. TreeSHAP is exact and does not sample: a value given with method 'tree' is reported as a warning."
     )]
     pub n_samples: Option<usize>,
 
@@ -495,6 +495,27 @@ pub struct ShapValuesRequest {
     /// Random seed for reproducibility
     #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
+
+    /// SHAP algorithm
+    #[schemars(
+        description = "'tree' (default): exact TreeSHAP (Lundberg, Erion & Lee 2020, Algorithm 2), the tree path-dependent Shapley values of each tree's conditional expectation, as shap's TreeExplainer. 'kernel': Kernel SHAP (Lundberg & Lee 2017, shap's KernelExplainer), the interventional Shapley values of the forest's mean prediction over a background of the training rows (all of them up to 100, else 100 evenly spaced rows); exact when every coalition fits in n_samples, sampled otherwise. Case-insensitive; anything else is an error."
+    )]
+    #[serde(default)]
+    pub method: Option<String>,
+
+    /// The game whose Shapley values are computed
+    #[schemars(
+        description = "The game: 'tree_path_dependent' (TreeSHAP's; default for 'tree') or 'interventional' (Kernel SHAP's; default for 'kernel'). A perturbation the method does not compute is refused; 'observational' (true conditional expectations) is not implemented and is refused."
+    )]
+    #[serde(default)]
+    pub feature_perturbation: Option<String>,
+
+    /// TreeSHAP interaction values
+    #[schemars(
+        description = "TreeSHAP interaction values (Lundberg et al. 2020): the JSON then holds the M x M matrices of the first 3 explained rows (interaction_values_sample); rows sum to the SHAP values. Default false; refused with method 'kernel'."
+    )]
+    #[serde(default)]
+    pub compute_interactions: Option<bool>,
 }
 
 /// Request for Cubist rule-based regression.

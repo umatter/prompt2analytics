@@ -19,6 +19,7 @@ use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, Het
 use crate::tools::requests::ml::*;
 
 use p2a_core::Dataset;
+use p2a_core::ml::shap::{ShapMethod, shap_values_model_with};
 use p2a_core::ml::{
     BartCausalConfig, CausalForestConfig, bart_causal, causal_forest, run_bart_causal_config,
     run_causal_forest_config,
@@ -34,6 +35,7 @@ use p2a_core::{
     CtreeTestType,
     CubistConfig,
     EffectEstimationMethod,
+    FeaturePerturbation,
     GbmConfig,
     GbmFamily,
     HetTestStat,
@@ -70,7 +72,6 @@ use p2a_core::{
     // Model-based Boosting (mboost)
     run_mboost,
     shap_summary,
-    shap_values_model,
     tsne,
 };
 
@@ -1596,28 +1597,51 @@ impl AnalyticsServer {
 
     /// Compute SHAP values for model interpretation.
     #[tool(
-        description = "SHAP (SHapley Additive exPlanations) computes feature importance for individual predictions using game-theoretic Shapley values. For tree-based models, uses TreeSHAP (Lundberg et al. 2018) for exact O(TLD^2) computation. Returns: SHAP values matrix (n_obs x n_features), global feature importance (mean |SHAP|), and summary statistics. Each SHAP value represents the contribution of a feature to the difference between the actual prediction and the average prediction. Implements R's 'fastshap' and Python's 'shap' packages."
+        description = "SHAP values for a random-forest regression trained on target and features (n_trees, max_depth, seed). method 'tree' (default): exact TreeSHAP, O(T L D^2) per row, tree path-dependent values. method 'kernel': Kernel SHAP, interventional values over a background of at most 100 training rows; Kernel SHAP costs about max_obs x n_coalitions x background rows forest evaluations, n_coalitions = min(2^M - 2, n_samples). Returns the base value E[f], the SHAP values of the first 5 explained rows, mean |SHAP| importances, the additivity check (base + sum = prediction, tolerance 1e-8 relative to max(1, |f|)), optional interaction values and summary statistics."
     )]
     pub async fn ml_shap_values(
         &self,
         Parameters(request): Parameters<ShapValuesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let (data, target, _missing, _rows) = match features_and_target(
-            dataset,
-            &request.features,
-            &request.target,
-            NaPolicy::Fail,
-        ) {
-            Ok(d) => d,
-            Err(e) => return Ok(ml_error("", e)),
+        let method = match parse_option(request.method.as_deref(), ShapMethod::Tree) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
+        };
+        let perturbation = match request
+            .feature_perturbation
+            .as_deref()
+            .map(|v| parse_option(Some(v), FeaturePerturbation::TreePathDependent))
+            .transpose()
+        {
+            Ok(p) => p,
+            Err(e) => return error_text(e),
+        };
+        let interactions = request.compute_interactions.unwrap_or(false);
+        if interactions && method == ShapMethod::Kernel {
+            return error_text(
+                "SHAP interaction values are computed by TreeSHAP only; use method 'tree' or set \
+                 compute_interactions = false"
+                    .to_string(),
+            );
+        }
+        let Some(dataset) = self.dataset_snapshot(&request.dataset).await else {
+            return dataset_not_found(&request.dataset);
         };
 
-        // Limit observations if requested
-        let max_obs = request.max_obs.unwrap_or(data.nrows());
+        let (data, target, _missing, _rows) =
+            match features_and_target(&dataset, &request.features, &request.target, NaPolicy::Fail)
+            {
+                Ok(d) => d,
+                Err(e) => return Ok(ml_error("", e)),
+            };
+
+        // Limit observations if requested: all rows for TreeSHAP, at most 100 for Kernel SHAP
+        // (each row costs a forest evaluation per coalition and background row).
+        let default_rows = match method {
+            ShapMethod::Tree => data.nrows(),
+            ShapMethod::Kernel => data.nrows().min(KERNEL_BACKGROUND_MAX),
+        };
+        let max_obs = request.max_obs.unwrap_or(default_rows);
         let n_obs = data.nrows().min(max_obs);
         let data_subset = data.slice(ndarray::s![..n_obs, ..]).to_owned();
 
@@ -1645,18 +1669,75 @@ impl AnalyticsServer {
         };
 
         // Compute SHAP values
+        let defaults = ShapConfig::default();
         let shap_config = ShapConfig {
             n_samples: request.n_samples,
-            seed,
+            feature_perturbation: perturbation,
+            compute_interactions: false,
+            seed: seed.or(defaults.seed),
             check_additivity: true,
-            ..Default::default()
+            ..defaults
+        };
+        // Kernel SHAP's background: the training rows, all of them up to 100, else 100 evenly
+        // spaced in row order (deterministic; shap.sample's size).
+        let background = match method {
+            ShapMethod::Tree => None,
+            ShapMethod::Kernel => {
+                let n = data.nrows();
+                if n <= KERNEL_BACKGROUND_MAX {
+                    Some(data.clone())
+                } else {
+                    let idx: Vec<usize> = (0..KERNEL_BACKGROUND_MAX)
+                        .map(|i| i * n / KERNEL_BACKGROUND_MAX)
+                        .collect();
+                    Some(data.select(ndarray::Axis(0), &idx))
+                }
+            }
         };
 
-        let shap_result = match shap_values_model(&model, data_subset.view(), &shap_config) {
+        let shap_result = match shap_values_model_with(
+            &model,
+            data_subset.view(),
+            background.as_ref().map(|b| b.view()),
+            method,
+            &shap_config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(ml_error("SHAP value computation failed: ", e));
             }
+        };
+
+        // Interaction matrices only for the rows the JSON returns: each row costs about 2M + 1
+        // TreeSHAP runs.
+        let interaction_sample = if interactions {
+            let rows = data_subset.nrows().min(3);
+            let cfg = ShapConfig {
+                n_samples: None,
+                compute_interactions: true,
+                ..shap_config.clone()
+            };
+            match shap_values_model_with(
+                &model,
+                data_subset.slice(ndarray::s![..rows, ..]),
+                None,
+                ShapMethod::Tree,
+                &cfg,
+            ) {
+                Ok(r) => r.interaction_values.map(|mats| {
+                    mats.iter()
+                        .map(|m| {
+                            m.rows()
+                                .into_iter()
+                                .map(|r| r.to_vec())
+                                .collect::<Vec<Vec<f64>>>()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+                Err(e) => return Ok(ml_error("SHAP interaction values failed: ", e)),
+            }
+        } else {
+            None
         };
 
         // Compute summary if requested
@@ -1752,7 +1833,14 @@ impl AnalyticsServer {
         });
 
         // Create output
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
+            "method": shap_result.method.to_string(),
+            "feature_perturbation": shap_result.feature_perturbation.to_string(),
+            "exact": shap_result.exact,
+            "n_coalitions": shap_result.n_coalitions,
+            "kernel_background_rows": background.as_ref().map(|b| b.nrows()),
+            "seed": shap_result.seed,
+            "warnings": notes_json(None, &shap_result.warnings)["warnings"].clone(),
             "n_observations": shap_result.n_obs,
             "n_features": shap_result.n_features,
             "base_value": shap_result.base_value,
@@ -1773,15 +1861,16 @@ impl AnalyticsServer {
             }
         });
 
+        if let Some(sample) = interaction_sample {
+            output["interaction_values_sample"] = serde_json::json!(sample);
+        }
+
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}\n\nJSON Summary:\n{}",
             shap_result,
             serde_json::to_string_pretty(&output).unwrap_or_default()
         ))]))
     }
-
-    // NOTE: ICE (Individual Conditional Expectation) curves are not yet implemented.
-    // TODO: Implement compute_ice_curves() and IceConfig in p2a-core.
 
     // ========================================================================
     // Statistical Decision Trees

@@ -1779,3 +1779,266 @@ async fn test_ml_descriptions_say_what_is_returned() {
     }
     assert!(d("ml_cutree").contains("1-based") || d("ml_cutree").contains("R's cutree numbering"));
 }
+
+// ----------------------------------------------------------------------------
+// SHAP
+// ----------------------------------------------------------------------------
+
+/// Interventional Shapley values of a forest by enumeration over all 2^M coalitions;
+/// background = the rows given.
+fn interventional_shapley(
+    trees: &[p2a_core::ml::trees::DecisionTree],
+    x: ndarray::ArrayView1<f64>,
+    bg: ndarray::ArrayView2<f64>,
+) -> (f64, Vec<f64>) {
+    let m = x.len();
+    let f = |z: ndarray::ArrayView1<f64>| {
+        trees.iter().map(|t| t.predict_one(&z)).sum::<f64>() / trees.len() as f64
+    };
+    let v = |mask: usize| -> f64 {
+        bg.outer_iter()
+            .map(|b| {
+                let z = ndarray::Array1::from_shape_fn(m, |j| {
+                    if mask & (1 << j) != 0 { x[j] } else { b[j] }
+                });
+                f(z.view())
+            })
+            .sum::<f64>()
+            / bg.nrows() as f64
+    };
+    let fact = |k: usize| (1..=k).product::<usize>() as f64;
+    let phi = (0..m)
+        .map(|j| {
+            (0..1usize << m)
+                .filter(|s| s & (1 << j) == 0)
+                .map(|s| {
+                    let k = s.count_ones() as usize;
+                    fact(k) * fact(m - k - 1) / fact(m) * (v(s | (1 << j)) - v(s))
+                })
+                .sum()
+        })
+        .collect();
+    (v(0), phi)
+}
+
+fn shap_rows(j: &Value) -> Vec<Vec<f64>> {
+    j["shap_values_sample"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r.as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["shap_value"].as_f64().unwrap())
+                .collect()
+        })
+        .collect()
+}
+
+fn shap_inputs() -> (ndarray::Array2<f64>, ndarray::Array1<f64>) {
+    let (_, df) = case_df("shap_tree_rpart");
+    let xs: Vec<Vec<f64>> = ["x0", "x1", "x2", "x3"]
+        .iter()
+        .map(|c| col_f64(&df, c))
+        .collect();
+    (
+        ndarray::Array2::from_shape_fn((80, 4), |(i, j)| xs[j][i]),
+        ndarray::Array1::from(col_f64(&df, "y")),
+    )
+}
+
+fn shap_forest(n_trees: usize, max_depth: usize) -> p2a_core::ml::trees::RandomForestModel {
+    let (x, y) = shap_inputs();
+    let names: Vec<String> = ["x0", "x1", "x2", "x3"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    p2a_core::random_forest_with_trees(
+        x.view(),
+        y.view(),
+        Some(n_trees),
+        Some(max_depth),
+        Some(2),
+        Some("sqrt"),
+        Some(3),
+        Some(names),
+    )
+    .unwrap()
+}
+
+/// method = "kernel": exact Kernel SHAP (M = 4, every coalition) of the handler's forest over
+/// its background (all 80 training rows) equals the interventional Shapley values by
+/// enumeration. Before: "method" was an unknown field, and n_samples changed nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_shap_kernel_path() {
+    let (s, server) = session_with("shap_tree_rpart");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_shap_values",
+        json!({"dataset": "shap_tree_sim", "features": ["x0", "x1", "x2", "x3"], "target": "y",
+               "n_trees": 10, "max_depth": 4, "max_obs": 5, "seed": 3, "method": "Kernel"}),
+    )
+    .await);
+    let j = json_block(&t);
+    assert_eq!(
+        (
+            j["method"].clone(),
+            j["feature_perturbation"].clone(),
+            j["exact"].clone(),
+            j["n_coalitions"].clone(),
+            j["kernel_background_rows"].clone()
+        ),
+        (
+            json!("kernel"),
+            json!("interventional"),
+            json!(true),
+            json!(14),
+            json!(80)
+        )
+    );
+    assert_eq!(j["additivity_check"], json!(true));
+    let (x, _) = shap_inputs();
+    let model = shap_forest(10, 4);
+    for (i, got) in shap_rows(&j).iter().enumerate() {
+        let (base, phi) = interventional_shapley(&model.trees, x.row(i), x.view());
+        close(
+            j["base_value"].as_f64().unwrap(),
+            base,
+            Tol::new(0.0, 1e-10),
+            "base value E f",
+        );
+        for (g, w) in got.iter().zip(&phi) {
+            close(*g, *w, Tol::new(0.0, 1e-10), &format!("row {i}"));
+        }
+    }
+}
+
+/// compute_interactions (TreeSHAP): each row of the interaction matrix sums to the SHAP value.
+/// Before: unknown field; interaction values were never computed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_shap_interactions_sum_to_shap_values() {
+    let (s, server) = session_with("shap_tree_rpart");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_shap_values",
+        json!({"dataset": "shap_tree_sim", "features": ["x0", "x1", "x2", "x3"], "target": "y",
+               "n_trees": 10, "max_depth": 4, "max_obs": 5, "seed": 3, "compute_interactions": true}),
+    )
+    .await);
+    let j = json_block(&t);
+    assert_eq!(
+        (
+            j["method"].clone(),
+            j["feature_perturbation"].clone(),
+            j["exact"].clone()
+        ),
+        (json!("tree"), json!("tree_path_dependent"), json!(true))
+    );
+    let phi = shap_rows(&j);
+    let inter = j["interaction_values_sample"]
+        .as_array()
+        .expect("interaction_values_sample");
+    assert_eq!(inter.len(), 3);
+    for (r, mat) in inter.iter().enumerate() {
+        let mat: Vec<Vec<f64>> = mat.as_array().unwrap().iter().map(f64s).collect();
+        for i in 0..4 {
+            close(
+                mat[i].iter().sum::<f64>(),
+                phi[r][i],
+                Tol::new(0.0, 1e-10),
+                &format!("row {r} feature {i}"),
+            );
+            for k in 0..4 {
+                close(mat[i][k], mat[k][i], Tol::new(0.0, 1e-12), "symmetric");
+            }
+        }
+    }
+}
+
+/// Combinations the core does not compute are refused; TreeSHAP stays the default; n_samples
+/// with TreeSHAP warns; a sampled Kernel SHAP uses exactly n_samples coalitions and stays
+/// additive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_shap_options_refused_and_defaults() {
+    let (s, server) = session_with("shap_tree_rpart");
+    let base = json!({"dataset": "shap_tree_sim", "features": ["x0", "x1", "x2", "x3"], "target": "y",
+                      "n_trees": 5, "max_depth": 3, "max_obs": 3, "seed": 3});
+    for (extra, fragment) in [
+        (
+            json!({"feature_perturbation": "observational"}),
+            "not implemented",
+        ),
+        (
+            json!({"method": "kernel", "compute_interactions": true}),
+            "TreeSHAP only",
+        ),
+        (
+            json!({"method": "kernel", "feature_perturbation": "tree_path_dependent"}),
+            "tree_path_dependent needs TreeSHAP",
+        ),
+        (
+            json!({"feature_perturbation": "interventional"}),
+            "Kernel path",
+        ),
+        (json!({"method": "deep"}), "unknown method 'deep'"),
+    ] {
+        let e = err(&call(&server, &s, "ml_shap_values", with(&base, extra.clone())).await);
+        assert!(e.contains(fragment), "{extra}: {e}");
+    }
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_shap_values",
+        with(&base, json!({"n_samples": 50})),
+    )
+    .await);
+    assert_eq!(json_block(&t)["method"], json!("tree"));
+    assert!(t.contains("Warning:") && t.contains("n_samples"), "{t}");
+    assert_eq!(
+        ok(&call(&server, &s, "ml_shap_values", base.clone()).await),
+        ok(&call(
+            &server,
+            &s,
+            "ml_shap_values",
+            with(&base, json!({"method": "tree"}))
+        )
+        .await)
+    );
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_shap_values",
+        with(&base, json!({"method": "kernel", "n_samples": 10})),
+    )
+    .await);
+    let j = json_block(&t);
+    assert_eq!(
+        (
+            j["exact"].clone(),
+            j["n_coalitions"].clone(),
+            j["seed"].clone()
+        ),
+        (json!(false), json!(10), json!(3)),
+        "{j}"
+    );
+    let (x, _) = shap_inputs();
+    let model = shap_forest(5, 3);
+    let base_value = j["base_value"].as_f64().unwrap();
+    for (i, phi) in shap_rows(&j).iter().enumerate() {
+        let fx = model
+            .trees
+            .iter()
+            .map(|t| t.predict_one(&x.row(i)))
+            .sum::<f64>()
+            / model.trees.len() as f64;
+        close(
+            phi.iter().sum::<f64>(),
+            fx - base_value,
+            Tol::new(0.0, 1e-10),
+            &format!("row {i} additivity"),
+        );
+    }
+}
