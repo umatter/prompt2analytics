@@ -12,6 +12,12 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
   bfill/nocb, most_frequent); the constant comes from `value`; unknown strategies are errors.
 - Tests: `test_validate_mcp_fill_na_mode` (exact); behaviour tests `test_mcp_fill_constant_keeps_case`,
   `test_mcp_fill_unknown_strategy_is_error`.
+- Wall-clock of `munge_fill_na` with `strategy = "mode"` on a text column with 10% missing cells
+  (2026-11-09, against fe13b889: release builds, one core, eight interleaved rounds, load average 1.4-2.1):
+  with 12 levels 0.09, 0.12 and 0.41 ms at 100, 1,000 and 10,000 rows (0.94, 1.01 and 1.21x of the base),
+  with a distinct value in most rows 0.09, 0.14 and 0.56 ms (0.97, 1.21 and 1.83x). The mode counts the
+  values in a hash map; it had sorted every distinct value (1.94 and 5.46x at 1,000 and 10,000 rows). The
+  12-level rows are accepted by the maintainer (2026-11-09).
 - Cleaning sessions store their result only through `output_dataset` (`cleaning_session_apply`,
   `cleaning_rollback`); no R reference (bookkeeping). Behaviour tests
   `test_mcp_cleaning_session_output_dataset_is_stored`, `test_mcp_cleaning_rollback_output_dataset`.
@@ -40,6 +46,9 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
   exact; mean and quartiles 1e-6, sd 1e-5 relative, the validation/README.md tolerances for n < 100),
   `test_validate_mcp_describe_dataset_nan_inf`, `test_validate_mcp_describe_dataset_statistics` (the MCP
   text, 7 significant digits).
+- Wall-clock (2026-11-09, against fe13b889: release builds, one core, eight interleaved rounds, load average
+  1.4-2.1): 2.15 ms at 10,000 rows, 23.9x of the base (reply 303 -> 1,644 bytes); accepted by the maintainer
+  (2026-11-09, 23.8x in the run it was judged on; 20.4x accepted earlier).
 
 ## viz_dendrogram
 - Reference: `hclust(dist(x))` (complete); case `viz_dendrogram_hclust`: merge rows (-6, -7), (-1, -2),

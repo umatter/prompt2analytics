@@ -135,6 +135,19 @@ The non-numeric tests are:
   the tight fit at Tol::iterative(1e-8).
 - The SBW `balance_penalty` is refused when it is not 1000, rather than reported.
 
+## Wall-clock
+
+`propensity_matching`, measured on 2026-11-09 against fe13b889 (release builds, one core, eight interleaved
+rounds, load average 1.4-2.1) and accepted by the maintainer the same day:
+
+- nearest and cem at 1,000 rows: 0.91 and 0.79 ms, 1.23x of the base each; the default request on
+  `matching_sim`: 0.32 ms, 1.35x. The extra 0.08-0.17 ms registers the matched sample as a dataset.
+- full matching at 1,000 rows (392 treated, 608 controls): 497 ms, 287x of the base. The optimal min-cost-flow
+  solver (accepted earlier, see `validation/econometrics/matching.md`) accounts for about 190x with the MCP's
+  former bounds [0.5, 2]; the unconstrained default (`min.controls = 0`, `max.controls = Inf`, as MatchIt) for
+  the remaining 1.5x: the same data take 333 ms (51,680 solver steps) with [0.5, 2] and 501 ms (152,153 steps)
+  unconstrained. Storing the matched sample and building the reply take under 1 ms.
+
 ## Not covered
 
 - `heterogeneity_test` (`HetTxRequest`) and `ml_bart_causal` (`BartCausalRequest`): ML-module tools whose options

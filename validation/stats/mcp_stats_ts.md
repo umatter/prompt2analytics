@@ -140,6 +140,16 @@ uses 18 (STAT-39, `stat_spectrum_t3`); R's canonical correlations are `cor` in
 `stat_cancor_t3` (STAT-16). The PP statistic and p-value are pinned to PP.test (no
 deviation).
 
+## Wall-clock
+
+Measured on 2026-11-09 against fe13b889 (release builds, one core, eight interleaved rounds, load average
+1.4-2.1) and accepted by the maintainer the same day:
+
+- `stats_spline` on 10,000 rows: 0.74 ms, 1.16x of the base (1.09x on minima), from the larger default
+  output (200 points with x and y, 9.6 KB).
+- `multivariate_factanal` with regression scores: 1.20 ms on 1,200 rows (1.56x) and 2.51 ms on 10,000
+  (1.36x). The handler change adds 1.04x and 1.01x; the rest is the core fit, as changed before it.
+
 ## Notes
 
 - factanal regression scores are pinned for varimax only. For promax, R multiplies by the
