@@ -44,7 +44,7 @@ case (`validation/methods/*.json`, `validation/expected/<case>.json`); see
 |---------|---------|---------------|------|
 | vars | 1.6.1 | `VAR()`, `VECM()`, `irf()` | [vars](https://cran.r-project.org/package=vars) |
 | forecast | 9.0.2 | `auto.arima()`, `Arima()`, `mstl()` | [forecast](https://cran.r-project.org/package=forecast) |
-| urca | 1.3.4 | `ca.jo()`, `ur.df()` | [urca](https://cran.r-project.org/package=urca) |
+| urca | 1.3.4 | `ca.jo()`, `cajorls()`, `ur.df()` | [urca](https://cran.r-project.org/package=urca) |
 | changepoint | 2.3 | `cpt.mean()`, `cpt.var()` | [changepoint](https://cran.r-project.org/package=changepoint) |
 
 ### Machine Learning
@@ -147,16 +147,21 @@ names a quantity the registry records as not matching R, with its finding.
 | `run_logit` | R `glm(family=binomial)` | Python `statsmodels.Logit` |
 | `run_probit` | R `glm(family=binomial(probit))` | Python `statsmodels.Probit` |
 | `run_feglm` | R `alpaca::feglm` | R `fixest::feglm` |
-| `run_var` | R `vars::VAR` | Python `statsmodels.VAR` |
-| `run_varma` | R custom | Python `statsmodels` |
-| `run_vecm` | R `vars::vec2var`, `urca::ca.jo` | - |
-| `run_var_irf` | R `vars::irf` | - |
+| `run_var` | R `vars::VAR(type = "const")`, `summary.varest` (pinned) | Python `statsmodels.VAR` |
+| `run_varma` | Hannan-Rissanen (1982) written out in R (`validation/r/cases/ts_varma.R`, `lm.fit`; q = 0 against `vars::VAR`); no R package installed (MTS, marima) (pinned) | Python `statsmodels` |
+| `run_vecm` | R `urca::ca.jo`, `urca::cajorls` (pinned) | - |
+| `run_var_irf` | R `vars::irf` (pinned) | - |
+| `granger_test` | R `lmtest::grangertest` (pinned) | - |
 | `run_arima` | R `forecast::Arima` | Python `statsmodels.ARIMA` |
 | `run_mstl` | R `forecast::mstl` | - |
 | `run_changepoint` | R `changepoint` | Python `ruptures` |
 | `kmeans` | R `stats::kmeans` | Python `sklearn.cluster.KMeans` |
-| `dbscan` | R `dbscan::dbscan` | Python `sklearn.cluster.DBSCAN` |
-| `hierarchical` | R `stats::hclust` | Python `scipy.cluster.hierarchy` |
+| `dbscan` | R `dbscan::dbscan` (pinned) | Python `sklearn.cluster.DBSCAN` |
+| `hierarchical` | R `stats::hclust`, `stats::cutree` (pinned) | Python `scipy.cluster.hierarchy` |
+| `hdbscan` | R `dbscan::hdbscan`, `dbscan::kNNdist` (pinned; deviation ML-49) | - |
+| `optics` | R `dbscan::optics`, `extractDBSCAN`, `extractXi` (pinned) | - |
+| GARCH (`garch`) | conditional GARCH(p, q) likelihood written out in R and maximised by `optim` plus Newton steps (fGarch and rugarch not installed) (pinned) | - |
+| Matching | R `MatchIt::matchit` (nearest, full via `optmatch::fullmatch`, cem, subclass), `summary.matchit`; min-cost flow against `rlemon::MinCostFlow` (pinned; deviations CAUS-67, CAUS-70) | - |
 | `pca` | R `stats::prcomp` | Python `sklearn.decomposition.PCA` |
 | `tsne` | R `Rtsne::Rtsne` | Python `sklearn.manifold.TSNE` |
 | `random_forest` | R `randomForest` | Python `sklearn.ensemble.RandomForestClassifier` |

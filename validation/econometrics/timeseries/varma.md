@@ -20,7 +20,9 @@ Hannan & Rissanen (1982) two-step estimator:
 1. **Step 1 (q > 0).** Fit a long VAR(m) with intercept by OLS on t = m + 1..n. Its residuals ê_t
    estimate u_t. Only the residuals are needed, so the diagonally equilibrated normal equations are
    solved by Cholesky; when the factorisation fails or the ratio of its largest to its smallest
-   diagonal entry exceeds 1e4, the pivoted QR of `stats::lm.fit` is used instead (an aliased lag
+   diagonal entry exceeds 1e4 (a heuristic gate: the squared ratio is a lower bound on the condition
+   number of the equilibrated matrix, not the condition number itself), the pivoted QR of
+   `stats::lm.fit` is used instead (an aliased lag
    then gets the warning "long VAR (step 1): Coefficients not defined because of singularities: ..").
    The cross products Z'Z and Z'Y are not formed from the lag matrix: the block of lags (a, a + d)
    is the lagged sum `sum y_s y_{s-d}'` over a window of rows, computed by dot products for lag 0

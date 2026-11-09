@@ -512,5 +512,27 @@ class Caus99Test(unittest.TestCase):
         self.assertTrue(listed and set(listed) <= variants, f"CLAUDE.md lists {listed}; DMLModelType has {sorted(variants)}")
 
 
+# ---------------------------------------------------------------- Task 4: ECON-80 (bounds, time-series index and registry)
+
+class Econ80Test(unittest.TestCase):
+    """ECON-80: Balke-Pearl table, time-series index and R-pinned VAR/IRF/Granger/VARMA/VECM docs."""
+
+    def test_econ80_bounds_and_time_series(self):
+        b = read_doc("econometrics/bpbounds.md")
+        for value in ("-0.1946228482113902", "0.0032280386285733"):   # vitamin A (Sommer et al. 1986), closed form
+            self.assertIn(value, b)
+        idx = read_doc("econometrics/timeseries/README.md")
+        self.assertNotIn("R custom", idx)
+        self.assertNotIn("timeseries::tests::test_validate", idx)
+        docs = sorted(p.name for p in (VALIDATION / "econometrics/timeseries").glob("*.md") if p.name != "README.md")
+        for name in docs:
+            with self.subTest(doc=name):
+                self.assertIn(f"]({name})", idx)
+        entries = registry_entries()
+        for name in ("var.md", "irf.md", "varma.md", "vecm.md", "granger.md"):
+            with self.subTest(registered=name):
+                self.assertTrue(any(e["doc"].endswith("econometrics/timeseries/" + name) for e in entries))
+
+
 if __name__ == "__main__":
     unittest.main()
