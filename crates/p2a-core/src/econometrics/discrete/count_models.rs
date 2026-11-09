@@ -2392,6 +2392,22 @@ mod tests {
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
+    #[test]
+    fn test_negbin_rejects_empty_and_single_row() {
+        // X-7: an empty or one-row sample is an error, not an underflowing n - k.
+        let empty: Vec<f64> = Vec::new();
+        let ds = Dataset::new(df!("y" => &empty, "x" => &empty).unwrap());
+        assert!(matches!(
+            run_negbin(&ds, "y", &["x"], None),
+            Err(EconError::InsufficientData { .. } | EconError::EmptyDataset)
+        ));
+        let ds = Dataset::new(df!("y" => [3.0], "x" => [0.4]).unwrap());
+        assert!(matches!(
+            run_negbin(&ds, "y", &["x"], None),
+            Err(EconError::InsufficientData { .. })
+        ));
+    }
+
     /// Case data for tests that are not R-pinned (not registered).
     fn negbin_data() -> Dataset {
         load_case("disc_negbin").1
