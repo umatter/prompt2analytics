@@ -21,6 +21,28 @@
       "tolerance": "exact (fills copy observed values)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_value_counts",
+      "name": "MCP munge_value_counts with and without normalize",
+      "category": "interfaces",
+      "reference": "dplyr::count(sort = TRUE); n / sum(n)",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_munging_value_counts"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_value_counts_normalize"
+      ],
+      "quantities": [
+        "values (NA a group)",
+        "counts",
+        "proportions",
+        "reply lines"
+      ],
+      "tolerance": "exact (counts; proportions are the same IEEE divisions)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

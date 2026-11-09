@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
 
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::data::format_significant;
 use crate::tools::limits::{self, Family, LimitViolation};
 use crate::tools::requests::munging::*;
 
@@ -29,6 +30,7 @@ use p2a_core::{
             JoinType,
             MungeError,
             MutateExpr,
+            aggregate::value_counts_with,
             bin_with,
             clean::{FillStrategyKind, fill_na_with},
             concat,
@@ -75,7 +77,6 @@ use p2a_core::{
             to_uppercase,
             // String operations
             trim,
-            value_counts,
         },
     },
     regression::{CovarianceType, run_ols},
@@ -121,6 +122,17 @@ pub(crate) fn fill_label(strategy: &FillStrategy) -> String {
     match strategy {
         FillStrategy::Constant(v) => format!("constant '{}'", p2a_text::ellipsize(v, 40)),
         other => other.kind().to_string(),
+    }
+}
+
+/// A value as a reply prints it: "NA (missing)" for a missing value, text quoted (cut to 40
+/// characters), anything else as polars writes the value ("2", "true", "2.5").
+fn cell_label(v: &p2a_core::polars::prelude::AnyValue, quoted: bool) -> String {
+    use p2a_core::polars::prelude::AnyValue;
+    match v {
+        AnyValue::Null => "NA (missing)".to_string(),
+        v if quoted => format!("'{}'", p2a_text::ellipsize(&v.str_value(), 40)),
+        v => v.str_value().into_owned(),
     }
 }
 
@@ -1040,25 +1052,29 @@ impl AnalyticsServer {
 
     /// Compute value counts for a column.
     #[tool(
-        description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages."
+        description = "Count the rows per distinct value of a column, most frequent first (tied counts in the order the values first appear); missing values are one group (R: dplyr::count(sort = TRUE)). normalize = true gives proportions instead: count / number of rows, the missing group included (dplyr's n / sum(n)). Saves the table as a dataset (column 'count' or 'proportion') and shows its first 10 rows."
     )]
     pub async fn munge_value_counts(
         &self,
         Parameters(request): Parameters<ValueCountsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let Some(dataset) = dataset else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Dataset '{}' not found.",
+                request.dataset
+            ))]));
         };
+        let normalize = request.normalize.unwrap_or(false);
+        let measure = if normalize { "proportion" } else { "count" };
+        if request.column == measure {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Value counts failed: the result names its column '{measure}', which is the name \
+                 of the counted column; rename it first (munge_rename)"
+            ))]));
+        }
 
-        let result = match value_counts(dataset, &request.column) {
+        let result = match value_counts_with(&dataset, &request.column, normalize) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1071,39 +1087,57 @@ impl AnalyticsServer {
         let result_name = request
             .result_name
             .unwrap_or_else(|| format!("{}_value_counts", request.column));
-        let n_rows = result.nrows();
+        let n_values = result.nrows();
 
-        // Format output for display
         let mut output = format!(
-            "Value Counts for '{}'\n{}\n",
+            "Value counts for '{}' ({} rows; missing values form one group{})\n{}\n",
             request.column,
+            dataset.nrows(),
+            if normalize {
+                "; proportion = count / rows"
+            } else {
+                ""
+            },
             "=".repeat(40)
         );
-
-        // Show first few rows
-        let show_n = 10.min(n_rows);
+        let show_n = 10.min(n_values);
         output.push_str(&format!(
-            "Showing top {} of {} unique values:\n\n",
-            show_n, n_rows
+            "Showing {show_n} of {n_values} distinct values:\n\n"
         ));
 
         let df = result.df();
-        for i in 0..show_n {
-            let val_col = df.column(&request.column).ok();
-            let count_col = df.column("count").ok();
-
-            if let (Some(v), Some(c)) = (val_col, count_col) {
-                if let (Ok(val), Ok(cnt)) = (v.get(i), c.get(i)) {
-                    output.push_str(&format!("  {:?}: {}\n", val, cnt));
+        if let (Ok(values), Ok(tallies)) = (df.column(&request.column), df.column(measure)) {
+            let quoted = matches!(
+                values.dtype(),
+                p2a_core::polars::prelude::DataType::String
+                    | p2a_core::polars::prelude::DataType::Categorical(..)
+                    | p2a_core::polars::prelude::DataType::Enum(..)
+            );
+            for i in 0..show_n {
+                let (Ok(value), Ok(tally)) = (values.get(i), tallies.get(i)) else {
+                    continue;
+                };
+                let label = cell_label(&value, quoted);
+                if normalize {
+                    let p = tally.extract::<f64>().unwrap_or(f64::NAN);
+                    output.push_str(&format!(
+                        "  {label}: {} ({:.1}%)\n",
+                        format_significant(p),
+                        100.0 * p
+                    ));
+                } else {
+                    output.push_str(&format!("  {label}: {}\n", tally.str_value()));
                 }
             }
         }
 
-        drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
-        output.push_str(&format!("\nFull result saved as '{}'", result_name));
+        output.push_str(&format!(
+            "\nFull result saved as '{}' (columns: {}, {measure})",
+            result_name, request.column
+        ));
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
@@ -4531,6 +4565,15 @@ mod tests {
             "{what}: bound {bound} < charged {charged} ({})",
             columns.join(", ")
         );
+    }
+
+    #[test]
+    fn value_count_labels_quote_text_and_name_missing() {
+        // DATA-65: values printed as values, not polars' Debug form
+        assert_eq!(cell_label(&AnyValue::Null, false), "NA (missing)");
+        assert_eq!(cell_label(&AnyValue::String("N/A"), true), "'N/A'");
+        assert_eq!(cell_label(&AnyValue::Int64(2), false), "2");
+        assert_eq!(cell_label(&AnyValue::Boolean(true), false), "true");
     }
 
     #[test]

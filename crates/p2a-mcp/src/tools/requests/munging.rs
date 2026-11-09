@@ -245,8 +245,10 @@ pub struct ValueCountsRequest {
     #[schemars(description = "Column name to compute value counts for.")]
     pub column: String,
 
-    /// Whether to normalize to percentages
-    #[schemars(description = "If true, return percentages instead of counts.")]
+    /// Whether to return proportions instead of counts
+    #[schemars(
+        description = "If true, the result holds proportions (count / rows, 0 to 1; the missing group counts) in a column 'proportion' instead of counts in 'count'. Default false."
+    )]
     pub normalize: Option<bool>,
 
     /// Optional name for the resulting dataset

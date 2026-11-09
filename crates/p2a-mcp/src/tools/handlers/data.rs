@@ -29,6 +29,38 @@ use p2a_core::polars::prelude::{
 };
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
+/// `x` with 7 significant digits (R's default print precision): fixed notation for decimal
+/// exponents -5 to 14, otherwise "1.234568e-6"; trailing zeros dropped; "NA" for NaN,
+/// "Inf"/"-Inf", "0" for zero.
+pub(crate) fn format_significant(x: f64) -> String {
+    if x.is_nan() {
+        return "NA".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Inf" } else { "-Inf" }.to_string();
+    }
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    fn trim(s: &str) -> &str {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            s
+        }
+    }
+    // Correctly rounded to 7 significant digits; the exponent is that of the rounded value.
+    let sci = format!("{x:.6e}");
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if (-5..15).contains(&exp) {
+        let decimals = usize::try_from(6 - exp).unwrap_or(0);
+        trim(&format!("{x:.decimals$}")).to_string()
+    } else {
+        format!("{}e{exp}", trim(mantissa))
+    }
+}
+
 /// Rows serialised between two cancellation checkpoints in a JSON export.
 const CHECKPOINT_ROWS: usize = 1 << 16;
 
@@ -1972,6 +2004,32 @@ mod tests {
     use super::*;
     use p2a_core::polars::prelude::df;
     use serde_json::json;
+
+    #[test]
+    fn format_significant_prints_seven_significant_digits() {
+        // R's default print precision (digits = 7); the values are the describe and value-count pins
+        for (x, s) in [
+            (51604.898333333331, "51604.9"),
+            (8933.5463495481035, "8933.546"),
+            (43618.024999999994, "43618.02"),
+            (4.4721359549995796, "4.472136"),
+            (0.29999999999999999, "0.3"),
+            (0.000123456789, "0.0001234568"),
+            (1e-6, "1e-6"),
+            (123456789.0, "123456789"),
+            (9.99999996, "10"),
+            (1234567.891, "1234568"),
+            (-0.5, "-0.5"),
+            (2.5e15, "2.5e15"),
+            (0.0, "0"),
+            (-0.0, "0"),
+            (f64::NAN, "NA"),
+            (f64::INFINITY, "Inf"),
+            (f64::NEG_INFINITY, "-Inf"),
+        ] {
+            assert_eq!(format_significant(x), s, "{x:e}");
+        }
+    }
 
     /// [`least_value_bytes`] of a whole column of `rows` rows whose leaf
     /// columns have `entries` entries, and `page_bytes` of pages each.

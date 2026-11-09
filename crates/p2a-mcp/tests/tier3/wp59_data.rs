@@ -265,3 +265,65 @@ async fn test_mcp_fill_unknown_strategy_is_error() {
         "{t}"
     );
 }
+
+/// DATA-65: normalize = true returned counts (the field was never read), and values were printed with
+/// Debug (`Int64(2)`). R: dplyr::count(d, g, sort = TRUE) with the NA group and n / sum(n)
+/// (data_munging_t3.R, case data_munging_value_counts, T3-WP50). (The architect's
+/// test_mcp_value_counts_normalize, named test_validate_* because it is R-pinned.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_value_counts_normalize() {
+    let case = Case::load("data_munging_value_counts");
+    let (session, server) = session_with("data_munging_value_counts"); // dataset "munging_counts"
+    let r = call(
+        &server,
+        &session,
+        "munge_value_counts",
+        json!({"dataset": "munging_counts", "column": "g", "normalize": true, "result_name": "p"}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(r.success, "{t}");
+    let p = dataset(&session, "p").await;
+    let names: Vec<String> = p
+        .df()
+        .get_column_names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    assert_eq!(names, ["g", "proportion"]); // before: ["g", "count"]
+    Check::new(&case)
+        .vector("vc_g", &nums(&p, "g"), Tol::exact())
+        .vector("vc_proportion", &nums(&p, "proportion"), Tol::exact())
+        .finish();
+    for line in [
+        "  2: 0.4 (40.0%)\n",
+        "  7: 0.3 (30.0%)\n",
+        "  NA (missing): 0.2 (20.0%)\n",
+        "  5: 0.1 (10.0%)\n",
+    ] {
+        assert!(t.contains(line), "{line:?} missing:\n{t}");
+    }
+    assert!(
+        t.contains("Full result saved as 'p' (columns: g, proportion)"),
+        "{t}"
+    );
+    let r = call(
+        &server,
+        &session,
+        "munge_value_counts",
+        json!({"dataset": "munging_counts", "column": "g", "result_name": "c"}),
+    )
+    .await;
+    let t = text(&r);
+    Check::new(&case)
+        .vector(
+            "vc_n",
+            &nums(&dataset(&session, "c").await, "count"),
+            Tol::exact(),
+        )
+        .finish();
+    assert!(
+        t.contains("  2: 4\n") && t.contains("  NA (missing): 2\n") && !t.contains("Int64("),
+        "{t}"
+    );
+}

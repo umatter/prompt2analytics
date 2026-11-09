@@ -12,3 +12,8 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
   bfill/nocb, most_frequent); the constant comes from `value`; unknown strategies are errors.
 - Tests: `test_validate_mcp_fill_na_mode` (exact); behaviour tests `test_mcp_fill_constant_keeps_case`,
   `test_mcp_fill_unknown_strategy_is_error`.
+
+## Value counts (`munge_value_counts`)
+- Reference: `dplyr::count(d, g, sort = TRUE)`, `n / sum(n)`; case `data_munging_value_counts`: values 2, 7,
+  NA, 5; counts 4, 3, 2, 1; proportions 0.4, 0.3, 0.2, 0.1.
+- Test: `test_validate_mcp_value_counts_normalize` (exact).
