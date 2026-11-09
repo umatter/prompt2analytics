@@ -145,3 +145,26 @@ The JSON reports the canonical names (`change_type`, `seasonal_type`, `method`,
 Not compared: the BSM level variance, which is 0 at R's optimum (a boundary a relative
 tolerance cannot compare), and the slope variance next to it; the estimator's own validation
 pins all four.
+
+### `ts holt-winters --horizon`
+
+`--horizon` was parsed and never used. With a horizon the command prints and serialises
+`predict.HoltWinters`' forecasts and limits at `--level` (default 0.95), in text
+`Forecasts (h = 12, 95% prediction interval):` and `  t+i: fit  [lower, upper]`, in JSON
+`forecast: {horizon, level, mean, std_errors, lower, upper, residual_variance}`. New
+`--alpha`, `--beta`, `--gamma` fix the smoothing parameters as `HoltWinters(alpha, beta,
+gamma)` does (0 for beta or gamma fits no trend or season, R's `FALSE`); without them the
+parameters are optimised.
+
+A multiplicative seasonal fit gets point forecasts only: R's interval formula for that branch
+is wrong (deviation TS-22), and the core refuses it. The text says
+`Forecasts (h = 12; prediction intervals are implemented for additive and non-seasonal
+fits):`, the JSON has `level`, `std_errors`, `lower` and `upper` null and a line in
+`warnings`.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_holt_winters_horizon_prints_forecasts` | `ts_holtwinters_forecast` `airpass_mult_fit`, `airpass_mult_resvar` (alpha 0.3, beta 0.05, gamma 0.4, multiplicative); `airpass_notrend_fit`, `_lwr`, `_upr` (alpha 0.3, beta 0, gamma 0.2, additive) | JSON `Tol::coef(144)` / `Tol::stat(144)`; text `Tol::printed(4)` |
+
+Deviations: TS-22 (`airpass_mult_lwr`, `airpass_mult_upr` not compared); TS-24 (the optimiser
+is not pinned; the optimised run's forecasts are compared with the library in process).

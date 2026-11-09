@@ -995,3 +995,174 @@ fn test_cli_ar_notes_and_changepoint_help() {
         "{help}"
     );
 }
+
+/// The `t+i:` rows of a forecast block: the numbers after the colon (brackets and commas dropped).
+fn forecast_rows(text: &str) -> Vec<Vec<f64>> {
+    text.lines()
+        .filter(|l| l.trim_start().starts_with("t+"))
+        .map(|l| {
+            l.split_once(':')
+                .unwrap()
+                .1
+                .replace(['[', ']', ','], " ")
+                .split_whitespace()
+                .map(|t| t.parse().unwrap_or_else(|_| panic!("{t:?} in {l:?}")))
+                .collect()
+        })
+        .collect()
+}
+
+fn column(rows: &[Vec<f64>], i: usize) -> Vec<f64> {
+    rows.iter().map(|r| r[i]).collect()
+}
+
+/// CLI-23: --horizon was parsed and dropped. R: ts_holtwinters_forecast
+/// airpass_mult_{fit,resvar} (HoltWinters(AirPassengers, 0.3, 0.05, 0.4, "multiplicative"))
+/// and airpass_notrend_{fit,lwr,upr} (HoltWinters(AirPassengers, 0.3, FALSE, 0.2, "additive");
+/// predict(n.ahead = 12, prediction.interval = TRUE)).
+#[test]
+fn test_validate_cli_holt_winters_horizon_prints_forecasts() {
+    let case = Case::load("ts_holtwinters_forecast");
+    let s = temp_session();
+    let d = s.load(&case);
+
+    // multiplicative: point forecasts; R's interval formula for this branch is wrong, so the
+    // intervals are null and a warning says why.
+    let mult = [
+        "ts",
+        "holt-winters",
+        d.as_str(),
+        "--col",
+        "airpass",
+        "--period",
+        "12",
+        "--seasonal",
+        "multiplicative",
+        "--alpha",
+        "0.3",
+        "--beta",
+        "0.05",
+        "--gamma",
+        "0.4",
+        "--horizon",
+        "12",
+    ];
+    let j = s.json(&mult);
+    let f = field(&j, "forecast");
+    Check::new(&case)
+        .vector("airpass_mult_fit", &f64s(&f["mean"]), Tol::coef(144))
+        .scalar(
+            "airpass_mult_resvar",
+            num(&f["residual_variance"]),
+            Tol::stat(144),
+        )
+        // deviation TS-22: airpass_mult_lwr / airpass_mult_upr are not compared
+        .finish();
+    assert_eq!(num(&f["horizon"]), 12.0);
+    for k in ["level", "std_errors", "lower", "upper"] {
+        assert!(f[k].is_null(), "{k}: {f:#}");
+    }
+    let warnings = strings(field(&j, "warnings"));
+    assert!(
+        warnings.iter().any(|w| w.contains("prediction intervals")),
+        "{warnings:?}"
+    );
+    let text = s.ok(&mult);
+    assert!(
+        text.contains(
+            "Forecasts (h = 12; prediction intervals are implemented for additive and non-seasonal fits):"
+        ),
+        "{text}"
+    );
+    let rows = forecast_rows(&text);
+    Check::new(&case)
+        .vector("airpass_mult_fit", &column(&rows, 0), Tol::printed(4))
+        .finish();
+
+    // additive, no trend: forecasts and 95% limits
+    let add = [
+        "ts",
+        "holt-winters",
+        d.as_str(),
+        "--col",
+        "airpass",
+        "--period",
+        "12",
+        "--seasonal",
+        "additive",
+        "--alpha",
+        "0.3",
+        "--beta",
+        "0",
+        "--gamma",
+        "0.2",
+        "--horizon",
+        "12",
+    ];
+    let j = s.json(&add);
+    let f = field(&j, "forecast");
+    Check::new(&case)
+        .vector("airpass_notrend_fit", &f64s(&f["mean"]), Tol::coef(144))
+        .vector("airpass_notrend_lwr", &f64s(&f["lower"]), Tol::stat(144))
+        .vector("airpass_notrend_upr", &f64s(&f["upper"]), Tol::stat(144))
+        .finish();
+    assert_eq!((num(&f["horizon"]), num(&f["level"])), (12.0, 0.95));
+    let text = s.ok(&add);
+    assert!(
+        text.contains("Forecasts (h = 12, 95% prediction interval):"),
+        "{text}"
+    );
+    let rows = forecast_rows(&text);
+    Check::new(&case)
+        .vector("airpass_notrend_fit", &column(&rows, 0), Tol::printed(4))
+        .vector("airpass_notrend_lwr", &column(&rows, 1), Tol::printed(4))
+        .vector("airpass_notrend_upr", &column(&rows, 2), Tol::printed(4))
+        .finish();
+
+    // optimised parameters (the optimiser is not pinned, TS-24): the CLI prints what the
+    // library predicts
+    let j6 = s.json(&[
+        "ts",
+        "holt-winters",
+        &d,
+        "--col",
+        "airpass",
+        "--period",
+        "12",
+        "--horizon",
+        "6",
+        "--level",
+        "0.8",
+    ]);
+    let ds = case_dataset(&case);
+    let fit = p2a_core::run_holt_winters(
+        &ds,
+        "airpass",
+        12,
+        p2a_core::SeasonalType::Additive,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let p = fit.predict(6, 0.8).unwrap();
+    let f6 = field(&j6, "forecast");
+    assert_eq!(f64s(&f6["mean"]), p.forecast);
+    assert_eq!(f64s(&f6["lower"]), p.lower);
+    assert!(
+        s.ok(&[
+            "ts",
+            "holt-winters",
+            &d,
+            "--col",
+            "airpass",
+            "--period",
+            "12",
+            "--horizon",
+            "2",
+            "--level",
+            "0.975"
+        ])
+        .contains("Forecasts (h = 2, 97.5% prediction interval):")
+    );
+}

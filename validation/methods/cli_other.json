@@ -58,25 +58,39 @@
     },
     {
       "id": "cli_timeseries_outputs",
-      "name": "p2a ts granger/struct-ts and the other time-series commands: typed options, labels, forecasts and notes",
+      "name": "p2a ts granger/struct-ts/holt-winters and the other time-series commands: typed options, labels, forecasts and notes",
       "category": "interfaces",
-      "reference": "lmtest::grangertest; stats::StructTS(type = 'BSM')",
+      "reference": "lmtest::grangertest; stats::StructTS(type = 'BSM'); stats::HoltWinters + predict(prediction.interval = TRUE)",
       "doc": "validation/cli/other.md",
       "cases": [
         "granger_short",
-        "structts_nile_ukgas"
+        "structts_nile_ukgas",
+        "ts_holtwinters_forecast"
       ],
       "tests": [
         "p2a-cli::tier3::wp61_other::test_validate_cli_granger_notes",
-        "p2a-cli::tier3::wp61_other::test_validate_cli_struct_ts_notes"
+        "p2a-cli::tier3::wp61_other::test_validate_cli_struct_ts_notes",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_holt_winters_horizon_prints_forecasts"
       ],
       "quantities": [
         "Granger F, p, df2",
         "StructTS BSM logLik and seasonal and observation variances",
-        "presence of warnings and convergence"
+        "presence of warnings and convergence",
+        "Holt-Winters forecasts (multiplicative and additive) and 95% limits (additive), residual variance"
       ],
-      "tolerance": "validation/README.md for each n (Granger n = 20: F 1e-5, p 1e-5 + 1e-12, df exact; StructTS logLik at n = 108); StructTS variances Tol::iterative(1e-6) (the tight optimum)",
-      "deviations": [],
+      "tolerance": "validation/README.md for each n (Granger n = 20: F 1e-5, p 1e-5 + 1e-12, df exact; StructTS logLik at n = 108); StructTS variances Tol::iterative(1e-6) (the tight optimum); Holt-Winters 144: forecasts 1e-8, limits and residual variance 1e-6; printed text at 4 decimals",
+      "deviations": [
+        {
+          "finding": "TS-22",
+          "quantity": "airpass_mult_lwr, airpass_mult_upr",
+          "note": "predict.HoltWinters' multiplicative interval formula is wrong; the core refuses multiplicative intervals and the CLI prints point forecasts with a warning"
+        },
+        {
+          "finding": "TS-24",
+          "quantity": "optimised Holt-Winters parameters",
+          "note": "Tier 4; the CLI pins fix alpha, beta, gamma; the optimised run is compared with the library in process"
+        }
+      ],
       "supersedes_legacy": []
     }
   ]

@@ -322,6 +322,9 @@ EXAMPLES:
 
     # Multiplicative seasonal
     p2a ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
+
+    # Fixed smoothing parameters and 12 forecasts with 95% prediction intervals
+    p2a ts holt-winters mydata --col sales --period 12 --alpha 0.3 --beta 0 --gamma 0.2 --horizon 12
 ")]
     HoltWinters {
         /// Dataset name
@@ -339,9 +342,27 @@ EXAMPLES:
         #[arg(long, default_value = "additive", value_parser = parse_seasonal)]
         seasonal: SeasonalType,
 
-        /// Forecast horizon (optional)
+        /// Level smoothing alpha in (0, 1]; default: optimised
+        #[arg(long)]
+        alpha: Option<f64>,
+
+        /// Trend smoothing beta in [0, 1]; 0 fits no trend (R beta = FALSE); default: optimised
+        #[arg(long)]
+        beta: Option<f64>,
+
+        /// Seasonal smoothing gamma in [0, 1]; 0 fits no seasonal component (R gamma = FALSE);
+        /// default: optimised
+        #[arg(long)]
+        gamma: Option<f64>,
+
+        /// Forecast h steps ahead with prediction intervals (predict.HoltWinters); a
+        /// multiplicative seasonal fit gets point forecasts only
         #[arg(long)]
         horizon: Option<usize>,
+
+        /// Level of the prediction intervals (predict.HoltWinters level)
+        #[arg(long, default_value_t = 0.95)]
+        level: f64,
     },
 
     /// Granger causality test
@@ -627,8 +648,21 @@ pub fn execute(
             col,
             period,
             seasonal,
+            alpha,
+            beta,
+            gamma,
             horizon,
-        } => execute_holt_winters(dataset, col, *period, *seasonal, *horizon, format, session),
+            level,
+        } => execute_holt_winters(
+            dataset,
+            col,
+            *period,
+            *seasonal,
+            (*alpha, *beta, *gamma),
+            horizon.map(|h| (h, *level)),
+            format,
+            session,
+        ),
         TimeseriesCommands::Granger {
             dataset,
             x,
@@ -1308,12 +1342,85 @@ fn execute_garch(
     Ok(())
 }
 
+/// Holt-Winters forecasts for the CLI: predict.HoltWinters's limits for additive and
+/// non-seasonal fits; point forecasts only for a multiplicative seasonal fit (its interval
+/// formula in R is wrong, and the core refuses it).
+struct HwForecast {
+    horizon: usize,
+    level: Option<f64>,
+    mean: Vec<f64>,
+    std_errors: Option<Vec<f64>>,
+    lower: Option<Vec<f64>>,
+    upper: Option<Vec<f64>>,
+    residual_variance: f64,
+    warning: Option<String>,
+}
+
+const HW_MULT_INTERVALS: &str =
+    "prediction intervals are implemented for additive and non-seasonal fits";
+
+fn hw_forecast(
+    result: &p2a_core::forecasting::HoltWintersResult,
+    h: usize,
+    level: f64,
+) -> p2a_core::EconResult<HwForecast> {
+    let multiplicative = result.coefficients.seasonal.is_some()
+        && result.seasonal_type == SeasonalType::Multiplicative;
+    if multiplicative {
+        let mean = p2a_core::holt_winters_forecast(result, h)?;
+        // var(residuals(fit)): sample variance of the one-step errors
+        let errors: Vec<f64> = result
+            .residuals
+            .iter()
+            .copied()
+            .filter(|e| e.is_finite())
+            .collect();
+        let m = errors.len() as f64;
+        let residual_variance = if errors.len() >= 2 {
+            let mu = errors.iter().sum::<f64>() / m;
+            errors.iter().map(|e| (e - mu).powi(2)).sum::<f64>() / (m - 1.0)
+        } else {
+            f64::NAN
+        };
+        return Ok(HwForecast {
+            horizon: h,
+            level: None,
+            mean,
+            std_errors: None,
+            lower: None,
+            upper: None,
+            residual_variance,
+            warning: Some(format!(
+                "{HW_MULT_INTERVALS}; a multiplicative seasonal fit gets point forecasts only"
+            )),
+        });
+    }
+    let p = result.predict(h, level)?;
+    Ok(HwForecast {
+        horizon: p.horizon,
+        level: Some(p.level),
+        mean: p.forecast,
+        std_errors: Some(p.std_errors),
+        lower: Some(p.lower),
+        upper: Some(p.upper),
+        residual_variance: p.residual_variance,
+        warning: None,
+    })
+}
+
+/// A level as a percentage the way it was typed: 0.95 -> "95", 0.975 -> "97.5".
+fn percent(level: f64) -> String {
+    let pct = (level * 100.0 * 1e9).round() / 1e9;
+    format!("{pct}")
+}
+
 fn execute_holt_winters(
     dataset_name: &str,
     col: &str,
     period: usize,
     seasonal_type: SeasonalType,
-    _horizon: Option<usize>,
+    (alpha, beta, gamma): (Option<f64>, Option<f64>, Option<f64>),
+    horizon: Option<(usize, f64)>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1324,45 +1431,104 @@ fn execute_holt_winters(
             return Ok(());
         }
     };
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
 
-    match dataset {
-        Some(ds) => {
-            // run_holt_winters(dataset, column, period, seasonal, alpha, beta, gamma)
-            match run_holt_winters(ds, col, period, seasonal_type, None, None, None) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "model": "Holt-Winters",
-                            "seasonal_type": SEASONAL_TYPES.canonical(result.seasonal_type),
-                            "period": result.period,
-                            "alpha": result.alpha,
-                            "beta": result.beta,
-                            "gamma": result.gamma,
-                            "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
-                            "sse": result.sse,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+    // run_holt_winters(dataset, column, period, seasonal, alpha, beta, gamma)
+    let result = match run_holt_winters(ds, col, period, seasonal_type, alpha, beta, gamma) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&ts_error_message("Holt-Winters failed", &e), format);
+            return Ok(());
+        }
+    };
+    let forecast = match horizon {
+        Some((h, level)) => match hw_forecast(&result, h, level) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                print_error(
+                    &ts_error_message("Holt-Winters forecast failed", &e),
+                    format,
+                );
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+    let warnings: Vec<String> = forecast
+        .as_ref()
+        .and_then(|f| f.warning.clone())
+        .into_iter()
+        .collect();
+
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "model": "Holt-Winters",
+                "seasonal_type": SEASONAL_TYPES.canonical(result.seasonal_type),
+                "period": result.period,
+                "alpha": result.alpha,
+                "beta": result.beta,
+                "gamma": result.gamma,
+                "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
+                "sse": result.sse,
+                "warnings": warnings,
+            });
+            if let Some(f) = &forecast {
+                json["forecast"] = serde_json::json!({
+                    "horizon": f.horizon,
+                    "level": f.level,
+                    "mean": f.mean,
+                    "std_errors": f.std_errors,
+                    "lower": f.lower,
+                    "upper": f.upper,
+                    "residual_variance": f.residual_variance,
+                });
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nHolt-Winters Exponential Smoothing");
+            println!("{}", "=".repeat(50));
+            println!(
+                "\nSeasonal type: {}",
+                SEASONAL_TYPES.canonical(result.seasonal_type)
+            );
+            println!("Period: {}", result.period);
+            println!("\nSmoothing parameters:");
+            println!("  Alpha (level): {:.4}", result.alpha);
+            if let Some(beta) = result.beta {
+                println!("  Beta (trend): {:.4}", beta);
+            }
+            if let Some(gamma) = result.gamma {
+                println!("  Gamma (seasonal): {:.4}", gamma);
+            }
+            println!("\nSSE: {:.4}", result.sse);
+            if let Some(f) = &forecast {
+                match (f.level, &f.lower, &f.upper) {
+                    (Some(level), Some(lower), Some(upper)) => {
+                        println!(
+                            "\nForecasts (h = {}, {}% prediction interval):",
+                            f.horizon,
+                            percent(level)
+                        );
+                        for (i, ((fit, lo), hi)) in f.mean.iter().zip(lower).zip(upper).enumerate()
+                        {
+                            println!("  t+{}: {fit:.4}  [{lo:.4}, {hi:.4}]", i + 1);
+                        }
                     }
                     _ => {
-                        println!("\nHolt-Winters Exponential Smoothing");
-                        println!("{}", "=".repeat(50));
-                        println!("\nSeasonal type: {:?}", result.seasonal_type);
-                        println!("Period: {}", result.period);
-                        println!("\nSmoothing parameters:");
-                        println!("  Alpha (level): {:.4}", result.alpha);
-                        if let Some(beta) = result.beta {
-                            println!("  Beta (trend): {:.4}", beta);
+                        println!("\nForecasts (h = {}; {HW_MULT_INTERVALS}):", f.horizon);
+                        for (i, fit) in f.mean.iter().enumerate() {
+                            println!("  t+{}: {fit:.4}", i + 1);
                         }
-                        if let Some(gamma) = result.gamma {
-                            println!("  Gamma (seasonal): {:.4}", gamma);
-                        }
-                        println!("\nSSE: {:.4}", result.sse);
                     }
-                },
-                Err(e) => print_error(&ts_error_message("Holt-Winters failed", &e), format),
+                }
             }
+            crate::output::print_notes(None, &warnings, format);
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
 }
