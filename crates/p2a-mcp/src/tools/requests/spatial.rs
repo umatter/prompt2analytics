@@ -255,7 +255,7 @@ pub struct SarProbitRequest {
 
     /// Compute spatial impacts
     #[schemars(
-        description = "If true, computes direct, indirect, and total spatial impacts. Default is true."
+        description = "If true, computes the direct, indirect and total marginal effects on the probability scale, each with its posterior SD. Default true; needs at least one x column (an intercept-only model has no marginal effects: set false)."
     )]
     pub compute_impacts: Option<bool>,
 

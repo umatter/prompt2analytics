@@ -827,7 +827,7 @@ impl AnalyticsServer {
 
     /// Run SAR Probit model (spatial lag probit for binary outcomes).
     #[tool(
-        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
+        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means and SDs, the rho credible interval and, per variable, the direct, indirect and total marginal effects on the probability scale with their posterior SDs. Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
     )]
     pub async fn sar_probit_model(
         &self,
@@ -923,26 +923,9 @@ impl AnalyticsServer {
                 ));
 
                 if let Some(impacts) = &result.impacts {
-                    output.push_str("\nSpatial Marginal Effects (Probability Scale):\n");
-                    output.push_str("--------------------------------------------\n");
-                    output.push_str(&format!(
-                        "{:15} {:>12} {:>12} {:>12}\n",
-                        "Variable", "Direct", "Indirect", "Total"
-                    ));
-                    for (i, name) in impacts.var_names.iter().enumerate() {
-                        output.push_str(&format!(
-                            "{:15} {:>12.6} {:>12.6} {:>12.6}\n",
-                            name, impacts.direct[i], impacts.indirect[i], impacts.total[i]
-                        ));
-                    }
-                    output.push_str(&format!(
-                        "{:15} ({:>10.6}) ({:>10.6}) ({:>10.6})\n",
-                        "Std.Errors",
-                        impacts.direct_se[0],
-                        impacts.indirect_se[0],
-                        impacts.total_se[0]
-                    ));
-                    output.push_str("\nNote: Direct = own probability effect, Indirect = spillover from neighbors");
+                    output.push('\n');
+                    output.push_str(&impacts.to_string());
+                    output.push_str("Note: Direct = own probability effect, Indirect = spillover from neighbors");
                 }
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))

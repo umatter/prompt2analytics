@@ -1236,3 +1236,82 @@ async fn test_mcp_sphet_hac_field_rules() {
     .await);
     assert!(t.contains("parzen kernel"), "{t}");
 }
+
+// ----------------------------------------------------------------------------
+// Spatial probits
+// ----------------------------------------------------------------------------
+
+/// spatial_sim with a 0/1 outcome yb = 1(y > 1.9) and a 4-NN W.
+async fn probit_session() -> (Session, AnalyticsServer) {
+    let (_, mut df) = case_df("spatial_weights_moran");
+    let yb: Vec<i64> = col_f64(&df, "y")
+        .into_iter()
+        .map(|v| i64::from(v > 1.9))
+        .collect();
+    df.with_column(Series::new("yb".into(), yb)).unwrap();
+    let (s, server) = session_with_datasets(vec![("spatial_sim", dataset(df))]);
+    neighbors(
+        &server,
+        &s,
+        "spatial_sim",
+        "w4",
+        json!({"method": "knn", "k": 4}),
+    )
+    .await;
+    (s, server)
+}
+
+/// Before: one "Std.Errors" row under the table that held only x1's SDs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_sar_probit_impact_se_per_variable() {
+    let (s, server) = probit_session().await;
+    let t = ok(&call(
+        &server,
+        &s,
+        "sar_probit_model",
+        json!({"dataset": "spatial_sim", "y": "yb", "x": ["x1", "x2"], "weights": "w4",
+               "n_draws": 200, "burn_in": 50, "seed": 3}),
+    )
+    .await);
+    let block = t
+        .split("Spatial impacts")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no impacts in {t}"));
+    assert!(!block.contains("Std.Errors"), "{block}");
+    let (x1, x2) = (row(block, "x1"), row(block, "x2"));
+    assert_eq!(
+        (x1.len(), x2.len()),
+        (6, 6),
+        "Direct (SD) Indirect (SD) Total (SD) per row:\n{block}"
+    );
+    assert!(
+        x1[1] > 0.0 && x2[1] > 0.0 && x1[1] != x2[1],
+        "each variable has its own SDs:\n{block}"
+    );
+}
+
+/// x = [] is an intercept-only model: with the default compute_impacts it is the core's error,
+/// returned as a tool error; with compute_impacts = false it runs. Before the core refused it,
+/// the handler indexed an empty vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_sar_probit_empty_x() {
+    let (s, server) = probit_session().await;
+    let a = json!({"dataset": "spatial_sim", "y": "yb", "x": [], "weights": "w4", "n_draws": 60, "burn_in": 20, "seed": 3});
+    let e = err(&call(&server, &s, "sar_probit_model", a.clone()).await);
+    assert!(
+        e.contains("compute_impacts needs at least one regressor"),
+        "{e}"
+    );
+    let t = ok(&call(
+        &server,
+        &s,
+        "sar_probit_model",
+        with(&a, json!({"compute_impacts": false})),
+    )
+    .await);
+    assert!(
+        row(&t, "(Intercept)").len() >= 2 && !t.contains("Spatial impacts"),
+        "{t}"
+    );
+    ok(&call(&server, &s, "sem_probit_model", a).await);
+}
