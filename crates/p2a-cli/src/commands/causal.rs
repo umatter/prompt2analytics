@@ -1044,6 +1044,16 @@ fn execute_iv(
                         format,
                     );
 
+                    // Identification diagnostics; a failure is reported as a warning, not
+                    // shown as an empty (warning-free) list.
+                    let diagnostics = iv_diagnostics(ds, &result);
+                    let mut warnings = result.warnings.clone();
+                    if let Err(e) = &diagnostics {
+                        warnings.push(format!(
+                            "identification diagnostics could not be computed: {e}"
+                        ));
+                    }
+
                     // Print first-stage diagnostics
                     match format {
                         OutputFormat::Json => {
@@ -1055,10 +1065,11 @@ fn execute_iv(
                                 "p_values": result.first_stage_p_values,
                                 "strong_instruments": result.strong_instruments,
                             });
-                            json["diagnostics"] = iv_diagnostics(ds, &result)
-                                .map(|r| identification_json(&r))
-                                .unwrap_or_else(|_| serde_json::json!([]));
-                            extend_json(&mut json, notes_json(None, &result.warnings));
+                            json["diagnostics"] = match &diagnostics {
+                                Ok(r) => identification_json(r),
+                                Err(_) => serde_json::Value::Null,
+                            };
+                            extend_json(&mut json, notes_json(None, &warnings));
                             if let Some(m) = missing_json(&result.missing) {
                                 json["missing"] = m;
                             }
@@ -1094,11 +1105,10 @@ fn execute_iv(
                                 }
                             }
 
-                            print_notes(None, &result.warnings, format);
+                            print_notes(None, &warnings, format);
 
-                            // Run identification diagnostics
-                            if let Ok(diag_report) = iv_diagnostics(ds, &result) {
-                                print_identification_warnings(&diag_report);
+                            if let Ok(diag_report) = &diagnostics {
+                                print_identification_warnings(diag_report);
                             }
                             print_missing_note(&result.missing, format);
                         }

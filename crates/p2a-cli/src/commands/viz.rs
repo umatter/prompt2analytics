@@ -1293,12 +1293,18 @@ fn execute_residuals(
         ("scale_location", &plot_result.scale_location),
         ("leverage", &plot_result.residuals_vs_leverage),
     ] {
-        if let Ok(data) = decode_base64_image(image) {
-            let path = parent.join(format!("{stem}_{suffix}.png"));
-            if std::fs::write(&path, &data).is_ok() {
-                files.push(path.display().to_string());
+        // A plot that cannot be decoded or written is an error, as for the main plot, so the
+        // message never names a file that was not written.
+        let data = match decode_base64_image(image) {
+            Ok(d) => d,
+            Err(e) => {
+                print_error(&format!("the {suffix} plot: {e}"), format);
+                return Ok(());
             }
-        }
+        };
+        let path = parent.join(format!("{stem}_{suffix}.png"));
+        std::fs::write(&path, &data)?;
+        files.push(path.display().to_string());
     }
 
     let msg = format!(

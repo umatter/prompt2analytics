@@ -1165,6 +1165,36 @@ fn test_validate_cli_holt_winters_horizon_prints_forecasts() {
         ])
         .contains("Forecasts (h = 2, 97.5% prediction interval):")
     );
+    // A level outside (0, 1) is refused for every seasonal type (a multiplicative fit has no
+    // intervals and ignored it), and --level without --horizon is refused instead of ignored.
+    let e = usage_error(&[
+        "ts",
+        "holt-winters",
+        "data",
+        "--col",
+        "airpass",
+        "--period",
+        "12",
+        "--seasonal",
+        "multiplicative",
+        "--horizon",
+        "12",
+        "--level",
+        "1.5",
+    ]);
+    assert!(e.contains("strictly between 0 and 1"), "{e}");
+    let e = s.err(&[
+        "ts",
+        "holt-winters",
+        &d,
+        "--col",
+        "airpass",
+        "--period",
+        "12",
+        "--level",
+        "0.8",
+    ]);
+    assert!(e.contains("give --horizon too"), "{e}");
 }
 
 /// CLI-10: "a -> b" printed irf[h][a][b], the response of a to a shock in b (the Cholesky zero

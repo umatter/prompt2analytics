@@ -405,9 +405,10 @@ EXAMPLES:
         #[arg(long)]
         horizon: Option<usize>,
 
-        /// Level of the prediction intervals (predict.HoltWinters level)
-        #[arg(long, default_value_t = 0.95)]
-        level: f64,
+        /// Level of the prediction intervals (predict.HoltWinters level), strictly between
+        /// 0 and 1; default 0.95. Needs --horizon
+        #[arg(long, value_parser = parse_interval_level)]
+        level: Option<f64>,
     },
 
     /// Granger causality test
@@ -722,16 +723,25 @@ pub fn execute(
             gamma,
             horizon,
             level,
-        } => execute_holt_winters(
-            dataset,
-            col,
-            *period,
-            *seasonal,
-            (*alpha, *beta, *gamma),
-            horizon.map(|h| (h, *level)),
-            format,
-            session,
-        ),
+        } => {
+            if horizon.is_none() && level.is_some() {
+                print_error(
+                    "--level sets the prediction intervals of a forecast; give --horizon too",
+                    format,
+                );
+                return Ok(());
+            }
+            execute_holt_winters(
+                dataset,
+                col,
+                *period,
+                *seasonal,
+                (*alpha, *beta, *gamma),
+                horizon.map(|h| (h, level.unwrap_or(0.95))),
+                format,
+                session,
+            )
+        }
         TimeseriesCommands::Granger {
             dataset,
             x,
@@ -1457,6 +1467,18 @@ fn hw_forecast(
         residual_variance: p.residual_variance,
         warning: None,
     })
+}
+
+/// `ts holt-winters --level`: a probability strictly between 0 and 1. Any other value is a
+/// usage error (exit 2) whatever the seasonal type, so a multiplicative fit, which has no
+/// intervals, does not take a value the additive one would refuse.
+fn parse_interval_level(s: &str) -> Result<f64, String> {
+    match s.trim().parse::<f64>() {
+        Ok(v) if v > 0.0 && v < 1.0 => Ok(v),
+        _ => Err(format!(
+            "expected a level strictly between 0 and 1, got '{s}'"
+        )),
+    }
 }
 
 /// A level as a percentage the way it was typed: 0.95 -> "95", 0.975 -> "97.5".
