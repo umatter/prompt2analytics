@@ -725,9 +725,7 @@ fn tree_entry(line: &str) -> Option<(usize, Vec<String>, bool)> {
         return None;
     }
     let rest: String = chars[pos..].iter().collect();
-    let rest = rest
-        .trim_start_matches(|c| matches!(c, '├' | '└' | '─'))
-        .trim_start();
+    let rest = rest.trim_start_matches(['├', '└', '─']).trim_start();
     let entry = rest.split('#').next().unwrap_or("").trim();
     let is_dir = entry.ends_with('/');
     let names = entry
@@ -772,7 +770,7 @@ fn claude_md_paths(md: &str) -> Vec<(usize, String)> {
         for span in lines[i].split('`').skip(1).step_by(2) {
             if span.starts_with("crates/")
                 && span.contains("/src/")
-                && !span.contains(|c: char| matches!(c, '*' | '<' | '{' | ' '))
+                && !span.contains(['*', '<', '{', ' '])
             {
                 out.push((i + 1, span.trim_end_matches('/').to_string()));
             }
