@@ -462,24 +462,15 @@ Open the URL printed by `dx serve` in your browser (web), or use the native wind
 
 ### Example MCP Tool Calls
 
-```
-# Load a dataset
-load_dataset path:/path/to/data.csv
+Chat shorthand (see `docs/guides/MCP_TOOL_EXAMPLES.md`):
 
-# Create an inline dataset
-create_dataset name:test_data csv_content:"x,y\n1,2\n2,4\n3,6"
-
-# Run OLS regression
-regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
-
-# Generate a scatter plot
-viz_scatter dataset:mydata x_column:sqft y_column:price
-
-# Run panel fixed effects
-panel_fixed_effects dataset:panel y:outcome x:treatment entity_col:firm time_col:year
-
-# Data quality profiling (for LLM-assisted cleaning)
-data_quality_profile dataset:mydata
+```text
+/load_dataset path:data.csv
+/create_dataset name:test_data csv_content:"x,y\n1,2.1\n2,3.9\n3,6.2"
+/regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
+/viz_scatter dataset:mydata x_column:sqft y_column:price
+/panel_fixed_effects dataset:panel y:outcome x:treatment entity_var:firm
+/data_quality_profile dataset:mydata
 ```
 
 ## Architecture

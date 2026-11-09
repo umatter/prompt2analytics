@@ -580,12 +580,12 @@ p2a's own, it is listed here (CLI and MCP alike), with R's default and the docum
 | General GMM weight (HAC) | Bartlett kernel, bandwidth lags + 1, no prewhitening | Quadratic Spectral kernel, Andrews bandwidth, VAR(1) prewhitening (`gmm`) | `validation/econometrics/general_gmm.md` |
 | CBPS estimand | ATE | ATT (`CBPS::CBPS`) | `validation/econometrics/cbps.md` |
 | ETWFE standard errors | clustered by unit (CR1) | iid (`fixest` as called by `etwfe`) | `validation/econometrics/etwfe.md` |
-| Driscoll-Kraay t tests | T - rank degrees of freedom | normal (`plm::vcovSCC` with `coeftest`) | `validation/regression/driscoll_kraay.md` |
+| Driscoll-Kraay t tests | T - rank degrees of freedom | n - rank (`coeftest` with `sandwich::vcovPL`) | `validation/regression/ols_robust_se.md` |
 | Panel unit-root lags | floor(T_max^(1/3)) for every unit; `dfcor = TRUE` | SIC with `pmax` 10; `dfcor = FALSE` (`plm::purtest`) | `validation/econometrics/panel_unit_root.md` |
 | Causal forest `mtry` | ceil(sqrt(p)) | a Poisson draw with mean sqrt(p) + 20 per tree (`grf`) | `validation/ml/causal_forest.md` |
 | Affinity propagation | damping 0.5, 200 iterations, convergence after 15 | 0.9, 1000, 100 (`apcluster`) | `validation/ml/affinity_propagation.md` |
 | Gaussian mixture stopping rule | relative log-likelihood change below 1e-8 | 1e-5 (`mclust`) | `validation/ml/gmm.md` |
-| Discrete-choice and GLM fits (`MleSettings`, `GlmSpec`) | `max_iter` 100, tolerance 1e-10 | 25, 1e-8 (`glm.control`) | `validation/linalg/glm.md` |
+| Discrete-choice and GLM fits (`MleSettings`, `GlmSpec`) | `max_iter` 100, tolerance 1e-10 | 25, 1e-8 (`glm.control`) | `validation/econometrics/logit.md` |
 | Hierarchical clustering `ward` | ward.D2 | ward.D (the deprecated `hclust(method = "ward")`) | `validation/ml/hclust.md` |
 | LTMLE variance | influence curve (`variance.method = "ic"`) | `"tmle"` substitution variance (`ltmle`) | `validation/econometrics/ltmle.md` |
 
