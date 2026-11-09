@@ -634,9 +634,16 @@ cargo test -p p2a-core --release --no-default-features --features ci --test benc
 
 ### Linting
 
+The clippy lines CI runs (`--all-features` would turn on `cuda`):
+
 ```bash
-cargo clippy --all-targets --all-features
-cargo fmt --check
+cargo clippy -p p2a-core --no-default-features --features ci
+cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
+cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
+cargo clippy -p p2a-chat
+cargo clippy -p p2a-text
+cargo clippy -p p2a-validation --all-targets
+cargo fmt --all -- --check
 ```
 
 ### Building Documentation

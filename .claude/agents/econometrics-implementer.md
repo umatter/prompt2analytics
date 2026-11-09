@@ -88,9 +88,10 @@ When implementing a new method:
 - [ ] Validate against reference implementation
   - [ ] Write an R case (`validation/r/cases/<area>.R`, from `.claude/tooling/validation/templates/r_validation.R.template`)
   - [ ] `Rscript validation/r/run.R --write <id>`, then `--check`
-  - [ ] Add a `test_validate_*` test that loads the case (`crate::test_support::load_case`) and compares every reported number with `p2a_validation::{Check, Tol}`
+  - [ ] Add a `test_validate_*` test that loads the case (`crate::test_support::load_case`) and compares every number the method reports at the solution with `p2a_validation::{Check, Tol}` (path quantities such as iteration counts are checked as properties)
   - [ ] Add the registry entry in `validation/methods/<area>.json`; record any mismatch as a deviation with its finding id
   - [ ] **Cite the reference implementation used**
+  - [ ] Follow "R is the test oracle, not the template" below; time the method at n = 100, 1,000 and 10,000
 
 - [ ] Add MCP tool if user-facing
   - [ ] Define request struct with JsonSchema
@@ -266,3 +267,19 @@ section if that repo is not checked out.
 **Lint**: `python3 validation/tools/validation_status.py lint --strict --tests target/*-tests.txt`
 
 **Related skill**: Use `/validation-benchmarking` for detailed workflow guidance
+
+## R is the test oracle, not the template
+
+Methods must be correct and efficient; R checks them and sets the default conventions.
+
+- Pin values at the solution (coefficients, standard errors, statistics), never iteration counts, traces or
+  other path quantities; check those as properties.
+- When the solution is not unique (ties, flat objectives, random starts), compare by the objective or the
+  optimality conditions, or give both sides the same folds, starts or seeds.
+- No ports of R/Fortran/C code for R's digits, unless the estimator is defined by its algorithm or the port is
+  the cheapest correct route; never reproduce an R bug.
+- Conventions (defaults, degrees-of-freedom corrections, option names) follow R when that is cheap; otherwise keep
+  p2a's, record a registry deviation and add a line to the method doc.
+- Before merging a new method or a rewrite, time it against the current code and against R at n = 100, 1,000 and
+  10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.5x slower needs a written reason and
+  the user's sign-off. No timing assertion is committed.
