@@ -927,6 +927,13 @@ pub static PARAM_RULES: &[ParamRule] = {
             "dynamic_threshold",
             Exempt("threshold value of the rule; it splits rows"),
         ),
+        p(
+            "treatment_double_ml",
+            "lambda",
+            Exempt(
+                "glmnet penalty of the nuisance fits; it changes the penalty, not the number of fits",
+            ),
+        ),
         // ---- end of the MCP causal surface block. ----
         p("stats_mauchly_test", "sigma", ArrayLen(ArrayLength)),
         p("stats_spline", "n", Max(GridPoints)),

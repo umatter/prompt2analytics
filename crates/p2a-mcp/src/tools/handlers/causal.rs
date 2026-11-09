@@ -842,25 +842,41 @@ impl AnalyticsServer {
 
     /// Run Double/Debiased Machine Learning (DoubleML) estimation.
     #[tool(
-        description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information. Columns must not contain missing values; integer and boolean columns are accepted."
+        description = "Treatment effects by double/debiased machine learning as R's DoubleML (Chernozhukov et al. 2018) with K-fold cross-fitting: PLR, IRM (ATE), PLIV and IIVM (LATE) with DoubleML's scores; learners OLS (default), lasso or ridge (glmnet at lambda), logistic regression for binary nuisances with propensities trimmed to [trim, 1 - trim]; folds seeded (session seed, else 42) or from fold_column. IRM/IIVM need a 0/1 treatment (and instrument). Columns must not contain missing values; integer and boolean columns are accepted."
     )]
     pub async fn treatment_double_ml(
         &self,
         Parameters(request): Parameters<DoubleMLRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::econometrics::{DMLModelType, DoubleMLConfig, TreatmentType, run_double_ml};
+        use p2a_core::econometrics::doubleml::{
+            DML_DEFAULT_LAMBDA, DMLModelType, DoubleMLConfig, MLMethod, run_double_ml,
+            run_double_ml_iv,
+        };
 
         let model_type = tool_try!(parse_option(
             request.model_type.as_deref(),
             DMLModelType::PLR
         ));
+        let ml_method = tool_try!(parse_option(request.ml_method.as_deref(), MLMethod::OLS));
+        let model_label = request.model_type.as_deref().unwrap_or("plr");
+        if model_type.needs_instrument() && request.instrument.is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "model '{model_label}' needs instrument (the instrument column)"
+            ))]));
+        }
+        if !model_type.needs_instrument() && request.instrument.is_some() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "instrument is only used with pliv and iivm",
+            )]));
+        }
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // y, d and X are read jointly; DoubleML refuses missing data, so a missing value
-        // in any of them is a tool error naming the column (NaPolicy::Fail).
+        // y, d, X, the instrument and the fold column are read jointly; DoubleML refuses
+        // missing data, so a missing value in any of them is a tool error naming the column
+        // (NaPolicy::Fail).
         let n = dataset.df().height();
         let p = request.covariates.len();
         if n.checked_mul(p)
@@ -873,6 +889,8 @@ impl AnalyticsServer {
         }
         let mut names: Vec<&str> = vec![request.outcome.as_str(), request.treatment.as_str()];
         names.extend(request.covariates.iter().map(String::as_str));
+        names.extend(request.instrument.as_deref());
+        names.extend(request.fold_column.as_deref());
         let cols = match crate::tools::common::numeric_columns(
             dataset,
             &names,
@@ -900,27 +918,45 @@ impl AnalyticsServer {
                 }
             }
         };
-
-        // Determine treatment type for IRM
-        let is_binary = d
-            .iter()
-            .all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
-        let treatment_type = if is_binary {
-            TreatmentType::Binary
-        } else {
-            TreatmentType::Continuous
+        let folds = match request.fold_column.as_deref() {
+            None => None,
+            Some(c) => {
+                let mut labels = Vec::with_capacity(cols.n());
+                for (i, &v) in cols.numeric(c).iter().enumerate() {
+                    if !(v.is_finite()
+                        && v.fract() == 0.0
+                        && (0.0..=f64::from(u32::MAX)).contains(&v))
+                    {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "fold_column '{c}' must hold non-negative whole numbers; row {} is {v}",
+                            i + 1
+                        ))]));
+                    }
+                    labels.push(v as usize);
+                }
+                Some(labels)
+            }
         };
 
+        // The treatment type is the core's: binary exactly when d is coded 0/1.
         let config = DoubleMLConfig {
             n_folds: request.n_folds.unwrap_or(5),
             model_type,
-            treatment_type,
-            seed: request.seed,
+            ml_method,
+            seed: request.seed.or(self.session_seed().await),
             trim: request.trim.unwrap_or(0.01),
+            lambda: request.lambda.unwrap_or(DML_DEFAULT_LAMBDA),
+            folds,
             ..Default::default()
         };
 
-        let result = match run_double_ml(&y.view(), &d.view(), &x.view(), config) {
+        let result = if let Some(z_name) = request.instrument.as_deref() {
+            let z = cols.numeric_array(z_name);
+            run_double_ml_iv(&y.view(), &d.view(), &z.view(), &x.view(), config)
+        } else {
+            run_double_ml(&y.view(), &d.view(), &x.view(), config)
+        };
+        let result = match result {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(

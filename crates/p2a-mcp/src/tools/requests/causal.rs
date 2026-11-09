@@ -627,9 +627,28 @@ pub struct DoubleMLRequest {
 
     /// Model type: 'plr' (Partially Linear Regression, default) or 'irm' (Interactive Regression Model)
     #[schemars(
-        description = "DML model: 'plr' (default, partially linear: Y = theta*D + g(X) + eps) or 'irm' (interactive, binary treatment, heterogeneous effects). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "DoubleML model: 'plr' (default; partially linear, Y = theta D + g(X) + e), 'irm' (interactive regression, ATE of a 0/1 treatment), 'pliv' (partially linear IV) or 'iivm' (interactive IV, LATE of a 0/1 treatment with a 0/1 instrument); pliv and iivm need instrument. Also accepted as model_type. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
+    #[serde(rename = "model", alias = "model_type")]
     pub model_type: Option<String>,
+
+    #[schemars(
+        description = "Learner of the regression nuisances: 'ols' (default), 'lasso' or 'ridge' (glmnet at lambda, standardized; ridge by its closed form, lambda = 0 is OLS). The IRM propensity and the IIVM instrument propensity and treatment models are logistic regressions; PLR fits m(X) = E[D|X] with the regression learner even for a 0/1 D (p2a's convention; DoubleML has no default learner). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub ml_method: Option<String>,
+
+    #[schemars(description = "Instrument column, required by pliv and iivm (0/1 for iivm).")]
+    pub instrument: Option<String>,
+
+    #[schemars(
+        description = "Column of fold labels (non-negative whole numbers, at least two distinct) used instead of seeded random folds; the folds are taken in label order."
+    )]
+    pub fold_column: Option<String>,
+
+    #[schemars(
+        description = "glmnet penalty of the lasso and ridge learners (finite, >= 0). Default is 0.05."
+    )]
+    pub lambda: Option<f64>,
 
     /// Number of cross-fitting folds (default: 5)
     #[schemars(
@@ -639,7 +658,7 @@ pub struct DoubleMLRequest {
 
     /// Random seed for reproducible fold splits
     #[schemars(
-        description = "Random seed for reproducible cross-fitting splits. If omitted, uses random seed."
+        description = "Seed of the random fold assignment (ignored with fold_column). Default: the session seed, else 42."
     )]
     pub seed: Option<u64>,
 

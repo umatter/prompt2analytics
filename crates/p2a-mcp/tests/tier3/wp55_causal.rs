@@ -121,6 +121,16 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["plr", "iivm"],
         ),
         (
+            "treatment_double_ml",
+            with(&otc, &[("model", json!("plm"))]),
+            vec!["model", "plr", "pliv"],
+        ),
+        (
+            "treatment_double_ml",
+            with(&otc, &[("ml_method", json!("forest"))]),
+            vec!["ml_method", "ols", "lasso", "ridge"],
+        ),
+        (
             "treatment_cbps",
             with(&tc, &[("method", json!("npcbps"))]),
             vec!["over", "exact", "logit"],
@@ -1587,4 +1597,117 @@ async fn test_validate_mcp_collaborative_tmle() {
         ),
         (vec![0], vec!["w1".to_string()])
     ); // [1,0,0,0]
+}
+
+/// DoubleML scores with the case's fixed folds (causal_doubleml.R, doubleml_models): PLIV with OLS
+/// learners, PLR with lasso.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_treatment_double_ml() {
+    use p2a_core::econometrics::doubleml::{
+        DMLModelType, DoubleMLConfig, MLMethod, run_double_ml, run_double_ml_iv,
+    };
+    let case = Case::load("doubleml_models");
+    let (session, server) = session_with("doubleml_models"); // dataset `doubleml_sim`
+    let ds = case_ds(&case);
+    let n = ds.df().height();
+    let xs = ["X1", "X2", "X3", "X4", "X5", "X6"];
+    let x = Array2::from_shape_fn((n, 6), |(i, j)| col(&ds, xs[j])[i]);
+    let folds: Vec<usize> = col(&ds, "fold").iter().map(|v| *v as usize).collect();
+    let cfg = |m: DMLModelType, l: MLMethod| {
+        let mut c = DoubleMLConfig::default();
+        c.model_type = m;
+        c.ml_method = l;
+        c.folds = Some(folds.clone());
+        c
+    };
+    let pliv = run_double_ml_iv(
+        &col(&ds, "yz").view(),
+        &col(&ds, "dz").view(),
+        &col(&ds, "z").view(),
+        &x.view(),
+        cfg(DMLModelType::PLIV, MLMethod::OLS),
+    )
+    .unwrap();
+    let base =
+        json!({"dataset": "doubleml_sim", "outcome": "yz", "treatment": "dz", "covariates": xs});
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "treatment_double_ml",
+            with(
+                &base,
+                &[
+                    ("model", json!("partially_linear_iv")),
+                    ("instrument", json!("z")),
+                    ("fold_column", json!("fold"))
+                ]
+            )
+        )
+        .await,
+        pliv.to_string()
+    );
+    let mut lc = cfg(DMLModelType::PLR, MLMethod::Lasso);
+    lc.lambda = 0.05;
+    let lasso = run_double_ml(
+        &col(&ds, "y").view(),
+        &col(&ds, "dcont").view(),
+        &x.view(),
+        lc,
+    )
+    .unwrap();
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "treatment_double_ml",
+            json!({"dataset": "doubleml_sim", "outcome": "y", "treatment": "dcont", "covariates": xs,
+                   "model_type": "plr", "ml_method": "L1", "lambda": 0.05, "fold_column": "fold"})
+        )
+        .await,
+        lasso.to_string()
+    );
+    Check::new(&case)
+        .scalar("pliv_theta", pliv.theta, Tol::coef(n))
+        .scalar("pliv_se", pliv.se, Tol::se(n))
+        .scalar("plr_lasso_theta_tight", lasso.theta, Tol::new(1e-9, 1e-12))
+        .scalar("plr_lasso_se_tight", lasso.se, Tol::new(1e-9, 1e-12))
+        .finish();
+    let e = refused(
+        &server,
+        &session,
+        "treatment_double_ml",
+        with(
+            &base,
+            &[("model", json!("pliv")), ("fold_column", json!("X1"))],
+        ),
+    )
+    .await;
+    assert!(e.contains("needs instrument"), "{e}");
+    let e = refused(
+        &server,
+        &session,
+        "treatment_double_ml",
+        with(&base, &[("instrument", json!("z"))]),
+    )
+    .await;
+    assert!(e.contains("only used with pliv and iivm"), "{e}");
+    let e = refused(
+        &server,
+        &session,
+        "treatment_double_ml",
+        with(
+            &base,
+            &[
+                ("model", json!("pliv")),
+                ("instrument", json!("z")),
+                ("fold_column", json!("X1")),
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        e.contains("fold_column 'X1' must hold non-negative whole numbers"),
+        "{e}"
+    );
 }
