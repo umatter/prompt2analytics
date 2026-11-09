@@ -1118,7 +1118,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel ML model (spml).
     #[tool(
-        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: its standard errors do not yet match the R reference (splm); in the within model the spatial error coefficient is reported as rho, with lag = true the spatial error is not estimated (the combined model runs the lag model), the random-effects and pooled models ignore spatial_error, and the time and two-way effects are not applied, so those estimates do not match either; see the release notes."
+        description = "Run a spatial panel data model by maximum likelihood, as splm::spml: default model within, effect individual, lag false, spatial_error 'b' (the Baltagi spatial error model). Supported: with model within or pooling, the spatial lag model (lag = true, spatial_error = 'none'), the spatial error model (the default) and the SARAR model (lag = true with a spatial error), with any effect for within; with model random, individual effects with spatial_error 'b', 'kkp' or 'none' and an optional lag. lag = false with spatial_error = 'none' has no spatial parameter and is refused. Standard errors are the inverse observed information of the full log-likelihood. Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
     )]
     pub async fn spatial_panel_ml(
         &self,
@@ -1149,16 +1149,21 @@ impl AnalyticsServer {
             Ok(m) => m,
             Err(e) => return error_text(e),
         };
+        // splm::spml's defaults: spatial.error = "b", lag = FALSE.
         let spatial_error =
-            match parse_option(request.spatial_error.as_deref(), SpatialErrorType::None) {
+            match parse_option(request.spatial_error.as_deref(), SpatialErrorType::Baltagi) {
                 Ok(m) => m,
                 Err(e) => return error_text(e),
             };
+        let lag = request.lag.unwrap_or(false);
+        if !lag && spatial_error == SpatialErrorType::None {
+            return error_text(NO_SPATIAL_PARAMETER.to_string());
+        }
 
         let config = SpmlConfig {
             model,
             effect,
-            lag: request.lag.unwrap_or(false),
+            lag,
             spatial_error,
             ..Default::default()
         };
@@ -1174,82 +1179,9 @@ impl AnalyticsServer {
         );
         self.keep_weights_cache(&request.weights, listw).await;
         match fit {
-            Ok(result) => {
-                let mut output = format!(
-                    "Spatial Panel Model (ML)\n\
-                     ========================\n\
-                     Model: {}  Effect: {}\n\
-                     Spatial Lag: {}  Spatial Error: {}\n\
-                     Observations: {}  Entities: {}  Time periods: {}\n\
-                     Log-Likelihood: {:.4}  AIC: {:.4}  BIC: {:.4}\n\n",
-                    result.model,
-                    result.effect,
-                    result.has_lag,
-                    result.spatial_error,
-                    result.n_obs,
-                    result.n_entities,
-                    result.n_time,
-                    result.log_likelihood,
-                    result.aic,
-                    result.bic
-                );
-
-                // Spatial parameters
-                if let Some(rho) = result.rho {
-                    output.push_str(&format!(
-                        "Spatial lag coefficient (rho):\n\
-                         ------------------------------\n\
-                         Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}\n\n",
-                        rho,
-                        result.rho_se.unwrap_or(0.0),
-                        result.rho_z.unwrap_or(0.0),
-                        result.rho_p.unwrap_or(1.0)
-                    ));
-                }
-
-                if let Some(lambda) = result.lambda {
-                    output.push_str(&format!(
-                        "Spatial error coefficient (lambda):\n\
-                         -----------------------------------\n\
-                         Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}\n\n",
-                        lambda,
-                        result.lambda_se.unwrap_or(0.0),
-                        result.lambda_z.unwrap_or(0.0),
-                        result.lambda_p.unwrap_or(1.0)
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "Regression Coefficients:\n\
-                     ------------------------\n\
-                     {:20} {:>12} {:>10} {:>10} {:>10}\n",
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
-                ));
-
-                for (i, name) in result.coef_names.iter().enumerate() {
-                    output.push_str(&format!(
-                        "{:20} {:>12.6} {:>10.6} {:>10.4} {:>10.4}{}\n",
-                        name,
-                        result.coefficients[i],
-                        result.std_errors[i],
-                        result.z_values[i],
-                        result.p_values[i],
-                        result.significance[i].stars()
-                    ));
-                }
-
-                // Variance components
-                output.push_str("\nVariance Components:\n");
-                if let Some(sigma_mu) = result.variance.sigma_mu {
-                    output.push_str(&format!("  sigma_mu (individual): {:.6}\n", sigma_mu));
-                }
-                output.push_str(&format!(
-                    "  sigma_epsilon (error): {:.6}\n",
-                    result.variance.sigma_epsilon
-                ));
-
-                Ok(CallToolResult::success(vec![Content::text(output)]))
-            }
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string().trim_start().to_string(),
+            )])),
             Err(e) => error_text(model_error(
                 "Spatial panel ML estimation failed: ",
                 &e,
@@ -1260,7 +1192,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel GMM model (spgm).
     #[tool(
-        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. The spatial error model (spatial_error, alone or with lag) is estimated with w2sls only; b2sls, ec2sls and g2sls estimate the spatial lag model, which is their default."
+        description = "Run a spatial panel data model by generalized method of moments, as splm::spgm. Models: the spatial lag model by 2SLS with method w2sls (within), b2sls (between), ec2sls (Baltagi's EC2SLS) or g2sls (GLS random effects); the within GM spatial error model of Kapoor, Kelejian & Prucha (2007) (w2sls, the default call); and, with w2sls only, lag plus spatial error (within GS2SLS). The spatial error model with b2sls, ec2sls or g2sls is refused. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
     )]
     pub async fn spatial_panel_gmm(
         &self,
@@ -1309,78 +1241,9 @@ impl AnalyticsServer {
         );
         self.keep_weights_cache(&request.weights, listw).await;
         match fit {
-            Ok(result) => {
-                let mut output = format!(
-                    "Spatial Panel Model (GMM)\n\
-                     =========================\n\
-                     Method: {}\n\
-                     Spatial Lag: {}  Spatial Error: {}\n\
-                     Observations: {}  Entities: {}  Time periods: {}\n\
-                     Instruments: {}\n\n",
-                    result.method,
-                    result.has_lag,
-                    result.has_spatial_error,
-                    result.n_obs,
-                    result.n_entities,
-                    result.n_time,
-                    result.n_instruments
-                );
-
-                // Spatial parameters
-                if let Some(rho) = result.rho {
-                    output.push_str(&format!("Spatial lag coefficient (rho): {:.6}\n\n", rho));
-                }
-                if let Some(lambda) = result.lambda {
-                    output.push_str(&format!(
-                        "Spatial error coefficient (lambda): {:.6}\n\n",
-                        lambda
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "Regression Coefficients:\n\
-                     ------------------------\n\
-                     {:20} {:>12} {:>10} {:>10} {:>10}\n",
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
-                ));
-
-                for (i, name) in result.coef_names.iter().enumerate() {
-                    output.push_str(&format!(
-                        "{:20} {:>12.6} {:>10.6} {:>10.4} {:>10.4}{}\n",
-                        name,
-                        result.coefficients[i],
-                        result.std_errors[i],
-                        result.z_values[i],
-                        result.p_values[i],
-                        result.significance[i].stars()
-                    ));
-                }
-
-                // Sargan test
-                if let (Some(stat), Some(p), Some(df)) =
-                    (result.sargan_stat, result.sargan_p, result.sargan_df)
-                {
-                    output.push_str(&format!(
-                        "\nSargan test for overidentifying restrictions:\n\
-                         chi2({}) = {:.4}, p-value = {:.4}\n",
-                        df, stat, p
-                    ));
-                }
-
-                // Variance components
-                output.push_str(&format!(
-                    "\nResidual variance (sigma2): {:.6}\n",
-                    result.sigma2
-                ));
-                if let Some(sigma2_mu) = result.sigma2_mu {
-                    output.push_str(&format!(
-                        "Individual variance (sigma2_mu): {:.6}\n",
-                        sigma2_mu
-                    ));
-                }
-
-                Ok(CallToolResult::success(vec![Content::text(output)]))
-            }
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string().trim_start().to_string(),
+            )])),
             Err(e) => error_text(model_error(
                 "Spatial panel GMM estimation failed: ",
                 &e,
@@ -1389,6 +1252,12 @@ impl AnalyticsServer {
         }
     }
 }
+
+/// The refusal of a spml call with neither a spatial lag nor a spatial error.
+const NO_SPATIAL_PARAMETER: &str = "spatial_panel_ml estimates a spatial lag (lag = true), a \
+    spatial error (spatial_error = 'b', the default as splm::spml, or 'kkp'), or both; with \
+    lag = false and spatial_error = 'none' there is no spatial parameter. Use \
+    panel_fixed_effects or panel_random_effects for a non-spatial panel model.";
 
 /// Lock discipline for the weights map: handlers compute on O(1) snapshots and hold the
 /// map's lock only to take a snapshot or to store a cache computed on one.
@@ -1756,7 +1625,7 @@ mod tests {
                 weights: "w".into(),
                 model: None,
                 lag: Some(true),
-                spatial_error: None,
+                spatial_error: Some("none".into()),
                 effect: None,
             }))),
             rt.block_on(s.spatial_panel_gmm(Parameters(SpgmRequest {
@@ -1859,7 +1728,8 @@ mod tests {
             let (err, t) = call(serde_json::json!({"method": method}));
             assert_ne!(err, Some(true), "{method}: {t}");
             assert!(
-                t.contains("Spatial Lag: true  Spatial Error: false"),
+                t.contains("Spatial lag coefficient (rho):")
+                    && !t.contains("Spatial error coefficient"),
                 "{method}: {t}"
             );
             let (err, t) = call(serde_json::json!({"method": method, "spatial_error": true}));
@@ -1868,7 +1738,11 @@ mod tests {
         }
         let (err, t) = call(serde_json::json!({}));
         assert_ne!(err, Some(true), "{t}");
-        assert!(t.contains("Spatial Lag: false  Spatial Error: true"), "{t}");
+        assert!(
+            t.contains("Spatial error coefficient (lambda, GM)")
+                && !t.contains("Spatial lag coefficient"),
+            "{t}"
+        );
     }
 
     fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
@@ -2180,7 +2054,7 @@ mod tests {
         let r = rt
             .block_on(s.spatial_panel_ml(Parameters(req(serde_json::json!({
                 "dataset": "panel", "y": "y", "x": ["x"], "entity_col": "entity",
-                "time_col": "time", "weights": "rook", "lag": true,
+                "time_col": "time", "weights": "rook", "lag": true, "spatial_error": "none",
             })))))
             .unwrap();
         let t = text(&r);

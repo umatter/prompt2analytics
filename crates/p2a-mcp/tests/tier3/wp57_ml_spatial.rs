@@ -811,3 +811,280 @@ async fn test_ml_option_descriptions_list_every_value() {
         vec!["matching", "regression", "stratified"],
     );
 }
+
+// ----------------------------------------------------------------------------
+// Spatial panels
+// ----------------------------------------------------------------------------
+
+/// splm_sim with its unit-coordinate dataset (period 1, sorted by id: W row i = the i-th id)
+/// and a 4-NN W.
+async fn splm_session() -> (Case, Session, AnalyticsServer) {
+    let (case, df) = case_df("splm_spml_spgm");
+    let units = df
+        .clone()
+        .lazy()
+        .filter(col("time").eq(lit(1)))
+        .sort(["id"], SortMultipleOptions::default())
+        .select([col("id"), col("cx"), col("cy")])
+        .collect()
+        .unwrap();
+    let (s, server) = session_with_datasets(vec![
+        ("splm_sim", dataset(df)),
+        ("splm_units", dataset(units)),
+    ]);
+    neighbors(
+        &server,
+        &s,
+        "splm_units",
+        "w4",
+        json!({"method": "knn", "k": 4}),
+    )
+    .await;
+    (case, s, server)
+}
+
+fn panel(y: &str, extra: Value) -> Value {
+    with(
+        &json!({"dataset": "splm_sim", "y": y, "x": ["x1", "x2"], "entity_col": "id", "time_col": "time", "weights": "w4"}),
+        extra,
+    )
+}
+
+/// splm::spml's default spatial.error = "b": the default call is the within Baltagi error
+/// model. Before: lag = false and spatial_error = None ran the plain within estimator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_spatial_panel_ml_default_is_spatial() {
+    let (case, s, server) = splm_session().await;
+    let t = ok(&call(&server, &s, "spatial_panel_ml", panel("y_err", json!({}))).await);
+    let lam = line_after(&t, "Spatial error coefficient (lambda)");
+    printed(
+        num_after(lam, "Estimate:"),
+        case.scalar("individual_error_lambda"),
+        6,
+        "lambda",
+    );
+    let se = case.vector("individual_error_se");
+    printed(num_after(lam, "SE:"), se[2], 6, "lambda SE");
+    for (i, name) in ["x1", "x2"].iter().enumerate() {
+        let r = row(&t, name);
+        printed(r[0], case.vector("individual_error_coef")[i], 6, name);
+        printed(r[1], se[i], 6, &format!("{name} SE"));
+    }
+    assert!(!t.contains("Spatial lag coefficient (rho)"), "{t}");
+    let e = err(&call(
+        &server,
+        &s,
+        "spatial_panel_ml",
+        panel("y_err", json!({"lag": false, "spatial_error": "none"})),
+    )
+    .await);
+    assert!(
+        e.contains("no spatial parameter") && e.contains("panel_fixed_effects"),
+        "{e}"
+    );
+}
+
+/// The other spml surfaces: lag alone is SARAR with the default error (spml(lag = TRUE)), lag
+/// with spatial_error "none" the lag model, model "random" the Baltagi random-effects error
+/// model (phi, sigma_mu).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_spml() {
+    let (case, s, server) = splm_session().await;
+    let sarar = ok(&call(
+        &server,
+        &s,
+        "spatial_panel_ml",
+        panel("y_lag", json!({"lag": true})),
+    )
+    .await);
+    let rho = line_after(&sarar, "Spatial lag coefficient (rho)");
+    let lam = line_after(&sarar, "Spatial error coefficient (lambda)");
+    printed(
+        num_after(rho, "Estimate:"),
+        case.scalar("individual_sarar_rho"),
+        6,
+        "sarar rho",
+    );
+    printed(
+        num_after(lam, "Estimate:"),
+        case.scalar("individual_sarar_lambda"),
+        6,
+        "sarar lambda",
+    );
+    printed(
+        num_after(lam, "SE:"),
+        case.vector("individual_sarar_se")[3],
+        6,
+        "sarar lambda SE",
+    );
+    let lag = ok(&call(
+        &server,
+        &s,
+        "spatial_panel_ml",
+        panel("y_lag", json!({"lag": true, "spatial_error": "none"})),
+    )
+    .await);
+    let rho = line_after(&lag, "Spatial lag coefficient (rho)");
+    printed(
+        num_after(rho, "Estimate:"),
+        case.scalar("individual_lag_rho"),
+        6,
+        "lag rho",
+    );
+    printed(
+        num_after(rho, "SE:"),
+        case.vector("individual_lag_se")[2],
+        6,
+        "lag rho SE",
+    );
+    printed(
+        row(&lag, "x1")[0],
+        case.vector("individual_lag_coef")[0],
+        6,
+        "lag x1",
+    );
+    assert!(!lag.contains("Spatial error coefficient (lambda)"), "{lag}");
+    let re = ok(&call(
+        &server,
+        &s,
+        "spatial_panel_ml",
+        panel("y_re", json!({"model": "RE"})),
+    )
+    .await);
+    printed(
+        num_after(
+            line_after(&re, "Spatial error coefficient (lambda)"),
+            "Estimate:",
+        ),
+        case.scalar("random_b_lambda"),
+        6,
+        "re lambda",
+    );
+    printed(
+        num_after(
+            line(&re, "phi = sigma_mu^2/sigma^2:"),
+            "phi = sigma_mu^2/sigma^2:",
+        ),
+        case.scalar("random_b_phi"),
+        6,
+        "phi",
+    );
+    printed(
+        num_after(
+            line(&re, "sigma_mu (individual):"),
+            "sigma_mu (individual):",
+        ),
+        case.scalar("random_b_sigma2_mu").sqrt(),
+        6,
+        "sigma_mu",
+    );
+    for (i, name) in ["(Intercept)", "x1", "x2"].iter().enumerate() {
+        printed(row(&re, name)[0], case.vector("random_b_coef")[i], 6, name);
+    }
+}
+
+/// spgm (splm::spgm's defaults where p2a implements them): the default call is the KKP within
+/// GM error model; lag = true with w2sls keeps the spatial error (spatial.error = TRUE) and
+/// fits the within GS2SLS; spatial_error = false gives the within 2SLS lag model; the
+/// random-effects methods default to the lag model and refuse the error model, naming w2sls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_spgm() {
+    let (case, s, server) = splm_session().await;
+    let gm = ok(&call(&server, &s, "spatial_panel_gmm", panel("y_err", json!({}))).await);
+    printed(
+        num_after(line(&gm, "Spatial error coefficient (lambda"), "):"),
+        case.scalar("spgm_within_error_rho"),
+        6,
+        "GM lambda",
+    );
+    for (i, name) in ["x1", "x2"].iter().enumerate() {
+        let r = row(&gm, name);
+        printed(r[0], case.vector("spgm_within_error_coef")[i], 6, name);
+        printed(
+            r[1],
+            case.vector("spgm_within_error_se")[i],
+            6,
+            &format!("{name} SE"),
+        );
+    }
+    let gs = ok(&call(
+        &server,
+        &s,
+        "spatial_panel_gmm",
+        panel("y_lag", json!({"lag": true})),
+    )
+    .await);
+    let rho = line(&gs, "Spatial lag coefficient (rho):");
+    printed(
+        num_after(rho, "Spatial lag coefficient (rho):"),
+        case.vector("gs2sls_coef")[2],
+        6,
+        "gs2sls rho",
+    );
+    printed(
+        num_after(rho, "SE:"),
+        case.vector("gs2sls_se")[2],
+        6,
+        "gs2sls rho SE",
+    );
+    printed(
+        num_after(line(&gs, "Spatial error coefficient (lambda"), "):"),
+        case.scalar("gs2sls_lambda"),
+        6,
+        "gs2sls lambda",
+    );
+    for (i, name) in ["x1", "x2"].iter().enumerate() {
+        let r = row(&gs, name);
+        printed(r[0], case.vector("gs2sls_coef")[i], 6, name);
+        printed(r[1], case.vector("gs2sls_se")[i], 6, &format!("{name} SE"));
+    }
+    let lag = ok(&call(
+        &server,
+        &s,
+        "spatial_panel_gmm",
+        panel("y_lag", json!({"lag": true, "spatial_error": false})),
+    )
+    .await);
+    let rho = line(&lag, "Spatial lag coefficient (rho):");
+    printed(
+        num_after(rho, "Spatial lag coefficient (rho):"),
+        case.vector("w2sls_coef")[2],
+        6,
+        "w2sls rho",
+    );
+    printed(
+        num_after(rho, "SE:"),
+        case.vector("w2sls_se")[2],
+        6,
+        "w2sls rho SE",
+    );
+    printed(
+        row(&lag, "x1")[0],
+        case.vector("w2sls_coef")[0],
+        6,
+        "w2sls x1",
+    );
+    assert!(!lag.contains("Spatial error coefficient"), "{lag}");
+    let g2 = ok(&call(
+        &server,
+        &s,
+        "spatial_panel_gmm",
+        panel("y_lag", json!({"lag": true, "method": "g2sls"})),
+    )
+    .await);
+    assert!(
+        g2.contains("Spatial lag coefficient (rho):") && !g2.contains("Spatial error coefficient"),
+        "{g2}"
+    );
+    let e = err(&call(
+        &server,
+        &s,
+        "spatial_panel_gmm",
+        panel(
+            "y_lag",
+            json!({"lag": true, "spatial_error": true, "method": "g2sls"}),
+        ),
+    )
+    .await);
+    assert!(e.contains("w2sls"), "{e}");
+}

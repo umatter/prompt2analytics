@@ -337,13 +337,13 @@ pub struct SpmlRequest {
 
     /// Include spatial lag
     #[schemars(
-        description = "If true, includes spatial lag of dependent variable (rho*W*y). Default is false."
+        description = "If true, includes the spatial lag of the dependent variable (rho*W*y). Default false; lag = true with the default spatial_error fits the SARAR model, as spml(lag = TRUE); set spatial_error = 'none' for the lag model alone."
     )]
     pub lag: Option<bool>,
 
     /// Spatial error type
     #[schemars(
-        description = "Spatial error specification: 'none' (default), 'b' (Baltagi; also 'baltagi') or 'kkp' (Kapoor-Kelejian-Prucha). Case-insensitive; anything else is an error."
+        description = "Spatial error term as splm::spml(spatial.error =): 'b' (Baltagi, default; also 'baltagi'), 'kkp' (Kapoor-Kelejian-Prucha; differs from 'b' only with model = 'random') or 'none'. With lag = false, 'none' is refused (no spatial parameter). Case-insensitive; anything else is an error."
     )]
     pub spatial_error: Option<String>,
 

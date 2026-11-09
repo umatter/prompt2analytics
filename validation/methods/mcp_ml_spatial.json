@@ -93,6 +93,53 @@
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_spatial_panel_ml",
+      "name": "MCP spatial_panel_ml",
+      "category": "interfaces",
+      "reference": "splm::spml ML, written out",
+      "doc": "validation/econometrics/splm.md",
+      "cases": [
+        "splm_spml_spgm"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spatial_panel_ml_default_is_spatial",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spml"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs",
+        "rho",
+        "lambda",
+        "phi",
+        "sigma_mu"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_spatial_panel_gmm",
+      "name": "MCP spatial_panel_gmm",
+      "category": "interfaces",
+      "reference": "splm::spgm w2sls, within GS2SLS and the KKP within GM, written out",
+      "doc": "validation/econometrics/splm.md",
+      "cases": [
+        "splm_spml_spgm"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spgm"
+      ],
+      "quantities": [
+        "coefficients",
+        "rho and its SE",
+        "lambda (GM)",
+        "SEs"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
