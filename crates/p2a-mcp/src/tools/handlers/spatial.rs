@@ -9,9 +9,11 @@ use rmcp::{
     tool, tool_router,
 };
 
+use super::ml::parse_choice;
 use crate::server::AnalyticsServer;
-use crate::tools::common::{self, NaPolicy, error_text};
+use crate::tools::common::{self, NaPolicy, error_text, parse_option};
 use crate::tools::requests::spatial::*;
+use p2a_core::options::Choices;
 
 use p2a_core::{
     EconError,
@@ -52,6 +54,52 @@ use p2a_core::{
     // Spatial LM tests
     spatial_lm_tests,
 };
+
+/// How `spatial_neighbors` defines the neighbours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NeighborMethod {
+    /// k nearest neighbours (spdep::knearneigh)
+    Knn,
+    /// d_min < d <= d_max in coordinate units (spdep::dnearneigh)
+    Distance,
+    /// The distance band in great-circle km on lon/lat (dnearneigh(longlat = TRUE))
+    DistanceLonglat,
+}
+
+impl NeighborMethod {
+    fn name(self) -> &'static str {
+        NEIGHBOR_METHOD.canonical(self)
+    }
+}
+
+/// The spellings of the neighbour method (the canonical name first).
+static NEIGHBOR_METHOD: Choices<NeighborMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["knn", "k_nearest", "knearneigh"], NeighborMethod::Knn),
+        (
+            &["distance", "dnearneigh", "band"],
+            NeighborMethod::Distance,
+        ),
+        (
+            &["distance_longlat", "longlat", "great_circle"],
+            NeighborMethod::DistanceLonglat,
+        ),
+    ],
+};
+
+/// What a weight style does, after its spdep name in the `spatial_neighbors` text.
+fn style_label(style: WeightStyle) -> &'static str {
+    match style {
+        WeightStyle::RowStd => "row-standardised",
+        WeightStyle::Binary => "binary",
+        WeightStyle::GlobalStd => "globally standardised, sums to n",
+        WeightStyle::UnitSum => "unit sum, C / n",
+        WeightStyle::MinMax => "min-max, Kelejian-Prucha 2010",
+        WeightStyle::VarStab => "variance-stabilising, Tiefelsdorf et al. 1999",
+        WeightStyle::Custom => "custom",
+    }
+}
 
 /// How to proceed after a missing value in a spatial test or model (appended by
 /// [`with_hint`]).
@@ -95,12 +143,26 @@ fn with_hint(message: String, hint: &str) -> String {
 impl AnalyticsServer {
     /// Create spatial neighbors and weights from coordinates.
     #[tool(
-        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(); k-nearest neighbours equal spdep::knearneigh(x, k, use_kd_tree = FALSE) (distance ties go to the lower row index); the default kd-tree search (dbscan) can order distance ties differently. Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort). Known limitation: style 'U' gives binary weights, not spdep's 'U' (the globally standardized weights divided by n), and a style it does not know is read as 'W'; see the release notes."
+        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(); k-nearest neighbours equal spdep::knearneigh(x, k, use_kd_tree = FALSE) (distance ties go to the lower row index); the default kd-tree search (dbscan) can order distance ties differently. Styles are nb2listw's six: W (row-standardised, default), B, C, U, minmax and S; the output names the style and reports the sum of weights S0. A style other than W changes the scale of W, and so of rho and lambda. Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort)."
     )]
     pub async fn spatial_neighbors(
         &self,
         Parameters(request): Parameters<SpatialNeighborsRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // The options first: an unknown value is refused before any work.
+        let method = match parse_choice(
+            &NEIGHBOR_METHOD,
+            request.method.as_deref(),
+            NeighborMethod::Knn,
+        ) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
+        };
+        let style = match parse_option(request.style.as_deref(), WeightStyle::RowStd) {
+            Ok(s) => s,
+            Err(e) => return error_text(e),
+        };
+
         // Snapshot the dataset (a cheap clone) so no lock is held while computing.
         let dataset = {
             let datasets = self.datasets.read().await;
@@ -136,9 +198,8 @@ impl AnalyticsServer {
         let cap_links = cap.map(|c| usize::try_from(c).unwrap_or(usize::MAX));
 
         // Create neighbors based on method
-        let method = request.method.as_deref().unwrap_or("knn");
         let (built, band) = match method {
-            "knn" => {
+            NeighborMethod::Knn => {
                 let k = request.k.unwrap_or(5);
                 // kNN stores exactly n * min(k, n - 1) links: refuse before building anything.
                 let links = (n as u64).saturating_mul(k.min(n.saturating_sub(1)) as u64);
@@ -159,7 +220,7 @@ impl AnalyticsServer {
                 }
                 (Neighbors::try_from_knn(&coords, k), None)
             }
-            "distance" => {
+            NeighborMethod::Distance => {
                 let d_max = request.d_max.unwrap_or(1.0);
                 let d_min = request.d_min.unwrap_or(0.0);
                 (
@@ -167,19 +228,13 @@ impl AnalyticsServer {
                     Some((d_min, d_max)),
                 )
             }
-            "distance_longlat" | "longlat" => {
+            NeighborMethod::DistanceLonglat => {
                 let d_max = request.d_max.unwrap_or(100.0); // km
                 let d_min = request.d_min.unwrap_or(0.0);
                 (
                     Neighbors::try_from_distance_longlat(&coords, d_min, d_max, cap_links),
                     Some((d_min, d_max)),
                 )
-            }
-            other => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown neighbor method '{}'. Use 'knn', 'distance', or 'distance_longlat'.",
-                    other
-                ))]));
             }
         };
         let neighbors = match (built, cap, band) {
@@ -206,14 +261,6 @@ impl AnalyticsServer {
             }
         };
 
-        // Determine weight style
-        let style = match request.style.as_deref() {
-            Some("B") | Some("binary") => WeightStyle::Binary,
-            Some("C") | Some("global") => WeightStyle::GlobalStd,
-            Some("U") | Some("unstandardized") => WeightStyle::Binary, // Closest approximation
-            _ => WeightStyle::RowStd,                                  // Default: row-standardized
-        };
-
         // Get stats from neighbors before we lose access to it
         let avg_neighbors = neighbors.avg_neighbors();
         let has_isolates = neighbors.has_isolates();
@@ -222,6 +269,7 @@ impl AnalyticsServer {
 
         // Create spatial weights (they share the neighbour lists)
         let weights = SpatialWeights::from_neighbors(&neighbors, style);
+        let s0 = weights.sum_weights();
         drop(neighbors);
         drop(dataset);
 
@@ -240,10 +288,18 @@ impl AnalyticsServer {
              ========================\n\
              Observations: {}\n\
              Method: {}\n\
-             Style: {:?}\n\
+             Style: {} ({})\n\
+             Sum of weights (S0): {:.6}\n\
              Average neighbors: {:.2}\n\
              Symmetric: {}\n",
-            weights_name, n, method, style, avg_neighbors, is_symmetric
+            weights_name,
+            n,
+            method.name(),
+            style,
+            style_label(style),
+            s0,
+            avg_neighbors,
+            is_symmetric
         );
 
         if has_isolates {
@@ -258,12 +314,17 @@ impl AnalyticsServer {
 
     /// Run Moran's I test for spatial autocorrelation.
     #[tool(
-        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
+        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test(randomisation = TRUE); units without neighbours (islands) are handled as spdep's zero.policy = TRUE, adjust.n = TRUE (the statistic uses the linked units) and reported. Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn moran_test(
         &self,
         Parameters(request): Parameters<MoranTestRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let alternative =
+            match parse_option(request.alternative.as_deref(), MoranAlternative::Greater) {
+                Ok(a) => a,
+                Err(e) => return error_text(e),
+            };
         let dataset = {
             let datasets = self.datasets.read().await;
             crate::get_dataset!(datasets, &request.dataset).clone()
@@ -290,16 +351,20 @@ impl AnalyticsServer {
             }
         };
         let x = ndarray::Array1::from_vec(x_vec);
-
-        // Parse alternative
-        let alternative = match request.alternative.as_deref() {
-            Some("less") | Some("negative") => MoranAlternative::Less,
-            Some("two.sided") | Some("two-sided") => MoranAlternative::TwoSided,
-            _ => MoranAlternative::Greater, // Default: positive autocorrelation
-        };
+        let n = x.len();
 
         match moran_test(&x, &listw, alternative) {
             Ok(result) => {
+                let islands = if result.n_islands > 0 {
+                    format!(
+                        "Islands (units without neighbours): {} (spdep zero.policy = TRUE, \
+                         adjust.n = TRUE: the statistic uses the {} linked units)\n",
+                        result.n_islands,
+                        n.saturating_sub(result.n_islands)
+                    )
+                } else {
+                    String::new()
+                };
                 let output = format!(
                     "Moran's I Test for Spatial Autocorrelation\n\
                      ==========================================\n\
@@ -309,7 +374,8 @@ impl AnalyticsServer {
                      Variance: {:.6}\n\
                      Z-score: {:.4}\n\
                      P-value: {:.6}\n\
-                     Alternative: {:?}\n\n\
+                     {}\
+                     Alternative: {}\n\n\
                      Interpretation:\n\
                      - I > E[I]: positive spatial autocorrelation (clustering)\n\
                      - I < E[I]: negative spatial autocorrelation (dispersion)\n\
@@ -320,6 +386,7 @@ impl AnalyticsServer {
                     result.variance,
                     result.z_score,
                     result.p_value,
+                    islands,
                     alternative
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -662,18 +729,13 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse model type
-        let model = match request.model.as_deref() {
-            Some("error") | Some("sem") => SphetModel::SpatialError,
-            Some("sarar") | Some("both") | Some("combined") => SphetModel::SARAR,
-            _ => SphetModel::SpatialLag, // Default: lag/SAR
+        let model = match parse_option(request.model.as_deref(), SphetModel::SpatialLag) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
-
-        // Parse SE type
-        let se_type = match request.se_type.as_deref() {
-            Some("hac") | Some("HAC") => SphetSE::HAC,
-            Some("standard") | Some("homoscedastic") => SphetSE::Standard,
-            _ => SphetSE::Robust, // Default: robust
+        let se_type = match parse_option(request.se_type.as_deref(), SphetSE::Robust) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
 
         // The spatial HAC works on distances between the units: it needs their coordinates and
@@ -1079,26 +1141,19 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse model type
-        let model = match request.model.as_deref() {
-            Some("random") | Some("re") => SpatialPanelModel::Random,
-            Some("pooling") | Some("pool") | Some("pooled") => SpatialPanelModel::Pooling,
-            _ => SpatialPanelModel::Within, // Default: fixed effects
+        let model = match parse_option(request.model.as_deref(), SpatialPanelModel::Within) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
-
-        // Parse effect type
-        let effect = match request.effect.as_deref() {
-            Some("time") => SpatialPanelEffect::Time,
-            Some("twoways") | Some("twoway") | Some("both") => SpatialPanelEffect::TwoWays,
-            _ => SpatialPanelEffect::Individual, // Default
+        let effect = match parse_option(request.effect.as_deref(), SpatialPanelEffect::Individual) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
-
-        // Parse spatial error type
-        let spatial_error = match request.spatial_error.as_deref() {
-            Some("baltagi") | Some("b") | Some("sem") => SpatialErrorType::Baltagi,
-            Some("kkp") | Some("sem2") => SpatialErrorType::KKP,
-            _ => SpatialErrorType::None,
-        };
+        let spatial_error =
+            match parse_option(request.spatial_error.as_deref(), SpatialErrorType::None) {
+                Ok(m) => m,
+                Err(e) => return error_text(e),
+            };
 
         let config = SpmlConfig {
             model,
@@ -1228,12 +1283,9 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse method
-        let method = match request.method.as_deref() {
-            Some("g2sls") | Some("gls") | Some("random") => SpgmMethod::G2sls,
-            Some("b2sls") | Some("between") => SpgmMethod::B2sls,
-            Some("ec2sls") | Some("baltagi") => SpgmMethod::Ec2sls,
-            _ => SpgmMethod::W2sls, // Default: within/fixed effects
+        let method = match parse_option(request.method.as_deref(), SpgmMethod::W2sls) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
 
         // Only w2sls estimates the spatial error model; the other methods estimate the spatial

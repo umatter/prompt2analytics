@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_spatial_weights",
+      "name": "MCP spatial_neighbors styles and moran_test",
+      "category": "interfaces",
+      "reference": "spdep::nb2listw(style = W, B, C, U, minmax, S), spdep::moran.test(randomisation = TRUE, zero.policy = TRUE, adjust.n = TRUE), written out",
+      "doc": "validation/spatial/weights.md",
+      "cases": [
+        "spatial_weights_moran"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spatial_styles",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_style_u_is_c_over_n",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_moran_alternative",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_moran_islands"
+      ],
+      "quantities": [
+        "S0 per style",
+        "Moran I per style",
+        "Moran I, E, var, z, p (greater, less, two-sided)",
+        "islands"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

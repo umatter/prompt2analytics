@@ -222,3 +222,307 @@ fn col_f64(df: &DataFrame, c: &str) -> Vec<f64> {
         .map(|v| v.expect("complete case data"))
         .collect()
 }
+
+// ----------------------------------------------------------------------------
+// Spatial option strings (spdep's names)
+// ----------------------------------------------------------------------------
+
+/// spdep's S0 and Moran's I of x1 per nb2listw style on the band (0, 0.2] of spatial_sim.
+/// Before: "S" and "minmax" ran row standardisation and "U" binary weights; the output said
+/// "Style: RowStd".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_spatial_styles() {
+    let (s, server) = session_with("spatial_weights_moran");
+    let case = Case::load("spatial_weights_moran");
+    for (style, canon) in [
+        ("W", "W"),
+        ("B", "B"),
+        ("C", "C"),
+        ("U", "U"),
+        ("minmax", "minmax"),
+        ("S", "S"),
+        ("row", "W"),
+        ("binary", "B"),
+        ("MinMax", "minmax"),
+        ("s", "S"),
+    ] {
+        let t = neighbors(
+            &server,
+            &s,
+            "spatial_sim",
+            "wb",
+            json!({"method": "distance", "d_min": 0.0, "d_max": 0.2, "style": style}),
+        )
+        .await;
+        assert!(
+            line(&t, "Style:")
+                .trim_start()
+                .starts_with(&format!("Style: {canon} (")),
+            "{style}: {t}"
+        );
+        printed(
+            num_after(line(&t, "Sum of weights (S0):"), "Sum of weights (S0):"),
+            case.scalar(&format!("style_{canon}_sum")),
+            6,
+            &format!("{style} S0"),
+        );
+        let m = ok(&call(
+            &server,
+            &s,
+            "moran_test",
+            json!({"dataset": "spatial_sim", "variable": "x1", "weights": "wb"}),
+        )
+        .await);
+        printed(
+            num_after(line(&m, "Moran I statistic:"), "Moran I statistic:"),
+            case.scalar(&format!("style_{canon}_moran_I")),
+            6,
+            &format!("{style} I"),
+        );
+    }
+}
+
+/// spdep style "U" is C / n: S0(U) = S0(C) / 80. Before: "U" was mapped to binary weights.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_style_u_is_c_over_n() {
+    let (s, server) = session_with("spatial_weights_moran");
+    let case = Case::load("spatial_weights_moran");
+    let band = |st: &str| json!({"method": "distance", "d_min": 0.0, "d_max": 0.2, "style": st});
+    let u = neighbors(&server, &s, "spatial_sim", "wu", band("U")).await;
+    let c = neighbors(&server, &s, "spatial_sim", "wc", band("C")).await;
+    let s0 = |t: &str| num_after(line(t, "Sum of weights (S0):"), "Sum of weights (S0):");
+    printed(
+        s0(&u),
+        case.scalar("style_C_sum") / 80.0,
+        6,
+        "S0(U) = S0(C) / n",
+    );
+    printed(s0(&u), case.scalar("style_U_sum"), 6, "S0(U)");
+    printed(s0(&c), case.scalar("style_C_sum"), 6, "S0(C)");
+    assert!(!line(&u, "Style:").contains("B ("), "{u}");
+}
+
+/// R (4-NN W): p greater 0.5291689446820709, two-sided 0.9416621106358581, less = pnorm(z) =
+/// 0.47083105531792907. Before: "twosided" and "Two-Sided" ran the greater test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_moran_alternative() {
+    let (s, server) = session_with("spatial_weights_moran");
+    let case = Case::load("spatial_weights_moran");
+    neighbors(
+        &server,
+        &s,
+        "spatial_sim",
+        "w4",
+        json!({"method": "knn", "k": 4}),
+    )
+    .await;
+    let p_less = 0.470_831_055_317_929_07;
+    let two = case.named("moran", "p_two_sided");
+    for (alt, canon, p) in [
+        (None, "greater", case.named("moran", "p_rand")),
+        (Some("two.sided"), "two.sided", two),
+        (Some("twosided"), "two.sided", two),
+        (Some("Two-Sided"), "two.sided", two),
+        (Some("less"), "less", p_less),
+        (Some("Negative"), "less", p_less),
+    ] {
+        let mut a = json!({"dataset": "spatial_sim", "variable": "x1", "weights": "w4"});
+        if let Some(alt) = alt {
+            a["alternative"] = json!(alt);
+        }
+        let t = ok(&call(&server, &s, "moran_test", a).await);
+        assert_eq!(
+            line(&t, "Alternative:").trim(),
+            format!("Alternative: {canon}"),
+            "{alt:?}"
+        );
+        printed(
+            num_after(line(&t, "P-value:"), "P-value:"),
+            p,
+            6,
+            &format!("{alt:?} p"),
+        );
+        for (label, key, d) in [
+            ("Moran I statistic:", "I", 6),
+            ("Expected I:", "E", 6),
+            ("Variance:", "var_rand", 6),
+            ("Z-score:", "z_rand", 4),
+        ] {
+            printed(
+                num_after(line(&t, label), label),
+                case.named("moran", key),
+                d,
+                key,
+            );
+        }
+    }
+}
+
+/// R: the band (0, 0.12] leaves 4 islands; spdep zero.policy = TRUE, adjust.n = TRUE uses n = 76.
+/// Before: no islands line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_moran_islands() {
+    let (s, server) = session_with("spatial_weights_moran");
+    let case = Case::load("spatial_weights_moran");
+    neighbors(
+        &server,
+        &s,
+        "spatial_sim",
+        "w12",
+        json!({"method": "distance", "d_min": 0.0, "d_max": 0.12}),
+    )
+    .await;
+    let m = ok(&call(
+        &server,
+        &s,
+        "moran_test",
+        json!({"dataset": "spatial_sim", "variable": "x1", "weights": "w12"}),
+    )
+    .await);
+    let isl = line(&m, "Islands");
+    assert_eq!(
+        num_after(isl, "Islands (units without neighbours):"),
+        case.scalar("n_islands"),
+        "{isl}"
+    );
+    assert!(isl.contains("76 linked units"), "{isl}");
+    for (label, key, d) in [
+        ("Moran I statistic:", "I", 6),
+        ("Expected I:", "E", 6),
+        ("Variance:", "var_rand", 6),
+        ("Z-score:", "z_rand", 4),
+        ("P-value:", "p_rand", 6),
+    ] {
+        printed(
+            num_after(line(&m, label), label),
+            case.named("moran_islands", key),
+            d,
+            key,
+        );
+    }
+}
+
+/// Unknown option strings are tool errors that list the accepted values; R, CLI and old MCP
+/// spellings still work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_spatial_unknown_option_is_error() {
+    let (s, server) = session_with("spatial_weights_moran");
+    // before: "Unknown neighbor method 'KNN'"
+    neighbors(
+        &server,
+        &s,
+        "spatial_sim",
+        "w4",
+        json!({"method": "KNN", "k": 4}),
+    )
+    .await;
+    let base = json!({"dataset": "spatial_sim", "x_coord": "cx", "y_coord": "cy"});
+    let e = err(&call(
+        &server,
+        &s,
+        "spatial_neighbors",
+        with(&base, json!({"style": "Q"})),
+    )
+    .await);
+    assert!(
+        e.contains("unknown weight style 'Q'") && e.contains("W, B, C, U, minmax, S"),
+        "{e}"
+    );
+    let e = err(&call(
+        &server,
+        &s,
+        "spatial_neighbors",
+        with(&base, json!({"method": "radius"})),
+    )
+    .await);
+    assert!(
+        e.contains("unknown method 'radius'") && e.contains("knn, distance, distance_longlat"),
+        "{e}"
+    );
+    let e = err(&call(
+        &server,
+        &s,
+        "moran_test",
+        json!({"dataset": "spatial_sim", "variable": "x1", "weights": "w4", "alternative": "bogus"}),
+    )
+    .await);
+    assert!(
+        e.contains("unknown alternative 'bogus'") && e.contains("two.sided, greater, less"),
+        "{e}"
+    );
+    for (tool, field, value, expect) in [
+        ("sphet_model", "model", "durbin", "lag"),
+        ("sphet_model", "se_type", "newey", "robust"),
+        ("spatial_panel_ml", "spatial_error", "error", "kkp"),
+        ("spatial_panel_ml", "effect", "tw", "twoways"),
+        ("spatial_panel_ml", "model", "fd", "pooling"),
+        ("spatial_panel_gmm", "method", "gmm", "ec2sls"),
+    ] {
+        let mut a = json!({"dataset": "spatial_sim", "y": "y", "x": ["x1"], "weights": "w4"});
+        if tool != "sphet_model" {
+            a["entity_col"] = json!("id");
+            a["time_col"] = json!("id");
+        }
+        a[field] = json!(value);
+        let e = err(&call(&server, &s, tool, a).await);
+        assert!(
+            e.contains(&format!("'{value}'")) && e.contains(expect),
+            "{tool}.{field}: {e}"
+        );
+    }
+}
+
+/// Every option field's schema description lists every canonical value the parser accepts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_spatial_option_descriptions_list_every_value() {
+    lists_every_value(
+        "spatial_neighbors",
+        "style",
+        p2a_core::WeightStyle::choices().names(),
+    );
+    lists_every_value(
+        "spatial_neighbors",
+        "method",
+        vec!["knn", "distance", "distance_longlat"],
+    );
+    lists_every_value(
+        "moran_test",
+        "alternative",
+        p2a_core::MoranAlternative::choices().names(),
+    );
+    lists_every_value(
+        "sphet_model",
+        "model",
+        p2a_core::SphetModel::choices().names(),
+    );
+    lists_every_value(
+        "sphet_model",
+        "se_type",
+        p2a_core::SphetSE::choices().names(),
+    );
+    lists_every_value(
+        "sphet_model",
+        "kernel",
+        p2a_core::econometrics::sphet::SpatialHacKernel::choices().names(),
+    );
+    lists_every_value(
+        "spatial_panel_ml",
+        "model",
+        p2a_core::SpatialPanelModel::choices().names(),
+    );
+    lists_every_value(
+        "spatial_panel_ml",
+        "effect",
+        p2a_core::SpatialPanelEffect::choices().names(),
+    );
+    lists_every_value(
+        "spatial_panel_ml",
+        "spatial_error",
+        p2a_core::SpatialErrorType::choices().names(),
+    );
+    lists_every_value(
+        "spatial_panel_gmm",
+        "method",
+        p2a_core::SpgmMethod::choices().names(),
+    );
+}
