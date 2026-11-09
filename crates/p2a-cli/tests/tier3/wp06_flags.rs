@@ -344,8 +344,8 @@ fn test_validate_cli_quantreg_no_intercept_reaches_core() {
     }
 }
 
-/// ts ar: AIC selection (default) = ar(method = "yule-walker"); --aic false = ar(aic = FALSE), order 20.
-/// var_pred is not pinned (TS-15).
+/// ts ar: AIC selection (default) = ar(method = "yule-walker"); --aic false = ar(aic = FALSE), order 20,
+/// with the prediction variance of both fits.
 #[test]
 fn test_validate_cli_ts_ar_aic_flag() {
     let case = Case::load("ts_ar_yw_aic");
@@ -359,11 +359,13 @@ fn test_validate_cli_ts_ar_aic_flag() {
         .vector("aic_ar", &f64s(&v["ar_coefficients"]), Tol::coef(n))
         .vector("aic_rel", &f64s(&v["aic"]), Tol::stat(n))
         .scalar("x_mean", num(&v["x_mean"]), Tol::coef(n))
+        .scalar("aic_var_pred", num(&v["var_pred"]), Tol::stat(n))
         .finish();
     let v0 = s.json(&argv(&base, &["--aic", "false"]));
     Check::new(&case)
         .scalar("noaic_order", num(&v0["order"]), Tol::exact())
         .vector("noaic_ar", &f64s(&v0["ar_coefficients"]), Tol::coef(n))
+        .scalar("noaic_var_pred", num(&v0["var_pred"]), Tol::stat(n))
         .finish();
     assert!(v0["aic"].is_null());
     assert_eq!(

@@ -54,8 +54,8 @@
         "p2a-cli::tier3::wp06_flags::test_validate_cli_ts_stl_robust_flag",
         "p2a-cli::tier3::wp06_flags::test_validate_cli_ts_spectrum_detrend_flag"
       ],
-      "quantities": ["selected order", "AR coefficients (AIC, aic = FALSE order 20, fixed order 2)", "relative AIC vector", "series mean", "STL remainder and spectrum ordinates equal p2a-core in process for both flag values, and differ between them"],
-      "tolerance": "validation/README.md, n = 120: coefficients and mean 1e-8, AIC 1e-6 relative; orders exact; STL and spectrum exact equality with the in-process call",
+      "quantities": ["selected order", "AR coefficients (AIC, aic = FALSE order 20, fixed order 2)", "relative AIC vector", "series mean", "prediction variance (AIC and aic = FALSE fits)", "STL remainder and spectrum ordinates equal p2a-core in process for both flag values, and differ between them"],
+      "tolerance": "validation/README.md, n = 120: coefficients and mean 1e-8, AIC and prediction variance 1e-6 relative; orders exact; STL and spectrum exact equality with the in-process call",
       "deviations": [
         {"finding": "TS-26", "quantity": "STL components", "note": "STL runs in f32 with p2a's default windows; R's stl needs s.window and differs; the test pins the CLI against run_stl in process."},
         {"finding": "STAT-68", "quantity": "periodogram ordinates", "note": "the raw periodogram is 2x spec.pgram's with a different taper; the test pins the CLI against run_spectrum in process."}
