@@ -64,7 +64,13 @@
         "followers by node and subjects below the lower g bound at the last node (from the written-out estimator's g fits, the same glm g models as ltmle)"
       ],
       "tolerance": "default tolerance (1e-8) against ltmle itself: the always mean, its SE, the ATE and its SE 1e-6 relative (ltmle fits at glm epsilon 1e-8; its slack measured on 30 regular data sets is 2.9e-9 on means and ATE); the never mean and SE (about 4e-11 and 5e-12, a clamped prediction's distance from 0) 1e-8 absolute; nodes, flags and counts exact",
-      "deviations": [],
+      "deviations": [
+        {
+          "finding": "CAUS-101",
+          "quantity": "regime means and ATE on five quasi-separated shifted_outcome data sets (scratch fixtures of the oracle sweep, not a case)",
+          "note": "|p2a - ltmle| 5.1e-5 to 0.018 at the default tolerance 1e-8 (up to 0.021 at 1e-10 and 1e-14); the last node's Q regression is quasi-separated, so the prediction depends on where the deviance rule stops, and on three of the five ltmle re-solves with bounded offsets where p2a's scalar fluctuation solves the score; a tighter tolerance does not close the gap. Default 1e-8 kept (decided 2026-11-09); the case's own quantities are pinned."
+        }
+      ],
       "supersedes_legacy": []
     }
   ]

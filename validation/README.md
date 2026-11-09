@@ -361,7 +361,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | TMLE | [tmle.md](econometrics/tmle.md) | R-pinned |
 | C-TMLE (greedy g selection, V-fold risk) | [ctmle.md](econometrics/ctmle.md) | R-pinned |
 | Regression standardization (stdReg-style g-computation) | [stdreg.md](econometrics/stdreg.md) | R-pinned |
-| LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | R-pinned |
+| LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | R-pinned, known deviations (CAUS-101) |
 | Parametric g-formula (natural course, discrete-time hazard) | [gformula.md](econometrics/gformula.md) | R-pinned |
 | CBPS | [cbps.md](econometrics/cbps.md) | R-pinned, known deviations (CAUS-11, CAUS-55) |
 | WeightIt (logistic, entropy balancing, energy, stable balancing) | [weightit.md](econometrics/weightit.md) | R-pinned |

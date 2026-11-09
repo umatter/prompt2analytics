@@ -296,11 +296,27 @@ those scores without a re-solve.
   Q* is on the outcome's own scale); propensities numerically 0 or 1 (glm.fit's `10 * eps`
   threshold), named by the treatment columns.
 
-**Default tolerance.** It is 1e-8, ltmle's glm epsilon, pending a decision: agreement with
-ltmle within 1e-6 on every data set where ltmle succeeds is not met on the quasi-separated five at
-any tolerance tried (1e-8, 1e-10, 1e-14). With the rules, 1e-10 changes no count
-in the table above beyond the quasi-separated five and does not remove them, and costs up to 1.15x
-on the T = 10 rows ("Saturating regimes: before and after").
+**Default tolerance.** It stays 1e-8, ltmle's glm epsilon (decided 2026-11-09). Agreement with
+ltmle within 1e-6 holds on every data set of the oracle sets where ltmle succeeds except the five
+quasi-separated `shifted_outcome` data sets, which are a known deviation (`causal_ltmle_saturation`,
+CAUS-101). Their |p2a - ltmle| on the regime means and the ATE, at tolerance 1e-8 / 1e-10 / 1e-14:
+
+| Data set | 1e-8 | 1e-10 | 1e-14 |
+|---|---:|---:|---:|
+| `shifted_outcome((150, 4, 2), -5, false, 0.3)` | 0.018 | 2.7e-4 | 0.018 |
+| `shifted_outcome((150, 4, 2), 3, false, 2)` | 2.8e-3 | 0.021 | 0.020 |
+| `shifted_outcome((150, 4, 4), 3, false, 2)` | 6.0e-3 | 5.6e-3 | 0.010 |
+| `shifted_outcome((300, 3, 4), -5, false, 0.3)` | 5.1e-5 | 7.1e-5 | 7.1e-5 |
+| `shifted_outcome((300, 8, 3), -5, false, 0.3)` | 5.2e-5 | 5.5e-5 | of the same order |
+
+A tighter tolerance does not help: the gap does not shrink from 1e-8 to 1e-14 on any of the five
+and grows on four. Their last node's Q regression is quasi-separated, so the regime prediction
+depends on where the deviance rule stops at every tolerance; on three of them ltmle re-solves its
+targeting step with bounded offsets where p2a's scalar fluctuation solves the score, and on the
+other two a regime mean within 0.02 of 0 leaves a nearly flat score on which the two fluctuations
+stop at different points. With the rules, 1e-10 changes no count in the table above beyond these
+five and costs 1.02x to 1.15x of the default (up to 1.15x on the T = 10 rows that do not saturate,
+"Saturating regimes: before and after"), so it is not adopted.
 
 ## 4. Regimes and contrasts
 
@@ -584,4 +600,6 @@ fixtures), `test_ltmle_targeting_solves_the_score_at_every_node`,
 
 R-pinned: the logistic-Q quantities to the written-out ltmle algorithm, cross-checked against
 ltmle 1.3-0; the linear-Q quantities to a written-out reference; a saturating regime
-(`ltmle_saturation`) to ltmle 1.3-0 itself.
+(`ltmle_saturation`) to ltmle 1.3-0 itself. Known deviation (CAUS-101): the five quasi-separated
+`shifted_outcome` data sets of the oracle sweep, off by 5.1e-5 to 0.018 at the default tolerance
+("Default tolerance" in section 3).
