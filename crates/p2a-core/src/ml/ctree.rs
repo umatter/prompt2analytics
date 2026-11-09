@@ -50,11 +50,11 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
 
 use super::extract::class_labels_line;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::traits::estimator::{chi_squared_p_value, normal_p_value_two_sided};
 
 /// Configuration for Conditional Inference Trees.
 ///
@@ -394,8 +394,7 @@ fn compute_test_statistic(
         // P-value from chi-squared distribution
         let df = (n_classes - 1).max(1) as f64;
         let p_value = if chi_sq.is_finite() && chi_sq >= 0.0 {
-            let chi2 = ChiSquared::new(df).unwrap();
-            1.0 - chi2.cdf(chi_sq)
+            chi_squared_p_value(chi_sq, df)
         } else {
             1.0
         };
@@ -435,13 +434,11 @@ fn compute_test_statistic(
         // P-value
         let p_value = if teststat == CtreeTestStat::Maximum {
             // Two-sided normal
-            let normal = Normal::new(0.0, 1.0).unwrap();
-            2.0 * (1.0 - normal.cdf(z.abs()))
+            normal_p_value_two_sided(z)
         } else {
             // Chi-squared with df=1
-            let chi2 = ChiSquared::new(1.0).unwrap();
             if statistic.is_finite() && statistic >= 0.0 {
-                1.0 - chi2.cdf(statistic)
+                chi_squared_p_value(statistic, 1.0)
             } else {
                 1.0
             }
@@ -1200,6 +1197,42 @@ mod tests {
     use super::*;
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    /// Relative-only tolerance for an upper tail: Tol::p_value's absolute floor would accept
+    /// 0 for a tail far below 1e-16.
+    fn tail(n: usize) -> p2a_validation::Tol {
+        p2a_validation::Tol::new(p2a_validation::Tol::p_value(n).rel, 0.0)
+    }
+
+    #[test]
+    fn test_validate_ctree_root_tail_tie_break() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("tail_ctree_root");
+        let col = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
+        let x = ndarray::stack![Axis(1), col("x1"), col("x2"), col("x3")];
+        let r = ctree(x.view(), col("y").view(), &CtreeConfig::default()).unwrap();
+        let split = r.root.split.as_ref().expect("root split");
+        Check::new(&case)
+            .vector("p", &r.root_p_values, tail(300))
+            .finish();
+        assert_eq!(
+            split.feature, 1,
+            "the more significant x2 must win; both p were 0 before"
+        );
+        // The chosen variable's statistic and Bonferroni p are element 1 (x2) of the 3-vectors.
+        let (z2, pb) = (case.vector("z2")[1], case.vector("p_bonferroni")[1]);
+        assert!(
+            Tol::stat(300).allows(split.statistic, z2),
+            "statistic {} vs R {z2}",
+            split.statistic
+        );
+        assert!(
+            tail(300).allows(split.p_value, pb),
+            "Bonferroni p {} vs R {pb}",
+            split.p_value
+        );
+    }
 
     #[test]
     fn test_ctree_classifies_rule() {

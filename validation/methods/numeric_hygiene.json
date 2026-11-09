@@ -74,6 +74,28 @@
       "supersedes_legacy": []
     },
     {
+      "id": "ctree_root_statistics",
+      "name": "ctree variable-selection statistics and p-values below 1e-16",
+      "category": "ml",
+      "reference": "quadratic rank statistic written out in R (partykit not installed): (n - 1) cor(rank(x), y)^2, pchisq(lower.tail = FALSE)",
+      "doc": "validation/ml/ctree.md",
+      "cases": [
+        "tail_ctree_root"
+      ],
+      "tests": [
+        "p2a-core::ml::ctree::tests::test_validate_ctree_root_tail_tie_break"
+      ],
+      "quantities": [
+        "root p-values",
+        "chosen variable",
+        "its statistic",
+        "its Bonferroni p"
+      ],
+      "tolerance": "validation/README.md, n = 300 (relative only for p)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "hettx_effect_summary_and_imputation",
       "name": "hettx effect summary (type-7 quantiles, IQR statistic) and regression imputation on an aliased arm",
       "category": "econometrics",

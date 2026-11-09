@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "tail_ctree_root",
+  "area": "ml/ctree",
+  "method": "ctree root association statistics below 1e-16 (formula; partykit not installed)",
+  "reference": "ctree quadratic rank statistic written out: z = cor(rank(x), y) sqrt(n - 1); pchisq(z^2, 1, lower.tail = FALSE)",
+  "call": "(n - 1) * cor(rank(x), y)^2",
+  "dataset": "validation/datasets/generated/tail_ctree_root.csv",
+  "datasets": ["validation/datasets/generated/tail_ctree_root.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "z2": [81.524970171248242, 206.06541305685201, 0.18202082315556534],
+    "p": [1.7306112234473998e-19, 9.9156007003082571e-47, 0.66964229820484211],
+    "p_bonferroni": [5.1918336703421992e-19, 2.9746802100924771e-46, 1]
+  }
+}

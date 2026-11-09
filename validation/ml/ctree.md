@@ -39,6 +39,14 @@ varimp(model)
   `minbucket` rows. `teststat = maximum` with a classification target is refused until ML-26 and ML-27 fix the
   statistic. The `MonteCarlo` and `Teststatistic` test types are not implemented and are refused.
 
+- The root's variable-selection statistic and its p-values below 1e-16 (registry entry
+  `ctree_root_statistics` in `validation/methods/numeric_hygiene.json`; case `tail_ctree_root`,
+  `validation/r/cases/numeric_ctree.R`). partykit is not installed, so the case writes out the quadratic rank
+  statistic, `(n - 1) cor(rank(x), y)^2`, and `pchisq(lower.tail = FALSE)`. Two of the three root p-values are
+  below 1e-16 (1.73e-19 and 9.92e-47), where `1 - cdf` returned 0 for both and the choice between them fell to
+  column order; the tail is now computed directly, so the variable with the larger statistic is chosen.
+  Test: `test_validate_ctree_root_tail_tie_break`.
+
 ## What is not R parity
 
 - The node statistics and p-values (ML-26, ML-27). No statistic or p-value is compared with partykit output.
