@@ -2,12 +2,13 @@
 
 use clap::{Subcommand, ValueEnum};
 use p2a_core::Dataset;
+use p2a_core::data::munging::aggregate::value_counts_with;
+use p2a_core::data::munging::clean::fill_na_with;
 use p2a_core::data::munging::{
     AggFn, AggSpec, ArithOp, BinOptions, BinStrategy, CastOptions, FillStrategy, MungeError,
-    MutateExpr, bin_with, cast_with, concat, deduplicate, diff, drop_columns, drop_na, fill_na,
-    filter, full_join, group_by, inner_join, lag, lead, left_join, melt, mutate, normalize,
-    one_hot_encode, pct_change, pivot, rename, right_join, sample, select, sort, standardize,
-    value_counts,
+    MutateExpr, bin_with, cast_with, concat, deduplicate, diff, drop_columns, drop_na, filter,
+    full_join, group_by, inner_join, lag, lead, left_join, melt, mutate, normalize, one_hot_encode,
+    pct_change, pivot, rename, right_join, sample, select, sort, standardize,
 };
 
 use crate::output::{OutputFormat, print_error};
@@ -25,6 +26,9 @@ pub enum JoinType {
 pub enum FillMethod {
     Mean,
     Median,
+    /// The most frequent value (ties go to the first level, as R's which.max(table(x)))
+    #[value(alias = "most-frequent")]
+    Mode,
     Constant,
     Forward,
     Backward,
@@ -288,6 +292,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     p2a --session s.json munge value-counts mydata --column category
+    p2a --session s.json munge value-counts mydata --column category --normalize
 ")]
     ValueCounts {
         /// Dataset name
@@ -296,6 +301,10 @@ EXAMPLES:
         /// Column to count
         #[arg(short, long)]
         column: String,
+
+        /// Add a proportion column, count / rows, missing values included (dplyr::count + n / sum(n))
+        #[arg(long)]
+        normalize: bool,
 
         /// Name for the resulting dataset
         #[arg(short, long)]
@@ -391,8 +400,12 @@ EXAMPLES:
     # Fill with mean
     p2a --session s.json munge fill-na mydata --method mean
 
-    # Fill with constant
+    # Fill with the most frequent value
+    p2a --session s.json munge fill-na mydata --method mode --columns region
+
+    # Fill with constant (typed to the column; text for String columns)
     p2a --session s.json munge fill-na mydata --method constant --value 0
+    p2a --session s.json munge fill-na mydata --method constant --value unknown --columns region
 
     # Forward fill specific columns
     p2a --session s.json munge fill-na mydata --method forward --columns price volume
@@ -409,9 +422,9 @@ EXAMPLES:
         #[arg(short, long, num_args = 1..)]
         columns: Option<Vec<String>>,
 
-        /// Constant value (for constant method)
+        /// Fill value for --method constant; typed to the column, as text for String columns
         #[arg(long)]
-        value: Option<f64>,
+        value: Option<String>,
 
         /// Name for the resulting dataset
         #[arg(short, long)]
@@ -752,8 +765,16 @@ pub fn execute(
         MungeCommands::ValueCounts {
             dataset,
             column,
+            normalize,
             name,
-        } => execute_value_counts(dataset, column, name.as_deref(), format, session),
+        } => execute_value_counts(
+            dataset,
+            column,
+            *normalize,
+            name.as_deref(),
+            format,
+            session,
+        ),
         MungeCommands::Pivot {
             dataset,
             index,
@@ -801,7 +822,7 @@ pub fn execute(
             dataset,
             method,
             columns.as_ref(),
-            *value,
+            value.as_deref(),
             name.as_deref(),
             format,
             session,
@@ -1421,13 +1442,14 @@ fn execute_group_by(
 fn execute_value_counts(
     dataset: &str,
     column: &str,
+    normalize: bool,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     let ds = get_dataset_clone!(dataset, session, format);
 
-    match value_counts(&ds, column) {
+    match value_counts_with(&ds, column, normalize) {
         Ok(result) => store_result(result, output_name, dataset, "counts", session, format),
         Err(e) => {
             print_error(&format!("Value counts failed: {}", e), format);
@@ -1508,30 +1530,47 @@ fn execute_fill_na(
     dataset: &str,
     method: &FillMethod,
     columns: Option<&Vec<String>>,
-    value: Option<f64>,
+    value: Option<&str>,
     output_name: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    let keyword = match method {
+        FillMethod::Mean => "mean",
+        FillMethod::Median => "median",
+        FillMethod::Mode => "mode",
+        FillMethod::Constant => "constant",
+        FillMethod::Forward => "forward",
+        FillMethod::Backward => "backward",
+        FillMethod::Zero => "zero",
+    };
+    let strategy = match FillStrategy::parse(keyword, value) {
+        Ok(s) => s,
+        Err(e) => {
+            print_error(&format!("Fill NA failed: {}", e), format);
+            return Ok(());
+        }
+    };
+
     let ds = get_dataset_clone!(dataset, session, format);
 
     let cols: Option<Vec<&str>> = columns.map(|v| v.iter().map(|s| s.as_str()).collect());
     let cols_ref: Option<&[&str]> = cols.as_deref();
 
-    let strategy = match method {
-        FillMethod::Mean => FillStrategy::Mean,
-        FillMethod::Median => FillStrategy::Median,
-        FillMethod::Constant => {
-            let val = value.unwrap_or(0.0);
-            FillStrategy::Constant(val.to_string())
+    match fill_na_with(&ds, cols_ref, &strategy) {
+        Ok(outcome) => {
+            let summary = outcome.summary();
+            store_result_with(
+                outcome.dataset,
+                output_name,
+                dataset,
+                "fillna",
+                Some(summary),
+                &[],
+                session,
+                format,
+            )
         }
-        FillMethod::Forward => FillStrategy::Forward,
-        FillMethod::Backward => FillStrategy::Backward,
-        FillMethod::Zero => FillStrategy::Zero,
-    };
-
-    match fill_na(&ds, cols_ref, strategy) {
-        Ok(result) => store_result(result, output_name, dataset, "fillna", session, format),
         Err(e) => {
             print_error(&format!("Fill NA failed: {}", e), format);
             Ok(())

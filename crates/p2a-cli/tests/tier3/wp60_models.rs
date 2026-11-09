@@ -1422,6 +1422,119 @@ fn test_cli_munge_bin_and_cast_print_one_json_document() {
     );
 }
 
+/// fill-na --method mode (R's names(which.max(table(x))): ties go to the first level), a text
+/// constant, the strategy rules; value-counts --normalize (dplyr::count, then n / sum(n)).
+#[test]
+fn test_cli_munge_fill_na_mode_and_value_counts_normalize() {
+    let s = temp_session();
+    let csv = s.dir().join("fill.csv");
+    std::fs::write(
+        &csv,
+        "k,s,f,g\n3,b,1.5,x\n1,a,,y\n2,b,2.5,x\n2,,4.5,\n,a,,x\n1,c,0.5,y\n",
+    )
+    .unwrap();
+    s.load_as(&csv, "fill", &[]);
+    // `data head` JSON prints every cell as a string and quotes text cells inside it (CLI-15):
+    // compare the text without either layer of quotes
+    let cell = |v: &Value| -> String {
+        v.as_str()
+            .map_or_else(|| v.to_string(), str::to_string)
+            .trim_matches('"')
+            .to_string()
+    };
+    let out = s.ok(&[
+        "munge",
+        "fill-na",
+        "fill",
+        "--method",
+        "mode",
+        "--columns",
+        "k",
+        "s",
+        "--name",
+        "filled",
+    ]);
+    assert!(
+        out.contains("Filled 2 missing values in 2 columns: k (1, with 1), s (1, with 'a')"),
+        "{out}"
+    );
+    let col = |r: &Value, k: &str| -> Vec<String> {
+        r.as_array().unwrap().iter().map(|x| cell(&x[k])).collect()
+    };
+    let rows = s.json(&["data", "head", "filled", "-n", "6"]);
+    assert_eq!(col(&rows, "k"), ["3", "1", "2", "2", "1", "1"]);
+    assert_eq!(col(&rows, "s"), ["b", "a", "b", "a", "a", "c"]);
+    s.ok(&[
+        "munge",
+        "fill-na",
+        "fill",
+        "--method",
+        "constant",
+        "--value",
+        "missing",
+        "--columns",
+        "s",
+        "--name",
+        "c1",
+    ]);
+    assert_eq!(
+        col(&s.json(&["data", "head", "c1", "-n", "6"]), "s")[3],
+        "missing"
+    );
+    assert!(
+        s.err(&[
+            "munge",
+            "fill-na",
+            "fill",
+            "--method",
+            "constant",
+            "--columns",
+            "f"
+        ])
+        .contains("needs a value")
+    );
+    assert!(
+        s.err(&[
+            "munge",
+            "fill-na",
+            "fill",
+            "--method",
+            "mean",
+            "--value",
+            "3",
+            "--columns",
+            "f",
+        ])
+        .contains("only used with strategy 'constant'")
+    );
+    s.ok(&[
+        "munge",
+        "value-counts",
+        "fill",
+        "-c",
+        "g",
+        "--normalize",
+        "--name",
+        "counts",
+    ]);
+    let rows = s.json(&["data", "head", "counts", "-n", "5"]);
+    // g is x, y, x, NA, x, y: dplyr::count(g, sort = TRUE) |> mutate(proportion = n / sum(n))
+    // gives x 3 1/2, y 2 1/3, NA 1 1/6 (the table prints six decimals)
+    let mut got: Vec<(String, f64)> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (cell(&r["g"]), cell(&r["proportion"]).parse().unwrap()))
+        .collect();
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    let want = [("null", 1.0 / 6.0), ("x", 0.5), ("y", 1.0 / 3.0)];
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for ((g, p), (wg, wp)) in got.iter().zip(want) {
+        assert_eq!(g, wg);
+        assert!((p - wp).abs() < 1e-6, "{g}: {p} vs {wp}");
+    }
+}
+
 // =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
@@ -2427,6 +2540,11 @@ const STATS_REFUSED: &[(&[&str], &[&str])] = &[(
     &["'IV'", "I", "II", "III"],
 )];
 
+const MUNGE_REFUSED: &[(&[&str], &[&str])] = &[(
+    &["munge", "fill-na", "grunfeld", "--method", "interpolate"],
+    &["mean", "median", "mode"],
+)];
+
 const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL, PANEL, REGRESSION, STATS];
 const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK, PANEL_OK, REGRESSION_OK];
 const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[
@@ -2435,6 +2553,7 @@ const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[
     PANEL_REFUSED,
     REGRESSION_REFUSED,
     STATS_REFUSED,
+    MUNGE_REFUSED,
 ];
 
 /// A session with every dataset the table tests use, each named after its file stem.
