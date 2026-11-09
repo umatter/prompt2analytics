@@ -44,6 +44,57 @@ use p2a_core::regression::{
     run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
 };
 
+use p2a_core::EconError;
+use p2a_core::options::Choices;
+use p2a_core::traits::convergence::ResultNotes;
+
+/// Parses an option string through a `Choices` table (for core enums without `FromStr`):
+/// `None` gives `default`; an unknown value is an error naming the option and the accepted
+/// spellings.
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        None => Ok(default),
+        Some(s) => choices.parse(s).map_err(|e| match e {
+            EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
+        }),
+    }
+}
+
+/// Appends the convergence line and the warnings of `result` that `text` does not show yet.
+pub(crate) fn append_unshown_notes(text: &mut String, result: &dyn ResultNotes) {
+    let converged = result
+        .notes_convergence()
+        .filter(|_| !text.contains("Converged:"))
+        .map(|c| (c.converged, c.iterations));
+    let warnings: Vec<String> = result
+        .notes_warnings()
+        .into_iter()
+        .map(|w| {
+            let w = w.trim();
+            w.strip_prefix("Warning:").map_or(w, str::trim).to_string()
+        })
+        .filter(|w| !w.is_empty() && !text.contains(w.as_str()))
+        .collect();
+    crate::tools::common::append_notes(text, converged, &warnings);
+}
+
+/// Pretty JSON of a tool result; never panics.
+pub(crate) fn json_text(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
+/// Compact JSON of a tool result (one line, for replies the chat loop may cut); never panics.
+pub(crate) fn json_compact(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialisation failed: {e}\"}}"))
+}
+
 /// The intercept flag and covariance type of an OLS request: `intercept`
 /// defaults to true and `cov_type` to HC1 (parsed case-insensitively by
 /// `CovarianceType::from_str`). An unknown `cov_type` is an error naming the
@@ -655,9 +706,9 @@ impl AnalyticsServer {
             output["missing"] = m;
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Fit Friedman's SuperSmoother.
@@ -717,17 +768,17 @@ impl AnalyticsServer {
             "n_unique_points": result.n,
             "bass": result.bass,
             "periodic": result.periodic,
-            "x_sample": &result.x[..result.n.min(20)],
-            "y_smoothed_sample": &result.y[..result.n.min(20)],
+            "x_sample": result.x.iter().take(20).collect::<Vec<_>>(),
+            "y_smoothed_sample": result.y.iter().take(20).collect::<Vec<_>>(),
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} points", result.n)) } else { None::<String> }
         });
         if let Some(m) = missing_json(cols.missing()) {
             output["missing"] = m;
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Fit Tukey's resistant line.
@@ -787,17 +838,17 @@ impl AnalyticsServer {
                 "intercept": result.intercept,
                 "slope": result.slope
             },
-            "fitted_sample": &result.fitted[..result.n.min(20)],
-            "residuals_sample": &result.residuals[..result.n.min(20)],
+            "fitted_sample": result.fitted.iter().take(20).collect::<Vec<_>>(),
+            "residuals_sample": result.residuals.iter().take(20).collect::<Vec<_>>(),
             "note": if result.n > 20 { Some(format!("Showing first 20 of {} values", result.n)) } else { None::<String> }
         });
         if let Some(m) = missing_json(cols.missing()) {
             output["missing"] = m;
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Stepwise regression model selection.
@@ -864,9 +915,9 @@ impl AnalyticsServer {
             })).collect::<Vec<_>>()
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &output,
+        ))]))
     }
 
     /// Fit a Generalized Least Squares model.
@@ -991,9 +1042,9 @@ impl AnalyticsServer {
                     "df_residual": result.df_residual
                 });
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json_output).unwrap(),
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(json_text(
+                    &json_output,
+                ))]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "GLS regression failed: {}",
@@ -1063,9 +1114,9 @@ impl AnalyticsServer {
                     "n_knots": result.n_knots
                 });
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json_output).unwrap(),
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(json_text(
+                    &json_output,
+                ))]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Smooth spline failed: {}",
@@ -1211,6 +1262,75 @@ mod tests {
     use p2a_core::data::{DataLoader, Dataset};
     use p2a_validation::{Case, Check, Tol};
     use serde_json::{Value, json};
+
+    #[test]
+    fn test_parse_choice_parses_and_reports_the_option() {
+        use p2a_core::options::Choices;
+        const T: Choices<u8> = Choices {
+            option: "criterion",
+            values: &[(&["aic"], 1), (&["bic", "schwarz"], 2)],
+        };
+        assert_eq!(super::parse_choice(&T, None, 1), Ok(1));
+        assert_eq!(super::parse_choice(&T, Some(" Schwarz "), 1), Ok(2));
+        let e = super::parse_choice(&T, Some("cp"), 1).unwrap_err();
+        assert!(
+            e.contains("unknown criterion 'cp'") && e.contains("aic, bic"),
+            "{e}"
+        );
+    }
+
+    struct Notes(Option<(bool, usize)>, Vec<String>);
+    impl p2a_core::traits::convergence::ResultNotes for Notes {
+        fn notes_warnings(&self) -> Vec<String> {
+            self.1.clone()
+        }
+        fn notes_convergence(&self) -> Option<p2a_core::traits::convergence::Convergence> {
+            self.0.map(|(c, i)| {
+                p2a_core::traits::convergence::Convergence::new(
+                    c,
+                    i,
+                    100,
+                    "relative change",
+                    f64::NAN,
+                    1e-8,
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn test_append_unshown_notes_adds_only_what_is_missing() {
+        let r = Notes(
+            Some((true, 4)),
+            vec!["Warning: x dropped".into(), "rows dropped (y: 2)".into()],
+        );
+        let mut t = "Model\nMissing values: 2 rows dropped (y: 2)\n".to_string();
+        super::append_unshown_notes(&mut t, &r);
+        assert!(
+            t.ends_with("Converged: yes (4 iterations)\nWarning: x dropped"),
+            "{t}"
+        );
+        assert_eq!(t.matches("rows dropped").count(), 1, "{t}");
+        let before = t.clone();
+        super::append_unshown_notes(&mut t, &r);
+        assert_eq!(t, before);
+        let mut quiet = "Model".to_string();
+        super::append_unshown_notes(&mut quiet, &Notes(None, vec![]));
+        assert_eq!(quiet, "Model");
+    }
+
+    #[test]
+    fn test_json_text_never_panics() {
+        assert_eq!(
+            super::json_text(&serde_json::json!({"a": 1})),
+            "{\n  \"a\": 1\n}"
+        );
+        assert!(super::json_text(&serde_json::json!({"x": f64::NAN})).contains("null"));
+        assert_eq!(
+            super::json_compact(&serde_json::json!({"a": [1, 2]})),
+            "{\"a\":[1,2]}"
+        );
+    }
 
     /// `inv ~ value + capital` on `grunfeld`, plus `extra` keys.
     fn request(extra: Value) -> OlsRequest {
