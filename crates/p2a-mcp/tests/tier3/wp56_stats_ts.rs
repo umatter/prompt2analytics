@@ -27,7 +27,6 @@ fn f(v: &Value) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
-#[allow(dead_code)]
 fn fs(v: &Value) -> Vec<f64> {
     v.as_array()
         .unwrap_or_else(|| panic!("not an array: {v}"))
@@ -272,4 +271,204 @@ async fn test_mcp_ks_distribution_aliases() {
             "{needle}"
         );
     }
+}
+
+/// TOOL-27: power options with the CLI's kebab-case and R's spellings. Before:
+/// 'one-sample'/'one-sided' ran the two-sample, two-sided calculation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_power_option_spellings() {
+    // power.t.test(n = 20, delta = 0.8, sd = 1.2, type = .., alternative = ..)$power
+    // (stat_power_solve); the port reproduces pt/pnt to <= 1.8e-14 relative, so 1e-10 is the
+    // documented margin.
+    let case = Case::load("stat_power_solve");
+    let (se, s) = session_with_datasets(vec![]);
+    let tight = Tol::new(1e-10, 0.0);
+    let t = |ty: &str, alt: &str| json!({"n": 20.0, "delta": 0.8, "sd": 1.2, "test_type": ty, "alternative": alt});
+    let mut c = Check::new(&case);
+    for (ty, alt, key) in [
+        ("one-sample", "one-sided", "t_onesample_onesided_power"),
+        ("one.sample", "onesided", "t_onesample_onesided_power"),
+        ("Paired", "two-sided", "t_paired_twosided_power"),
+        ("two_sample", "two.sided", "t_twosample_twosided_power"),
+    ] {
+        let j = json_of(&ok(&s, &se, "power_t_test", t(ty, alt)).await);
+        c.scalar(key, f(&j["power"]), tight);
+    }
+    // power.prop.test(n = 50, p1 = 0.5, p2 = 0.75, alternative = "one.sided")$power
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "power_prop_test",
+            json!({"n": 50.0, "p1": 0.5, "p2": 0.75, "alternative": "one-sided"}),
+        )
+        .await,
+    );
+    c.scalar("prop_onesided_power", f(&j["power"]), tight);
+    c.finish();
+    assert_eq!(j["alternative"], "one.sided");
+    assert!(
+        refused(&s, &se, "power_t_test", t("student", "two.sided"))
+            .await
+            .contains("expected one of: two.sample, one.sample, paired")
+    );
+    assert!(
+        refused(
+            &s,
+            &se,
+            "power_prop_test",
+            json!({"n": 50.0, "p1": 0.5, "p2": 0.75, "alternative": "less"})
+        )
+        .await
+        .contains("one.sided")
+    );
+}
+
+/// TOOL-27: options of the descriptive and multivariate tools. Before: MAD centre 'trimmed'
+/// silently used the median, cov.wt 'mle' and 'biased' silently used the unbiased divisor,
+/// MANOVA `test` was read nowhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_stats_option_aliases() {
+    // mad(x1, center = mean(x1)) (mcp_misc_t3, n = 25); cov.wt(.., method = "ML")
+    // (stat_robust_weighted_t3)
+    let misc = Case::load("mcp_misc_t3");
+    let rw = Case::load("stat_robust_weighted_t3");
+    let (se, s) = session_with("mcp_misc_t3"); // dataset robust_weighted_t3
+    let m = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_mad",
+            json!({"dataset": "robust_weighted_t3", "column": "x1", "center": "Mean"}),
+        )
+        .await,
+    );
+    let cw = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_cov_wt",
+            json!({"dataset": "robust_weighted_t3", "columns": ["x1", "x2"], "weights": "w", "method": "mle"}),
+        )
+        .await,
+    );
+    let cov: Vec<f64> = cw["covariance_matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(fs)
+        .collect();
+    Check::new(&misc)
+        .scalar("mad_x1_center_mean", f(&m["mad"]), Tol::coef(25))
+        .scalar("mean_x1", f(&m["center_used"]), Tol::coef(25))
+        .finish();
+    Check::new(&rw)
+        .vector("covwt_ml", &cov, Tol::stat(25))
+        .finish();
+    assert_eq!(
+        (m["center"].as_str(), cw["method"].as_str()),
+        (Some("mean"), Some("ML"))
+    );
+    for (tool, args, needle) in [
+        (
+            "stats_mad",
+            json!({"dataset": "robust_weighted_t3", "column": "x1", "center": "trimmed"}),
+            "unknown center 'trimmed'",
+        ),
+        (
+            "stats_cov_wt",
+            json!({"dataset": "robust_weighted_t3", "columns": ["x1", "x2"], "weights": "w", "method": "biased"}),
+            "unknown method 'biased'",
+        ),
+        (
+            "stats_density",
+            json!({"dataset": "robust_weighted_t3", "column": "x1", "kernel": "optcosine"}),
+            "gaussian",
+        ),
+        (
+            "stats_spline",
+            json!({"dataset": "robust_weighted_t3", "x": "x1", "y": "x2", "method": "akima"}),
+            "natural",
+        ),
+        (
+            "stats_approx",
+            json!({"dataset": "robust_weighted_t3", "x": "x1", "y": "x2", "xout": [8.0], "rule": "extrapolate"}),
+            "nearest",
+        ),
+        (
+            "multivariate_factanal",
+            json!({"dataset": "robust_weighted_t3", "columns": ["x1", "x2", "w"], "n_factors": 1, "rotation": "oblimin"}),
+            "varimax",
+        ),
+    ] {
+        assert!(
+            refused(&s, &se, tool, args).await.contains(needle),
+            "{tool}: {needle}"
+        );
+    }
+    // aliases give the canonical result
+    let d =
+        |k: &str| json!({"dataset": "robust_weighted_t3", "column": "x1", "kernel": k, "n": 64});
+    assert_eq!(
+        ok(&s, &se, "stats_density", d("normal")).await,
+        ok(&s, &se, "stats_density", d("gaussian")).await
+    );
+    // MANOVA: the selected test is reported and summarised (all four are computed, as
+    // summary.manova(test = ..))
+    let (ge, gs) = session_with("mcp_groups_t3");
+    let w = json_of(
+        &ok(
+            &gs,
+            &ge,
+            "anova_manova",
+            json!({"dataset": "mcp_groups_t3", "response_vars": ["vi", "v"], "factor": "g", "test": "Wilks"}),
+        )
+        .await,
+    );
+    assert_eq!(w["selected_test"], "wilks");
+    assert!(
+        w["interpretation"]
+            .as_str()
+            .unwrap()
+            .starts_with("Wilks' Lambda"),
+        "{w}"
+    );
+    assert!(
+        refused(
+            &gs,
+            &ge,
+            "anova_manova",
+            json!({"dataset": "mcp_groups_t3", "response_vars": ["vi", "v"], "factor": "g", "test": "lambda"})
+        )
+        .await
+        .contains("pillai")
+    );
+    let mt = json_of(
+        &ok(
+            &gs,
+            &ge,
+            "stats_model_tables",
+            json!({"dataset": "mcp_groups_t3", "response": "vi", "factors": ["g"], "table_type": "effect"}),
+        )
+        .await,
+    );
+    let gc = Case::load("mcp_groups_t3");
+    Check::new(&gc)
+        .named(
+            "effects",
+            &["ctl", "trtA", "trtB"],
+            &fs(&mt["one_way_table"]["values"]),
+            Tol::coef(30),
+        )
+        .finish();
+    assert!(
+        ok(
+            &gs,
+            &ge,
+            "stats_se_contrast",
+            json!({"dataset": "mcp_groups_t3", "response": "vi", "factor": "g", "contrast_type": "contr.helmert"})
+        )
+        .await
+        .contains("standard_errors")
+    );
 }

@@ -69,7 +69,7 @@ pub struct ModelTablesRequest {
 
     /// Type of table
     #[schemars(
-        description = "Type of table: 'means' (default) or 'effects' (deviations from grand mean)."
+        description = "Type of table: 'means' (default; also 'mean') or 'effects' (deviations from the grand mean; also 'effect'). Other values are refused."
     )]
     pub table_type: Option<String>,
 
@@ -104,7 +104,7 @@ pub struct SeContrastRequest {
 
     /// Contrast type (if contrasts not provided)
     #[schemars(
-        description = "Type of contrasts to generate: 'treatment', 'helmert', 'sum', or 'poly'. Only used if contrasts not provided."
+        description = "Type of contrasts to generate: 'treatment' (default), 'helmert', 'sum' or 'poly' (also 'polynomial'); R's names 'contr.treatment', 'contr.helmert', 'contr.sum' and 'contr.poly' are accepted. Only used if contrasts not provided."
     )]
     pub contrast_type: Option<String>,
 }
@@ -159,7 +159,9 @@ pub struct CovWtRequest {
     pub center: Option<bool>,
 
     /// Covariance method
-    #[schemars(description = "Method for computing covariance: 'unbiased' (default) or 'ml'.")]
+    #[schemars(
+        description = "Method for computing covariance, R's cov.wt method: 'unbiased' (default) or 'ML' (also 'mle', 'maximum_likelihood'). Other values are refused."
+    )]
     pub method: Option<String>,
 }
 
@@ -227,7 +229,9 @@ pub struct MadRequest {
     pub column: String,
 
     /// Center (default: median)
-    #[schemars(description = "Center to use. Default is 'median'. Can also use 'mean'.")]
+    #[schemars(
+        description = "Center to use: 'median' (default) or 'mean'. Other values are refused."
+    )]
     pub center: Option<String>,
 
     /// Scaling constant (default: 1.4826 for normal consistency)
@@ -274,7 +278,7 @@ pub struct DensityRequest {
 
     /// Kernel type
     #[schemars(
-        description = "Kernel function: 'gaussian' (default), 'epanechnikov', 'rectangular', 'triangular', 'biweight', or 'cosine'."
+        description = "Kernel function: 'gaussian' (default; also 'normal'), 'epanechnikov', 'rectangular' (also 'uniform'), 'triangular', 'biweight' (also 'quartic') or 'cosine'. Other values are refused."
     )]
     pub kernel: Option<String>,
 
@@ -315,7 +319,7 @@ pub struct SplineRequest {
 
     /// Spline method
     #[schemars(
-        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic', or 'hyman' (monotone)."
+        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic' or 'monoH.FC' (monotone Fritsch-Carlson; also 'hyman', 'monotone'). Other values are refused."
     )]
     pub method: Option<String>,
 }
@@ -343,12 +347,14 @@ pub struct ApproxRequest {
     pub xout: Vec<f64>,
 
     /// Interpolation method
-    #[schemars(description = "Interpolation method: 'linear' (default) or 'constant'.")]
+    #[schemars(
+        description = "Interpolation method: 'linear' (default) or 'constant' (also 'step'). Other values are refused."
+    )]
     pub method: Option<String>,
 
     /// Rule for extrapolation
     #[schemars(
-        description = "Rule for handling points outside range: 'na' (default, return NA) or 'nearest' (use boundary value)."
+        description = "Rule for points outside the range of x, R's rule: 'na' (default, return NA; also '1') or 'nearest' (use the boundary value; also 'boundary', 'const', '2'). Other values are refused."
     )]
     pub rule: Option<String>,
 }
@@ -375,7 +381,7 @@ pub struct ManovaRequest {
 
     /// Which test statistic to emphasize (default: Pillai)
     #[schemars(
-        description = "Test statistic to use: 'pillai' (default, most robust), 'wilks' (most popular), 'hotelling' (Hotelling-Lawley), or 'roy' (Roy's largest root). All four are always computed."
+        description = "The test summarised in the interpretation (all four are always reported): 'pillai' (default), 'wilks', 'hotelling-lawley' (also 'hotelling'), or 'roy' (Roy's largest root)."
     )]
     pub test: Option<String>,
 }
@@ -402,7 +408,7 @@ pub struct FactorAnalysisRequest {
 
     /// Rotation method
     #[schemars(
-        description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors), or 'none'."
+        description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors) or 'none'. Other values are refused."
     )]
     pub rotation: Option<String>,
 
@@ -475,7 +481,9 @@ pub struct PowerPropTestRequest {
     pub power: Option<f64>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'; spellings such as 'two-sided' and 'one-sided' are accepted."
+    )]
     pub alternative: Option<String>,
 }
 
@@ -711,10 +719,14 @@ pub struct PowerTTestRequest {
     pub power: Option<f64>,
 
     /// Type of t-test
-    #[schemars(description = "Type of t-test: 'two.sample' (default), 'one.sample', or 'paired'.")]
+    #[schemars(
+        description = "Type of t-test: 'two.sample' (default), 'one.sample' or 'paired'; spellings such as 'one-sample' and 'two_sample' are accepted."
+    )]
     pub test_type: Option<String>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'; spellings such as 'two-sided' and 'one-sided' are accepted."
+    )]
     pub alternative: Option<String>,
 }
