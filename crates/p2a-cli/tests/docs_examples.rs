@@ -715,6 +715,36 @@ fn test_in_binary_examples_parse() {
     );
 }
 
+/// INF-3: every example in a command's EXAMPLES block names a session, unless the command is
+/// script, chat or smoke-test: a copied example must not stop with "No session active". Fails
+/// when one example loses its `--session` (checked on `data load`).
+#[test]
+fn test_in_binary_examples_name_a_session() {
+    let (mut problems, mut seen) = (Vec::new(), 0usize);
+    for c in commands() {
+        for ex in &c.examples {
+            seen += 1;
+            let label = format!("`p2a {} -h` EXAMPLES: {ex}", c.path.join(" "));
+            match args_of(ex) {
+                Ok(a) => {
+                    let free = subcommand_of(&a).is_some_and(|s| SESSIONLESS.contains(&s));
+                    if !free && !names_session(ex) {
+                        problems.push(format!("{label}: no --session"));
+                    }
+                }
+                Err(e) => problems.push(format!("{label}: {e}")),
+            }
+        }
+    }
+    assert!(seen >= 150, "only {seen} in-binary examples found");
+    assert!(
+        problems.is_empty(),
+        "{} in-binary examples name no session:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
 // ---------------------------------------------------------------- Task 4
 
 /// `(depth, names, is_dir)` of a tree line such as `│   ├── shap.rs, pdp.rs   # ...`.
