@@ -616,8 +616,10 @@ pub(super) fn split(df: &DataFrame, column: &str, prefix: &str, parts: usize) ->
 /// column filled with a constant is copied with each null replaced, a
 /// numeric column filled with its mean or median becomes Float64, a
 /// forward or backward fill copies the value each null takes (counted
-/// exactly for a String or Binary column, see [`filled_text`]), and any
-/// other fill keeps the column's type and width.
+/// exactly for a String or Binary column, see [`filled_text`]), a mode fill
+/// copies one of the column's values into each null of a String column (at
+/// most its longest value each), and any other fill keeps the column's type
+/// and width.
 pub(super) fn fill_na(
     df: &DataFrame,
     columns: Option<&[&str]>,
@@ -664,6 +666,13 @@ pub(super) fn fill_na(
             FillStrategy::Forward | FillStrategy::Backward => {
                 let nulls = column.null_count() as u64;
                 bound.gathered(name, column, Gather::Fill(nulls))
+            }
+            FillStrategy::Mode if dtype == &DataType::String => {
+                let series = column.as_materialized_series();
+                let nulls = column.null_count() as u64;
+                let text =
+                    text_bytes(series).saturating_add(nulls.saturating_mul(longest_value(series)));
+                bound.string(name, text);
             }
             _ => bound.column(name, session::series_bytes(column.as_materialized_series())),
         }

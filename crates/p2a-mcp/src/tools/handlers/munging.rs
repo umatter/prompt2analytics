@@ -12,8 +12,10 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
 
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::data::format_significant;
 use crate::tools::limits::{self, Family, LimitViolation};
 use crate::tools::requests::munging::*;
+use p2a_core::options::Choices;
 
 use p2a_core::{
     data::{
@@ -29,8 +31,9 @@ use p2a_core::{
             JoinType,
             MungeError,
             MutateExpr,
+            aggregate::value_counts_with,
             bin_with,
-            clean::fill_na_with,
+            clean::{FillStrategyKind, ReplaceOptions, fill_na_with, replace_with},
             concat,
             deduplicate,
             diff,
@@ -59,7 +62,6 @@ use p2a_core::{
             regex_replace,
             regex_replace_bytes,
             rename,
-            replace,
             sample,
             sample_rows,
             select,
@@ -75,11 +77,115 @@ use p2a_core::{
             to_uppercase,
             // String operations
             trim,
-            value_counts,
         },
     },
     regression::{CovarianceType, run_ols},
     stats::correlation_matrix,
+};
+
+/// The fill strategy of `munge_fill_na` and of the cleaning tools' `fill_na`: keywords are case-
+/// and separator-insensitive ([`FillStrategy::parse`]) and the constant comes from `value` with its
+/// case kept. No strategy with a value means 'constant'; neither is an error. An error is the text
+/// of a tool error; an unknown keyword adds how to pass a constant.
+pub(crate) fn parse_fill_strategy(
+    strategy: Option<&str>,
+    value: Option<&str>,
+) -> Result<FillStrategy, String> {
+    let keyword = match (strategy.map(str::trim).filter(|s| !s.is_empty()), value) {
+        (Some(keyword), _) => keyword,
+        (None, Some(_)) => "constant",
+        (None, None) => {
+            return Err(format!(
+                "fill_na needs a strategy ({}) or a fill value in 'value'",
+                FillStrategyKind::choices().help()
+            ));
+        }
+    };
+    FillStrategy::parse(keyword, value).map_err(|e| {
+        let mut message = match e {
+            MungeError::InvalidExpression(m) => m,
+            other => other.to_string(),
+        };
+        if keyword.parse::<FillStrategyKind>().is_err() {
+            message.push_str(
+                ". To fill with a constant, use strategy 'constant' and put the fill value in \
+                 'value'.",
+            );
+        }
+        message
+    })
+}
+
+/// How a cleaning log names a fill strategy: "mode", "constant 'Unknown'" (the value cut to 40
+/// characters).
+pub(crate) fn fill_label(strategy: &FillStrategy) -> String {
+    match strategy {
+        FillStrategy::Constant(v) => format!("constant '{}'", p2a_text::ellipsize(v, 40)),
+        other => other.kind().to_string(),
+    }
+}
+
+/// A value as a reply prints it: "NA (missing)" for a missing value, text quoted (cut to 40
+/// characters), anything else as polars writes the value ("2", "true", "2.5").
+fn cell_label(v: &p2a_core::polars::prelude::AnyValue, quoted: bool) -> String {
+    use p2a_core::polars::prelude::AnyValue;
+    match v {
+        AnyValue::Null => "NA (missing)".to_string(),
+        v if quoted => format!("'{}'", p2a_text::ellipsize(&v.str_value(), 40)),
+        v => v.str_value().into_owned(),
+    }
+}
+
+/// A handler-local option parsed with [`Choices`]: the canonical value, or the bare message of an
+/// unknown spelling ("unknown how 'some'; expected one of: any, all").
+pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
+    choices: &Choices<T>,
+    value: &str,
+) -> Result<T, String> {
+    choices.parse(value).map_err(|e| match e {
+        p2a_core::EconError::InvalidSpecification { message } => message,
+        other => other.to_string(),
+    })
+}
+
+/// The `how` of `drop_na`, as the core takes it.
+pub(crate) const DROP_HOW: Choices<&'static str> = Choices {
+    option: "how",
+    values: &[(&["any"], "any"), (&["all"], "all")],
+};
+
+/// The operations of `batch_process`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchOperation {
+    Describe,
+    Correlation,
+    Ols,
+}
+
+const BATCH_OPERATIONS: Choices<BatchOperation> = Choices {
+    option: "operation",
+    values: &[
+        (&["describe"], BatchOperation::Describe),
+        (&["correlation"], BatchOperation::Correlation),
+        (&["ols"], BatchOperation::Ols),
+    ],
+};
+
+/// The comparisons of `compare_datasets`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comparison {
+    Summary,
+    Distribution,
+    Correlation,
+}
+
+const COMPARISONS: Choices<Comparison> = Choices {
+    option: "comparison_type",
+    values: &[
+        (&["summary"], Comparison::Summary),
+        (&["distribution"], Comparison::Distribution),
+        (&["correlation"], Comparison::Correlation),
+    ],
 };
 
 #[tool_router(router = munging_router, vis = "pub")]
@@ -100,6 +206,11 @@ impl AnalyticsServer {
             )]));
         }
 
+        let operation = match parse_choice(&BATCH_OPERATIONS, &request.operation) {
+            Ok(op) => op,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
         let datasets = self.datasets.read().await;
         let mut results = Vec::new();
         let mut combined_stats: Option<Vec<(String, Vec<f64>)>> =
@@ -119,8 +230,8 @@ impl AnalyticsServer {
             };
 
             let df = dataset.df();
-            let result = match request.operation.to_lowercase().as_str() {
-                "describe" => {
+            let result = match operation {
+                BatchOperation::Describe => {
                     // Get summary statistics
                     let columns: Vec<String> = if let Some(ref cols) = request.columns {
                         cols.clone()
@@ -174,7 +285,7 @@ impl AnalyticsServer {
                     }
                     stats_output
                 }
-                "correlation" => {
+                BatchOperation::Correlation => {
                     // Get correlation matrix
                     match correlation_matrix(dataset) {
                         Ok(corr) => {
@@ -183,7 +294,7 @@ impl AnalyticsServer {
                         Err(e) => format!("Dataset '{}': Error - {}", ds_name, e),
                     }
                 }
-                "ols" => {
+                BatchOperation::Ols => {
                     // Run OLS regression
                     if let Some(ref cols) = request.columns {
                         if cols.len() < 2 {
@@ -228,10 +339,6 @@ impl AnalyticsServer {
                         )
                     }
                 }
-                other => format!(
-                    "Unknown operation: '{}'. Use 'describe', 'correlation', or 'ols'.",
-                    other
-                ),
             };
 
             results.push(result);
@@ -284,8 +391,12 @@ impl AnalyticsServer {
             )]));
         }
 
-        let datasets = self.datasets.read().await;
         let comparison_type = request.comparison_type.as_deref().unwrap_or("summary");
+        let comparison = match parse_choice(&COMPARISONS, comparison_type) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let datasets = self.datasets.read().await;
 
         let mut output = format!("Dataset Comparison\n{}\n\n", "=".repeat(40));
         output.push_str(&format!("Datasets: {:?}\n", request.datasets));
@@ -333,8 +444,8 @@ impl AnalyticsServer {
             all_stats.insert(ds_name.clone(), ds_stats);
         }
 
-        match comparison_type {
-            "summary" => {
+        match comparison {
+            Comparison::Summary => {
                 // Side-by-side comparison table
                 for col_name in &request.columns {
                     output.push_str(&format!("\nColumn: {}\n{}\n", col_name, "-".repeat(60)));
@@ -382,7 +493,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            "distribution" => {
+            Comparison::Distribution => {
                 // Distribution comparison (basic)
                 for col_name in &request.columns {
                     output.push_str(&format!(
@@ -409,7 +520,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            "correlation" => {
+            Comparison::Correlation => {
                 // Correlation comparison (if multiple columns)
                 if request.columns.len() < 2 {
                     output.push_str("Correlation comparison requires at least 2 columns\n");
@@ -427,9 +538,6 @@ impl AnalyticsServer {
                         }
                     }
                 }
-            }
-            _ => {
-                output.push_str(&format!("Unknown comparison type: '{}'. Use 'summary', 'distribution', or 'correlation'.\n", comparison_type));
             }
         }
 
@@ -998,25 +1106,29 @@ impl AnalyticsServer {
 
     /// Compute value counts for a column.
     #[tool(
-        description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages."
+        description = "Count the rows per distinct value of a column, most frequent first (tied counts in the order the values first appear); missing values are one group (R: dplyr::count(sort = TRUE)). normalize = true gives proportions instead: count / number of rows, the missing group included (dplyr's n / sum(n)). Saves the table as a dataset (column 'count' or 'proportion') and shows its first 10 rows."
     )]
     pub async fn munge_value_counts(
         &self,
         Parameters(request): Parameters<ValueCountsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let Some(dataset) = dataset else {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Dataset '{}' not found.",
+                request.dataset
+            ))]));
         };
+        let normalize = request.normalize.unwrap_or(false);
+        let measure = if normalize { "proportion" } else { "count" };
+        if request.column == measure {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Value counts failed: the result names its column '{measure}', which is the name \
+                 of the counted column; rename it first (munge_rename)"
+            ))]));
+        }
 
-        let result = match value_counts(dataset, &request.column) {
+        let result = match value_counts_with(&dataset, &request.column, normalize) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1029,39 +1141,57 @@ impl AnalyticsServer {
         let result_name = request
             .result_name
             .unwrap_or_else(|| format!("{}_value_counts", request.column));
-        let n_rows = result.nrows();
+        let n_values = result.nrows();
 
-        // Format output for display
         let mut output = format!(
-            "Value Counts for '{}'\n{}\n",
+            "Value counts for '{}' ({} rows; missing values form one group{})\n{}\n",
             request.column,
+            dataset.nrows(),
+            if normalize {
+                "; proportion = count / rows"
+            } else {
+                ""
+            },
             "=".repeat(40)
         );
-
-        // Show first few rows
-        let show_n = 10.min(n_rows);
+        let show_n = 10.min(n_values);
         output.push_str(&format!(
-            "Showing top {} of {} unique values:\n\n",
-            show_n, n_rows
+            "Showing {show_n} of {n_values} distinct values:\n\n"
         ));
 
         let df = result.df();
-        for i in 0..show_n {
-            let val_col = df.column(&request.column).ok();
-            let count_col = df.column("count").ok();
-
-            if let (Some(v), Some(c)) = (val_col, count_col) {
-                if let (Ok(val), Ok(cnt)) = (v.get(i), c.get(i)) {
-                    output.push_str(&format!("  {:?}: {}\n", val, cnt));
+        if let (Ok(values), Ok(tallies)) = (df.column(&request.column), df.column(measure)) {
+            let quoted = matches!(
+                values.dtype(),
+                p2a_core::polars::prelude::DataType::String
+                    | p2a_core::polars::prelude::DataType::Categorical(..)
+                    | p2a_core::polars::prelude::DataType::Enum(..)
+            );
+            for i in 0..show_n {
+                let (Ok(value), Ok(tally)) = (values.get(i), tallies.get(i)) else {
+                    continue;
+                };
+                let label = cell_label(&value, quoted);
+                if normalize {
+                    let p = tally.extract::<f64>().unwrap_or(f64::NAN);
+                    output.push_str(&format!(
+                        "  {label}: {} ({:.1}%)\n",
+                        format_significant(p),
+                        100.0 * p
+                    ));
+                } else {
+                    output.push_str(&format!("  {label}: {}\n", tally.str_value()));
                 }
             }
         }
 
-        drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
-        output.push_str(&format!("\nFull result saved as '{}'", result_name));
+        output.push_str(&format!(
+            "\nFull result saved as '{}' (columns: {}, {measure})",
+            result_name, request.column
+        ));
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
@@ -1199,7 +1329,7 @@ impl AnalyticsServer {
 
     /// Drop rows with null values.
     #[tool(
-        description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null."
+        description = "Drop rows containing missing values. how: 'any' (default; drop a row with any missing value in the checked columns) or 'all' (only rows missing in every checked column); case-insensitive, anything else is an error."
     )]
     pub async fn munge_drop_na(
         &self,
@@ -1221,7 +1351,10 @@ impl AnalyticsServer {
             .columns
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        let how = request.how.as_deref().unwrap_or("any");
+        let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+            Ok(how) => how,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         let orig_rows = dataset.nrows();
         let result = match drop_na(dataset, columns.as_deref(), how) {
@@ -1252,7 +1385,7 @@ impl AnalyticsServer {
 
     /// Fill missing values using a strategy.
     #[tool(
-        description = "Fill missing values (null, and NaN in float columns) using a strategy: 'mean', 'median', 'forward', 'backward', 'zero', or a constant value. Mean and median use the observed values; a column with no observed value is an error."
+        description = "Fill missing values (null, and NaN in float columns). strategy: 'mean' or 'median' of the observed values (numeric columns; integer columns become float), 'mode' (the most frequent observed value; ties go to the first value in sorted order, as R's names(which.max(table(x)))), 'forward'/'backward' (the last or next observed value, as tidyr::fill), 'zero' (0, FALSE or an empty string), or 'constant' with the fill value in 'value' (kept as given and read in the column's type). Keywords are case-insensitive. Without 'columns' every column is filled, and a column whose type cannot take the strategy or the constant is skipped and listed. A column without observed values is an error for mean, median and mode."
     )]
     pub async fn munge_fill_na(
         &self,
@@ -1277,16 +1410,10 @@ impl AnalyticsServer {
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
-        let strategy = match request.strategy.to_lowercase().as_str() {
-            "mean" => FillStrategy::Mean,
-            "median" => FillStrategy::Median,
-            "forward" => FillStrategy::Forward,
-            "backward" => FillStrategy::Backward,
-            "zero" => FillStrategy::Zero,
-            val => {
-                // Try to use as a constant value string
-                FillStrategy::Constant(val.to_string())
-            }
+        let strategy = match parse_fill_strategy(Some(&request.strategy), request.value.as_deref())
+        {
+            Ok(strategy) => strategy,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let result_name = request
@@ -1325,17 +1452,17 @@ impl AnalyticsServer {
                     };
                     match &strategy {
                         FillStrategy::Constant(value) => format!(
-                            "filling {nulls} nulls with the {}-byte constant `strategy`",
+                            "filling {nulls} nulls with the {}-byte constant `value`",
                             value.len()
                         ),
                         FillStrategy::Mean | FillStrategy::Median => format!(
                             "filling {nulls} nulls with the `strategy` {}, which makes each \
                              numeric column Float64",
-                            request.strategy.to_lowercase()
+                            strategy.kind()
                         ),
                         _ => format!(
                             "filling {nulls} nulls with the `strategy` {}",
-                            request.strategy.to_lowercase()
+                            strategy.kind()
                         ),
                     }
                 },
@@ -1365,8 +1492,7 @@ impl AnalyticsServer {
         datasets.insert(result_name.clone(), outcome.dataset);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Filled null values with strategy '{}', saved as '{}'. {}.",
-            request.strategy, result_name, summary
+            "{summary}\nSaved as '{result_name}'."
         ))]))
     }
 
@@ -1610,7 +1736,7 @@ impl AnalyticsServer {
 
     /// Replace exact values in a column.
     #[tool(
-        description = "Replace exact values in a column with a new value. Use to clean sentinel values like -99, 'N/A', or 'missing' by replacing them (use null as new_value to convert to missing). For pattern-based replacement, use str_regex_replace. Call this directly — do NOT call head_dataset or describe_dataset first."
+        description = "Replace exact values in a column with a new value. Use to clean sentinel values like -99, 'N/A', or 'missing' by replacing them (new_value null, or omitted, writes missing values, as R's dplyr::na_if). For pattern-based replacement, use str_regex_replace. Call this directly — do NOT call head_dataset or describe_dataset first."
     )]
     pub async fn str_replace_value(
         &self,
@@ -1635,13 +1761,15 @@ impl AnalyticsServer {
             .clone()
             .unwrap_or_else(|| request.dataset.clone());
 
+        // A missing new value adds no text to a String column.
+        let new_value = request.new_value.as_deref();
         // Each matching value of a String column becomes `new_value`.
         if bound::active() {
             let bounded = match bound::replace_value(
                 dataset.df(),
                 &request.column,
                 &request.old_value,
-                &request.new_value,
+                new_value.unwrap_or(""),
             ) {
                 Ok(bounded) => bounded,
                 Err(e) => {
@@ -1658,7 +1786,7 @@ impl AnalyticsServer {
                     || {
                         format!(
                             "replacing {matches} values of `column` with the {}-byte `new_value`",
-                            request.new_value.len()
+                            new_value.map_or(0, str::len)
                         )
                     },
                     &["use a shorter new_value", "filter the rows first"],
@@ -1667,13 +1795,14 @@ impl AnalyticsServer {
             }
         }
 
-        let result = match replace(
+        let outcome = match replace_with(
             &dataset,
             &request.column,
             &request.old_value,
-            &request.new_value,
+            new_value,
+            &ReplaceOptions::default(),
         ) {
-            Ok(ds) => ds,
+            Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Replace failed: {}",
@@ -1681,13 +1810,13 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+        let summary = outcome.summary();
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(result_name.clone(), result);
+        datasets.insert(result_name.clone(), outcome.dataset);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Replaced '{}' with '{}' in column '{}', saved as '{}'",
-            request.old_value, request.new_value, request.column, result_name
+            "{summary}\nSaved as '{result_name}'."
         ))]))
     }
 
@@ -3020,7 +3149,7 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_core::data::munging::bin;
     use p2a_core::data::munging::{
-        JoinShape, JoinType, MungeResult, cast_columns, concat, fill_na,
+        JoinShape, JoinType, MungeResult, cast_columns, concat, fill_na, replace,
     };
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
@@ -3485,7 +3614,7 @@ mod tests {
             dataset: "d".into(),
             column: "s".into(),
             old_value: "v3".into(),
-            new_value: new_value.into(),
+            new_value: Some(new_value.into()),
             result_name: Some(result.into()),
         };
         // 286 of 2,000 rows replaced by 2,000 bytes each: about 570 kB.
@@ -3619,10 +3748,11 @@ mod tests {
             .map(|i| (i % 10 == 0).then_some("kept"))
             .collect();
         let qs = QuotaSession::new(vec![("d", df!("s" => s, "x" => noise(2_000)).unwrap())]);
-        let req = |strategy: &str, result: &str| FillNaRequest {
+        let req = |value: &str, result: &str| FillNaRequest {
             dataset: "d".into(),
             columns: Some(vec!["s".into()]),
-            strategy: strategy.into(),
+            strategy: "constant".into(),
+            value: Some(value.into()),
             result_name: Some(result.into()),
         };
         // 1,800 nulls filled with 1,000 bytes each: about 1.8 MB.
@@ -3631,7 +3761,7 @@ mod tests {
             256 << 10,
             qs.server
                 .munge_fill_na(Parameters(req(&"z".repeat(1_000), "big"))),
-            &["1800 nulls", "`strategy`"],
+            &["1800 nulls", "`value`"],
             qs.server.munge_fill_na(Parameters(req("none", "small"))),
             "small",
         );
@@ -4099,7 +4229,8 @@ mod tests {
             server.munge_fill_na(Parameters(FillNaRequest {
                 dataset: "d".into(),
                 columns: None,
-                strategy: "none".into(),
+                strategy: "constant".into(),
+                value: Some("none".into()),
                 result_name: Some("f".into()),
             })),
         );
@@ -4140,6 +4271,7 @@ mod tests {
                         dataset: "d".into(),
                         columns: Some(vec!["s".into()]),
                         strategy: strategy.into(),
+                        value: None,
                         result_name: Some(strategy.into()),
                     })),
                 )
@@ -4496,6 +4628,64 @@ mod tests {
     }
 
     #[test]
+    fn option_tables_are_consistent() {
+        DROP_HOW.validate().unwrap();
+        BATCH_OPERATIONS.validate().unwrap();
+        COMPARISONS.validate().unwrap();
+        assert_eq!(parse_choice(&DROP_HOW, " ALL "), Ok("all"));
+    }
+
+    #[test]
+    fn value_count_labels_quote_text_and_name_missing() {
+        // DATA-65: values printed as values, not polars' Debug form
+        assert_eq!(cell_label(&AnyValue::Null, false), "NA (missing)");
+        assert_eq!(cell_label(&AnyValue::String("N/A"), true), "'N/A'");
+        assert_eq!(cell_label(&AnyValue::Int64(2), false), "2");
+        assert_eq!(cell_label(&AnyValue::Boolean(true), false), "true");
+    }
+
+    #[test]
+    fn parse_fill_strategy_reads_keywords_and_values() {
+        // DATA-28 / LLM-12: keywords case-insensitive with aliases, constants from `value`, unknown refused
+        assert!(matches!(
+            parse_fill_strategy(Some("ffill"), None),
+            Ok(FillStrategy::Forward)
+        ));
+        assert!(matches!(
+            parse_fill_strategy(Some("Most Frequent"), None),
+            Ok(FillStrategy::Mode)
+        ));
+        assert!(
+            matches!(parse_fill_strategy(None, Some("Unknown")), Ok(FillStrategy::Constant(v)) if v == "Unknown")
+        );
+        assert!(
+            matches!(parse_fill_strategy(Some(" "), Some("x")), Ok(FillStrategy::Constant(v)) if v == "x")
+        );
+        let none = parse_fill_strategy(None, None).unwrap_err();
+        assert_eq!(
+            none,
+            "fill_na needs a strategy (mean | median | mode | forward | backward | zero | constant) or a fill value in 'value'"
+        );
+        let unknown = parse_fill_strategy(Some("Unknown"), None).unwrap_err();
+        assert_eq!(
+            unknown,
+            "unknown fill strategy 'Unknown'; expected one of: mean, median, mode, forward, backward, zero, constant. \
+                            To fill with a constant, use strategy 'constant' and put the fill value in 'value'."
+        );
+        let stray = parse_fill_strategy(Some("mean"), Some("3")).unwrap_err();
+        assert!(
+            stray.contains("only used with strategy 'constant', not 'mean'")
+                && !stray.contains("To fill with"),
+            "{stray}"
+        );
+        assert_eq!(
+            fill_label(&FillStrategy::Constant("Unknown".into())),
+            "constant 'Unknown'"
+        );
+        assert_eq!(fill_label(&FillStrategy::Mode), "mode");
+    }
+
+    #[test]
     fn result_bounds_never_undercount_what_the_quotas_charge() {
         // polars shares a String column's buffers when it gathers from one
         // array and copies each value it gathers from several.
@@ -4564,6 +4754,7 @@ mod tests {
             FillStrategy::Forward,
             FillStrategy::Backward,
             FillStrategy::Zero,
+            FillStrategy::Mode,
         ] {
             for columns in [None, Some(&["s", "x"][..])] {
                 let built = fill_na(&ds, columns, strategy.clone());
@@ -4577,6 +4768,24 @@ mod tests {
                 );
             }
         }
+        // A mode fill copies the most frequent value into every null: a long
+        // mode and many nulls.
+        let mut moded = df.clone();
+        let m = chunked_like(&df, "m", |i| match i % 10 {
+            0 => Some("M".repeat(100)),
+            1 => Some(format!("u{i}")),
+            _ => None,
+        });
+        moded.with_column(m.into_column()).unwrap();
+        covers(
+            "munge_fill_na mode of long text",
+            bound::fill_na(&moded, Some(&["m"]), &FillStrategy::Mode).unwrap(),
+            fill_na(
+                &Dataset::new(moded.clone()),
+                Some(&["m"]),
+                FillStrategy::Mode,
+            ),
+        );
         // Mostly nulls, two long values, a fill that crosses the arrays: the
         // filled text is counted exactly.
         let sparse = with_sparse_text(&df);

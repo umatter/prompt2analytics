@@ -13,7 +13,7 @@ pub struct BatchProcessRequest {
 
     /// Operation to perform on each dataset
     #[schemars(
-        description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression)."
+        description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression); case-insensitive; anything else is an error."
     )]
     pub operation: String,
 
@@ -42,7 +42,7 @@ pub struct CompareDatasetRequest {
 
     /// Type of comparison
     #[schemars(
-        description = "Comparison type: 'summary' (side-by-side stats), 'correlation' (correlation differences), or 'distribution' (distribution comparison)."
+        description = "Comparison type: 'summary' (side-by-side stats, the default), 'correlation' (correlation differences), or 'distribution' (distribution comparison); case-insensitive; anything else is an error."
     )]
     pub comparison_type: Option<String>,
 }
@@ -245,8 +245,10 @@ pub struct ValueCountsRequest {
     #[schemars(description = "Column name to compute value counts for.")]
     pub column: String,
 
-    /// Whether to normalize to percentages
-    #[schemars(description = "If true, return percentages instead of counts.")]
+    /// Whether to return proportions instead of counts
+    #[schemars(
+        description = "If true, the result holds proportions (count / rows, 0 to 1; the missing group counts) in a column 'proportion' instead of counts in 'count'. Default false."
+    )]
     pub normalize: Option<bool>,
 
     /// Optional name for the resulting dataset
@@ -324,7 +326,7 @@ pub struct DropNaRequest {
 
     /// How to drop rows
     #[schemars(
-        description = "How to drop: 'any' (drop if any null) or 'all' (drop only if all null). Default is 'any'."
+        description = "How to drop: 'any' (default: drop a row with any missing value) or 'all' (only rows missing in every checked column); case-insensitive; anything else is an error."
     )]
     pub how: Option<String>,
 
@@ -347,9 +349,15 @@ pub struct FillNaRequest {
 
     /// Fill strategy
     #[schemars(
-        description = "Fill strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
+        description = "Fill strategy: 'mean' or 'median' of the observed values, 'mode' (the most frequent observed value), 'forward' or 'backward' (the last or next observed value), 'zero', or 'constant' (with 'value'). Case-insensitive; aliases 'ffill'/'locf', 'bfill'/'nocb', 'most_frequent'."
     )]
     pub strategy: String,
+
+    /// The fill value of strategy 'constant'
+    #[schemars(
+        description = "The fill value for strategy 'constant' (required then, refused with the other strategies). Kept exactly as given and read in each column's own type: a number for numeric columns, TRUE/FALSE for booleans, YYYY-MM-DD for dates, any text for text and categorical columns."
+    )]
+    pub value: Option<String>,
 
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]
@@ -448,9 +456,11 @@ pub struct ReplaceValueRequest {
     #[schemars(description = "Exact value to search for and replace.")]
     pub old_value: String,
 
-    /// Replacement value
-    #[schemars(description = "Value to replace matches with.")]
-    pub new_value: String,
+    /// Replacement value; `None` writes a missing value
+    #[schemars(
+        description = "The replacement. JSON null, an omitted new_value, or the text 'NA', 'null' (any case) or '' writes a missing value; any other text is read in the column's type (a number for numeric columns, TRUE/FALSE, YYYY-MM-DD)."
+    )]
+    pub new_value: Option<String>,
 
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]

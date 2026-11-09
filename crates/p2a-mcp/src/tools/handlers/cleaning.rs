@@ -12,19 +12,22 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
+use p2a_core::data::munging::clean::fill_na_with;
 use p2a_core::data::{
-    CleaningOperation, CleaningSession, FillStrategy, SuggestionPriority, deduplicate, drop_na,
-    fill_na, filter, generate_quality_profile, generate_suggestions, preview_cleaning, replace,
-    to_lowercase, to_uppercase, trim, verify_cleaning,
+    CleaningOperation, CleaningSession, SuggestionPriority, deduplicate, drop_na, filter,
+    generate_quality_profile, generate_suggestions, preview_cleaning, replace, to_lowercase,
+    to_uppercase, trim, verify_cleaning,
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::handlers::munging::{DROP_HOW, fill_label, parse_choice, parse_fill_strategy};
 use crate::tools::requests::cleaning::{
     CleaningRollbackRequest, CleaningSessionApplyRequest, CleaningSessionCheckpointsRequest,
     CleaningSessionStartRequest, CleaningSessionStatusRequest, DataQualityProfileRequest,
     ListCleaningSessionsRequest, PreviewCleaningRequest, SuggestCleaningRequest,
     VerifyCleaningRequest,
 };
+use p2a_core::options::Choices;
 
 #[tool_router(router = cleaning_router, vis = "pub")]
 impl AnalyticsServer {
@@ -107,7 +110,7 @@ impl AnalyticsServer {
 
     /// Preview what a cleaning operation would do before applying it.
     #[tool(
-        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter."
+        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant."
     )]
     pub async fn preview_cleaning(
         &self,
@@ -144,15 +147,30 @@ impl AnalyticsServer {
                     .clone();
                 CleaningOperation::ToUppercase { column }
             }
-            "fill_na" | "fillna" => CleaningOperation::FillNa {
-                columns: request.columns,
-                strategy: request.strategy.unwrap_or_else(|| "constant".to_string()),
-                value: request.value,
-            },
-            "drop_na" | "dropna" => CleaningOperation::DropNa {
-                columns: request.columns,
-                how: request.how.unwrap_or_else(|| "any".to_string()),
-            },
+            "fill_na" | "fillna" => {
+                let strategy = match parse_fill_strategy(
+                    request.strategy.as_deref(),
+                    request.value.as_deref(),
+                ) {
+                    Ok(strategy) => strategy,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
+                CleaningOperation::FillNa {
+                    columns: request.columns,
+                    strategy: strategy.kind().to_string(),
+                    value: request.value,
+                }
+            }
+            "drop_na" | "dropna" => {
+                let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+                    Ok(how) => how,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
+                CleaningOperation::DropNa {
+                    columns: request.columns,
+                    how: how.to_string(),
+                }
+            }
             "deduplicate" | "dedup" => CleaningOperation::Deduplicate {
                 columns: request.columns,
                 keep: request.keep.unwrap_or_else(|| "first".to_string()),
@@ -339,7 +357,7 @@ impl AnalyticsServer {
 
     /// Apply a cleaning operation within a session.
     #[tool(
-        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed."
+        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed. fill_na strategies: mean, median, mode, forward, backward, zero, constant (with value); a value without a strategy means constant. Pass output_dataset to store the session's current data as a dataset that analysis tools can read."
     )]
     pub async fn cleaning_session_apply(
         &self,
@@ -371,13 +389,17 @@ impl AnalyticsServer {
                     McpError::invalid_request(format!("{operation} requires a column"), None)
                 })
         };
-        type Apply = Box<
-            dyn FnOnce(&p2a_core::data::Dataset) -> Result<p2a_core::data::Dataset, String> + Send,
+        type Apply<'a> = Box<
+            dyn FnOnce(&p2a_core::data::Dataset) -> Result<p2a_core::data::Dataset, String>
+                + Send
+                + 'a,
         >;
+        // What a fill wrote, for the reply (the session's report counts cells, not values).
+        let mut fill_note = String::new();
 
         // The operation and its required parameters are resolved before the
         // session is touched, so a request that is refused copies nothing.
-        let (description, apply): (String, Apply) = match operation_type.as_str() {
+        let (description, apply): (String, Apply<'_>) = match operation_type.as_str() {
             "trim" => {
                 let cols = request.columns.clone();
                 (
@@ -402,33 +424,35 @@ impl AnalyticsServer {
                 )
             }
             "fill_na" | "fillna" => {
-                let strategy_str = request.strategy.as_deref().unwrap_or("constant");
-                let value = request.value.clone();
-                let cols = request.columns.clone();
-                let strategy = match strategy_str {
-                    "mean" => FillStrategy::Mean,
-                    "median" => FillStrategy::Median,
-                    "forward" => FillStrategy::Forward,
-                    "backward" => FillStrategy::Backward,
-                    "constant" | _ => {
-                        FillStrategy::Constant(value.unwrap_or_else(|| "0".to_string()))
-                    }
+                let strategy = match parse_fill_strategy(
+                    request.strategy.as_deref(),
+                    request.value.as_deref(),
+                ) {
+                    Ok(strategy) => strategy,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
                 };
+                let cols = request.columns.clone();
+                let note = &mut fill_note;
                 (
-                    format!("fill_na with {:?}", strategy),
+                    format!("fill_na ({})", fill_label(&strategy)),
                     Box::new(move |ds| {
-                        fill_na(ds, to_str_slice(&cols).as_deref(), strategy)
-                            .map_err(|e| e.to_string())
+                        let outcome = fill_na_with(ds, to_str_slice(&cols).as_deref(), &strategy)
+                            .map_err(|e| e.to_string())?;
+                        *note = outcome.summary();
+                        Ok(outcome.dataset)
                     }),
                 )
             }
             "drop_na" | "dropna" => {
-                let how = request.how.as_deref().unwrap_or("any").to_string();
+                let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+                    Ok(how) => how,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
                 let cols = request.columns.clone();
                 (
                     format!("drop_na ({})", how),
                     Box::new(move |ds| {
-                        drop_na(ds, to_str_slice(&cols).as_deref(), &how).map_err(|e| e.to_string())
+                        drop_na(ds, to_str_slice(&cols).as_deref(), how).map_err(|e| e.to_string())
                     }),
                 )
             }
@@ -490,10 +514,29 @@ impl AnalyticsServer {
             Arc::make_mut(shared).apply_operation(&operation_type, &description, params, apply);
 
         match result {
-            Ok(report) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Operation applied successfully!\n\n{}",
-                report.summary()
-            ))])),
+            Ok(report) => {
+                let mut reply = String::from("Operation applied successfully!\n\n");
+                if !fill_note.is_empty() {
+                    reply.push_str(&fill_note);
+                    reply.push_str("\n\n");
+                }
+                reply.push_str(&report.summary());
+                let current = request
+                    .output_dataset
+                    .is_some()
+                    .then(|| shared.current_dataset().clone());
+                drop(sessions);
+                reply.push_str(
+                    &self
+                        .store_session_result(
+                            "cleaning_session_apply",
+                            request.output_dataset,
+                            current,
+                        )
+                        .await?,
+                );
+                Ok(CallToolResult::success(vec![Content::text(reply)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Operation failed: {}",
                 e
@@ -503,7 +546,7 @@ impl AnalyticsServer {
 
     /// Rollback a cleaning session to a previous checkpoint.
     #[tool(
-        description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation)."
+        description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation). Pass output_dataset to store the session's current data as a dataset that analysis tools can read."
     )]
     pub async fn cleaning_rollback(
         &self,
@@ -536,7 +579,7 @@ impl AnalyticsServer {
         match result {
             Ok(()) => {
                 let status = session.status();
-                Ok(CallToolResult::success(vec![Content::text(format!(
+                let mut reply = format!(
                     "Rollback successful!\n\n\
                      Current checkpoint: {}\n\
                      Rows: {}\n\
@@ -544,7 +587,18 @@ impl AnalyticsServer {
                     status.current_checkpoint,
                     status.current_row_count,
                     status.current_completeness * 100.0
-                ))]))
+                );
+                let current = request
+                    .output_dataset
+                    .is_some()
+                    .then(|| session.current_dataset().clone());
+                drop(sessions);
+                reply.push_str(
+                    &self
+                        .store_session_result("cleaning_rollback", request.output_dataset, current)
+                        .await?,
+                );
+                Ok(CallToolResult::success(vec![Content::text(reply)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Rollback failed: {}",
@@ -618,17 +672,13 @@ impl AnalyticsServer {
         let report = generate_suggestions(&profile);
 
         // Parse minimum priority filter
-        let min_priority =
-            request
-                .min_priority
-                .as_ref()
-                .and_then(|p| match p.to_lowercase().as_str() {
-                    "low" => Some(SuggestionPriority::Low),
-                    "medium" => Some(SuggestionPriority::Medium),
-                    "high" => Some(SuggestionPriority::High),
-                    "critical" => Some(SuggestionPriority::Critical),
-                    _ => None,
-                });
+        let min_priority = match request.min_priority.as_deref() {
+            None => None,
+            Some(p) => match parse_choice(&MIN_PRIORITY, p) {
+                Ok(p) => Some(p),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            },
+        };
 
         // Filter suggestions
         let mut suggestions: Vec<_> = report
@@ -691,7 +741,7 @@ impl AnalyticsServer {
                     s.estimated_impact.impact_description,
                     s.operation,
                     s.parameters.column.as_deref().unwrap_or("-"),
-                    s.parameters.value.as_deref().unwrap_or("-"),
+                    suggested_value(s.operation.as_str(), &s.parameters),
                     s.parameters.strategy.as_deref().unwrap_or("-"),
                 ));
 
@@ -709,6 +759,77 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+}
+
+/// The `min_priority` of `suggest_cleaning`.
+const MIN_PRIORITY: Choices<SuggestionPriority> = Choices {
+    option: "min_priority",
+    values: &[
+        (&["low"], SuggestionPriority::Low),
+        (&["medium"], SuggestionPriority::Medium),
+        (&["high"], SuggestionPriority::High),
+        (&["critical"], SuggestionPriority::Critical),
+    ],
+};
+
+/// The `- value:` of a suggestion. A computed fill value (the median or mode `suggest_cleaning`
+/// shows) is for reference only: `fill_na` computes it itself and refuses a value with any strategy
+/// but 'constant'.
+fn suggested_value(operation: &str, parameters: &p2a_core::data::SuggestionParameters) -> String {
+    let value = parameters.value.as_deref().unwrap_or("-");
+    match (
+        operation,
+        parameters.value.as_deref(),
+        parameters.strategy.as_deref(),
+    ) {
+        ("fill_na", Some(_), Some(strategy))
+            if !strategy.trim().eq_ignore_ascii_case("constant") =>
+        {
+            format!("{value} (shown for reference; pass only strategy '{strategy}' to fill_na)")
+        }
+        _ => value.to_string(),
+    }
+}
+
+impl AnalyticsServer {
+    /// The end of a cleaning step's reply: stores `current` (the session's
+    /// dataset after the step, cloned with the session lock released) under
+    /// `output_dataset` and says so, or says how to keep the result. With
+    /// quotas on, the stored copy is charged as a dataset first; a shortfall
+    /// is the quota refusal, and the step stays applied in the session.
+    async fn store_session_result(
+        &self,
+        tool: &str,
+        output_dataset: Option<String>,
+        current: Option<p2a_core::data::Dataset>,
+    ) -> Result<String, McpError> {
+        let (Some(name), Some(dataset)) = (output_dataset, current) else {
+            return Ok(
+                "\nThe result is in the cleaning session only; pass output_dataset to \
+                 store it as a dataset."
+                    .to_string(),
+            );
+        };
+        if crate::session::dataset_admission_active() {
+            // The frame's whole charge (structure and values), as the store will charge it;
+            // admit_charge adds the name.
+            let bytes = crate::session::frame_bytes(dataset.df());
+            if let Err(shortfall) = crate::session::admit_charge(&name, bytes).await {
+                return Err(crate::session::quota_refusal(format!(
+                    "{tool} applied its step in the cleaning session, but storing the result as \
+                     '{name}' would take {}, so {}. The step stays applied \
+                     in the cleaning session; nothing was stored.",
+                    crate::session::fmt_bytes(bytes),
+                    shortfall.outcome()
+                )));
+            }
+        }
+        let (rows, cols) = (dataset.nrows(), dataset.ncols());
+        self.datasets.write().await.insert(name.clone(), dataset);
+        Ok(format!(
+            "\nSaved as '{name}' ({rows} rows x {cols} columns)."
+        ))
     }
 }
 

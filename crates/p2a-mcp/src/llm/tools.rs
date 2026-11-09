@@ -250,7 +250,7 @@ fn get_base_system_prompt() -> &'static str {
 ## EXAMPLES OF CORRECT BEHAVIOR
 
 User: "What's the average income in my dataset?"
-✓ CORRECT: Call `describe_dataset` to get statistics
+✓ CORRECT: Call `describe_dataset`: it reports n, mean, sd, min, quartiles and max for every numeric column
 ✗ WRONG: Try to calculate or estimate the average yourself
 
 User: "Run a regression of price on sqft and bedrooms"
@@ -526,6 +526,13 @@ pub fn get_system_prompt_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statistics_example_says_what_describe_dataset_returns() {
+        // LLM-6: the example sends the model to describe_dataset for an average; it must say the tool returns it
+        assert!(get_system_prompt().contains(
+            "Call `describe_dataset`: it reports n, mean, sd, min, quartiles and max for every numeric column"));
+    }
 
     #[test]
     fn test_system_prompt_not_empty() {

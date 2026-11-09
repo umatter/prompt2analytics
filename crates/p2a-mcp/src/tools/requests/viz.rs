@@ -21,7 +21,7 @@ pub struct HistogramRequest {
 
     /// Number of bins (optional, auto-calculated if not specified)
     #[schemars(
-        description = "Number of bins for the histogram. If not specified, uses Sturges' rule."
+        description = "Number of bins (at least 1). Default R's nclass.Sturges: ceiling(log2(n) + 1)."
     )]
     pub bins: Option<usize>,
 
@@ -312,7 +312,7 @@ pub struct ResidualDiagnosticsRequest {
 
     /// Column name for leverage (hat) values (optional)
     #[schemars(
-        description = "Optional column with leverage (hat) values. If not provided, will be estimated."
+        description = "Optional column with the model's hat values (R: hatvalues(model)). Without it, the hat values of a regression on one predictor are used, which is exact only for such a model."
     )]
     pub leverage_column: Option<String>,
 }
@@ -323,13 +323,13 @@ pub struct ResidualDiagnosticsRequest {
 pub struct DendrogramRequest {
     /// Linkage matrix from hierarchical clustering (JSON array of arrays)
     #[schemars(
-        description = "Linkage matrix from hierarchical clustering. Array of [cluster1, cluster2, distance, size] tuples."
+        description = "One [cluster1, cluster2, height, size] row per merge (scipy linkage format, 0-based ids: samples 0..n-1, row i creates cluster n + i)."
     )]
     pub linkage_matrix: Vec<Vec<f64>>,
 
     /// Optional labels for leaf nodes
     #[schemars(
-        description = "Optional labels for leaf nodes (original samples). If not provided, uses indices."
+        description = "One label per sample (rows + 1), in sample order. Default: the sample indices."
     )]
     pub labels: Option<Vec<String>>,
 

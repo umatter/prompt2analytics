@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_fill_na",
+      "name": "MCP munge_fill_na and the cleaning fill_na: mode fill, keyword parsing, constants from value",
+      "category": "interfaces",
+      "reference": "names(which.max(table(x))); tidyr::replace_na",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_munging_fill_mode"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_fill_na_mode"
+      ],
+      "quantities": [
+        "filled k, f, s through munge_fill_na (strategy 'mode' and 'MODE')",
+        "fill summary (cells and values per column)",
+        "preview_cleaning and cleaning_session_apply fill values for 'mode'"
+      ],
+      "tolerance": "exact (fills copy observed values)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_value_counts",
+      "name": "MCP munge_value_counts with and without normalize",
+      "category": "interfaces",
+      "reference": "dplyr::count(sort = TRUE); n / sum(n)",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_munging_value_counts"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_value_counts_normalize"
+      ],
+      "quantities": [
+        "values (NA a group)",
+        "counts",
+        "proportions",
+        "reply lines"
+      ],
+      "tolerance": "exact (counts; proportions are the same IEEE divisions)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_str_replace_value",
+      "name": "MCP str_replace_value with new_value null or omitted (missing values)",
+      "category": "interfaces",
+      "reference": "dplyr::na_if",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_munging_na_if"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_str_replace_value_null"
+      ],
+      "quantities": [
+        "integer, double and text columns after replacing a sentinel with NA"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_describe_dataset",
+      "name": "MCP describe_dataset column summaries",
+      "category": "interfaces",
+      "reference": "summary(x); sd(x, na.rm = TRUE); quantile(x, type = 7, na.rm = TRUE); head(sort(table(x), decreasing = TRUE), 5)",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_describe_columns"
+      ],
+      "tests": [
+        "p2a-mcp::tools::handlers::data::tests::test_validate_mcp_describe_dataset_summaries",
+        "p2a-mcp::tools::handlers::data::tests::test_validate_mcp_describe_dataset_nan_inf",
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_describe_dataset_statistics"
+      ],
+      "quantities": [
+        "n and missing per column",
+        "mean, sd, min, quartiles, median, max of numeric columns",
+        "distinct values and the five most frequent (order and counts)",
+        "NaN counted as missing, Inf kept (Rust fixtures)"
+      ],
+      "tolerance": "counts, min, max and level tables exact; mean, quartiles 1e-6 and sd 1e-5 relative (validation/README.md, n < 100); MCP text at 7 significant digits",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_dendrogram",
+      "name": "MCP viz_dendrogram: R hclust() merge matrix converted to the 0-based linkage",
+      "category": "interfaces",
+      "reference": "stats::hclust(stats::dist(x), method = 'complete'): merge, height",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "viz_dendrogram_hclust"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_dendrogram_hclust"
+      ],
+      "quantities": [
+        "samples and merge steps",
+        "maximum merge height",
+        "refusal of the unconverted R matrix"
+      ],
+      "tolerance": "counts exact; maximum height as printed with 4 decimals (Tol::printed(4))",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_residual_diagnostics",
+      "name": "MCP viz_residual_diagnostics: influential rows and residual standard error",
+      "category": "interfaces",
+      "reference": "stats::cooks.distance; summary.lm sigma",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "viz_residual_diag"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_residual_diagnostics_cooks"
+      ],
+      "quantities": [
+        "rows with Cook's distance > 0.5 (with and without hat values)",
+        "residual standard error",
+        "warning without hat values"
+      ],
+      "tolerance": "rows exact; sigma 7 significant digits (5e-7 relative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_viz_histogram",
+      "name": "MCP viz_histogram: Sturges bin count and bin counts",
+      "category": "interfaces",
+      "reference": "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1), right = FALSE, include.lowest = TRUE)",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "viz_histogram_bins"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_histogram_counts"
+      ],
+      "quantities": [
+        "number of bins",
+        "count per bin"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

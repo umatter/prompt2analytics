@@ -13,7 +13,7 @@ use serde::Deserialize;
 pub struct LoadDatasetRequest {
     /// Path to the data file
     #[schemars(
-        description = "Path of the data file, relative to the server's data directory (for example 'sales.csv' or 'raw/sales.csv'). An absolute path must lie inside that directory. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats."
+        description = "Path of the data file, relative to the server's data directory (for example 'sales.csv' or 'raw/sales.csv'). An absolute path must lie inside that directory. Supports CSV, Parquet (.parquet, .pq), Excel (xlsx, xls, xlsb, ods), Stata (dta), SAS (sas7bdat), JSON Lines (.jsonl, .ndjson) and JSON record arrays (.json)."
     )]
     pub path: String,
 
@@ -46,7 +46,9 @@ pub struct UploadDatasetRequest {
     pub content: String,
 
     /// Original filename (used to determine format and default name)
-    #[schemars(description = "Original filename including extension (e.g., 'data.csv')")]
+    #[schemars(
+        description = "Original filename including extension (e.g., 'data.csv'); the extension sets the format: CSV (.csv), Parquet (.parquet, .pq), JSON Lines (.jsonl, .ndjson) or a JSON record array (.json)."
+    )]
     pub filename: String,
 
     /// Optional name/identifier for the dataset

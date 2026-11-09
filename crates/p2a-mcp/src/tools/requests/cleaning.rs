@@ -34,13 +34,13 @@ pub struct PreviewCleaningRequest {
 
     /// Strategy for fill_na operations
     #[schemars(
-        description = "For fill_na: strategy to use ('mean', 'median', 'mode', 'forward', 'backward', 'constant')."
+        description = "For fill_na: 'mean', 'median', 'mode', 'forward', 'backward', 'zero' or 'constant' (case-insensitive). Omitted with a value: 'constant'. Omitted without a value: an error."
     )]
     pub strategy: Option<String>,
 
     /// Value for fill_na with constant, or replacement value
     #[schemars(
-        description = "For fill_na with constant: the fill value. For replace: the new value."
+        description = "For fill_na with strategy 'constant': the fill value, kept as given. For replace: the new value; 'NA', 'null' or '' write a missing value."
     )]
     pub value: Option<String>,
 
@@ -50,7 +50,7 @@ pub struct PreviewCleaningRequest {
 
     /// How to handle drop_na: 'any' or 'all'
     #[schemars(
-        description = "For drop_na: 'any' (drop if any null) or 'all' (drop only if all null)."
+        description = "For drop_na: 'any' (default: drop a row with any missing value) or 'all' (only rows missing in every checked column); case-insensitive; anything else is an error."
     )]
     pub how: Option<String>,
 
@@ -127,6 +127,12 @@ pub struct CleaningRollbackRequest {
         description = "Checkpoint index to rollback to. If not provided, rolls back to the previous checkpoint."
     )]
     pub checkpoint_index: Option<usize>,
+
+    /// Name to store the session's dataset under after this step
+    #[schemars(
+        description = "Store the session's dataset after this step under this name, so that analysis tools can use it (an existing dataset of that name is replaced). Without it the result stays in the cleaning session only."
+    )]
+    pub output_dataset: Option<String>,
 }
 
 /// Request to apply a cleaning operation within a session.
@@ -148,11 +154,15 @@ pub struct CleaningSessionApplyRequest {
     pub columns: Option<Vec<String>>,
 
     /// Strategy for fill_na operations
-    #[schemars(description = "For fill_na: strategy to use.")]
+    #[schemars(
+        description = "For fill_na: 'mean', 'median', 'mode', 'forward', 'backward', 'zero' or 'constant' (case-insensitive). Omitted with a value: 'constant'. Omitted without a value: an error."
+    )]
     pub strategy: Option<String>,
 
     /// Value for fill_na or replace
-    #[schemars(description = "For fill_na with constant or replace: the value.")]
+    #[schemars(
+        description = "For fill_na with strategy 'constant': the fill value, kept as given. For replace: the new value; 'NA', 'null' or '' write a missing value."
+    )]
     pub value: Option<String>,
 
     /// Old value for replace operation
@@ -160,7 +170,9 @@ pub struct CleaningSessionApplyRequest {
     pub old_value: Option<String>,
 
     /// How to handle drop_na
-    #[schemars(description = "For drop_na: 'any' or 'all'.")]
+    #[schemars(
+        description = "For drop_na: 'any' (default: drop a row with any missing value) or 'all' (only rows missing in every checked column); case-insensitive; anything else is an error."
+    )]
     pub how: Option<String>,
 
     /// Keep strategy for deduplicate
@@ -174,6 +186,12 @@ pub struct CleaningSessionApplyRequest {
     /// Value for filter comparison
     #[schemars(description = "For filter: value to compare against.")]
     pub filter_value: Option<String>,
+
+    /// Name to store the session's dataset under after this step
+    #[schemars(
+        description = "Store the session's dataset after this step under this name, so that analysis tools can use it (an existing dataset of that name is replaced). Without it the result stays in the cleaning session only."
+    )]
+    pub output_dataset: Option<String>,
 }
 
 /// Request to list all checkpoints in a session.
