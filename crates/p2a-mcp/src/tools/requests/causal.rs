@@ -1009,9 +1009,19 @@ pub struct CTmleRequest {
 
     /// Stopping rule: 'cv_minimum' (default), 'one_se', or 'max_covariates'
     #[schemars(
-        description = "Stopping rule of the covariate selection: 'cv_minimum' (default, minimum cross-validated risk), 'one_se' (one-standard-error rule) or 'max_covariates' (needs max_covariates). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Stopping rule of the covariate selection: 'cv_minimum' (default, minimum cross-validated risk), 'one_se' (one-standard-error rule) or 'max_covariates' (max_covariates is required there). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub stopping_rule: Option<String>,
+
+    #[schemars(
+        description = "Cross-validated risk of the selection path: 'rss' (default), 'varic' (cross-validated variance of the influence curve, Gruber & van der Laan 2010) or 'penrss' (RSS + penalty * ln(n) * k). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub cv_criterion: Option<String>,
+
+    #[schemars(
+        description = "Selection order: 'forward' (default), 'backward' or 'prespecified' (the covariates in the listed order). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub order: Option<String>,
 
     /// Lower bound for propensity score truncation (default: 0.025)
     #[schemars(description = "Lower bound for propensity score truncation. Default is 0.025.")]

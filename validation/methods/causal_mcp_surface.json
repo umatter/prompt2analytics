@@ -169,16 +169,20 @@
       "reference": "ltmle (written out); C-TMLE criteria of Gruber & van der Laan (2010), written out",
       "doc": "validation/mcp/causal_surface.md",
       "cases": [
-        "ltmle_two_period"
+        "ltmle_two_period",
+        "ctmle_cv"
       ],
       "tests": [
-        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_ltmle"
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_ltmle",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_collaborative_tmle"
       ],
       "quantities": [
         "psi always/never/dynamic",
-        "ATE and EIC SE"
+        "ATE and EIC SE",
+        "C-TMLE ATE and SE under the RSS and VarIC criteria",
+        "C-TMLE selected covariates"
       ],
-      "tolerance": "default ltmle configuration against the tight values at Tol::iterative(1e-8); dynamic Tol::iterative(1e-8)",
+      "tolerance": "default ltmle configuration against the tight values at Tol::iterative(1e-8); dynamic Tol::iterative(1e-8); C-TMLE at the default glm control against the epsilon-1e-14 fit: ATE Tol::iterative(1e-7), SE Tol::iterative(1e-6)",
       "deviations": [],
       "supersedes_legacy": []
     },

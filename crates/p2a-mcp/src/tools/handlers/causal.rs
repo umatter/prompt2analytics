@@ -1325,7 +1325,7 @@ impl AnalyticsServer {
 
     /// Run Collaborative Targeted Maximum Likelihood Estimation (C-TMLE) for causal inference.
     #[tool(
-        description = "Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors."
+        description = "Average treatment effect by collaborative TMLE (C-TMLE; van der Laan & Gruber 2010): greedy forward (default), backward or prespecified selection of the propensity covariates with a fixed initial outcome model Q (ctmle's ctmleDiscrete also updates Q; p2a does not), a real V-fold cross-validated risk (RSS, VarIC or penalised RSS), and the TMLE at the selected step with influence-curve SEs. Returns the ATE, the selected covariates and the selection path with the criterion at each step."
     )]
     pub async fn collaborative_tmle(
         &self,
@@ -1341,6 +1341,14 @@ impl AnalyticsServer {
                 StoppingRule::parse_with(s, request.max_covariates).map_err(option_message)
             ),
         };
+        let cv_criterion = tool_try!(parse_option(
+            request.cv_criterion.as_deref(),
+            p2a_core::econometrics::ctmle::CVCriterion::RSS
+        ));
+        let order = tool_try!(parse_option(
+            request.order.as_deref(),
+            SelectionOrder::Forward
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -1355,7 +1363,8 @@ impl AnalyticsServer {
             n_folds: request.n_folds.unwrap_or(5),
             max_covariates: request.max_covariates,
             stopping_rule,
-            order: SelectionOrder::Forward,
+            order,
+            cv_criterion,
             q_model,
             gbound: (ps_lower, ps_upper),
             ..Default::default()

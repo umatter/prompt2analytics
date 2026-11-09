@@ -186,6 +186,16 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["cv_minimum", "one_se"],
         ),
         (
+            "collaborative_tmle",
+            with(&otc, &[("cv_criterion", json!("aic"))]),
+            vec!["cv_criterion", "rss", "varic"],
+        ),
+        (
+            "collaborative_tmle",
+            with(&otc, &[("order", json!("random"))]),
+            vec!["order", "forward", "prespecified"],
+        ),
+        (
             "gformula",
             with(&gf, &[("intervention", json!("sometimes"))]),
             vec!["always_treat", "natural_course"],
@@ -1488,4 +1498,93 @@ async fn test_validate_mcp_gformula() {
     no_time.as_object_mut().unwrap().remove("time_col");
     let e = refused(&server, &session, "gformula", no_time).await;
     assert!(e.contains("needs time_col"), "{e}");
+}
+
+/// C-TMLE with a real 5-fold CV risk (causal_stdreg.R, ctmle_cv), VarIC and RSS criteria. The MCP runs
+/// `CTmleConfig::default()` (glm epsilon 1e-8), the case epsilon 1e-14: iterative tolerances.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_collaborative_tmle() {
+    use p2a_core::econometrics::ctmle::{
+        CTmleConfig, CTmleQModel, CVCriterion, SelectionOrder, ctmle,
+    };
+    let case = Case::load("ctmle_cv");
+    let (session, server) = session_with("ctmle_cv"); // dataset `ctmle_sim`
+    let ds = case_ds(&case);
+    let w = ["w1", "w2", "w3", "w4"];
+    let base = json!({"dataset": "ctmle_sim", "outcome": "yb", "treatment": "a", "covariates": w, "q_model": "binary"});
+    let fit = |cr: CVCriterion, order: SelectionOrder| {
+        let mut c = CTmleConfig::default();
+        c.q_model = CTmleQModel::Logistic;
+        c.cv_criterion = cr;
+        c.order = order;
+        c.gbound = (0.025, 0.975);
+        ctmle(&ds, "yb", "a", &w, c).unwrap()
+    };
+    let (varic, rss) = (
+        fit(CVCriterion::VarIC, SelectionOrder::Forward),
+        fit(CVCriterion::RSS, SelectionOrder::Forward),
+    );
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "collaborative_tmle",
+            with(&base, &[("cv_criterion", json!("var-ic"))])
+        )
+        .await,
+        varic.to_string()
+    );
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "collaborative_tmle",
+            with(
+                &base,
+                &[("cv_criterion", json!("rss")), ("order", json!("fwd"))]
+            )
+        )
+        .await,
+        rss.to_string()
+    );
+    let back = fit(CVCriterion::RSS, SelectionOrder::Backward);
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "collaborative_tmle",
+            with(&base, &[("order", json!("backward"))])
+        )
+        .await,
+        back.to_string()
+    );
+    let pre = fit(CVCriterion::RSS, SelectionOrder::Prespecified(Vec::new()));
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "collaborative_tmle",
+            with(&base, &[("order", json!("prespecified"))])
+        )
+        .await,
+        pre.to_string()
+    );
+    Check::new(&case)
+        .scalar("logit_varic_ate", varic.ate, Tol::iterative(1e-7))
+        .scalar("logit_varic_se", varic.se, Tol::iterative(1e-6))
+        .scalar("logit_rss_ate", rss.ate, Tol::iterative(1e-7))
+        .scalar("logit_rss_se", rss.se, Tol::iterative(1e-6))
+        .finish();
+    assert!(
+        varic.selected_covariates.is_empty(),
+        "{:?}",
+        varic.selected_covariate_names
+    ); // mask [0,0,0,0]
+    assert_eq!(
+        (
+            rss.selected_covariates.clone(),
+            rss.selected_covariate_names.clone()
+        ),
+        (vec![0], vec!["w1".to_string()])
+    ); // [1,0,0,0]
 }
