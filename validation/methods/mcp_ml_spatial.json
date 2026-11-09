@@ -140,6 +140,30 @@
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_sphet",
+      "name": "MCP sphet_model",
+      "category": "interfaces",
+      "reference": "Kelejian-Prucha S2SLS and GM with spatial HAC (sphet::stslshac variable bandwidth, Epanechnikov), written out",
+      "doc": "validation/econometrics/sphet.md",
+      "cases": [
+        "sphet_gmm_hac"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_sphet_hac",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_sphet_sem_het"
+      ],
+      "quantities": [
+        "coefficients",
+        "lambda",
+        "spatial HAC SEs (Epanechnikov, variable bandwidth)",
+        "White SEs",
+        "GM rho and its SE"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

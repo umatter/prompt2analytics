@@ -1088,3 +1088,151 @@ async fn test_validate_mcp_spgm() {
     .await);
     assert!(e.contains("w2sls"), "{e}");
 }
+
+// ----------------------------------------------------------------------------
+// sphet
+// ----------------------------------------------------------------------------
+
+/// Kelejian-Prucha S2SLS with spatial HAC SEs on the coordinates (5-NN W, sphet's default
+/// variable bandwidth and Epanechnikov kernel). Before: the description said the SEs do not
+/// match sphet, and the text was built in the handler.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_sphet_hac() {
+    let (s, server) = session_with("sphet_gmm_hac");
+    let case = Case::load("sphet_gmm_hac");
+    neighbors(
+        &server,
+        &s,
+        "sphet_sim",
+        "w5",
+        json!({"method": "knn", "k": 5}),
+    )
+    .await;
+    let base = json!({"dataset": "sphet_sim", "y": "y_sar", "x": ["x1", "x2"], "weights": "w5",
+                      "model": "lag", "se_type": "hac", "coord_x": "cx", "coord_y": "cy"});
+    for kernel in [None, Some("Epanechnikov")] {
+        let mut a = base.clone();
+        if let Some(k) = kernel {
+            a["kernel"] = json!(k);
+        }
+        let t = ok(&call(&server, &s, "sphet_model", a).await);
+        assert!(
+            t.contains(
+                "Spatial HAC (Kelejian-Prucha 2007; epanechnikov kernel, variable bandwidth"
+            ),
+            "{t}"
+        );
+        let se = case.vector("sar_se_hac_epa_var");
+        let coef = case.vector("sar_coef");
+        for (i, name) in ["(Intercept)", "x1", "x2"].iter().enumerate() {
+            let r = row(&t, name);
+            printed(r[0], coef[i], 6, name);
+            printed(r[1], se[i], 6, &format!("{name} SE ({kernel:?})"));
+        }
+        let lam = line(&t, "Spatial lag (lambda):");
+        printed(
+            num_after(lam, "Spatial lag (lambda):"),
+            coef[3],
+            6,
+            "lambda",
+        );
+        printed(num_after(lam, "SE:"), se[3], 6, "lambda SE");
+    }
+}
+
+/// The MCP's het = true for the error model: KP (2010) GM rho, its SE and White SEs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_sphet_sem_het() {
+    let (s, server) = session_with("sphet_gmm_hac");
+    let case = Case::load("sphet_gmm_hac");
+    neighbors(
+        &server,
+        &s,
+        "sphet_sim",
+        "w5",
+        json!({"method": "knn", "k": 5}),
+    )
+    .await;
+    let t = ok(&call(
+        &server,
+        &s,
+        "sphet_model",
+        json!({"dataset": "sphet_sim", "y": "y_sem", "x": ["x1", "x2"], "weights": "w5", "model": "SEM"}),
+    )
+    .await);
+    let rho = line(&t, "Spatial error (rho):");
+    printed(
+        num_after(rho, "Spatial error (rho):"),
+        case.scalar("sem_het_rho"),
+        6,
+        "rho",
+    );
+    printed(
+        num_after(rho, "SE:"),
+        case.scalar("sem_het_rho_se"),
+        6,
+        "rho SE",
+    );
+    assert!(
+        t.contains("GM moments for rho: Kelejian-Prucha (2010)"),
+        "{t}"
+    );
+    for (i, name) in ["(Intercept)", "x1", "x2"].iter().enumerate() {
+        let r = row(&t, name);
+        printed(r[0], case.vector("sem_het_coef")[i], 6, name);
+        printed(
+            r[1],
+            case.vector("sem_het_se_white")[i],
+            6,
+            &format!("{name} SE"),
+        );
+    }
+}
+
+/// The HAC fields need se_type = "hac" and each other; the removed lag bandwidth is refused;
+/// an unknown kernel names the MCP field; sphet's seven kernels are reachable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_sphet_hac_field_rules() {
+    let (s, server) = session_with("sphet_gmm_hac");
+    neighbors(
+        &server,
+        &s,
+        "sphet_sim",
+        "w5",
+        json!({"method": "knn", "k": 5}),
+    )
+    .await;
+    let base = json!({"dataset": "sphet_sim", "y": "y_sar", "x": ["x1", "x2"], "weights": "w5"});
+    for (extra, fragment) in [
+        (json!({"se_type": "hac"}), "coord_x and coord_y"),
+        (json!({"se_type": "hac", "coord_x": "cx"}), "together"),
+        (json!({"kernel": "parzen"}), "se_type = 'hac'"),
+        (json!({"coord_x": "cx", "coord_y": "cy"}), "se_type = 'hac'"),
+        (
+            json!({"se_type": "hac", "coord_x": "cx", "coord_y": "cy", "kernel": "gaussian"}),
+            "unknown kernel 'gaussian'",
+        ),
+        (
+            json!({"se_type": "hac", "coord_x": "cx", "coord_y": "cy", "bandwidth": 4}),
+            "bandwidth is not used",
+        ),
+    ] {
+        let e = err(&call(&server, &s, "sphet_model", with(&base, extra.clone())).await);
+        assert!(e.contains(fragment), "{extra}: {e}");
+        assert!(
+            !e.contains("hac_kernel"),
+            "{extra}: names no MCP field: {e}"
+        );
+    }
+    let t = ok(&call(
+        &server,
+        &s,
+        "sphet_model",
+        with(
+            &base,
+            json!({"se_type": "hac", "coord_x": "cx", "coord_y": "cy", "kernel": "parzen"}),
+        ),
+    )
+    .await);
+    assert!(t.contains("parzen kernel"), "{t}");
+}

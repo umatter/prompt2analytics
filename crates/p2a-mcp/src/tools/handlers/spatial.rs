@@ -706,7 +706,7 @@ impl AnalyticsServer {
 
     /// Run Spatial GMM with heteroscedasticity robustness (sphet).
     #[tool(
-        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its estimates and standard errors do not yet match the R reference (sphet), for every model; see the release notes."
+        description = "Run a spatial regression by GMM, robust to heteroskedasticity of unknown form, as sphet::spreg(het = TRUE). Models: 'lag' (SAR by spatial two-stage least squares, instruments X, WX, W^2X, ...), 'error' (SEM, the Kelejian-Prucha 2010 GM estimator of the spatial error parameter) and 'sarar' (both). Standard errors: 'robust' (White, the default), 'hac' (the spatial HAC of Kelejian-Prucha 2007 on distances between the units: set coord_x and coord_y to the coordinate columns; kernel picks one of sphet's seven kernels, default epanechnikov; each unit's bandwidth is its largest distance to its neighbours in the weights, sphet's variable bandwidth) or 'standard'. Unlike ML estimation, GMM does not require normally distributed errors. Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn sphet_model(
         &self,
@@ -742,6 +742,15 @@ impl AnalyticsServer {
         // takes sphet's variable bandwidth (each unit's farthest neighbour in the weights).
         let mut hac_kernel = SpatialHacKernel::default();
         let mut coords = None;
+        if se_type != SphetSE::HAC
+            && (request.kernel.is_some() || request.coord_x.is_some() || request.coord_y.is_some())
+        {
+            return error_text(
+                "coord_x, coord_y and kernel are used only with se_type = 'hac' (the spatial HAC); \
+                 set se_type = 'hac' or leave them unset."
+                    .to_string(),
+            );
+        }
         if se_type == SphetSE::HAC {
             if request.bandwidth.is_some() {
                 return error_text(
@@ -755,8 +764,16 @@ impl AnalyticsServer {
                 SpatialHacKernel::default(),
             ) {
                 Ok(k) => k,
-                Err(e) => return error_text(e.to_string()),
+                // The core names its config field; the MCP field is `kernel`.
+                Err(e) => return error_text(e.to_string().replace("hac_kernel", "kernel")),
             };
+            if request.coord_x.is_some() != request.coord_y.is_some() {
+                return error_text(
+                    "coord_x and coord_y go together: set both to the coordinate columns the \
+                     weights were built from."
+                        .to_string(),
+                );
+            }
             let (Some(cx), Some(cy)) = (request.coord_x.as_deref(), request.coord_y.as_deref())
             else {
                 return error_text(
@@ -790,84 +807,14 @@ impl AnalyticsServer {
 
         match run_sphet(&dataset, &request.y, &x_refs, &listw, config) {
             Ok(result) => {
-                let model_name = match result.model_type {
-                    SphetModel::SpatialLag => "Spatial Lag (SAR) - GMM",
-                    SphetModel::SpatialError => "Spatial Error (SEM) - GMM",
-                    SphetModel::SARAR => "SARAR (Lag + Error) - GMM",
-                };
-
-                let mut output = format!(
-                    "{}\n{}\n\
-                     Heteroscedasticity-robust GMM estimation (Kelejian-Prucha)\n\
-                     Standard errors: {}\n\n",
-                    model_name,
-                    "=".repeat(model_name.len()),
-                    result.se_type
+                let mut output = result.to_string();
+                if !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(
+                    "Note: the GMM estimator is robust to heteroskedasticity of unknown form and \
+                     does not require normally distributed errors.",
                 );
-
-                // Spatial parameters
-                if let (Some(lambda), Some(se), Some(z), Some(p)) = (
-                    result.lambda,
-                    result.lambda_se,
-                    result.lambda_z,
-                    result.lambda_p,
-                ) {
-                    output.push_str(&format!(
-                        "Spatial lag coefficient (lambda):\n\
-                         ---------------------------------\n\
-                         Estimate: {:.6}\n\
-                         Std.Error: {:.6}\n\
-                         Z-value: {:.4}\n\
-                         P-value: {:.6}\n\n",
-                        lambda, se, z, p
-                    ));
-                }
-
-                if let (Some(rho), Some(se), Some(z), Some(p)) =
-                    (result.rho, result.rho_se, result.rho_z, result.rho_p)
-                {
-                    output.push_str(&format!(
-                        "Spatial error coefficient (rho):\n\
-                         --------------------------------\n\
-                         Estimate: {:.6}\n\
-                         Std.Error: {:.6}\n\
-                         Z-value: {:.4}\n\
-                         P-value: {:.6}\n\n",
-                        rho, se, z, p
-                    ));
-                }
-
-                output.push_str("Regression Coefficients:\n");
-                output.push_str("------------------------\n");
-                output.push_str(&format!(
-                    "{:15} {:>12} {:>10} {:>10} {:>10}\n",
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
-                ));
-
-                for (i, name) in result.coef_names.iter().enumerate() {
-                    output.push_str(&format!(
-                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
-                        name,
-                        result.coefficients[i],
-                        result.std_errors[i],
-                        result.z_values[i],
-                        result.p_values[i]
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "\nModel Statistics:\n\
-                     -----------------\n\
-                     Sigma²: {:.6}\n\
-                     N: {}\n\
-                     df: {}\n\
-                     Iterations: {}\n\
-                     Converged: {}\n\n\
-                     Note: GMM estimation is robust to heteroscedasticity of unknown form.\n\
-                     Unlike ML, it does not require normally distributed errors.",
-                    result.sigma2, result.n_obs, result.df, result.iterations, result.converged
-                ));
-
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
             Err(e) => error_text(model_error(
@@ -1699,7 +1646,10 @@ mod tests {
             "coord_x": "cx", "coord_y": "cy", "kernel": "gaussian",
         }));
         assert_eq!(err, Some(true), "{t}");
-        assert!(t.contains("hac_kernel"), "{t}");
+        assert!(
+            t.contains("unknown kernel") && !t.contains("hac_kernel"),
+            "{t}"
+        );
         let (err, t) = call(serde_json::json!({"coord_x": "cx", "coord_y": "nope"}));
         assert_eq!(err, Some(true), "{t}");
         assert!(t.contains("nope"), "{t}");
