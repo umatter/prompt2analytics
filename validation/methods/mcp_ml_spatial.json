@@ -1,0 +1,238 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_spatial_weights",
+      "name": "MCP spatial_neighbors styles and moran_test",
+      "category": "interfaces",
+      "reference": "spdep::nb2listw(style = W, B, C, U, minmax, S), spdep::moran.test(randomisation = TRUE, zero.policy = TRUE, adjust.n = TRUE), written out",
+      "doc": "validation/spatial/weights.md",
+      "cases": [
+        "spatial_weights_moran"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spatial_styles",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_style_u_is_c_over_n",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_moran_alternative",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_moran_islands"
+      ],
+      "quantities": [
+        "S0 per style",
+        "Moran I per style",
+        "Moran I, E, var, z, p (greater, less, two-sided)",
+        "islands"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ml_cutree",
+      "name": "MCP ml_cutree linkages",
+      "category": "interfaces",
+      "reference": "stats::hclust(method) + stats::cutree(k = 3)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_cutree_linkages"
+      ],
+      "quantities": [
+        "cutree labels for ward.D2, ward.D, mcquitty, centroid, median, average"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ppr",
+      "name": "MCP ml_ppr (sm_method, bass)",
+      "category": "interfaces",
+      "reference": "stats::ppr(nterms = 2, max.terms = 3, sm.method, bass)",
+      "doc": "validation/ml/ppr.md",
+      "cases": [
+        "ppr_methods"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_ppr"
+      ],
+      "quantities": [
+        "alpha",
+        "beta",
+        "gofn",
+        "fitted values (first 20)"
+      ],
+      "tolerance": "The core pin's tolerances: super-smoother runs Tol::new(1e-8, 1e-10); gcvspline runs Tol::new(0.03, 0.02), the measured gap of the exact spline penalty (deviation)",
+      "deviations": [
+        {
+          "finding": "ML-34",
+          "quantity": "gcvspline alpha, beta, gofn and fitted values, at Tol::new(0.03, 0.02)",
+          "note": "The smoother uses the exact 1/3 in the penalty (R's sgram.f writes 0.333) and the fit at the reported spar (R returns its last Brent evaluation); the spline runs agree with R to about 1e-2 relative, not to digits, as in the core pin"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_mboost",
+      "name": "MCP ml_mboost families",
+      "category": "interfaces",
+      "reference": "mboost::glmboost with bols learners: Gaussian(), Binomial(), Binomial(type = 'glm'), Poisson(), written out",
+      "doc": "validation/ml/mboost.md",
+      "cases": [
+        "ml_mboost_bols"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_mboost_families"
+      ],
+      "quantities": [
+        "coefficients",
+        "intercept",
+        "selection frequencies at mstop 100"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_spatial_panel_ml",
+      "name": "MCP spatial_panel_ml",
+      "category": "interfaces",
+      "reference": "splm::spml ML, written out",
+      "doc": "validation/econometrics/splm.md",
+      "cases": [
+        "splm_spml_spgm"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spatial_panel_ml_default_is_spatial",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spml"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs",
+        "rho",
+        "lambda",
+        "phi",
+        "sigma_mu"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_spatial_panel_gmm",
+      "name": "MCP spatial_panel_gmm",
+      "category": "interfaces",
+      "reference": "splm::spgm w2sls, within GS2SLS and the KKP within GM, written out",
+      "doc": "validation/econometrics/splm.md",
+      "cases": [
+        "splm_spml_spgm"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spgm"
+      ],
+      "quantities": [
+        "coefficients",
+        "rho and its SE",
+        "lambda (GM)",
+        "SEs"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_sphet",
+      "name": "MCP sphet_model",
+      "category": "interfaces",
+      "reference": "Kelejian-Prucha S2SLS and GM with spatial HAC (sphet::stslshac variable bandwidth, Epanechnikov), written out",
+      "doc": "validation/econometrics/sphet.md",
+      "cases": [
+        "sphet_gmm_hac"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_sphet_hac",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_sphet_sem_het"
+      ],
+      "quantities": [
+        "coefficients",
+        "lambda",
+        "spatial HAC SEs (Epanechnikov, variable bandwidth)",
+        "White SEs",
+        "GM rho and its SE"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ml_clustering",
+      "name": "MCP ml_kmeans, ml_hierarchical and ml_dbscan",
+      "category": "interfaces",
+      "reference": "stats::kmeans(algorithm = 'Lloyd'), stats::hclust + cutree, dbscan::dbscan(eps = 1, minPts = 5)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods",
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_kmeans_output_column",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_hierarchical_output_column",
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_dbscan"
+      ],
+      "quantities": [
+        "k-means partition and tot.withinss",
+        "cutree labels written through output_column",
+        "DBSCAN cluster sizes and noise points"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ml_pca_scores",
+      "name": "MCP ml_pca with output_column",
+      "category": "interfaces",
+      "reference": "stats::prcomp(center = TRUE, scale. = FALSE)$x and $sdev",
+      "doc": "validation/ml/pca.md",
+      "cases": [
+        "mcp_pca_scores"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_pca_output_column"
+      ],
+      "quantities": [
+        "scores (one sign per component)",
+        "explained variance"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_sar_sem",
+      "name": "MCP sar_model (SAR, SDM) and sem_model",
+      "category": "interfaces",
+      "reference": "spatialreg::lagsarlm, lagsarlm(Durbin = TRUE), errorsarlm and impacts, written out",
+      "doc": "validation/econometrics/spatial.md",
+      "cases": [
+        "spatial_sar_sdm_sem"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_sar_sdm_sem"
+      ],
+      "quantities": [
+        "rho",
+        "lambda",
+        "coefficients",
+        "SAR observed-information SEs",
+        "SEM SEs",
+        "SAR and SDM impacts",
+        "convergence line"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

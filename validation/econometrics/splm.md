@@ -219,7 +219,7 @@ and they are pinned inline in the tests.
 - `test_spml_weights_must_follow_sorted_entities`: an 11 x 11 W for 12 entities is
   refused with the sorted-order message; region ids equal to the sorted labels are
   accepted, reversed ones are refused.
-- MCP (`tools::handlers::spatial::tests`): `test_mcp_spatial_panel_ml_sorted_ids_match_r`
+- MCP (`tools::handlers::spatial::tests`): `test_mcp_spatial_panel_ml_sorted_ids_base_r_cross_check`
   (dataset C through `spatial_neighbors` and `spatial_panel_ml`) and
   `test_mcp_spatial_panel_unbalanced_duplicated_and_w_size_refused`.
 

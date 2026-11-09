@@ -21,7 +21,7 @@ pub struct SpatialNeighborsRequest {
 
     /// Neighbor method: 'knn' (default), 'distance', or 'distance_longlat'
     #[schemars(
-        description = "Method for defining neighbors: 'knn' (k-nearest neighbors, default), 'distance' (within distance), 'distance_longlat' (great-circle distance for lon/lat)."
+        description = "Method for defining neighbors: 'knn' (k nearest neighbours, default; spdep::knearneigh), 'distance' (d_min < d <= d_max in coordinate units; spdep::dnearneigh) or 'distance_longlat' (the same band in great-circle km on lon/lat). Case-insensitive; anything else is an error."
     )]
     pub method: Option<String>,
 
@@ -47,7 +47,7 @@ pub struct SpatialNeighborsRequest {
 
     /// Weight style
     #[schemars(
-        description = "Weight style: 'W' or 'row' (row-standardized, default), 'B' (binary), 'C' (global standardized), 'U' (unstandardized)."
+        description = "Weight style as spdep::nb2listw(style =): 'W' (row-standardised, default; also 'row'), 'B' (binary), 'C' (globally standardised: sums to n), 'U' (C / n: sums to 1), 'minmax' (divided by min(max row sum, max column sum)), 'S' (variance-stabilising, Tiefelsdorf et al. 1999). Case-insensitive; anything else is an error. A style other than 'W' changes the scale of W, and so of rho and lambda in the spatial models."
     )]
     pub style: Option<String>,
 }
@@ -72,7 +72,7 @@ pub struct MoranTestRequest {
 
     /// Alternative hypothesis
     #[schemars(
-        description = "Alternative hypothesis: 'greater' (positive autocorrelation, default), 'less' (negative), 'two.sided'."
+        description = "Alternative hypothesis, as spdep::moran.test: 'greater' (positive autocorrelation, default), 'less' (negative) or 'two.sided' (also 'twosided'). Case-insensitive; anything else is an error."
     )]
     pub alternative: Option<String>,
 }
@@ -182,13 +182,13 @@ pub struct SphetRequest {
 
     /// Model type: 'lag' (SAR), 'error' (SEM), or 'sarar' (both)
     #[schemars(
-        description = "Model type: 'lag' for SAR (y=lambda*Wy+Xb+e), 'error' for SEM (y=Xb+u, u=rho*Wu+e), or 'sarar' for combined. Default is 'lag'."
+        description = "Model type: 'lag' (default; SAR, y = lambda*Wy + Xb + e), 'error' (SEM, y = Xb + u, u = rho*Wu + e) or 'sarar' (both). Case-insensitive; anything else is an error."
     )]
     pub model: Option<String>,
 
     /// Standard error type: 'robust', 'hac', or 'standard'
     #[schemars(
-        description = "Standard error type: 'robust' for heteroscedasticity-robust (Kelejian-Prucha 2010), 'hac' for HAC (Kelejian-Prucha 2007), or 'standard' for homoscedastic. Default is 'robust'."
+        description = "Standard error type: 'robust' (default; White, heteroskedasticity-robust), 'hac' (spatial HAC on distances, Kelejian-Prucha 2007; needs coord_x and coord_y) or 'standard' (classical). Case-insensitive; anything else is an error."
     )]
     pub se_type: Option<String>,
 
@@ -255,12 +255,14 @@ pub struct SarProbitRequest {
 
     /// Compute spatial impacts
     #[schemars(
-        description = "If true, computes direct, indirect, and total spatial impacts. Default is true."
+        description = "If true, computes the direct, indirect and total marginal effects on the probability scale, each with its posterior SD. Default true; needs at least one x column (an intercept-only model has no marginal effects: set false)."
     )]
     pub compute_impacts: Option<bool>,
 
     /// Random seed
-    #[schemars(description = "Random seed for reproducibility. Optional.")]
+    #[schemars(
+        description = "Random seed of the MCMC sampler; when omitted, the value of set_seed, else 42. The output reports the seed used."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -295,7 +297,9 @@ pub struct SemProbitRequest {
     pub burn_in: Option<usize>,
 
     /// Random seed
-    #[schemars(description = "Random seed for reproducibility. Optional.")]
+    #[schemars(
+        description = "Random seed of the MCMC sampler; when omitted, the value of set_seed, else 42. The output reports the seed used."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -331,24 +335,26 @@ pub struct SpmlRequest {
 
     /// Panel model type
     #[schemars(
-        description = "Panel model type: 'within' (fixed effects, default), 'random' (random effects), or 'pooling' (no effects)."
+        description = "Panel model type: 'within' (fixed effects, default), 'random' (random effects) or 'pooling' (no effects). Case-insensitive; anything else is an error."
     )]
     pub model: Option<String>,
 
     /// Include spatial lag
     #[schemars(
-        description = "If true, includes spatial lag of dependent variable (rho*W*y). Default is false."
+        description = "If true, includes the spatial lag of the dependent variable (rho*W*y). Default false; lag = true with the default spatial_error fits the SARAR model, as spml(lag = TRUE); set spatial_error = 'none' for the lag model alone."
     )]
     pub lag: Option<bool>,
 
     /// Spatial error type
     #[schemars(
-        description = "Spatial error specification: 'none' (default), 'baltagi' (Baltagi-type), or 'kkp' (Kapoor-Kelejian-Prucha type)."
+        description = "Spatial error term as splm::spml(spatial.error =): 'b' (Baltagi, default; also 'baltagi'), 'kkp' (Kapoor-Kelejian-Prucha; differs from 'b' only with model = 'random') or 'none'. With lag = false, 'none' is refused (no spatial parameter). Case-insensitive; anything else is an error."
     )]
     pub spatial_error: Option<String>,
 
     /// Effect type
-    #[schemars(description = "Effect type: 'individual' (default), 'time', or 'twoways'.")]
+    #[schemars(
+        description = "Effect type: 'individual' (default), 'time' or 'twoways'. Case-insensitive; anything else is an error."
+    )]
     pub effect: Option<String>,
 }
 
@@ -384,7 +390,7 @@ pub struct SpgmRequest {
 
     /// Estimation method
     #[schemars(
-        description = "GMM estimation method: 'w2sls' (within/fixed effects, default), 'g2sls' (GLS random effects), 'b2sls' (between), or 'ec2sls' (Baltagi EC2SLS)."
+        description = "GMM estimation method: 'w2sls' (within/fixed effects, default), 'b2sls' (between), 'g2sls' (GLS random effects) or 'ec2sls' (Baltagi's EC2SLS). Case-insensitive; anything else is an error."
     )]
     pub method: Option<String>,
 

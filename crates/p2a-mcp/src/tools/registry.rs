@@ -340,7 +340,7 @@ pub static CATEGORY_TABLE: &[(&str, ToolCategory, &[&str], Option<&str>)] = &[
     ("server_stats", C::Utility, &["list_datasets"], None),
     ("set_seed", C::Utility, &["generate_random_data"], Some("set.seed()")),
     ("spatial_lm_tests_tool", C::Spatial, &["moran_test", "sar_model", "sem_model"], Some("spdep::lm.LMtests()")),
-    ("spatial_neighbors", C::Spatial, &["moran_test", "sar_model"], Some("spdep::knearneigh()")),
+    ("spatial_neighbors", C::Spatial, &["moran_test", "sar_model"], Some("spdep::knearneigh(use_kd_tree = FALSE)")),
     ("spatial_panel_gmm", C::Spatial, &["spatial_panel_ml", "sphet_model"], Some("splm::spgm()")),
     ("spatial_panel_ml", C::Spatial, &["sar_model", "panel_fixed_effects"], Some("splm::spml()")),
     ("sphet_model", C::Spatial, &["sar_model", "spatial_panel_gmm"], Some("sphet::spreg()")),

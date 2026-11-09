@@ -28,8 +28,15 @@ pub struct KMeansRequest {
     pub n_init: Option<usize>,
 
     /// Random seed for reproducibility (optional)
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's cluster (Int64, 1..k as R's kmeans()$cluster / cutree()) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for DBSCAN clustering.
@@ -74,6 +81,13 @@ pub struct PCARequest {
         description = "Number of principal components to keep. If not specified, keeps all components."
     )]
     pub n_components: Option<usize>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "A prefix: writes the principal-component scores (prcomp()$x) as columns <prefix>1 .. <prefix>m (Float64); 'PC' gives PC1, PC2, .... None may be one of the columns used; existing columns of those names are replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for Hierarchical clustering.
@@ -102,9 +116,16 @@ pub struct HierarchicalRequest {
 
     /// Linkage method
     #[schemars(
-        description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'."
+        description = "Agglomeration method as stats::hclust(method =): 'ward.D2' (default; also 'ward'), 'single', 'complete', 'average', 'mcquitty', 'ward.D', 'centroid' or 'median' (centroid and median on squared Euclidean distances, as R documents). Case-insensitive; anything else is an error."
     )]
     pub linkage: Option<String>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's cluster (Int64, 1..k as R's kmeans()$cluster / cutree()) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for t-SNE dimensionality reduction.
@@ -138,7 +159,7 @@ pub struct TsneRequest {
     pub learning_rate: Option<f64>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -193,7 +214,7 @@ pub struct CutreeRequest {
 
     /// Linkage method for hierarchical clustering
     #[schemars(
-        description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'."
+        description = "Agglomeration method as stats::hclust(method =): 'ward.D2' (default; also 'ward'), 'single', 'complete', 'average', 'mcquitty', 'ward.D', 'centroid' or 'median' (centroid and median on squared Euclidean distances, as R documents). Case-insensitive; anything else is an error."
     )]
     pub linkage: Option<String>,
 }
@@ -233,8 +254,15 @@ pub struct RandomForestRequest {
     pub max_features: Option<String>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's in-sample prediction (Float64, the mean over all trees) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for Linear SVM classification.
@@ -268,6 +296,13 @@ pub struct SvmRequest {
     /// Convergence tolerance (default: 1e-3)
     #[schemars(description = "Convergence tolerance. Default is 0.001.")]
     pub tolerance: Option<f64>,
+
+    /// Column to write the per-row result into (optional)
+    #[schemars(
+        description = "If set, writes each row's predicted label (Int64, the target's labels; null for rows dropped for missing values) into the dataset under this column name. Must not be one of the columns used; an existing column of that name is replaced."
+    )]
+    #[serde(default)]
+    pub output_column: Option<String>,
 }
 
 /// Request for Projection Pursuit Regression (PPR).
@@ -298,7 +333,7 @@ pub struct PprRequest {
 
     /// Smoothing method
     #[schemars(
-        description = "Smoothing method for ridge functions: 'supsmu' (default), 'spline', or 'gcvspline'."
+        description = "Ridge-function smoother as stats::ppr(sm.method =): 'supsmu' (default), 'spline' or 'gcvspline'. span, df, gcvpen and optlevel use R's defaults. The spline smoothers use the exact penalty and the fit at the selected spar, so they agree with R's to about 1e-2 relative, not to digits. Case-insensitive; anything else is an error."
     )]
     pub sm_method: Option<String>,
 
@@ -335,7 +370,7 @@ pub struct CtreeRequest {
 
     /// Minimum observations in a node to attempt split, default: 20
     #[schemars(
-        description = "Minimum number of observations in a node required to attempt a split. Default is 20."
+        description = "Minimum number of observations in a node required to attempt a split. Default 20, or 2 x minbucket when only a larger minbucket is given (a split needs minbucket rows on each side; partykit keeps 20 whatever minbucket is, which this fit refuses)."
     )]
     pub minsplit: Option<usize>,
 
@@ -349,18 +384,20 @@ pub struct CtreeRequest {
 
     /// Test statistic type: "quadratic" or "max"
     #[schemars(
-        description = "Type of test statistic: 'quadratic' (chi-squared) or 'max' (maximum). Default is 'quadratic'."
+        description = "Test statistic: 'quadratic' (default; chi-squared) or 'maximum' (also 'max'; regression trees only for now). Case-insensitive; anything else is an error."
     )]
     pub teststat: Option<String>,
 
     /// P-value adjustment: "bonferroni", "univariate", or "none"
     #[schemars(
-        description = "P-value adjustment method: 'bonferroni', 'univariate', or 'none'. Default is 'bonferroni'."
+        description = "P-value adjustment: 'bonferroni' (default) or 'univariate' (no multiplicity adjustment; also 'none'). partykit's 'MonteCarlo' and 'Teststatistic' are not implemented and are refused. Case-insensitive."
     )]
     pub testtype: Option<String>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(
+        description = "Accepted for compatibility; ctree's Bonferroni and univariate tests have no random component, so the seed does not change the fit."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -409,7 +446,7 @@ pub struct C50Request {
     pub cf: Option<f64>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -439,13 +476,13 @@ pub struct ShapValuesRequest {
 
     /// Maximum observations to compute SHAP for (default: all)
     #[schemars(
-        description = "Maximum observations to compute SHAP values for. Default is all observations."
+        description = "Explain the first max_obs rows. Default: all rows for method 'tree', 100 (or all, when fewer) for 'kernel'."
     )]
     pub max_obs: Option<usize>,
 
     /// Number of background samples for approximation (default: use all training data)
     #[schemars(
-        description = "Number of background samples for SHAP approximation. If not specified, uses TreeSHAP exact computation."
+        description = "Coalition budget of Kernel SHAP (method 'kernel'; shap's nsamples, default 2M + 2048). Every coalition is evaluated, and the values are exact, when 2^M - 2 <= n_samples (with the default: M <= 11 features); otherwise shap's sampled design uses exactly n_samples coalitions. TreeSHAP is exact and does not sample: a value given with method 'tree' is reported as a warning."
     )]
     pub n_samples: Option<usize>,
 
@@ -456,8 +493,29 @@ pub struct ShapValuesRequest {
     pub compute_summary: Option<bool>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
+
+    /// SHAP algorithm
+    #[schemars(
+        description = "'tree' (default): exact TreeSHAP (Lundberg, Erion & Lee 2020, Algorithm 2), the tree path-dependent Shapley values of each tree's conditional expectation, as shap's TreeExplainer. 'kernel': Kernel SHAP (Lundberg & Lee 2017, shap's KernelExplainer), the interventional Shapley values of the forest's mean prediction over a background of the training rows (all of them up to 100, else 100 evenly spaced rows); exact when every coalition fits in n_samples, sampled otherwise. Case-insensitive; anything else is an error."
+    )]
+    #[serde(default)]
+    pub method: Option<String>,
+
+    /// The game whose Shapley values are computed
+    #[schemars(
+        description = "The game: 'tree_path_dependent' (TreeSHAP's; default for 'tree') or 'interventional' (Kernel SHAP's; default for 'kernel'). A perturbation the method does not compute is refused; 'observational' (true conditional expectations) is not implemented and is refused."
+    )]
+    #[serde(default)]
+    pub feature_perturbation: Option<String>,
+
+    /// TreeSHAP interaction values
+    #[schemars(
+        description = "TreeSHAP interaction values (Lundberg et al. 2020): the JSON then holds the M x M matrices of the first 3 explained rows (interaction_values_sample); rows sum to the SHAP values. Default false; refused with method 'kernel'."
+    )]
+    #[serde(default)]
+    pub compute_interactions: Option<bool>,
 }
 
 /// Request for Cubist rule-based regression.
@@ -501,7 +559,9 @@ pub struct CubistRequest {
     pub min_bucket: Option<usize>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(
+        description = "Accepted for compatibility; Cubist without subsampling is deterministic (R's Cubist uses the seed only with cubistControl(sample > 0), which p2a does not implement)."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -535,13 +595,13 @@ pub struct MboostRequest {
 
     /// Loss function family
     #[schemars(
-        description = "Loss function family: 'gaussian' (default, for regression), 'binomial' (for binary classification), or 'poisson' (for count data)."
+        description = "Loss function family: 'gaussian' (default; mboost Gaussian(), L2 loss), 'binomial' (mboost's default Binomial(): y coded -1/+1, f = half the log-odds), 'binomial_glm' (mboost Binomial(type = 'glm'): f = the log-odds, as glm) or 'poisson' (mboost Poisson()). Case-insensitive; anything else is an error."
     )]
     pub family: Option<String>,
 
     /// Base learner type
     #[schemars(
-        description = "Base learner type: 'linear' (default, L2-boosting) or 'tree' (regression stumps)."
+        description = "Base learner: 'linear' (default; bols) or 'tree' (regression trees of depth tree_depth). Case-insensitive; anything else is an error."
     )]
     pub base_learner: Option<String>,
 
@@ -568,7 +628,9 @@ pub struct MboostRequest {
     pub center: Option<bool>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(
+        description = "Random seed of the cross-validation folds (cv_folds); when omitted, the value of set_seed, else 42."
+    )]
     pub seed: Option<u64>,
 }
 

@@ -1689,7 +1689,8 @@ impl InMemorySessionStore {
 // Fixtures of the session-state tests (T2-WP02, MCP-4): spatial weights and
 // cleaning sessions kept in a `Session` between tool calls. The values the
 // tests pin were computed in R 4.3.3. spdep is not installed, so its
-// knearneigh (ties broken by the lower index, as p2a does),
+// knearneigh(use_kd_tree = FALSE) (distance ties broken by the lower index,
+// as p2a does; the default kd-tree search can order ties differently),
 // nb2listw(style = "W") and moran.test(randomisation = TRUE) are written
 // out from their definitions; the values are therefore not an R-pinned
 // case (no validation case or registry entry). The fixture is the same

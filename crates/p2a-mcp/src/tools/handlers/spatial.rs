@@ -9,9 +9,12 @@ use rmcp::{
     tool, tool_router,
 };
 
+use super::ml::parse_choice;
 use crate::server::AnalyticsServer;
-use crate::tools::common::{self, NaPolicy, error_text};
+use crate::tools::common::{self, NaPolicy, error_text, parse_option};
 use crate::tools::requests::spatial::*;
+use p2a_core::econometrics::spatialprobit::SPATIAL_PROBIT_DEFAULT_SEED;
+use p2a_core::options::Choices;
 
 use p2a_core::{
     EconError,
@@ -53,6 +56,52 @@ use p2a_core::{
     spatial_lm_tests,
 };
 
+/// How `spatial_neighbors` defines the neighbours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NeighborMethod {
+    /// k nearest neighbours (spdep::knearneigh)
+    Knn,
+    /// d_min < d <= d_max in coordinate units (spdep::dnearneigh)
+    Distance,
+    /// The distance band in great-circle km on lon/lat (dnearneigh(longlat = TRUE))
+    DistanceLonglat,
+}
+
+impl NeighborMethod {
+    fn name(self) -> &'static str {
+        NEIGHBOR_METHOD.canonical(self)
+    }
+}
+
+/// The spellings of the neighbour method (the canonical name first).
+static NEIGHBOR_METHOD: Choices<NeighborMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["knn", "k_nearest", "knearneigh"], NeighborMethod::Knn),
+        (
+            &["distance", "dnearneigh", "band"],
+            NeighborMethod::Distance,
+        ),
+        (
+            &["distance_longlat", "longlat", "great_circle"],
+            NeighborMethod::DistanceLonglat,
+        ),
+    ],
+};
+
+/// What a weight style does, after its spdep name in the `spatial_neighbors` text.
+fn style_label(style: WeightStyle) -> &'static str {
+    match style {
+        WeightStyle::RowStd => "row-standardised",
+        WeightStyle::Binary => "binary",
+        WeightStyle::GlobalStd => "globally standardised, sums to n",
+        WeightStyle::UnitSum => "unit sum, C / n",
+        WeightStyle::MinMax => "min-max, Kelejian-Prucha 2010",
+        WeightStyle::VarStab => "variance-stabilising, Tiefelsdorf et al. 1999",
+        WeightStyle::Custom => "custom",
+    }
+}
+
 /// How to proceed after a missing value in a spatial test or model (appended by
 /// [`with_hint`]).
 const MISSING_HINT_MODELS: &str = "Spatial models use one row per unit of the weights, so \
@@ -64,7 +113,25 @@ const MISSING_HINT_NEIGHBORS: &str = "Row i of the weights is row i of the datas
     cannot be skipped: remove the rows with missing coordinates (munge_drop_na) and rebuild \
     the dataset's weights with spatial_neighbors.";
 
-/// `message`, followed by `hint` on its own line when the message reports a missing value.
+/// How to proceed after a missing value in a spatial panel model (appended by
+/// [`model_error`]): a balanced panel cannot lose a single row.
+const MISSING_HINT_PANELS: &str = "Spatial panel models need a balanced panel, so a single \
+    incomplete row cannot be dropped: drop that entity in every period (or that period for \
+    every entity), and build the weights with spatial_neighbors from a one-row-per-entity \
+    coordinate dataset of the remaining entities, sorted by entity id.";
+
+/// "<prefix><error>", followed by `hint` on its own line when the error is a missing-value
+/// error ([`EconError::NullValues`]).
+fn model_error(prefix: &str, e: &EconError, hint: &str) -> String {
+    if matches!(e, EconError::NullValues { .. }) {
+        format!("{prefix}{e}\n{hint}")
+    } else {
+        format!("{prefix}{e}")
+    }
+}
+
+/// `message`, followed by `hint` on its own line when the message reports a missing value
+/// (for the column readers, whose errors are already text).
 fn with_hint(message: String, hint: &str) -> String {
     if message.contains("missing value") {
         format!("{message}\n{hint}")
@@ -77,12 +144,26 @@ fn with_hint(message: String, hint: &str) -> String {
 impl AnalyticsServer {
     /// Create spatial neighbors and weights from coordinates.
     #[tool(
-        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(). Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort). Known limitation: style 'U' gives binary weights, not spdep's 'U' (the globally standardized weights divided by n), and a style it does not know is read as 'W'; see the release notes."
+        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(); k-nearest neighbours equal spdep::knearneigh(x, k, use_kd_tree = FALSE) (distance ties go to the lower row index); the default kd-tree search (dbscan) can order distance ties differently. Styles are nb2listw's six: W (row-standardised, default), B, C, U, minmax and S; the output names the style and reports the sum of weights S0. A style other than W changes the scale of W, and so of rho and lambda. Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort)."
     )]
     pub async fn spatial_neighbors(
         &self,
         Parameters(request): Parameters<SpatialNeighborsRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // The options first: an unknown value is refused before any work.
+        let method = match parse_choice(
+            &NEIGHBOR_METHOD,
+            request.method.as_deref(),
+            NeighborMethod::Knn,
+        ) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
+        };
+        let style = match parse_option(request.style.as_deref(), WeightStyle::RowStd) {
+            Ok(s) => s,
+            Err(e) => return error_text(e),
+        };
+
         // Snapshot the dataset (a cheap clone) so no lock is held while computing.
         let dataset = {
             let datasets = self.datasets.read().await;
@@ -118,9 +199,8 @@ impl AnalyticsServer {
         let cap_links = cap.map(|c| usize::try_from(c).unwrap_or(usize::MAX));
 
         // Create neighbors based on method
-        let method = request.method.as_deref().unwrap_or("knn");
         let (built, band) = match method {
-            "knn" => {
+            NeighborMethod::Knn => {
                 let k = request.k.unwrap_or(5);
                 // kNN stores exactly n * min(k, n - 1) links: refuse before building anything.
                 let links = (n as u64).saturating_mul(k.min(n.saturating_sub(1)) as u64);
@@ -141,7 +221,7 @@ impl AnalyticsServer {
                 }
                 (Neighbors::try_from_knn(&coords, k), None)
             }
-            "distance" => {
+            NeighborMethod::Distance => {
                 let d_max = request.d_max.unwrap_or(1.0);
                 let d_min = request.d_min.unwrap_or(0.0);
                 (
@@ -149,19 +229,13 @@ impl AnalyticsServer {
                     Some((d_min, d_max)),
                 )
             }
-            "distance_longlat" | "longlat" => {
+            NeighborMethod::DistanceLonglat => {
                 let d_max = request.d_max.unwrap_or(100.0); // km
                 let d_min = request.d_min.unwrap_or(0.0);
                 (
                     Neighbors::try_from_distance_longlat(&coords, d_min, d_max, cap_links),
                     Some((d_min, d_max)),
                 )
-            }
-            other => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown neighbor method '{}'. Use 'knn', 'distance', or 'distance_longlat'.",
-                    other
-                ))]));
             }
         };
         let neighbors = match (built, cap, band) {
@@ -188,14 +262,6 @@ impl AnalyticsServer {
             }
         };
 
-        // Determine weight style
-        let style = match request.style.as_deref() {
-            Some("B") | Some("binary") => WeightStyle::Binary,
-            Some("C") | Some("global") => WeightStyle::GlobalStd,
-            Some("U") | Some("unstandardized") => WeightStyle::Binary, // Closest approximation
-            _ => WeightStyle::RowStd,                                  // Default: row-standardized
-        };
-
         // Get stats from neighbors before we lose access to it
         let avg_neighbors = neighbors.avg_neighbors();
         let has_isolates = neighbors.has_isolates();
@@ -204,6 +270,7 @@ impl AnalyticsServer {
 
         // Create spatial weights (they share the neighbour lists)
         let weights = SpatialWeights::from_neighbors(&neighbors, style);
+        let s0 = weights.sum_weights();
         drop(neighbors);
         drop(dataset);
 
@@ -222,10 +289,18 @@ impl AnalyticsServer {
              ========================\n\
              Observations: {}\n\
              Method: {}\n\
-             Style: {:?}\n\
+             Style: {} ({})\n\
+             Sum of weights (S0): {:.6}\n\
              Average neighbors: {:.2}\n\
              Symmetric: {}\n",
-            weights_name, n, method, style, avg_neighbors, is_symmetric
+            weights_name,
+            n,
+            method.name(),
+            style,
+            style_label(style),
+            s0,
+            avg_neighbors,
+            is_symmetric
         );
 
         if has_isolates {
@@ -240,12 +315,17 @@ impl AnalyticsServer {
 
     /// Run Moran's I test for spatial autocorrelation.
     #[tool(
-        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
+        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test(randomisation = TRUE); units without neighbours (islands) are handled as spdep's zero.policy = TRUE, adjust.n = TRUE (the statistic uses the linked units) and reported. Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
     )]
     pub async fn moran_test(
         &self,
         Parameters(request): Parameters<MoranTestRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let alternative =
+            match parse_option(request.alternative.as_deref(), MoranAlternative::Greater) {
+                Ok(a) => a,
+                Err(e) => return error_text(e),
+            };
         let dataset = {
             let datasets = self.datasets.read().await;
             crate::get_dataset!(datasets, &request.dataset).clone()
@@ -272,16 +352,20 @@ impl AnalyticsServer {
             }
         };
         let x = ndarray::Array1::from_vec(x_vec);
-
-        // Parse alternative
-        let alternative = match request.alternative.as_deref() {
-            Some("less") | Some("negative") => MoranAlternative::Less,
-            Some("two.sided") | Some("two-sided") => MoranAlternative::TwoSided,
-            _ => MoranAlternative::Greater, // Default: positive autocorrelation
-        };
+        let n = x.len();
 
         match moran_test(&x, &listw, alternative) {
             Ok(result) => {
+                let islands = if result.n_islands > 0 {
+                    format!(
+                        "Islands (units without neighbours): {} (spdep zero.policy = TRUE, \
+                         adjust.n = TRUE: the statistic uses the {} linked units)\n",
+                        result.n_islands,
+                        n.saturating_sub(result.n_islands)
+                    )
+                } else {
+                    String::new()
+                };
                 let output = format!(
                     "Moran's I Test for Spatial Autocorrelation\n\
                      ==========================================\n\
@@ -291,7 +375,8 @@ impl AnalyticsServer {
                      Variance: {:.6}\n\
                      Z-score: {:.4}\n\
                      P-value: {:.6}\n\
-                     Alternative: {:?}\n\n\
+                     {}\
+                     Alternative: {}\n\n\
                      Interpretation:\n\
                      - I > E[I]: positive spatial autocorrelation (clustering)\n\
                      - I < E[I]: negative spatial autocorrelation (dispersion)\n\
@@ -302,12 +387,14 @@ impl AnalyticsServer {
                     result.variance,
                     result.z_score,
                     result.p_value,
+                    islands,
                     alternative
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Moran's I test failed: {e}"),
+            Err(e) => error_text(model_error(
+                "Moran's I test failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -348,8 +435,9 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return error_text(with_hint(
-                    format!("OLS estimation failed: {e}"),
+                return error_text(model_error(
+                    "OLS estimation failed: ",
+                    &e,
                     MISSING_HINT_MODELS,
                 ));
             }
@@ -406,8 +494,9 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Spatial LM tests failed: {e}"),
+            Err(e) => error_text(model_error(
+                "Spatial LM tests failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -415,7 +504,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Autoregressive Lag (SAR) model.
     #[tool(
-        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its standard errors do not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes."
+        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Standard errors of the coefficients and rho are the inverse observed information of the full log-likelihood. With durbin = true (SDM), the direct, indirect and total impacts are spatialreg's (exact). The output ends with the optimiser's convergence and any warnings."
     )]
     pub async fn sar_model(
         &self,
@@ -512,15 +601,22 @@ impl AnalyticsServer {
                     output.push_str(
                         "\nNote: Direct = own effect, Indirect = spillover effects from neighbors",
                     );
-                    for warning in &impacts.warnings {
-                        output.push_str(&format!("\n⚠ WARNING: {}", warning));
-                    }
                 }
+                let mut notes = result.warnings.clone();
+                if let Some(impacts) = &result.impacts {
+                    notes.extend(impacts.warnings.iter().cloned());
+                }
+                common::append_notes(
+                    &mut output,
+                    Some((result.convergence.converged, result.convergence.iterations)),
+                    &notes,
+                );
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SAR model estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SAR model estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -528,7 +624,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Error Model (SEM).
     #[tool(
-        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: the standard error of lambda does not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes."
+        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). The output ends with the optimiser's convergence and any warnings."
     )]
     pub async fn sem_model(
         &self,
@@ -604,11 +700,17 @@ impl AnalyticsServer {
                      (no spatial multiplier effects unlike SAR)",
                     result.log_likelihood, result.aic, result.bic, result.sigma2, result.n_obs
                 ));
+                common::append_notes(
+                    &mut output,
+                    Some((result.convergence.converged, result.convergence.iterations)),
+                    &result.warnings,
+                );
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SEM model estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SEM model estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -616,7 +718,7 @@ impl AnalyticsServer {
 
     /// Run Spatial GMM with heteroscedasticity robustness (sphet).
     #[tool(
-        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its estimates and standard errors do not yet match the R reference (sphet), for every model; see the release notes."
+        description = "Run a spatial regression by GMM, robust to heteroskedasticity of unknown form, after sphet::spreg(het = TRUE). Models: 'lag' (SAR by spatial two-stage least squares, instruments X, WX, W^2X, ...), 'error' (SEM, the Kelejian-Prucha 2010 GM estimator of the spatial error parameter) and 'sarar' (both). Standard errors: 'robust' (White, the default), 'hac' (the spatial HAC of Kelejian-Prucha 2007 on distances between the units: set coord_x and coord_y to the coordinate columns; kernel picks one of sphet's seven kernels, default epanechnikov; each unit's bandwidth is its largest distance to its neighbours in the weights, sphet's variable bandwidth) or 'standard'. Unlike ML estimation, GMM does not require normally distributed errors. Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Differences from sphet: rho is the identity-weighted GM estimate (one GM step, not sphet's efficient step 2b), het = false (not exposed here: this tool always sets het = true) uses the Kelejian-Prucha (1999) three moments, and rho is searched in [-0.99, 0.99] (sphet: (-0.9, 0.9))."
     )]
     pub async fn sphet_model(
         &self,
@@ -639,24 +741,28 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse model type
-        let model = match request.model.as_deref() {
-            Some("error") | Some("sem") => SphetModel::SpatialError,
-            Some("sarar") | Some("both") | Some("combined") => SphetModel::SARAR,
-            _ => SphetModel::SpatialLag, // Default: lag/SAR
+        let model = match parse_option(request.model.as_deref(), SphetModel::SpatialLag) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
-
-        // Parse SE type
-        let se_type = match request.se_type.as_deref() {
-            Some("hac") | Some("HAC") => SphetSE::HAC,
-            Some("standard") | Some("homoscedastic") => SphetSE::Standard,
-            _ => SphetSE::Robust, // Default: robust
+        let se_type = match parse_option(request.se_type.as_deref(), SphetSE::Robust) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
 
         // The spatial HAC works on distances between the units: it needs their coordinates and
         // takes sphet's variable bandwidth (each unit's farthest neighbour in the weights).
         let mut hac_kernel = SpatialHacKernel::default();
         let mut coords = None;
+        if se_type != SphetSE::HAC
+            && (request.kernel.is_some() || request.coord_x.is_some() || request.coord_y.is_some())
+        {
+            return error_text(
+                "coord_x, coord_y and kernel are used only with se_type = 'hac' (the spatial HAC); \
+                 set se_type = 'hac' or leave them unset."
+                    .to_string(),
+            );
+        }
         if se_type == SphetSE::HAC {
             if request.bandwidth.is_some() {
                 return error_text(
@@ -670,8 +776,16 @@ impl AnalyticsServer {
                 SpatialHacKernel::default(),
             ) {
                 Ok(k) => k,
-                Err(e) => return error_text(e.to_string()),
+                // The core names its config field; the MCP field is `kernel`.
+                Err(e) => return error_text(e.to_string().replace("hac_kernel", "kernel")),
             };
+            if request.coord_x.is_some() != request.coord_y.is_some() {
+                return error_text(
+                    "coord_x and coord_y go together: set both to the coordinate columns the \
+                     weights were built from."
+                        .to_string(),
+                );
+            }
             let (Some(cx), Some(cy)) = (request.coord_x.as_deref(), request.coord_y.as_deref())
             else {
                 return error_text(
@@ -705,88 +819,19 @@ impl AnalyticsServer {
 
         match run_sphet(&dataset, &request.y, &x_refs, &listw, config) {
             Ok(result) => {
-                let model_name = match result.model_type {
-                    SphetModel::SpatialLag => "Spatial Lag (SAR) - GMM",
-                    SphetModel::SpatialError => "Spatial Error (SEM) - GMM",
-                    SphetModel::SARAR => "SARAR (Lag + Error) - GMM",
-                };
-
-                let mut output = format!(
-                    "{}\n{}\n\
-                     Heteroscedasticity-robust GMM estimation (Kelejian-Prucha)\n\
-                     Standard errors: {}\n\n",
-                    model_name,
-                    "=".repeat(model_name.len()),
-                    result.se_type
+                let mut output = result.to_string();
+                if !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(
+                    "Note: the GMM estimator is robust to heteroskedasticity of unknown form and \
+                     does not require normally distributed errors.",
                 );
-
-                // Spatial parameters
-                if let (Some(lambda), Some(se), Some(z), Some(p)) = (
-                    result.lambda,
-                    result.lambda_se,
-                    result.lambda_z,
-                    result.lambda_p,
-                ) {
-                    output.push_str(&format!(
-                        "Spatial lag coefficient (lambda):\n\
-                         ---------------------------------\n\
-                         Estimate: {:.6}\n\
-                         Std.Error: {:.6}\n\
-                         Z-value: {:.4}\n\
-                         P-value: {:.6}\n\n",
-                        lambda, se, z, p
-                    ));
-                }
-
-                if let (Some(rho), Some(se), Some(z), Some(p)) =
-                    (result.rho, result.rho_se, result.rho_z, result.rho_p)
-                {
-                    output.push_str(&format!(
-                        "Spatial error coefficient (rho):\n\
-                         --------------------------------\n\
-                         Estimate: {:.6}\n\
-                         Std.Error: {:.6}\n\
-                         Z-value: {:.4}\n\
-                         P-value: {:.6}\n\n",
-                        rho, se, z, p
-                    ));
-                }
-
-                output.push_str("Regression Coefficients:\n");
-                output.push_str("------------------------\n");
-                output.push_str(&format!(
-                    "{:15} {:>12} {:>10} {:>10} {:>10}\n",
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
-                ));
-
-                for (i, name) in result.coef_names.iter().enumerate() {
-                    output.push_str(&format!(
-                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
-                        name,
-                        result.coefficients[i],
-                        result.std_errors[i],
-                        result.z_values[i],
-                        result.p_values[i]
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "\nModel Statistics:\n\
-                     -----------------\n\
-                     Sigma²: {:.6}\n\
-                     N: {}\n\
-                     df: {}\n\
-                     Iterations: {}\n\
-                     Converged: {}\n\n\
-                     Note: GMM estimation is robust to heteroscedasticity of unknown form.\n\
-                     Unlike ML, it does not require normally distributed errors.",
-                    result.sigma2, result.n_obs, result.df, result.iterations, result.converged
-                ));
-
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Spatial GMM estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "Spatial GMM estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -794,7 +839,7 @@ impl AnalyticsServer {
 
     /// Run SAR Probit model (spatial lag probit for binary outcomes).
     #[tool(
-        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
+        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means and SDs, the rho credible interval and, per variable, the direct, indirect and total marginal effects on the probability scale with their posterior SDs. Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused."
     )]
     pub async fn sar_probit_model(
         &self,
@@ -817,11 +862,12 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        let (seed, seed_source) = self.probit_seed(request.seed).await;
         let config = SpatialProbitConfig {
             n_draws: request.n_draws.unwrap_or(1000),
             burn_in: request.burn_in.unwrap_or(200),
             compute_impacts: request.compute_impacts.unwrap_or(true),
-            seed: request.seed,
+            seed: Some(seed),
             ..Default::default()
         };
 
@@ -877,7 +923,8 @@ impl AnalyticsServer {
                      Pseudo R-squared: {:.4}\n\
                      Percent Correctly Predicted: {:.2}%\n\
                      N: {} (Y=1: {})\n\
-                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n",
+                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\
+                     Seed: {} ({})\n",
                     result.log_likelihood,
                     result.log_marginal_likelihood,
                     result.dic,
@@ -886,36 +933,22 @@ impl AnalyticsServer {
                     result.n_obs,
                     result.n_positive,
                     result.n_draws,
-                    result.acceptance_rate * 100.0
+                    result.acceptance_rate * 100.0,
+                    seed,
+                    seed_source
                 ));
 
                 if let Some(impacts) = &result.impacts {
-                    output.push_str("\nSpatial Marginal Effects (Probability Scale):\n");
-                    output.push_str("--------------------------------------------\n");
-                    output.push_str(&format!(
-                        "{:15} {:>12} {:>12} {:>12}\n",
-                        "Variable", "Direct", "Indirect", "Total"
-                    ));
-                    for (i, name) in impacts.var_names.iter().enumerate() {
-                        output.push_str(&format!(
-                            "{:15} {:>12.6} {:>12.6} {:>12.6}\n",
-                            name, impacts.direct[i], impacts.indirect[i], impacts.total[i]
-                        ));
-                    }
-                    output.push_str(&format!(
-                        "{:15} ({:>10.6}) ({:>10.6}) ({:>10.6})\n",
-                        "Std.Errors",
-                        impacts.direct_se[0],
-                        impacts.indirect_se[0],
-                        impacts.total_se[0]
-                    ));
-                    output.push_str("\nNote: Direct = own probability effect, Indirect = spillover from neighbors");
+                    output.push('\n');
+                    output.push_str(&impacts.to_string());
+                    output.push_str("Note: Direct = own probability effect, Indirect = spillover from neighbors");
                 }
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SAR Probit estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SAR Probit estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -946,11 +979,12 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        let (seed, seed_source) = self.probit_seed(request.seed).await;
         let config = SpatialProbitConfig {
             n_draws: request.n_draws.unwrap_or(1000),
             burn_in: request.burn_in.unwrap_or(200),
             compute_impacts: false, // SEM doesn't have spatial multiplier impacts
-            seed: request.seed,
+            seed: Some(seed),
             ..Default::default()
         };
 
@@ -1005,7 +1039,8 @@ impl AnalyticsServer {
                      Pseudo R-squared: {:.4}\n\
                      Percent Correctly Predicted: {:.2}%\n\
                      N: {} (Y=1: {})\n\
-                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\n\
+                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\
+                     Seed: {} ({})\n\n\
                      Note: SEM Probit coefficients have their usual interpretation\n\
                      (marginal effect = beta * phi(X'beta) at mean, no spatial multiplier)",
                     result.log_likelihood,
@@ -1016,13 +1051,16 @@ impl AnalyticsServer {
                     result.n_obs,
                     result.n_positive,
                     result.n_draws,
-                    result.acceptance_rate * 100.0
+                    result.acceptance_rate * 100.0,
+                    seed,
+                    seed_source
                 ));
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SEM Probit estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SEM Probit estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -1030,7 +1068,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel ML model (spml).
     #[tool(
-        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: its standard errors do not yet match the R reference (splm); in the within model the spatial error coefficient is reported as rho, with lag = true the spatial error is not estimated (the combined model runs the lag model), the random-effects and pooled models ignore spatial_error, and the time and two-way effects are not applied, so those estimates do not match either; see the release notes."
+        description = "Run a spatial panel data model by maximum likelihood, as splm::spml: default model within, effect individual, lag false, spatial_error 'b' (the Baltagi spatial error model). Supported: with model within or pooling, the spatial lag model (lag = true, spatial_error = 'none'), the spatial error model (the default) and the SARAR model (lag = true with a spatial error), with any effect for within; with model random, individual effects with spatial_error 'b', 'kkp' or 'none' and an optional lag. lag = false with spatial_error = 'none' has no spatial parameter and is refused. Standard errors are the inverse observed information of the full log-likelihood. Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
     )]
     pub async fn spatial_panel_ml(
         &self,
@@ -1053,31 +1091,29 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse model type
-        let model = match request.model.as_deref() {
-            Some("random") | Some("re") => SpatialPanelModel::Random,
-            Some("pooling") | Some("pool") | Some("pooled") => SpatialPanelModel::Pooling,
-            _ => SpatialPanelModel::Within, // Default: fixed effects
+        let model = match parse_option(request.model.as_deref(), SpatialPanelModel::Within) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
-
-        // Parse effect type
-        let effect = match request.effect.as_deref() {
-            Some("time") => SpatialPanelEffect::Time,
-            Some("twoways") | Some("twoway") | Some("both") => SpatialPanelEffect::TwoWays,
-            _ => SpatialPanelEffect::Individual, // Default
+        let effect = match parse_option(request.effect.as_deref(), SpatialPanelEffect::Individual) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
-
-        // Parse spatial error type
-        let spatial_error = match request.spatial_error.as_deref() {
-            Some("baltagi") | Some("b") | Some("sem") => SpatialErrorType::Baltagi,
-            Some("kkp") | Some("sem2") => SpatialErrorType::KKP,
-            _ => SpatialErrorType::None,
-        };
+        // splm::spml's defaults: spatial.error = "b", lag = FALSE.
+        let spatial_error =
+            match parse_option(request.spatial_error.as_deref(), SpatialErrorType::Baltagi) {
+                Ok(m) => m,
+                Err(e) => return error_text(e),
+            };
+        let lag = request.lag.unwrap_or(false);
+        if !lag && spatial_error == SpatialErrorType::None {
+            return error_text(NO_SPATIAL_PARAMETER.to_string());
+        }
 
         let config = SpmlConfig {
             model,
             effect,
-            lag: request.lag.unwrap_or(false),
+            lag,
             spatial_error,
             ..Default::default()
         };
@@ -1093,92 +1129,20 @@ impl AnalyticsServer {
         );
         self.keep_weights_cache(&request.weights, listw).await;
         match fit {
-            Ok(result) => {
-                let mut output = format!(
-                    "Spatial Panel Model (ML)\n\
-                     ========================\n\
-                     Model: {}  Effect: {}\n\
-                     Spatial Lag: {}  Spatial Error: {}\n\
-                     Observations: {}  Entities: {}  Time periods: {}\n\
-                     Log-Likelihood: {:.4}  AIC: {:.4}  BIC: {:.4}\n\n",
-                    result.model,
-                    result.effect,
-                    result.has_lag,
-                    result.spatial_error,
-                    result.n_obs,
-                    result.n_entities,
-                    result.n_time,
-                    result.log_likelihood,
-                    result.aic,
-                    result.bic
-                );
-
-                // Spatial parameters
-                if let Some(rho) = result.rho {
-                    output.push_str(&format!(
-                        "Spatial lag coefficient (rho):\n\
-                         ------------------------------\n\
-                         Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}\n\n",
-                        rho,
-                        result.rho_se.unwrap_or(0.0),
-                        result.rho_z.unwrap_or(0.0),
-                        result.rho_p.unwrap_or(1.0)
-                    ));
-                }
-
-                if let Some(lambda) = result.lambda {
-                    output.push_str(&format!(
-                        "Spatial error coefficient (lambda):\n\
-                         -----------------------------------\n\
-                         Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}\n\n",
-                        lambda,
-                        result.lambda_se.unwrap_or(0.0),
-                        result.lambda_z.unwrap_or(0.0),
-                        result.lambda_p.unwrap_or(1.0)
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "Regression Coefficients:\n\
-                     ------------------------\n\
-                     {:20} {:>12} {:>10} {:>10} {:>10}\n",
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
-                ));
-
-                for (i, name) in result.coef_names.iter().enumerate() {
-                    output.push_str(&format!(
-                        "{:20} {:>12.6} {:>10.6} {:>10.4} {:>10.4}{}\n",
-                        name,
-                        result.coefficients[i],
-                        result.std_errors[i],
-                        result.z_values[i],
-                        result.p_values[i],
-                        result.significance[i].stars()
-                    ));
-                }
-
-                // Variance components
-                output.push_str("\nVariance Components:\n");
-                if let Some(sigma_mu) = result.variance.sigma_mu {
-                    output.push_str(&format!("  sigma_mu (individual): {:.6}\n", sigma_mu));
-                }
-                output.push_str(&format!(
-                    "  sigma_epsilon (error): {:.6}\n",
-                    result.variance.sigma_epsilon
-                ));
-
-                Ok(CallToolResult::success(vec![Content::text(output)]))
-            }
-            Err(e) => error_text(with_hint(
-                format!("Spatial panel ML estimation failed: {e}"),
-                MISSING_HINT_MODELS,
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string().trim_start().to_string(),
+            )])),
+            Err(e) => error_text(model_error(
+                "Spatial panel ML estimation failed: ",
+                &e,
+                MISSING_HINT_PANELS,
             )),
         }
     }
 
     /// Run Spatial Panel GMM model (spgm).
     #[tool(
-        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. The spatial error model (spatial_error, alone or with lag) is estimated with w2sls only; b2sls, ec2sls and g2sls estimate the spatial lag model, which is their default."
+        description = "Run a spatial panel data model by generalized method of moments, as splm::spgm. Models: the spatial lag model by 2SLS with method w2sls (within), b2sls (between), ec2sls (Baltagi's EC2SLS) or g2sls (GLS random effects); the within GM spatial error model of Kapoor, Kelejian & Prucha (2007) (w2sls, the default call); and, with w2sls only, lag plus spatial error (within GS2SLS). The spatial error model with b2sls, ec2sls or g2sls is refused. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
     )]
     pub async fn spatial_panel_gmm(
         &self,
@@ -1201,12 +1165,9 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse method
-        let method = match request.method.as_deref() {
-            Some("g2sls") | Some("gls") | Some("random") => SpgmMethod::G2sls,
-            Some("b2sls") | Some("between") => SpgmMethod::B2sls,
-            Some("ec2sls") | Some("baltagi") => SpgmMethod::Ec2sls,
-            _ => SpgmMethod::W2sls, // Default: within/fixed effects
+        let method = match parse_option(request.method.as_deref(), SpgmMethod::W2sls) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
 
         // Only w2sls estimates the spatial error model; the other methods estimate the spatial
@@ -1230,82 +1191,32 @@ impl AnalyticsServer {
         );
         self.keep_weights_cache(&request.weights, listw).await;
         match fit {
-            Ok(result) => {
-                let mut output = format!(
-                    "Spatial Panel Model (GMM)\n\
-                     =========================\n\
-                     Method: {}\n\
-                     Spatial Lag: {}  Spatial Error: {}\n\
-                     Observations: {}  Entities: {}  Time periods: {}\n\
-                     Instruments: {}\n\n",
-                    result.method,
-                    result.has_lag,
-                    result.has_spatial_error,
-                    result.n_obs,
-                    result.n_entities,
-                    result.n_time,
-                    result.n_instruments
-                );
-
-                // Spatial parameters
-                if let Some(rho) = result.rho {
-                    output.push_str(&format!("Spatial lag coefficient (rho): {:.6}\n\n", rho));
-                }
-                if let Some(lambda) = result.lambda {
-                    output.push_str(&format!(
-                        "Spatial error coefficient (lambda): {:.6}\n\n",
-                        lambda
-                    ));
-                }
-
-                output.push_str(&format!(
-                    "Regression Coefficients:\n\
-                     ------------------------\n\
-                     {:20} {:>12} {:>10} {:>10} {:>10}\n",
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
-                ));
-
-                for (i, name) in result.coef_names.iter().enumerate() {
-                    output.push_str(&format!(
-                        "{:20} {:>12.6} {:>10.6} {:>10.4} {:>10.4}{}\n",
-                        name,
-                        result.coefficients[i],
-                        result.std_errors[i],
-                        result.z_values[i],
-                        result.p_values[i],
-                        result.significance[i].stars()
-                    ));
-                }
-
-                // Sargan test
-                if let (Some(stat), Some(p), Some(df)) =
-                    (result.sargan_stat, result.sargan_p, result.sargan_df)
-                {
-                    output.push_str(&format!(
-                        "\nSargan test for overidentifying restrictions:\n\
-                         chi2({}) = {:.4}, p-value = {:.4}\n",
-                        df, stat, p
-                    ));
-                }
-
-                // Variance components
-                output.push_str(&format!(
-                    "\nResidual variance (sigma2): {:.6}\n",
-                    result.sigma2
-                ));
-                if let Some(sigma2_mu) = result.sigma2_mu {
-                    output.push_str(&format!(
-                        "Individual variance (sigma2_mu): {:.6}\n",
-                        sigma2_mu
-                    ));
-                }
-
-                Ok(CallToolResult::success(vec![Content::text(output)]))
-            }
-            Err(e) => error_text(with_hint(
-                format!("Spatial panel GMM estimation failed: {e}"),
-                MISSING_HINT_MODELS,
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string().trim_start().to_string(),
+            )])),
+            Err(e) => error_text(model_error(
+                "Spatial panel GMM estimation failed: ",
+                &e,
+                MISSING_HINT_PANELS,
             )),
+        }
+    }
+}
+
+/// The refusal of a spml call with neither a spatial lag nor a spatial error.
+const NO_SPATIAL_PARAMETER: &str = "spatial_panel_ml estimates a spatial lag (lag = true), a \
+    spatial error (spatial_error = 'b', the default as splm::spml, or 'kkp'), or both; with \
+    lag = false and spatial_error = 'none' there is no spatial parameter. Use \
+    panel_fixed_effects or panel_random_effects for a non-spatial panel model.";
+
+impl AnalyticsServer {
+    /// The seed of a spatial probit and where it came from: the request, else `set_seed`, else
+    /// the core's documented default.
+    async fn probit_seed(&self, request: Option<u64>) -> (u64, &'static str) {
+        match (request, self.seed_or_global(None).await) {
+            (Some(s), _) => (s, "request"),
+            (None, Some(s)) => (s, "set_seed"),
+            (None, None) => (SPATIAL_PROBIT_DEFAULT_SEED, "default"),
         }
     }
 }
@@ -1341,6 +1252,12 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_validation::{Tol, text::labelled};
     use polars::prelude::*;
+
+    /// The neighbour-method table has no spelling listed twice (the first would win).
+    #[test]
+    fn test_neighbor_method_table_validates() {
+        assert_eq!(NEIGHBOR_METHOD.validate(), Ok(()));
+    }
 
     /// A current-thread runtime: `limits::with_limits` is thread-local.
     fn runtime() -> tokio::runtime::Runtime {
@@ -1676,7 +1593,7 @@ mod tests {
                 weights: "w".into(),
                 model: None,
                 lag: Some(true),
-                spatial_error: None,
+                spatial_error: Some("none".into()),
                 effect: None,
             }))),
             rt.block_on(s.spatial_panel_gmm(Parameters(SpgmRequest {
@@ -1750,7 +1667,10 @@ mod tests {
             "coord_x": "cx", "coord_y": "cy", "kernel": "gaussian",
         }));
         assert_eq!(err, Some(true), "{t}");
-        assert!(t.contains("hac_kernel"), "{t}");
+        assert!(
+            t.contains("unknown kernel") && !t.contains("hac_kernel"),
+            "{t}"
+        );
         let (err, t) = call(serde_json::json!({"coord_x": "cx", "coord_y": "nope"}));
         assert_eq!(err, Some(true), "{t}");
         assert!(t.contains("nope"), "{t}");
@@ -1779,7 +1699,8 @@ mod tests {
             let (err, t) = call(serde_json::json!({"method": method}));
             assert_ne!(err, Some(true), "{method}: {t}");
             assert!(
-                t.contains("Spatial Lag: true  Spatial Error: false"),
+                t.contains("Spatial lag coefficient (rho):")
+                    && !t.contains("Spatial error coefficient"),
                 "{method}: {t}"
             );
             let (err, t) = call(serde_json::json!({"method": method, "spatial_error": true}));
@@ -1788,7 +1709,11 @@ mod tests {
         }
         let (err, t) = call(serde_json::json!({}));
         assert_ne!(err, Some(true), "{t}");
-        assert!(t.contains("Spatial Lag: false  Spatial Error: true"), "{t}");
+        assert!(
+            t.contains("Spatial error coefficient (lambda, GM)")
+                && !t.contains("Spatial lag coefficient"),
+            "{t}"
+        );
     }
 
     fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
@@ -1796,7 +1721,7 @@ mod tests {
     }
 
     /// The 25 integer points of the Moran's I cross-check (the R script is in the doc
-    /// comment of `test_mcp_spatial_neighbors_and_moran_int64_match_r`), i = 0..24:
+    /// comment of `test_mcp_spatial_neighbors_and_moran_int64_base_r_cross_check`), i = 0..24:
     /// gx = (40 i^2 + 3 i) mod 101, gy = (2 i^2 + 7 i + 5) mod 97,
     /// v = (gx + gy) div 10 + (3 i) mod 7, b = (v >= 13) as 0/1. No kNN ties for k = 4.
     /// `float`: Float64 copies (the same values), else Int64.
@@ -1903,7 +1828,7 @@ mod tests {
     ///   p_two = 2 * pnorm(-abs(Z)), min_gap = min(gap))  # min_gap > 0: no kNN ties
     /// ```
     #[test]
-    fn test_mcp_spatial_neighbors_and_moran_int64_match_r() {
+    fn test_mcp_spatial_neighbors_and_moran_int64_base_r_cross_check() {
         let (rt, s) = server_with(vec![("pts", points_df(false)), ("ptsf", points_df(true))]);
         for (ds, w) in [("pts", "w"), ("ptsf", "wf")] {
             let r = call(&s, Limits::off(), knn4(ds, w));
@@ -2085,7 +2010,7 @@ mod tests {
     /// R: spml_entity_order.R (validation/econometrics/splm.md): within spatial-lag fit
     /// with W rows in sorted label order.
     #[test]
-    fn test_mcp_spatial_panel_ml_sorted_ids_match_r() {
+    fn test_mcp_spatial_panel_ml_sorted_ids_base_r_cross_check() {
         let (panel, coords) = panel_dfs();
         let (rt, s) = server_with(vec![("panel", panel), ("coords", coords)]);
         let r = call(
@@ -2100,7 +2025,7 @@ mod tests {
         let r = rt
             .block_on(s.spatial_panel_ml(Parameters(req(serde_json::json!({
                 "dataset": "panel", "y": "y", "x": ["x"], "entity_col": "entity",
-                "time_col": "time", "weights": "rook", "lag": true,
+                "time_col": "time", "weights": "rook", "lag": true, "spatial_error": "none",
             })))))
             .unwrap();
         let t = text(&r);
@@ -2160,5 +2085,82 @@ mod tests {
                 assert!(t.contains(part), "{ds}: {t}");
             }
         }
+    }
+
+    /// A missing value in a panel gets the panel advice (drop the entity or the period), not the
+    /// cross-section advice (drop the row and rebuild the weights).
+    #[test]
+    fn test_mcp_spatial_panel_missing_value_gets_the_panel_hint() {
+        let (panel, coords) = panel_dfs();
+        let y: Vec<Option<f64>> = panel
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| if i == 7 { None } else { v })
+            .collect();
+        let mut na = panel.clone();
+        na.with_column(Column::new("y".into(), y)).unwrap();
+        let (rt, s) = server_with(vec![("panel", na), ("coords", coords)]);
+        let r = call(
+            &s,
+            Limits::off(),
+            req(serde_json::json!({
+                "dataset": "coords", "x_coord": "gx", "y_coord": "gy",
+                "method": "distance", "d_min": 0.0, "d_max": 1.0, "weights_name": "rook",
+            })),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let args = serde_json::json!({
+            "dataset": "panel", "y": "y", "x": ["x"], "entity_col": "entity",
+            "time_col": "time", "weights": "rook", "lag": true, "spatial_error": "none",
+        });
+        let mut gmm = args.clone();
+        gmm["spatial_error"] = serde_json::json!(false);
+        let results = [
+            rt.block_on(s.spatial_panel_ml(Parameters(req(args)))),
+            rt.block_on(s.spatial_panel_gmm(Parameters(req(gmm)))),
+        ];
+        for r in results {
+            let r = r.unwrap();
+            let t = text(&r);
+            assert_eq!(r.is_error, Some(true), "{t}");
+            assert!(t.contains("need a balanced panel"), "{t}");
+            assert!(
+                !t.contains("rebuild the weights with spatial_neighbors on the cleaned"),
+                "{t}"
+            );
+        }
+    }
+
+    /// The hint follows the error variant, not words in the message.
+    #[test]
+    fn test_mcp_spatial_hint_follows_the_error_variant() {
+        let null = EconError::NullValues {
+            column: "y".into(),
+            count: 1,
+        };
+        assert!(
+            model_error("SAR model failed: ", &null, MISSING_HINT_MODELS)
+                .ends_with(MISSING_HINT_MODELS)
+        );
+        let other = EconError::Computation("missing value in the log".into());
+        let t = model_error("SAR model failed: ", &other, MISSING_HINT_MODELS);
+        assert!(!t.contains(MISSING_HINT_MODELS), "{t}");
+        assert!(t.starts_with("SAR model failed: "), "{t}");
+    }
+
+    /// SPAT-30: the neighbour description names spdep's exact tie order.
+    #[test]
+    fn test_mcp_spatial_neighbors_description_names_the_tie_rule() {
+        let tools = AnalyticsServer::new().router_tools();
+        let d = tools
+            .iter()
+            .find(|t| t.name == "spatial_neighbors")
+            .and_then(|t| t.description.clone())
+            .unwrap_or_default();
+        assert!(d.contains("use_kd_tree = FALSE"), "{d}");
     }
 }
