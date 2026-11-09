@@ -143,6 +143,12 @@ websocket `tool` messages runs through one governor
   its tool loop.
 - **Panics.** A tool that panics answers 500 `internal`; the session and the
   process survive.
+- **Integer overflow.** Release builds keep Rust's overflow checks
+  (`[profile.release] overflow-checks = true` in the workspace `Cargo.toml`).
+  An arithmetic overflow left in core code therefore panics and is answered
+  with 500 `internal`, like any panic, instead of computing with a wrapped
+  value. The bench profile turns the checks off, so `cargo bench` numbers are
+  unaffected; the server pays a small cost in integer-heavy loops.
 - **Memory admission.** While the process RSS is above
   `P2A_MEMORY_SOFT_LIMIT_MB` (hosted 700 MiB), new calls are refused with 503
   `memory_pressure` (`Retry-After: 15`). This needs a platform that reports RSS
@@ -280,6 +286,9 @@ HTTP), and they never depend on the resource profile:
   bound;
 - buffers sized by a caller are allocated fallibly, with checked size
   arithmetic, so an impossible size is an error and not a process abort;
+- size and degrees-of-freedom arithmetic is checked, and a release build panics
+  on any overflow that remains (the CLI exits with a panic message, the HTTP
+  server answers 500);
 - loops whose progress depends on comparing values reject or filter NaN and
   infinite values first;
 - method-level caps, modelled on R's own limits: multinomial and ordered models
@@ -1009,7 +1018,10 @@ Nothing here runs automatically except the two workflows named in steps 0 and
    ```
 
    `.github/workflows/backend-image.yml` then publishes `X.Y.Z`, `vX.Y.Z` and
-   `sha-<short>` to GHCR. Do not run that workflow by `workflow_dispatch` on
+   `sha-<short>` to GHCR. The image's `cargo build --release`
+   (`docker/backend.Dockerfile`) picks up the workspace release profile, overflow
+   checks included; no `CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS` override may be
+   set in the image or on the platform. Do not run that workflow by `workflow_dispatch` on
    `main` for a release: a dispatch on `main` publishes only `latest` and a sha
    tag.
 3. **Confirm the image exists.** The package is public, so an anonymous token
