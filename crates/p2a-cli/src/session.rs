@@ -54,19 +54,27 @@ pub fn sidecar_dir(session_path: &Path) -> PathBuf {
     session_path.with_file_name(name)
 }
 
-/// The file a derived dataset is stored in: every byte of `name` outside `[A-Za-z0-9_-]`
-/// as `%XX` (so the map is injective and no name leaves the directory), plus ".parquet".
+/// The file a derived dataset is stored in: every byte of `name` outside `[a-z0-9_-]`
+/// (uppercase ASCII letters included) as `%XX`, plus ".parquet". The map is injective,
+/// and stays injective under case-insensitive comparison (the encoded name has no
+/// uppercase letter outside the hex digits of an escape, whose case never varies), so
+/// two names never share a file on a case-insensitive filesystem; no name leaves the
+/// directory. A name that would encode to a Windows device name (`con`, `nul`, `com1`,
+/// ...) has its first byte escaped too.
 fn sidecar_file_name(name: &str) -> anyhow::Result<String> {
     if name.is_empty() {
         anyhow::bail!("a dataset name cannot be empty");
     }
     let mut out = String::with_capacity(name.len());
     for b in name.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-' {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
         }
+    }
+    if is_windows_device_name(&out) {
+        out = format!("%{:02X}{}", out.as_bytes()[0], &out[1..]);
     }
     if out.len() > MAX_SIDECAR_NAME {
         anyhow::bail!(
@@ -77,6 +85,40 @@ fn sidecar_file_name(name: &str) -> anyhow::Result<String> {
     }
     out.push_str(".parquet");
     Ok(out)
+}
+
+/// Whether `stem` (lowercase, no extension) is a name Windows reserves for a device.
+fn is_windows_device_name(stem: &str) -> bool {
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || ((stem.starts_with("com") || stem.starts_with("lpt"))
+            && stem.len() == 4
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// The file of a derived dataset entry, checked: its `source_path` must be exactly
+/// `<session file name>.datasets/<file>.parquet`, as [`SessionManager::persist_dataset`]
+/// writes it. A hand-edited or foreign session file that points anywhere else is refused,
+/// so neither a reload nor a replacing `data load` reads or removes a file outside the
+/// session's own directory of derived datasets.
+fn derived_file(meta: &DatasetMeta, session_path: &Path) -> anyhow::Result<PathBuf> {
+    use std::path::Component;
+    let dir = sidecar_dir(session_path);
+    let expected_dir = dir.file_name().unwrap_or_default();
+    let parts: Vec<Component> = meta.source_path.components().collect();
+    match parts.as_slice() {
+        [Component::Normal(d), Component::Normal(f)]
+            if *d == expected_dir
+                && f.to_str()
+                    .is_some_and(|f| f.ends_with(".parquet") && f.len() > ".parquet".len()) =>
+        {
+            Ok(dir.join(f))
+        }
+        _ => anyhow::bail!(
+            "the session entry points outside {} ({}); refusing to use it",
+            expected_dir.to_string_lossy(),
+            meta.source_path.display()
+        ),
+    }
 }
 
 /// A recorded command execution
@@ -182,10 +224,10 @@ impl Default for Session {
 }
 
 /// Reload a dataset from its source file, with the missing-value strings it was
-/// loaded with. A derived dataset's path is relative to `session_dir`.
-fn reload_dataset(meta: &DatasetMeta, session_dir: &Path) -> anyhow::Result<Dataset> {
+/// loaded with. A derived dataset's file is checked by [`derived_file`].
+fn reload_dataset(meta: &DatasetMeta, session_path: &Path) -> anyhow::Result<Dataset> {
     if meta.derived {
-        let df = DataLoader::load_parquet(session_dir.join(&meta.source_path))?;
+        let df = DataLoader::load_parquet(derived_file(meta, session_path)?)?;
         return Ok(Dataset::new(df));
     }
     // the markers apply to CSV only; `data load` refuses them for any other format
@@ -215,8 +257,6 @@ struct MemoryState {
 pub struct SessionManager {
     /// Path to the session file
     path: PathBuf,
-    /// Directory that relative (derived) dataset paths are resolved against
-    session_dir: PathBuf,
     /// The session being recorded
     session: Session,
     /// The datasets by name, each read from its file the first time a command asks for
@@ -243,11 +283,9 @@ impl SessionManager {
             .keys()
             .map(|name| (name.clone(), OnceCell::new()))
             .collect();
-        let session_dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
 
         Ok(Self {
             path,
-            session_dir,
             session,
             datasets,
             command_start: None,
@@ -438,7 +476,14 @@ impl SessionManager {
         if !old.derived {
             return;
         }
-        match std::fs::remove_file(self.session_dir.join(&old.source_path)) {
+        let file = match derived_file(old, &self.path) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("Warning: not removing the stored copy of '{name}': {e}");
+                return;
+            }
+        };
+        match std::fs::remove_file(file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => eprintln!("Warning: could not remove the stored copy of '{name}': {e}"),
@@ -486,7 +531,7 @@ impl SessionManager {
         let cell = self.datasets.get(name)?;
         cell.get_or_init(|| {
             let meta = self.session.datasets.get(name)?;
-            match reload_dataset(meta, &self.session_dir) {
+            match reload_dataset(meta, &self.path) {
                 Ok(ds) => {
                     self.count_bytes(name.to_string(), estimate_dataset_memory(&ds));
                     self.emit_memory_warning();
@@ -702,6 +747,22 @@ mod derived_dataset_tests {
             "my%20data%2F%C3%BC.parquet"
         );
         assert_eq!(sidecar_file_name("..").unwrap(), "%2E%2E.parquet");
+        assert_eq!(sidecar_file_name("Sales").unwrap(), "%53ales.parquet");
+        // distinct under case folding (macOS APFS, NTFS)
+        for (a, b) in [("Sales", "sales"), ("AB", "ab"), ("aB", "Ab")] {
+            assert_ne!(
+                sidecar_file_name(a).unwrap().to_lowercase(),
+                sidecar_file_name(b).unwrap().to_lowercase()
+            );
+        }
+        assert_eq!(sidecar_file_name("con").unwrap(), "%63on.parquet");
+        assert_eq!(sidecar_file_name("com1").unwrap(), "%63om1.parquet");
+        assert_eq!(sidecar_file_name("com").unwrap(), "com.parquet");
+        assert_eq!(sidecar_file_name("console").unwrap(), "console.parquet");
+        assert_ne!(
+            sidecar_file_name("con").unwrap(),
+            sidecar_file_name("%63on").unwrap()
+        );
         assert!(sidecar_file_name("").is_err());
         assert!(sidecar_file_name(&"x".repeat(201)).is_err());
         assert_eq!(sidecar_file_name(&"x".repeat(200)).unwrap().len(), 208);
@@ -752,6 +813,42 @@ mod derived_dataset_tests {
         m.register_dataset("d", dir.path().join("d.csv"), "csv", &sample(), None);
         assert!(!file.exists());
         assert!(!m.session().datasets["d"].derived);
+    }
+
+    /// A derived entry whose path leaves the session's directory of derived datasets is
+    /// neither removed by a replacing load nor read by a reload.
+    #[test]
+    fn derived_entries_outside_the_sidecar_dir_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let outside = dir.path().join("outside.parquet");
+        sample().to_parquet(&outside).unwrap();
+        for bad in [
+            PathBuf::from("../outside.parquet"),
+            PathBuf::from("outside.parquet"),
+            outside.clone(),
+            PathBuf::from("s.json.datasets/../outside.parquet"),
+            PathBuf::from("other.datasets/outside.parquet"),
+            PathBuf::from("s.json.datasets/x.csv"),
+        ] {
+            let mut m = SessionManager::new(path.clone()).unwrap();
+            m.persist_dataset("d", sample()).unwrap();
+            m.session.datasets.get_mut("d").unwrap().source_path = bad.clone();
+            m.save().unwrap();
+            let again = SessionManager::new(path.clone()).unwrap();
+            assert!(again.get_dataset("d").is_none(), "{bad:?} was read");
+            let mut again = SessionManager::new(path.clone()).unwrap();
+            again.register_dataset("d", dir.path().join("d.csv"), "csv", &sample(), None);
+            assert!(outside.exists(), "{bad:?} removed the outside file");
+        }
+        // the path persist_dataset writes is accepted
+        let mut m = SessionManager::new(dir.path().join("t.json")).unwrap();
+        m.persist_dataset("d", sample()).unwrap();
+        let meta = &m.session().datasets["d"];
+        assert_eq!(
+            derived_file(meta, &dir.path().join("t.json")).unwrap(),
+            dir.path().join("t.json.datasets/d.parquet")
+        );
     }
 
     #[test]
