@@ -352,7 +352,7 @@ pub fn mantelhaen_test(
     };
 
     // Confidence interval for OR using Robins et al. (1986) variance
-    let (or_lower, or_upper) = compute_or_confidence_interval(tables, common_odds_ratio, 0.95);
+    let (or_lower, or_upper) = compute_or_confidence_interval(tables, common_odds_ratio, 0.95)?;
 
     let test_name = if correct {
         "Cochran-Mantel-Haenszel chi-squared test (with continuity correction)"
@@ -380,7 +380,11 @@ pub fn mantelhaen_test(
 }
 
 /// Compute confidence interval for the common odds ratio using Robins et al. (1986) formula.
-fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f64) -> (f64, f64) {
+fn compute_or_confidence_interval(
+    tables: &[Table2x2],
+    or_mh: f64,
+    conf_level: f64,
+) -> EconResult<(f64, f64)> {
     // Robins, Breslow, Greenland (1986) variance formula
     // Var(ln(OR_MH)) ≈ Σ{P_k R_k / (2R²)} + Σ{(P_k S_k + Q_k R_k) / (2RS)} + Σ{Q_k S_k / (2S²)}
     // where R = Σ(a*d/n), S = Σ(b*c/n), P = (a+d)/n, Q = (b+c)/n
@@ -411,7 +415,7 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
 
     // Avoid division by zero
     if r_sum <= 0.0 || s_sum <= 0.0 {
-        return (0.0, f64::INFINITY);
+        return Ok((0.0, f64::INFINITY));
     }
 
     let var_ln_or = pr_sum / (2.0 * r_sum * r_sum)
@@ -419,10 +423,7 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
         + qs_sum / (2.0 * s_sum * s_sum);
 
     // z critical value for confidence level
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let z = Normal::new(0.0, 1.0)
-        .map(|n| n.inverse_cdf((1.0 + conf_level) / 2.0))
-        .unwrap_or(1.96);
+    let z = crate::traits::estimator::z_critical(conf_level)?;
 
     let ln_or = or_mh.ln();
     let se_ln_or = var_ln_or.sqrt();
@@ -430,7 +431,7 @@ fn compute_or_confidence_interval(tables: &[Table2x2], or_mh: f64, conf_level: f
     let lower = (ln_or - z * se_ln_or).exp();
     let upper = (ln_or + z * se_ln_or).exp();
 
-    (lower, upper)
+    Ok((lower, upper))
 }
 
 /// Run CMH test on a Dataset with factor columns.

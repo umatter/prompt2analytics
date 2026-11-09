@@ -71,6 +71,7 @@ impl KernelType {
     /// rdbwselect's rule-of-thumb constant `C_c` of the pilot bandwidth.
     pub fn constant(&self) -> f64 {
         match self {
+            // numeric-ok: rdbwselect's kernel constant C_c, not a critical value
             KernelType::Triangular => 2.576,
             KernelType::Epanechnikov => 2.34,
             KernelType::Uniform => 1.843,

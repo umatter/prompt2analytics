@@ -776,6 +776,7 @@ fn select_lag(
                 let s2 = rss(&ls.residuals) / if dfcor { (n - k) as f64 } else { nf };
                 let j = nd + p;
                 let t_last = ls.coefficients[j] / (s2 * ls.unscaled_cov[[j, j]]).sqrt();
+                // numeric-ok: plm's lagsel (Hall's rule) hard-codes 1.96
                 if t_last.abs() >= 1.96 {
                     return Ok(p);
                 }
