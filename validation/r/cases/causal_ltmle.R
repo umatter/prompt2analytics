@@ -54,7 +54,7 @@
 # d: data; Lc: list of covariate-name vectors per time point; Ac: treatment names; Ycol: outcome;
 # abar: n x T regime matrix (row i = the treatments the regime assigns to subject i).
 .ltmle <- function(d, Lc, Ac, Ycol, abar, gbounds = c(0.01, 1), q = "logistic", per_factor_bounds = FALSE,
-                   set_prior_a = TRUE, ctl = .lt_tight) {
+                   set_prior_a = TRUE, ctl = .lt_tight, check_ic = TRUE) {
   n <- nrow(d); TT <- length(Ac)
   y <- d[[Ycol]]; sc <- c(0, 1)
   if (q == "logistic" && (min(y) < 0 || max(y) > 1)) { sc <- range(y); y <- (y - sc[1]) / diff(sc) }
@@ -94,8 +94,8 @@
     qnext <- qs
   }
   psi <- mean(qnext); ic <- ic + qnext - psi
-  stopifnot(abs(mean(ic)) < 1e-9)                                   # the targeting solved the EIC equation
-  list(psi = psi * diff(sc) + sc[1], ic = ic * diff(sc), eps = eps, n_follow = colSums(follow),
+  if (check_ic) stopifnot(abs(mean(ic)) < 1e-9)                     # the targeting solved the EIC equation
+  list(psi = psi * diff(sc) + sc[1], ic = ic * diff(sc), eps = eps, n_follow = colSums(follow), cum_unb = cum_unb,
        n_bounded = colSums(out_of_bounds), n_bounded_follow = colSums(out_of_bounds & follow),
        H = H, cum = cum, gfits = gfits, qfits = qfits, scale = sc)
 }
@@ -194,5 +194,84 @@ case("ltmle_two_period", "causal/tmle", "LTMLE as ltmle's defaults (written out,
   list(values = v,
        reference = "LTMLE (Lendle et al. 2017) as ltmle 1.x with its defaults (stratify = FALSE, gbounds = c(0.01, 1) on the cumulative g, SetA predictions, weighted-intercept fluctuation) and variance.method = 'ic', written out with glm and cross-checked against ltmle::ltmle 1.3-0 (logistic-Q regime means and EIC SEs to 1e-8 relative); the linear Q model is p2a's Gaussian variant written out with lm",
        call = "ltmle(d, Anodes = c('A1','A2'), Lnodes = 'L1', Ynodes = 'Y', abar = list(c(1,1), c(0,0)), SL.library = 'glm', stratify = FALSE, variance.method = 'ic'); abar = c(1,0) and the rule A_t = 1{L_{t-1} > 0}; gbounds = c(0.1, 0.5); Ynodes = 'Yc' (rescaled, and p2a's linear variant); randomized R1, Lr, R2, Yr (linear); Anodes = c('A1','A2','A3'), Lnodes = c('L1','L2'), Ynodes = 'Y3'",
+       packages = c("ltmle"))
+})
+
+# ltmle_saturation: an eight-node design (an R port of the sparse_followers fixture of ltmle.rs's
+# tests: two uniform covariates per node, A_t ~ plogis(0.3 L_t1 + 0.2 A_{t-1}), Y ~ plogis(latent -
+# mean(latent)) with latent = 1 + 0.2 L_11 + U(-0.5, 0.5) + sum_t (0.5 - 0.2 (t - 1) / 8) A_t) whose
+# never regime has a handful of followers at the last node.
+# Seed search (2026-11-09): the first seed in 1..200 such that ltmle::ltmle's never
+# regime has at least one no-variation Q node, the written-out estimator's never mean moves by more
+# than 1e-3 between glm epsilon 1e-8 and 1e-14, and ltmle succeeds. Seed 1: no no-variation node;
+# seed 2: the written-out never mean moves by 1e-5 only; seed 3 meets all three (9 never followers,
+# 7 no-variation nodes, written-out never mean 7.4e-13 at 1e-8 and 0.0169 at 1e-14).
+.lt_sat_data <- function(seed = 3, n = 2500, TT = 8) {
+  set.seed(seed)
+  L <- vector("list", TT); A <- vector("list", TT); prev <- numeric(n)
+  for (t in seq_len(TT)) {
+    L[[t]] <- cbind(runif(n, -1, 1), runif(n, -1, 1))
+    A[[t]] <- rbinom(n, 1, plogis(0.3 * L[[t]][, 1] + 0.2 * prev)); prev <- A[[t]]
+  }
+  latent <- 1 + 0.2 * L[[1]][, 1] + runif(n, -0.5, 0.5)
+  for (t in seq_len(TT)) latent <- latent + (0.5 - 0.2 * (t - 1) / TT) * A[[t]]
+  Y <- rbinom(n, 1, plogis(latent - mean(latent)))
+  d <- data.frame(row.names = seq_len(n))
+  for (t in seq_len(TT)) {
+    d[[paste0("L", t, "a")]] <- round(L[[t]][, 1], 10); d[[paste0("L", t, "b")]] <- round(L[[t]][, 2], 10)
+    d[[paste0("A", t)]] <- A[[t]]
+  }
+  d$Y <- Y
+  list(d = d, mean_latent = mean(latent))
+}
+# ltmle::ltmle itself; its score re-solve restarts from rnorm, so the seed is set before each call.
+.lt_sat_fit <- function(d, Lc, Ac, abar) {
+  nodes <- c(unlist(lapply(seq_along(Ac), function(s) c(Lc[[s]], Ac[s]))), "Y")
+  w <- character(0)
+  set.seed(20261109)
+  fit <- suppressMessages(withCallingHandlers(ltmle::ltmle(d[, nodes], Anodes = Ac, Lnodes = unlist(Lc[-1]), Ynodes = "Y",
+           abar = abar, SL.library = "glm", stratify = FALSE, variance.method = "ic", estimate.time = FALSE),
+           warning = function(x) { w <<- c(w, conditionMessage(x)); invokeRestart("muffleWarning") }))
+  list(fit = fit, warnings = w)
+}
+
+case("ltmle_saturation", "causal/tmle", "LTMLE on a regime with few followers: ltmle::ltmle itself as the reference (its no-variation rule, score check and positivity warning), with the written-out estimator's tolerance dependence and the analytic estimands recorded", function(ctx) {
+  g <- .lt_sat_data(3); d <- ctx$gen_dataset("ltmle_saturation", g$d); n <- nrow(d); TT <- 8
+  stopifnot(all(d$Y %in% c(0, 1)), is.integer(d$A1))
+  Lc <- lapply(1:TT, function(s) c(paste0("L", s, "a"), paste0("L", s, "b"))); Ac <- paste0("A", 1:TT)
+  a1 <- .lt_sat_fit(d, Lc, Ac, rep(1, TT)); a0 <- .lt_sat_fit(d, Lc, Ac, rep(0, TT))
+  ab <- .lt_sat_fit(d, Lc, Ac, list(rep(1, TT), rep(0, TT)))
+  s1 <- summary(a1$fit)$treatment; s0 <- summary(a0$fit)$treatment; ate <- summary(ab$fit)$effect.measures$ATE
+  const <- function(f) as.numeric(which(sapply(f$fit$fit$Q, function(q) inherits(q, "no.Y.variation"))))
+  resolved <- function(f) as.numeric(which(sapply(f$fit$fit$Qstar, function(q) is.list(q) && !is.null(q$ltmle.msg))))
+  positivity <- function(f) any(grepl("positivity", f$warnings))
+  # the written-out estimator (glm fits at the given epsilon); its EIC check is off: on this design
+  # its targeting does not solve the EIC equation, which is why ltmle::ltmle is the reference here
+  w1 <- .ltmle(d, Lc, Ac, "Y", matrix(1, n, TT))
+  w8 <- suppressWarnings(.ltmle(d, Lc, Ac, "Y", matrix(0, n, TT), ctl = glm.control(epsilon = 1e-8, maxit = 100), check_ic = FALSE))
+  w14 <- suppressWarnings(.ltmle(d, Lc, Ac, "Y", matrix(0, n, TT), ctl = glm.control(epsilon = 1e-14, maxit = 100), check_ic = FALSE))
+  stopifnot(length(const(a0)) > 0, abs(w8$psi - w14$psi) > 1e-3, positivity(a0), positivity(ab))
+  # analytic estimands: Y depends on L_1a, U(-0.5, 0.5) and the treatments, given mean(latent)
+  est <- function(c0, b) integrate(function(l) sapply(l, function(li) integrate(function(u) plogis(c0 + b * li + u), -0.5, 0.5)$value), -1, 1)$value / 2
+  m <- g$mean_latent
+  v <- list(
+    psi_always_sat = unname(s1$estimate), psi_never_sat = unname(s0$estimate),
+    se_always_sat = unname(s1$std.dev), se_never_sat = unname(s0$std.dev),
+    ate_sat = unname(ate$estimate), ate_se_sat = unname(ate$std.dev),
+    positivity_warning = as.numeric(positivity(ab)),
+    positivity_warning_always = as.numeric(positivity(a1)), positivity_warning_never = as.numeric(positivity(a0)),
+    rare_warning = as.numeric(any(grepl("rare", ab$warnings))),
+    n_below_gbound_always = sum(w1$cum_unb[, TT] < 0.01), n_below_gbound_never = sum(w14$cum_unb[, TT] < 0.01),
+    # per node 1..8, 1 where ltmle predicted the Q response as a constant (no.Y.variation) or re-solved
+    # the score equation (an empty vector is not a case value)
+    constant_q_always = vec(as.numeric(1:TT %in% const(a1))), constant_q_never = vec(as.numeric(1:TT %in% const(a0))),
+    resolved_always = vec(as.numeric(1:TT %in% resolved(a1))), resolved_never = vec(as.numeric(1:TT %in% resolved(a0))),
+    n_follow_always = vec(w1$n_follow), n_follow_never = vec(w14$n_follow),
+    writtenout_psi_always = w1$psi,
+    writtenout_psi_never_1e8 = w8$psi, writtenout_psi_never_1e14 = w14$psi, writtenout_icmean_never_1e14 = mean(w14$ic),
+    truth_always = est(1 + sum(0.5 - 0.2 * (0:(TT - 1)) / TT) - m, 0.2), truth_never = est(1 - m, 0.2))
+  list(values = v,
+       reference = "ltmle::ltmle 1.3-0 (glm, stratify = FALSE, gbounds = c(0.01, 1), variance.method = 'ic'): regime means and SEs from single-regime calls, the ATE and its SE from the two-regime call, its no-variation Q nodes (class no.Y.variation), its score re-solves (ltmle.msg) and its positivity warning; the followers by node and the subjects below the g bound come from the written-out estimator's g fits (the same glm g models as ltmle), not from ltmle::ltmle; the written-out glm estimator of ltmle_two_period does not solve the EIC equation on this design and is recorded for documentation only; the analytic estimands are context, not pins",
+       call = "ltmle(d, Anodes = A1..A8, Lnodes = L2a..L8b, Ynodes = 'Y', abar = rep(1, 8) / rep(0, 8) / list(rep(1, 8), rep(0, 8)), SL.library = 'glm', stratify = FALSE, variance.method = 'ic'), set.seed(20261109) before each call",
        packages = c("ltmle"))
 })
