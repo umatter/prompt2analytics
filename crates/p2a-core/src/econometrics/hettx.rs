@@ -1104,7 +1104,6 @@ fn compute_heterogeneity_decomposition(
     // The permutation fits share the design: one pivoted QR, and each permuted fit's
     // systematic variance is the squared length of its projection on the column space.
     let qr = Qr::decompose(x_with_int.view(), LM_QR_TOL)?;
-    let rank = qr.rank();
 
     // Systematic variance: Var(E[tau|X]) = Var(X * gamma)
     let tau_fitted_mean = tau_fitted.mean().unwrap_or(0.0);
@@ -1130,46 +1129,8 @@ fn compute_heterogeneity_decomposition(
     let idiosyncratic_test_stat = idiosyncratic_variance;
 
     // Permutation tests for decomposition components
-    let mut systematic_null =
-        resource::try_with_capacity::<f64>(n_perm, "systematic null distribution")?;
-    let mut idiosyncratic_null =
-        resource::try_with_capacity::<f64>(n_perm, "idiosyncratic null distribution")?;
-
-    for _ in 0..n_perm {
-        resource::checkpoint()?;
-
-        // Permute the relationship between X and tau
-        let perm: Vec<usize> = {
-            let mut indices: Vec<usize> = (0..n).collect();
-            indices.shuffle(rng);
-            indices
-        };
-
-        // Create permuted tau
-        let tau_perm: Array1<f64> = perm.iter().map(|&i| tau[i]).collect();
-
-        // Fit on permuted data: the fitted values are the projection Q_r Q_r' tau_perm, and
-        // the intercept makes their mean that of tau_perm, so their sum of squares about the
-        // mean is ||Q_r' tau_perm||^2 - n mean^2.
-        {
-            let effects = qr.qty(tau_perm.view())?;
-            let tau_perm_mean = tau_perm.mean().unwrap_or(0.0);
-            let projected: f64 = effects.iter().take(rank).map(|e| e * e).sum();
-            let sys_var_perm = (projected - n as f64 * tau_perm_mean * tau_perm_mean).max(0.0)
-                / (n - 1).max(1) as f64;
-
-            // Compute permuted tau variance for idiosyncratic
-            let total_var_perm = tau_perm
-                .iter()
-                .map(|&t| (t - tau_perm_mean).powi(2))
-                .sum::<f64>()
-                / (n - 1).max(1) as f64;
-            let idio_var_perm = (total_var_perm - sys_var_perm).max(0.0);
-
-            systematic_null.push(sys_var_perm);
-            idiosyncratic_null.push(idio_var_perm);
-        }
-    }
+    let (systematic_null, idiosyncratic_null) =
+        decomposition_null(tau, &qr, total_variance, n_perm, rng)?;
 
     // Compute p-values
     let systematic_p_value = if !systematic_null.is_empty() {
@@ -1211,6 +1172,54 @@ fn compute_heterogeneity_decomposition(
         covariate_importance,
         covariate_names: covariate_names.to_vec(),
     })
+}
+
+/// Permutation null distributions of the systematic and idiosyncratic variances.
+///
+/// Every permuted fit shares the design `[1, X]`, factored once in `qr`. The effects are
+/// centred once (their mean and total variance do not change under permutation), and the
+/// systematic variance of a permuted fit is the squared length of the centred effects'
+/// projection on the column space, `||Q_r' tau_c[perm]||^2 / (n - 1)`: the intercept is in
+/// the column space, so this is the variance of the fitted values without subtracting
+/// `n mean^2` from a sum of squares. Each permutation costs one application of the
+/// Householder reflectors.
+fn decomposition_null(
+    tau: &Array1<f64>,
+    qr: &Qr,
+    total_variance: f64,
+    n_perm: usize,
+    rng: &mut ChaCha8Rng,
+) -> EconResult<(Vec<f64>, Vec<f64>)> {
+    let n = tau.len();
+    let rank = qr.rank();
+    let denom = (n - 1).max(1) as f64;
+    let tau_mean = tau.mean().unwrap_or(0.0);
+    let tau_c: Vec<f64> = tau.iter().map(|&t| t - tau_mean).collect();
+
+    let mut systematic_null =
+        resource::try_with_capacity::<f64>(n_perm, "systematic null distribution")?;
+    let mut idiosyncratic_null =
+        resource::try_with_capacity::<f64>(n_perm, "idiosyncratic null distribution")?;
+    let mut indices: Vec<usize> = (0..n).collect();
+    let mut tau_perm = resource::try_zeros1(n, "permuted effects")?;
+
+    for _ in 0..n_perm {
+        resource::checkpoint()?;
+
+        // Permute the relationship between X and tau
+        indices.clear();
+        indices.extend(0..n);
+        indices.shuffle(rng);
+        for (dst, &i) in tau_perm.iter_mut().zip(&indices) {
+            *dst = tau_c[i];
+        }
+
+        let effects = qr.qty(tau_perm.view())?;
+        let sys_var_perm = effects.iter().take(rank).map(|e| e * e).sum::<f64>() / denom;
+        systematic_null.push(sys_var_perm);
+        idiosyncratic_null.push((total_variance - sys_var_perm).max(0.0));
+    }
+    Ok((systematic_null, idiosyncratic_null))
 }
 
 /// Compute variable importance for explaining treatment effect heterogeneity.
@@ -1303,6 +1312,146 @@ mod tests {
             fit.warning.as_deref(),
             Some("Coefficients not defined because of singularities: x2")
         );
+    }
+
+    /// Per-permutation `least_squares` refit of the decomposition null (the route the
+    /// projection replaced), drawing the permutations exactly as `decomposition_null`.
+    fn decomposition_null_by_refit(
+        tau: &Array1<f64>,
+        x_with_int: &Array2<f64>,
+        n_perm: usize,
+        rng: &mut ChaCha8Rng,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let n = tau.len();
+        let var = |v: &Array1<f64>| {
+            let m = v.mean().unwrap();
+            v.iter().map(|t| (t - m).powi(2)).sum::<f64>() / (n - 1) as f64
+        };
+        let (mut sys, mut idio) = (Vec::new(), Vec::new());
+        for _ in 0..n_perm {
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.shuffle(rng);
+            let tau_perm: Array1<f64> = indices.iter().map(|&i| tau[i]).collect();
+            let fit = least_squares(x_with_int.view(), tau_perm.view()).unwrap();
+            let s = var(&fit.fitted);
+            sys.push(s);
+            idio.push((var(&tau_perm) - s).max(0.0));
+        }
+        (sys, idio)
+    }
+
+    fn assert_close(what: &str, a: &[f64], b: &[f64]) -> bool {
+        assert_eq!(a.len(), b.len(), "{what}: lengths");
+        a.iter()
+            .zip(b)
+            .all(|(x, y)| (x - y).abs() <= 1e-12 + 1e-10 * x.abs().max(y.abs()))
+    }
+
+    #[test]
+    fn test_hettx_decomposition_projection_matches_refit() {
+        // The decomposition's permutation null projects the centred effects on one QR of
+        // [1, X] instead of refitting per permutation; both must give the same null
+        // distributions and observed statistics, with and without an aliased covariate.
+        let n = 60;
+        let noise = |i: usize, s: f64| ((i as f64 * s).sin() * 43758.5453).fract() - 0.5;
+        let x1: Vec<f64> = (0..n).map(|i| noise(i, 1.3) * 2.0).collect();
+        let x2: Vec<f64> = (0..n).map(|i| noise(i, 2.7) + 0.3 * x1[i]).collect();
+        let x3: Vec<f64> = (0..n)
+            .map(|i| (i as f64 / n as f64) + 0.2 * noise(i, 5.1))
+            .collect();
+        let x4: Vec<f64> = (0..n).map(|i| noise(i, 7.9) * 3.0).collect();
+        // A large mean relative to the spread: the cancellation the centring avoids.
+        let tau: Array1<f64> = (0..n)
+            .map(|i| 50.0 + 0.8 * x1[i] - 0.5 * x2[i] + 0.3 * x4[i] + 0.4 * noise(i, 11.3))
+            .collect();
+        let x4_aliased: Vec<f64> = (0..n).map(|i| 2.0 * x1[i] - x3[i] + 1.0).collect();
+
+        for (label, last) in [("full rank", &x4), ("aliased", &x4_aliased)] {
+            let mut x = Array2::zeros((n, 4));
+            for i in 0..n {
+                x[[i, 0]] = x1[i];
+                x[[i, 1]] = x2[i];
+                x[[i, 2]] = x3[i];
+                x[[i, 3]] = last[i];
+            }
+            let x_with_int = add_intercept(&x.view());
+            let qr = Qr::decompose(x_with_int.view(), LM_QR_TOL).unwrap();
+            let expected_rank = if label == "aliased" { 4 } else { 5 };
+            assert_eq!(qr.rank(), expected_rank, "{label}: rank");
+
+            let m = tau.mean().unwrap();
+            let total = tau.iter().map(|t| (t - m).powi(2)).sum::<f64>() / (n - 1) as f64;
+            let n_perm = 200;
+            let (sys, idio) =
+                decomposition_null(&tau, &qr, total, n_perm, &mut ChaCha8Rng::seed_from_u64(7))
+                    .unwrap();
+            let (sys_ref, idio_ref) = decomposition_null_by_refit(
+                &tau,
+                &x_with_int,
+                n_perm,
+                &mut ChaCha8Rng::seed_from_u64(7),
+            );
+            assert!(
+                assert_close(label, &sys, &sys_ref),
+                "{label}: systematic null"
+            );
+            assert!(
+                assert_close(label, &idio, &idio_ref),
+                "{label}: idiosyncratic null"
+            );
+
+            // The comparison is sensitive: a reference on effects moved by 1e-6 differs.
+            let mut tau_moved = tau.clone();
+            tau_moved[3] += 1e-6;
+            let (sys_moved, _) = decomposition_null_by_refit(
+                &tau_moved,
+                &x_with_int,
+                n_perm,
+                &mut ChaCha8Rng::seed_from_u64(7),
+            );
+            assert!(
+                !assert_close(label, &sys, &sys_moved),
+                "{label}: insensitive comparison"
+            );
+
+            // Observed statistics against the refit on the unpermuted effects.
+            let names: Vec<String> = (1..=4).map(|j| format!("x{j}")).collect();
+            let mut warnings = Vec::new();
+            let d = compute_heterogeneity_decomposition(
+                &tau,
+                &x.view(),
+                &names,
+                n_perm,
+                &mut ChaCha8Rng::seed_from_u64(7),
+                false,
+                &mut warnings,
+            )
+            .unwrap();
+            let fit = least_squares(x_with_int.view(), tau.view()).unwrap();
+            let fm = fit.fitted.mean().unwrap();
+            let sys_obs = fit.fitted.iter().map(|t| (t - fm).powi(2)).sum::<f64>() / (n - 1) as f64;
+            assert!(
+                assert_close(
+                    label,
+                    &[d.systematic_test_stat, d.total_variance],
+                    &[sys_obs, total]
+                ),
+                "{label}: observed statistics"
+            );
+            assert!(
+                assert_close(
+                    label,
+                    &[d.idiosyncratic_test_stat],
+                    &[(total - sys_obs).max(0.0)]
+                ),
+                "{label}: observed idiosyncratic statistic"
+            );
+            assert_eq!(
+                warnings.is_empty(),
+                label != "aliased",
+                "{label}: {warnings:?}"
+            );
+        }
     }
 
     #[test]
