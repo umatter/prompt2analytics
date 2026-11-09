@@ -334,6 +334,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Smoothing spline (GCV / CV selection) | [smooth_spline.md](regression/smooth_spline.md) | not R-pinned |
 | Lasso, ridge and elastic net (glmnet gaussian and binomial paths, cv.glmnet, predict) | [glmnet.md](regression/glmnet.md) | R-pinned |
 | Quantile regression (Barrodale-Roberts simplex, Frisch-Newton, summary.rq iid/nid/ker SEs, xy bootstrap) | [quantreg.md](regression/quantreg.md) | R-pinned, known deviations (REG-26) |
+| Logit average marginal effects (delta-method SEs, aliased regressors) | [marginal_effects.md](regression/marginal_effects.md) | R-pinned, known deviations (REG-16) |
 
 ### Econometrics
 | Method | File | Status |
@@ -368,6 +369,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
 | Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-22, CAUS-23) |
 | Double/debiased ML (PLR, IRM, PLIV, IIVM) | [doubleml.md](econometrics/doubleml.md) | R-pinned |
+| Heterogeneous effects (hettx): effect summary with type-7 quantiles and IQR statistic, regression imputation on an aliased arm | [hettx.md](econometrics/hettx.md) | R-pinned |
 | Synthetic control (Synth: simplex QP, V search) | [synth.md](econometrics/synth.md) | R-pinned, known deviations (CAUS-40) |
 | Synthetic control with prediction intervals (SCPI quantities) | [scpi.md](econometrics/scpi.md) | R-pinned, known deviations (CAUS-32) |
 | Generalized synthetic control (gsynth / fect: IFE, matrix completion, bootstrap) | [gsynth.md](econometrics/gsynth.md) | R-pinned, known deviations (CAUS-41, CAUS-43, CAUS-44) |
@@ -444,6 +446,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Gaussian mixtures (mclust::Mclust VVV, EEE, VVI, VII) | [gmm.md](ml/gmm.md) | R-pinned |
 | Mixture EMs (mixtools::normalmixEM, mvnormalmixEM; flexmix::flexmix) | [mixtures.md](ml/mixtures.md) | R-pinned |
 | Affinity propagation (apcluster::apcluster) | [affinity_propagation.md](ml/affinity_propagation.md) | R-pinned |
+| Conditional inference tree root statistics and p-values below 1e-16 (partykit::ctree formulas) | [ctree.md](ml/ctree.md) | R-pinned |
+| Cubist leaf linear model with collinear attributes | [cubist.md](ml/cubist.md) | R-pinned |
 | PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
@@ -495,6 +499,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Power analysis (power.t.test, power.prop.test, power.anova.test) | [power.md](stats/power.md) | R-pinned, known deviations (STAT-61) |
 | p-value adjustment (p.adjust) | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
 | Factor analysis (ML; varimax, promax) | [factanal.md](multivariate/factanal.md) | R-pinned, known deviations (STAT-23) |
+| Upper-tail p-values below 1e-16 (mcnemar.test, oneway.test, prop.trend.test, var.test) and var.test limits at large df | [upper_tails.md](stats/upper_tails.md) | R-pinned, known deviations (X-14, X-17) |
 
 ### Spatial Econometrics
 | Method | File | Status |

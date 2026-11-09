@@ -63,6 +63,7 @@ uses, or the formula written out in R where no package is installed.
 | Regression standardisation (stdReg) | [stdreg.md](stdreg.md) | `run_stdreg()` | R `glm` and standardisation as `stdReg::stdGlm` (written out) |
 | Parametric g-formula | [gformula.md](gformula.md) | `run_gformula()` | g-formula written out in R |
 | Double/debiased ML | [doubleml.md](doubleml.md) | `run_double_ml()`, `run_double_ml_iv()` | DoubleML's PLR, IRM, PLIV and IIVM scores written out in R |
+| Treatment effect heterogeneity (hettx) | [hettx.md](hettx.md) | `run_hettx()` | R `stats::quantile(type = 7)`, `IQR`, `lm` and `predict.lm` (hettx not installed) |
 
 ### Synthetic control
 | Method | File | p2a Function | Reference |

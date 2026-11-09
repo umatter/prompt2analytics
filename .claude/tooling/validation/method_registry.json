@@ -707,7 +707,7 @@
       "rust_module": "crates/p2a-core/src/forecasting/mstl.rs",
       "rust_function": "run_mstl",
       "validation_doc": "validation/forecasting/mstl.md",
-      "test_patterns": ["test_validate_mstl"]
+      "test_patterns": ["test_mstl_"]
     },
     "struct_ts": {
       "display_name": "Structural Time Series",

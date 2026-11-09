@@ -286,6 +286,16 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/pdp_small_scale.csv` | 40 × 3 (x, z, y) | `pdp_small_scale` | `r/cases/ml_pdp.R` | seed 20261023; x = 1e-12 U(1, 3) (a feature on a tiny scale), z ~ N(0, 1), y = 2 + 4e11 x - 0.5 z + N(0, 0.3^2) |
 | `generated/spatial_sim.csv` | 80 × 6 (id, cx, cy, x1, x2, y) | `spatial_weights_moran`, `spatial_sar_sdm_sem` | `r/cases/spatial_ml_weights.R` | seeds 20261202 and 20261203; uniform coordinates, W = 4 nearest neighbours row-standardised; y an SDM with rho 0.4 and a lagged x1 |
 | `generated/sphet_sim.csv` | 150 × 8 (id, cx, cy, x1, x2, y_sar, y_sem, y_sarar) | `sphet_gmm_hac` | `r/cases/spatial_sphet.R` | seed 20261208; uniform coordinates, W = 5 nearest neighbours; heteroskedastic, spatially correlated errors; SAR (rho 0.4), SEM (lambda 0.5) and SARAR outcomes |
+| `generated/tail_mcnemar.csv` | 1 × 4 (a, b, c, d) | `tail_mcnemar` | `r/cases/numeric_tails.R` | the 2 x 2 table 25, 400, 10, 30 (no randomness) |
+| `generated/tail_oneway.csv` | 36 × 2 (g, y) | `tail_oneway` | `r/cases/numeric_tails.R` | seed 20261023; three groups of 12 with means 0, 3, 6 and SDs 0.5, 0.7, 0.4 |
+| `generated/tail_prop_trend.csv` | 4 × 2 (x, n) | `tail_prop_trend` | `r/cases/numeric_tails.R` | successes 10, 60, 140, 240 out of 300 each (no randomness) |
+| `generated/tail_var_test.csv` | 45 × 3 (i, x, y) | `tail_var_test` | `r/cases/numeric_tails.R` | seed 20261024; x ~ N(0, 30^2) (40 values, then 5 missing cells), y ~ N(0, 1) (45 values) |
+| `generated/tail_marginal_logit.csv` | 2,000 × 4 (y, x1, x2, x3) | `tail_marginal_logit` | `r/cases/numeric_marginal_effects.R` | seed 20261023; y ~ Bernoulli(plogis(-0.4 + 1.2 x1 + 0.15 x2)), x3 = 2 x1 (aliased) |
+| `generated/tail_ctree_root.csv` | 300 × 4 (x1, x2, x3, y) | `tail_ctree_root` | `r/cases/numeric_ctree.R` | seed 20261025; y = x2 + N(0, 0.6^2), x1 = y + N(0, 1.8^2), x3 pure noise: two root statistics with p-values below 1e-16 |
+| `generated/qtl_hettx_summary.csv` | 38 × 1 (tau) | `qtl_hettx_summary` | `r/cases/numeric_hettx.R` | seed 20261026; 34 draws of N(1, 2^2) rounded to 2 digits plus the ties 0.5, 0.5, 2, 2 ((n - 1) p fractional at the quartiles) |
+| `generated/inv_hettx_outcome.csv` | 40 × 4 (y, treat, x1, x2) | `inv_hettx_outcome_model` | `r/cases/numeric_hettx.R` | seed 20261027; x2 = 2 x1 + 1 among the treated (aliased with the intercept and x1 in that arm), N(0, 1.5^2) otherwise; y = 1 + 0.5 x1 - 0.3 x2 + 0.8 treat + N(0, 0.2^2) |
+| `generated/inv_cubist_leaf.csv` | 30 × 3 (y, x1, x1dup) | `inv_cubist_leaf_model` | `r/cases/numeric_cubist.R` | seed 20261028; x1 ~ U(0, 10), y = 2 + 1.5 x1 + N(0, 0.7^2), x1dup a copy of x1 (the collinear attribute of a Cubist leaf model) |
+| `generated/ltmle_saturation.csv` | 2,500 × 25 (L1a, L1b, A1, ..., L8a, L8b, A8, Y) | `ltmle_saturation` | `r/cases/causal_ltmle.R` | seed 3 (`.lt_sat_data`, an R port of the `sparse_followers` fixture of ltmle.rs's tests); eight nodes; the never regime has 9 followers at the last node |
 
 ## Adding a dataset
 
