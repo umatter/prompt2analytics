@@ -196,9 +196,10 @@ the same values as `id%08d`; fill frames 10% missing.
 | `preview_fill_na`, constant on a clean frame | 100-100,000 | 0.24 µs | 2.25 µs | 9.5 | 9.4 |
 
 Every other size of these rows is in the same range; fill mean at 1,000 and 100,000 rows is within
-1.01x. The previews now run the operation (above) and are accepted by the maintainer (2026-11-08) as
-measured earlier (2.3-5x and about +1.4 µs); the n = 100 match row and the fill preview's +2.0 µs here
-are above those figures. The high-cardinality `value_counts` rows were re-measured on 2026-11-09 (same
+1.01x. The previews now run the operation (above) and are accepted by the maintainer: `preview_replace`
+at 2.3-5.5x (9.5x for the n = 100 match row) and the fill preview at about +2 µs (2026-11-08, extended
+2026-11-09). Mode fill is a new strategy and runs 1.4-2.7x of the base's mean fill, which is a different
+computation; it was accepted as such. The high-cardinality `value_counts` rows were re-measured on 2026-11-09 (same
 conditions, five rounds, load average 1.7-3.5, base rebuilt in the same run) after ties came to follow first
 appearance (see "Value counts"); with ties ordered by value they had run 1.19-3.01x of the base. In that
 run the low-cardinality rows ran 0.18-1.06x, mean fill 0.88-1.06x, `preview_replace` 2.8-5.5x (9.4x for

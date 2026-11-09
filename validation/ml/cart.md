@@ -121,7 +121,7 @@ rows use that example's data and settings (depth 5, `min_split` 20, `min_bucket`
 Without cross-validation a fit is 2-5x faster than the base. The base ran no cross-validation (its `xerror` and
 `xstd` columns were not cross-validated, and its `xval = 10` time equals its `xval = 0` time); the default
 `xval = 10` now runs the 11 fits rpart runs, the default kept by the maintainer (2026-10-30) against an estimate of
-1.5-5x. Measured: 1.24-4.33x of the base and 0.13-0.65x of rpart; the `ml_benchmark` rows, which run the default
+1.5-5x. Measured: 1.24-4.33x of the base and 0.12-0.65x of rpart; the `ml_benchmark` rows, which run the default
 10 folds, 1.28-2.95x. These ratios were signed off by the maintainer on 2026-11-08.
 
 ## Running
