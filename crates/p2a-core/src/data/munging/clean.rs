@@ -556,27 +556,7 @@ fn fill_mode(df: &DataFrame, name: &str, col: &Column) -> MungeResult<ColumnFill
         }));
     }
     let stopped = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
-    let (codes, levels) = crate::data::columns::factor_options(df, name).map_err(stopped)?;
-    let mut counts =
-        crate::resource::try_vec(levels.len(), 0usize, "mode level counts").map_err(stopped)?;
-    for (i, code) in codes.iter().enumerate() {
-        if i.is_multiple_of(CHECKPOINT_EVERY) {
-            crate::resource::checkpoint().map_err(stopped)?;
-        }
-        if let Some(code) = code {
-            counts[*code as usize] += 1;
-        }
-    }
-    // The first index holding the maximum, as which.max.
-    let most = counts
-        .iter()
-        .enumerate()
-        .fold(None::<(usize, usize)>, |best, (i, &n)| match best {
-            Some((_, m)) if m >= n => best,
-            _ if n > 0 => Some((i, n)),
-            _ => best,
-        });
-    let Some((level, _)) = most else {
+    let Some(label) = crate::data::columns::factor_mode(df, name).map_err(stopped)? else {
         return Err(invalid_value(
             name,
             "mode",
@@ -587,7 +567,7 @@ fn fill_mode(df: &DataFrame, name: &str, col: &Column) -> MungeResult<ColumnFill
     };
     // The label parses back exactly: decimal integers, shortest round-trip floats, TRUE/FALSE, ISO
     // dates, text and category labels.
-    fill_constant(col, &levels[level])
+    fill_constant(col, &label)
 }
 
 /// `col` with its NaN cells made null (float columns; others unchanged), so

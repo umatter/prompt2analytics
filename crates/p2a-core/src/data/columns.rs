@@ -890,6 +890,109 @@ pub fn factor_options(df: &DataFrame, name: &str) -> EconResult<(Vec<Option<u32>
     Ok((raw.codes, raw.levels))
 }
 
+/// The most frequent observed label of column `name`, as R's `names(which.max(table(x)))`:
+/// ties go to the first level in [`factor_options`]'s order. `None` when no cell is observed.
+/// Counts with a hash map and orders only the tied labels, so its cost is linear in the rows
+/// whatever the number of distinct values; the label is the one `factor_options` prints.
+pub fn factor_mode(df: &DataFrame, name: &str) -> EconResult<Option<String>> {
+    let col = column(df, name)?;
+    let n = col.len();
+    if col.null_count() == n {
+        return Ok(None);
+    }
+    let dtype = col.dtype();
+    if dtype.is_signed_integer() {
+        let cast = col
+            .strict_cast(&DataType::Int64)
+            .map_err(|_| integers_out_of_range(name))?;
+        return Ok(
+            mode_of_keys(cast.i64().map_err(polars_error)?.iter(), Ord::cmp)?
+                .map(|k| k.to_string()),
+        );
+    }
+    if dtype.is_unsigned_integer() {
+        let cast = col
+            .strict_cast(&DataType::UInt64)
+            .map_err(|_| integers_out_of_range(name))?;
+        return Ok(
+            mode_of_keys(cast.u64().map_err(polars_error)?.iter(), Ord::cmp)?
+                .map(|k| k.to_string()),
+        );
+    }
+    if dtype.is_float() || dtype.is_decimal() {
+        let cast = col.strict_cast(&DataType::Float64).map_err(polars_error)?;
+        // As raw_factor: NaN is missing, -0.0 and 0.0 are one level.
+        let bits = cast.f64().map_err(polars_error)?.iter().map(|v| {
+            v.filter(|x| !x.is_nan())
+                .map(|x| if x == 0.0 { 0.0f64 } else { x }.to_bits())
+        });
+        return Ok(mode_of_keys(bits, |a, b| {
+            f64::from_bits(*a).total_cmp(&f64::from_bits(*b))
+        })?
+        .map(|b| float_label(f64::from_bits(b))));
+    }
+    match dtype {
+        DataType::Boolean => Ok(
+            mode_of_keys(col.bool().map_err(polars_error)?.iter(), Ord::cmp)?
+                .map(|b| if b { "TRUE" } else { "FALSE" }.to_string()),
+        ),
+        DataType::Date => {
+            let cast = col.strict_cast(&DataType::Int32).map_err(polars_error)?;
+            Ok(mode_of_keys(cast.i32().map_err(polars_error)?.iter(), Ord::cmp)?.map(date_label))
+        }
+        DataType::String => Ok(
+            mode_of_keys(col.str().map_err(polars_error)?.iter(), Ord::cmp)?.map(str::to_string),
+        ),
+        DataType::Categorical(..) => {
+            let labels = col.cast(&DataType::String).map_err(polars_error)?;
+            Ok(
+                mode_of_keys(labels.str().map_err(polars_error)?.iter(), Ord::cmp)?
+                    .map(str::to_string),
+            )
+        }
+        DataType::Enum(categories, _) => {
+            let declared: HashMap<&str, usize> = categories
+                .categories()
+                .values_iter()
+                .enumerate()
+                .map(|(i, label)| (label, i))
+                .collect();
+            let labels = col.cast(&DataType::String).map_err(polars_error)?;
+            Ok(
+                mode_of_keys(labels.str().map_err(polars_error)?.iter(), |a, b| {
+                    declared.get(a).cmp(&declared.get(b))
+                })?
+                .map(str::to_string),
+            )
+        }
+        other => Err(not_a_factor(name, other)),
+    }
+}
+
+/// The most frequent key of `values` (`None` missing), ties to the smallest under `cmp`.
+fn mode_of_keys<K: Copy + Eq + Hash>(
+    values: impl Iterator<Item = Option<K>>,
+    cmp: impl Fn(&K, &K) -> Ordering,
+) -> EconResult<Option<K>> {
+    let mut counts: HashMap<K, usize> = HashMap::new();
+    for (i, key) in values.enumerate() {
+        if i % (1 << 16) == 0 {
+            crate::resource::checkpoint()?;
+        }
+        if let Some(key) = key {
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    let Some(max) = counts.values().copied().max() else {
+        return Ok(None);
+    };
+    Ok(counts
+        .into_iter()
+        .filter(|&(_, c)| c == max)
+        .map(|(k, _)| k)
+        .min_by(|a, b| cmp(a, b)))
+}
+
 /// Does `dtype` pass the numeric rule (integers, floats, Decimal; Boolean when
 /// `allow_bool`)?
 pub fn is_numeric_dtype(dtype: &DataType, allow_bool: bool) -> bool {
@@ -1230,6 +1333,184 @@ mod tests {
             Err(EconError::InvalidSpecification { message }) => message,
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
+    }
+
+    /// The label `factor_mode` replaced: count every factor level, take the first maximum.
+    fn reference_mode(df: &DataFrame, name: &str) -> Option<String> {
+        let (codes, levels) = factor_options(df, name).unwrap();
+        let mut counts = vec![0usize; levels.len()];
+        for code in codes.iter().flatten() {
+            counts[*code as usize] += 1;
+        }
+        let mut best: Option<(usize, usize)> = None;
+        for (i, &n) in counts.iter().enumerate() {
+            if n > 0 && best.is_none_or(|(_, m)| n > m) {
+                best = Some((i, n));
+            }
+        }
+        best.map(|(i, _)| levels[i].clone())
+    }
+
+    /// `factor_mode` (hash count, ties ordered among themselves) gives the label of the
+    /// full-sort reference on noisy columns of every supported dtype, with ties, missing
+    /// cells and high and low cardinality.
+    #[test]
+    fn test_factor_mode_equals_full_sort_reference() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let mut frames: Vec<DataFrame> = Vec::new();
+        for (n, distinct) in [
+            (10usize, 3u64),
+            (200, 12),
+            (2_000, 12),
+            (3_000, 2_500),
+            (10_000, 9_000),
+        ] {
+            let draws: Vec<u64> = (0..n).map(|_| next()).collect();
+            let missing = |i: usize| draws[i] % 17 == 0;
+            let text: Vec<Option<String>> = (0..n)
+                .map(|i| {
+                    (!missing(i)).then(|| {
+                        let k = (draws[i] >> 5) % distinct;
+                        // Mixed case and non-ASCII so byte order differs from locale order.
+                        match k % 4 {
+                            0 => format!("v{k}"),
+                            1 => format!("V{k}"),
+                            2 => format!("\u{e9}{k}"),
+                            _ => format!("_{k}"),
+                        }
+                    })
+                })
+                .collect();
+            let ints: Vec<Option<i64>> = (0..n)
+                .map(|i| {
+                    (!missing(i))
+                        .then(|| ((draws[i] >> 5) % distinct) as i64 - (distinct as i64) / 2)
+                })
+                .collect();
+            let uints: Vec<Option<u32>> = (0..n)
+                .map(|i| (!missing(i)).then(|| ((draws[i] >> 7) % distinct) as u32))
+                .collect();
+            let floats: Vec<Option<f64>> = (0..n)
+                .map(|i| {
+                    (!missing(i)).then(|| match (draws[i] >> 3) % 23 {
+                        0 => f64::NAN,
+                        1 => -0.0,
+                        2 => f64::INFINITY,
+                        _ => ((draws[i] >> 9) % distinct) as f64 / 4.0 - 3.0,
+                    })
+                })
+                .collect();
+            let bools: Vec<Option<bool>> = (0..n)
+                .map(|i| (!missing(i)).then(|| draws[i] % 2 == 0))
+                .collect();
+            let days: Vec<Option<i32>> = (0..n)
+                .map(|i| (!missing(i)).then(|| ((draws[i] >> 11) % distinct) as i32 - 400))
+                .collect();
+            let low: Vec<Option<&str>> = (0..n)
+                .map(|i| {
+                    (!missing(i))
+                        .then(|| ["high", "low", "mid", "zz"][(draws[i] >> 13) as usize % 4])
+                })
+                .collect();
+            let declared = FrozenCategories::new(["zz", "mid", "low", "high"]).unwrap();
+            frames.push(
+                DataFrame::new(vec![
+                    Series::new("text".into(), text).into_column(),
+                    Series::new("int".into(), ints).into_column(),
+                    Series::new("uint".into(), uints).into_column(),
+                    Series::new("float".into(), floats).into_column(),
+                    Series::new("bool".into(), bools).into_column(),
+                    Series::new("date".into(), days)
+                        .cast(&DataType::Date)
+                        .unwrap()
+                        .into_column(),
+                    Series::new("cat".into(), low.clone())
+                        .cast(&DataType::from_categories(Categories::global()))
+                        .unwrap()
+                        .into_column(),
+                    Series::new("enum".into(), low)
+                        .cast(&DataType::from_frozen_categories(declared))
+                        .unwrap()
+                        .into_column(),
+                ])
+                .unwrap(),
+            );
+        }
+        // Exact ties of every kind, and an all-missing column.
+        let declared = FrozenCategories::new(["mid", "low", "high"]).unwrap();
+        frames.push(
+            DataFrame::new(vec![
+                Series::new(
+                    "text".into(),
+                    [
+                        Some("b"),
+                        Some("a"),
+                        Some("b"),
+                        Some("a"),
+                        None,
+                        Some("\u{e9}"),
+                    ],
+                )
+                .into_column(),
+                Series::new(
+                    "int".into(),
+                    [Some(3i64), Some(-1), Some(3), Some(-1), None, Some(10)],
+                )
+                .into_column(),
+                Series::new(
+                    "float".into(),
+                    [
+                        Some(-0.0),
+                        Some(0.0),
+                        Some(2.0),
+                        Some(2.0),
+                        Some(f64::NAN),
+                        Some(f64::NAN),
+                    ],
+                )
+                .into_column(),
+                Series::new(
+                    "enum".into(),
+                    [
+                        Some("high"),
+                        Some("low"),
+                        Some("high"),
+                        Some("low"),
+                        None,
+                        Some("mid"),
+                    ],
+                )
+                .cast(&DataType::from_frozen_categories(declared))
+                .unwrap()
+                .into_column(),
+                Series::new("none".into(), [None::<f64>; 6]).into_column(),
+                Series::new("nan".into(), [f64::NAN; 6]).into_column(),
+            ])
+            .unwrap(),
+        );
+        for df in &frames {
+            for col in df.get_column_names() {
+                assert_eq!(
+                    factor_mode(df, col).unwrap(),
+                    reference_mode(df, col),
+                    "column {col}, {} rows",
+                    df.height()
+                );
+            }
+        }
+        let ties = frames.last().unwrap();
+        let modes: Vec<Option<String>> = ["text", "int", "float", "enum", "none", "nan"]
+            .iter()
+            .map(|c| factor_mode(ties, c).unwrap())
+            .collect();
+        let want = [Some("a"), Some("-1"), Some("0"), Some("low"), None, None];
+        assert_eq!(modes, want.map(|m| m.map(str::to_string)));
     }
 
     #[test]
