@@ -142,6 +142,69 @@
       "tolerance": "validation/README.md, n = 480 and 180: lag orders exact, statistics 1e-6 relative; coefficients 1e-8, SE 1e-6",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_regression_t3",
+      "name": "p2a reg quantreg --se/--method, gls --group/--method, loess warnings, nls exponential_decay",
+      "category": "interfaces",
+      "reference": "quantreg::rq(method = 'br') with summary.rq(se = 'nid'/'iid'/'ker'); nlme::gls(correlation = corCompSymm(form = ~ 1 | g), method = 'REML'/'ML'), its profile optimum pinned and nlme's own fit as a cross-check at 1e-6; stats::loess at a mass point; stats::nls(y ~ a * exp(-b * x) + c)",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "rq_br_se",
+        "gls_compsymm",
+        "smoothers_gcv_periodic_loess",
+        "nls_expdecay"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp60_models::test_validate_cli_quantreg_se",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_gls_compsymm_group",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_loess_masspoint_warns",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_nls_expdecay"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE",
+        "t",
+        "p",
+        "confidence limits",
+        "objective",
+        "rho",
+        "sigma",
+        "log-likelihood",
+        "AIC",
+        "BIC",
+        "groups",
+        "fitted values",
+        "parameters",
+        "RSS"
+      ],
+      "tolerance": "validation/README.md at each n (coefficients 1e-8, SE and statistics 1e-6); the GLS rho Tol::iterative(1e-6) (flat maximum); nls Tol::iterative(1e-6) coefficients, 1e-5 SE, 1e-8 RSS",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_hac_aliased",
+      "name": "p2a reg hac: aliased design, t and p on n - rank",
+      "category": "interfaces",
+      "reference": "sandwich::NeweyWest(lm(y ~ x1 + x2 + x3), lag = 4, prewhite = FALSE); t-based p on df.residual",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "cli_hac_aliased"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp60_models::test_validate_cli_hac_aliased_df"
+      ],
+      "quantities": [
+        "coefficients",
+        "Newey-West SE",
+        "t",
+        "p",
+        "residual df",
+        "R-squared"
+      ],
+      "tolerance": "validation/README.md, n = 120: coefficients 1e-8, SE and statistics 1e-6; df exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

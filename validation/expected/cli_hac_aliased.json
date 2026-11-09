@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "cli_hac_aliased",
+  "area": "cli",
+  "method": "Newey-West (lag 4, Bartlett, no prewhitening) t and p on df.residual = n - rank for a design with an aliased column",
+  "reference": "sandwich::NeweyWest(lm(y ~ x1 + x2 + x3), lag = 4, prewhite = FALSE) on the identified columns; t-based p on df.residual (n - rank); p_nw_df_n_minus_k (n - number of columns) is what the CLI printed before",
+  "call": "coeftest(lm(y ~ x1 + x2 + x3, ols_aliased), vcov = NeweyWest(m, lag = 4, prewhite = FALSE))",
+  "dataset": "validation/datasets/generated/ols_aliased.csv",
+  "datasets": ["validation/datasets/generated/ols_aliased.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.94887771102635188, 0.51467209555024762, 0.18595553418496888]
+    },
+    "se_nw": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.057714923616133271, 0.047964597088424724, 0.047496254939913586]
+    },
+    "t_nw": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [16.440768722790242, 10.730249533868246, 3.9151620358324446]
+    },
+    "p_nw": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [3.4011230570490425e-32, 4.0573158839555978e-19, 0.00015230586050654196]
+    },
+    "p_nw_df_n_minus_k": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [4.3828098826725216e-32, 4.4716209999298963e-19, 0.00015293989634322866]
+    },
+    "df_resid": 117,
+    "r2": 0.43684794066477278,
+    "n": 120
+  }
+}

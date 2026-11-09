@@ -74,3 +74,19 @@ case("cli_competing_risks", "cli", "Aalen-Johansen CIF of two competing causes; 
   list(values = v, reference = "survival::survfit(Surv(time, factor(event_type))): pstate, std.err and log-scale limits at conf.int 0.95 and 0.5 (multi-state Aalen-Johansen)",
        call = "survfit(Surv(time, factor(event_type, levels = 0:2)) ~ 1, data = cr_sim, conf.int = level)", packages = "survival")
 })
+
+case("cli_hac_aliased", "cli", "Newey-West (lag 4, Bartlett, no prewhitening) t and p on df.residual = n - rank for a design with an aliased column", function(ctx) {
+  suppressPackageStartupMessages(library(sandwich))
+  d <- ctx$dataset("datasets/generated/ols_aliased.csv")     # committed with case ols_aliased
+  m <- lm(y ~ x1 + x2 + x3, data = d)                        # x2 = 2 x1 is aliased (NA)
+  stopifnot(is.na(coef(m)["x2"]), m$rank == 3)
+  b <- coef(m)[!is.na(coef(m))]
+  se <- sqrt(diag(NeweyWest(m, lag = 4, prewhite = FALSE)))
+  t <- b / se
+  list(values = list(coef = named(b), se_nw = named(se), t_nw = named(t),
+                     p_nw = named(2 * pt(abs(t), df.residual(m), lower.tail = FALSE)),
+                     p_nw_df_n_minus_k = named(2 * pt(abs(t), nrow(d) - length(coef(m)), lower.tail = FALSE)),
+                     df_resid = df.residual(m), r2 = summary(m)$r.squared, n = nrow(d)),
+       reference = "sandwich::NeweyWest(lm(y ~ x1 + x2 + x3), lag = 4, prewhite = FALSE) on the identified columns; t-based p on df.residual (n - rank); p_nw_df_n_minus_k (n - number of columns) is what the CLI printed before",
+       call = "coeftest(lm(y ~ x1 + x2 + x3, ols_aliased), vcov = NeweyWest(m, lag = 4, prewhite = FALSE))", packages = "sandwich")
+})

@@ -859,6 +859,331 @@ fn test_validate_cli_panel_absorbed_regressors() {
 }
 
 // =================================================================================================
+// Regression
+// =================================================================================================
+
+/// WP10 surface: --se nid|iid|ker as summary.rq, BR coefficients (rq_br_se, tau 0.5, n 100).
+#[test]
+fn test_validate_cli_quantreg_se() {
+    let case = Case::load("rq_br_se");
+    let n = 100;
+    let s = temp_session();
+    let d = s.load(&case);
+    for se in ["nid", "iid", "ker"] {
+        let v = s.json(&[
+            "reg",
+            "quantreg",
+            d.as_str(),
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "-t",
+            "0.5",
+            "--se",
+            se,
+        ]);
+        let rows = v["coefficients"].as_array().unwrap();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect();
+        let col = |k: &str| {
+            rows.iter()
+                .map(|r| if r[k].is_null() { f64::NAN } else { num(&r[k]) })
+                .collect::<Vec<f64>>()
+        };
+        Check::new(&case)
+            .named("tau50_coef", &names, &col("estimate"), Tol::coef(n))
+            .named(
+                &format!("tau50_se_{se}"),
+                &names,
+                &col("std_error"),
+                Tol::se(n),
+            )
+            .named(
+                &format!("tau50_t_{se}"),
+                &names,
+                &col("t_value"),
+                Tol::stat(n),
+            )
+            .named(
+                &format!("tau50_p_{se}"),
+                &names,
+                &col("p_value"),
+                Tol::p_value(n),
+            )
+            .named(
+                &format!("tau50_ci_lower_{se}"),
+                &names,
+                &col("ci_lower_95"),
+                Tol::stat(n),
+            )
+            .named(
+                &format!("tau50_ci_upper_{se}"),
+                &names,
+                &col("ci_upper_95"),
+                Tol::stat(n),
+            )
+            .scalar("tau50_objective", num(&v["objective"]), Tol::stat(n))
+            .finish();
+        assert_eq!(v["se_type"], se);
+        assert!(v["se_method"].as_str().unwrap().starts_with(se), "{v}");
+        assert_eq!(v["converged"], true);
+    }
+    let args = ["reg", "quantreg", d.as_str(), "-y", "y", "-x", "x"];
+    let v = s.json(&args);
+    let w = warnings(&v);
+    assert!(!w.iter().any(|x| x.contains("rank")), "no rank note: {w:?}");
+    let text = s.ok(&args);
+    for x in &w {
+        assert!(text.contains(&format!("Warning: {x}")), "{text}");
+    }
+    assert!(
+        text.contains("Algorithm: Barrodale-Roberts simplex (br)"),
+        "{text}"
+    );
+    assert!(
+        s.json(&argv(&args, &["--method", "fn"]))["algorithm"]
+            .as_str()
+            .unwrap()
+            .ends_with("(fn)")
+    );
+}
+
+/// WP11 surface: compound symmetry within --group, rho by REML or ML (gls_compsymm, 30 groups of 5).
+#[test]
+fn test_validate_cli_gls_compsymm_group() {
+    let case = Case::load("gls_compsymm");
+    let n = 150;
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "reg",
+        "gls",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x",
+        "z",
+        "--correlation",
+        "cs",
+        "--group",
+        "g",
+    ];
+    for k in ["reml", "ml"] {
+        let v = s.json(&argv(&base, &["--method", k]));
+        let t = json_arrays(&v);
+        Check::new(&case)
+            .named(
+                &format!("{k}_profile_coef"),
+                &t.names,
+                &t.coef,
+                Tol::coef(n),
+            )
+            .named(&format!("{k}_profile_se"), &t.names, &t.se, Tol::se(n))
+            .scalar(
+                &format!("{k}_profile_rho"),
+                num(&v["correlation_param"]),
+                Tol::iterative(1e-6), // flat maximum
+            )
+            .scalar(
+                &format!("{k}_profile_sigma"),
+                num(&v["sigma"]),
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{k}_profile_loglik"),
+                num(&v["log_likelihood"]),
+                Tol::stat(n),
+            )
+            // cross-check: nlme's own fit stops up to 3e-8 relative short in rho; coefficients
+            // within 1e-6
+            .named(
+                &format!("{k}_coef"),
+                &t.names,
+                &t.coef,
+                Tol::iterative(1e-6),
+            )
+            .scalar(&format!("{k}_aic"), num(&v["aic"]), Tol::stat(n))
+            .scalar(&format!("{k}_bic"), num(&v["bic"]), Tol::stat(n))
+            .scalar("n_groups", num(&v["n_groups"]), Tol::exact())
+            .finish();
+        assert_eq!(v["rho_estimated"], true);
+        assert_eq!(v["method"].as_str().unwrap().to_lowercase(), k);
+    }
+    let v = s.json(&argv(&base, &["--rho", "0.3"]));
+    let t = json_arrays(&v);
+    Check::new(&case)
+        .named("cs03_reml_coef", &t.names, &t.coef, Tol::coef(n))
+        .named("cs03_reml_se", &t.names, &t.se, Tol::se(n))
+        .finish();
+    assert_eq!(v["rho_estimated"], false);
+    // one group: compound symmetry is not identified
+    let e = s.err(&[
+        "reg",
+        "gls",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x",
+        "z",
+        "--correlation",
+        "cs",
+    ]);
+    assert!(e.to_lowercase().contains("group"), "{e}");
+}
+
+/// WP11 surface: the zero-width-neighbourhood warning reaches text and JSON
+/// (smoothers_gcv_periodic_loess).
+#[test]
+fn test_validate_cli_loess_masspoint_warns() {
+    let case = Case::load("smoothers_gcv_periodic_loess");
+    let s = temp_session();
+    let d = s.load(&case); // "smoothers_t3"
+    let args = [
+        "reg",
+        "loess",
+        d.as_str(),
+        "-y",
+        "ym",
+        "-x",
+        "xm",
+        "--span",
+        "0.5",
+        "--degree",
+        "1",
+    ];
+    let v = s.json(&args);
+    let fit = f64s(&v["fitted_values_sample"]);
+    let want = case.vector("loess_masspoint_expected");
+    for i in 0..10 {
+        assert!(
+            Tol::coef(100).allows(fit[i], want[i]),
+            "{i}: {} vs {}",
+            fit[i],
+            want[i]
+        );
+    }
+    let w = warnings(&v);
+    assert!(
+        w.iter()
+            .any(|x| x.contains("zero-width neighbourhood at 60 of 100 points")),
+        "{w:?}"
+    );
+    let text = s.ok(&args);
+    for x in &w {
+        assert!(text.contains(&format!("Warning: {x}")), "{text}");
+    }
+}
+
+/// WP11 surface: --criterion gcv (default, R's cv = FALSE) | cv, equal to the core in process. No R
+/// pin: p2a's smoother is not R's yet.
+#[test]
+fn test_cli_smooth_spline_criterion() {
+    use p2a_core::data::columns::{NaPolicy, numeric_column};
+    use p2a_core::regression::smooth_spline::{SmoothSplineConfig, SplineCriterion, smooth_spline};
+    let p = repo_path("validation/datasets/generated/smoothers_t3.csv");
+    let s = temp_session();
+    s.load_as(&p, "sm", &[]);
+    let ds = p2a_core::Dataset::new(p2a_core::DataLoader::load_csv(&p).unwrap());
+    let x = numeric_column(ds.df(), "x", NaPolicy::Fail).unwrap().0;
+    let y = numeric_column(ds.df(), "y", NaPolicy::Fail).unwrap().0;
+    let base = ["reg", "smooth-spline", "sm", "-y", "y", "-x", "x"];
+    for (extra, crit, name) in [
+        (&[][..], SplineCriterion::Gcv, "gcv"),
+        (&["--criterion", "cv"][..], SplineCriterion::Cv, "cv"),
+        (&["--criterion", "LOOCV"][..], SplineCriterion::Cv, "cv"),
+    ] {
+        let v = s.json(&argv(&base, extra));
+        let r = smooth_spline(&x, &y, SmoothSplineConfig::with_criterion(crit)).unwrap();
+        assert_eq!(v["criterion"], name);
+        assert!(
+            Tol::new(1e-15, 0.0).allows(num(&v["df"]), r.df)
+                && Tol::new(1e-15, 0.0).allows(num(&v["lambda"]), r.lambda),
+            "{v}"
+        );
+    }
+    assert!(s.json(&argv(&base, &["--df", "5"]))["criterion"].is_null());
+    assert!(s.ok(&base).contains("Criterion: GCV"));
+}
+
+/// WP09 surface: reg hac on an aliased design: x2 null, t and p on df = n - rank = 117
+/// (cli_hac_aliased).
+#[test]
+fn test_validate_cli_hac_aliased_df() {
+    let case = Case::load("cli_hac_aliased");
+    let n = 120;
+    let s = temp_session();
+    let d = s.load(&case); // "ols_aliased"
+    let v = s.json(&[
+        "reg",
+        "hac",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "x3",
+        "--lags",
+        "4",
+    ]);
+    let t = json_arrays(&v);
+    assert_eq!(t.names, ["(Intercept)", "x1", "x2", "x3"]);
+    assert!(t.coef[2].is_nan() && t.se[2].is_nan());
+    let keep = ["(Intercept)", "x1", "x3"];
+    Check::new(&case)
+        .named_subset("coef", &keep, &t.names, &t.coef, Tol::coef(n))
+        .named_subset("se_nw", &keep, &t.names, &t.se, Tol::se(n))
+        .named_subset("t_nw", &keep, &t.names, &t.stat, Tol::stat(n))
+        .named_subset("p_nw", &keep, &t.names, &t.p, Tol::p_value(n))
+        .scalar("df_resid", num(&v["df_resid"]), Tol::exact())
+        .scalar("r2", num(&v["r_squared"]), Tol::stat(n))
+        .finish();
+    assert_eq!(v["kernel"], "Bartlett (Newey-West)");
+    assert!(v["warnings"].is_array());
+}
+
+/// exponential_decay is y = a exp(-b x) + c with three start values, all required (nls_expdecay).
+#[test]
+fn test_validate_cli_nls_expdecay() {
+    let case = Case::load("nls_expdecay");
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "reg",
+        "nls",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x",
+        "--model",
+        "exponential_decay",
+    ];
+    let v = s.json(&argv(&base, &["--start", "8,0.3,1"]));
+    let ps = v["parameters"].as_array().unwrap();
+    let names: Vec<String> = ps
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["a", "b", "c"]);
+    let est: Vec<f64> = ps.iter().map(|p| num(&p["estimate"])).collect();
+    Check::new(&case)
+        .named("coef", &names, &est, Tol::iterative(1e-6))
+        .named("se", &names, &f64s(&v["std_errors"]), Tol::iterative(1e-5))
+        .scalar("rss", num(&v["rss"]), Tol::iterative(1e-8))
+        .finish();
+    assert_eq!(v["converged"], true);
+    let e = s.err(&argv(&base, &["--start", "1,0.1"]));
+    assert!(e.contains("3 starting values"), "{e}");
+    assert_eq!(s.run(&base).status.code(), Some(2), "--start is required");
+}
+
+// =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
 // =================================================================================================
@@ -900,6 +1225,14 @@ const DATASETS: &[&str] = &[
     "validation/datasets/generated/ab_balanced.csv",
     "validation/datasets/generated/purtest_panel.csv",
     "validation/datasets/generated/panel_absorbed.csv",
+    "validation/datasets/generated/quantreg_hetero.csv",
+    "validation/datasets/generated/smoothers_t3.csv",
+    "validation/datasets/generated/gls_cs.csv",
+    "validation/datasets/generated/nls_expdecay.csv",
+    "validation/datasets/generated/line_outliers.csv",
+    "validation/datasets/generated/supsmu_sine.csv",
+    "validation/datasets/generated/step_legacy.csv",
+    "validation/datasets/generated/hac_ar1.csv",
 ];
 
 const DISCRETE: &[Cmd] = &[
@@ -1478,10 +1811,260 @@ const PANEL_REFUSED: &[(&[&str], &[&str])] = &[
     ),
 ];
 
-const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL, PANEL];
-const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK, PANEL_OK];
-const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] =
-    &[DISCRETE_REFUSED, SURVIVAL_REFUSED, PANEL_REFUSED];
+const REGRESSION: &[Cmd] = &[
+    c(
+        &[
+            "reg", "ols", "grunfeld", "-y", "inv", "-x", "value", "capital",
+        ],
+        Rp,
+    ),
+    c(
+        &[
+            "reg",
+            "clustered",
+            "grunfeld",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+            "--cluster",
+            "firm",
+        ],
+        Rp,
+    ),
+    c(
+        &[
+            "reg",
+            "diagnostics",
+            "grunfeld",
+            "-y",
+            "inv",
+            "-x",
+            "value",
+            "capital",
+        ],
+        Pl,
+    ),
+    c(
+        &["reg", "quantreg", "quantreg_hetero", "-y", "y", "-x", "x"],
+        It,
+    ),
+    c(
+        &[
+            "reg",
+            "loess",
+            "smoothers_t3",
+            "-y",
+            "ym",
+            "-x",
+            "xm",
+            "--span",
+            "0.5",
+            "--degree",
+            "1",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "reg",
+            "nls",
+            "nls_expdecay",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--model",
+            "exponential_decay",
+            "--start",
+            "8,0.3,1",
+        ],
+        It,
+    ),
+    c(
+        &[
+            "reg",
+            "gls",
+            "gls_cs",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "z",
+            "--correlation",
+            "cs",
+            "--group",
+            "g",
+        ],
+        It,
+    ),
+    c(
+        &[
+            "reg",
+            "step",
+            "step_legacy",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "x2",
+            "x3",
+        ],
+        Pl,
+    ),
+    c(
+        &["reg", "smooth-spline", "smoothers_t3", "-y", "y", "-x", "x"],
+        Pl,
+    ),
+    c(&["reg", "supsmu", "supsmu_sine", "-y", "y", "-x", "x"], Pl),
+    c(&["reg", "line", "line_outliers", "-y", "y", "-x", "x"], Pl),
+    c(&["reg", "hac", "hac_ar1", "-y", "y", "-x", "x"], Pl),
+];
+
+const REGRESSION_OK: &[&[&str]] = &[
+    &[
+        "reg",
+        "quantreg",
+        "quantreg_hetero",
+        "-y",
+        "y",
+        "-x",
+        "x",
+        "--se",
+        "Koenker-Bassett",
+        "--method",
+        "simplex",
+    ],
+    &[
+        "reg",
+        "gls",
+        "gls_cs",
+        "-y",
+        "y",
+        "-x",
+        "x",
+        "z",
+        "--correlation",
+        "exchangeable",
+        "--group",
+        "g",
+        "--method",
+        "restricted",
+    ],
+    &[
+        "reg",
+        "smooth-spline",
+        "smoothers_t3",
+        "-y",
+        "y",
+        "-x",
+        "x",
+        "--criterion",
+        "LOOCV",
+    ],
+    &[
+        "reg",
+        "step",
+        "step_legacy",
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "x3",
+        "--direction",
+        "Forwards",
+    ],
+];
+
+const REGRESSION_REFUSED: &[(&[&str], &[&str])] = &[
+    (
+        &[
+            "reg",
+            "quantreg",
+            "quantreg_hetero",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--se",
+            "rank",
+        ],
+        &["nid", "iid", "ker", "boot"],
+    ),
+    (
+        &[
+            "reg",
+            "quantreg",
+            "quantreg_hetero",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--method",
+            "lasso",
+        ],
+        &["br", "fn", "irls"],
+    ),
+    (
+        &[
+            "reg", "gls", "gls_cs", "-y", "y", "-x", "x", "--method", "gmm",
+        ],
+        &["reml", "ml"],
+    ),
+    (
+        &[
+            "reg",
+            "gls",
+            "gls_cs",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--correlation",
+            "arma",
+        ],
+        &["identity", "ar1", "compound_symmetry", "ar1_auto"],
+    ),
+    (
+        &[
+            "reg",
+            "smooth-spline",
+            "smoothers_t3",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--criterion",
+            "aic",
+        ],
+        &["gcv", "cv"],
+    ),
+    (
+        &[
+            "reg",
+            "step",
+            "step_legacy",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "--direction",
+            "sideways",
+        ],
+        &["forward", "backward", "both"],
+    ),
+];
+
+const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL, PANEL, REGRESSION];
+const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK, PANEL_OK, REGRESSION_OK];
+const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[
+    DISCRETE_REFUSED,
+    SURVIVAL_REFUSED,
+    PANEL_REFUSED,
+    REGRESSION_REFUSED,
+];
 
 /// A session with every dataset the table tests use, each named after its file stem.
 fn table_session() -> TempSession {
