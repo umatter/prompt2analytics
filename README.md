@@ -166,17 +166,16 @@ p2a --session s.json reg ols mydata -y price -x sqft bedrooms --robust hc1
 p2a --session s.json reg clustered mydata -y revenue -x employees --cluster firm_id
 
 # HAC (Newey-West) standard errors for time series
-p2a --session s.json reg hac mydata -y returns -x mkt_rf smb hml --lag 4
-
-# Bootstrap standard errors
-p2a --session s.json reg bootstrap mydata -y outcome -x treatment -B 1000
+p2a --session s.json reg hac mydata -y returns -x mkt_rf smb hml --lags 4
 
 # Quantile regression
-p2a --session s.json reg quantile mydata -y wage -x education experience --tau 0.5
+p2a --session s.json reg quantreg mydata -y wage -x education experience --tau 0.5
 
 # Diagnostics (VIF, Breusch-Pagan, Durbin-Watson)
 p2a --session s.json reg diagnostics mydata -y price -x sqft bedrooms bathrooms
 ```
+
+Bootstrap covariances are an MCP tool (`regression_bootstrap_cov`), not a CLI command.
 
 #### Panel Data
 
@@ -185,10 +184,10 @@ p2a --session s.json reg diagnostics mydata -y price -x sqft bedrooms bathrooms
 p2a --session s.json panel fe mydata -y revenue -x employees capital --entity firm_id
 
 # Random effects
-p2a --session s.json panel re mydata -y gdp -x investment --entity country --time year
+p2a --session s.json panel re mydata -y gdp -x investment --entity country
 
 # Hausman specification test
-p2a --session s.json panel hausman mydata -y outcome -x treatment --entity id --time period
+p2a --session s.json panel hausman mydata -y outcome -x treatment --entity id
 
 # High-dimensional fixed effects
 p2a --session s.json panel hdfe mydata -y sales -x price --fe firm_id year
@@ -204,29 +203,29 @@ p2a --session s.json panel gmm mydata -y growth -x investment --entity country -
 
 ```bash
 # Instrumental Variables (2SLS)
-p2a --session s.json causal iv mydata -y wage -x education --instruments distance
+p2a --session s.json causal iv mydata -y wage --endog education --instruments distance
 
 # Difference-in-Differences
 p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period
 
 # Staggered DiD (Callaway-Sant'Anna)
-p2a --session s.json causal staggered-did mydata -y outcome --unit id --time period --treat first_treat
+p2a --session s.json causal staggered-did mydata -y outcome --unit id --time period --treatment-time first_treat
 
 # Regression Discontinuity (Sharp)
 p2a --session s.json causal rd mydata -y outcome --running score --cutoff 0
 
 # Fuzzy RD
-p2a --session s.json causal fuzzy-rd mydata -y outcome --running score --treat treatment --cutoff 0
+p2a --session s.json causal fuzzy-rd mydata -y outcome --running score --treatment treatment --cutoff 0
 
 # Propensity Score Matching
-p2a --session s.json causal matching mydata -y outcome --treat treatment -x age income education
+p2a --session s.json causal matching mydata --treatment treatment -x age income education
 
 # IPW and Doubly Robust
-p2a --session s.json causal ipw mydata -y outcome --treat treatment -x age income
-p2a --session s.json causal doubly-robust mydata -y outcome --treat treatment -x age income
+p2a --session s.json causal ipw mydata -y outcome --treatment treatment -x age income
+p2a --session s.json causal doubly-robust mydata -y outcome --treatment treatment -x age income
 
 # Synthetic Control
-p2a --session s.json causal synth mydata -y gdp --unit state --time year --treat california --treat-time 2000
+p2a --session s.json causal synth mydata -y gdp --unit state --time year --treated california --treatment-time 2000
 ```
 
 #### Discrete Choice
@@ -237,7 +236,7 @@ p2a --session s.json discrete logit mydata -y hired -x education experience age
 p2a --session s.json discrete probit mydata -y default -x income debt_ratio
 
 # Ordered models
-p2a --session s.json discrete ologit mydata -y satisfaction -x service_quality price
+p2a --session s.json discrete o-logit mydata -y satisfaction -x service_quality price
 
 # Multinomial logit
 p2a --session s.json discrete mlogit mydata -y transport_mode -x income distance
@@ -260,13 +259,13 @@ p2a --session s.json ts var mydata --cols gdp inflation unemployment --lags 2
 p2a --session s.json ts garch mydata --col returns -p 1 -q 1
 
 # Holt-Winters forecasting
-p2a --session s.json ts holt-winters mydata --col sales --seasonal 12
+p2a --session s.json ts holt-winters mydata --col sales --period 12
 
 # STL decomposition
 p2a --session s.json ts stl mydata --col sales --period 12
 
 # Granger causality
-p2a --session s.json ts granger mydata --cause money_supply --effect inflation --lags 4
+p2a --session s.json ts granger mydata --x money_supply --y inflation --lags 4
 ```
 
 #### Statistics

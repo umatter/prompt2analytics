@@ -33,6 +33,10 @@ const DOCS: [&str; 4] = [
 const SHELL_FENCES: [&str; 6] = ["", "bash", "sh", "shell", "console", "zsh"];
 /// Commands that need no session.
 const SESSIONLESS: [&str; 3] = ["script", "chat", "smoke-test"];
+/// Option values the commands refuse (`(command path, option, value)`, canonical command names): a
+/// hand-written example must not use one. The parse test cannot see them, because an example runs
+/// without a session and stops before the value is checked.
+const REFUSED: &[(&str, &str, &str)] = &[("regression quantreg", "--se", "rank")];
 
 fn bin() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_p2a"))
@@ -330,6 +334,56 @@ fn names_session(text: &str) -> bool {
     })
 }
 
+/// The canonical subcommand path of a command's arguments (`reg ols` -> `regression ols`), through
+/// names and aliases; global options and their values are skipped.
+fn canonical_path(args: &[String]) -> Vec<String> {
+    let cmds = commands();
+    let mut path: Vec<String> = Vec::new();
+    let mut skip = false;
+    for a in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if matches!(a.as_str(), "-F" | "--format" | "--max-memory") {
+            skip = true;
+            continue;
+        }
+        if a.starts_with('-') {
+            continue;
+        }
+        let Some(cur) = cmds.iter().find(|c| c.path == path) else {
+            break;
+        };
+        let subs = cur.subcommands();
+        let Some((name, _, _)) = subs
+            .iter()
+            .find(|(n, _, al)| n == a || al.iter().any(|x| x == a))
+        else {
+            break;
+        };
+        path.push(name.clone());
+    }
+    path
+}
+
+/// The refused `option value` a command's arguments use, if any (`--se rank` or `--se=rank`).
+fn refused_value(args: &[String]) -> Option<String> {
+    let path = canonical_path(args).join(" ");
+    REFUSED
+        .iter()
+        .filter(|(cmd, _, _)| *cmd == path)
+        .find_map(|(_, opt, value)| {
+            let used = args
+                .windows(2)
+                .any(|w| w[0] == *opt && w[1].eq_ignore_ascii_case(value))
+                || args
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&format!("{opt}={value}")));
+            used.then(|| format!("`{opt} {value}` is refused"))
+        })
+}
+
 struct Run {
     code: Option<i32>,
     stderr: String,
@@ -545,4 +599,87 @@ fn test_placeholders_are_recognised() {
     assert!(placeholder("p2a data load file.csv [--name NAME]").is_some());
     assert!(placeholder("p2a --format json ...").is_some());
     assert!(placeholder("p2a data generate --columns '[{\"name\":\"x\"}]'").is_none());
+}
+
+// ---------------------------------------------------------------- Task 2
+
+/// INF-3: every documented `p2a` command parses. Shell fences hold examples only (concrete values,
+/// with `--session` unless the command is script/chat/smoke-test); table cells name real subcommands.
+/// Fails before (d6a3a3b binary): 40 usage errors, 10 panics (fixed by T2-WP03 before this package),
+/// placeholder synopses in shell fences, 33 CLI_REFERENCE examples without a session and two CLAUDE.md
+/// table cells naming no subcommand.
+#[test]
+fn test_documented_p2a_examples_parse() {
+    let top = top_level_names();
+    let (mut problems, mut jobs) = (Vec::new(), Vec::new());
+    for file in DOCS {
+        for doc in documented(file, &read(file), &top) {
+            let label = doc.label();
+            match doc.kind {
+                Kind::Table => {
+                    let words: Vec<&str> = doc.text.split_whitespace().collect();
+                    if let Err(e) = resolve(&words) {
+                        problems.push(format!("{label}: {e}"));
+                    } else if words.iter().any(|w| w.starts_with('-'))
+                        && placeholder(&doc.text).is_none()
+                    {
+                        match args_of(&format!("p2a {}", doc.text)) {
+                            Ok(a) => jobs.push((label, a)),
+                            Err(e) => problems.push(format!("{label}: {e}")),
+                        }
+                    }
+                }
+                Kind::Fenced | Kind::Inline => {
+                    if let Some(why) = placeholder(&doc.text) {
+                        if doc.kind == Kind::Fenced {
+                            problems.push(format!(
+                                "{label}: {why} in a shell fence (a synopsis belongs in a ```text block)"
+                            ));
+                        }
+                        continue;
+                    }
+                    match args_of(&doc.text) {
+                        Ok(a) => {
+                            if let Some(why) = refused_value(&a) {
+                                problems.push(format!("{label}: {why}"));
+                            }
+                            let free = subcommand_of(&a).is_some_and(|s| SESSIONLESS.contains(&s));
+                            if doc.kind == Kind::Fenced && !free && !names_session(&doc.text) {
+                                problems.push(format!(
+                                    "{label}: no --session (the command would stop with \"No session active\")"
+                                ));
+                            }
+                            jobs.push((label, a));
+                        }
+                        Err(e) => problems.push(format!("{label}: {e}")),
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        jobs.len() >= 150,
+        "only {} documented commands found: did the extraction break?",
+        jobs.len()
+    );
+    problems.extend(run_all(&jobs));
+    assert!(
+        problems.is_empty(),
+        "{} problems in the documented p2a commands:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// A hand-written example that uses a refused option value is caught (the doc test runs examples without
+/// a session, so the command itself never reaches the check).
+#[test]
+fn test_refused_option_values_are_caught() {
+    let args = args_of("p2a --session s.json reg quantreg d -y y -x x --se rank").expect("args");
+    assert_eq!(canonical_path(&args), ["regression", "quantreg"]);
+    assert!(refused_value(&args).is_some());
+    let args = args_of("p2a reg quantreg d -y y -x x --se=RANK").expect("args");
+    assert!(refused_value(&args).is_some());
+    let args = args_of("p2a reg quantreg d -y y -x x --se nid").expect("args");
+    assert!(refused_value(&args).is_none());
 }

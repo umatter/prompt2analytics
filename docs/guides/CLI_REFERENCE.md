@@ -382,7 +382,7 @@ forecasts with 80% and 95% prediction intervals, as `forecast(Arima(...))`. The 
 `model`, `label` (forecast::Arima's model label), `coefficients`, `std_errors`, `sigma2`, `loglik`,
 `aic`, `converged`, `iterations`, `include_mean`, `drift`, `warnings` and, with `--horizon`, the
 forecasts with `lower_80`, `upper_80`, `lower_95` and `upper_95`. A series with missing values
-is refused, with how to fill the gaps first (`p2a munge fill-na`): dropping a value would splice
+is refused, with how to fill the gaps first (`munge fill-na`): dropping a value would splice
 the series.
 
 - `ts vecm` takes `--lags` (the VAR order K in levels, at least 2; default 2), `--ecdet none|const|trend` and an

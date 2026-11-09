@@ -66,9 +66,6 @@ Configure your AI assistant to use the MCP server:
 # Load CSV file
 p2a --session analysis.json data load /path/to/data.csv --name mydata
 
-# Load with custom delimiter
-p2a --session analysis.json data load data.tsv --name mydata --delimiter "\t"
-
 # Load Parquet file
 p2a --session analysis.json data load data.parquet --name mydata
 
@@ -76,13 +73,16 @@ p2a --session analysis.json data load data.parquet --name mydata
 p2a --session analysis.json data load data.dta --name mydata
 ```
 
+CSV, Parquet, Excel, Stata and SAS files are read; the format comes from the extension. CSV files are read
+with a comma separator; `--na-strings` sets the missing-value markers (default `NA` and the empty field).
+
 ### Exploring Data
 
 ```bash
 # List all loaded datasets
 p2a --session analysis.json data list
 
-# Get summary statistics
+# Row and column counts, column names and types
 p2a --session analysis.json data describe mydata
 
 # Preview first 10 rows
@@ -91,12 +91,14 @@ p2a --session analysis.json data head mydata -n 10
 
 ### Data Quality
 
-```bash
-# Generate quality profile (missing values, outliers, duplicates)
-p2a --session analysis.json data quality mydata
+Quality profiles and cleaning suggestions are MCP tools (`/data_quality_profile`, `/suggest_cleaning`, see
+`docs/guides/MCP_TOOL_EXAMPLES.md`). From the CLI, inspect a dataset with `data describe` (row and column counts,
+names and types) and clean it with the `munge` commands:
 
-# Get cleaning suggestions
-p2a --session analysis.json data suggest mydata
+```bash
+p2a --session analysis.json data describe mydata
+p2a --session analysis.json munge drop-na mydata
+p2a --session analysis.json munge fill-na mydata --method mean
 ```
 
 ---
@@ -112,8 +114,8 @@ p2a --session analysis.json reg ols mydata -y price -x sqft
 # Multiple regression
 p2a --session analysis.json reg ols mydata -y price -x sqft bedrooms bathrooms
 
-# Without intercept
-p2a --session analysis.json reg ols mydata -y price -x sqft --no-intercept
+# Without intercept (uncentered R-squared, as lm(y ~ 0 + x))
+p2a --session analysis.json reg ols mydata -y price -x sqft --intercept false
 ```
 
 ### Robust Standard Errors
@@ -140,10 +142,10 @@ p2a --session analysis.json reg diagnostics mydata -y price -x sqft bedrooms bat
 
 ```bash
 # Median regression (tau=0.5)
-p2a --session analysis.json reg quantile mydata -y price -x sqft bedrooms --tau 0.5
+p2a --session analysis.json reg quantreg mydata -y price -x sqft bedrooms --tau 0.5
 
 # 25th percentile
-p2a --session analysis.json reg quantile mydata -y price -x sqft bedrooms --tau 0.25
+p2a --session analysis.json reg quantreg mydata -y price -x sqft bedrooms --tau 0.25
 ```
 
 ---
@@ -158,10 +160,10 @@ p2a --session analysis.json panel fe mydata \
     -y revenue -x employees marketing \
     --entity firm_id
 
-# Two-way fixed effects (entity + time)
-p2a --session analysis.json panel fe mydata \
+# Two-way fixed effects (entity + time), as high-dimensional fixed effects
+p2a --session analysis.json panel hdfe mydata \
     -y revenue -x employees marketing \
-    --entity firm_id --time year
+    --fe firm_id year
 ```
 
 ### Random Effects
@@ -218,9 +220,9 @@ p2a --session analysis.json causal did mydata \
 # Staggered treatment timing
 p2a --session analysis.json causal staggered-did mydata \
     -y outcome \
-    --gvar treatment_year \
-    --tvar year \
-    --idvar unit_id
+    --treatment-time treatment_year \
+    --time year \
+    --unit unit_id
 ```
 
 ### Instrumental Variables
@@ -229,13 +231,13 @@ p2a --session analysis.json causal staggered-did mydata \
 # 2SLS with a single instrument
 p2a --session analysis.json causal iv mydata \
     -y outcome \
-    -x treatment \
+    --endog treatment \
     --instruments instrument1
 
 # Multiple instruments
 p2a --session analysis.json causal iv mydata \
     -y outcome \
-    -x treatment \
+    --endog treatment \
     --instruments instrument1 instrument2
 ```
 
@@ -245,13 +247,13 @@ p2a --session analysis.json causal iv mydata \
 # Sharp RD
 p2a --session analysis.json causal rd mydata \
     -y outcome \
-    -x running_variable \
+    --running running_variable \
     --cutoff 50
 
 # Fuzzy RD
-p2a --session analysis.json causal rd-fuzzy mydata \
+p2a --session analysis.json causal fuzzy-rd mydata \
     -y outcome \
-    -x running_variable \
+    --running running_variable \
     --cutoff 50 \
     --treatment actual_treatment
 ```
@@ -260,9 +262,8 @@ p2a --session analysis.json causal rd-fuzzy mydata \
 
 ```bash
 # Nearest neighbor matching
-p2a --session analysis.json causal match mydata \
-    -y outcome \
-    --treat treatment \
+p2a --session analysis.json causal matching mydata \
+    --treatment treatment \
     --covariates age income education \
     --method nearest
 ```
@@ -298,14 +299,14 @@ p2a --session analysis.json ts mstl mydata --col sales --periods 7 365
 p2a --session analysis.json ts var mydata --cols gdp inflation unemployment --lags 2
 
 # Impulse response functions
-p2a --session analysis.json ts irf mydata --cols gdp inflation unemployment --lags 2 --horizon 20
+p2a --session analysis.json ts irf mydata --cols gdp inflation unemployment --lags 2 --steps 20
 ```
 
 ### Changepoint Detection
 
 ```bash
-# Detect structural breaks
-p2a --session analysis.json ts changepoint mydata --col price --method pelt
+# Detect structural breaks in the mean (PELT; --change-type variance or meanvar for the others)
+p2a --session analysis.json ts changepoint mydata --col price
 ```
 
 ---
@@ -322,7 +323,7 @@ p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
 p2a --session analysis.json ml dbscan mydata --cols x1 x2 x3 --eps 0.5 --min-samples 5
 
 # Hierarchical clustering
-p2a --session analysis.json ml hierarchical mydata --cols x1 x2 x3 --method ward
+p2a --session analysis.json ml hierarchical mydata --cols x1 x2 x3 --linkage ward
 ```
 
 ### Dimensionality Reduction
@@ -354,7 +355,7 @@ p2a --session analysis.json ml random-forest mydata \
 
 ```bash
 # Histogram
-p2a --session analysis.json viz histogram mydata -x price -f histogram.png
+p2a --session analysis.json viz histogram mydata --col price -f histogram.png
 
 # Scatter plot
 p2a --session analysis.json viz scatter mydata -x sqft -y price -f scatter.png
@@ -363,7 +364,7 @@ p2a --session analysis.json viz scatter mydata -x sqft -y price -f scatter.png
 p2a --session analysis.json viz line mydata -x date -y sales -f trend.png
 
 # Box plot
-p2a --session analysis.json viz boxplot mydata -x category -y value -f boxplot.png
+p2a --session analysis.json viz box mydata -y value -g category -f boxplot.png
 ```
 
 ### Interactive Charts (HTML)
@@ -383,7 +384,7 @@ p2a --session analysis.json viz line-interactive mydata -x date -y sales -f tren
 p2a --session analysis.json viz heatmap mydata --cols x1 x2 x3 x4 x5 -f correlation.png
 
 # Coefficient plot from regression
-p2a --session analysis.json viz coefficient mydata -y price -x sqft bedrooms bathrooms -f coef.png
+p2a --session analysis.json viz coefplot mydata -y price -x sqft bedrooms bathrooms -f coef.png
 ```
 
 ---

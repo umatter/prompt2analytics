@@ -151,24 +151,26 @@ p2a script run analysis.sh
 | Category | Description | Examples |
 |----------|-------------|----------|
 | `data` | Load, describe, generate, export | `data load`, `data describe`, `data head` |
-| `reg` | OLS, clustered SEs, HAC, bootstrap, quantile | `reg ols`, `reg clustered`, `reg hac` |
+| `reg` | OLS, clustered and HAC SEs, quantile regression, GLS, LOESS, NLS, stepwise, splines | `reg ols`, `reg quantreg`, `reg hac` |
 | `panel` | FE, RE, Hausman, HDFE, FEGLM, GMM | `panel fe`, `panel re`, `panel hdfe` |
 | `causal` | IV, DiD, RD, matching, IPW, synth | `causal iv`, `causal did`, `causal rd` |
 | `discrete` | Logit, probit, ordered, multinomial, count | `discrete logit`, `discrete mlogit` |
 | `ts` | ARIMA, VAR, GARCH, Holt-Winters, STL | `ts arima`, `ts var`, `ts garch` |
 | `stats` | T-tests, ANOVA, non-parametric, ACF/PACF | `stats t-test-two`, `stats anova` |
 | `spatial` | SAR, SEM, SAC, Moran's I | `spatial sar`, `spatial moran` |
-| `survival` | Kaplan-Meier, Cox PH, log-rank | `survival km`, `survival cox` |
+| `survival` | Kaplan-Meier, log-rank, Cox PH, AFT, competing risks | `survival km`, `survival cox` |
 | `ml` | K-means, DBSCAN, PCA, t-SNE, RF, SVM | `ml kmeans`, `ml pca` |
 | `munge` | Filter, join, reshape, aggregate, clean | `munge filter`, `munge join` |
 | `viz` | Static (PNG) and interactive (HTML) charts | `viz scatter`, `viz histogram` |
 
+Every command, argument and option: the generated reference at the end of `docs/guides/CLI_REFERENCE.md`.
+
 ### Output Formats
 
 ```bash
-p2a --format text ...   # Human-readable (default)
-p2a --format json ...   # Programmatic use
-p2a --format table ...  # Tabular display
+p2a --session analysis.json reg ols sales -y price -x sqft              # text (default)
+p2a --session analysis.json -F json reg ols sales -y price -x sqft      # JSON for programs
+p2a --session analysis.json -F table reg ols sales -y price -x sqft     # table (printed like text today)
 ```
 
 ## Architecture Principles
@@ -940,7 +942,7 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 | `bench_utils.rs` JSON schema and method names emitted by `comprehensive_benchmarks`, `unified_benchmarks`, `benchmark_n10000` | `performance/results/rust_*.json` → `merge_results.R` (name normalization across R/Rust) | Renaming a benchmark or a JSON field drops the method from the speed/memory comparison |
 | MCP **tool names** (270 handlers) | `paper/code/e2e_eval/test_cases.json` expects exact names for the 96 single-turn prompts (`regression_ols`, `panel_fixed_effects`, `rd_estimate`, `ts_arima_fit`, ...); `rescore.py` scores them with an alias table | Renaming a tool turns every single-turn prompt targeting it into a scored miss. Multi-turn (MT1–MT8) scoring only checks that *some* tool was called, so names there are documentation |
 | HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
-| `p2a` **text output format** for `data describe/head`, `reg ols` (text and `--format json`), `panel fe/re/hausman/hdfe`, diagnostics | `paper/archive/code/generate_outputs.sh` → `paper/archive/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build). The paper Makefile does not re-run it | Output formatter changes alter exhibits. Golden copies in `crates/p2a-cli/tests/golden/cli_*.txt` fail the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`) on any output change; update them with `P2A_UPDATE_GOLDEN=1` only after the R checks in the same test pass |
+| `p2a` **text output format** for `data describe`, `data head`, `reg ols` (text and `-F json`), `panel fe`, `panel re`, `panel hausman`, `panel hdfe`, diagnostics | `paper/archive/code/generate_outputs.sh` → `paper/archive/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build). The paper Makefile does not re-run it | Output formatter changes alter exhibits. Golden copies in `crates/p2a-cli/tests/golden/cli_*.txt` fail the exhibit tests (`p2a-cli::exhibits::test_validate_cli_*`) on any output change; update them with `P2A_UPDATE_GOLDEN=1` only after the R checks in the same test pass |
 | `validation/datasets/` (Grunfeld etc.) | CLI captures above, `rust_validation/scripts/run_validation.sh`, several R benchmark DGPs | Moving a dataset breaks `make generate` |
 | The LLM system prompt and dataset-context format (`llm/context.rs`, `llm/tools.rs`) | e2e evaluation accuracy (`run_evaluation.py` results) | Tier 0 bounded and delimited the dataset block (JSON-quoted names and values, byte and column caps), so re-running the evaluation against a newer `SOFTWARE_VERSION` can shift the accuracy numbers. Tool names and SSE events are unchanged |
 | `validation/expected/*.json`, `validation/methods/*.json` | the paper's validation claims (supplementary appendix "numerical validation", introduction footnote, discussion) | A changed reference value or registry entry changes what the paper may claim as R-pinned |
