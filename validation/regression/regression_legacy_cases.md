@@ -48,9 +48,9 @@ Tests: `test_validate_reset_quad` (every `diag_reset_quad` value above, and n) a
 Tolerance: statistics and R-squared 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute,
 df exact.
 
-Deviation REG-35: `type = "princomp"` is not implemented. `ResetType::PrinComp` reuses the
-fitted-value augmentation, so on Grunfeld p2a gives the fitted F, 19.56011807, where
-`resettest(type = "princomp")` gives 6.108133142. No case exercises it.
+`type = "princomp"` is pinned by its own case (`reset_princomp`, registry entry
+`resettest_princomp` in `validation/methods/reg_rank_qr.json`); see
+[regression_diagnostics.md](../diagnostics/regression_diagnostics.md).
 
 ## Wald test (diag_wald_sim, ols_diagnostics_grunfeld)
 
@@ -203,21 +203,13 @@ its check-loss objective `$rho`; `summary.rq(se = "iid" | "nid")` for the standa
 | `se_iid_tau25`, `se_nid_tau25` | 0.3091597442, 0.05114879633; 0.2982451330, 0.1411274807 |
 | `se_iid_tau75`, `se_nid_tau75` | 0.5593514870, 0.09254165791; 0.6195115282, 0.1643775195 |
 
-Test: `test_validate_quantreg_hetero` pins the objective at the three quantiles, the residual
-df and n. It also asserts that p2a's objective is not below rq's linear-programming minimum, that
-IRLS converges (fewer than 100 iterations; it takes 30, 23 and 52), and that the slope increases
-with tau. p2a's IRLS objective exceeds rq's minimum by 2.2e-7, 7.4e-8 and 1.4e-7 relative.
-Tolerance: objective 1e-6 relative (the statistic row), counts exact.
+Test: `test_validate_quantreg_hetero` pins the objective, the coefficients and the nid and iid
+standard errors at the three quantiles, the residual df and n, and asserts that p2a's objective
+is not below rq's linear-programming minimum and that the slope increases with tau. Tolerance
+(n = 100): coefficients 1e-8, standard errors and objective 1e-6 relative, counts exact.
 
-Deviations (left out of the test):
-
-| Finding | Quantity | R | p2a |
-|---|---|---|---|
-| REG-52 | coefficients, tau = 0.5 (`coef_tau50`) | 1.348734984, 3.169951199 | 1.348696693, 3.169975618 (relative gaps 2.8e-5, 7.7e-6; at tau 0.25: 1.8e-5, 5.5e-8; at tau 0.75: 1.0e-6, 1.8e-6) |
-| REG-26 | standard errors, tau = 0.5 (`se_iid_tau50`, `se_nid_tau50`) | iid 0.4807247768, 0.07953329683; nid 0.1798711171, 0.1079530876 | 0.05028920546, 0.008320075224 |
-| REG-64 | 95% confidence intervals | not recorded | estimate +/- 1.96 SE (slope at tau 0.5: 3.153668270 to 3.186282965) |
-
-The simplex, summary.rq's SEs, Frisch-Newton and the bootstrap are validated in
+Quantile regression is pinned by `quantreg_hetero` and the cases of `reg_quantreg_br.R`: see
+[quantreg.md](quantreg.md). The simplex, summary.rq's SEs, Frisch-Newton and the bootstrap are validated in
 [quantreg.md](quantreg.md) (methods `quantreg_br`, `quantreg_summary_se`, `quantreg_fn`,
 `quantreg_boot`); `test_validate_rq_multi_hetero` there replaces the range-only multi-quantile
 test (REG-44).
@@ -250,18 +242,15 @@ nlme to about 1e-15. p2a reports p = 0 for the slope where R gives 5.3e-38, insi
 absolute p-value tolerance. Tolerance (n = 50): coefficients 1e-6, standard errors, t and sigma
 1e-5 relative, p-values 1e-5 relative or 1e-12 absolute, counts exact.
 
-Deviations (left out of the test):
-
-| Finding | Quantity | R | p2a |
-|---|---|---|---|
-| REG-43 | estimated rho, `"ar1_auto"` (`phi`, `phi_ml`) | REML 0.6819761522, ML 0.6532503857 | 0.6541921822, the lag-1 correlation of the OLS residuals |
-| REG-9 | log-likelihood, AIC, BIC at phi (`log_lik_reml`, `aic_reml`, `bic_reml`) | -79.12921201, 166.2584240, 173.7432281 | -93.62614993, 193.2522999, 198.9883689 (omits -0.5 log\|Omega\| and uses SSE/(n - p)) |
+The same test pins the REML log-likelihood at that phi, and the `"ar1_auto"` fit (phi estimated
+by REML as nlme: `phi`, coefficients, standard errors, `log_lik_reml`, `aic_reml`, `bic_reml`)
+and the ML fit (`phi_ml`, `coef_ml`, `log_lik_ml`), with phi at `Tol::iterative(1e-6)` because
+the profile likelihood is flat at its maximum.
 
 T0-WP14's `test_validate_gls_fixed_correlation_vs_nlme` pins fixed-rho AR(1), compound-symmetry
 and identity fits on its own 30-point data to `nlme::gls` at 1e-8, with the R values quoted in
-the test; it loads no case and is not registered. Estimated and grouped correlation, and the
-deviations above (fixed by T3-WP11), are documented in [gls.md](gls.md) and the
-`gls_estimated_correlation` registry entry.
+the test; it loads no case and is not registered. Estimated and grouped correlation are
+documented in [gls.md](gls.md) and the `gls_estimated_correlation` registry entry.
 
 ## Legacy files superseded
 
@@ -274,6 +263,6 @@ deviations above (fixed by T3-WP11), are documented in [gls.md](gls.md) and the
 | `hac_test.csv` | `hac_ar1` | regenerated (INF-16): rows "Bartlett" and "Parzen" held `vcovHAC(m)`'s default quadratic-spectral estimate, because `vcovHAC` ignores a `kernel` argument; they now hold `kernhac_bartlett_bw4` and `kernhac_parzen_bw4`. Row "NeweyWest" equals `neweywest_default` |
 | `driscoll_kraay_test.csv` | `dk_panel` | coefficients and `ols_se` equal; `dk_se` sums the scores by firm, not by period (above), and is not a Driscoll-Kraay value |
 | `bootstrap_test.csv` | none | not asserted: `vcovBS` resamples with R's RNG (see `validation/regression/vcovBS.md`) |
-| `quantreg_test.csv` | `quantreg_hetero` | coefficients equal to 15 digits; p2a's coefficients are a deviation (REG-52), its objective is pinned |
+| `quantreg_test.csv` | `quantreg_hetero` | coefficients equal to 15 digits; coefficients, standard errors and objective are pinned |
 | `gls_ar1_test.csv` | `gls_ar1` | coefficients, standard errors and `rho_estimated` (= `phi`) equal to 15 digits |
 | `step_test.csv` | `step_legacy` (T1-WP02, `validation/r/cases/regression.R`) | |

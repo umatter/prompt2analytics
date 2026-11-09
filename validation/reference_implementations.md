@@ -131,15 +131,15 @@ names a quantity the registry records as not matching R, with its finding.
 | `run_ols_clustered` | R `sandwich::vcovCL(cluster = ~g, type = "HC1")`, two-way `~g1 + g2` (pinned) | Python `linearmodels` |
 | `step` | R `stats::step`, `extractAIC` (pinned) | - |
 | `run_diagnostics` | R `tseries::jarque.bera.test`, `lmtest::bptest` (studentized), `lmtest::dwtest`, `car::vif`, `base::kappa(exact = TRUE)` (pinned) | - |
-| `bg_test`, `reset_test`, `harvey_collier_test`, `wald_test` | R `lmtest::bgtest`, `resettest`, `harvtest` (with `strucchange::recresid`), `waldtest` (pinned; deviations REG-35 RESET, REG-37 Wald Chisq) | R `aod::wald.test` |
+| `bg_test`, `reset_test`, `harvey_collier_test`, `wald_test` | R `lmtest::bgtest`, `resettest`, `harvtest` (with `strucchange::recresid`), `waldtest` (pinned, `type = "princomp"` too; deviation REG-37 Wald Chisq) | R `aod::wald.test` |
 | `run_fixed_effects` | R `plm(model = "within")`, `vcovHC(method = "arellano")`, `pwaldtest` (pinned) | Python `linearmodels.PanelOLS` |
 | `run_random_effects` | R `plm(model = "random")` Swamy-Arora, `ercomp`, `pwaldtest`; z inference (pinned) | - |
 | `run_hausman_test` | R `plm::phtest`, classical covariances (pinned) | - |
 | `run_hdfe` | R `fixest::feols`, `fitstat`; adjusted within R² from `plm(effect = "twoways")` (pinned) | R `lfe::felm` |
 | HAC (`vcov_hac`) | R `sandwich::NeweyWest(lag =, prewhite = FALSE)`, `kernHAC(kernel =, bw =, prewhite = FALSE, adjust = FALSE)` (pinned; deviations REG-22, REG-50, REG-61) | - |
 | Driscoll-Kraay (`vcov_driscoll_kraay`) | R `sandwich::vcovPL` (pinned; deviations REG-24, REG-50) | R `plm::vcovSCC` |
-| Quantile regression | R `quantreg::rq(method = "br")`, `summary.rq(se = "iid" / "nid")` (pinned; deviations REG-26, REG-52, REG-64) | - |
-| GLS AR(1) | R `nlme::gls(correlation = corAR1())`, REML (pinned; deviations REG-9, REG-43) | - |
+| Quantile regression | R `quantreg::rq(method = "br")`, `summary.rq(se = "iid" / "nid")` (pinned; deviation REG-26, the scale-free sparsity fuzz) | - |
+| GLS AR(1) | R `nlme::gls(correlation = corAR1())`, REML and ML, phi estimated (pinned) | - |
 | `run_multinom` | R `nnet::multinom` (pinned) | - |
 | `run_ordered_logit`, `run_ordered_probit` | R `MASS::polr` (pinned; deviations ECON-4, ECON-5) | - |
 | `run_iv2sls` | R `AER::ivreg` | Python `linearmodels.IV2SLS` |

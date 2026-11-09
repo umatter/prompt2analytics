@@ -41,7 +41,13 @@
         "reply lines"
       ],
       "tolerance": "exact (counts; proportions are the same IEEE divisions)",
-      "deviations": [],
+      "deviations": [
+        {
+          "finding": "DATA-65",
+          "quantity": "order of tied counts",
+          "note": "tied counts follow first appearance (core value_counts_with); dplyr::count(sort = TRUE) orders them by value; the case has no ties, so none is compared"
+        }
+      ],
       "supersedes_legacy": []
     },
     {

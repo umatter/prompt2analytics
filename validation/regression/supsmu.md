@@ -113,9 +113,8 @@ line through MCP and the CLI.
 ### REG-31 (fixed)
 
 The smooth on this case is now pinned: `supsmu_y` is compared at `Tol::coef(56)` (the old
-smoother was up to 0.673 off). The `supsmu_missing` registry entry in
-`validation/methods/regression_na.json` still lists REG-31 as a deviation; its removal is
-left to the status integration.
+smoother was up to 0.673 off), and the `supsmu_missing` registry entry in
+`validation/methods/regression_na.json` lists it among its quantities.
 
 ## Deviations
 

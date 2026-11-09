@@ -374,5 +374,82 @@ class ToleranceTextTest(unittest.TestCase):
                 self.assertIn(phrase, self.text)
 
 
+# ---------------------------------------------------------------- Task 2: registry deviations of fixed findings
+
+# (registry file, finding): deviations that Tier 3 made stale (T3-WP64 Task 2; confirmed against the
+# Fixes: lines of the Tier 3 range before committing).
+STALE_DEVIATIONS = [
+    ("regression_diagnostics.json", "REG-35"),
+    ("regression_diagnostics.json", "REG-52"),
+    ("regression_diagnostics.json", "REG-26"),
+    ("regression_diagnostics.json", "REG-64"),
+    ("regression_diagnostics.json", "REG-9"),
+    ("regression_diagnostics.json", "REG-43"),
+    ("regression_na.json", "REG-26"),
+    ("regression_na.json", "REG-31"),
+    ("causal_rd.json", "CAUS-28"),
+    ("causal_rd.json", "CAUS-77"),
+    ("causal_rdbw.json", "CAUS-77"),
+    ("cli_flags.json", "REG-52"),
+    ("cli_flags.json", "TS-15"),
+    ("regression_na.json", "REG-14"),
+    ("causal_na.json", "CAUS-92"),
+]
+
+
+def sources_of_test(test_id):
+    """Raw source text of the test function(s) a registry test id names (comments kept)."""
+    package, rest = test_id.split("::", 1)
+    segs = rest.split("::")
+    name, mods = segs[-1], segs[:-1]
+    crate = CRATES / package
+    candidates = []
+    for k in range(len(mods), 0, -1):
+        base = "/".join(mods[:k])
+        for root in ("src", "tests"):
+            for p in (crate / root / f"{base}.rs", crate / root / base / "mod.rs", crate / root / base / "main.rs"):
+                if p.is_file():
+                    candidates.append(p)
+        if candidates:
+            break
+    if not candidates:
+        candidates = [crate / "src" / "lib.rs"]
+    out = []
+    for p in candidates:
+        src = p.read_text(encoding="utf-8")
+        for tname, _, _, body, off in rust_tests(src):
+            if tname == name:
+                out.append(src[off:off + len(body)])
+    return out
+
+
+class RegistryDeviationTest(unittest.TestCase):
+    def test_tier3_fixed_deviations_are_removed(self):
+        left = []
+        for e in registry_entries():
+            for d in e.get("deviations", []):
+                if (e["_file"], d["finding"]) in STALE_DEVIATIONS:
+                    left.append(f"{e['_file']} {e['id']}: {d['finding']} ({d['quantity']})")
+        self.assertEqual(left, [], "\n" + "\n".join(left))
+
+    def test_deviation_comments_have_registry_deviations(self):
+        """T1 1.4 rule 3: a `// deviation <id>` comment in a registered test matches a registry deviation."""
+        problems = []
+        entries = registry_entries()
+        for e in entries:
+            allowed = {d["finding"] for x in entries for d in x.get("deviations", []) if set(x["tests"]) & set(e["tests"])}
+            for test_id in e["tests"]:
+                for raw in sources_of_test(test_id):
+                    for line in raw.splitlines():
+                        c = line.split("//", 1)[1] if "//" in line else ""
+                        m = re.search(r"\bdeviations?\b(.*)$", c)
+                        if not m:
+                            continue
+                        for fid in re.findall(r"\b[A-Z]{2,5}-\d+\b", m.group(1)):
+                            if fid not in allowed:
+                                problems.append(f"{test_id}: comment names deviation {fid}, registry has {sorted(allowed)}")
+        self.assertEqual(sorted(set(problems)), [], "\n" + "\n".join(sorted(set(problems))))
+
+
 if __name__ == "__main__":
     unittest.main()

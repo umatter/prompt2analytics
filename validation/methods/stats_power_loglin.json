@@ -173,7 +173,7 @@
       "quantities": [
         "12 vectors (legacy, STAT-31's Hommel examples, ties, NA, single, ones) x 7 methods"
       ],
-      "tolerance": "1e-12 relative + 1e-15 (arithmetic in R's order); NaN equals NaN",
+      "tolerance": "1e-12 relative + 1e-15; NaN equals NaN",
       "deviations": [],
       "supersedes_legacy": []
     },

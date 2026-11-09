@@ -134,7 +134,8 @@ That was a one-off check, not rerun since; it is not a committed test.
 - The error model's SE of rho uses `alpha_r = 0`, its value under exogenous X; sphet's `Psi`
   plugs in the sample `alpha_r`.
 - The variable bandwidth takes W's neighbour sets as the distance object (each unit's farthest
-  W-neighbour); sphet takes a separate `sphet::distance` object.
+  W-neighbour); sphet takes a separate `sphet::distance` object (registry deviation SPAT-20; the
+  other differences above are SPAT-8).
 - The spatial HAC is also available for the error and SARAR models.
 
 ## What the rewrite changed
