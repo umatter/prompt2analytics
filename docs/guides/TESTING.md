@@ -500,7 +500,8 @@ Benchmark-only tests are `#[ignore]`d, so the Test job reports them as ignored (
 ## Timing comparisons
 
 A method rewrite is timed against the code it replaces (and against R where R is timed) before it merges;
-more than about 1.1x slower than the current code at n = 100, 1,000 and 10,000 needs the user's sign-off. No timing assertion is committed.
+more than about 1.1x slower than the current code at n = 100, 1,000 and 10,000 needs the user's sign-off. No
+timing assertion is committed.
 
 - Build the base commit in a separate worktree (`git worktree add ../p2a-base <commit>`) with `--release` and
   the CI feature set (`--no-default-features --features ci` for p2a-core), so both sides share flags.

@@ -906,7 +906,7 @@ that is cheap, otherwise a registry deviation and a method-doc line. No ports of
 digits unless the estimator is defined by its algorithm or the port is the cheapest correct route; never
 reproduce an R bug. A method rewrite includes a timing comparison with the current code (and R where timed)
 at n = 100, 1,000 and 10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.1x slower
-than the current code at n = 100, 1,000 and 10,000 needs the user's sign-off.
+than the current code needs the user's sign-off.
 
 Never widen a tolerance. A mismatch outside the package's findings is a registry deviation
 (`{"finding", "quantity", "note"}`) with a `// deviation <id>` comment that keeps the quantity
@@ -1248,7 +1248,7 @@ let df = df! {
 - `crates/p2a-mcp/src/llm/egress.rs` - LLM host allowlist and resolve-check-pin resolver
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
 - `crates/p2a-mcp/src/path_jail.rs` - Filesystem path validation (P2A_DATA_ROOT, per-session directories)
-- `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools for MCP clients (not offered to the LLM chat, D3)
+- `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools for MCP clients (not offered to the LLM chat; see Router Composition)
 - `crates/p2a-mcp/src/llm/tools.rs` - Curated LLM-facing tool subset and few-shot examples
 
 **Dioxus App:**

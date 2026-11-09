@@ -94,8 +94,14 @@ pub fn splice(doc: &str, begin: &str, end: &str, body: &str) -> Result<String, S
 pub fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
     // A name of its own: the CLI generator also rewrites README.md.
     let tmp = path.with_extension(format!("md.{}.mcp.tmp", std::process::id()));
-    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::write(&tmp, text).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", tmp.display())
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })
 }
 
 /// Writes README.md's tool table (any build) and docs/mcp/tools-reference.md (only with the

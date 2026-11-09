@@ -567,8 +567,14 @@ pub fn update(cmds: &[CommandHelp]) -> Result<Vec<&'static str>, String> {
         if new != doc {
             // A name of its own: the MCP generator also rewrites README.md.
             let tmp = path.with_extension(format!("md.{}.cli.tmp", std::process::id()));
-            std::fs::write(&tmp, &new).map_err(|e| format!("{}: {e}", tmp.display()))?;
-            std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+            std::fs::write(&tmp, &new).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("{}: {e}", tmp.display())
+            })?;
+            std::fs::rename(&tmp, &path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("{}: {e}", path.display())
+            })?;
             written.push(s.file);
         }
     }

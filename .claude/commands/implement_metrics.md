@@ -192,8 +192,8 @@ The user has provided: $ARGUMENTS
 - Conventions (defaults, degrees-of-freedom corrections, option names) follow R when that is cheap; otherwise keep
   p2a's, record a registry deviation and add a line to the method doc.
 - Before merging a new method or a rewrite, time it against the current code and against R at n = 100, 1,000 and
-  10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.5x slower needs a written reason and
-  the user's sign-off. No timing assertion is committed.
+  10,000 (`docs/guides/TESTING.md`, "Timing comparisons"); more than about 1.1x slower than the current code
+  needs the user's sign-off. No timing assertion is committed.
 
 1. **Create R validation script** in `validation/scripts/[method]_validation.R`:
    ```r
