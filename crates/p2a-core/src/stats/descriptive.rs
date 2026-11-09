@@ -152,20 +152,21 @@ impl DescriptiveStats {
 
 /// Compute quantiles from a float series.
 fn compute_quantiles(series: &Series) -> (f64, f64, f64) {
-    // na-legacy(T4): STAT-48, X-6 (quantiles over present values; NaN cells are not dropped)
+    // na-legacy(T4): STAT-48 (quantiles by the floor(n p) index rule, not R's type 7)
     let f64_series = match series.f64() {
         Ok(s) => s,
         Err(_) => return (f64::NAN, f64::NAN, f64::NAN),
     };
 
-    // Collect non-null values
+    // Collect the present values: nulls and NaN cells are both missing
     let mut values: Vec<f64> = f64_series.into_iter().flatten().collect();
+    values.retain(|v| !v.is_nan());
 
     if values.is_empty() {
         return (f64::NAN, f64::NAN, f64::NAN);
     }
 
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values.sort_by(f64::total_cmp);
 
     let n = values.len();
 
@@ -208,5 +209,21 @@ impl std::fmt::Display for DescriptiveStats {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_describe_quantiles_skip_nan_cells() {
+        // X-6: a NaN cell used to count towards n and enter a sort with no total order, so the
+        // quantile indices fell on other elements (or on the NaN itself).
+        let df = df!("x" => [3.0, f64::NAN, 1.0, 2.0, 5.0]).unwrap();
+        let stats = DescriptiveStats::compute(&Dataset::new(df)).unwrap();
+        let num = stats.columns[0].numeric.as_ref().unwrap();
+        // The floor(n p) index rule on the four present values [1, 2, 3, 5].
+        assert_eq!((num.q25, num.median, num.q75), (2.0, 3.0, 5.0));
     }
 }

@@ -314,6 +314,9 @@ pub fn medpolish(
 fn compute_median(data: &[f64], na_rm: bool) -> f64 {
     let mut clean: Vec<f64> = if na_rm {
         data.iter().filter(|x| !x.is_nan()).copied().collect()
+    } else if data.iter().any(|x| x.is_nan()) {
+        // R's median(x) without na.rm
+        return f64::NAN;
     } else {
         data.to_vec()
     };
@@ -322,7 +325,7 @@ fn compute_median(data: &[f64], na_rm: bool) -> f64 {
         return f64::NAN;
     }
 
-    clean.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    clean.sort_by(f64::total_cmp);
 
     let n = clean.len();
     if n % 2 == 0 {

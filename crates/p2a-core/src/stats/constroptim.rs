@@ -175,6 +175,10 @@ where
     if margin0.iter().any(|&m| m <= 0.0) {
         return Err("Initial value is not feasible (does not satisfy constraints)".to_string());
     }
+    // R's nmmin stops on a non-finite objective at the start value.
+    if !f(theta0).is_finite() {
+        return Err("function cannot be evaluated at initial parameters".to_string());
+    }
 
     let mut theta = theta0.to_vec();
     let mut mu = config.mu;
@@ -271,7 +275,7 @@ where
             let min_margin_idx = current_margin
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .min_by(|(_, a), (_, b)| a.total_cmp(b))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
 
@@ -329,11 +333,23 @@ fn compute_constraint_margin(theta: &[f64], ui: &[Vec<f64>], ci: &[f64]) -> Vec<
         .collect()
 }
 
+/// R's nmmin (src/appl/optim.c): non-finite function values become big.
+const NM_BIG: f64 = 1.0e35;
+
 /// Nelder-Mead simplex optimization (gradient-free).
-fn nelder_mead<F>(x0: &[f64], f: F, max_evals: usize, tol: f64) -> (Vec<f64>, f64, usize, usize)
+fn nelder_mead<F>(
+    x0: &[f64],
+    f_user: F,
+    max_evals: usize,
+    tol: f64,
+) -> (Vec<f64>, f64, usize, usize)
 where
     F: Fn(&[f64]) -> f64,
 {
+    let f = |x: &[f64]| {
+        let v = f_user(x);
+        if v.is_finite() { v } else { NM_BIG }
+    };
     let n = x0.len();
     let mut fn_evals = 0;
 
@@ -369,11 +385,7 @@ where
     for _ in 0..max_evals {
         // Sort vertices by function value
         let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| {
-            values[a]
-                .partial_cmp(&values[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indices.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
 
         // Check convergence
         let f_range = values[indices[n]] - values[indices[0]];
@@ -606,6 +618,32 @@ where
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn test_constr_optim_refuses_non_finite_start_value() {
+        // R's nmmin stops with "function cannot be evaluated at initial parameters"; NaN used
+        // to enter the simplex sort.
+        let f = |t: &[f64]| {
+            if t[0] < 1.0 {
+                f64::NAN
+            } else {
+                (t[0] - 2.0).powi(2) + 0.1 * t[1].powi(2)
+            }
+        };
+        let r = constr_optim(
+            &[0.5, 0.5],
+            f,
+            None::<fn(&[f64]) -> Vec<f64>>,
+            &[vec![1.0, 0.0]],
+            &[0.0],
+            ConstrOptimConfig::default(),
+        );
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("cannot be evaluated at initial parameters"),
+            "{e}"
+        );
+    }
 
     #[test]
     fn test_constr_optim_basic() {
