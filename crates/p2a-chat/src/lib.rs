@@ -1191,13 +1191,23 @@ mod tests {
         }
     }
 
-    fn script_file(tag: &str, body: &str) -> PathBuf {
+    /// A script in the temporary directory, removed when dropped (also when an assertion
+    /// fails first).
+    struct ScriptFile(PathBuf);
+
+    impl Drop for ScriptFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn script_file(tag: &str, body: &str) -> ScriptFile {
         let p = std::env::temp_dir().join(format!(
             "p2a_chat_read_script_{}_{tag}.txt",
             std::process::id()
         ));
         std::fs::write(&p, body).unwrap();
-        p
+        ScriptFile(p)
     }
 
     #[test]
@@ -1207,16 +1217,14 @@ mod tests {
             "first prompt\n\nsecond prompt\n  \t \n  padded  \n\n\nlast",
         );
         assert_eq!(
-            read_script(&p).unwrap(),
+            read_script(&p.0).unwrap(),
             ["first prompt", "second prompt", "padded", "last"]
         );
-        std::fs::remove_file(&p).unwrap();
         let p = script_file("crlf", "a\r\n\r\nGröße of x?\r\n");
-        assert_eq!(read_script(&p).unwrap(), ["a", "Größe of x?"]);
-        std::fs::remove_file(&p).unwrap();
+        assert_eq!(read_script(&p.0).unwrap(), ["a", "Größe of x?"]);
         let p = script_file("empty", "");
-        assert!(read_script(&p).unwrap().is_empty());
-        std::fs::remove_file(&p).unwrap();
+        assert!(read_script(&p.0).unwrap().is_empty());
+        drop(p);
         assert!(read_script(&std::env::temp_dir().join("p2a_chat_no_such_script.txt")).is_err());
     }
 }
