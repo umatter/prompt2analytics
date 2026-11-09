@@ -32,3 +32,87 @@ The numbers come from the cores; the tests here pin them through the binary agai
 
 `test_cli_smooth_spline_criterion` loads no case: it checks that `--criterion gcv|cv` gives the core's
 own fit (p2a's smoothing spline is not R's yet), so it is not in the registry.
+
+Not listed above, because they read no R case: the table tests `test_cli_json_has_warnings_and_diagnostics`
+(every computing command of these files prints one JSON document with its notes) and
+`test_cli_option_values_parse_aliases_and_reject_unknown` (option values parse through the cores' spellings and
+unknown ones are usage errors), plus `test_cli_smooth_spline_criterion`, `test_cli_munge_bin_and_cast_print_one_json_document`,
+`test_cli_munge_fill_na_mode_and_value_counts_normalize`, `test_cli_data_load_jsonl_persists` and
+`test_cli_data_save_json_round_trip`. Grouped Kaplan-Meier is left out of the table (CLI-38).
+
+## Persisted datasets
+
+Every `p2a` invocation is its own process. With `--session <file>`, a dataset that a command produces
+(`munge *`, `data generate`) is written as Parquet to `<file>.datasets/<name>.parquet` (a temporary file, then a
+rename) and registered in the session with `"derived": true`, `"format": "parquet"` and a `source_path` relative to
+the session file's directory, so a session directory can be moved with its sidecar.
+
+- Names are percent-encoded into file names (`%XX` for every byte outside `[A-Za-z0-9._-]`, and for a leading dot);
+  a name whose encoding exceeds 200 bytes is refused, and the error shows it shortened.
+- A result that cannot be written is an error and is not registered (no "Created dataset" line).
+- Loading a file over a derived dataset's name removes the stored copy.
+- Session datasets are read when a command first asks for one. With `--max-memory` set, every dataset is read
+  at start-up so the estimate covers the whole session, and the warning is printed once per invocation.
+- Exported scripts (`script export`) end with `rm -f "$SESSION_FILE"` and, when the session ran a command that
+  stores a derived dataset, `rm -rf -- "$SESSION_FILE.datasets"`.
+- `munge bin` and `munge cast` print one JSON document: `message`, plus `details` (bin's edges and counts) or
+  `warnings` (cast's conversion note).
+- `data load` and the session reload read every format `DataLoader::load` reads (CSV with `--na-strings`
+  through `load_with_na`); an unknown extension is an error listing the readable ones. `data save --output x.json`
+  writes text cells as plain JSON strings, so the file loads back to the same values.
+
+## Notes contract
+
+- Text: after the result, `Converged: yes|no (<n> iterations)` for iterative fits and one `Warning: <text>` line per
+  core warning, then the `Missing values:` line, as earlier tiers print it.
+- JSON: every computing command prints a `warnings` array (empty when there is none), plus `converged` and
+  `iterations` for iterative fits. The exception: `reg ols`, `reg clustered` and `panel fe/re/hdfe`, whose JSON is
+  quoted in the paper, carry `warnings` only when it is non-empty.
+- Formats of earlier tiers are kept; the only golden change is the aliased-regressor warning line in
+  `crates/p2a-cli/tests/golden/cli_diagnostics.txt`.
+- `panel hdfe` text has no `Converged:` line, as fixest prints none; its JSON has `converged` and `iterations`.
+
+## Options
+
+Core enums are parsed with their own `FromStr` (case- and separator-insensitive, with the aliases the core lists in
+its error message); an unknown value is a usage error (exit 2) naming the accepted values.
+
+| Command | Option | Accepted values (default first) |
+|---|---|---|
+| `survival cox` | `--ties` | `efron`, `breslow` (`TiesMethod`) |
+| `survival aft` | `--dist` | `weibull`, `exponential`, `lognormal`, `loglogistic` (`AftDistribution`) |
+| `reg quantreg` | `--method`, `--se` | `auto`, `br` (`simplex`, ...), `fn` (`interior_point`, ...), `irls` (`QuantRegMethod`); `nid` (`sandwich`, ...), `iid`, `ker` (`kernel`, `powell`), `boot` (`QuantRegSe`) |
+| `reg gls` | `--correlation`, `--method` | `ar1_auto` or a `GlsCorrelation` structure; `reml`, `ml` (`GlsMethod`) |
+| `reg step` | `--direction` | `both`, `forward`, `backward` (`StepDirection`) |
+| `reg smooth-spline` | `--criterion` | `gcv` (aliases `generalized_cv`, ...), `cv` (aliases `loocv`, `loo`, ...) (`SplineCriterion`) |
+| `panel unit-root` | `--test`, `--model`, `--lag-selection` | `llc` (aliases `levinlin`, `levin_lin_chu`), `ips`, `madwu` (aliases `maddala_wu`, `fisher`), `hadri` (`PanelUnitRootTest`); `intercept` (aliases `drift`, `c`, `const`), `none` (`nc`), `trend` (`ct`) (`PanelModel`); `aic`, `sic`, `hall` |
+| `stats anova-two` | `--ss-type` | `I`, `II`, `III` (`SsType`) |
+| `panel feglm` | `--family` | `logit` (alias `binomial`), `probit`, `poisson`, `gaussian` |
+| `panel pvcm`, `panel pmg` | `--model` | `within`, `random` (alias `swamy`) |
+| `panel gls` | `--model` | `fe` (aliases `fixed-effects`, `within`), `fd` (aliases `first-difference`, `first_difference`), `pooling` |
+| `panel gmm` | `--step`, `--vcov` | `onestep`, `twostep`; `robust`, `classical` |
+| `munge fill-na` | `--method` | `mean`, `median`, `mode` (alias `most-frequent`), `constant`, `forward`, `backward`, `zero` |
+
+`munge fill-na --method constant` needs `--value` (typed to the column, text for String columns); `--value` with
+any other method is an error.
+
+## Known differences
+
+- `smooth-spline` numbers are not R-pinned (REG-29, REG-30); its default criterion is now GCV, as R's.
+- `data head` and `data describe` JSON shapes (every cell a string, text cells quoted inside it: CLI-15) and grouped
+  Kaplan-Meier (CLI-38) are later work; the tests compare cell text without the quotes.
+- `discrete logit/probit` use p2a's default glm control (ECON-60); the probit pins compare at the tight MLE, which
+  the default control reaches within 1e-6.
+- `panel unit-root` keeps the core's defaults for lags and the lag rule, which differ from `plm::purtest`'s
+  defaults; the tests pass the options explicitly.
+- `reg quantreg` defaults to `--method auto` and `--se nid` at every n (R's `summary.rq` switches to `iid`-based
+  rules at small n).
+- `survival cox` now defaults to Efron ties, as `survival::coxph`; before, the CLI used Breslow.
+- `stats pp-test`: Z(tau), its p-value and the default truncation lag are not pinned (STAT-6, STAT-35, CLI-21).
+
+## Reproduce
+
+```bash
+Rscript validation/r/run.R --check
+cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier3 wp60_models
+```
