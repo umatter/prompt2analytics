@@ -59,7 +59,9 @@ serde reads the old variant names. User strings are parsed with `FromStr`: `over
    (measured: a relative step of about 2e-8 to 6e-8 on simulated n = 100 to 10,000). It
    therefore also stops, converged, when its predicted decrease `r's` is below 1e-14 of
    `g'Wg`, or when no step lowers `g'Wg` and the predicted decrease is below 1e-10 of it
-   (R's `optim` stops at a relative objective change of 1e-8).
+   (R's `optim` stops at a relative objective change of 1e-8). The convergence record names
+   the rule that stopped the run: the step with its tolerance, or the predicted decrease
+   relative to `g'Wg` with its bound (1e-14 or 1e-10).
 7. **Reported.** `cbps_j` is CBPS's `J = gbar' W gbar` at the estimate (no factor n; for
    `Exact` too). For `Over`, `j_statistic = n J`, `j_df = k` and `j_p_value` is Hansen's test
    `P(chi2_k > n J)`, which CBPS does not print; a rejection at 5% adds a warning. Weights are

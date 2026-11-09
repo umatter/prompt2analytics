@@ -1200,6 +1200,9 @@ const DECREMENT_RTOL: f64 = 1e-14;
 const FLOOR_RTOL: f64 = 1e-10;
 
 const STEP_CRITERION: &str = "relative change in coefficients (whitened scale)";
+/// The criterion a Gauss-Newton run records when it stops on its predicted decrease
+/// (`DECREMENT_RTOL`, or `FLOOR_RTOL` when no step lowered `g'Wg`) rather than on the step.
+const DECREMENT_CRITERION: &str = "predicted decrease of g'Wg relative to g'Wg";
 
 /// `max|s| / max|beta|`.
 fn step_change(s: &Array1<f64>, beta: &Array1<f64>) -> f64 {
@@ -1300,6 +1303,8 @@ fn solve_over(
     let mut warnings: Vec<String> = Vec::new();
     let mut converged = false;
     let mut change = f64::NAN;
+    // (criterion, value, tolerance) of the stopping rule that fired; the step rule by default.
+    let mut stop: Option<(&str, f64, f64)> = None;
     let mut it = 0;
     let objective = |b: &Array1<f64>| {
         let pw = pointwise(u, t, b, e);
@@ -1328,6 +1333,9 @@ fn solve_over(
         let q0 = m.gbar.dot(&wg);
         let slope = r.dot(&s);
         if change <= tol || slope <= DECREMENT_RTOL * q0 {
+            if change > tol {
+                stop = Some((DECREMENT_CRITERION, slope / q0, DECREMENT_RTOL));
+            }
             beta = &beta - &s;
             converged = true;
             break;
@@ -1348,6 +1356,7 @@ fn solve_over(
             if slope <= FLOOR_RTOL * q0 {
                 // g'Wg cannot be lowered in floating point and its predicted decrease is
                 // negligible: the minimum to the precision g'Wg can be evaluated.
+                stop = Some((DECREMENT_CRITERION, slope / q0, FLOOR_RTOL));
                 converged = true;
                 break;
             }
@@ -1357,7 +1366,8 @@ fn solve_over(
             break;
         }
     }
-    let convergence = Convergence::new(converged, it, max_iter, STEP_CRITERION, change, tol);
+    let (criterion, final_change, tolerance) = stop.unwrap_or((STEP_CRITERION, change, tol));
+    let convergence = Convergence::new(converged, it, max_iter, criterion, final_change, tolerance);
     if let Some(msg) = convergence.note("CBPS (over)") {
         warnings.push(msg);
     }
@@ -1962,6 +1972,9 @@ mod tests {
             config.estimand = e;
             let r = run_cbps(&ds, "treatment", &["x1", "x2"], Some(config)).unwrap();
             assert!(r.converged, "{e}: {:?}", r.warnings);
+            // The record names the rule that stopped the run, and that rule is met.
+            let c = &r.convergence;
+            assert!(c.final_change <= c.tolerance, "{e}: {c:?}");
             assert!(
                 r.warnings.iter().all(|w| !w.contains("line search")),
                 "{e}: {:?}",
