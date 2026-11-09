@@ -11,8 +11,8 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, append_missing_note, limit_refusal, missing_json, numeric_columns,
-    numeric_matrix,
+    MissingSummary, NaPolicy, append_missing_note, error_text, limit_refusal, missing_json,
+    numeric_columns, numeric_matrix, parse_option,
 };
 use crate::tools::limits::{EnsembleChange, EnsembleTier};
 use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, HetTxRequest};
@@ -30,6 +30,8 @@ use p2a_core::{
     CartConfig,
     CartMethod,
     CtreeConfig,
+    CtreeTestStat,
+    CtreeTestType,
     CubistConfig,
     EffectEstimationMethod,
     GbmConfig,
@@ -391,17 +393,9 @@ impl AnalyticsServer {
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        let linkage_method = match request.linkage.as_deref() {
-            Some("single") => Linkage::Single,
-            Some("complete") => Linkage::Complete,
-            Some("average") => Linkage::Average,
-            Some("ward") | None => Linkage::Ward,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown linkage method '{}'. Use 'single', 'complete', 'average', or 'ward'.",
-                    other
-                ))]));
-            }
+        let linkage_method = match parse_option(request.linkage.as_deref(), Linkage::Ward) {
+            Ok(l) => l,
+            Err(e) => return error_text(e),
         };
 
         let result = match hierarchical(
@@ -438,17 +432,9 @@ impl AnalyticsServer {
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        let linkage_method = match request.linkage.as_deref() {
-            Some("single") => Linkage::Single,
-            Some("complete") => Linkage::Complete,
-            Some("average") => Linkage::Average,
-            Some("ward") | None => Linkage::Ward,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown linkage method '{}'. Use 'single', 'complete', 'average', or 'ward'.",
-                    other
-                ))]));
-            }
+        let linkage_method = match parse_option(request.linkage.as_deref(), Linkage::Ward) {
+            Ok(l) => l,
+            Err(e) => return error_text(e),
         };
 
         // First, perform hierarchical clustering to get full dendrogram
@@ -734,17 +720,9 @@ impl AnalyticsServer {
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        // Parse smoothing method
-        let sm_method = match request.sm_method.as_deref() {
-            Some("spline") => SmoothingMethod::Spline,
-            Some("gcvspline") => SmoothingMethod::GcvSpline,
-            Some("supsmu") | None => SmoothingMethod::Supsmu,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown smoothing method '{}'. Use 'supsmu', 'spline', or 'gcvspline'.",
-                    other
-                ))]));
-            }
+        let sm_method = match parse_option(request.sm_method.as_deref(), SmoothingMethod::Supsmu) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
 
         let config = PprConfig {
@@ -771,10 +749,20 @@ impl AnalyticsServer {
             "projection_directions": result.alpha,
             "ridge_coefficients": result.beta,
             "gof_rss": result.gofn,
-            "fitted_values_sample": &result.fitted[..result.n.min(20)],
-            "residuals_sample": &result.residuals[..result.n.min(20)],
-            "note": if result.n > 20 { Some(format!("Showing first 20 of {} fitted values", result.n)) } else { None }
+            "fitted_values_sample": first(&result.fitted, PREDICTIONS_SHOWN),
+            "residuals_sample": first(&result.residuals, PREDICTIONS_SHOWN),
+            "note": if result.n > PREDICTIONS_SHOWN { Some(format!("Showing first {PREDICTIONS_SHOWN} of {} fitted values", result.n)) } else { None }
         });
+        let notes = crate::tools::common::notes_json(
+            result
+                .convergence
+                .as_ref()
+                .map(|c| (c.converged, c.iterations)),
+            &result.warnings,
+        );
+        if let (Some(out), serde_json::Value::Object(notes)) = (output.as_object_mut(), notes) {
+            out.extend(notes);
+        }
         if let Some(m) = missing_json(&missing) {
             output["missing"] = m;
         }
@@ -1097,19 +1085,21 @@ impl AnalyticsServer {
         let global_seed = self.global_seed.read().await;
         let seed = request.seed.or(*global_seed);
 
-        // Parse test statistic
-        let test_statistic = match request.test_statistic.as_deref() {
-            Some("range") => HetTestStat::Range,
-            Some("iqr") => HetTestStat::IQR,
-            Some("mad") => HetTestStat::MeanAbsDeviation,
-            _ => HetTestStat::Variance,
+        let test_statistic = match parse_choice(
+            &HETTX_STAT,
+            request.test_statistic.as_deref(),
+            HetTestStat::Variance,
+        ) {
+            Ok(t) => t,
+            Err(e) => return error_text(e),
         };
-
-        // Parse effect estimation method
-        let effect_method = match request.effect_method.as_deref() {
-            Some("regression") | Some("reg") => EffectEstimationMethod::Regression,
-            Some("stratified") | Some("strat") => EffectEstimationMethod::Stratified,
-            _ => EffectEstimationMethod::Matching,
+        let effect_method = match parse_choice(
+            &HETTX_EFFECT,
+            request.effect_method.as_deref(),
+            EffectEstimationMethod::Matching,
+        ) {
+            Ok(m) => m,
+            Err(e) => return error_text(e),
         };
 
         let mut config = HetTxConfig::default();
@@ -1528,20 +1518,27 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Build configuration
+        let teststat = match parse_option(request.teststat.as_deref(), CtreeTestStat::Quadratic) {
+            Ok(t) => t,
+            Err(e) => return error_text(e),
+        };
+        let testtype = match parse_option(request.testtype.as_deref(), CtreeTestType::Bonferroni) {
+            Ok(t) => t,
+            Err(e) => return error_text(e),
+        };
+
+        // Build configuration. A request giving only minbucket gets the smallest minsplit the
+        // fit accepts (splits need minbucket rows on each side), not partykit's fixed 20.
+        let minbucket = request.minbucket.unwrap_or(7);
         let mut config = CtreeConfig::default();
         config.mincriterion = request.mincriterion.unwrap_or(0.95);
-        config.minsplit = request.minsplit.unwrap_or(20);
-        config.minbucket = request.minbucket.unwrap_or(7);
+        config.minbucket = minbucket;
+        config.minsplit = request
+            .minsplit
+            .unwrap_or_else(|| 20.max(minbucket.saturating_mul(2)));
         config.maxdepth = request.maxdepth.unwrap_or(0);
-        config.teststat = request
-            .teststat
-            .clone()
-            .unwrap_or_else(|| "quadratic".to_string());
-        config.testtype = request
-            .testtype
-            .clone()
-            .unwrap_or_else(|| "bonferroni".to_string());
+        config.teststat = CtreeTestStat::choices().canonical(teststat).to_string();
+        config.testtype = CtreeTestType::choices().canonical(testtype).to_string();
         config.seed = request.seed;
 
         let feature_refs: Vec<&str> = request.features.iter().map(|s| s.as_str()).collect();
@@ -1625,7 +1622,7 @@ impl AnalyticsServer {
 
     /// Run Model-based Boosting (mboost).
     #[tool(
-        description = "Run Model-based Boosting (mboost), a component-wise gradient boosting method that selects one variable per iteration. Supports Gaussian (regression), Binomial (classification), and Poisson (count data) families with linear or tree base learners. Equivalent to R's mboost package. Returns variable importance via selection frequency and automatic variable selection."
+        description = "Run Model-based Boosting (mboost), a component-wise gradient boosting method that selects one variable per iteration. mboost's componentwise boosting with bols (or tree) base learners. Families: 'gaussian' (Gaussian(), L2 loss), 'binomial' (mboost's default Binomial(): y coded -1/+1, coefficients on the half-log-odds scale), 'binomial_glm' (Binomial(type = 'glm'): coefficients on the log-odds scale, as glm) and 'poisson' (Poisson()). Returns variable importance via selection frequency and automatic variable selection."
     )]
     pub async fn ml_mboost(
         &self,
@@ -1635,30 +1632,15 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Parse family
-        let family = match request.family.as_deref() {
-            Some("binomial") | Some("logistic") => MboostFamily::Binomial,
-            Some("poisson") | Some("count") => MboostFamily::Poisson,
-            Some("gaussian") | Some("normal") | None => MboostFamily::Gaussian,
-            Some(f) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown family '{}'. Valid options: 'gaussian', 'binomial', 'poisson'.",
-                    f
-                ))]));
-            }
+        let family = match parse_option(request.family.as_deref(), MboostFamily::Gaussian) {
+            Ok(f) => f,
+            Err(e) => return error_text(e),
         };
-
-        // Parse base learner
-        let base_learner = match request.base_learner.as_deref() {
-            Some("tree") | Some("btree") | Some("stump") => MboostBaseLearner::Tree,
-            Some("linear") | Some("bols") | None => MboostBaseLearner::Linear,
-            Some(bl) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown base learner '{}'. Valid options: 'linear', 'tree'.",
-                    bl
-                ))]));
-            }
-        };
+        let base_learner =
+            match parse_option(request.base_learner.as_deref(), MboostBaseLearner::Linear) {
+                Ok(b) => b,
+                Err(e) => return error_text(e),
+            };
 
         // Build config
         let mut config = MboostConfig::default();
@@ -1716,6 +1698,30 @@ impl AnalyticsServer {
 // ============================================================================
 // Helpers shared by the ML and spatial handlers (seeds, option tables, output columns)
 // ============================================================================
+
+/// The spellings of hettx's test statistic (the canonical name first).
+static HETTX_STAT: Choices<HetTestStat> = Choices {
+    option: "test_statistic",
+    values: &[
+        (&["variance", "var"], HetTestStat::Variance),
+        (&["range"], HetTestStat::Range),
+        (&["iqr", "interquartile_range"], HetTestStat::IQR),
+        (
+            &["mad", "mean_abs_deviation", "mean_absolute_deviation"],
+            HetTestStat::MeanAbsDeviation,
+        ),
+    ],
+};
+
+/// The spellings of hettx's individual-effect estimator (the canonical name first).
+static HETTX_EFFECT: Choices<EffectEstimationMethod> = Choices {
+    option: "effect_method",
+    values: &[
+        (&["matching", "match"], EffectEstimationMethod::Matching),
+        (&["regression", "reg"], EffectEstimationMethod::Regression),
+        (&["stratified", "strat"], EffectEstimationMethod::Stratified),
+    ],
+};
 
 /// Seed of the randomized handlers whose core would otherwise fall back to entropy, when
 /// neither the request nor `set_seed` gives one, so every run is reproducible. The tool

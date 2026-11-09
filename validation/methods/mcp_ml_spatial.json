@@ -25,6 +25,74 @@
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ml_cutree",
+      "name": "MCP ml_cutree linkages",
+      "category": "interfaces",
+      "reference": "stats::hclust(method) + stats::cutree(k = 3)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_cutree_linkages"
+      ],
+      "quantities": [
+        "cutree labels for ward.D2, ward.D, mcquitty, centroid, median, average"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_ppr",
+      "name": "MCP ml_ppr (sm_method, bass)",
+      "category": "interfaces",
+      "reference": "stats::ppr(nterms = 2, max.terms = 3, sm.method, bass)",
+      "doc": "validation/ml/ppr.md",
+      "cases": [
+        "ppr_methods"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_ppr"
+      ],
+      "quantities": [
+        "alpha",
+        "beta",
+        "gofn",
+        "fitted values (first 20)"
+      ],
+      "tolerance": "The core pin's tolerances: super-smoother runs Tol::new(1e-8, 1e-10); gcvspline runs Tol::new(0.03, 0.02), the measured gap of the exact spline penalty (deviation)",
+      "deviations": [
+        {
+          "finding": "ML-34",
+          "quantity": "gcvspline alpha, beta, gofn and fitted values, at Tol::new(0.03, 0.02)",
+          "note": "The smoother uses the exact 1/3 in the penalty (R's sgram.f writes 0.333) and the fit at the reported spar (R returns its last Brent evaluation); the spline runs agree with R to about 1e-2 relative, not to digits, as in the core pin"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_mboost",
+      "name": "MCP ml_mboost families",
+      "category": "interfaces",
+      "reference": "mboost::glmboost with bols learners: Gaussian(), Binomial(), Binomial(type = 'glm'), Poisson(), written out",
+      "doc": "validation/ml/mboost.md",
+      "cases": [
+        "ml_mboost_bols"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_mboost_families"
+      ],
+      "quantities": [
+        "coefficients",
+        "intercept",
+        "selection frequencies at mstop 100"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

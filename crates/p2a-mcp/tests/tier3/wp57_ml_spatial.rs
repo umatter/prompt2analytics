@@ -526,3 +526,288 @@ async fn test_spatial_option_descriptions_list_every_value() {
         p2a_core::SpgmMethod::choices().names(),
     );
 }
+
+// ----------------------------------------------------------------------------
+// ML option strings
+// ----------------------------------------------------------------------------
+
+/// R cutree(hclust(dist(X), method), 3) on hclust_60. Before: every linkage other than the
+/// four lowercase names was refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_cutree_linkages() {
+    let (s, server) = session_with("hclust_methods");
+    let case = Case::load("hclust_methods");
+    for (linkage, key) in [
+        ("ward", "wardD2"),
+        ("ward.D2", "wardD2"),
+        ("WARD.D", "wardD"),
+        ("mcquitty", "mcquitty"),
+        ("weighted", "mcquitty"),
+        ("centroid", "centroid"),
+        ("median", "median"),
+        ("UPGMA", "average"),
+    ] {
+        let t = ok(&call(
+            &server,
+            &s,
+            "ml_cutree",
+            json!({"dataset": "hclust_60", "columns": ["a", "b", "c"], "k": 3, "linkage": linkage}),
+        )
+        .await);
+        let j: Value = serde_json::from_str(&t).expect("ml_cutree returns JSON");
+        assert_eq!(
+            f64s(&j["cluster_assignments"]),
+            case.vector(&format!("{key}_cutree3")),
+            "{linkage}"
+        );
+    }
+}
+
+/// stats::ppr through ml_ppr (nterms 2, max_terms 3). The smoother names parse as R's
+/// sm.method. Before: "GCV spline" was refused. Tolerances are the core pin's: the
+/// super-smoother runs agree to 1e-8, the spline runs only to the measured gap of the exact
+/// penalty (deviation ML-34).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ppr() {
+    let (s, server) = session_with("ppr_methods");
+    let case = Case::load("ppr_methods");
+    let supsmu = Tol::new(1e-8, 1e-10);
+    let spline = Tol::new(0.03, 0.02);
+    for (extra, key, tol) in [
+        (json!({}), "supsmu_b0", supsmu),
+        (json!({"bass": 5.0}), "supsmu_b5", supsmu),
+        (json!({"sm_method": "GCV spline"}), "gcvspline", spline),
+        (json!({"sm_method": "gcvspline"}), "gcvspline", spline),
+    ] {
+        let a = with(
+            &json!({"dataset": "ppr_sim", "features": ["x1", "x2", "x3"], "target": "y", "nterms": 2, "max_terms": 3}),
+            extra,
+        );
+        let j: Value = serde_json::from_str(&ok(&call(&server, &s, "ml_ppr", a).await)).unwrap();
+        let alpha: Vec<f64> = j["projection_directions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(f64s)
+            .collect();
+        for direction in j["projection_directions"].as_array().unwrap() {
+            let norm: f64 = f64s(direction).iter().map(|a| a * a).sum::<f64>().sqrt();
+            close(norm, 1.0, Tol::new(0.0, 1e-12), "unit-norm alpha");
+        }
+        for (got, want, what) in [
+            (alpha, case.vector(&format!("{key}_alpha")), "alpha"),
+            (
+                f64s(&j["ridge_coefficients"]),
+                case.vector(&format!("{key}_beta")),
+                "beta",
+            ),
+            (
+                f64s(&j["gof_rss"]),
+                case.vector(&format!("{key}_gofn")),
+                "gofn",
+            ),
+            (
+                f64s(&j["fitted_values_sample"]),
+                case.vector(&format!("{key}_fitted"))[..20].to_vec(),
+                "fitted",
+            ),
+        ] {
+            assert_eq!(got.len(), want.len(), "{key} {what}");
+            for (g, w) in got.iter().zip(&want) {
+                close(*g, *w, tol, &format!("{key} {what}"));
+            }
+        }
+    }
+}
+
+/// mboost bols paths (mstop 100, nu 0.1, centred) for the four families through ml_mboost.
+/// Before: "binomial_glm" was refused ("Unknown family").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_mboost_families() {
+    let (s, server) = session_with("ml_mboost_bols");
+    let case = Case::load("ml_mboost_bols");
+    for (family, key, y) in [
+        ("gaussian", "gaussian", "yg"),
+        ("binomial", "binomial", "yb"),
+        ("Binomial-GLM", "binomial_glm", "yb"),
+        ("poisson", "poisson", "yc"),
+    ] {
+        let t = ok(&call(
+            &server,
+            &s,
+            "ml_mboost",
+            json!({"dataset": "mboost_sim", "y_col": y, "x_cols": ["x1", "x2", "x3"], "family": family, "mstop": 100, "nu": 0.1}),
+        )
+        .await);
+        let j = json_block(&t);
+        let coef = case.vector(&format!("{key}_m100_coef"));
+        assert_eq!(f64s(&j["coefficients"]).len(), coef.len(), "{key}");
+        for (g, w) in f64s(&j["coefficients"]).iter().zip(coef) {
+            close(*g, w, Tol::coef(200), &format!("{key} coef"));
+        }
+        close(
+            j["intercept"].as_f64().unwrap(),
+            case.scalar(&format!("{key}_m100_intercept")),
+            Tol::coef(200),
+            &format!("{key} intercept"),
+        );
+        assert_eq!(
+            f64s(&j["selection_frequency"]),
+            case.vector(&format!("{key}_m100_sel")),
+            "{key} selections"
+        );
+    }
+}
+
+/// ctree options are parsed by the core enums and echoed canonically; a request giving only
+/// minbucket gets a valid minsplit. Before: the raw string was echoed and minbucket 12 alone was
+/// refused by the minsplit >= 2 minbucket rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_ctree_options_canonical_and_minsplit_default() {
+    let (s, server) = session_with("shap_tree_rpart");
+    let base =
+        json!({"dataset": "shap_tree_sim", "features": ["x0", "x1", "x2", "x3"], "target": "y"});
+    let lower = json_block(&ok(&call(
+        &server,
+        &s,
+        "ml_ctree",
+        with(
+            &base,
+            json!({"testtype": "bonferroni", "teststat": "quadratic"}),
+        ),
+    )
+    .await));
+    let upper = json_block(&ok(&call(
+        &server,
+        &s,
+        "ml_ctree",
+        with(&base, json!({"testtype": "Bonferroni", "teststat": "Quad"})),
+    )
+    .await));
+    assert_eq!(upper["config"]["testtype"], json!("bonferroni"));
+    assert_eq!(upper["config"]["teststat"], json!("quadratic"));
+    assert_eq!(upper["tree_structure"], lower["tree_structure"]);
+    let mb = json_block(&ok(&call(
+        &server,
+        &s,
+        "ml_ctree",
+        with(&base, json!({"minbucket": 12})),
+    )
+    .await));
+    assert_eq!(
+        (
+            mb["config"]["minsplit"].clone(),
+            mb["config"]["minbucket"].clone()
+        ),
+        (json!(24), json!(12))
+    );
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_ctree",
+        with(&base, json!({"testtype": "MonteCarlo"})),
+    )
+    .await);
+    assert!(e.to_lowercase().contains("montecarlo"), "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_ml_unknown_option_is_error() {
+    let (s, server) = session_with("hclust_methods");
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_hierarchical",
+        json!({"dataset": "hclust_60", "columns": ["a", "b"], "n_clusters": 2, "linkage": "wpgm"}),
+    )
+    .await);
+    assert!(
+        e.contains("unknown linkage 'wpgm'") && e.contains("mcquitty"),
+        "{e}"
+    );
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_ppr",
+        json!({"dataset": "hclust_60", "features": ["a", "b"], "target": "c", "sm_method": "loess"}),
+    )
+    .await);
+    assert!(e.contains("'loess'") && e.contains("gcvspline"), "{e}");
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_mboost",
+        json!({"dataset": "hclust_60", "y_col": "c", "x_cols": ["a"], "base_learner": "spline"}),
+    )
+    .await);
+    assert!(e.contains("'spline'") && e.contains("tree"), "{e}");
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_ctree",
+        json!({"dataset": "hclust_60", "features": ["a"], "target": "c", "teststat": "bogus"}),
+    )
+    .await);
+    assert!(e.contains("'bogus'"), "{e}");
+    let mut ds = s.datasets.try_read().unwrap()["hclust_60"].clone();
+    let tr: Vec<i64> = (0..60).map(|i| (i % 2) as i64).collect();
+    ds.df_mut()
+        .with_column(Series::new("tr".into(), tr))
+        .unwrap();
+    s.datasets.try_write().unwrap().insert("h2".into(), ds);
+    for (field, expect) in [
+        ("test_statistic", "variance, range, iqr, mad"),
+        ("effect_method", "matching, regression, stratified"),
+    ] {
+        let mut a = json!({"dataset": "h2", "outcome": "c", "treatment": "tr", "covariates": ["a"], "n_permutations": 10});
+        a[field] = json!("bogus");
+        // before: the default ran
+        let e = err(&call(&server, &s, "heterogeneity_test", a).await);
+        assert!(e.contains("'bogus'") && e.contains(expect), "{field}: {e}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ml_option_descriptions_list_every_value() {
+    lists_every_value(
+        "ml_hierarchical",
+        "linkage",
+        p2a_core::Linkage::choices().names(),
+    );
+    lists_every_value("ml_cutree", "linkage", p2a_core::Linkage::choices().names());
+    lists_every_value(
+        "ml_ppr",
+        "sm_method",
+        p2a_core::SmoothingMethod::choices().names(),
+    );
+    lists_every_value(
+        "ml_mboost",
+        "family",
+        p2a_core::MboostFamily::choices().names(),
+    );
+    lists_every_value(
+        "ml_mboost",
+        "base_learner",
+        p2a_core::MboostBaseLearner::choices().names(),
+    );
+    lists_every_value(
+        "ml_ctree",
+        "teststat",
+        p2a_core::CtreeTestStat::choices().names(),
+    );
+    lists_every_value(
+        "ml_ctree",
+        "testtype",
+        p2a_core::CtreeTestType::choices().names(),
+    );
+    lists_every_value(
+        "heterogeneity_test",
+        "test_statistic",
+        vec!["variance", "range", "iqr", "mad"],
+    );
+    lists_every_value(
+        "heterogeneity_test",
+        "effect_method",
+        vec!["matching", "regression", "stratified"],
+    );
+}

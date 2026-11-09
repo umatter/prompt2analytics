@@ -102,7 +102,7 @@ pub struct HierarchicalRequest {
 
     /// Linkage method
     #[schemars(
-        description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'."
+        description = "Agglomeration method as stats::hclust(method =): 'ward.D2' (default; also 'ward'), 'single', 'complete', 'average', 'mcquitty', 'ward.D', 'centroid' or 'median' (centroid and median on squared Euclidean distances, as R documents). Case-insensitive; anything else is an error."
     )]
     pub linkage: Option<String>,
 }
@@ -193,7 +193,7 @@ pub struct CutreeRequest {
 
     /// Linkage method for hierarchical clustering
     #[schemars(
-        description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'."
+        description = "Agglomeration method as stats::hclust(method =): 'ward.D2' (default; also 'ward'), 'single', 'complete', 'average', 'mcquitty', 'ward.D', 'centroid' or 'median' (centroid and median on squared Euclidean distances, as R documents). Case-insensitive; anything else is an error."
     )]
     pub linkage: Option<String>,
 }
@@ -298,7 +298,7 @@ pub struct PprRequest {
 
     /// Smoothing method
     #[schemars(
-        description = "Smoothing method for ridge functions: 'supsmu' (default), 'spline', or 'gcvspline'."
+        description = "Ridge-function smoother as stats::ppr(sm.method =): 'supsmu' (default), 'spline' or 'gcvspline'. span, df, gcvpen and optlevel use R's defaults. The spline smoothers use the exact penalty and the fit at the selected spar, so they agree with R's to about 1e-2 relative, not to digits. Case-insensitive; anything else is an error."
     )]
     pub sm_method: Option<String>,
 
@@ -335,7 +335,7 @@ pub struct CtreeRequest {
 
     /// Minimum observations in a node to attempt split, default: 20
     #[schemars(
-        description = "Minimum number of observations in a node required to attempt a split. Default is 20."
+        description = "Minimum number of observations in a node required to attempt a split. Default 20, or 2 x minbucket when only a larger minbucket is given (a split needs minbucket rows on each side; partykit keeps 20 whatever minbucket is, which this fit refuses)."
     )]
     pub minsplit: Option<usize>,
 
@@ -349,13 +349,13 @@ pub struct CtreeRequest {
 
     /// Test statistic type: "quadratic" or "max"
     #[schemars(
-        description = "Type of test statistic: 'quadratic' (chi-squared) or 'max' (maximum). Default is 'quadratic'."
+        description = "Test statistic: 'quadratic' (default; chi-squared) or 'maximum' (also 'max'; regression trees only for now). Case-insensitive; anything else is an error."
     )]
     pub teststat: Option<String>,
 
     /// P-value adjustment: "bonferroni", "univariate", or "none"
     #[schemars(
-        description = "P-value adjustment method: 'bonferroni', 'univariate', or 'none'. Default is 'bonferroni'."
+        description = "P-value adjustment: 'bonferroni' (default) or 'univariate' (no multiplicity adjustment; also 'none'). partykit's 'MonteCarlo' and 'Teststatistic' are not implemented and are refused. Case-insensitive."
     )]
     pub testtype: Option<String>,
 
@@ -535,13 +535,13 @@ pub struct MboostRequest {
 
     /// Loss function family
     #[schemars(
-        description = "Loss function family: 'gaussian' (default, for regression), 'binomial' (for binary classification), or 'poisson' (for count data)."
+        description = "Loss function family: 'gaussian' (default; mboost Gaussian(), L2 loss), 'binomial' (mboost's default Binomial(): y coded -1/+1, f = half the log-odds), 'binomial_glm' (mboost Binomial(type = 'glm'): f = the log-odds, as glm) or 'poisson' (mboost Poisson()). Case-insensitive; anything else is an error."
     )]
     pub family: Option<String>,
 
     /// Base learner type
     #[schemars(
-        description = "Base learner type: 'linear' (default, L2-boosting) or 'tree' (regression stumps)."
+        description = "Base learner: 'linear' (default; bols) or 'tree' (regression trees of depth tree_depth). Case-insensitive; anything else is an error."
     )]
     pub base_learner: Option<String>,
 
