@@ -110,8 +110,15 @@ pub struct DiagnosticsResult {
     pub durbin_watson: Option<DurbinWatsonResult>,
     /// Variance Inflation Factors for multicollinearity
     pub vif: Option<Vec<VifResult>>,
-    /// Condition number of the design matrix
+    /// Condition number of the design matrix (intercept included), as R's
+    /// `kappa(model.matrix(fit), exact = TRUE)`
     pub condition_number: Option<f64>,
+    /// Condition number of the design matrix with every column (the intercept included)
+    /// scaled to unit length, Belsley, Kuh & Welsch (1980). Unlike the raw number it does not
+    /// depend on the units of the regressors; the multicollinearity warning and the
+    /// interpretation apply Belsley's threshold of 30 to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaled_condition_number: Option<f64>,
     /// Number of observations
     pub n_obs: usize,
     /// Number of parameters
@@ -464,11 +471,19 @@ impl fmt::Display for DiagnosticsResult {
         if let Some(cn) = self.condition_number {
             writeln!(f, "Condition Number (Multicollinearity)")?;
             writeln!(f, "  Value: {:.2}", cn)?;
-            let interpretation = if cn < 10.0 {
+            // The interpretation reads the unit-free scaled number when there is one.
+            let judged = match self.scaled_condition_number {
+                Some(scaled) => {
+                    writeln!(f, "  Scaled (unit-length columns): {:.2}", scaled)?;
+                    scaled
+                }
+                None => cn,
+            };
+            let interpretation = if judged < 10.0 {
                 "No multicollinearity concern"
-            } else if cn < 30.0 {
+            } else if judged < 30.0 {
                 "Moderate multicollinearity"
-            } else if cn < 100.0 {
+            } else if judged < 100.0 {
                 "Strong multicollinearity - caution advised"
             } else {
                 "Severe multicollinearity - results may be unreliable"
@@ -548,22 +563,21 @@ pub fn run_diagnostics(
     // Durbin-Watson test for autocorrelation
     let durbin_watson = Some(compute_durbin_watson(residuals));
 
-    // Condition number
-    let cond_num = match condition_number(&x.view()) {
-        Ok(cn) => {
-            if cn > 30.0 {
-                warnings.push(
-                    EstimationWarning::HighConditionNumber {
-                        value: cn,
-                        threshold: 30.0,
-                    }
-                    .message(),
-                );
+    // Condition number: the raw one is R's kappa; Belsley's threshold of 30 applies to the
+    // column-scaled one, which a change of units in a regressor cannot move.
+    let cond_num = condition_number(&x.view()).ok();
+    let scaled_cond_num = scaled_condition_number(&x.view());
+    if let Some(scaled) = scaled_cond_num
+        && scaled > SCALED_CONDITION_THRESHOLD
+    {
+        warnings.push(
+            EstimationWarning::HighConditionNumber {
+                value: scaled,
+                threshold: SCALED_CONDITION_THRESHOLD,
             }
-            Some(cn)
-        }
-        Err(_) => None,
-    };
+            .message(),
+        );
+    }
 
     // VIF for each variable
     let vif = compute_vif(&x.view(), &design.column_names, &mut warnings)?;
@@ -574,10 +588,35 @@ pub fn run_diagnostics(
         durbin_watson,
         vif,
         condition_number: cond_num,
+        scaled_condition_number: scaled_cond_num,
         n_obs: n,
         n_params: k,
         warnings,
     })
+}
+
+/// Belsley, Kuh & Welsch's threshold for the column-scaled condition number: above 30,
+/// moderate to strong dependencies among the columns.
+const SCALED_CONDITION_THRESHOLD: f64 = 30.0;
+
+/// Condition number of `x` after scaling every column to unit Euclidean length, without
+/// centring (Belsley, Kuh & Welsch 1980, ch. 3; the intercept column is kept and scaled
+/// like the others). `None` when the SVD fails; infinite when a column is all zeros or the
+/// columns are linearly dependent.
+fn scaled_condition_number(x: &ndarray::ArrayView2<f64>) -> Option<f64> {
+    let mut scaled = x.to_owned();
+    for mut col in scaled.columns_mut() {
+        let norm = col.dot(&col).sqrt();
+        if !(norm.is_finite() && norm > 0.0) {
+            return if norm == 0.0 {
+                Some(f64::INFINITY)
+            } else {
+                None
+            };
+        }
+        col /= norm;
+    }
+    condition_number(&scaled.view()).ok()
 }
 
 /// Compute Jarque-Bera test for normality of residuals.
@@ -2439,6 +2478,88 @@ mod tests {
         // implied), durbin_watson_p_greater (p2a computes no DW p-value),
         // breusch_pagan_nonstudentized (not offered), bgtest*/reset*/harvey_collier*/wald*
         // (T1-WP04 pins them).
+    }
+
+    /// Regressors in large units with an offset: the raw condition number is in the
+    /// thousands only because of the scale, the column-scaled one is small, and no warning
+    /// is printed (Grunfeld: raw 2457.59, scaled 2.872962 from
+    /// `kappa(sweep(X, 2, sqrt(colSums(X^2)), "/"), exact = TRUE)`).
+    #[test]
+    fn test_scaled_condition_number_ignores_units() {
+        let path = p2a_validation::repo_path("validation/datasets/grunfeld.csv");
+        let ds = crate::data::DataLoader::load(&path).unwrap();
+        let d = run_diagnostics(&ds, "inv", &["value", "capital"]).unwrap();
+        assert!(d.condition_number.unwrap() > 2000.0);
+        let scaled = d.scaled_condition_number.unwrap();
+        assert!((scaled - 2.872962).abs() < 1e-5, "{scaled}");
+        assert!(
+            !d.warnings.iter().any(|w| w.contains("condition number")),
+            "{:?}",
+            d.warnings
+        );
+        let text = d.to_string();
+        assert!(
+            text.contains("Scaled (unit-length columns): 2.87"),
+            "{text}"
+        );
+        assert!(text.contains("No multicollinearity concern"), "{text}");
+
+        // Pure scale: x in units of 1e4 around 1e5, with noise; uncorrelated with z.
+        let n = 60;
+        let x: Vec<f64> = (0..n)
+            .map(|i| 1e5 + 1e4 * (((i * 37) % 23) as f64 / 7.0 + 0.3 * ((i as f64) * 1.7).sin()))
+            .collect();
+        let z: Vec<f64> = (0..n)
+            .map(|i| ((i * 13) % 11) as f64 * 0.01 + 0.002 * (i as f64).cos())
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1e-4 * x[i] + 10.0 * z[i] + ((i * 7) % 5) as f64 * 0.3)
+            .collect();
+        let ds = Dataset::new(df! {"y" => y, "x" => x, "z" => z}.unwrap());
+        let d = run_diagnostics(&ds, "y", &["x", "z"]).unwrap();
+        assert!(
+            d.condition_number.unwrap() > 1e5,
+            "{:?}",
+            d.condition_number
+        );
+        assert!(
+            d.scaled_condition_number.unwrap() < 30.0,
+            "{:?}",
+            d.scaled_condition_number
+        );
+        assert!(
+            !d.warnings.iter().any(|w| w.contains("condition number")),
+            "{:?}",
+            d.warnings
+        );
+    }
+
+    /// Near-collinear regressors (x2 = x1 + small noise): the scaled condition number is
+    /// above 30 and the warning reports it.
+    #[test]
+    fn test_scaled_condition_number_warns_on_collinearity() {
+        let n = 80;
+        let x1: Vec<f64> = (0..n)
+            .map(|i| ((i * 17) % 29) as f64 + 0.5 * (i as f64).sin())
+            .collect();
+        let x2: Vec<f64> = (0..n)
+            .map(|i| x1[i] + 0.01 * (((i * 31) % 13) as f64 - 6.0))
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 2.0 + x1[i] - 0.5 * x2[i] + ((i * 7) % 5) as f64 * 0.4)
+            .collect();
+        let ds = Dataset::new(df! {"y" => y, "x1" => x1, "x2" => x2}.unwrap());
+        let d = run_diagnostics(&ds, "y", &["x1", "x2"]).unwrap();
+        let scaled = d.scaled_condition_number.unwrap();
+        assert!(scaled > 30.0, "{scaled}");
+        assert!(
+            d.warnings
+                .iter()
+                .any(|w| w.contains("column-scaled design") && w.contains("3.00e1")),
+            "{:?}",
+            d.warnings
+        );
+        assert!(d.to_string().contains("multicollinearity"));
     }
 
     #[test]

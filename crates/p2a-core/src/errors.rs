@@ -304,7 +304,7 @@ pub enum EconError {
 /// Warnings that don't prevent estimation but should be noted.
 #[derive(Debug, Clone, Serialize)]
 pub enum EstimationWarning {
-    /// Condition number is elevated but not critical
+    /// Condition number of the column-scaled design is elevated but not critical
     HighConditionNumber { value: f64, threshold: f64 },
 
     /// Variance inflation factors indicate potential multicollinearity
@@ -342,7 +342,7 @@ impl EstimationWarning {
         match self {
             Self::HighConditionNumber { value, threshold } => {
                 format!(
-                    "High condition number ({:.2e} > {:.2e}). Results may be sensitive to small data changes.",
+                    "High condition number of the column-scaled design ({:.2e} > {:.2e}). Results may be sensitive to small data changes.",
                     value, threshold
                 )
             }

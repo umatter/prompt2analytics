@@ -19,4 +19,3 @@ Variance Inflation Factors:
   capital: 1.3138
 
 Condition Number: 2457.5938
-Warning: High condition number (2.46e3 > 3.00e1). Results may be sensitive to small data changes.

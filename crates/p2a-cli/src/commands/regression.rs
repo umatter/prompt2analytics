@@ -965,6 +965,7 @@ fn execute_diagnostics(
                                 })).collect::<Vec<_>>()
                             }),
                             "condition_number": diag.condition_number,
+                            "scaled_condition_number": diag.scaled_condition_number,
                         });
                         let mut json = json;
                         add_notes(&mut json, None, &diag.warnings);
