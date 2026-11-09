@@ -43,7 +43,7 @@
 //!   means of Kalman filtering. *Applied Statistics*, 29(3), 311-322.
 //!
 //! - Hyndman, R.J., & Athanasopoulos, G. (2021). *Forecasting: Principles and
-//!   Practice* (3rd ed.). OTexts. https://otexts.com/fpp3/
+//!   Practice* (3rd ed.). OTexts. <https://otexts.com/fpp3/>
 //!
 //! - Brockwell, P.J., & Davis, R.A. (1991). *Time Series: Theory and Methods*
 //!   (2nd ed.). Springer. ISBN: 978-0387974293.

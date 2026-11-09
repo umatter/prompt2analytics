@@ -37,11 +37,11 @@
 //!
 //! - Friedman, J., Hastie, T., & Tibshirani, R. (2010). Regularization paths for
 //!   generalized linear models via coordinate descent. *Journal of Statistical Software*,
-//!   33(1), 1-22. https://doi.org/10.18637/jss.v033.i01
+//!   33(1), 1-22. <https://doi.org/10.18637/jss.v033.i01>
 //!
 //! - Zou, H., & Hastie, T. (2005). Regularization and variable selection via the elastic
 //!   net. *Journal of the Royal Statistical Society: Series B*, 67(2), 301-320.
-//!   https://doi.org/10.1111/j.1467-9868.2005.00503.x
+//!   <https://doi.org/10.1111/j.1467-9868.2005.00503.x>
 //!
 //! R equivalent: `glmnet::glmnet()`, `glmnet::cv.glmnet()`
 

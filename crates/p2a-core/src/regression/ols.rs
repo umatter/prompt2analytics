@@ -34,18 +34,18 @@
 //!
 //! - White, H. (1980). A heteroskedasticity-consistent covariance matrix estimator and
 //!   a direct test for heteroskedasticity. *Econometrica*, 48(4), 817-838.
-//!   https://doi.org/10.2307/1912934
+//!   <https://doi.org/10.2307/1912934>
 //!
 //! - MacKinnon, J.G., & White, H. (1985). Some heteroskedasticity-consistent covariance
 //!   matrix estimators with improved finite sample properties. *Journal of Econometrics*,
-//!   29(3), 305-325. https://doi.org/10.1016/0304-4076(85)90158-7
+//!   29(3), 305-325. <https://doi.org/10.1016/0304-4076(85)90158-7>
 //!
 //! - Liang, K.Y., & Zeger, S.L. (1986). Longitudinal data analysis using generalized
-//!   linear models. *Biometrika*, 73(1), 13-22. https://doi.org/10.1093/biomet/73.1.13
+//!   linear models. *Biometrika*, 73(1), 13-22. <https://doi.org/10.1093/biomet/73.1.13>
 //!
 //! - Cameron, A.C., & Miller, D.L. (2015). A practitioner's guide to cluster-robust
 //!   inference. *Journal of Human Resources*, 50(2), 317-372.
-//!   https://doi.org/10.3368/jhr.50.2.317
+//!   <https://doi.org/10.3368/jhr.50.2.317>
 //!
 //! - Wooldridge, J.M. (2010). *Econometric Analysis of Cross Section and Panel Data*
 //!   (2nd ed.). MIT Press. ISBN: 978-0262232586.
@@ -1937,11 +1937,11 @@ const HAC_LAG_SUMS: usize = 65_536;
 ///
 /// - Newey, W.K., & West, K.D. (1987). A Simple, Positive Semi-Definite, Heteroskedasticity
 ///   and Autocorrelation Consistent Covariance Matrix. *Econometrica*, 55(3), 703-708.
-///   https://doi.org/10.2307/1913610
+///   <https://doi.org/10.2307/1913610>
 ///
 /// - Andrews, D.W.K. (1991). Heteroskedasticity and Autocorrelation Consistent Covariance
 ///   Matrix Estimation. *Econometrica*, 59(3), 817-858.
-///   https://doi.org/10.2307/2938229
+///   <https://doi.org/10.2307/2938229>
 ///
 /// R equivalent: `sandwich::vcovHAC()`, `sandwich::NeweyWest()`
 ///

@@ -44,7 +44,7 @@ EXAMPLES:
     /// List all loaded datasets
     List,
 
-    /// Show dataset summary and statistics
+    /// Show the row and column counts, column names and types
     Describe {
         /// Dataset name
         dataset: String,

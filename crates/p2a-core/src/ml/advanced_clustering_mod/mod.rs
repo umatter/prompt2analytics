@@ -8,7 +8,7 @@
 //! | [`kmedoids`](mod@kmedoids) | PAM ([`kmedoids()`]), CLARA ([`clara`]) |
 //! | [`spectral`] | Spectral clustering ([`spectral_clustering`]) |
 //! | [`affinity`] | Affinity propagation ([`affinity_propagation`]) |
-//! | [`optics`](mod@optics) | OPTICS ([`optics()`]) |
+//! | [`optics`](mod@optics) | OPTICS ([`optics()`]), as dbscan::optics, with extractDBSCAN and extractXi |
 //! | [`hdbscan`](mod@hdbscan) | HDBSCAN ([`hdbscan()`]) |
 //! | [`gmm`] | Gaussian mixture models ([`gaussian_mixture`]) |
 //! | [`fuzzy`] | Fuzzy c-means ([`fuzzy_cmeans`]), FANNY ([`fanny`]) |
@@ -21,11 +21,9 @@
 //!
 //! # Large-N Performance
 //!
-//! HDBSCAN and OPTICS automatically select the optimal algorithm based on dataset size:
-//! - n < 500: Brute-force (no overhead)
-//! - n < 10,000 && d <= 15: KD-Tree + Prim's MST (good balance)
-//! - n >= 10,000 && d <= 15: Dual-Tree Boruvka (best scaling)
-//! - d > 15: Parallel brute-force (KD-tree degrades in high dimensions)
+//! HDBSCAN builds its spanning tree with Prim's algorithm on the dense mutual-reachability graph
+//! for every n (O(n^2) time, O(n) memory), as R's dbscan does, so ties break as in R; a k-d tree
+//! (n >= 500, d <= 15) speeds up the core distances and OPTICS's eps-neighbourhood queries.
 //!
 //! # Module paths
 //!

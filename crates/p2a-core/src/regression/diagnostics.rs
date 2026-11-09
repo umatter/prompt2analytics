@@ -53,19 +53,19 @@
 //!
 //! - Jarque, C.M., & Bera, A.K. (1980). Efficient tests for normality,
 //!   homoscedasticity and serial independence of regression residuals.
-//!   *Economics Letters*, 6(3), 255-259. https://doi.org/10.1016/0165-1765(80)90024-5
+//!   *Economics Letters*, 6(3), 255-259. <https://doi.org/10.1016/0165-1765(80)90024-5>
 //!
 //! - Breusch, T.S., & Pagan, A.R. (1979). A simple test for heteroscedasticity
 //!   and random coefficient variation. *Econometrica*, 47(5), 1287-1294.
-//!   https://doi.org/10.2307/1911963
+//!   <https://doi.org/10.2307/1911963>
 //!
 //! - Durbin, J., & Watson, G.S. (1950). Testing for serial correlation in least
 //!   squares regression: I. *Biometrika*, 37(3/4), 409-428.
-//!   https://doi.org/10.2307/2332391
+//!   <https://doi.org/10.2307/2332391>
 //!
 //! - Durbin, J., & Watson, G.S. (1951). Testing for serial correlation in least
 //!   squares regression. II. *Biometrika*, 38(1/2), 159-178.
-//!   https://doi.org/10.2307/2332325
+//!   <https://doi.org/10.2307/2332325>
 //!
 //! - Belsley, D.A., Kuh, E., & Welsch, R.E. (1980). *Regression Diagnostics:
 //!   Identifying Influential Data and Sources of Collinearity*. Wiley.
@@ -73,14 +73,14 @@
 //!
 //! - Marquardt, D.W. (1970). Generalized inverses, ridge regression, biased linear
 //!   estimation, and nonlinear estimation. *Technometrics*, 12(3), 591-612.
-//!   https://doi.org/10.1080/00401706.1970.10488699. Original VIF proposal.
+//!   <https://doi.org/10.1080/00401706.1970.10488699>. Original VIF proposal.
 //!
 //! - Breusch, T.S. (1979). Testing for autocorrelation in dynamic linear models.
 //!   *Australian Economic Papers*, 17, 334-355.
 //!
 //! - Godfrey, L.G. (1978). Testing against general autoregressive and moving average
 //!   error models when the regressors include lagged dependent variables.
-//!   *Econometrica*, 46, 1293-1302. https://doi.org/10.2307/1913829
+//!   *Econometrica*, 46, 1293-1302. <https://doi.org/10.2307/1913829>
 //!
 //! R equivalent: `lmtest::bptest()`, `lmtest::bgtest()`, `car::durbinWatsonTest()`, `car::vif()`
 

@@ -53,7 +53,7 @@
 //!   Statistical Association, 83(403), 596-610.
 //! - Cleveland, W. S., Grosse, E., & Shyu, W. M. (1992). "Local regression models."
 //!   Chapter 8 of Statistical Models in S, eds J.M. Chambers and T.J. Hastie.
-//! - R implementation: `stats::loess()` - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loess.html
+//! - R implementation: `stats::loess()` - <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loess.html>
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

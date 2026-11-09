@@ -977,7 +977,7 @@ impl AnalyticsServer {
 
     /// Set the global random seed for ML reproducibility.
     #[tool(
-        description = "Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value."
+        description = "Set the session random seed. Every tool that draws random numbers and was given no seed of its own uses it: ml_kmeans, ml_random_forest, ml_tsne, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_ppr, ml_shap_values, heterogeneity_test, the spatial probit tools, regression_cv_glmnet, regression_bootstrap_cov, mixed_logit and the resampling causal tools (propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation). Without a session seed those tools use a fixed default seed, so repeated calls agree. Clear by calling with no seed value."
     )]
     pub async fn set_seed(
         &self,
@@ -989,19 +989,17 @@ impl AnalyticsServer {
         match request.seed {
             Some(seed) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Global random seed set to: {}\n\
-                 This seed will be used by ML tools (kmeans, random_forest, tsne) unless overridden per-tool.",
+                 Tools that draw random numbers use it unless a per-tool seed is given.",
                 seed
             ))])),
             None => Ok(CallToolResult::success(vec![Content::text(
-                "Global random seed cleared. ML tools will use random initialization unless a per-tool seed is specified.".to_string()
+                "Global random seed cleared. Tools that draw random numbers use their fixed default seed unless a per-tool seed is given.".to_string()
             )])),
         }
     }
 
     /// Get the current global random seed.
-    #[tool(
-        description = "Get the current global random seed setting and list which ML tools support seeded reproducibility."
-    )]
+    #[tool(description = "Get the current session random seed and list the tools that honour it.")]
     pub async fn get_seed(
         &self,
         Parameters(_request): Parameters<GetSeedRequest>,
@@ -1016,11 +1014,8 @@ impl AnalyticsServer {
         let output = format!(
             "Seed Management\n{}\n\
              {}\n\n\
-             ML tools supporting reproducibility:\n\
-             - ml_kmeans: Uses seed for centroid initialization\n\
-             - ml_random_forest: Uses seed for bootstrap sampling and feature selection\n\
-             - ml_tsne: Uses seed for initial embedding\n\n\
-             Per-tool seeds override the global seed.",
+             Tools that honour it: ml_kmeans, ml_random_forest, ml_tsne, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_ppr, ml_shap_values, heterogeneity_test, the spatial probit tools, regression_cv_glmnet, regression_bootstrap_cov, mixed_logit and the resampling causal tools (propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation).\n\
+             Without a session seed they use a fixed default seed; per-tool seeds override both.",
             "=".repeat(40),
             seed_status
         );

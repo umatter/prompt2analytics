@@ -170,6 +170,9 @@ pub const INTERNAL_TOOLS: &[&str] = &[
 
 /// Check a tool name the model emitted before it is executed.
 ///
+/// The model is offered the curated subset only; it does not see the search
+/// meta-tools.
+///
 /// Names in [`INTERNAL_TOOLS`] are refused even when registered (they are
 /// never offered to the model), and so are names no handler registers
 /// (`is_registered`). Registered analytical tools outside the advertised

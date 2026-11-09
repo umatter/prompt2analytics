@@ -32,13 +32,13 @@
 //!
 //! - Wager, S., & Athey, S. (2018). Estimation and Inference of Heterogeneous
 //!   Treatment Effects using Random Forests. *Journal of the American Statistical
-//!   Association*, 113(523), 1228-1242. https://doi.org/10.1080/01621459.2017.1319839
+//!   Association*, 113(523), 1228-1242. <https://doi.org/10.1080/01621459.2017.1319839>
 //!
 //! - Athey, S., Tibshirani, J., & Wager, S. (2019). Generalized random forests.
-//!   *Annals of Statistics*, 47(2), 1148-1178. https://doi.org/10.1214/18-AOS1709
+//!   *Annals of Statistics*, 47(2), 1148-1178. <https://doi.org/10.1214/18-AOS1709>
 //!
 //! - Nie, X., & Wager, S. (2021). Quasi-oracle estimation of heterogeneous treatment effects.
-//!   *Biometrika*, 108(2), 299-319. https://doi.org/10.1093/biomet/asaa076
+//!   *Biometrika*, 108(2), 299-319. <https://doi.org/10.1093/biomet/asaa076>
 //!
 //! - Sexton, J., & Laake, P. (2009). Standard errors for bagged and random forest estimators.
 //!   *Computational Statistics & Data Analysis*, 53(3), 801-811.
@@ -47,7 +47,7 @@
 //!   overlap in estimation of average treatment effects. *Biometrika*, 96(1), 187-199.
 //!
 //! - R package `grf`: Tibshirani, J., Athey, S., & Wager, S. (2024).
-//!   *grf: Generalized Random Forests*. https://grf-labs.github.io/grf/
+//!   *grf: Generalized Random Forests*. <https://grf-labs.github.io/grf/>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
