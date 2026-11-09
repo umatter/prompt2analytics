@@ -109,7 +109,7 @@ pub enum CausalCommands {
     #[command(after_help = "\
 EXAMPLES:
     # IV regression with education instrumented by distance to college
-    p2a causal iv mydata -y wage --exog experience --endog education --instruments distance_college
+    p2a --session s.json causal iv mydata -y wage --exog experience --endog education --instruments distance_college
 ")]
     Iv {
         /// Dataset name
@@ -136,10 +136,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Classic 2x2 DiD
-    p2a causal did mydata -y outcome --treat treatment --post post_period
+    p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period
 
     # DiD with controls
-    p2a causal did mydata -y outcome --treat treatment --post post_period -x age income
+    p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period -x age income
 ")]
     Did {
         /// Dataset name
@@ -166,11 +166,11 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Synthetic control for California tobacco program
-    p2a causal synth mydata -y cigsale --unit state --time year --treated California \\
+    p2a --session s.json causal synth mydata -y cigsale --unit state --time year --treated California \\
         --treatment-time 1989 -p income beer retprice
 
     # With placebo tests
-    p2a causal synth mydata -y gdp --unit country --time year --treated Spain \\
+    p2a --session s.json causal synth mydata -y gdp --unit country --time year --treated Spain \\
         --treatment-time 1986 -p population unemployment --placebos
 ")]
     Synth {
@@ -216,10 +216,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # IPW for ATE with default trimming
-    p2a causal ipw mydata -y outcome -t treatment -x age income education
+    p2a --session s.json causal ipw mydata -y outcome -t treatment -x age income education
 
     # IPW for ATT with custom trimming
-    p2a causal ipw mydata -y outcome -t treatment -x age income --estimand att --trim 0.1
+    p2a --session s.json causal ipw mydata -y outcome -t treatment -x age income --estimand att --trim 0.1
 ")]
     Ipw {
         /// Dataset name
@@ -256,10 +256,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # AIPW (doubly robust)
-    p2a causal doubly-robust mydata -y outcome -t treatment -x age income --method aipw
+    p2a --session s.json causal doubly-robust mydata -y outcome -t treatment -x age income --method aipw
 
     # Regression-only method for ATT
-    p2a causal doubly-robust mydata -y outcome -t treatment -x age income --method regression --estimand att
+    p2a --session s.json causal doubly-robust mydata -y outcome -t treatment -x age income --method regression --estimand att
 ")]
     DoublyRobust {
         /// Dataset name
@@ -300,7 +300,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Mediation analysis (treatment -> mediator -> outcome)
-    p2a causal mediation mydata -y outcome -t treatment -m mediator -x age income
+    p2a --session s.json causal mediation mydata -y outcome -t treatment -m mediator -x age income
 ")]
     Mediation {
         /// Dataset name
@@ -331,13 +331,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Sharp RD with MSE-optimal bandwidth
-    p2a causal rd mydata -y test_score -r running_var -c 50
+    p2a --session s.json causal rd mydata -y test_score -r running_var -c 50
 
     # With local quadratic polynomial
-    p2a causal rd mydata -y test_score -r running_var -c 50 -p 2
+    p2a --session s.json causal rd mydata -y test_score -r running_var -c 50 -p 2
 
     # Given bandwidths (h for the estimate, b for the bias correction) and HC1 variance
-    p2a causal rd mydata -y score -r x -c 0 --h 0.3 --b 0.3 --vce hc1
+    p2a --session s.json causal rd mydata -y score -r x -c 0 --h 0.3 --b 0.3 --vce hc1
 ")]
     Rd {
         /// Dataset name
@@ -387,13 +387,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Fuzzy RD (imperfect compliance at cutoff)
-    p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60
+    p2a --session s.json causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60
 
     # One given bandwidth for both stages, bias bandwidth 0.5, HC1 variance
-    p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
+    p2a --session s.json causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
 
     # CER-optimal bandwidths, separate left and right
-    p2a causal fuzzy-rd mydata -y y -r x -t d -c 0 --bwselect certwo
+    p2a --session s.json causal fuzzy-rd mydata -y y -r x -t d -c 0 --bwselect certwo
 ")]
     FuzzyRd {
         /// Dataset name
@@ -447,11 +447,11 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Staggered DiD with never-treated comparison
-    p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
+    p2a --session s.json causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state
 
     # Doubly robust (DRDID) with covariates
-    p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
+    p2a --session s.json causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state -x population gdp --method dr
 ")]
     StaggeredDid {
@@ -508,10 +508,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # TMLE for ATE
-    p2a causal tmle mydata -y outcome -t treatment -x age income education
+    p2a --session s.json causal tmle mydata -y outcome -t treatment -x age income education
 
     # With custom propensity score truncation
-    p2a causal tmle mydata -y outcome -t treatment -x age income --truncate-lower 0.05 --truncate-upper 0.95
+    p2a --session s.json causal tmle mydata -y outcome -t treatment -x age income --truncate-lower 0.05 --truncate-upper 0.95
 ")]
     Tmle {
         /// Dataset name
@@ -548,10 +548,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Interactive FE with auto-selected factors
-    p2a causal gsynth mydata -y gdp -d treatment --unit country --time year
+    p2a --session s.json causal gsynth mydata -y gdp -d treatment --unit country --time year
 
     # Matrix completion estimator with bootstrap SEs
-    p2a causal gsynth mydata -y gdp -d treatment --unit country --time year \\
+    p2a --session s.json causal gsynth mydata -y gdp -d treatment --unit country --time year \\
         --estimator mc --bootstrap-se
 ")]
     Gsynth {
@@ -605,13 +605,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Nearest neighbor 1:1 matching with caliper
-    p2a causal matching mydata -t treatment -x age income education --caliper 0.25
+    p2a --session s.json causal matching mydata -t treatment -x age income education --caliper 0.25
 
     # Coarsened exact matching
-    p2a causal matching mydata -t treatment -x age income education --method cem
+    p2a --session s.json causal matching mydata -t treatment -x age income education --method cem
 
     # Full matching
-    p2a causal matching mydata -t treatment -x age income --method full
+    p2a --session s.json causal matching mydata -t treatment -x age income --method full
 ")]
     Matching {
         /// Dataset name
@@ -661,10 +661,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # G-computation for ATE with bootstrap SEs
-    p2a causal stdreg mydata -y outcome -t treatment -x age income
+    p2a --session s.json causal stdreg mydata -y outcome -t treatment -x age income
 
     # Logistic outcome model for ATT
-    p2a causal stdreg mydata -y binary_outcome -t treatment -x age income \\
+    p2a --session s.json causal stdreg mydata -y binary_outcome -t treatment -x age income \\
         --model logistic --estimand att
 ")]
     Stdreg {

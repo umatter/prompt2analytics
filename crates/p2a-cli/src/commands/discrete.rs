@@ -29,7 +29,7 @@ pub enum DiscreteCommands {
     #[command(after_help = "\
 EXAMPLES:
     # Binary logit
-    p2a discrete logit mydata -y employed -x age education income
+    p2a --session s.json discrete logit mydata -y employed -x age education income
 ")]
     Logit {
         /// Dataset name
@@ -48,7 +48,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Binary probit
-    p2a discrete probit mydata -y employed -x age education income
+    p2a --session s.json discrete probit mydata -y employed -x age education income
 ")]
     Probit {
         /// Dataset name
@@ -67,10 +67,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Ordered logit for satisfaction ratings (1-5)
-    p2a discrete o-logit mydata -y satisfaction -x age income service_quality
+    p2a --session s.json discrete o-logit mydata -y satisfaction -x age income service_quality
 
     # A text outcome needs its order, lowest category first
-    p2a discrete o-logit mydata -y rating -x age income --levels low,mid,high
+    p2a --session s.json discrete o-logit mydata -y rating -x age income --levels low,mid,high
 ")]
     OLogit {
         /// Dataset name
@@ -93,7 +93,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Ordered probit; a text outcome needs its order, lowest category first
-    p2a discrete o-probit mydata -y rating -x age income --levels low,mid,high
+    p2a --session s.json discrete o-probit mydata -y rating -x age income --levels low,mid,high
 ")]
     OProbit {
         /// Dataset name
@@ -116,7 +116,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Multinomial choice model
-    p2a discrete mlogit mydata -y transport_mode -x income distance age
+    p2a --session s.json discrete mlogit mydata -y transport_mode -x income distance age
 ")]
     Mlogit {
         /// Dataset name
@@ -139,7 +139,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Count data with overdispersion
-    p2a discrete negbin mydata -y doctor_visits -x age income chronic_conditions
+    p2a --session s.json discrete negbin mydata -y doctor_visits -x age income chronic_conditions
 ")]
     Negbin {
         /// Dataset name
@@ -172,10 +172,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # ZIP with same covariates for both parts
-    p2a discrete zip mydata -y patents -x rd_spending firm_size
+    p2a --session s.json discrete zip mydata -y patents -x rd_spending firm_size
 
     # ZIP with different covariates for zero-inflation
-    p2a discrete zip mydata -y patents -x rd_spending firm_size -z age industry
+    p2a --session s.json discrete zip mydata -y patents -x rd_spending firm_size -z age industry
 ")]
     Zip {
         /// Dataset name
@@ -238,7 +238,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Discrete choice model for mode choice
-    p2a discrete clogit mydata --choice-id trip_id --alt-id mode -y chosen -x travel_time cost
+    p2a --session s.json discrete clogit mydata --choice-id trip_id --alt-id mode -y chosen -x travel_time cost
 ")]
     Clogit {
         /// Dataset name

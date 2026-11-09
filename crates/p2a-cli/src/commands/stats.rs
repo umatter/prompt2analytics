@@ -569,10 +569,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Find required sample size for 80% power
-    p2a stats power-t --delta 0.5 --power 0.8
+    p2a --session s.json stats power-t --delta 0.5 --power 0.8
 
     # Find achievable power with n=50
-    p2a stats power-t --n 50 --delta 0.5
+    p2a --session s.json stats power-t --n 50 --delta 0.5
 ")]
     PowerT {
         /// Sample size per group (leave unset to solve for it)

@@ -27,10 +27,10 @@ pub enum PanelCommands {
     #[command(after_help = "\
 EXAMPLES:
     # Entity fixed effects
-    p2a panel fe mydata -y revenue -x employees capital --entity firm_id
+    p2a --session s.json panel fe mydata -y revenue -x employees capital --entity firm_id
 
     # Entity-clustered (Arellano) standard errors
-    p2a panel fe mydata -y revenue -x employees capital --entity firm_id --vcov cluster
+    p2a --session s.json panel fe mydata -y revenue -x employees capital --entity firm_id --vcov cluster
 ")]
     Fe {
         /// Dataset name
@@ -57,10 +57,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Random effects with GLS
-    p2a panel re mydata -y revenue -x employees capital --entity firm_id
+    p2a --session s.json panel re mydata -y revenue -x employees capital --entity firm_id
 
     # Entity-clustered (Arellano) standard errors
-    p2a panel re mydata -y revenue -x employees capital --entity firm_id --vcov cluster
+    p2a --session s.json panel re mydata -y revenue -x employees capital --entity firm_id --vcov cluster
 ")]
     Re {
         /// Dataset name
@@ -87,7 +87,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Test FE vs RE (H0: RE consistent)
-    p2a panel hausman mydata -y revenue -x employees capital --entity firm_id
+    p2a --session s.json panel hausman mydata -y revenue -x employees capital --entity firm_id
 ")]
     Hausman {
         /// Dataset name
@@ -110,10 +110,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Two-way fixed effects (firm + year)
-    p2a panel hdfe mydata -y revenue -x employees --fe firm_id year
+    p2a --session s.json panel hdfe mydata -y revenue -x employees --fe firm_id year
 
     # Three-way fixed effects
-    p2a panel hdfe mydata -y wage -x experience --fe worker_id firm_id year
+    p2a --session s.json panel hdfe mydata -y wage -x experience --fe worker_id firm_id year
 ")]
     Hdfe {
         /// Dataset name
@@ -136,10 +136,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Logit with fixed effects
-    p2a panel feglm mydata -y employed -x age education --fe industry year --family logit
+    p2a --session s.json panel feglm mydata -y employed -x age education --fe industry year --family logit
 
     # Poisson FE for count data
-    p2a panel feglm mydata -y patents -x rd_spending --fe firm_id --family poisson
+    p2a --session s.json panel feglm mydata -y patents -x rd_spending --fe firm_id --family poisson
 ")]
     Feglm {
         /// Dataset name
@@ -166,13 +166,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Dynamic panel with lagged dependent variable (two-step, Windmeijer SEs)
-    p2a panel gmm mydata -y investment -x sales cash_flow --entity firm_id --time year
+    p2a --session s.json panel gmm mydata -y investment -x sales cash_flow --entity firm_id --time year
 
     # One-step with Arellano-Bond (1991) classical SEs
-    p2a panel gmm mydata -y investment -x sales --entity firm_id --time year --step onestep --vcov classical
+    p2a --session s.json panel gmm mydata -y investment -x sales --entity firm_id --time year --step onestep --vcov classical
 
     # Two lags of y, instrument lags 2 to 4, collapsed instruments
-    p2a panel gmm mydata -y investment -x sales --entity firm_id --time year --lags 2 --max-lag 4 --collapse
+    p2a --session s.json panel gmm mydata -y investment -x sales --entity firm_id --time year --lags 2 --max-lag 4 --collapse
 ")]
     Gmm {
         /// Dataset name
@@ -223,10 +223,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Variable coefficients (within model)
-    p2a panel pvcm mydata -y gdp -x investment exports --entity country --model within
+    p2a --session s.json panel pvcm mydata -y gdp -x investment exports --entity country --model within
 
     # Random coefficient model
-    p2a panel pvcm mydata -y gdp -x investment exports --entity country --model random
+    p2a --session s.json panel pvcm mydata -y gdp -x investment exports --entity country --model random
 ")]
     Pvcm {
         /// Dataset name
@@ -253,7 +253,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # PMG for heterogeneous panels
-    p2a panel pmg mydata -y consumption -x income wealth --entity country
+    p2a --session s.json panel pmg mydata -y consumption -x income wealth --entity country
 ")]
     Pmg {
         /// Dataset name
@@ -276,10 +276,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # FGLS with FE
-    p2a panel gls mydata -y revenue -x employees --entity firm_id --time year --model fe
+    p2a --session s.json panel gls mydata -y revenue -x employees --entity firm_id --time year --model fe
 
     # First-difference estimation
-    p2a panel gls mydata -y revenue -x employees --entity firm_id --time year --model fd
+    p2a --session s.json panel gls mydata -y revenue -x employees --entity firm_id --time year --model fd
 ")]
     Gls {
         /// Dataset name
@@ -310,10 +310,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Levin-Lin-Chu test
-    p2a panel unit-root mydata -v gdp --unit country --time year --test llc
+    p2a --session s.json panel unit-root mydata -v gdp --unit country --time year --test llc
 
     # Im-Pesaran-Shin test with 2 lags
-    p2a panel unit-root mydata -v gdp --unit country --time year --test ips --lags 2
+    p2a --session s.json panel unit-root mydata -v gdp --unit country --time year --test ips --lags 2
 ")]
     UnitRoot {
         /// Dataset name

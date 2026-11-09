@@ -161,13 +161,13 @@ pub enum TimeseriesCommands {
     #[command(after_help = "\
 EXAMPLES:
     # Fit ARIMA(1,1,1)
-    p2a ts arima mydata --col sales -p 1 -d 1 -q 1
+    p2a --session s.json ts arima mydata --col sales -p 1 -d 1 -q 1
 
     # With 12-step forecast (standard errors and 80/95% intervals)
-    p2a ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+    p2a --session s.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
 
     # Random walk with drift and an MA(1) term
-    p2a ts arima mydata --col sales -p 0 -d 1 -q 1 --drift --horizon 12
+    p2a --session s.json ts arima mydata --col sales -p 0 -d 1 -q 1 --drift --horizon 12
 ")]
     Arima {
         /// Dataset name
@@ -220,7 +220,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # VAR(2) with two variables
-    p2a ts var mydata --cols gdp inflation --lags 2
+    p2a --session s.json ts var mydata --cols gdp inflation --lags 2
 ")]
     Var {
         /// Dataset name
@@ -328,10 +328,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # GARCH(1,1) for returns
-    p2a ts garch mydata --col returns -p 1 -q 1
+    p2a --session s.json ts garch mydata --col returns -p 1 -q 1
 
     # With volatility forecast
-    p2a ts garch mydata --col returns -p 1 -q 1 --horizon 5
+    p2a --session s.json ts garch mydata --col returns -p 1 -q 1 --horizon 5
 ")]
     Garch {
         /// Dataset name
@@ -363,13 +363,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Additive seasonal (monthly data)
-    p2a ts holt-winters mydata --col sales --period 12
+    p2a --session s.json ts holt-winters mydata --col sales --period 12
 
     # Multiplicative seasonal
-    p2a ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
+    p2a --session s.json ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
 
     # Fixed smoothing parameters and 12 forecasts with 95% prediction intervals
-    p2a ts holt-winters mydata --col sales --period 12 --alpha 0.3 --beta 0 --gamma 0.2 --horizon 12
+    p2a --session s.json ts holt-winters mydata --col sales --period 12 --alpha 0.3 --beta 0 --gamma 0.2 --horizon 12
 ")]
     HoltWinters {
         /// Dataset name
@@ -415,7 +415,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Test if x Granger-causes y
-    p2a ts granger mydata --x money_supply --y inflation --lags 4
+    p2a --session s.json ts granger mydata --x money_supply --y inflation --lags 4
 ")]
     Granger {
         /// Dataset name
@@ -470,10 +470,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # STL for monthly data
-    p2a ts stl mydata --col sales --period 12
+    p2a --session s.json ts stl mydata --col sales --period 12
 
     # With robust fitting
-    p2a ts stl mydata --col sales --period 12 --robust true
+    p2a --session s.json ts stl mydata --col sales --period 12 --robust true
 ")]
     Stl {
         /// Dataset name
@@ -540,11 +540,11 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Estimate causal impact of intervention
-    p2a ts causal-impact mydata --response sales --time date \\
+    p2a --session s.json ts causal-impact mydata --response sales --time date \\
         --pre-start 1 --pre-end 100 --post-start 101 --post-end 150
 
     # With control series
-    p2a ts causal-impact mydata --response sales --time date \\
+    p2a --session s.json ts causal-impact mydata --response sales --time date \\
         --pre-start 1 --pre-end 100 --post-start 101 --post-end 150 \\
         --controls competitor_sales,market_index
 ")]
