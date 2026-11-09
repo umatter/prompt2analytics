@@ -2239,7 +2239,7 @@ impl AnalyticsServer {
 
     /// Run general GMM IV estimation (Hansen 1982).
     #[tool(
-        description = "Run general GMM (Generalized Method of Moments) IV estimation following Hansen (1982). Estimates parameters using moment conditions E[z(y - xβ)] = 0. Supports two-step, iterative, and CUE estimation with HAC weighting. Reports J-test for overidentifying restrictions. Use for IV estimation when you have more instruments than endogenous variables."
+        description = "Estimate a linear IV model by GMM as R's gmm::gmm: two-step (default), iterated or continuously updated (CUE) estimation, or one step with a fixed weighting matrix; moment covariance HAC (default: Bartlett weights with floor(4 (n/100)^(2/9)) lags and no prewhitening, as gmm(kernel = 'Bartlett', bw = m + 1, prewhite = 0); gmm's own default, the Quadratic Spectral kernel with Andrews bandwidth and prewhitening, is not implemented), MDS (heteroskedasticity-robust), iid (2SLS) or fixed; z-statistics and Hansen's J test of the over-identifying restrictions (optimal W only)."
     )]
     pub async fn gmm_iv(
         &self,
@@ -2248,6 +2248,24 @@ impl AnalyticsServer {
         let method = tool_try!(parse_option(request.method.as_deref(), GmmMethod::TwoStep));
         let vcov = tool_try!(parse_option(request.vcov.as_deref(), GmmVcov::HAC));
         let kernel = tool_try!(parse_option(request.kernel.as_deref(), HacKernel::Bartlett));
+        let weight_matrix = match &request.weight_matrix {
+            None => None,
+            Some(w) => {
+                let k = request.z.len();
+                let q = k + 1;
+                if w.len() != q * q {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "weight_matrix has {} entries; with {k} z columns plus the constant it must be a {q} x {q} matrix ({} entries, row-major)",
+                        w.len(),
+                        q * q
+                    ))]));
+                }
+                Some(tool_try!(
+                    ndarray::Array2::from_shape_vec((q, q), w.clone())
+                        .map_err(|e| format!("weight_matrix: {e}"))
+                ))
+            }
+        };
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -2260,6 +2278,7 @@ impl AnalyticsServer {
             vcov,
             kernel,
             bandwidth: request.bandwidth,
+            weight_matrix,
             ..Default::default()
         };
 

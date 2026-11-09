@@ -848,3 +848,101 @@ async fn test_validate_mcp_iv_mte_uses_covariates() {
     assert_eq!(b1, b2); // seeded
     assert!(b1.to_lowercase().contains("bootstrap"), "{b1}");
 }
+
+/// gmm::gmm(y ~ x1 + x2 + w, ~ z1 + z2 + z3 + w) (the gmm_linear_iv case) through the MCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_gmm_iv() {
+    use p2a_core::econometrics::general_gmm::{GeneralGmmConfig, GmmMethod, GmmVcov, run_gmm_iv};
+    let case = Case::load("gmm_linear_iv");
+    let (session, server) = session_with("gmm_linear_iv"); // dataset `gmm_iv`
+    let ds = case_ds(&case);
+    let (x, z) = (["x1", "x2", "w"], ["z1", "z2", "z3", "w"]);
+    let base = json!({"dataset": "gmm_iv", "y": "y", "x": x, "z": z});
+    let fit = |c: GeneralGmmConfig| run_gmm_iv(&ds, "y", &x, &z, Some(c)).unwrap();
+    let cfg = |m: GmmMethod, v: GmmVcov| {
+        let mut c = GeneralGmmConfig::default();
+        c.method = m;
+        c.vcov = v;
+        c
+    };
+    let hac = fit(cfg(GmmMethod::TwoStep, GmmVcov::HAC));
+    assert_eq!(
+        ok(&server, &session, "gmm_iv", base.clone()).await,
+        hac.to_string()
+    );
+    let mds = fit(cfg(GmmMethod::TwoStep, GmmVcov::MDS));
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "gmm_iv",
+            with(&base, &[("vcov", json!("MDS"))])
+        )
+        .await,
+        mds.to_string()
+    );
+    let cue = fit(cfg(GmmMethod::CUE, GmmVcov::MDS));
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "gmm_iv",
+            with(
+                &base,
+                &[("method", json!("cue")), ("vcov", json!("robust"))]
+            )
+        )
+        .await,
+        cue.to_string()
+    );
+    // W = (Z'Z/n)^-1, Z = [1, z1, z2, z3, w]: gmm(weightsMatrix = W) is 2SLS with the sandwich variance
+    let n = 500usize;
+    let cols: Vec<Array1<f64>> = z.iter().map(|c| col(&ds, c)).collect();
+    let zm = Array2::from_shape_fn((n, 5), |(i, j)| if j == 0 { 1.0 } else { cols[j - 1][i] });
+    let w = p2a_core::linalg::solve::sym_inverse(
+        (zm.t().dot(&zm) / n as f64).view(),
+        p2a_core::linalg::solve::SingularPolicy::Error,
+        "Z'Z/n",
+    )
+    .unwrap()
+    .inverse;
+    let mut fc = cfg(GmmMethod::TwoStep, GmmVcov::MDS);
+    fc.weight_matrix = Some(w.clone());
+    let fixed = fit(fc);
+    let tf = ok(
+        &server,
+        &session,
+        "gmm_iv",
+        with(
+            &base,
+            &[
+                ("vcov", json!("mds")),
+                (
+                    "weight_matrix",
+                    json!(w.iter().copied().collect::<Vec<f64>>()),
+                ),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(tf, fixed.to_string());
+    assert!(tf.contains("One-Step"), "{tf}");
+    Check::new(&case)
+        .vector("twostep_hac_bartlett_coef", &hac.coefficients, Tol::coef(n))
+        .vector("twostep_hac_bartlett_se", &hac.std_errors, Tol::se(n))
+        .vector("twostep_mds_coef", &mds.coefficients, Tol::coef(n))
+        .vector("twostep_mds_se", &mds.std_errors, Tol::se(n))
+        .scalar("twostep_mds_J", mds.j_stat, Tol::stat(n))
+        .vector("cue_mds_coef", &cue.coefficients, Tol::iterative(1e-8))
+        .vector("fixedw_mds_coef", &fixed.coefficients, Tol::coef(n))
+        .vector("fixedw_mds_se", &fixed.std_errors, Tol::se(n))
+        .finish();
+    let e = refused(
+        &server,
+        &session,
+        "gmm_iv",
+        with(&base, &[("weight_matrix", json!(vec![0.0; 16]))]),
+    )
+    .await;
+    assert!(e.contains("weight_matrix") && e.contains("5 x 5"), "{e}");
+}

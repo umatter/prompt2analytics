@@ -72,6 +72,26 @@
       "tolerance": "validation/README.md at n = 2000 for the tight estimands; first stage Tol::iterative(1e-10); second-stage coefficients Tol::iterative(1e-8) (the near-collinear cubic in P amplifies the 2e-11 first-stage gap)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_gmm",
+      "name": "MCP gmm_iv",
+      "category": "mcp",
+      "reference": "gmm::gmm",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "gmm_linear_iv"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_gmm_iv"
+      ],
+      "quantities": [
+        "coefficients and SEs (HAC Bartlett, MDS, CUE, fixed W)",
+        "J"
+      ],
+      "tolerance": "validation/README.md, n = 500; CUE Tol::iterative(1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -60,13 +60,13 @@ pub struct GeneralGmmIvRequest {
 
     /// GMM estimation method
     #[schemars(
-        description = "Estimation method, as gmm::gmm type: 'twostep' (default), 'iterative', 'cue' (continuously updated) or 'onestep'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Estimation method, as gmm::gmm type: 'twostep' (default), 'iterative', 'cue' (continuously updated) or 'onestep' (with a fixed weighting matrix). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
     /// Variance-covariance type
     #[schemars(
-        description = "Weighting and covariance: 'hac' (default), 'iid', 'fixed' (weight_matrix) or 'mds' (heteroskedasticity-robust; 'robust'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Moment covariance: 'hac' (default: Bartlett weights with floor(4 (n/100)^(2/9)) lags and no prewhitening, as gmm(kernel = 'Bartlett', bw = m + 1, prewhite = 0); gmm's own default (Quadratic Spectral kernel, Andrews bandwidth, prewhite = 1) is not implemented), 'iid' (two-step is 2SLS), 'fixed' (one step with the identity weighting matrix, or weight_matrix) or 'mds' (heteroskedasticity-robust; 'robust'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub vcov: Option<String>,
 
@@ -79,6 +79,12 @@ pub struct GeneralGmmIvRequest {
     /// HAC bandwidth
     #[schemars(description = "Bandwidth for HAC estimation. None for automatic selection.")]
     pub bandwidth: Option<usize>,
+
+    /// Fixed weighting matrix
+    #[schemars(
+        description = "Fixed weighting matrix W (one-step GMM with the sandwich variance, as gmm::gmm(weightsMatrix = W)), row-major q x q with q = number of z columns + 1 (the constant first, then z in the listed order); symmetric positive definite. No J test is reported for a fixed W."
+    )]
+    pub weight_matrix: Option<Vec<f64>>,
 }
 
 /// Request for IV/2SLS regression.
