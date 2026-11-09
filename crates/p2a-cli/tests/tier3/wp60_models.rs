@@ -732,6 +732,133 @@ fn test_validate_cli_competing_risks_ci() {
 }
 
 // =================================================================================================
+// Panel
+// =================================================================================================
+
+/// WP17 surface: --lag-selection aic|sic|hall per unit as plm::purtest (purtest_lag_selection;
+/// dfcor = TRUE).
+#[test]
+fn test_validate_cli_unit_root_lag_selection() {
+    let case = Case::load("purtest_lag_selection");
+    let n = case.scalar("n_obs") as usize; // 480
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "panel",
+        "unit-root",
+        d.as_str(),
+        "-v",
+        "y",
+        "--unit",
+        "id",
+        "--time",
+        "t",
+        "--test",
+        "ips",
+        "--pmax",
+        "4",
+    ];
+    for rule in ["aic", "sic", "hall"] {
+        let v = s.json(&argv(&base, &["--lag-selection", rule]));
+        Check::new(&case)
+            .vector(
+                &format!("ips_{rule}_dfcor_lags"),
+                &f64s(&v["unit_lags"]),
+                Tol::exact(),
+            )
+            .vector(
+                &format!("trho_{rule}_dfcor"),
+                &f64s(&v["unit_statistics"]),
+                Tol::stat(n),
+            )
+            .finish();
+        assert!(v["warnings"].is_array(), "{v}");
+    }
+    let v = s.json(&argv(
+        &base,
+        &["--lag-selection", "aic", "--model", "trend"],
+    ));
+    Check::new(&case)
+        .vector("trend_lags_aic_dfcor", &f64s(&v["unit_lags"]), Tol::exact())
+        .vector(
+            "trend_trho_aic_dfcor",
+            &f64s(&v["unit_statistics"]),
+            Tol::stat(n),
+        )
+        .finish();
+    let want = case
+        .vector("ips_aic_dfcor_lags")
+        .iter()
+        .map(|x| (*x as usize).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = s.ok(&argv(&base, &["--lag-selection", "aic"]));
+    assert!(text.contains(&format!("Unit lags: {want}")), "{text}");
+    let e = s.err(&argv(&base, &["--lag-selection", "fixed"]));
+    assert!(e.contains("lags"), "{e}");
+}
+
+/// WP17 surface: regressors without within variation are dropped and named
+/// (panel_absorbed_regressors, N 30, T 6).
+#[test]
+fn test_validate_cli_panel_absorbed_regressors() {
+    let case = Case::load("panel_absorbed_regressors");
+    let n = 180;
+    let s = temp_session();
+    let d = s.load(&case);
+    let fe = [
+        "panel",
+        "fe",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "z",
+        "--entity",
+        "id",
+    ];
+    let v = s.json(&fe);
+    let t = json_table(&v, "t_value");
+    assert_eq!(t.names, ["x1", "x2"]);
+    assert_eq!(strs(&v["dropped"]), ["z"]);
+    Check::new(&case)
+        .named("fe_coef", &t.names, &t.coef, Tol::coef(n))
+        .named("fe_se", &t.names, &t.se, Tol::se(n))
+        .finish();
+    let w = warnings(&v);
+    assert!(w.iter().any(|x| x.contains('z')), "{w:?}");
+    let text = s.ok(&fe);
+    for x in &w {
+        assert!(text.contains(x.as_str()), "text lacks {x:?}");
+    }
+    let v = s.json(&[
+        "panel",
+        "hdfe",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "z",
+        "w",
+        "--fe",
+        "id",
+        "t",
+    ]);
+    let t = json_table(&v, "t_value");
+    assert_eq!(t.names, ["x1", "x2"]);
+    assert_eq!(strs(&v["dropped"]), ["z", "w"]);
+    Check::new(&case)
+        .named("hdfe2_coef", &t.names, &t.coef, Tol::coef(n))
+        .finish();
+    assert_eq!(v["converged"], true);
+    assert!(v["iterations"].as_u64().unwrap() >= 1);
+}
+
+// =================================================================================================
 // Table tests: every computing command prints one JSON document with its notes; option values
 // parse through the cores' spellings
 // =================================================================================================
@@ -767,6 +894,12 @@ const DATASETS: &[&str] = &[
     "validation/datasets/generated/mixed_logit.csv",
     "validation/datasets/generated/lung.csv",
     "validation/datasets/generated/cr_sim.csv",
+    "validation/datasets/generated/feglm_panel.csv",
+    "validation/datasets/generated/pvcm_panel.csv",
+    "validation/datasets/generated/pggls_panel.csv",
+    "validation/datasets/generated/ab_balanced.csv",
+    "validation/datasets/generated/purtest_panel.csv",
+    "validation/datasets/generated/panel_absorbed.csv",
 ];
 
 const DISCRETE: &[Cmd] = &[
@@ -1009,9 +1142,346 @@ const SURVIVAL_REFUSED: &[(&[&str], &[&str])] = &[
     ),
 ];
 
-const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL];
-const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK];
-const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] = &[DISCRETE_REFUSED, SURVIVAL_REFUSED];
+const PANEL: &[Cmd] = &[
+    c(
+        &[
+            "panel", "fe", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+        ],
+        Rp,
+    ),
+    c(
+        &[
+            "panel", "re", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity", "firm",
+        ],
+        Rp,
+    ),
+    c(
+        &[
+            "panel", "hausman", "grunfeld", "-y", "inv", "-x", "value", "capital", "--entity",
+            "firm",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "panel", "hdfe", "grunfeld", "-y", "inv", "-x", "value", "capital", "--fe", "firm",
+            "year",
+        ],
+        RpIt,
+    ),
+    c(
+        &[
+            "panel",
+            "feglm",
+            "feglm_panel",
+            "-y",
+            "y_bin",
+            "-x",
+            "x",
+            "x2",
+            "--fe",
+            "id",
+            "time",
+            "--family",
+            "logit",
+        ],
+        It,
+    ),
+    c(
+        &[
+            "panel",
+            "gmm",
+            "ab_balanced",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--entity",
+            "id",
+            "--time",
+            "year",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "panel",
+            "pvcm",
+            "pvcm_panel",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "x2",
+            "--entity",
+            "id",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "panel",
+            "pmg",
+            "pvcm_panel",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "x2",
+            "--entity",
+            "id",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "panel",
+            "gls",
+            "pggls_panel",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "x2",
+            "--entity",
+            "id",
+            "--time",
+            "t",
+            "--model",
+            "fe",
+        ],
+        Pl,
+    ),
+    c(
+        &[
+            "panel",
+            "unit-root",
+            "purtest_panel",
+            "-v",
+            "y",
+            "--unit",
+            "id",
+            "--time",
+            "t",
+            "--test",
+            "ips",
+            "--lag-selection",
+            "aic",
+            "--pmax",
+            "4",
+        ],
+        Pl,
+    ),
+];
+
+const PANEL_OK: &[&[&str]] = &[
+    &[
+        "panel",
+        "feglm",
+        "feglm_panel",
+        "-y",
+        "y_bin",
+        "-x",
+        "x",
+        "x2",
+        "--fe",
+        "id",
+        "time",
+        "--family",
+        "binomial",
+    ],
+    &[
+        "panel",
+        "pvcm",
+        "pvcm_panel",
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "--entity",
+        "id",
+        "--model",
+        "swamy",
+    ],
+    &[
+        "panel",
+        "gls",
+        "pggls_panel",
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "--entity",
+        "id",
+        "--time",
+        "t",
+        "--model",
+        "first-difference",
+    ],
+    &[
+        "panel",
+        "unit-root",
+        "purtest_panel",
+        "-v",
+        "y",
+        "--unit",
+        "id",
+        "--time",
+        "t",
+        "--test",
+        "levinlin",
+        "--model",
+        "drift",
+        "--lag-selection",
+        "BIC",
+        "--pmax",
+        "4",
+    ],
+];
+
+const PANEL_REFUSED: &[(&[&str], &[&str])] = &[
+    (
+        &[
+            "panel",
+            "feglm",
+            "feglm_panel",
+            "-y",
+            "y_bin",
+            "-x",
+            "x",
+            "--fe",
+            "id",
+            "--family",
+            "gamma",
+        ],
+        &["logit", "probit", "poisson", "gaussian"],
+    ),
+    (
+        &[
+            "panel",
+            "pvcm",
+            "pvcm_panel",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "--entity",
+            "id",
+            "--model",
+            "pooling",
+        ],
+        &["within", "random"],
+    ),
+    (
+        &[
+            "panel",
+            "gls",
+            "pggls_panel",
+            "-y",
+            "y",
+            "-x",
+            "x1",
+            "--entity",
+            "id",
+            "--time",
+            "t",
+            "--model",
+            "random",
+        ],
+        &["fe", "fd", "pooling"],
+    ),
+    (
+        &[
+            "panel",
+            "unit-root",
+            "purtest_panel",
+            "-v",
+            "y",
+            "--unit",
+            "id",
+            "--time",
+            "t",
+            "--test",
+            "kpss",
+        ],
+        &["llc", "ips", "madwu", "hadri"],
+    ),
+    (
+        &[
+            "panel",
+            "unit-root",
+            "purtest_panel",
+            "-v",
+            "y",
+            "--unit",
+            "id",
+            "--time",
+            "t",
+            "--model",
+            "quadratic",
+        ],
+        &["none", "intercept", "trend"],
+    ),
+    (
+        &[
+            "panel",
+            "unit-root",
+            "purtest_panel",
+            "-v",
+            "y",
+            "--unit",
+            "id",
+            "--time",
+            "t",
+            "--lag-selection",
+            "hq",
+        ],
+        &["fixed", "aic", "sic", "hall"],
+    ),
+    (
+        &[
+            "panel",
+            "gmm",
+            "ab_balanced",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--entity",
+            "id",
+            "--time",
+            "year",
+            "--step",
+            "three",
+        ],
+        &["onestep", "twostep"],
+    ),
+    (
+        &[
+            "panel",
+            "gmm",
+            "ab_balanced",
+            "-y",
+            "y",
+            "-x",
+            "x",
+            "--entity",
+            "id",
+            "--time",
+            "year",
+            "--vcov",
+            "hc9",
+        ],
+        &["robust", "classical"],
+    ),
+];
+
+const ALL: &[&[Cmd]] = &[DISCRETE, SURVIVAL, PANEL];
+const OPTIONS_OK: &[&[&[&str]]] = &[DISCRETE_OK, SURVIVAL_OK, PANEL_OK];
+const OPTIONS_REFUSED: &[&[(&[&str], &[&str])]] =
+    &[DISCRETE_REFUSED, SURVIVAL_REFUSED, PANEL_REFUSED];
 
 /// A session with every dataset the table tests use, each named after its file stem.
 fn table_session() -> TempSession {

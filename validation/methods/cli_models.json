@@ -117,6 +117,31 @@
       "tolerance": "validation/README.md, n = 200: CIF 1e-8, SE and limits 1e-6 relative; times to JSON round-trip; printed first row at 4 decimals",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_panel_t3",
+      "name": "p2a panel unit-root --lag-selection/--pmax/--model; fe and hdfe absorbed regressors",
+      "category": "interfaces",
+      "reference": "plm::purtest(test = 'ips', lags = 'AIC'/'SIC'/'Hall', pmax = 4, dfcor = TRUE, exo = 'intercept'/'trend'); plm::plm(model = 'within') and fixest::feols(| id + t) with regressors the fixed effects absorb",
+      "doc": "validation/cli/models.md",
+      "cases": [
+        "purtest_lag_selection",
+        "panel_absorbed_regressors"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp60_models::test_validate_cli_unit_root_lag_selection",
+        "p2a-cli::tier3::wp60_models::test_validate_cli_panel_absorbed_regressors"
+      ],
+      "quantities": [
+        "per-unit lag orders",
+        "per-unit t statistics",
+        "coefficients",
+        "SE",
+        "dropped regressors"
+      ],
+      "tolerance": "validation/README.md, n = 480 and 180: lag orders exact, statistics 1e-6 relative; coefficients 1e-8, SE 1e-6",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
