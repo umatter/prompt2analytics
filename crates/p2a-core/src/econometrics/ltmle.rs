@@ -112,6 +112,17 @@ use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided, z_cr
 /// Variance estimator of every standard error.
 const VARIANCE_METHOD: &str = "influence curve (ltmle variance.method = \"ic\")";
 
+/// ltmle's positivity check (`ltmle:::CheckForVarianceWarning`): it warns when more than this
+/// share of the subjects, pooled over the estimated regimes, have an unbounded cumulative g at
+/// the last node below the lower g bound. Also the share of Q* at 0 or 1 that is flagged.
+const POSITIVITY_SHARE: f64 = 0.01;
+/// ltmle's rare-events check: a 0/1 outcome with a mean below this.
+const RARE_OUTCOME_MEAN: f64 = 0.03;
+/// A targeted prediction (on the fitted [0, 1] scale) this close to 0 or 1 counts as saturated.
+const Q_STAR_AT_BOUND: f64 = 1e-8;
+/// glm.fit's "fitted probabilities numerically 0 or 1 occurred" threshold.
+const G_AT_BOUND: f64 = 10.0 * f64::EPSILON;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -684,6 +695,56 @@ pub struct RegimeEstimate {
     pub q_models: Vec<NodeModel>,
 }
 
+/// Signs that an estimate rests on few regime followers or on saturated fits: ltmle's positivity
+/// and rare-event checks, its no-variation rule for Q regressions and its score re-solve, and
+/// targeted predictions or propensities at 0 or 1. Empty when none applies.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LtmleSaturation {
+    /// Per estimated regime (intervention first): the share of all subjects whose unbounded
+    /// cumulative probability of following it at the last node is below the lower g bound
+    /// (ltmle warns when this share, pooled over the regimes, is above 0.01).
+    pub share_below_gbound: Vec<f64>,
+    /// Per regime: 0-based nodes whose Q response had a range below 1e-4 and was predicted as
+    /// a constant (ltmle's no-variation rule).
+    pub constant_q_nodes: Vec<Vec<usize>>,
+    /// Per regime: 0-based nodes whose targeting step left `|sum_i H_i (Q*_{t+1,i} - Q*_{t,i})|`
+    /// above 1e-3 and was re-solved, with the offset bound `lb` used (offsets bounded to
+    /// `logit([lb, 1 - lb])`, as ltmle's `FixScoreEquation`).
+    pub resolved_targeting: Vec<Vec<(usize, f64)>>,
+    /// Per regime: the share of subjects whose Q*_1 is within 1e-8 of 0 or 1 (on the fitted
+    /// [0, 1] scale).
+    pub share_q_star_at_bound: Vec<f64>,
+    /// 0-based nodes with a fitted propensity within `10 * f64::EPSILON` of 0 or 1 (glm.fit's
+    /// "numerically 0 or 1" threshold).
+    pub g_at_bound_nodes: Vec<usize>,
+    /// A 0/1 outcome with a mean below 0.03 (ltmle's rare-events check).
+    pub rare_outcome: bool,
+}
+
+impl LtmleSaturation {
+    /// ltmle's positivity check: the share of subjects below the lower g bound at the last node,
+    /// pooled over the estimated regimes, is above 0.01.
+    pub fn positivity(&self) -> bool {
+        !self.share_below_gbound.is_empty()
+            && self.share_below_gbound.iter().sum::<f64>() / self.share_below_gbound.len() as f64
+                > POSITIVITY_SHARE
+    }
+
+    /// Whether any check fired: positivity, a constant Q node, a re-solved targeting step, Q* at
+    /// 0 or 1 for more than 1% of the subjects, a propensity at 0 or 1, a rare outcome.
+    pub fn flagged(&self) -> bool {
+        self.positivity()
+            || self.constant_q_nodes.iter().any(|v| !v.is_empty())
+            || self.resolved_targeting.iter().any(|v| !v.is_empty())
+            || self
+                .share_q_star_at_bound
+                .iter()
+                .any(|s| *s > POSITIVITY_SHARE)
+            || !self.g_at_bound_nodes.is_empty()
+            || self.rare_outcome
+    }
+}
+
 /// Result from LTMLE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LtmleResult {
@@ -760,6 +821,10 @@ pub struct LtmleResult {
     /// Iterative fits (g, logistic Q, logistic fluctuations).
     #[serde(default)]
     pub n_model_fits: usize,
+    /// Few followers and saturated fits ([`LtmleSaturation`]); the checks that fire also add
+    /// warnings and a "Saturation:" block to the Display.
+    #[serde(default)]
+    pub saturation: LtmleSaturation,
 }
 
 impl ResultNotes for LtmleResult {
@@ -891,8 +956,67 @@ impl fmt::Display for LtmleResult {
             )?;
         }
         writeln!(f)?;
+        if self.saturation.flagged() {
+            self.fmt_saturation(f, &estimates)?;
+            writeln!(f)?;
+        }
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
         write!(f, "{}", notes_text(self))
+    }
+}
+
+impl LtmleResult {
+    /// The Display's "Saturation:" block, one line per regime.
+    fn fmt_saturation(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        estimates: &[&RegimeEstimate],
+    ) -> fmt::Result {
+        let s = &self.saturation;
+        let a_name = |t: usize| -> String {
+            self.regime_estimate
+                .q_models
+                .get(t)
+                .and_then(|m| m.names.last().cloned())
+                .unwrap_or_else(|| format!("A{}", t + 1))
+        };
+        let names = |nodes: &mut dyn Iterator<Item = usize>| -> String {
+            nodes.map(a_name).collect::<Vec<_>>().join(", ")
+        };
+        writeln!(f, "Saturation (see the warnings):")?;
+        for (k, e) in estimates.iter().enumerate() {
+            let mut parts = vec![format!(
+                "{} followers at the last node",
+                e.n_following.last().copied().unwrap_or(0)
+            )];
+            if let Some(p) = s.share_below_gbound.get(k) {
+                parts.push(format!("{:.1}% of subjects below the g bound", 100.0 * p));
+            }
+            if let Some(c) = s.constant_q_nodes.get(k).filter(|c| !c.is_empty()) {
+                parts.push(format!("constant Q at {}", names(&mut c.iter().copied())));
+            }
+            if let Some(r) = s.resolved_targeting.get(k).filter(|r| !r.is_empty()) {
+                parts.push(format!(
+                    "targeting re-solved at {}",
+                    names(&mut r.iter().map(|(t, _)| *t))
+                ));
+            }
+            if let Some(q) = s.share_q_star_at_bound.get(k).filter(|q| **q > 0.0) {
+                parts.push(format!("Q* at 0 or 1 for {:.1}%", 100.0 * q));
+            }
+            writeln!(f, "  {}: {}", e.label, parts.join("; "))?;
+        }
+        if !s.g_at_bound_nodes.is_empty() {
+            writeln!(
+                f,
+                "  propensities at 0 or 1 at {}",
+                names(&mut s.g_at_bound_nodes.iter().copied())
+            )?;
+        }
+        if s.rare_outcome {
+            writeln!(f, "  rare outcome (mean below {RARE_OUTCOME_MEAN})")?;
+        }
+        Ok(())
     }
 }
 
@@ -1028,12 +1152,16 @@ fn run_ltmle_with(
     )?;
 
     let mut estimates = Vec::with_capacity(regimes.len());
+    let mut parts = Vec::with_capacity(regimes.len());
     for ((regime, d, label), follow) in regimes.into_iter().zip(&follow) {
-        estimates.push(estimate_regime(
+        let (e, part) = estimate_regime(
             data, regime, &d, label, follow, &designs, &g, &last_q, &y_scaled, &scale, &config,
             paths, &mut notes,
-        )?);
+        )?;
+        estimates.push(e);
+        parts.push(part);
     }
+    let saturation = saturation_checks(y, &g, &estimates, parts, config.gbounds.0, &mut notes);
 
     let n_treated_by_time = data
         .treatments
@@ -1100,7 +1228,85 @@ fn run_ltmle_with(
         g_models: g.models,
         outcome_range: scale.rescaled.then_some((scale.lower, scale.upper)),
         n_model_fits: notes.n_fits,
+        saturation,
     })
+}
+
+/// One regime's part of [`LtmleSaturation`].
+struct RegimeSaturation {
+    share_below_gbound: f64,
+    constant_q_nodes: Vec<usize>,
+    resolved_targeting: Vec<(usize, f64)>,
+    share_q_star_at_bound: f64,
+}
+
+/// ltmle's positivity and rare-event checks and the rest of the saturation record, with their
+/// warnings.
+fn saturation_checks(
+    y: &Array1<f64>,
+    g: &TreatmentModels,
+    estimates: &[RegimeEstimate],
+    parts: Vec<RegimeSaturation>,
+    g_lower: f64,
+    notes: &mut FitNotes,
+) -> LtmleSaturation {
+    let mut s = LtmleSaturation::default();
+    for p in parts {
+        s.share_below_gbound.push(p.share_below_gbound);
+        s.constant_q_nodes.push(p.constant_q_nodes);
+        s.resolved_targeting.push(p.resolved_targeting);
+        s.share_q_star_at_bound.push(p.share_q_star_at_bound);
+    }
+    s.g_at_bound_nodes = g
+        .fitted
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.iter().any(|v| *v < G_AT_BOUND || *v > 1.0 - G_AT_BOUND))
+        .map(|(t, _)| t)
+        .collect();
+    let mean = y.sum() / y.len() as f64;
+    s.rare_outcome = y.iter().all(|v| *v == 0.0 || *v == 1.0) && mean < RARE_OUTCOME_MEAN;
+    if s.positivity() {
+        for (e, p) in estimates.iter().zip(&s.share_below_gbound) {
+            if *p > 0.0 {
+                notes.warnings.push(format!(
+                    "LTMLE: positivity: {:.1}% of subjects have a cumulative probability of \
+                     following {} below {g_lower} at the last node; the influence-curve SE may be \
+                     anticonservative (ltmle warns the same)",
+                    100.0 * p,
+                    e.label
+                ));
+            }
+        }
+    }
+    if s.rare_outcome {
+        notes.warnings.push(format!(
+            "LTMLE: rare outcome (mean {mean:.4} < {RARE_OUTCOME_MEAN}); the influence-curve SE \
+             may be anticonservative (ltmle warns the same)"
+        ));
+    }
+    for (e, q) in estimates.iter().zip(&s.share_q_star_at_bound) {
+        if *q > POSITIVITY_SHARE {
+            notes.warnings.push(format!(
+                "LTMLE: {}: Q* is within {Q_STAR_AT_BOUND:e} of 0 or 1 for {:.1}% of subjects; \
+                 the estimate rests on saturated fits",
+                e.label,
+                100.0 * q
+            ));
+        }
+    }
+    if !s.g_at_bound_nodes.is_empty() {
+        let nodes: Vec<String> = s
+            .g_at_bound_nodes
+            .iter()
+            .map(|t| format!("A{}", t + 1))
+            .collect();
+        notes.warnings.push(format!(
+            "LTMLE: fitted propensities numerically 0 or 1 at {}",
+            nodes.join(", ")
+        ));
+    }
+    s
 }
 
 /// Run LTMLE with default configuration.
@@ -1670,10 +1876,12 @@ fn estimate_regime(
     config: &LtmleConfig,
     paths: FitPaths,
     notes: &mut FitNotes,
-) -> EconResult<RegimeEstimate> {
+) -> EconResult<(RegimeEstimate, RegimeSaturation)> {
     let n = data.n_obs();
     let t_max = data.time_points();
     let (lo, hi) = config.gbounds;
+    let constant_q_nodes: Vec<usize> = Vec::new();
+    let resolved_targeting: Vec<(usize, f64)> = Vec::new();
 
     // Cumulative probability of following the regime, g predicted with SetA.
     let mut cum = vec![1.0f64; n];
@@ -1712,6 +1920,8 @@ fn estimate_regime(
         n_bounded.push(nb);
         n_bounded_following.push(nbf);
     }
+    // ltmle's positivity check counts the unbounded cumulative g below the lower bound only.
+    let share_below_gbound = cum.iter().filter(|c| **c < lo).count() as f64 / n as f64;
 
     // Backward pass.
     let mut q_next = y.clone();
@@ -1782,6 +1992,11 @@ fn estimate_regime(
         q_star[t] = qs;
     }
     let psi_s = q_next.mean().unwrap_or(f64::NAN);
+    let share_q_star_at_bound = q_next
+        .iter()
+        .filter(|q| **q < Q_STAR_AT_BOUND || **q > 1.0 - Q_STAR_AT_BOUND)
+        .count() as f64
+        / n as f64;
     for i in 0..n {
         ic[i] = (ic[i] + q_next[i] - psi_s) * scale.width;
     }
@@ -1789,7 +2004,7 @@ fn estimate_regime(
     let influence_curve = ic.to_vec();
     let se = ic_se(&influence_curve)?;
     let zc = z_critical(0.95)?;
-    Ok(RegimeEstimate {
+    let estimate = RegimeEstimate {
         regime,
         label,
         psi,
@@ -1811,7 +2026,16 @@ fn estimate_regime(
         n_bounded,
         n_bounded_following,
         q_models,
-    })
+    };
+    Ok((
+        estimate,
+        RegimeSaturation {
+            share_below_gbound,
+            constant_q_nodes,
+            resolved_targeting,
+            share_q_star_at_bound,
+        },
+    ))
 }
 
 /// The logit link's inverse as R's `binomial()$linkinv` (and `predict.glm(type =
@@ -2663,6 +2887,7 @@ mod tests {
         c.contrast = None;
         let out = run_ltmle(&data, c).unwrap().to_string();
         assert!(!out.contains("Contrast:"), "{out}");
+        assert!(!out.contains("Saturation"), "{out}");
         let mut d2 = data.clone();
         d2.outcomes[0] = d2.outcomes[1].clone();
         let out = ltmle(&d2).unwrap().to_string();
@@ -2671,6 +2896,83 @@ mod tests {
                 .any(|l| l.starts_with("Warning: LTMLE: outcomes at time points 1..1 are not used")),
             "{out}"
         );
+    }
+
+    #[test]
+    fn test_ltmle_saturation_is_reported_and_warned() {
+        // Few followers of one regime at the last node: ltmle's positivity check fires.
+        for (data, few) in [
+            (shifted_outcome((5000, 10, 4), 3.0, false, 2.0), 1),
+            (sparse_followers(2500, 8, 20), 1),
+        ] {
+            let r = ltmle(&data).unwrap();
+            let s = &r.saturation;
+            assert!(s.flagged() && s.positivity(), "{s:?}");
+            assert_eq!(s.share_below_gbound.len(), 2);
+            assert!(s.share_below_gbound[few] > 0.01, "{s:?}");
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("LTMLE: positivity:")),
+                "{:?}",
+                r.warnings
+            );
+            let out = r.to_string();
+            assert!(out.contains("Saturation"), "{out}");
+            assert!(out.contains("followers at the last node"), "{out}");
+        }
+        // Six nodes at n = 300: ltmle 1.3-0 warns, with 10 and 137 subjects below the bound.
+        let r = ltmle(&long_horizon(300, 6, 17)).unwrap();
+        assert!(r.saturation.positivity(), "{:?}", r.saturation);
+        let below: Vec<f64> = r
+            .saturation
+            .share_below_gbound
+            .iter()
+            .map(|s| (s * 300.0).round())
+            .collect();
+        assert_eq!(below, [10.0, 137.0]);
+    }
+
+    #[test]
+    fn test_ltmle_no_saturation_on_regular_data() {
+        // ltmle 1.3-0 gives no positivity or rare-events warning on these two
+        for data in [two_period(&sim()), long_horizon(600, 3, 5)] {
+            let r = ltmle(&data).unwrap();
+            assert!(!r.saturation.flagged(), "{:?}", r.saturation);
+            assert!(!r.saturation.rare_outcome);
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("LTMLE: positivity")),
+                "{:?}",
+                r.warnings
+            );
+            assert!(!r.to_string().contains("Saturation"));
+        }
+    }
+
+    #[test]
+    fn test_ltmle_rare_outcome_is_warned() {
+        use rand::{Rng, SeedableRng};
+        let mut data = two_period(&sim());
+        let n = data.n_obs();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(29);
+        let y: Array1<f64> = (0..n)
+            .map(|_| f64::from(u8::from(rng.gen_range(0.0..1.0) < 0.02)))
+            .collect();
+        let mean = y.sum() / n as f64;
+        assert!(mean > 0.0 && mean < 0.03, "{mean}");
+        data.outcomes[1] = y;
+        let r = ltmle(&data).unwrap();
+        assert!(r.saturation.rare_outcome && r.saturation.flagged());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("LTMLE: rare outcome (mean")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("rare outcome (mean below 0.03)"));
     }
 
     #[test]
