@@ -249,7 +249,9 @@ pub struct IVMTERequest {
     pub z: String,
 
     /// Covariate columns (optional)
-    #[schemars(description = "Optional covariate column names to include in the second stage.")]
+    #[schemars(
+        description = "Covariate columns. They enter the propensity model (with z) and the second stage (Y on 1, P, ..., P^degree and X), as local IV with controls (Brinch, Mogstad & Wiswall 2017). Must not repeat y, d or z."
+    )]
     pub x: Option<Vec<String>>,
 
     /// Polynomial degree for MTE curve
@@ -265,8 +267,28 @@ pub struct IVMTERequest {
     pub propensity_model: Option<String>,
 
     /// Number of grid points for MTE curve
-    #[schemars(description = "Number of grid points for evaluating MTE curve. Default is 100.")]
+    #[schemars(
+        description = "Number of grid points of the MTE curve and the estimand weights (default 100, at least 2)."
+    )]
     pub n_grid: Option<usize>,
+
+    /// Target estimand
+    #[schemars(
+        description = "Target estimand reported as `target`: 'mte_curve' (default: the curve and every estimand), 'late', 'att', 'atu', 'ate' or 'prte' (needs prte_weights). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub estimand: Option<String>,
+
+    /// PRTE weights
+    #[schemars(
+        description = "PRTE weights, one per grid point (length n_grid), normalised by the core."
+    )]
+    pub prte_weights: Option<Vec<f64>>,
+
+    /// Bootstrap replicates
+    #[schemars(
+        description = "Bootstrap replicates for the SEs; units are resampled and both stages refitted, seeded by the session seed. Default 0: delta method (HC1 covariance of the MTE polynomial; the first-stage estimation error is not included; bootstrap_reps > 0 includes it)."
+    )]
+    pub bootstrap_reps: Option<usize>,
 }
 
 /// Request for Difference-in-Differences estimation.

@@ -442,73 +442,85 @@ impl AnalyticsServer {
 
     /// Estimate Marginal Treatment Effects (MTE) using instrumental variables.
     #[tool(
-        description = "Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS."
+        description = "Estimate marginal treatment effects by local IV (Heckman & Vytlacil 2005): P(Z, X) by a probit (default), logit or linear first stage; Y on a polynomial in P and the covariates; MTE(u) its derivative; ATE, ATT, ATU, LATE over the propensity support and PRTE with Heckman-Vytlacil weights, delta-method SEs (HC1 covariance of the MTE polynomial; the first-stage estimation error is not included; bootstrap_reps > 0 includes it) or seeded bootstrap SEs, and the share of each estimand's weight extrapolated outside the support."
     )]
     pub async fn iv_mte(
         &self,
         Parameters(request): Parameters<IVMTERequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::MTEEstimand;
         let propensity_model = tool_try!(parse_option(
             request.propensity_model.as_deref(),
             PropensityModel::Probit
         ));
-        use p2a_core::linalg::design::DesignMatrix;
+        let estimand = tool_try!(parse_option(
+            request.estimand.as_deref(),
+            MTEEstimand::MTECurve
+        ));
+        let x_names: Vec<&str> = request.x.iter().flatten().map(String::as_str).collect();
+        if x_names
+            .iter()
+            .any(|c| *c == request.y || *c == request.d || *c == request.z)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "x must not repeat y, d or z",
+            )]));
+        }
+        let reps = request.bootstrap_reps.unwrap_or(0);
+        let seed = self.session_seed().await;
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract outcome variable
-        let y = match DesignMatrix::extract_column(dataset.df(), &request.y) {
-            Ok(col) => col,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to extract outcome variable '{}': {:?}",
-                    request.y, e
-                ))]));
-            }
-        };
-
-        // Extract treatment variable
-        let d = match DesignMatrix::extract_column(dataset.df(), &request.d) {
-            Ok(col) => col,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to extract treatment variable '{}': {:?}",
-                    request.d, e
-                ))]));
-            }
-        };
-
-        // Extract instrument variable
-        let z = match DesignMatrix::extract_column(dataset.df(), &request.z) {
-            Ok(col) => col,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to extract instrument variable '{}': {:?}",
-                    request.z, e
-                ))]));
-            }
-        };
-
-        // Build config
-        let config = IVMTEConfig {
-            mte_degree: request.mte_degree.unwrap_or(2),
-            n_grid: request.n_grid.unwrap_or(100),
-            propensity_model,
-            ..Default::default()
-        };
-
-        // Note: Covariates are not currently supported in the array-based API
-        // TODO: Add covariate support when needed
-
-        let result = match run_ivmte(
-            &y.view(),
-            &d.view(),
-            &z.view(),
-            None, // covariates
-            config,
+        // y, d, z and the covariates are read jointly; a missing value or an unknown column
+        // is a tool error naming it.
+        let mut names: Vec<&str> = vec![&request.y, &request.d, &request.z];
+        names.extend(x_names.iter().copied());
+        let cols = match crate::tools::common::numeric_columns(
+            dataset,
+            &names,
+            crate::tools::common::NaPolicy::Fail,
         ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "MTE estimation failed: {e}"
+                ))]));
+            }
+        };
+        let y = cols.numeric_array(&request.y);
+        let d = cols.numeric_array(&request.d);
+        let z = cols.numeric_array(&request.z);
+        let x = if x_names.is_empty() {
+            None
+        } else {
+            match cols.matrix(&x_names, false) {
+                Ok(m) => Some(m.data),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "MTE estimation failed: {e}"
+                    ))]));
+                }
+            }
+        };
+
+        let mut config = IVMTEConfig::default();
+        config.mte_degree = request.mte_degree.unwrap_or(2);
+        config.n_grid = request.n_grid.unwrap_or(100);
+        config.propensity_model = propensity_model;
+        config.estimand = estimand;
+        config.prte_weights = request.prte_weights.clone();
+        config.include_covariates = true;
+        config.propensity_covariates = x.is_some();
+        config.bootstrap_se = reps > 0;
+        if reps > 0 {
+            config.n_bootstrap = reps;
+        }
+        config.seed = seed;
+
+        let x_view = x.as_ref().map(|m| m.view());
+        let result = match run_ivmte(&y.view(), &d.view(), &z.view(), x_view.as_ref(), config) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(

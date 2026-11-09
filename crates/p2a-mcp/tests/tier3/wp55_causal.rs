@@ -96,6 +96,11 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["probit", "logit"],
         ),
         (
+            "iv_mte",
+            with(&mte, &[("estimand", json!("ite"))]),
+            vec!["mte_curve", "prte"],
+        ),
+        (
             "treatment_ipw",
             with(&otc, &[("estimand", json!("atc"))]),
             vec!["estimand", "ate", "att"],
@@ -701,4 +706,145 @@ async fn test_validate_mcp_rd_bandwidth_selection() {
         .scalar("fuzzy_auto_coef_bc", fz.tau_fuzzy_bc, Tol::coef(n))
         .scalar("fuzzy_auto_se_robust", fz.se_fuzzy_robust, Tol::se(n))
         .finish();
+}
+
+/// TOOL-4: x = [z2] enters the probit propensity and the second stage (the mte_mcp_covariate case); before,
+/// x was dropped and the tool returned the single-instrument fit without it (`nox_*`). The R pins are the
+/// first-stage fits at epsilon 1e-14 (`*_tight`); the tool runs the default tolerance, whose text is the
+/// library Display of the same call and whose estimands lie within Tol::iterative(1e-6) of the tight fit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_iv_mte_uses_covariates() {
+    use p2a_core::econometrics::ivmte::{IVMTEConfig, TreatmentEffectEstimate, run_ivmte};
+    let case = Case::load("mte_mcp_covariate");
+    let (session, server) = session_with("mte_mcp_covariate"); // dataset `mte_sim`
+    let ds = case_ds(&case);
+    let (y, d, z1) = (col(&ds, "y"), col(&ds, "d"), col(&ds, "z1"));
+    let n = y.len();
+    let x = Array2::from_shape_vec((n, 1), col(&ds, "z2").to_vec()).unwrap();
+    let args = json!({"dataset": "mte_sim", "y": "y", "d": "d", "z": "z1", "x": ["z2"], "mte_degree": 3, "n_grid": 1001});
+    let t = ok(&server, &session, "iv_mte", args.clone()).await;
+    let mut c = IVMTEConfig::default();
+    c.mte_degree = 3;
+    c.n_grid = 1001;
+    let without = run_ivmte(&y.view(), &d.view(), &z1.view(), None, c.clone()).unwrap();
+    let mut cx = c.clone();
+    cx.propensity_covariates = true;
+    let lib = run_ivmte(
+        &y.view(),
+        &d.view(),
+        &z1.view(),
+        Some(&x.view()),
+        cx.clone(),
+    )
+    .unwrap();
+    assert!(t.starts_with(&lib.to_string()), "{t}");
+    assert!(!t.starts_with(&without.to_string()));
+    // the tight fits (glm epsilon 1e-14)
+    let mut ct = cx.clone();
+    ct.tolerance = 1e-14;
+    let tight = run_ivmte(&y.view(), &d.view(), &z1.view(), Some(&x.view()), ct).unwrap();
+    let mut c0t = c.clone();
+    c0t.tolerance = 1e-14;
+    let tight0 = run_ivmte(&y.view(), &d.view(), &z1.view(), None, c0t).unwrap();
+    let te = |t: &TreatmentEffectEstimate| [t.estimate, t.se];
+    let mut check = Check::new(&case);
+    check
+        .vector(
+            "fs_coef_tight",
+            &tight.first_stage.coefficients,
+            Tol::iterative(1e-10),
+        )
+        // The two probit solutions agree to about 2e-11 relative; the cubic in P is nearly collinear and
+        // amplifies that to about 5e-9 in the P^3 coefficient, while the estimands (combinations along
+        // the well-determined directions) hold at Tol::coef. A documented iterative tolerance.
+        .vector(
+            "mte_coef_tight",
+            &tight.second_stage_coefficients,
+            Tol::iterative(1e-8),
+        )
+        .vector(
+            "nox_fs_coef_tight",
+            &tight0.first_stage.coefficients,
+            Tol::iterative(1e-10),
+        )
+        .vector(
+            "nox_mte_coef_tight",
+            &tight0.second_stage_coefficients,
+            Tol::iterative(1e-8),
+        );
+    for (k, e) in [
+        ("ate_tight", &tight.ate),
+        ("att_tight", &tight.att),
+        ("atu_tight", &tight.atu),
+        ("late_support_tight", &tight.late),
+        ("nox_ate_tight", &tight0.ate),
+        ("nox_att_tight", &tight0.att),
+        ("nox_atu_tight", &tight0.atu),
+        ("nox_late_support_tight", &tight0.late),
+    ] {
+        check
+            .named_subset(k, &["est"], &["est", "se"], &te(e), Tol::coef(n))
+            .named_subset(k, &["se"], &["est", "se"], &te(e), Tol::se(n));
+    }
+    // the tool's default first-stage tolerance (1e-8) against the tight fit; under HC1 the R default-control
+    // fit is 2.0e-8 relative from it in the ATE estimate and 2.8e-7 in its SE
+    for (k, e) in [
+        ("ate_tight", &lib.ate),
+        ("att_tight", &lib.att),
+        ("atu_tight", &lib.atu),
+        ("late_support_tight", &lib.late),
+        ("nox_ate_tight", &without.ate),
+        ("nox_att_tight", &without.att),
+        ("nox_atu_tight", &without.atu),
+        ("nox_late_support_tight", &without.late),
+    ] {
+        check.named(k, &["est", "se"], &te(e), Tol::iterative(1e-6));
+    }
+    check.finish();
+    let e = refused(
+        &server,
+        &session,
+        "iv_mte",
+        with(&args, &[("x", json!(["no_such_column"]))]),
+    )
+    .await;
+    assert!(e.contains("no_such_column"), "{e}");
+    let r = refused(
+        &server,
+        &session,
+        "iv_mte",
+        with(&args, &[("x", json!(["z1"]))]),
+    )
+    .await;
+    assert!(r.contains("x must not repeat y, d or z"), "{r}");
+    let g = refused(
+        &server,
+        &session,
+        "iv_mte",
+        with(&args, &[("prte_weights", json!([1.0, 2.0]))]),
+    )
+    .await;
+    assert!(g.contains("prte_weights"), "{g}");
+    let b1 = ok(
+        &server,
+        &session,
+        "iv_mte",
+        with(
+            &args,
+            &[("bootstrap_reps", json!(20)), ("estimand", json!("att"))],
+        ),
+    )
+    .await;
+    let b2 = ok(
+        &server,
+        &session,
+        "iv_mte",
+        with(
+            &args,
+            &[("bootstrap_reps", json!(20)), ("estimand", json!("ATT"))],
+        ),
+    )
+    .await;
+    assert_eq!(b1, b2); // seeded
+    assert!(b1.to_lowercase().contains("bootstrap"), "{b1}");
 }

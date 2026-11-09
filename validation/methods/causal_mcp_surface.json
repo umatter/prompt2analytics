@@ -49,6 +49,29 @@
       "tolerance": "validation/README.md, n = 1000",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_mte",
+      "name": "MCP iv_mte with covariates",
+      "category": "mcp",
+      "reference": "local IV MTE with Heckman-Vytlacil weights, written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "mte_mcp_covariate"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_iv_mte_uses_covariates"
+      ],
+      "quantities": [
+        "probit coefficients (tight fit)",
+        "second-stage coefficients (tight fit)",
+        "ATE, ATT, ATU, LATE and delta SEs (HC1)",
+        "the call without covariates",
+        "default configuration within Tol::iterative(1e-6) of the tight fit (estimands)"
+      ],
+      "tolerance": "validation/README.md at n = 2000 for the tight estimands; first stage Tol::iterative(1e-10); second-stage coefficients Tol::iterative(1e-8) (the near-collinear cubic in P amplifies the 2e-11 first-stage gap)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

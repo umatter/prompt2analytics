@@ -920,6 +920,7 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("rd_bw", "scaleregul", Exempt(SCALEREGUL)),
         p("rd_fuzzy", "scaleregul", Exempt(SCALEREGUL)),
         p("rd_multi", "scaleregul", Exempt(SCALEREGUL)),
+        p("iv_mte", "prte_weights[]", Exempt(ARRAY_VALUE)),
         // ---- end of the MCP causal surface block. ----
         p("stats_mauchly_test", "sigma", ArrayLen(ArrayLength)),
         p("stats_spline", "n", Max(GridPoints)),
@@ -1105,8 +1106,6 @@ pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
     ("ltmle", "dynamic_columns"),
     ("gsynth", "r_max"),
     ("gsynth", "bootstrap_reps"),
-    ("iv_mte", "bootstrap_reps"),
-    ("iv_mte", "prte_weights"),
     ("gmm_iv", "weight_matrix"),
     ("panel_unit_root", "pmax"),
     ("munge_fill_na", "value"),
