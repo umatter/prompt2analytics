@@ -327,3 +327,46 @@ async fn test_validate_mcp_value_counts_normalize() {
         "{t}"
     );
 }
+
+/// T3 design 5.1 (the MCP half of DATA-9, T3-WP50): new_value was a required string, so the documented
+/// `null` was refused before the handler ran. R: dplyr::na_if (data_munging_t3.R, case
+/// data_munging_na_if, T3-WP50).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_str_replace_value_null() {
+    let case = Case::load("data_munging_na_if");
+    let (session, server) = session_with("data_munging_na_if"); // dataset "munging_fill"
+    let r = call(&server, &session, "str_replace_value",
+        json!({"dataset": "munging_fill", "column": "k", "old_value": "3", "new_value": null, "result_name": "r1"})).await;
+    assert!(
+        r.success && text(&r).contains("Replaced 2 values '3' with missing in column 'k'"),
+        "{}",
+        text(&r)
+    );
+    // new_value omitted: missing too
+    let r = call(
+        &server,
+        &session,
+        "str_replace_value",
+        json!({"dataset": "r1", "column": "f", "old_value": "1.25", "result_name": "r2"}),
+    )
+    .await;
+    assert!(
+        r.success && text(&r).contains("Replaced 2 values '1.25' with missing in column 'f'"),
+        "{}",
+        text(&r)
+    );
+    let r = call(&server, &session, "str_replace_value",
+        json!({"dataset": "r2", "column": "s", "old_value": "c", "new_value": null, "result_name": "r3"})).await;
+    assert!(r.success, "{}", text(&r));
+    let r3 = dataset(&session, "r3").await;
+    Check::new(&case)
+        .vector("k_na_if_3", &nums(&r3, "k"), Tol::exact())
+        .vector("f_na_if_1_25", &nums(&r3, "f"), Tol::exact())
+        .finish();
+    assert_eq!(labels(&r3, "s"), case.names("s_na_if_c"));
+    // a text replacement is still literal
+    let r = call(&server, &session, "str_replace_value",
+        json!({"dataset": "munging_fill", "column": "s", "old_value": "d", "new_value": "D", "result_name": "r4"})).await;
+    assert!(r.success, "{}", text(&r));
+    assert_eq!(labels(&dataset(&session, "r4").await, "s")[8], "D");
+}

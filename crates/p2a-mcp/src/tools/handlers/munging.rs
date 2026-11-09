@@ -32,7 +32,7 @@ use p2a_core::{
             MutateExpr,
             aggregate::value_counts_with,
             bin_with,
-            clean::{FillStrategyKind, fill_na_with},
+            clean::{FillStrategyKind, ReplaceOptions, fill_na_with, replace_with},
             concat,
             deduplicate,
             diff,
@@ -61,7 +61,6 @@ use p2a_core::{
             regex_replace,
             regex_replace_bytes,
             rename,
-            replace,
             sample,
             sample_rows,
             select,
@@ -1679,7 +1678,7 @@ impl AnalyticsServer {
 
     /// Replace exact values in a column.
     #[tool(
-        description = "Replace exact values in a column with a new value. Use to clean sentinel values like -99, 'N/A', or 'missing' by replacing them (use null as new_value to convert to missing). For pattern-based replacement, use str_regex_replace. Call this directly — do NOT call head_dataset or describe_dataset first."
+        description = "Replace exact values in a column with a new value. Use to clean sentinel values like -99, 'N/A', or 'missing' by replacing them (new_value null, or omitted, writes missing values, as R's dplyr::na_if). For pattern-based replacement, use str_regex_replace. Call this directly — do NOT call head_dataset or describe_dataset first."
     )]
     pub async fn str_replace_value(
         &self,
@@ -1704,13 +1703,15 @@ impl AnalyticsServer {
             .clone()
             .unwrap_or_else(|| request.dataset.clone());
 
+        // A missing new value adds no text to a String column.
+        let new_value = request.new_value.as_deref();
         // Each matching value of a String column becomes `new_value`.
         if bound::active() {
             let bounded = match bound::replace_value(
                 dataset.df(),
                 &request.column,
                 &request.old_value,
-                &request.new_value,
+                new_value.unwrap_or(""),
             ) {
                 Ok(bounded) => bounded,
                 Err(e) => {
@@ -1727,7 +1728,7 @@ impl AnalyticsServer {
                     || {
                         format!(
                             "replacing {matches} values of `column` with the {}-byte `new_value`",
-                            request.new_value.len()
+                            new_value.map_or(0, str::len)
                         )
                     },
                     &["use a shorter new_value", "filter the rows first"],
@@ -1736,13 +1737,14 @@ impl AnalyticsServer {
             }
         }
 
-        let result = match replace(
+        let outcome = match replace_with(
             &dataset,
             &request.column,
             &request.old_value,
-            &request.new_value,
+            new_value,
+            &ReplaceOptions::default(),
         ) {
-            Ok(ds) => ds,
+            Ok(outcome) => outcome,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Replace failed: {}",
@@ -1750,13 +1752,13 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+        let summary = outcome.summary();
 
         let mut datasets = self.datasets.write().await;
-        datasets.insert(result_name.clone(), result);
+        datasets.insert(result_name.clone(), outcome.dataset);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Replaced '{}' with '{}' in column '{}', saved as '{}'",
-            request.old_value, request.new_value, request.column, result_name
+            "{summary}\nSaved as '{result_name}'."
         ))]))
     }
 
@@ -3089,7 +3091,7 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_core::data::munging::bin;
     use p2a_core::data::munging::{
-        JoinShape, JoinType, MungeResult, cast_columns, concat, fill_na,
+        JoinShape, JoinType, MungeResult, cast_columns, concat, fill_na, replace,
     };
     use p2a_core::polars::prelude::*;
     use rmcp::model::RawContent;
@@ -3554,7 +3556,7 @@ mod tests {
             dataset: "d".into(),
             column: "s".into(),
             old_value: "v3".into(),
-            new_value: new_value.into(),
+            new_value: Some(new_value.into()),
             result_name: Some(result.into()),
         };
         // 286 of 2,000 rows replaced by 2,000 bytes each: about 570 kB.

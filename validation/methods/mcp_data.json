@@ -43,6 +43,25 @@
       "tolerance": "exact (counts; proportions are the same IEEE divisions)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_str_replace_value",
+      "name": "MCP str_replace_value with new_value null or omitted (missing values)",
+      "category": "interfaces",
+      "reference": "dplyr::na_if",
+      "doc": "validation/data/mcp_data_tools.md",
+      "cases": [
+        "data_munging_na_if"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp59_data::test_validate_mcp_str_replace_value_null"
+      ],
+      "quantities": [
+        "integer, double and text columns after replacing a sentinel with NA"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

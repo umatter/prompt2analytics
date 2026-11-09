@@ -456,9 +456,11 @@ pub struct ReplaceValueRequest {
     #[schemars(description = "Exact value to search for and replace.")]
     pub old_value: String,
 
-    /// Replacement value
-    #[schemars(description = "Value to replace matches with.")]
-    pub new_value: String,
+    /// Replacement value; `None` writes a missing value
+    #[schemars(
+        description = "The replacement. JSON null, an omitted new_value, or the text 'NA', 'null' (any case) or '' writes a missing value; any other text is read in the column's type (a number for numeric columns, TRUE/FALSE, YYYY-MM-DD)."
+    )]
+    pub new_value: Option<String>,
 
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]
