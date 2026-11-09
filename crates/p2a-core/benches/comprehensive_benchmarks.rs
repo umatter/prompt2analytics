@@ -577,7 +577,7 @@ fn main() {
 
     // Doubly Robust (AIPW)
     for n in [100, 1000, 10000] {
-        let dataset = generate_binary_data(n, 42);
+        let dataset = generate_treatment_data(n, 42);
         let dr_config = DoublyRobustConfig {
             method: DRMethod::AIPW,
             estimand: Estimand::ATE,
@@ -585,8 +585,14 @@ fn main() {
             seed: Some(42),
             ..Default::default()
         };
+        // The binary treatment column of the treatment DGP (the old call passed the continuous
+        // x1 as the treatment).
+        assert!(
+            run_doubly_robust(&dataset, "y", "treatment", &["x1", "x2"], dr_config.clone()).is_ok(),
+            "Doubly_Robust must time a successful run"
+        );
         let result = run_benchmark("Doubly_Robust", "AIPW", n, &config, || {
-            run_doubly_robust(&dataset, "y", "x1", &["x2"], dr_config.clone())
+            run_doubly_robust(&dataset, "y", "treatment", &["x1", "x2"], dr_config.clone())
         });
         print_result(&result);
         results.push(result);
@@ -933,14 +939,17 @@ fn main() {
     // TMLE
     for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
+        // y is continuous: a linear Q (the default logistic Q is for an outcome in [0, 1])
+        let cfg = TmleConfig {
+            q_model: p2a_core::QModel::Linear,
+            ..TmleConfig::default()
+        };
+        assert!(
+            tmle(&dataset, "y", "treatment", &["x1", "x2"], cfg.clone()).is_ok(),
+            "TMLE must time a successful run"
+        );
         let result = run_benchmark("TMLE", "ATE", n, &slow_config, || {
-            tmle(
-                &dataset,
-                "y",
-                "treatment",
-                &["x1", "x2"],
-                TmleConfig::default(),
-            )
+            tmle(&dataset, "y", "treatment", &["x1", "x2"], cfg.clone())
         });
         print_result(&result);
         results.push(result);
@@ -949,14 +958,17 @@ fn main() {
     // CTMLE
     for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
+        // y is continuous: a linear Q (the default logistic Q is for an outcome in [0, 1])
+        let cfg = CTmleConfig {
+            q_model: p2a_core::CTmleQModel::Linear,
+            ..CTmleConfig::default()
+        };
+        assert!(
+            ctmle(&dataset, "y", "treatment", &["x1", "x2"], cfg.clone()).is_ok(),
+            "CTMLE must time a successful run"
+        );
         let result = run_benchmark("CTMLE", "adaptive", n, &slow_config, || {
-            ctmle(
-                &dataset,
-                "y",
-                "treatment",
-                &["x1", "x2"],
-                CTmleConfig::default(),
-            )
+            ctmle(&dataset, "y", "treatment", &["x1", "x2"], cfg.clone())
         });
         print_result(&result);
         results.push(result);
