@@ -185,7 +185,7 @@ pub struct GrangerRequest {
 
     /// Number of lags (optional, default: automatic selection)
     #[schemars(
-        description = "Number of lags to include in the test. Default: automatic selection using Schwert's rule."
+        description = "Lag order p (needs n >= 3p + 2). Default: floor(12 (n/100)^(1/4)) (Schwert), capped at floor((n - 2)/3) with a warning."
     )]
     pub lags: Option<usize>,
 }
@@ -253,7 +253,9 @@ pub struct VarIrfRequest {
     pub lags: usize,
 
     /// Number of IRF steps/periods
-    #[schemars(description = "Number of periods to compute impulse responses for.")]
+    #[schemars(
+        description = "Number of horizons including h = 0 (vars::irf n.ahead + 1): steps = 13 gives h = 0 .. 12."
+    )]
     pub steps: usize,
 }
 

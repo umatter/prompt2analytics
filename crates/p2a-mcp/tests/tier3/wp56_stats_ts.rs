@@ -1336,3 +1336,145 @@ async fn test_validate_mcp_mahalanobis_threshold() {
     .await;
     assert!(e.contains("rank 1 of 2"), "{e}");
 }
+
+const CANADA: [&str; 4] = ["e", "prod", "rw", "U"];
+
+/// ECON-49's MCP half: ts_var returns coefficients, SEs, t and p per equation as JSON.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_var_coefficients() {
+    let case = Case::load("var_canada");
+    let (se, s) = session_with("var_canada");
+    let t = ok(
+        &s,
+        &se,
+        "ts_var",
+        json!({"dataset": "var_canada", "columns": CANADA, "lags": 2}),
+    )
+    .await;
+    assert!(t.starts_with("Vector Autoregression VAR(2)"), "{t}"); // the Display stays first
+    let j = json_of(&t);
+    let names: Vec<String> = j["coef_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let mut c = Check::new(&case);
+    for (k, eq) in CANADA.iter().enumerate() {
+        c.named(
+            &format!("coef_{eq}"),
+            &names,
+            &fs(&j["coefficients"][k]),
+            Tol::coef(82),
+        )
+        .named(
+            &format!("se_{eq}"),
+            &names,
+            &fs(&j["std_errors"][k]),
+            Tol::se(82),
+        )
+        .named(
+            &format!("t_{eq}"),
+            &names,
+            &fs(&j["t_values"][k]),
+            Tol::stat(82),
+        )
+        .named(
+            &format!("p_{eq}"),
+            &names,
+            &fs(&j["p_values"][k]),
+            Tol::p_value(82),
+        );
+    }
+    let sigma: Vec<f64> = j["sigma_u"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(fs)
+        .collect();
+    c.vector("sigma_df", &sigma, Tol::stat(82))
+        .scalar("loglik", f(&j["log_likelihood"]), Tol::stat(82))
+        .scalar("aic_stats", f(&j["aic"]), Tol::stat(82))
+        .scalar("bic_stats", f(&j["bic"]), Tol::stat(82))
+        .scalar("df_resid", f(&j["df_residual"]), Tol::exact())
+        .scalar("n_obs", f(&j["n_obs"]), Tol::exact())
+        .finish();
+}
+
+/// Every impulse-response horizon as JSON. `steps` counts horizons including h = 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_var_irf() {
+    let case = Case::load("var_canada");
+    let (se, s) = session_with("var_canada");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "ts_var_irf",
+            json!({"dataset": "var_canada", "columns": CANADA, "lags": 2, "steps": 13}),
+        )
+        .await,
+    );
+    assert_eq!(
+        (j["steps"].as_u64(), j["orthogonalized"].as_bool()),
+        (Some(13), Some(true))
+    );
+    let mut c = Check::new(&case);
+    for (i, imp) in CANADA.iter().enumerate() {
+        // R irf_ortho_<impulse>: 13 x 4 column-major (response r at horizon h = index h + 13 r)
+        let got: Vec<f64> = (0..4)
+            .flat_map(|r| (0..13).map(move |h| (h, r)))
+            .map(|(h, r)| f(&j["irf"][h][r][i]))
+            .collect();
+        c.vector(&format!("irf_ortho_{imp}"), &got, Tol::coef(82));
+    }
+    c.finish();
+    let steps = AnalyticsServer::new()
+        .router_tools()
+        .into_iter()
+        .find(|t| t.name == "ts_var_irf")
+        .unwrap()
+        .input_schema["properties"]["steps"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        steps.contains("h = 0") && steps.contains("n.ahead + 1"),
+        "{steps}"
+    );
+}
+
+/// ECON-53's MCP half: the Granger F with df and the capped default order with its warning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ts_granger() {
+    let case = Case::load("granger_short");
+    let (se, s) = session_with("granger_short");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "ts_granger",
+            json!({"dataset": "granger_short", "dependent": "y", "cause": "x", "lags": 2}),
+        )
+        .await,
+    );
+    let d = json_of(
+        &ok(
+            &s,
+            &se,
+            "ts_granger",
+            json!({"dataset": "granger_short", "dependent": "y", "cause": "x"}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .scalar("lag2_F", f(&j["f_statistic"]), Tol::stat(20))
+        .scalar("lag2_p", f(&j["p_value"]), Tol::p_value(20))
+        .scalar("lag2_df1", f(&j["df1"]), Tol::exact())
+        .scalar("lag2_df2", f(&j["df2"]), Tol::exact())
+        .scalar("lag2_n_used", f(&j["n_obs"]), Tol::exact())
+        .scalar("default_lag", f(&d["lags"]), Tol::exact())
+        .scalar("lag6_F", f(&d["f_statistic"]), Tol::stat(20))
+        .finish();
+    assert!(!d["warnings"].as_array().unwrap().is_empty(), "{d}");
+}

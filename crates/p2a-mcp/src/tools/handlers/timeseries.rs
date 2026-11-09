@@ -588,7 +588,7 @@ impl AnalyticsServer {
 
     /// Run VAR (Vector Autoregression) model.
     #[tool(
-        description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC."
+        description = "Vector autoregression VAR(p) with a constant, as vars::VAR(type = 'const'): per-equation coefficients, standard errors (df T - Kp - 1), t and p values, the residual covariance, logLik, AIC and BIC. Returns the summary as text followed by the full result as JSON."
     )]
     pub async fn ts_var(
         &self,
@@ -607,14 +607,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Granger causality test.
     #[tool(
-        description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models."
+        description = "Test Granger causality between two time series variables, as lmtest::grangertest: whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent' (F test of the restricted against the unrestricted model). Without lags, Schwert's order is used, capped so that the F test keeps at least one residual degree of freedom, with a warning. Returns text followed by the result as JSON (F, df1, df2, p, the order used and any warning)."
     )]
     pub async fn ts_granger(
         &self,
@@ -636,9 +634,7 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Run VARMA (Vector ARMA) model.
@@ -695,7 +691,7 @@ impl AnalyticsServer {
 
     /// Compute VAR Impulse Response Functions.
     #[tool(
-        description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization."
+        description = "Compute impulse response functions from a VAR(p) with a constant, orthogonalised (lower Cholesky factor of Sigma_u) as vars::irf(ortho = TRUE). Returns text followed by every horizon as JSON: irf[h][response][impulse] for h = 0 .. steps - 1."
     )]
     pub async fn ts_var_irf(
         &self,
@@ -714,9 +710,7 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(text_and_json(&result))
     }
 
     /// Fit an ARIMA model by conditional sum of squares.
@@ -2124,6 +2118,19 @@ fn arima_spec(
         q,
         include_mean,
         include_drift: include_drift.unwrap_or(false),
+    }
+}
+
+/// A model result as its text summary followed by "JSON:" and the result as compact JSON
+/// (NaN and infinite values become null).
+fn text_and_json<T: serde::Serialize + std::fmt::Display>(result: &T) -> CallToolResult {
+    match serde_json::to_string(result) {
+        Ok(json) => {
+            CallToolResult::success(vec![Content::text(format!("{result}\n\nJSON:\n{json}"))])
+        }
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "the result could not be serialised: {e}"
+        ))]),
     }
 }
 
