@@ -13,6 +13,7 @@ use super::ml::parse_choice;
 use crate::server::AnalyticsServer;
 use crate::tools::common::{self, NaPolicy, error_text, parse_option};
 use crate::tools::requests::spatial::*;
+use p2a_core::econometrics::spatialprobit::SPATIAL_PROBIT_DEFAULT_SEED;
 use p2a_core::options::Choices;
 
 use p2a_core::{
@@ -850,11 +851,12 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        let (seed, seed_source) = self.probit_seed(request.seed).await;
         let config = SpatialProbitConfig {
             n_draws: request.n_draws.unwrap_or(1000),
             burn_in: request.burn_in.unwrap_or(200),
             compute_impacts: request.compute_impacts.unwrap_or(true),
-            seed: request.seed,
+            seed: Some(seed),
             ..Default::default()
         };
 
@@ -910,7 +912,8 @@ impl AnalyticsServer {
                      Pseudo R-squared: {:.4}\n\
                      Percent Correctly Predicted: {:.2}%\n\
                      N: {} (Y=1: {})\n\
-                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n",
+                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\
+                     Seed: {} ({})\n",
                     result.log_likelihood,
                     result.log_marginal_likelihood,
                     result.dic,
@@ -919,7 +922,9 @@ impl AnalyticsServer {
                     result.n_obs,
                     result.n_positive,
                     result.n_draws,
-                    result.acceptance_rate * 100.0
+                    result.acceptance_rate * 100.0,
+                    seed,
+                    seed_source
                 ));
 
                 if let Some(impacts) = &result.impacts {
@@ -963,11 +968,12 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        let (seed, seed_source) = self.probit_seed(request.seed).await;
         let config = SpatialProbitConfig {
             n_draws: request.n_draws.unwrap_or(1000),
             burn_in: request.burn_in.unwrap_or(200),
             compute_impacts: false, // SEM doesn't have spatial multiplier impacts
-            seed: request.seed,
+            seed: Some(seed),
             ..Default::default()
         };
 
@@ -1022,7 +1028,8 @@ impl AnalyticsServer {
                      Pseudo R-squared: {:.4}\n\
                      Percent Correctly Predicted: {:.2}%\n\
                      N: {} (Y=1: {})\n\
-                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\n\
+                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\
+                     Seed: {} ({})\n\n\
                      Note: SEM Probit coefficients have their usual interpretation\n\
                      (marginal effect = beta * phi(X'beta) at mean, no spatial multiplier)",
                     result.log_likelihood,
@@ -1033,7 +1040,9 @@ impl AnalyticsServer {
                     result.n_obs,
                     result.n_positive,
                     result.n_draws,
-                    result.acceptance_rate * 100.0
+                    result.acceptance_rate * 100.0,
+                    seed,
+                    seed_source
                 ));
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1188,6 +1197,18 @@ const NO_SPATIAL_PARAMETER: &str = "spatial_panel_ml estimates a spatial lag (la
     spatial error (spatial_error = 'b', the default as splm::spml, or 'kkp'), or both; with \
     lag = false and spatial_error = 'none' there is no spatial parameter. Use \
     panel_fixed_effects or panel_random_effects for a non-spatial panel model.";
+
+impl AnalyticsServer {
+    /// The seed of a spatial probit and where it came from: the request, else `set_seed`, else
+    /// the core's documented default.
+    async fn probit_seed(&self, request: Option<u64>) -> (u64, &'static str) {
+        match (request, self.seed_or_global(None).await) {
+            (Some(s), _) => (s, "request"),
+            (None, Some(s)) => (s, "set_seed"),
+            (None, None) => (SPATIAL_PROBIT_DEFAULT_SEED, "default"),
+        }
+    }
+}
 
 /// Lock discipline for the weights map: handlers compute on O(1) snapshots and hold the
 /// map's lock only to take a snapshot or to store a cache computed on one.

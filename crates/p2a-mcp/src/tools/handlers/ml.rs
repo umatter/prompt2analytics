@@ -524,9 +524,7 @@ impl AnalyticsServer {
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        let seed = self.seed_or_global(request.seed).await;
 
         let result = match tsne(
             data.view(),
@@ -632,9 +630,7 @@ impl AnalyticsServer {
             Err(e) => return Ok(ml_error("", e)),
         };
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        let seed = self.seed_or_global(request.seed).await;
 
         let result = match random_forest(
             data.view(),
@@ -784,9 +780,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        let seed = self.seed_or_global(request.seed).await;
 
         // Build C5.0 config
         let config = C50Config {
@@ -899,9 +893,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        let seed = self.seed_or_global(request.seed).await;
 
         let config = run_causal_forest_config(
             request.n_trees,
@@ -989,9 +981,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        let seed = self.seed_or_global(request.seed).await;
 
         let config = run_bart_causal_config(
             request.n_trees,
@@ -1081,9 +1071,8 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        // hettx's core draws from entropy without a seed: 42 keeps unseeded runs reproducible.
+        let seed = self.seed_for(request.seed).await;
 
         let test_statistic = match parse_choice(
             &HETTX_STAT,
@@ -1108,7 +1097,7 @@ impl AnalyticsServer {
         config.decompose = request.decompose.unwrap_or(true);
         config.effect_method = effect_method;
         config.n_neighbors = request.n_neighbors.unwrap_or(3);
-        config.seed = seed;
+        config.seed = Some(seed);
         config.compute_importance = true;
 
         let cov_refs: Vec<&str> = request
@@ -1145,6 +1134,7 @@ impl AnalyticsServer {
             "n_treated": result.n_treated,
             "n_control": result.n_control,
             "n_permutations": result.n_permutations,
+            "seed": seed,
             "effect_summary": {
                 "min": result.effect_summary.min,
                 "p10": result.effect_summary.p10,
@@ -1193,6 +1183,7 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
+        let seed = self.seed_or_global(request.seed).await;
         // Build configuration
         let config = CubistConfig {
             committees: request.committees.unwrap_or(1),
@@ -1200,7 +1191,7 @@ impl AnalyticsServer {
             max_depth: request.max_depth.unwrap_or(10),
             min_split: request.min_split.unwrap_or(10),
             min_bucket: request.min_bucket.unwrap_or(5),
-            seed: request.seed,
+            seed,
             ..Default::default()
         };
 
@@ -1338,9 +1329,7 @@ impl AnalyticsServer {
         let n_obs = data.nrows().min(max_obs);
         let data_subset = data.slice(ndarray::s![..n_obs, ..]).to_owned();
 
-        // Use per-tool seed if provided, otherwise fall back to global seed
-        let global_seed = self.global_seed.read().await;
-        let seed = request.seed.or(*global_seed);
+        let seed = self.seed_or_global(request.seed).await;
 
         // Train Random Forest and compute SHAP values
         let n_trees = request.n_trees.unwrap_or(50);
@@ -1539,7 +1528,7 @@ impl AnalyticsServer {
         config.maxdepth = request.maxdepth.unwrap_or(0);
         config.teststat = CtreeTestStat::choices().canonical(teststat).to_string();
         config.testtype = CtreeTestType::choices().canonical(testtype).to_string();
-        config.seed = request.seed;
+        config.seed = self.seed_or_global(request.seed).await;
 
         let feature_refs: Vec<&str> = request.features.iter().map(|s| s.as_str()).collect();
 
@@ -1652,7 +1641,7 @@ impl AnalyticsServer {
         config.min_samples_split = request.min_samples_split.unwrap_or(5);
         config.cv_folds = request.cv_folds;
         config.center = request.center.unwrap_or(true);
-        config.seed = request.seed;
+        config.seed = self.seed_or_global(request.seed).await;
 
         // Convert column names to &str
         let x_cols: Vec<&str> = request.x_cols.iter().map(|s| s.as_str()).collect();
@@ -1679,6 +1668,8 @@ impl AnalyticsServer {
             "selected_variables": result.selected_variables,
             "selection_frequency": result.selection_frequency,
             "cv_optimal_mstop": result.cv_optimal_mstop,
+            // The CV fold seed the core used (its default when no seed reached it).
+            "seed": result.config.seed.unwrap_or(42),
             "feature_names": result.feature_names,
             "loss_history_summary": {
                 "initial": result.loss_history.first(),

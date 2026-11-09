@@ -1315,3 +1315,88 @@ async fn test_mcp_sar_probit_empty_x() {
     );
     ok(&call(&server, &s, "sem_probit_model", a).await);
 }
+
+// ----------------------------------------------------------------------------
+// Seeds
+// ----------------------------------------------------------------------------
+
+/// After set_seed(7), an unseeded probit equals the seed-7 run and differs from the seed-8 run.
+/// Before: the handlers passed request.seed only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_spatial_probit_global_seed() {
+    let (s, server) = probit_session().await;
+    let a = json!({"dataset": "spatial_sim", "y": "yb", "x": ["x1"], "weights": "w4", "n_draws": 60, "burn_in": 20});
+    for tool in ["sar_probit_model", "sem_probit_model"] {
+        let d = ok(&call(&server, &s, tool, a.clone()).await);
+        assert_eq!(line(&d, "Seed:").trim(), "Seed: 42 (default)", "{tool}");
+    }
+    ok(&call(&server, &s, "set_seed", json!({"seed": 7})).await);
+    for tool in ["sar_probit_model", "sem_probit_model"] {
+        let u = ok(&call(&server, &s, tool, a.clone()).await);
+        let s7 = ok(&call(&server, &s, tool, with(&a, json!({"seed": 7}))).await);
+        let s8 = ok(&call(&server, &s, tool, with(&a, json!({"seed": 8}))).await);
+        let strip = |t: &str| {
+            t.lines()
+                .filter(|l| !l.starts_with("Seed:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            strip(&u),
+            strip(&s7),
+            "{tool}: unseeded after set_seed(7) is seed 7"
+        );
+        assert_ne!(strip(&s7), strip(&s8), "{tool}: the seed matters");
+        assert_eq!(line(&u, "Seed:").trim(), "Seed: 7 (set_seed)", "{tool}");
+        assert_eq!(line(&s8, "Seed:").trim(), "Seed: 8 (request)", "{tool}");
+    }
+}
+
+/// Request seed > set_seed > documented default, reported. ml_mboost's CV folds follow the
+/// global seed; heterogeneity_test without any seed uses 42 (before: entropy in the core).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_ml_seeds_follow_request_then_set_seed_then_default() {
+    let (s, server) = session_with("ml_mboost_bols");
+    let mb = json!({"dataset": "mboost_sim", "y_col": "yg", "x_cols": ["x1", "x2", "x3"], "mstop": 30, "cv_folds": 5});
+    let ht = json!({"dataset": "mboost_sim", "outcome": "yg", "treatment": "yb", "covariates": ["x1"], "n_permutations": 200});
+    let seed_of = |t: &str| json_block(t)["seed"].clone();
+    let unseeded_ht = ok(&call(&server, &s, "heterogeneity_test", ht.clone()).await);
+    assert_eq!(seed_of(&unseeded_ht), json!(42));
+    assert_eq!(
+        unseeded_ht,
+        ok(&call(
+            &server,
+            &s,
+            "heterogeneity_test",
+            with(&ht, json!({"seed": 42}))
+        )
+        .await)
+    );
+    assert_eq!(
+        seed_of(&ok(&call(&server, &s, "ml_mboost", mb.clone()).await)),
+        json!(42)
+    );
+    ok(&call(&server, &s, "set_seed", json!({"seed": 7})).await);
+    let unseeded = ok(&call(&server, &s, "ml_mboost", mb.clone()).await);
+    assert_eq!(seed_of(&unseeded), json!(7));
+    assert_eq!(
+        unseeded,
+        ok(&call(&server, &s, "ml_mboost", with(&mb, json!({"seed": 7}))).await)
+    );
+    assert_eq!(
+        seed_of(&ok(
+            &call(&server, &s, "heterogeneity_test", ht.clone()).await
+        )),
+        json!(7)
+    );
+    assert_eq!(
+        seed_of(&ok(&call(
+            &server,
+            &s,
+            "heterogeneity_test",
+            with(&ht, json!({"seed": 3}))
+        )
+        .await)),
+        json!(3)
+    );
+}

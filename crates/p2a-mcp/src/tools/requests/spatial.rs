@@ -260,7 +260,9 @@ pub struct SarProbitRequest {
     pub compute_impacts: Option<bool>,
 
     /// Random seed
-    #[schemars(description = "Random seed for reproducibility. Optional.")]
+    #[schemars(
+        description = "Random seed of the MCMC sampler; when omitted, the value of set_seed, else 42. The output reports the seed used."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -295,7 +297,9 @@ pub struct SemProbitRequest {
     pub burn_in: Option<usize>,
 
     /// Random seed
-    #[schemars(description = "Random seed for reproducibility. Optional.")]
+    #[schemars(
+        description = "Random seed of the MCMC sampler; when omitted, the value of set_seed, else 42. The output reports the seed used."
+    )]
     pub seed: Option<u64>,
 }
 

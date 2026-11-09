@@ -28,7 +28,7 @@ pub struct KMeansRequest {
     pub n_init: Option<usize>,
 
     /// Random seed for reproducibility (optional)
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -138,7 +138,7 @@ pub struct TsneRequest {
     pub learning_rate: Option<f64>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -233,7 +233,7 @@ pub struct RandomForestRequest {
     pub max_features: Option<String>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -360,7 +360,9 @@ pub struct CtreeRequest {
     pub testtype: Option<String>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(
+        description = "Accepted for compatibility; ctree's Bonferroni and univariate tests have no random component, so the seed does not change the fit."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -409,7 +411,7 @@ pub struct C50Request {
     pub cf: Option<f64>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -456,7 +458,7 @@ pub struct ShapValuesRequest {
     pub compute_summary: Option<bool>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(description = "Random seed; when omitted, the value of set_seed, else 42.")]
     pub seed: Option<u64>,
 }
 
@@ -501,7 +503,9 @@ pub struct CubistRequest {
     pub min_bucket: Option<usize>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(
+        description = "Accepted for compatibility; Cubist without subsampling is deterministic (R's Cubist uses the seed only with cubistControl(sample > 0), which p2a does not implement)."
+    )]
     pub seed: Option<u64>,
 }
 
@@ -568,7 +572,9 @@ pub struct MboostRequest {
     pub center: Option<bool>,
 
     /// Random seed for reproducibility
-    #[schemars(description = "Optional random seed for reproducible results.")]
+    #[schemars(
+        description = "Random seed of the cross-validation folds (cv_folds); when omitted, the value of set_seed, else 42."
+    )]
     pub seed: Option<u64>,
 }
 
