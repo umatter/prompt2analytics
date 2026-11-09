@@ -1174,7 +1174,7 @@ impl AnalyticsServer {
 
     /// Run Causal Forest for heterogeneous treatment effects (Wager & Athey 2018).
     #[tool(
-        description = "Causal Forest estimates heterogeneous treatment effects (CATE) using random forests adapted for causal inference. Key features: honest splitting (separate data for tree structure vs estimation), local centering, bootstrap variance estimation. Returns: CATE estimates for each unit, ATE with confidence interval, variable importance showing which covariates drive treatment effect heterogeneity. Based on R package 'grf'."
+        description = "Causal forest as grf::causal_forest: local centering (out-of-bag Y.hat and W.hat regression forests), honest trees with grf's gradient splits, out-of-bag CATEs with little-bags variance estimates, and the AIPW average treatment effect with SE sd(scores)/sqrt(n). Returns the ATE with its CI, CATE summaries, variable importance (split frequency) and oob_error, the out-of-bag R-loss."
     )]
     pub async fn ml_causal_forest(
         &self,
@@ -1228,6 +1228,12 @@ impl AnalyticsServer {
             }
         };
 
+        // The propensity range (overlap): [min, max] of the out-of-bag W.hat.
+        let w_hat_range = (!result.w_hat.is_empty()).then(|| {
+            let lo = result.w_hat.iter().copied().min_by(f64::total_cmp);
+            let hi = result.w_hat.iter().copied().max_by(f64::total_cmp);
+            [lo, hi]
+        });
         // Create a summary JSON output
         let output = serde_json::json!({
             "ate": result.ate,
@@ -1246,10 +1252,14 @@ impl AnalyticsServer {
                 "max": result.predictions.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
                 "mean": result.predictions.iter().sum::<f64>() / result.predictions.len() as f64,
             },
+            "se_method": "AIPW scores",
+            "warnings": notes_json(None, &result.warnings)["warnings"].clone(),
+            "w_hat_range": w_hat_range,
             "config": {
                 "honesty": result.config.honesty,
                 "min_node_size": result.config.min_node_size,
                 "max_depth": result.config.max_depth,
+                "ci_group_size": result.config.ci_group_size,
             }
         });
 

@@ -2042,3 +2042,127 @@ async fn test_mcp_shap_options_refused_and_defaults() {
         );
     }
 }
+
+// ----------------------------------------------------------------------------
+// SAR/SEM notes, causal forest
+// ----------------------------------------------------------------------------
+
+/// spatialreg lagsarlm / Durbin / errorsarlm and impacts, written out (4-NN W).
+/// Before: no "Converged:" line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_sar_sdm_sem() {
+    let (s, server) = session_with("spatial_sar_sdm_sem");
+    let case = Case::load("spatial_sar_sdm_sem");
+    neighbors(
+        &server,
+        &s,
+        "spatial_sim",
+        "w4",
+        json!({"method": "knn", "k": 4}),
+    )
+    .await;
+    let base = json!({"dataset": "spatial_sim", "y": "y", "x": ["x1", "x2"], "weights": "w4"});
+    // The rho/lambda block is "<header>\n-----\nEstimate: ..": the first "Estimate:" line is
+    // the spatial parameter.
+    let sar = ok(&call(&server, &s, "sar_model", base.clone()).await);
+    printed(
+        num_after(line(&sar, "Estimate:"), "Estimate:"),
+        case.scalar("sar_rho"),
+        6,
+        "SAR rho",
+    );
+    let se_obs = case.vector("sar_se_obs");
+    for (i, n) in ["(Intercept)", "x1", "x2"].iter().enumerate() {
+        let r = row(&sar, n);
+        printed(r[0], case.vector("sar_beta")[i], 6, n);
+        printed(r[1], se_obs[i], 6, &format!("SAR {n} SE"));
+    }
+    let sar_imp = sar
+        .split("Spatial Impacts")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no SAR impacts: {sar}"));
+    for n in ["x1", "x2"] {
+        printed(
+            row(sar_imp, n)[0],
+            case.named("sar_impact_direct", n),
+            6,
+            &format!("SAR {n} direct"),
+        );
+    }
+    let sdm = ok(&call(
+        &server,
+        &s,
+        "sar_model",
+        with(&base, json!({"durbin": true})),
+    )
+    .await);
+    printed(
+        num_after(line(&sdm, "Estimate:"), "Estimate:"),
+        case.scalar("sdm_rho"),
+        6,
+        "SDM rho",
+    );
+    let imp = sdm
+        .split("Spatial Impacts")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no SDM impacts: {sdm}"));
+    for n in ["x1", "x2"] {
+        let r = row(imp, n);
+        printed(
+            r[0],
+            case.named("sdm_impact_direct", n),
+            6,
+            &format!("{n} direct"),
+        );
+        printed(
+            r[1],
+            case.named("sdm_impact_indirect", n),
+            6,
+            &format!("{n} indirect"),
+        );
+        printed(
+            r[2],
+            case.named("sdm_impact_total", n),
+            6,
+            &format!("{n} total"),
+        );
+    }
+    let sem = ok(&call(&server, &s, "sem_model", base).await);
+    printed(
+        num_after(line(&sem, "Estimate:"), "Estimate:"),
+        case.scalar("sem_lambda"),
+        6,
+        "SEM lambda",
+    );
+    for (i, n) in ["(Intercept)", "x1", "x2"].iter().enumerate() {
+        let r = row(&sem, n);
+        printed(r[0], case.vector("sem_beta")[i], 6, n);
+        printed(r[1], case.vector("sem_beta_se")[i], 6, &format!("{n} SE"));
+    }
+    for t in [&sar, &sdm, &sem] {
+        assert!(t.contains("Converged: yes"), "{t}");
+    }
+}
+
+/// The description and JSON tell what the causal forest computes. Before: "bootstrap variance
+/// estimation" and no se_method / warnings in the JSON.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_causal_forest_description_and_notes() {
+    let d = tool_description("ml_causal_forest");
+    assert!(
+        d.contains("AIPW") && d.contains("local centering") && !d.contains("bootstrap variance"),
+        "{d}"
+    );
+    let (s, server) = session_with("ml_mboost_bols");
+    let t = ok(&call(
+        &server,
+        &s,
+        "ml_causal_forest",
+        json!({"dataset": "mboost_sim", "outcome": "yg", "treatment": "yb", "covariates": ["x1", "x2"], "n_trees": 50, "seed": 2}),
+    )
+    .await);
+    let j = json_block(&t);
+    assert_eq!(j["se_method"], json!("AIPW scores"));
+    assert!(j["warnings"].is_array(), "{j}");
+    assert_eq!(j["w_hat_range"].as_array().map(Vec::len), Some(2), "{j}");
+}

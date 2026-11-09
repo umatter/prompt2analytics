@@ -208,6 +208,31 @@
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_sar_sem",
+      "name": "MCP sar_model (SAR, SDM) and sem_model",
+      "category": "interfaces",
+      "reference": "spatialreg::lagsarlm, lagsarlm(Durbin = TRUE), errorsarlm and impacts, written out",
+      "doc": "validation/econometrics/spatial.md",
+      "cases": [
+        "spatial_sar_sdm_sem"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_sar_sdm_sem"
+      ],
+      "quantities": [
+        "rho",
+        "lambda",
+        "coefficients",
+        "SAR observed-information SEs",
+        "SEM SEs",
+        "SAR and SDM impacts",
+        "convergence line"
+      ],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -504,7 +504,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Autoregressive Lag (SAR) model.
     #[tool(
-        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its standard errors do not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes."
+        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Standard errors of the coefficients and rho are the inverse observed information of the full log-likelihood. With durbin = true (SDM), the direct, indirect and total impacts are spatialreg's (exact). The output ends with the optimiser's convergence and any warnings."
     )]
     pub async fn sar_model(
         &self,
@@ -601,10 +601,16 @@ impl AnalyticsServer {
                     output.push_str(
                         "\nNote: Direct = own effect, Indirect = spillover effects from neighbors",
                     );
-                    for warning in &impacts.warnings {
-                        output.push_str(&format!("\n⚠ WARNING: {}", warning));
-                    }
                 }
+                let mut notes = result.warnings.clone();
+                if let Some(impacts) = &result.impacts {
+                    notes.extend(impacts.warnings.iter().cloned());
+                }
+                common::append_notes(
+                    &mut output,
+                    Some((result.convergence.converged, result.convergence.iterations)),
+                    &notes,
+                );
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
@@ -618,7 +624,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Error Model (SEM).
     #[tool(
-        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: the standard error of lambda does not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes."
+        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). The output ends with the optimiser's convergence and any warnings."
     )]
     pub async fn sem_model(
         &self,
@@ -694,6 +700,11 @@ impl AnalyticsServer {
                      (no spatial multiplier effects unlike SAR)",
                     result.log_likelihood, result.aic, result.bic, result.sigma2, result.n_obs
                 ));
+                common::append_notes(
+                    &mut output,
+                    Some((result.convergence.converged, result.convergence.iterations)),
+                    &result.warnings,
+                );
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
