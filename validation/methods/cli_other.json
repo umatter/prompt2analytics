@@ -5,16 +5,29 @@
       "id": "cli_causal_options",
       "name": "p2a causal rd/fuzzy-rd/staggered-did/did/ipw/doubly-robust/tmle/stdreg/matching/synth/gsynth: typed options, R and MCP spellings, notes and wave-2 fields",
       "category": "interfaces",
-      "reference": "rdrobust::rdbwselect (bwselect, kernel)",
+      "reference": "rdrobust::rdbwselect (bwselect, kernel); did att_gt (control_group, est_method, anticipation; DRDID); lm + sandwich (2x2 DiD, aliased)",
       "doc": "validation/cli/other.md",
-      "cases": ["rd_bwselect_sharp", "rd_bwselect_fuzzy"],
+      "cases": [
+        "rd_bwselect_sharp",
+        "rd_bwselect_fuzzy",
+        "did_cs_analytic",
+        "did_cs_covariates",
+        "did_2x2_training"
+      ],
       "tests": [
         "p2a-cli::tier3::wp61_other::test_validate_cli_rd_bwselect_certwo",
         "p2a-cli::tier3::wp61_other::test_validate_cli_rd_kernel_alias",
-        "p2a-cli::tier3::wp61_other::test_validate_cli_fuzzy_rd_bwselect"
+        "p2a-cli::tier3::wp61_other::test_validate_cli_fuzzy_rd_bwselect",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_staggered_accepts_mcp_spelling",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_staggered_anticipation",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_did_aliased"
       ],
-      "quantities": ["selected bandwidths h and b (left, right) for certwo and the Epanechnikov mserd, sharp and fuzzy"],
-      "tolerance": "validation/README.md for each n (rd_sim 1000: 1e-8)",
+      "quantities": [
+        "selected bandwidths h and b (left, right) for certwo and the Epanechnikov mserd, sharp and fuzzy",
+        "staggered overall ATT and SE (not-yet-treated; DR with anticipation 1)",
+        "2x2 DiD ATT, HC1 SE, residual df and the aliased regressor"
+      ],
+      "tolerance": "validation/README.md for each n (rd_sim 1000: 1e-8; cs_panel 720: ATT 1e-8, SE 1e-6; employee_training 1200: 1e-10 / 1e-8); DR with anticipation Tol::iterative(1e-8) (glm IRLS propensity); counts and df exact",
       "deviations": [],
       "supersedes_legacy": []
     }

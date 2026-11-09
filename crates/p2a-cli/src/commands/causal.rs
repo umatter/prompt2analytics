@@ -476,7 +476,7 @@ EXAMPLES:
     p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state
 
-    # With doubly-robust estimation and covariates
+    # Doubly robust (DRDID) with covariates
     p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state -x population gdp --method dr
 ")]
@@ -488,33 +488,44 @@ EXAMPLES:
         #[arg(short = 'y', long)]
         outcome: String,
 
-        /// Treatment timing column (period when unit was first treated; 0 or negative = never treated)
+        /// Treatment timing column: the period a unit is first treated (0 or negative: never).
         #[arg(long)]
         treatment_time: String,
 
-        /// Time period column
+        /// Time period column.
         #[arg(long)]
         time: String,
 
-        /// Unit identifier column
+        /// Unit identifier column.
         #[arg(long)]
         unit: String,
 
-        /// Covariate columns for conditional parallel trends (optional)
+        /// Covariate columns for conditional parallel trends (optional).
         #[arg(short = 'x', long, num_args = 0..)]
         covariates: Vec<String>,
 
-        /// Comparison group: "nevertreated" (default) or "notyettreated"
-        #[arg(long, default_value = "nevertreated")]
-        comparison: String,
+        /// Comparison group, as did's control_group.
+        ///
+        /// never_treated (default) or not_yet_treated (also nevertreated, never, notyettreated,
+        /// notyet, nyt).
+        #[arg(long, default_value = "never_treated", value_parser = option_arg::<ComparisonGroup>)]
+        comparison: ComparisonGroup,
 
-        /// Estimation method: "or" (outcome regression, default), "ipw", or "dr" (doubly robust)
-        #[arg(long, default_value = "or")]
-        method: String,
+        /// Estimation method, as did's est_method (DRDID).
+        ///
+        /// or = outcome_regression (default; also reg), ipw = inverse probability weighting
+        /// (also std_ipw), dr = doubly_robust (also aipw, drdid).
+        #[arg(long, default_value = "or", value_parser = option_arg::<AttEstimationMethod>)]
+        method: AttEstimationMethod,
 
-        /// Bootstrap replications for SEs, at least 50 (a multiplier bootstrap of the
-        /// influence functions with covariates); 0 gives analytic influence-function SEs
-        /// (default: 999)
+        /// Periods before treatment in which units may anticipate it (did's anticipation).
+        #[arg(long, default_value_t = 0)]
+        anticipation: usize,
+
+        /// Unit-bootstrap replications for SEs (at least 50), or 0 for analytic SEs.
+        ///
+        /// The bootstrap is a multiplier bootstrap of the influence functions with covariates;
+        /// 0 gives analytic influence-function SEs (DRDID's with covariates).
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },
@@ -852,6 +863,7 @@ pub fn execute(
             covariates,
             comparison,
             method,
+            anticipation,
             bootstrap,
         } => execute_staggered_did(
             dataset,
@@ -860,8 +872,9 @@ pub fn execute(
             time,
             unit,
             covariates,
-            comparison,
-            method,
+            *comparison,
+            *method,
+            *anticipation,
             *bootstrap,
             format,
             session,
@@ -1110,7 +1123,7 @@ fn execute_did(
             match run_did(ds, outcome, treat, post, controls_opt, None) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Difference-in-Differences",
                             "att": result.att,
                             "std_error": result.std_error,
@@ -1121,9 +1134,11 @@ fn execute_did(
                             "treated_post_mean": result.treated_post_mean,
                             "control_pre_mean": result.control_pre_mean,
                             "control_post_mean": result.control_post_mean,
+                            "df": result.df,
                             "aliased": result.aliased,
-                            "warnings": result.warnings,
+                            "diagnostics": identification_json(&did_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1154,10 +1169,11 @@ fn execute_did(
                                 result.aliased.join(", ")
                             );
                         }
-                        let notes = p2a_core::traits::convergence::notes_text(&result);
-                        if !notes.is_empty() {
-                            print!("\n{notes}");
+                        let (converged, warnings) = result_notes(&result);
+                        if converged.is_some() || !warnings.is_empty() {
+                            println!();
                         }
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics
                         let diag_report = did_diagnostics(&result);
@@ -1548,6 +1564,15 @@ fn rd_name_message(e: p2a_core::EconError) -> String {
     }
 }
 
+/// clap value parser of an option enum (a core `option_enum!` table): the parsed value, or the
+/// core's message ("unknown <option> '<value>'; expected one of: ..."), which clap prints after
+/// "invalid value". Shared by the T3 CLI command files.
+pub(crate) fn option_arg<T: std::str::FromStr<Err = p2a_core::EconError>>(
+    s: &str,
+) -> Result<T, String> {
+    s.parse::<T>().map_err(rd_name_message)
+}
+
 /// `--vce` as a `VceType`, or the core message.
 fn parse_vce_arg(vce: &str) -> Result<VceType, String> {
     VceType::parse(vce).map_err(rd_name_message)
@@ -1807,8 +1832,9 @@ fn execute_staggered_did(
     time_col: &str,
     unit_col: &str,
     covariates: &[String],
-    comparison: &str,
-    method: &str,
+    comparison_group: ComparisonGroup,
+    estimation_method: AttEstimationMethod,
+    anticipation: usize,
     bootstrap: usize,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1830,23 +1856,11 @@ fn execute_staggered_did(
                 Some(cov_refs.as_slice())
             };
 
-            let comparison_group = match comparison.to_lowercase().as_str() {
-                "notyettreated" | "notyet" | "nyt" => ComparisonGroup::NotYetTreated,
-                _ => ComparisonGroup::NeverTreated,
-            };
-
-            let estimation_method = match method.to_lowercase().as_str() {
-                "ipw" => AttEstimationMethod::IPW,
-                "dr" | "doublyrobust" | "aipw" => AttEstimationMethod::DoublyRobust,
-                _ => AttEstimationMethod::OutcomeRegression,
-            };
-
-            let config = StaggeredDidConfig {
-                comparison_group,
-                estimation_method,
-                bootstrap,
-                ..Default::default()
-            };
+            let mut config = StaggeredDidConfig::default();
+            config.comparison_group = comparison_group;
+            config.estimation_method = estimation_method;
+            config.anticipation = anticipation;
+            config.bootstrap = bootstrap;
 
             match run_staggered_did(
                 ds,
@@ -1894,7 +1908,11 @@ fn execute_staggered_did(
                                     "method": pt.method,
                                 })
                             }),
+                            "covariates": result.covariates,
+                            "anticipation": result.config.anticipation,
+                            "diagnostics": identification_json(&staggered_did_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         // The text output's Display already ends with the missing-value note.
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;

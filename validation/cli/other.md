@@ -39,3 +39,24 @@ has its own `missing` key.
 | `test_validate_cli_fuzzy_rd_bwselect` | `rd_bwselect_fuzzy` `fuzzy_tri_p1_nn_certwo` (`--bwselect cer_two`) | `Tol::coef(1000)` |
 
 `test_cli_unknown_kernel_is_rejected` checks the usage errors (no R value).
+
+### `causal staggered-did`, `causal did`
+
+| Option | Values (canonical first; aliases) | R argument |
+|---|---|---|
+| `--comparison` | never_treated (nevertreated, never), not_yet_treated (notyettreated, notyet, nyt) | `att_gt(control_group = )` |
+| `--method` | outcome_regression (or, reg, regression), ipw (std_ipw), doubly_robust (dr, aipw, drdid) | `att_gt(est_method = )` |
+| `--anticipation` (new) | whole number, default 0 | `att_gt(anticipation = )` |
+
+The staggered JSON gains `covariates`, `anticipation`, `diagnostics` and the notes; `causal did`
+gains `df` (n minus the rank), `diagnostics` and the notes (its `aliased` key and R's
+singularity warning are the estimator's).
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_staggered_accepts_mcp_spelling` | `did_cs_analytic` `notyet_simple_att`, `notyet_simple_se` (`--comparison not_yet_treated --bootstrap 0`) | `Tol::coef(720)`, `Tol::se(720)` |
+| `test_validate_cli_staggered_anticipation` | `did_cs_covariates` `never_ant1_simple_att_dr`, `never_ant1_simple_se_dr` (`-x x1 x2 --method DR --anticipation 1 --bootstrap 0`) | `Tol::iterative(1e-8)` (glm IRLS propensity) |
+| `test_validate_cli_did_aliased` | `did_2x2_training` `aliased_df_resid` (exact), `aliased_coef` and `aliased_se_hc1` of `training_group:post_training` | `Tol::coef(1200)`, `Tol::se(1200)` |
+
+`test_cli_staggered_help_names_the_default` and `test_cli_staggered_short_help_lists_flags`
+check the help (the default `or` is named next to `outcome_regression`; CLI-32).

@@ -243,3 +243,218 @@ fn test_validate_cli_fuzzy_rd_bwselect() {
         "{text}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// causal staggered-did, did
+// ---------------------------------------------------------------------------------------------
+
+/// CLI-14: the MCP spelling not_yet_treated ran the never-treated comparison.
+/// R: did_cs_analytic notyet_simple_att / _se (analytic influence-function SEs, bstrap = FALSE).
+#[test]
+fn test_validate_cli_staggered_accepts_mcp_spelling() {
+    let case = Case::load("did_cs_analytic");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "causal",
+        "staggered-did",
+        &d,
+        "-y",
+        "y",
+        "--treatment-time",
+        "first_treat",
+        "--time",
+        "time",
+        "--unit",
+        "unit",
+        "--comparison",
+        "not_yet_treated",
+        "--bootstrap",
+        "0",
+    ]);
+    let o = field(&j, "overall_att");
+    Check::new(&case)
+        .scalar("notyet_simple_att", num(&o["att"]), Tol::coef(720))
+        .scalar("notyet_simple_se", num(&o["std_error"]), Tol::se(720))
+        .finish();
+    assert_eq!(field(&j, "comparison_group"), "Not-Yet-Treated");
+    assert_keys(
+        &j,
+        &["warnings", "diagnostics", "anticipation", "covariates"],
+    );
+    let base = [
+        "causal",
+        "staggered-did",
+        "d",
+        "-y",
+        "y",
+        "--treatment-time",
+        "g",
+        "--time",
+        "t",
+        "--unit",
+        "u",
+    ];
+    assert_usage_errors(&[
+        (argv(&base, &["--comparison", "later"]), "not_yet_treated"),
+        (argv(&base, &["--method", "drdid2"]), "doubly_robust"),
+    ]);
+}
+
+/// did's anticipation = 1 with DRDID's doubly robust cells and covariates.
+/// R: did_cs_covariates never_ant1_simple_att_dr / _se_dr (glm IRLS propensity).
+#[test]
+fn test_validate_cli_staggered_anticipation() {
+    let case = Case::load("did_cs_covariates");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "causal",
+        "staggered-did",
+        &d,
+        "-y",
+        "y",
+        "--treatment-time",
+        "first_treat",
+        "--time",
+        "time",
+        "--unit",
+        "unit",
+        "-x",
+        "x1",
+        "x2",
+        "--method",
+        "DR",
+        "--anticipation",
+        "1",
+        "--bootstrap",
+        "0",
+    ]);
+    let o = field(&j, "overall_att");
+    Check::new(&case)
+        .scalar(
+            "never_ant1_simple_att_dr",
+            num(&o["att"]),
+            Tol::iterative(1e-8),
+        )
+        .scalar(
+            "never_ant1_simple_se_dr",
+            num(&o["std_error"]),
+            Tol::iterative(1e-8),
+        )
+        .finish();
+    assert_eq!(num(field(&j, "anticipation")), 1.0);
+    assert_eq!(field(&j, "covariates"), &serde_json::json!(["x1", "x2"]));
+}
+
+/// CLI-32: the help called dr the default while `or` runs (the hand-written text was fixed by
+/// 6d139e07; this test guards the typed arg's help and `--anticipation`).
+#[test]
+fn test_cli_staggered_help_names_the_default() {
+    let out = p2a()
+        .args(["causal", "staggered-did", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{help}");
+    assert!(!help.contains("doubly robust, default"), "{help}");
+    let line = help
+        .lines()
+        .skip_while(|l| !l.contains("--method <"))
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        line.contains("outcome_regression") && line.contains("[default: or]"),
+        "{line}"
+    );
+    assert!(help.contains("--anticipation"), "{help}");
+}
+
+/// The 2x2 DiD JSON carries `aliased`, `df`, the warnings and the diagnostics (lm drops
+/// years_since_hire, collinear with tenure).
+/// R: did_2x2_training aliased_coef / aliased_se_hc1 for training_group:post_training.
+#[test]
+fn test_validate_cli_did_aliased() {
+    let case = Case::load("did_2x2_training");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "causal",
+        "did",
+        d.as_str(),
+        "-y",
+        "performance",
+        "--treat",
+        "training_group",
+        "--post",
+        "post_training",
+        "-x",
+        "tenure",
+        "years_since_hire",
+    ];
+    let j = s.json(&args);
+    Check::new(&case)
+        .scalar("aliased_df_resid", num(field(&j, "df")), Tol::exact())
+        .finish();
+    let att = num(field(&j, "att"));
+    let se = num(field(&j, "std_error"));
+    let coef = case.named("aliased_coef", "training_group:post_training");
+    let se_r = case.named("aliased_se_hc1", "training_group:post_training");
+    assert!(Tol::coef(1200).allows(att, coef), "{att} vs {coef}");
+    assert!(Tol::se(1200).allows(se, se_r), "{se} vs {se_r}");
+    assert_eq!(
+        field(&j, "aliased"),
+        &serde_json::json!(["years_since_hire"])
+    );
+    assert!(
+        field(&j, "warnings")
+            .to_string()
+            .contains("years_since_hire"),
+        "{j:#}"
+    );
+    assert_keys(&j, &["diagnostics"]);
+    let text = s.ok(&args);
+    assert!(
+        text.contains("Warning: Coefficients not defined because of singularities")
+            && text.contains("years_since_hire"),
+        "{text}"
+    );
+}
+
+/// `causal staggered-did -h` shows a one-line help for every flag (clap prints it after the
+/// value name, or on the next line when another flag's help is long).
+#[test]
+fn test_cli_staggered_short_help_lists_flags() {
+    let out = p2a()
+        .args(["causal", "staggered-did", "-h"])
+        .output()
+        .unwrap();
+    let h = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = h.lines().collect();
+    for flag in [
+        "--treatment-time <",
+        "--comparison <",
+        "--method <",
+        "--bootstrap <",
+        "--anticipation <",
+    ] {
+        let i = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(flag))
+            .unwrap_or_else(|| panic!("{flag} missing:\n{h}"));
+        let same = lines[i]
+            .split(flag)
+            .nth(1)
+            .and_then(|r| r.split_once('>'))
+            .map(|(_, d)| d.trim());
+        let help = match same {
+            Some(d) if !d.is_empty() => d,
+            _ => lines.get(i + 1).map(|l| l.trim()).unwrap_or(""),
+        };
+        assert!(
+            !help.is_empty() && !help.starts_with("--"),
+            "{flag} has no one-line help:\n{h}"
+        );
+    }
+}
