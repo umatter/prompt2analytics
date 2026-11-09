@@ -562,7 +562,7 @@ Families (Off: none):
 
 | Key | What it bounds (typical fields) | Hosted |
 |---|---|---|
-| `replications` | bootstrap and permutation counts (`n_boot`, `n_bootstrap`, `n_permutations`, `bootstrap`) | 10,000 |
+| `replications` | bootstrap and permutation counts (`n_boot`, `n_bootstrap`, `n_permutations`, `bootstrap`, gsynth and iv_mte `bootstrap_reps`) | 10,000 |
 | `simulation_size` | Monte Carlo sizes (`n_simulations`, `n_samples`) | 100,000 |
 | `trees` | `n_trees`, `ntree`, `committees` | 5,000 |
 | `boosting_iterations` | `mstop`, `trials`, `nterms`, boosting `n_iter` | 10,000 |
@@ -570,14 +570,14 @@ Families (Off: none):
 | `folds` | `cv_folds`, `n_folds`, `nfolds` | 20 |
 | `iterations` | `max_iter`, `max_iterations`, `maxit` | 100,000 |
 | `restarts` | `n_init`, `n_starts` | 100 |
-| `grid_points` | `n_grid`, density `n`, `n_points`, `nlambda` | 10,000 |
+| `grid_points` | `n_grid`, density `n`, `stats_spline` `n`, `n_points`, `nlambda` | 10,000 |
 | `bins` | `bins`, `breaks`, `n_bins` | 1,000 |
-| `lags` | `lag_max`, `lags`, `max_lag`, `order_max`, `differences` | 1,000 |
+| `lags` | `lag_max`, `lags`, `max_lag`, `order_max`, `differences`, ts_varma `long_var_order`, panel_unit_root `pmax` | 1,000 |
 | `horizon` | forecast `horizon`, `steps`, `n_ahead`, `h` | 5,000 |
 | `model_order` | ARIMA, GARCH and VAR orders, RD `p`, `degree`, `instrument_order` | 20 |
 | `bandwidth` | integer HAC, Driscoll-Kraay, GMM and sphet bandwidths | 1,000 |
 | `span_width` | `spans` elements, `runmed` `k`, windows | 1,001 |
-| `components` | `n_components`, `n_factors`, `rank`, `n_clusters`, k-means `k` | 500 |
+| `components` | `n_components`, `n_factors`, `rank`, `n_clusters`, k-means `k`, gsynth `r_max` | 500 |
 | `neighbors` | kNN `k`, `n_neighbors` | 100 |
 | `generated_rows` | generated and sampled rows (`n_rows`, `munge_sample` `n`, `arima_sim` `n`) | 1,000,000 |
 | `image_dimension` | chart `width`, `height` | 4,000 |
