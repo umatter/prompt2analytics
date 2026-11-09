@@ -267,16 +267,18 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Estimand: "ate" (default) or "att"
-        #[arg(long, default_value = "ate")]
-        estimand: String,
+        /// Estimand: ate (default) or att
+        #[arg(long, default_value = "ate", value_parser = option_arg::<Estimand>)]
+        estimand: Estimand,
 
-        /// Trimming threshold for propensity scores (default: 0.05)
+        /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
         #[arg(long, default_value = "0.05")]
         trim: f64,
 
-        /// Number of bootstrap replications (default: 999)
-        #[arg(long, default_value = "999")]
+        /// Standard errors: 0 (default) gives the M-estimation SE with the propensity score
+        /// estimated, as WeightIt; N >= 2 a bootstrap of the weighted means with the fitted
+        /// propensity scores held fixed (conservative)
+        #[arg(long, default_value = "0")]
         bootstrap: usize,
     },
 
@@ -305,19 +307,21 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Method: "aipw" (default), "ipw", or "regression"
-        #[arg(long, default_value = "aipw")]
-        method: String,
+        /// Method: aipw (default; also dr, doubly_robust), ipw or regression (also reg, ra,
+        /// outcome_regression)
+        #[arg(long, default_value = "aipw", value_parser = option_arg::<DRMethod>)]
+        method: DRMethod,
 
-        /// Estimand: "ate" (default) or "att"
-        #[arg(long, default_value = "ate")]
-        estimand: String,
+        /// Estimand: ate (default) or att
+        #[arg(long, default_value = "ate", value_parser = option_arg::<Estimand>)]
+        estimand: Estimand,
 
-        /// Trimming threshold (default: 0.05)
+        /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
         #[arg(long, default_value = "0.05")]
         trim: f64,
 
-        /// Number of bootstrap replications (default: 999)
+        /// Bootstrap replications for the SEs of --method ipw and regression (at least 2;
+        /// default: 999); aipw uses its analytic influence-function SE and ignores it
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },
@@ -336,7 +340,7 @@ EXAMPLES:
         #[arg(short = 'y', long)]
         outcome: String,
 
-        /// Treatment indicator column
+        /// Treatment indicator column (binary 0/1)
         #[arg(short = 't', long)]
         treatment: String,
 
@@ -555,9 +559,11 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Outcome model: "logistic" (default) or "linear"
-        #[arg(long, default_value = "logistic")]
-        qmodel: String,
+        /// Outcome (Q) model: logistic (default; also logit, binomial, binary) or linear (also
+        /// gaussian, continuous, ols); logistic: Y outside [0, 1] is rescaled to [0, 1] first,
+        /// as the tmle package does
+        #[arg(long, default_value = "logistic", value_parser = option_arg::<QModel>)]
+        qmodel: QModel,
 
         /// Propensity score truncation lower bound (default: 0.01)
         #[arg(long, default_value = "0.01")]
@@ -698,17 +704,18 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         covariates: Vec<String>,
 
-        /// Outcome model: "linear" (default), "logistic", or "poisson"
-        #[arg(long, default_value = "linear")]
-        model: String,
+        /// Outcome model: linear (default; also ols, gaussian), logistic (also logit, binomial)
+        /// or poisson (also count, log_linear)
+        #[arg(long, default_value = "linear", value_parser = option_arg::<StdRegModel>)]
+        model: StdRegModel,
 
-        /// Estimand: "ate" (default), "att", "atc", or "levels"
-        #[arg(long, default_value = "ate")]
-        estimand: String,
+        /// Estimand: ate (default), att, atc or levels (also potential_outcomes)
+        #[arg(long, default_value = "ate", value_parser = option_arg::<StdRegEstimand>)]
+        estimand: StdRegEstimand,
 
-        /// SE method: "bootstrap" (default), "delta", or "sandwich"
-        #[arg(long, default_value = "bootstrap")]
-        se_method: String,
+        /// SE method: bootstrap (default; also boot), delta or sandwich (also robust)
+        #[arg(long, default_value = "bootstrap", value_parser = option_arg::<SEMethod>)]
+        se_method: SEMethod,
 
         /// Number of bootstrap replications (default: 999)
         #[arg(long, default_value = "999")]
@@ -773,7 +780,7 @@ pub fn execute(
             trim,
             bootstrap,
         } => execute_ipw(
-            dataset, outcome, treatment, covariates, estimand, *trim, *bootstrap, format, session,
+            dataset, outcome, treatment, covariates, *estimand, *trim, *bootstrap, format, session,
         ),
         CausalCommands::DoublyRobust {
             dataset,
@@ -785,7 +792,7 @@ pub fn execute(
             trim,
             bootstrap,
         } => execute_dr(
-            dataset, outcome, treatment, covariates, method, estimand, *trim, *bootstrap, format,
+            dataset, outcome, treatment, covariates, *method, *estimand, *trim, *bootstrap, format,
             session,
         ),
         CausalCommands::Mediation {
@@ -892,7 +899,7 @@ pub fn execute(
             outcome,
             treatment,
             covariates,
-            qmodel,
+            *qmodel,
             *truncate_lower,
             *truncate_upper,
             format,
@@ -963,9 +970,9 @@ pub fn execute(
             outcome,
             treatment,
             covariates,
-            model,
-            estimand,
-            se_method,
+            *model,
+            *estimand,
+            *se_method,
             *bootstrap,
             *interactions,
             format,
@@ -1036,6 +1043,10 @@ fn execute_iv(
                                 "p_values": result.first_stage_p_values,
                                 "strong_instruments": result.strong_instruments,
                             });
+                            json["diagnostics"] = iv_diagnostics(ds, &result)
+                                .map(|r| identification_json(&r))
+                                .unwrap_or_else(|_| serde_json::json!([]));
+                            extend_json(&mut json, notes_json(None, &result.warnings));
                             if let Some(m) = missing_json(&result.missing) {
                                 json["missing"] = m;
                             }
@@ -1070,6 +1081,8 @@ fn execute_iv(
                                     println!("  Warning: Some instruments may be weak (F < 10)");
                                 }
                             }
+
+                            print_notes(None, &result.warnings, format);
 
                             // Run identification diagnostics
                             if let Ok(diag_report) = iv_diagnostics(ds, &result) {
@@ -1299,7 +1312,7 @@ fn execute_ipw(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    estimand: &str,
+    est: Estimand,
     trim: f64,
     bootstrap: usize,
     format: &OutputFormat,
@@ -1316,10 +1329,6 @@ fn execute_ipw(
     match dataset {
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
-            let est = match estimand.to_lowercase().as_str() {
-                "att" => Estimand::ATT,
-                _ => Estimand::ATE,
-            };
             let mut config = IpwConfig::default();
             config.estimand = est;
             config.trim = trim;
@@ -1330,11 +1339,15 @@ fn execute_ipw(
             match run_ipw_treatment(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "IPW Treatment Effect",
                             "estimand": format!("{:?}", result.estimand),
                             "effect": result.effect,
                             "std_error": result.std_error,
+                            "se_method": result.se_method,
+                            "se_mest": result.se_mest,
+                            "se_naive": result.se_naive,
+                            "se_eif": result.se_eif,
                             "ci_lower": result.ci_lower,
                             "ci_upper": result.ci_upper,
                             "t_stat": result.t_stat,
@@ -1342,7 +1355,9 @@ fn execute_ipw(
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
+                            "diagnostics": identification_json(&ipw_diagnostics(&result)),
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1350,6 +1365,7 @@ fn execute_ipw(
                         println!("{}", "=".repeat(50));
                         println!("Effect: {:.6}", result.effect);
                         println!("Std Error: {:.6}", result.std_error);
+                        println!("SE method: {}", result.se_method);
                         println!("95% CI: [{:.6}, {:.6}]", result.ci_lower, result.ci_upper);
                         println!(
                             "t-stat: {:.4}, p-value: {:.4}",
@@ -1359,6 +1375,7 @@ fn execute_ipw(
                             "N: {} (treated: {}, control: {})",
                             result.n_obs, result.n_treated, result.n_control
                         );
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics
                         let diag_report = ipw_diagnostics(&result);
@@ -1378,8 +1395,8 @@ fn execute_dr(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    method: &str,
-    estimand: &str,
+    dr_method: DRMethod,
+    est: Estimand,
     trim: f64,
     bootstrap: usize,
     format: &OutputFormat,
@@ -1396,15 +1413,6 @@ fn execute_dr(
     match dataset {
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
-            let est = match estimand.to_lowercase().as_str() {
-                "att" => Estimand::ATT,
-                _ => Estimand::ATE,
-            };
-            let dr_method = match method.to_lowercase().as_str() {
-                "ipw" => DRMethod::IPW,
-                "regression" => DRMethod::Regression,
-                _ => DRMethod::AIPW,
-            };
             let mut config = DoublyRobustConfig::default();
             config.method = dr_method;
             config.estimand = est;
@@ -1415,17 +1423,19 @@ fn execute_dr(
             match run_doubly_robust(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": format!("{:?}", result.method),
                             "estimand": format!("{:?}", result.estimand),
                             "effect": result.effect,
                             "std_error": result.std_error,
+                            "se_method": result.se_method,
                             "ci_lower": result.ci_lower,
                             "ci_upper": result.ci_upper,
                             "t_stat": result.t_stat,
                             "p_value": result.p_value,
                             "n_obs": result.n_obs,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1436,12 +1446,14 @@ fn execute_dr(
                         println!("{}", "=".repeat(50));
                         println!("Effect: {:.6}", result.effect);
                         println!("Std Error: {:.6}", result.std_error);
+                        println!("SE method: {}", result.se_method);
                         println!("95% CI: [{:.6}, {:.6}]", result.ci_lower, result.ci_upper);
                         println!(
                             "t-stat: {:.4}, p-value: {:.4}",
                             result.t_stat, result.p_value
                         );
                         println!("N: {}", result.n_obs);
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("Doubly robust failed: {}", e), format),
@@ -1495,6 +1507,7 @@ fn execute_mediation(
                             "p_indirect": result.p_indirect,
                             "n_obs": result.n_obs,
                         });
+                        with_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1520,6 +1533,7 @@ fn execute_mediation(
                             result.proportion_mediated * 100.0
                         );
                         println!("N: {}", result.n_obs);
+                        print_result_notes(&result, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1940,7 +1954,7 @@ fn execute_tmle(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    qmodel: &str,
+    q_model: QModel,
     truncate_lower: f64,
     truncate_upper: f64,
     format: &OutputFormat,
@@ -1958,22 +1972,15 @@ fn execute_tmle(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let q_model = match qmodel.to_lowercase().as_str() {
-                "linear" => QModel::Linear,
-                _ => QModel::Logistic,
-            };
-
-            let config = TmleConfig {
-                q_model,
-                g_model: GModel::Logistic,
-                truncate_ps: (truncate_lower, truncate_upper),
-                ..Default::default()
-            };
+            let mut config = TmleConfig::default();
+            config.q_model = q_model;
+            config.g_model = GModel::Logistic;
+            config.truncate_ps = (truncate_lower, truncate_upper);
 
             match tmle(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Targeted Maximum Likelihood Estimation (TMLE)",
                             "ate": result.ate,
                             "ate_se": result.ate_se,
@@ -1983,6 +1990,9 @@ fn execute_tmle(
                             "p_value": result.ate_p_value,
                             "significance": format!("{}", result.significance),
                             "fluctuation_coef": result.fluctuation_coef,
+                            "fluctuation_coef_control": result.fluctuation_coef_control,
+                            "targeting_iterations": result.targeting_iterations,
+                            "outcome_range": result.outcome_range,
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
@@ -1990,6 +2000,7 @@ fn execute_tmle(
                             "q_model_converged": result.q_model_converged,
                             "g_model_converged": result.g_model_converged,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2008,8 +2019,8 @@ fn execute_tmle(
                             result.significance.stars()
                         );
                         println!(
-                            "\nFluctuation coefficient (epsilon): {:.6}",
-                            result.fluctuation_coef
+                            "\nFluctuation coefficients (epsilon): {:.6} (treated), {:.6} (control)",
+                            result.fluctuation_coef, result.fluctuation_coef_control
                         );
                         println!(
                             "N: {} (treated: {}, control: {})",
@@ -2022,6 +2033,7 @@ fn execute_tmle(
                             "Q-model converged: {}, G-model converged: {}",
                             result.q_model_converged, result.g_model_converged
                         );
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("TMLE failed: {}", e), format),
@@ -2233,9 +2245,9 @@ fn execute_stdreg(
     outcome: &str,
     treatment: &str,
     covariates: &[String],
-    model: &str,
-    estimand: &str,
-    se_method: &str,
+    model_type: StdRegModel,
+    stdreg_estimand: StdRegEstimand,
+    se_meth: SEMethod,
     bootstrap: usize,
     interactions: bool,
     format: &OutputFormat,
@@ -2253,38 +2265,17 @@ fn execute_stdreg(
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
 
-            let model_type = match model.to_lowercase().as_str() {
-                "logistic" | "logit" => StdRegModel::Logistic,
-                "poisson" => StdRegModel::Poisson,
-                _ => StdRegModel::Linear,
-            };
-
-            let stdreg_estimand = match estimand.to_lowercase().as_str() {
-                "att" => StdRegEstimand::ATT,
-                "atc" => StdRegEstimand::ATC,
-                "levels" => StdRegEstimand::Levels,
-                _ => StdRegEstimand::ATE,
-            };
-
-            let se_meth = match se_method.to_lowercase().as_str() {
-                "delta" => SEMethod::Delta,
-                "sandwich" | "robust" => SEMethod::Sandwich,
-                _ => SEMethod::Bootstrap,
-            };
-
-            let config = StdRegConfig {
-                model_type,
-                estimand: stdreg_estimand,
-                se_method: se_meth,
-                n_bootstrap: bootstrap,
-                include_interactions: interactions,
-                ..Default::default()
-            };
+            let mut config = StdRegConfig::default();
+            config.model_type = model_type;
+            config.estimand = stdreg_estimand;
+            config.se_method = se_meth;
+            config.n_bootstrap = bootstrap;
+            config.include_interactions = interactions;
 
             match run_stdreg(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Regression Standardization (G-computation)",
                             "estimand": format!("{}", result.estimand),
                             "model_type": format!("{}", result.model_type),
@@ -2309,6 +2300,7 @@ fn execute_stdreg(
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2354,6 +2346,7 @@ fn execute_stdreg(
                             "N: {} (treated: {}, control: {})",
                             result.n_obs, result.n_treated, result.n_control
                         );
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("Regression standardization failed: {}", e), format),

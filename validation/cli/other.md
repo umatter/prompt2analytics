@@ -60,3 +60,32 @@ singularity warning are the estimator's).
 
 `test_cli_staggered_help_names_the_default` and `test_cli_staggered_short_help_lists_flags`
 check the help (the default `or` is named next to `outcome_regression`; CLI-32).
+
+### `causal ipw`, `doubly-robust`, `tmle`, `stdreg`, `iv`, `mediation`
+
+| Command, option | Values (canonical first; aliases) | R argument |
+|---|---|---|
+| `ipw --estimand`, `doubly-robust --estimand` | ate, att | `weightit(estimand = )` |
+| `doubly-robust --method` | aipw (dr, doubly_robust), ipw, regression (reg, ra, outcome_regression) | |
+| `tmle --qmodel` | logistic (logit, binomial, binary), linear (gaussian, continuous, ols) | `tmle(Q.SL.library = )` family |
+| `stdreg --model` | linear (ols, gaussian, continuous), logistic (logit, binomial, binary), poisson (count, counts, log_linear) | `glm(family = )` |
+| `stdreg --estimand` | ate, att, atc, levels (potential_outcomes) | |
+| `stdreg --se-method` | bootstrap (boot), delta (delta_method), sandwich (robust) | |
+
+`causal ipw` defaults to `--bootstrap 0`: the M-estimation SE with the propensity score
+estimated (WeightIt's `vcov = "asympt"`). `--bootstrap N` (N >= 2) bootstraps the weighted means
+with the fitted propensity scores held fixed, which is conservative. `doubly-robust` keeps 999
+replicates for `--method ipw` and `regression`; AIPW uses its analytic influence-function SE.
+IPW and doubly robust print `SE method:` and serialise `se_method` (IPW also `se_mest`,
+`se_naive`, `se_eif`); every command prints and serialises the core notes, IPW and IV the
+identification diagnostics, TMLE both fluctuation coefficients.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_ipw_dr_se_method` | `ipw_aipw_sim` `ipw_ate_hajek`, `ipw_ate_se_mest`, `ipw_ate_se_eif`, `aipw_ate`, `aipw_ate_se` (`--trim 0`) | `Tol::coef(300)`, `Tol::se(300)` |
+| `test_validate_cli_tmle_qmodel_alias` | `tmle_glm` `linear_ate`, `linear_se` (`--qmodel gaussian`) | `Tol::coef(300)`, `Tol::se(300)` |
+| `test_validate_cli_stdreg_r_spellings` | `stdreg_glm` `logit_ate`, `logit_ey1`, `logit_ey0` (`--model binomial`) | `Tol::iterative(1e-8)` |
+
+Deviation: the stdreg SEs are not pinned (CAUS-39). `test_cli_causal_json_carries_notes` checks
+that the IV and mediation JSON carry `warnings` (IV also `diagnostics` and `first_stage`,
+mediation `missing`); it pins no value.

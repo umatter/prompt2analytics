@@ -458,3 +458,209 @@ fn test_cli_staggered_short_help_lists_flags() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// causal ipw, doubly-robust, tmle, stdreg, iv, mediation
+// ---------------------------------------------------------------------------------------------
+
+/// CLI-14 (`--estimand atc` gave ATE) and the SE method and warnings of IPW and AIPW.
+/// R: ipw_aipw_sim (glm propensity, Hajek IPW with the M-estimation SE; AIPW with OLS outcome
+/// models), trim 0.
+#[test]
+fn test_validate_cli_ipw_dr_se_method() {
+    let case = Case::load("ipw_aipw_sim");
+    let s = temp_session();
+    let d = s.load(&case);
+    let ipw_args = [
+        "causal",
+        "ipw",
+        d.as_str(),
+        "-y",
+        "y",
+        "-t",
+        "treat",
+        "-x",
+        "x1",
+        "x2",
+        "x3",
+        "--trim",
+        "0",
+    ];
+    let ipw = s.json(&ipw_args); // default --bootstrap 0: the analytic M-estimation SE
+    let dr = s.json(&[
+        "causal",
+        "doubly-robust",
+        &d,
+        "-y",
+        "y",
+        "-t",
+        "treat",
+        "-x",
+        "x1",
+        "x2",
+        "x3",
+        "--trim",
+        "0",
+        "--method",
+        "dr",
+    ]);
+    Check::new(&case)
+        .scalar("ipw_ate_hajek", num(field(&ipw, "effect")), Tol::coef(300))
+        .scalar(
+            "ipw_ate_se_mest",
+            num(field(&ipw, "std_error")),
+            Tol::se(300),
+        )
+        .scalar("ipw_ate_se_eif", num(field(&ipw, "se_eif")), Tol::se(300))
+        .scalar("aipw_ate", num(field(&dr, "effect")), Tol::coef(300))
+        .scalar("aipw_ate_se", num(field(&dr, "std_error")), Tol::se(300))
+        .finish();
+    assert_eq!(
+        field(&ipw, "se_method"),
+        "M-estimation (propensity estimated)"
+    );
+    assert_eq!(field(&dr, "se_method"), "analytic influence function");
+    assert_keys(
+        &ipw,
+        &["warnings", "diagnostics", "se_mest", "se_naive", "se_eif"],
+    );
+    assert_keys(&dr, &["warnings"]);
+    let text = s.ok(&ipw_args);
+    assert!(
+        text.contains("SE method: M-estimation (propensity estimated)"),
+        "{text}"
+    );
+    let base = ["causal", "ipw", "d", "-y", "y", "-t", "t", "-x", "a"];
+    let drb = [
+        "causal",
+        "doubly-robust",
+        "d",
+        "-y",
+        "y",
+        "-t",
+        "t",
+        "-x",
+        "a",
+    ];
+    assert_usage_errors(&[
+        (
+            argv(&base, &["--estimand", "atc"]),
+            "unknown estimand 'atc'; expected one of: ate, att",
+        ),
+        (argv(&drb, &["--method", "tmle"]), "aipw"),
+    ]);
+}
+
+/// CLI-14: `--qmodel gaussian` (a QModel alias) ran the logistic Q model.
+/// R: tmle_glm linear_ate, linear_se (lm Q on yc, glm g, linear fluctuation).
+#[test]
+fn test_validate_cli_tmle_qmodel_alias() {
+    let case = Case::load("tmle_glm");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "causal", "tmle", &d, "-y", "yc", "-t", "a", "-x", "w1", "w2", "w3", "w4", "--qmodel",
+        "gaussian",
+    ]);
+    Check::new(&case)
+        .scalar("linear_ate", num(field(&j, "ate")), Tol::coef(300))
+        .scalar("linear_se", num(field(&j, "ate_se")), Tol::se(300))
+        .finish();
+    assert_keys(
+        &j,
+        &[
+            "warnings",
+            "fluctuation_coef_control",
+            "targeting_iterations",
+        ],
+    );
+    assert_usage_errors(&[(
+        vec![
+            "causal", "tmle", "d", "-y", "y", "-t", "t", "-x", "a", "--qmodel", "probit",
+        ],
+        "logistic",
+    )]);
+}
+
+/// CLI-14: R's family name `binomial` ran a linear outcome model.
+/// R: stdreg_glm logit_ate, logit_ey1, logit_ey0 (glm(yb ~ x1 + x2 + a, binomial), tight fit).
+#[test]
+fn test_validate_cli_stdreg_r_spellings() {
+    let case = Case::load("stdreg_glm");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&[
+        "causal",
+        "stdreg",
+        &d,
+        "-y",
+        "yb",
+        "-t",
+        "a",
+        "-x",
+        "x1",
+        "x2",
+        "--model",
+        "binomial",
+        "--se-method",
+        "robust",
+    ]);
+    Check::new(&case)
+        .scalar("logit_ate", num(field(&j, "ate")), Tol::iterative(1e-8))
+        .scalar("logit_ey1", num(field(&j, "ey1")), Tol::iterative(1e-8))
+        .scalar("logit_ey0", num(field(&j, "ey0")), Tol::iterative(1e-8))
+        .finish();
+    assert_eq!(field(&j, "converged"), true);
+    assert_keys(&j, &["warnings", "iterations"]);
+    let b = ["causal", "stdreg", "d", "-y", "y", "-t", "t", "-x", "a"];
+    assert_usage_errors(&[
+        (argv(&b, &["--model", "probit"]), "poisson"),
+        (argv(&b, &["--estimand", "ato"]), "levels"),
+        (argv(&b, &["--se-method", "jackknife"]), "sandwich"),
+    ]);
+}
+
+/// CLI-17 (causal part): IV and mediation JSON carried no warnings, IV no diagnostics (the IV
+/// first stage and both commands' `missing` are kept).
+#[test]
+fn test_cli_causal_json_carries_notes() {
+    let s = temp_session();
+    let iv = load_repo_csv(
+        &s,
+        "validation/datasets/generated/iv_weak_controls.csv",
+        "ivw",
+    );
+    let j = s.json(&[
+        "causal",
+        "iv",
+        &iv,
+        "-y",
+        "y",
+        "--exog",
+        "w",
+        "--endog",
+        "x",
+        "--instruments",
+        "z1",
+        "z2",
+    ]);
+    assert_keys(&j, &["warnings", "diagnostics", "first_stage"]);
+    let med = load_repo_csv(&s, "validation/datasets/generated/causal_na.csv", "cna");
+    let j = s.json(&[
+        "causal",
+        "mediation",
+        &med,
+        "-y",
+        "y",
+        "-t",
+        "d",
+        "-m",
+        "m",
+        "-x",
+        "x1",
+        "x2",
+        "--bootstrap",
+        "50",
+    ]);
+    assert_keys(&j, &["warnings", "missing"]);
+}
