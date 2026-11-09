@@ -979,5 +979,63 @@ class ValidateFilterTest(unittest.TestCase):
 
 
 
+# ---------------------------------------------------------------- Task 9: validation docs and tooling after the renames
+
+class DocCommandsTest(unittest.TestCase):
+    """Every `cargo test ... -- <filter>` in a validation doc selects at least one listed test."""
+
+    @unittest.skipUnless(WITH_LISTS, NEEDS_LISTS)
+    def test_cargo_test_filters_select_tests(self):
+        ids, _ = load_test_lists()
+        by_pkg = {}
+        for test_id, (_, raw) in ids.items():
+            by_pkg.setdefault(test_id.split("::", 1)[0], []).append(raw)
+        problems = []
+        for p in md_files():
+            in_fence = False
+            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if not in_fence or "cargo test" not in line or " -- " not in line:
+                    continue
+                cmd = line.split("#", 1)[0]
+                pkg = re.search(r"-p\s+(p2a-[a-z]+)", cmd)
+                names = by_pkg.get(pkg.group(1), []) if pkg else [r for v in by_pkg.values() for r in v]
+                tail = []
+                for tok in cmd.split(" -- ", 1)[1].split():
+                    if tok in (">", ">>", "|", "&&", "||", ";") or tok.startswith((">", "2>", "|")):
+                        break
+                    if tok != "\\":
+                        tail.append(tok)
+                exact = "--exact" in tail
+                for f in (t for t in tail if not t.startswith("-") and "<" not in t):
+                    if not any((r == f) if exact else (f in r) for r in names):
+                        problems.append(f"{p.relative_to(REPO)}:{n}: filter {f!r} selects no test")
+        self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+
+class ClaudeToolingTest(unittest.TestCase):
+    """The agent tooling's method registry names validation docs and test patterns that exist (X-10 renames)."""
+
+    def test_patterns_and_docs_resolve(self):
+        reg = json.loads((REPO / ".claude/tooling/validation/method_registry.json").read_text(encoding="utf-8"))
+        names = set()
+        for _, path in rust_files():
+            names.update(re.findall(r"\bfn (test_\w+)", path.read_text(encoding="utf-8")))
+        problems = []
+        for key, m in reg["methods"].items():
+            doc = m.get("validation_doc")
+            if doc and not (REPO / doc).is_file():
+                problems.append(f"{key}: validation_doc {doc} does not exist")
+            module = m.get("rust_module")
+            if module and not (REPO / module).exists():
+                problems.append(f"{key}: rust_module {module} does not exist (WP04 split or moved it)")
+            for pat in m.get("test_patterns", []):
+                if not any(pat in n for n in names):
+                    problems.append(f"{key}: test pattern {pat!r} matches no test")
+        self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+
 if __name__ == "__main__":
     unittest.main()
