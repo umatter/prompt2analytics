@@ -10,3 +10,4 @@ mod wp56_stats_ts;
 mod wp57_ml_spatial;
 mod wp58_models;
 mod wp59_data;
+mod wp62_numeric;

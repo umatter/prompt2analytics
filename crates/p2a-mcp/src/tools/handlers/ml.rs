@@ -1629,7 +1629,7 @@ impl AnalyticsServer {
 
     /// Compute SHAP values for model interpretation.
     #[tool(
-        description = "SHAP values for a random-forest regression trained on target and features (n_trees, max_depth, seed). method 'tree' (default): exact TreeSHAP, O(T L D^2) per row, tree path-dependent values. method 'kernel': Kernel SHAP, interventional values over a background of at most 100 training rows; Kernel SHAP costs about max_obs x n_coalitions x background rows forest evaluations, n_coalitions = min(2^M - 2, n_samples). Returns the base value E[f], the SHAP values of the first 5 explained rows, mean |SHAP| importances, the additivity check (base + sum = prediction, tolerance 1e-8 relative to max(1, |f|)), optional interaction values and summary statistics."
+        description = "SHAP values for a random-forest regression trained on target and features (n_trees, max_depth, seed). method 'tree' (default): exact TreeSHAP, O(T L D^2) per row, tree path-dependent values. method 'kernel': Kernel SHAP, interventional values over a background of at most 100 training rows; Kernel SHAP costs about max_obs x n_coalitions x background rows forest evaluations, n_coalitions = min(2^M - 2, n_samples). Returns the base value E[f], the SHAP values of the first 5 explained rows, mean |SHAP| importances, the additivity check (base + sum = prediction, tolerance 1e-8 relative to max(1, |f|)), optional TreeSHAP interaction values (for the first 3 explained rows: the main effects and the 10 largest pairwise cells, with the number of pairs not shown) and summary statistics."
     )]
     pub async fn ml_shap_values(
         &self,
@@ -1754,16 +1754,9 @@ impl AnalyticsServer {
                 ShapMethod::Tree,
                 &cfg,
             ) {
-                Ok(r) => r.interaction_values.map(|mats| {
-                    mats.iter()
-                        .map(|m| {
-                            m.rows()
-                                .into_iter()
-                                .map(|r| r.to_vec())
-                                .collect::<Vec<Vec<f64>>>()
-                        })
-                        .collect::<Vec<_>>()
-                }),
+                Ok(r) => r
+                    .interaction_values
+                    .map(|mats| shap_interaction_summary(&mats, &request.features)),
                 Err(e) => return Ok(ml_error("SHAP interaction values failed: ", e)),
             }
         } else {
@@ -1892,7 +1885,7 @@ impl AnalyticsServer {
         });
 
         if let Some(sample) = interaction_sample {
-            output["interaction_values_sample"] = serde_json::json!(sample);
+            output["interaction_values_sample"] = sample;
         }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -2102,6 +2095,51 @@ impl AnalyticsServer {
 // ============================================================================
 // Helpers shared by the ML and spatial handlers (seeds, option tables, output columns)
 // ============================================================================
+
+/// Off-diagonal SHAP interaction cells listed per explained row in the reply; the rest are
+/// counted in `pairs_not_shown`, so the reply stays inside the chat loop's budget at any M.
+const SHAP_INTERACTION_PAIRS_SHOWN: usize = 10;
+
+/// The interaction matrices of the explained rows as the reply shows them: per row, the main
+/// effects (the diagonal, in feature order) and the largest off-diagonal cells by absolute
+/// value (`phi_ij = phi_ji`; row i of the matrix sums to feature i's SHAP value), with the
+/// number of pairs not shown.
+fn shap_interaction_summary(
+    mats: &[ndarray::Array2<f64>],
+    features: &[String],
+) -> serde_json::Value {
+    let name = |j: usize| {
+        features
+            .get(j)
+            .cloned()
+            .unwrap_or_else(|| format!("Feature_{j}"))
+    };
+    let rows: Vec<serde_json::Value> = mats
+        .iter()
+        .enumerate()
+        .map(|(row, m)| {
+            let k = m.nrows();
+            let mut pairs: Vec<(usize, usize, f64)> = (0..k)
+                .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+                .map(|(i, j)| (i, j, m[[i, j]]))
+                .collect();
+            pairs.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()).then((a.0, a.1).cmp(&(b.0, b.1))));
+            let not_shown = pairs.len().saturating_sub(SHAP_INTERACTION_PAIRS_SHOWN);
+            pairs.truncate(SHAP_INTERACTION_PAIRS_SHOWN);
+            let top: Vec<serde_json::Value> = pairs
+                .iter()
+                .map(|&(i, j, v)| serde_json::json!({"features": [name(i), name(j)], "interaction": v}))
+                .collect();
+            serde_json::json!({
+                "row": row,
+                "main_effects": m.diag().to_vec(),
+                "top_pairs": top,
+                "pairs_not_shown": not_shown,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
 
 /// Rows of the Kernel SHAP background: all training rows up to this many, else this many rows
 /// evenly spaced in row order (shap.sample's size).
