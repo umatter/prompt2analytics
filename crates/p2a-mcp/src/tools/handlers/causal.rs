@@ -2647,25 +2647,8 @@ impl AnalyticsServer {
             }
         }
         let outcome = request.outcomes[t_max - 1].as_str();
-        // the outcome is never a covariate, and a treatment is not a covariate at its own or a
-        // later time point (it would be conditioned on after it is set)
-        for (t, names_t) in cov_lists.iter().enumerate() {
-            for c in names_t {
-                if *c == outcome {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "covariate '{c}' at time point {} is the outcome",
-                        t + 1
-                    ))]));
-                }
-                if let Some(s) = request.treatments[..=t].iter().position(|a| a == c) {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "covariate '{c}' at time point {} is the treatment of time point {}; a treatment may only be a covariate of later time points",
-                        t + 1,
-                        s + 1
-                    ))]));
-                }
-            }
-        }
+        // LtmleData::from_dataset refuses an outcome or treatment listed as a covariate of the
+        // wrong time point
         let treatment_refs: Vec<&str> = request.treatments.iter().map(String::as_str).collect();
         let cov_refs: Vec<&[&str]> = cov_lists.iter().map(Vec::as_slice).collect();
         let data = match LtmleData::from_dataset(dataset, outcome, &treatment_refs, &cov_refs) {

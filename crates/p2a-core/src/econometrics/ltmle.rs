@@ -573,6 +573,32 @@ impl LtmleData {
                 covariates.len()
             )));
         }
+        // The outcome is never a treatment or a covariate, and a treatment is not a covariate at
+        // its own or a later time point (it would be conditioned on after it is set).
+        if let Some(t) = treatments.iter().position(|a| *a == outcome) {
+            return Err(spec_err(format!(
+                "the outcome '{outcome}' is also the treatment of time point {}",
+                t + 1
+            )));
+        }
+        for (t, cs) in covariates.iter().enumerate() {
+            for c in cs.iter() {
+                if *c == outcome {
+                    return Err(spec_err(format!(
+                        "covariate '{c}' at time point {} is the outcome",
+                        t + 1
+                    )));
+                }
+                if let Some(s) = treatments[t..].iter().position(|a| a == c).map(|p| p + t) {
+                    return Err(spec_err(format!(
+                        "covariate '{c}' at time point {} is the treatment of time point {}; a \
+                         treatment may only be a covariate of later time points",
+                        t + 1,
+                        s + 1
+                    )));
+                }
+            }
+        }
         let mut names: Vec<&str> = vec![outcome];
         names.extend_from_slice(treatments);
         for cs in covariates {
@@ -2670,6 +2696,53 @@ mod tests {
             out.lines()
                 .any(|l| l.starts_with("Warning: LTMLE: outcomes at time points 1..1 are not used")),
             "{out}"
+        );
+    }
+
+    #[test]
+    fn test_ltmle_from_dataset_refuses_overlapping_roles() {
+        let (_, ds) = crate::test_support::load_case("ltmle_two_period");
+        let msg = |r: EconResult<LtmleData>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        };
+        let m = msg(LtmleData::from_dataset(
+            &ds,
+            "Y",
+            &["A1", "A2"],
+            &[&["L0"], &["L1", "Y"]],
+        ));
+        assert_eq!(m, "covariate 'Y' at time point 2 is the outcome");
+        let m = msg(LtmleData::from_dataset(
+            &ds,
+            "Y",
+            &["A1", "A2"],
+            &[&["L0"], &["A2"]],
+        ));
+        assert!(
+            m.starts_with("covariate 'A2' at time point 2 is the treatment of time point 2"),
+            "{m}"
+        );
+        let m = msg(LtmleData::from_dataset(
+            &ds,
+            "Y",
+            &["A1", "A2"],
+            &[&["A2"], &["L1"]],
+        ));
+        assert!(
+            m.starts_with("covariate 'A2' at time point 1 is the treatment"),
+            "{m}"
+        );
+        let m = msg(LtmleData::from_dataset(
+            &ds,
+            "A2",
+            &["A1", "A2"],
+            &[&["L0"], &["L1"]],
+        ));
+        assert_eq!(m, "the outcome 'A2' is also the treatment of time point 2");
+        // a treatment is a covariate of a later time point
+        assert!(
+            LtmleData::from_dataset(&ds, "Y", &["A1", "A2"], &[&["L0"], &["L1", "A1"]]).is_ok()
         );
     }
 
