@@ -107,6 +107,29 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_ml_spatial_viz_outputs",
+      "name": "p2a spatial sar/moran, ml and viz commands: weight styles, impact warnings, alternatives, scores, linkage names, model leverage",
+      "category": "interfaces",
+      "reference": "spatialreg lagsarlm and impacts, spdep nb2listw styles and moran.test (written out)",
+      "doc": "validation/cli/other.md",
+      "cases": [
+        "spatial_sar_sdm_sem",
+        "spatial_weights_moran"
+      ],
+      "tests": [
+        "p2a-cli::tier3::wp61_other::test_validate_cli_spatial_impacts_warnings_in_json",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_spatial_weight_style_b",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_moran_alternative"
+      ],
+      "quantities": [
+        "SAR rho and impacts (style W); rho and logLik with styles B (rho_W / 4) and U (80 rho_W)",
+        "Moran's I and its two-sided and greater p-values"
+      ],
+      "tolerance": "validation/README.md for each n (spatial_sim 80: 1e-6 / 1e-5, p 1e-5 + 1e-12)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

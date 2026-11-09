@@ -20,6 +20,9 @@ use p2a_core::{
 
 use p2a_core::data::columns::{ColumnRequest, NaPolicy, numeric_column};
 
+use p2a_core::SpatialImpacts;
+
+use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, print_error};
 use crate::session::SessionManager;
 
@@ -62,9 +65,11 @@ EXAMPLES:
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
-        /// Weight style: "rowstd" (default), "binary", "minmax"
-        #[arg(long, default_value = "rowstd")]
-        weight_style: String,
+        /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
+        /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
+        /// binary accepted
+        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        weight_style: WeightStyle,
 
         /// Estimate Spatial Durbin Model (include spatially lagged X)
         #[arg(long)]
@@ -107,9 +112,11 @@ EXAMPLES:
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
-        /// Weight style: "rowstd" (default), "binary", "minmax"
-        #[arg(long, default_value = "rowstd")]
-        weight_style: String,
+        /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
+        /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
+        /// binary accepted
+        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        weight_style: WeightStyle,
     },
 
     /// Spatial Autoregressive Combined Model (SAC / SARAR)
@@ -144,9 +151,11 @@ EXAMPLES:
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
-        /// Weight style: "rowstd" (default), "binary", "minmax"
-        #[arg(long, default_value = "rowstd")]
-        weight_style: String,
+        /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
+        /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
+        /// binary accepted
+        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        weight_style: WeightStyle,
     },
 
     /// Moran's I test for spatial autocorrelation
@@ -176,13 +185,15 @@ EXAMPLES:
         #[arg(short = 'k', long, default_value = "5")]
         k_neighbors: usize,
 
-        /// Weight style: "rowstd" (default), "binary", "minmax"
-        #[arg(long, default_value = "rowstd")]
-        weight_style: String,
+        /// Weight style, as spdep::nb2listw: W (row-standardised, default), B (binary), C
+        /// (global), U (unit sum), minmax or S (variance-stabilising); old spellings rowstd,
+        /// binary accepted
+        #[arg(long, default_value = "W", value_parser = super::causal::option_arg::<WeightStyle>)]
+        weight_style: WeightStyle,
 
-        /// Alternative hypothesis: "two-sided" (default), "greater", "less"
-        #[arg(long, default_value = "two-sided")]
-        alternative: String,
+        /// Alternative hypothesis, as spdep::moran.test: two.sided (default), greater or less
+        #[arg(long, default_value = "two.sided", value_parser = super::causal::option_arg::<MoranAlternative>)]
+        alternative: MoranAlternative,
     },
 }
 
@@ -210,7 +221,7 @@ pub fn execute(
             coord_x,
             coord_y,
             *k_neighbors,
-            weight_style,
+            *weight_style,
             *durbin,
             *impacts,
             format,
@@ -231,7 +242,7 @@ pub fn execute(
             coord_x,
             coord_y,
             *k_neighbors,
-            weight_style,
+            *weight_style,
             format,
             session,
         ),
@@ -250,7 +261,7 @@ pub fn execute(
             coord_x,
             coord_y,
             *k_neighbors,
-            weight_style,
+            *weight_style,
             format,
             session,
         ),
@@ -268,21 +279,46 @@ pub fn execute(
             coord_x,
             coord_y,
             *k_neighbors,
-            weight_style,
-            alternative,
+            *weight_style,
+            *alternative,
             format,
             session,
         ),
     }
 }
 
-/// Helper to parse weight style from CLI string
-fn parse_weight_style(style: &str) -> WeightStyle {
-    match style.to_lowercase().as_str() {
-        "binary" | "b" => WeightStyle::Binary,
-        "minmax" | "mm" => WeightStyle::MinMax,
-        _ => WeightStyle::RowStd,
+/// The "Spatial Impacts" table, then one "Warning: <w>" line per warning of the impacts.
+fn impacts_lines(imp: &SpatialImpacts) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "{:<15} {:>12} {:>12} {:>12}",
+            "Variable", "Direct", "Indirect", "Total"
+        ),
+        "-".repeat(55),
+    ];
+    let get = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(f64::NAN);
+    for (i, name) in imp.var_names.iter().enumerate() {
+        lines.push(format!(
+            "{:<15} {:>12.6} {:>12.6} {:>12.6}",
+            name,
+            get(&imp.direct, i),
+            get(&imp.indirect, i),
+            get(&imp.total, i)
+        ));
     }
+    lines.extend(imp.warnings.iter().map(|w| format!("Warning: {w}")));
+    lines
+}
+
+/// The impacts as JSON; `warnings` is always present.
+fn impacts_json(imp: &SpatialImpacts) -> serde_json::Value {
+    serde_json::json!({
+        "direct": imp.direct,
+        "indirect": imp.indirect,
+        "total": imp.total,
+        "var_names": imp.var_names,
+        "warnings": imp.warnings,
+    })
 }
 
 /// Helper to build spatial weights from dataset coordinates
@@ -325,7 +361,7 @@ fn execute_sar(
     coord_x: &str,
     coord_y: &str,
     k_neighbors: usize,
-    weight_style: &str,
+    style: WeightStyle,
     durbin: bool,
     compute_impacts: bool,
     format: &OutputFormat,
@@ -344,7 +380,6 @@ fn execute_sar(
 
     match dataset {
         Some(ds) => {
-            let style = parse_weight_style(weight_style);
             let mut listw = match build_spatial_weights(ds, coord_x, coord_y, k_neighbors, style) {
                 Ok(w) => w,
                 Err(e) => {
@@ -364,7 +399,7 @@ fn execute_sar(
             match run_sar(ds, dep_var, &x_refs, &mut listw, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": if result.is_durbin { "Spatial Durbin Model (SDM)" } else { "Spatial Autoregressive Model (SAR)" },
                             "coefficients": result.coef_names.iter().zip(result.coefficients.iter()).map(|(n, c)| {
                                 serde_json::json!({ "name": n, "estimate": c })
@@ -382,15 +417,11 @@ fn execute_sar(
                             "bic": result.bic,
                             "n_obs": result.n_obs,
                             "df": result.df,
-                            "impacts": result.impacts.as_ref().map(|imp| {
-                                serde_json::json!({
-                                    "direct": imp.direct,
-                                    "indirect": imp.indirect,
-                                    "total": imp.total,
-                                    "var_names": imp.var_names,
-                                })
-                            }),
+                            "impacts": result.impacts.as_ref().map(impacts_json),
+                            "weight_style": style.to_string(),
+                            "k_neighbors": k_neighbors,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -437,21 +468,11 @@ fn execute_sar(
 
                         if let Some(impacts) = &result.impacts {
                             println!("\nSpatial Impacts:");
-                            println!(
-                                "{:<15} {:>12} {:>12} {:>12}",
-                                "Variable", "Direct", "Indirect", "Total"
-                            );
-                            println!("{}", "-".repeat(55));
-                            for i in 0..impacts.var_names.len() {
-                                println!(
-                                    "{:<15} {:>12.6} {:>12.6} {:>12.6}",
-                                    impacts.var_names[i],
-                                    impacts.direct[i],
-                                    impacts.indirect[i],
-                                    impacts.total[i]
-                                );
+                            for line in impacts_lines(impacts) {
+                                println!("{line}");
                             }
                         }
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => {
@@ -474,7 +495,7 @@ fn execute_sem(
     coord_x: &str,
     coord_y: &str,
     k_neighbors: usize,
-    weight_style: &str,
+    style: WeightStyle,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -491,7 +512,6 @@ fn execute_sem(
 
     match dataset {
         Some(ds) => {
-            let style = parse_weight_style(weight_style);
             let mut listw = match build_spatial_weights(ds, coord_x, coord_y, k_neighbors, style) {
                 Ok(w) => w,
                 Err(e) => {
@@ -507,7 +527,7 @@ fn execute_sem(
             match run_sem(ds, dep_var, &x_refs, &mut listw, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Spatial Error Model (SEM)",
                             "coefficients": result.coef_names.iter().zip(result.coefficients.iter()).map(|(n, c)| {
                                 serde_json::json!({ "name": n, "estimate": c })
@@ -525,7 +545,10 @@ fn execute_sem(
                             "bic": result.bic,
                             "n_obs": result.n_obs,
                             "df": result.df,
+                            "weight_style": style.to_string(),
+                            "k_neighbors": k_neighbors,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -568,6 +591,7 @@ fn execute_sem(
                         println!("  BIC: {:.4}", result.bic);
                         println!("  Sigma^2: {:.6}", result.sigma2);
                         println!("  N: {}, df: {}", result.n_obs, result.df);
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => {
@@ -590,7 +614,7 @@ fn execute_sac(
     coord_x: &str,
     coord_y: &str,
     k_neighbors: usize,
-    weight_style: &str,
+    style: WeightStyle,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -607,7 +631,6 @@ fn execute_sac(
 
     match dataset {
         Some(ds) => {
-            let style = parse_weight_style(weight_style);
             let mut listw = match build_spatial_weights(ds, coord_x, coord_y, k_neighbors, style) {
                 Ok(w) => w,
                 Err(e) => {
@@ -623,7 +646,7 @@ fn execute_sac(
             match run_sac(ds, dep_var, &x_refs, &mut listw, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Spatial Autoregressive Combined Model (SAC/SARAR)",
                             "coefficients": result.coef_names.iter().zip(result.coefficients.iter()).map(|(n, c)| {
                                 serde_json::json!({ "name": n, "estimate": c })
@@ -645,7 +668,10 @@ fn execute_sac(
                             "bic": result.bic,
                             "n_obs": result.n_obs,
                             "df": result.df,
+                            "weight_style": style.to_string(),
+                            "k_neighbors": k_neighbors,
                         });
+                        with_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -695,6 +721,7 @@ fn execute_sac(
                         println!("  BIC: {:.4}", result.bic);
                         println!("  Sigma^2: {:.6}", result.sigma2);
                         println!("  N: {}, df: {}", result.n_obs, result.df);
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => {
@@ -716,8 +743,8 @@ fn execute_moran(
     coord_x: &str,
     coord_y: &str,
     k_neighbors: usize,
-    weight_style: &str,
-    alternative: &str,
+    style: WeightStyle,
+    alt: MoranAlternative,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -734,7 +761,6 @@ fn execute_moran(
 
     match dataset {
         Some(ds) => {
-            let style = parse_weight_style(weight_style);
             let listw = match build_spatial_weights(ds, coord_x, coord_y, k_neighbors, style) {
                 Ok(w) => w,
                 Err(e) => {
@@ -753,12 +779,6 @@ fn execute_moran(
             };
             let y = ndarray::Array1::from_vec(y_vals);
 
-            let alt = match alternative.to_lowercase().as_str() {
-                "greater" => MoranAlternative::Greater,
-                "less" => MoranAlternative::Less,
-                _ => MoranAlternative::TwoSided,
-            };
-
             match moran_test(&y, &listw, alt) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
@@ -770,8 +790,11 @@ fn execute_moran(
                             "variance": result.variance,
                             "z_score": result.z_score,
                             "p_value": result.p_value,
-                            "alternative": format!("{:?}", result.alternative),
+                            "alternative": result.alternative.to_string(),
                             "n": result.n,
+                            "n_islands": result.n_islands,
+                            "weight_style": style.to_string(),
+                            "k_neighbors": k_neighbors,
                         });
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -779,7 +802,7 @@ fn execute_moran(
                         println!("\nMoran's I Test for Spatial Autocorrelation");
                         println!("{}", "=".repeat(50));
                         println!("\nVariable: {}", variable);
-                        println!("Alternative: {:?}", result.alternative);
+                        println!("Alternative: {}", result.alternative);
                         println!();
                         println!("Moran's I: {:.6}", result.statistic);
                         println!("Expected I: {:.6}", result.expectation);
@@ -831,5 +854,26 @@ fn significance_stars(p: f64) -> &'static str {
         " ."
     } else {
         ""
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_impacts_output_prints_warnings() {
+        let w = "the spatial multiplier (I - rho W) is singular (min |1 - rho lambda| = 0); impacts are NaN";
+        let imp = SpatialImpacts {
+            direct: vec![f64::NAN],
+            indirect: vec![f64::NAN],
+            total: vec![f64::NAN],
+            var_names: vec!["x1".into()],
+            warnings: vec![w.into()],
+        };
+        let lines = impacts_lines(&imp);
+        assert_eq!(lines.last().unwrap(), &format!("Warning: {w}"));
+        assert!(lines.iter().any(|l| l.starts_with("x1")), "{lines:?}");
+        assert_eq!(impacts_json(&imp)["warnings"], serde_json::json!([w]));
     }
 }

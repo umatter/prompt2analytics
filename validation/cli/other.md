@@ -220,3 +220,26 @@ the Johansen result (`"method": "VECM"` first). Only the transitory form is esti
 |---|---|---|
 | `test_validate_cli_varma_long_var_order` | `varma_hr` `long_var_order`, `n_eff`, `df_residual`, `loglik`, `coef_y1` (m = 8); `default_long_var_order`, `default_loglik` | exact; `Tol::stat(391)`, `Tol::coef(391)`; `Tol::stat(388)` |
 | `test_validate_cli_vecm_options` | `vecm_denmark` `none_trace_stat`, `none_beta` (ecdet none, rank chosen 1); `trace_stat` (ecdet const, rank chosen 0) | `Tol::stat(55)`, `Tol::coef(55)` |
+
+### `spatial sar`, `sem`, `sac`, `moran`
+
+| Command, option | Values (canonical first; aliases) | R argument |
+|---|---|---|
+| `--weight-style` (all four) | W (row, rowstd, row_standardised), B (binary), C (global, globalstd), U (unit_sum, unitsum), minmax (mm, min_max), S (varstab, variance_stabilising) | `spdep::nb2listw(style = )` |
+| `moran --alternative` | two.sided (two_sided, ...), greater, less | `moran.test(alternative = )` |
+
+An unknown style ran row standardisation and an unknown alternative the two-sided test; both
+are now usage errors. The SAR impacts carry the core's warnings (text: a `Warning:` line after
+the table; JSON: `impacts.warnings`, always present), so a degraded impact computation (a
+singular multiplier) no longer looks like a real one (SPAT-25). SAR, SEM and SAC report the
+style (`weight_style`, spdep's letter), `k_neighbors` and the optimiser's notes; Moran reports
+the alternative by its R name and `n_islands`.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_spatial_impacts_warnings_in_json` | `spatial_sar_sdm_sem` `sar_rho`, `sar_impact_direct`, `_indirect`, `_total` | `Tol::coef(80)` |
+| `test_validate_cli_spatial_weight_style_b` | `spatial_sar_sdm_sem` `sar_rho` (B: rho_W / 4; U: 80 rho_W on the 4-NN graph of 80 rows), `sar_loglik` | `Tol::coef(80)`, `Tol::stat(80)` |
+| `test_validate_cli_moran_alternative` | `spatial_weights_moran` `moran` I, p_two_sided (two.sided), p_rand (greater) | `Tol::coef(80)`, `Tol::p_value(80)` |
+
+Styles B and U reparameterise rho: on a k-nearest-neighbour graph every row of B sums to k, so
+W = B / k and U = B / (n k) = W / n, and the fit is W's with rho scaled.

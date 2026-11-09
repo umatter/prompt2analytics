@@ -1523,3 +1523,195 @@ fn test_validate_cli_vecm_options() {
         "trend",
     )]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// spatial
+// ---------------------------------------------------------------------------------------------
+
+/// SPAT-25: the CLI JSON impacts object had no warnings; the text table printed none.
+/// R: spatial_sar_sdm_sem sar_rho, sar_impact_* (spatialreg formulas written out; 4-NN
+/// row-standardised W).
+#[test]
+fn test_validate_cli_spatial_impacts_warnings_in_json() {
+    let case = Case::load("spatial_sar_sdm_sem");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "spatial",
+        "sar",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "--coord-x",
+        "cx",
+        "--coord-y",
+        "cy",
+        "-k",
+        "4",
+        "--impacts",
+    ];
+    let j = s.json(&args);
+    let imp = field(&j, "impacts");
+    assert_eq!(field(imp, "warnings"), &serde_json::json!([]));
+    let names = strings(&imp["var_names"]);
+    Check::new(&case)
+        .scalar("sar_rho", num(field(&j, "rho")), Tol::coef(80))
+        .named(
+            "sar_impact_direct",
+            &names,
+            &f64s(&imp["direct"]),
+            Tol::coef(80),
+        )
+        .named(
+            "sar_impact_indirect",
+            &names,
+            &f64s(&imp["indirect"]),
+            Tol::coef(80),
+        )
+        .named(
+            "sar_impact_total",
+            &names,
+            &f64s(&imp["total"]),
+            Tol::coef(80),
+        )
+        .finish();
+    assert_keys(
+        &j,
+        &[
+            "converged",
+            "iterations",
+            "warnings",
+            "weight_style",
+            "k_neighbors",
+        ],
+    );
+    assert_eq!(field(&j, "weight_style"), "W");
+    assert!(s.ok(&args).contains("Spatial Impacts:"));
+}
+
+/// CLI-14: an unknown style ran row standardisation. On a 4-NN graph of n = 80 rows W = B / 4
+/// and U = B / 320 = W / 80, so rho_B = rho_W / 4 and rho_U = 80 rho_W, all with
+/// W's logLik (R: spatial_sar_sdm_sem sar_rho, sar_loglik; spdep's styles reparameterise rho).
+#[test]
+fn test_validate_cli_spatial_weight_style_b() {
+    let case = Case::load("spatial_sar_sdm_sem");
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "spatial",
+        "sar",
+        d.as_str(),
+        "-y",
+        "y",
+        "-x",
+        "x1",
+        "x2",
+        "--coord-x",
+        "cx",
+        "--coord-y",
+        "cy",
+        "-k",
+        "4",
+    ];
+    let rho_w = case.scalar("sar_rho");
+    for (style, canonical, scale) in [("binary", "B", 0.25), ("unit_sum", "U", 80.0)] {
+        let j = s.json(&argv(&base, &["--weight-style", style]));
+        assert!(
+            Tol::coef(80).allows(num(field(&j, "rho")), rho_w * scale),
+            "{style}: {j:#}"
+        );
+        Check::new(&case)
+            .scalar(
+                "sar_loglik",
+                num(field(&j, "log_likelihood")),
+                Tol::stat(80),
+            )
+            .finish();
+        assert_eq!(field(&j, "weight_style"), canonical);
+    }
+    let sar = [
+        "spatial",
+        "sar",
+        "d",
+        "-y",
+        "y",
+        "-x",
+        "a",
+        "--coord-x",
+        "cx",
+        "--coord-y",
+        "cy",
+    ];
+    assert_usage_errors(&[
+        (argv(&sar, &["--weight-style", "rowstdd"]), "minmax"),
+        (
+            vec![
+                "spatial",
+                "moran",
+                "d",
+                "-y",
+                "y",
+                "--coord-x",
+                "cx",
+                "--coord-y",
+                "cy",
+                "--alternative",
+                "bigger",
+            ],
+            "two.sided",
+        ),
+    ]);
+}
+
+/// CLI-14: Moran's alternative by R's names. R: spatial_weights_moran moran (moran.test on the
+/// 4-NN W, x1).
+#[test]
+fn test_validate_cli_moran_alternative() {
+    let case = Case::load("spatial_weights_moran");
+    let s = temp_session();
+    let d = s.load(&case);
+    let m = [
+        "spatial",
+        "moran",
+        d.as_str(),
+        "-y",
+        "x1",
+        "--coord-x",
+        "cx",
+        "--coord-y",
+        "cy",
+        "-k",
+        "4",
+    ];
+    let two = s.json(&argv(&m, &["--alternative", "two.sided"]));
+    let gt = s.json(&argv(&m, &["--alternative", "greater"]));
+    Check::new(&case)
+        .named_subset(
+            "moran",
+            &["I"],
+            &["I"],
+            &[num(field(&two, "moran_i"))],
+            Tol::coef(80),
+        )
+        .named_subset(
+            "moran",
+            &["p_two_sided"],
+            &["p_two_sided"],
+            &[num(field(&two, "p_value"))],
+            Tol::p_value(80),
+        )
+        .named_subset(
+            "moran",
+            &["p_rand"],
+            &["p_rand"],
+            &[num(field(&gt, "p_value"))],
+            Tol::p_value(80),
+        )
+        .finish();
+    assert_eq!(field(&two, "alternative"), "two.sided");
+    assert_eq!(field(&gt, "alternative"), "greater");
+    assert_keys(&two, &["n_islands", "weight_style"]);
+}
