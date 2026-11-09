@@ -78,6 +78,7 @@
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::stats::robust::{QuantileType, quantile_sorted};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use std::collections::HashMap;
 
@@ -609,9 +610,12 @@ fn check_quantiles(quantiles: &[f64]) -> Result<(), String> {
 }
 
 /// Compute empirical quantile from a set of values: R's `quantile(type = 7)`, the default.
+/// The prediction paths sort the pooled leaf observations once per point and call
+/// `quantile_sorted` per quantile; this one-shot form is kept for its unit test.
+#[cfg(test)]
 fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
     values.sort_by(f64::total_cmp);
-    crate::stats::robust::quantile_sorted(values, quantile, crate::stats::robust::QuantileType::T7)
+    quantile_sorted(values, quantile, QuantileType::T7)
 }
 
 /// Fit a Quantile Regression Forest.
@@ -856,9 +860,10 @@ fn compute_quantile_predictions(
             }
         }
 
-        // Compute quantiles from pooled observations
+        // Compute quantiles from pooled observations (sorted once per point)
+        all_leaf_obs.sort_unstable_by(f64::total_cmp);
         for (j, &q) in quantiles.iter().enumerate() {
-            predictions[[i, j]] = empirical_quantile(&mut all_leaf_obs.clone(), q);
+            predictions[[i, j]] = quantile_sorted(&all_leaf_obs, q, QuantileType::T7);
         }
     }
 
@@ -909,9 +914,10 @@ fn compute_oob_predictions(
         }
 
         if !all_leaf_obs.is_empty() {
+            all_leaf_obs.sort_unstable_by(f64::total_cmp);
             for (j, &q) in quantiles.iter().enumerate() {
                 oob_predictions[[*sample_idx, j]] =
-                    empirical_quantile(&mut all_leaf_obs.clone(), q);
+                    quantile_sorted(&all_leaf_obs, q, QuantileType::T7);
             }
             oob_counts[*sample_idx] = tree_indices.len();
         }
@@ -1138,8 +1144,9 @@ pub fn predict_quantiles_with_y_at(
                 predictions[[i, j]] = f64::NAN;
             }
         } else {
+            all_leaf_obs.sort_unstable_by(f64::total_cmp);
             for (j, &q) in quantiles.iter().enumerate() {
-                predictions[[i, j]] = empirical_quantile(&mut all_leaf_obs.clone(), q);
+                predictions[[i, j]] = quantile_sorted(&all_leaf_obs, q, QuantileType::T7);
             }
         }
     }
