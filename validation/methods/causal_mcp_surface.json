@@ -181,6 +181,25 @@
       "tolerance": "default ltmle configuration against the tight values at Tol::iterative(1e-8); dynamic Tol::iterative(1e-8)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_gformula",
+      "name": "MCP gformula survival",
+      "category": "mcp",
+      "reference": "pooled logistic hazard g-formula, written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "gformula_hazard"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_gformula"
+      ],
+      "quantities": [
+        "risk curves under always and never treat and the hazard coefficients (tight fit)"
+      ],
+      "tolerance": "Tol::iterative(1e-8) against the tight fit",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

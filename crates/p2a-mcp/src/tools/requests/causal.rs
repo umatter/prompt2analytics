@@ -1193,27 +1193,39 @@ pub struct GFormulaRequest {
 
     /// For threshold intervention: variable index (0-indexed into time-varying covariates)
     #[schemars(
-        description = "For threshold intervention: index of the time-varying covariate to check (0-indexed)."
+        description = "Intervention 'threshold' only (required there): index of the time-varying covariate to check (0-indexed)."
     )]
     pub threshold_variable: Option<usize>,
 
     /// For threshold intervention: cutoff value
     #[schemars(
-        description = "For threshold intervention: threshold value for treatment decision."
+        description = "Intervention 'threshold' only (required there): threshold value for the treatment decision."
     )]
     pub threshold_cutoff: Option<f64>,
 
     /// For threshold intervention: treat if above (true) or below (false)
     #[schemars(
-        description = "For threshold intervention: if true, treat when variable > cutoff; if false, treat when variable <= cutoff."
+        description = "Intervention 'threshold' only: if true, treat when variable > cutoff; if false, treat when variable <= cutoff."
     )]
     pub threshold_above: Option<bool>,
 
     /// Outcome type: 'continuous' (default), 'binary', or 'survival'
     #[schemars(
-        description = "Outcome model: 'continuous' (default, linear model), 'binary' (logistic model) or 'survival' (discrete-time hazard model). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Outcome model: 'continuous' (default, linear model), 'binary' (logistic model) or 'survival' (needs time_col; pooled logistic discrete-time hazard on person-periods, logit h = b0 + b1 t + b2 A_t + baseline + L_t (a linear period term); risks 1 - S(t) under the intervention, standardised exactly over the covariates for static regimes without time-varying covariates, by Monte Carlo otherwise). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub outcome_type: Option<String>,
+
+    #[schemars(
+        description = "Survival outcome: the last period each subject is observed, 1..time_points; required with outcome_type 'survival'."
+    )]
+    #[serde(default)]
+    pub time_col: Option<String>,
+
+    #[schemars(
+        description = "Survival outcome: the 0/1 event indicator at that period; default: outcome."
+    )]
+    #[serde(default)]
+    pub event_col: Option<String>,
 
     /// Number of Monte Carlo simulations (default: 1000)
     #[schemars(description = "Number of Monte Carlo simulations. Default is 1000.")]

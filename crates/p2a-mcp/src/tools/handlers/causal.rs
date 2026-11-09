@@ -1384,7 +1384,7 @@ impl AnalyticsServer {
 
     /// Run Parametric G-Formula for time-varying treatments.
     #[tool(
-        description = "Estimate causal effects of time-varying treatments using the parametric g-formula (generalized formula). Uses Monte Carlo simulation to estimate counterfactual outcomes under different treatment regimes. Suitable for longitudinal/panel data with time-varying confounders. Returns risk difference, risk ratio, potential outcomes, and bootstrap confidence intervals. Based on Robins (1986) and Hernan & Robins (2020). R equivalent: gfoRmula package."
+        description = "Estimate counterfactual risks or means under treatment regimes by the parametric g-formula (Robins 1986; Hernan & Robins 2020, ch. 17 and 21): covariate, treatment and outcome models fitted per period (continuous, binary, or a pooled logistic discrete-time hazard for survival outcomes), risks under always/never treat, the natural course or a threshold rule, standardised over the covariates (exactly for static regimes without time-varying covariates, else by seeded Monte Carlo), with bootstrap CIs. R equivalent: gfoRmula (written out)."
     )]
     pub async fn gformula(
         &self,
@@ -1410,6 +1410,17 @@ impl AnalyticsServer {
         ));
         use ndarray::{Array1, Array2};
         use p2a_core::linalg::design::DesignMatrix;
+        let survival = outcome_type == GFormulaOutcomeType::Survival;
+        if survival && request.time_col.is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "outcome_type 'survival' needs time_col (the last period observed) and an event column (event_col, default outcome)",
+            )]));
+        }
+        if !survival && (request.time_col.is_some() || request.event_col.is_some()) {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "time_col and event_col are only used with outcome_type 'survival'",
+            )]));
+        }
 
         let datasets = self.datasets.read().await;
 
@@ -1435,79 +1446,155 @@ impl AnalyticsServer {
             ))]));
         }
 
-        // Extract baseline covariates
-        let n_baseline = request.baseline_covariates.len();
-        let mut baseline = Array2::zeros((n, n_baseline));
-        for (j, col_name) in request.baseline_covariates.iter().enumerate() {
-            let col = match DesignMatrix::extract_column(dataset.df(), col_name) {
+        let baseline_names: Vec<&str> = request
+            .baseline_covariates
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let tv_names: Vec<&str> = request
+            .time_varying_covariates
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let treatment_name = {
+            let first = request
+                .treatment_cols
+                .first()
+                .map(String::as_str)
+                .unwrap_or("A");
+            first.strip_suffix("_t0").unwrap_or(first).to_string()
+        };
+        let gformula_data = if survival {
+            // baseline covariates, time and event are read jointly (a missing value is a tool
+            // error); the treatment and time-varying cells may be missing after a subject's
+            // last period
+            let time_col = request.time_col.as_deref().unwrap_or_default();
+            let event_col = request.event_col.as_deref().unwrap_or(&request.outcome);
+            let mut names = baseline_names.clone();
+            names.push(time_col);
+            names.push(event_col);
+            let cols = match crate::tools::common::numeric_columns(
+                dataset,
+                &names,
+                crate::tools::common::NaPolicy::Fail,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to extract baseline covariate '{}': {:?}",
-                        col_name, e
+                        "G-formula: {e}"
                     ))]));
                 }
             };
-            for i in 0..n {
-                baseline[[i, j]] = col[i];
+            let baseline = if baseline_names.is_empty() {
+                Array2::zeros((n, 0))
+            } else {
+                match cols.matrix(&baseline_names, false) {
+                    Ok(m) => m.data,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "G-formula: {e}"
+                        ))]));
+                    }
+                }
+            };
+            let time = cols.numeric_array(time_col);
+            let event = cols.numeric_array(event_col);
+            let cells = |name: &str| -> Result<Array1<f64>, String> {
+                p2a_core::data::columns::numeric_options(dataset.df(), name)
+                    .map(|v| v.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect())
+                    .map_err(|e| format!("G-formula: {e}"))
+            };
+            let mut treatments: Vec<Array1<f64>> = Vec::with_capacity(t_max);
+            for c in &request.treatment_cols {
+                treatments.push(tool_try!(cells(c)));
             }
-        }
-
-        // Extract time-varying covariates for each time point
-        let n_tv = request.time_varying_covariates.len();
-        let mut time_varying: Vec<Array2<f64>> = Vec::with_capacity(t_max);
-        for t in 0..t_max {
-            let mut tv_matrix = Array2::zeros((n, n_tv));
-            for (j, base_name) in request.time_varying_covariates.iter().enumerate() {
-                let col_name = format!("{}_t{}", base_name, t);
-                let col = match DesignMatrix::extract_column(dataset.df(), &col_name) {
+            let mut time_varying: Vec<Array2<f64>> = Vec::with_capacity(t_max);
+            for t in 0..t_max {
+                let mut m = Array2::zeros((n, tv_names.len()));
+                for (j, base) in tv_names.iter().enumerate() {
+                    let v = tool_try!(cells(&format!("{base}_t{t}")));
+                    m.column_mut(j).assign(&v);
+                }
+                time_varying.push(m);
+            }
+            GFormulaData::new_survival(baseline, time_varying, treatments, time, event)
+        } else {
+            // Extract baseline covariates
+            let n_baseline = request.baseline_covariates.len();
+            let mut baseline = Array2::zeros((n, n_baseline));
+            for (j, col_name) in request.baseline_covariates.iter().enumerate() {
+                let col = match DesignMatrix::extract_column(dataset.df(), col_name) {
                     Ok(c) => c,
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Failed to extract time-varying covariate '{}': {:?}. \
-                             Expected columns named '{}' for each time point t=0..{}.",
-                            col_name,
-                            e,
-                            format!("{}_t0, {}_t1, ...", base_name, base_name),
-                            t_max - 1
+                            "Failed to extract baseline covariate '{}': {:?}",
+                            col_name, e
                         ))]));
                     }
                 };
                 for i in 0..n {
-                    tv_matrix[[i, j]] = col[i];
+                    baseline[[i, j]] = col[i];
                 }
             }
-            time_varying.push(tv_matrix);
-        }
 
-        // Extract treatments for each time point
-        let mut treatments: Vec<Array1<f64>> = Vec::with_capacity(t_max);
-        for col_name in &request.treatment_cols {
-            let col = match DesignMatrix::extract_column(dataset.df(), col_name) {
+            // Extract time-varying covariates for each time point
+            let n_tv = request.time_varying_covariates.len();
+            let mut time_varying: Vec<Array2<f64>> = Vec::with_capacity(t_max);
+            for t in 0..t_max {
+                let mut tv_matrix = Array2::zeros((n, n_tv));
+                for (j, base_name) in request.time_varying_covariates.iter().enumerate() {
+                    let col_name = format!("{}_t{}", base_name, t);
+                    let col = match DesignMatrix::extract_column(dataset.df(), &col_name) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Failed to extract time-varying covariate '{}': {:?}. \
+                                 Expected columns named '{}' for each time point t=0..{}.",
+                                col_name,
+                                e,
+                                format!("{}_t0, {}_t1, ...", base_name, base_name),
+                                t_max - 1
+                            ))]));
+                        }
+                    };
+                    for i in 0..n {
+                        tv_matrix[[i, j]] = col[i];
+                    }
+                }
+                time_varying.push(tv_matrix);
+            }
+
+            // Extract treatments for each time point
+            let mut treatments: Vec<Array1<f64>> = Vec::with_capacity(t_max);
+            for col_name in &request.treatment_cols {
+                let col = match DesignMatrix::extract_column(dataset.df(), col_name) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to extract treatment column '{}': {:?}",
+                            col_name, e
+                        ))]));
+                    }
+                };
+                treatments.push(col);
+            }
+
+            // Extract outcome
+            let outcome = match DesignMatrix::extract_column(dataset.df(), &request.outcome) {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to extract treatment column '{}': {:?}",
-                        col_name, e
+                        "Failed to extract outcome '{}': {:?}",
+                        request.outcome, e
                     ))]));
                 }
             };
-            treatments.push(col);
-        }
 
-        // Extract outcome
-        let outcome = match DesignMatrix::extract_column(dataset.df(), &request.outcome) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to extract outcome '{}': {:?}",
-                    request.outcome, e
-                ))]));
-            }
+            GFormulaData::new(baseline, time_varying, treatments, outcome)
         };
-
-        // Create GFormulaData
-        let gformula_data = match GFormulaData::new(baseline, time_varying, treatments, outcome) {
+        let gformula_data = match gformula_data
+            .and_then(|d| d.with_names(&baseline_names, &tv_names, &treatment_name))
+        {
             Ok(d) => d,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(

@@ -1399,3 +1399,93 @@ async fn test_validate_mcp_ltmle() {
     .await;
     assert!(a_cov.contains("'A1'"), "{a_cov}");
 }
+
+/// The pooled logistic hazard g-formula (causal_gformula.R, gformula_hazard): point treatment A replicated
+/// over 5 periods, time-fixed L and Lb. The tool runs the hazard model at its default control; the pins are
+/// the R solution (`risk_always`, `risk_never`, `hazard_coef`), from which the default control is within
+/// 7.8e-10 relative.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_gformula() {
+    use p2a_core::econometrics::gformula::{
+        GFormulaConfig, GFormulaData, GFormulaIntervention, GFormulaOutcomeType, run_gformula,
+    };
+    let case = Case::load("gformula_hazard");
+    let (session, server) = session_with("gformula_hazard"); // dataset `gformula_surv`
+    let ds = case_ds(&case);
+    let n = ds.df().height();
+    let args = |iv: &str| {
+        json!({"dataset": "gformula_surv", "outcome": "event", "baseline_covariates": ["L", "Lb"],
+        "time_varying_covariates": [], "treatment_cols": ["A", "A", "A", "A", "A"], "time_points": 5,
+        "outcome_type": "survival", "time_col": "time", "intervention": iv, "n_bootstrap": 20, "seed": 7})
+    };
+    let base = Array2::from_shape_fn((n, 2), |(i, j)| {
+        if j == 0 {
+            col(&ds, "L")[i]
+        } else {
+            col(&ds, "Lb")[i]
+        }
+    });
+    let a = col(&ds, "A");
+    let data = GFormulaData::new_survival(
+        base,
+        vec![Array2::zeros((n, 0)); 5],
+        vec![a; 5],
+        col(&ds, "time"),
+        col(&ds, "event"),
+    )
+    .unwrap()
+    .with_names(&["L", "Lb"], &[], "A")
+    .unwrap();
+    let run = |treat_all: bool| {
+        let mut c = GFormulaConfig::default();
+        c.time_points = 5;
+        c.outcome_type = GFormulaOutcomeType::Survival;
+        c.n_bootstrap = 20;
+        c.seed = Some(7);
+        c.intervention = GFormulaIntervention::Static { treat_all };
+        c.max_iter = 100;
+        c.tolerance = 1e-8;
+        run_gformula(&data, c).unwrap()
+    };
+    let (r1, r0) = (run(true), run(false));
+    assert_eq!(
+        ok(&server, &session, "gformula", args("always")).await,
+        r1.to_string()
+    );
+    assert_eq!(
+        ok(&server, &session, "gformula", args("never_treat")).await,
+        r0.to_string()
+    );
+    assert!(r1.all_models_converged && r0.all_models_converged);
+    let hm = r1.outcome_model.as_ref().unwrap();
+    Check::new(&case)
+        .vector(
+            "risk_always",
+            &r1.risk_curve_intervention,
+            Tol::iterative(1e-8),
+        )
+        .vector(
+            "risk_never",
+            &r0.risk_curve_intervention,
+            Tol::iterative(1e-8),
+        )
+        .named(
+            "hazard_coef",
+            &hm.names,
+            &hm.coefficients,
+            Tol::iterative(1e-8),
+        )
+        .finish();
+    let e = refused(
+        &server,
+        &session,
+        "gformula",
+        with(&args("always"), &[("outcome_type", json!("binary"))]),
+    )
+    .await;
+    assert!(e.contains("time_col"), "{e}");
+    let mut no_time = args("always");
+    no_time.as_object_mut().unwrap().remove("time_col");
+    let e = refused(&server, &session, "gformula", no_time).await;
+    assert!(e.contains("needs time_col"), "{e}");
+}
