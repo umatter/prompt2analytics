@@ -2199,3 +2199,36 @@ async fn test_validate_mcp_panel_fe_drops_absorbed() {
     .await;
     assert!(r.success, "{}", text(&r));
 }
+
+/// mcp_competing_risks (mcp_dispatch.R): Aalen-Johansen CIF of two competing events with
+/// integer, tied times; the point estimates the table prints (first five and last three times)
+/// as survfit's pstate. The standard errors are pinned in core (surv_competing_risks).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_competing_risks_cif() {
+    let case = Case::load("mcp_competing_risks");
+    let (session, server) = session_with("mcp_competing_risks"); // dataset "cr_small"
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "competing_risks",
+            json!({"dataset": "cr_small", "time": "time", "event": "event"}),
+        )
+        .await,
+    );
+    assert!(t.contains("N = 40, Censored = 9"), "{t}");
+    let times = case.vector("times");
+    assert_eq!(times.len(), 19);
+    for (marker, key) in [("Event Type 1:", "cif1"), ("Event Type 2:", "cif2")] {
+        let block = section(&t, marker);
+        let cif = case.vector(key);
+        for i in [0, 1, 2, 3, 4, 16, 17, 18] {
+            assert_row(
+                &format!("{key} t = {}", times[i]),
+                row(block, &format!("{:.3}", times[i])),
+                &[cif[i]],
+                Tol::printed(4),
+            );
+        }
+    }
+}

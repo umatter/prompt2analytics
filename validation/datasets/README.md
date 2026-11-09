@@ -273,6 +273,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/mboost_sim.csv` | 200 × 6 (x1, x2, x3, yg, yb, yc) | `ml_mboost_bols`; read by `ml_mboost_pkg` | `r/cases/ml_boosting_t3.R` | seed 4636 |
 | `generated/bart_probit_small.csv` | 40 × 2 (x1, y) | `ml_bart_probit_single_leaf` | `r/cases/ml_boosting_t3.R` | seed 4639 |
 | `generated/bart_probit_sim.csv` | 300 × 4 (x1, x2, x3, y) | `ml_bart_probit_glm` | `r/cases/ml_boosting_t3.R` | seed 4640 |
+| `generated/cr_small.csv` | 40 × 3 (id, time, event) | `mcp_competing_risks` | `r/cases/mcp_dispatch.R` | seed 20261023; integer times with ties; event 0 censored, 1 and 2 competing events |
+| `generated/mcp_dispatch.csv` | 48 × 19 (id, k, xn, a, b, gx, gy, v, s, u, w, seas, y1, y2, f1-f4, txt) | `mcp_dispatch_smoke` | `r/cases/mcp_dispatch.R` | seed 20261024; k integer counts, xn with 3 empty cells, (a, b) three separated blobs, (gx, gy) an 8 × 6 grid with v, s one mean shift, u and w correlated, seas trend plus season, y1/y2 a VAR(1), f1-f4 one factor, txt strings |
 
 ## Adding a dataset
 
