@@ -882,7 +882,8 @@ cd crates/p2a-dioxus && dx serve
 Only the first kind may be described as matching R, and only for the quantities its registry entry lists as
 pinned (a `registered-property` test compares none). A test named `test_validate_*` is R-pinned and registered
 in `validation/methods/*.json`, or listed with its reason in `validation/tools/validate_property_tests.txt`;
-`validation/tools/tests/test_tier3_closure.py` enforces it. `validation/README.md` explains both, the
+`validation/tools/tests/test_tier3_closure.py` enforces it for the tests the review findings cite (older
+unregistered `test_validate_*` tests remain until X-10 closes). `validation/README.md` explains both, the
 layout and the workflow.
 
 **Adding or fixing a method's validation** (the rules for Tiers 2-4):
