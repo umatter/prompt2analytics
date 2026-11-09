@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "mcp_hw_additive_t3",
+  "area": "timeseries/mcp",
+  "method": "HoltWinters additive (alpha 0.3, beta 0.05, gamma 0.4) on AirPassengers: 12-step forecasts and 95% prediction intervals, the interval pin of ts_holt_winters (T3-WP37-13)",
+  "reference": "stats::HoltWinters(seasonal = 'additive', alpha = 0.3, beta = 0.05, gamma = 0.4) + predict(prediction.interval = TRUE, level = 0.95)",
+  "call": "predict(HoltWinters(AirPassengers, 0.3, 0.05, 0.4, seasonal = 'additive'), 12, prediction.interval = TRUE)",
+  "dataset": "validation/datasets/generated/holtwinters_series.csv",
+  "datasets": ["validation/datasets/generated/holtwinters_series.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "hw_add_sse": 53988.885396936843,
+    "hw_add_fit": [465.81862457864736, 453.33408080079113, 502.50268985913635, 513.69890999745837, 525.43726244463426, 579.62142022362752, 635.43644355117272, 621.17261020929675, 532.63981247921356, 485.88573627321949, 440.36932787117075, 484.30957448874381],
+    "hw_add_upr": [505.53907161051518, 494.97855913070231, 546.16131581589366, 559.45765800105664, 573.37821301828615, 629.82302140165962, 687.97377358340759, 676.11763338154822, 590.06162284381821, 545.85078626589996, 502.94164034152766, 549.55093773782949],
+    "hw_add_lwr": [426.09817754677954, 411.68960247087995, 458.84406390237905, 467.94016199386004, 477.49631187098237, 529.41981904559543, 582.89911351893784, 566.22758703704528, 475.21800211460891, 425.92068628053897, 377.79701540081385, 419.06821123965813]
+  }
+}
