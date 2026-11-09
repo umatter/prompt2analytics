@@ -514,15 +514,27 @@ pub struct GlsRequest {
 
     /// Correlation structure type
     #[schemars(
-        description = "Correlation structure: 'ar1' (default), 'compound_symmetry', or 'identity' (OLS)."
+        description = "'ar1' (default; within each group in row order), 'compound_symmetry' (also 'cs', 'exchangeable'; needs group) or 'identity'."
     )]
     pub correlation: Option<String>,
 
     /// Correlation parameter (rho)
     #[schemars(
-        description = "Correlation parameter rho for AR(1) or compound symmetry. If omitted with 'ar1', auto-estimated from OLS residuals."
+        description = "Correlation parameter. If omitted it is estimated (method) for 'ar1' and 'compound_symmetry'; if given it is used as fixed (nlme fixed = TRUE)."
     )]
     pub rho: Option<f64>,
+
+    /// How rho is estimated
+    #[schemars(
+        description = "How rho is estimated when it is not given: 'REML' (default, as nlme::gls) or 'ML'."
+    )]
+    pub method: Option<String>,
+
+    /// Grouping column of the correlation structure
+    #[schemars(
+        description = "Column whose values define independent groups (nlme correlation form = ~ 1 | group): the correlation acts within each group, in row order. Compound symmetry needs it: with one group and an intercept rho is not identified."
+    )]
+    pub group: Option<String>,
 }
 
 /// Request for smooth spline fitting.

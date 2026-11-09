@@ -39,11 +39,11 @@ use p2a_core::data::Dataset;
 use p2a_core::data::columns::ColumnRequest;
 use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
-    BgTestType, CorrelationStructure, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType,
-    SmoothSplineConfig, bg_test, gls, harvey_collier_test, quantreg_multi, reset_test,
-    run_cv_glmnet, run_diagnostics, run_glmnet, run_lasso, run_line, run_loess, run_ols,
-    run_ols_clustered, run_quantreg, run_ridge, run_step, run_vcov_bootstrap,
-    run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
+    BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType, SmoothSplineConfig, bg_test,
+    harvey_collier_test, quantreg_multi, reset_test, run_cv_glmnet, run_diagnostics, run_glmnet,
+    run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_quantreg, run_ridge, run_step,
+    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
+    smooth_spline_predict, supsmu, wald_test,
 };
 
 use p2a_core::EconError;
@@ -1106,22 +1106,41 @@ impl AnalyticsServer {
 
     /// Fit a Generalized Least Squares model.
     #[tool(
-        description = "Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics."
+        description = "Generalized least squares as R nlme::gls. correlation 'ar1' (default, a p2a convention: nlme's default is no correlation; within each group, in row order), 'compound_symmetry' (exchangeable within each group, nlme corCompSymm) or 'identity'. Unless rho is given it is estimated by REML (default) or ML (method), as nlme; group names the grouping column (nlme form = ~ 1 | group) and is required for compound symmetry. Returns JSON with the coefficients, the correlation parameter and whether it was estimated or user-supplied, sigma, log-likelihood, AIC and BIC as nlme, and convergence."
     )]
     pub async fn regression_gls(
         &self,
         Parameters(request): Parameters<GlsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use ndarray::Array1;
-        use p2a_core::linalg::design::DesignMatrix;
+        use p2a_core::regression::{GlsCorrelation, GlsMethod, GlsOptions, run_gls_with};
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Extract y column (a missing value is an error, as nlme::gls's na.fail)
-        let y = match numeric_column(dataset, &request.y, NaPolicy::Fail) {
-            Ok((v, _)) => Array1::from_vec(v),
+        let correlation = match parse_option::<GlsCorrelation>(
+            request.correlation.as_deref(),
+            GlsCorrelation::Ar1,
+        ) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let method = match parse_option::<GlsMethod>(request.method.as_deref(), GlsMethod::Reml) {
+            Ok(m) => m,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let intercept = request.intercept.unwrap_or(true);
+
+        let mut options = GlsOptions::default();
+        options.correlation = correlation;
+        options.rho = request.rho;
+        options.group_col = request.group.clone();
+        options.method = method;
+
+        let result = match run_gls_with(dataset, &request.y, &x_refs, intercept, &options) {
+            Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "GLS regression failed: {e}"
@@ -1129,112 +1148,68 @@ impl AnalyticsServer {
             }
         };
 
-        // Build design matrix
-        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-        let intercept = request.intercept.unwrap_or(true);
+        let mut coef_names: Vec<String> = if intercept {
+            vec!["(Intercept)".to_string()]
+        } else {
+            vec![]
+        };
+        coef_names.extend(request.x.iter().cloned());
 
-        let dm = match DesignMatrix::from_dataframe(dataset.df(), &x_refs, intercept) {
-            Ok(dm) => dm,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to build design matrix: {}",
-                    e
-                ))]));
-            }
+        let coef_table: Vec<serde_json::Value> = coef_names
+            .iter()
+            .enumerate()
+            .take(result.coefficients.len())
+            .map(|(i, name)| {
+                serde_json::json!({
+                    "term": name,
+                    "estimate": result.coefficients[i],
+                    "std_error": result.std_errors.get(i),
+                    "t_value": result.t_values.get(i),
+                    "p_value": result.p_values.get(i)
+                })
+            })
+            .collect();
+
+        let source = if result.correlation_param.is_none() {
+            "not applicable".to_string()
+        } else if !result.rho_estimated {
+            "user-supplied".to_string()
+        } else {
+            format!("estimated ({})", result.method.label())
         };
 
-        let x = dm.view();
-
-        // Determine correlation structure
-        let corr_type = request.correlation.as_deref().unwrap_or("ar1");
-
-        let correlation = match corr_type {
-            "identity" | "ols" => CorrelationStructure::Identity,
-            "compound_symmetry" | "cs" => {
-                let rho = request.rho.unwrap_or(0.5);
-                CorrelationStructure::CompoundSymmetry { rho }
-            }
-            "ar1" | "ar" => {
-                // If rho not provided, auto-estimate from OLS residuals
-                let rho = if let Some(r) = request.rho {
-                    r
-                } else {
-                    // Run OLS to get residuals for AR(1) estimation
-                    match gls(&y.view(), &x, CorrelationStructure::Identity) {
-                        Ok(ols_result) => {
-                            // Estimate rho from residuals
-                            let residuals = &ols_result.residuals;
-                            let n = residuals.len();
-                            if n > 1 {
-                                let mut sum_prod = 0.0;
-                                let mut sum_sq = 0.0;
-                                for i in 1..n {
-                                    sum_prod += residuals[i] * residuals[i - 1];
-                                    sum_sq += residuals[i - 1].powi(2);
-                                }
-                                (sum_prod / sum_sq).clamp(-0.99, 0.99)
-                            } else {
-                                0.0
-                            }
-                        }
-                        Err(_) => 0.5, // fallback
-                    }
-                };
-                CorrelationStructure::AR1 { rho }
-            }
-            other => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown correlation structure '{}'. Supported: ar1, compound_symmetry, identity.",
-                    other
-                ))]));
-            }
-        };
-
-        match gls(&y.view(), &x, correlation) {
-            Ok(result) => {
-                // Build coefficient names
-                let mut coef_names: Vec<String> = if intercept {
-                    vec!["(Intercept)".to_string()]
-                } else {
-                    vec![]
-                };
-                coef_names.extend(request.x.iter().cloned());
-
-                let mut coef_table: Vec<serde_json::Value> = Vec::new();
-                for (i, name) in coef_names.iter().enumerate() {
-                    coef_table.push(serde_json::json!({
-                        "term": name,
-                        "estimate": result.coefficients[i],
-                        "std_error": result.std_errors[i],
-                        "t_value": result.t_values[i],
-                        "p_value": result.p_values[i]
-                    }));
-                }
-
-                let json_output = serde_json::json!({
-                    "model": "Generalized Least Squares",
-                    "correlation": result.correlation,
-                    "correlation_param": result.correlation_param,
-                    "coefficients": coef_table,
-                    "sigma": result.sigma,
-                    "r_squared": result.r_squared,
-                    "adj_r_squared": result.adj_r_squared,
-                    "log_likelihood": result.log_likelihood,
-                    "aic": result.aic,
-                    "bic": result.bic,
-                    "n_obs": result.n_obs,
-                    "df_residual": result.df_residual
-                });
-
-                Ok(CallToolResult::success(vec![Content::text(json_text(
-                    &json_output,
-                ))]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "GLS regression failed: {}",
-                e
-            ))])),
+        let mut json_output = serde_json::json!({
+            "model": "Generalized Least Squares",
+            "method": result.method.label(),
+            "correlation": result.correlation,
+            "correlation_param": result.correlation_param,
+            "correlation_param_source": source,
+            "group": request.group,
+            "n_groups": result.n_groups,
+            "coefficients": coef_table,
+            "sigma": result.sigma,
+            "r_squared": result.r_squared,
+            "adj_r_squared": result.adj_r_squared,
+            "log_likelihood": result.log_likelihood,
+            "aic": result.aic,
+            "bic": result.bic,
+            "n_obs": result.n_obs,
+            "df_residual": result.df_residual
+        });
+        let notes = notes_json(
+            result
+                .convergence
+                .as_ref()
+                .map(|c| (c.converged, c.iterations)),
+            &result.warnings,
+        );
+        if let (Some(out), Some(n)) = (json_output.as_object_mut(), notes.as_object()) {
+            out.extend(n.clone());
         }
+
+        Ok(CallToolResult::success(vec![Content::text(json_text(
+            &json_output,
+        ))]))
     }
 
     /// Fit a smoothing spline.

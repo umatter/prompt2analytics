@@ -334,3 +334,210 @@ async fn test_validate_mcp_glmnet_reply_survives_the_chat_loop_cut() {
         }
     }
 }
+
+/// (term names, estimates, standard errors) of a GLS JSON result.
+fn gls_terms(j: &Value) -> (Vec<String>, Vec<f64>, Vec<f64>) {
+    let rows = j["coefficients"].as_array().expect("coefficients");
+    (
+        rows.iter()
+            .map(|r| r["term"].as_str().unwrap().to_string())
+            .collect(),
+        rows.iter()
+            .map(|r| r["estimate"].as_f64().unwrap())
+            .collect(),
+        rows.iter()
+            .map(|r| r["std_error"].as_f64().unwrap())
+            .collect(),
+    )
+}
+
+fn num(j: &Value, k: &str) -> f64 {
+    j[k].as_f64().unwrap_or_else(|| panic!("{k}: {j}"))
+}
+
+/// gls_compsymm (regression_smoothers_t3.R): nlme::gls(y ~ x + z, correlation =
+/// corCompSymm(form = ~ 1 | g)), REML and ML; pinned to nlme's profile likelihood maximised
+/// tightly (the *_profile_* keys).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_gls_compsymm() {
+    let case = Case::load("gls_compsymm");
+    let n = case.scalar("n") as usize; // 150, 30 groups of 5
+    let (session, server) = session_with("gls_compsymm"); // dataset "gls_cs"
+    for (method, m) in [(None, "reml"), (Some("ML"), "ml")] {
+        let mut a = json!({"dataset": "gls_cs", "y": "y", "x": ["x", "z"],
+                           "correlation": "compound_symmetry", "group": "g"});
+        if let Some(mm) = method {
+            a["method"] = json!(mm);
+        }
+        // fails before: unknown field `group`
+        let j = json_of(&call(&server, &session, "regression_gls", a).await);
+        let (names, est, se) = gls_terms(&j);
+        let p = |s: &str| format!("{m}_profile_{s}");
+        Check::new(&case)
+            .scalar(
+                &p("rho"),
+                num(&j, "correlation_param"),
+                Tol::iterative(1e-6),
+            )
+            .named(&p("coef"), &names, &est, Tol::coef(n))
+            .named(&p("se"), &names, &se, Tol::se(n))
+            .scalar(&p("sigma"), num(&j, "sigma"), Tol::stat(n))
+            .scalar(&p("loglik"), num(&j, "log_likelihood"), Tol::stat(n))
+            .scalar(&format!("{m}_aic"), num(&j, "aic"), Tol::stat(n))
+            .scalar(&format!("{m}_bic"), num(&j, "bic"), Tol::stat(n))
+            .scalar("n_groups", num(&j, "n_groups"), Tol::exact())
+            .finish();
+        let source = if m == "reml" {
+            "estimated (REML)"
+        } else {
+            "estimated (ML)"
+        };
+        assert_eq!(j["correlation_param_source"], source);
+        assert_eq!(
+            (j["method"].as_str(), j["group"].as_str()),
+            (Some(m.to_uppercase().as_str()), Some("g"))
+        );
+        assert_eq!(j["converged"], true);
+    }
+    // a user rho is labelled as such and not optimised (corCompSymm(0.3, fixed = TRUE))
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            json!({"dataset": "gls_cs", "y": "y", "x": ["x", "z"], "correlation": "cs",
+                   "group": "g", "rho": 0.3}),
+        )
+        .await,
+    );
+    let (names, est, se) = gls_terms(&j);
+    Check::new(&case)
+        .named("cs03_reml_coef", &names, &est, Tol::coef(n))
+        .named("cs03_reml_se", &names, &se, Tol::se(n))
+        .scalar("cs03_reml_sigma", num(&j, "sigma"), Tol::stat(n))
+        .scalar("cs03_reml_loglik", num(&j, "log_likelihood"), Tol::stat(n))
+        .finish();
+    assert_eq!(j["correlation_param_source"], "user-supplied");
+    assert!(j.get("converged").is_none(), "{j}");
+}
+
+/// gls_ar1: the default AR(1) without rho is nlme's REML (phi 0.68198), not the lag-1
+/// residual correlation (0.6542); ML on request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_gls_ar1_reml() {
+    let case = Case::load("gls_ar1");
+    let n = case.scalar("n_obs") as usize; // 50
+    let (session, server) = session_with("gls_ar1");
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            json!({"dataset": "gls_ar1", "y": "y", "x": ["x"]}),
+        )
+        .await,
+    );
+    let (names, est, se) = gls_terms(&j);
+    Check::new(&case)
+        // fails before: 0.6541921822266757
+        .scalar("phi", num(&j, "correlation_param"), Tol::iterative(1e-6))
+        .named("coef", &names, &est, Tol::coef(n))
+        .named("se", &names, &se, Tol::se(n))
+        .scalar("log_lik_reml", num(&j, "log_likelihood"), Tol::stat(n))
+        .finish();
+    assert_eq!(j["correlation_param_source"], "estimated (REML)");
+    let ml = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            json!({"dataset": "gls_ar1", "y": "y", "x": ["x"], "method": "ml"}),
+        )
+        .await,
+    );
+    let (names, est, _) = gls_terms(&ml);
+    Check::new(&case)
+        .scalar(
+            "phi_ml",
+            num(&ml, "correlation_param"),
+            Tol::iterative(1e-6),
+        )
+        .named("coef_ml", &names, &est, Tol::coef(n))
+        .scalar("log_lik_ml", num(&ml, "log_likelihood"), Tol::stat(n))
+        .finish();
+}
+
+/// Compound symmetry needs groups; unknown structures and methods are errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_gls_options_and_errors() {
+    let case = Case::load("gls_compsymm");
+    let _ = &case;
+    let (session, server) = session_with("gls_compsymm");
+    let base = json!({"dataset": "gls_cs", "y": "y", "x": ["x", "z"]});
+    let with = |k: &str, v: Value| {
+        let mut a = base.clone();
+        a[k] = v;
+        a
+    };
+    // fails before: success with correlation_param 0.5
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            with("correlation", json!("compound_symmetry")),
+        )
+        .await,
+    );
+    assert!(e.contains("rho") && e.contains("not identified"), "{e}");
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            with("correlation", json!("toeplitz")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("toeplitz") && e.contains("compound_symmetry") && e.contains("ar1"),
+        "{e}"
+    );
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            with("method", json!("GMM")),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("GMM") && e.contains("reml") && e.contains("ml"),
+        "{e}"
+    );
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            json!({"dataset": "gls_cs", "y": "y", "x": ["x"], "correlation": "cs", "group": "nope"}),
+        )
+        .await,
+    );
+    assert!(e.contains("nope"), "{e}");
+    // identity: no correlation parameter
+    let j = json_of(
+        &call(
+            &server,
+            &session,
+            "regression_gls",
+            with("correlation", json!("identity")),
+        )
+        .await,
+    );
+    assert!(
+        j["correlation_param"].is_null() && j["correlation_param_source"] == "not applicable",
+        "{j}"
+    );
+}

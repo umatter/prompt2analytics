@@ -3,19 +3,29 @@
   "methods": [
     {
       "id": "mcp_regression_surface",
-      "name": "MCP regression tools through call_tool_with_session: glmnet JSON",
+      "name": "MCP regression tools through call_tool_with_session: glmnet JSON, GLS rho",
       "category": "mcp",
-      "reference": "glmnet::glmnet, glmnet::cv.glmnet (the R cases of each method)",
+      "reference": "glmnet::glmnet, glmnet::cv.glmnet, nlme::gls (the R cases of each method)",
       "doc": "validation/mcp/models.md",
-      "cases": ["glmnet_paths"],
+      "cases": [
+        "glmnet_paths",
+        "gls_compsymm",
+        "gls_ar1"
+      ],
       "tests": [
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_returns_coefficients",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_lasso_default_path",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_reply_survives_the_chat_loop_cut"
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_reply_survives_the_chat_loop_cut",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_compsymm",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_ar1_reml",
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_options_and_errors"
       ],
-      "quantities": ["glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df; cv coefficients equal the library's; the selection summary precedes the path in the reply"],
-      "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact",
+      "quantities": [
+        "glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df; cv coefficients equal the library's; the selection summary precedes the path in the reply",
+        "GLS rho, coefficients, SEs, sigma, log-likelihood, AIC, BIC (REML, ML, fixed rho; CS within groups, AR(1))"
+      ],
+      "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative",
       "deviations": [],
       "supersedes_legacy": []
     }
