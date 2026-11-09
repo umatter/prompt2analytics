@@ -334,9 +334,21 @@ pub struct QuantRegRequest {
 
     /// Multiple quantiles to estimate
     #[schemars(
-        description = "Optional: estimate multiple quantiles at once (e.g., [0.25, 0.5, 0.75] for quartiles). If provided, 'tau' is ignored."
+        description = "A list of quantiles (each in (0, 1)), e.g. [0.25, 0.5, 0.75]; give tau or taus, not both."
     )]
     pub taus: Option<Vec<f64>>,
+
+    /// Fitting algorithm
+    #[schemars(
+        description = "'auto' (default: 'br' up to 5,000 rows, 'fn' above; rq's own default is 'br' at every n), 'br' (Barrodale-Roberts simplex), 'fn' (Frisch-Newton interior point) or 'irls' (an approximation, not an R method)."
+    )]
+    pub method: Option<String>,
+
+    /// Standard errors
+    #[schemars(
+        description = "Standard errors as summary.rq(se =): 'nid' (Hendricks-Koenker sandwich, default at every n; R uses 'rank' below n = 1001, which p2a does not offer), 'iid', 'ker' (Powell kernel) or 'boot' (xy-pair bootstrap, 200 replications, seeded by the session seed, else 42)."
+    )]
+    pub se: Option<String>,
 }
 
 /// Request for nonlinear least squares (NLS).

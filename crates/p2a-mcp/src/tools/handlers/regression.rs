@@ -40,10 +40,9 @@ use p2a_core::data::columns::ColumnRequest;
 use p2a_core::regression::OlsResult;
 use p2a_core::regression::{
     BgTestType, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType, SmoothSplineConfig, bg_test,
-    harvey_collier_test, quantreg_multi, reset_test, run_cv_glmnet, run_diagnostics, run_glmnet,
-    run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_quantreg, run_ridge, run_step,
-    run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
-    smooth_spline_predict, supsmu, wald_test,
+    harvey_collier_test, reset_test, run_cv_glmnet, run_diagnostics, run_glmnet, run_lasso,
+    run_line, run_loess, run_ols, run_ols_clustered, run_ridge, run_step, run_vcov_bootstrap,
+    run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
 };
 
 use p2a_core::EconError;
@@ -612,56 +611,72 @@ impl AnalyticsServer {
 
     /// Quantile regression.
     #[tool(
-        description = "Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously."
+        description = "Quantile regression as R quantreg::rq: method 'auto' (default: 'br' up to 5,000 rows, 'fn' above; rq's own default is 'br' at every n), 'br' (Barrodale-Roberts simplex), 'fn' (Frisch-Newton interior point) or 'irls' (an approximation, not an R method); standard errors as summary.rq with se 'nid' (default), 'iid', 'ker' or 'boot'. Give one quantile tau (default 0.5) or a list taus, not both. Returns coefficients, standard errors, t, p and 95% intervals from t(n - k) for each quantile."
     )]
     pub async fn regression_quantreg(
         &self,
         Parameters(request): Parameters<QuantRegRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::quantreg::{
+            QuantRegConfig, QuantRegMethod, QuantRegSe, quantreg, quantreg_multi_with,
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Handle multiple quantiles or single quantile
-        if let Some(taus) = &request.taus {
-            // Multiple quantiles
-            let results = match quantreg_multi(dataset, &request.y, &x_refs, taus) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Quantile regression failed: {}",
-                        e
-                    ))]));
-                }
+        let mut config = QuantRegConfig::default();
+        config.algorithm =
+            match parse_option::<QuantRegMethod>(request.method.as_deref(), QuantRegMethod::Auto) {
+                Ok(m) => m,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
+        config.se = match parse_option::<QuantRegSe>(request.se.as_deref(), QuantRegSe::Nid) {
+            Ok(s) => s,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        // the bootstrap's seed (se = boot only); None = QUANTREG_BOOT_DEFAULT_SEED
+        config.seed = *self.global_seed.read().await;
 
-            // Format all results
-            let output: String = results
-                .iter()
-                .map(|r| format!("{}", r))
-                .collect::<Vec<_>>()
-                .join("\n---\n");
-
-            Ok(CallToolResult::success(vec![Content::text(output)]))
-        } else {
-            // Single quantile
-            let tau = request.tau.unwrap_or(0.5);
-            let result = match run_quantreg(dataset, &request.y, &x_refs, tau) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Quantile regression failed: {}",
-                        e
-                    ))]));
+        let fail = |e: p2a_core::EconError| {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Quantile regression failed: {e}"
+            ))]))
+        };
+        let results = match (request.tau, &request.taus) {
+            (Some(_), Some(_)) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "give either tau or taus, not both".to_string(),
+                )]));
+            }
+            (_, Some(taus)) => {
+                match quantreg_multi_with(dataset, &request.y, &x_refs, taus, &config) {
+                    Ok(r) => r,
+                    Err(e) => return fail(e),
                 }
-            };
+            }
+            (tau, None) => {
+                config.tau = tau.unwrap_or(0.5);
+                match quantreg(dataset, &request.y, &x_refs, &config) {
+                    Ok(r) => vec![r],
+                    Err(e) => return fail(e),
+                }
+            }
+        };
 
-            Ok(CallToolResult::success(vec![Content::text(
-                result.to_string(),
-            )]))
-        }
+        let output: String = results
+            .iter()
+            .map(|r| {
+                let mut block = r.to_string();
+                append_unshown_notes(&mut block, r);
+                block
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run OLS with clustered standard errors.

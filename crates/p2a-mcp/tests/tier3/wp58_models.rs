@@ -541,3 +541,133 @@ async fn test_validate_mcp_gls_options_and_errors() {
         "{j}"
     );
 }
+
+/// rq_br_se (reg_quantreg_br.R): rq(method = "br") and summary.rq(se = nid | iid | ker) at
+/// tau 0.25, 0.5, 0.75.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_quantreg_br_se() {
+    let case = Case::load("rq_br_se");
+    let (session, server) = session_with("rq_br_se"); // dataset "quantreg_hetero"
+    let base = json!({"dataset": "quantreg_hetero", "y": "y", "x": ["x"], "tau": 0.25});
+    for (se, key) in [
+        (None, "nid"),
+        (Some("iid"), "iid"),
+        (Some("ker"), "ker"),
+        (Some("Powell"), "ker"),
+    ] {
+        let mut a = base.clone();
+        if let Some(s) = se {
+            a["se"] = json!(s); // fails before: unknown field `se`
+        }
+        let t = text(&call(&server, &session, "regression_quantreg", a).await);
+        for v in ["(Intercept)", "x"] {
+            assert_row(
+                &format!("tau 0.25 {v} se {key}"),
+                row(&t, v),
+                &[
+                    case.named("tau25_coef", v),
+                    case.named(&format!("tau25_se_{key}"), v),
+                ],
+                Tol::printed(4),
+            );
+        }
+        // the default method 'auto' runs the simplex at this n
+        assert!(t.contains("Barrodale-Roberts simplex (br)"), "{t}");
+    }
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "regression_quantreg",
+            json!({"dataset": "quantreg_hetero", "y": "y", "x": ["x"], "taus": [0.25, 0.5, 0.75]}),
+        )
+        .await,
+    );
+    let blocks: Vec<&str> = t.split("\n---\n").collect();
+    assert_eq!(blocks.len(), 3, "{t}");
+    for (b, tag) in blocks.iter().zip(["tau25", "tau50", "tau75"]) {
+        assert_row(
+            tag,
+            row(b, "x"),
+            &[
+                case.named(&format!("{tag}_coef"), "x"),
+                case.named(&format!("{tag}_se_nid"), "x"),
+            ],
+            Tol::printed(4),
+        );
+    }
+    let mut a = base.clone();
+    a["method"] = json!("simplex");
+    assert!(
+        text(&call(&server, &session, "regression_quantreg", a).await)
+            .contains("Barrodale-Roberts simplex (br)")
+    );
+    let mut a = base.clone();
+    a["method"] = json!("IRLS");
+    assert!(
+        text(&call(&server, &session, "regression_quantreg", a).await)
+            .contains("IRLS approximation (irls)")
+    );
+    let mut a = base.clone();
+    a["se"] = json!("hc1");
+    let e = tool_error(&call(&server, &session, "regression_quantreg", a).await);
+    assert!(
+        e.contains("hc1") && e.contains("nid, iid, ker, boot"),
+        "{e}"
+    );
+    let mut a = base.clone();
+    a["method"] = json!("lasso");
+    let e = tool_error(&call(&server, &session, "regression_quantreg", a).await);
+    assert!(
+        e.contains("lasso") && e.contains("auto, br, fn, irls"),
+        "{e}"
+    );
+}
+
+/// An empty taus list, tau together with taus, and tau on the boundary are tool errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_quantreg_empty_taus_is_error() {
+    let case = Case::load("rq_br_se");
+    let _ = &case;
+    let (session, server) = session_with("rq_br_se");
+    let q = |extra: Value| {
+        let mut a = json!({"dataset": "quantreg_hetero", "y": "y", "x": ["x"]});
+        for (k, v) in extra.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        a
+    };
+    // before: an empty success
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_quantreg",
+            q(json!({"taus": []})),
+        )
+        .await,
+    );
+    assert!(e.to_lowercase().contains("tau"), "{e}");
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "regression_quantreg",
+            q(json!({"tau": 0.5, "taus": [0.25]})),
+        )
+        .await,
+    );
+    assert!(e.contains("tau") && e.contains("taus"), "{e}");
+    for tau in [0.0, 1.0] {
+        let e = tool_error(
+            &call(
+                &server,
+                &session,
+                "regression_quantreg",
+                q(json!({"tau": tau})),
+            )
+            .await,
+        );
+        assert!(e.contains("tau"), "tau = {tau}: {e}");
+    }
+}
