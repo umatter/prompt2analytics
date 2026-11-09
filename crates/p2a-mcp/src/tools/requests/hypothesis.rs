@@ -36,7 +36,7 @@ pub struct KsTestRequest {
 
     /// Theoretical distribution for one-sample test
     #[schemars(
-        description = "For one-sample test: distribution to test against. Options: 'normal' (default), 'uniform', 'exponential'. Ignored for two-sample test."
+        description = "One-sample test: the reference distribution, 'normal' (default; also R's 'pnorm'; parameters mean, sd), 'uniform' ('punif'; parameters a, b) or 'exponential' ('pexp'; parameter rate). A parameter of another distribution is refused, and so are the distribution and its parameters on a two-sample test."
     )]
     pub distribution: Option<String>,
 
@@ -72,7 +72,7 @@ pub struct KsTestRequest {
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For two-sample: 'greater' means CDF of x is not below CDF of y (x is stochastically greater)."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted. For two-sample: 'greater' means CDF of x is not below CDF of y (x is stochastically greater)."
     )]
     pub alternative: Option<String>,
 }
@@ -101,7 +101,7 @@ pub struct FisherExactRequest {
 
     /// Alternative hypothesis
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. One-sided tests compare odds ratio to 1."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted. One-sided tests compare odds ratio to 1."
     )]
     pub alternative: Option<String>,
 
@@ -165,7 +165,7 @@ pub struct WilcoxonTestRequest {
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 
@@ -226,7 +226,7 @@ pub struct TTestRequest {
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 
@@ -329,7 +329,7 @@ pub struct PoissonTestRequest {
 
     /// Alternative hypothesis
     #[schemars(
-        description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 
@@ -412,7 +412,7 @@ pub struct MantelhaenTestRequest {
 
     /// Alternative hypothesis
     #[schemars(
-        description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 }
@@ -458,7 +458,7 @@ pub struct PairwiseTTestRequest {
 
     /// P-value adjustment method
     #[schemars(
-        description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'."
+        description = "Method for adjusting p-values: 'holm' (default), 'hochberg', 'hommel', 'bonferroni' (also 'bonf'), 'BH' (Benjamini-Hochberg FDR; also 'fdr'), 'BY' or 'none'."
     )]
     pub p_adjust_method: Option<String>,
 
@@ -470,7 +470,7 @@ pub struct PairwiseTTestRequest {
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 }
@@ -522,13 +522,13 @@ pub struct PairwiseWilcoxRequest {
 
     /// P-value adjustment method
     #[schemars(
-        description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'."
+        description = "Method for adjusting p-values: 'holm' (default), 'hochberg', 'hommel', 'bonferroni' (also 'bonf'), 'BH' (Benjamini-Hochberg FDR; also 'fdr'), 'BY' or 'none'."
     )]
     pub p_adjust_method: Option<String>,
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 
@@ -559,7 +559,7 @@ pub struct MoodTestRequest {
 
     /// Alternative hypothesis direction
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For 'greater': scale of x > scale of y."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted. For 'greater': scale of x > scale of y."
     )]
     pub alternative: Option<String>,
 }
@@ -590,7 +590,7 @@ pub struct CorTestRequest {
 
     /// Alternative hypothesis
     #[schemars(
-        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater' or 'less'; R and CLI spellings such as 'two-sided', 'right' and 'left' are accepted."
     )]
     pub alternative: Option<String>,
 

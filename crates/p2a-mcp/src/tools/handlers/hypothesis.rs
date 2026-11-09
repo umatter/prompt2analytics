@@ -14,7 +14,7 @@
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
     MissingSummary, NaPolicy, budget_group_count, budget_level_count, check_named_budget,
-    insert_missing, missing_json, numeric_columns,
+    insert_missing, missing_json, numeric_columns, parse_option,
 };
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
@@ -356,7 +356,7 @@ impl AnalyticsServer {
                     "statistic": result.statistic,
                     "statistic_name": result.statistic_name,
                     "p_value": result.p_value,
-                    "alternative": format!("{:?}", result.alternative),
+                    "alternative": result.alternative.to_string(),
                     "n": result.n,
                     "null_value": result.null_value,
                     "conf_level": result.conf_level,
@@ -406,16 +406,13 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") => FisherAlternative::Greater,
-            Some("less") => FisherAlternative::Less,
-            Some("two.sided") | None => FisherAlternative::TwoSided,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid alternative '{}'. Must be 'two.sided', 'greater', or 'less'.",
-                    other
-                ))]));
-            }
+        let alternative = match parse_choice(
+            &FISHER_ALTERNATIVE,
+            request.alternative.as_deref(),
+            FisherAlternative::TwoSided,
+        ) {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         match run_fisher_test(
@@ -610,56 +607,69 @@ impl AnalyticsServer {
 
     /// Kolmogorov-Smirnov test for comparing distributions.
     #[tool(
-        description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ."
+        description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs), p-value and, for a one-sample test, the reference distribution tested in R's notation (e.g. punif(min = -1.5, max = 3)). A small p-value suggests the distributions differ."
     )]
     pub async fn hypothesis_ks_test(
         &self,
         Parameters(request): Parameters<KsTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::ks::{TheoreticalDistribution, ks_test};
+        use p2a_core::stats::ks::{KsDistribution, TheoreticalDistribution, ks_test};
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // The theoretical distribution of a one-sample test (none for two samples)
+        let params = [
+            ("mean", request.mean, KsDistribution::Normal),
+            ("sd", request.sd, KsDistribution::Normal),
+            ("a", request.a, KsDistribution::Uniform),
+            ("b", request.b, KsDistribution::Uniform),
+            ("rate", request.rate, KsDistribution::Exponential),
+        ];
         let distribution = if request.y.is_some() {
+            if request.distribution.is_some() || params.iter().any(|(_, v, _)| v.is_some()) {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "distribution and its parameters apply only to the one-sample test (omit y)",
+                )]));
+            }
             None
         } else {
-            Some(match request.distribution.as_deref() {
-                Some("uniform") => {
-                    let a = request.a.unwrap_or(0.0);
-                    let b = request.b.unwrap_or(1.0);
-                    TheoreticalDistribution::UniformParams { a, b }
+            let kind = match parse_option(request.distribution.as_deref(), KsDistribution::Normal) {
+                Ok(k) => k,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
+            if let Some((param, _, owner)) = params
+                .iter()
+                .find(|(_, v, owner)| v.is_some() && *owner != kind)
+            {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "{param} applies only to distribution = '{owner}'; drop it or change distribution"
+                ))]));
+            }
+            match TheoreticalDistribution::from_kind(
+                kind,
+                request.mean,
+                request.sd,
+                request.a,
+                request.b,
+                request.rate,
+            ) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "KS test failed: {e}"
+                    ))]));
                 }
-                Some("exponential") => {
-                    let rate = request.rate.unwrap_or(1.0);
-                    TheoreticalDistribution::Exponential { rate }
-                }
-                _ => {
-                    let mean = request.mean.unwrap_or(0.0);
-                    let sd = request.sd.unwrap_or(1.0);
-                    if (mean - 0.0).abs() < 1e-10 && (sd - 1.0).abs() < 1e-10 {
-                        TheoreticalDistribution::Normal
-                    } else {
-                        TheoreticalDistribution::NormalParams { mean, sd }
-                    }
-                }
-            })
+            }
         };
+        let distribution_label = distribution.as_ref().map(|d| d.label());
 
         match ks_test(
             dataset,
@@ -691,6 +701,9 @@ impl AnalyticsServer {
                     }
                 });
 
+                if let Some(label) = &distribution_label {
+                    json_output["distribution"] = serde_json::json!(label);
+                }
                 if let Some(n2) = result.n_2 {
                     json_output["n_2"] = serde_json::json!(n2);
                 }
@@ -721,10 +734,13 @@ impl AnalyticsServer {
 
         let correct = request.correct.unwrap_or(true);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") => CmhAlternative::Greater,
-            Some("less") => CmhAlternative::Less,
-            _ => CmhAlternative::TwoSided,
+        let alternative = match parse_choice(
+            &CMH_ALTERNATIVE,
+            request.alternative.as_deref(),
+            CmhAlternative::TwoSided,
+        ) {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let result = match run_mantelhaen_test(
@@ -879,10 +895,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") | Some("gt") => Alternative::Greater,
-            Some("less") | Some("lt") => Alternative::Less,
-            _ => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let result = match run_mood_test(dataset, &request.x, &request.y, Some(alternative)) {
@@ -1023,30 +1039,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let p_adjust_method = match request.p_adjust_method.as_deref() {
-            Some(m) => match PValueAdjustMethod::from_str(m) {
-                Some(method) => method,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid p-value adjustment method '{}'. Use 'holm', 'bonferroni', 'hochberg', 'hommel', 'BH', 'BY', or 'none'.",
-                        m
-                    ))]));
-                }
-            },
-            None => PValueAdjustMethod::Holm,
-        };
+        let p_adjust_method =
+            match parse_option(request.p_adjust_method.as_deref(), PValueAdjustMethod::Holm) {
+                Ok(m) => m,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let pool_sd = request.pool_sd.unwrap_or(false);
@@ -1082,9 +1084,9 @@ impl AnalyticsServer {
 
                 let mut output = serde_json::json!({
                     "test": result.test_name,
-                    "p_adjust_method": result.p_adjust_method.name(),
+                    "p_adjust_method": result.p_adjust_method.to_string(),
                     "pool_sd": result.pool_sd,
-                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "alternative": result.alternative.to_string(),
                     "group_names": result.group_names,
                     "group_sizes": result.group_sizes,
                     "group_means": result.group_means,
@@ -1128,30 +1130,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let p_adjust_method = match request.p_adjust_method.as_deref() {
-            Some(m) => match PValueAdjustMethod::from_str(m) {
-                Some(method) => method,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid p-value adjustment method '{}'. Use 'holm', 'bonferroni', 'hochberg', 'hommel', 'BH', 'BY', or 'none'.",
-                        m
-                    ))]));
-                }
-            },
-            None => PValueAdjustMethod::Holm,
-        };
+        let p_adjust_method =
+            match parse_option(request.p_adjust_method.as_deref(), PValueAdjustMethod::Holm) {
+                Ok(m) => m,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         if let Err(msg) = check_pairwise_groups(
@@ -1185,8 +1173,8 @@ impl AnalyticsServer {
 
                 let mut output = serde_json::json!({
                     "test": result.test_name,
-                    "p_adjust_method": result.p_adjust_method.name(),
-                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "p_adjust_method": result.p_adjust_method.to_string(),
+                    "alternative": result.alternative.to_string(),
                     "group_names": result.group_names,
                     "group_sizes": result.group_sizes,
                     "group_medians": result.group_medians,
@@ -1229,11 +1217,11 @@ impl AnalyticsServer {
         let r = request.r.unwrap_or(1.0);
         let conf_level = request.conf_level.unwrap_or(0.95);
 
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") => PoissonAlternative::Greater,
-            Some("less") => PoissonAlternative::Less,
-            _ => PoissonAlternative::TwoSided,
-        };
+        let alternative =
+            match parse_option(request.alternative.as_deref(), PoissonAlternative::TwoSided) {
+                Ok(a) => a,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
         let result = match poisson_test(&request.x, &request.t, r, alternative, conf_level) {
             Ok(r) => r,
@@ -1519,10 +1507,10 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let mu = request.mu.unwrap_or(0.0);
-        let alternative = match request.alternative.as_deref() {
-            Some("greater") | Some("gt") => Alternative::Greater,
-            Some("less") | Some("lt") => Alternative::Less,
-            _ => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
         let paired = request.paired.unwrap_or(false);
         let var_equal = request.var_equal.unwrap_or(false);
@@ -1566,17 +1554,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let alternative = match request.alternative.as_deref() {
-            Some(alt) => match Alternative::from_str(alt) {
-                Some(a) => a,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
-                        alt
-                    ))]));
-                }
-            },
-            None => Alternative::TwoSided,
+        let alternative = match parse_option(request.alternative.as_deref(), Alternative::TwoSided)
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let mu = request.mu.unwrap_or(0.0);
@@ -1602,7 +1583,7 @@ impl AnalyticsServer {
                     "statistic": result.statistic,
                     "p_value": result.p_value,
                     "significance": result.significance.to_string(),
-                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "alternative": result.alternative.to_string(),
                     "null_value": result.null_value,
                     "exact": result.exact,
                     "continuity_correction": result.continuity_correction,
