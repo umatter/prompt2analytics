@@ -171,6 +171,11 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["logit", "mahalanobis"],
         ),
         (
+            "propensity_matching",
+            with(&tc, &[("m_order", json!("closest"))]),
+            vec!["m_order", "largest", "random"],
+        ),
+        (
             "treatment_tmle",
             with(&otc, &[("q_model", json!("poisson"))]),
             vec!["q_model", "logistic", "linear"],
@@ -1069,4 +1074,171 @@ async fn test_validate_mcp_weighting() {
         .scalar("ipw_ate_hajek", ipw.effect, Tol::iterative(1e-8))
         .scalar("ipw_ate_se_mest", ipw.std_error, Tol::se(300))
         .finish();
+}
+
+/// MatchIt's defaults through the MCP: optimal full matching without bounds and CEM with Sturges bins
+/// (the matchit_full_cem case).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_propensity_matching() {
+    use p2a_core::econometrics::matching::{MatchMethod, MatchOptions, match_it_with};
+    let case = Case::load("matchit_full_cem");
+    let (session, server) = session_with("matchit_full_cem"); // dataset `matching_sim`
+    let ds = case_ds(&case);
+    let covs = ["x1", "x2", "x3"];
+    let base = json!({"dataset": "matching_sim", "treatment": "treat", "covariates": covs});
+    // the tool passes a distance only when one is given
+    let full = match_it_with(
+        &ds,
+        "treat",
+        &covs,
+        MatchMethod::Full {
+            min_ratio: 0.0,
+            max_ratio: f64::INFINITY,
+        },
+        None,
+        &MatchOptions::default(),
+    )
+    .unwrap();
+    let tf = ok(
+        &server,
+        &session,
+        "propensity_matching",
+        with(
+            &base,
+            &[("method", json!("optimal")), ("output_name", json!("fm"))],
+        ),
+    )
+    .await;
+    assert!(tf.starts_with(&full.to_string()), "{tf}");
+    let cem = match_it_with(
+        &ds,
+        "treat",
+        &covs,
+        MatchMethod::CoarsenedExact {
+            cutpoints: None,
+            n_bins: None,
+        },
+        None,
+        &MatchOptions::default(),
+    )
+    .unwrap();
+    let tc = ok(
+        &server,
+        &session,
+        "propensity_matching",
+        with(&base, &[("method", json!("CEM")), ("ratio", json!(3))]),
+    )
+    .await;
+    assert!(
+        tc.starts_with(&cem.to_string()) && tc.contains("Sturges bins"),
+        "{tc}"
+    );
+    assert!(
+        tc.contains("Warning: ratio is not used with method 'cem'"),
+        "{tc}"
+    );
+    Check::new(&case)
+        .scalar(
+            "full_tight_total_distance",
+            full.total_distance.unwrap(),
+            Tol::iterative(1e-8),
+        ) // 0.8659137461118286
+        .scalar(
+            "cem_n_matched_t",
+            cem.n_matched_treated as f64,
+            Tol::exact(),
+        ) // 68
+        .scalar(
+            "cem_n_matched_c",
+            cem.n_matched_control as f64,
+            Tol::exact(),
+        ) // 90
+        .scalar(
+            "cem_n_strata",
+            cem.subclasses.as_ref().unwrap().len() as f64,
+            Tol::exact(),
+        ) // 33
+        .finish();
+    // MatchIt's tol-0.001 value 0.8700895944690001
+    assert!(full.total_distance.unwrap() < case.scalar("full_total_distance"));
+}
+
+/// TOOL-15: the matched sample is registered as MatchIt::match.data builds it (matched units with distance,
+/// weights, subclass), and the text holds both balance tables (the matchit_mcp_output case).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_matching_output_dataset() {
+    let case = Case::load("matchit_mcp_output");
+    let nearest = Case::load("matchit_nearest");
+    let (session, server) = session_with("matchit_mcp_output"); // dataset `matching_sim`
+    let base =
+        json!({"dataset": "matching_sim", "treatment": "treat", "covariates": ["x1", "x2", "x3"]});
+    let t = ok(&server, &session, "propensity_matching", base.clone()).await;
+    for want in [
+        "Balance Before Matching",
+        "Balance After Matching",
+        "eCDF Max",
+        "Matching order: largest",
+        "Matched sample saved as 'matching_sim_matched': 178 of 240 rows",
+    ] {
+        assert!(t.contains(want), "missing {want:?} in\n{t}");
+    }
+    assert!(!t.contains("KS statistics"));
+    let m = session
+        .datasets
+        .read()
+        .await
+        .get("matching_sim_matched")
+        .cloned()
+        .expect("matched sample registered");
+    let df = m.df();
+    let keep: Vec<usize> = case
+        .vector("r1_weights")
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| **w > 0.0)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(df.height(), keep.len()); // 178
+    let get = |c: &str| numeric_column(df, c, NaPolicy::Fail).unwrap().0;
+    let sub_r: Vec<f64> = keep
+        .iter()
+        .map(|&i| case.vector("r1_subclass")[i])
+        .collect();
+    let ps_r: Vec<f64> = keep
+        .iter()
+        .map(|&i| nearest.vector("logit_ps_tight")[i])
+        .collect();
+    assert_eq!(get("weights"), vec![1.0; keep.len()]);
+    assert_eq!(get("subclass"), sub_r); // 71, 87, 1, 2, 77, 3, 48, 4, 7, 41, ...
+    for (a, b) in get("distance").iter().zip(&ps_r) {
+        assert!(Tol::iterative(1e-8).allows(*a, *b), "{a} vs {b}");
+    }
+    assert_eq!(get("id").len(), keep.len()); // input columns kept
+    // 1:2 rounds: every unit is matched; MatchIt's weights (0.848314606741573, 1, 1.696629213483146)
+    ok(
+        &server,
+        &session,
+        "propensity_matching",
+        with(&base, &[("ratio", json!(2)), ("output_name", json!("m2"))]),
+    )
+    .await;
+    let m2 = session.datasets.read().await.get("m2").cloned().unwrap();
+    let w2 = numeric_column(m2.df(), "weights", NaPolicy::Fail)
+        .unwrap()
+        .0;
+    let s2 = numeric_column(m2.df(), "subclass", NaPolicy::Fail)
+        .unwrap()
+        .0;
+    Check::new(&case)
+        .vector("r2_weights", &w2, Tol::coef(240))
+        .vector("r2_subclass", &s2, Tol::exact())
+        .finish();
+    let e = refused(
+        &server,
+        &session,
+        "propensity_matching",
+        with(&base, &[("output_name", json!("matching_sim"))]),
+    )
+    .await;
+    assert!(e.contains("output_name"), "{e}");
 }

@@ -118,6 +118,30 @@
       "tolerance": "CBPS Tol::iterative(1e-6); AIPW and IPW effect Tol::iterative(1e-8) (IRLS propensity); others validation/README.md, n = 300",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_matching",
+      "name": "MCP propensity_matching and the matched sample",
+      "category": "mcp",
+      "reference": "MatchIt::matchit, match.data; optmatch::fullmatch",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "matchit_full_cem",
+        "matchit_nearest",
+        "matchit_mcp_output"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_propensity_matching",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_matching_output_dataset"
+      ],
+      "quantities": [
+        "full-matching total distance",
+        "CEM counts",
+        "registered weights, subclass, distance"
+      ],
+      "tolerance": "Tol::iterative(1e-8) (optimum, PS); exact counts; Tol::coef(240) weights",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

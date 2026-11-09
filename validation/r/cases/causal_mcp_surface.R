@@ -9,6 +9,12 @@
 #    restarted from its own estimate until the coefficients stop changing: a single epsilon-1e-14 fit
 #    stops 3e-10 short); the default-control values are recorded only. `nox_*` is the same tool call
 #    with x ignored (what the handler returned before TOOL-4): P = probit(d ~ z1), y ~ [1, P, P^2, P^3].
+#  * matchit_mcp_output: the matched sample propensity_matching registers (TOOL-15): MatchIt 4.8.0
+#    nearest-neighbour matching on the logit PS (m.order 'largest', MatchIt's default), 1:1 (the tool's
+#    default; 62 controls unmatched) and 1:2, the per-row weights and subclass (0 = unmatched, MatchIt NA),
+#    on matching_sim.csv.
+suppressPackageStartupMessages(library(MatchIt))
+
 .mcp_mte <- function(y, P, Xcov, ngrid = 1001, deg = 3) {
   Xp <- sapply(seq_len(deg), function(j) P^j); colnames(Xp) <- c("P", "I(P^2)", "I(P^3)")[seq_len(deg)]
   X <- if (is.null(Xcov)) Xp else cbind(Xp, Xcov)
@@ -54,4 +60,20 @@ case("mte_mcp_covariate", "econometrics/mte", "MTE by local IV through the MCP t
   for (e in names(f0t$mte$te)) v[[paste0("nox_", e, "_tight")]] <- named(f0t$mte$te[[e]])
   list(values = v, reference = "local IV MTE (Brinch, Mogstad & Wiswall 2017), probit propensity with the covariate, cubic in P plus the covariate by OLS; Heckman & Vytlacil (2005) weights; delta method with the full HC1 covariance (sandwich::vcovHC(type = 'HC1')); written out. Pins: the probit solution (*_tight: epsilon 1e-14, restarted until the coefficients stop changing); glm.control() defaults recorded",
        call = "glm(d ~ z1 + z2, binomial('probit')); lm(y ~ P + P^2 + P^3 + z2); sandwich::vcovHC(type = 'HC1')", packages = c("sandwich"))
+})
+
+case("matchit_mcp_output", "econometrics/matching", "Matched sample of propensity_matching: MatchIt nearest 1:1 and 1:2 on the logit PS (m.order largest), per-row weights and subclass", function(ctx) {
+  d <- ctx$dataset("datasets/generated/matching_sim.csv")
+  v <- list(n = nrow(d))
+  tr <- which(d$treat == 1)
+  for (r in 1:2) {
+    m <- suppressWarnings(matchit(treat ~ x1 + x2 + x3, data = d, method = "nearest", distance = "glm", ratio = r))
+    sc <- as.integer(m$subclass); sc[is.na(sc)] <- 0L
+    stopifnot(identical(sc[tr], seq_along(tr)))            # MatchIt numbers subclasses by the treated units' data order
+    p <- paste0("r", r, "_")
+    v[[paste0(p, "n_matched")]] <- sum(m$weights > 0); v[[paste0(p, "weights")]] <- vec(m$weights)
+    v[[paste0(p, "subclass")]] <- vec(sc)
+  }
+  list(values = v, reference = "MatchIt::matchit(treat ~ x1 + x2 + x3, method = 'nearest', distance = 'glm', ratio = 1 | 2): weights, subclass",
+       call = "matchit(treat ~ x1 + x2 + x3, data = matching_sim, method = 'nearest', ratio = 1 | 2)", packages = c("MatchIt"))
 })

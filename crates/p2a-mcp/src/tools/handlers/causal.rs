@@ -221,6 +221,57 @@ static LTMLE_CONTRAST: Choices<ContrastKind> = Choices {
     ],
 };
 
+/// The matched sample as MatchIt::match.data builds it: the units with positive weight, in data
+/// order, with `distance` (the propensity score, when one was used), `weights` and `subclass`
+/// (null for units outside every subclass) appended.
+fn matched_sample(
+    dataset: &p2a_core::data::Dataset,
+    result: &MatchResult,
+) -> Result<p2a_core::data::Dataset, String> {
+    use p2a_core::polars::prelude::{BooleanChunked, Column, IntoColumn, NamedFrom, Series};
+    let df = dataset.df();
+    let n = df.height();
+    if result.weights.len() != n || result.subclass.len() != n {
+        return Err(format!(
+            "the matching result has {} weights and {} subclass labels for {n} rows",
+            result.weights.len(),
+            result.subclass.len()
+        ));
+    }
+    let ps = result.propensity_scores.as_ref().filter(|p| p.len() == n);
+    let mut added: Vec<&str> = Vec::new();
+    if ps.is_some() {
+        added.push("distance");
+    }
+    added.extend(["weights", "subclass"]);
+    let names = df.get_column_names();
+    for c in &added {
+        if names.iter().any(|x| x.as_str() == *c) {
+            return Err(format!(
+                "the dataset already has a column '{c}'; MatchIt::match.data adds distance, weights and subclass. Rename it first"
+            ));
+        }
+    }
+    let mut out = df.clone();
+    let mut columns: Vec<Column> = Vec::new();
+    if let Some(p) = ps {
+        columns.push(Series::new("distance".into(), p.as_slice()).into_column());
+    }
+    columns.push(Series::new("weights".into(), result.weights.as_slice()).into_column());
+    let sub: Vec<Option<i64>> = result
+        .subclass
+        .iter()
+        .map(|s| s.map(|v| v as i64))
+        .collect();
+    columns.push(Series::new("subclass".into(), sub).into_column());
+    for c in columns {
+        out.with_column(c).map_err(|e| e.to_string())?;
+    }
+    let keep: BooleanChunked = result.weights.iter().map(|w| *w > 0.0).collect();
+    let out = out.filter(&keep).map_err(|e| e.to_string())?;
+    Ok(p2a_core::data::Dataset::new(out))
+}
+
 impl AnalyticsServer {
     /// The session's global seed, used when a request sets none.
     async fn session_seed(&self) -> Option<u64> {
@@ -1098,35 +1149,76 @@ impl AnalyticsServer {
 
     /// Run propensity score matching (MatchIt) for causal inference.
     #[tool(
-        description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance. Returns a matched dataset. For direct effect estimation via reweighting, use treatment_ipw instead."
+        description = "Match treated and control units as R's MatchIt::matchit: 'nearest' (default; PS by logit or probit glm, or Mahalanobis/Euclidean distance; m.order, ratio, caliper, replacement), optimal 'full' matching (optmatch::fullmatch; refused above 1e7 treated-control pairs, optmatch's default maximum problem size), 'cem' (Sturges bins; one-sided strata are left unmatched with a warning) or 'subclass'. Returns the summary.matchit balance tables before and after matching (standardized mean differences, variance ratios, eCDF mean and max), sample sizes and effective sample sizes, and registers the matched sample (MatchIt::match.data: distance, weights, subclass) under output_name for weighted outcome analyses. Options the chosen method does not use are ignored with a warning, as MatchIt. For direct effect estimation by reweighting, use treatment_ipw."
     )]
     pub async fn propensity_matching(
         &self,
         Parameters(request): Parameters<MatchItRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::econometrics::matching::MatchMethodKind;
+        use p2a_core::econometrics::matching::{
+            MOrder, MatchMethodKind, MatchOptions, match_it_with,
+        };
         let method_kind = tool_try!(parse_option(
             request.method.as_deref(),
             MatchMethodKind::Nearest
         ));
-        let distance = Some(tool_try!(parse_option(
-            request.distance.as_deref(),
-            DistanceMethod::Logit
-        )));
-        let datasets = self.datasets.read().await;
-
-        let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-
+        let distance: Option<DistanceMethod> = match request.distance.as_deref() {
+            None => None,
+            Some(s) => Some(tool_try!(
+                s.parse::<DistanceMethod>().map_err(option_message)
+            )),
+        };
+        let m_order: Option<MOrder> = match request.m_order.as_deref() {
+            None => None,
+            Some(s) => Some(tool_try!(s.parse::<MOrder>().map_err(option_message))),
+        };
+        let name = request
+            .output_name
+            .clone()
+            .unwrap_or_else(|| format!("{}_matched", request.dataset));
+        if name == request.dataset {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "output_name must differ from the input dataset ('{name}'), which is kept unchanged"
+            ))]));
+        }
+        let method_name = match method_kind {
+            MatchMethodKind::Nearest => "nearest",
+            MatchMethodKind::Cem => "cem",
+            MatchMethodKind::Full => "full",
+            MatchMethodKind::Subclass => "subclass",
+        };
+        // options the chosen method does not use, reported as MatchIt warns
+        let mut warnings: Vec<String> = Vec::new();
+        let mut unused = |given: bool, option: &str, used: bool| {
+            if given && !used {
+                warnings.push(format!(
+                    "{option} is not used with method '{method_name}' and was ignored"
+                ));
+            }
+        };
+        let nearest = method_kind == MatchMethodKind::Nearest;
+        unused(request.ratio.is_some(), "ratio", nearest);
+        unused(request.caliper.is_some(), "caliper", nearest);
+        unused(request.replace.is_some(), "replace", nearest);
+        unused(request.m_order.is_some(), "m_order", nearest);
+        unused(
+            request.n_subclasses.is_some(),
+            "n_subclasses",
+            method_kind == MatchMethodKind::Subclass,
+        );
+        unused(
+            request.distance.is_some(),
+            "distance",
+            method_kind != MatchMethodKind::Cem,
+        );
         let method = match method_kind {
             MatchMethodKind::Cem => MatchMethod::CoarsenedExact {
                 cutpoints: None,
-                n_bins: Some(4),
+                n_bins: None,
             },
             MatchMethodKind::Full => MatchMethod::Full {
-                min_ratio: 0.5,
-                max_ratio: 2.0,
+                min_ratio: 0.0,
+                max_ratio: f64::INFINITY,
             },
             MatchMethodKind::Subclass => MatchMethod::Subclass {
                 n_subclasses: request.n_subclasses.unwrap_or(5),
@@ -1137,23 +1229,50 @@ impl AnalyticsServer {
                 replace: request.replace.unwrap_or(false),
             },
         };
+        let mut opts = MatchOptions::default();
+        opts.m_order = m_order;
+        opts.seed = self.session_seed().await;
 
-        let result: MatchResult =
-            match match_it(dataset, &request.treatment, &cov_refs, method, distance) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Propensity score matching failed: {}",
-                        e
-                    ))]));
-                }
-            };
+        let datasets = self.datasets.read().await;
 
-        // Run identification diagnostics
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        let result: MatchResult = match match_it_with(
+            dataset,
+            &request.treatment,
+            &cov_refs,
+            method,
+            distance,
+            &opts,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Propensity score matching failed: {}",
+                    e
+                ))]));
+            }
+        };
+        let n = dataset.df().height();
+        let sample = tool_try!(matched_sample(dataset, &result));
+        drop(datasets);
+        let k = sample.df().height();
+        self.datasets.write().await.insert(name.clone(), sample);
+
         let mut output = result.to_string();
         let diag_report = matching_diagnostics(&result);
         output.push_str(&format_diagnostic_warnings(&diag_report));
-
+        crate::tools::common::append_notes(&mut output, None, &warnings);
+        let added = if result.propensity_scores.is_some() {
+            "distance, weights, subclass"
+        } else {
+            "weights, subclass"
+        };
+        output.push_str(&format!(
+            "\nMatched sample saved as '{name}': {k} of {n} rows (units with positive weight, as MatchIt::match.data); added columns: {added}"
+        ));
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 

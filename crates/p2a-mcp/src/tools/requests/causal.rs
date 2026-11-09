@@ -875,39 +875,51 @@ pub struct MatchItRequest {
 
     /// Matching method: 'nearest' (default), 'cem', 'full', or 'subclass'
     #[schemars(
-        description = "Matching method: 'nearest' (default, nearest neighbour), 'cem' (coarsened exact matching), 'full' (optimal full matching) or 'subclass' (propensity-score subclassification). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Matching method: 'nearest' (default), 'full' (optimal full matching as optmatch::fullmatch, no bounds as MatchIt; optimal full matching is refused above 1e7 treated-control pairs, optmatch's default maximum problem size), 'cem' (coarsened exact matching with Sturges bins; one-sided strata are left unmatched with a warning) or 'subclass' (n_subclasses quantile subclasses of the propensity score). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub method: Option<String>,
 
     /// Distance metric: 'logit' (default), 'probit', 'mahalanobis', or 'euclidean'
     #[schemars(
-        description = "Distance: 'logit' (default, propensity score by logistic regression; 'glm'), 'probit', 'mahalanobis' or 'euclidean'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Distance: 'logit' (default, propensity score by logistic regression; 'glm'), 'probit', 'mahalanobis' or 'euclidean'; not used by 'cem'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub distance: Option<String>,
 
     /// Matching ratio (1:k matching, default k=1)
     #[schemars(
-        description = "For nearest neighbor: number of controls per treated unit (1:k matching). Default is 1."
+        description = "Number of controls per treated unit (1:k matching; default 1): nearest only; ignored with a warning for other methods."
     )]
     pub ratio: Option<usize>,
 
     /// Caliper width (in SD of propensity score)
     #[schemars(
-        description = "For nearest neighbor: maximum distance for a valid match, in SD of propensity score. Default is no caliper."
+        description = "Maximum distance for a valid match, in SDs of the propensity score (default none): nearest only; ignored with a warning for other methods."
     )]
     pub caliper: Option<f64>,
 
     /// Whether to sample with replacement
     #[schemars(
-        description = "For nearest neighbor: whether to sample controls with replacement. Default is false."
+        description = "Match controls with replacement (default false): nearest only; ignored with a warning for other methods."
     )]
     pub replace: Option<bool>,
 
     /// Number of subclasses for subclassification
     #[schemars(
-        description = "For subclassification: number of subclasses to create. Default is 5."
+        description = "Number of propensity-score subclasses (default 5): subclass only; ignored with a warning for other methods."
     )]
     pub n_subclasses: Option<usize>,
+
+    /// Matching order
+    #[schemars(
+        description = "Order in which treated units pick controls, as MatchIt `m.order`: 'largest' (default for propensity-score distances), 'smallest', 'data' (default for Mahalanobis/Euclidean) or 'random' (seeded by the session seed); nearest only; ignored with a warning for other methods. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub m_order: Option<String>,
+
+    /// Name of the matched sample
+    #[schemars(
+        description = "Name for the matched sample, registered as a dataset (default '<dataset>_matched'; must differ from the input)."
+    )]
+    pub output_name: Option<String>,
 }
 
 /// Request for Targeted Maximum Likelihood Estimation (TMLE).
