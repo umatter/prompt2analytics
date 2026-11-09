@@ -472,3 +472,211 @@ async fn test_mcp_stats_option_aliases() {
         .contains("standard_errors")
     );
 }
+
+/// TOOL-27: ACF types. Before: acf_type 'autocovariance' returned correlations (lag 0 = 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_acf_type_aliases() {
+    // acf(x, type = "covariance") (19 lags, lag.max 18 = floor(10 log10 64)); acf(x); pacf(x)
+    // (stat_ts_acf_spline_t3)
+    let case = Case::load("stat_ts_acf_spline_t3");
+    let (se, s) = session_with("stat_ts_acf_spline_t3");
+    let run = |t: &str| json!({"dataset": "ts_acf_spline_t3", "column": "x", "acf_type": t});
+    let cov = json_of(&ok(&s, &se, "timeseries_acf", run("autocovariance")).await);
+    let acvf = json_of(&ok(&s, &se, "timeseries_acf", run("ACVF")).await);
+    let cor = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_acf",
+            json!({"dataset": "ts_acf_spline_t3", "column": "x"}),
+        )
+        .await,
+    );
+    let pacf = json_of(&ok(&s, &se, "timeseries_acf", run("pacf")).await);
+    Check::new(&case)
+        .vector("acvf", &fs(&cov["values"]), Tol::stat(64))
+        .vector("acf", &fs(&cor["values"]), Tol::stat(64))
+        .vector("pacf", &fs(&pacf["values"]), Tol::stat(64))
+        .scalar(
+            "acf_ci_bound",
+            f(&cor["confidence_bound_95"]),
+            Tol::coef(64),
+        )
+        .finish();
+    assert_eq!(cov["values"], acvf["values"]);
+    assert!(
+        refused(&s, &se, "timeseries_acf", run("spectral"))
+            .await
+            .contains("correlation")
+    );
+}
+
+/// TOOL-27: the other time-series options. Before: 'box_pierce' ran Ljung-Box, 'mle' fitted
+/// Yule-Walker, 'Multiplicative' (decompose) ran additive, unknown spectrum methods ran the
+/// periodogram, an unknown StructTS model ran the local level, 'var' (changepoint) detected
+/// mean changes, and 'Recursive'/'Keep' were refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_timeseries_option_aliases() {
+    let sc = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    // Box.test(w, lag = 10, type = "Box-Pierce", fitdf = 2)
+    let bp = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_box_test",
+            json!({"dataset": "mcp_series_t3", "column": "w", "lag": 10, "test_type": "box_pierce", "fitdf": 2}),
+        )
+        .await,
+    );
+    // ar(z, method = "yule-walker")
+    let yw = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_ar",
+            json!({"dataset": "mcp_series_t3", "column": "z", "method": "yw"}),
+        )
+        .await,
+    );
+    // decompose(ts(y, frequency = 12), "multiplicative")$figure (printed with 4 decimals)
+    let dm = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_decompose",
+            json!({"dataset": "mcp_series_t3", "column": "y", "period": 12, "decompose_type": "Multiplicative"}),
+        )
+        .await,
+    );
+    let fig: Vec<f64> = dm["seasonal_figure"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| f(&e["value"]))
+        .collect();
+    // runmed(z, 5, endrule = "keep")[1:20]; filter(z, c(0.5, -0.2), method = "recursive")[1:20]
+    let rk = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_runmed",
+            json!({"dataset": "mcp_series_t3", "column": "z", "k": 5, "endrule": "Keep"}),
+        )
+        .await,
+    );
+    let fr = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_filter",
+            json!({"dataset": "mcp_series_t3", "column": "z", "filter": [0.5, -0.2], "method": "Recursive"}),
+        )
+        .await,
+    );
+    Check::new(&sc)
+        .scalar("bp_stat", f(&bp["statistic"]), Tol::stat(96))
+        .scalar("bp_df", f(&bp["df"]), Tol::exact())
+        .scalar("bp_p", f(&bp["p_value"]), Tol::p_value(96))
+        .scalar("yw_order", f(&yw["order"]), Tol::exact())
+        .vector("yw_ar", &fs(&yw["ar_coefficients"]), Tol::coef(96))
+        .scalar("yw_var", f(&yw["prediction_variance"]), Tol::stat(96))
+        .scalar("yw_mean", f(&yw["x_mean"]), Tol::coef(96))
+        .vector("mult_figure", &fig, Tol::printed(4))
+        .vector("runmed_keep_head", &fs(&rk["values_sample"]), Tol::coef(96))
+        .vector(
+            "filter_recursive_head",
+            &fs(&fr["values_sample"]),
+            Tol::coef(96),
+        )
+        .finish();
+    assert_eq!(
+        (
+            bp["test_type"].as_str(),
+            dm["decompose_type"].as_str(),
+            fr["method"].as_str(),
+            rk["endrule"].as_str()
+        ),
+        (
+            Some("Box-Pierce"),
+            Some("multiplicative"),
+            Some("recursive"),
+            Some("keep")
+        )
+    );
+    // changepoint 'var' on lev: cpt.var(lev, PELT, MBIC) = 84, 151 (ts_filter_ar_cpt)
+    let cp = Case::load("ts_filter_ar_cpt");
+    let (ce, cs) = session_with("ts_filter_ar_cpt");
+    let t = ok(
+        &cs,
+        &ce,
+        "ts_changepoint",
+        json!({"dataset": "ts_utils", "column": "lev", "change_type": "var"}),
+    )
+    .await;
+    assert!(t.contains("Changepoint Positions: [84, 151]"), "{t}");
+    Check::new(&cp)
+        .scalar(
+            "cpt_var_cost",
+            number_after(&t, "Total Cost:"),
+            Tol::printed(4),
+        )
+        .finish();
+    for (tool, args, needle) in [
+        (
+            "timeseries_box_test",
+            json!({"dataset": "mcp_series_t3", "column": "w", "test_type": "portmanteau"}),
+            "expected one of: Ljung-Box, Box-Pierce",
+        ),
+        (
+            "timeseries_ar",
+            json!({"dataset": "mcp_series_t3", "column": "z", "method": "mle"}),
+            "expected one of: yule-walker, burg, ols",
+        ),
+        (
+            "timeseries_decompose",
+            json!({"dataset": "mcp_series_t3", "column": "y", "period": 12, "decompose_type": "log"}),
+            "additive",
+        ),
+        (
+            "timeseries_spectrum",
+            json!({"dataset": "mcp_series_t3", "column": "w", "method": "welch"}),
+            "expected one of: pgram, ar",
+        ),
+        (
+            "timeseries_structts",
+            json!({"dataset": "mcp_series_t3", "column": "w", "model_type": "arima"}),
+            "level",
+        ),
+        (
+            "ts_holt_winters",
+            json!({"dataset": "mcp_series_t3", "column": "y", "period": 12, "seasonal": "damped"}),
+            "additive",
+        ),
+        (
+            "ts_changepoint",
+            json!({"dataset": "mcp_series_t3", "column": "w", "method": "segneigh"}),
+            "pelt",
+        ),
+        (
+            "ts_changepoint",
+            json!({"dataset": "mcp_series_t3", "column": "w", "method": "binary", "change_type": "variance"}),
+            "binary",
+        ),
+        (
+            "timeseries_runmed",
+            json!({"dataset": "mcp_series_t3", "column": "z", "k": 5, "endrule": "tukey"}),
+            "keep",
+        ),
+        (
+            "timeseries_filter",
+            json!({"dataset": "mcp_series_t3", "column": "z", "filter": [0.5], "method": "fir"}),
+            "convolution",
+        ),
+    ] {
+        assert!(
+            refused(&s, &se, tool, args).await.contains(needle),
+            "{tool}: {needle}"
+        );
+    }
+}

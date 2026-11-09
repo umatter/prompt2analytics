@@ -10,7 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column};
+use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column, parse_option};
 use crate::tools::requests::timeseries::*;
 
 use p2a_core::forecasting::{ArimaSpec, forecast_arima_with, run_arima_with};
@@ -206,10 +206,9 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse ACF type
-        let acf_type = match request.acf_type.as_deref() {
-            Some("covariance") | Some("cov") => AcfType::Covariance,
-            Some("partial") | Some("pacf") => AcfType::Partial,
-            _ => AcfType::Correlation,
+        let acf_type = match parse_option(request.acf_type.as_deref(), AcfType::Correlation) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // For PACF, use the dedicated function
@@ -360,10 +359,17 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Determine method
-        let method = request.method.as_deref().unwrap_or("pgram");
+        let method = match parse_choice(
+            &SPECTRUM_METHOD,
+            request.method.as_deref(),
+            SpectrumMethod::Pgram,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
 
-        let result = match method.to_lowercase().as_str() {
-            "ar" | "autoregressive" => {
+        let result = match method {
+            SpectrumMethod::Ar => {
                 match run_spectrum_ar(dataset, &request.column, request.ar_order, None) {
                     Ok(r) => r,
                     Err(e) => {
@@ -374,7 +380,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            _ => {
+            SpectrumMethod::Pgram => {
                 // Periodogram method
                 let mut config = SpectrumConfig::default();
                 config.spans = request.spans.clone();
@@ -466,9 +472,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse test type
-        let test_type = match request.test_type.as_deref() {
-            Some("box-pierce") | Some("Box-Pierce") | Some("boxpierce") => BoxTestType::BoxPierce,
-            _ => BoxTestType::LjungBox, // Default
+        let test_type = match parse_choice(
+            &BOX_TEST_TYPE,
+            request.test_type.as_deref(),
+            BoxTestType::LjungBox,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let fitdf = request.fitdf.unwrap_or(0);
@@ -893,15 +903,28 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Determine cost function
-        let cost_fn = match request.change_type.as_deref() {
-            Some("variance") => CostFunction::VarianceChange,
-            Some("both") => CostFunction::MeanAndVariance,
-            _ => CostFunction::MeanChange,
+        let cost_fn = match parse_choice(
+            &CHANGE_TYPE,
+            request.change_type.as_deref(),
+            CostFunction::MeanChange,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
+        let cp_method = match parse_choice(&CP_METHOD, request.method.as_deref(), CpMethod::Pelt) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+        };
+        if cp_method == CpMethod::BinSeg && cost_fn != CostFunction::MeanChange {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "method 'binary' detects mean changes only (binary_segmentation has no variance cost); use method 'pelt' for change_type '{}'",
+                CHANGE_TYPE.canonical(cost_fn)
+            ))]));
+        }
 
         // Run detection based on method
-        let result = match request.method.as_deref() {
-            Some("binary") => {
+        let result = match cp_method {
+            CpMethod::BinSeg => {
                 match run_binary_segmentation(
                     dataset,
                     &request.column,
@@ -915,7 +938,7 @@ impl AnalyticsServer {
                     }
                 }
             }
-            _ => {
+            CpMethod::Pelt => {
                 match run_changepoint(
                     dataset,
                     &request.column,
@@ -986,11 +1009,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse seasonal type
-        let seasonal = match request.seasonal.as_deref() {
-            Some("multiplicative") | Some("Multiplicative") | Some("mult") => {
-                SeasonalType::Multiplicative
-            }
-            _ => SeasonalType::Additive,
+        let seasonal = match parse_choice(
+            &SEASONAL_TYPE,
+            request.seasonal.as_deref(),
+            SeasonalType::Additive,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Run Holt-Winters
@@ -1123,10 +1148,10 @@ impl AnalyticsServer {
         };
 
         // Parse method
-        let method = match request.method.as_deref() {
-            Some("burg") | Some("Burg") => ArMethod::Burg,
-            Some("ols") | Some("OLS") => ArMethod::Ols,
-            _ => ArMethod::YuleWalker,
+        let method = match parse_choice(&AR_METHOD, request.method.as_deref(), ArMethod::YuleWalker)
+        {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Build config
@@ -1196,9 +1221,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse decomposition type
-        let decompose_type = match request.decompose_type.as_deref() {
-            Some("multiplicative") | Some("mult") => DecomposeType::Multiplicative,
-            _ => DecomposeType::Additive,
+        let decompose_type = match parse_choice(
+            &DECOMPOSE_TYPE,
+            request.decompose_type.as_deref(),
+            DecomposeType::Additive,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Run decomposition (the core wrapper reads the column: Int64 accepted, a missing
@@ -1297,10 +1326,13 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse model type
-        let model_type = match request.model_type.as_deref() {
-            Some("trend") | Some("Trend") => StructTsType::Trend,
-            Some("bsm") | Some("BSM") => StructTsType::BSM,
-            _ => StructTsType::Level,
+        let model_type = match parse_choice(
+            &STRUCTTS_TYPE,
+            request.model_type.as_deref(),
+            StructTsType::Level,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         // Validate period for BSM
@@ -1769,15 +1801,13 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
-        let method = match request.method.as_deref() {
-            Some("recursive") => FilterMethod::Recursive,
-            Some("convolution") | None => FilterMethod::Convolution,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown method '{}'. Use 'convolution' or 'recursive'.",
-                    other
-                ))]));
-            }
+        let method = match parse_choice(
+            &FILTER_METHOD,
+            request.method.as_deref(),
+            FilterMethod::Convolution,
+        ) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let sides = match request.sides {
@@ -1803,7 +1833,7 @@ impl AnalyticsServer {
 
         let output = serde_json::json!({
             "n": result.values.len(),
-            "method": format!("{:?}", method),
+            "method": FILTER_METHOD.canonical(method),
             "filter_length": request.filter.len(),
             "values_sample": &result.values[..result.values.len().min(20)],
             "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
@@ -2026,16 +2056,9 @@ impl AnalyticsServer {
             Err(e) => return Ok(ts_error("runmed failed", &e)),
         };
 
-        let endrule = match request.endrule.as_deref() {
-            Some("constant") => EndRule::Constant,
-            Some("median") => EndRule::Median,
-            Some("keep") | None => EndRule::Keep,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown endrule '{}'. Use 'keep', 'constant', or 'median'.",
-                    other
-                ))]));
-            }
+        let endrule = match parse_choice(&END_RULE, request.endrule.as_deref(), EndRule::Keep) {
+            Ok(v) => v,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         let result = match runmed(&values, request.k, endrule) {
@@ -2048,7 +2071,7 @@ impl AnalyticsServer {
         let output = serde_json::json!({
             "n": result.n_obs,
             "k": result.k,
-            "endrule": format!("{:?}", result.endrule),
+            "endrule": END_RULE.canonical(result.endrule),
             "values_sample": &result.values[..result.values.len().min(20)],
             "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
         });

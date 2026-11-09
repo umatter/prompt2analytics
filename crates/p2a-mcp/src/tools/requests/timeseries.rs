@@ -21,7 +21,7 @@ pub struct AcfRequest {
 
     /// Type of ACF
     #[schemars(
-        description = "Type of autocorrelation: 'correlation' (default), 'covariance', or 'partial' (PACF)."
+        description = "Type of autocorrelation, R's acf type: 'correlation' (default; also 'acf'), 'covariance' (also 'autocovariance', 'acvf') or 'partial' (PACF; also 'pacf'). Other values are refused."
     )]
     pub acf_type: Option<String>,
 }
@@ -81,7 +81,7 @@ pub struct SpectrumRequest {
 
     /// Method for spectrum estimation
     #[schemars(
-        description = "Estimation method: 'pgram' (periodogram, default) or 'ar' (autoregressive). AR method fits an AR model and computes its theoretical spectrum."
+        description = "Estimation method: 'pgram' (periodogram, default; also 'spec.pgram') or 'ar' (autoregressive; also 'spec.ar'). AR method fits an AR model and computes its theoretical spectrum. Other values are refused."
     )]
     pub method: Option<String>,
 
@@ -114,7 +114,7 @@ pub struct BoxTestRequest {
 
     /// Test type
     #[schemars(
-        description = "Test type: 'ljung-box' (default, better finite-sample properties) or 'box-pierce' (simpler, classic version)."
+        description = "Test type, R's Box.test type: 'Ljung-Box' (default, better finite-sample properties; also 'ljung', 'lb') or 'Box-Pierce' (simpler, classic version; also 'box', 'bp'); case, hyphens and underscores do not matter. Other values are refused."
     )]
     pub test_type: Option<String>,
 
@@ -409,12 +409,14 @@ pub struct ChangepointRequest {
 
     /// Detection method: 'pelt' or 'binary'
     #[schemars(
-        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation)."
+        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation; also 'binseg'). Binary segmentation detects mean changes only, so it is refused with change_type 'variance' or 'meanvar'."
     )]
     pub method: Option<String>,
 
     /// Type of change to detect: 'mean', 'variance', or 'both'
-    #[schemars(description = "Type of change to detect: 'mean' (default), 'variance', or 'both'.")]
+    #[schemars(
+        description = "Type of change to detect, as changepoint's cpt.mean, cpt.var and cpt.meanvar: 'mean' (default; also 'cpt.mean'), 'variance' (also 'var', 'cpt.var') or 'meanvar' (mean and variance; also 'both', 'cpt.meanvar'). Other values are refused."
+    )]
     pub change_type: Option<String>,
 }
 
@@ -438,7 +440,7 @@ pub struct HoltWintersRequest {
 
     /// Seasonal type
     #[schemars(
-        description = "Type of seasonality: 'additive' (default) for constant seasonal variation, 'multiplicative' for proportional variation."
+        description = "Type of seasonality: 'additive' (default; also 'add') for constant seasonal variation, 'multiplicative' (also 'mult') for proportional variation. Other values are refused."
     )]
     pub seasonal: Option<String>,
 
@@ -494,7 +496,9 @@ pub struct ArModelRequest {
     pub order: Option<usize>,
 
     /// Fitting method
-    #[schemars(description = "Method for fitting: 'yule-walker' (default), 'burg', or 'ols'.")]
+    #[schemars(
+        description = "Method for fitting: 'yule-walker' (default; also 'yw'), 'burg' or 'ols'. Other values (R's 'mle' among them) are refused."
+    )]
     pub method: Option<String>,
 
     /// Demean the series
@@ -522,7 +526,7 @@ pub struct DecomposeRequest {
 
     /// Decomposition type
     #[schemars(
-        description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random) or 'multiplicative' (Y = Trend × Seasonal × Random)."
+        description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random; also 'add') or 'multiplicative' (Y = Trend × Seasonal × Random; also 'mult'). Other values are refused."
     )]
     pub decompose_type: Option<String>,
 }
@@ -541,7 +545,7 @@ pub struct StructTsRequest {
 
     /// Model type
     #[schemars(
-        description = "Type of structural model: 'level' (local level/random walk + noise), 'trend' (local linear trend), or 'bsm' (basic structural model with seasonality)."
+        description = "Type of structural model, R's StructTS type: 'level' (default; local level/random walk + noise), 'trend' (local linear trend) or 'BSM' (basic structural model with seasonality). Other values are refused."
     )]
     pub model_type: Option<String>,
 
@@ -725,7 +729,9 @@ pub struct FilterRequest {
     pub filter: Vec<f64>,
 
     /// Filter method
-    #[schemars(description = "Method: 'convolution' (default) or 'recursive'.")]
+    #[schemars(
+        description = "Method, R's filter method: 'convolution' (default) or 'recursive'. Other values are refused."
+    )]
     pub method: Option<String>,
 
     /// Sides for convolution
@@ -849,6 +855,8 @@ pub struct RunmedRequest {
     pub k: usize,
 
     /// End rule
-    #[schemars(description = "How to handle ends: 'keep' (default), 'constant', or 'median'.")]
+    #[schemars(
+        description = "How to handle ends: 'keep' (default), 'constant' or 'median' (R's runmed default is 'median'; p2a's median end rule is not R's smoothEnds). Other values are refused."
+    )]
     pub endrule: Option<String>,
 }
