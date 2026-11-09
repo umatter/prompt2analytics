@@ -72,5 +72,5 @@ pub mod vecm;
 
 pub use granger::{GrangerResult, granger_test, granger_test_bidirectional, run_granger_test};
 pub use var::{VarIrfResult, VarResult, run_var, run_var_irf};
-pub use varma::{VarmaResult, run_varma};
+pub use varma::{VarmaConfig, VarmaResult, run_varma, run_varma_with};
 pub use vecm::{VecmResult, run_vecm};
