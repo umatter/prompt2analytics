@@ -181,7 +181,9 @@ impl Dataset {
 
     /// Export the dataset to a JSON string (records format).
     ///
-    /// Each row becomes a JSON object with column names as keys.
+    /// Each row becomes a JSON object with column names as keys. Missing cells and
+    /// non-finite floats are `null`, text is a plain JSON string, and any other type
+    /// (dates, durations, ...) is its text form.
     pub fn to_json_string(&self) -> PolarsResult<String> {
         // Convert DataFrame to JSON manually since polars JSON features may not be enabled
         let mut records = Vec::new();
@@ -226,7 +228,12 @@ impl Dataset {
                         polars::datatypes::AnyValue::Float64(n) => serde_json::Number::from_f64(n)
                             .map(serde_json::Value::Number)
                             .unwrap_or(serde_json::Value::Null),
-                        _ => serde_json::Value::String(format!("{}", v)),
+                        // text (and categorical labels) as plain JSON strings: the Display
+                        // of a string value adds literal quotes
+                        ref other => match other.get_str() {
+                            Some(t) => serde_json::Value::String(t.to_string()),
+                            None => serde_json::Value::String(format!("{}", other)),
+                        },
                     }
                 });
                 row.insert(col.name().to_string(), val);

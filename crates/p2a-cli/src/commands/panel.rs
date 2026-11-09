@@ -2,6 +2,7 @@
 
 use clap::Subcommand;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
+use p2a_core::econometrics::panel_unit_root::LagSelection;
 use p2a_core::regression::CovarianceType;
 use p2a_core::{
     ClusterAdjustment, PanelConfig, PanelResult, PanelVcov, TestDistribution,
@@ -14,8 +15,9 @@ use p2a_core::{PanelModel, PanelUnitRootConfig, PanelUnitRootTest, run_panel_uni
 use p2a_core::{PvcmType, run_pvcm};
 
 use crate::output::{
-    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, missing_json,
-    print_error, print_missing_note, se_label, sorted_object,
+    CoefRow, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
+    format_regression_report, missing_json, parse_core_option, print_error, print_missing_note,
+    print_notes, print_result_notes, se_label, sorted_object,
 };
 use crate::session::SessionManager;
 
@@ -155,9 +157,9 @@ EXAMPLES:
         #[arg(long, num_args = 1..)]
         fe: Vec<String>,
 
-        /// GLM family: "logit" (default), "probit", "poisson", "gaussian"
-        #[arg(long, default_value = "logit")]
-        family: String,
+        /// GLM family: logit (default; also binomial), probit, poisson, gaussian
+        #[arg(long, value_enum, ignore_case = true, default_value = "logit")]
+        family: FeglmFamily,
     },
 
     /// Arellano-Bond difference GMM for dynamic panels (as plm::pgmm)
@@ -197,8 +199,8 @@ EXAMPLES:
         lags: usize,
 
         /// One-step or two-step GMM
-        #[arg(long, default_value = "twostep", value_parser = ["onestep", "twostep"])]
-        step: String,
+        #[arg(long, value_enum, ignore_case = true, default_value = "twostep")]
+        step: GmmStepArg,
 
         /// Shallowest lag of y used as instrument
         #[arg(long = "min-lag", default_value_t = 2)]
@@ -213,8 +215,8 @@ EXAMPLES:
         collapse: bool,
 
         /// robust (one-step robust, two-step Windmeijer) or classical
-        #[arg(long, default_value = "robust", value_parser = ["robust", "classical"])]
-        vcov: String,
+        #[arg(long, value_enum, ignore_case = true, default_value = "robust")]
+        vcov: GmmVcovArg,
     },
 
     /// Panel Variable Coefficients Model (Swamy estimator)
@@ -242,9 +244,9 @@ EXAMPLES:
         #[arg(long)]
         entity: String,
 
-        /// Model type: "within" (default) or "random"
-        #[arg(long, default_value = "within")]
-        model: String,
+        /// Model type: within (default) or random (Swamy; also swamy)
+        #[arg(long, value_enum, ignore_case = true, default_value = "within")]
+        model: PvcmModel,
     },
 
     /// Pooled Mean Group estimator
@@ -299,9 +301,9 @@ EXAMPLES:
         #[arg(long)]
         time: String,
 
-        /// Model type: "fe" (fixed effects), "pooling", or "fd" (first-difference)
-        #[arg(long, default_value = "fe")]
-        model: String,
+        /// Model type: fe (fixed effects, default), fd (first-difference) or pooling
+        #[arg(long, value_enum, ignore_case = true, default_value = "fe")]
+        model: PanelGlsModelArg,
     },
 
     /// Panel unit root tests (LLC, IPS, Hadri)
@@ -329,13 +331,29 @@ EXAMPLES:
         #[arg(long)]
         time: String,
 
-        /// Test type: "llc" (Levin-Lin-Chu), "ips" (Im-Pesaran-Shin), "hadri", or "fisher"
-        #[arg(long, default_value = "llc")]
-        test: String,
+        /// Test: llc (Levin-Lin-Chu; also levinlin), ips (Im-Pesaran-Shin), madwu
+        /// (Maddala-Wu Fisher; also fisher) or hadri, as plm::purtest's test
+        #[arg(long, value_parser = parse_core_option::<PanelUnitRootTest>, default_value = "llc")]
+        test: PanelUnitRootTest,
 
-        /// Number of lags (optional, auto-selected if not specified)
+        /// Deterministic terms: none, intercept (default) or trend, as purtest's exo
+        #[arg(long, value_parser = parse_core_option::<PanelModel>, default_value = "intercept")]
+        model: PanelModel,
+
+        /// Lag order of every unit (default floor(T_max^(1/3)) for every unit;
+        /// plm::purtest's default is SIC with pmax 10); see --lag-selection
         #[arg(long)]
         lags: Option<usize>,
+
+        /// Lag order per unit: fixed (needs --lags), aic, sic or hall, as
+        /// plm::purtest(lags = ..)
+        #[arg(long, value_parser = lag_selection_arg)]
+        lag_selection: Option<String>,
+
+        /// Largest lag the criteria try (default 10, purtest's pmax); needs --lag-selection
+        /// aic, sic or hall
+        #[arg(long, value_name = "N")]
+        pmax: Option<usize>,
     },
 }
 
@@ -378,7 +396,15 @@ pub fn execute(
             indep_vars,
             fe,
             family,
-        } => execute_feglm(dataset, dep_var, indep_vars, fe, family, format, session),
+        } => execute_feglm(
+            dataset,
+            dep_var,
+            indep_vars,
+            fe,
+            family.core(),
+            format,
+            session,
+        ),
         PanelCommands::Gmm {
             dataset,
             dep_var,
@@ -394,15 +420,14 @@ pub fn execute(
         } => {
             let mut config = GmmConfig::default();
             config.transform = GmmTransform::Difference;
-            config.step = if step == "onestep" {
-                GmmStep::OneStep
-            } else {
-                GmmStep::TwoStep
+            config.step = match step {
+                GmmStepArg::Onestep => GmmStep::OneStep,
+                GmmStepArg::Twostep => GmmStep::TwoStep,
             };
             config.max_lag = *max_lag;
             config.min_lag = *min_lag;
             config.collapse = *collapse;
-            config.robust = vcov == "robust";
+            config.robust = *vcov == GmmVcovArg::Robust;
             execute_gmm(
                 dataset, dep_var, indep_vars, entity, time, *lags, config, format, session,
             )
@@ -413,7 +438,15 @@ pub fn execute(
             indep_vars,
             entity,
             model,
-        } => execute_pvcm(dataset, dep_var, indep_vars, entity, model, format, session),
+        } => execute_pvcm(
+            dataset,
+            dep_var,
+            indep_vars,
+            entity,
+            model.core(),
+            format,
+            session,
+        ),
         PanelCommands::Pmg {
             dataset,
             dep_var,
@@ -428,7 +461,14 @@ pub fn execute(
             time,
             model,
         } => execute_gls(
-            dataset, dep_var, indep_vars, entity, time, model, format, session,
+            dataset,
+            dep_var,
+            indep_vars,
+            entity,
+            time,
+            model.core(),
+            format,
+            session,
         ),
         PanelCommands::UnitRoot {
             dataset,
@@ -436,8 +476,36 @@ pub fn execute(
             unit,
             time,
             test,
+            model,
             lags,
-        } => execute_unit_root(dataset, var, unit, time, test, lags, format, session),
+            lag_selection,
+            pmax,
+        } => {
+            let lag_selection = match lag_selection {
+                None => None,
+                Some(name) => match LagSelection::from_option(name, *lags) {
+                    Ok(rule) => Some(rule),
+                    Err(e) => {
+                        print_error(&format!("Panel unit root test failed: {e}"), format);
+                        return Ok(());
+                    }
+                },
+            };
+            if pmax.is_some() && matches!(lag_selection, None | Some(LagSelection::Fixed(_))) {
+                print_error(
+                    "--pmax applies to --lag-selection aic, sic or hall only",
+                    format,
+                );
+                return Ok(());
+            }
+            let mut config = PanelUnitRootConfig::default();
+            config.test_type = *test;
+            config.model = *model;
+            config.lags = *lags;
+            config.lag_selection = lag_selection;
+            config.pmax = *pmax;
+            execute_unit_root(dataset, var, unit, time, config, format, session)
+        }
     }
 }
 
@@ -475,6 +543,7 @@ fn execute_fe(
                     extra_json.insert("n_groups".to_string(), result.n_groups.into());
                     extra_json.insert("f_statistic".to_string(), result.f_stat.into());
                     extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
+                    extra_json.insert("dropped".to_string(), result.dropped.clone().into());
                     let report = RegressionReport {
                         method: "Fixed Effects (Within) Estimation",
                         coefficients: panel_rows(&result),
@@ -545,6 +614,7 @@ fn execute_re(
                     extra_json.insert("n_groups".to_string(), result.n_groups.into());
                     extra_json.insert("f_statistic".to_string(), result.f_stat.into());
                     extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
+                    extra_json.insert("dropped".to_string(), result.dropped.clone().into());
                     if let Some(df) = result.wald_df {
                         extra_json.insert("wald_df".to_string(), df.into());
                     }
@@ -739,6 +809,9 @@ fn execute_hdfe(
                     extra_json.insert("f_statistic".to_string(), result.f_stat.into());
                     extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
                     extra_json.insert("fe_dimensions".to_string(), fe_dimensions.into());
+                    extra_json.insert("dropped".to_string(), result.dropped.clone().into());
+                    extra_json.insert("converged".to_string(), result.converged.into());
+                    extra_json.insert("iterations".to_string(), result.iterations.into());
                     if let Some(missing) = missing_json(&result.missing) {
                         extra_json.insert("missing".to_string(), missing);
                     }
@@ -759,7 +832,7 @@ fn execute_hdfe(
                         se_type_json: result.cov_type.short_label(),
                         r_squared_type: "within",
                         extra_json,
-                        warnings: &[],
+                        warnings: &result.warnings,
                     };
                     println!("{}", format_regression_report(&report, format));
 
@@ -869,7 +942,7 @@ fn execute_feglm(
     dep_var: &str,
     indep_vars: &[String],
     fe_cols: &[String],
-    family_str: &str,
+    family: GlmFamily,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -885,13 +958,6 @@ fn execute_feglm(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
             let fe_refs: Vec<&str> = fe_cols.iter().map(|s| s.as_str()).collect();
-
-            let family = match family_str.to_lowercase().as_str() {
-                "probit" => GlmFamily::Probit,
-                "poisson" => GlmFamily::Poisson,
-                "gaussian" => GlmFamily::Gaussian,
-                _ => GlmFamily::Logit,
-            };
 
             match run_feglm(ds, dep_var, &x_cols, &fe_refs, family, None) {
                 Ok(result) => match format {
@@ -912,8 +978,10 @@ fn execute_feglm(
                             "fe_counts": result.fe_counts,
                             "converged": result.converged,
                             "iterations": result.iterations,
+                            "dropped": result.dropped,
                         });
-                        let json = with_missing(json, &result.missing);
+                        let mut json = with_missing(json, &result.missing);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -966,6 +1034,7 @@ fn execute_feglm(
                         for (dim, count) in result.fe_dimensions.iter().zip(&result.fe_counts) {
                             println!("  {}: {} levels", dim, count);
                         }
+                        print_result_notes(&result, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1038,6 +1107,7 @@ fn execute_gmm(
                         if let Some(missing) = missing_json(&result.missing) {
                             json["missing"] = missing;
                         }
+                        add_notes(&mut json, None, &result.warnings);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1111,7 +1181,7 @@ fn execute_pvcm(
     dep_var: &str,
     indep_vars: &[String],
     entity: &str,
-    model_str: &str,
+    model: PvcmType,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1126,11 +1196,6 @@ fn execute_pvcm(
     match dataset {
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
-
-            let model = match model_str.to_lowercase().as_str() {
-                "random" => PvcmType::Random,
-                _ => PvcmType::Within,
-            };
 
             match run_pvcm(ds, dep_var, &x_cols, entity, model) {
                 Ok(result) => match format {
@@ -1150,7 +1215,8 @@ fn execute_pvcm(
                             "homogeneity_pvalue": result.homogeneity_pvalue,
                             "individual_coefficients": result.individual_coefficients,
                         });
-                        let json = with_missing(json, &result.missing);
+                        let mut json = with_missing(json, &result.missing);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1199,6 +1265,7 @@ fn execute_pvcm(
                             "  Chi-squared = {:.4}, p = {:.4}",
                             result.homogeneity_stat, result.homogeneity_pvalue
                         );
+                        print_result_notes(&result, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1245,7 +1312,8 @@ fn execute_pmg(
                             "n_entities": result.n_entities,
                             "individual_coefficients": result.individual_coefficients,
                         });
-                        let json = with_missing(json, &result.missing);
+                        let mut json = with_missing(json, &result.missing);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1288,6 +1356,7 @@ fn execute_pmg(
 
                         println!("\n---");
                         println!("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+                        print_result_notes(&result, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1305,7 +1374,7 @@ fn execute_gls(
     indep_vars: &[String],
     entity: &str,
     time: &str,
-    model_str: &str,
+    model: PanelGlsModel,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1321,13 +1390,7 @@ fn execute_gls(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            let model = match model_str.to_lowercase().as_str() {
-                "pooling" => Some(PanelGlsModel::Pooling),
-                "fd" | "first-difference" => Some(PanelGlsModel::FirstDifference),
-                _ => Some(PanelGlsModel::FixedEffects),
-            };
-
-            match run_panel_gls(ds, dep_var, &x_cols, entity, time, model) {
+            match run_panel_gls(ds, dep_var, &x_cols, entity, time, Some(model)) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({
@@ -1345,7 +1408,8 @@ fn execute_gls(
                             "n_periods": result.n_periods,
                             "sigma": result.sigma,
                         });
-                        let json = with_missing(json, &result.missing);
+                        let mut json = with_missing(json, &result.missing);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1393,6 +1457,12 @@ fn execute_gls(
                         println!("\nModel Fit:");
                         println!("  R-squared: {:.4}", result.r_squared);
                         println!("  Residual std. error: {:.4}", result.sigma);
+                        // the missing-value note is one of the warnings; it prints last
+                        print_notes(
+                            None,
+                            &without_missing_note(&result.warnings, &result.missing),
+                            format,
+                        );
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1409,8 +1479,7 @@ fn execute_unit_root(
     var: &str,
     unit: &str,
     time: &str,
-    test_str: &str,
-    lags: &Option<usize>,
+    config: PanelUnitRootConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1423,76 +1492,73 @@ fn execute_unit_root(
     };
 
     match dataset {
-        Some(ds) => {
-            let test_type = match test_str.to_lowercase().as_str() {
-                "ips" => PanelUnitRootTest::IPS,
-                "hadri" => PanelUnitRootTest::Hadri,
-                "fisher" => PanelUnitRootTest::Fisher,
-                _ => PanelUnitRootTest::LLC,
-            };
-
-            let mut config = PanelUnitRootConfig::default();
-            config.test_type = test_type;
-            config.model = PanelModel::Intercept;
-            config.lags = *lags;
-            config.max_lags = None;
-
-            match run_panel_unit_root(ds, var, unit, time, config) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let mut json = serde_json::json!({
-                            "test_type": format!("{}", result.test_type),
-                            "model": format!("{}", result.model),
-                            "statistic": result.statistic,
-                            "p_value": result.p_value,
-                            "null_hypothesis": result.null_hypothesis,
-                            "alternative_hypothesis": result.alternative_hypothesis,
-                            "n_panels": result.n_panels,
-                            "avg_time_periods": result.avg_time_periods,
-                            "lags_used": result.lags_used,
-                            "warnings": result.warnings,
-                        });
-                        if let Some(stats) = &result.unit_statistics {
-                            json["unit_statistics"] = serde_json::json!(stats);
-                        }
-                        if let Some(p) = &result.unit_p_values {
-                            json["unit_p_values"] = serde_json::json!(p);
-                        }
-                        let json = with_missing(json, &result.missing);
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+        Some(ds) => match run_panel_unit_root(ds, var, unit, time, config) {
+            Ok(result) => match format {
+                OutputFormat::Json => {
+                    let mut json = serde_json::json!({
+                        "test_type": format!("{}", result.test_type),
+                        "model": format!("{}", result.model),
+                        "statistic": result.statistic,
+                        "p_value": result.p_value,
+                        "null_hypothesis": result.null_hypothesis,
+                        "alternative_hypothesis": result.alternative_hypothesis,
+                        "n_panels": result.n_panels,
+                        "avg_time_periods": result.avg_time_periods,
+                        "lags_used": result.lags_used,
+                        "warnings": result.warnings,
+                    });
+                    if let Some(stats) = &result.unit_statistics {
+                        json["unit_statistics"] = serde_json::json!(stats);
                     }
-                    _ => {
-                        println!("\nPanel Unit Root Test: {}", result.test_type);
-                        println!("{}", "=".repeat(70));
-                        println!("Model: {}", result.model);
-                        println!(
-                            "Panels: {}  Avg. time periods: {:.1}  Lags: {}",
-                            result.n_panels, result.avg_time_periods, result.lags_used
-                        );
-
-                        println!("\nH0: {}", result.null_hypothesis);
-                        println!("H1: {}", result.alternative_hypothesis);
-
-                        println!("\nTest statistic: {:.4}", result.statistic);
-                        println!("P-value: {:.4}", result.p_value);
-
-                        print_warnings(&result.warnings);
-
-                        let sig = if result.p_value < 0.01 {
-                            "*** Reject H0 at 1% level"
-                        } else if result.p_value < 0.05 {
-                            "** Reject H0 at 5% level"
-                        } else if result.p_value < 0.10 {
-                            "* Reject H0 at 10% level"
-                        } else {
-                            "Fail to reject H0"
-                        };
-                        println!("\nConclusion: {}", sig);
+                    if let Some(p) = &result.unit_p_values {
+                        json["unit_p_values"] = serde_json::json!(p);
                     }
-                },
-                Err(e) => print_error(&format!("Panel unit root test failed: {}", e), format),
-            }
-        }
+                    json["unit_ids"] = serde_json::json!(result.unit_ids);
+                    json["unit_lags"] = serde_json::json!(result.unit_lags);
+                    json["lag_selection"] = serde_json::json!(result.lag_selection);
+                    json["dfcor"] = serde_json::json!(result.dfcor);
+                    let mut json = with_missing(json, &result.missing);
+                    add_result_notes(&mut json, &result);
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!("\nPanel Unit Root Test: {}", result.test_type);
+                    println!("{}", "=".repeat(70));
+                    println!("Model: {}", result.model);
+                    println!(
+                        "Panels: {}  Avg. time periods: {:.1}  Lags: {}",
+                        result.n_panels, result.avg_time_periods, result.lags_used
+                    );
+
+                    println!("Lags: {}", result.lag_selection);
+                    if !result.unit_lags.is_empty() {
+                        let joined: Vec<String> =
+                            result.unit_lags.iter().map(|p| p.to_string()).collect();
+                        println!("Unit lags: {}", joined.join(", "));
+                    }
+
+                    println!("\nH0: {}", result.null_hypothesis);
+                    println!("H1: {}", result.alternative_hypothesis);
+
+                    println!("\nTest statistic: {:.4}", result.statistic);
+                    println!("P-value: {:.4}", result.p_value);
+
+                    print_warnings(&result.warnings);
+
+                    let sig = if result.p_value < 0.01 {
+                        "*** Reject H0 at 1% level"
+                    } else if result.p_value < 0.05 {
+                        "** Reject H0 at 5% level"
+                    } else if result.p_value < 0.10 {
+                        "* Reject H0 at 10% level"
+                    } else {
+                        "Fail to reject H0"
+                    };
+                    println!("\nConclusion: {}", sig);
+                }
+            },
+            Err(e) => print_error(&format!("Panel unit root test failed: {}", e), format),
+        },
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
@@ -1534,4 +1600,105 @@ fn significance_mark(p: f64) -> &'static str {
     } else {
         ""
     }
+}
+
+/// `warnings` without the missing-value note, for a caller that prints that note last.
+fn without_missing_note(
+    warnings: &[String],
+    missing: &p2a_core::data::columns::MissingSummary,
+) -> Vec<String> {
+    let note = missing.note();
+    warnings
+        .iter()
+        .filter(|w| Some(w.as_str()) != note.as_deref())
+        .cloned()
+        .collect()
+}
+
+/// `--lag-selection`: fixed or a criterion name [`LagSelection`] accepts; `--lags` is
+/// checked against it when the command runs.
+fn lag_selection_arg(s: &str) -> Result<String, String> {
+    if p2a_core::options::normalize(s) == "fixed" {
+        return Ok(s.to_string());
+    }
+    LagSelection::from_option(s, None)
+        .map(|_| s.to_string())
+        .map_err(|_| {
+            format!(
+                "unknown lag selection '{s}'; use one of: {}",
+                LagSelection::names_help()
+            )
+        })
+}
+
+/// `panel feglm --family`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum FeglmFamily {
+    #[value(alias = "binomial")]
+    Logit,
+    Probit,
+    Poisson,
+    Gaussian,
+}
+
+impl FeglmFamily {
+    fn core(self) -> GlmFamily {
+        match self {
+            FeglmFamily::Logit => GlmFamily::Logit,
+            FeglmFamily::Probit => GlmFamily::Probit,
+            FeglmFamily::Poisson => GlmFamily::Poisson,
+            FeglmFamily::Gaussian => GlmFamily::Gaussian,
+        }
+    }
+}
+
+/// `panel pvcm --model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PvcmModel {
+    Within,
+    #[value(alias = "swamy")]
+    Random,
+}
+
+impl PvcmModel {
+    fn core(self) -> PvcmType {
+        match self {
+            PvcmModel::Within => PvcmType::Within,
+            PvcmModel::Random => PvcmType::Random,
+        }
+    }
+}
+
+/// `panel gls --model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PanelGlsModelArg {
+    #[value(aliases = ["fixed-effects", "within"])]
+    Fe,
+    #[value(aliases = ["first-difference", "first_difference"])]
+    Fd,
+    Pooling,
+}
+
+impl PanelGlsModelArg {
+    fn core(self) -> PanelGlsModel {
+        match self {
+            PanelGlsModelArg::Fe => PanelGlsModel::FixedEffects,
+            PanelGlsModelArg::Fd => PanelGlsModel::FirstDifference,
+            PanelGlsModelArg::Pooling => PanelGlsModel::Pooling,
+        }
+    }
+}
+
+/// `panel gmm --step`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GmmStepArg {
+    Onestep,
+    Twostep,
+}
+
+/// `panel gmm --vcov`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GmmVcovArg {
+    Robust,
+    Classical,
 }

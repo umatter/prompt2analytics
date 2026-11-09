@@ -67,6 +67,9 @@ EXAMPLES:
     p2a --session s.json data generate -n 1000 -d simdata \\
         --columns '[{\"name\":\"x\",\"distribution\":{\"type\":\"normal\",\"mean\":0,\"std\":1}},
                     {\"name\":\"e\",\"distribution\":{\"type\":\"uniform\",\"min\":-1,\"max\":1}}]'
+
+With --session the result is stored next to the session file (<session>.datasets/) and is
+available to later commands and exported scripts.
 ")]
     Generate {
         /// Number of rows to generate
@@ -156,19 +159,17 @@ pub fn execute(
     }
 }
 
-/// Read a CSV file with the `--na-strings` markers of a load (`None`: the loader's
-/// default, `NA` and the empty field). `data load` and the session's reload share it, so
-/// a reload reads the file as the load did.
-pub(crate) fn load_csv_with_markers(
-    path: &Path,
-    na: Option<&[String]>,
-) -> Result<DataFrame, LoadError> {
+/// Read a data file of any format [`DataLoader::load`] reads, with the `--na-strings`
+/// markers of a CSV load (`None`: the loader's default, `NA` and the empty field).
+/// `data load` and the session's reload share it, so a reload reads the file as the load
+/// did.
+pub(crate) fn load_with_markers(path: &Path, na: Option<&[String]>) -> Result<Dataset, LoadError> {
     match na {
         Some(na) => {
             let na: Vec<&str> = na.iter().map(String::as_str).collect();
-            DataLoader::load_csv_with_na(path, &na)
+            DataLoader::load_with_na(path, &na)
         }
-        None => DataLoader::load_csv(path),
+        None => DataLoader::load(path),
     }
 }
 
@@ -230,22 +231,10 @@ fn execute_load(
         return Ok(());
     }
 
-    // Load the dataset
-    let df = match extension.as_str() {
-        "csv" => load_csv_with_markers(path, na_strings)?,
-        "parquet" => DataLoader::load_parquet(path)?,
-        "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(path, None)?,
-        "dta" => DataLoader::load_stata(path)?,
-        "sas7bdat" => DataLoader::load_sas(path)?,
-        _ => {
-            progress.finish_and_clear();
-            print_error(&format!("Unsupported file format: {}", extension), format);
-            return Ok(());
-        }
-    };
-
+    // Load the dataset (an unknown extension is an error listing the readable ones)
+    let loaded = load_with_markers(path, na_strings);
     progress.finish_and_clear();
-    let dataset = Dataset::new(df);
+    let dataset = loaded?;
 
     let df = dataset.df();
     let nrows = df.height();
@@ -286,21 +275,36 @@ fn execute_load(
 fn execute_list(format: &OutputFormat, session: Option<&mut SessionManager>) -> anyhow::Result<()> {
     match session {
         Some(mgr) => {
-            let datasets = mgr.list_datasets();
-            if datasets.is_empty() {
+            // datasets load lazily: read each one so that a source that is gone is
+            // warned about (by get_dataset) and listed apart, not as loaded
+            let mut names: Vec<String> = mgr.list_datasets().into_iter().cloned().collect();
+            names.sort();
+            let (loaded, unavailable): (Vec<String>, Vec<String>) = names
+                .into_iter()
+                .partition(|name| mgr.get_dataset(name).is_some());
+            if loaded.is_empty() && unavailable.is_empty() {
                 print_message("No datasets loaded", format);
             } else {
                 match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "datasets": datasets
-                        });
+                        let mut json = serde_json::json!({ "datasets": loaded });
+                        if !unavailable.is_empty() {
+                            json["unavailable"] = serde_json::json!(unavailable);
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
-                        println!("Loaded datasets:");
-                        for name in datasets {
-                            println!("  - {}", name);
+                        if !loaded.is_empty() {
+                            println!("Loaded datasets:");
+                            for name in &loaded {
+                                println!("  - {}", name);
+                            }
+                        }
+                        if !unavailable.is_empty() {
+                            println!("Datasets whose source could not be read:");
+                            for name in &unavailable {
+                                println!("  - {}", name);
+                            }
                         }
                     }
                 }
@@ -528,9 +532,13 @@ fn execute_generate(
         ncols
     );
 
-    // Register with session if available
+    // With a session the dataset is written next to the session file, so later
+    // invocations find it
     if let Some(mgr) = session {
-        mgr.store_dataset(name.to_string(), dataset);
+        if let Err(e) = mgr.persist_dataset(name, dataset) {
+            print_error(&e.to_string(), format);
+            return Ok(());
+        }
     }
 
     // Output success message

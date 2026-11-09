@@ -111,6 +111,10 @@ fn execute_export(
 }
 
 /// Render the bash script for `session`, replaying into `temp_session`.
+///
+/// When the session ran a command that produces a dataset (`munge *`, `data generate`),
+/// the replay's own session stores those datasets next to `$SESSION_FILE`
+/// (`session::sidecar_dir`), so the cleanup removes that directory too.
 fn render_script(session: &Session, comments: bool, temp_session: &str) -> String {
     let mut script = String::new();
 
@@ -156,10 +160,25 @@ fn render_script(session: &Session, comments: bool, temp_session: &str) -> Strin
     // Cleanup
     script.push_str("# Cleanup temporary session file\n");
     script.push_str("rm -f \"$SESSION_FILE\"\n");
+    if session.commands.iter().any(creates_derived_dataset) {
+        script.push_str("rm -rf -- \"$SESSION_FILE.datasets\"\n");
+    }
     script.push('\n');
     script.push_str("echo \"Script completed successfully\"\n");
 
     script
+}
+
+/// Whether `record` produced a dataset that a session stores as a derived dataset:
+/// `munge *` and `data generate`. Reads the recorded argv, or the category and
+/// subcommand of a legacy record without one.
+fn creates_derived_dataset(record: &crate::session::CommandRecord) -> bool {
+    let (category, subcommand) = match record.argv.as_slice() {
+        [c, s, ..] => (c.as_str(), s.as_str()),
+        [] => (record.category.as_str(), record.subcommand.as_str()),
+        [c] => (c.as_str(), ""),
+    };
+    category == "munge" || (category == "data" && subcommand == "generate")
 }
 
 /// Text for a `# ` comment line, with control characters shown as escapes
@@ -510,6 +529,54 @@ mod tests {
             error: None,
             duration_ms: 0,
         }
+    }
+
+    #[test]
+    fn render_script_removes_the_derived_dataset_directory() {
+        let mut s = Session::new();
+        s.version = "0.1.3".into();
+        s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        s.commands.push(record(
+            &["data", "load", "d.csv", "--name", "d"],
+            "data load d.csv --name d",
+            "data",
+            "load",
+            serde_json::Value::Null,
+        ));
+        s.commands.push(record(
+            &["munge", "select", "d", "--columns", "x", "--name", "e"],
+            "munge select d --columns x --name e",
+            "munge",
+            "select",
+            serde_json::Value::Null,
+        ));
+        let text = render_script(&s, false, ".p2a_session_test.json");
+        assert!(
+            text.ends_with(
+                "rm -f \"$SESSION_FILE\"\nrm -rf -- \"$SESSION_FILE.datasets\"\n\necho \"Script completed successfully\"\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            crate::session::sidecar_dir(std::path::Path::new(".p2a_session_test.json")),
+            std::path::PathBuf::from(".p2a_session_test.json.datasets")
+        );
+        let generate = record(
+            &["data", "generate", "-d", "g", "-c", "[]"],
+            "data generate",
+            "data",
+            "generate",
+            serde_json::Value::Null,
+        );
+        let legacy = record(
+            &[],
+            "munge sort d",
+            "munge",
+            "sort",
+            serde_json::json!({"dataset": "d"}),
+        );
+        assert!(creates_derived_dataset(&generate) && creates_derived_dataset(&legacy));
+        assert!(!creates_derived_dataset(&s.commands[0]));
     }
 
     #[test]

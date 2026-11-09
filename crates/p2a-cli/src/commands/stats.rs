@@ -46,8 +46,8 @@ use p2a_core::{
 };
 
 use crate::output::{
-    OutputFormat, missing_json, print_error, print_missing_note, validate_column_exists,
-    validate_confidence_level,
+    OutputFormat, add_notes, missing_json, parse_core_option, print_error, print_missing_note,
+    print_notes, validate_column_exists, validate_confidence_level,
 };
 use crate::session::SessionManager;
 
@@ -406,8 +406,8 @@ EXAMPLES:
 
         /// Sums of squares: I (sequential, as R aov; default), II or III (as car::Anova; III
         /// with sum-to-zero contrasts)
-        #[arg(long, default_value = "I", value_name = "TYPE")]
-        ss_type: String,
+        #[arg(long, default_value = "I", value_name = "TYPE", value_parser = parse_core_option::<SsType>)]
+        ss_type: SsType,
     },
 
     /// Tukey's HSD post-hoc test
@@ -727,7 +727,7 @@ pub fn execute(
             factor_a,
             factor_b,
             *interaction,
-            ss_type,
+            *ss_type,
             format,
             session,
         ),
@@ -794,11 +794,17 @@ pub fn execute(
 }
 
 /// Prints `json` pretty, with a `"missing"` object (`output::missing_json`) when rows were
-/// dropped because of missing values.
-fn print_json(mut json: serde_json::Value, missing: &MissingSummary) -> anyhow::Result<()> {
+/// dropped because of missing values, and `"warnings"` (`output::add_notes`: the result's
+/// warnings, `[]` when there are none; a `"warnings"` key already in `json` is kept).
+fn print_json(
+    mut json: serde_json::Value,
+    missing: &MissingSummary,
+    warnings: &[String],
+) -> anyhow::Result<()> {
     if let (Some(summary), Some(object)) = (missing_json(missing), json.as_object_mut()) {
         object.insert("missing".to_string(), summary);
     }
+    add_notes(&mut json, None, warnings);
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
 }
@@ -988,7 +994,7 @@ fn execute_t_test_one(
                                 "std_error": result.std_error,
                                 "n": result.n,
                             });
-                            print_json(json, &result.missing)?;
+                            print_json(json, &result.missing, &[])?;
                         }
                         _ => {
                             println!("\nOne-sample t-test");
@@ -1056,7 +1062,7 @@ fn execute_t_test_two(
                             "n_y": result.n_2,
                             "std_error": result.std_error,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &[])?;
                     }
                     _ => {
                         let test_name = if equal_var {
@@ -1125,7 +1131,7 @@ fn execute_t_test_paired(
                             "std_error": result.std_error,
                             "n": result.n,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &[])?;
                     }
                     _ => {
                         println!("\nPaired t-test");
@@ -1184,7 +1190,7 @@ fn execute_chisq_gof(
                             "n": n,
                             "warnings": result.warnings,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &result.warnings)?;
                     }
                     _ => {
                         println!("\nChi-squared Goodness-of-Fit Test");
@@ -1269,7 +1275,7 @@ fn execute_chisq_indep(
                                 "warnings": result.warnings,
                                 "yates_correction": result.yates_correction,
                             });
-                            print_json(json, &result.missing)?;
+                            print_json(json, &result.missing, &result.warnings)?;
                         }
                         _ => {
                             println!("\nChi-squared Test of Independence");
@@ -1369,7 +1375,7 @@ fn execute_fisher(
                                 "col_levels": result.col_levels,
                                 "table": result.table,
                             });
-                            print_json(json, &result.missing)?;
+                            print_json(json, &result.missing, &[])?;
                         }
                         _ => {
                             println!("\nFisher's Exact Test for 2x2 Table");
@@ -1434,7 +1440,7 @@ fn execute_shapiro(
                             "p_value": result.p_value,
                             "n": result.n,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &[])?;
                     }
                     _ => {
                         println!("\nShapiro-Wilk Normality Test");
@@ -1485,6 +1491,7 @@ fn execute_wilcoxon(
             // Paired: complete pairs; rank-sum: each sample's missing values dropped.
             match wilcoxon_test(ds, col1, Some(col2), 0.0, alt, paired, &config) {
                 Ok(res) => {
+                    let warnings: Vec<String> = res.warning.iter().cloned().collect();
                     let test_name = if paired {
                         "Wilcoxon signed-rank test"
                     } else {
@@ -1497,12 +1504,13 @@ fn execute_wilcoxon(
                                 "statistic": res.statistic,
                                 "p_value": res.p_value,
                             });
-                            print_json(json, &res.missing)?;
+                            print_json(json, &res.missing, &warnings)?;
                         }
                         _ => {
                             println!("\n{}", test_name);
                             println!("{}", "=".repeat(40));
                             println!("W = {:.4}, p-value = {:.6}", res.statistic, res.p_value);
+                            print_notes(None, &warnings, format);
                             if paired {
                                 print_missing_note(&res.missing, format);
                             } else {
@@ -1546,7 +1554,7 @@ fn execute_bartlett(
                             "df": result.df,
                             "p_value": result.p_value,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &[])?;
                     }
                     _ => {
                         println!("\nBartlett's Test for Homogeneity of Variances");
@@ -1593,7 +1601,7 @@ fn execute_kruskal(
                             "df": result.df,
                             "p_value": result.p_value,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &[])?;
                     }
                     _ => {
                         println!("\nKruskal-Wallis Rank Sum Test");
@@ -1649,7 +1657,7 @@ fn execute_fivenum(
                             "max": result.maximum,
                             "n": result.n,
                         });
-                        print_json(json, &missing)?;
+                        print_json(json, &missing, &[])?;
                     }
                     _ => {
                         println!("\nFive-Number Summary for '{}'", col);
@@ -1701,7 +1709,7 @@ fn execute_iqr(
                         let json = serde_json::json!({
                             "iqr": iqr_val,
                         });
-                        print_json(json, &missing)?;
+                        print_json(json, &missing, &[])?;
                     }
                     _ => {
                         println!("IQR({}): {:.4}", col, iqr_val);
@@ -1747,7 +1755,7 @@ fn execute_mad(
                         let json = serde_json::json!({
                             "mad": mad_val,
                         });
-                        print_json(json, &missing)?;
+                        print_json(json, &missing, &[])?;
                     }
                     _ => {
                         println!("MAD({}): {:.4}", col, mad_val);
@@ -1797,7 +1805,7 @@ fn execute_acf(
                                 "lags": result.lags,
                                 "values": result.values,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &MissingSummary::default(), &[])?;
                         }
                         _ => {
                             println!("\nPartial Autocorrelation Function");
@@ -1810,7 +1818,8 @@ fn execute_acf(
                     Err(e) => print_error(&format!("PACF failed: {}", e), format),
                 }
             } else {
-                // acf(data, lag_max, acf_type, demean, na_rm) // adjusted = true: CLI-22 (Tier 4)
+                // The sample autocorrelations of the demeaned series (acf type "correlation"); the
+                // series has no missing values (series_column refuses them).
                 match acf(&data, Some(lag_max), AcfType::Correlation, true, true) {
                     Ok(result) => match format {
                         OutputFormat::Json => {
@@ -1819,7 +1828,7 @@ fn execute_acf(
                                 "lags": result.lags,
                                 "values": result.values,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &MissingSummary::default(), &[])?;
                         }
                         _ => {
                             println!("\nAutocorrelation Function");
@@ -1874,7 +1883,7 @@ fn execute_anova(
                         "n_groups": result.n_groups,
                         "n_obs": result.n_obs,
                     });
-                    print_json(json, &result.missing)?;
+                    print_json(json, &result.missing, &[])?;
                 }
                 _ => {
                     println!("\nOne-Way ANOVA");
@@ -1925,7 +1934,7 @@ fn execute_anova_two(
     factor_a: &str,
     factor_b: &str,
     interaction: bool,
-    ss_type: &str,
+    ss_type: SsType,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1933,13 +1942,6 @@ fn execute_anova_two(
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
             print_error("No session active. Use --session <file>.", format);
-            return Ok(());
-        }
-    };
-    let ss_type: SsType = match ss_type.parse() {
-        Ok(t) => t,
-        Err(e) => {
-            print_error(&e.to_string(), format);
             return Ok(());
         }
     };
@@ -1982,7 +1984,7 @@ fn execute_anova_two(
                         "p_ab": opt(result.p_ab),
                         "n_obs": result.n_obs,
                     });
-                    print_json(json, &result.missing)?;
+                    print_json(json, &result.missing, &[])?;
                 }
                 _ => {
                     println!("\nTwo-Way ANOVA");
@@ -2128,7 +2130,7 @@ fn execute_tukey(
                         "anova_p_value": anova_result.p_value,
                         "comparisons": comparisons,
                     });
-                    print_json(json, &anova_result.missing)?;
+                    print_json(json, &anova_result.missing, &[])?;
                 }
                 _ => {
                     println!("\nTukey's HSD Test");
@@ -2193,7 +2195,7 @@ fn execute_friedman(
                         "rank_sums": result.rank_sums,
                         "mean_ranks": result.mean_ranks,
                     });
-                    print_json(json, &result.missing)?;
+                    print_json(json, &result.missing, &[])?;
                 }
                 _ => {
                     println!("\nFriedman Rank Sum Test");
@@ -2258,7 +2260,7 @@ fn execute_pacf(
                             "n_obs": result.n_obs,
                             "confidence_bound": result.confidence_bound,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &MissingSummary::default(), &[])?;
                     }
                     _ => {
                         println!("\nPartial Autocorrelation Function");
@@ -2312,7 +2314,7 @@ fn execute_ccf(
                         "values": result.values,
                         "n_obs": result.n_obs,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &MissingSummary::default(), &[])?;
                 }
                 _ => {
                     println!("\nCross-Correlation Function");
@@ -2372,7 +2374,7 @@ fn execute_box_test(
                                 "fitdf": result.fitdf,
                                 "n_obs": result.n_obs,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &MissingSummary::default(), &[])?;
                         }
                         _ => {
                             println!("\n{}", test_name);
@@ -2424,7 +2426,7 @@ fn execute_ks_test(
                             "n": result.n,
                             "n_2": result.n_2,
                         });
-                        print_json(json, &result.missing)?;
+                        print_json(json, &result.missing, &[])?;
                     }
                     _ => {
                         println!("\n{}", result.test_name);
@@ -2477,8 +2479,12 @@ fn execute_pp_test(
                         "p_value": result.p_value,
                         "n_obs": result.n_obs,
                         "lshort": result.lshort,
+                        "gamma_hat": result.gamma_hat,
+                        "t_statistic": result.t_statistic,
+                        "sigma_squared": result.sigma_squared,
+                        "lambda_squared": result.lambda_squared,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &MissingSummary::default(), &[])?;
                 }
                 _ => {
                     println!("\nPhillips-Perron Unit Root Test");
@@ -2486,6 +2492,13 @@ fn execute_pp_test(
                     println!(
                         "Dickey-Fuller Z(tau) = {:.4}, Truncation lag = {}, p-value = {:.4}",
                         result.statistic, result.truncation_lag, result.p_value
+                    );
+                    println!(
+                        "Regression: gamma = {:.6}, t = {:.4}; sigma^2 = {:.6}, lambda^2 = {:.6}",
+                        result.gamma_hat,
+                        result.t_statistic,
+                        result.sigma_squared,
+                        result.lambda_squared
                     );
                     println!("Observations: {}", result.n_obs);
                     if result.p_value < 0.05 {
@@ -2546,7 +2559,7 @@ fn execute_power_t(
                     "test_type": format!("{:?}", result.test_type),
                     "note": result.note,
                 });
-                println!("{}", serde_json::to_string_pretty(&json)?);
+                print_json(json, &MissingSummary::default(), &result.warnings)?;
             }
             _ => {
                 println!("\n{}", result.method);
@@ -2560,6 +2573,7 @@ fn execute_power_t(
                 if let Some(note) = &result.note {
                     println!("\nNOTE: {}", note);
                 }
+                print_notes(None, &result.warnings, format);
             }
         },
         Err(e) => print_error(&format!("Power analysis failed: {}", e), format),

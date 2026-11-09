@@ -1,16 +1,25 @@
 //! Discrete choice model commands
 
-use clap::Subcommand;
-use p2a_core::data::columns::{MissingSummary, is_numeric_dtype};
+use clap::{Subcommand, ValueEnum};
+use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy, is_numeric_dtype};
+use p2a_core::econometrics::discrete::conditional_logit::{
+    MlogitConfig, run_conditional_logit_with,
+};
+use p2a_core::econometrics::discrete::types::DiscreteResult;
+use p2a_core::econometrics::glm::{GlmSpec, fit_glm};
 use p2a_core::econometrics::{OrderedConfig, run_ordered_model_with};
+use p2a_core::linalg::solve::aliasing_message;
+use p2a_core::traits::convergence::ResultNotes;
+use p2a_core::traits::estimator::normal_p_value_two_sided;
 use p2a_core::{
-    GlmFamily, HurdleType, MixedLogitConfig, OrderedModelType, RandomDistribution,
-    RandomParameterSpec, run_conditional_logit, run_feglm, run_hurdle, run_logit, run_mixed_logit,
-    run_multinom, run_negbin, run_probit, run_zinb, run_zip,
+    HurdleType, MixedLogitConfig, OrderedModelType, RandomDistribution, RandomParameterSpec,
+    run_hurdle, run_logit, run_mixed_logit, run_multinom, run_negbin, run_probit, run_zinb,
+    run_zip,
 };
 
 use crate::output::{
-    OutputFormat, format_regression_results, missing_json, print_error, print_missing_note,
+    OutputFormat, add_notes, add_result_notes, format_regression_results, missing_json,
+    print_error, print_missing_note, print_notes, print_result_notes, regression_results_json,
 };
 use crate::session::SessionManager;
 
@@ -220,9 +229,9 @@ EXAMPLES:
         #[arg(short = 'z', long, num_args = 1..)]
         zero_vars: Option<Vec<String>>,
 
-        /// Count distribution: poisson or negbin (default: poisson)
-        #[arg(long, default_value = "poisson")]
-        dist: String,
+        /// Count distribution: poisson (default) or negbin (aliases nb, negative-binomial)
+        #[arg(long, value_enum, ignore_case = true, default_value = "poisson")]
+        dist: HurdleDist,
     },
 
     /// Conditional Logit (McFadden's choice model for panel/choice data)
@@ -251,9 +260,23 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         indep_vars: Vec<String>,
 
-        /// Reference alternative (default: first alternative)
-        #[arg(long)]
+        /// Reference alternative (mlogit's reflevel); default: the first alternative in sorted
+        /// order
+        #[arg(long, visible_alias = "reflevel")]
         reference: Option<String>,
+
+        /// Alternative-specific constants (true/false; default true), as mlogit's default;
+        /// false fits mlogit(choice ~ x | 0)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        asc: bool,
     },
 
     /// Mixed Logit / Random Parameters Logit
@@ -289,6 +312,16 @@ EXAMPLES:
         #[arg(long)]
         individual: Option<String>,
     },
+}
+
+/// Count distribution of `discrete hurdle --dist` (the core's `HurdleType` has no `FromStr`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum HurdleDist {
+    /// Truncated Poisson count part.
+    Poisson,
+    /// Truncated negative binomial count part.
+    #[value(name = "negbin", aliases = ["nb", "negative-binomial", "negative_binomial"])]
+    NegBin,
 }
 
 pub fn execute(
@@ -396,7 +429,7 @@ pub fn execute(
             dep_var,
             indep_vars,
             zero_vars.as_deref(),
-            dist,
+            *dist,
             format,
             session,
         ),
@@ -407,6 +440,7 @@ pub fn execute(
             choice,
             indep_vars,
             reference,
+            asc,
         } => execute_clogit(
             dataset,
             choice_id,
@@ -414,6 +448,7 @@ pub fn execute(
             choice,
             indep_vars,
             reference.as_deref(),
+            *asc,
             format,
             session,
         ),
@@ -469,21 +504,72 @@ fn insert_notes(json: &mut serde_json::Value, missing: &MissingSummary, warnings
     }
 }
 
-/// `output` (a `format_regression_results` JSON document) with `missing` inserted when
-/// rows were dropped.
-fn with_missing(output: String, missing: &MissingSummary) -> String {
-    let Some(m) = missing_json(missing) else {
-        return output;
-    };
-    match serde_json::from_str::<serde_json::Value>(&output) {
-        Ok(mut json) => {
+/// The logit/probit report: the coefficient table (aliased rows `NaN` in text, `null` in JSON),
+/// the log-likelihoods, the convergence line and every core warning, then T2's missing-value note.
+/// JSON adds `log_likelihood`, `log_likelihood_null`, `aic`, `separation`, `aliased`, `missing`
+/// (when rows were dropped) and the notes (`converged`, `iterations`, `warnings`).
+fn print_binary(
+    method: &str,
+    result: &DiscreteResult,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    let coef_table: Vec<(String, f64, f64, f64, f64)> = result
+        .variables
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let at = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
+            (
+                name.clone(),
+                at(&result.coefficients),
+                at(&result.std_errors),
+                at(&result.z_stats),
+                at(&result.p_values),
+            )
+        })
+        .collect();
+    match format {
+        OutputFormat::Json => {
+            let mut json = regression_results_json(
+                method,
+                &coef_table,
+                result.pseudo_r_squared,
+                result.pseudo_r_squared,
+                result.n_obs,
+            );
             if let Some(object) = json.as_object_mut() {
-                object.insert("missing".to_string(), m);
+                object.insert("log_likelihood".into(), result.log_likelihood.into());
+                object.insert(
+                    "log_likelihood_null".into(),
+                    result.log_likelihood_null.into(),
+                );
+                object.insert("aic".into(), result.aic.into());
+                object.insert("separation".into(), result.separation.into());
+                object.insert("aliased".into(), serde_json::json!(result.aliased));
+                if let Some(m) = missing_json(&result.missing) {
+                    object.insert("missing".into(), m);
+                }
             }
-            serde_json::to_string_pretty(&json).unwrap_or(output)
+            add_result_notes(&mut json, result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
-        Err(_) => output,
+        _ => {
+            let output = format_regression_results(
+                method,
+                &coef_table,
+                result.pseudo_r_squared,
+                result.pseudo_r_squared,
+                result.n_obs,
+                format,
+            );
+            println!("{}", output);
+            println!("\nLog-likelihood: {:.4}", result.log_likelihood);
+            println!("Null log-likelihood: {:.4}", result.log_likelihood_null);
+            print_result_notes(result, format);
+            print_missing_note(&result.missing, format);
+        }
     }
+    Ok(())
 }
 
 fn execute_logit(
@@ -511,41 +597,7 @@ fn execute_logit(
             // run_logit takes 3 args: dataset, y_col, x_cols
             match run_logit(ds, dep_var, &x_cols) {
                 Ok(result) => {
-                    // DiscreteResult uses fields, not methods
-                    let coeffs = &result.coefficients;
-                    let ses = &result.std_errors;
-                    let p_vals = &result.p_values;
-                    let z_vals = &result.z_stats;
-
-                    // Build variable names from the result
-                    let var_names = &result.variables;
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], z_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        "Logit Regression (MLE)",
-                        &coef_table,
-                        result.pseudo_r_squared,
-                        result.pseudo_r_squared, // Same for now
-                        result.n_obs,
-                        format,
-                    );
-                    match format {
-                        OutputFormat::Json => {
-                            println!("{}", with_missing(output, &result.missing));
-                        }
-                        _ => {
-                            println!("{}", output);
-                            println!("\nLog-likelihood: {:.4}", result.log_likelihood);
-                            println!("Null log-likelihood: {:.4}", result.log_likelihood_null);
-                            println!("Iterations: {}", result.iterations);
-                            print_missing_note(&result.missing, format);
-                        }
-                    }
+                    print_binary("Logit Regression (MLE)", &result, format)?;
                 }
                 Err(e) => {
                     print_error(&format!("Logit failed: {}", e), format);
@@ -584,40 +636,7 @@ fn execute_probit(
             // run_probit takes 3 args: dataset, y_col, x_cols
             match run_probit(ds, dep_var, &x_cols) {
                 Ok(result) => {
-                    // DiscreteResult uses fields, not methods
-                    let coeffs = &result.coefficients;
-                    let ses = &result.std_errors;
-                    let p_vals = &result.p_values;
-                    let z_vals = &result.z_stats;
-
-                    let var_names = &result.variables;
-
-                    let coef_table: Vec<(String, f64, f64, f64, f64)> = var_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), coeffs[i], ses[i], z_vals[i], p_vals[i]))
-                        .collect();
-
-                    let output = format_regression_results(
-                        "Probit Regression (MLE)",
-                        &coef_table,
-                        result.pseudo_r_squared,
-                        result.pseudo_r_squared,
-                        result.n_obs,
-                        format,
-                    );
-                    match format {
-                        OutputFormat::Json => {
-                            println!("{}", with_missing(output, &result.missing));
-                        }
-                        _ => {
-                            println!("{}", output);
-                            println!("\nLog-likelihood: {:.4}", result.log_likelihood);
-                            println!("Null log-likelihood: {:.4}", result.log_likelihood_null);
-                            println!("Iterations: {}", result.iterations);
-                            print_missing_note(&result.missing, format);
-                        }
-                    }
+                    print_binary("Probit Regression (MLE)", &result, format)?;
                 }
                 Err(e) => {
                     print_error(&format!("Probit failed: {}", e), format);
@@ -700,6 +719,11 @@ fn execute_ordered(
                 "iterations": result.iterations,
             });
             insert_notes(&mut json, &result.missing, &result.warnings);
+            add_notes(
+                &mut json,
+                Some((result.converged, result.iterations)),
+                &result.warnings,
+            );
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
@@ -765,7 +789,7 @@ fn execute_mlogit(
     dataset_name: &str,
     dep_var: &str,
     indep_vars: &[String],
-    _base: Option<&str>,
+    base: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -781,7 +805,7 @@ fn execute_mlogit(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            match run_multinom(ds, dep_var, &x_cols, None) {
+            match run_multinom(ds, dep_var, &x_cols, base) {
                 Ok(result) => {
                     match format {
                         OutputFormat::Json => {
@@ -797,8 +821,10 @@ fn execute_mlogit(
                                 "n_obs": result.n_obs,
                                 "log_likelihood": result.log_likelihood,
                                 "aic": result.aic,
+                                "separation": result.separation,
                             });
                             insert_notes(&mut json, &result.missing, &[]);
+                            add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -851,6 +877,7 @@ fn execute_mlogit(
                             println!("Observations: {}", result.n_obs);
                             println!("Log-likelihood: {:.4}", result.log_likelihood);
                             println!("AIC: {:.4}", result.aic);
+                            print_result_notes(&result, format);
                             print_missing_note(&result.missing, format);
                         }
                     }
@@ -901,6 +928,7 @@ fn execute_negbin(
                             "iterations": result.iterations,
                         });
                         insert_notes(&mut json, &result.missing, &result.warnings);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -955,6 +983,8 @@ fn execute_negbin(
     Ok(())
 }
 
+/// `discrete poisson`: glm(family = poisson) through the shared GLM, rows with a missing
+/// outcome or regressor dropped jointly (glm's na.omit).
 fn execute_poisson(
     dataset_name: &str,
     dep_var: &str,
@@ -969,72 +999,115 @@ fn execute_poisson(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => {
-            let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
-
-            // Use FEGLM with Poisson family for simple Poisson regression
-            match run_feglm(ds, dep_var, &x_cols, &[], GlmFamily::Poisson, None) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "Poisson Regression",
-                            "variables": result.variables,
-                            "coefficients": result.coefficients,
-                            "std_errors": result.std_errors,
-                            "z_stats": result.z_stats,
-                            "p_values": result.p_values,
-                            "n_obs": result.n_obs,
-                            "log_likelihood": result.log_likelihood,
-                            "aic": result.aic,
-                            "dispersion": result.dispersion,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nPoisson Regression");
-                        println!("{}", "=".repeat(60));
-
-                        println!("\nCoefficients:");
-                        println!(
-                            "{:<15} {:>12} {:>12} {:>10} {:>10}",
-                            "Variable", "Coef", "Std Err", "z", "P>|z|"
-                        );
-                        println!("{}", "-".repeat(60));
-
-                        for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
-                            println!(
-                                "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
-                                var,
-                                result.coefficients[i],
-                                result.std_errors[i],
-                                result.z_stats[i],
-                                result.p_values[i],
-                                sig
-                            );
-                        }
-
-                        println!("\n---");
-                        println!("Observations: {}", result.n_obs);
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                        println!("AIC: {:.4}", result.aic);
-                        println!("Dispersion: {:.4}", result.dispersion);
-                    }
-                },
-                Err(e) => print_error(&format!("Poisson regression failed: {}", e), format),
-            }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+    let fitted = ColumnRequest::new(ds.df())
+        .numeric(dep_var)
+        .numerics(&x_cols)
+        .na(NaPolicy::Omit)
+        .min_rows(x_cols.len() + 2, "Poisson GLM")
+        .extract()
+        .and_then(|cols| {
+            let x = cols.matrix(&x_cols, true)?;
+            let y = cols.numeric_array(dep_var);
+            let fit = fit_glm(x.data.view(), y.view(), &GlmSpec::poisson())?;
+            Ok((cols.missing().clone(), x.column_names, fit))
+        });
+    let (missing, variables, fit) = match fitted {
+        Ok(v) => v,
+        Err(e) => {
+            print_error(&format!("Poisson regression failed: {}", e), format);
+            return Ok(());
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    };
+    let z: Vec<f64> = fit
+        .coefficients
+        .iter()
+        .zip(fit.std_errors.iter())
+        .map(|(b, se)| {
+            if se.is_finite() && *se > 0.0 {
+                b / se
+            } else {
+                f64::NAN
+            }
+        })
+        .collect();
+    let p: Vec<f64> = z.iter().map(|z| normal_p_value_two_sided(*z)).collect();
+    let aliased: Vec<String> = fit
+        .aliased
+        .iter()
+        .filter_map(|&j| variables.get(j).cloned())
+        .collect();
+    let mut warnings = fit.warnings.clone();
+    if let Some(msg) = aliasing_message(&fit.aliased, &variables)
+        && !warnings.contains(&msg)
+    {
+        warnings.push(msg);
+    }
+    let n_obs = fit.fitted.len();
+    let converged = Some((fit.converged, fit.iterations));
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "method": "Poisson Regression",
+                "variables": variables,
+                "coefficients": fit.coefficients.to_vec(),
+                "std_errors": fit.std_errors.to_vec(),
+                "z_stats": z,
+                "p_values": p,
+                "n_obs": n_obs,
+                "log_likelihood": fit.log_likelihood,
+                "aic": fit.aic,
+                "dispersion": fit.dispersion,
+                "deviance": fit.deviance,
+                "null_deviance": fit.null_deviance,
+                "df_residual": fit.df_residual,
+                "aliased": aliased,
+            });
+            insert_notes(&mut json, &missing, &[]);
+            add_notes(&mut json, converged, &warnings);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nPoisson Regression");
+            println!("{}", "=".repeat(60));
+
+            println!("\nCoefficients:");
+            println!(
+                "{:<15} {:>12} {:>12} {:>10} {:>10}",
+                "Variable", "Coef", "Std Err", "z", "P>|z|"
+            );
+            println!("{}", "-".repeat(60));
+
+            for (i, var) in variables.iter().enumerate() {
+                let sig = if p[i] < 0.001 {
+                    "***"
+                } else if p[i] < 0.01 {
+                    "**"
+                } else if p[i] < 0.05 {
+                    "*"
+                } else {
+                    ""
+                };
+                println!(
+                    "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
+                    var, fit.coefficients[i], fit.std_errors[i], z[i], p[i], sig
+                );
+            }
+
+            println!("\n---");
+            println!("Observations: {}", n_obs);
+            println!("Log-likelihood: {:.4}", fit.log_likelihood);
+            println!("AIC: {:.4}", fit.aic);
+            println!("Deviance: {:.4}", fit.deviance);
+            println!("Null deviance: {:.4}", fit.null_deviance);
+            println!("Dispersion: {:.4}", fit.dispersion);
+            print_notes(converged, &warnings, format);
+            print_missing_note(&missing, format);
+        }
     }
     Ok(())
 }
@@ -1086,6 +1159,7 @@ fn execute_zip(
                             "iterations": result.iterations,
                         });
                         insert_notes(&mut json, &result.missing, &result.warnings);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1217,6 +1291,7 @@ fn execute_zinb(
                             "iterations": result.iterations,
                         });
                         insert_notes(&mut json, &result.missing, &result.warnings);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1317,7 +1392,7 @@ fn execute_hurdle(
     dep_var: &str,
     indep_vars: &[String],
     zero_vars: Option<&[String]>,
-    dist: &str,
+    dist: HurdleDist,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1335,9 +1410,9 @@ fn execute_hurdle(
             let z_cols: Option<Vec<&str>> =
                 zero_vars.map(|zv| zv.iter().map(|s| s.as_str()).collect());
 
-            let hurdle_type = match dist.to_lowercase().as_str() {
-                "negbin" | "nb" => HurdleType::NegBin,
-                _ => HurdleType::Poisson,
+            let hurdle_type = match dist {
+                HurdleDist::Poisson => HurdleType::Poisson,
+                HurdleDist::NegBin => HurdleType::NegBin,
             };
 
             match run_hurdle(ds, dep_var, &x_cols, z_cols.as_deref(), hurdle_type) {
@@ -1364,7 +1439,8 @@ fn execute_hurdle(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &[]);
+                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1436,6 +1512,7 @@ fn execute_hurdle(
                         println!("Log-likelihood: {:.4}", result.log_likelihood);
                         println!("AIC: {:.4}", result.aic);
                         print_convergence(result.converged, result.iterations, &[]);
+                        print_notes(None, &result.warnings, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1447,6 +1524,7 @@ fn execute_hurdle(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_clogit(
     dataset_name: &str,
     choice_id: &str,
@@ -1454,6 +1532,7 @@ fn execute_clogit(
     choice: &str,
     indep_vars: &[String],
     reference: Option<&str>,
+    asc: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1464,83 +1543,121 @@ fn execute_clogit(
             return Ok(());
         }
     };
-
-    match dataset {
-        Some(ds) => {
-            let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
-
-            match run_conditional_logit(ds, choice_id, alt_id, choice, &x_cols, reference) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "Conditional Logit (McFadden)",
-                            "alternatives": result.alternatives,
-                            "reference_alternative": result.reference_alternative,
-                            "n_choice_situations": result.n_choice_situations,
-                            "n_alternatives": result.n_alternatives,
-                            "alt_specific_vars": result.alt_specific_vars,
-                            "beta": result.beta,
-                            "beta_std_errors": result.beta_std_errors,
-                            "beta_z_stats": result.beta_z_stats,
-                            "beta_p_values": result.beta_p_values,
-                            "log_likelihood": result.log_likelihood,
-                            "pseudo_r_squared": result.pseudo_r_squared,
-                            "aic": result.aic,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    }
-                    _ => {
-                        println!("\nConditional Logit (McFadden's Choice Model)");
-                        println!("{}", "=".repeat(60));
-                        println!("Choice situations: {}", result.n_choice_situations);
-                        println!(
-                            "Alternatives: {} (reference: {})",
-                            result.n_alternatives, result.reference_alternative
-                        );
-
-                        println!("\nCoefficients:");
-                        println!(
-                            "{:<15} {:>12} {:>12} {:>10} {:>10}",
-                            "Variable", "Coef", "Std Err", "z", "P>|z|"
-                        );
-                        println!("{}", "-".repeat(60));
-
-                        for (i, var) in result.alt_specific_vars.iter().enumerate() {
-                            let sig = if result.beta_p_values[i] < 0.001 {
-                                "***"
-                            } else if result.beta_p_values[i] < 0.01 {
-                                "**"
-                            } else if result.beta_p_values[i] < 0.05 {
-                                "*"
-                            } else {
-                                ""
-                            };
-                            println!(
-                                "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
-                                var,
-                                result.beta[i],
-                                result.beta_std_errors[i],
-                                result.beta_z_stats[i],
-                                result.beta_p_values[i],
-                                sig
-                            );
-                        }
-
-                        println!("\n---");
-                        println!("Log-likelihood: {:.4}", result.log_likelihood);
-                        println!("Pseudo R-squared: {:.4}", result.pseudo_r_squared);
-                        println!("AIC: {:.4}", result.aic);
-                        println!(
-                            "Converged: {} ({} iterations)",
-                            if result.converged { "Yes" } else { "No" },
-                            result.iterations
-                        );
-                    }
-                },
-                Err(e) => print_error(&format!("Conditional Logit failed: {}", e), format),
-            }
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+    let mut config = MlogitConfig::default();
+    config.asc = asc;
+    config.reflevel = reference.map(str::to_string);
+    let result = match run_conditional_logit_with(ds, choice_id, alt_id, choice, &x_cols, &config) {
+        Ok(r) => r,
+        Err(e) => {
+            print_error(&format!("Conditional Logit failed: {}", e), format);
+            return Ok(());
         }
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    };
+    // every coefficient in mlogit's order: the constants (with --asc), then the generic ones
+    let names = result.coefficient_names();
+    let coefs = result.coefficients();
+    let ses = result.std_errors();
+    let rows: Vec<(String, f64, f64, f64, f64)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let b = coefs.get(i).copied().unwrap_or(f64::NAN);
+            let se = ses.get(i).copied().unwrap_or(f64::NAN);
+            let z = if se.is_finite() && se > 0.0 {
+                b / se
+            } else {
+                f64::NAN
+            };
+            (name.clone(), b, se, z, normal_p_value_two_sided(z))
+        })
+        .collect();
+    match format {
+        OutputFormat::Json => {
+            let coefficients: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(name, b, se, z, p)| {
+                    serde_json::json!({
+                        "name": name,
+                        "coefficient": b,
+                        "std_error": se,
+                        "z_value": z,
+                        "p_value": p,
+                    })
+                })
+                .collect();
+            let mut json = serde_json::json!({
+                "method": "Conditional Logit (McFadden)",
+                "alternatives": result.alternatives,
+                "reference_alternative": result.reference_alternative,
+                "n_choice_situations": result.n_choice_situations,
+                "n_alternatives": result.n_alternatives,
+                "alt_specific_vars": result.alt_specific_vars,
+                "beta": result.beta,
+                "beta_std_errors": result.beta_std_errors,
+                "beta_z_stats": result.beta_z_stats,
+                "beta_p_values": result.beta_p_values,
+                "coefficients": coefficients,
+                "asc": result.asc,
+                "separation": result.separation,
+                "log_likelihood": result.log_likelihood,
+                "pseudo_r_squared": result.pseudo_r_squared,
+                "aic": result.aic,
+            });
+            add_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nConditional Logit (McFadden's Choice Model)");
+            println!("{}", "=".repeat(60));
+            println!("Choice situations: {}", result.n_choice_situations);
+            println!(
+                "Alternatives: {} (reference: {})",
+                result.n_alternatives, result.reference_alternative
+            );
+
+            println!("\nCoefficients:");
+            println!(
+                "{:<20} {:>12} {:>12} {:>10} {:>10}",
+                "Variable", "Coef", "Std Err", "z", "P>|z|"
+            );
+            println!("{}", "-".repeat(65));
+
+            for (name, b, se, z, p) in &rows {
+                let sig = if *p < 0.001 {
+                    "***"
+                } else if *p < 0.01 {
+                    "**"
+                } else if *p < 0.05 {
+                    "*"
+                } else {
+                    ""
+                };
+                println!(
+                    "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
+                    name, b, se, z, p, sig
+                );
+            }
+
+            println!("\n---");
+            println!("Log-likelihood: {:.4}", result.log_likelihood);
+            println!("Pseudo R-squared: {:.4}", result.pseudo_r_squared);
+            println!("AIC: {:.4}", result.aic);
+            println!(
+                "Alternative-specific constants: {}",
+                if result.asc { "yes" } else { "no" }
+            );
+            println!(
+                "Converged: {} ({} iterations)",
+                if result.converged { "Yes" } else { "No" },
+                result.iterations
+            );
+            print_notes(None, &result.notes_warnings(), format);
+        }
     }
     Ok(())
 }
@@ -1630,6 +1747,11 @@ fn execute_mixed_logit(
                             "max_abs_gradient": result.max_abs_gradient,
                         });
                         insert_notes(&mut json, &MissingSummary::default(), &result.warnings);
+                        add_notes(
+                            &mut json,
+                            Some((result.converged, result.iterations)),
+                            &result.warnings,
+                        );
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {

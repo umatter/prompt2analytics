@@ -2,6 +2,10 @@
 
 use clap::{Subcommand, ValueEnum};
 use p2a_core::regression::CovarianceType;
+use p2a_core::regression::gls::{GlsCorrelation, GlsMethod, GlsOptions, run_gls_with};
+use p2a_core::regression::quantreg::{QuantRegMethod, QuantRegSe};
+use p2a_core::regression::smooth_spline::{SmoothSplineConfig, SplineCriterion, smooth_spline};
+use p2a_core::regression::step::StepDirection;
 use p2a_core::regression::{OlsClusteredResult, QuantRegConfig, quantreg};
 use p2a_core::run_loess;
 use p2a_core::{HacResult, run_diagnostics, run_ols};
@@ -12,12 +16,13 @@ use p2a_core::{
     model_asymptotic, model_exponential_decay, model_exponential_growth, model_logistic_growth,
     model_michaelis_menten, model_power, run_nls,
 };
-use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu};
+use p2a_core::{run_line, run_step, run_supsmu};
 
 use crate::output::{
-    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, missing_json,
-    print_error, print_missing_note, se_label, validate_column_exists, validate_columns_exist,
-    validate_sample_size,
+    CoefRow, OutputFormat, RegressionReport, StatKind, add_notes, add_result_notes,
+    check_core_option, format_regression_report, missing_json, parse_core_option, print_error,
+    print_missing_note, print_notes, print_result_notes, se_label, validate_column_exists,
+    validate_columns_exist, validate_sample_size,
 };
 use crate::progress::Progress;
 use crate::session::SessionManager;
@@ -176,6 +181,20 @@ EXAMPLES:
         #[arg(short = 't', long, default_value = "0.5")]
         tau: f64,
 
+        /// Algorithm: auto (default: br up to 5,000 rows, fn above; rq's default is br at
+        /// every n), br (Barrodale-Roberts simplex), fn (Frisch-Newton interior point) or irls
+        /// (an approximation)
+        #[arg(long, value_parser = parse_core_option::<QuantRegMethod>, default_value = "auto")]
+        method: QuantRegMethod,
+
+        /// Standard errors as summary.rq: nid (default at every n), iid, ker, boot
+        #[arg(long, value_parser = parse_core_option::<QuantRegSe>, default_value = "nid")]
+        se: QuantRegSe,
+
+        /// Seed of the xy-pair bootstrap (--se boot only)
+        #[arg(long)]
+        seed: Option<u64>,
+
         /// Include an intercept (true/false; default true). With false the model goes through
         /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
         #[arg(
@@ -223,8 +242,8 @@ EXAMPLES:
     /// Nonlinear Least Squares regression
     #[command(after_help = "\
 EXAMPLES:
-    # Exponential decay: y = a * exp(-b * x)
-    p2a reg nls mydata -y response -x time --model exponential_decay --start 10,0.5
+    # Exponential decay: y = a * exp(-b * x) + c
+    p2a reg nls mydata -y response -x time --model exponential_decay --start 10,0.5,0
 
     # Michaelis-Menten: y = Vmax * x / (Km + x)
     p2a reg nls mydata -y rate -x substrate --model michaelis_menten --start 100,5
@@ -244,12 +263,14 @@ EXAMPLES:
         #[arg(short = 'x', long)]
         indep_var: String,
 
-        /// Model type: exponential_decay, exponential_growth, michaelis_menten, logistic_growth, power, asymptotic
+        /// Model type: exponential_decay (y = a * exp(-b * x) + c), exponential_growth,
+        /// michaelis_menten, logistic_growth, power, asymptotic
         #[arg(long, default_value = "exponential_decay")]
         model: String,
 
-        /// Starting values for parameters (comma-separated)
-        #[arg(long, default_value = "1.0,0.1")]
+        /// Comma-separated start values, as many as the model has parameters (R's nls needs
+        /// them)
+        #[arg(long)]
         start: String,
     },
 
@@ -274,13 +295,24 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         indep_vars: Vec<String>,
 
-        /// Correlation structure: ar1, ar1_auto, compound_symmetry, identity
-        #[arg(long, default_value = "ar1_auto")]
-        correlation: String,
+        /// Correlation structure: ar1_auto (default; AR(1) with rho estimated), ar1,
+        /// compound_symmetry (cs) or identity
+        #[arg(long, value_parser = gls_correlation_arg, default_value = "ar1_auto")]
+        correlation: GlsCorrelationArg,
 
-        /// Correlation parameter (rho for ar1/cs, ignored for ar1_auto)
+        /// Correlation parameter (rho for ar1/cs; estimated when not given; refused with
+        /// ar1_auto and identity)
         #[arg(long)]
         rho: Option<f64>,
+
+        /// Likelihood for rho and the reported fit: reml (default, as nlme) or ml
+        #[arg(long, value_parser = parse_core_option::<GlsMethod>, default_value = "reml")]
+        method: GlsMethod,
+
+        /// Groups for the correlation (nlme form = ~ 1 | g); compound symmetry without
+        /// groups needs --rho
+        #[arg(long, value_name = "COL")]
+        group: Option<String>,
 
         /// Include an intercept (true/false; default true). With false the model goes through
         /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
@@ -325,7 +357,7 @@ EXAMPLES:
         required_vars: Vec<String>,
 
         /// Direction: forward, backward, or both (default: both)
-        #[arg(long, default_value = "both")]
+        #[arg(long, value_parser = check_core_option::<StepDirection>, default_value = "both")]
         direction: String,
 
         /// Use BIC (k = log n) instead of AIC (true/false; default false)
@@ -357,8 +389,11 @@ EXAMPLES:
     /// Smoothing spline regression
     #[command(after_help = "\
 EXAMPLES:
-    # Auto-select smoothing via cross-validation
+    # Smoothing chosen by generalized cross-validation (R's default)
     p2a reg smooth-spline mydata -y response -x time
+
+    # Leave-one-out cross-validation instead
+    p2a reg smooth-spline mydata -y response -x time --criterion cv
 
     # Fixed degrees of freedom
     p2a reg smooth-spline mydata -y response -x time --df 5
@@ -375,9 +410,14 @@ EXAMPLES:
         #[arg(short = 'x', long)]
         indep_var: String,
 
-        /// Equivalent degrees of freedom (if not set, uses cross-validation)
+        /// Equivalent degrees of freedom (if not set, --criterion chooses the smoothing)
         #[arg(long)]
         df: Option<f64>,
+
+        /// Smoothing-parameter criterion when --df is not given: gcv (R's default cv = FALSE)
+        /// or cv (leave-one-out, R's cv = TRUE)
+        #[arg(long, value_parser = parse_core_option::<SplineCriterion>, default_value = "gcv")]
+        criterion: SplineCriterion,
     },
 
     /// Friedman's SuperSmoother
@@ -519,10 +559,26 @@ pub fn execute(
             dep_var,
             indep_vars,
             tau,
+            method,
+            se,
+            seed,
             intercept,
-        } => execute_quantreg(
-            dataset, dep_var, indep_vars, *tau, *intercept, format, session,
-        ),
+        } => {
+            if seed.is_some() && *se != QuantRegSe::Boot {
+                print_error(
+                    "--seed applies to --se boot only (the other standard errors draw nothing)",
+                    format,
+                );
+                return Ok(());
+            }
+            let mut config = QuantRegConfig::default();
+            config.tau = *tau;
+            config.intercept = *intercept;
+            config.algorithm = *method;
+            config.se = *se;
+            config.seed = *seed;
+            execute_quantreg(dataset, dep_var, indep_vars, &config, format, session)
+        }
         RegressionCommands::Loess {
             dataset,
             dep_var,
@@ -543,17 +599,45 @@ pub fn execute(
             indep_vars,
             correlation,
             rho,
+            method,
+            group,
             intercept,
-        } => execute_gls(
-            dataset,
-            dep_var,
-            indep_vars,
-            correlation,
-            *rho,
-            *intercept,
-            format,
-            session,
-        ),
+        } => {
+            if rho.is_some()
+                && matches!(
+                    correlation,
+                    GlsCorrelationArg::Ar1Auto
+                        | GlsCorrelationArg::Structure(GlsCorrelation::Identity)
+                )
+            {
+                print_error(
+                    "--rho applies to --correlation ar1 and compound_symmetry only (ar1_auto \
+                     estimates rho; identity has none)",
+                    format,
+                );
+                return Ok(());
+            }
+            let mut options = GlsOptions::default();
+            match correlation {
+                GlsCorrelationArg::Ar1Auto => {
+                    options.correlation = GlsCorrelation::Ar1;
+                    options.rho = None;
+                }
+                GlsCorrelationArg::Structure(GlsCorrelation::Identity) => {
+                    options.correlation = GlsCorrelation::Identity;
+                    options.rho = None;
+                }
+                GlsCorrelationArg::Structure(c) => {
+                    options.correlation = *c;
+                    options.rho = *rho;
+                }
+            }
+            options.method = *method;
+            options.group_col = group.clone();
+            execute_gls(
+                dataset, dep_var, indep_vars, &options, *intercept, format, session,
+            )
+        }
         RegressionCommands::Step {
             dataset,
             dep_var,
@@ -578,7 +662,10 @@ pub fn execute(
             dep_var,
             indep_var,
             df,
-        } => execute_smooth_spline(dataset, dep_var, indep_var, *df, format, session),
+            criterion,
+        } => execute_smooth_spline(
+            dataset, dep_var, indep_var, *df, *criterion, format, session,
+        ),
         RegressionCommands::Supsmu {
             dataset,
             dep_var,
@@ -879,6 +966,8 @@ fn execute_diagnostics(
                             }),
                             "condition_number": diag.condition_number,
                         });
+                        let mut json = json;
+                        add_notes(&mut json, None, &diag.warnings);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -924,6 +1013,7 @@ fn execute_diagnostics(
                         if let Some(cond) = diag.condition_number {
                             println!("\nCondition Number: {:.4}", cond);
                         }
+                        print_notes(None, &diag.warnings, format);
                     }
                 },
                 Err(e) => {
@@ -942,8 +1032,7 @@ fn execute_quantreg(
     dataset_name: &str,
     dep_var: &str,
     indep_vars: &[String],
-    tau: f64,
-    intercept: bool,
+    config: &QuantRegConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -959,15 +1048,15 @@ fn execute_quantreg(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            let mut config = QuantRegConfig::default();
-            config.tau = tau;
-            config.intercept = intercept;
-            match quantreg(ds, dep_var, &x_cols, &config) {
+            match quantreg(ds, dep_var, &x_cols, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let mut json = serde_json::json!({
                             "method": "Quantile Regression",
                             "tau": result.tau,
+                            "algorithm": result.algorithm.label(),
+                            "se_type": result.se_type.to_string(),
+                            "se_method": result.se_method,
                             "coefficients": result.coefficients.iter().map(|c| {
                                 serde_json::json!({
                                     "name": c.name,
@@ -979,16 +1068,21 @@ fn execute_quantreg(
                                     "ci_upper_95": c.ci_upper_95,
                                 })
                             }).collect::<Vec<_>>(),
+                            "objective": result.objective,
+                            "nonunique": result.nonunique,
                             "n_obs": result.n_obs,
                         });
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("\nQuantile Regression (tau = {:.2})", result.tau);
                         println!("{}", "=".repeat(60));
+                        println!("Algorithm: {}", result.algorithm.label());
+                        println!("Standard errors: {}", result.se_method);
 
                         println!("\nCoefficients:");
                         println!(
@@ -1014,7 +1108,9 @@ fn execute_quantreg(
                         }
 
                         println!("\n---");
+                        println!("Objective: {:.6}", result.objective);
                         println!("Observations: {}", result.n_obs);
+                        print_result_notes(&result, format);
                         print_missing_note(&result.missing, format);
                     }
                 },
@@ -1060,6 +1156,7 @@ fn execute_loess(
                     if let Some(m) = missing_json(&result.missing) {
                         json["missing"] = m;
                     }
+                    add_result_notes(&mut json, &result);
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -1074,6 +1171,7 @@ fn execute_loess(
                     for (i, fitted) in result.fitted.iter().take(10).enumerate() {
                         println!("  {}: {:.6}", i + 1, fitted);
                     }
+                    print_result_notes(&result, format);
                     print_missing_note(&result.missing, format);
                 }
             },
@@ -1123,14 +1221,14 @@ fn execute_nls(
             let (model_fn, param_names): (fn(&Array1<f64>, &Array1<f64>) -> f64, Vec<&str>) =
                 match model_name.to_lowercase().as_str() {
                     "exponential_decay" | "exp_decay" => {
-                        if start_vals.len() != 2 {
+                        if start_vals.len() != 3 {
                             print_error(
-                                "exponential_decay requires 2 starting values: a, b (y = a * exp(-b * x))",
+                                "exponential_decay requires 3 starting values: a, b, c (y = a * exp(-b * x) + c)",
                                 format,
                             );
                             return Ok(());
                         }
-                        (model_exponential_decay, vec!["a", "b"])
+                        (model_exponential_decay, vec!["a", "b", "c"])
                     }
                     "exponential_growth" | "exp_growth" => {
                         if start_vals.len() != 2 {
@@ -1211,14 +1309,14 @@ fn execute_nls(
                             "rss": result.rss,
                             "n_obs": result.n_obs,
                         });
+                        let mut json = json;
+                        add_notes(&mut json, Some((result.converged, result.iterations)), &[]);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("\nNonlinear Least Squares");
                         println!("{}", "=".repeat(50));
                         println!("Model: {}", model_name);
-                        println!("Converged: {}", result.converged);
-                        println!("Iterations: {}", result.iterations);
 
                         println!("\nParameters:");
                         println!("{:<12} {:>15} {:>15}", "Parameter", "Estimate", "Std Error");
@@ -1236,6 +1334,7 @@ fn execute_nls(
                         println!("\n---");
                         println!("RSS: {:.6}", result.rss);
                         println!("Observations: {}", result.n_obs);
+                        print_notes(Some((result.converged, result.iterations)), &[], format);
                     }
                 },
                 Err(e) => print_error(&format!("NLS failed: {}", e), format),
@@ -1250,8 +1349,7 @@ fn execute_gls(
     dataset_name: &str,
     dep_var: &str,
     indep_vars: &[String],
-    correlation: &str,
-    rho: Option<f64>,
+    options: &GlsOptions,
     intercept: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -1272,12 +1370,16 @@ fn execute_gls(
                 var_names.push("(Intercept)".to_string());
             }
             var_names.extend(indep_vars.iter().cloned());
-            match run_gls(ds, dep_var, &x_refs, intercept, correlation, rho) {
+            match run_gls_with(ds, dep_var, &x_refs, intercept, options) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "method": "GLS Regression",
+                        let mut json = serde_json::json!({
+                            "model": "GLS Regression",
+                            "method": result.method.label(),
                             "correlation": result.correlation,
+                            "rho_estimated": result.rho_estimated,
+                            "n_groups": result.n_groups,
+                            "log_likelihood": result.log_likelihood,
                             "correlation_param": result.correlation_param,
                             "names": var_names,
                             "coefficients": result.coefficients,
@@ -1291,6 +1393,7 @@ fn execute_gls(
                             "bic": result.bic,
                             "n_obs": result.n_obs,
                         });
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1298,8 +1401,20 @@ fn execute_gls(
                         println!("{}", "=".repeat(60));
                         println!("Correlation: {}", result.correlation);
                         if let Some(rho_val) = result.correlation_param {
-                            println!("Rho: {:.4}", rho_val);
+                            if result.rho_estimated {
+                                println!(
+                                    "Rho: {:.4} (estimated, {})",
+                                    rho_val,
+                                    result.method.label()
+                                );
+                            } else {
+                                println!("Rho: {:.4} (user-supplied)", rho_val);
+                            }
                         }
+                        if let Some(g) = result.n_groups {
+                            println!("Groups: {g}");
+                        }
+                        println!("Log-likelihood: {:.4}", result.log_likelihood);
                         println!("\nCoefficients:");
                         println!(
                             "{:<15} {:>12} {:>12} {:>10} {:>10}",
@@ -1337,6 +1452,7 @@ fn execute_gls(
                         println!("Sigma: {:.4}", result.sigma);
                         println!("AIC: {:.4}, BIC: {:.4}", result.aic, result.bic);
                         println!("Observations: {}", result.n_obs);
+                        print_result_notes(&result, format);
                     }
                 },
                 Err(e) => print_error(&format!("GLS failed: {}", e), format),
@@ -1401,6 +1517,8 @@ fn execute_step(
                                 })
                             }).collect::<Vec<_>>(),
                         });
+                        let mut json = json;
+                        add_result_notes(&mut json, &result.final_model);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1432,6 +1550,7 @@ fn execute_step(
                             "\nFinal model R-squared{uncentered}: {:.4}",
                             result.final_model.r_squared
                         );
+                        print_result_notes(&result.final_model, format);
                     }
                 },
                 Err(e) => print_error(&format!("Stepwise selection failed: {}", e), format),
@@ -1447,6 +1566,7 @@ fn execute_smooth_spline(
     dep_var: &str,
     indep_var: &str,
     df: Option<f64>,
+    criterion: SplineCriterion,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1458,43 +1578,69 @@ fn execute_smooth_spline(
         }
     };
 
-    match dataset {
-        Some(ds) => match run_smooth_spline(ds, indep_var, dep_var, df) {
-            Ok(result) => match format {
-                OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "method": "Smoothing Spline",
-                        "df": result.df,
-                        "spar": result.spar,
-                        "lambda": result.lambda,
-                        "cv_crit": result.cv_crit,
-                        "n_obs": result.n_obs,
-                        "n_knots": result.n_knots,
-                        "fitted_sample": result.y.iter().take(10).collect::<Vec<_>>(),
-                    });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
-                }
-                _ => {
-                    println!("\nSmoothing Spline");
-                    println!("{}", "=".repeat(50));
-                    println!("Equivalent df: {:.4}", result.df);
-                    println!("Smoothing param (spar): {:.4}", result.spar);
-                    println!("Lambda: {:.6e}", result.lambda);
-                    if let Some(cv) = result.cv_crit {
-                        println!("CV criterion: {:.6}", cv);
-                    }
-                    println!("Observations: {}", result.n_obs);
-                    println!("Knots: {}", result.n_knots);
+    let Some(ds) = dataset else {
+        print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        return Ok(());
+    };
+    // R's smooth.spline refuses missing or infinite values: so does this.
+    let fit = ColumnRequest::new(ds.df())
+        .numeric(indep_var)
+        .numeric(dep_var)
+        .na(NaPolicy::Fail)
+        .extract()
+        .and_then(|cols| {
+            let config = df
+                .map(SmoothSplineConfig::with_df)
+                .unwrap_or_else(|| SmoothSplineConfig::with_criterion(criterion));
+            smooth_spline(cols.numeric(indep_var), cols.numeric(dep_var), config)
+        });
+    let result = match fit {
+        Ok(result) => result,
+        Err(e) => {
+            print_error(&format!("Smoothing spline failed: {}", e), format);
+            return Ok(());
+        }
+    };
+    let criterion_name = result
+        .criterion
+        .map(|c| SplineCriterion::choices().canonical(c));
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
+                "method": "Smoothing Spline",
+                "criterion": criterion_name,
+                "df": result.df,
+                "spar": result.spar,
+                "lambda": result.lambda,
+                "cv_crit": result.cv_crit,
+                "n_obs": result.n_obs,
+                "n_knots": result.n_knots,
+                "fitted_sample": result.y.iter().take(10).collect::<Vec<_>>(),
+            });
+            add_result_notes(&mut json, &result);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("\nSmoothing Spline");
+            println!("{}", "=".repeat(50));
+            if let Some(name) = criterion_name {
+                println!("Criterion: {}", name.to_uppercase());
+            }
+            println!("Equivalent df: {:.4}", result.df);
+            println!("Smoothing param (spar): {:.4}", result.spar);
+            println!("Lambda: {:.6e}", result.lambda);
+            if let Some(cv) = result.cv_crit {
+                println!("CV criterion: {:.6}", cv);
+            }
+            println!("Observations: {}", result.n_obs);
+            println!("Knots: {}", result.n_knots);
 
-                    println!("\nFitted values (first 10):");
-                    for (i, (x, y)) in result.x.iter().zip(result.y.iter()).take(10).enumerate() {
-                        println!("  {}: x={:.4}, y={:.6}", i + 1, x, y);
-                    }
-                }
-            },
-            Err(e) => print_error(&format!("Smoothing spline failed: {}", e), format),
-        },
-        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+            println!("\nFitted values (first 10):");
+            for (i, (x, y)) in result.x.iter().zip(result.y.iter()).take(10).enumerate() {
+                println!("  {}: x={:.4}, y={:.6}", i + 1, x, y);
+            }
+            print_result_notes(&result, format);
+        }
     }
     Ok(())
 }
@@ -1554,6 +1700,7 @@ fn execute_supsmu(
                         if let Some(m) = missing_json(cols.missing()) {
                             json["missing"] = m;
                         }
+                        add_notes(&mut json, None, &[]);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1630,6 +1777,7 @@ fn execute_line(
                         if let Some(m) = missing_json(cols.missing()) {
                             json["missing"] = m;
                         }
+                        add_notes(&mut json, None, &[]);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1706,7 +1854,8 @@ fn execute_hac(
                         .map(|(c, s)| c / s)
                         .collect();
 
-                    let df = (hac_result.n_obs - hac_result.n_params) as f64;
+                    // lm's df.residual: n - rank
+                    let df = hac_result.df_resid as f64;
                     let p_values: Vec<f64> =
                         t_values.iter().map(|&t| t_test_p_value(t, df)).collect();
 
@@ -1714,7 +1863,8 @@ fn execute_hac(
                         OutputFormat::Json => {
                             let mut json = serde_json::json!({
                                 "method": "OLS with HAC Standard Errors",
-                                "kernel": "Bartlett (Newey-West)",
+                                "kernel": hac_result.kernel.to_string(),
+                                "df_resid": hac_result.df_resid,
                                 "bandwidth": hac_result.bandwidth,
                                 "names": hac_result.names,
                                 "coefficients": coefficients,
@@ -1727,12 +1877,13 @@ fn execute_hac(
                             if !hac_result.warnings.is_empty() {
                                 json["warnings"] = serde_json::json!(hac_result.warnings);
                             }
+                            add_result_notes(&mut json, &hac_result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
                             println!("\nOLS with HAC (Newey-West) Standard Errors");
                             println!("{}", "=".repeat(60));
-                            println!("Kernel: Bartlett");
+                            println!("Kernel: {}", hac_result.kernel);
                             println!("Bandwidth: {}", hac_result.bandwidth);
 
                             println!("\nCoefficients:");
@@ -1784,6 +1935,24 @@ fn execute_hac(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+/// `reg gls --correlation`: `ar1_auto` (AR(1) with rho estimated, `--rho` ignored) or a
+/// correlation structure.
+#[derive(Debug, Clone, Copy)]
+pub enum GlsCorrelationArg {
+    Ar1Auto,
+    Structure(GlsCorrelation),
+}
+
+fn gls_correlation_arg(s: &str) -> Result<GlsCorrelationArg, String> {
+    let name = p2a_core::options::normalize(s);
+    if name == "ar1_auto" || name == "auto" {
+        return Ok(GlsCorrelationArg::Ar1Auto);
+    }
+    parse_core_option::<GlsCorrelation>(s)
+        .map(GlsCorrelationArg::Structure)
+        .map_err(|e| format!("{e}; or ar1_auto (AR(1) with rho estimated)"))
 }
 
 #[cfg(test)]

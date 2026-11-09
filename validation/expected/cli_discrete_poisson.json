@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "id": "cli_discrete_poisson",
+  "area": "cli",
+  "method": "glm(family = poisson) on the count data of disc_negbin, complete and with missing cells (na.omit)",
+  "reference": "stats::glm(family = poisson) at glm.control(epsilon = 1e-10, maxit = 100) (p2a's default control, registry deviation ECON-60; the fit is at the MLE either way); na.omit",
+  "call": "glm(y ~ x1 + x2, family = poisson, data = negbin)",
+  "dataset": "validation/datasets/generated/negbin.csv",
+  "datasets": ["validation/datasets/generated/negbin.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.27077322935625919, 0.4702735625143375, -0.50440436769046371]
+    },
+    "se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.089204882512633366, 0.049899239993995273, 0.16103161077993053]
+    },
+    "z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [3.0354081719452046, 9.4244634301229606, -3.1323313804504771]
+    },
+    "p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.0024021035840294924, 4.3231021918758674e-21, 0.0017342401236130087]
+    },
+    "loglik": -593.77406376983174,
+    "aic": 1193.5481275396635,
+    "deviance": 649.36814447261997,
+    "null_deviance": 748.33045012972877,
+    "n": 400,
+    "na_coef": {
+      "names": ["(Intercept)", "x1_na", "x2"],
+      "values": [0.26602751978617845, 0.46633421070456704, -0.49459133041694897]
+    },
+    "na_se": {
+      "names": ["(Intercept)", "x1_na", "x2"],
+      "values": [0.089564686309378028, 0.050351729597311781, 0.16208339219456347]
+    },
+    "na_z": {
+      "names": ["(Intercept)", "x1_na", "x2"],
+      "values": [2.9702277845004139, 9.2615331078808474, -3.0514621129303978]
+    },
+    "na_p": {
+      "names": ["(Intercept)", "x1_na", "x2"],
+      "values": [0.0029757900793191184, 2.0151761331960291e-20, 0.0022772978647208173]
+    },
+    "na_loglik": -588.18168608375856,
+    "na_aic": 1182.3633721675171,
+    "na_deviance": 645.7889399458013,
+    "na_null_deviance": 741.1369647412447,
+    "na_n": 395,
+    "na_n_dropped": 5
+  }
+}

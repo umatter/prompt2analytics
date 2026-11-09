@@ -31,6 +31,7 @@ fn assert_only_intended_lines(script: &str, expected_commands: usize) {
                 t,
                 "set -euo pipefail"
                     | "rm -f \"$SESSION_FILE\""
+                    | "rm -rf -- \"$SESSION_FILE.datasets\""
                     | "echo \"Script completed successfully\""
             ) || t.starts_with("SESSION_FILE=\".p2a_session_"),
             "unexpected executable line {line:?} in:\n{script}"
@@ -294,6 +295,31 @@ fn test_data_head_command() {
         ])
         .assert()
         .success();
+
+    let out = p2a()
+        .args([
+            "--session",
+            session_path.to_str().unwrap(),
+            "-F",
+            "json",
+            "data",
+            "head",
+            "head_data",
+            "-n",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
+    let rows = rows.as_array().expect("an array of rows");
+    assert_eq!(rows.len(), 5);
+    // cells may print as strings or typed values: compare their text
+    let cell = |v: &serde_json::Value| v.to_string().trim_matches('"').to_string();
+    assert_eq!(
+        (cell(&rows[4]["a"]), cell(&rows[4]["b"])),
+        ("4".into(), "8".into())
+    );
 }
 
 /// A "soft" usage error (referencing a nonexistent dataset) must exit non-zero
@@ -366,6 +392,33 @@ fn test_session_records_and_exports() {
         exported.contains("data describe rec"),
         "exported script should contain the recorded describe command:\n{exported}"
     );
+
+    // the exported script runs: bash, with the built p2a first on PATH
+    #[cfg(unix)]
+    {
+        let bin = assert_cmd::cargo::cargo_bin("p2a");
+        let path = format!(
+            "{}:{}",
+            bin.parent().unwrap().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(temp_dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "replay failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains("Dataset: rec") && stdout.contains("Script completed successfully"),
+            "{stdout}"
+        );
+    }
 }
 
 /// A recorded argument containing a newline must stay inside its comment and its quoted argument.

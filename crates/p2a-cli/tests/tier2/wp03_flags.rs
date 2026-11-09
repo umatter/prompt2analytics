@@ -305,9 +305,12 @@ fn test_cli_na_strings_refused_for_any_non_csv_file() {
     ]);
     assert!(e.contains("--na-strings") && e.contains("CSV"), "{e}");
     assert!(e.contains("'txt'"), "{e}");
-    // without the flag the format itself is refused
+    // without the flag the format itself is refused, with the extensions the build reads
     let e = s.err(&["data", "load", txt.to_str().unwrap(), "--name", "t"]);
-    assert!(e.contains("Unsupported file format: txt"), "{e}");
+    assert!(
+        e.contains("Unsupported file format") && e.contains("'txt'") && e.contains("csv"),
+        "{e}"
+    );
 }
 
 /// DATA-32 (CLI): "NA" is missing by default (R write.csv), --na-strings replaces the marker list,
