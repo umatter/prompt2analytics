@@ -1925,11 +1925,15 @@ pub struct CausalForestRequest {
     pub n_trees: Option<usize>,
 
     /// Minimum node size (default: 5)
-    #[schemars(description = "Minimum number of observations in each leaf. Default is 5.")]
+    #[schemars(
+        description = "grf min.node.size: nodes with at most this many growing units are not split. Default is 5."
+    )]
     pub min_node_size: Option<usize>,
 
     /// Maximum tree depth (default: 10)
-    #[schemars(description = "Maximum depth of each tree. Default is 10.")]
+    #[schemars(
+        description = "Depth cap of the causal trees; the nuisance forests are not capped. Default is 10."
+    )]
     pub max_depth: Option<usize>,
 
     /// Use honest splitting (default: true)

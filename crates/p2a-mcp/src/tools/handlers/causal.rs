@@ -1317,7 +1317,7 @@ impl AnalyticsServer {
 
     /// Run Targeted Maximum Likelihood Estimation (TMLE) for causal inference.
     #[tool(
-        description = "Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals."
+        description = "Average treatment effect by targeted maximum likelihood (TMLE; van der Laan & Rubin 2006), doubly robust: a logistic propensity model truncated to [ps_lower, ps_upper], an initial outcome model Q (logistic by default, a continuous outcome rescaled to [0, 1] by its range as R's tmle, or linear) and a fluctuation along the clever covariates H1 = A/g and H0 = (1-A)/(1-g). Returns the ATE on the outcome's original scale with influence-curve standard errors and confidence intervals."
     )]
     pub async fn treatment_tmle(
         &self,
