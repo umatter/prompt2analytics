@@ -1008,9 +1008,11 @@ async fn cors_headers_on_auth_failures_and_preflight() {
 }
 
 #[tokio::test]
+#[cfg(debug_assertions)]
 async fn overflow_in_a_governed_call_is_an_internal_error() {
-    // With overflow checks on in every test profile (release included), a residual integer
-    // overflow is a panic that the governor answers with 500 "internal"; the session survives.
+    // With overflow checks on (Rust's default in builds with debug assertions), a residual
+    // integer overflow is a panic that the governor answers with 500 "internal"; the session
+    // survives.
     let (app, state) = app_with(&local(), ExecConfig::default()).await;
     let sid = new_session(&app).await;
     let session = session_of(&state, &sid).await;

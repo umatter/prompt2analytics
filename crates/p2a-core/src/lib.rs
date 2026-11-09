@@ -1473,9 +1473,11 @@ pub use polars;
 
 #[cfg(test)]
 mod overflow_checks_tests {
-    /// Dev, test and release builds check integer overflow; only the bench profile does not.
+    /// Dev and test builds check integer overflow (Rust's default follows debug assertions;
+    /// release builds keep Rust's default and wrap).
     #[test]
-    fn integer_overflow_panics_in_every_test_profile() {
+    #[cfg(debug_assertions)]
+    fn integer_overflow_panics_in_debug_builds() {
         let r = std::panic::catch_unwind(|| {
             std::hint::black_box(usize::MAX) + std::hint::black_box(1usize)
         });

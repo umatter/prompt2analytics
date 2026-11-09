@@ -35,8 +35,9 @@
 //! malformed marker, and a valid marker with no site of its kinds on its line or the next a
 //! stale one; both are reported. The rules are checked on fixture trees;
 //! `test_numeric_guard_tree_is_clean` runs them on the repository.
-//! `test_release_profile_checks_overflow_and_bench_does_not` checks the workspace profiles:
-//! release builds keep integer overflow checks, the bench profile alone turns them off.
+//! `test_build_profiles_keep_rust_defaults` checks that no manifest, image or workflow changes
+//! the build profiles, so the deployed server, the CLI and `cargo bench` are built with the
+//! settings the benchmarks were measured with.
 
 mod source_scan;
 
@@ -1106,33 +1107,18 @@ fn text_files(dir: &Path, out: &mut Vec<(String, String)>) {
 }
 
 #[test]
-fn test_release_profile_checks_overflow_and_bench_does_not() {
+fn test_build_profiles_keep_rust_defaults() {
     let root = p2a_validation::repo_root();
     let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    let release = toml_section(&manifest, "profile.release")
-        .expect("no [profile.release] section in Cargo.toml");
-    assert_eq!(
-        release,
-        ["overflow-checks = true"],
-        "Cargo.toml [profile.release] must hold exactly overflow-checks = true"
-    );
-    let bench =
-        toml_section(&manifest, "profile.bench").expect("no [profile.bench] section in Cargo.toml");
-    assert_eq!(
-        bench,
-        ["overflow-checks = false"],
-        "Cargo.toml [profile.bench] must hold exactly overflow-checks = false"
-    );
-    let others: Vec<&str> = manifest
+    let sections: Vec<&str> = manifest
         .lines()
         .map(str::trim)
-        .filter(|l| {
-            l.starts_with("[profile.") && *l != "[profile.release]" && *l != "[profile.bench]"
-        })
+        .filter(|l| l.starts_with("[profile"))
         .collect();
     assert!(
-        others.is_empty(),
-        "Cargo.toml has other profile sections: {others:?}"
+        sections.is_empty(),
+        "Cargo.toml has profile sections {sections:?}: a profile setting changes the code the \
+         benchmarks measured, so it lands only with before/after timings"
     );
     for entry in fs::read_dir(root.join("crates")).unwrap().flatten() {
         let m = entry.path().join("Cargo.toml");
@@ -1149,10 +1135,7 @@ fn test_release_profile_checks_overflow_and_bench_does_not() {
         text_files(&root.join(d), &mut deploy);
     }
     for (path, text) in deploy {
-        for key in [
-            "CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS",
-            "CARGO_PROFILE_BENCH_",
-        ] {
+        for key in ["CARGO_PROFILE_RELEASE_", "CARGO_PROFILE_BENCH_"] {
             assert!(
                 !text.contains(key),
                 "{path} overrides the build profile with {key}"
