@@ -150,11 +150,11 @@ mod dispatch {
         assert_eq!(z("r1"), z("r2"));
     }
 
-    /// viz: a histogram comes back as a PNG image.
+    /// viz: a histogram comes back as a PNG image (a property test: no R value).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_validate_dispatch_viz_module() {
-        let case = Case::load("mcp_dispatch_smoke");
-        let (session, server) = session_with_datasets(vec![("mcp_dispatch", dataset_of(&case))]);
+    async fn test_dispatch_viz_module() {
+        let (session, server) =
+            session_with_datasets(vec![("mcp_dispatch", generated_dataset("mcp_dispatch"))]);
         let r = call(
             &server,
             &session,

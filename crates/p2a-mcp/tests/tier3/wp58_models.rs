@@ -209,10 +209,9 @@ async fn test_validate_mcp_lasso_default_path() {
 /// cv.glmnet: coefficients at lambda.min / lambda.1se equal the library's for the same seed;
 /// the seed is the request's, else the session's, else CV_GLMNET_DEFAULT_SEED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed() {
-    let case = Case::load("glmnet_paths");
-    let (session, server) = session_with("glmnet_paths");
-    let _ = &case;
+async fn test_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed() {
+    let (session, server) =
+        session_with_datasets(vec![("glmnet_sim", generated_dataset("glmnet_sim"))]);
     let j = json_of(
         &call(
             &server,
@@ -283,10 +282,9 @@ async fn test_validate_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed(
 /// predictors the lasso keeps even when the full path is cut.
 #[cfg(feature = "llm")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_glmnet_reply_survives_the_chat_loop_cut() {
-    let case = Case::load("glmnet_paths");
-    let _ = &case;
-    let (session, server) = session_with("glmnet_paths");
+async fn test_mcp_glmnet_reply_survives_the_chat_loop_cut() {
+    let (session, server) =
+        session_with_datasets(vec![("glmnet_sim", generated_dataset("glmnet_sim"))]);
     let k30: Vec<String> = (1..=30).map(|j| format!("K{j}")).collect();
     let x8: Vec<String> = X8.iter().map(|s| s.to_string()).collect();
     let ds = session
@@ -469,10 +467,8 @@ async fn test_validate_mcp_gls_ar1_reml() {
 
 /// Compound symmetry needs groups; unknown structures and methods are errors.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_gls_options_and_errors() {
-    let case = Case::load("gls_compsymm");
-    let _ = &case;
-    let (session, server) = session_with("gls_compsymm");
+async fn test_mcp_gls_options_and_errors() {
+    let (session, server) = session_with_datasets(vec![("gls_cs", generated_dataset("gls_cs"))]);
     let base = json!({"dataset": "gls_cs", "y": "y", "x": ["x", "z"]});
     let with = |k: &str, v: Value| {
         let mut a = base.clone();
@@ -626,10 +622,11 @@ async fn test_validate_mcp_quantreg_br_se() {
 
 /// An empty taus list, tau together with taus, and tau on the boundary are tool errors.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_quantreg_empty_taus_is_error() {
-    let case = Case::load("rq_br_se");
-    let _ = &case;
-    let (session, server) = session_with("rq_br_se");
+async fn test_mcp_quantreg_empty_taus_is_error() {
+    let (session, server) = session_with_datasets(vec![(
+        "quantreg_hetero",
+        generated_dataset("quantreg_hetero"),
+    )]);
     let q = |extra: Value| {
         let mut a = json!({"dataset": "quantreg_hetero", "y": "y", "x": ["x"]});
         for (k, v) in extra.as_object().unwrap() {
@@ -903,16 +900,11 @@ async fn test_validate_mcp_regression_hac_dk() {
 /// Option strings of the regression tools are parsed; unknown values are errors that list
 /// the accepted ones.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_regression_options_reject_unknown() {
-    let (bg, st, nl) = (
-        Case::load("diag_bgtest_ar1"),
-        Case::load("step_legacy"),
-        Case::load("nls_expdecay"),
-    );
+async fn test_mcp_regression_options_reject_unknown() {
     let (session, server) = session_with_datasets(vec![
-        ("bgtest_ar1", dataset_of(&bg)),
-        ("step_legacy", dataset_of(&st)),
-        ("nls_expdecay", dataset_of(&nl)),
+        ("bgtest_ar1", generated_dataset("bgtest_ar1")),
+        ("step_legacy", generated_dataset("step_legacy")),
+        ("nls_expdecay", generated_dataset("nls_expdecay")),
     ]);
     let reg = json!({"dataset": "bgtest_ar1", "y": "y", "x": ["x"]});
     let with = |base: &Value, k: &str, v: Value| {
@@ -1008,9 +1000,8 @@ async fn test_validate_mcp_regression_options_reject_unknown() {
 
 /// The bootstrap is seeded by the request, else the session seed, else 42 (before: entropy).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_bootstrap_cov_is_seeded() {
-    let case = Case::load("ols_mtcars");
-    let (session, server) = session_with_datasets(vec![("mtcars", dataset_of(&case))]);
+async fn test_mcp_bootstrap_cov_is_seeded() {
+    let (session, server) = session_with_datasets(vec![("mtcars", generated_dataset("mtcars"))]);
     let a = json!({"dataset": "mtcars", "y": "mpg", "x": ["wt"], "n_boot": 200});
     let run = |extra: Option<u64>| {
         let mut x = a.clone();
@@ -1172,14 +1163,13 @@ async fn test_validate_mcp_supsmu_span_and_periodic() {
     assert!(e.contains("periodic"), "{e}");
 }
 
-/// smooth.spline's criterion through MCP. Its numbers are REG-29/REG-30 (Tier 4) and are not
-/// R-pinned: the tool must equal the library with the same criterion, and GCV and CV must give
-/// different fits.
+/// smooth.spline's criterion through MCP. A property test, not R-pinned (its numbers are
+/// REG-29/REG-30, Tier 4): the tool must equal the library with the same criterion, and GCV
+/// and CV must give different fits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_smooth_spline_criterion() {
+async fn test_mcp_smooth_spline_criterion() {
     use p2a_core::regression::{SmoothSplineConfig, smooth_spline, smooth_spline::SplineCriterion};
-    let case = Case::load("smoothers_gcv_periodic_loess");
-    let ds = dataset_of(&case);
+    let ds = generated_dataset("smoothers_t3");
     let col = |n: &str| {
         p2a_core::data::columns::numeric_column(ds.df(), n, p2a_core::data::columns::NaPolicy::Fail)
             .unwrap()
@@ -1540,18 +1530,12 @@ async fn test_validate_mcp_feglm_gaussian() {
 
 /// Option strings and boundary parameters of the discrete tools.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_discrete_options_and_boundaries() {
-    let (ml, zi, bg, fe) = (
-        Case::load("disc_mixed_logit"),
-        Case::load("disc_zeroinfl"),
-        Case::load("disc_binary_glm"),
-        Case::load("feglm_families"),
-    );
+async fn test_mcp_discrete_options_and_boundaries() {
     let (session, server) = session_with_datasets(vec![
-        ("mixed_logit", dataset_of(&ml)),
-        ("zeroinfl", dataset_of(&zi)),
-        ("binary_glm", dataset_of(&bg)),
-        ("feglm_panel", dataset_of(&fe)),
+        ("mixed_logit", generated_dataset("mixed_logit")),
+        ("zeroinfl", generated_dataset("zeroinfl")),
+        ("binary_glm", generated_dataset("binary_glm")),
+        ("feglm_panel", generated_dataset("feglm_panel")),
     ]);
     let mixed = json!({"dataset": "mixed_logit", "choice_id": "id", "alt_id": "alt",
                        "choice": "choice", "variables": ["x", "w"], "random_vars": ["x"],
@@ -1653,13 +1637,12 @@ async fn test_validate_mcp_discrete_options_and_boundaries() {
 
 /// Pseudo-random mixed-logit draws follow the session seed (before: always 42).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_mixed_logit_uses_session_seed() {
-    let case = Case::load("disc_mixed_logit");
-    let (session, server) = session_with("disc_mixed_logit"); // dataset "mixed_logit"
+async fn test_mcp_mixed_logit_uses_session_seed() {
+    let (session, server) =
+        session_with_datasets(vec![("mixed_logit", generated_dataset("mixed_logit"))]);
     let a = json!({"dataset": "mixed_logit", "choice_id": "id", "alt_id": "alt",
                    "choice": "choice", "variables": ["x", "w"], "random_vars": ["x"],
                    "n_draws": 20, "halton": false});
-    let _ = &case;
     let mut runs = Vec::new();
     for seed in [5, 5, 6] {
         assert!(
@@ -1749,10 +1732,8 @@ async fn test_validate_mcp_cox_robust() {
 
 /// Contradictory or invalid Cox settings are tool errors.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_validate_mcp_cox_options_are_checked() {
-    let case = Case::load("surv_cox_robust");
-    let _ = &case;
-    let (session, server) = session_with("surv_cox_robust");
+async fn test_mcp_cox_options_are_checked() {
+    let (session, server) = session_with_datasets(vec![("lung", generated_dataset("lung"))]);
     let base = json!({"dataset": "lung", "time": "time", "event": "status", "covariates": COX_X});
     let with = |pairs: &[(&str, Value)]| {
         let mut a = base.clone();

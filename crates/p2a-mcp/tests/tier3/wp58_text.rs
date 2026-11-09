@@ -131,3 +131,13 @@ pub fn dataset_of(case: &Case) -> p2a_core::data::Dataset {
         p2a_core::data::DataLoader::load_csv(case.dataset_path()).expect("case dataset"),
     )
 }
+
+/// The generated dataset `validation/datasets/generated/<stem>.csv`, read as the server reads
+/// CSV files. For property and error tests, which pin no R value and so load no case.
+pub fn generated_dataset(stem: &str) -> p2a_core::data::Dataset {
+    let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{stem}.csv"));
+    p2a_core::data::Dataset::new(
+        p2a_core::data::DataLoader::load_csv(&path)
+            .unwrap_or_else(|e| panic!("cannot load {}: {e}", path.display())),
+    )
+}

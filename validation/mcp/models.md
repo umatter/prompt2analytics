@@ -34,10 +34,10 @@ R cases by area (each in `validation/r/cases/<file>.R`, values in `validation/ex
 
 - regression: `glmnet_paths`, `gls_compsymm`, `gls_ar1`, `rq_br_se`, `ols_aliased`,
   `ols_diagnostics_grunfeld`, `diag_bgtest_ar1`, `reset_princomp`, `diag_wald_sim`,
-  `diag_harvtest_nonlin`, `hac_ar1`, `dk_panel`, `step_legacy`, `nls_expdecay`, `ols_mtcars`,
+  `diag_harvtest_nonlin`, `hac_ar1`, `dk_panel`, `step_legacy`, `nls_expdecay`,
   `loess_x10_direct`, `smoothers_gcv_periodic_loess`, `supsmu_sine`;
 - discrete: `disc_mlogit_fishing`, `disc_binary_glm`, `disc_multinom_overlap`,
-  `disc_hurdle_zero`, `feglm_families`, `disc_mixed_logit`, `disc_zeroinfl`;
+  `disc_hurdle_zero`, `feglm_families`;
 - survival: `surv_cox_robust`, `surv_aft`, `mcp_competing_risks`;
 - panel: `dpd_sys_balanced`, `purtest_lag_selection`, `pvcm_pmg_sim`, `pggls_sim`,
   `panel_absorbed_regressors`;
@@ -63,21 +63,14 @@ Tests of `crates/p2a-mcp/tests/tier3/wp58_models.rs` unless the module is named.
 |---|---|---|---|---|
 | `test_validate_mcp_glmnet_returns_coefficients` | regression_glmnet, regression_ridge | `a10_std_coef_tight`, `a10_std_dev_ratio_tight`, `a0_std_coef_tight`, `binom_coef_tight` | 1e-3 absolute (dev ratio 1e-5); library equality | REG-8 |
 | `test_validate_mcp_lasso_default_path` | regression_lasso | `path_lambda`, `path_df` | `Tol::coef(150)`, exact | REG-8 |
-| `test_validate_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed` | regression_cv_glmnet | library equality for the same seed | exact | REG-8 |
-| `test_validate_mcp_glmnet_reply_survives_the_chat_loop_cut` | regression_lasso | entry order equals the library's | exact | REG-8 |
 | `test_validate_mcp_gls_compsymm` | regression_gls | `{reml,ml}_profile_{rho,coef,se,sigma,loglik}`, `{reml,ml}_{aic,bic}`, `cs03_reml_*` | rho 1e-6 relative; `Tol::coef/se/stat(n)` | TOOL-19, REG-43 |
 | `test_validate_mcp_gls_ar1_reml` | regression_gls | `phi`, `coef`, `se`, `log_lik_reml`, `phi_ml`, `coef_ml`, `log_lik_ml` | rho 1e-6 relative; `Tol::coef/se/stat(n)` | TOOL-19 |
-| `test_validate_mcp_gls_options_and_errors` | regression_gls | refusals | exact | TOOL-19 |
 | `test_validate_mcp_quantreg_br_se` | regression_quantreg | `tau{25,50,75}_coef`, `tau25_se_{nid,iid,ker}`, `tau{25,50,75}_se_nid` | printed | TOOL-14, TOOL-32 |
-| `test_validate_mcp_quantreg_empty_taus_is_error` | regression_quantreg | refusals | exact | TOOL-14 |
 | `test_validate_mcp_regression_ols_aliased` | regression_ols | `trap_coef`, `trap_se` | printed | TOOL-32 |
 | `test_validate_mcp_regression_diagnostics_tests` | regression_diagnostics, _bgtest, _resettest, _waldtest, _harvtest | `jarque_bera`, `breusch_pagan`, `durbin_watson`, `condition_number`, `bgtest4_f`, `princomp_stat`, `princomp_df`, `wald_drop_x2_x3_f`, `harvey_collier`, `harvey_collier_df` | printed; df exact | TOOL-32 |
 | `test_validate_mcp_regression_hac_dk` | regression_hac, regression_driscoll_kraay | `coef`, `kernhac_parzen_bw4`; `coef`, `n_periods` | printed | TOOL-32 |
-| `test_validate_mcp_regression_options_reject_unknown` | bgtest, resettest, bootstrap_cov, step, nls | refusals | exact | TOOL-32 |
-| `test_validate_mcp_bootstrap_cov_is_seeded` | regression_bootstrap_cov | equal text for equal seeds | exact | TOOL-32 |
 | `test_validate_mcp_loess_x10_and_mass_point` | regression_loess | `fit_s075_d2`, `fit_s075_d1`, `fit_s12_d2`, `loess_masspoint_expected` | `Tol::coef(10)`, `Tol::coef(100)` | TOOL-32 |
 | `test_validate_mcp_supsmu_span_and_periodic` | regression_supsmu | `cv_x`, `span03_y`, `weighted_y`, `supsmu_periodic_y`, `supsmu_plain_y` | `Tol::coef(100)` | TOOL-32 |
-| `test_validate_mcp_smooth_spline_criterion` | regression_smooth_spline | library equality (not R-pinned) | exact | TOOL-32 |
 | `test_validate_mcp_regression_step` | regression_step | `forward_aic`, `backward_bic` | `Tol::stat(n)` | TOOL-32 |
 | `test_validate_mcp_regression_nls` | regression_nls | `coef`, `se` | printed | TOOL-32 |
 | `test_validate_mcp_mlogit_asc` | mlogit | `asc_coef_tight`, `asc_se_tight`, `asc_loglik`, `noasc_*`, `pier_*_tight` | printed | TOOL-32 |
@@ -85,20 +78,39 @@ Tests of `crates/p2a-mcp/tests/tier3/wp58_models.rs` unless the module is named.
 | `test_validate_mcp_multinom_overlap` | multinom | `coef_tight`, `se_tight`, `refB_coef_tight`, `refB_se_tight` | printed | TOOL-32 |
 | `test_validate_mcp_hurdle_zero_part` | hurdle_model | `zero_coef`, `zero_se_tight` | printed | TOOL-32 |
 | `test_validate_mcp_feglm_gaussian` | feglm | `gauss_coef` | printed | TOOL-32 |
-| `test_validate_mcp_discrete_options_and_boundaries` | mixed_logit, ordered_model, zeroinfl, hurdle_model, feglm | refusals | exact | TOOL-14, TOOL-32 |
-| `test_validate_mcp_mixed_logit_uses_session_seed` | mixed_logit | equal text for equal seeds | exact | TOOL-32 |
 | `test_validate_mcp_cox_robust` | cox_ph | `efron_coef`, `efron_se`, `efron_se_robust`, `efron_rscore_robust`, `efron_*_cluster`, `breslow_*` | printed (robust score 2 decimals) | TOOL-32 |
-| `test_validate_mcp_cox_options_are_checked` | cox_ph | refusals | exact | TOOL-32 |
 | `test_validate_mcp_aft` | aft | `{weibull,exponential,lognormal,loglogistic}_{coef,se,loglik,scale}` | printed | TOOL-32 |
 | `test_validate_mcp_competing_risks_cif` | competing_risks | `times`, `cif1`, `cif2` | printed | TOOL-32 |
 | `test_validate_mcp_panel_gmm_system` | panel_gmm | `twostep_coef`, `twostep_se_robust`, `twostep_n_obs`, `twostep_sargan`, `onestep_coef`, `onestep_se_robust` | printed; n exact | TOOL-32 |
 | `test_validate_mcp_panel_unit_root_aic` | panel_unit_root | `ips_aic_lags`, `ips_sic_lags` (min, max, mean) | printed (2 decimals) | TOOL-32 |
 | `test_validate_mcp_panel_heterogeneous_and_gls` | panel_pvcm, panel_pmg, panel_gls | `random_coef`, `random_se`, `mg_coef`, `pooling_coef` | printed | TOOL-32, TOOL-4 |
 | `test_validate_mcp_panel_fe_drops_absorbed` | panel_fixed_effects, panel_hdfe | `fe_coef`, `fe_se` | printed | TOOL-32 |
-| integration_tests, module dispatch: test_validate_dispatch_ + module + _module for 13 modules (viz, regression, panel, discrete, survival, causal, stats, hypothesis, timeseries, ml, spatial, munging, cleaning) | one or more tools per module | the dispatcher cases above | printed; JSON coefficient rows of `validation/README.md` | TOOL-31 |
+| integration_tests, module dispatch: test_validate_dispatch_ + module + _module for 12 modules (regression, panel, discrete, survival, causal, stats, hypothesis, timeseries, ml, spatial, munging, cleaning) | one or more tools per module | the dispatcher cases above | printed; JSON coefficient rows of `validation/README.md` | TOOL-31 |
 
-The dispatcher tests of the data, utils and search modules, the database test (feature
-`database`, which CI leaves out) and the router test load no case and are not registered.
+The dispatcher tests of the viz (`test_dispatch_viz_module`: the reply is a PNG), data, utils
+and search modules, the database test (feature `database`, which CI leaves out) and the router
+test load no case and are not registered.
+
+### Property and error tests (not R-pinned)
+
+These tests pin no R value: they check option parsing, refusals, seeds and equality with the
+library. They read their dataset from `validation/datasets/generated/` without loading a case
+(`generated_dataset` in `crates/p2a-mcp/tests/tier3/wp58_text.rs`), carry no `test_validate`
+in their names and are not in the registry, so the status page does not count them as
+R-pinned.
+
+| Test | Tool(s) | Checks | Finding |
+|---|---|---|---|
+| `test_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed` | regression_cv_glmnet | library equality for the same seed | REG-8 |
+| `test_mcp_glmnet_reply_survives_the_chat_loop_cut` | regression_lasso | entry order equals the library's | REG-8 |
+| `test_mcp_gls_options_and_errors` | regression_gls | refusals | TOOL-19 |
+| `test_mcp_quantreg_empty_taus_is_error` | regression_quantreg | refusals | TOOL-14 |
+| `test_mcp_regression_options_reject_unknown` | bgtest, resettest, bootstrap_cov, step, nls | refusals | TOOL-32 |
+| `test_mcp_bootstrap_cov_is_seeded` | regression_bootstrap_cov | equal text for equal seeds | TOOL-32 |
+| `test_mcp_smooth_spline_criterion` | regression_smooth_spline | library equality (not R-pinned) | TOOL-32 |
+| `test_mcp_discrete_options_and_boundaries` | mixed_logit, ordered_model, zeroinfl, hurdle_model, feglm | refusals | TOOL-14, TOOL-32 |
+| `test_mcp_mixed_logit_uses_session_seed` | mixed_logit | equal text for equal seeds | TOOL-32 |
+| `test_mcp_cox_options_are_checked` | cox_ph | refusals | TOOL-32 |
 
 ## Tolerances
 
@@ -116,8 +128,9 @@ The dispatcher tests of the data, utils and search modules, the database test (f
 Registry deviations (quantities not pinned through MCP):
 
 - REG-24: Driscoll-Kraay standard errors.
-- REG-29, REG-30: smooth.spline fit, df, lambda and criterion value (the test compares with the
-  library and checks that GCV and CV differ).
+- REG-29, REG-30: smooth.spline fit, df, lambda and criterion value (the property test
+  `test_mcp_smooth_spline_criterion` compares with the library and checks that GCV and CV
+  differ).
 - ECON-16: the hurdle count part.
 - ECON-20: FEGLM standard errors and deviance.
 - ECON-33, ECON-34: pooled-GLS and mean-group standard errors.

@@ -22,7 +22,6 @@
         "dk_panel",
         "step_legacy",
         "nls_expdecay",
-        "ols_mtcars",
         "loess_x10_direct",
         "smoothers_gcv_periodic_loess",
         "supsmu_sine"
@@ -30,34 +29,25 @@
       "tests": [
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_returns_coefficients",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_lasso_default_path",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_cv_glmnet_returns_coefficients_and_uses_session_seed",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_glmnet_reply_survives_the_chat_loop_cut",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_compsymm",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_ar1_reml",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_gls_options_and_errors",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_quantreg_br_se",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_quantreg_empty_taus_is_error",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_ols_aliased",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_diagnostics_tests",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_hac_dk",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_options_reject_unknown",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_bootstrap_cov_is_seeded",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_loess_x10_and_mass_point",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_supsmu_span_and_periodic",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_smooth_spline_criterion",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_step",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_regression_nls"
       ],
       "quantities": [
-        "glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df; cv coefficients equal the library's; the selection summary precedes the path in the reply",
+        "glmnet coefficient path (lasso, ridge, binomial) and default path lambdas/df",
         "GLS rho, coefficients, SEs, sigma, log-likelihood, AIC, BIC (REML, ML, fixed rho; CS within groups, AR(1))",
-        "quantreg coefficients and nid/iid/ker SEs at tau 0.25, 0.5, 0.75; tau/taus refusals",
+        "quantreg coefficients and nid/iid/ker SEs at tau 0.25, 0.5, 0.75",
         "aliased OLS rows",
         "JB, BP, DW, condition number, bgtest F, RESET princomp, Wald F, Harvey-Collier",
         "HAC Parzen SEs, DK coefficients",
-        "option parsing, bootstrap seeds",
-        "loess fitted values, supsmu smooths, step criteria, nls estimates and SEs",
-        "smooth.spline criterion (library equality, GCV differs from CV)"
+        "loess fitted values, supsmu smooths, step criteria, nls estimates and SEs"
       ],
       "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative; text at the printed precision (Tol::printed: half a unit of the last printed digit); loess Tol::coef(10) / Tol::coef(100), supsmu Tol::coef(100), step Tol::stat(n)",
       "deviations": [
@@ -69,7 +59,7 @@
         {
           "finding": "REG-29",
           "quantity": "smooth.spline fit, df, lambda, criterion",
-          "note": "not R-pinned (REG-29, REG-30, Tier 4): the MCP test compares with the library and checks GCV and CV differ"
+          "note": "not R-pinned (REG-29, REG-30, Tier 4): the property test test_mcp_smooth_spline_criterion (unregistered) compares with the library and checks GCV and CV differ"
         }
       ],
       "supersedes_legacy": []
@@ -85,26 +75,21 @@
         "disc_binary_glm",
         "disc_multinom_overlap",
         "disc_hurdle_zero",
-        "feglm_families",
-        "disc_mixed_logit",
-        "disc_zeroinfl"
+        "feglm_families"
       ],
       "tests": [
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_mlogit_asc",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_logit_probit_binary_glm",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_multinom_overlap",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_hurdle_zero_part",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_feglm_gaussian",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_discrete_options_and_boundaries",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_mixed_logit_uses_session_seed"
+        "p2a-mcp::tier3::wp58_models::test_validate_mcp_feglm_gaussian"
       ],
       "quantities": [
         "mlogit coefficients and SEs with and without ASCs and with reflevel (asc_*_tight, noasc_*_tight, pier_*_tight), log-likelihood",
         "logit coefficients and SEs (logit_coef, logit_se), probit coefficients and SEs (probit_coef_tight, probit_se_tight), aliased row, outcome domain, convergence line",
         "multinom coefficients and SEs (two references, tight MLE)",
         "hurdle binary-part coefficients (zero_coef) and SEs (zero_se_tight)",
-        "FEGLM gaussian coefficients",
-        "option errors, n_draws = 0, seeds"
+        "FEGLM gaussian coefficients"
       ],
       "tolerance": "text at the printed precision (4 decimals, Tol::printed)",
       "deviations": [
@@ -134,7 +119,6 @@
       ],
       "tests": [
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_cox_robust",
-        "p2a-mcp::tier3::wp58_models::test_validate_mcp_cox_options_are_checked",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_aft",
         "p2a-mcp::tier3::wp58_models::test_validate_mcp_competing_risks_cif"
       ],
@@ -213,7 +197,6 @@
         "mcp_dispatch_smoke"
       ],
       "tests": [
-        "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_viz_module",
         "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_regression_module",
         "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_panel_module",
         "p2a-mcp::integration_tests::dispatch::test_validate_dispatch_discrete_module",
