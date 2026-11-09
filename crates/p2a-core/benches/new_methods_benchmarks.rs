@@ -218,7 +218,7 @@ fn spline_approx_benchmark(c: &mut Criterion) {
     for size in [10, 50, 100].iter() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let mut x: Vec<f64> = (0..*size).map(|_| rng.r#gen::<f64>() * 10.0).collect();
-        x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        x.sort_by(f64::total_cmp);
         let y: Vec<f64> = x.iter().map(|&xi| xi.sin()).collect();
 
         group.bench_with_input(BenchmarkId::new("spline_natural", size), size, |b, _| {
@@ -1509,7 +1509,7 @@ fn create_mixedlogit_dataset(n_choosers: usize, n_alts: usize, seed: u64) -> Dat
         let chosen_alt = utilities
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .unwrap()
             .0;
 

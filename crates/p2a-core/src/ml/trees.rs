@@ -348,11 +348,7 @@ impl SortedFeatureIndices {
             .into_par_iter()
             .map(|f| {
                 let mut indices: Vec<usize> = (0..n_samples).collect();
-                indices.sort_by(|&a, &b| {
-                    data[[a, f]]
-                        .partial_cmp(&data[[b, f]])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                indices.sort_by(|&a, &b| data[[a, f]].total_cmp(&data[[b, f]]));
                 indices
             })
             .collect();

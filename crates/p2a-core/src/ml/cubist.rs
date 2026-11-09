@@ -255,7 +255,7 @@ impl std::fmt::Display for CubistResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| a.1.is_nan().cmp(&b.1.is_nan()).then(b.1.total_cmp(&a.1)));
 
         let total: f64 = indexed.iter().map(|(_, v)| v).sum();
         for (i, importance) in indexed.iter().take(10) {
@@ -514,7 +514,7 @@ impl CubistTree {
                 .iter()
                 .map(|&i| (x[[i, feature]], y[i], i))
                 .collect();
-            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
             // Incremental MSE calculation
             let total_sum: f64 = sorted.iter().map(|(_, y_val, _)| y_val).sum();
@@ -822,7 +822,7 @@ fn find_k_neighbors(
         .collect();
 
     // Sort by distance
-    distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    distances.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Average k nearest
     let k_actual = k.min(distances.len());
@@ -1141,6 +1141,30 @@ mod tests {
     use super::*;
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    #[test]
+    fn test_validate_cubist_leaf_model_duplicated_column() {
+        // lm reports the duplicated attribute NA; Cubist eliminates it (coefficient 0).
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("inv_cubist_leaf_model");
+        let col = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
+        let x = ndarray::stack![Axis(1), col("x1"), col("x1dup")];
+        let y = col("y");
+        let tree = CubistTree::new(2, None, 0.0);
+        let (intercept, coefs) =
+            tree.fit_linear_model(&x.view(), &y.view(), &(0..30).collect::<Vec<_>>(), &[]);
+        Check::new(&case)
+            .named_subset(
+                "coef",
+                &["(Intercept)", "x1"],
+                &["(Intercept)", "x1"],
+                &[intercept, coefs[0]],
+                Tol::coef(30),
+            )
+            .finish();
+        assert_eq!(coefs[1], 0.0);
+    }
 
     fn cancelled_budget() -> Budget {
         let t = CancelToken::new();

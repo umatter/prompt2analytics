@@ -1186,8 +1186,8 @@ fn compute_ks_statistic(
         .collect();
 
     // Sort by value
-    t_vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    c_vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    t_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    c_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Compute total weights
     let t_total: f64 = t_vals.iter().map(|(_, w)| w).sum();
@@ -1203,7 +1203,7 @@ fn compute_ks_statistic(
         .map(|(v, _)| *v)
         .chain(c_vals.iter().map(|(v, _)| *v))
         .collect();
-    all_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    all_vals.sort_by(f64::total_cmp);
     all_vals.dedup();
 
     let mut max_diff: f64 = 0.0;

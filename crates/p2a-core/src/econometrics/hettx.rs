@@ -1178,7 +1178,7 @@ fn compute_covariate_importance(
     }
 
     // Sort by importance (descending)
-    importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    importance.sort_by(|a, b| a.1.is_nan().cmp(&b.1.is_nan()).then(b.1.total_cmp(&a.1)));
 
     importance
 }
@@ -1193,6 +1193,72 @@ mod tests {
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array1;
     use polars::prelude::*;
+
+    #[test]
+    fn test_validate_hettx_outcome_model_aliased_subset() {
+        // On the treated arm x2 = 2 x1 + 1: lm reports x2 NA and predict.lm counts it as 0;
+        // a generalized inverse splits its role between the columns instead.
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("inv_hettx_outcome_model");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let (y, treat) = (Array1::from(col("y")), col("treat"));
+        let x = add_intercept(
+            &ndarray::stack![
+                ndarray::Axis(1),
+                Array1::from(col("x1")),
+                Array1::from(col("x2"))
+            ]
+            .view(),
+        );
+        let treated: Vec<usize> = (0..y.len()).filter(|&i| treat[i] == 1.0).collect();
+        let (beta, r2) = fit_outcome_model_on_subset(&x, &y.view(), &treated).unwrap();
+        let pred: Vec<f64> = (0..y.len()).map(|i| x.row(i).dot(&beta)).collect();
+        Check::new(&case)
+            .vector("coef", beta.as_slice().unwrap(), Tol::coef(20))
+            .vector("predictions", &pred, Tol::coef(40))
+            .scalar("r2", r2, Tol::stat(20))
+            .finish();
+    }
+
+    #[test]
+    fn test_hettx_unseeded_is_reproducible() {
+        // Without a seed the permutations used entropy; they now use HETTX_DEFAULT_SEED.
+        let (y, treatment, x) = create_hettx_test_data();
+        let config = || HetTxConfig {
+            n_permutations: 40,
+            seed: None,
+            ..Default::default()
+        };
+        let a = run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config()).unwrap();
+        let b = run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config()).unwrap();
+        assert_eq!(a.null_distribution, b.null_distribution);
+        assert_eq!(a.p_value, b.p_value);
+    }
+
+    #[test]
+    fn test_validate_hettx_effect_summary_type7() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("qtl_hettx_summary");
+        let tau = Array1::from(numeric_column(ds.df(), "tau", NaPolicy::Fail).unwrap().0);
+        let s = compute_effect_summary(&tau);
+        Check::new(&case)
+            .vector(
+                "quantiles",
+                &[s.p10, s.p25, s.median, s.p75, s.p90],
+                Tol::coef(38),
+            )
+            .scalar("min", s.min, Tol::exact())
+            .scalar("max", s.max, Tol::exact())
+            .scalar("sd", s.std_dev, Tol::stat(38))
+            .scalar(
+                "iqr",
+                compute_test_statistic(&tau, HetTestStat::IQR),
+                Tol::coef(38),
+            )
+            .finish();
+    }
 
     fn cancelled() -> Budget {
         let token = CancelToken::new();

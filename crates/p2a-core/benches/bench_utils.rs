@@ -106,7 +106,7 @@ where
     let mem_after = memory_stats().map(|m| m.physical_mem).unwrap_or(0);
 
     // Sort for percentile calculations
-    times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    times_us.sort_by(f64::total_cmp);
 
     let n_times = times_us.len();
     let time_min = times_us[0];
@@ -317,7 +317,7 @@ where
     let mem_after = memory_stats().map(|m| m.physical_mem).unwrap_or(0);
 
     // Sort for percentile calculations
-    times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    times_us.sort_by(f64::total_cmp);
 
     let n_times = times_us.len();
     let time_min = times_us[0];
