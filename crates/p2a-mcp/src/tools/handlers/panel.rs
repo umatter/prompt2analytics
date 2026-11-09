@@ -41,6 +41,12 @@ const PVCM_MODEL: Choices<PvcmType> = Choices {
     ],
 };
 
+/// panel_pmg runs only the within (mean-group) model, so its errors list only that model.
+const PMG_MODEL: Choices<PvcmType> = Choices {
+    option: "model",
+    values: &[(&["within", "individual", "separate"], PvcmType::Within)],
+};
+
 const PANEL_GLS_MODEL: Choices<PanelGlsModel> = Choices {
     option: "model",
     values: &[
@@ -282,16 +288,16 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         // panel_pmg shares panel_pvcm's request; it runs only the within (mean-group) model
-        match parse_choice(&PVCM_MODEL, request.model.as_deref(), PvcmType::Within) {
-            Ok(PvcmType::Within) => {}
-            Ok(PvcmType::Random) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "panel_pmg is the mean-group estimator, which is panel_pvcm with model 'within'; \
-                     for Swamy's random-coefficients model use panel_pvcm with model = 'random'"
-                        .to_string(),
-                )]));
-            }
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        // (an error lists only 'within'; Swamy's spellings point to panel_pvcm)
+        if let Err(e) = parse_choice(&PMG_MODEL, request.model.as_deref(), PvcmType::Within) {
+            let msg = match parse_choice(&PVCM_MODEL, request.model.as_deref(), PvcmType::Within) {
+                Ok(PvcmType::Random) => "panel_pmg is the mean-group estimator, which is panel_pvcm \
+                     with model 'within'; for Swamy's random-coefficients model use panel_pvcm with \
+                     model = 'random'"
+                    .to_string(),
+                _ => e,
+            };
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
         let result = match run_pmg(dataset, &request.y, &x_refs, &request.entity_var) {
@@ -555,6 +561,7 @@ mod tests {
     #[test]
     fn test_panel_option_tables_validate() {
         assert_eq!(super::PVCM_MODEL.validate(), Ok(()));
+        assert_eq!(super::PMG_MODEL.validate(), Ok(()));
         assert_eq!(super::PANEL_GLS_MODEL.validate(), Ok(()));
     }
 

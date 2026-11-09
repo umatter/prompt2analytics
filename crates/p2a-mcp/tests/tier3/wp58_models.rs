@@ -2225,11 +2225,12 @@ async fn test_mcp_panel_pmg_model_spellings() {
                "model": model})
     };
     let e = tool_error(&call(&server, &session, "panel_pmg", pmg("withn")).await);
+    // The misspelling's error lists only the model panel_pmg runs.
+    assert!(e.contains("withn") && e.contains("within"), "{e}");
     assert!(
-        e.contains("withn") && e.contains("within") && e.contains("random"),
+        !e.contains("panel_pvcm") && !e.contains("random") && !e.contains("swamy"),
         "{e}"
     );
-    assert!(!e.contains("panel_pvcm"), "{e}");
     let e = tool_error(&call(&server, &session, "panel_pmg", pmg("swamy")).await);
     assert!(e.contains("panel_pvcm"), "{e}");
     assert!(
