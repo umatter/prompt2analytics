@@ -969,6 +969,10 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
+/// The tools that read the session seed (`set_seed`), as `set_seed`'s description and
+/// `get_seed`'s reply list them; a test checks the list against the handlers.
+const SEED_TOOLS_TEXT: &str = "ml_kmeans, ml_random_forest, ml_tsne, ml_c50, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_shap_values, heterogeneity_test, sar_probit_model, sem_probit_model, regression_cv_glmnet, regression_bootstrap_cov, regression_quantreg, mixed_logit, gformula, propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation and generate_random_data";
+
 #[tool_router(router = utils_router, vis = "pub")]
 impl AnalyticsServer {
     // ========================================================================
@@ -977,7 +981,7 @@ impl AnalyticsServer {
 
     /// Set the global random seed for ML reproducibility.
     #[tool(
-        description = "Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value."
+        description = "Set the session random seed. Every tool that draws random numbers and was given no seed of its own uses it: ml_kmeans, ml_random_forest, ml_tsne, ml_c50, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_shap_values, heterogeneity_test, sar_probit_model, sem_probit_model, regression_cv_glmnet, regression_bootstrap_cov, regression_quantreg, mixed_logit, gformula, propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation and generate_random_data. Without a session seed each of them uses its fixed default seed, so repeated calls agree, except generate_random_data, which then draws new data on every call. Clear by calling with no seed value."
     )]
     pub async fn set_seed(
         &self,
@@ -989,19 +993,17 @@ impl AnalyticsServer {
         match request.seed {
             Some(seed) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Global random seed set to: {}\n\
-                 This seed will be used by ML tools (kmeans, random_forest, tsne) unless overridden per-tool.",
+                 Tools that draw random numbers use it unless a per-tool seed is given.",
                 seed
             ))])),
             None => Ok(CallToolResult::success(vec![Content::text(
-                "Global random seed cleared. ML tools will use random initialization unless a per-tool seed is specified.".to_string()
+                "Global random seed cleared. Tools that draw random numbers use their fixed default seed unless a per-tool seed is given (generate_random_data draws new data on every call).".to_string()
             )])),
         }
     }
 
     /// Get the current global random seed.
-    #[tool(
-        description = "Get the current global random seed setting and list which ML tools support seeded reproducibility."
-    )]
+    #[tool(description = "Get the current session random seed and list the tools that honour it.")]
     pub async fn get_seed(
         &self,
         Parameters(_request): Parameters<GetSeedRequest>,
@@ -1010,19 +1012,17 @@ impl AnalyticsServer {
 
         let seed_status = match *global_seed {
             Some(seed) => format!("Current global seed: {}", seed),
-            None => "No global seed set (using random initialization)".to_string(),
+            None => "No global seed set (each tool uses its fixed default seed)".to_string(),
         };
 
         let output = format!(
             "Seed Management\n{}\n\
              {}\n\n\
-             ML tools supporting reproducibility:\n\
-             - ml_kmeans: Uses seed for centroid initialization\n\
-             - ml_random_forest: Uses seed for bootstrap sampling and feature selection\n\
-             - ml_tsne: Uses seed for initial embedding\n\n\
-             Per-tool seeds override the global seed.",
+             Tools that honour it: {}.\n\
+             Without a session seed they use a fixed default seed (generate_random_data draws new data); per-tool seeds override both.",
             "=".repeat(40),
-            seed_status
+            seed_status,
+            SEED_TOOLS_TEXT
         );
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1619,6 +1619,58 @@ mod tests {
     use super::*;
     use crate::tools::limits::{self, Family, Limits};
     use std::io::Write;
+
+    /// The tools `set_seed` and `get_seed` name are exactly the handlers that read the session
+    /// seed (through seed_for, seed_or_global, global_seed or a helper of their own module).
+    #[test]
+    fn seed_tool_list_matches_the_handlers() {
+        let sources = [
+            include_str!("causal.rs"),
+            include_str!("discrete.rs"),
+            include_str!("ml.rs"),
+            include_str!("regression.rs"),
+            include_str!("spatial.rs"),
+            include_str!("utils.rs"),
+            include_str!("timeseries.rs"),
+            include_str!("stats.rs"),
+            include_str!("panel.rs"),
+            include_str!("survival.rs"),
+        ];
+        let readers = [
+            "seed_for(",
+            "seed_or_global(",
+            "global_seed.read()",
+            "probit_seed(",
+        ];
+        let mut found = std::collections::BTreeSet::new();
+        for src in sources {
+            // the text between one `pub async fn` and the next is that handler's body
+            let mut parts = src.split("\n    pub async fn ");
+            parts.next();
+            for part in parts {
+                let name = part.split('(').next().unwrap().trim();
+                let body = part.split("\n    #[tool(").next().unwrap();
+                let body = body.split("\n    async fn ").next().unwrap();
+                // the impl block ends at the first closing brace in column 0
+                let body = body.split("\n}\n").next().unwrap();
+                if !["set_seed", "get_seed"].contains(&name)
+                    && readers.iter().any(|r| body.contains(r))
+                {
+                    found.insert(name.to_string());
+                }
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = SEED_TOOLS_TEXT
+            .replace(" and ", ", ")
+            .split(", ")
+            .map(str::to_string)
+            .collect();
+        assert_eq!(listed, found);
+        let description = AnalyticsServer::set_seed_tool_attr()
+            .description
+            .unwrap_or_default();
+        assert!(description.contains(SEED_TOOLS_TEXT), "{description}");
+    }
 
     #[test]
     fn capped_writer_stops_at_the_cap() {

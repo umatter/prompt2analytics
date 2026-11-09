@@ -303,8 +303,8 @@ fn spearman_test(
     let n = x.len();
 
     // Rank the data
-    let x_ranks = rank_data(x);
-    let y_ranks = rank_data(y);
+    let x_ranks = crate::stats::ranks::midranks(x)?.0;
+    let y_ranks = crate::stats::ranks::midranks(y)?.0;
 
     // Spearman's rho is Pearson correlation of ranks
     let rho = pearson_correlation(&x_ranks, &y_ranks);
@@ -549,33 +549,6 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
 
     // The product of the sums can overflow where each sum fits; rounding can leave |r| just above 1.
     (sum_xy / (sum_x2.sqrt() * sum_y2.sqrt())).clamp(-1.0, 1.0)
-}
-
-/// Assign ranks to data, handling ties with average ranks.
-fn rank_data(data: &[f64]) -> Vec<f64> {
-    let n = data.len();
-    let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
-    // Tied values share a rank, so the order among them does not matter
-    indexed.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-
-    let mut ranks = vec![0.0; n];
-    let mut i = 0;
-
-    while i < n {
-        let mut j = i;
-        // Find all elements with the same value (ties are exact equality, as in R's rank)
-        while j < n && indexed[j].1 == indexed[i].1 {
-            j += 1;
-        }
-        // Assign average rank to all tied elements
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-        i = j;
-    }
-
-    ranks
 }
 
 /// Run correlation test from Dataset columns (MCP-friendly wrapper).
@@ -938,14 +911,14 @@ mod tests {
     #[test]
     fn test_rank_data() {
         let data = vec![3.0, 1.0, 2.0];
-        let ranks = rank_data(&data);
+        let ranks = crate::stats::ranks::midranks(&data).unwrap().0;
         assert_eq!(ranks, vec![3.0, 1.0, 2.0]);
     }
 
     #[test]
     fn test_rank_data_ties() {
         let data = vec![1.0, 2.0, 2.0, 3.0];
-        let ranks = rank_data(&data);
+        let ranks = crate::stats::ranks::midranks(&data).unwrap().0;
         // Tied values get average rank: 2.5
         assert_eq!(ranks, vec![1.0, 2.5, 2.5, 4.0]);
     }

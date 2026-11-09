@@ -23,7 +23,8 @@
 //! solved by damped Newton, the over-identified problem by Gauss-Newton from the scaled logit
 //! start and from the exact-balance solution (the smaller `g'Wg` wins); both stop on the
 //! relative Newton step, Gauss-Newton also when `g'Wg` is at its minimum to rounding (a slowly
-//! converging over-identified fit can reach that floor first). Probabilities are clipped to `[1e-6, 1 - 1e-6]` (CBPS's `probs.min`).
+//! converging over-identified fit can reach that floor first). Probabilities are clipped to
+//! `[1e-6, 1 - 1e-6]` (CBPS's `probs.min`).
 //!
 //! Reported: CBPS's `J = g'Wg` at the estimate ([`CbpsResult::cbps_j`], no factor n) and, for
 //! `Over`, Hansen's test of the over-identifying restrictions on `n J` with k degrees of freedom
@@ -155,7 +156,7 @@ crate::option_enum!(
         values: &[
             (&["ATE", "average_treatment_effect"], CbpsEstimand::Ate),
             (
-                &["ATT", "average_treatment_effect_on_the_treated", "treated",],
+                &["ATT", "average_treatment_effect_on_the_treated", "treated"],
                 CbpsEstimand::Att,
             ),
         ],

@@ -26,6 +26,7 @@
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::xtx;
 use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
+use crate::options::Choices;
 use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource::{checkpoint, try_vec, try_zeros1, try_zeros2};
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -43,6 +44,20 @@ pub enum ArMethod {
     /// Ordinary least squares
     Ols,
 }
+
+// The accepted spellings (ar(method = ); "mle" is not implemented); the first of each entry is canonical.
+crate::option_enum!(
+    ArMethod,
+    Choices {
+        option: "method",
+        values: &[
+            (&["yule-walker", "yw", "yulewalker"], ArMethod::YuleWalker),
+            (&["burg"], ArMethod::Burg),
+            (&["ols"], ArMethod::Ols),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for AR model fitting.
 #[derive(Debug, Clone)]
@@ -694,6 +709,30 @@ pub fn run_ar_with_order(x: &[f64], order: usize) -> EconResult<ArResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ar_method_parses_aliases_and_rejects_unknown() {
+        ArMethod::choices().validate().unwrap();
+        assert_eq!(
+            "Yule Walker".parse::<ArMethod>().unwrap(),
+            ArMethod::YuleWalker
+        );
+        assert_eq!("YW".parse::<ArMethod>().unwrap(), ArMethod::YuleWalker);
+        assert_eq!(
+            "yulewalker".parse::<ArMethod>().unwrap(),
+            ArMethod::YuleWalker
+        );
+        assert_eq!("OLS".parse::<ArMethod>().unwrap(), ArMethod::Ols);
+        match "mle".parse::<ArMethod>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown method 'mle'; expected one of: yule-walker, burg, ols"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     use p2a_validation::{Check, Tol};
 

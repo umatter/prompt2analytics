@@ -124,7 +124,7 @@ fit through a wrapper that implements only the required ones, and pins t, p, CI,
 sigma, logLik, AIC and BIC to `ols_grunfeld`. `test_default_p_values_are_nan_safe` and
 `test_default_adj_r_squared_uses_residual_df` check the NaN and df = 0 cases by hand.
 
-`test_validate_ols_simple_regression` is a DGP-recovery check (coefficients near the true
+`test_ols_simple_regression_recovers_dgp` is a DGP-recovery check (coefficients near the true
 values), not pinned to R.
 
 ## Measured agreement

@@ -894,8 +894,7 @@ pub static PARAM_RULES: &[ParamRule] = {
                  height, and a size it ignores",
             ),
         ),
-        // ---- Tier 3 request fields (T3 design 5.1; T3-WP05). Inert until the wave-3 owner
-        // adds the field (TIER3_PENDING_FIELDS lists the ones not there yet). ----
+        // ---- Tier 3 request fields (T3 design 5.1; T3-WP05). ----
         p("staggered_did", "anticipation", Max(Lags)),
         p(
             "etwfe",
@@ -1110,10 +1109,6 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 /// deadline as a cancelled call. That is the residual risk: a call the budget admitted can still be
 /// cancelled.
 pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
-
-/// (tool, field) of T3 design 5.1 that wave-3 packages add; their rules above exist from wave 1.
-#[cfg(test)]
-pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -3315,15 +3310,12 @@ mod schema_tests {
                 let s = tools
                     .get(r.tool)
                     .unwrap_or_else(|| panic!("rule for unknown tool `{}`", r.tool));
-                // a T3 design 5.1 field gets its rule before its wave-3 owner adds it
-                if !super::TIER3_PENDING_FIELDS.contains(&(r.tool, first)) {
-                    assert!(
-                        s["properties"].get(first).is_some(),
-                        "{}.{} is not a field",
-                        r.tool,
-                        r.path
-                    );
-                }
+                assert!(
+                    s["properties"].get(first).is_some(),
+                    "{}.{} is not a field",
+                    r.tool,
+                    r.path
+                );
             }
         }
         for rr in ROW_RULES {

@@ -12,6 +12,7 @@
 //! - And more
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_choice;
 use crate::tools::common::{
     MissingSummary, NaPolicy, budget_group_count, budget_level_count, check_named_budget,
     insert_missing, missing_json, numeric_columns, parse_option,
@@ -28,7 +29,6 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
-use crate::tools::handlers::stats::parse_choice;
 use p2a_core::options::Choices;
 use p2a_core::stats::FisherAlternative;
 

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "tail_oneway",
+  "area": "stats/oneway",
+  "method": "oneway.test upper tail below 1e-16 (equal and Welch variances)",
+  "reference": "stats::oneway.test",
+  "call": "oneway.test(y ~ g, var.equal = TRUE | FALSE)",
+  "dataset": "validation/datasets/generated/tail_oneway.csv",
+  "datasets": ["validation/datasets/generated/tail_oneway.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "equal_f": 348.76951910919774,
+    "equal_df": [2, 33],
+    "equal_p": 6.3879783758898932e-23,
+    "welch_f": 427.34397044102622,
+    "welch_df": [2, 21.391743061919342],
+    "welch_p": 5.6894955006403019e-18
+  }
+}

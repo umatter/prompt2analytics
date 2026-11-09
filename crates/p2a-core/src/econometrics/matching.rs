@@ -3396,6 +3396,38 @@ mod tests {
     }
 
     #[test]
+    fn test_match_it_rejects_nan_covariate() {
+        // MatchIt: "Missing values are not allowed in the covariates." A NaN covariate is
+        // refused before any distance is sorted.
+        let ds = create_test_dataset();
+        let mut x1: Vec<f64> = ds
+            .df()
+            .column("x1")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap())
+            .collect();
+        x1[7] = f64::NAN;
+        let mut df = ds.df().clone();
+        df.with_column(Series::new("x1".into(), x1)).unwrap();
+        let r = match_it(
+            &Dataset::new(df),
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::default(),
+            None,
+        );
+        match r {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("x1", 1));
+            }
+            other => panic!("expected NullValues for x1, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_nearest_neighbor_matching_basic() {
         let dataset = create_test_dataset();
         let result =

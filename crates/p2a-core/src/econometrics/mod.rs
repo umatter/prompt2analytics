@@ -170,6 +170,7 @@ pub use discrete::{
     MixedLogitConfig,
     MixedLogitResult,
     // McFadden conditional logit (mlogit)
+    MlogitConfig,
     MlogitResult,
     // Multinomial logit
     MultinomResult,
@@ -186,12 +187,14 @@ pub use discrete::{
     // Zero-inflated models
     ZeroInflatedType,
     run_conditional_logit,
+    run_conditional_logit_with,
     run_gmnl,
     run_hurdle,
     run_logit,
     run_mixed_logit,
     run_mixl,
     run_mlogit,
+    run_mlogit_with,
     run_multinom,
     run_negbin,
     run_ordered_logit,
@@ -352,6 +355,7 @@ pub use timeseries::{
     GrangerResult,
     VarIrfResult,
     VarResult,
+    VarmaConfig,
     VarmaResult,
     VecmResult,
     granger_test,
@@ -360,6 +364,7 @@ pub use timeseries::{
     run_var,
     run_var_irf,
     run_varma,
+    run_varma_with,
     run_vecm,
 };
 pub use tmle::{
@@ -410,14 +415,18 @@ pub use bpbounds::{
     run_bp_bounds,
 };
 pub use doubleml::{
+    DML_DEFAULT_LAMBDA,
+    DML_DEFAULT_SEED,
     // Double/Debiased Machine Learning (DoubleML)
     DMLModelType,
     DoubleMLConfig,
     DoubleMLResult,
     MLMethod,
     NuisanceDiagnostics,
+    NuisanceFit,
     TreatmentType,
     run_double_ml,
+    run_double_ml_iv,
 };
 pub use gformula::{
     GFormulaConfig,

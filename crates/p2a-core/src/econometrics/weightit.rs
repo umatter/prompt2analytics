@@ -2238,6 +2238,8 @@ fn trim_weights(weights: &[f64], quantile: f64) -> Vec<f64> {
     sorted.sort_by(f64::total_cmp);
 
     let n = sorted.len();
+    // Not R's rule: WeightIt's trim(at) caps above at quantile(w, at, type = 7) and trims
+    // no lower tail; these floor/ceil order statistics and the lower cap stay (X-18, Tier 4).
     let lower_idx = ((1.0 - quantile) * n as f64).floor() as usize;
     let upper_idx = (quantile * n as f64).ceil() as usize;
 

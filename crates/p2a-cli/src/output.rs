@@ -207,8 +207,9 @@ pub fn print_result_notes(r: &dyn ResultNotes, format: &OutputFormat) {
     print_notes(converged, &warnings, format);
 }
 
-/// Inserts [`notes_json`] into a JSON object payload. Keys the payload already has (an
-/// earlier tier's `warnings` or `converged`) are kept, never overwritten. A payload that
+/// Inserts [`notes_json`] into a JSON object payload. `converged` and `iterations` the
+/// payload already has are kept; `warnings` are merged: the result's warnings are appended
+/// to those the command already put there (an earlier tier's), each once. A payload that
 /// is not an object is left unchanged.
 pub fn add_notes(
     json: &mut serde_json::Value,
@@ -217,8 +218,44 @@ pub fn add_notes(
 ) {
     debug_assert!(json.is_object(), "add_notes needs a JSON object payload");
     if let Some(map) = json.as_object_mut() {
-        for (k, v) in notes_json(converged, warnings) {
-            map.entry(k).or_insert(v);
+        for (k, v) in notes_json(converged, &[]) {
+            if k != "warnings" {
+                map.entry(k).or_insert(v);
+            }
+        }
+        merge_warnings(map, warnings);
+    }
+}
+
+/// Appends `warnings` to the object's `warnings` array (created when absent), skipping the
+/// ones it already holds; a `warnings` key that is not an array is left alone.
+fn merge_warnings(map: &mut serde_json::Map<String, serde_json::Value>, warnings: &[String]) {
+    let entry = map
+        .entry("warnings".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(list) = entry.as_array_mut() {
+        for w in warnings {
+            let v = serde_json::Value::from(w.as_str());
+            if !list.contains(&v) {
+                list.push(v);
+            }
+        }
+    }
+}
+
+/// Inserts `missing` (when rows were dropped) and merges `warnings` (when there are any)
+/// into a JSON object payload; nothing is added for an empty summary and no warnings.
+pub fn add_missing_and_warnings(
+    json: &mut serde_json::Value,
+    missing: &MissingSummary,
+    warnings: &[String],
+) {
+    if let Some(map) = json.as_object_mut() {
+        if let Some(m) = missing_json(missing) {
+            map.insert("missing".to_string(), m);
+        }
+        if !warnings.is_empty() {
+            merge_warnings(map, warnings);
         }
     }
 }
@@ -235,10 +272,16 @@ pub fn add_result_notes(json: &mut serde_json::Value, r: &dyn ResultNotes) {
 pub fn parse_core_option<T: std::str::FromStr<Err = p2a_core::EconError>>(
     s: &str,
 ) -> Result<T, String> {
-    s.parse::<T>().map_err(|e| match e {
+    s.parse::<T>().map_err(core_message)
+}
+
+/// The message of a core refusal of an option value, without a second prefix (it names the
+/// option and the valid values); any other error's Display.
+pub fn core_message(e: p2a_core::EconError) -> String {
+    match e {
         p2a_core::EconError::InvalidSpecification { message } => message,
         other => other.to_string(),
-    })
+    }
 }
 
 /// The check of [`parse_core_option`], returning the string unchanged, for core entry
@@ -1133,11 +1176,31 @@ mod notes_helper_tests {
         );
         assert_eq!(
             kept,
-            json!({"warnings": ["from tier 2"], "converged": false, "iterations": 3})
+            json!({"warnings": ["from tier 2", "new"], "converged": false, "iterations": 3})
         );
         let mut empty = json!({});
         add_notes(&mut empty, None, &[]);
         assert_eq!(empty, json!({"warnings": []}));
+    }
+
+    #[test]
+    fn add_result_notes_merges_warnings_a_command_prefilled() {
+        // A command that put its own warnings into the payload keeps them; the result's
+        // warnings are appended once each (one helper for every command).
+        let mut v = json!({"method": "m", "warnings": ["command warning", "shared"]});
+        add_result_notes(
+            &mut v,
+            &Fake(None, vec!["shared".into(), "core warning".into()]),
+        );
+        assert_eq!(
+            v,
+            json!({"method": "m", "warnings": ["command warning", "shared", "core warning"]})
+        );
+        let mut d = json!({"n": 3});
+        add_missing_and_warnings(&mut d, &MissingSummary::default(), &[]);
+        assert_eq!(d, json!({"n": 3}));
+        add_missing_and_warnings(&mut d, &MissingSummary::default(), &["w".into()]);
+        assert_eq!(d, json!({"n": 3, "warnings": ["w"]}));
     }
 
     #[test]

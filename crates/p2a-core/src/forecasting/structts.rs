@@ -34,6 +34,7 @@ use crate::forecasting::kalman::{
     kalman_likelihood_terms, kalman_smoother,
 };
 use crate::linalg::matrix_ops::{cholesky, eig_symmetric};
+use crate::options::Choices;
 use crate::resource::{checkpoint, overflow, try_zeros1, try_zeros2, with_remedy};
 use crate::traits::convergence::{Convergence, ResultNotes};
 use ndarray::{Array1, Array2};
@@ -56,6 +57,26 @@ pub enum StructTsType {
     /// Observation: y_t = μ_t + γ_t + ε_t
     BSM,
 }
+
+// The accepted spellings (StructTS(type = )); the first of each entry is canonical.
+crate::option_enum!(
+    StructTsType,
+    Choices {
+        option: "model_type",
+        values: &[
+            (&["level", "local_level"], StructTsType::Level),
+            (
+                &["trend", "local_trend", "llt", "local_linear_trend"],
+                StructTsType::Trend,
+            ),
+            (
+                &["BSM", "basic_structural", "basic_structural_model"],
+                StructTsType::BSM,
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for structural time series fitting.
 #[derive(Debug, Clone)]
@@ -1120,6 +1141,30 @@ fn minimize_nonnegative(
 mod tests {
     use super::*;
     use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_struct_ts_type_parses_aliases_and_rejects_unknown() {
+        StructTsType::choices().validate().unwrap();
+        assert_eq!("bsm".parse::<StructTsType>().unwrap(), StructTsType::BSM);
+        assert_eq!(
+            "local linear trend".parse::<StructTsType>().unwrap(),
+            StructTsType::Trend
+        );
+        assert_eq!("LLT".parse::<StructTsType>().unwrap(), StructTsType::Trend);
+        assert_eq!(
+            "local-level".parse::<StructTsType>().unwrap(),
+            StructTsType::Level
+        );
+        match "arima".parse::<StructTsType>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown model_type 'arima'; expected one of: level, trend, BSM"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     /// The search on a plain objective, which has no scoring matrix: Newton throughout.
     fn minimize_nonnegative(

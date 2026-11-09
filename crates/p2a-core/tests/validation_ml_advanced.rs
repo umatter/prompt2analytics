@@ -127,7 +127,7 @@ fn compute_classification_accuracy(y_true: &Array1<f64>, y_pred: &[usize]) -> f6
 // ============================================================================
 
 #[test]
-fn test_validate_c50_classification() {
+fn test_c50_classification_properties() {
     let (x, y) = create_classification_data(200, 42);
 
     let config = C50Config {
@@ -164,7 +164,7 @@ fn test_validate_c50_classification() {
 }
 
 #[test]
-fn test_validate_c50_boosted() {
+fn test_c50_boosted_properties() {
     let (x, y) = create_classification_data(200, 42);
 
     let config = C50Config {
@@ -190,7 +190,7 @@ fn test_validate_c50_boosted() {
 }
 
 #[test]
-fn test_validate_c50_predict() {
+fn test_c50_predict_properties() {
     let (x_train, y_train) = create_classification_data(200, 42);
     let (x_test, y_test) = create_classification_data(50, 123);
 
@@ -220,7 +220,7 @@ fn test_validate_c50_predict() {
 // ============================================================================
 
 #[test]
-fn test_validate_cubist_regression() {
+fn test_cubist_regression_properties() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = CubistConfig {
@@ -255,7 +255,7 @@ fn test_validate_cubist_regression() {
 }
 
 #[test]
-fn test_validate_cubist_committees() {
+fn test_cubist_committees_properties() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = CubistConfig {
@@ -281,7 +281,7 @@ fn test_validate_cubist_committees() {
 }
 
 #[test]
-fn test_validate_cubist_predict() {
+fn test_cubist_predict_properties() {
     let (x_train, y_train) = create_regression_data(200, 42);
     let (x_test, y_test) = create_regression_data(50, 123);
 
@@ -310,7 +310,7 @@ fn test_validate_cubist_predict() {
 // ============================================================================
 
 #[test]
-fn test_validate_ctree_regression() {
+fn test_ctree_regression_properties() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = CtreeConfig {
@@ -347,7 +347,7 @@ fn test_validate_ctree_regression() {
 }
 
 #[test]
-fn test_validate_ctree_classification() {
+fn test_ctree_classification_properties() {
     let (x, y) = create_classification_data(200, 42);
 
     let config = CtreeConfig {
@@ -385,7 +385,7 @@ fn test_validate_ctree_classification() {
 }
 
 #[test]
-fn test_validate_ctree_predict() {
+fn test_ctree_predict_properties() {
     let (x_train, y_train) = create_regression_data(200, 42);
     let (x_test, y_test) = create_regression_data(50, 123);
 
@@ -414,7 +414,7 @@ fn test_validate_ctree_predict() {
 // ============================================================================
 
 #[test]
-fn test_validate_mboost_linear_regression() {
+fn test_mboost_linear_regression_recovers_dgp() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = MboostConfig {
@@ -457,7 +457,7 @@ fn test_validate_mboost_linear_regression() {
 }
 
 #[test]
-fn test_validate_mboost_tree_regression() {
+fn test_mboost_tree_regression_properties() {
     let (x, y) = create_regression_data(200, 42);
 
     let config = MboostConfig {
@@ -486,7 +486,7 @@ fn test_validate_mboost_tree_regression() {
 }
 
 #[test]
-fn test_validate_mboost_predict() {
+fn test_mboost_predict_properties() {
     let (x_train, y_train) = create_regression_data(200, 42);
     let (x_test, y_test) = create_regression_data(50, 123);
 
@@ -513,7 +513,7 @@ fn test_validate_mboost_predict() {
 }
 
 #[test]
-fn test_validate_mboost_poisson() {
+fn test_mboost_poisson_properties() {
     // Poisson regression on count-like data: y = exp(0.5*x1 + 0.2*x2)
     let mut state: u64 = 42;
     let next = |s: &mut u64| -> f64 {

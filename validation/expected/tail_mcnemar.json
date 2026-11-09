@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "tail_mcnemar",
+  "area": "stats/mcnemar",
+  "method": "McNemar chi-square upper tail below 1e-16",
+  "reference": "stats::mcnemar.test",
+  "call": "mcnemar.test(matrix(c(25, 10, 400, 30), 2), correct = TRUE | FALSE)",
+  "dataset": "validation/datasets/generated/tail_mcnemar.csv",
+  "datasets": ["validation/datasets/generated/tail_mcnemar.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "stat_correct": 369.07560975609755,
+    "p_correct": 2.974837071294514e-82,
+    "stat_plain": 370.97560975609758,
+    "p_plain": 1.1475572687301979e-82
+  }
+}

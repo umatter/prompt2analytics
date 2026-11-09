@@ -169,8 +169,16 @@ pub fn line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, Str
     let (_q1_idx, _q2_idx) = compute_split_indices(n);
 
     // Compute quantile values for splitting
-    let q1 = interpolate_quantile(&sorted_x, 1.0 / 3.0);
-    let q2 = interpolate_quantile(&sorted_x, 2.0 / 3.0);
+    let q1 = crate::stats::robust::quantile_sorted(
+        &sorted_x,
+        1.0 / 3.0,
+        crate::stats::robust::QuantileType::T7,
+    );
+    let q2 = crate::stats::robust::quantile_sorted(
+        &sorted_x,
+        2.0 / 3.0,
+        crate::stats::robust::QuantileType::T7,
+    );
 
     // Split into three groups
     let (group1_x, group1_y): (Vec<f64>, Vec<f64>) = sorted_x
@@ -322,28 +330,6 @@ fn compute_split_indices(n: usize) -> (usize, usize) {
     (j1_low, j2_low)
 }
 
-/// Interpolate a quantile value from sorted data.
-fn interpolate_quantile(sorted: &[f64], p: f64) -> f64 {
-    let n = sorted.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    if n == 1 {
-        return sorted[0];
-    }
-
-    let index = p * (n as f64 - 1.0);
-    let lower = index.floor() as usize;
-    let upper = index.ceil() as usize;
-
-    if lower == upper || upper >= n {
-        sorted[lower.min(n - 1)]
-    } else {
-        let frac = index - lower as f64;
-        sorted[lower] * (1.0 - frac) + sorted[upper] * frac
-    }
-}
-
 /// Run Tukey's line fitting (convenience wrapper).
 pub fn run_line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, String> {
     line(x, y, iter)
@@ -353,6 +339,39 @@ pub fn run_line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult,
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn test_line_drops_incomplete_pairs_as_r() {
+        // X-6: R's line() keeps complete.cases(x, y). NaN used to reach a partial_cmp sort (no
+        // total order: a panic for n > 20 under Rust >= 1.81, or NaN quantiles and slope).
+        let n = 40;
+        let x: Vec<f64> = (0..n)
+            .map(|i| i as f64 * 0.5 + 0.13 * ((i * 7 % 11) as f64))
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| 1.5 + 0.8 * v + 0.3 * (((i * 5) % 7) as f64 - 3.0))
+            .collect();
+        let (mut xn, mut yn) = (x.clone(), y.clone());
+        xn[5] = f64::NAN;
+        yn[17] = f64::NAN;
+        xn[30] = f64::NAN;
+        let keep: Vec<usize> = (0..n).filter(|i| ![5, 17, 30].contains(i)).collect();
+        let (xc, yc): (Vec<f64>, Vec<f64>) = keep.iter().map(|&i| (x[i], y[i])).unzip();
+        let (a, b) = (
+            line(&xn, &yn, Some(1)).unwrap(),
+            line(&xc, &yc, Some(1)).unwrap(),
+        );
+        assert_eq!(
+            (a.intercept, a.slope, &a.fitted),
+            (b.intercept, b.slope, &b.fitted)
+        );
+        assert_eq!(
+            (a.missing.n_dropped, a.missing.n_used, b.missing.n_dropped),
+            (3, 37, 0)
+        );
+    }
 
     #[test]
     fn test_line_basic() {

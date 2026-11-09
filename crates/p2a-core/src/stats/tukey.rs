@@ -154,21 +154,13 @@ impl std::fmt::Display for TukeyHsdResult {
     }
 }
 
-/// Compute the CDF of the Studentized range distribution.
-///
-/// Uses r_mathlib's implementation, which is a port of R's ptukey.
-///
-/// # Arguments
-/// * `q` - The q statistic value
-/// * `k` - Number of groups (nmeans)
-/// * `df` - Degrees of freedom (error df)
-///
-/// # Returns
-/// The probability P(Q <= q)
-fn ptukey(q: f64, k: f64, df: f64) -> f64 {
-    // r_mathlib::tukey_pdf is actually the CDF (named confusingly)
+/// R's `ptukey(q, k, df, lower.tail = FALSE)`, the call `TukeyHSD` makes: the upper tail
+/// `P(Q > q)` of the studentized range for `k` means and `df` error degrees of freedom,
+/// computed directly rather than as `1 - P(Q <= q)`.
+fn ptukey_upper(q: f64, k: f64, df: f64) -> f64 {
+    // r_mathlib::tukey_pdf is the distribution function despite its name.
     // Parameters: q, rr (nranges), cc (nmeans), df, lower_tail, log_p
-    r_mathlib::tukey_pdf(q, 1.0, k, df, true, false)
+    r_mathlib::tukey_pdf(q, 1.0, k, df, false, false)
 }
 
 /// Compute the quantile of the Studentized range distribution.
@@ -255,7 +247,7 @@ pub fn tukey_hsd(anova: &AnovaResult, conf_level: f64) -> EconResult<TukeyHsdRes
 
             // P-value from upper tail of Studentized range distribution
             // p = 1 - P(Q <= q)
-            let p_adj = 1.0 - ptukey(q_stat, k as f64, df as f64);
+            let p_adj = ptukey_upper(q_stat, k as f64, df as f64);
 
             // Confidence interval width
             let width = q_crit * se;

@@ -37,7 +37,7 @@ Test ids:
   `p2a-core::econometrics::panel::tests::test_validate_panel_re_grunfeld`;
 - integration tests (`tests/<bin>.rs` or `tests/<bin>/main.rs`):
   `<package>::<test binary>::<name>`, for example
-  `p2a-core::validation_ml_advanced::test_validate_c50_classification`.
+  `p2a-core::validation_new_methods::test_validate_multinom_overlapping`.
 
 These are the ids `validation_status.py` builds from `cargo test -- --list` output, and the
 lint looks each one up in the list of its package.

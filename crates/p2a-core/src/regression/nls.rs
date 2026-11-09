@@ -9,7 +9,7 @@
 //!   in Least Squares". Quarterly of Applied Mathematics, 2(2), 164-168.
 //! - Marquardt, D. W. (1963). "An Algorithm for Least-Squares Estimation of Nonlinear
 //!   Parameters". SIAM Journal on Applied Mathematics, 11(2), 431-441.
-//! - R implementation: `stats::nls()` - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/nls.html
+//! - R implementation: `stats::nls()` - <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/nls.html>
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
 use crate::traits::estimator::t_test_p_value;
 
 /// Available NLS algorithms.
@@ -400,9 +401,15 @@ pub fn nls(
     let jacobian_final = compute_jacobian(x, y, &theta, model, n, k, config.diff_step);
     let jtj_final = jacobian_final.t().dot(&jacobian_final);
 
-    let (vcov, std_errors) = match safe_inverse(&jtj_final.view()) {
-        Ok((inv, _)) => {
-            let vcov = &inv * (sigma * sigma);
+    // A rank-deficient J'J at the solution (R's nls stops with "singular gradient") has no
+    // covariance: NaN standard errors rather than a generalized inverse.
+    let (vcov, std_errors) = match sym_inverse(
+        jtj_final.view(),
+        SingularPolicy::Error,
+        "J'J at the solution",
+    ) {
+        Ok(s) => {
+            let vcov = &s.inverse * (sigma * sigma);
             let se: Vec<f64> = vcov.diag().iter().map(|v| v.max(0.0).sqrt()).collect();
             (Some(vcov), se)
         }
@@ -625,9 +632,15 @@ pub fn nls_multi(
     let jacobian_final = compute_jacobian_multi(x, y, &theta, model, config.diff_step);
     let jtj_final = jacobian_final.t().dot(&jacobian_final);
 
-    let (vcov, std_errors) = match safe_inverse(&jtj_final.view()) {
-        Ok((inv, _)) => {
-            let vcov = &inv * (sigma * sigma);
+    // A rank-deficient J'J at the solution (R's nls stops with "singular gradient") has no
+    // covariance: NaN standard errors rather than a generalized inverse.
+    let (vcov, std_errors) = match sym_inverse(
+        jtj_final.view(),
+        SingularPolicy::Error,
+        "J'J at the solution",
+    ) {
+        Ok(s) => {
+            let vcov = &s.inverse * (sigma * sigma);
             let se: Vec<f64> = vcov.diag().iter().map(|v| v.max(0.0).sqrt()).collect();
             (Some(vcov), se)
         }
@@ -888,6 +901,7 @@ fn solve_normal_equations(
         }
     }
 
+    // inverse-ok: a Levenberg-Marquardt trial step; the residual-sum check accepts or rejects it
     let (inv, _) = safe_inverse(&augmented.view()).map_err(|e| EconError::SingularMatrix {
         context: "Normal equations in NLS".to_string(),
         suggestion: format!("Try different starting values or increase lambda: {:?}", e),
@@ -910,6 +924,7 @@ fn solve_lm_equations(
         augmented[[i, i]] += lambda * diag[i].max(1e-10);
     }
 
+    // inverse-ok: a Levenberg-Marquardt trial step; the residual-sum check accepts or rejects it
     let (inv, _) = safe_inverse(&augmented.view()).map_err(|e| EconError::SingularMatrix {
         context: "L-M equations in NLS".to_string(),
         suggestion: format!("Lambda may be too small: {:?}", e),

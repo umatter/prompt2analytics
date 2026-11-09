@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "inv_cubist_leaf_model",
+  "area": "ml/cubist",
+  "method": "lm with a duplicated column (Cubist leaf model)",
+  "reference": "stats::lm (x1dup NA)",
+  "call": "lm(y ~ x1 + x1dup)",
+  "dataset": "validation/datasets/generated/inv_cubist_leaf.csv",
+  "datasets": ["validation/datasets/generated/inv_cubist_leaf.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "MASS": "7.3.60.0.1"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x1dup"],
+      "values": [1.7324117064449327, 1.542842534411597, null]
+    },
+    "coef_ginv": [1.7324117064449389, 0.77142126720579807, 0.77142126720579762]
+  }
+}

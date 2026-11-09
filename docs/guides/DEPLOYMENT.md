@@ -143,6 +143,11 @@ websocket `tool` messages runs through one governor
   its tool loop.
 - **Panics.** A tool that panics answers 500 `internal`; the session and the
   process survive.
+- **Integer overflow.** Release builds keep Rust's default: integer overflow
+  checks are off, as in the builds `cargo bench` measures. Sizes and
+  allocation arithmetic are checked explicitly in core code (see "Core
+  invariants"). Debug builds check every operation, and there an overflow is a
+  panic that the governor answers with 500 `internal`.
 - **Memory admission.** While the process RSS is above
   `P2A_MEMORY_SOFT_LIMIT_MB` (hosted 700 MiB), new calls are refused with 503
   `memory_pressure` (`Retry-After: 15`). This needs a platform that reports RSS
@@ -280,6 +285,8 @@ HTTP), and they never depend on the resource profile:
   bound;
 - buffers sized by a caller are allocated fallibly, with checked size
   arithmetic, so an impossible size is an error and not a process abort;
+- size and degrees-of-freedom arithmetic is checked; release builds do not
+  check the remaining integer arithmetic (Rust's default);
 - loops whose progress depends on comparing values reject or filter NaN and
   infinite values first;
 - method-level caps, modelled on R's own limits: multinomial and ordered models
@@ -553,7 +560,7 @@ Families (Off: none):
 
 | Key | What it bounds (typical fields) | Hosted |
 |---|---|---|
-| `replications` | bootstrap and permutation counts (`n_boot`, `n_bootstrap`, `n_permutations`, `bootstrap`) | 10,000 |
+| `replications` | bootstrap and permutation counts (`n_boot`, `n_bootstrap`, `n_permutations`, `bootstrap`, gsynth and iv_mte `bootstrap_reps`) | 10,000 |
 | `simulation_size` | Monte Carlo sizes (`n_simulations`, `n_samples`) | 100,000 |
 | `trees` | `n_trees`, `ntree`, `committees` | 5,000 |
 | `boosting_iterations` | `mstop`, `trials`, `nterms`, boosting `n_iter` | 10,000 |
@@ -561,14 +568,14 @@ Families (Off: none):
 | `folds` | `cv_folds`, `n_folds`, `nfolds` | 20 |
 | `iterations` | `max_iter`, `max_iterations`, `maxit` | 100,000 |
 | `restarts` | `n_init`, `n_starts` | 100 |
-| `grid_points` | `n_grid`, density `n`, `n_points`, `nlambda` | 10,000 |
+| `grid_points` | `n_grid`, density `n`, `stats_spline` `n`, `n_points`, `nlambda` | 10,000 |
 | `bins` | `bins`, `breaks`, `n_bins` | 1,000 |
-| `lags` | `lag_max`, `lags`, `max_lag`, `order_max`, `differences` | 1,000 |
+| `lags` | `lag_max`, `lags`, `max_lag`, `order_max`, `differences`, ts_varma `long_var_order`, panel_unit_root `pmax` | 1,000 |
 | `horizon` | forecast `horizon`, `steps`, `n_ahead`, `h` | 5,000 |
 | `model_order` | ARIMA, GARCH and VAR orders, RD `p`, `degree`, `instrument_order` | 20 |
 | `bandwidth` | integer HAC, Driscoll-Kraay, GMM and sphet bandwidths | 1,000 |
 | `span_width` | `spans` elements, `runmed` `k`, windows | 1,001 |
-| `components` | `n_components`, `n_factors`, `rank`, `n_clusters`, k-means `k` | 500 |
+| `components` | `n_components`, `n_factors`, `rank`, `n_clusters`, k-means `k`, gsynth `r_max` | 500 |
 | `neighbors` | kNN `k`, `n_neighbors` | 100 |
 | `generated_rows` | generated and sampled rows (`n_rows`, `munge_sample` `n`, `arima_sim` `n`) | 1,000,000 |
 | `image_dimension` | chart `width`, `height` | 4,000 |
@@ -1009,7 +1016,10 @@ Nothing here runs automatically except the two workflows named in steps 0 and
    ```
 
    `.github/workflows/backend-image.yml` then publishes `X.Y.Z`, `vX.Y.Z` and
-   `sha-<short>` to GHCR. Do not run that workflow by `workflow_dispatch` on
+   `sha-<short>` to GHCR. The image's `cargo build --release`
+   (`docker/backend.Dockerfile`) uses Rust's default release profile; no
+   `CARGO_PROFILE_RELEASE_*` override may be set in the image or on the
+   platform. Do not run that workflow by `workflow_dispatch` on
    `main` for a release: a dispatch on `main` publishes only `latest` and a sha
    tag.
 3. **Confirm the image exists.** The package is public, so an anonymous token

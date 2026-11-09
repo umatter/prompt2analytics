@@ -69,7 +69,10 @@ pub use count_models::{
 };
 
 // Re-exports for conditional logit (mlogit)
-pub use conditional_logit::{MlogitResult, run_conditional_logit, run_mlogit};
+pub use conditional_logit::{
+    MlogitConfig, MlogitResult, run_conditional_logit, run_conditional_logit_with, run_mlogit,
+    run_mlogit_with,
+};
 
 // Re-exports for mixed logit
 pub use mixed_logit::{

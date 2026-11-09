@@ -357,9 +357,16 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
     // Use Cholesky of E to compute E^(-1/2)
     let eigenvalues = compute_generalized_eigenvalues(&sscp_hypothesis, &sscp_error)?;
 
+    if eigenvalues.iter().any(|e| !e.is_finite()) {
+        return Err(EconError::Computation(
+            "MANOVA: the eigenvalues of E^-1 H are not finite (singular error SSCP matrix?)"
+                .to_string(),
+        ));
+    }
+
     // Sort eigenvalues in descending order
     let mut eigenvalues = eigenvalues;
-    eigenvalues.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    eigenvalues.sort_by(|a, b| b.total_cmp(a));
 
     // Filter out negative eigenvalues (numerical noise)
     let eigenvalues: Vec<f64> = eigenvalues.into_iter().map(|e| e.max(0.0)).collect();

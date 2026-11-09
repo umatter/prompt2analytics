@@ -633,8 +633,9 @@ impl SymInverse {
 }
 
 /// `(max |m_ij - m_ji|, max |m_ij|)` of a square matrix in one pass over its pairs, or
-/// `None` when an entry is not finite.
+/// `None` when an entry is not finite. The matrix must be square (both callers check first).
 pub(crate) fn finite_asymmetry(m: &ArrayView2<f64>) -> Option<(f64, f64)> {
+    debug_assert_eq!(m.nrows(), m.ncols(), "finite_asymmetry: square input");
     let d = m.nrows();
     let Some(sl) = m.as_slice() else {
         // Not row-major contiguous: indexed reads.
@@ -750,6 +751,18 @@ fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize, guarded: bool) -> EconRes
         }
     }
     Ok(g)
+}
+
+/// Restate a `SingularMatrix` from [`sym_inverse`] (whose context names the matrix and its
+/// rank) with the place it occurred and a suggestion; other errors pass through.
+pub(crate) fn singular_in(e: EconError, place: &str, suggestion: &str) -> EconError {
+    match e {
+        EconError::SingularMatrix { context, .. } => EconError::SingularMatrix {
+            context: format!("{context}; {place}"),
+            suggestion: suggestion.to_string(),
+        },
+        other => other,
+    }
 }
 
 /// Inverse of a symmetric matrix with its numerical rank.

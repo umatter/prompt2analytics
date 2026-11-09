@@ -527,6 +527,29 @@ mod tests {
     use super::*;
     use polars::prelude::*;
 
+    #[test]
+    fn test_did_rejects_empty_and_tiny_samples() {
+        // X-7: an empty sample or a clustered one smaller than the model is an error, not
+        // an underflowing residual degrees of freedom.
+        let empty: Vec<f64> = Vec::new();
+        let ds = Dataset::new(
+            df!("y" => &empty, "treat" => &empty, "post" => &empty, "cl" => &empty).unwrap(),
+        );
+        assert!(matches!(
+            run_did(&ds, "y", "treat", "post", None, None),
+            Err(EconError::InsufficientData { .. } | EconError::EmptyDataset)
+        ));
+        let ds = Dataset::new(
+            df!("y" => [1.0, 2.5, 3.1], "treat" => [0.0, 1.0, 1.0], "post" => [0.0, 0.0, 1.0],
+                "cl" => [1.0, 2.0, 3.0])
+            .unwrap(),
+        );
+        assert!(matches!(
+            run_did(&ds, "y", "treat", "post", None, Some("cl")),
+            Err(EconError::InsufficientData { .. })
+        ));
+    }
+
     fn create_did_dataset() -> Dataset {
         // Classic DiD setup:
         // Control group: y goes from 10 to 12 (trend = +2)

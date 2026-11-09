@@ -12,6 +12,7 @@
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::options::Choices;
 use serde::{Deserialize, Serialize};
 
 /// Type of seasonal decomposition.
@@ -23,6 +24,22 @@ pub enum DecomposeType {
     /// Multiplicative decomposition: Y = Trend × Seasonal × Random
     Multiplicative,
 }
+
+// The accepted spellings (decompose(type = )); the first of each entry is canonical.
+crate::option_enum!(
+    DecomposeType,
+    Choices {
+        option: "decompose_type",
+        values: &[
+            (&["additive", "add"], DecomposeType::Additive),
+            (
+                &["multiplicative", "mult", "multi"],
+                DecomposeType::Multiplicative,
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for classical decomposition.
 #[derive(Debug, Clone)]
@@ -352,6 +369,28 @@ pub fn run_decompose_with_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decompose_type_parses_aliases_and_rejects_unknown() {
+        DecomposeType::choices().validate().unwrap();
+        assert_eq!(
+            "Multi".parse::<DecomposeType>().unwrap(),
+            DecomposeType::Multiplicative
+        );
+        assert_eq!(
+            "add".parse::<DecomposeType>().unwrap(),
+            DecomposeType::Additive
+        );
+        match "stl".parse::<DecomposeType>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown decompose_type 'stl'; expected one of: additive, multiplicative"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     /// X-2: an Int64 column decomposes as its Float64 copy; missing values, text and
     /// absent columns are refused by name.

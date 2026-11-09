@@ -53,22 +53,22 @@
 //!
 //! - VanderWeele, T. J., & Ding, P. (2017). "Sensitivity Analysis in Observational
 //!   Research: Introducing the E-Value". Annals of Internal Medicine, 167(4), 268-274.
-//!   https://doi.org/10.7326/M16-2607
+//!   <https://doi.org/10.7326/M16-2607>
 //!
 //! - VanderWeele, T. J. (2017). "On a Square-Root Transformation of the Odds Ratio
 //!   for a Common Outcome". Epidemiology, 28(6), e58-e59.
-//!   https://doi.org/10.1097/EDE.0000000000000733
+//!   <https://doi.org/10.1097/EDE.0000000000000733>
 //!
 //! - Chinn, S. (2000). "A simple method for converting an odds ratio to effect size
 //!   for use in meta-analysis". Statistics in Medicine, 19(22), 3127-3131.
-//!   https://doi.org/10.1002/1097-0258(20001130)19:22<3127::AID-SIM784>3.0.CO;2-M
+//!   <https://doi.org/10.1002/1097-0258(20001130)19:22%3C3127::AID-SIM784%3E3.0.CO;2-M>
 //!
 //! - Linden, A., Mathur, M. B., & VanderWeele, T. J. (2020). "Conducting sensitivity
 //!   analysis for unmeasured confounding in observational studies using E-values:
 //!   The evalue package". The Stata Journal, 20(1), 162-175.
-//!   https://doi.org/10.1177/1536867X20909696
+//!   <https://doi.org/10.1177/1536867X20909696>
 //!
-//! - R package EValue: https://CRAN.R-project.org/package=EValue
+//! - R package EValue: <https://CRAN.R-project.org/package=EValue>
 //!
 //! R equivalent: `EValue::evalue()`
 
@@ -568,15 +568,16 @@ pub fn evalue_smd(smd: f64, se: Option<f64>) -> EconResult<EValueResult> {
 
     let rr_point = (CHINN_CONSTANT * smd).exp();
 
-    // If SE provided, compute CI for the RR
-    // Using delta method: CI for SMD is (d - 1.96*se, d + 1.96*se)
-    // Then transform to RR scale
+    // If SE provided: the 95% CI of the SMD, and the RR limits as EValue's evalues.MD
+    // computes them, exp(0.91 d -/+ 1.78 se) (VanderWeele and Ding's approximation for the
+    // RR scale, not 0.91 times the SMD limits)
+    const EVALUE_MD_SE_MULTIPLIER: f64 = 1.78;
     let (ci_lower, ci_upper, rr_lower, rr_upper) = if let Some(s) = se {
-        let z = 1.96; // For 95% CI
+        let z = crate::traits::estimator::z_critical(0.95)?;
         let smd_lo = smd - z * s;
         let smd_hi = smd + z * s;
-        let rr_lo = (CHINN_CONSTANT * smd_lo).exp();
-        let rr_hi = (CHINN_CONSTANT * smd_hi).exp();
+        let rr_lo = (CHINN_CONSTANT * smd - EVALUE_MD_SE_MULTIPLIER * s).exp();
+        let rr_hi = (CHINN_CONSTANT * smd + EVALUE_MD_SE_MULTIPLIER * s).exp();
         (Some(smd_lo), Some(smd_hi), Some(rr_lo), Some(rr_hi))
     } else {
         (None, None, None, None)
@@ -663,7 +664,8 @@ pub fn evalue_rd(rd: f64, baseline_risk: f64, se: Option<f64>) -> EconResult<EVa
     // For CI, we need to propagate uncertainty through the transformation
     // This is approximate; exact propagation requires more information
     let (ci_lower, ci_upper, evalue_ci) = if let Some(s) = se {
-        let z = 1.96;
+        // EValue's evalues.RD: qnorm(1 - alpha / 2) at alpha = 0.05
+        let z = crate::traits::estimator::z_critical(0.95)?;
         let rd_lo = rd - z * s;
         let rd_hi = rd + z * s;
 
@@ -1035,12 +1037,11 @@ mod tests {
         let smd = evalue_smd(0.5, Some(0.1)).unwrap();
         c.scalar("row8_rr", smd.risk_ratio, tol)
             .scalar("row8_e_point", smd.evalue_point, tol)
+            .scalar("row8_e_ci", smd.evalue_ci.unwrap(), tol)
             .scalar("evalue_rr_3_9", evalue_rr(3.9), tol)
             .finish();
         // deviation REG-5: row7 (HR 4, common outcome): EValue RR 2.560660171779822, E
         //   4.559740046011876; p2a sqrt(HR).
-        // not pinned (new observation): row8_e_ci -- EValue exp(0.91 d - 1.78 se) gives
-        //   1.9680373469882557, p2a exp(0.91 (d - 1.96 se)) gives 1.9669630004308964.
         // deviation REG-39: could_explain_away is not pinned.
     }
 

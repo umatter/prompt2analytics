@@ -88,6 +88,9 @@ const NO_HESSIAN: &str = "the Hessian of the log-likelihood could not be evaluat
 
 /// Conditional distribution of the standardised errors z_t = e_t / sqrt(h_t) (fGarch's `cond.dist`).
 ///
+/// Serde accepts the same spellings as `FromStr`, but only in their exact case: parse user
+/// strings with `FromStr` (case-insensitive), not with serde.
+///
 /// ```
 /// use p2a_core::forecasting::garch::GarchDistribution;
 ///
@@ -102,7 +105,13 @@ pub enum GarchDistribution {
     #[serde(rename = "norm", alias = "normal", alias = "gaussian")]
     Normal,
     /// z_t standardised Student-t with shape nu > 2 (fGarch "std").
-    #[serde(rename = "std", alias = "t", alias = "student_t", alias = "student")]
+    #[serde(
+        rename = "std",
+        alias = "t",
+        alias = "student_t",
+        alias = "student",
+        alias = "studentt"
+    )]
     StudentT,
 }
 
@@ -1948,6 +1957,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.distribution, GarchDistribution::Normal);
+        // serde and FromStr accept the same spellings
+        for name in ["std", "t", "student_t", "student", "studentt"] {
+            let d: GarchDistribution = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(d, GarchDistribution::StudentT, "{name}");
+            assert_eq!(name.parse::<GarchDistribution>().unwrap(), d, "{name}");
+        }
     }
 
     /// run_garch is garch() with p, q, include_mean and the defaults.

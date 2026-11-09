@@ -31,16 +31,16 @@ EXAMPLES:
     p2a --session analysis.json reg ols mydata -y price -x sqft bedrooms
 
     # Panel fixed effects with clustered SEs
-    p2a panel fe mydata -y revenue -x employees --entity firm_id
+    p2a --session analysis.json panel fe mydata -y revenue -x employees --entity firm_id
 
     # Difference-in-differences
-    p2a causal did mydata -y outcome --treat treatment --post post_period
+    p2a --session analysis.json causal did mydata -y outcome --treat treatment --post post_period
 
     # K-means clustering
-    p2a ml kmeans mydata --cols x1 x2 x3 -k 3
+    p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
 
     # Create a scatter plot
-    p2a viz scatter mydata -x income -y spending -f plot.png
+    p2a --session analysis.json viz scatter mydata -x income -y spending -f plot.png
 ")]
 pub struct Cli {
     /// Output format: text, json, or table
@@ -840,6 +840,47 @@ mod cli_definition_tests {
         assert_eq!(
             na(&["data", "load", "f.csv", "--na-strings=-99,."]),
             Some(vec!["-99".into(), ".".into()])
+        );
+    }
+
+    /// Every EXAMPLES line of every command's after-help that runs a dataset command names a
+    /// session, so a copied example does not stop with "No session active". `script`, `chat`
+    /// and `smoke-test` need none.
+    #[test]
+    fn every_in_binary_example_names_a_session() {
+        fn walk(cmd: &clap::Command, path: &mut Vec<String>, missing: &mut Vec<String>) {
+            if let Some(help) = cmd.get_after_help() {
+                for line in help
+                    .to_string()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| l.starts_with("p2a "))
+                {
+                    let free = ["script", "chat", "smoke-test"]
+                        .iter()
+                        .any(|s| line.split_whitespace().any(|w| w == *s));
+                    if !free && !line.contains("--session") {
+                        missing.push(format!("p2a {}: {line}", path.join(" ")));
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                path.push(sub.get_name().to_string());
+                walk(sub, path, missing);
+                path.pop();
+            }
+        }
+        let mut missing = Vec::new();
+        walk(
+            &<Cli as clap::CommandFactory>::command(),
+            &mut Vec::new(),
+            &mut missing,
+        );
+        assert!(
+            missing.is_empty(),
+            "{} in-binary examples name no session:\n{}",
+            missing.len(),
+            missing.join("\n")
         );
     }
 }

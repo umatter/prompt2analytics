@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "qtl_hettx_summary",
+  "area": "econometrics/hettx",
+  "method": "type-7 quantiles and IQR of an effect vector with ties (hettx effect summary)",
+  "reference": "stats::quantile(type = 7); stats::IQR",
+  "call": "quantile(tau, c(0.1, 0.25, 0.5, 0.75, 0.9)); IQR(tau)",
+  "dataset": "validation/datasets/generated/qtl_hettx_summary.csv",
+  "datasets": ["validation/datasets/generated/qtl_hettx_summary.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "probs": [0.10000000000000001, 0.25, 0.5, 0.75, 0.90000000000000002],
+    "quantiles": [-1.7449999999999999, -0.76500000000000001, 0.67500000000000004, 2.1875, 4.110000000000003],
+    "iqr": 2.9525000000000001,
+    "min": -3.1400000000000001,
+    "max": 6.96,
+    "sd": 2.3656879283013965,
+    "quantiles_old_rule": [-2.27, -0.81000000000000005, 0.76000000000000001, 2.25, 4.5300000000000002],
+    "iqr_old_rule": 3.0600000000000001
+  }
+}

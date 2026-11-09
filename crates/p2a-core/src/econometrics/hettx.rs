@@ -68,8 +68,12 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::{xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
+use crate::options::Choices;
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
+use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::estimator::SignificanceLevel;
 
 // ===============================================================================
@@ -93,6 +97,24 @@ pub enum HetTestStat {
     /// Robust alternative to variance.
     MeanAbsDeviation,
 }
+
+// The accepted spellings (hettx's HetTestStat); the first of each entry is canonical.
+crate::option_enum!(
+    HetTestStat,
+    Choices {
+        option: "test_statistic",
+        values: &[
+            (&["variance", "var"], HetTestStat::Variance),
+            (&["range"], HetTestStat::Range),
+            (&["iqr", "interquartile_range"], HetTestStat::IQR),
+            (
+                &["mad", "mean_abs_deviation", "mean_absolute_deviation"],
+                HetTestStat::MeanAbsDeviation,
+            ),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for HetTestStat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -122,6 +144,20 @@ pub enum EffectEstimationMethod {
     Stratified,
 }
 
+// The accepted spellings (hettx's EffectEstimationMethod); the first of each entry is canonical.
+crate::option_enum!(
+    EffectEstimationMethod,
+    Choices {
+        option: "effect_method",
+        values: &[
+            (&["matching", "match"], EffectEstimationMethod::Matching),
+            (&["regression", "reg"], EffectEstimationMethod::Regression),
+            (&["stratified", "strat"], EffectEstimationMethod::Stratified),
+        ],
+    },
+    no_display
+);
+
 impl fmt::Display for EffectEstimationMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -147,11 +183,15 @@ pub struct HetTxConfig {
     /// Number of nearest neighbors for matching (default: 3).
     /// Must be at least 1 with [`EffectEstimationMethod::Matching`].
     pub n_neighbors: usize,
-    /// Random seed for reproducibility
+    /// Random seed of the permutations (`None`: [`HETTX_DEFAULT_SEED`])
     pub seed: Option<u64>,
     /// Whether to compute variable importance in decomposition (default: true)
     pub compute_importance: bool,
 }
+
+/// The seed of the permutations when [`HetTxConfig::seed`] is `None`, so every run is
+/// reproducible (the MCP handler's default seed is the same value).
+pub const HETTX_DEFAULT_SEED: u64 = 42;
 
 impl Default for HetTxConfig {
     fn default() -> Self {
@@ -559,7 +599,7 @@ fn run_hettx_with_names(
     // Initialize RNG
     let mut rng: ChaCha8Rng = match config.seed {
         Some(s) => ChaCha8Rng::seed_from_u64(s),
-        None => ChaCha8Rng::from_entropy(),
+        None => ChaCha8Rng::seed_from_u64(HETTX_DEFAULT_SEED),
     };
 
     // The null distribution has one slot per permutation; refuse an impossible
@@ -576,6 +616,8 @@ fn run_hettx_with_names(
         &control_idx,
         config.effect_method,
         config.n_neighbors,
+        &covariate_names,
+        &mut warnings,
     )?;
 
     // Compute ATE and SE
@@ -589,8 +631,9 @@ fn run_hettx_with_names(
     // Step 2: Compute observed test statistic
     let observed_stat = compute_test_statistic(&tau_hat, config.test_statistic);
 
-    // Step 3: Permutation test
+    // Step 3: Permutation test (the aliasing notes of permuted fits are not the data's)
     let mut treatment_perm = treatment.to_owned();
+    let mut permutation_warnings = Vec::new();
 
     for _ in 0..config.n_permutations {
         resource::checkpoint()?;
@@ -619,6 +662,8 @@ fn run_hettx_with_names(
             &control_perm,
             config.effect_method,
             config.n_neighbors,
+            &covariate_names,
+            &mut permutation_warnings,
         ) {
             Ok(t) => t,
             Err(e) if is_resource_stop(&e) => return Err(e),
@@ -661,6 +706,7 @@ fn run_hettx_with_names(
             config.n_permutations,
             &mut rng,
             config.compute_importance,
+            &mut warnings,
         )?)
     } else {
         if config.decompose && covariates.is_none() {
@@ -737,6 +783,7 @@ fn validate_config(
 }
 
 /// Estimate individual treatment effects using the specified method.
+#[allow(clippy::too_many_arguments)]
 fn estimate_individual_effects(
     y: &ArrayView1<f64>,
     treatment: &ArrayView1<f64>,
@@ -745,6 +792,8 @@ fn estimate_individual_effects(
     control_idx: &[usize],
     method: EffectEstimationMethod,
     n_neighbors: usize,
+    covariate_names: &[String],
+    warnings: &mut Vec<String>,
 ) -> EconResult<Array1<f64>> {
     let n = y.len();
     let mut tau_hat = Array1::zeros(n);
@@ -782,18 +831,23 @@ fn estimate_individual_effects(
 
             // Add intercept
             let x_with_int = add_intercept(x);
+            let names = design_names(covariate_names, x.ncols());
 
             // Fit model on treated: Y(1) = X * beta_1
-            let (mu_1, _) = fit_outcome_model_on_subset(&x_with_int, y, treated_idx)?;
+            let mu_1 = fit_outcome_model_on_subset(&x_with_int, y, treated_idx, &names)?;
 
             // Fit model on control: Y(0) = X * beta_0
-            let (mu_0, _) = fit_outcome_model_on_subset(&x_with_int, y, control_idx)?;
+            let mu_0 = fit_outcome_model_on_subset(&x_with_int, y, control_idx, &names)?;
+            for (arm, fit) in [("treated", &mu_1), ("control", &mu_0)] {
+                if let Some(w) = &fit.warning {
+                    push_once(warnings, format!("Outcome model ({arm} arm): {w}"));
+                }
+            }
 
             // tau_hat_i = mu_1(X_i) - mu_0(X_i)
             for i in 0..n {
-                let y_hat_1 = x_with_int.row(i).dot(&mu_1);
-                let y_hat_0 = x_with_int.row(i).dot(&mu_0);
-                tau_hat[i] = y_hat_1 - y_hat_0;
+                let row = x_with_int.row(i);
+                tau_hat[i] = mu_1.predict(&row) - mu_0.predict(&row);
             }
         }
         EffectEstimationMethod::Stratified => {
@@ -855,6 +909,26 @@ fn euclidean_distance(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
         .sqrt()
 }
 
+/// The names of the design columns: "(Intercept)", then the covariates (`x1`, `x2`, ... for
+/// unnamed ones, as R's default names).
+fn design_names(covariate_names: &[String], k: usize) -> Vec<String> {
+    std::iter::once("(Intercept)".to_string())
+        .chain((0..k).map(|j| {
+            covariate_names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("x{}", j + 1))
+        }))
+        .collect()
+}
+
+/// Push `w` unless `warnings` already holds it.
+fn push_once(warnings: &mut Vec<String>, w: String) {
+    if !warnings.contains(&w) {
+        warnings.push(w);
+    }
+}
+
 /// Add intercept column to design matrix.
 fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
     let n = x.nrows();
@@ -871,12 +945,35 @@ fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
     x_with_int
 }
 
-/// Fit OLS model on a subset of observations, return coefficients.
+/// An outcome model fitted on a subset of rows, as R's `lm`: aliased coefficients are NaN
+/// (R's NA) and the fit records R's "Coefficients not defined because of singularities".
+#[derive(Debug, Clone)]
+struct OutcomeFit {
+    coefficients: Array1<f64>,
+    r2: f64,
+    warning: Option<String>,
+}
+
+impl OutcomeFit {
+    /// The prediction for one design row, as `predict.lm`: aliased coefficients count as 0.
+    fn predict(&self, row: &ArrayView1<f64>) -> f64 {
+        row.iter()
+            .zip(self.coefficients.iter())
+            .filter(|(_, b)| b.is_finite())
+            .map(|(x, b)| x * b)
+            .sum()
+    }
+}
+
+/// Fit OLS on a subset of observations: the normal equations when the design is of full rank
+/// and well conditioned, otherwise lm's pivoted QR (aliased columns NaN, with R's warning).
+/// `names` names the columns of `x` for the warning.
 fn fit_outcome_model_on_subset(
     x: &Array2<f64>,
     y: &ArrayView1<f64>,
     subset_idx: &[usize],
-) -> EconResult<(Array1<f64>, f64)> {
+    names: &[String],
+) -> EconResult<OutcomeFit> {
     let n_sub = subset_idx.len();
     let k = x.ncols();
 
@@ -897,21 +994,22 @@ fn fit_outcome_model_on_subset(
         y_sub[new_i] = y[old_i];
     }
 
-    // OLS: beta = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x_sub.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Outcome model fitting".to_string(),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x_sub.view(), &y_sub);
-    let beta = xtx_inv.dot(&xty_vec);
+    let (beta, y_hat, warning) = match normal_equations_inverse(x_sub.view())? {
+        Some(ne) => {
+            let beta = ne.coefficients(x_sub.view(), &y_sub);
+            let y_hat = x_sub.dot(&beta);
+            (beta, y_hat, None)
+        }
+        None => {
+            let ls = least_squares(x_sub.view(), y_sub.view())?;
+            let warning = ls.aliasing_warning(names);
+            (ls.coefficients, ls.fitted, warning)
+        }
+    };
 
     // Compute R-squared
     let y_mean = y_sub.mean().unwrap_or(0.0);
     let sst: f64 = y_sub.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
-    let y_hat = x_sub.dot(&beta);
     let ssr: f64 = y_sub
         .iter()
         .zip(y_hat.iter())
@@ -920,7 +1018,11 @@ fn fit_outcome_model_on_subset(
 
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
-    Ok((beta, r2))
+    Ok(OutcomeFit {
+        coefficients: beta,
+        r2,
+        warning,
+    })
 }
 
 /// Compute the test statistic for heterogeneity.
@@ -941,11 +1043,11 @@ fn compute_test_statistic(tau: &Array1<f64>, stat_type: HetTestStat) -> f64 {
             max - min
         }
         HetTestStat::IQR => {
+            // R's IQR(): type-7 quantiles (tau is computed from finite, checked inputs)
             let mut sorted: Vec<f64> = tau.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let q1 = sorted[n / 4];
-            let q3 = sorted[3 * n / 4];
-            q3 - q1
+            sorted.sort_by(f64::total_cmp);
+            let q = |p| quantile_sorted(&sorted, p, QuantileType::T7);
+            q(0.75) - q(0.25)
         }
         HetTestStat::MeanAbsDeviation => {
             let mean = tau.mean().unwrap_or(0.0);
@@ -970,19 +1072,21 @@ fn compute_effect_summary(tau: &Array1<f64>) -> EffectSummary {
         };
     }
 
+    // R's quantile() (type 7); tau is computed from finite, checked inputs
     let mut sorted: Vec<f64> = tau.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
+    let q = |p| quantile_sorted(&sorted, p, QuantileType::T7);
 
     let mean = tau.mean().unwrap_or(0.0);
     let var = tau.iter().map(|&t| (t - mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
 
     EffectSummary {
         min: sorted[0],
-        p10: sorted[(n as f64 * 0.10).floor() as usize],
-        p25: sorted[n / 4],
-        median: sorted[n / 2],
-        p75: sorted[3 * n / 4],
-        p90: sorted[((n as f64 * 0.90).floor() as usize).min(n - 1)],
+        p10: q(0.10),
+        p25: q(0.25),
+        median: q(0.5),
+        p75: q(0.75),
+        p90: q(0.90),
         max: sorted[n - 1],
         std_dev: var.sqrt(),
     }
@@ -1004,6 +1108,7 @@ fn compute_heterogeneity_decomposition(
     n_perm: usize,
     rng: &mut ChaCha8Rng,
     compute_importance: bool,
+    warnings: &mut Vec<String>,
 ) -> EconResult<HetDecomposition> {
     let n = tau.len();
     let k = x.ncols();
@@ -1017,10 +1122,21 @@ fn compute_heterogeneity_decomposition(
     // This estimates E[tau|X] = X * gamma
     let x_with_int = add_intercept(x);
     let all_idx: Vec<usize> = (0..n).collect();
-    let (gamma, _r2) = fit_outcome_model_on_subset(&x_with_int, &tau.view(), &all_idx)?;
+    let names = design_names(covariate_names, k);
+    let fit = fit_outcome_model_on_subset(&x_with_int, &tau.view(), &all_idx, &names)?;
+    if let Some(w) = &fit.warning {
+        warnings.push(format!("Outcome model (effects): {w}"));
+    }
+    // Aliased coefficients count as 0, as predict.lm
+    let gamma = fit
+        .coefficients
+        .mapv(|b| if b.is_finite() { b } else { 0.0 });
 
     // Predicted effects: E[tau|X]
     let tau_fitted = x_with_int.dot(&gamma);
+    // The permutation fits share the design: one pivoted QR, and each permuted fit's
+    // systematic variance is the squared length of its projection on the column space.
+    let qr = Qr::decompose(x_with_int.view(), LM_QR_TOL)?;
 
     // Systematic variance: Var(E[tau|X]) = Var(X * gamma)
     let tau_fitted_mean = tau_fitted.mean().unwrap_or(0.0);
@@ -1046,51 +1162,8 @@ fn compute_heterogeneity_decomposition(
     let idiosyncratic_test_stat = idiosyncratic_variance;
 
     // Permutation tests for decomposition components
-    let mut systematic_null =
-        resource::try_with_capacity::<f64>(n_perm, "systematic null distribution")?;
-    let mut idiosyncratic_null =
-        resource::try_with_capacity::<f64>(n_perm, "idiosyncratic null distribution")?;
-
-    for _ in 0..n_perm {
-        resource::checkpoint()?;
-
-        // Permute the relationship between X and tau
-        let perm: Vec<usize> = {
-            let mut indices: Vec<usize> = (0..n).collect();
-            indices.shuffle(rng);
-            indices
-        };
-
-        // Create permuted tau
-        let tau_perm: Array1<f64> = perm.iter().map(|&i| tau[i]).collect();
-
-        // Fit on permuted data
-        if let Ok((gamma_perm, _)) =
-            fit_outcome_model_on_subset(&x_with_int, &tau_perm.view(), &all_idx)
-        {
-            let tau_fitted_perm = x_with_int.dot(&gamma_perm);
-
-            // Compute permuted systematic variance
-            let fitted_mean_perm = tau_fitted_perm.mean().unwrap_or(0.0);
-            let sys_var_perm = tau_fitted_perm
-                .iter()
-                .map(|&t| (t - fitted_mean_perm).powi(2))
-                .sum::<f64>()
-                / (n - 1).max(1) as f64;
-
-            // Compute permuted tau variance for idiosyncratic
-            let tau_perm_mean = tau_perm.mean().unwrap_or(0.0);
-            let total_var_perm = tau_perm
-                .iter()
-                .map(|&t| (t - tau_perm_mean).powi(2))
-                .sum::<f64>()
-                / (n - 1).max(1) as f64;
-            let idio_var_perm = (total_var_perm - sys_var_perm).max(0.0);
-
-            systematic_null.push(sys_var_perm);
-            idiosyncratic_null.push(idio_var_perm);
-        }
-    }
+    let (systematic_null, idiosyncratic_null) =
+        decomposition_null(tau, &qr, total_variance, n_perm, rng)?;
 
     // Compute p-values
     let systematic_p_value = if !systematic_null.is_empty() {
@@ -1132,6 +1205,54 @@ fn compute_heterogeneity_decomposition(
         covariate_importance,
         covariate_names: covariate_names.to_vec(),
     })
+}
+
+/// Permutation null distributions of the systematic and idiosyncratic variances.
+///
+/// Every permuted fit shares the design `[1, X]`, factored once in `qr`. The effects are
+/// centred once (their mean and total variance do not change under permutation), and the
+/// systematic variance of a permuted fit is the squared length of the centred effects'
+/// projection on the column space, `||Q_r' tau_c[perm]||^2 / (n - 1)`: the intercept is in
+/// the column space, so this is the variance of the fitted values without subtracting
+/// `n mean^2` from a sum of squares. Each permutation costs one application of the
+/// Householder reflectors.
+fn decomposition_null(
+    tau: &Array1<f64>,
+    qr: &Qr,
+    total_variance: f64,
+    n_perm: usize,
+    rng: &mut ChaCha8Rng,
+) -> EconResult<(Vec<f64>, Vec<f64>)> {
+    let n = tau.len();
+    let rank = qr.rank();
+    let denom = (n - 1).max(1) as f64;
+    let tau_mean = tau.mean().unwrap_or(0.0);
+    let tau_c: Vec<f64> = tau.iter().map(|&t| t - tau_mean).collect();
+
+    let mut systematic_null =
+        resource::try_with_capacity::<f64>(n_perm, "systematic null distribution")?;
+    let mut idiosyncratic_null =
+        resource::try_with_capacity::<f64>(n_perm, "idiosyncratic null distribution")?;
+    let mut indices: Vec<usize> = (0..n).collect();
+    let mut tau_perm = resource::try_zeros1(n, "permuted effects")?;
+
+    for _ in 0..n_perm {
+        resource::checkpoint()?;
+
+        // Permute the relationship between X and tau
+        indices.clear();
+        indices.extend(0..n);
+        indices.shuffle(rng);
+        for (dst, &i) in tau_perm.iter_mut().zip(&indices) {
+            *dst = tau_c[i];
+        }
+
+        let effects = qr.qty(tau_perm.view())?;
+        let sys_var_perm = effects.iter().take(rank).map(|e| e * e).sum::<f64>() / denom;
+        systematic_null.push(sys_var_perm);
+        idiosyncratic_null.push((total_variance - sys_var_perm).max(0.0));
+    }
+    Ok((systematic_null, idiosyncratic_null))
 }
 
 /// Compute variable importance for explaining treatment effect heterogeneity.
@@ -1178,7 +1299,7 @@ fn compute_covariate_importance(
     }
 
     // Sort by importance (descending)
-    importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    importance.sort_by(|a, b| a.1.is_nan().cmp(&b.1.is_nan()).then(b.1.total_cmp(&a.1)));
 
     importance
 }
@@ -1193,6 +1314,263 @@ mod tests {
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array1;
     use polars::prelude::*;
+
+    #[test]
+    fn test_effect_estimation_method_parses_aliases_and_rejects_unknown() {
+        EffectEstimationMethod::choices().validate().unwrap();
+        assert_eq!(
+            "Reg".parse::<EffectEstimationMethod>().unwrap(),
+            EffectEstimationMethod::Regression
+        );
+        assert_eq!(
+            "strat".parse::<EffectEstimationMethod>().unwrap(),
+            EffectEstimationMethod::Stratified
+        );
+        assert_eq!(
+            "match".parse::<EffectEstimationMethod>().unwrap(),
+            EffectEstimationMethod::Matching
+        );
+        match "forest".parse::<EffectEstimationMethod>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown effect_method 'forest'; expected one of: matching, regression, stratified"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_het_test_stat_parses_aliases_and_rejects_unknown() {
+        HetTestStat::choices().validate().unwrap();
+        assert_eq!("IQR".parse::<HetTestStat>().unwrap(), HetTestStat::IQR);
+        assert_eq!(
+            "mean absolute deviation".parse::<HetTestStat>().unwrap(),
+            HetTestStat::MeanAbsDeviation
+        );
+        assert_eq!("var".parse::<HetTestStat>().unwrap(), HetTestStat::Variance);
+        match "sd".parse::<HetTestStat>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown test_statistic 'sd'; expected one of: variance, range, iqr, mad"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_hettx_outcome_model_aliased_subset() {
+        // On the treated arm x2 = 2 x1 + 1: lm reports x2 NA and predict.lm counts it as 0;
+        // a generalized inverse splits its role between the columns instead.
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("inv_hettx_outcome_model");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let (y, treat) = (Array1::from(col("y")), col("treat"));
+        let x = add_intercept(
+            &ndarray::stack![
+                ndarray::Axis(1),
+                Array1::from(col("x1")),
+                Array1::from(col("x2"))
+            ]
+            .view(),
+        );
+        let treated: Vec<usize> = (0..y.len()).filter(|&i| treat[i] == 1.0).collect();
+        let names = design_names(&["x1".to_string(), "x2".to_string()], 2);
+        let fit = fit_outcome_model_on_subset(&x, &y.view(), &treated, &names).unwrap();
+        let pred: Vec<f64> = (0..y.len()).map(|i| fit.predict(&x.row(i))).collect();
+        Check::new(&case)
+            .vector("coef", fit.coefficients.as_slice().unwrap(), Tol::coef(20))
+            .vector("predictions", &pred, Tol::coef(40))
+            .scalar("r2", fit.r2, Tol::stat(20))
+            .finish();
+        assert_eq!(
+            fit.warning.as_deref(),
+            Some("Coefficients not defined because of singularities: x2")
+        );
+    }
+
+    /// Per-permutation `least_squares` refit of the decomposition null (the route the
+    /// projection replaced), drawing the permutations exactly as `decomposition_null`.
+    fn decomposition_null_by_refit(
+        tau: &Array1<f64>,
+        x_with_int: &Array2<f64>,
+        n_perm: usize,
+        rng: &mut ChaCha8Rng,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let n = tau.len();
+        let var = |v: &Array1<f64>| {
+            let m = v.mean().unwrap();
+            v.iter().map(|t| (t - m).powi(2)).sum::<f64>() / (n - 1) as f64
+        };
+        let (mut sys, mut idio) = (Vec::new(), Vec::new());
+        for _ in 0..n_perm {
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.shuffle(rng);
+            let tau_perm: Array1<f64> = indices.iter().map(|&i| tau[i]).collect();
+            let fit = least_squares(x_with_int.view(), tau_perm.view()).unwrap();
+            let s = var(&fit.fitted);
+            sys.push(s);
+            idio.push((var(&tau_perm) - s).max(0.0));
+        }
+        (sys, idio)
+    }
+
+    fn assert_close(what: &str, a: &[f64], b: &[f64]) -> bool {
+        assert_eq!(a.len(), b.len(), "{what}: lengths");
+        a.iter()
+            .zip(b)
+            .all(|(x, y)| (x - y).abs() <= 1e-12 + 1e-10 * x.abs().max(y.abs()))
+    }
+
+    #[test]
+    fn test_hettx_decomposition_projection_matches_refit() {
+        // The decomposition's permutation null projects the centred effects on one QR of
+        // [1, X] instead of refitting per permutation; both must give the same null
+        // distributions and observed statistics, with and without an aliased covariate.
+        let n = 60;
+        let noise = |i: usize, s: f64| ((i as f64 * s).sin() * 43758.5453).fract() - 0.5;
+        let x1: Vec<f64> = (0..n).map(|i| noise(i, 1.3) * 2.0).collect();
+        let x2: Vec<f64> = (0..n).map(|i| noise(i, 2.7) + 0.3 * x1[i]).collect();
+        let x3: Vec<f64> = (0..n)
+            .map(|i| (i as f64 / n as f64) + 0.2 * noise(i, 5.1))
+            .collect();
+        let x4: Vec<f64> = (0..n).map(|i| noise(i, 7.9) * 3.0).collect();
+        // A large mean relative to the spread: the cancellation the centring avoids.
+        let tau: Array1<f64> = (0..n)
+            .map(|i| 50.0 + 0.8 * x1[i] - 0.5 * x2[i] + 0.3 * x4[i] + 0.4 * noise(i, 11.3))
+            .collect();
+        let x4_aliased: Vec<f64> = (0..n).map(|i| 2.0 * x1[i] - x3[i] + 1.0).collect();
+
+        for (label, last) in [("full rank", &x4), ("aliased", &x4_aliased)] {
+            let mut x = Array2::zeros((n, 4));
+            for i in 0..n {
+                x[[i, 0]] = x1[i];
+                x[[i, 1]] = x2[i];
+                x[[i, 2]] = x3[i];
+                x[[i, 3]] = last[i];
+            }
+            let x_with_int = add_intercept(&x.view());
+            let qr = Qr::decompose(x_with_int.view(), LM_QR_TOL).unwrap();
+            let expected_rank = if label == "aliased" { 4 } else { 5 };
+            assert_eq!(qr.rank(), expected_rank, "{label}: rank");
+
+            let m = tau.mean().unwrap();
+            let total = tau.iter().map(|t| (t - m).powi(2)).sum::<f64>() / (n - 1) as f64;
+            let n_perm = 200;
+            let (sys, idio) =
+                decomposition_null(&tau, &qr, total, n_perm, &mut ChaCha8Rng::seed_from_u64(7))
+                    .unwrap();
+            let (sys_ref, idio_ref) = decomposition_null_by_refit(
+                &tau,
+                &x_with_int,
+                n_perm,
+                &mut ChaCha8Rng::seed_from_u64(7),
+            );
+            assert!(
+                assert_close(label, &sys, &sys_ref),
+                "{label}: systematic null"
+            );
+            assert!(
+                assert_close(label, &idio, &idio_ref),
+                "{label}: idiosyncratic null"
+            );
+
+            // The comparison is sensitive: a reference on effects moved by 1e-6 differs.
+            let mut tau_moved = tau.clone();
+            tau_moved[3] += 1e-6;
+            let (sys_moved, _) = decomposition_null_by_refit(
+                &tau_moved,
+                &x_with_int,
+                n_perm,
+                &mut ChaCha8Rng::seed_from_u64(7),
+            );
+            assert!(
+                !assert_close(label, &sys, &sys_moved),
+                "{label}: insensitive comparison"
+            );
+
+            // Observed statistics against the refit on the unpermuted effects.
+            let names: Vec<String> = (1..=4).map(|j| format!("x{j}")).collect();
+            let mut warnings = Vec::new();
+            let d = compute_heterogeneity_decomposition(
+                &tau,
+                &x.view(),
+                &names,
+                n_perm,
+                &mut ChaCha8Rng::seed_from_u64(7),
+                false,
+                &mut warnings,
+            )
+            .unwrap();
+            let fit = least_squares(x_with_int.view(), tau.view()).unwrap();
+            let fm = fit.fitted.mean().unwrap();
+            let sys_obs = fit.fitted.iter().map(|t| (t - fm).powi(2)).sum::<f64>() / (n - 1) as f64;
+            assert!(
+                assert_close(
+                    label,
+                    &[d.systematic_test_stat, d.total_variance],
+                    &[sys_obs, total]
+                ),
+                "{label}: observed statistics"
+            );
+            assert!(
+                assert_close(
+                    label,
+                    &[d.idiosyncratic_test_stat],
+                    &[(total - sys_obs).max(0.0)]
+                ),
+                "{label}: observed idiosyncratic statistic"
+            );
+            assert_eq!(
+                warnings.is_empty(),
+                label != "aliased",
+                "{label}: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hettx_unseeded_is_reproducible() {
+        // Without a seed the permutations used entropy; they now use HETTX_DEFAULT_SEED.
+        let (y, treatment, x) = create_hettx_test_data();
+        let config = || HetTxConfig {
+            n_permutations: 40,
+            seed: None,
+            ..Default::default()
+        };
+        let a = run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config()).unwrap();
+        let b = run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config()).unwrap();
+        assert_eq!(a.null_distribution, b.null_distribution);
+        assert_eq!(a.p_value, b.p_value);
+    }
+
+    #[test]
+    fn test_validate_hettx_effect_summary_type7() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("qtl_hettx_summary");
+        let tau = Array1::from(numeric_column(ds.df(), "tau", NaPolicy::Fail).unwrap().0);
+        let s = compute_effect_summary(&tau);
+        Check::new(&case)
+            .vector(
+                "quantiles",
+                &[s.p10, s.p25, s.median, s.p75, s.p90],
+                Tol::coef(38),
+            )
+            .scalar("min", s.min, Tol::exact())
+            .scalar("max", s.max, Tol::exact())
+            .scalar("sd", s.std_dev, Tol::stat(38))
+            .scalar(
+                "iqr",
+                compute_test_statistic(&tau, HetTestStat::IQR),
+                Tol::coef(38),
+            )
+            .finish();
+    }
 
     fn cancelled() -> Budget {
         let token = CancelToken::new();
@@ -1809,6 +2187,7 @@ mod tests {
                 20,
                 &mut ChaCha8Rng::seed_from_u64(1),
                 false,
+                &mut Vec::new(),
             )
         };
         assert!(decompose().is_ok());

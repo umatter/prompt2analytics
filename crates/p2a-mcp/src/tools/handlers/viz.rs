@@ -105,6 +105,9 @@ fn linkage_rows(matrix: &[Vec<f64>]) -> Result<Vec<(usize, usize, f64, usize)>, 
     Ok(rows)
 }
 
+/// Outliers listed per column in the viz_boxplot reply (in the core's order); the rest are
+/// counted, so a heavy-tailed column cannot push later columns past the chat loop's cut.
+const BOXPLOT_OUTLIERS_LISTED: usize = 20;
 #[tool_router(router = viz_router, vis = "pub")]
 impl AnalyticsServer {
     // ========================================================================
@@ -422,7 +425,7 @@ impl AnalyticsServer {
 
     /// Generate a box plot for comparing distributions.
     #[tool(
-        description = "Box plots of one or more numeric columns with Tukey hinges and whiskers to the most extreme values within 1.5 IQR, as R's boxplot.stats; values beyond them are listed as outliers. Missing values are left out; ±Inf count as values and are listed as outliers but not drawn. Returns a PNG image and the statistics with n per column."
+        description = "Box plots of one or more numeric columns with Tukey hinges and whiskers to the most extreme values within 1.5 IQR, as R's boxplot.stats; values beyond them are listed as outliers (at most 20 per column, then the count of the rest). Missing values are left out; ±Inf count as values and are listed as outliers but not drawn. Returns a PNG image and the statistics with n per column."
     )]
     pub async fn viz_boxplot(
         &self,
@@ -502,11 +505,17 @@ impl AnalyticsServer {
                     let outliers = if stat.outliers.is_empty() {
                         "none".to_string()
                     } else {
-                        stat.outliers
+                        let shown = stat
+                            .outliers
                             .iter()
+                            .take(BOXPLOT_OUTLIERS_LISTED)
                             .map(|v| format!("{v:.4}"))
                             .collect::<Vec<_>>()
-                            .join(", ")
+                            .join(", ");
+                        match stat.outliers.len().saturating_sub(BOXPLOT_OUTLIERS_LISTED) {
+                            0 => shown,
+                            more => format!("{shown}, and {more} more"),
+                        }
                     };
                     description.push_str(&format!(
                         "\n{} (n = {}):\n  Lower whisker: {:.4}, Q1 (lower hinge): {:.4}, Median: {:.4}, \

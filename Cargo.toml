@@ -102,9 +102,6 @@ rand_chacha = "0.3"
 # SIMD-optimized string operations
 bytecount = { version = "0.6", features = ["runtime-dispatch-simd"] }
 
-# Quadratic programming solver (pure Rust, Goldfarb-Idnani algorithm)
-quadprog = "0.0.1"
-
 # FFT for spectral analysis (O(n log n) instead of O(n²))
 rustfft = "6.2"
 

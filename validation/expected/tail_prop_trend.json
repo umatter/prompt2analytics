@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "tail_prop_trend",
+  "area": "stats/prop_trend",
+  "method": "prop.trend.test upper tail below 1e-16",
+  "reference": "stats::prop.trend.test",
+  "call": "prop.trend.test(c(10, 60, 140, 240), rep(300, 4))",
+  "dataset": "validation/datasets/generated/tail_prop_trend.csv",
+  "datasets": ["validation/datasets/generated/tail_prop_trend.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "statistic": 421.61777777777769,
+    "p": 1.0847243620272031e-93
+  }
+}

@@ -574,9 +574,8 @@ fn cross_covariance(x: &[f64], y: &[f64], lag_max: usize) -> Vec<(i32, f64)> {
 ///
 /// ρ̂ₓᵧ(k) = γ̂ₓᵧ(k) / √(γ̂ₓₓ(0) × γ̂ᵧᵧ(0))
 ///
-/// The lag k value estimates the correlation between x_{t+k} and y_t.
-/// - Positive lag k: x leads y (x_{t+k} is correlated with y_t)
-/// - Negative lag k: y leads x (x_t is correlated with y_{t-k})
+/// As R's `ccf`, the lag-k value estimates cor(x\[t+k\], y\[t\]); a peak at k < 0 means x
+/// leads y (x at time t is correlated with y later), a peak at k > 0 that y leads x.
 ///
 /// # Arguments
 ///

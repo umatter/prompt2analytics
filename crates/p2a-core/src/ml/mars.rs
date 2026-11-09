@@ -53,16 +53,16 @@
 //!
 //! - Friedman, J. H. (1991). "Multivariate Adaptive Regression Splines".
 //!   *The Annals of Statistics*, 19(1), 1-67.
-//!   https://doi.org/10.1214/aos/1176347963
+//!   <https://doi.org/10.1214/aos/1176347963>
 //!   The foundational MARS paper describing the algorithm.
 //!
 //! - Hastie, T., Tibshirani, R., & Friedman, J. (2009). *The Elements of
 //!   Statistical Learning* (2nd ed.), Section 9.4. Springer.
-//!   https://hastie.su.domains/ElemStatLearn/
+//!   <https://hastie.su.domains/ElemStatLearn/>
 //!   Accessible treatment of MARS with intuition.
 //!
 //! - Milborrow, S. (2024). earth: Multivariate Adaptive Regression Splines.
-//!   R package version 5.3.3. https://CRAN.R-project.org/package=earth
+//!   R package version 5.3.3. <https://CRAN.R-project.org/package=earth>
 //!   Reference implementation used for validation.
 //!
 //! R equivalent: `earth::earth()`

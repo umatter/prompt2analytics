@@ -348,11 +348,7 @@ impl SortedFeatureIndices {
             .into_par_iter()
             .map(|f| {
                 let mut indices: Vec<usize> = (0..n_samples).collect();
-                indices.sort_by(|&a, &b| {
-                    data[[a, f]]
-                        .partial_cmp(&data[[b, f]])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                indices.sort_by(|&a, &b| data[[a, f]].total_cmp(&data[[b, f]]));
                 indices
             })
             .collect();
@@ -1456,6 +1452,26 @@ mod tests {
                 lcg_random(&mut s);
             }
         }
+    }
+
+    #[test]
+    fn test_random_forest_rejects_nan_feature() {
+        // A NaN feature is refused, naming the feature, before the presort orders it.
+        let (mut x, y) = noisy_regression(30, 2, 3);
+        x[[5, 1]] = f64::NAN;
+        let names = Some(vec!["size".to_string(), "age".to_string()]);
+        let err = random_forest(
+            x.view(),
+            y.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            names,
+        )
+        .unwrap_err();
+        assert!(err.contains("feature 'age'"), "{err}");
     }
 
     #[test]

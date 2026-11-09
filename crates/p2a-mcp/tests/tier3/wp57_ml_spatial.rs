@@ -2008,8 +2008,24 @@ async fn test_mcp_shap_interactions_sum_to_shap_values() {
         .as_array()
         .expect("interaction_values_sample");
     assert_eq!(inter.len(), 3);
-    for (r, mat) in inter.iter().enumerate() {
-        let mat: Vec<Vec<f64>> = mat.as_array().unwrap().iter().map(f64s).collect();
+    for (r, row) in inter.iter().enumerate() {
+        // M = 4: the 6 pairs are all listed, so the matrix can be rebuilt
+        assert_eq!(row["pairs_not_shown"], json!(0), "{row}");
+        let mut mat = vec![vec![0.0; 4]; 4];
+        for (i, v) in f64s(&row["main_effects"]).into_iter().enumerate() {
+            mat[i][i] = v;
+        }
+        let pairs = row["top_pairs"].as_array().unwrap();
+        assert_eq!(pairs.len(), 6);
+        for p in pairs {
+            let idx = |k: usize| {
+                let f = p["features"][k].as_str().unwrap();
+                f[1..].parse::<usize>().unwrap()
+            };
+            let v = p["interaction"].as_f64().unwrap();
+            mat[idx(0)][idx(1)] = v;
+            mat[idx(1)][idx(0)] = v;
+        }
         for i in 0..4 {
             close(
                 mat[i].iter().sum::<f64>(),

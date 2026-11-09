@@ -132,3 +132,9 @@ Note: McNemar's test operates on summary counts (b, c values) rather than raw da
 - McNemar, Q. (1947). "Note on the sampling error of the difference between correlated proportions or percentages". Psychometrika, 12(2), 153-157.
 - Edwards, A. L. (1948). "Note on the 'correction for continuity' in testing the significance of the difference between correlated proportions". Psychometrika, 13(3), 185-187.
 - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/mcnemar.test.html
+
+## Tail accuracy
+
+The p-value is the chi-square upper tail computed directly (`chi_squared_p_value`), not `1 - cdf`, so tails
+below 1e-16 are reported as R reports them (b = 400, c = 10: 2.97e-82, not 0). Case `tail_mcnemar` and its test
+are described in [upper_tails.md](upper_tails.md).

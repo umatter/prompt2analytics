@@ -98,7 +98,7 @@ model_nb$theta  # Dispersion parameter
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
 - `econometrics::discrete::count_models::tests::test_hurdle_negbin` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): the model type and that a theta is returned.
-- `econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_structure` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, theta > 0 and a finite log-likelihood; no `pscl::hurdle` value is compared.
+- `econometrics::discrete::count_models::tests::test_hurdle_negbin_structure_properties` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, theta > 0 and a finite log-likelihood; no `pscl::hurdle` value is compared.
 
 ### Test 3: Coefficient Sign Test
 
@@ -107,7 +107,7 @@ model_nb$theta  # Dispersion parameter
 **Data:** Uses test dataset with y increasing with x.
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
-- `econometrics::discrete::count_models::tests::test_validate_hurdle_poisson_structure` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, no theta, the zero and positive counts, and finite log-likelihoods; no `pscl::hurdle` value is compared.
+- `econometrics::discrete::count_models::tests::test_hurdle_poisson_structure_properties` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, no theta, the zero and positive counts, and finite log-likelihoods; no `pscl::hurdle` value is compared.
 
 ## Missing values
 

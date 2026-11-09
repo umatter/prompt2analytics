@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::options::Choices;
 use crate::resource::{checkpoint, try_with_capacity};
 use crate::traits::estimator::{validate_level, z_critical};
 
@@ -33,6 +34,22 @@ pub enum SeasonalType {
     /// Multiplicative seasonality: Y = (Level + Trend) * Seasonal * Error
     Multiplicative,
 }
+
+// The accepted spellings (HoltWinters(seasonal = )); the first of each entry is canonical.
+crate::option_enum!(
+    SeasonalType,
+    Choices {
+        option: "seasonal",
+        values: &[
+            (&["additive", "add"], SeasonalType::Additive),
+            (
+                &["multiplicative", "mult", "multi"],
+                SeasonalType::Multiplicative,
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for Holt-Winters fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +153,28 @@ impl HoltWintersResult {
     /// Forecasts with prediction intervals; see [`holt_winters_predict`].
     pub fn predict(&self, horizon: usize, level: f64) -> EconResult<HoltWintersForecast> {
         holt_winters_predict(self, horizon, level)
+    }
+
+    /// R's `var(residuals(fit))`: the sample variance (divisor m - 1) of the m one-step
+    /// errors, for every seasonal type; `None` with fewer than two errors. The prediction
+    /// intervals of [`holt_winters_predict`] scale it.
+    pub fn residual_variance(&self) -> Option<f64> {
+        let (mut count, mut mean) = (0usize, 0.0);
+        for r in self.residuals.iter().filter(|r| !r.is_nan()) {
+            count += 1;
+            mean += r;
+        }
+        if count < 2 {
+            return None;
+        }
+        mean /= count as f64;
+        let ss = self
+            .residuals
+            .iter()
+            .filter(|r| !r.is_nan())
+            .map(|r| (r - mean).powi(2))
+            .sum::<f64>();
+        Some(ss / (count - 1) as f64)
     }
 }
 
@@ -490,27 +529,18 @@ pub fn holt_winters_predict(
     }
     let forecast = holt_winters_forecast(result, horizon)?;
 
-    let (mut count, mut mean) = (0usize, 0.0);
-    for r in result.residuals.iter().filter(|r| !r.is_nan()) {
-        count += 1;
-        mean += r;
-    }
-    if count < 2 {
-        return Err(EconError::InsufficientData {
-            required: 2,
-            provided: count,
-            context: "prediction intervals need the variance of at least two one-step errors"
-                .to_string(),
-        });
-    }
-    mean /= count as f64;
-    let residual_variance = result
-        .residuals
-        .iter()
-        .filter(|r| !r.is_nan())
-        .map(|r| (r - mean).powi(2))
-        .sum::<f64>()
-        / (count - 1) as f64;
+    let residual_variance = match result.residual_variance() {
+        Some(v) => v,
+        None => {
+            let provided = result.residuals.iter().filter(|r| !r.is_nan()).count();
+            return Err(EconError::InsufficientData {
+                required: 2,
+                provided,
+                context: "prediction intervals need the variance of at least two one-step errors"
+                    .to_string(),
+            });
+        }
+    };
 
     let alpha = result.alpha;
     let beta = result.beta.unwrap_or(0.0);
@@ -1254,6 +1284,32 @@ where
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_seasonal_type_parses_aliases_and_rejects_unknown() {
+        SeasonalType::choices().validate().unwrap();
+        assert_eq!(
+            "Mult".parse::<SeasonalType>().unwrap(),
+            SeasonalType::Multiplicative
+        );
+        assert_eq!(
+            "multi".parse::<SeasonalType>().unwrap(),
+            SeasonalType::Multiplicative
+        );
+        assert_eq!(
+            "add".parse::<SeasonalType>().unwrap(),
+            SeasonalType::Additive
+        );
+        match "none".parse::<SeasonalType>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown seasonal 'none'; expected one of: additive, multiplicative"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
     use p2a_validation::{Check, Tol};
 
     fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
@@ -1786,6 +1842,45 @@ mod tests {
 
         assert_eq!(result.n_obs, 24);
         assert_eq!(result.seasonal_type, SeasonalType::Multiplicative);
+    }
+
+    #[test]
+    fn test_holt_winters_residual_variance_accessor() {
+        // var(residuals(fit)) for every seasonal type: predict's interval scale for an
+        // additive fit, and the same sample variance for a multiplicative one.
+        let period = 4;
+        let y: Vec<f64> = (0..32)
+            .map(|i| {
+                (100.0 + 2.0 * i as f64) * [1.2, 0.8, 1.0, 1.0][i % period]
+                    + ((i * 7) % 11) as f64 * 0.3
+            })
+            .collect();
+        for seasonal in [SeasonalType::Additive, SeasonalType::Multiplicative] {
+            let config = HoltWintersConfig {
+                alpha: Some(0.3),
+                beta: Some(0.1),
+                gamma: Some(0.2),
+                seasonal,
+                period,
+                use_trend: true,
+                use_seasonal: true,
+                ..Default::default()
+            };
+            let fit = holt_winters(&y, config).unwrap();
+            let e: Vec<f64> = fit
+                .residuals
+                .iter()
+                .copied()
+                .filter(|r| !r.is_nan())
+                .collect();
+            let m = e.iter().sum::<f64>() / e.len() as f64;
+            let v = e.iter().map(|r| (r - m).powi(2)).sum::<f64>() / (e.len() - 1) as f64;
+            let got = fit.residual_variance().unwrap();
+            assert!((got - v).abs() <= 1e-12 * v, "{seasonal:?}: {got} vs {v}");
+            if seasonal == SeasonalType::Additive {
+                assert_eq!(fit.predict(3, 0.95).unwrap().residual_variance, got);
+            }
+        }
     }
 
     #[test]

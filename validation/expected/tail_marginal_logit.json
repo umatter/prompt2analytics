@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "tail_marginal_logit",
+  "area": "regression/marginal_effects",
+  "method": "Logit average marginal effects (delta method) with p far below 1e-16; aliased regressor",
+  "reference": "stats::glm(binomial); delta-method AME as p2a computes it (G = d AME / d beta), cross-checked against marginaleffects::avg_slopes",
+  "call": "glm(y ~ x1 + x2, binomial, epsilon = 1e-14); avg_slopes(fit)",
+  "dataset": "validation/datasets/generated/tail_marginal_logit.csv",
+  "datasets": ["validation/datasets/generated/tail_marginal_logit.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "marginaleffects": "1.0.0"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.48884096240333352, 1.1686993138906427, 0.11318058920565473]
+    },
+    "coef_aliased": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [-0.48884096239776903, 1.1686993138759241, 0.11318058920451766, null]
+    },
+    "ame": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.092778589049702861, 0.22181093996919563, 0.021480882704037217]
+    },
+    "ame_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.0091258598120860738, 0.0079643427162474304, 0.0096288372285900439]
+    },
+    "ame_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-10.1665586542135, 27.850501651152772, 2.2308906251168059]
+    },
+    "ame_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [2.7961352782053276e-24, 1.0621734736959923e-170, 0.025688374882841109]
+    }
+  }
+}

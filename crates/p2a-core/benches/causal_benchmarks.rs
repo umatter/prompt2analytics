@@ -216,6 +216,15 @@ fn bench_tmle(c: &mut Criterion) {
     let mut group = c.benchmark_group("tmle");
     group.sample_size(10); // TMLE is slow
 
+    // y is continuous: a linear Q (the default logistic Q is for an outcome in [0, 1])
+    let config = TmleConfig {
+        q_model: p2a_core::QModel::Linear,
+        ..TmleConfig::default()
+    };
+    assert!(
+        tmle(&dataset, "y", "treatment", &covariates, config.clone()).is_ok(),
+        "tmle must time a successful run"
+    );
     group.bench_function("tmle_n500", |b| {
         b.iter(|| {
             tmle(
@@ -223,7 +232,7 @@ fn bench_tmle(c: &mut Criterion) {
                 "y",
                 "treatment",
                 &covariates,
-                TmleConfig::default(),
+                config.clone(),
             )
         })
     });

@@ -29,7 +29,7 @@ pub enum DiscreteCommands {
     #[command(after_help = "\
 EXAMPLES:
     # Binary logit
-    p2a discrete logit mydata -y employed -x age education income
+    p2a --session s.json discrete logit mydata -y employed -x age education income
 ")]
     Logit {
         /// Dataset name
@@ -48,7 +48,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Binary probit
-    p2a discrete probit mydata -y employed -x age education income
+    p2a --session s.json discrete probit mydata -y employed -x age education income
 ")]
     Probit {
         /// Dataset name
@@ -67,10 +67,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Ordered logit for satisfaction ratings (1-5)
-    p2a discrete o-logit mydata -y satisfaction -x age income service_quality
+    p2a --session s.json discrete o-logit mydata -y satisfaction -x age income service_quality
 
     # A text outcome needs its order, lowest category first
-    p2a discrete o-logit mydata -y rating -x age income --levels low,mid,high
+    p2a --session s.json discrete o-logit mydata -y rating -x age income --levels low,mid,high
 ")]
     OLogit {
         /// Dataset name
@@ -93,7 +93,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Ordered probit; a text outcome needs its order, lowest category first
-    p2a discrete o-probit mydata -y rating -x age income --levels low,mid,high
+    p2a --session s.json discrete o-probit mydata -y rating -x age income --levels low,mid,high
 ")]
     OProbit {
         /// Dataset name
@@ -116,7 +116,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Multinomial choice model
-    p2a discrete mlogit mydata -y transport_mode -x income distance age
+    p2a --session s.json discrete mlogit mydata -y transport_mode -x income distance age
 ")]
     Mlogit {
         /// Dataset name
@@ -139,7 +139,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Count data with overdispersion
-    p2a discrete negbin mydata -y doctor_visits -x age income chronic_conditions
+    p2a --session s.json discrete negbin mydata -y doctor_visits -x age income chronic_conditions
 ")]
     Negbin {
         /// Dataset name
@@ -172,10 +172,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # ZIP with same covariates for both parts
-    p2a discrete zip mydata -y patents -x rd_spending firm_size
+    p2a --session s.json discrete zip mydata -y patents -x rd_spending firm_size
 
     # ZIP with different covariates for zero-inflation
-    p2a discrete zip mydata -y patents -x rd_spending firm_size -z age industry
+    p2a --session s.json discrete zip mydata -y patents -x rd_spending firm_size -z age industry
 ")]
     Zip {
         /// Dataset name
@@ -238,7 +238,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Discrete choice model for mode choice
-    p2a discrete clogit mydata --choice-id trip_id --alt-id mode -y chosen -x travel_time cost
+    p2a --session s.json discrete clogit mydata --choice-id trip_id --alt-id mode -y chosen -x travel_time cost
 ")]
     Clogit {
         /// Dataset name
@@ -491,19 +491,6 @@ fn print_convergence(converged: bool, iterations: usize, warnings: &[String]) {
     }
 }
 
-/// Insert `missing` (when rows were dropped) and `warnings` (when there are any) into a
-/// JSON object.
-fn insert_notes(json: &mut serde_json::Value, missing: &MissingSummary, warnings: &[String]) {
-    if let Some(object) = json.as_object_mut() {
-        if let Some(m) = missing_json(missing) {
-            object.insert("missing".to_string(), m);
-        }
-        if !warnings.is_empty() {
-            object.insert("warnings".to_string(), serde_json::json!(warnings));
-        }
-    }
-}
-
 /// The logit/probit report: the coefficient table (aliased rows `NaN` in text, `null` in JSON),
 /// the log-likelihoods, the convergence line and every core warning, then T2's missing-value note.
 /// JSON adds `log_likelihood`, `log_likelihood_null`, `aic`, `separation`, `aliased`, `missing`
@@ -718,7 +705,7 @@ fn execute_ordered(
                 "converged": result.converged,
                 "iterations": result.iterations,
             });
-            insert_notes(&mut json, &result.missing, &result.warnings);
+            crate::output::add_missing_and_warnings(&mut json, &result.missing, &result.warnings);
             add_notes(
                 &mut json,
                 Some((result.converged, result.iterations)),
@@ -823,7 +810,11 @@ fn execute_mlogit(
                                 "aic": result.aic,
                                 "separation": result.separation,
                             });
-                            insert_notes(&mut json, &result.missing, &[]);
+                            crate::output::add_missing_and_warnings(
+                                &mut json,
+                                &result.missing,
+                                &[],
+                            );
                             add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
@@ -927,7 +918,11 @@ fn execute_negbin(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1067,7 +1062,7 @@ fn execute_poisson(
                 "df_residual": fit.df_residual,
                 "aliased": aliased,
             });
-            insert_notes(&mut json, &missing, &[]);
+            crate::output::add_missing_and_warnings(&mut json, &missing, &[]);
             add_notes(&mut json, converged, &warnings);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
@@ -1158,7 +1153,11 @@ fn execute_zip(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1290,7 +1289,11 @@ fn execute_zinb(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1439,7 +1442,11 @@ fn execute_hurdle(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
-                        insert_notes(&mut json, &result.missing, &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &result.missing,
+                            &result.warnings,
+                        );
                         add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1746,7 +1753,11 @@ fn execute_mixed_logit(
                             "iterations": result.iterations,
                             "max_abs_gradient": result.max_abs_gradient,
                         });
-                        insert_notes(&mut json, &MissingSummary::default(), &result.warnings);
+                        crate::output::add_missing_and_warnings(
+                            &mut json,
+                            &MissingSummary::default(),
+                            &result.warnings,
+                        );
                         add_notes(
                             &mut json,
                             Some((result.converged, result.iterations)),

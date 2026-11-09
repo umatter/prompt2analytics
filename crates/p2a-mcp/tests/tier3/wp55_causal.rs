@@ -2,7 +2,6 @@
 //! Each test drives `call_tool_with_session`. An R pin computes the library result for the configuration the
 //! request must map to, checks it against the case (Tier 1 tolerances), and requires the tool text to be that
 //! result's text.
-#![allow(dead_code, unused_imports)]
 use crate::common::*;
 use ndarray::{Array1, Array2};
 use p2a_core::data::columns::{NaPolicy, numeric_column};

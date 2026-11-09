@@ -512,7 +512,7 @@ pub struct ShapValuesRequest {
 
     /// TreeSHAP interaction values
     #[schemars(
-        description = "TreeSHAP interaction values (Lundberg et al. 2020): the JSON then holds the M x M matrices of the first 3 explained rows (interaction_values_sample); rows sum to the SHAP values. Default false; refused with method 'kernel'."
+        description = "TreeSHAP interaction values (Lundberg et al. 2020): for the first 3 explained rows the JSON (interaction_values_sample) holds the main effects (the matrix diagonal, in feature order) and the 10 largest off-diagonal cells by absolute value (phi_ij = phi_ji; row i of the M x M matrix sums to feature i's SHAP value), with the number of pairs not shown. Default false; refused with method 'kernel'."
     )]
     #[serde(default)]
     pub compute_interactions: Option<bool>,

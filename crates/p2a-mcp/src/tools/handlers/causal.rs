@@ -26,6 +26,7 @@ const MAX_TIME_POINTS: usize = 1_000;
 const GSYNTH_DEFAULT_BOOTSTRAP: usize = 200;
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::{option_message, parse_choice};
 use crate::tools::requests::causal::{
     BPBoundsRequest, BaconDecompRequest, CTmleRequest, CbpsRequest, DiDRequest, DoubleMLRequest,
     DoublyRobustRequest, EValueRequest, EntropyBalanceRequest, EtwfeRequest, FirstStageRequest,
@@ -83,28 +84,6 @@ fn rd_option<T>(
     }
 }
 
-/// The bare message of an option error (the option and the accepted values), else the error's
-/// Display.
-fn option_message(e: p2a_core::EconError) -> String {
-    match e {
-        p2a_core::EconError::InvalidSpecification { message } => message,
-        other => other.to_string(),
-    }
-}
-
-/// `None` gives `default`; `Some(s)` parses `s` with a local table, an unknown value giving the
-/// bare message (the local twin of `common::parse_option`).
-fn choice<T: Copy + PartialEq + 'static>(
-    table: &'static Choices<T>,
-    value: Option<&str>,
-    default: T,
-) -> Result<T, String> {
-    match value {
-        None => Ok(default),
-        Some(s) => table.parse(s).map_err(option_message),
-    }
-}
-
 /// Unwraps a `Result<T, String>`, or returns the message as a tool error from the handler.
 macro_rules! tool_try {
     ($e:expr) => {
@@ -114,43 +93,6 @@ macro_rules! tool_try {
         }
     };
 }
-
-/// twang's stopping rules (`stop.method`).
-static STOP_METHOD: Choices<StopMethod> = Choices {
-    option: "stop_method",
-    values: &[
-        (&["es.mean", "esmean"], StopMethod::ESMean),
-        (&["es.max", "esmax"], StopMethod::ESMax),
-        (&["ks.mean", "ksmean"], StopMethod::KSMean),
-        (&["ks.max", "ksmax"], StopMethod::KSMax),
-    ],
-};
-
-/// twang's estimands.
-static TWANG_ESTIMAND: Choices<TwangEstimand> = Choices {
-    option: "estimand",
-    values: &[
-        (&["att"], TwangEstimand::ATT),
-        (&["ate"], TwangEstimand::ATE),
-        (&["atc"], TwangEstimand::ATC),
-    ],
-};
-
-/// rd_multi's pooling weights across cutoffs.
-static POOLING_WEIGHTS: Choices<PoolingWeights> = Choices {
-    option: "pooling_weights",
-    values: &[
-        (
-            &["sample_size", "samplesize", "n"],
-            PoolingWeights::SampleSize,
-        ),
-        (
-            &["inverse_variance", "iv", "precision"],
-            PoolingWeights::InverseVariance,
-        ),
-        (&["equal", "uniform"], PoolingWeights::Equal),
-    ],
-};
 
 /// The models marginal_effects fits.
 static MARGINAL_MODEL: Choices<MarginalModel> = Choices {
@@ -284,12 +226,7 @@ fn matched_sample(
     Ok(p2a_core::data::Dataset::new(out))
 }
 
-impl AnalyticsServer {
-    /// The session's global seed, used when a request sets none.
-    async fn session_seed(&self) -> Option<u64> {
-        *self.global_seed.read().await
-    }
-}
+impl AnalyticsServer {}
 
 // Helper function for formatting diagnostic warnings
 fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationReport) -> String {
@@ -530,7 +467,7 @@ impl AnalyticsServer {
             )]));
         }
         let reps = request.bootstrap_reps.unwrap_or(0);
-        let seed = self.session_seed().await;
+        let seed = self.seed_or_global(None).await;
 
         let datasets = self.datasets.read().await;
 
@@ -625,7 +562,7 @@ impl AnalyticsServer {
             base_period: request.base_period.unwrap_or(-1),
             bootstrap: request.bootstrap.unwrap_or(999),
             anticipation: request.anticipation.unwrap_or(0),
-            seed: self.session_seed().await,
+            seed: self.seed_or_global(None).await,
             ..Default::default()
         };
 
@@ -782,7 +719,7 @@ impl AnalyticsServer {
         config.estimand = estimand;
         config.bootstrap = request.bootstrap.unwrap_or(0);
         config.normalized = true;
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result = match run_ipw_treatment(
             dataset,
@@ -829,7 +766,7 @@ impl AnalyticsServer {
         config.trim = request.trim.unwrap_or(0.05);
         config.estimand = estimand;
         config.bootstrap = request.bootstrap.unwrap_or(999);
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result = match run_doubly_robust(
             dataset,
@@ -962,7 +899,7 @@ impl AnalyticsServer {
             n_folds: request.n_folds.unwrap_or(5),
             model_type,
             ml_method,
-            seed: request.seed.or(self.session_seed().await),
+            seed: request.seed.or(self.seed_or_global(None).await),
             trim: request.trim.unwrap_or(0.01),
             lambda: request.lambda.unwrap_or(DML_DEFAULT_LAMBDA),
             folds,
@@ -1161,13 +1098,11 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<TwangRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let stop_method = tool_try!(choice(
-            &STOP_METHOD,
+        let stop_method = tool_try!(parse_option(
             request.stop_method.as_deref(),
             StopMethod::ESMean
         ));
-        let estimand = tool_try!(choice(
-            &TWANG_ESTIMAND,
+        let estimand = tool_try!(parse_option(
             request.estimand.as_deref(),
             TwangEstimand::ATT
         ));
@@ -1286,7 +1221,7 @@ impl AnalyticsServer {
         };
         let mut opts = MatchOptions::default();
         opts.m_order = m_order;
-        opts.seed = self.session_seed().await;
+        opts.seed = self.seed_or_global(None).await;
 
         let datasets = self.datasets.read().await;
 
@@ -1726,7 +1661,7 @@ impl AnalyticsServer {
         let mut config = MediationConfig::default();
         config.bootstrap = request.bootstrap.unwrap_or(999);
         config.trim = request.trim.unwrap_or(0.05);
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result = match run_mediation_analysis(
             dataset,
@@ -1785,7 +1720,7 @@ impl AnalyticsServer {
         config.confidence_level = request.confidence_level.unwrap_or(0.95);
         config.scale = scale;
         config.family = family;
-        config.seed = self.session_seed().await;
+        config.seed = self.seed_or_global(None).await;
 
         let result: MedflexResult = match run_medflex_dataset(
             dataset,
@@ -1925,7 +1860,7 @@ impl AnalyticsServer {
             force,
             bootstrap_se,
             n_bootstrap,
-            seed: self.session_seed().await,
+            seed: self.seed_or_global(None).await,
             ..Default::default()
         };
 
@@ -2380,8 +2315,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let pooling_weights = tool_try!(choice(
-            &POOLING_WEIGHTS,
+        let pooling_weights = tool_try!(parse_option(
             request.pooling_weights.as_deref(),
             PoolingWeights::SampleSize
         ));
@@ -2513,7 +2447,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::regression::{evalue_hr, evalue_or, evalue_rd, evalue_rr_ci, evalue_smd};
 
-        let effect_type = tool_try!(choice(
+        let effect_type = tool_try!(parse_choice(
             &EFFECT_MEASURE,
             Some(request.effect_type.as_str()),
             EffectMeasure::Rr
@@ -2624,7 +2558,7 @@ impl AnalyticsServer {
             LtmleQModel::Logistic
         ));
         let regime_kind = tool_try!(parse_option(request.regime.as_deref(), RegimeKind::Always));
-        let contrast_kind = tool_try!(choice(
+        let contrast_kind = tool_try!(parse_choice(
             &LTMLE_CONTRAST,
             request.contrast.as_deref(),
             ContrastKind::Never
@@ -2713,25 +2647,8 @@ impl AnalyticsServer {
             }
         }
         let outcome = request.outcomes[t_max - 1].as_str();
-        // the outcome is never a covariate, and a treatment is not a covariate at its own or a
-        // later time point (it would be conditioned on after it is set)
-        for (t, names_t) in cov_lists.iter().enumerate() {
-            for c in names_t {
-                if *c == outcome {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "covariate '{c}' at time point {} is the outcome",
-                        t + 1
-                    ))]));
-                }
-                if let Some(s) = request.treatments[..=t].iter().position(|a| a == c) {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "covariate '{c}' at time point {} is the treatment of time point {}; a treatment may only be a covariate of later time points",
-                        t + 1,
-                        s + 1
-                    ))]));
-                }
-            }
-        }
+        // LtmleData::from_dataset refuses an outcome or treatment listed as a covariate of the
+        // wrong time point
         let treatment_refs: Vec<&str> = request.treatments.iter().map(String::as_str).collect();
         let cov_refs: Vec<&[&str]> = cov_lists.iter().map(Vec::as_slice).collect();
         let data = match LtmleData::from_dataset(dataset, outcome, &treatment_refs, &cov_refs) {
@@ -2789,7 +2706,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<MarginalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let model_type = tool_try!(choice(
+        let model_type = tool_try!(parse_choice(
             &MARGINAL_MODEL,
             request.model.as_deref(),
             MarginalModel::Ols
@@ -3495,23 +3412,16 @@ mod tests {
 
     #[test]
     fn test_local_option_tables_parse_aliases_and_reject_unknown() {
-        STOP_METHOD.validate().unwrap();
-        TWANG_ESTIMAND.validate().unwrap();
-        POOLING_WEIGHTS.validate().unwrap();
         MARGINAL_MODEL.validate().unwrap();
         EFFECT_MEASURE.validate().unwrap();
         LTMLE_CONTRAST.validate().unwrap();
-        assert_eq!(STOP_METHOD.parse("ES.Mean").unwrap(), StopMethod::ESMean);
-        assert_eq!(STOP_METHOD.parse("ksmax").unwrap(), StopMethod::KSMax);
-        assert_eq!(STOP_METHOD.parse("es-max").unwrap(), StopMethod::ESMax);
-        assert_eq!(TWANG_ESTIMAND.parse("ATT").unwrap(), TwangEstimand::ATT);
         assert_eq!(
-            POOLING_WEIGHTS.parse("iv").unwrap(),
-            PoolingWeights::InverseVariance
+            parse_option(Some("ES.Mean"), StopMethod::KSMax),
+            Ok(StopMethod::ESMean)
         );
         assert_eq!(
-            POOLING_WEIGHTS.parse("Sample Size").unwrap(),
-            PoolingWeights::SampleSize
+            parse_option(Some("iv"), PoolingWeights::SampleSize),
+            Ok(PoolingWeights::InverseVariance)
         );
         assert_eq!(
             MARGINAL_MODEL.parse("logistic").unwrap(),

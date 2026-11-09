@@ -28,6 +28,17 @@ pub struct FastRocAucResult {
     pub n_negative: usize,
 }
 
+/// Refuse NaN predictions or labels: they have no place in a ranking.
+fn refuse_nan(predictions: &[f64], actual: &[f64]) -> Result<(), String> {
+    for (name, values) in [("predictions", predictions), ("actual", actual)] {
+        let k = values.iter().filter(|v| v.is_nan()).count();
+        if k > 0 {
+            return Err(format!("{name} contain {k} missing value(s) (NaN)"));
+        }
+    }
+    Ok(())
+}
+
 /// Compute ROC/AUC using the fast Mann-Whitney U statistic method.
 ///
 /// Complexity: O(n log n) for sorting + O(n) for AUC calculation
@@ -45,6 +56,7 @@ pub fn fast_roc_auc(predictions: &[f64], actual: &[f64]) -> Result<FastRocAucRes
     if n == 0 {
         return Err("Need at least one sample".to_string());
     }
+    refuse_nan(predictions, actual)?;
 
     // Determine positive/negative class
     let mut unique: Vec<f64> = actual.to_vec();
@@ -66,7 +78,7 @@ pub fn fast_roc_auc(predictions: &[f64], actual: &[f64]) -> Result<FastRocAucRes
         .collect();
 
     // Sort by prediction descending (for ROC curve generation)
-    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
 
     let n_pos = pairs.iter().filter(|(_, is_pos, _)| *is_pos).count();
     let n_neg = n - n_pos;
@@ -78,7 +90,7 @@ pub fn fast_roc_auc(predictions: &[f64], actual: &[f64]) -> Result<FastRocAucRes
     // === Fast AUC via Mann-Whitney U statistic ===
     // Sort by prediction ascending for rank calculation
     let mut ranked: Vec<(f64, bool)> = pairs.iter().map(|(p, is_pos, _)| (*p, *is_pos)).collect();
-    ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Assign ranks (handle ties by averaging)
     let mut ranks = vec![0.0; n];
@@ -188,6 +200,8 @@ pub fn fast_roc_auc_parallel(predictions: &[f64], actual: &[f64]) -> Result<f64,
         return Err("Predictions and actual must have same length".to_string());
     }
 
+    refuse_nan(predictions, actual)?;
+
     // Determine positive class
     let pos_class = actual.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
@@ -199,7 +213,7 @@ pub fn fast_roc_auc_parallel(predictions: &[f64], actual: &[f64]) -> Result<f64,
         .collect();
 
     // Parallel sort
-    pairs.par_sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.par_sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let n_pos: usize = pairs.par_iter().filter(|(_, is_pos)| *is_pos).count();
     let n_neg = n - n_pos;
@@ -225,6 +239,20 @@ pub fn fast_roc_auc_parallel(predictions: &[f64], actual: &[f64]) -> Result<f64,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_fast_roc_auc_refuses_nan_predictions() {
+        // X-6: a NaN prediction entered a sort with no total order and gave a NaN-dependent AUC.
+        let predictions = [0.1, f64::NAN, 0.8, 0.4, 0.65, 0.3];
+        let actual = [0.0, 1.0, 1.0, 0.0, 1.0, 0.0];
+        let e = fast_roc_auc(&predictions, &actual).unwrap_err();
+        assert!(e.contains("missing"), "{e}");
+        let e = fast_roc_auc_parallel(&predictions, &actual).unwrap_err();
+        assert!(e.contains("missing"), "{e}");
+        let labels = [0.0, f64::NAN, 1.0, 0.0, 1.0, 0.0];
+        let e = fast_roc_auc(&[0.1, 0.2, 0.8, 0.4, 0.65, 0.3], &labels).unwrap_err();
+        assert!(e.contains("missing"), "{e}");
+    }
 
     #[test]
     fn test_fast_roc_auc_perfect() {

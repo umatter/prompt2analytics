@@ -10,6 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_choice;
 use crate::tools::common::{
     MissingSummary, NaPolicy, append_missing_note, append_notes, error_text, limit_refusal,
     missing_json, notes_json, numeric_columns, numeric_matrix, parse_option,
@@ -1400,16 +1401,12 @@ impl AnalyticsServer {
         // hettx's core draws from entropy without a seed: 42 keeps unseeded runs reproducible.
         let seed = self.seed_for(request.seed).await;
 
-        let test_statistic = match parse_choice(
-            &HETTX_STAT,
-            request.test_statistic.as_deref(),
-            HetTestStat::Variance,
-        ) {
-            Ok(t) => t,
-            Err(e) => return error_text(e),
-        };
-        let effect_method = match parse_choice(
-            &HETTX_EFFECT,
+        let test_statistic =
+            match parse_option(request.test_statistic.as_deref(), HetTestStat::Variance) {
+                Ok(t) => t,
+                Err(e) => return error_text(e),
+            };
+        let effect_method = match parse_option(
             request.effect_method.as_deref(),
             EffectEstimationMethod::Matching,
         ) {
@@ -1632,7 +1629,7 @@ impl AnalyticsServer {
 
     /// Compute SHAP values for model interpretation.
     #[tool(
-        description = "SHAP values for a random-forest regression trained on target and features (n_trees, max_depth, seed). method 'tree' (default): exact TreeSHAP, O(T L D^2) per row, tree path-dependent values. method 'kernel': Kernel SHAP, interventional values over a background of at most 100 training rows; Kernel SHAP costs about max_obs x n_coalitions x background rows forest evaluations, n_coalitions = min(2^M - 2, n_samples). Returns the base value E[f], the SHAP values of the first 5 explained rows, mean |SHAP| importances, the additivity check (base + sum = prediction, tolerance 1e-8 relative to max(1, |f|)), optional interaction values and summary statistics."
+        description = "SHAP values for a random-forest regression trained on target and features (n_trees, max_depth, seed). method 'tree' (default): exact TreeSHAP, O(T L D^2) per row, tree path-dependent values. method 'kernel': Kernel SHAP, interventional values over a background of at most 100 training rows; Kernel SHAP costs about max_obs x n_coalitions x background rows forest evaluations, n_coalitions = min(2^M - 2, n_samples). Returns the base value E[f], the SHAP values of the first 5 explained rows, mean |SHAP| importances, the additivity check (base + sum = prediction, tolerance 1e-8 relative to max(1, |f|)), optional TreeSHAP interaction values (for the first 3 explained rows: the main effects and the 10 largest pairwise cells, with the number of pairs not shown) and summary statistics."
     )]
     pub async fn ml_shap_values(
         &self,
@@ -1757,16 +1754,9 @@ impl AnalyticsServer {
                 ShapMethod::Tree,
                 &cfg,
             ) {
-                Ok(r) => r.interaction_values.map(|mats| {
-                    mats.iter()
-                        .map(|m| {
-                            m.rows()
-                                .into_iter()
-                                .map(|r| r.to_vec())
-                                .collect::<Vec<Vec<f64>>>()
-                        })
-                        .collect::<Vec<_>>()
-                }),
+                Ok(r) => r
+                    .interaction_values
+                    .map(|mats| shap_interaction_summary(&mats, &request.features)),
                 Err(e) => return Ok(ml_error("SHAP interaction values failed: ", e)),
             }
         } else {
@@ -1895,7 +1885,7 @@ impl AnalyticsServer {
         });
 
         if let Some(sample) = interaction_sample {
-            output["interaction_values_sample"] = serde_json::json!(sample);
+            output["interaction_values_sample"] = sample;
         }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -2106,34 +2096,50 @@ impl AnalyticsServer {
 // Helpers shared by the ML and spatial handlers (seeds, option tables, output columns)
 // ============================================================================
 
-/// The spellings of hettx's test statistic (the canonical name first).
-static HETTX_STAT: Choices<HetTestStat> = Choices {
-    option: "test_statistic",
-    values: &[
-        (&["variance", "var"], HetTestStat::Variance),
-        (&["range"], HetTestStat::Range),
-        (&["iqr", "interquartile_range"], HetTestStat::IQR),
-        (
-            &["mad", "mean_abs_deviation", "mean_absolute_deviation"],
-            HetTestStat::MeanAbsDeviation,
-        ),
-    ],
-};
+/// Off-diagonal SHAP interaction cells listed per explained row in the reply; the rest are
+/// counted in `pairs_not_shown`, so the reply stays inside the chat loop's budget at any M.
+const SHAP_INTERACTION_PAIRS_SHOWN: usize = 10;
 
-/// The spellings of hettx's individual-effect estimator (the canonical name first).
-static HETTX_EFFECT: Choices<EffectEstimationMethod> = Choices {
-    option: "effect_method",
-    values: &[
-        (&["matching", "match"], EffectEstimationMethod::Matching),
-        (&["regression", "reg"], EffectEstimationMethod::Regression),
-        (&["stratified", "strat"], EffectEstimationMethod::Stratified),
-    ],
-};
-
-/// Seed of the randomized handlers whose core would otherwise fall back to entropy, when
-/// neither the request nor `set_seed` gives one, so every run is reproducible. The tool
-/// descriptions name it.
-pub(crate) const MCP_DEFAULT_SEED: u64 = 42;
+/// The interaction matrices of the explained rows as the reply shows them: per row, the main
+/// effects (the diagonal, in feature order) and the largest off-diagonal cells by absolute
+/// value (`phi_ij = phi_ji`; row i of the matrix sums to feature i's SHAP value), with the
+/// number of pairs not shown.
+fn shap_interaction_summary(
+    mats: &[ndarray::Array2<f64>],
+    features: &[String],
+) -> serde_json::Value {
+    let name = |j: usize| {
+        features
+            .get(j)
+            .cloned()
+            .unwrap_or_else(|| format!("Feature_{j}"))
+    };
+    let rows: Vec<serde_json::Value> = mats
+        .iter()
+        .enumerate()
+        .map(|(row, m)| {
+            let k = m.nrows();
+            let mut pairs: Vec<(usize, usize, f64)> = (0..k)
+                .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+                .map(|(i, j)| (i, j, m[[i, j]]))
+                .collect();
+            pairs.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()).then((a.0, a.1).cmp(&(b.0, b.1))));
+            let not_shown = pairs.len().saturating_sub(SHAP_INTERACTION_PAIRS_SHOWN);
+            pairs.truncate(SHAP_INTERACTION_PAIRS_SHOWN);
+            let top: Vec<serde_json::Value> = pairs
+                .iter()
+                .map(|&(i, j, v)| serde_json::json!({"features": [name(i), name(j)], "interaction": v}))
+                .collect();
+            serde_json::json!({
+                "row": row,
+                "main_effects": m.diag().to_vec(),
+                "top_pairs": top,
+                "pairs_not_shown": not_shown,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
 
 /// Rows of the Kernel SHAP background: all training rows up to this many, else this many rows
 /// evenly spaced in row order (shap.sample's size).
@@ -2148,23 +2154,6 @@ const LABELS_SHOWN: usize = 100;
 
 /// Per-row values shown in a JSON block: predictions.
 const PREDICTIONS_SHOWN: usize = 20;
-
-/// [`crate::tools::common::parse_option`] for a local [`Choices`] table (a core enum without an
-/// `option_enum!`): `None` gives `default`; any given string, blank included, is parsed; an
-/// unknown value is the table's message ("unknown <option> '<value>'; expected one of: ...").
-pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
-    choices: &Choices<T>,
-    value: Option<&str>,
-    default: T,
-) -> Result<T, String> {
-    match value {
-        Some(v) => choices.parse(v).map_err(|e| match e {
-            p2a_core::EconError::InvalidSpecification { message } => message,
-            other => other.to_string(),
-        }),
-        None => Ok(default),
-    }
-}
 
 /// Checks the names a tool would write into its dataset: none blank, none one of the columns
 /// the call reads (`inputs`), none twice.
@@ -2244,86 +2233,16 @@ fn cluster_sizes_json(labels: &[usize], k: usize) -> serde_json::Value {
 }
 
 impl AnalyticsServer {
-    /// The request seed, else the session's `set_seed` value; the read guard is released
-    /// before returning, so no lock is held while a tool computes.
-    pub(crate) async fn seed_or_global(&self, request: Option<u64>) -> Option<u64> {
-        match request {
-            Some(s) => Some(s),
-            None => *self.global_seed.read().await,
-        }
-    }
-
-    /// [`Self::seed_or_global`], else [`MCP_DEFAULT_SEED`].
-    pub(crate) async fn seed_for(&self, request: Option<u64>) -> u64 {
-        self.seed_or_global(request)
-            .await
-            .unwrap_or(MCP_DEFAULT_SEED)
-    }
-
     /// A snapshot (O(1) clone) of dataset `name`; the read lock is released before returning.
     async fn dataset_snapshot(&self, name: &str) -> Option<Dataset> {
         self.datasets.read().await.get(name).cloned()
-    }
-
-    /// Writes `columns` into dataset `dataset` under a short write lock. `snapshot` is the
-    /// dataset the tool read and `inputs` the columns it read from it. Refuses a dataset that
-    /// is gone, whose height is no longer the snapshot's, or in which an input column is
-    /// missing or no longer equal to the snapshot's (missing values compared as equal): a
-    /// concurrent call in the same session replaced, sorted or filtered it while the tool
-    /// ran, and the new column would not line up with the rows it was computed from. Returns
-    /// the names that replaced an existing column.
-    pub(crate) async fn write_output_columns(
-        &self,
-        dataset: &str,
-        snapshot: &Dataset,
-        inputs: &[&str],
-        columns: Vec<Series>,
-    ) -> Result<Vec<String>, String> {
-        let n_rows = snapshot.nrows();
-        let mut map = self.datasets.write().await;
-        let current = map
-            .get(dataset)
-            .ok_or_else(|| format!("Dataset '{dataset}' not found; the column was not written."))?;
-        if current.nrows() != n_rows {
-            return Err(format!(
-                "Dataset '{dataset}' changed while the tool ran (it has {} rows, the fit used \
-                 {n_rows}); the column was not written. Run the tool again.",
-                current.nrows()
-            ));
-        }
-        for &name in inputs {
-            let unchanged = match (current.df().column(name), snapshot.df().column(name)) {
-                (Ok(now), Ok(then)) => now.equals_missing(then),
-                _ => false,
-            };
-            if !unchanged {
-                return Err(format!(
-                    "Dataset '{dataset}' changed while the tool ran (column '{name}' is no \
-                     longer the one the fit used); the column was not written. Run the tool \
-                     again."
-                ));
-            }
-        }
-        let mut updated = current.clone();
-        let mut replaced = Vec::new();
-        for s in columns {
-            let name = s.name().to_string();
-            if updated.df().column(&name).is_ok() {
-                replaced.push(name.clone());
-            }
-            updated
-                .df_mut()
-                .with_column(s)
-                .map_err(|e| format!("could not write column '{name}': {e}"))?;
-        }
-        map.insert(dataset.to_string(), updated);
-        Ok(replaced)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::common::MCP_DEFAULT_SEED;
     use crate::tools::limits::{Limits, with_limits};
     use p2a_core::DataLoader;
     use p2a_core::data::Dataset;
@@ -2342,14 +2261,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// The handler's own option tables have no spelling listed twice (the first would win);
-    /// spatial.rs checks its NEIGHBOR_METHOD table the same way.
-    #[test]
-    fn test_local_option_tables_validate() {
-        assert_eq!(HETTX_STAT.validate(), Ok(()));
-        assert_eq!(HETTX_EFFECT.validate(), Ok(()));
     }
 
     /// A causal-forest refusal that offers max_depth says it caps only the causal trees.

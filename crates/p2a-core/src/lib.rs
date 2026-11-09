@@ -664,6 +664,7 @@ pub use econometrics::{
     MediationResult,
     MixedLogitConfig,
     MixedLogitResult,
+    MlogitConfig,
     // McFadden conditional logit (mlogit)
     MlogitResult,
     MomentCondition,
@@ -784,6 +785,7 @@ pub use econometrics::{
     VarIrfResult,
     VarResult,
     VarianceMethod,
+    VarmaConfig,
     VarmaResult,
     VceType,
     VecmResult,
@@ -819,6 +821,7 @@ pub use econometrics::{
     run_cbps,
     run_competing_risks,
     run_conditional_logit,
+    run_conditional_logit_with,
     run_cox_ph,
     run_ctmle,
     run_did,
@@ -854,6 +857,7 @@ pub use econometrics::{
     run_mixed_logit,
     run_mixl,
     run_mlogit,
+    run_mlogit_with,
     run_multinom,
     run_negbin,
     run_ordered_logit,
@@ -891,6 +895,7 @@ pub use econometrics::{
     run_var,
     run_var_irf,
     run_varma,
+    run_varma_with,
     run_vecm,
     run_zinb,
     run_zip,
@@ -942,6 +947,7 @@ pub use forecasting::{
     FilterSides,
     // GARCH (volatility modeling)
     GarchConfig,
+    GarchDistribution,
     GarchResult,
     HoltWintersCoefficients,
     HoltWintersConfig,
@@ -1018,6 +1024,7 @@ pub use ml::{
     AdaBoostLoss,
     AdaBoostResult,
     AdaBoostType,
+    AteEstimate,
     BartCausalConfig,
     BartCausalResult,
     // BART (Bayesian Additive Regression Trees) for prediction
@@ -1132,8 +1139,11 @@ pub use ml::{
     adaboost,
     adaboost_predict,
     adaboost_predict_class,
+    aipw_ate,
+    aipw_scores,
     apriori,
     average_treatment_effect,
+    average_treatment_effect_with,
     // BART for prediction (Chipman, George & McCulloch 2010)
     bart,
     bart_arrays,
@@ -1155,6 +1165,7 @@ pub use ml::{
     cart_variable_importance,
     causal_forest,
     causal_forest_arrays,
+    causal_forest_arrays_with_nuisance,
     causal_forest_predict,
     causal_forest_predict_arrays,
     cmdscale,
@@ -1459,3 +1470,21 @@ pub use visualization::{
 
 /// Re-export polars for downstream use
 pub use polars;
+
+#[cfg(test)]
+mod overflow_checks_tests {
+    /// Dev and test builds check integer overflow (Rust's default follows debug assertions;
+    /// release builds keep Rust's default and wrap).
+    #[test]
+    #[cfg(debug_assertions)]
+    fn integer_overflow_panics_in_debug_builds() {
+        let r = std::panic::catch_unwind(|| {
+            std::hint::black_box(usize::MAX) + std::hint::black_box(1usize)
+        });
+        assert!(
+            r.is_err(),
+            "usize overflow wrapped to {:?}: overflow-checks is off in this profile",
+            r.ok()
+        );
+    }
+}

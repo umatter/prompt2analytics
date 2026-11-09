@@ -50,12 +50,12 @@
 //!
 //! - Cinelli, C. & Hazlett, C. (2020). "Making Sense of Sensitivity: Extending
 //!   Omitted Variable Bias". Journal of the Royal Statistical Society: Series B,
-//!   82(1), 39-67. https://doi.org/10.1111/rssb.12348
+//!   82(1), 39-67. <https://doi.org/10.1111/rssb.12348>
 //!
-//! - sensemakr R package: https://carloscinelli.com/sensemakr/
+//! - sensemakr R package: <https://carloscinelli.com/sensemakr/>
 //!   Cinelli, C., Ferwerda, J., & Hazlett, C. (2020). sensemakr: Sensitivity
 //!   Analysis Tools for Regression Models. R package version 0.1.4.
-//!   https://CRAN.R-project.org/package=sensemakr
+//!   <https://CRAN.R-project.org/package=sensemakr>
 //!
 //! R equivalent: `sensemakr::sensemakr()`
 

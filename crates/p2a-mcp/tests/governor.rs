@@ -1006,3 +1006,36 @@ async fn cors_headers_on_auth_failures_and_preflight() {
             .contains("retry-after")
     );
 }
+
+#[tokio::test]
+#[cfg(debug_assertions)]
+async fn overflow_in_a_governed_call_is_an_internal_error() {
+    // With overflow checks on (Rust's default in builds with debug assertions), a residual
+    // integer overflow is a panic that the governor answers with 500 "internal"; the session
+    // survives.
+    let (app, state) = app_with(&local(), ExecConfig::default()).await;
+    let sid = new_session(&app).await;
+    let session = session_of(&state, &sid).await;
+    let r = state
+        .governor
+        .clone()
+        .run_blocking(
+            &session,
+            "overflow",
+            |_budget| -> Result<usize, ToolCallError> {
+                Ok(std::hint::black_box(0usize) - std::hint::black_box(1usize))
+            },
+        )
+        .await;
+    match r {
+        Err(e @ ToolCallError::Internal(_)) => {
+            assert_eq!(
+                (e.code(), e.status()),
+                ("internal", StatusCode::INTERNAL_SERVER_ERROR)
+            );
+        }
+        other => panic!("expected the overflow panic as internal, got {other:?}"),
+    }
+    let (s, _, b) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+}

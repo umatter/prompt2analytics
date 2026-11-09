@@ -55,7 +55,6 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, FisherSnedecor};
 use std::fmt;
 
 use crate::data::Dataset;
@@ -63,6 +62,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, singular_in, sym_inverse};
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
 
@@ -242,10 +242,7 @@ fn f_upper_tail(f: f64, df1: usize, df2: usize) -> f64 {
     if f.is_infinite() {
         return 0.0;
     }
-    match FisherSnedecor::new(df1 as f64, df2 as f64) {
-        Ok(d) => d.sf(f.max(0.0)),
-        Err(_) => f64::NAN,
-    }
+    crate::traits::estimator::f_test_p_value(f.max(0.0), df1 as f64, df2 as f64)
 }
 
 /// OLS of `v` on the columns of `z`, given `(z'z)^-1`: the coefficients, the explicit
@@ -263,14 +260,17 @@ fn ols_fit(
 
 /// The classical partial F of `l` excluded columns: `((rss0 - rss1)/l) / (rss1/df2)`,
 /// with `rss0` the restricted and `rss1` the full residual sum of squares. NaN when
-/// `df2 == 0`; +inf for a perfect full fit.
+/// `df2 == 0` and for 0/0 (both fits perfect: the excluded columns explain nothing that
+/// was left); +inf only for a perfect full fit with a positive restricted RSS.
 fn partial_f(rss0: f64, rss1: f64, l: usize, df2: usize) -> f64 {
     if df2 == 0 || l == 0 {
         f64::NAN
     } else if rss1 > 0.0 {
         ((rss0 - rss1).max(0.0) / l as f64) / (rss1 / df2 as f64)
-    } else {
+    } else if rss0 - rss1 > 0.0 {
         f64::INFINITY
+    } else {
+        f64::NAN
     }
 }
 
@@ -309,6 +309,7 @@ fn hc1_wald_f(
     let v = ztz_inv.dot(&meat).dot(ztz_inv) * (n as f64 / df2 as f64);
     let v_bb = v.slice(s![k_exog.., k_exog..]);
     let b = beta.slice(s![k_exog..]);
+    // A singular V_bb (condition Some) gives None: the HC1 F is not reported.
     match safe_inverse(&v_bb) {
         Ok((inv, None)) => Some(b.dot(&inv.dot(&b)) / l as f64),
         _ => None,
@@ -467,12 +468,19 @@ pub fn run_iv2sls(
     // the restricted fit x_j ~ [1, X_exog] with x_j ~ [1, X_exog, Z] (AER's
     // weak-instrument statistic), classical or HC1 Wald.
     // ═══════════════════════════════════════════════════════════════════
-    let (ztz0_inv, _) = safe_inverse(&ztz.slice(s![..k_exog, ..k_exog])).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "[1, X_exog]'[1, X_exog] in the first-stage restricted fit".to_string(),
-            suggestion: format!("Check for collinearity among the exogenous regressors: {e:?}"),
-        }
-    })?;
+    let ztz0_inv = sym_inverse(
+        ztz.slice(s![..k_exog, ..k_exog]),
+        SingularPolicy::Error,
+        "exogenous-instrument cross-product Z_0'Z_0",
+    )
+    .map_err(|e| {
+        singular_in(
+            e,
+            "[1, X_exog]'[1, X_exog] in the first-stage restricted fit",
+            "Check for collinearity among the exogenous regressors",
+        )
+    })?
+    .inverse;
     let z0 = z_full.slice(s![.., ..k_exog]);
     let fs_df2 = n.saturating_sub(k_full_z);
     let f_type = if robust { HC1_WALD_F } else { PARTIAL_F };
@@ -575,10 +583,13 @@ pub fn run_iv2sls(
     let xpzy = ztx_full.t().dot(&ztz_inv_zty);
 
     // β = (X'P_Z X)^{-1} X'P_Z y
-    let (xpzx_inv, _) = safe_inverse(&xpzx.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'P_Z X in 2SLS second stage".to_string(),
-        suggestion: format!("Check for collinearity: {:?}", e),
-    })?;
+    let xpzx_inv = sym_inverse(
+        xpzx.view(),
+        SingularPolicy::Error,
+        "2SLS normal matrix X'P_Z X",
+    )
+    .map_err(|e| singular_in(e, "X'P_Z X in 2SLS second stage", "Check for collinearity"))?
+    .inverse;
 
     let beta: Array1<f64> = xpzx_inv.dot(&xpzy);
 
@@ -874,10 +885,19 @@ pub fn run_first_stage_diagnostics(
 
     // OLS regression
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'X in first-stage diagnostics".to_string(),
-        suggestion: format!("Check for collinearity: {:?}", e),
-    })?;
+    let xtx_inv = sym_inverse(
+        xtx_mat.view(),
+        SingularPolicy::Error,
+        "first-stage design X'X",
+    )
+    .map_err(|e| {
+        singular_in(
+            e,
+            "X'X in first-stage diagnostics",
+            "Check for collinearity",
+        )
+    })?
+    .inverse;
 
     let xty_vec = xty(&x.view(), &y);
     let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
@@ -905,12 +925,19 @@ pub fn run_first_stage_diagnostics(
     // Partial F of the instruments given the controls: the restricted fit
     // endog ~ [1, controls] against the full first stage (AER's weak-instrument F)
     let restricted = cols.matrix(&controls, true)?;
-    let (restricted_inv, _) = safe_inverse(&xtx(&restricted.data.view()).view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "[1, controls]'[1, controls] in the first-stage restricted fit".to_string(),
-            suggestion: format!("Check for collinearity among the controls: {e:?}"),
-        }
-    })?;
+    let restricted_inv = sym_inverse(
+        xtx(&restricted.data.view()).view(),
+        SingularPolicy::Error,
+        "restricted first-stage X'X",
+    )
+    .map_err(|e| {
+        singular_in(
+            e,
+            "[1, controls]'[1, controls] in the first-stage restricted fit",
+            "Check for collinearity among the controls",
+        )
+    })?
+    .inverse;
     let (_, _, rss0) = ols_fit(&restricted.data.view(), &restricted_inv, &y.view());
     let l = instruments.len();
     let f_statistic = partial_f(rss0, ssr, l, df);
@@ -1165,10 +1192,19 @@ pub fn sargan_test(
 
     // Auxiliary regression: residuals on Z
     let ztz = xtx(&z_full.view());
-    let (ztz_inv, _) = safe_inverse(&ztz.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Z'Z in Sargan test".to_string(),
-        suggestion: format!("Check for collinearity among instruments: {:?}", e),
-    })?;
+    let ztz_inv = sym_inverse(
+        ztz.view(),
+        SingularPolicy::Error,
+        "instrument cross-product Z'Z",
+    )
+    .map_err(|e| {
+        singular_in(
+            e,
+            "Z'Z in Sargan test",
+            "Check for collinearity among instruments",
+        )
+    })?
+    .inverse;
 
     let ztr = xty(&z_full.view(), &residuals);
     let gamma = ztz_inv.dot(&ztr);
@@ -1240,6 +1276,71 @@ pub fn run_sargan_test(dataset: &Dataset, iv_result: &IVResult) -> EconResult<Sa
 mod tests {
     use super::*;
     use polars::prelude::*;
+
+    #[test]
+    fn test_partial_f_zero_over_zero_is_nan() {
+        // 0/0 (no fit in either model) has no F; only a perfect unrestricted fit with a
+        // positive restricted RSS is +inf.
+        assert!(partial_f(0.0, 0.0, 2, 10).is_nan());
+        assert_eq!(partial_f(1.0, 0.0, 2, 10), f64::INFINITY);
+        assert!(partial_f(1.0, 0.5, 2, 0).is_nan());
+        assert!(f_upper_tail(3.0, 2, 0).is_nan());
+        assert_eq!(f_upper_tail(f64::INFINITY, 2, 10), 0.0);
+    }
+
+    #[test]
+    fn test_hc1_wald_f_singular_is_none() {
+        // A zero covariance block (here from a zero (Z'Z)^-1) cannot be inverted: no HC1 F.
+        let z = ndarray::Array2::from_shape_fn((6, 2), |(i, j)| (i * (j + 1)) as f64 + 0.5);
+        let zero = ndarray::Array2::<f64>::zeros((2, 2));
+        let resid = ndarray::Array1::from(vec![0.3, -0.2, 0.1, -0.4, 0.25, -0.05]);
+        let beta = ndarray::Array1::from(vec![0.7, -0.3]);
+        assert_eq!(hc1_wald_f(&z.view(), &zero, &resid, &beta, 0), None);
+    }
+
+    fn aliased_iv_data() -> Dataset {
+        let n = 40;
+        let z1: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.37).sin() * 2.0 + 0.1 * i as f64)
+            .collect();
+        let z2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.91).cos()).collect();
+        let w: Vec<f64> = (0..n).map(|i| ((i * 7 % 13) as f64) / 13.0).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| 0.8 * z1[i] + 0.5 * z2[i] + 0.3 * w[i] + 0.2 * (i as f64 * 1.7).sin())
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x[i] - 0.4 * w[i] + 0.3 * (i as f64 * 2.3).cos())
+            .collect();
+        let z2_dup = z2.clone();
+        Dataset::new(
+            df!("y" => y, "x" => x, "z1" => z1, "z2" => z2, "z2_dup" => z2_dup,
+                "w" => w.clone(), "w_dup" => w)
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_iv_refuses_aliased_designs() {
+        // R's AER::ivreg reports NA for an aliased regressor or instrument; p2a refuses instead
+        // of returning a generalized-inverse fit with a silently discarded rank condition.
+        let ds = aliased_iv_data();
+        assert!(run_iv2sls(&ds, "y", &["w"], &["x"], &["z1", "z2"], false).is_ok());
+        assert!(sargan_test(&ds, "y", &["w"], &["x"], &["z1", "z2"]).is_ok());
+        let e = run_iv2sls(&ds, "y", &["w", "w_dup"], &["x"], &["z1", "z2"], false)
+            .unwrap_err()
+            .to_string();
+        // w_dup is an exogenous instrument too, so the first inverse to meet it is Z_0'Z_0.
+        assert!(e.contains("Z_0'Z_0: rank 2 of 3"), "{e}");
+        let e = run_first_stage_diagnostics(&ds, "x", &["z1", "z2"], Some(&["w", "w_dup"]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("first-stage") && e.contains("rank"), "{e}");
+        // A duplicated instrument: whichever inverse meets the rank deficiency first refuses it.
+        let e = sargan_test(&ds, "y", &["w"], &["x"], &["z1", "z2", "z2_dup"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("rank"), "{e}");
+    }
 
     fn create_iv_dataset() -> Dataset {
         // Classic IV setup: y = 0.5*x_endog + noise

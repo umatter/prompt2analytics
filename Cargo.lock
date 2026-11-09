@@ -6941,7 +6941,6 @@ dependencies = [
  "plotters",
  "polars",
  "polars-ops",
- "quadprog",
  "r_mathlib",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
@@ -8531,12 +8530,6 @@ checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
 ]
-
-[[package]]
-name = "quadprog"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad6c72940db1c4374a9e385fcdf2232cb409b8a76bf784964c1ab857b9b1d3b"
 
 [[package]]
 name = "quick-error"

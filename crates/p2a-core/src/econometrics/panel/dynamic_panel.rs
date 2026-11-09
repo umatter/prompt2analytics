@@ -87,7 +87,7 @@
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
@@ -671,7 +671,7 @@ fn chi_squared_upper(stat: f64, df: usize) -> f64 {
     if df == 0 || stat.is_nan() {
         return f64::NAN;
     }
-    ChiSquared::new(df as f64).map_or(f64::NAN, |c| c.sf(stat.max(0.0)))
+    crate::traits::estimator::chi_squared_p_value(stat.max(0.0), df as f64)
 }
 
 /// The non-zero cells of each row of Z, row by row.

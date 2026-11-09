@@ -11,6 +11,7 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{NaPolicy, limit_refusal, missing_json, numeric_column, parse_option};
+use crate::tools::common::{insert_notes, parse_choice};
 use crate::tools::requests::timeseries::*;
 
 use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
@@ -66,7 +67,6 @@ use p2a_core::{
     window as ts_window,
 };
 
-use crate::tools::handlers::stats::parse_choice;
 use p2a_core::options::Choices;
 
 /// Spectrum estimator of `timeseries_spectrum` (R's spectrum `method`).
@@ -102,22 +102,6 @@ static BOX_TEST_TYPE: Choices<BoxTestType> = Choices {
     ],
 };
 
-/// `ts_changepoint` change type (changepoint's cpt.mean, cpt.var, cpt.meanvar).
-static CHANGE_TYPE: Choices<CostFunction> = Choices {
-    option: "change_type",
-    values: &[
-        (&["mean", "cpt.mean"], CostFunction::MeanChange),
-        (
-            &["variance", "var", "cpt.var"],
-            CostFunction::VarianceChange,
-        ),
-        (
-            &["meanvar", "both", "mean_and_variance", "cpt.meanvar"],
-            CostFunction::MeanAndVariance,
-        ),
-    ],
-};
-
 /// Search method of `ts_changepoint` (changepoint's `method`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CpMethod {
@@ -133,44 +117,6 @@ static CP_METHOD: Choices<CpMethod> = Choices {
             &["binary", "binseg", "binary_segmentation"],
             CpMethod::BinSeg,
         ),
-    ],
-};
-
-/// Seasonal component of `ts_holt_winters` (R's HoltWinters `seasonal`).
-static SEASONAL_TYPE: Choices<SeasonalType> = Choices {
-    option: "seasonal",
-    values: &[
-        (&["additive", "add"], SeasonalType::Additive),
-        (&["multiplicative", "mult"], SeasonalType::Multiplicative),
-    ],
-};
-
-/// Estimation method of `ts_ar` (R's ar `method`).
-static AR_METHOD: Choices<ArMethod> = Choices {
-    option: "method",
-    values: &[
-        (&["yule-walker", "yw", "yulewalker"], ArMethod::YuleWalker),
-        (&["burg"], ArMethod::Burg),
-        (&["ols"], ArMethod::Ols),
-    ],
-};
-
-/// `ts_decompose` type (R's decompose `type`).
-static DECOMPOSE_TYPE: Choices<DecomposeType> = Choices {
-    option: "decompose_type",
-    values: &[
-        (&["additive", "add"], DecomposeType::Additive),
-        (&["multiplicative", "mult"], DecomposeType::Multiplicative),
-    ],
-};
-
-/// `ts_structts` model (R's StructTS `type`).
-static STRUCTTS_TYPE: Choices<StructTsType> = Choices {
-    option: "model_type",
-    values: &[
-        (&["level", "local_level"], StructTsType::Level),
-        (&["trend", "local_linear_trend"], StructTsType::Trend),
-        (&["bsm", "basic_structural_model"], StructTsType::BSM),
     ],
 };
 
@@ -865,7 +811,7 @@ impl AnalyticsServer {
                 "volatility": volatility,
             });
         }
-        crate::tools::handlers::stats::insert_notes(
+        insert_notes(
             &mut output,
             Some((result.converged, result.iterations)),
             &result.warnings,
@@ -960,11 +906,7 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Determine cost function
-        let cost_fn = match parse_choice(
-            &CHANGE_TYPE,
-            request.change_type.as_deref(),
-            CostFunction::MeanChange,
-        ) {
+        let cost_fn = match parse_option(request.change_type.as_deref(), CostFunction::MeanChange) {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
@@ -975,7 +917,7 @@ impl AnalyticsServer {
         if cp_method == CpMethod::BinSeg && cost_fn != CostFunction::MeanChange {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "method 'binary' detects mean changes only (binary_segmentation has no variance cost); use method 'pelt' for change_type '{}'",
-                CHANGE_TYPE.canonical(cost_fn)
+                CostFunction::choices().canonical(cost_fn)
             ))]));
         }
 
@@ -1066,11 +1008,7 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse seasonal type
-        let seasonal = match parse_choice(
-            &SEASONAL_TYPE,
-            request.seasonal.as_deref(),
-            SeasonalType::Additive,
-        ) {
+        let seasonal = match parse_option(request.seasonal.as_deref(), SeasonalType::Additive) {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
@@ -1229,8 +1167,7 @@ impl AnalyticsServer {
         };
 
         // Parse method
-        let method = match parse_choice(&AR_METHOD, request.method.as_deref(), ArMethod::YuleWalker)
-        {
+        let method = match parse_option(request.method.as_deref(), ArMethod::YuleWalker) {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
@@ -1283,7 +1220,7 @@ impl AnalyticsServer {
             },
             "references": "Brockwell & Davis (1991), Time Series: Theory and Methods"
         });
-        crate::tools::handlers::stats::insert_notes(&mut output, None, &result.warnings);
+        insert_notes(&mut output, None, &result.warnings);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1303,14 +1240,11 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse decomposition type
-        let decompose_type = match parse_choice(
-            &DECOMPOSE_TYPE,
-            request.decompose_type.as_deref(),
-            DecomposeType::Additive,
-        ) {
-            Ok(v) => v,
-            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
-        };
+        let decompose_type =
+            match parse_option(request.decompose_type.as_deref(), DecomposeType::Additive) {
+                Ok(v) => v,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
         // Run decomposition (the core wrapper reads the column: Int64 accepted, a missing
         // value refused by name)
@@ -1408,11 +1342,7 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse model type
-        let model_type = match parse_choice(
-            &STRUCTTS_TYPE,
-            request.model_type.as_deref(),
-            StructTsType::Level,
-        ) {
+        let model_type = match parse_option(request.model_type.as_deref(), StructTsType::Level) {
             Ok(v) => v,
             Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
@@ -1489,7 +1419,7 @@ impl AnalyticsServer {
             },
             "references": "Harvey, A. C. (1990). Forecasting, Structural Time Series Models and the Kalman Filter."
         });
-        crate::tools::handlers::stats::insert_notes(
+        insert_notes(
             &mut output,
             Some((result.convergence.converged, result.convergence.iterations)),
             &result.warnings,
@@ -1608,7 +1538,7 @@ impl AnalyticsServer {
             },
             "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274."
         });
-        crate::tools::handlers::stats::insert_notes(
+        insert_notes(
             &mut output,
             Some((result.convergence.converged, result.convergence.iterations)),
             &result.warnings,
@@ -2321,12 +2251,7 @@ mod tests {
         let checks = [
             SPECTRUM_METHOD.validate(),
             BOX_TEST_TYPE.validate(),
-            CHANGE_TYPE.validate(),
             CP_METHOD.validate(),
-            SEASONAL_TYPE.validate(),
-            AR_METHOD.validate(),
-            DECOMPOSE_TYPE.validate(),
-            STRUCTTS_TYPE.validate(),
             FILTER_METHOD.validate(),
             END_RULE.validate(),
         ];
@@ -2336,19 +2261,19 @@ mod tests {
             Ok(BoxTestType::BoxPierce)
         );
         assert_eq!(
-            parse_choice(&AR_METHOD, Some("YW"), ArMethod::Burg),
+            parse_option(Some("YW"), ArMethod::Burg),
             Ok(ArMethod::YuleWalker)
         );
         assert_eq!(
-            parse_choice(&AR_METHOD, Some("mle"), ArMethod::YuleWalker).unwrap_err(),
+            parse_option(Some("mle"), ArMethod::YuleWalker).unwrap_err(),
             "unknown method 'mle'; expected one of: yule-walker, burg, ols"
         );
         assert_eq!(
-            parse_choice(&CHANGE_TYPE, Some("cpt.var"), CostFunction::MeanChange),
+            parse_option(Some("cpt.var"), CostFunction::MeanChange),
             Ok(CostFunction::VarianceChange)
         );
         assert_eq!(
-            parse_choice(&STRUCTTS_TYPE, Some("BSM"), StructTsType::Level),
+            parse_option(Some("BSM"), StructTsType::Level),
             Ok(StructTsType::BSM)
         );
         assert_eq!(

@@ -16,7 +16,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::handlers::regression::{append_unshown_notes, parse_choice};
+use crate::tools::common::{MCP_DEFAULT_SEED, append_unshown_notes, parse_choice};
 use crate::tools::requests::discrete::{
     FeglmRequest, HurdleModelRequest, LogitRequest, MixedLogitRequest, MlogitRequest,
     MultinomRequest, NegBinRequest, OrderedRequest, ProbitRequest, ZeroInflRequest,
@@ -30,10 +30,6 @@ use p2a_core::{
     run_feglm, run_gmnl, run_hurdle, run_logit, run_multinom, run_negbin, run_probit, run_zinb,
     run_zip,
 };
-
-/// mixed_logit's seed for pseudo-random draws when the session sets none (MixedLogitConfig's
-/// default seed).
-const MIXED_LOGIT_DEFAULT_SEED: u64 = 42;
 
 const MIXED_DISTRIBUTION: Choices<RandomDistribution> = Choices {
     option: "distribution",
@@ -271,12 +267,7 @@ impl AnalyticsServer {
         config.halton = request.halton.unwrap_or(true);
         config.individual_col = request.individual_id.clone();
         // pseudo-random draws (halton = false) follow the session seed, else the default
-        config.seed = Some(
-            self.global_seed
-                .read()
-                .await
-                .unwrap_or(MIXED_LOGIT_DEFAULT_SEED),
-        );
+        config.seed = Some(self.global_seed.read().await.unwrap_or(MCP_DEFAULT_SEED));
 
         let result = match run_gmnl(
             dataset,

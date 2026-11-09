@@ -31,6 +31,7 @@ const FACTANAL_INLINE_VALUES: usize = 500;
 const SPLINE_DEFAULT_MAX_POINTS: usize = 200;
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::{COV_WT_METHOD, insert_notes, parse_choice};
 use crate::tools::common::{
     MissingSummary, NaPolicy, REFUSAL_NAMES, budget_level_count, check_named_budget, echo_list,
     insert_missing, numeric_column, numeric_columns, numeric_matrix, parse_option,
@@ -54,48 +55,6 @@ use p2a_core::stats::{
 
 use p2a_core::options::Choices;
 use p2a_core::stats::CovWtMethod;
-
-/// Parses an optional option string with a `Choices` table: None gives `default`; an unknown
-/// value gives the table's message ("unknown method 'biased'; expected one of: unbiased, ML").
-/// For p2a-core enums that have no `FromStr` (no `impl` is possible in this crate) and for
-/// handler-local choices; enums with one use `common::parse_option`.
-pub(crate) fn parse_choice<T: Copy + PartialEq + 'static>(
-    choices: &Choices<T>,
-    value: Option<&str>,
-    default: T,
-) -> Result<T, String> {
-    match value {
-        None => Ok(default),
-        Some(s) => choices.parse(s).map_err(|e| match e {
-            p2a_core::EconError::InvalidSpecification { message } => message,
-            other => other.to_string(),
-        }),
-    }
-}
-
-/// Merges `common::notes_json(converged, warnings)` into a JSON tool output object; a
-/// non-object is left alone.
-pub(crate) fn insert_notes(
-    output: &mut serde_json::Value,
-    converged: Option<(bool, usize)>,
-    warnings: &[String],
-) {
-    if let (Some(o), serde_json::Value::Object(n)) = (
-        output.as_object_mut(),
-        crate::tools::common::notes_json(converged, warnings),
-    ) {
-        o.extend(n);
-    }
-}
-
-/// `stats_cov_wt` method (R's cov.wt `method`).
-pub(crate) static COV_WT_METHOD: Choices<CovWtMethod> = Choices {
-    option: "method",
-    values: &[
-        (&["unbiased"], CovWtMethod::Unbiased),
-        (&["ML", "mle", "maximum_likelihood"], CovWtMethod::ML),
-    ],
-};
 
 /// Centre of `stats_mad` (R's mad `center`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

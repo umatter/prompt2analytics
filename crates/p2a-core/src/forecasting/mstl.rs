@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mstl_two_seasonal_components() {
+    fn test_mstl_two_seasonal_components_properties() {
         // Create data with two seasonal periods: period=7 and period=28
         // y_t = trend_t + S1_t(period=7) + S2_t(period=28) + noise
         let n = 7 * 28; // = 196, enough for both periods
@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mstl_reconstruction() {
+    fn test_mstl_reconstruction_properties() {
         // Verify that trend + sum(seasonal) + residuals == original series
         let n = 100;
         let period = 10;
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mstl_seasonal_has_correct_period() {
+    fn test_mstl_seasonal_has_correct_period_properties() {
         // For data with strong period-12 seasonality, the extracted seasonal
         // component should exhibit period-12 repetition.
         let n = 120; // 10 cycles of period 12

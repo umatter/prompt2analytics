@@ -49,6 +49,7 @@ use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::f_test_p_value;
 
 /// Result of an F test for comparing two variances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,37 +332,19 @@ pub fn run_var_test(
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compute p-value for F test based on alternative hypothesis.
+/// P-value of the F statistic. R's var.test computes 1 - pf; this computes both tails directly
+/// (X-17), the lower one as `P(F <= f) = P(F' >= 1/f)` with `F' ~ F(df2, df1)`, so at an extreme
+/// ratio p is the exact tail where R prints 0.
 fn compute_f_p_value(f_stat: f64, df1: f64, df2: f64, alternative: Alternative) -> f64 {
-    use statrs::distribution::{ContinuousCDF, FisherSnedecor};
-
     if df1 <= 0.0 || df2 <= 0.0 || f_stat.is_nan() || f_stat < 0.0 {
         return f64::NAN;
     }
-    if f_stat.is_infinite() {
-        return 0.0;
-    }
-
-    let f_dist = match FisherSnedecor::new(df1, df2) {
-        Ok(d) => d,
-        Err(_) => return f64::NAN,
-    };
-
+    let upper = f_test_p_value(f_stat, df1, df2);
+    let lower = f_test_p_value(1.0 / f_stat, df2, df1);
     match alternative {
-        Alternative::TwoSided => {
-            // Two-tailed: 2 * min(P(F < f), P(F > f))
-            let p_lower = f_dist.cdf(f_stat);
-            let p_upper = 1.0 - p_lower;
-            2.0 * p_lower.min(p_upper)
-        }
-        Alternative::Greater => {
-            // Right-tailed: P(F > f)
-            1.0 - f_dist.cdf(f_stat)
-        }
-        Alternative::Less => {
-            // Left-tailed: P(F < f)
-            f_dist.cdf(f_stat)
-        }
+        Alternative::TwoSided => (2.0 * lower.min(upper)).min(1.0),
+        Alternative::Greater => upper,
+        Alternative::Less => lower,
     }
 }
 
@@ -410,6 +393,59 @@ fn compute_variance_ratio_ci(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
+
+    /// Relative-only tolerance for an upper tail: Tol::p_value's absolute floor would accept
+    /// 0 for a tail far below 1e-16.
+    fn tail(n: usize) -> Tol {
+        Tol::new(Tol::p_value(n).rel, 0.0)
+    }
+
+    #[test]
+    fn test_validate_var_test_ci_quantiles_at_large_df() {
+        // At df 2e7 R's qf switches to qchisq(p, df1) / df1, which ignores the denominator's
+        // variance and is 2.6e-4 off; var.test's limits are pinned to the exact quantile
+        // instead (qbeta in the case: F = x / (1 - x) for x ~ Beta(df / 2, df / 2)).
+        let (case, _) = crate::test_support::load_case("tail_var_test");
+        let (lo, hi) = compute_variance_ratio_ci(1.0, 2e7, 2e7, 0.95, Alternative::TwoSided);
+        Check::new(&case)
+            .vector("ci_big_exact_estimate_1", &[lo, hi], Tol::new(1e-10, 0.0))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_var_test_extreme_ratio() {
+        // X-17: R's var.test computes 1 - pf and prints 0 here; the exact tails are pinned to
+        // pf(lower.tail = FALSE), and to R's printed values within Tol::p_value.
+        let (case, ds) = crate::test_support::load_case("tail_var_test");
+        let x = numeric_column(ds.df(), "x", NaPolicy::Omit).unwrap().0;
+        let y = numeric_column(ds.df(), "y", NaPolicy::Omit).unwrap().0;
+        assert_eq!((x.len(), y.len()), (40, 45));
+        let run = |alt| var_test(&x, &y, 1.0, alt, 0.95).unwrap();
+        let (two, gt, lt) = (
+            run(Alternative::TwoSided),
+            run(Alternative::Greater),
+            run(Alternative::Less),
+        );
+        Check::new(&case)
+            .scalar("statistic", two.f_statistic, Tol::stat(85))
+            .vector("df", &[two.df_num, two.df_denom], Tol::exact())
+            .scalar("p_two_sided_accurate", two.p_value, tail(85))
+            .scalar("var_test_p_two_sided", two.p_value, Tol::p_value(85))
+            .scalar("p_upper", gt.p_value, tail(85))
+            .scalar("var_test_p_greater", gt.p_value, Tol::p_value(85))
+            .scalar("p_lower", lt.p_value, Tol::p_value(85))
+            .scalar("var_test_p_less", lt.p_value, Tol::p_value(85))
+            .vector(
+                "conf_int_two_sided",
+                &[two.conf_int_lower, two.conf_int_upper],
+                Tol::stat(85),
+            )
+            .vector("conf_int_greater", &[gt.conf_int_lower], Tol::stat(85))
+            .vector("conf_int_less", &[lt.conf_int_upper], Tol::stat(85))
+            .finish();
+        assert_eq!((gt.conf_int_upper, lt.conf_int_lower), (f64::INFINITY, 0.0));
+    }
     use polars::prelude::*;
 
     #[test]

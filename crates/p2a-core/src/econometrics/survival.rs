@@ -17,7 +17,7 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
@@ -1136,6 +1136,9 @@ pub fn log_rank_test(
                 .to_string(),
         });
     }
+    // u lies in the column space of W, so an ill-conditioned W changes neither the statistic
+    // nor survdiff's answer.
+    // inverse-ok: u' W^- u is the same for every generalized inverse
     let w_inv = match safe_inverse(&w.view()) {
         Ok((inv, _)) => inv,
         Err(_) => pseudoinverse(&w.view())?,
@@ -1143,9 +1146,7 @@ pub fn log_rank_test(
     let chi_squared = u.dot(&w_inv.dot(&u));
 
     let df_val = k;
-    let p_value = ChiSquared::new(df_val as f64)
-        .map_err(|e| EconError::Internal(format!("log-rank test: chi-square df: {e}")))?
-        .sf(chi_squared);
+    let p_value = crate::traits::estimator::chi_squared_p_value(chi_squared, df_val as f64);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     Ok(LogRankResult {
@@ -3943,7 +3944,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cox_concordance() {
+    fn test_cox_concordance_properties() {
         // Concordance should match R within ~0.05
         let dataset = create_test_dataset();
         let result = run_cox_ph(&dataset, "time", "event", &["x1"], None).unwrap();
@@ -3961,7 +3962,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_competing_risks_cif_sum() {
+    fn test_competing_risks_cif_sum_properties() {
         // Aalen-Johansen property: sum of CIFs + overall survival = 1
         let df = df! {
             "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],

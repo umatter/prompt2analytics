@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "stats_upper_tails",
+      "name": "Upper-tail p-values below 1e-16 (mcnemar.test, oneway.test, prop.trend.test, var.test) and var.test limits at large df",
+      "category": "stats",
+      "reference": "stats::mcnemar.test; stats::oneway.test; stats::prop.trend.test; stats::var.test; stats::pf(lower.tail = FALSE); stats::qbeta",
+      "doc": "validation/stats/upper_tails.md",
+      "cases": [
+        "tail_mcnemar",
+        "tail_oneway",
+        "tail_prop_trend",
+        "tail_var_test"
+      ],
+      "tests": [
+        "p2a-core::stats::mcnemar::tests::test_validate_mcnemar_tail_below_1e16",
+        "p2a-core::stats::oneway::tests::test_validate_oneway_tail_below_1e16",
+        "p2a-core::stats::proptrendtest::tests::test_validate_prop_trend_tail_below_1e16",
+        "p2a-core::stats::vartest::tests::test_validate_var_test_extreme_ratio",
+        "p2a-core::stats::vartest::tests::test_validate_var_test_ci_quantiles_at_large_df"
+      ],
+      "quantities": [
+        "statistic",
+        "df",
+        "p (relative, no absolute floor)",
+        "var.test p as R prints it",
+        "confidence limits",
+        "var.test limits at df 2e7 (exact F quantile from qbeta)"
+      ],
+      "tolerance": "validation/README.md by n for statistics and limits; p-values relative only (X-17); limits at df 2e7 1e-10 relative",
+      "deviations": [
+        {
+          "finding": "X-17",
+          "quantity": "var.test p-value at an extreme ratio",
+          "note": "R's var.test computes 1 - pf and reports 0; p2a reports pf(lower.tail = FALSE) (keys p_upper, p_two_sided_accurate), equal to R's printed value within Tol::p_value's absolute 1e-12"
+        },
+        {
+          "finding": "X-14",
+          "quantity": "var.test confidence limits above df 4e5",
+          "note": "R's qf returns qchisq(p, df1) / df1 above df 4e5, 2.6e-4 off at df 2e7; p2a keeps the exact F quantile (statrs FisherSnedecor::inverse_cdf, within 3e-12 of qbeta's) and is pinned to qbeta (key ci_big_exact_estimate_1), not to qf (keys qf_big, ci_big_estimate_1)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "marginal_effects_logit_ame",
+      "name": "Logit average marginal effects with delta-method SEs; aliased regressors",
+      "category": "regression",
+      "reference": "stats::glm(binomial); delta method written out in R; marginaleffects::avg_slopes cross-check",
+      "doc": "validation/regression/marginal_effects.md",
+      "cases": [
+        "tail_marginal_logit"
+      ],
+      "tests": [
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_logit_tail",
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_aliased_regressor_is_nan"
+      ],
+      "quantities": [
+        "coefficients",
+        "AME",
+        "AME SE",
+        "z",
+        "p"
+      ],
+      "tolerance": "iterative 1e-8 (GLM stopping rule); p 5e-5 relative (z^2 x relative z error)",
+      "deviations": [
+        {
+          "finding": "REG-16",
+          "quantity": "MEM standard errors",
+          "note": "not pinned: the MEM SE approximation drops the gradient term (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ctree_root_statistics",
+      "name": "ctree variable-selection statistics and p-values below 1e-16",
+      "category": "ml",
+      "reference": "quadratic rank statistic written out in R (partykit not installed): (n - 1) cor(rank(x), y)^2, pchisq(lower.tail = FALSE)",
+      "doc": "validation/ml/ctree.md",
+      "cases": [
+        "tail_ctree_root"
+      ],
+      "tests": [
+        "p2a-core::ml::ctree::tests::test_validate_ctree_root_tail_tie_break"
+      ],
+      "quantities": [
+        "root p-values",
+        "chosen variable",
+        "its statistic",
+        "its Bonferroni p"
+      ],
+      "tolerance": "validation/README.md, n = 300 (relative only for p)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "hettx_effect_summary_and_imputation",
+      "name": "hettx effect summary (type-7 quantiles, IQR statistic) and regression imputation on an aliased arm",
+      "category": "econometrics",
+      "reference": "stats::quantile(type = 7); stats::IQR; stats::lm; predict.lm (rank-deficient); hettx itself is not installed",
+      "doc": "validation/econometrics/hettx.md",
+      "cases": [
+        "qtl_hettx_summary",
+        "inv_hettx_outcome_model"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_effect_summary_type7",
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_outcome_model_aliased_subset"
+      ],
+      "quantities": [
+        "p10, p25, median, p75, p90",
+        "IQR",
+        "min, max, sd",
+        "outcome-model coefficients (NA aliased)",
+        "predictions",
+        "R2"
+      ],
+      "tolerance": "validation/README.md, n = 20-40",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cubist_leaf_model",
+      "name": "Cubist leaf linear model with collinear attributes",
+      "category": "ml",
+      "reference": "stats::lm (aliased column NA, eliminated); Cubist itself is not installed",
+      "doc": "validation/ml/cubist.md",
+      "cases": [
+        "inv_cubist_leaf_model"
+      ],
+      "tests": [
+        "p2a-core::ml::cubist::tests::test_validate_cubist_leaf_model_duplicated_column"
+      ],
+      "quantities": [
+        "intercept",
+        "coefficients (aliased 0)"
+      ],
+      "tolerance": "validation/README.md, n = 30",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "affinity_propagation_optimized",
+      "name": "affinity_propagation_optimized (delegates to the apcluster port)",
+      "category": "ml",
+      "reference": "apcluster::apcluster (WP43's case)",
+      "doc": "validation/ml/affinity_propagation.md",
+      "cases": [
+        "apcluster_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::cluster_optimized::tests::test_validate_affinity_propagation_optimized_lam9_defaults"
+      ],
+      "quantities": [
+        "exemplars",
+        "number of clusters",
+        "cluster of each point",
+        "converged"
+      ],
+      "tolerance": "exact; the iteration count is not pinned",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

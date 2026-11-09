@@ -52,7 +52,6 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use crate::data::Dataset;
 use crate::data::columns::{self, MissingSummary, is_numeric_dtype};
@@ -224,9 +223,7 @@ fn chisq_upper_tail(stat: f64, df: usize) -> f64 {
     if stat == f64::INFINITY {
         return 0.0;
     }
-    ChiSquared::new(df as f64)
-        .map(|d| d.sf(stat))
-        .unwrap_or(f64::NAN)
+    crate::traits::estimator::chi_squared_p_value(stat, df as f64)
 }
 
 /// R's "Chi-squared approximation may be incorrect" when any expected count is below 5,

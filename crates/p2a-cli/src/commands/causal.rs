@@ -53,44 +53,13 @@ use p2a_core::{
 };
 
 use crate::output::{
-    OutputFormat, format_regression_results, missing_json, notes_json, print_error,
-    print_missing_note, print_notes,
+    OutputFormat, add_notes, add_result_notes, core_message, format_regression_results,
+    missing_json, parse_core_option, print_error, print_missing_note, print_notes,
+    print_result_notes, result_notes,
 };
 use crate::session::SessionManager;
 use p2a_core::diagnostics::IdentificationReport;
 use p2a_core::econometrics::matching::{MOrder, MatchMethodKind, MatchOptions, match_it_with};
-use p2a_core::traits::convergence::ResultNotes;
-
-/// Convergence and warnings of a core result in the form `output::print_notes` /
-/// `output::notes_json` take. Shared by the causal, time-series, ML, spatial and viz commands.
-pub(crate) fn result_notes(r: &dyn ResultNotes) -> (Option<(bool, usize)>, Vec<String>) {
-    (
-        r.notes_convergence().map(|c| (c.converged, c.iterations)),
-        r.notes_warnings(),
-    )
-}
-
-/// `output::print_notes` of a core result ("Converged: ..." and "Warning: ..." lines; nothing
-/// for JSON).
-pub(crate) fn print_result_notes(r: &dyn ResultNotes, format: &OutputFormat) {
-    let (converged, warnings) = result_notes(r);
-    print_notes(converged, &warnings, format);
-}
-
-/// Extends a JSON object with `output::notes_json` of `r`: "warnings" always (replacing an
-/// existing key), "converged" and "iterations" when the result reports them. A non-object
-/// value is left unchanged.
-pub(crate) fn with_result_notes(json: &mut serde_json::Value, r: &dyn ResultNotes) {
-    let (converged, warnings) = result_notes(r);
-    extend_json(json, notes_json(converged, &warnings));
-}
-
-/// Inserts every key of `map` into the JSON object `json` (no-op for a non-object).
-fn extend_json(json: &mut serde_json::Value, map: serde_json::Map<String, serde_json::Value>) {
-    if let Some(obj) = json.as_object_mut() {
-        obj.extend(map);
-    }
-}
 
 /// Identification warnings of severity Caution and above, as
 /// `[{"code", "severity", "title", "message"}]`.
@@ -140,7 +109,7 @@ pub enum CausalCommands {
     #[command(after_help = "\
 EXAMPLES:
     # IV regression with education instrumented by distance to college
-    p2a causal iv mydata -y wage --exog experience --endog education --instruments distance_college
+    p2a --session s.json causal iv mydata -y wage --exog experience --endog education --instruments distance_college
 ")]
     Iv {
         /// Dataset name
@@ -167,10 +136,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Classic 2x2 DiD
-    p2a causal did mydata -y outcome --treat treatment --post post_period
+    p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period
 
     # DiD with controls
-    p2a causal did mydata -y outcome --treat treatment --post post_period -x age income
+    p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period -x age income
 ")]
     Did {
         /// Dataset name
@@ -197,11 +166,11 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Synthetic control for California tobacco program
-    p2a causal synth mydata -y cigsale --unit state --time year --treated California \\
+    p2a --session s.json causal synth mydata -y cigsale --unit state --time year --treated California \\
         --treatment-time 1989 -p income beer retprice
 
     # With placebo tests
-    p2a causal synth mydata -y gdp --unit country --time year --treated Spain \\
+    p2a --session s.json causal synth mydata -y gdp --unit country --time year --treated Spain \\
         --treatment-time 1986 -p population unemployment --placebos
 ")]
     Synth {
@@ -247,10 +216,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # IPW for ATE with default trimming
-    p2a causal ipw mydata -y outcome -t treatment -x age income education
+    p2a --session s.json causal ipw mydata -y outcome -t treatment -x age income education
 
     # IPW for ATT with custom trimming
-    p2a causal ipw mydata -y outcome -t treatment -x age income --estimand att --trim 0.1
+    p2a --session s.json causal ipw mydata -y outcome -t treatment -x age income --estimand att --trim 0.1
 ")]
     Ipw {
         /// Dataset name
@@ -269,7 +238,7 @@ EXAMPLES:
         covariates: Vec<String>,
 
         /// Estimand: ate (default) or att
-        #[arg(long, default_value = "ate", value_parser = option_arg::<Estimand>)]
+        #[arg(long, default_value = "ate", value_parser = parse_core_option::<Estimand>)]
         estimand: Estimand,
 
         /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
@@ -287,10 +256,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # AIPW (doubly robust)
-    p2a causal doubly-robust mydata -y outcome -t treatment -x age income --method aipw
+    p2a --session s.json causal doubly-robust mydata -y outcome -t treatment -x age income --method aipw
 
     # Regression-only method for ATT
-    p2a causal doubly-robust mydata -y outcome -t treatment -x age income --method regression --estimand att
+    p2a --session s.json causal doubly-robust mydata -y outcome -t treatment -x age income --method regression --estimand att
 ")]
     DoublyRobust {
         /// Dataset name
@@ -310,11 +279,11 @@ EXAMPLES:
 
         /// Method: aipw (default; also dr, doubly_robust), ipw or regression (also reg, ra,
         /// outcome_regression)
-        #[arg(long, default_value = "aipw", value_parser = option_arg::<DRMethod>)]
+        #[arg(long, default_value = "aipw", value_parser = parse_core_option::<DRMethod>)]
         method: DRMethod,
 
         /// Estimand: ate (default) or att
-        #[arg(long, default_value = "ate", value_parser = option_arg::<Estimand>)]
+        #[arg(long, default_value = "ate", value_parser = parse_core_option::<Estimand>)]
         estimand: Estimand,
 
         /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
@@ -331,7 +300,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Mediation analysis (treatment -> mediator -> outcome)
-    p2a causal mediation mydata -y outcome -t treatment -m mediator -x age income
+    p2a --session s.json causal mediation mydata -y outcome -t treatment -m mediator -x age income
 ")]
     Mediation {
         /// Dataset name
@@ -362,13 +331,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Sharp RD with MSE-optimal bandwidth
-    p2a causal rd mydata -y test_score -r running_var -c 50
+    p2a --session s.json causal rd mydata -y test_score -r running_var -c 50
 
     # With local quadratic polynomial
-    p2a causal rd mydata -y test_score -r running_var -c 50 -p 2
+    p2a --session s.json causal rd mydata -y test_score -r running_var -c 50 -p 2
 
     # Given bandwidths (h for the estimate, b for the bias correction) and HC1 variance
-    p2a causal rd mydata -y score -r x -c 0 --h 0.3 --b 0.3 --vce hc1
+    p2a --session s.json causal rd mydata -y score -r x -c 0 --h 0.3 --b 0.3 --vce hc1
 ")]
     Rd {
         /// Dataset name
@@ -418,13 +387,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Fuzzy RD (imperfect compliance at cutoff)
-    p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60
+    p2a --session s.json causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60
 
     # One given bandwidth for both stages, bias bandwidth 0.5, HC1 variance
-    p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
+    p2a --session s.json causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
 
     # CER-optimal bandwidths, separate left and right
-    p2a causal fuzzy-rd mydata -y y -r x -t d -c 0 --bwselect certwo
+    p2a --session s.json causal fuzzy-rd mydata -y y -r x -t d -c 0 --bwselect certwo
 ")]
     FuzzyRd {
         /// Dataset name
@@ -478,11 +447,11 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Staggered DiD with never-treated comparison
-    p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
+    p2a --session s.json causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state
 
     # Doubly robust (DRDID) with covariates
-    p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
+    p2a --session s.json causal staggered-did mydata -y outcome --treatment-time first_treat \\
         --time year --unit state -x population gdp --method dr
 ")]
     StaggeredDid {
@@ -513,14 +482,14 @@ EXAMPLES:
         ///
         /// never_treated (default) or not_yet_treated (also nevertreated, never, notyettreated,
         /// notyet, nyt).
-        #[arg(long, default_value = "never_treated", value_parser = option_arg::<ComparisonGroup>)]
+        #[arg(long, default_value = "never_treated", value_parser = parse_core_option::<ComparisonGroup>)]
         comparison: ComparisonGroup,
 
         /// Estimation method, as did's est_method (DRDID).
         ///
         /// or = outcome_regression (default; also reg), ipw = inverse probability weighting
         /// (also std_ipw), dr = doubly_robust (also aipw, drdid).
-        #[arg(long, default_value = "or", value_parser = option_arg::<AttEstimationMethod>)]
+        #[arg(long, default_value = "or", value_parser = parse_core_option::<AttEstimationMethod>)]
         method: AttEstimationMethod,
 
         /// Periods before treatment in which units may anticipate it (did's anticipation).
@@ -539,10 +508,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # TMLE for ATE
-    p2a causal tmle mydata -y outcome -t treatment -x age income education
+    p2a --session s.json causal tmle mydata -y outcome -t treatment -x age income education
 
     # With custom propensity score truncation
-    p2a causal tmle mydata -y outcome -t treatment -x age income --truncate-lower 0.05 --truncate-upper 0.95
+    p2a --session s.json causal tmle mydata -y outcome -t treatment -x age income --truncate-lower 0.05 --truncate-upper 0.95
 ")]
     Tmle {
         /// Dataset name
@@ -563,7 +532,7 @@ EXAMPLES:
         /// Outcome (Q) model: logistic (default; also logit, binomial, binary) or linear (also
         /// gaussian, continuous, ols); logistic: Y outside [0, 1] is rescaled to [0, 1] first,
         /// as the tmle package does
-        #[arg(long, default_value = "logistic", value_parser = option_arg::<QModel>)]
+        #[arg(long, default_value = "logistic", value_parser = parse_core_option::<QModel>)]
         qmodel: QModel,
 
         /// Propensity score truncation lower bound (default: 0.01)
@@ -579,10 +548,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Interactive FE with auto-selected factors
-    p2a causal gsynth mydata -y gdp -d treatment --unit country --time year
+    p2a --session s.json causal gsynth mydata -y gdp -d treatment --unit country --time year
 
     # Matrix completion estimator with bootstrap SEs
-    p2a causal gsynth mydata -y gdp -d treatment --unit country --time year \\
+    p2a --session s.json causal gsynth mydata -y gdp -d treatment --unit country --time year \\
         --estimator mc --bootstrap-se
 ")]
     Gsynth {
@@ -615,12 +584,12 @@ EXAMPLES:
 
         /// Fixed effects (gsynth force): none, unit (also individual), time or two_way (default;
         /// also twoway, two-way)
-        #[arg(long, default_value = "two_way", value_parser = option_arg::<GsynthForce>)]
+        #[arg(long, default_value = "two_way", value_parser = parse_core_option::<GsynthForce>)]
         force: GsynthForce,
 
         /// Estimator: ife (interactive fixed effects, default; also gsynth) or mc (matrix
         /// completion; also matrix_completion)
-        #[arg(long, default_value = "ife", value_parser = option_arg::<GsynthEstimator>)]
+        #[arg(long, default_value = "ife", value_parser = parse_core_option::<GsynthEstimator>)]
         estimator: GsynthEstimator,
 
         /// Compute bootstrap standard errors
@@ -636,13 +605,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Nearest neighbor 1:1 matching with caliper
-    p2a causal matching mydata -t treatment -x age income education --caliper 0.25
+    p2a --session s.json causal matching mydata -t treatment -x age income education --caliper 0.25
 
     # Coarsened exact matching
-    p2a causal matching mydata -t treatment -x age income education --method cem
+    p2a --session s.json causal matching mydata -t treatment -x age income education --method cem
 
     # Full matching
-    p2a causal matching mydata -t treatment -x age income --method full
+    p2a --session s.json causal matching mydata -t treatment -x age income --method full
 ")]
     Matching {
         /// Dataset name
@@ -658,17 +627,17 @@ EXAMPLES:
 
         /// Matching method, as MatchIt: nearest (default; also nn), cem (coarsened exact, Sturges
         /// bins), full (optimal full matching; also optimal) or subclass (also subclassification)
-        #[arg(long, default_value = "nearest", value_parser = option_arg::<MatchMethodKind>)]
+        #[arg(long, default_value = "nearest", value_parser = parse_core_option::<MatchMethodKind>)]
         method: MatchMethodKind,
 
         /// Distance: logit (default; also glm, logistic, ps), probit, mahalanobis or euclidean
-        #[arg(long, default_value = "logit", value_parser = option_arg::<DistanceMethod>)]
+        #[arg(long, default_value = "logit", value_parser = parse_core_option::<DistanceMethod>)]
         distance: DistanceMethod,
 
         /// Order in which treated units are matched (MatchIt m.order): largest (also
         /// descending), smallest (also ascending), data or random; default largest for
         /// logit/probit, data otherwise
-        #[arg(long, value_parser = option_arg::<MOrder>)]
+        #[arg(long, value_parser = parse_core_option::<MOrder>)]
         m_order: Option<MOrder>,
 
         /// Matching ratio for nearest neighbor (default: 1)
@@ -692,10 +661,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # G-computation for ATE with bootstrap SEs
-    p2a causal stdreg mydata -y outcome -t treatment -x age income
+    p2a --session s.json causal stdreg mydata -y outcome -t treatment -x age income
 
     # Logistic outcome model for ATT
-    p2a causal stdreg mydata -y binary_outcome -t treatment -x age income \\
+    p2a --session s.json causal stdreg mydata -y binary_outcome -t treatment -x age income \\
         --model logistic --estimand att
 ")]
     Stdreg {
@@ -716,15 +685,15 @@ EXAMPLES:
 
         /// Outcome model: linear (default; also ols, gaussian), logistic (also logit, binomial)
         /// or poisson (also count, log_linear)
-        #[arg(long, default_value = "linear", value_parser = option_arg::<StdRegModel>)]
+        #[arg(long, default_value = "linear", value_parser = parse_core_option::<StdRegModel>)]
         model: StdRegModel,
 
         /// Estimand: ate (default), att, atc or levels (also potential_outcomes)
-        #[arg(long, default_value = "ate", value_parser = option_arg::<StdRegEstimand>)]
+        #[arg(long, default_value = "ate", value_parser = parse_core_option::<StdRegEstimand>)]
         estimand: StdRegEstimand,
 
         /// SE method: bootstrap (default; also boot), delta or sandwich (also robust)
-        #[arg(long, default_value = "bootstrap", value_parser = option_arg::<SEMethod>)]
+        #[arg(long, default_value = "bootstrap", value_parser = parse_core_option::<SEMethod>)]
         se_method: SEMethod,
 
         /// Number of bootstrap replications (default: 999)
@@ -1069,7 +1038,7 @@ fn execute_iv(
                                 Ok(r) => identification_json(r),
                                 Err(_) => serde_json::Value::Null,
                             };
-                            extend_json(&mut json, notes_json(None, &warnings));
+                            add_notes(&mut json, None, &warnings);
                             if let Some(m) = missing_json(&result.missing) {
                                 json["missing"] = m;
                             }
@@ -1173,7 +1142,7 @@ fn execute_did(
                             "aliased": result.aliased,
                             "diagnostics": identification_json(&did_diagnostics(&result)),
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1307,7 +1276,7 @@ fn execute_synth(
                                 })
                             }),
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1376,7 +1345,7 @@ fn execute_ipw(
                             "n_control": result.n_control,
                             "diagnostics": identification_json(&ipw_diagnostics(&result)),
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1454,7 +1423,7 @@ fn execute_dr(
                             "p_value": result.p_value,
                             "n_obs": result.n_obs,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1526,7 +1495,7 @@ fn execute_mediation(
                             "p_indirect": result.p_indirect,
                             "n_obs": result.n_obs,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1588,43 +1557,25 @@ impl RdOptions {
     }
 }
 
-/// The message of a core refusal of an RD option name, without a second prefix (it names
-/// the option and the valid values).
-fn rd_name_message(e: p2a_core::EconError) -> String {
-    match e {
-        p2a_core::EconError::InvalidSpecification { message } => message,
-        other => other.to_string(),
-    }
-}
-
-/// clap value parser of an option enum (a core `option_enum!` table): the parsed value, or the
-/// core's message ("unknown <option> '<value>'; expected one of: ..."), which clap prints after
-/// "invalid value". Shared by the T3 CLI command files.
-pub(crate) fn option_arg<T: std::str::FromStr<Err = p2a_core::EconError>>(
-    s: &str,
-) -> Result<T, String> {
-    s.parse::<T>().map_err(rd_name_message)
-}
-
 /// `--v-method` of `causal synth`: `VOptimization::from_options(Some(s), None)`, or the core
 /// message.
 fn parse_v_method(s: &str) -> Result<VOptimization, String> {
-    VOptimization::from_options(Some(s), None).map_err(rd_name_message)
+    VOptimization::from_options(Some(s), None).map_err(core_message)
 }
 
 /// `--vce` as a `VceType`, or the core message.
 fn parse_vce_arg(vce: &str) -> Result<VceType, String> {
-    VceType::parse(vce).map_err(rd_name_message)
+    VceType::parse(vce).map_err(core_message)
 }
 
 /// `--kernel` as a `KernelType`, or the core message.
 fn parse_kernel_arg(kernel: &str) -> Result<KernelType, String> {
-    KernelType::parse(kernel).map_err(rd_name_message)
+    KernelType::parse(kernel).map_err(core_message)
 }
 
 /// `--bwselect` as a `BandwidthMethod`, or the core message.
 fn parse_bwselect_arg(bwselect: &str) -> Result<BandwidthMethod, String> {
-    BandwidthMethod::parse(bwselect).map_err(rd_name_message)
+    BandwidthMethod::parse(bwselect).map_err(core_message)
 }
 
 fn execute_rd(
@@ -1687,7 +1638,7 @@ fn execute_rd(
                             "diagnostics": identification_json(&rd_diagnostics(&result)),
                         });
                         // the notes leave out the missing-value note, which has its own key
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1806,7 +1757,7 @@ fn execute_fuzzy_rd(
                             "diagnostics": identification_json(&rd_diagnostics(rd)),
                         });
                         // the notes leave out the missing-value note, which has its own key
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1951,7 +1902,7 @@ fn execute_staggered_did(
                             "anticipation": result.config.anticipation,
                             "diagnostics": identification_json(&staggered_did_diagnostics(&result)),
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         // The text output's Display already ends with the missing-value note.
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
@@ -2025,7 +1976,7 @@ fn execute_tmle(
                             "q_model_converged": result.q_model_converged,
                             "g_model_converged": result.g_model_converged,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2144,7 +2095,7 @@ fn execute_gsynth(
                                 })
                             }).collect::<Vec<_>>(),
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2245,7 +2196,7 @@ fn execute_matching(
                             },
                             "diagnostics": identification_json(&matching_diagnostics(&result)),
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2326,7 +2277,7 @@ fn execute_stdreg(
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2386,7 +2337,6 @@ fn execute_stdreg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p2a_core::traits::convergence::Convergence;
     use serde_json::json;
 
     /// CLI-14 closure: the --help text of every typed option names each canonical value (no drift
@@ -2797,38 +2747,6 @@ mod tests {
         for a in more {
             ok(a);
         }
-    }
-
-    struct Notes(Option<Convergence>, Vec<String>);
-    impl ResultNotes for Notes {
-        fn notes_warnings(&self) -> Vec<String> {
-            self.1.clone()
-        }
-        fn notes_convergence(&self) -> Option<Convergence> {
-            self.0.clone()
-        }
-    }
-
-    #[test]
-    fn test_result_notes_helpers() {
-        let c = Convergence::new(false, 100, 100, "relative change in deviance", 3.2e-4, 1e-8);
-        let r = Notes(Some(c), vec!["w1".into()]);
-        assert_eq!(
-            result_notes(&r),
-            (Some((false, 100)), vec!["w1".to_string()])
-        );
-        let mut v = json!({"method": "m"});
-        with_result_notes(&mut v, &r);
-        assert_eq!(
-            v,
-            json!({"method": "m", "converged": false, "iterations": 100, "warnings": ["w1"]})
-        );
-        let mut v = json!({"warnings": ["stale"]});
-        with_result_notes(&mut v, &Notes(None, vec![]));
-        assert_eq!(v, json!({"warnings": []}));
-        let mut arr = json!([1]);
-        with_result_notes(&mut arr, &r);
-        assert_eq!(arr, json!([1]));
     }
 
     #[test]

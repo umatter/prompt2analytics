@@ -123,6 +123,10 @@ impl std::fmt::Display for DBSCANResult {
     }
 }
 
+/// The seed k-means uses when the caller gives none, so every run is reproducible (the MCP
+/// handler's default seed is the same value).
+pub const KMEANS_DEFAULT_SEED: u64 = 42;
+
 /// Run K-means clustering: Lloyd iterations from k-means++ starts.
 ///
 /// Each run alternates an assignment pass (each point to its nearest centroid, the first on
@@ -142,7 +146,7 @@ impl std::fmt::Display for DBSCANResult {
 /// * `tolerance` - Relative tolerance on the centroid shift (default 0: until no point is
 ///   reassigned)
 /// * `n_init` - Number of initializations to try (default 10)
-/// * `seed` - Optional random seed for reproducibility
+/// * `seed` - Random seed of the initial centres (`None`: [`KMEANS_DEFAULT_SEED`])
 ///
 /// Refuses NaN and ±Inf, naming the first non-finite cell (R `kmeans` stops too).
 pub fn kmeans(
@@ -173,10 +177,7 @@ pub fn kmeans(
     }
     let tol_abs = check_kmeans_options(&data, max_iter, tolerance)?;
 
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(KMEANS_DEFAULT_SEED));
 
     let mut best_result: Option<KMeansResult> = None;
     let mut best_inertia = f64::INFINITY;
@@ -1254,6 +1255,27 @@ mod tests {
     use ndarray::array;
     use std::collections::HashSet;
 
+    #[test]
+    fn test_kmeans_unseeded_is_reproducible() {
+        // Without a seed k-means used entropy; it now uses KMEANS_DEFAULT_SEED.
+        let data = Array2::from_shape_fn((60, 2), |(i, j)| {
+            ((i * 37 + j * 11) % 17) as f64 * 0.3 + if i < 30 { 0.0 } else { 4.0 } + j as f64
+        });
+        let a = kmeans(data.view(), 3, None, None, Some(1), None).unwrap();
+        let b = kmeans(data.view(), 3, None, None, Some(1), None).unwrap();
+        let c = kmeans(
+            data.view(),
+            3,
+            None,
+            None,
+            Some(1),
+            Some(KMEANS_DEFAULT_SEED),
+        )
+        .unwrap();
+        assert_eq!(a.labels, b.labels);
+        assert_eq!(a.labels, c.labels);
+    }
+
     fn cancelled() -> Budget {
         let t = CancelToken::new();
         t.cancel();
@@ -1707,6 +1729,26 @@ mod tests {
         assert_eq!(result.n_clusters, 2);
         assert_eq!(result.n_noise, 1);
         assert_eq!(result.labels[5], -1); // Noise
+    }
+
+    #[test]
+    fn test_dbscan_rejects_nan() {
+        // n = 600, d = 2: past the small-n path, so the k-d tree would sort the NaN.
+        let n = 600;
+        let mut data = Array2::from_shape_fn((n, 2), |(i, j)| {
+            ((i * 7 + j * 13) % 97) as f64 * 0.1 + (i as f64 * 0.31 + j as f64).sin() * 0.05
+        });
+        assert!(
+            n >= DBSCAN_SMALL_N_THRESHOLD,
+            "the k-d path needs n >= {DBSCAN_SMALL_N_THRESHOLD}"
+        );
+        data[[123, 1]] = f64::NAN;
+        match dbscan(data.view(), 0.5, 5) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("row 123, column 1"), "{message}")
+            }
+            other => panic!("expected an error for the NaN, got {other:?}"),
+        }
     }
 
     #[test]

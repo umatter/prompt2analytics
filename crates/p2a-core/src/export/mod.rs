@@ -69,7 +69,8 @@
 //! use p2a_core::regression::OlsResult;
 //!
 //! // Given an OlsResult from regression
-//! let csv = ols_result.to_csv();  // Returns CSV string
+//! ols_result.to_csv("ols.csv")?;  // writes the CSV to `path`
+//! let csv = ols_result.to_csv_string();  // or returns it as a string
 //! ```
 //!
 //! ## Supported Result Types

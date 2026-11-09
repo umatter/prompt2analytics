@@ -66,11 +66,11 @@ feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
     against fixest's `hetero`.
   - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only`: firm effects only,
     coefficients and iid SEs (the one-way within estimator).
-- DGP recovery (no R values compared): `econometrics::hdfe::tests::test_validate_against_felm_coefficients`,
-  `econometrics::hdfe::tests::test_validate_against_felm_standard_errors`,
-  `econometrics::hdfe::tests::test_validate_against_felm_r_squared`,
-  `econometrics::hdfe::tests::test_validate_single_fe_against_within_estimator`,
-  `econometrics::hdfe::tests::test_validate_large_panel_coefficient_recovery`. They check
+- DGP recovery (no R values compared): `econometrics::hdfe::tests::test_against_felm_coefficients_recovers_dgp`,
+  `econometrics::hdfe::tests::test_against_felm_standard_errors_properties`,
+  `econometrics::hdfe::tests::test_against_felm_r_squared_properties`,
+  `econometrics::hdfe::tests::test_single_fe_against_within_estimator_recovers_dgp`,
+  `econometrics::hdfe::tests::test_large_panel_coefficient_recovery_recovers_dgp`. They check
   that known coefficients and degrees of freedom are recovered on simulated panels.
 
 On a balanced firm x year panel the two demeaning projections commute, so the MAP is exact

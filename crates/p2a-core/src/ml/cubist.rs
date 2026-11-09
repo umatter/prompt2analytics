@@ -67,7 +67,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::xty;
+use crate::linalg::solve::least_squares;
+use crate::regression::ols::normal_equations_inverse;
 
 /// Configuration for Cubist regression trees.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,7 +257,7 @@ impl std::fmt::Display for CubistResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| a.1.is_nan().cmp(&b.1.is_nan()).then(b.1.total_cmp(&a.1)));
 
         let total: f64 = indexed.iter().map(|(_, v)| v).sum();
         for (i, importance) in indexed.iter().take(10) {
@@ -472,14 +474,23 @@ impl CubistTree {
         // Build y vector
         let y_sub: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
 
-        // Fit OLS: beta = (X'X)^-1 X'y
-        let xtx_mat = xtx(&design.view());
-        let xty_vec = xty(&design.view(), &y_sub);
+        // Fit OLS: the normal equations when the design is of full rank and well conditioned,
+        // otherwise lm's pivoted QR; an aliased attribute is eliminated (coefficient 0), as
+        // Cubist does. The normal-equations solve skips OLS's refinement step, which would
+        // add two passes over the design at every node: unrefined, the coefficients' relative
+        // error is of order eps / rcond, at most about 1e-8 where the normal equations are
+        // accepted.
+        let fit = match normal_equations_inverse(design.view()) {
+            Ok(Some(ne)) => Ok(ne.inverse.dot(&xty(&design.view(), &y_sub))),
+            Ok(None) => least_squares(design.view(), y_sub.view()).map(|ls| {
+                ls.coefficients
+                    .mapv(|b| if b.is_finite() { b } else { 0.0 })
+            }),
+            Err(e) => Err(e),
+        };
 
-        match safe_inverse(&xtx_mat.view()) {
-            Ok((inv, _cond)) => {
-                let beta = inv.dot(&xty_vec);
-
+        match fit {
+            Ok(beta) => {
                 let intercept = beta[0];
                 let mut coefficients = vec![0.0; self.n_features];
                 for (i, &feat_idx) in features_to_use.iter().enumerate() {
@@ -514,7 +525,7 @@ impl CubistTree {
                 .iter()
                 .map(|&i| (x[[i, feature]], y[i], i))
                 .collect();
-            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
             // Incremental MSE calculation
             let total_sum: f64 = sorted.iter().map(|(_, y_val, _)| y_val).sum();
@@ -822,7 +833,7 @@ fn find_k_neighbors(
         .collect();
 
     // Sort by distance
-    distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    distances.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Average k nearest
     let k_actual = k.min(distances.len());
@@ -1141,6 +1152,30 @@ mod tests {
     use super::*;
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    #[test]
+    fn test_validate_cubist_leaf_model_duplicated_column() {
+        // lm reports the duplicated attribute NA; Cubist eliminates it (coefficient 0).
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("inv_cubist_leaf_model");
+        let col = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
+        let x = ndarray::stack![Axis(1), col("x1"), col("x1dup")];
+        let y = col("y");
+        let tree = CubistTree::new(2, None, 0.0);
+        let (intercept, coefs) =
+            tree.fit_linear_model(&x.view(), &y.view(), &(0..30).collect::<Vec<_>>(), &[]);
+        Check::new(&case)
+            .named_subset(
+                "coef",
+                &["(Intercept)", "x1"],
+                &["(Intercept)", "x1"],
+                &[intercept, coefs[0]],
+                Tol::coef(30),
+            )
+            .finish();
+        assert_eq!(coefs[1], 0.0);
+    }
 
     fn cancelled_budget() -> Budget {
         let t = CancelToken::new();

@@ -53,6 +53,7 @@ use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::options::Choices;
 use crate::resource;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -90,6 +91,21 @@ pub enum StopMethod {
     KSMax,
 }
 
+// The accepted spellings (twang's names); the first of each entry is canonical.
+crate::option_enum!(
+    StopMethod,
+    Choices {
+        option: "stop_method",
+        values: &[
+            (&["es.mean", "esmean"], StopMethod::ESMean),
+            (&["es.max", "esmax"], StopMethod::ESMax),
+            (&["ks.mean", "ksmean"], StopMethod::KSMean),
+            (&["ks.max", "ksmax"], StopMethod::KSMax),
+        ],
+    },
+    no_display
+);
+
 impl fmt::Display for StopMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -120,6 +136,20 @@ pub enum TwangEstimand {
     /// Weights treated units to match the control group distribution.
     ATC,
 }
+
+// The accepted spellings (twang's names); the first of each entry is canonical.
+crate::option_enum!(
+    TwangEstimand,
+    Choices {
+        option: "estimand",
+        values: &[
+            (&["att"], TwangEstimand::ATT),
+            (&["ate"], TwangEstimand::ATE),
+            (&["atc"], TwangEstimand::ATC),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for TwangEstimand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1186,8 +1216,8 @@ fn compute_ks_statistic(
         .collect();
 
     // Sort by value
-    t_vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    c_vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    t_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    c_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Compute total weights
     let t_total: f64 = t_vals.iter().map(|(_, w)| w).sum();
@@ -1203,7 +1233,7 @@ fn compute_ks_statistic(
         .map(|(v, _)| *v)
         .chain(c_vals.iter().map(|(v, _)| *v))
         .collect();
-    all_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    all_vals.sort_by(f64::total_cmp);
     all_vals.dedup();
 
     let mut max_diff: f64 = 0.0;
@@ -1270,6 +1300,24 @@ mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    #[test]
+    fn test_stop_method_and_estimand_parse_aliases_and_reject_unknown() {
+        StopMethod::choices().validate().unwrap();
+        TwangEstimand::choices().validate().unwrap();
+        assert_eq!("ES.Mean".parse::<StopMethod>().unwrap(), StopMethod::ESMean);
+        assert_eq!("ksmax".parse::<StopMethod>().unwrap(), StopMethod::KSMax);
+        assert_eq!("es-max".parse::<StopMethod>().unwrap(), StopMethod::ESMax);
+        assert_eq!("ATC".parse::<TwangEstimand>().unwrap(), TwangEstimand::ATC);
+        match "es.median".parse::<StopMethod>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown stop_method 'es.median'; expected one of: es.mean, es.max, ks.mean, ks.max"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        assert!("atu".parse::<TwangEstimand>().is_err());
+    }
 
     fn expect_invalid_spec(err: EconError, needle: &str) {
         match err {

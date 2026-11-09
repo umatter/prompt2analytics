@@ -41,7 +41,7 @@
 //! - Freund, Y., & Schapire, R. E. (1997). "A Decision-Theoretic Generalization of
 //!   On-Line Learning". *Journal of Computer and System Sciences*, 55(1), 119-139.
 //! - R package C50: Kuhn, M., Weston, S., Coulter, N., & Quinlan, R. (2023).
-//!   https://cran.r-project.org/package=C50
+//!   <https://cran.r-project.org/package=C50>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
@@ -276,7 +276,7 @@ impl std::fmt::Display for C50Result {
             .map(|(i, &v)| (i, v))
             .filter(|(_, v)| *v > 0.0)
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| a.1.is_nan().cmp(&b.1.is_nan()).then(b.1.total_cmp(&a.1)));
 
         let total: f64 = indexed.iter().map(|(_, v)| v).sum();
         for (i, importance) in indexed.iter().take(10) {
@@ -521,7 +521,7 @@ fn best_c50_split(
     for &feature in &features_to_try {
         // Get sorted values for this feature
         let mut values: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
-        values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        values.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         // Scan through possible thresholds. With up to 1000 classes the
         // per-candidate work is O(K), so the left total is a running counter
@@ -610,7 +610,7 @@ fn c50_node_stats(
     let (predicted_class, _) = weighted_counts
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .unwrap_or((0, &0.0));
 
     let node_entropy = entropy(&class_counts, n);
@@ -833,7 +833,7 @@ fn predict_boosted(
     class_votes
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -872,7 +872,7 @@ fn winnow_features(
     // Compute threshold for selection
     // C5.0 uses a heuristic: keep features with importance > median importance
     let mut sorted_importance: Vec<f64> = importance.to_vec();
-    sorted_importance.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_importance.sort_by(f64::total_cmp);
 
     // Use 25th percentile as threshold
     let threshold_idx = n_features / 4;
@@ -1240,11 +1240,9 @@ pub fn c50(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &C50Config) -> EconRe
         }
         // Sort rules by support and confidence
         all_rules.sort_by(|a, b| {
-            b.support.cmp(&a.support).then(
-                b.confidence
-                    .partial_cmp(&a.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
+            b.support
+                .cmp(&a.support)
+                .then(b.confidence.total_cmp(&a.confidence))
         });
         Some(all_rules)
     } else {

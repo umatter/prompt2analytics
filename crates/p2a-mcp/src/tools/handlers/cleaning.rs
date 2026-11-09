@@ -20,7 +20,8 @@ use p2a_core::data::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::handlers::munging::{DROP_HOW, fill_label, parse_choice, parse_fill_strategy};
+use crate::tools::common::parse_choice_value;
+use crate::tools::handlers::munging::{DROP_HOW, fill_label, parse_fill_strategy};
 use crate::tools::requests::cleaning::{
     CleaningRollbackRequest, CleaningSessionApplyRequest, CleaningSessionCheckpointsRequest,
     CleaningSessionStartRequest, CleaningSessionStatusRequest, DataQualityProfileRequest,
@@ -162,10 +163,11 @@ impl AnalyticsServer {
                 }
             }
             "drop_na" | "dropna" => {
-                let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
-                    Ok(how) => how,
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-                };
+                let how =
+                    match parse_choice_value(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+                        Ok(how) => how,
+                        Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                    };
                 CleaningOperation::DropNa {
                     columns: request.columns,
                     how: how.to_string(),
@@ -444,10 +446,11 @@ impl AnalyticsServer {
                 )
             }
             "drop_na" | "dropna" => {
-                let how = match parse_choice(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
-                    Ok(how) => how,
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-                };
+                let how =
+                    match parse_choice_value(&DROP_HOW, request.how.as_deref().unwrap_or("any")) {
+                        Ok(how) => how,
+                        Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                    };
                 let cols = request.columns.clone();
                 (
                     format!("drop_na ({})", how),
@@ -674,7 +677,7 @@ impl AnalyticsServer {
         // Parse minimum priority filter
         let min_priority = match request.min_priority.as_deref() {
             None => None,
-            Some(p) => match parse_choice(&MIN_PRIORITY, p) {
+            Some(p) => match parse_choice_value(&MIN_PRIORITY, p) {
                 Ok(p) => Some(p),
                 Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             },

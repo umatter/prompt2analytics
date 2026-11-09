@@ -17,7 +17,7 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::parse_option;
-use crate::tools::handlers::regression::{append_unshown_notes, parse_choice};
+use crate::tools::common::{append_unshown_notes, parse_choice};
 use crate::tools::requests::panel::{
     GmmRequest, HausmanRequest, PanelFERequest, PanelGlsRequest, PanelHdfeRequest, PanelRERequest,
     PanelUnitRootRequest, PvcmRequest,

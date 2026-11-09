@@ -1463,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_svm_linearly_separable_perfect() {
+    fn test_svm_linearly_separable_perfect_properties() {
         // Well-separated data should achieve 100% accuracy.
         let x = array![
             // Class 0: bottom-left cluster
@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_svm_support_vectors_identified() {
+    fn test_svm_support_vectors_identified_properties() {
         // There should be at least some support vectors.
         let x = array![
             [0.0, 0.0],
@@ -1541,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_svm_decision_boundary_sign() {
+    fn test_svm_decision_boundary_sign_properties() {
         // For data where class 1 is at higher x1 values, w[0] should be positive.
         let x = array![
             [0.0, 1.0],
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_svm_kernel_rbf_nonlinear() {
+    fn test_svm_kernel_rbf_nonlinear_properties() {
         // RBF kernel should handle nonlinear separation (XOR-like pattern).
         // Class 0: (low, low) and (high, high)
         // Class 1: (low, high) and (high, low)

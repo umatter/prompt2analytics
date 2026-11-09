@@ -161,10 +161,20 @@ fn benchmark_affinity_propagation(c: &mut Criterion) {
 
     for n in [100, 200] {
         let data = generate_cluster_data(n, 5, 3, 5.0);
+        assert!(
+            affinity_propagation(data.view(), None, Some(0.9), Some(1000), Some(100)).is_ok(),
+            "affinity_propagation must time a successful run"
+        );
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                affinity_propagation(black_box(data.view()), None, Some(0.9), Some(100), Some(10))
+                affinity_propagation(
+                    black_box(data.view()),
+                    None,
+                    Some(0.9),
+                    Some(1000),
+                    Some(100),
+                )
             })
         });
     }
@@ -312,6 +322,11 @@ fn benchmark_affinity_propagation_optimized(c: &mut Criterion) {
 
     for n in [100, 200] {
         let data = generate_cluster_data(n, 5, 3, 5.0);
+        assert!(
+            affinity_propagation_optimized(data.view(), None, Some(0.9), Some(1000), Some(100))
+                .is_ok(),
+            "affinity_propagation_optimized must time a successful run"
+        );
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
@@ -319,8 +334,8 @@ fn benchmark_affinity_propagation_optimized(c: &mut Criterion) {
                     black_box(data.view()),
                     None,
                     Some(0.9),
+                    Some(1000),
                     Some(100),
-                    Some(10),
                 )
             })
         });
@@ -409,10 +424,25 @@ fn benchmark_affinity_propagation_comparison(c: &mut Criterion) {
 
     for n in [100, 200] {
         let data = generate_cluster_data(n, 5, 3, 5.0);
+        assert!(
+            affinity_propagation(data.view(), None, Some(0.9), Some(1000), Some(100)).is_ok(),
+            "affinity_propagation must time a successful run"
+        );
+        assert!(
+            affinity_propagation_optimized(data.view(), None, Some(0.9), Some(1000), Some(100))
+                .is_ok(),
+            "affinity_propagation_optimized must time a successful run"
+        );
 
         group.bench_with_input(BenchmarkId::new("original", n), &n, |b, _| {
             b.iter(|| {
-                affinity_propagation(black_box(data.view()), None, Some(0.9), Some(100), Some(10))
+                affinity_propagation(
+                    black_box(data.view()),
+                    None,
+                    Some(0.9),
+                    Some(1000),
+                    Some(100),
+                )
             })
         });
 
@@ -422,8 +452,8 @@ fn benchmark_affinity_propagation_comparison(c: &mut Criterion) {
                     black_box(data.view()),
                     None,
                     Some(0.9),
+                    Some(1000),
                     Some(100),
-                    Some(10),
                 )
             })
         });

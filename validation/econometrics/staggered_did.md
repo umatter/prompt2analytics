@@ -291,13 +291,13 @@ p against R's `pf`), `test_pretrend_blocked_gram_matches_naive_and_checks_every_
 ## DGP property tests (not R-pinned)
 
 These check properties of known data-generating processes, not R values:
-`test_validate_staggered_did_group_time_atts_recover_true_effects`,
-`test_validate_staggered_did_event_study_pre_treatment_near_zero`,
-`test_validate_staggered_did_event_study_post_treatment_positive`,
-`test_validate_staggered_did_overall_att_weighted_average`,
-`test_validate_staggered_did_group_effects_heterogeneity`,
-`test_validate_staggered_did_never_treated_comparison`,
-`test_validate_staggered_did_homogeneous_effect`.
+`test_staggered_did_group_time_atts_recover_true_effects_recovers_dgp`,
+`test_staggered_did_event_study_pre_treatment_near_zero_recovers_dgp`,
+`test_staggered_did_event_study_post_treatment_positive_properties`,
+`test_staggered_did_overall_att_weighted_average_properties`,
+`test_staggered_did_group_effects_heterogeneity_properties`,
+`test_staggered_did_never_treated_comparison_properties`,
+`test_staggered_did_homogeneous_effect_recovers_dgp`.
 
 ## Running the Tests
 

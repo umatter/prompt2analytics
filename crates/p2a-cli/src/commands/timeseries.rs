@@ -33,124 +33,63 @@ use p2a_core::{SpectrumConfig, run_spectrum};
 use p2a_core::econometrics::timeseries::varma::{VarmaConfig, run_varma_with};
 use p2a_core::econometrics::timeseries::vecm::{VecmConfig, VecmDeterministic, run_vecm_with};
 use p2a_core::forecasting::garch::GarchDistribution;
-use p2a_core::options::Choices;
 use p2a_core::{GarchConfig, garch as fit_garch, garch_forecast};
 
-use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, print_error};
+use crate::output::{add_result_notes, parse_core_option, print_result_notes};
 use crate::session::SessionManager;
 
-// The R names of the time-series options. The core enums have no FromStr, so the tables live
-// here; the first spelling of each entry is canonical.
-
-/// `--change-type`, as the changepoint package's cpt.mean / cpt.var / cpt.meanvar.
-pub(crate) static CHANGE_TYPES: Choices<CostFunction> = Choices {
-    option: "change type",
-    values: &[
-        (&["mean"], CostFunction::MeanChange),
-        (&["variance", "var"], CostFunction::VarianceChange),
-        (
-            &["meanvar", "both", "mean_and_variance", "mean_var"],
-            CostFunction::MeanAndVariance,
-        ),
-    ],
-};
-
-/// `--seasonal`, as HoltWinters(seasonal = ).
-pub(crate) static SEASONAL_TYPES: Choices<SeasonalType> = Choices {
-    option: "seasonal type",
-    values: &[
-        (&["additive", "add"], SeasonalType::Additive),
-        (
-            &["multiplicative", "mult", "multi"],
-            SeasonalType::Multiplicative,
-        ),
-    ],
-};
-
-/// `--method` of `ts ar`, as ar(method = ).
-pub(crate) static AR_METHODS: Choices<ArMethod> = Choices {
-    option: "AR method",
-    values: &[
-        (&["yule-walker", "yw"], ArMethod::YuleWalker),
-        (&["burg"], ArMethod::Burg),
-        (&["ols"], ArMethod::Ols),
-    ],
-};
-
-/// `--decompose-type`, as decompose(type = ).
-pub(crate) static DECOMPOSE_TYPES: Choices<DecomposeType> = Choices {
-    option: "decomposition type",
-    values: &[
-        (&["additive", "add"], DecomposeType::Additive),
-        (
-            &["multiplicative", "mult", "multi"],
-            DecomposeType::Multiplicative,
-        ),
-    ],
-};
-
-/// `--model-type`, as StructTS(type = ).
-pub(crate) static STRUCT_TS_TYPES: Choices<StructTsType> = Choices {
-    option: "StructTS type",
-    values: &[
-        (&["level", "local_level"], StructTsType::Level),
-        (&["trend", "local_trend", "llt"], StructTsType::Trend),
-        (&["BSM", "basic_structural"], StructTsType::BSM),
-    ],
-};
-
-fn table_arg<T: Copy + PartialEq>(table: &Choices<T>, s: &str) -> Result<T, String> {
-    table.parse(s).map_err(|e| match e {
-        p2a_core::EconError::InvalidSpecification { message } => message,
-        other => other.to_string(),
-    })
-}
+// The time-series options parse through the core enums' tables (their R names; the first
+// spelling of each entry is canonical).
 
 fn parse_change_type(s: &str) -> Result<CostFunction, String> {
-    table_arg(&CHANGE_TYPES, s)
+    parse_core_option(s)
 }
 
 fn parse_seasonal(s: &str) -> Result<SeasonalType, String> {
-    table_arg(&SEASONAL_TYPES, s)
+    parse_core_option(s)
 }
 
 fn parse_ar_method(s: &str) -> Result<ArMethod, String> {
-    table_arg(&AR_METHODS, s)
+    parse_core_option(s)
 }
 
 fn parse_decompose_type(s: &str) -> Result<DecomposeType, String> {
-    table_arg(&DECOMPOSE_TYPES, s)
+    parse_core_option(s)
 }
 
 fn parse_struct_ts_type(s: &str) -> Result<StructTsType, String> {
-    table_arg(&STRUCT_TS_TYPES, s)
+    parse_core_option(s)
 }
 
-/// (subcommand path, arg id, canonical names) of the CLI-local tables, for the help test.
+/// (subcommand path, arg id, canonical names) of the core option tables, for the help test.
 #[cfg(test)]
 pub(super) fn option_names() -> Vec<(Vec<&'static str>, &'static str, Vec<&'static str>)> {
     vec![
         (
             vec!["timeseries", "changepoint"],
             "change_type",
-            CHANGE_TYPES.names(),
+            CostFunction::choices().names(),
         ),
         (
             vec!["timeseries", "holt-winters"],
             "seasonal",
-            SEASONAL_TYPES.names(),
+            SeasonalType::choices().names(),
         ),
-        (vec!["timeseries", "ar"], "method", AR_METHODS.names()),
+        (
+            vec!["timeseries", "ar"],
+            "method",
+            ArMethod::choices().names(),
+        ),
         (
             vec!["timeseries", "decompose"],
             "decompose_type",
-            DECOMPOSE_TYPES.names(),
+            DecomposeType::choices().names(),
         ),
         (
             vec!["timeseries", "struct-ts"],
             "model_type",
-            STRUCT_TS_TYPES.names(),
+            StructTsType::choices().names(),
         ),
     ]
 }
@@ -161,13 +100,13 @@ pub enum TimeseriesCommands {
     #[command(after_help = "\
 EXAMPLES:
     # Fit ARIMA(1,1,1)
-    p2a ts arima mydata --col sales -p 1 -d 1 -q 1
+    p2a --session s.json ts arima mydata --col sales -p 1 -d 1 -q 1
 
     # With 12-step forecast (standard errors and 80/95% intervals)
-    p2a ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+    p2a --session s.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
 
     # Random walk with drift and an MA(1) term
-    p2a ts arima mydata --col sales -p 0 -d 1 -q 1 --drift --horizon 12
+    p2a --session s.json ts arima mydata --col sales -p 0 -d 1 -q 1 --drift --horizon 12
 ")]
     Arima {
         /// Dataset name
@@ -220,7 +159,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # VAR(2) with two variables
-    p2a ts var mydata --cols gdp inflation --lags 2
+    p2a --session s.json ts var mydata --cols gdp inflation --lags 2
 ")]
     Var {
         /// Dataset name
@@ -278,7 +217,7 @@ EXAMPLES:
 
         /// Deterministic term in the cointegration relation, as ca.jo ecdet: none (default),
         /// const or trend
-        #[arg(long, default_value = "none", value_parser = super::causal::option_arg::<VecmDeterministic>)]
+        #[arg(long, default_value = "none", value_parser = crate::output::parse_core_option::<VecmDeterministic>)]
         ecdet: VecmDeterministic,
     },
 
@@ -328,10 +267,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # GARCH(1,1) for returns
-    p2a ts garch mydata --col returns -p 1 -q 1
+    p2a --session s.json ts garch mydata --col returns -p 1 -q 1
 
     # With volatility forecast
-    p2a ts garch mydata --col returns -p 1 -q 1 --horizon 5
+    p2a --session s.json ts garch mydata --col returns -p 1 -q 1 --horizon 5
 ")]
     Garch {
         /// Dataset name
@@ -355,7 +294,7 @@ EXAMPLES:
 
         /// Conditional distribution, as fGarch cond.dist: norm (default) or std (standardised
         /// Student t; aliases t, student_t)
-        #[arg(long, default_value = "norm", value_parser = super::causal::option_arg::<GarchDistribution>)]
+        #[arg(long, default_value = "norm", value_parser = crate::output::parse_core_option::<GarchDistribution>)]
         distribution: GarchDistribution,
     },
 
@@ -363,13 +302,13 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Additive seasonal (monthly data)
-    p2a ts holt-winters mydata --col sales --period 12
+    p2a --session s.json ts holt-winters mydata --col sales --period 12
 
     # Multiplicative seasonal
-    p2a ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
+    p2a --session s.json ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
 
     # Fixed smoothing parameters and 12 forecasts with 95% prediction intervals
-    p2a ts holt-winters mydata --col sales --period 12 --alpha 0.3 --beta 0 --gamma 0.2 --horizon 12
+    p2a --session s.json ts holt-winters mydata --col sales --period 12 --alpha 0.3 --beta 0 --gamma 0.2 --horizon 12
 ")]
     HoltWinters {
         /// Dataset name
@@ -415,7 +354,7 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Test if x Granger-causes y
-    p2a ts granger mydata --x money_supply --y inflation --lags 4
+    p2a --session s.json ts granger mydata --x money_supply --y inflation --lags 4
 ")]
     Granger {
         /// Dataset name
@@ -470,10 +409,10 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # STL for monthly data
-    p2a ts stl mydata --col sales --period 12
+    p2a --session s.json ts stl mydata --col sales --period 12
 
     # With robust fitting
-    p2a ts stl mydata --col sales --period 12 --robust true
+    p2a --session s.json ts stl mydata --col sales --period 12 --robust true
 ")]
     Stl {
         /// Dataset name
@@ -540,11 +479,11 @@ EXAMPLES:
     #[command(after_help = "\
 EXAMPLES:
     # Estimate causal impact of intervention
-    p2a ts causal-impact mydata --response sales --time date \\
+    p2a --session s.json ts causal-impact mydata --response sales --time date \\
         --pre-start 1 --pre-end 100 --post-start 101 --post-end 150
 
     # With control series
-    p2a ts causal-impact mydata --response sales --time date \\
+    p2a --session s.json ts causal-impact mydata --response sales --time date \\
         --pre-start 1 --pre-end 100 --post-start 101 --post-end 150 \\
         --controls competitor_sales,market_index
 ")]
@@ -1096,7 +1035,7 @@ fn execute_varma(
                 "bic": result.bic,
                 "log_likelihood": result.log_likelihood,
             });
-            with_result_notes(&mut json, &result);
+            add_result_notes(&mut json, &result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => println!("\n{result}"),
@@ -1138,7 +1077,7 @@ fn execute_vecm(
             {
                 out.extend(fields);
             }
-            with_result_notes(&mut json, &result);
+            add_result_notes(&mut json, &result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => println!("\n{result}"),
@@ -1251,7 +1190,7 @@ fn execute_changepoint(
                     OutputFormat::Json => {
                         let json = serde_json::json!({
                             "method": result.method,
-                            "change_type": CHANGE_TYPES.canonical(cost_fn),
+                            "change_type": CostFunction::choices().canonical(cost_fn),
                             "n_changepoints": result.n_changepoints,
                             "changepoints": result.changepoints,
                             "penalty": result.penalty,
@@ -1385,7 +1324,7 @@ fn execute_garch(
                     "mean": mean,
                 });
             }
-            with_result_notes(&mut json, &result);
+            add_result_notes(&mut json, &result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
@@ -1430,19 +1369,7 @@ fn hw_forecast(
     if multiplicative {
         let mean = p2a_core::holt_winters_forecast(result, h)?;
         // var(residuals(fit)): sample variance of the one-step errors
-        let errors: Vec<f64> = result
-            .residuals
-            .iter()
-            .copied()
-            .filter(|e| e.is_finite())
-            .collect();
-        let m = errors.len() as f64;
-        let residual_variance = if errors.len() >= 2 {
-            let mu = errors.iter().sum::<f64>() / m;
-            errors.iter().map(|e| (e - mu).powi(2)).sum::<f64>() / (m - 1.0)
-        } else {
-            f64::NAN
-        };
+        let residual_variance = result.residual_variance().unwrap_or(f64::NAN);
         return Ok(HwForecast {
             horizon: h,
             level: None,
@@ -1540,7 +1467,7 @@ fn execute_holt_winters(
         OutputFormat::Json => {
             let mut json = serde_json::json!({
                 "model": "Holt-Winters",
-                "seasonal_type": SEASONAL_TYPES.canonical(result.seasonal_type),
+                "seasonal_type": SeasonalType::choices().canonical(result.seasonal_type),
                 "period": result.period,
                 "alpha": result.alpha,
                 "beta": result.beta,
@@ -1567,7 +1494,7 @@ fn execute_holt_winters(
             println!("{}", "=".repeat(50));
             println!(
                 "\nSeasonal type: {}",
-                SEASONAL_TYPES.canonical(result.seasonal_type)
+                SeasonalType::choices().canonical(result.seasonal_type)
             );
             println!("Period: {}", result.period);
             println!("\nSmoothing parameters:");
@@ -1643,7 +1570,7 @@ fn execute_granger(
                                 "df2": result.df2,
                                 "granger_causes": granger_causes,
                             });
-                            with_result_notes(&mut json, &result);
+                            add_result_notes(&mut json, &result);
                             println!("{}", serde_json::to_string_pretty(&json)?);
                         }
                         _ => {
@@ -1731,18 +1658,18 @@ fn execute_ar(
                             "ar_coefficients": result.ar,
                             "var_pred": result.var_pred,
                             "x_mean": result.x_mean,
-                            "method": AR_METHODS.canonical(result.method),
+                            "method": ArMethod::choices().canonical(result.method),
                             "n_obs": result.n_obs,
                             "aic": result.aic,
                             "partial_acf": result.partial_acf,
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
                         println!("\nAR({}) Model Results", result.order);
                         println!("{}", "=".repeat(50));
-                        println!("Method: {}", AR_METHODS.canonical(result.method));
+                        println!("Method: {}", ArMethod::choices().canonical(result.method));
                         println!("Observations: {}", result.n_obs);
                         println!("\nCoefficients:");
                         for (i, coef) in result.ar.iter().enumerate() {
@@ -1854,7 +1781,7 @@ fn execute_decompose(
                 OutputFormat::Json => {
                     let json = serde_json::json!({
                         "method": "Classical Decomposition",
-                        "decompose_type": DECOMPOSE_TYPES.canonical(result.decompose_type),
+                        "decompose_type": DecomposeType::choices().canonical(result.decompose_type),
                         "period": result.period,
                         "n_obs": result.n_obs,
                         "figure": result.figure,
@@ -1867,7 +1794,10 @@ fn execute_decompose(
                 _ => {
                     println!("\nClassical Decomposition Results");
                     println!("{}", "=".repeat(50));
-                    println!("Type: {}", DECOMPOSE_TYPES.canonical(result.decompose_type));
+                    println!(
+                        "Type: {}",
+                        DecomposeType::choices().canonical(result.decompose_type)
+                    );
                     println!("Period: {}", result.period);
                     println!("Observations: {}", result.n_obs);
                     println!("\nSeasonal figure (one cycle):");
@@ -1907,7 +1837,7 @@ fn execute_struct_ts(
         Some(ds) => match run_struct_ts(ds, col, ts_type, period) {
             Ok(result) => match format {
                 OutputFormat::Json => {
-                    let model_type = STRUCT_TS_TYPES.canonical(result.model_type);
+                    let model_type = StructTsType::choices().canonical(result.model_type);
                     let mut json = serde_json::json!({
                         "model": format!("StructTS {model_type}"),
                         "model_type": model_type,
@@ -1925,7 +1855,7 @@ fn execute_struct_ts(
                         },
                         "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
                     });
-                    with_result_notes(&mut json, &result);
+                    add_result_notes(&mut json, &result);
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
                 _ => {
@@ -1933,7 +1863,7 @@ fn execute_struct_ts(
                     println!("{}", "=".repeat(50));
                     println!(
                         "Model type: {}",
-                        STRUCT_TS_TYPES.canonical(result.model_type)
+                        StructTsType::choices().canonical(result.model_type)
                     );
                     println!("Observations: {}", result.n_obs);
                     println!("Parameters: {}", result.n_params);
@@ -2022,7 +1952,7 @@ fn execute_causal_impact(
                                 "null_rejected": result.inference.null_rejected,
                             },
                         });
-                        with_result_notes(&mut json, &result);
+                        add_result_notes(&mut json, &result);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -2182,11 +2112,11 @@ mod tests {
     #[test]
     fn test_cli_option_tables_parse_aliases_and_reject_unknown() {
         for v in [
-            CHANGE_TYPES.validate(),
-            SEASONAL_TYPES.validate(),
-            AR_METHODS.validate(),
-            DECOMPOSE_TYPES.validate(),
-            STRUCT_TS_TYPES.validate(),
+            CostFunction::choices().validate(),
+            SeasonalType::choices().validate(),
+            ArMethod::choices().validate(),
+            DecomposeType::choices().validate(),
+            StructTsType::choices().validate(),
         ] {
             v.unwrap()
         }
@@ -2215,21 +2145,21 @@ mod tests {
         for (e, want) in [
             (
                 parse_change_type("trend").unwrap_err(),
-                "unknown change type 'trend'; expected one of: mean, variance, meanvar",
+                "unknown change_type 'trend'; expected one of: mean, variance, meanvar",
             ),
             (
                 parse_ar_method("mle").unwrap_err(),
-                "unknown AR method 'mle'; expected one of: yule-walker, burg, ols",
+                "unknown method 'mle'; expected one of: yule-walker, burg, ols",
             ),
             (
                 parse_struct_ts_type("arima").unwrap_err(),
-                "unknown StructTS type 'arima'; expected one of: level, trend, BSM",
+                "unknown model_type 'arima'; expected one of: level, trend, BSM",
             ),
         ] {
             assert!(e.contains(want), "{e}")
         }
         assert_eq!(
-            CHANGE_TYPES.canonical(CostFunction::MeanAndVariance),
+            CostFunction::choices().canonical(CostFunction::MeanAndVariance),
             "meanvar"
         );
     }

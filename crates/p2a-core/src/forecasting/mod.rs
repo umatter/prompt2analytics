@@ -145,7 +145,7 @@ pub use decompose::{
     DecomposeConfig, DecomposeResult, DecomposeType, decompose, run_decompose,
     run_decompose_with_filter,
 };
-pub use garch::{GarchConfig, GarchResult, garch, garch_forecast, run_garch};
+pub use garch::{GarchConfig, GarchDistribution, GarchResult, garch, garch_forecast, run_garch};
 pub use holtwinters::{
     HoltWintersCoefficients, HoltWintersConfig, HoltWintersResult, SeasonalType, holt_winters,
     holt_winters_forecast, run_holt_winters,

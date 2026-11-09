@@ -389,12 +389,9 @@ pub fn optics_optimized(
 // Optimized Affinity Propagation
 // =============================================================================
 
-/// Optimized Affinity Propagation with parallel message passing.
-///
-/// Uses parallel computation for:
-/// - Similarity matrix construction
-/// - Responsibility updates
-/// - Availability updates
+/// Affinity propagation as `(labels, exemplar_indices, n_iterations, converged)`: the apcluster
+/// port [`crate::ml::advanced_clustering_mod::affinity_propagation`] with the same arguments
+/// (kept for callers of the tuple form).
 pub fn affinity_propagation_optimized(
     data: ArrayView2<f64>,
     preference: Option<f64>,
@@ -402,173 +399,51 @@ pub fn affinity_propagation_optimized(
     max_iterations: Option<usize>,
     convergence_iterations: Option<usize>,
 ) -> Result<(Vec<usize>, Vec<usize>, usize, bool), String> {
-    let n = data.nrows();
-
-    if n < 2 {
-        return Err("Need at least 2 observations".to_string());
-    }
-    crate::ml::advanced_clustering_mod::common::check_points(
-        &data,
-        "affinity_propagation_optimized",
+    crate::ml::advanced_clustering_mod::affinity_propagation(
+        data,
+        preference,
+        damping,
+        max_iterations,
+        convergence_iterations,
     )
-    .map_err(|e| e.to_string())?;
-
-    let damp = damping.unwrap_or(0.5);
-    if !(0.5..1.0).contains(&damp) {
-        return Err("Damping must be between 0.5 and 1.0".to_string());
-    }
-
-    let max_iter = max_iterations.unwrap_or(200);
-    let conv_iter = convergence_iterations.unwrap_or(15);
-
-    // Compute similarity matrix in parallel (negative squared distance)
-    let similarity = compute_pairwise_sq_distances_parallel(&data);
-    let mut similarity = similarity.mapv(|x| -x);
-
-    // Set preference
-    let pref = preference.unwrap_or_else(|| {
-        let mut sims: Vec<f64> = Vec::with_capacity(n * (n - 1));
-        for i in 0..n {
-            for j in 0..n {
-                if i != j {
-                    sims.push(similarity[[i, j]]);
-                }
-            }
-        }
-        sims.sort_by(f64::total_cmp);
-        if sims.is_empty() {
-            0.0
-        } else {
-            sims[sims.len() / 2]
-        }
-    });
-
-    for i in 0..n {
-        similarity[[i, i]] = pref;
-    }
-
-    // Initialize matrices with explicit f64 type
-    let mut responsibility: Array2<f64> = Array2::zeros((n, n));
-    let mut availability: Array2<f64> = Array2::zeros((n, n));
-
-    let mut prev_exemplars = vec![false; n];
-    let mut unchanged_count = 0;
-    let mut n_iterations = 0;
-    let mut converged = false;
-
-    for iter in 0..max_iter {
-        n_iterations = iter + 1;
-
-        // Update responsibilities in parallel
-        let r_new: Vec<Vec<f64>> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                (0..n)
-                    .map(|k| {
-                        let max_other = (0..n)
-                            .filter(|&kp| kp != k)
-                            .map(|kp| availability[[i, kp]] + similarity[[i, kp]])
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        similarity[[i, k]] - max_other
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Apply damping
-        for i in 0..n {
-            for k in 0..n {
-                responsibility[[i, k]] = damp * responsibility[[i, k]] + (1.0 - damp) * r_new[i][k];
-            }
-        }
-
-        // Update availabilities in parallel
-        let a_new: Vec<Vec<f64>> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                (0..n)
-                    .map(|k| {
-                        if i == k {
-                            // Self-availability
-                            (0..n)
-                                .filter(|&ip| ip != k)
-                                .map(|ip| responsibility[[ip, k]].max(0.0))
-                                .sum()
-                        } else {
-                            let sum: f64 = (0..n)
-                                .filter(|&ip| ip != i && ip != k)
-                                .map(|ip| responsibility[[ip, k]].max(0.0))
-                                .sum();
-                            (responsibility[[k, k]] + sum).min(0.0)
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Apply damping
-        for i in 0..n {
-            for k in 0..n {
-                availability[[i, k]] = damp * availability[[i, k]] + (1.0 - damp) * a_new[i][k];
-            }
-        }
-
-        // Check convergence
-        let exemplars: Vec<bool> = (0..n)
-            .map(|k| responsibility[[k, k]] + availability[[k, k]] > 0.0)
-            .collect();
-
-        if exemplars == prev_exemplars {
-            unchanged_count += 1;
-            if unchanged_count >= conv_iter {
-                converged = true;
-                break;
-            }
-        } else {
-            unchanged_count = 0;
-        }
-        prev_exemplars = exemplars;
-    }
-
-    // Extract exemplars and labels
-    let exemplar_mask: Vec<bool> = (0..n)
-        .map(|k| responsibility[[k, k]] + availability[[k, k]] > 0.0)
-        .collect();
-
-    let exemplar_indices: Vec<usize> = exemplar_mask
-        .iter()
-        .enumerate()
-        .filter(|&(_, &is_ex)| is_ex)
-        .map(|(i, _)| i)
-        .collect();
-
-    // Assign points to nearest exemplar in parallel
-    let labels: Vec<usize> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            if exemplar_mask[i] {
-                exemplar_indices.iter().position(|&e| e == i).unwrap_or(0)
-            } else {
-                let mut best_ex = 0;
-                let mut best_sim = f64::NEG_INFINITY;
-                for (ex_idx, &ex) in exemplar_indices.iter().enumerate() {
-                    if similarity[[i, ex]] > best_sim {
-                        best_sim = similarity[[i, ex]];
-                        best_ex = ex_idx;
-                    }
-                }
-                best_ex
-            }
-        })
-        .collect();
-
-    Ok((labels, exemplar_indices, n_iterations, converged))
+    .map(|r| (r.labels, r.exemplar_indices, r.n_iterations, r.converged))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn test_validate_affinity_propagation_optimized_lam9_defaults() {
+        // ML-5: the optimized copy declared convergence with zero exemplars after 15 iterations at
+        // the default limits; it now delegates to the apcluster port.
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("apcluster_blobs");
+        let col =
+            |c: &str| ndarray::Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
+        let x = ndarray::stack![ndarray::Axis(1), col("x"), col("y")];
+        let (labels, exemplars, _iterations, converged) =
+            affinity_propagation_optimized(x.view(), None, Some(0.9), None, None).unwrap();
+        let ex: Vec<f64> = exemplars.iter().map(|&e| (e + 1) as f64).collect();
+        let of: Vec<f64> = labels.iter().map(|&l| (exemplars[l] + 1) as f64).collect();
+        Check::new(&case)
+            .vector("lam9_default_exemplars", &ex, Tol::exact())
+            .scalar(
+                "lam9_default_n_clusters",
+                exemplars.len() as f64,
+                Tol::exact(),
+            )
+            .vector("lam9_default_exemplar_of", &of, Tol::exact())
+            .scalar(
+                "lam9_default_converged",
+                if converged { 1.0 } else { 0.0 },
+                Tol::exact(),
+            )
+            .finish();
+        // not pinned: iteration path (the iteration count).
+    }
 
     #[test]
     fn test_validate_hdbscan_optimized_matches_hdbscan() {
@@ -628,7 +503,7 @@ mod tests {
         assert!(
             affinity_propagation_optimized(data.view(), None, None, None, None)
                 .unwrap_err()
-                .contains("non-finite")
+                .contains("finite values")
         );
     }
 

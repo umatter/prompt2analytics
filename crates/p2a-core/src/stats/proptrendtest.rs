@@ -3,8 +3,8 @@
 //! Tests for a trend in binomial proportions across ordered groups.
 
 use crate::errors::{EconError, EconResult};
+use crate::traits::estimator::chi_squared_p_value;
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 /// Result of prop.trend.test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,11 +143,8 @@ pub fn prop_trend_test(
     let z = numerator / denominator;
     let chi_sq = z * z;
 
-    // P-value from chi-squared distribution with 1 df
-    let chi_dist = ChiSquared::new(1.0)
-        .map_err(|e| EconError::Computation(format!("Chi-squared distribution error: {}", e)))?;
-
-    let p_value = 1.0 - chi_dist.cdf(chi_sq);
+    // Upper tail of the chi-square with 1 df, computed directly (not 1 - cdf, which is 0 below 1e-16)
+    let p_value = chi_squared_p_value(chi_sq, 1.0);
 
     Ok(PropTrendTestResult {
         statistic: chi_sq,
@@ -171,6 +168,33 @@ pub fn run_prop_trend_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    /// Relative-only tolerance for an upper tail: Tol::p_value's absolute floor would accept
+    /// 0 for a tail far below 1e-16.
+    fn tail(n: usize) -> Tol {
+        Tol::new(Tol::p_value(n).rel, 0.0)
+    }
+
+    #[test]
+    fn test_validate_prop_trend_tail_below_1e16() {
+        // X-17: 1 - cdf gave exactly 0.
+        let (case, ds) = crate::test_support::load_case("tail_prop_trend");
+        let col = |c: &str| -> Vec<usize> {
+            numeric_column(ds.df(), c, NaPolicy::Fail)
+                .unwrap()
+                .0
+                .iter()
+                .map(|&v| v as usize)
+                .collect()
+        };
+        let r = prop_trend_test(&col("x"), &col("n"), None).unwrap();
+        Check::new(&case)
+            .scalar("statistic", r.statistic, Tol::stat(1200))
+            .scalar("p", r.p_value, tail(1200))
+            .finish();
+    }
 
     #[test]
     fn test_prop_trend_basic() {

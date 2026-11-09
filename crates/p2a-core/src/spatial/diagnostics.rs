@@ -12,9 +12,9 @@
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
+use statrs::distribution::{ContinuousCDF, Normal};
 
-use crate::traits::estimator::normal_p_value_two_sided;
+use crate::traits::estimator::{chi_squared_p_value, normal_p_value_two_sided};
 
 use super::weights::SpatialWeights;
 use crate::errors::{EconError, EconResult};
@@ -885,14 +885,11 @@ pub fn spatial_lm_tests(
     let lm_sarma_stat = lm_lag_stat + rlm_error_stat;
 
     // Compute p-values (chi-squared distribution)
-    let chi2_1 = ChiSquared::new(1.0).unwrap();
-    let chi2_2 = ChiSquared::new(2.0).unwrap();
-
-    let p_lm_lag = chi2_1.sf(lm_lag_stat.max(0.0));
-    let p_lm_error = chi2_1.sf(lm_error_stat.max(0.0));
-    let p_rlm_lag = chi2_1.sf(rlm_lag_stat.max(0.0));
-    let p_rlm_error = chi2_1.sf(rlm_error_stat.max(0.0));
-    let p_lm_sarma = chi2_2.sf(lm_sarma_stat.max(0.0));
+    let p_lm_lag = chi_squared_p_value(lm_lag_stat.max(0.0), 1.0);
+    let p_lm_error = chi_squared_p_value(lm_error_stat.max(0.0), 1.0);
+    let p_rlm_lag = chi_squared_p_value(rlm_lag_stat.max(0.0), 1.0);
+    let p_rlm_error = chi_squared_p_value(rlm_error_stat.max(0.0), 1.0);
+    let p_lm_sarma = chi_squared_p_value(lm_sarma_stat.max(0.0), 2.0);
 
     Ok(SpatialLmTests {
         lm_lag: LmTestResult {

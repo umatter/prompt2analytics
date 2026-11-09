@@ -409,9 +409,10 @@ pub use cart::{
     cart_predict_proba, cart_prune, run_cart, run_cart_default,
 };
 pub use causal_forest::{
-    CausalForestConfig, CausalForestResult, average_treatment_effect, causal_forest,
-    causal_forest_arrays, causal_forest_predict, causal_forest_predict_arrays, run_causal_forest,
-    run_causal_forest_config,
+    AteEstimate, CausalForestConfig, CausalForestResult, aipw_ate, aipw_scores,
+    average_treatment_effect, average_treatment_effect_with, causal_forest, causal_forest_arrays,
+    causal_forest_arrays_with_nuisance, causal_forest_predict, causal_forest_predict_arrays,
+    run_causal_forest, run_causal_forest_config,
 };
 pub use cluster_optimized::{
     affinity_propagation_optimized, compute_pairwise_distances_parallel,

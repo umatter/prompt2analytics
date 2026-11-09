@@ -15,8 +15,8 @@ use p2a_core::{
 };
 use std::path::PathBuf;
 
-use super::causal::{print_result_notes, with_result_notes};
 use crate::output::{OutputFormat, missing_json, print_error, print_message, print_missing_note};
+use crate::output::{add_result_notes, print_result_notes};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -224,7 +224,7 @@ EXAMPLES:
         /// Linkage, as stats::hclust: single, complete, average (also upgma), ward.D2 (default;
         /// also ward), mcquitty (also weighted), ward.D, centroid or median. R's deprecated
         /// hclust(method = "ward") is ward.D
-        #[arg(long, default_value = "ward.D2", value_parser = super::causal::option_arg::<Linkage>)]
+        #[arg(long, default_value = "ward.D2", value_parser = crate::output::parse_core_option::<Linkage>)]
         linkage: Linkage,
 
         /// Output file path
@@ -1132,25 +1132,23 @@ fn execute_coefplot(
             // Run OLS to get coefficients
             match run_ols(ds, dep_var, &x_cols, true, CovarianceType::HC1) {
                 Ok(result) => {
-                    // Calculate critical value for confidence interval
-                    let _alpha = 1.0 - conf_level;
-                    let z = 1.96; // Approximate for 95% CI
-
                     let names: Vec<String> = result.variable_names.clone();
                     let estimates: Vec<f64> =
                         result.coefficients.iter().map(|c| c.estimate).collect();
                     let std_errors: Vec<f64> =
                         result.coefficients.iter().map(|c| c.std_error).collect();
-                    let ci_lower: Vec<f64> = estimates
-                        .iter()
-                        .zip(std_errors.iter())
-                        .map(|(b, se)| b - z * se)
-                        .collect();
-                    let ci_upper: Vec<f64> = estimates
-                        .iter()
-                        .zip(std_errors.iter())
-                        .map(|(b, se)| b + z * se)
-                        .collect();
+                    let (ci_lower, ci_upper) = match coefficient_intervals(
+                        &estimates,
+                        &std_errors,
+                        result.df_resid,
+                        conf_level,
+                    ) {
+                        Ok(ci) => ci,
+                        Err(e) => {
+                            print_error(&e, format);
+                            return Ok(());
+                        }
+                    };
 
                     let chart_title = title
                         .map(|s| s.to_string())
@@ -1183,6 +1181,31 @@ fn execute_coefplot(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+/// Confidence limits b -/+ qt((1 + level) / 2, df) se of OLS coefficients, as R's
+/// `confint.lm`.
+fn coefficient_intervals(
+    estimates: &[f64],
+    std_errors: &[f64],
+    df_resid: usize,
+    conf_level: f64,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    p2a_core::traits::estimator::validate_level(conf_level, "conf-level")
+        .map_err(|e| e.to_string())?;
+    let q = p2a_core::traits::estimator::t_quantile((1.0 + conf_level) / 2.0, df_resid as f64)
+        .map_err(|e| e.to_string())?;
+    let lower = estimates
+        .iter()
+        .zip(std_errors)
+        .map(|(b, se)| b - q * se)
+        .collect();
+    let upper = estimates
+        .iter()
+        .zip(std_errors)
+        .map(|(b, se)| b + q * se)
+        .collect();
+    Ok((lower, upper))
 }
 
 /// Hat values h_i = x_i' (X'X)^{-1} x_i of a least-squares fit, over its identified columns.
@@ -1323,7 +1346,7 @@ fn execute_residuals(
                 "standardized_residuals": plot_result.standardized_residuals,
                 "cooks_distance": plot_result.cooks_distance,
             });
-            with_result_notes(&mut json, &plot_result);
+            add_result_notes(&mut json, &plot_result);
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
@@ -1709,6 +1732,21 @@ fn execute_line_interactive(
 mod tests {
     use super::*;
     use p2a_validation::{Case, Check, Tol};
+
+    /// The coefficient plot's limits follow --conf-level with R's t quantile (confint.lm); a
+    /// fixed 1.96 ignored the option.
+    #[test]
+    fn test_coefficient_intervals_follow_the_level() {
+        // qt(0.95, 20) = 1.7247182429207868 (R)
+        let (lo, hi) = coefficient_intervals(&[1.0, -2.0], &[0.5, 0.25], 20, 0.90).unwrap();
+        let q = 1.7247182429207868;
+        for (k, (b, se)) in [(1.0, 0.5), (-2.0, 0.25)].into_iter().enumerate() {
+            assert!((lo[k] - (b - q * se)).abs() < 1e-12, "{lo:?}");
+            assert!((hi[k] - (b + q * se)).abs() < 1e-12, "{hi:?}");
+        }
+        assert!(coefficient_intervals(&[1.0], &[0.5], 20, 1.5).is_err());
+        assert!(coefficient_intervals(&[1.0], &[0.5], 0, 0.95).is_err());
+    }
 
     /// viz heatmap correlates complete rows (R cor(use = "complete.obs")); the missing cells were
     /// read as zeros (r(x, y) 0.7955).

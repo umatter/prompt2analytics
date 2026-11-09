@@ -294,7 +294,7 @@ pub struct Pdp2dResult {
 
     /// Partial dependence matrix (grid_1 x grid_2)
     ///
-    /// Element [i][j] is the PDP value at (grid_values_1[i], grid_values_2[j])
+    /// Element `[i][j]` is the PDP value at `(grid_values_1[i], grid_values_2[j])`
     pub pdp_values: Vec<Vec<f64>>,
 
     /// First feature index
