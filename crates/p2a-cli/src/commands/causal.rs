@@ -385,13 +385,16 @@ EXAMPLES:
         #[arg(short = 'p', long, default_value = "1")]
         poly_order: usize,
 
-        /// Kernel: "triangular" (default), "uniform", "epanechnikov"
-        #[arg(long, default_value = "triangular")]
-        kernel: String,
+        /// Kernel, as rdrobust: triangular (default), epanechnikov or uniform (aliases tri,
+        /// epa, uni)
+        #[arg(long, default_value = "triangular", value_parser = parse_kernel_arg)]
+        kernel: KernelType,
 
-        /// Bandwidth selection: "mserd" (default), "msetwo", "cerrd", "certwo"
-        #[arg(long, default_value = "mserd")]
-        bwselect: String,
+        /// Bandwidth selector, as rdrobust::rdbwselect: mserd (default), msetwo, msesum,
+        /// msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1 or cercomb2; not used for h when
+        /// --h is given
+        #[arg(long, default_value = "mserd", value_parser = parse_bwselect_arg)]
+        bwselect: BandwidthMethod,
 
         /// Main bandwidth h (both sides); default: p2a's MSE-type selector
         #[arg(long = "h", visible_alias = "bandwidth")]
@@ -401,9 +404,9 @@ EXAMPLES:
         #[arg(long = "b", visible_alias = "bias-bandwidth")]
         b: Option<f64>,
 
-        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2, hc3
-        #[arg(long, default_value = "nn")]
-        vce: String,
+        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2 or hc3
+        #[arg(long, default_value = "nn", value_parser = parse_vce_arg)]
+        vce: VceType,
     },
 
     /// Fuzzy Regression Discontinuity
@@ -414,6 +417,9 @@ EXAMPLES:
 
     # One given bandwidth for both stages, bias bandwidth 0.5, HC1 variance
     p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60 --h 0.3 --b 0.5 --vce hc1
+
+    # CER-optimal bandwidths, separate left and right
+    p2a causal fuzzy-rd mydata -y y -r x -t d -c 0 --bwselect certwo
 ")]
     FuzzyRd {
         /// Dataset name
@@ -439,9 +445,16 @@ EXAMPLES:
         #[arg(short = 'p', long, default_value = "1")]
         poly_order: usize,
 
-        /// Kernel: "triangular" (default), "uniform", "epanechnikov"
-        #[arg(long, default_value = "triangular")]
-        kernel: String,
+        /// Kernel, as rdrobust: triangular (default), epanechnikov or uniform (aliases tri,
+        /// epa, uni)
+        #[arg(long, default_value = "triangular", value_parser = parse_kernel_arg)]
+        kernel: KernelType,
+
+        /// Bandwidth selector for both stages, as rdrobust::rdbwselect(fuzzy = ..): mserd
+        /// (default), msetwo, msesum, msecomb1, msecomb2, cerrd, certwo, cersum, cercomb1 or
+        /// cercomb2; not used for h when --h is given
+        #[arg(long, default_value = "mserd", value_parser = parse_bwselect_arg)]
+        bwselect: BandwidthMethod,
 
         /// Main bandwidth h (both sides); default: p2a's MSE-type selector
         #[arg(long = "h", visible_alias = "bandwidth")]
@@ -451,9 +464,9 @@ EXAMPLES:
         #[arg(long = "b", visible_alias = "bias-bandwidth")]
         b: Option<f64>,
 
-        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2, hc3
-        #[arg(long, default_value = "nn")]
-        vce: String,
+        /// Variance estimator: nn (default, as rdrobust), hc0, hc1, hc2 or hc3
+        #[arg(long, default_value = "nn", value_parser = parse_vce_arg)]
+        vce: VceType,
     },
 
     /// Staggered Difference-in-Differences (Callaway-Sant'Anna)
@@ -791,10 +804,13 @@ pub fn execute(
             running,
             *cutoff,
             *poly_order,
-            kernel,
-            bwselect,
-            RdBandwidths { h: *h, b: *b },
-            vce,
+            RdOptions {
+                kernel: *kernel,
+                bwselect: *bwselect,
+                vce: *vce,
+                h: *h,
+                b: *b,
+            },
             format,
             session,
         ),
@@ -806,6 +822,7 @@ pub fn execute(
             cutoff,
             poly_order,
             kernel,
+            bwselect,
             h,
             b,
             vce,
@@ -816,9 +833,13 @@ pub fn execute(
             treatment,
             *cutoff,
             *poly_order,
-            kernel,
-            RdBandwidths { h: *h, b: *b },
-            vce,
+            RdOptions {
+                kernel: *kernel,
+                bwselect: *bwselect,
+                vce: *vce,
+                h: *h,
+                b: *b,
+            },
             format,
             session,
         ),
@@ -1494,25 +1515,27 @@ fn execute_mediation(
     Ok(())
 }
 
-/// The `--h` and `--b` flags of `causal rd` and `causal fuzzy-rd`.
+/// The kernel, selector, variance and bandwidth flags of `causal rd` and `causal fuzzy-rd`.
 #[derive(Clone, Copy)]
-struct RdBandwidths {
+struct RdOptions {
+    kernel: KernelType,
+    bwselect: BandwidthMethod,
+    vce: VceType,
     h: Option<f64>,
     b: Option<f64>,
 }
 
-/// Print the estimator's warnings, leaving out the missing-value note (printed last).
-fn print_rd_warnings(warnings: &[String], missing: &p2a_core::data::columns::MissingSummary) {
-    let note = missing.note();
-    let shown: Vec<&String> = warnings
-        .iter()
-        .filter(|w| Some(w.as_str()) != note.as_deref())
-        .collect();
-    if !shown.is_empty() {
-        println!("\nWarnings:");
-        for w in shown {
-            println!("  - {w}");
-        }
+impl RdOptions {
+    /// `RdConfig::default()` with polynomial order `p` and these options.
+    fn config(&self, p: usize) -> RdConfig {
+        let mut config = RdConfig::default();
+        config.p = p;
+        config.h = self.h;
+        config.b = self.b;
+        config.kernel = self.kernel;
+        config.bwselect = self.bwselect;
+        config.vce = self.vce;
+        config
     }
 }
 
@@ -1546,28 +1569,10 @@ fn execute_rd(
     running: &str,
     cutoff: f64,
     poly_order: usize,
-    kernel: &str,
-    bwselect: &str,
-    bandwidths: RdBandwidths,
-    vce: &str,
+    options: RdOptions,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    // --vce, --kernel and --bwselect are checked before the session and the dataset
-    let parsed = parse_vce_arg(vce).and_then(|vce| {
-        Ok((
-            vce,
-            parse_kernel_arg(kernel)?,
-            parse_bwselect_arg(bwselect)?,
-        ))
-    });
-    let (vce, kern, bw) = match parsed {
-        Ok(v) => v,
-        Err(message) => {
-            print_error(&message, format);
-            return Ok(());
-        }
-    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -1578,15 +1583,7 @@ fn execute_rd(
 
     match dataset {
         Some(ds) => {
-            let config = RdConfig {
-                p: poly_order,
-                h: bandwidths.h,
-                b: bandwidths.b,
-                kernel: kern,
-                bwselect: bw,
-                vce,
-                ..RdConfig::default()
-            };
+            let config = options.config(poly_order);
 
             match run_rd(ds, outcome, running, cutoff, config) {
                 Ok(result) => match format {
@@ -1617,12 +1614,16 @@ fn execute_rd(
                             "b_left": result.b_left,
                             "b_right": result.b_right,
                             "kernel": result.kernel.to_string(),
+                            "bwselect": result.bwselect.name(),
+                            "bandwidth_source": result.bandwidth_label(),
                             "vce": result.vce.to_string(),
                             "p": result.p,
                             "q": result.q,
                             "level": result.level,
-                            "warnings": result.warnings,
+                            "diagnostics": identification_json(&rd_diagnostics(&result)),
                         });
+                        // the notes leave out the missing-value note, which has its own key
+                        with_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1667,8 +1668,10 @@ fn execute_rd(
                             "Bandwidth b: left={:.4}, right={:.4}",
                             result.b_left, result.b_right
                         );
+                        println!("Kernel: {}", result.kernel);
+                        println!("Bandwidth source: {}", result.bandwidth_label());
                         println!("VCE: {}", result.vce);
-                        print_rd_warnings(&result.warnings, &result.missing);
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics
                         print_identification_warnings(&rd_diagnostics(&result));
@@ -1690,21 +1693,10 @@ fn execute_fuzzy_rd(
     treatment: &str,
     cutoff: f64,
     poly_order: usize,
-    kernel: &str,
-    bandwidths: RdBandwidths,
-    vce: &str,
+    options: RdOptions,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    // --vce and --kernel are checked before the session and the dataset
-    let parsed = parse_vce_arg(vce).and_then(|vce| Ok((vce, parse_kernel_arg(kernel)?)));
-    let (vce, kern) = match parsed {
-        Ok(v) => v,
-        Err(message) => {
-            print_error(&message, format);
-            return Ok(());
-        }
-    };
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -1715,15 +1707,7 @@ fn execute_fuzzy_rd(
 
     match dataset {
         Some(ds) => {
-            let config = RdConfig {
-                p: poly_order,
-                h: bandwidths.h,
-                b: bandwidths.b,
-                kernel: kern,
-                bwselect: BandwidthMethod::MseRd,
-                vce,
-                ..RdConfig::default()
-            };
+            let config = options.config(poly_order);
 
             match run_fuzzy_rd(ds, outcome, running, treatment, cutoff, config) {
                 Ok(result) => match format {
@@ -1750,10 +1734,15 @@ fn execute_fuzzy_rd(
                             "b_right": rd.b_right,
                             "n_eff_left": rd.n_eff_left,
                             "n_eff_right": rd.n_eff_right,
+                            "kernel": rd.kernel.to_string(),
+                            "bwselect": rd.bwselect.name(),
+                            "bandwidth_source": rd.bandwidth_label(),
                             "vce": rd.vce.to_string(),
                             "level": result.level,
-                            "warnings": result.warnings,
+                            "diagnostics": identification_json(&rd_diagnostics(rd)),
                         });
+                        // the notes leave out the missing-value note, which has its own key
+                        with_result_notes(&mut json, &result);
                         if let Some(m) = missing_json(&result.missing) {
                             json["missing"] = m;
                         }
@@ -1793,8 +1782,10 @@ fn execute_fuzzy_rd(
                              (both stages)",
                             rd.h_left, rd.h_right, rd.b_left, rd.b_right
                         );
+                        println!("Kernel: {}", rd.kernel);
+                        println!("Bandwidth source: {}", rd.bandwidth_label());
                         println!("VCE: {}", rd.vce);
-                        print_rd_warnings(&result.warnings, &result.missing);
+                        print_result_notes(&result, format);
 
                         // Run identification diagnostics on the outcome RD
                         print_identification_warnings(&rd_diagnostics(rd));

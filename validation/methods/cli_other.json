@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_causal_options",
+      "name": "p2a causal rd/fuzzy-rd/staggered-did/did/ipw/doubly-robust/tmle/stdreg/matching/synth/gsynth: typed options, R and MCP spellings, notes and wave-2 fields",
+      "category": "interfaces",
+      "reference": "rdrobust::rdbwselect (bwselect, kernel)",
+      "doc": "validation/cli/other.md",
+      "cases": ["rd_bwselect_sharp", "rd_bwselect_fuzzy"],
+      "tests": [
+        "p2a-cli::tier3::wp61_other::test_validate_cli_rd_bwselect_certwo",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_rd_kernel_alias",
+        "p2a-cli::tier3::wp61_other::test_validate_cli_fuzzy_rd_bwselect"
+      ],
+      "quantities": ["selected bandwidths h and b (left, right) for certwo and the Epanechnikov mserd, sharp and fuzzy"],
+      "tolerance": "validation/README.md for each n (rd_sim 1000: 1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

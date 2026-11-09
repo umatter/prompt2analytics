@@ -21,6 +21,20 @@ fn nums(v: &Value, key: &str) -> Vec<f64> {
         .collect()
 }
 
+// T3-WP61: --vce, --kernel and --bwselect are parsed by clap (a usage error, exit 2).
+/// Runs; asserts exit code 2 and no panic; returns stderr.
+fn usage_err(s: &TempSession, args: &[&str]) -> String {
+    let out = s.run(args);
+    assert_no_panic(&out, &args.join(" "));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 /// The number after `label` in `text` (panics with the text when absent).
 fn label(text: &str, l: &str) -> f64 {
     labelled(text, l).unwrap_or_else(|| panic!("no `{l}` line in\n{text}"))
@@ -89,9 +103,12 @@ fn test_validate_cli_causal_rd_vce() {
 fn test_cli_causal_rd_rejects_unknown_vce() {
     // --vce is parsed before the dataset lookup: no dataset is loaded
     let s = temp_session();
-    let err = s.err(&[
-        "causal", "rd", "none", "-y", "y", "-r", "x", "-c", "0", "--vce", "robust",
-    ]);
+    let err = usage_err(
+        &s,
+        &[
+            "causal", "rd", "none", "-y", "y", "-r", "x", "-c", "0", "--vce", "robust",
+        ],
+    );
     // the core message alone, without a second prefix
     let once = |err: &str, value: &str| {
         assert!(
@@ -104,9 +121,13 @@ fn test_cli_causal_rd_rejects_unknown_vce() {
         );
     };
     once(&err, "robust");
-    let err = s.err(&[
-        "causal", "fuzzy-rd", "none", "-y", "y", "-r", "x", "-t", "d", "-c", "0", "--vce", "hc4",
-    ]);
+    let err = usage_err(
+        &s,
+        &[
+            "causal", "fuzzy-rd", "none", "-y", "y", "-r", "x", "-t", "d", "-c", "0", "--vce",
+            "hc4",
+        ],
+    );
     once(&err, "hc4");
 }
 
@@ -122,26 +143,35 @@ fn test_cli_causal_rd_rejects_unknown_kernel_and_bwselect() {
             "{err}"
         );
     };
-    kernel(&s.err(&[
-        "causal", "rd", "none", "-y", "y", "-r", "x", "-c", "0", "--kernel", "gaussian",
-    ]));
-    kernel(&s.err(&[
-        "causal", "fuzzy-rd", "none", "-y", "y", "-r", "x", "-t", "d", "-c", "0", "--kernel",
-        "gaussian",
-    ]));
-    let err = s.err(&[
-        "causal",
-        "rd",
-        "none",
-        "-y",
-        "y",
-        "-r",
-        "x",
-        "-c",
-        "0",
-        "--bwselect",
-        "ik",
-    ]);
+    kernel(&usage_err(
+        &s,
+        &[
+            "causal", "rd", "none", "-y", "y", "-r", "x", "-c", "0", "--kernel", "gaussian",
+        ],
+    ));
+    kernel(&usage_err(
+        &s,
+        &[
+            "causal", "fuzzy-rd", "none", "-y", "y", "-r", "x", "-t", "d", "-c", "0", "--kernel",
+            "gaussian",
+        ],
+    ));
+    let err = usage_err(
+        &s,
+        &[
+            "causal",
+            "rd",
+            "none",
+            "-y",
+            "y",
+            "-r",
+            "x",
+            "-c",
+            "0",
+            "--bwselect",
+            "ik",
+        ],
+    );
     assert!(
         err.contains("Unknown bwselect 'ik'; use \"mserd\"") && err.contains("certwo"),
         "{err}"
