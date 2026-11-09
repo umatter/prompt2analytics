@@ -28,10 +28,17 @@ cargo test -- --nocapture
 # Run validation tests only
 cargo test -p p2a-core -- test_validate
 
-# NA extraction guard, and the Tier 2 MCP-path and CLI tests
+# NA and numeric source guards, the Tier 2 and Tier 3 MCP-path and CLI tests
 cargo test -p p2a-validation --test na_guard
+cargo test -p p2a-validation --test numeric_guard
 cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier2
 cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier2
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier3
+cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier3
+
+# Documentation tests (see "Documentation tests")
+cargo test -p p2a-cli --no-default-features --features spectral-analysis --test docs_examples
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tool_examples_doc
 ```
 
 ### Test Categories
@@ -61,6 +68,21 @@ package (`wp<nn>_<topic>.rs`); a package edits only its own module. The shared h
 binary's `common.rs`: MCP `session_with(case_id)`, `session_with_datasets`, `call` (the dispatcher the
 HTTP API uses) and `text`; CLI `temp_session()`, whose `TempSession` runs the real `p2a` binary with
 `ok`, `err`, `json`, `json_docs`, `load` and `load_as`. The MCP binary needs the `http` feature.
+
+#### Tier 3 test binaries
+
+The Tier 3 packages follow the same layout in two `tier3` binaries:
+
+- `crates/p2a-mcp/tests/tier3/` (`#![cfg(feature = "http")]`): `wp05_mechanics`, `wp53_llm_routes`,
+  `wp54_ui_persistence`, `wp55_causal`, `wp56_stats_ts`, `wp57_ml_spatial`, `wp58_models`, `wp58_text`,
+  `wp59_data`. The `wp53_llm_routes::conversations` and `wp53_llm_routes::chat_conversation` modules need `db`.
+- `crates/p2a-cli/tests/tier3/`: `wp06_flags`, `wp21_did`, `t3perf4_vecm`, `wp60_models`, `wp61_other`.
+
+```bash
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier3   # the CI set
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,db" --test tier3          # with the db modules
+cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier3
+```
 
 #### Validation Tests
 
@@ -95,6 +117,8 @@ socket.
 | `uploads.rs` | `upload_dataset` decodes an uploaded Parquet file from the request's bytes and stores nothing (not in the session directory, not in the temporary folder) | `#![cfg(feature = "http")]` | the CI set |
 | `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket; while it runs, a start of other limits (`serve`, `start_transport` over HTTP or stdio, `start_embedded_server`, which returns the refusal) or of the same limits with another allocation ceiling or session-directory setting is refused | `#![cfg(feature = "http")]` | the CI set |
 | `tier2/` (`main.rs`, one module per package) | Tier 2 MCP-path tests through `call_tool_with_session`: missing values, integer columns and the R pins of the migrated tools | `#![cfg(feature = "http")]` | the CI set |
+| `tier3/` (`main.rs`, one module per package) | Tier 3 MCP-path tests (see [Tier 3 test binaries](#tier-3-test-binaries)) | `#![cfg(feature = "http")]`; two `wp53_llm_routes` modules need `db` | the CI set, plus `http,llm,auth,db` |
+| `tool_examples_doc.rs` | the MCP documentation (see [Documentation tests](#documentation-tests)) | none; the `database` tools are checked only in builds that have them | the CI set and the default features |
 | `serve_limits_hold.rs` | a server holds its limits until its last connection or websocket session closes: after an aborted `start_http_transport` with a keep-alive connection open, and after a graceful shutdown with a websocket session open, a local start is refused and the old connection keeps the caps; once it closes, the local start is accepted. Its tests run one at a time, since each ends by installing the off profile | `#![cfg(feature = "http")]`; the websocket test needs `websocket` | the CI set |
 
 Commands for the feature sets CI does not build:
@@ -104,10 +128,27 @@ cargo test -p p2a-mcp --features full                                          #
 cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,db"      # sessions.rs
 cargo check -p p2a-mcp --no-default-features                                   # stdio-only build
 cargo test -p p2a-core --features database data::database                      # SQL lockdown (duckdb-sys)
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,database"   # the SQL tool handlers
+cargo test -p p2a-mcp --test tool_examples_doc                                 # the database tools' examples, exact tools reference
 ```
 
 `llm_egress.rs` relies on the Off defaults: run it with `P2A_LLM_ALLOWED_HOSTS`, `P2A_LIMITS` and
 `P2A_LIMIT_OVERRIDES` unset.
+
+## Documentation tests
+
+Two test binaries hold the documentation to the code. Both run in CI's test step.
+
+| Binary | What it checks | Gate | Regenerate |
+|---|---|---|---|
+| `crates/p2a-cli/tests/docs_examples.rs` | every fenced `p2a` example in `README.md`, `docs/guides/CLI_REFERENCE.md`, `docs/cookbook.md` and `CLAUDE.md` runs through the real binary (without its `--session`, in an empty directory) and is not refused by the parser, does not panic or hang, and names a session; no placeholder in a shell fence; no refused option value; every after-help example of the binary parses; the generated sections are what the binary's help prints; every source path `CLAUDE.md` names exists | `#![cfg(feature = "spectral-analysis")]` (the CI set) | `P2A_UPDATE_DOCS=1 cargo test -p p2a-cli --no-default-features --features spectral-analysis --test docs_examples`, or `cargo run -p p2a-cli --example generate_cli_reference` after a build |
+| `crates/p2a-mcp/tests/tool_examples_doc.rs` | every `/tool key:value` example in `docs/guides/MCP_TOOL_EXAMPLES.md` and `README.md` names a registered tool, only its fields and every required field, with values of the field's type, and no refused option value; the guide's headings and parameter bullets; README's generated tool table and the tool names in its MCP sections; `docs/mcp/tools-reference.md`; every "N tools" count in the docs | none (the `database` tools' examples are skipped and the reference compared row by row without that feature) | `cargo run -p p2a-mcp --example generate_tool_docs` (default features; it refuses to write the reference without `database`), or `P2A_UPDATE_DOCS=1` with the test |
+
+- Edit only outside the `BEGIN GENERATED`/`END GENERATED` lines; the text between them is rewritten.
+- Regenerate with plain `cargo test` (one test binary at a time), not a parallel runner: two binaries
+  rewriting `README.md` at once would race.
+- The CLI reference is rendered from the `p2a` binary of the CI feature set. A CLI command behind a feature
+  other than `spectral-analysis` would make it build-dependent; none exists.
 
 ## Test Runtime Expectations
 
@@ -123,6 +164,9 @@ Test runtime varies by system resources. Approximate times on a modern laptop:
 | NA guard | `cargo test -p p2a-validation --test na_guard` | about 1 second (after the build) |
 | Tier 2 MCP-path tests | `cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier2` | under 1 second (after the build) |
 | Tier 2 CLI tests | `cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier2` | a few seconds (after the build) |
+| Numeric guard | `cargo test -p p2a-validation --test numeric_guard` | a few seconds (after the build) |
+| CLI documentation tests | `cargo test -p p2a-cli --no-default-features --features spectral-analysis --test docs_examples` | under 10 seconds (after the build; several hundred runs of the debug `p2a` binary) |
+| MCP documentation tests | `cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tool_examples_doc` | under 1 second (after the build) |
 
 **Note**: First run will be slower due to compilation.
 
@@ -194,6 +238,17 @@ compares at least one value of its R case through `p2a_validation::Check` (a cou
 A test that checks only an error variant, a text or a property is named `test_na_*`, `test_mcp_*` or
 `test_cli_*` and is not registered; it loads its CSV through `p2a_validation::repo_path` (CLI:
 `TempSession::load_as`), because the registry lint refuses `Case::load` in an unregistered test.
+
+### The numeric guard
+
+`crates/p2a-validation/tests/numeric_guard.rs` walks the product crates' `src` (skipping `#[cfg(test)]`
+items) for the numeric patterns rules R5-R7 and R9 forbid, five rules in all: `partial-cmp-unwrap`
+(`partial_cmp(..).unwrap*` comparators), `one-minus-cdf` (`1 - cdf` p-values), `abramowitz-stegun` (local
+approximation constants), `critical-value-literal` (`1.96`, `2.576`, `1.645` as literals) and
+`discarded-inverse-condition` (a `safe_inverse` result whose condition element is dropped). It prints
+`file:line` for each. A deliberate use carries `// numeric-ok: <reason>` or, for an inverse,
+`// inverse-ok: <reason>`; the module documentation is the reference. `cargo test -p p2a-validation` runs
+it, in CI too.
 
 ### Test Tolerances
 
@@ -406,14 +461,21 @@ CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests, o
 runner, with feature sets chosen to keep it cheap:
 
 1. **Format**: `cargo fmt --all -- --check`
-2. **Tests** (`cargo test --tests`):
+2. **Keep duckdb-sys out**: `cargo tree --locked -p <pkg> <feature set> -i libduckdb-sys` must report no match
+   for p2a-core (`ci`), p2a-mcp (`http,llm,auth,websocket`) and p2a-cli (`spectral-analysis`)
+3. **Tests** (`RUST_TEST_THREADS=4`):
    - `cargo test -p p2a-core --tests --no-default-features --features ci`
-   - `cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"`
-   - `cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis`
-3. **Doctests**: p2a-core with `ci`, p2a-mcp with `http,llm,auth,websocket`
-4. **Validation harness, registry lint and runner tests** (after the doctests, in the same job):
-   - `cargo test -p p2a-validation` (includes the NA guard, `tests/na_guard.rs`)
-   - the three test lists, `cargo test -p <pkg> --tests <the feature set of item 2> -- --list > target/<pkg>-tests.txt 2>&1`
+   - `cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"` (includes
+     `tool_examples_doc`)
+   - `cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis` (includes
+     `docs_examples`)
+   - `cargo test -p p2a-text`
+   - `cargo test -p p2a-chat --lib`
+4. **Doctests**: p2a-core with `ci`, p2a-mcp with `http,llm,auth,websocket`
+5. **Validation harness, registry lint and runner tests** (after the doctests, in the same job):
+   - `cargo test -p p2a-validation` (includes the NA guard, `tests/na_guard.rs`, and the numeric guard,
+     `tests/numeric_guard.rs`)
+   - the three test lists, `cargo test -p <pkg> --tests <the feature set of item 3> -- --list > target/<pkg>-tests.txt 2>&1`
    - `python3 validation/tools/validation_status.py lint --strict --tests target/p2a-core-tests.txt target/p2a-mcp-tests.txt target/p2a-cli-tests.txt`
    - `P2A_CHECK_STATUS_PAGE=1 python3 -m unittest discover -s validation/tools/tests -v` (includes the
      status-page check: `validation/VALIDATION_STATUS.md`'s `test_validate` counts must equal the lists)
@@ -421,18 +483,33 @@ runner, with feature sets chosen to keep it cheap:
 
    CI does not install R; the R drift check (`Rscript validation/r/run.R --check`) runs in
    `validation/run_validation.sh` locally.
-5. **Clippy** on p2a-core (`ci`), p2a-mcp (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`),
-   p2a-chat and `cargo clippy -p p2a-validation --all-targets`; it reports but does not gate
-6. **p2a-dioxus**: `cargo check --no-default-features --features web --target wasm32-unknown-unknown`,
+6. **Clippy** on p2a-core (`ci`), p2a-mcp (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`),
+   p2a-chat, p2a-text and `cargo clippy -p p2a-validation --all-targets`; it reports but does not gate
+7. **p2a-dioxus**: `cargo check --no-default-features --features web --target wasm32-unknown-unknown`,
    plus the host tests with `web`
 
-CI does not build the `database` feature of p2a-core (duckdb-sys), the `db` feature of
+CI does not build the `database` feature of p2a-core (duckdb-sys) or of p2a-mcp and p2a-cli, the `db` feature of
 p2a-mcp, `cuda`, release builds or the Dioxus desktop target; run those locally (commands above). A
 separate Security audit workflow (`.github/workflows/audit.yml`) runs `cargo audit` weekly and on
 every change to `Cargo.lock`, any `Cargo.toml` or the workflow itself.
 
 Benchmark-only tests are `#[ignore]`d, so the Test job reports them as ignored (see
 [Benchmark tests](#benchmark-tests-ignored-by-default)). No workflow measures code coverage.
+
+## Timing comparisons (rule 5)
+
+A method rewrite is timed against the code it replaces (and against R where R is timed) before it merges;
+more than about 1.5x slower needs a written reason and the user's sign-off. No timing assertion is committed.
+
+- Build the base commit in a separate worktree (`git worktree add ../p2a-base <commit>`) with `--release` and
+  the CI feature set (`--no-default-features --features ci` for p2a-core), so both sides share flags.
+- Fix `RAYON_NUM_THREADS` (for example `RAYON_NUM_THREADS=4`) on both sides, and take the median of 5 runs at
+  n = 100, 1,000 and 10,000.
+- Time with an uncommitted scratch program or a local copy of a bench, not a test. One Criterion group:
+  `cargo bench -p p2a-core --bench <bench> -- <group>`; the custom-harness benches (`harness = false`, see
+  `bench_utils.rs`) run one bench file with `cargo bench -p p2a-core --bench <bench>`, with the sizes edited
+  locally.
+- Report the three medians for each side in the commit body or the package report.
 
 ## Troubleshooting
 
@@ -454,6 +531,17 @@ Ensure test data types match expected schema. Use explicit casts if needed.
 Read the column through `p2a_core::data::columns` (in p2a-mcp: `tools::common::numeric_column(s)` /
 `numeric_matrix` with an explicit `NaPolicy`). If the data cannot hold nulls (a column the code built,
 a comparison mask), add `// na-ok: <reason>` on the line or the line above.
+
+**`numeric_guard` reports `file:line`**:
+Sort NaN-free data with `f64::total_cmp`, take upper tails from the direct-tail helpers of
+`traits::estimator`, take quantiles from its quantile helpers instead of literals, invert with
+`linalg::solve::sym_inverse` (or use `safe_inverse`'s condition), or add the marker its module documentation
+names (`// numeric-ok: <reason>`, `// inverse-ok: <reason>`).
+
+**A documentation test fails**:
+`docs_examples` and `tool_examples_doc` print `file:line` and what is wrong. A documented command, flag, tool
+or field that no longer exists is fixed in the document; a stale generated section is regenerated (see
+[Documentation tests](#documentation-tests)), never edited by hand.
 
 **Link failures or doctests that "couldn't compile"**:
 A full disk and a distro `rustdoc` that does not match its `libLLVM` both look like broken code.
