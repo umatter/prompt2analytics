@@ -125,7 +125,7 @@ pub struct PvcmRequest {
 
     /// Model type: 'within' or 'random'
     #[schemars(
-        description = "Model type: 'within' for separate OLS per entity (default), 'random' for Swamy (1970) GLS estimator."
+        description = "Model type: 'within' for separate OLS per entity (default; also 'individual', 'separate'), 'random' (also 'swamy') for the Swamy (1970) GLS estimator. panel_pmg accepts only 'within'. Other values are an error."
     )]
     pub model: Option<String>,
 }
@@ -168,13 +168,13 @@ pub struct GmmRequest {
 
     /// Transformation type: 'difference' (Arellano-Bond 1991); 'system' is not implemented yet
     #[schemars(
-        description = "'difference' (Arellano-Bond; default). 'system' (Blundell-Bond) is not implemented yet and runs difference GMM with a warning."
+        description = "'difference' (Arellano-Bond; default) or 'system' (Blundell-Bond, as plm::pgmm(transformation = 'ld')); also 'd', 'ld', 'diff', 'sys'. Unknown values are an error."
     )]
     pub transform: Option<String>,
 
     /// Estimation step: 'onestep' or 'twostep'
     #[schemars(
-        description = "Estimation step: 'onestep' or 'twostep'. Two-step is more efficient. Default: 'twostep'."
+        description = "'twostep' (default) or 'onestep'; one-step system fits need robust = true. Unknown values are an error."
     )]
     pub step: Option<String>,
 
@@ -233,7 +233,7 @@ pub struct PanelGlsRequest {
 
     /// Model type: 'fe' (fixed effects), 'pooling', or 'fd' (first difference)
     #[schemars(
-        description = "Model type: 'fe' for fixed effects GLS (default), 'pooling' for pooled GLS, 'fd' for first-difference GLS."
+        description = "Model type: 'fe' for fixed effects GLS (default; also 'within', 'fixed_effects'), 'pooling' for pooled GLS (also 'pool', 'pooled'), 'fd' for first-difference GLS (also 'first_difference'). Other values are an error."
     )]
     pub model: Option<String>,
 }
@@ -264,21 +264,33 @@ pub struct PanelUnitRootRequest {
 
     /// Test type
     #[schemars(
-        description = "Test type: 'llc' (Levin-Lin-Chu, default), 'ips' (Im-Pesaran-Shin), 'fisher' (Maddala-Wu), 'hadri' (stationarity null)."
+        description = "Test type: 'llc' (Levin-Lin-Chu, default; also 'levinlin'), 'ips' (Im-Pesaran-Shin), 'madwu' (Maddala-Wu; also 'fisher'), 'hadri' (stationarity null). Other values are an error."
     )]
     pub test: Option<String>,
 
     /// Model specification
     #[schemars(
-        description = "Model specification: 'none' (no deterministic terms), 'constant' (individual intercepts, default), 'trend' (individual intercepts and trends)."
+        description = "Model specification: 'none' (no deterministic terms), 'intercept' (individual intercepts, default; also 'drift'), 'trend' (individual intercepts and trends; also 'ct'). Other values are an error."
     )]
     pub model: Option<String>,
 
     /// Number of lags for ADF regression
     #[schemars(
-        description = "Number of lags for ADF regression. If not specified, uses automatic selection."
+        description = "Number of lags of every unit's ADF regression. If neither lags nor lag_selection is given, floor(T_max^(1/3)) lags for every unit. Not with lag_selection = aic | sic | hall (use pmax)."
     )]
     pub lags: Option<usize>,
+
+    /// Per-unit lag selection
+    #[schemars(
+        description = "Per-unit lag selection as plm::purtest(lags =): 'aic', 'sic' (also 'bic') or 'hall' choose each unit's order up to pmax on a common sample; 'fixed' uses lags. Without it, lags (if given) or floor(T_max^(1/3)) lags for every unit. Not for 'hadri'."
+    )]
+    pub lag_selection: Option<String>,
+
+    /// Largest lag order considered by lag selection
+    #[schemars(
+        description = "Largest lag order considered by lag_selection = aic | sic | hall (plm's pmax). Default 10. At least 1."
+    )]
+    pub pmax: Option<usize>,
 }
 
 /// Request for High-Dimensional Fixed Effects (HDFE).
@@ -305,7 +317,7 @@ pub struct PanelHdfeRequest {
 
     /// Convergence tolerance for MAP algorithm
     #[schemars(
-        description = "Convergence tolerance for the Method of Alternating Projections. Default is 1e-8."
+        description = "Convergence tolerance of the Method of Alternating Projections, relative: ||delta|| / ||x|| (fixest). Default is 1e-8."
     )]
     pub tolerance: Option<f64>,
 
@@ -315,7 +327,7 @@ pub struct PanelHdfeRequest {
 
     /// Standard error type
     #[schemars(
-        description = "Standard error type: 'standard', 'hc0', 'hc1' (default), 'hc2', or 'hc3'."
+        description = "Standard error type: 'standard' (also 'classical'), 'hc0', 'hc1' (default), 'hc2' or 'hc3'. Other values are an error."
     )]
     pub se_type: Option<String>,
 }

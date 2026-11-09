@@ -1858,3 +1858,344 @@ async fn test_validate_mcp_aft() {
         "{e}"
     );
 }
+
+/// dpd_sys_balanced (econ_sysgmm.R): plm::pgmm(transformation = "ld") two-step with
+/// Windmeijer SEs, one-step robust; one-step classical SEs are refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_panel_gmm_system() {
+    let case = Case::load("dpd_sys_balanced");
+    let (session, server) = session_with("dpd_sys_balanced"); // dataset "ab_balanced"
+    let base = json!({"dataset": "ab_balanced", "y": "y", "x": ["x"], "entity_var": "id",
+                      "time_var": "year", "transform": "system"});
+    let with = |pairs: &[(&str, Value)]| {
+        let mut a = base.clone();
+        for (k, v) in pairs {
+            a[*k] = v.clone();
+        }
+        a
+    };
+    let t = text(&call(&server, &session, "panel_gmm", base.clone()).await);
+    let (c2, s2) = (
+        case.vector("twostep_coef"),
+        case.vector("twostep_se_robust"),
+    );
+    assert_row("L1.y", row(&t, "L1.y"), &[c2[0], s2[0]], Tol::printed(4));
+    assert_row("x", row(&t, "x"), &[c2[1], s2[1]], Tol::printed(4));
+    assert_shows(
+        "n",
+        after(&t, "No. Observations:"),
+        case.scalar("twostep_n_obs"),
+        Tol::exact(),
+    );
+    assert!(t.contains("600 differenced, 700 level"), "{t}");
+    assert_shows(
+        "Sargan",
+        after(&t, "chi2(27) ="),
+        case.scalar("twostep_sargan"),
+        Tol::printed(4),
+    );
+    assert!(
+        !t.contains("ECON-30") && !t.contains("Difference GMM (Arellano-Bond)"),
+        "{t}"
+    );
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "panel_gmm",
+            with(&[
+                ("transform", json!("ld")),
+                ("step", json!("one-step")),
+                ("robust", json!(true)),
+            ]),
+        )
+        .await,
+    );
+    let (c1, s1) = (
+        case.vector("onestep_coef"),
+        case.vector("onestep_se_robust"),
+    );
+    assert_row(
+        "L1.y one-step",
+        row(&t, "L1.y"),
+        &[c1[0], s1[0]],
+        Tol::printed(4),
+    );
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_gmm",
+            with(&[("step", json!("onestep")), ("robust", json!(false))]),
+        )
+        .await,
+    );
+    assert!(e.contains("robust = true"), "{e}");
+    // before: difference
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_gmm",
+            with(&[("transform", json!("levels"))]),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("levels") && e.contains("difference, system"),
+        "{e}"
+    );
+    // before: two-step
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_gmm",
+            with(&[("step", json!("three"))]),
+        )
+        .await,
+    );
+    assert!(e.contains("three") && e.contains("onestep, twostep"), "{e}");
+}
+
+/// purtest_lag_selection (econ_purtest.R): per-unit AIC and SIC lags up to pmax = 4 as
+/// plm::purtest; the IPS/LLC/MW statistics are ECON-41/43/44 (Tier 4) and are not pinned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_panel_unit_root_aic() {
+    let case = Case::load("purtest_lag_selection");
+    let (session, server) = session_with("purtest_lag_selection"); // dataset "purtest_panel"
+    let base = json!({"dataset": "purtest_panel", "variable": "y", "unit_col": "id",
+                      "time_col": "t", "test": "ips", "pmax": 4});
+    let with = |pairs: &[(&str, Value)]| {
+        let mut a = base.clone();
+        for (k, v) in pairs {
+            a[*k] = v.clone();
+        }
+        a
+    };
+    for (rule, key, label) in [
+        ("aic", "ips_aic_lags", "AIC per unit, pmax = 4"),
+        ("SIC", "ips_sic_lags", "SIC per unit, pmax = 4"),
+    ] {
+        // fails before: unknown field `lag_selection`
+        let t = text(
+            &call(
+                &server,
+                &session,
+                "panel_unit_root",
+                with(&[("lag_selection", json!(rule))]),
+            )
+            .await,
+        );
+        let lags = case.vector(key);
+        let (min, max) = (
+            lags.iter().cloned().fold(f64::INFINITY, f64::min),
+            lags.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        );
+        let mean = lags.iter().sum::<f64>() / lags.len() as f64; // 2.00 (AIC), 1.08 (SIC)
+        assert!(t.contains(label), "{t}");
+        assert_row(
+            rule,
+            after(&t, "per unit:"),
+            &[min, max, mean],
+            Tol::printed(2),
+        );
+    }
+    let r = call(
+        &server,
+        &session,
+        "panel_unit_root",
+        with(&[("test", json!("madwu")), ("lag_selection", json!("hall"))]),
+    )
+    .await;
+    assert!(r.success, "{}", text(&r));
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_unit_root",
+            with(&[("lag_selection", json!("aic")), ("lags", json!(2))]),
+        )
+        .await,
+    );
+    assert!(e.contains("lags fixes the lag order"), "{e}");
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_unit_root",
+            with(&[("lag_selection", json!("aic")), ("pmax", json!(0))]),
+        )
+        .await,
+    );
+    assert!(e.contains("pmax must be at least 1"), "{e}");
+    // before: intercept
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_unit_root",
+            with(&[("model", json!("constant"))]),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("constant") && e.contains("none, intercept, trend"),
+        "{e}"
+    );
+    // before: LLC
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_unit_root",
+            with(&[("test", json!("llc2"))]),
+        )
+        .await,
+    );
+    assert!(
+        e.contains("llc2") && e.contains("llc, ips, madwu, hadri"),
+        "{e}"
+    );
+}
+
+/// pvcm_pmg_sim and pggls_sim (econ_panel_t3.R): Swamy random coefficients, mean group and
+/// pooled FGLS coefficients (the MG and pooled-GLS SEs are ECON-34 and ECON-33, Tier 4).
+/// panel_pmg accepts only model 'within'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_panel_heterogeneous_and_gls() {
+    let (pv, gl) = (Case::load("pvcm_pmg_sim"), Case::load("pggls_sim"));
+    let (session, server) = session_with_datasets(vec![
+        ("pvcm_panel", dataset_of(&pv)),
+        ("pggls_panel", dataset_of(&gl)),
+    ]);
+    let pvcm = json!({"dataset": "pvcm_panel", "y": "y", "x": ["x1", "x2"], "entity_var": "id"});
+    let with = |b: &Value, k: &str, v: Value| {
+        let mut a = b.clone();
+        a[k] = v;
+        a
+    };
+    let names = ["(Intercept)", "x1", "x2"];
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "panel_pvcm",
+            with(&pvcm, "model", json!("Random")),
+        )
+        .await,
+    );
+    for v in names {
+        assert_row(
+            v,
+            row(&t, v),
+            &[pv.named("random_coef", v), pv.named("random_se", v)],
+            Tol::printed(4),
+        );
+    }
+    let t = text(&call(&server, &session, "panel_pmg", pvcm.clone()).await);
+    for v in names {
+        assert_row(v, row(&t, v), &[pv.named("mg_coef", v)], Tol::printed(4));
+    }
+    // panel_pmg is the mean-group estimator; a model it does not run is refused (before: ignored)
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_pmg",
+            with(&pvcm, "model", json!("random")),
+        )
+        .await,
+    );
+    assert!(e.contains("panel_pvcm"), "{e}");
+    let within = text(
+        &call(
+            &server,
+            &session,
+            "panel_pmg",
+            with(&pvcm, "model", json!("within")),
+        )
+        .await,
+    );
+    assert_eq!(within, t);
+    // before: within
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_pvcm",
+            with(&pvcm, "model", json!("pooling")),
+        )
+        .await,
+    );
+    assert!(e.contains("pooling") && e.contains("within, random"), "{e}");
+    let g = json!({"dataset": "pggls_panel", "y": "y", "x": ["x1", "x2"], "entity_var": "id",
+                   "time_var": "t"});
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "panel_gls",
+            with(&g, "model", json!("pooling")),
+        )
+        .await,
+    );
+    for v in names {
+        assert_row(
+            v,
+            row(&t, v),
+            &[gl.named("pooling_coef", v)],
+            Tol::printed(4),
+        );
+    }
+    // before: fixed effects
+    let e = tool_error(
+        &call(
+            &server,
+            &session,
+            "panel_gls",
+            with(&g, "model", json!("re")),
+        )
+        .await,
+    );
+    assert!(e.contains("'re'") && e.contains("fe, pooling, fd"), "{e}");
+}
+
+/// panel_absorbed_regressors (econ_panel_t3.R): a time-invariant regressor is dropped by FE as
+/// plm, and the MCP text shows the warning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_panel_fe_drops_absorbed() {
+    let case = Case::load("panel_absorbed_regressors");
+    let (session, server) = session_with("panel_absorbed_regressors"); // dataset "panel_absorbed"
+    let t = text(
+        &call(
+            &server,
+            &session,
+            "panel_fixed_effects",
+            json!({"dataset": "panel_absorbed", "y": "y", "x": ["x1", "x2", "z"], "entity_var": "id"}),
+        )
+        .await,
+    );
+    for v in ["x1", "x2"] {
+        assert_row(
+            v,
+            row(&t, v),
+            &[case.named("fe_coef", v), case.named("fe_se", v)],
+            Tol::printed(4),
+        );
+    }
+    assert!(
+        t.contains("'z' dropped: no variation left after removing the 'id' fixed effects"),
+        "{t}"
+    );
+    // before: "Unknown SE type 'classical'"
+    let r = call(
+        &server,
+        &session,
+        "panel_hdfe",
+        json!({"dataset": "panel_absorbed", "y": "y", "x": ["x1", "x2"], "fe": ["id", "t"],
+               "se_type": "classical"}),
+    )
+    .await;
+    assert!(r.success, "{}", text(&r));
+}

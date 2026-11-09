@@ -16,18 +16,81 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::parse_option;
+use crate::tools::handlers::regression::{append_unshown_notes, parse_choice};
 use crate::tools::requests::panel::{
     GmmRequest, HausmanRequest, PanelFERequest, PanelGlsRequest, PanelHdfeRequest, PanelRERequest,
     PanelUnitRootRequest, PvcmRequest,
 };
 
+use p2a_core::econometrics::panel_unit_root::LagSelection;
 use p2a_core::econometrics::{
     GmmConfig, GmmResult, GmmStep, GmmTransform, HdfeConfig, HdfeResult, PanelConfig,
     PanelGlsModel, PanelGlsResult, PanelModel, PanelUnitRootConfig, PanelUnitRootTest, PanelVcov,
     PvcmType, run_fixed_effects_with, run_gmm, run_hausman_test, run_hdfe, run_panel_gls,
     run_panel_unit_root, run_pmg, run_pvcm, run_random_effects_with,
 };
+use p2a_core::options::Choices;
 use p2a_core::regression::CovarianceType;
+
+const PVCM_MODEL: Choices<PvcmType> = Choices {
+    option: "model",
+    values: &[
+        (&["within", "individual", "separate"], PvcmType::Within),
+        (&["random", "swamy"], PvcmType::Random),
+    ],
+};
+
+const PANEL_GLS_MODEL: Choices<PanelGlsModel> = Choices {
+    option: "model",
+    values: &[
+        (
+            &["fe", "within", "fixed_effects"],
+            PanelGlsModel::FixedEffects,
+        ),
+        (&["pooling", "pool", "pooled"], PanelGlsModel::Pooling),
+        (
+            &["fd", "first_difference", "firstdifference"],
+            PanelGlsModel::FirstDifference,
+        ),
+    ],
+};
+
+/// The text of a PVCM fit. For the within (mean-group) model the library's Display prints no
+/// pooled coefficients, so the mean-group estimates (the average of the entity estimates, as
+/// plm::pmg) are inserted before the homogeneity test.
+fn pvcm_text(result: &p2a_core::econometrics::PvcmResult) -> String {
+    let mut text = result.to_string();
+    if result.model_type == PvcmType::Within {
+        let mut table =
+            String::from("Mean Group Coefficients (average of the entity estimates):\n");
+        table.push_str(&format!(
+            "{:<20} {:>12} {:>12} {:>10} {:>10}\n",
+            "Variable", "Coef", "Std Err", "t", "P>|t|"
+        ));
+        table.push_str(&"-".repeat(70));
+        table.push('\n');
+        for (i, v) in result.variables.iter().enumerate() {
+            let at = |x: &Vec<f64>| x.get(i).copied().unwrap_or(f64::NAN);
+            table.push_str(&format!(
+                "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}\n",
+                v,
+                at(&result.coefficients),
+                at(&result.std_errors),
+                at(&result.t_stats),
+                at(&result.p_values),
+                result.significance.get(i).map(|s| s.stars()).unwrap_or("")
+            ));
+        }
+        table.push('\n');
+        match text.find("Homogeneity Test") {
+            Some(at) => text.insert_str(at, &table),
+            None => text.push_str(&table),
+        }
+    }
+    append_unshown_notes(&mut text, result);
+    text
+}
 
 /// The `vcov` option of `panel_fixed_effects` and `panel_random_effects`
 /// (`PanelVcov::from_str`; absent means classical). A refusal names the caller's
@@ -89,9 +152,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Random Effects panel regression.
@@ -129,9 +192,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Hausman specification test.
@@ -165,7 +228,7 @@ impl AnalyticsServer {
 
     /// Run Variable Coefficients Model (PVCM) for heterogeneous panels.
     #[tool(
-        description = "Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality."
+        description = "Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality. model 'within' (default; also 'individual', 'separate') or 'random' (also 'swamy'); other values are an error. The within model also prints the mean-group coefficients (the average of the entity estimates)."
     )]
     pub async fn panel_pvcm(
         &self,
@@ -177,9 +240,10 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let model_type = match request.model.as_deref() {
-            Some("random") | Some("Random") => PvcmType::Random,
-            _ => PvcmType::Within,
+        let model_type = match parse_choice(&PVCM_MODEL, request.model.as_deref(), PvcmType::Within)
+        {
+            Ok(m) => m,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let result = match run_pvcm(
@@ -198,14 +262,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(pvcm_text(
+            &result,
+        ))]))
     }
 
     /// Run Mean Group (PMG) estimator for heterogeneous panels.
     #[tool(
-        description = "Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type."
+        description = "Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type. model: only 'within' (the default) is accepted; for Swamy's random coefficients use panel_pvcm with model = 'random'. Prints the mean-group coefficients (the average of the entity estimates) and the homogeneity test."
     )]
     pub async fn panel_pmg(
         &self,
@@ -217,6 +281,17 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
+        // panel_pmg shares panel_pvcm's request; it runs only the within (mean-group) model
+        if parse_choice(&PVCM_MODEL, request.model.as_deref(), PvcmType::Within)
+            != Ok(PvcmType::Within)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "panel_pmg is the mean-group estimator, which is panel_pvcm with model 'within'; \
+                 for Swamy's random-coefficients model use panel_pvcm with model = 'random'"
+                    .to_string(),
+            )]));
+        }
+
         let result = match run_pmg(dataset, &request.y, &x_refs, &request.entity_var) {
             Ok(r) => r,
             Err(e) => {
@@ -227,14 +302,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(pvcm_text(
+            &result,
+        ))]))
     }
 
     /// Run Arellano-Bond difference GMM dynamic panel estimation.
     #[tool(
-        description = "Arellano-Bond difference GMM for dynamic panels, as R plm::pgmm(transformation = 'd'). Equations exist where y is observed at t, ..., t-lags-1 (time in steps of 1; gaps and late entry are handled; repeated (entity, time) rows are an error). GMM instruments are the observed lags y_{t-min_lag} ... y_{t-max_lag} (block-diagonal by period, or collapsed), and the exogenous x enter in differences. One-step (H-weighted) or two-step (default) estimates. Standard errors: one-step robust or Arellano-Bond (1991) classical; two-step Windmeijer (2005)-corrected (default) or uncorrected. Reports the Sargan/Hansen test (plm::sargan) and the robust Arellano-Bond AR(1)/AR(2) tests. Rows with missing values are dropped and reported. System GMM (transform='system') is not implemented yet: it runs difference GMM with a warning."
+        description = "Arellano-Bond difference GMM for dynamic panels, as R plm::pgmm(transformation = 'd'). Equations exist where y is observed at t, ..., t-lags-1 (time in steps of 1; gaps and late entry are handled; repeated (entity, time) rows are an error). GMM instruments are the observed lags y_{t-min_lag} ... y_{t-max_lag} (block-diagonal by period, or collapsed), and the exogenous x enter in differences. One-step (H-weighted) or two-step (default) estimates. Standard errors: one-step robust or Arellano-Bond (1991) classical; two-step Windmeijer (2005)-corrected (default) or uncorrected. Reports the Sargan/Hansen test (plm::sargan) and the robust Arellano-Bond AR(1)/AR(2) tests. Rows with missing values are dropped and reported. transform = 'system' runs Blundell-Bond system GMM as plm::pgmm(transformation = 'ld'): the difference equations stacked with level equations instrumented by y_{t-1} - y_{t-2} (and x in levels), with pgmm's 'full' one-step weight; one-step system fits need robust = true. The level equations have no intercept (plm::pgmm effect = 'individual'); with x in levels as its own instrument they are valid only when E[eta_i] = 0 or x has mean zero (Stata's xtabond2 adds _cons). transform 'difference' (default) or 'system'; step 'twostep' (default) or 'onestep'; unknown values are errors."
     )]
     pub async fn panel_gmm(
         &self,
@@ -247,16 +322,16 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let lags = request.lags.unwrap_or(1);
 
-        // Parse transform type
-        let transform = match request.transform.as_deref() {
-            Some("system") | Some("System") => GmmTransform::System,
-            _ => GmmTransform::Difference, // Default
+        let transform = match parse_option::<GmmTransform>(
+            request.transform.as_deref(),
+            GmmTransform::Difference,
+        ) {
+            Ok(t) => t,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
-
-        // Parse step type
-        let step = match request.step.as_deref() {
-            Some("onestep") | Some("OneStep") | Some("one") | Some("1") => GmmStep::OneStep,
-            _ => GmmStep::TwoStep, // Default
+        let step = match parse_option::<GmmStep>(request.step.as_deref(), GmmStep::TwoStep) {
+            Ok(t) => t,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         let mut config = GmmConfig::default();
@@ -285,14 +360,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run Panel GLS (Feasible Generalized Least Squares) estimation.
     #[tool(
-        description = "Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known."
+        description = "Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known. model 'fe' (default; also 'within', 'fixed_effects'), 'pooling' (also 'pool', 'pooled') or 'fd' (also 'first_difference'); other values are an error."
     )]
     pub async fn panel_gls(
         &self,
@@ -304,16 +379,13 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        // Parse model type
+        // None keeps the library's default, fixed effects
         let model = match request.model.as_deref() {
-            Some("pooling") | Some("Pooling") | Some("pool") => Some(PanelGlsModel::Pooling),
-            Some("fd") | Some("FD") | Some("first_difference") | Some("firstdifference") => {
-                Some(PanelGlsModel::FirstDifference)
-            }
-            Some("fe") | Some("FE") | Some("fixed_effects") | Some("fixedeffects") => {
-                Some(PanelGlsModel::FixedEffects)
-            }
-            _ => None, // Default to FixedEffects
+            None => None,
+            Some(m) => match parse_choice(&PANEL_GLS_MODEL, Some(m), PanelGlsModel::FixedEffects) {
+                Ok(m) => Some(m),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            },
         };
 
         let result: PanelGlsResult = match run_panel_gls(
@@ -333,14 +405,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run panel unit root tests.
     #[tool(
-        description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity. Unit ids may be text or numbers; time must hold whole numbers or dates; repeated (unit, time) rows are an error; gaps are joined in time order as plm::purtest does (reported); rows with missing values are dropped and reported."
+        description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity. Unit ids may be text or numbers; time must hold whole numbers or dates; repeated (unit, time) rows are an error; gaps are joined in time order as plm::purtest does (reported); rows with missing values are dropped and reported. test 'llc' (default; also 'levinlin'), 'ips', 'madwu' (also 'fisher') or 'hadri'; model 'none', 'intercept' (default) or 'trend'. If neither lags nor lag_selection is given, floor(T_max^(1/3)) lags for every unit; lag_selection = aic | sic | hall chooses per unit as plm::purtest (pmax default 10). Without lag_selection, p2a's default is a fixed floor(T_max^(1/3)) lags for every unit with dfcor = true; plm::purtest's default is SIC with pmax 10 and dfcor = FALSE."
     )]
     pub async fn panel_unit_root(
         &self,
@@ -350,19 +422,29 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        // Parse test type
-        let test_type = match request.test.as_deref() {
-            Some("ips") | Some("IPS") | Some("im_pesaran_shin") => PanelUnitRootTest::IPS,
-            Some("fisher") | Some("Fisher") | Some("maddala_wu") => PanelUnitRootTest::Fisher,
-            Some("hadri") | Some("Hadri") => PanelUnitRootTest::Hadri,
-            _ => PanelUnitRootTest::LLC, // Default
+        let test_type = match parse_option::<PanelUnitRootTest>(
+            request.test.as_deref(),
+            PanelUnitRootTest::LLC,
+        ) {
+            Ok(t) => t,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
-
-        // Parse model type
-        let model = match request.model.as_deref() {
-            Some("none") | Some("None") => PanelModel::None,
-            Some("trend") | Some("Trend") => PanelModel::Trend,
-            _ => PanelModel::Intercept, // Default
+        let model =
+            match parse_option::<PanelModel>(request.model.as_deref(), PanelModel::Intercept) {
+                Ok(m) => m,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
+        let lag_selection = match request
+            .lag_selection
+            .as_deref()
+            .map(|s| LagSelection::from_option(s, request.lags))
+            .transpose()
+        {
+            Ok(l) => l,
+            Err(p2a_core::EconError::InvalidSpecification { message }) => {
+                return Ok(CallToolResult::error(vec![Content::text(message)]));
+            }
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
 
         let mut config = PanelUnitRootConfig::default();
@@ -370,6 +452,8 @@ impl AnalyticsServer {
         config.model = model;
         config.lags = request.lags;
         config.max_lags = None;
+        config.lag_selection = lag_selection;
+        config.pmax = request.pmax;
 
         let result = match run_panel_unit_root(
             dataset,
@@ -387,14 +471,14 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        append_unshown_notes(&mut text, &result);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Run High-Dimensional Fixed Effects regression with multiple absorbed FE.
     #[tool(
-        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe."
+        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe. tolerance is relative: ||delta|| / ||x|| (fixest); se_type 'hc1' (default), 'standard', 'hc0', 'hc2' or 'hc3'."
     )]
     pub async fn panel_hdfe(
         &self,
@@ -413,20 +497,11 @@ impl AnalyticsServer {
         config.max_iterations = request.max_iterations.unwrap_or(10000);
         config.accelerate = true;
 
-        // Parse SE type
-        let cov_type = match request.se_type.as_deref() {
-            Some("standard") => CovarianceType::Standard,
-            Some("hc0") => CovarianceType::HC0,
-            Some("hc1") | None => CovarianceType::HC1,
-            Some("hc2") => CovarianceType::HC2,
-            Some("hc3") => CovarianceType::HC3,
-            Some(other) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unknown SE type '{}'. Use 'standard', 'hc0', 'hc1', 'hc2', or 'hc3'.",
-                    other
-                ))]));
-            }
-        };
+        let cov_type =
+            match parse_option::<CovarianceType>(request.se_type.as_deref(), CovarianceType::HC1) {
+                Ok(c) => c,
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
 
         let result: HdfeResult = match run_hdfe(
             dataset,
@@ -473,6 +548,35 @@ mod tests {
             v[k] = x.clone();
         }
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn test_panel_option_tables_validate() {
+        assert_eq!(super::PVCM_MODEL.validate(), Ok(()));
+        assert_eq!(super::PANEL_GLS_MODEL.validate(), Ok(()));
+    }
+
+    /// The dropped-row note, which the library also lists among the warnings, prints once.
+    #[test]
+    fn test_mcp_panel_fixed_effects_missing_note_once() {
+        use p2a_core::polars::prelude::*;
+        let df = df! {
+            "firm" => [1i64, 1, 1, 2, 2, 2, 3, 3, 3],
+            "y" => [Some(1.1), Some(2.3), Some(2.9), Some(4.2), None, Some(6.1), Some(6.8), Some(8.3), Some(8.8)],
+            "x" => [1.0, 2.1, 2.9, 4.0, 5.2, 6.1, 6.9, 8.0, 9.1],
+        }
+        .unwrap();
+        let (rt, server) = server_with(vec![("grunfeld", df)]);
+        let req: PanelFERequest = serde_json::from_value(
+            json!({"dataset": "grunfeld", "y": "y", "x": ["x"], "entity_var": "firm"}),
+        )
+        .unwrap();
+        let r = rt
+            .block_on(server.panel_fixed_effects(Parameters(req)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert_eq!(t.matches("1 of 9 rows dropped").count(), 1, "{t}");
     }
 
     /// A coefficient row of the `PanelResult` Display table (without the stars).
