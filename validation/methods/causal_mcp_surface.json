@@ -244,6 +244,32 @@
       "tolerance": "ATT Tol::coef(1500); r exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_sensemakr",
+      "name": "MCP sensemakr contour data",
+      "category": "mcp",
+      "reference": "sensemakr::adjusted_estimate on classical lm (reduce = TRUE)",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "sensemakr_mcp_contour"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_sensemakr_contour_data"
+      ],
+      "quantities": [
+        "contour grid",
+        "20 x 20 adjusted estimates"
+      ],
+      "tolerance": "Tol::coef(1276)",
+      "deviations": [
+        {
+          "finding": "REG-27",
+          "quantity": "adjusted t-statistic grid",
+          "note": "not returned by the tool: the core adjusted SE differs from sensemakr"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -1798,3 +1798,48 @@ async fn test_validate_mcp_gsynth() {
     .await;
     assert!(e.contains("former name of r_max"), "{e}");
 }
+
+/// TOOL-4 duplicate: contour_data returns sensemakr's adjusted-estimate grid of the classical lm fit
+/// (causal_mcp_surface.R, sensemakr_mcp_contour).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_sensemakr_contour_data() {
+    let case = Case::load("sensemakr_mcp_contour");
+    let (session, server) = session_with("sensemakr_mcp_contour"); // dataset `sensemakr_darfur`
+    let args = json!({"dataset": "sensemakr_darfur", "y": "peacefactor", "treatment": "directlyharmed",
+        "covariates": ["age", "farmer_dar", "herder_dar", "pastvoted", "hhsize_darfur", "female"], "contour_data": true});
+    let t = ok(&server, &session, "sensemakr", args.clone()).await;
+    let block = t.split("Contour data").nth(1).expect("contour section");
+    let json_start = block.find('{').unwrap();
+    let v: Value = serde_json::from_str(block[json_start..].lines().next().unwrap()).unwrap();
+    let flat: Vec<f64> = v["adjusted_estimates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()))
+        .collect();
+    let grid: Vec<f64> = v["r2dz_x"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    let grid_y: Vec<f64> = v["r2yz_dx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    Check::new(&case)
+        .vector("grid", &grid, Tol::coef(1276))
+        .vector("grid", &grid_y, Tol::coef(1276))
+        .vector("adjusted_estimates", &flat, Tol::coef(1276))
+        .finish();
+    let off = ok(
+        &server,
+        &session,
+        "sensemakr",
+        with(&args, &[("contour_data", json!(false))]),
+    )
+    .await;
+    assert!(!off.contains("Contour data"), "{off}");
+}

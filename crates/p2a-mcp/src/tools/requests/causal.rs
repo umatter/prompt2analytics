@@ -2102,7 +2102,7 @@ pub struct SensemakrRequest {
 
     /// Generate contour plot data
     #[schemars(
-        description = "Whether to generate data for sensitivity contour plots. Default: false."
+        description = "Append sensemakr's contour data: a 20 x 20 grid of adjusted estimates of the treatment coefficient for confounder partial R² (R²(D~Z|X) by rows, R²(Y~Z|D,X) by columns) from 0 to 0.5, from the classical-SE OLS fit, as one JSON line after the summary. Default: false."
     )]
     pub contour_data: Option<bool>,
 }

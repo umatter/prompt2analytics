@@ -2871,7 +2871,7 @@ impl AnalyticsServer {
         let q = request.q.unwrap_or(1.0);
         let alpha = request.alpha.unwrap_or(0.05);
 
-        let mut result = match run_sensemakr(
+        let result = match run_sensemakr(
             dataset,
             &request.y,
             &request.treatment,
@@ -2891,25 +2891,35 @@ impl AnalyticsServer {
             }
         };
 
-        // Generate contour data if requested
+        let mut output = result.to_string();
         if request.contour_data.unwrap_or(false) {
-            // Re-run OLS to get the result for contour generation
+            // sensemakr's adjusted estimates come from the classical lm fit
             let mut x_cols: Vec<&str> = vec![request.treatment.as_str()];
             x_cols.extend(covariate_refs.iter());
-
-            if let Ok(ols_result) = run_ols(dataset, &request.y, &x_cols, true, CovarianceType::HC1)
-            {
-                if let Ok(contour) =
-                    generate_contour_data(&ols_result, &request.treatment, Some(20), Some(0.5))
-                {
-                    result.contour_data = Some(contour);
+            let contour = run_ols(dataset, &request.y, &x_cols, true, CovarianceType::Standard)
+                .and_then(|ols| {
+                    generate_contour_data(&ols, &request.treatment, Some(20), Some(0.5))
+                });
+            let contour = match contour {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "contour data: {e}"
+                    ))]));
                 }
-            }
+            };
+            let grid = serde_json::json!({
+                "r2dz_x": contour.r2_xz_values,
+                "r2yz_dx": contour.r2_yd_values,
+                "adjusted_estimates": contour.adjusted_estimates,
+            });
+            output.push_str(&format!(
+                "\nContour data (sensemakr adjusted estimates of {}, reduce = TRUE, from the classical-SE OLS fit; rows R²(D~Z|X) = r2dz_x, columns R²(Y~Z|D,X) = r2yz_dx, sensemakr::ovb_contour_plot's sensitivity.of = \"estimate\"):\n{}\n",
+                request.treatment, grid
+            ));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 }
 

@@ -13,7 +13,11 @@
 #    nearest-neighbour matching on the logit PS (m.order 'largest', MatchIt's default), 1:1 (the tool's
 #    default; 62 controls unmatched) and 1:2, the per-row weights and subclass (0 = unmatched, MatchIt NA),
 #    on matching_sim.csv.
+#  * sensemakr_mcp_contour: the contour grid the MCP sensemakr tool returns with contour_data = true
+#    (TOOL-4's merged duplicate): sensemakr::adjusted_estimate of directlyharmed on classical lm, at
+#    r2dz.x (rows) x r2yz.dx (columns) in seq(0, 0.5, length.out = 20), on T3-WP11's sensemakr_darfur.csv.
 suppressPackageStartupMessages(library(MatchIt))
+suppressPackageStartupMessages(library(sensemakr))
 
 .mcp_mte <- function(y, P, Xcov, ngrid = 1001, deg = 3) {
   Xp <- sapply(seq_len(deg), function(j) P^j); colnames(Xp) <- c("P", "I(P^2)", "I(P^3)")[seq_len(deg)]
@@ -76,4 +80,18 @@ case("matchit_mcp_output", "econometrics/matching", "Matched sample of propensit
   }
   list(values = v, reference = "MatchIt::matchit(treat ~ x1 + x2 + x3, method = 'nearest', distance = 'glm', ratio = 1 | 2): weights, subclass",
        call = "matchit(treat ~ x1 + x2 + x3, data = matching_sim, method = 'nearest', ratio = 1 | 2)", packages = c("MatchIt"))
+})
+
+case("sensemakr_mcp_contour", "regression/sensemakr", "sensemakr contour grid of adjusted estimates (classical lm, darfur without village effects)", function(ctx) {
+  d <- ctx$dataset("datasets/generated/sensemakr_darfur.csv")
+  m <- lm(peacefactor ~ directlyharmed + age + farmer_dar + herder_dar + pastvoted + hhsize_darfur + female, data = d)
+  g <- seq(0, 0.5, length.out = 20)
+  A <- t(sapply(g, function(r2dz) sapply(g, function(r2yz)
+    unname(adjusted_estimate(m, treatment = "directlyharmed", r2dz.x = r2dz, r2yz.dx = r2yz)))))
+  stopifnot(nrow(A) == 20, abs(A[1, 1] - coef(m)["directlyharmed"]) < 1e-15)
+  list(values = list(estimate = unname(coef(m)["directlyharmed"]), dof = df.residual(m), grid = vec(g),
+                     adjusted_estimates = vec(as.numeric(t(A)))),
+       reference = "sensemakr::adjusted_estimate(lm, treatment = 'directlyharmed', r2dz.x, r2yz.dx), reduce = TRUE; rows r2dz.x, columns r2yz.dx",
+       call = "adjusted_estimate(lm(peacefactor ~ directlyharmed + age + farmer_dar + herder_dar + pastvoted + hhsize_darfur + female), 'directlyharmed', r2dz.x = g[i], r2yz.dx = g[j])",
+       packages = c("sensemakr"))
 })
