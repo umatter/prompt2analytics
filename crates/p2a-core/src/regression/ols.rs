@@ -4093,7 +4093,7 @@ mod tests {
     /// Validation test: Simple linear regression with known DGP
     /// y = 2.0 + 1.5*x + noise
     #[test]
-    fn test_validate_ols_simple_regression() {
+    fn test_ols_simple_regression_recovers_dgp() {
         // Create data with known DGP: y = 2.0 + 1.5*x + N(0, 0.5)
         // Using fixed seed for reproducibility
         let x: Vec<f64> = (0..100).map(|i| (i as f64) * 0.1).collect();

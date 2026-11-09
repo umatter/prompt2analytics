@@ -1605,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_density_structure() {
+    fn test_density_structure_properties() {
         // R: density(c(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0), bw = 0.5, n = 10, from = 0, to = 6)
         let data = vec![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
         let result = density(
@@ -1643,7 +1643,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_density_integrates() {
+    fn test_density_integrates_properties() {
         // Density should integrate to approximately 1
         let data = vec![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
         let result = density(

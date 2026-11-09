@@ -32,7 +32,7 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
 ## Rust Test Reference
 
 - **File**: `crates/p2a-core/tests/validation_ml_advanced.rs`
-- **Tests**: `test_validate_cubist_regression`, `test_validate_cubist_committees`, `test_validate_cubist_predict`
+- **Tests**: `test_cubist_regression_properties`, `test_cubist_committees_properties`, `test_cubist_predict_properties`
 
 ## Leaf model with collinear attributes (R-pinned)
 

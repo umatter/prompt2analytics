@@ -1644,7 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_against_felm_coefficients() {
+    fn test_against_felm_coefficients_recovers_dgp() {
         // DGP recovery on the felm()-style example of
         // create_felm_validation_data() (no R output is compared).
         //
@@ -1692,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_against_felm_standard_errors() {
+    fn test_against_felm_standard_errors_properties() {
         // This test validates SE computation and degrees of freedom.
         //
         // For a model with n=20, k=2 regressors, and two FE dimensions
@@ -1763,7 +1763,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_against_felm_r_squared() {
+    fn test_against_felm_r_squared_properties() {
         // DGP check: with coefficients 1.0 and 0.5 and small noise, the within
         // R² (after projecting out the fixed effects) is high. No R value is
         // compared.
@@ -1818,7 +1818,7 @@ mod tests {
     /// coef(fe_plm)  # Should match
     /// ```
     #[test]
-    fn test_validate_single_fe_against_within_estimator() {
+    fn test_single_fe_against_within_estimator_recovers_dgp() {
         // Data with known DGP: y = 2*x + id_effect + noise
         // id effects: 1=0, 2=5, 3=10
         let df = df! {
@@ -1902,7 +1902,7 @@ mod tests {
     /// Note: This test uses a deterministic approximation of the R random data
     /// to ensure reproducibility without requiring R.
     #[test]
-    fn test_validate_large_panel_coefficient_recovery() {
+    fn test_large_panel_coefficient_recovery_recovers_dgp() {
         // Create a larger panel with known structure
         // 50 observations, 5 entities, 10 time periods
         let n = 50;

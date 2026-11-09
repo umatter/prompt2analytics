@@ -3944,7 +3944,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cox_concordance() {
+    fn test_cox_concordance_properties() {
         // Concordance should match R within ~0.05
         let dataset = create_test_dataset();
         let result = run_cox_ph(&dataset, "time", "event", &["x1"], None).unwrap();
@@ -3962,7 +3962,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_competing_risks_cif_sum() {
+    fn test_competing_risks_cif_sum_properties() {
         // Aalen-Johansen property: sum of CIFs + overall survival = 1
         let df = df! {
             "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],

@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_weights_sum_to_one() {
+    fn test_bacon_weights_sum_to_one_properties() {
         // The fundamental property of the Bacon decomposition: all weights
         // must sum to exactly 1 (within numerical tolerance).
         // This follows from Theorem 1 in Goodman-Bacon (2021).
@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_all_weights_nonnegative() {
+    fn test_bacon_all_weights_nonnegative_properties() {
         // All decomposition weights must be non-negative.
         // Weights are proportional to (group share)^2 * variance(D), which
         // are inherently non-negative quantities.
@@ -1335,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_type_weights_sum_to_total() {
+    fn test_bacon_type_weights_sum_to_total_properties() {
         // The sum of weights by comparison type must equal the total weight sum.
         // This is a partition identity: every component belongs to exactly one type.
         let dataset = create_validation_bacon_dataset();
@@ -1353,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_homogeneous_effect_estimates() {
+    fn test_bacon_homogeneous_effect_estimates_recovers_dgp() {
         // Under a homogeneous treatment effect (ATT = 2.0 for all cohorts),
         // all 2x2 DD estimates should be close to the true effect.
         // The "treated vs never-treated" comparisons should be especially
@@ -1390,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_expected_comparison_count() {
+    fn test_bacon_expected_comparison_count_properties() {
         // With K timing groups and a never-treated group, we expect:
         // - K "treated vs never-treated" comparisons
         // - K*(K-1)/2 "treated vs not-yet-treated" comparisons
@@ -1445,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_each_component_has_valid_estimate() {
+    fn test_bacon_each_component_has_valid_estimate_properties() {
         // Each decomposition component should have a finite estimate
         // and positive observation counts.
         let dataset = create_validation_bacon_dataset();
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bacon_estimates_by_type_aggregation() {
+    fn test_bacon_estimates_by_type_aggregation_properties() {
         // Validate that the estimates_by_type field correctly aggregates
         // within-type weighted averages.
         let dataset = create_validation_bacon_dataset();

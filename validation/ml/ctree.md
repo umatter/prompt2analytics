@@ -54,7 +54,7 @@ varimp(model)
 
 ## DGP property tests
 
-`test_validate_ctree_regression`, `test_validate_ctree_classification` and `test_validate_ctree_predict`
+`test_ctree_regression_properties`, `test_ctree_classification_properties` and `test_ctree_predict_properties`
 (`crates/p2a-core/tests/validation_ml_advanced.rs`) check DGP recovery by thresholds, despite their names: they are
 property tests, not R parity, and they will be renamed (X-10).
 

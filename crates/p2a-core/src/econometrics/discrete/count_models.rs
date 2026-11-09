@@ -3671,7 +3671,7 @@ mod tests {
     // ==========================================================================
 
     #[test]
-    fn test_validate_hurdle_poisson_structure() {
+    fn test_hurdle_poisson_structure_properties() {
         // Hurdle Poisson validation
         // R reference: pscl::hurdle(y ~ x | x, dist="poisson")
 
@@ -3729,7 +3729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_hurdle_negbin_structure() {
+    fn test_hurdle_negbin_structure_properties() {
         // Hurdle Negative Binomial validation
         // R reference: pscl::hurdle(y ~ x | x, dist="negbin")
 

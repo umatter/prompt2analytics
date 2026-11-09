@@ -3123,7 +3123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_group_time_atts_recover_true_effects() {
+    fn test_staggered_did_group_time_atts_recover_true_effects_recovers_dgp() {
         // Validate that group-time ATT estimates recover the true ATTs
         // from the DGP within tolerance.
         //
@@ -3177,7 +3177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_event_study_pre_treatment_near_zero() {
+    fn test_staggered_did_event_study_pre_treatment_near_zero_recovers_dgp() {
         // Validate that pre-treatment event study coefficients are near zero,
         // confirming parallel trends hold in the DGP.
         let dataset = create_validation_dataset_heterogeneous();
@@ -3221,7 +3221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_event_study_post_treatment_positive() {
+    fn test_staggered_did_event_study_post_treatment_positive_properties() {
         // Validate that post-treatment event study coefficients are positive
         // and reflect the (weighted) true ATTs.
         let dataset = create_validation_dataset_heterogeneous();
@@ -3265,7 +3265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_overall_att_weighted_average() {
+    fn test_staggered_did_overall_att_weighted_average_properties() {
         // Validate that the overall ATT is a reasonable weighted average
         // of the group-specific effects.
         //
@@ -3309,7 +3309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_group_effects_heterogeneity() {
+    fn test_staggered_did_group_effects_heterogeneity_properties() {
         // Validate that group-level aggregated effects preserve the
         // treatment effect heterogeneity across cohorts.
         //
@@ -3381,7 +3381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_never_treated_comparison() {
+    fn test_staggered_did_never_treated_comparison_properties() {
         // Validate with never-treated comparison group explicitly, checking
         // structural properties of the result.
         let dataset = create_validation_dataset_heterogeneous();
@@ -3433,7 +3433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_staggered_did_homogeneous_effect() {
+    fn test_staggered_did_homogeneous_effect_recovers_dgp() {
         // Validate with homogeneous treatment effect (all cohorts get ATT = 3.0).
         // The overall ATT should be very close to 3.0.
         let mut year_vec = Vec::new();
