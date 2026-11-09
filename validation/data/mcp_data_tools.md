@@ -20,6 +20,8 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
 - Reference: `dplyr::count(d, g, sort = TRUE)`, `n / sum(n)`; case `data_munging_value_counts`: values 2, 7,
   NA, 5; counts 4, 3, 2, 1; proportions 0.4, 0.3, 0.2, 0.1.
 - Test: `test_validate_mcp_value_counts_normalize` (exact).
+- Tie order: tied counts keep the order in which their values first appear (core `value_counts_with`),
+  where `dplyr::count(sort = TRUE)` orders them by value; the pinned case has no ties.
 
 ## Replacing values with missing (`str_replace_value`)
 - Reference: `dplyr::na_if`; case `data_munging_na_if`.

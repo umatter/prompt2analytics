@@ -608,6 +608,15 @@ pub(crate) fn series_bytes(s: &Series) -> u64 {
     charge.bytes
 }
 
+/// What the dataset quotas charge for the frame `df`: its structure
+/// ([`structure_bytes`]) and its values, the dataset name left out (so
+/// `datasets_bytes_of([(name, d)])` is this plus the name's charge).
+pub(crate) fn frame_bytes(df: &DataFrame) -> u64 {
+    let mut charge = DataCharge::default();
+    charge.add_frame(df);
+    charge.bytes
+}
+
 /// The charge for a name of `len` bytes.
 fn name_bytes(len: usize) -> u64 {
     NAME_BYTE_COPIES.saturating_mul(len as u64)
@@ -2676,6 +2685,26 @@ mod tests {
         // The name is charged too.
         let map = HashMap::from([("w4".to_string(), knn_weights(4))]);
         assert_eq!(spatial_weights_map_bytes(&map), 6_722);
+    }
+
+    #[test]
+    fn frame_bytes_is_the_dataset_charge_without_its_name() {
+        // The cleaning tools admit a stored result with frame_bytes; admit_charge adds the
+        // name, so the admission equals what the store then charges. Values alone fall short
+        // by the structure (dataset overhead, per-column overhead and the column names).
+        let ds = test_fixtures::cleaning_fixture();
+        let df = ds.df();
+        let values: u64 = df
+            .get_columns()
+            .iter()
+            .map(|c| series_bytes(c.as_materialized_series()))
+            .sum();
+        let structure = structure_bytes(df.get_columns().iter().map(|c| c.name().as_str()));
+        assert_eq!(frame_bytes(df), values + structure);
+        assert_eq!(
+            frame_bytes(df) + name_bytes("out".len()),
+            datasets_bytes_of([("out", &ds)])
+        );
     }
 
     #[test]

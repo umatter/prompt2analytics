@@ -812,12 +812,9 @@ impl AnalyticsServer {
             );
         };
         if crate::session::dataset_admission_active() {
-            let bytes: u64 = dataset
-                .df()
-                .get_columns()
-                .iter()
-                .map(|c| crate::session::series_bytes(c.as_materialized_series()))
-                .fold(0, u64::saturating_add);
+            // The frame's whole charge (structure and values), as the store will charge it;
+            // admit_charge adds the name.
+            let bytes = crate::session::frame_bytes(dataset.df());
             if let Err(shortfall) = crate::session::admit_charge(&name, bytes).await {
                 return Err(crate::session::quota_refusal(format!(
                     "{tool} applied its step in the cleaning session, but storing the result as \

@@ -394,14 +394,17 @@ impl std::str::FromStr for DeclaredFileType {
     }
 }
 
-/// Checks a declared `file_type` against the extension of `file_name`: `Ok` when `declared`
-/// is `None` or auto, or names the type of the extension; else a message naming the declared
-/// type, the file name (its last path component, at most 64 characters, never its directory)
-/// and the extensions the type expects.
-pub fn check_declared_file_type(declared: Option<&str>, file_name: &str) -> Result<(), String> {
+/// Checks a declared `file_type` against the extension of `file_name`: `Ok` with the parsed
+/// type when `declared` is `None` (auto) or auto, or names the type of the extension; else the
+/// parse error, or a message naming the declared type, the file name (its last path component,
+/// at most 64 characters, never its directory) and the extensions the type expects.
+pub fn check_declared_file_type(
+    declared: Option<&str>,
+    file_name: &str,
+) -> Result<DeclaredFileType, String> {
     let declared = parse_option(declared, DeclaredFileType::Auto)?;
     if declared == DeclaredFileType::Auto {
-        return Ok(());
+        return Ok(declared);
     }
     let path = std::path::Path::new(file_name);
     let ext = path
@@ -409,7 +412,7 @@ pub fn check_declared_file_type(declared: Option<&str>, file_name: &str) -> Resu
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     if declared.extensions().contains(&ext.as_str()) {
-        return Ok(());
+        return Ok(declared);
     }
     let shown: String = path
         .file_name()
@@ -600,10 +603,30 @@ mod tests {
 
     #[test]
     fn test_check_declared_file_type() {
-        assert!(check_declared_file_type(None, "/data/x.csv").is_ok());
-        assert!(check_declared_file_type(Some("auto"), "x.txt").is_ok());
-        assert!(check_declared_file_type(Some("csv"), "/data/X.CSV").is_ok());
-        assert!(check_declared_file_type(Some("excel"), "book.ods").is_ok());
+        // The parsed type is returned, so callers never parse file_type a second time.
+        assert_eq!(
+            check_declared_file_type(None, "/data/x.csv"),
+            Ok(DeclaredFileType::Auto)
+        );
+        assert_eq!(
+            check_declared_file_type(Some("auto"), "x.txt"),
+            Ok(DeclaredFileType::Auto)
+        );
+        assert_eq!(
+            check_declared_file_type(Some("csv"), "/data/X.CSV"),
+            Ok(DeclaredFileType::Csv)
+        );
+        assert_eq!(
+            check_declared_file_type(Some("excel"), "book.ods"),
+            Ok(DeclaredFileType::Excel)
+        );
+        assert_eq!(
+            check_declared_file_type(Some("tsv"), "x.tsv"),
+            Err(
+                "unknown file_type 'tsv'; expected one of: auto, csv, parquet, excel, stata, sas"
+                    .to_string()
+            )
+        );
         let e = check_declared_file_type(Some("parquet"), "/home/u/private/sales.csv").unwrap_err();
         assert_eq!(
             e,

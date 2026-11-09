@@ -890,6 +890,18 @@ async fn test_mcp_upload_dataset_refuses_declared_types_it_cannot_read() {
         "{t}"
     );
     assert!(session.datasets.read().await.get("u").is_none());
+    // An unparseable file_type is refused with the parse error, never read as auto.
+    let csv = base64::engine::general_purpose::STANDARD.encode("x\n1\n2\n");
+    let r = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"filename": "u.csv", "file_type": "tsv", "content": csv}),
+    )
+    .await;
+    let t = text(&r);
+    assert!(!r.success && t.contains("unknown file_type 'tsv'"), "{t}");
+    assert!(session.datasets.read().await.get("u").is_none());
 }
 
 /// LLM-5: a cleaning session's result reaches the dataset store only through output_dataset; the original is untouched.

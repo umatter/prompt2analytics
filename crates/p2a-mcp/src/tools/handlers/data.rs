@@ -29,9 +29,12 @@ use p2a_core::polars::prelude::{
 };
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
-/// `x` with 7 significant digits (R's default print precision): fixed notation for decimal
-/// exponents -5 to 14, otherwise "1.234568e-6"; trailing zeros dropped; "NA" for NaN,
-/// "Inf"/"-Inf", "0" for zero.
+/// `x` with at least 7 significant digits (R's default print precision): rounded to 7
+/// significant digits, except that a whole-number part of 8 to 15 digits (decimal exponent 7
+/// to 14) is printed in full, as R does up to about 1e12 (R switches to the exponent form when
+/// that is shorter). Fixed notation for decimal exponents -5 to 14, otherwise the exponent form
+/// with an unpadded exponent ("1.234568e-6", where R writes "1.234568e-06"); trailing zeros
+/// dropped; "NA" for NaN, "Inf"/"-Inf", "0" for zero.
 pub(crate) fn format_significant(x: f64) -> String {
     if x.is_nan() {
         return "NA".to_string();
@@ -49,7 +52,8 @@ pub(crate) fn format_significant(x: f64) -> String {
             s
         }
     }
-    // Correctly rounded to 7 significant digits; the exponent is that of the rounded value.
+    // Correctly rounded to 7 significant digits; the exponent is that of the rounded value. In
+    // the fixed branch an exponent of 7 or more gives 0 decimals, so every integer digit shows.
     let sci = format!("{x:.6e}");
     let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
     let exp: i32 = exp.parse().unwrap_or(0);
@@ -1958,18 +1962,14 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<UploadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        if let Err(e) = crate::tools::common::check_declared_file_type(
+        let declared = match crate::tools::common::check_declared_file_type(
             request.file_type.as_deref(),
             &request.filename,
         ) {
-            return Ok(CallToolResult::error(vec![Content::text(e)]));
-        }
+            Ok(declared) => declared,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
         // The extension check passed; the tool itself reads only some of the declared types.
-        let declared = crate::tools::common::parse_option(
-            request.file_type.as_deref(),
-            crate::tools::common::DeclaredFileType::Auto,
-        )
-        .unwrap_or(crate::tools::common::DeclaredFileType::Auto);
         if !matches!(
             declared,
             crate::tools::common::DeclaredFileType::Auto
@@ -2187,7 +2187,8 @@ impl AnalyticsServer {
              Dimensions: {} rows x {} columns\n\
              Missing values (shown as nulls): null cells, and NaN in float columns (R's is.na). \
              Numeric columns: n, mean, sd (n - 1), min, quartiles (R quantile type 7) and max of \
-             the non-missing values, as R's summary() and sd(), to 7 significant digits. Other \
+             the non-missing values, as R's summary() and sd(), to at least 7 significant digits \
+             (integer parts below 1e15 in full). Other \
              columns: the number of distinct values and the {TOP_LEVELS} most frequent (R's \
              table()).\n\n\
              Columns:",
@@ -2434,6 +2435,10 @@ mod tests {
             (0.000123456789, "0.0001234568"),
             (1e-6, "1e-6"),
             (123456789.0, "123456789"),
+            // exponents 7 to 14 print the whole integer part (R: 123456789012; from 1e12 R
+            // prints 1.234568e+12)
+            (123456789012.0, "123456789012"),
+            (1234567890123.0, "1234567890123"),
             (9.99999996, "10"),
             (1234567.891, "1234568"),
             (-0.5, "-0.5"),
