@@ -2428,17 +2428,67 @@ impl AnalyticsServer {
 
     /// Run Longitudinal Targeted Maximum Likelihood Estimation (LTMLE) for time-varying treatments.
     #[tool(
-        description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics. Columns must not contain missing values (p2a has no censoring node); integer and boolean columns are accepted."
+        description = "Estimate the counterfactual mean of a treatment regime over several time points by longitudinal TMLE as R's ltmle (Lendle et al. 2017): sequential regressions of the outcome and logistic treatment models on the full covariate and treatment history, targeting with the clever covariate I(follows regime)/cumulative g bounded by gbounds, and influence-curve SEs (ltmle variance.method = 'ic'); ltmle's default 'tmle' variance is not implemented. Regimes: always or never treat, or a threshold rule A_t = 1{L_t > c}; the ATE contrasts two regimes. Columns must not contain missing values (p2a has no censoring node); integer and boolean columns are accepted."
     )]
     pub async fn ltmle(
         &self,
         Parameters(request): Parameters<LtmleRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::ltmle::{Regime, RegimeKind};
+        use p2a_core::econometrics::{LtmleConfig, LtmleData, LtmleQModel, run_ltmle};
         let q_model = tool_try!(parse_option(
             request.q_model.as_deref(),
-            p2a_core::econometrics::LtmleQModel::Linear
+            LtmleQModel::Logistic
         ));
-        use p2a_core::econometrics::{LtmleConfig, LtmleData, LtmleQModel, run_ltmle};
+        let regime_kind = tool_try!(parse_option(request.regime.as_deref(), RegimeKind::Always));
+        let contrast_kind = tool_try!(choice(
+            &LTMLE_CONTRAST,
+            request.contrast.as_deref(),
+            ContrastKind::Never
+        ));
+        let any_dynamic =
+            regime_kind == RegimeKind::Dynamic || contrast_kind == ContrastKind::Dynamic;
+        if !any_dynamic
+            && (request.dynamic_columns.is_some() || request.dynamic_threshold.is_some())
+        {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "dynamic_columns and dynamic_threshold are only used with regime or contrast 'dynamic'",
+            )]));
+        }
+        let contrast_as_regime = match contrast_kind {
+            ContrastKind::Never => Some(RegimeKind::Never),
+            ContrastKind::Always => Some(RegimeKind::Always),
+            ContrastKind::Dynamic => Some(RegimeKind::Dynamic),
+            ContrastKind::None => None,
+        };
+        if contrast_as_regime == Some(regime_kind) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "regime and contrast are the same ('{}'); choose another contrast or 'none'",
+                LTMLE_CONTRAST.canonical(contrast_kind)
+            ))]));
+        }
+        let make = |kind: RegimeKind| {
+            let dynamic = kind == RegimeKind::Dynamic;
+            Regime::from_kind(
+                kind,
+                if dynamic {
+                    request.dynamic_columns.as_deref()
+                } else {
+                    None
+                },
+                if dynamic {
+                    request.dynamic_threshold
+                } else {
+                    None
+                },
+            )
+            .map_err(option_message)
+        };
+        let intervention = tool_try!(make(regime_kind));
+        let contrast = match contrast_as_regime {
+            None => None,
+            Some(k) => Some(tool_try!(make(k))),
+        };
 
         let datasets = self.datasets.read().await;
 
@@ -2460,9 +2510,8 @@ impl AnalyticsServer {
             ))]));
         }
 
-        // Every node is read in one extractor request. p2a's LTMLE has no censoring node,
-        // so a missing value is a tool error naming the column (NaPolicy::Fail): dropping
-        // the row would change the sample of every time point.
+        // p2a's LTMLE has no censoring node, so a missing value is a tool error naming the
+        // column (NaPolicy::Fail): dropping the row would change the sample of every time point.
         let n = dataset.df().height();
         let cov_lists: Vec<Vec<&str>> = request
             .covariates
@@ -2480,61 +2529,57 @@ impl AnalyticsServer {
                 ))]));
             }
         }
-        let mut names: Vec<&str> = request.outcomes.iter().map(String::as_str).collect();
-        names.extend(request.treatments.iter().map(String::as_str));
-        names.extend(cov_lists.iter().flatten().copied());
-        let cols = match crate::tools::common::numeric_columns(
-            dataset,
-            &names,
-            crate::tools::common::NaPolicy::Fail,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "LTMLE: {e}"
-                ))]));
+        let outcome = request.outcomes[t_max - 1].as_str();
+        // the outcome is never a covariate, and a treatment is not a covariate at its own or a
+        // later time point (it would be conditioned on after it is set)
+        for (t, names_t) in cov_lists.iter().enumerate() {
+            for c in names_t {
+                if *c == outcome {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "covariate '{c}' at time point {} is the outcome",
+                        t + 1
+                    ))]));
+                }
+                if let Some(s) = request.treatments[..=t].iter().position(|a| a == c) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "covariate '{c}' at time point {} is the treatment of time point {}; a treatment may only be a covariate of later time points",
+                        t + 1,
+                        s + 1
+                    ))]));
+                }
             }
-        };
-        let outcomes: Vec<ndarray::Array1<f64>> = request
-            .outcomes
-            .iter()
-            .map(|c| cols.numeric_array(c))
-            .collect();
-        let treatments: Vec<ndarray::Array1<f64>> = request
-            .treatments
-            .iter()
-            .map(|c| cols.numeric_array(c))
-            .collect();
-        let covariates: Vec<ndarray::Array2<f64>> = match cov_lists
-            .iter()
-            .map(|names_t| cols.matrix(names_t, false).map(|m| m.data))
-            .collect()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "LTMLE: {e}"
-                ))]));
-            }
-        };
-
-        // Create LTMLE data structure
-        let data = match LtmleData::new(outcomes, treatments, covariates) {
+        }
+        let treatment_refs: Vec<&str> = request.treatments.iter().map(String::as_str).collect();
+        let cov_refs: Vec<&[&str]> = cov_lists.iter().map(Vec::as_slice).collect();
+        let data = match LtmleData::from_dataset(dataset, outcome, &treatment_refs, &cov_refs) {
             Ok(d) => d,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid LTMLE data: {}",
-                    e
+                    "LTMLE: {e}"
                 ))]));
             }
         };
-
-        let ps_lower = request.ps_lower.unwrap_or(0.01);
-        let ps_upper = request.ps_upper.unwrap_or(0.99);
+        let mut warnings: Vec<String> = Vec::new();
+        let unused: Vec<&str> = request.outcomes[..t_max - 1]
+            .iter()
+            .map(String::as_str)
+            .filter(|o| *o != outcome)
+            .collect();
+        if !unused.is_empty() {
+            warnings.push(format!(
+                "outcomes {} are not used: p2a's LTMLE models the outcome at the last time point only",
+                unused.join(", ")
+            ));
+        }
 
         let config = LtmleConfig {
+            intervention,
+            contrast,
             q_model,
-            gbounds: (ps_lower, ps_upper),
+            gbounds: (
+                request.ps_lower.unwrap_or(0.01),
+                request.ps_upper.unwrap_or(1.0),
+            ),
             ..Default::default()
         };
 
@@ -2548,9 +2593,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        let mut text = result.to_string();
+        crate::tools::common::append_notes(&mut text, None, &warnings);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// Compute average marginal effects from regression models.

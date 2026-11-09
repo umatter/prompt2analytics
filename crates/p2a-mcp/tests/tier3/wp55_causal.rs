@@ -297,6 +297,16 @@ fn unknown_option_rows() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             vec!["logistic", "linear"],
         ),
         (
+            "ltmle",
+            with(&lt, &[("regime", json!("sometimes"))]),
+            vec!["always", "dynamic"],
+        ),
+        (
+            "ltmle",
+            with(&lt, &[("contrast", json!("sometimes"))]),
+            vec!["contrast", "none"],
+        ),
+        (
             "marginal_effects",
             with(&me, &[("model", json!("tobit"))]),
             vec!["model", "ols", "probit"],
@@ -1300,4 +1310,92 @@ async fn test_validate_mcp_natural_effects_mediation() {
         w,
         ok(&server, &session, "mediation_analysis", args("n_bootstrap")).await
     ); // alias, same seed
+}
+
+/// ltmle's defaults written out (the ltmle_two_period case): static always/never, the dynamic rule
+/// A_t = 1{L_{t-1} > 0}. The tool runs the default configuration, pinned against the tight values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_ltmle() {
+    use p2a_core::econometrics::ltmle::{LtmleConfig, LtmleData, Regime, run_ltmle};
+    let case = Case::load("ltmle_two_period");
+    let (session, server) = session_with("ltmle_two_period"); // dataset `ltmle_sim`
+    let ds = case_ds(&case);
+    let base = json!({"dataset": "ltmle_sim", "outcomes": ["Y", "Y"], "treatments": ["A1", "A2"], "covariates": ["L0", "L1"]});
+    let data = LtmleData::from_dataset(&ds, "Y", &["A1", "A2"], &[&["L0"], &["L1"]]).unwrap();
+    let lib = run_ltmle(&data, LtmleConfig::default()).unwrap(); // always vs never, logistic Q, gbounds (0.01, 1)
+    assert_eq!(
+        ok(&server, &session, "ltmle", base.clone()).await,
+        lib.to_string()
+    );
+    assert!(lib.converged);
+    let mut dc = LtmleConfig::default();
+    dc.intervention = Regime::threshold_rules(&["L0".to_string(), "L1".to_string()], 0.0);
+    let dyn_ = run_ltmle(&data, dc).unwrap();
+    assert_eq!(
+        ok(
+            &server,
+            &session,
+            "ltmle",
+            with(
+                &base,
+                &[
+                    ("regime", json!("dynamic")),
+                    ("dynamic_columns", json!(["L0", "L1"])),
+                    ("dynamic_threshold", json!(0.0))
+                ]
+            )
+        )
+        .await,
+        dyn_.to_string()
+    );
+    Check::new(&case)
+        .scalar("psi_always", lib.psi_treated, Tol::iterative(1e-8))
+        .scalar("psi_never", lib.psi_control, Tol::iterative(1e-8))
+        .scalar("ate_se", lib.se, Tol::iterative(1e-8))
+        .scalar("psi_dynamic", dyn_.psi_treated, Tol::iterative(1e-8)) // 0.45392016719826284
+        .scalar("ate_dynamic_vs_never", dyn_.ate, Tol::iterative(1e-8)) // 0.12833200065831912
+        .finish();
+    let none = ok(
+        &server,
+        &session,
+        "ltmle",
+        with(&base, &[("contrast", json!("none"))]),
+    )
+    .await;
+    assert!(!none.contains("Contrast:"), "{none}");
+    let e = refused(
+        &server,
+        &session,
+        "ltmle",
+        with(&base, &[("dynamic_columns", json!(["L0", "L1"]))]),
+    )
+    .await;
+    assert!(e.contains("dynamic_columns"), "{e}");
+    let same = refused(
+        &server,
+        &session,
+        "ltmle",
+        with(&base, &[("contrast", json!("always"))]),
+    )
+    .await;
+    assert!(same.contains("regime and contrast are the same"), "{same}");
+    let y_cov = refused(
+        &server,
+        &session,
+        "ltmle",
+        with(&base, &[("covariates", json!(["L0", "L1,Y"]))]),
+    )
+    .await;
+    assert!(
+        y_cov.contains("'Y'") && y_cov.contains("outcome"),
+        "{y_cov}"
+    );
+    let a_cov = refused(
+        &server,
+        &session,
+        "ltmle",
+        with(&base, &[("covariates", json!(["L0,A1", "L1"]))]),
+    )
+    .await;
+    assert!(a_cov.contains("'A1'"), "{a_cov}");
 }

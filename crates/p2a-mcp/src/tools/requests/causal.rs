@@ -1032,7 +1032,7 @@ pub struct LtmleRequest {
 
     /// Outcome column names at each time point (chronological order)
     #[schemars(
-        description = "Names of outcome variable columns at each time point. For survival outcomes, only the last time point may have the actual outcome; earlier can be zeros."
+        description = "Outcome column at each time point (one per time point); only the last is the outcome node (p2a's LTMLE has no intermediate outcome or censoring nodes)."
     )]
     pub outcomes: Vec<String>,
 
@@ -1044,23 +1044,51 @@ pub struct LtmleRequest {
 
     /// Covariate column names at each time point (chronological order, comma-separated within each time point)
     #[schemars(
-        description = "Names of covariate columns at each time point. Each element is a comma-separated list of column names for that time point."
+        description = "Covariate columns at each time point, one entry per time point, each a comma-separated list. The outcome is never a covariate, and a treatment may only be a covariate of later time points."
     )]
     pub covariates: Vec<String>,
 
     /// Outcome model type: 'linear' (default) or 'logistic'
     #[schemars(
-        description = "Outcome model: 'linear' (default) or 'logistic'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Outcome model: 'logistic' (default, ltmle's; a continuous outcome is rescaled to [0, 1] by its range, as ltmle) or 'linear'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub q_model: Option<String>,
 
     /// Lower bound for propensity score truncation
-    #[schemars(description = "Lower bound for propensity score truncation. Default is 0.01.")]
+    #[schemars(
+        description = "Lower bound on the cumulative probability of following the regime, ltmle `gbounds` (default 0.01)."
+    )]
     pub ps_lower: Option<f64>,
 
     /// Upper bound for propensity score truncation
-    #[schemars(description = "Upper bound for propensity score truncation. Default is 0.99.")]
+    #[schemars(
+        description = "Upper bound on the cumulative probability of following the regime, ltmle `gbounds` (default 1)."
+    )]
     pub ps_upper: Option<f64>,
+
+    /// Regime
+    #[schemars(
+        description = "Regime whose counterfactual mean is estimated: 'always' (default), 'never' or 'dynamic' (A_t = 1{dynamic_columns[t] > dynamic_threshold}). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub regime: Option<String>,
+
+    /// Reference regime
+    #[schemars(
+        description = "Reference regime of the ATE: 'never' (default), 'always', 'dynamic' or 'none' (E[Y^regime] only). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub contrast: Option<String>,
+
+    /// Covariate of each time point's threshold rule
+    #[schemars(
+        description = "For a 'dynamic' regime or contrast: the covariate of each time point (one per time point) whose value above dynamic_threshold sets A_t = 1."
+    )]
+    pub dynamic_columns: Option<Vec<String>>,
+
+    /// Threshold of the rule
+    #[schemars(
+        description = "For a 'dynamic' regime or contrast: the threshold c of A_t = 1{L_t > c}."
+    )]
+    pub dynamic_threshold: Option<f64>,
 }
 
 /// Request for Regression Standardization (G-computation).

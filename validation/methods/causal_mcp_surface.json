@@ -161,6 +161,26 @@
       "tolerance": "Tol::iterative(1e-8) (IRLS working model; R at epsilon 1e-14)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_causal_tmle",
+      "name": "MCP ltmle and collaborative_tmle",
+      "category": "mcp",
+      "reference": "ltmle (written out); C-TMLE criteria of Gruber & van der Laan (2010), written out",
+      "doc": "validation/mcp/causal_surface.md",
+      "cases": [
+        "ltmle_two_period"
+      ],
+      "tests": [
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_ltmle"
+      ],
+      "quantities": [
+        "psi always/never/dynamic",
+        "ATE and EIC SE"
+      ],
+      "tolerance": "default ltmle configuration against the tight values at Tol::iterative(1e-8); dynamic Tol::iterative(1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

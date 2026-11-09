@@ -922,6 +922,11 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("rd_multi", "scaleregul", Exempt(SCALEREGUL)),
         p("iv_mte", "prte_weights[]", Exempt(ARRAY_VALUE)),
         p("gmm_iv", "weight_matrix[]", Exempt(ARRAY_VALUE)),
+        p(
+            "ltmle",
+            "dynamic_threshold",
+            Exempt("threshold value of the rule; it splits rows"),
+        ),
         // ---- end of the MCP causal surface block. ----
         p("stats_mauchly_test", "sigma", ArrayLen(ArrayLength)),
         p("stats_spline", "n", Max(GridPoints)),
@@ -1104,7 +1109,6 @@ pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 /// (tool, field) of T3 design 5.1 that wave-3 packages add; their rules above exist from wave 1.
 #[cfg(test)]
 pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
-    ("ltmle", "dynamic_columns"),
     ("gsynth", "r_max"),
     ("gsynth", "bootstrap_reps"),
     ("panel_unit_root", "pmax"),
