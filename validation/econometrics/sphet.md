@@ -177,6 +177,20 @@ a like-for-like slowdown.
 3. It does not need the eigenvalues of W.
 4. It is less efficient than ML under homoskedasticity.
 
+## MCP tools
+
+`sphet_model` on `sphet_sim` with `w5` (k nearest neighbours, k = 5), case `sphet_gmm_hac`: the lag
+model with `se_type: hac`, `coord_x: cx`, `coord_y: cy` (Epanechnikov kernel, variable bandwidth),
+and the SEM with heteroskedasticity (White SEs). Keys `sar_coef`, `sar_se_hac_epa_var`,
+`sem_het_coef`, `sem_het_se_white`, `sem_het_rho`, `sem_het_rho_se`. Tests:
+`test_validate_mcp_sphet_hac`, `test_validate_mcp_sphet_sem_het`
+(`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`). The reference is written out in base R, not
+sphet's output; the differences from sphet (one GM step instead of step 2b, Kelejian-Prucha (1999)
+moments with `het = false`, rho in [-0.99, 0.99]) are in the tool description.
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.
+
 ## References
 
 1. Kelejian, H.H. & Prucha, I.R. (1998). "A Generalized Spatial Two-Stage Least Squares Procedure for Estimating a Spatial Autoregressive Model with Autoregressive Disturbances." Journal of Real Estate Finance and Economics, 17(1), 99-121.

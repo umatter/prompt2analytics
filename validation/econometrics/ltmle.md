@@ -42,7 +42,8 @@ Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-base
    quasibinomial logit GLM of `Q*_{t+1}` on the Q design (pooled over all subjects), predicted
    on the link scale with every `A_s, s <= t`, set to the regime; the fluctuation is the
    intercept-only quasibinomial fit with offset `logit Q_t(d)` and weights `H_t` (zero weights
-   drop the non-followers); `Q*_t = plogis(logit Q_t(d) + eps_t)` for every subject. The last
+   drop the non-followers), solved by a scalar Newton iteration on its score equation (see
+   section 10, item 4); `Q*_t = plogis(logit Q_t(d) + eps_t)` for every subject. The last
    node's Q regression has the same response and design for every regime and is fitted once.
 6. **Estimate and EIC (`CalcIC`).** `psi = mean(Q*_1)`,
    `EIC = sum_t H_t (Q*_{t+1} - Q*_t) + Q*_1 - psi`.
@@ -196,7 +197,8 @@ expensive are the saturated ones, which keep glm.fit's start ("Wall-clock agains
 With the logistic Q model an outcome outside [0, 1] is mapped to [0, 1] by its range before the
 fits, and psi, the EIC and `targeted_predictions` are scaled back (ltmle's behaviour with
 `Yrange = NULL`); the result reports `outcome_range`. `LtmleQModel::Linear` is p2a's Gaussian
-variant: least-squares Q fits (OLS's normal equations, the pivoted QR when ill-conditioned) and
+variant: least-squares Q fits with OLS's solve decision (`regression::ols::solve_ols`: the normal
+equations, the pivoted QR when ill-conditioned, aliased columns NaN) and
 `eps_t` the `H_t`-weighted mean residual among the followers, `Q*_t = Q_t(d) + eps_t`.
 
 ## 6. Inference
@@ -254,6 +256,11 @@ same tight values at `Tol::iterative(1e-8)` (measured gaps: 2.8e-13, 1.1e-11, 6.
    the case data; the case pins `(0.1, 0.5)`, which binds.
 3. The case keeps its id but also pins a continuous outcome, a randomized design with a known
    effect, three time points and the mixed static regimes (1, 0) and (1, 0, 1).
+4. The logistic fluctuation is not fitted through `econometrics::glm`: it is a scalar Newton
+   iteration on the intercept-only quasibinomial score equation with offset `logit Q_t(d)` and
+   weights `H_t`, with glm.fit's deviance stopping rule, its step halving on a non-finite
+   deviance and R's +/-30 clamp of the logit inverse, and one polishing Newton step. It solves
+   the same equation in O(n) per iteration without building a design; the R pins hold.
 
 ## MCP extraction (T2-WP11)
 

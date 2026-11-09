@@ -425,7 +425,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | K-means | [kmeans.md](ml/kmeans.md) | R-pinned |
-| DBSCAN (dbscan::dbscan; recorded with the hclust data) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
+| DBSCAN (dbscan::dbscan; recorded with the hclust data; the deviations listed are hclust's, ml_dbscan has none) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
 | Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
 | Cutree | [cutree.md](ml/cutree.md) | R-pinned |
 | Dynamic tree cut (dynamicTreeCut::cutreeDynamic) | [dynamic_tree_cut.md](ml/dynamic_tree_cut.md) | R-pinned |

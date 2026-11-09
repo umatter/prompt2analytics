@@ -56,6 +56,17 @@ relative to the kept components only. The pins use all components on the covaria
 cargo test -p p2a-core --lib --no-default-features --features ci -- ml::reduction::tests::test_validate_prcomp ml::reduction::tests::test_pca
 ```
 
+## MCP tools
+
+`ml_pca` on `hclust_60` with `{columns a, b, c, output_column: PC}`, and with `{n_components: 2,
+output_column: Q}`, case `mcp_pca_scores` (`validation/r/cases/mcp_ml_spatial.R`). Keys
+`pca_x_pc1` to `pca_x_pc3` (one sign per component) and `pca_sdev` (the explained variance is
+`sdev^2`), `Tol::coef(60)`. Test: `test_validate_mcp_pca_output_column`
+(`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`).
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.
+
 ## References
 
 - Jolliffe, I.T. (2002). *Principal Component Analysis*, 2nd ed. Springer.

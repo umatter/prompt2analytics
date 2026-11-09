@@ -116,7 +116,9 @@ equality, so `-0.0` and `0.0` tie and two distinct doubles never do). The Fligne
 **Rust tests:** `stats::fligner::tests::test_validate_fligner_small_scale`,
 `stats::fligner::tests::test_validate_fligner_examples` (case `stat_rank_fligner`);
 `stats::fligner::tests::test_fligner_rejects_nan` (a NaN inside a group is an error; the dataset
-wrapper drops missing values first, as `fligner.test` does).
+wrapper drops missing values first, as `fligner.test` does). An infinite value is refused too,
+where `fligner.test` returns a value: an infinite group median makes `Inf - Inf` deviations,
+which R ranks as NaN.
 
 **Timing.** `fligner_test` refuses a non-finite value in the pass that computes each group's
 absolute deviations, and turns ranks into scores with one standard-normal quantile per value
@@ -136,8 +138,8 @@ sample with `midranks`, which scatters every midrank back to its input position,
 summed the stored ranks; at n = 100,000 it was 1.19x of base. `rank_sums_by_group` sorts
 (key, group) pairs on an integer key with `total_cmp`'s order (`-0.0` and `0.0` share a key)
 and lets each tie run add its midrank to its members' groups. Midranks are multiples of 1/2,
-so every partial sum is exact below 2^52 and the rank sums, tie sizes, statistic and p-value
-are bit-identical (`stats::ranks::tests::test_rank_sums_by_group_equals_midranks`, on noisy
+so every partial sum is exact below 2^52 and, for n below about 9.5e7 (where
+n(n+1)/2 < 2^52), the rank sums, tie sizes, statistic and p-value are bit-identical (`stats::ranks::tests::test_rank_sums_by_group_equals_midranks`, on noisy
 and heavily tied data, signed zeros, infinities and tiny distinct values). User-space CPU
 cycles per call from the hardware counter (`perf_event_open`; median of 11 batches, one P core,
 three interleaved rounds; the machine was shared and loaded, so wall clock was not usable),

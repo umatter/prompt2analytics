@@ -61,7 +61,11 @@ Property tests that load no case: `test_cart_exact_tie_takes_the_first_candidate
 `test_cart_rundown_stretches_equal_the_direct_loop` (the fast rundown against the direct loop),
 `test_cart_rejects_bad_arguments`, `test_cart_random_folds_are_seeded_and_balanced`,
 `test_cart_constant_target_is_a_single_leaf`, `test_cart_unsplittable_root_has_one_cp_row`,
-`test_cart_method_parses_aliases_and_rejects_unknown`.
+`test_cart_method_parses_aliases_and_rejects_unknown`, `test_cart_cumulate_stays_at_or_above_zero`,
+`test_cart_exact_step_target_has_no_noise_in_xerror`,
+`test_cart_table_does_not_depend_on_the_scale_of_the_target`,
+`test_cart_refuses_a_target_scale_out_of_range`, `test_cart_caps_the_class_count`,
+`a_min_bucket_above_half_of_usize_neither_panics_nor_wraps`.
 
 ## Deviations and what is not implemented
 

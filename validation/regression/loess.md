@@ -94,57 +94,11 @@ for degrees 0-2 and spans 0.1, 0.5 and 1.2).
 - REG-60: R's `enp`, residual SE (`one.delta`) and robust iterations (Tier 4).
 - Zero-width neighbourhoods: lowess's tie mean instead of R loess's 0 (decision P2).
 
-## Performance Comparison
+## Performance
 
-### Gaussian Family (default)
-
-| Dataset Size | Rust (ms) | R (ms) | Ratio |
-|--------------|-----------|--------|-------|
-| n=100 | 1.84 | 1.25 | 1.5x slower |
-| n=1,000 | 61.9 | 9.75 | 6.3x slower |
-| n=10,000 | 4,644 | 684 | 6.8x slower |
-
-### Robust Family (symmetric)
-
-| Dataset Size | Rust (ms) | R (ms) | Ratio |
-|--------------|-----------|--------|-------|
-| n=100 | 5.40 | 2.80 | 1.9x slower |
-| n=1,000 | 179 | 10.0 | 18x slower |
-| n=5,000 | 3,897 | 163 | 24x slower |
-
-### Span Comparison (n=1000, Gaussian)
-
-| Span | Rust (ms) | R (ms) | Ratio |
-|------|-----------|--------|-------|
-| 0.30 | 55.2 | 5.80 | 9.5x slower |
-| 0.50 | 63.9 | 7.05 | 9.1x slower |
-| 0.75 | 74.7 | 12.7 | 5.9x slower |
-| 0.90 | 98.3 | 12.5 | 7.9x slower |
-
-### Performance Notes
-
-The Rust implementation is slower than R's CLOESS for several reasons:
-
-1. **R's CLOESS uses Fortran**: R's loess() is implemented in highly optimized Fortran (CLOESS library), which uses efficient data structures and cache-friendly memory access patterns.
-
-2. **Algorithm complexity**: Our implementation is O(n² · k) where k is neighborhood size. R's implementation may use more sophisticated spatial indexing.
-
-3. **Matrix operations**: Each local fit requires solving a weighted least squares problem. R may use faster BLAS routines.
-
-4. **Room for optimization**:
-   - Could implement kd-tree for faster neighbor search
-   - Could use SIMD for weight calculations
-   - Could parallelize fits across target points
-
-Despite being slower, the Rust implementation:
-- Produces numerically correct results (validated against R)
-- Is pure Rust with no external dependencies
-- Has a clean API following project conventions
-- Could be optimized in future iterations
-
-*Benchmarks run on: Linux 6.17, Intel CPU*
-*R version: 4.x with stats package*
-*Rust: release build with -O3 optimizations*
+The fit, its complexity and the timings against the pre-Tier 3 engine are in
+[Timing (WP11-13)](#timing-wp11-13) below; the older comparison with R's CLOESS described an engine
+that no longer exists and was removed.
 
 ## Column Types and Missing Values (run_loess and the quantreg, smooth.spline and glmnet wrappers)
 

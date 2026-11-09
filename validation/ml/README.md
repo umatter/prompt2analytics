@@ -69,6 +69,15 @@ ML methods often have stochastic elements. Validation approaches:
 - For PCA, compare explained variance ratios
 - For t-SNE, compare perplexity and basic structure
 
+## MCP tools
+
+The MCP tools `ml_kmeans`, `ml_dbscan`, `ml_hierarchical`, `ml_cutree`, `ml_pca`, `ml_ppr` and
+`ml_mboost` are pinned to the same R cases as the core methods; each method document has an
+"MCP tools" section (registry `validation/methods/mcp_ml_spatial.json`). Not pinned through the MCP:
+the random-forest and SVM output columns (property tests against the core's predictions; the linear
+SVM is not pinned to e1071, ML-40), SHAP (the Shapley definitions are enumerated in the core tests)
+and HDBSCAN (no MCP tool).
+
 ## Running Tests
 
 ```bash

@@ -534,6 +534,8 @@ counter (`perf_event_open`; median of 11 batches, one P core, `RAYON_NUM_THREADS
 interleaved rounds) on the criterion bench's data and a generated entity panel of the same
 shapes for the Gaussian rows, against `fe13b889`. The IRLS iteration counts of the two-way
 logit are 10 / 12 / 11 (base 13 / 17 / 11), and the fits equal the pre-PERF5 ones bit for bit.
+The two-way logit row at n = 1,000 was re-measured with these three interleaved cycle-counter
+rounds instead of the five wall-clock rounds planned; the quiet-machine re-time below decides.
 
 | Fit | n | new / base (cycles) |
 |---|---|---|

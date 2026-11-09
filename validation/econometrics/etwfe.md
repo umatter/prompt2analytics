@@ -48,7 +48,10 @@ y_it = a_i + l_t + sum_(g,s) D_it 1(G_i = g) 1(t = s) b_gs [+ controls] + e_it
   pivoted QR (`lm.fit`'s `dqrdc2`, tolerance 1e-7) only as the last resort: a cell that is not
   identified, or equations that stay ill conditioned without collinear controls. A cohort-period
   cell that is absorbed or aliased is an error ("not identified"); collinear control columns are
-  removed, listed in `collinear_terms` with a warning, and the model is refitted.
+  removed, listed in `collinear_terms` with a warning, and the model is refitted. The two paths
+  remove controls at different levels: a near-collinear control whose relative within-residual
+  norm lies between 1e-7 and 1e-5 (1e-10 on the squared pivot) is removed on the structured path
+  and kept, with a near-singular estimate, on the QR fallback.
 
 ## Standard errors and inference
 

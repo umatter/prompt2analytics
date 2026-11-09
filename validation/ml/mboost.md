@@ -92,3 +92,13 @@ the same work per step.
 
 The tree learner against mboost (`btree` is a different learner), `mboost_cv`'s folds. For gbm, see
 `tree_importance.md`.
+
+## MCP tools
+
+`ml_mboost` on `mboost_sim` with `{y_col: <y>, x_cols: [x1, x2, x3], family: Gaussian | Binomial |
+Binomial-glm | Poisson, mstop: 100, nu: 0.1}`, case `ml_mboost_bols`. Keys `<key>_m100_coef`,
+`_m100_intercept` and `_m100_sel`, `Tol::coef(200)`. Test: `test_validate_mcp_mboost_families`
+(`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`).
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.
