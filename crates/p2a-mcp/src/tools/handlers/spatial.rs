@@ -64,7 +64,25 @@ const MISSING_HINT_NEIGHBORS: &str = "Row i of the weights is row i of the datas
     cannot be skipped: remove the rows with missing coordinates (munge_drop_na) and rebuild \
     the dataset's weights with spatial_neighbors.";
 
-/// `message`, followed by `hint` on its own line when the message reports a missing value.
+/// How to proceed after a missing value in a spatial panel model (appended by
+/// [`model_error`]): a balanced panel cannot lose a single row.
+const MISSING_HINT_PANELS: &str = "Spatial panel models need a balanced panel, so a single \
+    incomplete row cannot be dropped: drop that entity in every period (or that period for \
+    every entity), and build the weights with spatial_neighbors from a one-row-per-entity \
+    coordinate dataset of the remaining entities, sorted by entity id.";
+
+/// "<prefix><error>", followed by `hint` on its own line when the error is a missing-value
+/// error ([`EconError::NullValues`]).
+fn model_error(prefix: &str, e: &EconError, hint: &str) -> String {
+    if matches!(e, EconError::NullValues { .. }) {
+        format!("{prefix}{e}\n{hint}")
+    } else {
+        format!("{prefix}{e}")
+    }
+}
+
+/// `message`, followed by `hint` on its own line when the message reports a missing value
+/// (for the column readers, whose errors are already text).
 fn with_hint(message: String, hint: &str) -> String {
     if message.contains("missing value") {
         format!("{message}\n{hint}")
@@ -77,7 +95,7 @@ fn with_hint(message: String, hint: &str) -> String {
 impl AnalyticsServer {
     /// Create spatial neighbors and weights from coordinates.
     #[tool(
-        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(). Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort). Known limitation: style 'U' gives binary weights, not spdep's 'U' (the globally standardized weights divided by n), and a style it does not know is read as 'W'; see the release notes."
+        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(); k-nearest neighbours equal spdep::knearneigh(x, k, use_kd_tree = FALSE) (distance ties go to the lower row index); the default kd-tree search (dbscan) can order distance ties differently. Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort). Known limitation: style 'U' gives binary weights, not spdep's 'U' (the globally standardized weights divided by n), and a style it does not know is read as 'W'; see the release notes."
     )]
     pub async fn spatial_neighbors(
         &self,
@@ -306,8 +324,9 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Moran's I test failed: {e}"),
+            Err(e) => error_text(model_error(
+                "Moran's I test failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -348,8 +367,9 @@ impl AnalyticsServer {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return error_text(with_hint(
-                    format!("OLS estimation failed: {e}"),
+                return error_text(model_error(
+                    "OLS estimation failed: ",
+                    &e,
                     MISSING_HINT_MODELS,
                 ));
             }
@@ -406,8 +426,9 @@ impl AnalyticsServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Spatial LM tests failed: {e}"),
+            Err(e) => error_text(model_error(
+                "Spatial LM tests failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -519,8 +540,9 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SAR model estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SAR model estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -607,8 +629,9 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SEM model estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SEM model estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -785,8 +808,9 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Spatial GMM estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "Spatial GMM estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -914,8 +938,9 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SAR Probit estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SAR Probit estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -1021,8 +1046,9 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("SEM Probit estimation failed: {e}"),
+            Err(e) => error_text(model_error(
+                "SEM Probit estimation failed: ",
+                &e,
                 MISSING_HINT_MODELS,
             )),
         }
@@ -1169,9 +1195,10 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Spatial panel ML estimation failed: {e}"),
-                MISSING_HINT_MODELS,
+            Err(e) => error_text(model_error(
+                "Spatial panel ML estimation failed: ",
+                &e,
+                MISSING_HINT_PANELS,
             )),
         }
     }
@@ -1302,9 +1329,10 @@ impl AnalyticsServer {
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => error_text(with_hint(
-                format!("Spatial panel GMM estimation failed: {e}"),
-                MISSING_HINT_MODELS,
+            Err(e) => error_text(model_error(
+                "Spatial panel GMM estimation failed: ",
+                &e,
+                MISSING_HINT_PANELS,
             )),
         }
     }
@@ -1796,7 +1824,7 @@ mod tests {
     }
 
     /// The 25 integer points of the Moran's I cross-check (the R script is in the doc
-    /// comment of `test_mcp_spatial_neighbors_and_moran_int64_match_r`), i = 0..24:
+    /// comment of `test_mcp_spatial_neighbors_and_moran_int64_base_r_cross_check`), i = 0..24:
     /// gx = (40 i^2 + 3 i) mod 101, gy = (2 i^2 + 7 i + 5) mod 97,
     /// v = (gx + gy) div 10 + (3 i) mod 7, b = (v >= 13) as 0/1. No kNN ties for k = 4.
     /// `float`: Float64 copies (the same values), else Int64.
@@ -1903,7 +1931,7 @@ mod tests {
     ///   p_two = 2 * pnorm(-abs(Z)), min_gap = min(gap))  # min_gap > 0: no kNN ties
     /// ```
     #[test]
-    fn test_mcp_spatial_neighbors_and_moran_int64_match_r() {
+    fn test_mcp_spatial_neighbors_and_moran_int64_base_r_cross_check() {
         let (rt, s) = server_with(vec![("pts", points_df(false)), ("ptsf", points_df(true))]);
         for (ds, w) in [("pts", "w"), ("ptsf", "wf")] {
             let r = call(&s, Limits::off(), knn4(ds, w));
@@ -2085,7 +2113,7 @@ mod tests {
     /// R: spml_entity_order.R (validation/econometrics/splm.md): within spatial-lag fit
     /// with W rows in sorted label order.
     #[test]
-    fn test_mcp_spatial_panel_ml_sorted_ids_match_r() {
+    fn test_mcp_spatial_panel_ml_sorted_ids_base_r_cross_check() {
         let (panel, coords) = panel_dfs();
         let (rt, s) = server_with(vec![("panel", panel), ("coords", coords)]);
         let r = call(
@@ -2160,5 +2188,82 @@ mod tests {
                 assert!(t.contains(part), "{ds}: {t}");
             }
         }
+    }
+
+    /// A missing value in a panel gets the panel advice (drop the entity or the period), not the
+    /// cross-section advice (drop the row and rebuild the weights).
+    #[test]
+    fn test_mcp_spatial_panel_missing_value_gets_the_panel_hint() {
+        let (panel, coords) = panel_dfs();
+        let y: Vec<Option<f64>> = panel
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| if i == 7 { None } else { v })
+            .collect();
+        let mut na = panel.clone();
+        na.with_column(Column::new("y".into(), y)).unwrap();
+        let (rt, s) = server_with(vec![("panel", na), ("coords", coords)]);
+        let r = call(
+            &s,
+            Limits::off(),
+            req(serde_json::json!({
+                "dataset": "coords", "x_coord": "gx", "y_coord": "gy",
+                "method": "distance", "d_min": 0.0, "d_max": 1.0, "weights_name": "rook",
+            })),
+        );
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let args = serde_json::json!({
+            "dataset": "panel", "y": "y", "x": ["x"], "entity_col": "entity",
+            "time_col": "time", "weights": "rook", "lag": true, "spatial_error": "none",
+        });
+        let mut gmm = args.clone();
+        gmm["spatial_error"] = serde_json::json!(false);
+        let results = [
+            rt.block_on(s.spatial_panel_ml(Parameters(req(args)))),
+            rt.block_on(s.spatial_panel_gmm(Parameters(req(gmm)))),
+        ];
+        for r in results {
+            let r = r.unwrap();
+            let t = text(&r);
+            assert_eq!(r.is_error, Some(true), "{t}");
+            assert!(t.contains("need a balanced panel"), "{t}");
+            assert!(
+                !t.contains("rebuild the weights with spatial_neighbors on the cleaned"),
+                "{t}"
+            );
+        }
+    }
+
+    /// The hint follows the error variant, not words in the message.
+    #[test]
+    fn test_mcp_spatial_hint_follows_the_error_variant() {
+        let null = EconError::NullValues {
+            column: "y".into(),
+            count: 1,
+        };
+        assert!(
+            model_error("SAR model failed: ", &null, MISSING_HINT_MODELS)
+                .ends_with(MISSING_HINT_MODELS)
+        );
+        let other = EconError::Computation("missing value in the log".into());
+        let t = model_error("SAR model failed: ", &other, MISSING_HINT_MODELS);
+        assert!(!t.contains(MISSING_HINT_MODELS), "{t}");
+        assert!(t.starts_with("SAR model failed: "), "{t}");
+    }
+
+    /// SPAT-30: the neighbour description names spdep's exact tie order.
+    #[test]
+    fn test_mcp_spatial_neighbors_description_names_the_tie_rule() {
+        let tools = AnalyticsServer::new().router_tools();
+        let d = tools
+            .iter()
+            .find(|t| t.name == "spatial_neighbors")
+            .and_then(|t| t.description.clone())
+            .unwrap_or_default();
+        assert!(d.contains("use_kd_tree = FALSE"), "{d}");
     }
 }
