@@ -842,3 +842,156 @@ fn test_validate_cli_gsynth_r_spellings() {
         (argv(&b, &["--estimator", "em"]), "mc"),
     ]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// ts option parsing and notes
+// ---------------------------------------------------------------------------------------------
+
+/// CLI-14 time-series part: unknown values ran mean/additive/Yule-Walker/additive/level with exit
+/// 0, and `--spans 3,x` became [3]. Each must be a usage error listing the values.
+#[test]
+fn test_cli_ts_rejects_unknown_option_values() {
+    let mut rows: Vec<(Vec<&str>, &str)> = vec![
+        (
+            vec![
+                "ts",
+                "changepoint",
+                "d",
+                "--col",
+                "y",
+                "--change-type",
+                "trend",
+            ],
+            "meanvar",
+        ),
+        (
+            vec![
+                "ts",
+                "holt-winters",
+                "d",
+                "--col",
+                "y",
+                "--period",
+                "12",
+                "--seasonal",
+                "damped",
+            ],
+            "multiplicative",
+        ),
+        (
+            vec!["ts", "ar", "d", "--col", "y", "--method", "mle"],
+            "yule-walker",
+        ),
+        (
+            vec![
+                "ts",
+                "decompose",
+                "d",
+                "--col",
+                "y",
+                "--period",
+                "12",
+                "--decompose-type",
+                "stl",
+            ],
+            "multiplicative",
+        ),
+        (
+            vec![
+                "ts",
+                "struct-ts",
+                "d",
+                "--col",
+                "y",
+                "--model-type",
+                "arima",
+            ],
+            "BSM",
+        ),
+    ];
+    if cfg!(feature = "spectral-analysis") {
+        rows.push((
+            vec!["ts", "spectrum", "d", "--col", "y", "--spans", "3,x"],
+            "--spans",
+        ));
+    }
+    assert_usage_errors(&rows);
+}
+
+/// Granger reports the core's notes. R: granger_short lag2 (grangertest(y ~ x, order = 2)).
+#[test]
+fn test_validate_cli_granger_notes() {
+    let case = Case::load("granger_short");
+    let s = temp_session();
+    let d = s.load(&case);
+    let j = s.json(&["ts", "granger", &d, "--x", "x", "--y", "y", "--lags", "2"]);
+    Check::new(&case)
+        .scalar("lag2_F", num(field(&j, "f_statistic")), Tol::stat(20))
+        .scalar("lag2_p", num(field(&j, "p_value")), Tol::p_value(20))
+        .scalar("lag2_df2", num(field(&j, "df2")), Tol::exact())
+        .finish();
+    assert_keys(&j, &["warnings"]);
+}
+
+/// StructTS reports its convergence and warnings; the model name is the R spelling.
+/// R: structts_nile_ukgas ukgas_*_tight (StructTS(log10(UKgas), "BSM") at the tight optimum).
+/// The BSM level variance is 0 at the optimum (a boundary) and the slope variance sits next to
+/// it, so only the seasonal and observation variances are compared here.
+#[test]
+fn test_validate_cli_struct_ts_notes() {
+    let case = Case::load("structts_nile_ukgas");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "ts",
+        "struct-ts",
+        d.as_str(),
+        "--col",
+        "ukgas",
+        "--model-type",
+        "bsm",
+        "--period",
+        "4",
+    ];
+    let j = s.json(&args);
+    let c = field(&j, "coefficients");
+    Check::new(&case)
+        .scalar(
+            "ukgas_loglik_tight",
+            num(field(&j, "log_likelihood")),
+            Tol::stat(108),
+        )
+        .named_subset(
+            "ukgas_coef_tight",
+            &["seas", "epsilon"],
+            &["seas", "epsilon"],
+            &[num(&c["seasonal"]), num(&c["epsilon"])],
+            Tol::iterative(1e-6),
+        )
+        .finish();
+    assert_eq!(field(&j, "model_type"), "BSM");
+    assert_keys(&j, &["converged", "iterations", "warnings"]);
+    assert!(s.ok(&args).contains("Converged: "), "notes line");
+}
+
+/// `ts ar` JSON carries the warnings and the canonical method name; the changepoint penalty help
+/// names changepoint's MBIC default.
+#[test]
+fn test_cli_ar_notes_and_changepoint_help() {
+    let s = temp_session();
+    let d = load_repo_csv(&s, "validation/datasets/generated/granger_short.csv", "gs");
+    let j = s.json(&[
+        "ts", "ar", &d, "--col", "x", "--method", "OLS", "--order", "2",
+    ]);
+    assert_eq!(field(&j, "method"), "ols");
+    assert_keys(&j, &["warnings"]);
+    let out = p2a()
+        .args(["ts", "changepoint", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("MBIC") && !help.contains("automatic BIC"),
+        "{help}"
+    );
+}

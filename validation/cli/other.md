@@ -117,3 +117,31 @@ gains `beta`, `covariate_names`, `cv_mspe`, `cv_lambda`, `lambda`, `sigma2`, `mu
 
 Deviation: gsynth is compared at 5e-4 relative, the gap between p2a's default EM stopping rule
 and R's converged fit, as in the estimator's own validation.
+
+### `ts changepoint`, `holt-winters`, `ar`, `decompose`, `struct-ts`, `spectrum`, `granger`, `causal-impact`
+
+The core enums of these options have no `FromStr`, so their tables live in
+`commands/timeseries.rs`; they follow the same matching rules.
+
+| Command, option | Values (canonical first; aliases) | R argument |
+|---|---|---|
+| `changepoint --change-type` | mean, variance (var), meanvar (both, mean_and_variance, mean_var) | `cpt.mean` / `cpt.var` / `cpt.meanvar` |
+| `holt-winters --seasonal` | additive (add), multiplicative (mult, multi) | `HoltWinters(seasonal = )` |
+| `ar --method` | yule-walker (yw), burg, ols | `ar(method = )` |
+| `decompose --decompose-type` | additive (add), multiplicative (mult, multi) | `decompose(type = )` |
+| `struct-ts --model-type` | level (local_level), trend (local_trend, llt), BSM (basic_structural) | `StructTS(type = )` |
+| `spectrum --spans` | comma-separated integers; any other entry is a usage error | `spec.pgram(spans = )` |
+
+The JSON reports the canonical names (`change_type`, `seasonal_type`, `method`,
+`decompose_type`, `model_type`; they were Rust Debug names such as `Ols`). `granger`, `ar`,
+`struct-ts` and `causal-impact` print and serialise the core notes; the `--penalty` help of
+`changepoint` names its default, changepoint's MBIC.
+
+| Test | Case, keys | Tolerance |
+|---|---|---|
+| `test_validate_cli_granger_notes` | `granger_short` `lag2_F`, `lag2_p`, `lag2_df2` (`--lags 2`) | `Tol::stat(20)`, `Tol::p_value(20)`, exact |
+| `test_validate_cli_struct_ts_notes` | `structts_nile_ukgas` `ukgas_loglik_tight`; `ukgas_coef_tight` seasonal and observation variances (`--model-type bsm --period 4`) | `Tol::stat(108)`; `Tol::iterative(1e-6)` |
+
+Not compared: the BSM level variance, which is 0 at R's optimum (a boundary a relative
+tolerance cannot compare), and the slope variance next to it; the estimator's own validation
+pins all four.
