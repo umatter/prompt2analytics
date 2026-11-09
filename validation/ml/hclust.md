@@ -100,6 +100,25 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- ml::hclust m
     ml::advanced_clustering_mod::hierarchical
 ```
 
+## MCP tools
+
+- `ml_hierarchical` (`{hclust_60, columns a, b, c, n_clusters: 3, linkage: <l>, output_column: hc}`)
+  and `ml_cutree` (`{k: 3, linkage: <l>}`), case `hclust_methods`, keys `<linkage>_cutree3` for
+  ward.D2, ward.D, mcquitty, centroid, median and average; labels exact. Tests:
+  `test_validate_mcp_hierarchical_output_column`, `test_validate_mcp_cutree_linkages`.
+- `ml_kmeans` (`{hclust_60, columns a, b, c, k: 3, seed: 1, output_column: km}`) and `ml_dbscan`
+  (`{eps: 1.0, min_samples: 5}`), case `kmeans_lloyd_pca_mds`: `km_unit_cluster` (matched as a
+  partition), `km_unit_tot_withinss` (`Tol::coef(60)`), `dbscan_eps1_minpts5_cluster` (cluster sizes
+  and noise, exact). Tests: `test_validate_mcp_kmeans_output_column`, `test_validate_mcp_dbscan`. The
+  seed is the request's, else the session's `set_seed`, else 42, and is reported. The k-means method
+  itself is described in [kmeans.md](kmeans.md).
+
+The tests are in `crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`. There is no HDBSCAN MCP tool, so
+HDBSCAN is not pinned through the MCP.
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.
+
 ## References
 
 - Murtagh, F. (1985). *Multidimensional Clustering Algorithms*. COMPSTAT Lectures 4. Physica-Verlag.

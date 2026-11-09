@@ -1,8 +1,9 @@
 # Marginal Treatment Effects (MTE) by local IV
 
 **File:** `crates/p2a-core/src/econometrics/ivmte.rs` (`run_ivmte`, `run_ivmte_multi_z`, `ivmte`; MCP tool `iv_mte`).
-**Status:** R-pinned to the Heckman-Vytlacil formulas written out in R (registry
-`validation/methods/econ_gmm_mte.json`, entry `ivmte`), not to an R package.
+
+**Status**: R-pinned (registry `validation/methods/econ_gmm_mte.json`, id `ivmte`), to the Heckman-Vytlacil
+formulas written out in R, not to an R package.
 
 ## Method
 

@@ -47,18 +47,7 @@
         "Omit = the same function on the complete rows, with the reported counts"
       ],
       "tolerance": "exact",
-      "deviations": [
-        {
-          "finding": "REG-14",
-          "quantity": "loess fitted values",
-          "note": "not R-pinned (REG-14, REG-45: neighbourhood and span differ from R, Tier 4)"
-        },
-        {
-          "finding": "REG-26",
-          "quantity": "quantreg SEs",
-          "note": "not R-pinned (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -109,16 +98,11 @@
         "x grid after deletion (56 values, exact)",
         "n",
         "NA data = complete rows",
-        "missing counts"
+        "missing counts",
+        "smoothed values (supsmu_y)"
       ],
-      "tolerance": "exact (the CLI text's x grid: its 4 printed decimals)",
-      "deviations": [
-        {
-          "finding": "REG-31",
-          "quantity": "smoothed values (supsmu_y)",
-          "note": "p2a's super smoother is not Friedman's algorithm (Tier 4); supsmu_y is recorded in the case, not compared"
-        }
-      ],
+      "tolerance": "exact for the x grid and the counts (the CLI text's x grid: its 4 printed decimals); supsmu_y at validation/README.md, n = 56: 1e-6 relative",
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

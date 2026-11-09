@@ -185,6 +185,7 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_stata_column_buffers_respect_the_allocation_ceiling` | column buffers under a 64-byte ceiling are refused (G3) |
 | `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF or off their tag, N and K bounds (DATA-22) |
 | `p2a-core::data::stata::tests::test_stata_pre_117_formats_are_unsupported` | formats 102-116 and release 120 are `UnsupportedVersion` |
+| `p2a-core::data::stata::tests::test_stata_cell_check_covers_every_declared_row` | the cells of every declared row, not only the first buffer's, are checked against the allocation ceiling |
 | `p2a-core::data::sas::tests::test_magic_number` | the 32-byte magic |
 | `p2a-core::data::sas::tests::test_sas_invalid_magic` | a non-SAS file is refused for its magic |
 | `p2a-core::data::sas::tests::test_sas_truncated_magic` | a 16-byte file is refused |
@@ -223,4 +224,10 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::sas::tests::test_sas_rle_decompress_every_command` | every RLE command, hand-built from the command table |
 | `p2a-core::data::sas::tests::test_sas_rdc_decompress_every_command` | every RDC item, hand-built from the command table |
 | `p2a-core::data::sas::tests::test_sas_decompressed_cells_respect_the_allocation_ceiling` | what decoded cells hold is refused above the allocation ceiling |
+| `p2a-core::data::sas::tests::test_sas_cells_are_checked_after_each_compressed_row` | decoded cells are checked against the allocation ceiling after each compressed row (rows whose pointers share a subheader) |
+| `p2a-core::data::sas::tests::test_sas_cells_are_checked_inside_a_data_page` | the cells of a plain data page are checked before its last row is decoded |
+| `p2a-core::data::sas::tests::test_sas_budget_is_checked_before_rows_inside_a_page` | a cancelled budget stops the read before the rows of a page are decoded |
+| `p2a-core::data::sas::tests::test_sas_metadata_is_held_to_the_allocation_ceiling` | metadata pointers that share a subheader are held to the allocation ceiling |
+| `p2a-core::data::sas::tests::test_sas_short_plain_row_in_a_compressed_file` | a 3-byte plain row in a compressed file is read as 1.5 |
+| `p2a-core::data::sas::tests::test_sas_signature_of_short_subheaders` | subheader signatures of short subheaders, both word sizes and byte orders |
 | `p2a-core::data::sas::tests::test_validate_dataloader_loads_sas7bdat_fixture` | `DataLoader::load` of `sas64_rle` = haven |

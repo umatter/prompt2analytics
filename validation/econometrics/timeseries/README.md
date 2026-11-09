@@ -1,24 +1,25 @@
 # Time Series Validation
 
-This directory contains validation documentation for time series econometric methods.
+Validation documents for the multivariate time-series methods in
+`crates/p2a-core/src/econometrics/timeseries/`. Whether each is pinned to R, and at what tolerance,
+is in the method index of [../../README.md](../../README.md) (derived from
+`validation/methods/*.json`) and on `validation/VALIDATION_STATUS.md`.
 
 ## Methods
 
 | Method | File | p2a Function | Reference |
 |--------|------|--------------|-----------|
 | VAR | [var.md](var.md) | `run_var()` | R `vars::VAR()` |
-| VARMA | no validation document yet | `run_varma()` | R custom |
-| VECM | [vecm.md](vecm.md) | `run_vecm()` | R `vars::vec2var()`, `urca::ca.jo()` |
-| IRF | [irf.md](irf.md) | `run_var_irf()` | R `vars::irf()` |
+| IRF | [irf.md](irf.md) | `run_var_irf()`, `compute_irf()` | R `vars::irf()` |
+| Granger causality | [granger.md](granger.md) | `granger_test()`, `run_granger_test()` | R `lmtest::grangertest()` |
+| VARMA | [varma.md](varma.md) | `run_varma()`, `run_varma_with()` | Hannan-Rissanen (1982) written out in R; q = 0 checked against `vars::VAR()`. q > 0: coefficients, Sigma_u and information criteria; no SEs (step-2 OLS SEs are not valid) |
+| VECM | [vecm.md](vecm.md) | `run_vecm_with()`, `run_vecm()` | R `urca::ca.jo()`, `urca::cajorls()` |
 
-## Key Test Cases
-
-- **Bivariate VAR**: Two-variable system for basic validation
-- **Cointegration tests**: Johansen procedure for VECM
-- **Orthogonalized vs structural IRF**: Different identification schemes
+Integer series and missing values in Granger tests: [../granger.md](../granger.md).
 
 ## Running Tests
 
 ```bash
-cargo test -p p2a-core -- timeseries::tests::test_validate
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::timeseries::
+validation/run_validation.sh --rust-only --category econometrics
 ```

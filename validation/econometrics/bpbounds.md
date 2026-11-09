@@ -1,9 +1,11 @@
 # Balke-Pearl bounds
 
 **File:** `crates/p2a-core/src/econometrics/bpbounds.rs` (`run_bp_bounds`, `bp_bounds_from_probs`).
-**Status:** not R-pinned (closed form; hand-computed table). R's `bpbounds` is not installed on the reference
-machine; both tables below were checked during planning against the exact response-type LP (`lpSolve` 5.6.23: 16
-response types without monotonicity, 12 without defiers; agreement 5.5e-17).
+
+**Status**: not R-pinned (closed-form Balke-Pearl bounds pinned to a hand-computed table, checked against the exact
+response-type LP; the R package bpbounds is not installed). Both tables below were checked during planning against
+the exact response-type LP (`lpSolve` 5.6.23: 16 response types without monotonicity, 12 without defiers; agreement
+5.5e-17).
 
 ## Formulas
 
@@ -37,6 +39,12 @@ ACE_upper = min( 1 - p10|1 - p01|0,
 covariance `Cov = (p11|0 - P(Y=1|Z=0) P(D=1|Z=0)) / n_0 + (p11|1 - P(Y=1|Z=1) P(D=1|Z=1)) / n_1`:
 `Var = Var(num)/den^2 + num^2 Var(den)/den^4 - 2 num Cov / den^3` (equals 2SLS with HC0 on the expanded data).
 
+**Instrumental inequality** (Pearl 1995): for each `d`, the result warns when
+`sum_y max_z P(Y = y, D = d | Z = z) > 1` ("the instrumental inequality fails (d = <d>: <sum> > 1): the exclusion
+restriction or randomization of Z is violated; the Balke-Pearl bounds are not valid"), with and without
+monotonicity and on both entry points. The check does not depend on whether the bounds cross: a table can violate
+the inequality with lower <= upper.
+
 **Bootstrap:** units resampled (seeded; `seed = None` uses 42), type-7 percentile intervals (R `quantile(type =
 7)`); fewer than 100 valid replicates give no interval.
 
@@ -64,6 +72,8 @@ Table 2 by hand: p = 0.30, 0.25, 0.20, 0.25 | 0.15, 0.10, 0.25, 0.50.
 - `econometrics::bpbounds::tests::test_bp_bounds_bootstrap_ci_seeded`: no seed equals seed 42; the intervals are
   those of the replayed replicates.
 - `econometrics::bpbounds::tests::test_perfect_compliance`: with perfect compliance the Wald estimate is the ITT.
+- `econometrics::bpbounds::tests::test_bpbounds_inequality_fails_without_crossing`: a table with uncrossed bounds
+  [0.2, 0.6] that violates the inequality (d = 1: 1.2 > 1) warns, in both monotonicity modes and on both paths.
 
 ## References
 

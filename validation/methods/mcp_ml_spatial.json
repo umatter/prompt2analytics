@@ -108,12 +108,10 @@
         "p2a-mcp::tier3::wp57_ml_spatial::test_validate_mcp_spml"
       ],
       "quantities": [
-        "coefficients",
-        "SEs",
-        "rho",
-        "lambda",
-        "phi",
-        "sigma_mu"
+        "individual error model (default): coefficients, their SEs, lambda and its SE",
+        "SARAR (lag true): rho, lambda and the SE of lambda",
+        "lag model (spatial_error none): rho, its SE and the x1 coefficient",
+        "random effects (b): coefficients, lambda, phi and sigma_mu"
       ],
       "tolerance": "MCP text at print precision (Tol::printed: 6 decimals; z 4 decimals); JSON blocks at validation/README.md for the case's n (Tol::coef; labels exact)",
       "deviations": [],

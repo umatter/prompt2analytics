@@ -51,6 +51,7 @@ The spline runs, maximum gap over the vector's largest value:
 | gof | 2.1e-3 | 2.6e-3 | 2.4e-3 |
 | fitted values | 2.6e-3 | 9.0e-4 | 1.5e-3 |
 | edf per term | 1.2e-2 | 9.7e-3 | 1.1e-2 |
+| predict | 1.6e-3 (4.6e-3 absolute) | (no predict key) | (no predict key) |
 
 Three of these gaps exceed 1e-2 (1.20e-2 `spline` alpha, 1.15e-2 `spline` edf, 1.09e-2 `gcvspline`
 penalty 2 edf). The pins stay at `Tol::new(0.03, 0.02)` and are recorded as a registry deviation (ML-34):
@@ -107,6 +108,14 @@ Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_va
   (`crates/p2a-core/src/ml/ppr.rs`), `test_na_mcp_ppr_omits_incomplete_rows`
   (`crates/p2a-mcp/src/tools/handlers/ml.rs`). They compare p2a with p2a and pin no R
   number.
+
+## MCP tools
+
+`ml_ppr` with the default request, `{bass: 5}` and `{sm_method: gcvspline}`, case `ppr_methods`.
+Keys `<key>_alpha`, `_beta`, `_gofn` and `_fitted` (the first 20 values). Test:
+`test_validate_mcp_ppr` (`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`). The tolerances are the
+core pin's: super-smoother runs `Tol::new(1e-8, 1e-10)`, gcvspline runs `Tol::new(0.03, 0.02)`
+under registry deviation ML-34. Registry: `validation/methods/mcp_ml_spatial.json`.
 
 ## References
 

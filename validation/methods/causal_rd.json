@@ -31,13 +31,7 @@
         "missing-row handling (complete cases)"
       ],
       "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
-      "deviations": [
-        {
-          "finding": "CAUS-28",
-          "quantity": "bandwidths when h and b are not given",
-          "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": [
         "validation/expected/rd_sharp.csv"
       ]
@@ -66,13 +60,7 @@
         "reduced-form jump"
       ],
       "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute, counts exact; observed agreement <= 1.7e-12",
-      "deviations": [
-        {
-          "finding": "CAUS-28",
-          "quantity": "bandwidths when h and b are not given",
-          "note": "p2a's own MSE-type selector, not rdbwselect; every case passes h and b"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -95,9 +83,9 @@
       "tolerance": "validation/README.md, n = 1000: coefficients 1e-8, SE/statistics/CI bounds 1e-6 relative, p-values 1e-6 relative + 1e-12 absolute",
       "deviations": [
         {
-          "finding": "CAUS-77",
-          "quantity": "multi-cutoff pooling and heterogeneity test",
-          "note": "not pinned to rdmulti::rdmc (Tier 3)"
+          "finding": "CAUS-78",
+          "quantity": "multi-cutoff pooled estimate",
+          "note": "p2a pools the cutoff estimates by a weighted average, pinned to that formula in causal_rdbw.json (rd_multi_selected); rdmulti::rdmc's pooled estimate is rdrobust on the normalised score x - c, a different estimator, and rdmulti is not installed"
         }
       ],
       "supersedes_legacy": []

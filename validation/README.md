@@ -105,7 +105,9 @@ looks like a validation failure but is not one.
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
-  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost.
+  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost. Some case files also record the base
+  packages base, stats and datasets and the recommended packages boot and Matrix, which ship
+  with R.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -224,6 +226,37 @@ NaN; ±inf equals only itself. `Tol::iterative(rel)` and `Tol::new` need a comme
 reason. `Tol` (in `crates/p2a-validation/src/check.rs`) and this table must agree; change both
 or neither.
 
+**Rules that go with the table** (X-13):
+
+- The table applies to R-pinned tests. A test that needs a looser tolerance uses
+  `Tol::iterative(rel)` or `Tol::new(rel, abs)` with a comment giving the reason, and the
+  registry entry's `tolerance` repeats it. A tolerance is never widened to make a mismatch
+  pass: a mismatch is fixed, or recorded as a registry deviation with a `// deviation
+  <finding>` comment that keeps the quantity out of the pin.
+- Iterative estimators (IRLS, Newton, EM, MAP demeaning, numerical optimisers) are pinned to a
+  tight R refit (`glm.control(epsilon = 1e-14)`, `optim(control = list(reltol = 1e-15))`,
+  `uniroot(tol = 1e-15)`, or the package's own tolerance tightened) at `Tol::iterative(rel)`,
+  with `rel` stated in the test comment and in the registry entry's `tolerance`. The package's
+  default-tolerance output is recorded in the case (`*_pkg` keys) as a cross-check, never the
+  pin.
+- R values come from committed case files (`validation/expected/<case>.json`), which record the
+  R version and the package versions. A test comment never carries an R value that no case file
+  holds.
+- **Path quantities are never R-pinned**: iteration counts, intermediate iterates, optimiser
+  traces, the state after a fixed number of iterations, non-converged iterates. A case may keep
+  such keys as recorded R values; no `Check` reads them, and the test says so in a `// not
+  pinned: iteration path` comment.
+- Where the solution is not unique or depends on R's random numbers (degenerate LPs, local
+  optima of k-means or mixtures, tie order, CV folds, bootstrap draws), the test pins the
+  objective value or the optimality conditions, or gives both sides the same folds, draws or
+  starting values.
+- R is the test oracle and the default convention, not the algorithm template. A convention
+  kept as p2a's (a default, a df correction, a quantile type, tie handling, which collinear
+  column is dropped) is a registry deviation and a line in the method document.
+- When a pin is removed or loosened, the entry's `quantities` and `tolerance` say so (a
+  quantity checked only as a property is marked `(property)`), and the method document says
+  "not R-pinned" for it.
+
 ## Missing values, integer and logical columns
 
 R and Rust must compute on the same cells, so the harness and the loader read missing values
@@ -289,12 +322,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Robust SEs (HC0-HC3) | [ols_robust_se.md](regression/ols_robust_se.md) | R-pinned |
 | Clustered SEs | [ols_clustered.md](regression/ols_clustered.md) | R-pinned |
 | Regression through the origin: uncentered R², adjusted R² with n, F on k df (OLS, raw design, GLS, clustered, HAC) | [no_intercept.md](regression/no_intercept.md) | R-pinned |
-| HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-22, REG-24, REG-26, REG-35, REG-37, REG-43, REG-50, REG-52, REG-61, REG-64, REG-9) |
+| HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-22, REG-24, REG-37, REG-50, REG-61) |
 | Bootstrap covariance (vcovBS) | [vcovBS.md](regression/vcovBS.md) | not R-pinned |
-| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-14, REG-26, REG-60) |
+| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-60) |
 | Nonlinear least squares | [nls.md](regression/nls.md) | R-pinned |
 | Tukey's Resistant Line | [line.md](regression/line.md) | R-pinned, known deviations (REG-12) |
-| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned, known deviations (REG-31) |
+| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned |
 | Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | R-pinned, known deviations (REG-27, REG-28) |
 | E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | R-pinned, known deviations (REG-39, REG-5) |
 | GLS with grouped AR(1) / compound-symmetry errors, rho by REML or ML | [gls.md](regression/gls.md) | R-pinned |
@@ -322,7 +355,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Extended TWFE (etwfe::etwfe + emfx) | [etwfe.md](econometrics/etwfe.md) | R-pinned, known deviations (CAUS-14) |
 | Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
-| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned, known deviations (CAUS-92) |
+| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | R-pinned |
 | TMLE | [tmle.md](econometrics/tmle.md) | R-pinned |
 | C-TMLE (greedy g selection, V-fold risk) | [ctmle.md](econometrics/ctmle.md) | R-pinned |
@@ -342,7 +375,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Probit | [probit.md](econometrics/probit.md) | R-pinned |
 | Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
 | Mixed logit | [mixed_logit.md](econometrics/mixed_logit.md) | R-pinned |
-| Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
+| Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-78) |
 | Matching (MatchIt: nearest neighbour, CEM, subclassification; optimal full matching as optmatch) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
 | Minimum-cost flow (network simplex) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
 | Panel GLS (pggls): pooled pin on a simulated N > T panel, within and FD warnings | [pggls.md](econometrics/pggls.md) | R-pinned, known deviations (ECON-33) |
@@ -392,7 +425,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | K-means | [kmeans.md](ml/kmeans.md) | R-pinned |
-| DBSCAN (dbscan::dbscan; recorded with the hclust data) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
+| DBSCAN (dbscan::dbscan; recorded with the hclust data; the deviations listed are hclust's, ml_dbscan has none) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
 | Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
 | Cutree | [cutree.md](ml/cutree.md) | R-pinned |
 | Dynamic tree cut (dynamicTreeCut::cutreeDynamic) | [dynamic_tree_cut.md](ml/dynamic_tree_cut.md) | R-pinned |
@@ -471,7 +504,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | SAR, spatial Durbin (SDM), SEM and SAC by concentrated maximum likelihood; SAR and SDM impacts | [spatial.md](econometrics/spatial.md) | R-pinned, known deviations (SPAT-4) |
 | SAR Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
 | SEM Probit | [spatialprobit.md](econometrics/spatialprobit.md) | not R-pinned |
-| Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | R-pinned, known deviations (SPAT-8) |
+| Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | R-pinned, known deviations (SPAT-20, SPAT-8) |
 | Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR; individual random effects without, with Baltagi and with KKP spatial error | [splm.md](econometrics/splm.md) | R-pinned |
 | Spatial panel GM/2SLS (spgm): w2sls, b2sls, ec2sls, g2sls spatial lag; within GM spatial error; within GS2SLS | [splm.md](econometrics/splm.md) | R-pinned |
 
@@ -508,15 +541,15 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 |--------|------|--------|
 | CLI exhibits (data describe/head, reg ols, reg diagnostics, panel fe/re/hdfe/hausman) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | MCP `regression_ols` (cov_type, intercept) | [ols.md](regression/ols.md) | R-pinned |
-| CLI `reg ols/clustered/hac/gls/step/quantreg --intercept false`, `reg clustered --cluster2` | [flags.md](cli/flags.md) | R-pinned, known deviations (REG-52, STAT-68, TS-15, TS-26) |
-| CLI `ts ar --aic`, `ts stl --robust`, `ts spectrum --detrend` | [flags.md](cli/flags.md) | R-pinned, known deviations (REG-52, STAT-68, TS-15, TS-26) |
+| CLI `reg ols/clustered/hac/gls/step/quantreg --intercept false`, `reg clustered --cluster2` | [flags.md](cli/flags.md) | R-pinned, known deviations (STAT-68, TS-26) |
+| CLI `ts ar --aic`, `ts stl --robust`, `ts spectrum --detrend` | [flags.md](cli/flags.md) | R-pinned, known deviations (STAT-68, TS-26) |
 | CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | CLI causal iv, mediation and staggered-did (rows dropped, first-stage HC1 Wald F, units kept after trimming, pre-trend Wald test) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
 | MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, ECON-33, ECON-34, ECON-41, REG-24, REG-29, STAT-23, TS-23) |
 | MCP causal tools (option tables and aliases, MatchIt defaults and the matched sample, IPW, ltmle, gformula, gsynth and mediation fields) | [causal_surface.md](mcp/causal_surface.md) | R-pinned, known deviations (REG-27) |
 | MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-16, STAT-27, STAT-39, STAT-58, STAT-68, STAT-69, STAT-72, STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
-| MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned |
+| MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned, known deviations (DATA-65) |
 | CLI model commands (`reg`, `discrete`, `panel`, `survival`, `stats`), persisted datasets and notes | [models.md](cli/models.md) | R-pinned, known deviations (CLI-21, STAT-6) |
 | CLI causal, time-series, ML, spatial and viz commands (typed options, forecasts, PCA scores, impacts) | [other.md](cli/other.md) | R-pinned, known deviations (CAUS-39, TS-22, TS-24) |
 

@@ -58,17 +58,18 @@ ATC = E[Y(1) - Y(0) | A=0]
   treatment effect is not identified.
 - **Standard errors.** The bootstrap (`n_bootstrap` replicates, each refitting the outcome
   model; non-converged, separated and failed replicates are counted in warnings) is the
-  reference. A replicate computes coefficients only: the linear model by the normal
-  equations without OLS's refinement step (the pivoted QR when the design is rank-deficient
-  or ill conditioned), the logistic model by TMLE's lean logit IRLS from the full-sample fit
-  (the shared GLM when a replicate separates, is aliased, does not converge or has a converged fit
-  with a row beyond the path's bound, `y < 1` above `eta = 15` or `y > 0` below -15, so those counts
-  are the shared GLM's, and a replicate past the bound can count as not converged where the lean
-  path alone would have converged), the Poisson model by the shared GLM; its percentile intervals for the effect, risk ratio and odds ratio use R's type-7
-  quantiles of the finite draws (`stats::robust::percentile_interval`). The delta-method and
-  sandwich SEs are approximations on the treatment coefficient (CAUS-39, Tier 4), computed on
-  the identified columns with a rank-checked inverse and a checked residual df. Normal
-  intervals and p-values use `z_critical` and `normal_p_value_two_sided`.
+  reference. A replicate computes coefficients only: the linear model by the normal equations
+  without OLS's refinement step (the pivoted QR when the design is rank-deficient or ill
+  conditioned), the logistic model by TMLE's lean logit IRLS from the full-sample fit (the
+  shared GLM when a replicate separates, is aliased, does not converge or has a converged fit
+  with a row beyond the path's bound, `y < 1` above `eta = 15` or `y > 0` below -15, so those
+  counts are the shared GLM's, and a replicate past the bound can count as not converged where
+  the lean path alone would have converged), the Poisson model by the shared GLM; its
+  percentile intervals for the effect, risk ratio and odds ratio use R's type-7 quantiles of
+  the finite draws (`stats::robust::percentile_interval`). The delta-method and sandwich SEs
+  are approximations on the treatment coefficient (CAUS-39, Tier 4), computed on the identified
+  columns with a rank-checked inverse and a checked residual df. Normal intervals and p-values
+  use `z_critical` and `normal_p_value_two_sided`.
 
 ## R reference
 

@@ -63,3 +63,17 @@ Tolerances from `validation/README.md` at n = 80: weights 1e-6, statistics 1e-5 
 
 - `test_validate_weight_styles`, `test_validate_knn_ties_match_knearneigh_without_kd_tree`
 - `test_validate_logdet_complex_eigenvalues`
+
+## MCP tools
+
+`spatial_neighbors` and `moran_test` on `spatial_sim`, case `spatial_weights_moran`: the requests
+`{method: distance, d_min: 0, d_max: 0.2, style: W | B | C | U | minmax | S}` and then
+`{variable: x1}`; `{method: knn, k: 4}` for the alternatives; `{method: distance, d_max: 0.12}` for
+the islands. Keys `style_<S>_sum` and `style_<S>_moran_I`, `style_C_sum` and `style_U_sum` (U is C
+divided by n), `moran` (I, E, variance, z and p for the greater, less and two-sided alternatives),
+`moran_islands`, `n_islands`. Tests (`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`):
+`test_validate_mcp_spatial_styles`, `test_validate_mcp_style_u_is_c_over_n`,
+`test_validate_mcp_moran_alternative`, `test_validate_mcp_moran_islands`.
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.

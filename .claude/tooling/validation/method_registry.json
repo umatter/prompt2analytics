@@ -15,7 +15,7 @@
       "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
       "criterion_group": "OLS_Standard",
       "validation_doc": "validation/regression/ols.md",
-      "test_patterns": ["test_validate_ols", "test_validate_longley"]
+      "test_patterns": ["test_validate_ols", "test_validate_ols_longley"]
     },
     "ols_robust": {
       "display_name": "OLS with Robust Standard Errors",
@@ -28,7 +28,7 @@
       "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
       "criterion_group": "OLS_RobustSE",
       "validation_doc": "validation/regression/ols_robust_se.md",
-      "test_patterns": ["test_validate_robust"]
+      "test_patterns": ["test_validate_ols_robust_se"]
     },
     "ols_clustered": {
       "display_name": "OLS with Clustered Standard Errors",
@@ -104,7 +104,7 @@
       "r_name": "plm(model='within')",
       "r_packages": ["plm"],
       "category": "panel",
-      "rust_module": "crates/p2a-core/src/econometrics/panel.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/panel/linear_models.rs",
       "rust_function": "run_fixed_effects",
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
       "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
@@ -116,7 +116,7 @@
       "r_name": "plm(model='random')",
       "r_packages": ["plm"],
       "category": "panel",
-      "rust_module": "crates/p2a-core/src/econometrics/panel.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/panel/linear_models.rs",
       "rust_function": "run_random_effects",
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
       "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
@@ -128,7 +128,7 @@
       "r_name": "phtest",
       "r_packages": ["plm"],
       "category": "panel",
-      "rust_module": "crates/p2a-core/src/econometrics/panel.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/panel/specification_test.rs",
       "rust_function": "run_hausman_test",
       "validation_doc": "validation/econometrics/hausman.md",
       "test_patterns": ["test_hausman"]
@@ -143,7 +143,7 @@
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
       "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
       "validation_doc": "validation/econometrics/iv_2sls.md",
-      "test_patterns": ["test_validate_iv", "test_2sls"]
+      "test_patterns": ["test_validate_iv", "test_iv2sls"]
     },
     "did": {
       "display_name": "Difference-in-Differences",
@@ -210,7 +210,7 @@
       "r_name": "glm(family=binomial(logit))",
       "r_packages": ["stats"],
       "category": "discrete",
-      "rust_module": "crates/p2a-core/src/econometrics/discrete.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/discrete/binary_choice.rs",
       "rust_function": "run_logit",
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
       "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
@@ -222,7 +222,7 @@
       "r_name": "glm(family=binomial(probit))",
       "r_packages": ["stats"],
       "category": "discrete",
-      "rust_module": "crates/p2a-core/src/econometrics/discrete.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/discrete/binary_choice.rs",
       "rust_function": "run_probit",
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
       "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
@@ -254,7 +254,7 @@
       "r_name": "VAR",
       "r_packages": ["vars"],
       "category": "timeseries",
-      "rust_module": "crates/p2a-core/src/econometrics/timeseries.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/timeseries/var.rs",
       "rust_function": "run_var",
       "validation_doc": "validation/econometrics/timeseries/var.md",
       "test_patterns": ["test_var"]
@@ -264,7 +264,7 @@
       "r_name": "ca.jo",
       "r_packages": ["urca", "vars"],
       "category": "timeseries",
-      "rust_module": "crates/p2a-core/src/econometrics/timeseries.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/timeseries/vecm.rs",
       "rust_function": "run_vecm",
       "validation_doc": "validation/econometrics/timeseries/vecm.md",
       "test_patterns": ["test_vecm"]
@@ -274,7 +274,7 @@
       "r_name": "irf",
       "r_packages": ["vars"],
       "category": "timeseries",
-      "rust_module": "crates/p2a-core/src/econometrics/timeseries.rs",
+      "rust_module": "crates/p2a-core/src/econometrics/timeseries/var.rs",
       "rust_function": "compute_irf",
       "validation_doc": "validation/econometrics/timeseries/irf.md",
       "test_patterns": ["test_irf"]
@@ -676,7 +676,7 @@
       "rust_function": "holt_winters",
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_holtwinters.R",
       "validation_doc": "validation/forecasting/holtwinters.md",
-      "test_patterns": ["test_holt_winters"]
+      "test_patterns": ["test_validate_holtwinters"]
     },
     "decompose": {
       "display_name": "Classical Time Series Decomposition",
@@ -707,7 +707,7 @@
       "rust_module": "crates/p2a-core/src/forecasting/mstl.rs",
       "rust_function": "run_mstl",
       "validation_doc": "validation/forecasting/mstl.md",
-      "test_patterns": ["test_mstl"]
+      "test_patterns": ["test_validate_mstl"]
     },
     "struct_ts": {
       "display_name": "Structural Time Series",
@@ -718,7 +718,7 @@
       "rust_function": "struct_ts",
       "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_structts.R",
       "validation_doc": "validation/forecasting/structts.md",
-      "test_patterns": ["test_struct_ts"]
+      "test_patterns": ["test_validate_structts"]
     },
     "kmeans": {
       "display_name": "K-Means Clustering",

@@ -67,9 +67,7 @@
       ],
       "quantities": ["NullValues column and count (missing_y, missing_d_na, missing_x1)"],
       "tolerance": "exact",
-      "deviations": [
-        {"finding": "CAUS-92", "quantity": "effect and SE (IPW and the other estimators of this entry)", "note": "only the missing-value refusals are pinned in this entry; the IPW, AIPW, WeightIt and SBW estimates are pinned in validation/methods/causal_weighting.json (T3-WP23), CBPS in causal_cbps.json (T3-WP24)"}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

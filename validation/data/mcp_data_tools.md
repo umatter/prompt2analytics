@@ -66,3 +66,31 @@ cases of T3-WP50 (`validation/r/cases/data_munging_t3.R`) and T3-WP52
   `test_validate_mcp_residual_diagnostics_cooks` (rows exact, sigma 7 significant digits).
 - `viz_histogram_bins` (T3-WP52): 100 normal draws, 8 Sturges bins, counts 4 7 9 13 31 17 12 7. Test
   `test_validate_mcp_histogram_counts` (exact).
+
+## Timing (rule 5)
+
+Reference `825a4879` (the wave-3 base); the handler code of these tools is the same there as at
+`fe13b889` apart from the core changes to filling and value counts made earlier in Tier 3, which
+were timed with those changes. Release build, one P core, `RAYON_NUM_THREADS=1`, medians of
+interleaved rounds through `call_tool_with_session`.
+
+| Tool (cell) | n | after / before | Status |
+|---|---|---|---|
+| `describe_dataset`, 5 numeric + 3 text columns | 10,000 | 20.4 (lane, loaded); 23.8 (quiet re-time) | signed off 2026-10-30 at 20.4x; 23.8x accepted 2026-11-09 |
+| `munge_fill_na` mode, high-cardinality text | 1,000 / 10,000 | 1.03 / 1.26 (+0.08 ms) | covered by the 2026-11-09 acceptance of the mode strategy |
+| `munge_fill_na` mode, 12-level text | 10,000 | 1.10 | covered by the same acceptance |
+| `munge_fill_na` mean, 2 float columns | 100 / 1,000 / 10,000 | 0.99 / 1.02 / 1.00 | within 1.1x |
+| `munge_value_counts` normalize, 20-level text | 100 / 1,000 / 10,000 | 1.05 / 0.98 / 1.03 | within 1.1x |
+| `munge_value_counts` normalize, 50-level Int64 | 100 / 1,000 / 10,000 | 1.11 / 1.05 / 1.05 (minimum ratio 1.02 at 100) | within 1.1x |
+| `viz_dendrogram`, balanced linkage | 1,000 / 10,000 merges | 1.03 / 0.95 | within 1.1x |
+
+The baseline `describe_dataset` printed only dtypes and null counts and computed no statistics, so
+its ratio measures the summary statistics the tool now reports. On a 1e6 x 20 frame (16 numeric and
+4 text columns, 2% missing) one call takes 854-965 ms (median of two processes, three calls each)
+and adds about 7-8 MB of peak memory above the frame (the baseline added about 5 MB).
+
+The mode strategy of `munge_fill_na` is new: `fe13b889` filled the literal text "mode". Its cells
+are the counting the strategy exists to do; the high-cardinality cell counts distinct values with a
+hash map instead of sorting every level, and the 1.26x and 1.10x above are after that change
+(quiet re-time against `fe13b889`). The
+other rows are the lane's measurements on a loaded machine (load average 10-19).

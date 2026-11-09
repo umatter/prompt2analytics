@@ -58,7 +58,12 @@ The mediator model `lm(M ~ A + C)` is reported for description only (`Treatment 
   one arm) or gives a non-finite effect is dropped and counted in a warning naming the first
   error; fewer than 50 usable replicates is an error. Gaussian/difference replicates use the
   closed form `NDE = bA + bAM (alpha_0 + alpha_C' cbar)`, `NIE = alpha_A (bM + bAM)`, which equals
-  the imputation estimator (test `test_medflex_closed_form_matches_imputation`).
+  the imputation estimator (test `test_medflex_closed_form_matches_imputation`). With `A:M` on
+  the ratio and odds-ratio scales, each replicate fits the natural effect model as two n-row
+  fits on `[1, A1, C]` (`A0 = 0` and `A0 = 1`; exact for canonical links, test
+  `test_medflex_split_replicates_match_the_full_fit`), and falls back to the full 2n-row fit
+  when a half reports aliasing, non-convergence or a fit warning. Non-gaussian working and
+  natural effect fits start IRLS from the sample coefficients.
 
 ## Identification and degenerate inputs
 

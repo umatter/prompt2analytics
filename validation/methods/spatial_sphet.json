@@ -43,7 +43,7 @@
       "tolerance": "validation/README.md, n = 150: closed-form 2SLS coefficients 1e-8 and SEs 1e-6 relative; GM rho and everything after it Tol::iterative(1e-8) (exact R minimiser; Rust safeguarded Newton to a 1e-10 relative step); SE of rho 1e-6",
       "deviations": [
         {
-          "finding": "SPAT-8",
+          "finding": "SPAT-20",
           "quantity": "SE spatial HAC, variable bandwidth",
           "note": "The variable bandwidth takes W's neighbour sets as the distance object (each unit's farthest W-neighbour); sphet takes a separate sphet::distance object. The case writes out the p2a definition."
         },

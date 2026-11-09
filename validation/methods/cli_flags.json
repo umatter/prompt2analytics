@@ -39,9 +39,7 @@
       ],
       "quantities": ["coefficient tables (text and JSON)", "R2 and adjusted R2", "two-way CR1 SE, t, p and cluster counts", "step criterion, final variables, R2 and AIC", "quantreg coefficients equal p2a-core in process"],
       "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE and R2, 3 for t, 4 for p); -F json at validation/README.md, n = 200 (coefficients 1e-8, SE and statistics 1e-6 relative, p also 1e-12 absolute); counts exact; quantreg in-process Tol::new(1e-12, 1e-15)",
-      "deviations": [
-        {"finding": "REG-52", "quantity": "rq coefficients without intercept", "note": "p2a's IRLS quantile regression (tol 1e-6) is not the exact LP of rq(method = 'br'); R gives 0.1116253861993205 / 0.078613841312111174 (rq_coef). The CLI test checks that --intercept false reaches quantreg() (in-process equality); T3-WP10 implements Barrodale-Roberts and can pin rq_coef."}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -59,7 +57,6 @@
       "quantities": ["selected order", "AR coefficients (AIC, aic = FALSE order 20, fixed order 2)", "relative AIC vector", "series mean", "STL remainder and spectrum ordinates equal p2a-core in process for both flag values, and differ between them"],
       "tolerance": "validation/README.md, n = 120: coefficients and mean 1e-8, AIC 1e-6 relative; orders exact; STL and spectrum exact equality with the in-process call",
       "deviations": [
-        {"finding": "TS-15", "quantity": "var_pred", "note": "p2a's Yule-Walker prediction variance omits ar.yw's n / (n - (order + 1)): p2a 1.012860245443493 (order 2) and 0.9090641227233529 (order 20), R 1.0388310209676848 and 1.1018959063313365 (aic_var_pred, noaic_var_pred); not pinned."},
         {"finding": "TS-26", "quantity": "STL components", "note": "STL runs in f32 with p2a's default windows; R's stl needs s.window and differs; the test pins the CLI against run_stl in process."},
         {"finding": "STAT-68", "quantity": "periodogram ordinates", "note": "the raw periodogram is 2x spec.pgram's with a different taper; the test pins the CLI against run_spectrum in process."}
       ],

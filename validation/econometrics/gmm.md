@@ -391,6 +391,9 @@ Registered tests (`panel_gmm_system` in `validation/methods/econ_sysgmm.json`), 
   the x estimate and SE scaled by 1e-6 (to 1e-9), with full-rank weights;
 - `test_validate_sysgmm_rejects_max_lag_below_min_lag`: `max_lag` below `min_lag` is an
   error on the system path (X-7's repro, `max_lag` 0 or 1);
+  The four tests above compare no value with R (they use the case's data only) and are listed
+  as `registered-property` in `validation/tools/validate_property_tests.txt`, so they do not
+  count as R-pinned;
 - `econometrics::panel::utils::tests::test_validate_system_equations_balanced_layout`,
   `test_validate_system_equations_gaps_layout`: the stacked equations (counts, row kinds,
   times, the level rows' instruments read from the CSV digits).

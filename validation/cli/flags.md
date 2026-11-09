@@ -92,15 +92,17 @@ R-pinned (registry `validation/methods/cli_flags.json`, ids `cli_regression_flag
 
 ## Known Differences
 
-- **TS-15** (`var_pred` of `ts ar`): p2a's Yule-Walker prediction variance omits `ar.yw`'s
-  n/(n − (order + 1)) factor: 1.012860245443493 (order 2) and 0.9090641227233529 (order 20)
-  against R's 1.0388310209676848 and 1.1018959063313365. Not pinned.
+- `var_pred` of `ts ar` is not compared by these tests; the Yule-Walker prediction variance
+  (with `ar.yw`'s n/(n − (order + 1)) factor) is pinned by the core AR tests
+  ([ar.md](../timeseries/ar.md)).
 - **TS-26** (`ts stl`): STL runs in f32 with p2a's default windows; R's `stl` needs `s.window`
   and differs. The test compares the CLI with `run_stl` in process.
 - **STAT-68** (`ts spectrum`): the raw periodogram is twice `spec.pgram`'s, with a different
   taper. The test compares the CLI with `run_spectrum` in process.
-- **REG-52** (`reg quantreg`): p2a's quantile regression is not the exact LP of
-  `rq(method = "br")`; R's no-intercept coefficients are recorded (`rq_coef`), not pinned.
+- `reg quantreg --intercept false`: the test checks that the flag reaches `quantreg()` (equal
+  to the in-process call); the Barrodale-Roberts coefficients themselves are pinned by the core
+  tests ([quantreg.md](../regression/quantreg.md)). R's no-intercept coefficients (`rq_coef`)
+  are recorded in the case, not compared here.
 - `reg step --intercept false --direction forward` without `--required-vars` fails ("No
   independent variables specified"): p2a cannot fit the empty model y ~ 0 that R's `step`
   starts from.

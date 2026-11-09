@@ -116,3 +116,20 @@ In `econometrics::spatial::tests`:
   `test_spatial_ml_refuses_an_unbounded_search_interval`, `test_impacts_report_a_singular_multiplier`.
 
 The paper's Makefile filters do not select spatial tests.
+
+## MCP tools
+
+`sar_model` (SAR; `durbin: true` for the spatial Durbin model) and `sem_model` on `spatial_sim` with
+`{y, x: [x1, x2], weights: w4}` (k nearest neighbours, k = 4), case `spatial_sar_sdm_sem`. Keys
+`sar_rho`, `sar_beta`, `sar_se_obs`, `sar_impact_direct`, `sdm_rho`, `sdm_impact_direct`,
+`sdm_impact_indirect`, `sdm_impact_total`, `sem_lambda`, `sem_beta`, `sem_beta_se`, and the
+convergence line. Test: `test_validate_mcp_sar_sdm_sem`
+(`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`).
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.
+
+Not pinned through the MCP: the rho and lambda SEs (p2a reports the observed information at the MLE,
+spatialreg the expected information; registry deviation SPAT-4 in `spatial_ml_weights.json`), and the
+spatial probits (`sar_probit_model`, `sem_probit_model`: no R reference; they print impacts and the
+seed).

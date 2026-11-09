@@ -8,8 +8,8 @@ entities over T periods, stacked by period (`W_NT = I_T (x) W`):
 1. **`run_spml()`**, maximum likelihood (splm's `spml`):
    - within models with individual, time or two-way effects (y and X demeaned, then W
      applied to the demeaned data) and pooled models, each with a spatial lag
-     (`y = rho W y + X b + u`), a spatial error (`u = lambda W u + e`) or both (SARAR,
-     individual effects and pooled);
+     (`y = rho W y + X b + u`), a spatial error (`u = lambda W u + e`) or both (SARAR, with
+     every effect; only the individual-effects and pooled SARAR are R-pinned);
    - individual random effects, `u = iota_T (x) mu + eps`, `phi = sigma_mu^2 / sigma^2`,
      without spatial error, with Baltagi, Song and Koh's error (`b`: mu not spatially
      correlated) or with Kapoor, Kelejian and Prucha's (`kkp`: mu spatially correlated),
@@ -93,7 +93,7 @@ Jacobian of the analytic score. R 4.3.3.
 | Function | model / method | effect | lag | error | Notes |
 |---|---|---|---|---|---|
 | `run_spml` | within | individual | yes / no | none, b, kkp (identical) | SARAR with both |
-| `run_spml` | within | time, twoways | yes / no | none, b, kkp | |
+| `run_spml` | within | time, twoways | yes / no | none, b, kkp | SARAR with both: not R-pinned |
 | `run_spml` | pooling | individual only (E1) | yes / no | none, b, kkp | |
 | `run_spml` | random | individual only (E2) | yes / no | none, b, kkp | |
 | `run_spgm` | w2sls | individual (within) | yes | no | |
@@ -293,11 +293,25 @@ the same system by 200 Neumann iterations and reproduces it to about 1e-15.
    paths are sparse.
 5. No spatial Durbin specification.
 
-## MCP Tool Exposure
+## MCP tools
 
-Two tools exposed:
-- `spatial_panel_ml` - ML estimation via `run_spml()`
-- `spatial_panel_gmm` - GMM estimation via `run_spgm()`
+`spatial_panel_ml` and `spatial_panel_gmm` on `splm_sim`, case `splm_spml_spgm`. `spatial_panel_ml`:
+the default (spatial error `b`, individual effects), `{lag: true}` (SARAR), `{lag: true,
+spatial_error: none}` (the lag model) and `{model: RE}`; `spatial_panel_gmm`: the default,
+`{lag: true}`, `{lag: true, spatial_error: false}` and `{lag: true, method: g2sls}`. Keys
+`individual_error_coef`, `_se`, `_lambda`; `individual_lag_coef`, `_se`, `_rho`;
+`individual_sarar_rho`, `_lambda`, `_se`; `random_b_coef`, `_lambda`, `_phi`, `_sigma2_mu`;
+`gs2sls_coef`, `_se`, `_lambda`; `spgm_within_error_coef`, `_se`, `_rho`; `w2sls_coef`, `_se`.
+Tests: `test_validate_mcp_spatial_panel_ml_default_is_spatial`, `test_validate_mcp_spml`,
+`test_validate_mcp_spgm` (`crates/p2a-mcp/tests/tier3/wp57_ml_spatial.rs`). The ML pins compare
+the error model's coefficients, SEs, lambda and its SE; the SARAR rho, lambda and lambda's SE; the
+lag model's rho, its SE and the x1 coefficient; the random-effects coefficients, lambda, phi and
+sigma_mu. The other printed values (the SARAR coefficients and their SEs, the lag model's other
+coefficients and SEs, the random-effects SEs) are pinned by the core tests above, not through the
+MCP.
+MCP text is compared at print precision (`Tol::printed`: 6 decimals, z 4 decimals), JSON blocks at the
+[validation/README.md](../README.md) table for the case's n (`Tol::coef(n)`), labels exactly. Registry:
+`validation/methods/mcp_ml_spatial.json`.
 
 ## References
 

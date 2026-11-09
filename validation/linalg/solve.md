@@ -60,7 +60,8 @@ They are not ports for exactness: R is the test oracle and the default conventio
   `100 * dim * eps * min(kappa_1, cap)`: `kappa_1 = ||m||_1 ||X||_1` from the candidate (within a
   factor `dim` of `kappa_2(m)` for a correct one), capped by `||m||_1 max s_i^2 / min |lambda(E)|`,
   an upper bound on `kappa_2(m)` that a wrong candidate cannot raise; the eigen route if that
-  fails. (No second eigendecomposition for the exact condition of `m`.)
+  fails. On badly scaled indefinite input the cap can exceed `kappa_2(m)` by up to
+  `max s_i^2 / min s_i^2`, which widens the allowance for a candidate by the same factor. (No second eigendecomposition for the exact condition of `m`.)
 - **Certificate.** When Cholesky succeeds, `kappa_1(E) = ||E||_1 ||E^-1||_1` is computed in
   O(dim^2) from the inverse. For a symmetric matrix `kappa_2 <= kappa_1`, so
   `kappa_1 <= min(1e10, 0.1 / (SYM_RANK_TOL * dim))` proves full rank and "no warning" without any

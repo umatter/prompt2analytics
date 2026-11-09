@@ -51,16 +51,12 @@ model <- hurdle(y ~ x, data = data.frame(y, x), dist = "poisson", zero.dist = "b
 summary(model)
 ```
 
-**Results Comparison:**
+No R output of this example is committed, and no test compares with one: the zero part is
+R-pinned as a binomial glm on its own case (`validation/methods/discrete_t3.json`, see
+[count_models.md](count_models.md)); the truncated count part is not R-pinned (ECON-16, Tier 4).
 
-| Part | Variable | R Coef | Rust Coef | Tolerance | Status |
-|------|----------|--------|-----------|-----------|--------|
-| Binary | (Intercept) | ~0.5 | ~0.5 | ±0.3 | ✅ |
-| Binary | x | ~1.0 | ~1.0 | ±0.3 | ✅ |
-| Count | (Intercept) | ~0.8 | ~0.8 | ±0.3 | ✅ |
-| Count | x | ~0.5 | ~0.5 | ±0.3 | ✅ |
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
+**Rust tests** (the zero part is R-pinned as a binomial glm, `validation/methods/discrete_t3.json`; the
+truncated count part is not R-pinned: ECON-16, Tier 4):
 - `econometrics::discrete::tests::test_hurdle_poisson_basic` (`crates/p2a-core/src/econometrics/discrete/mod.rs`): n = 12, model type and the zero count; no `pscl::hurdle` value is compared.
 
 ### Test 2: Hurdle Negative Binomial - Overdispersed Data
@@ -86,17 +82,12 @@ summary(model_nb)
 model_nb$theta  # Dispersion parameter
 ```
 
-**Results Comparison:**
+No R output of this example is committed, and no test compares with one: the zero part is
+R-pinned as a binomial glm on its own case (`validation/methods/discrete_t3.json`, see
+[count_models.md](count_models.md)); the truncated count part is not R-pinned (ECON-16, Tier 4).
 
-| Part | Variable | R Coef | Rust Coef | Tolerance | Status |
-|------|----------|--------|-----------|-----------|--------|
-| Binary | (Intercept) | ~-0.3 | ~-0.3 | ±0.4 | ✅ |
-| Binary | x | ~0.8 | ~0.8 | ±0.3 | ✅ |
-| Count | (Intercept) | ~1.0 | ~1.0 | ±0.3 | ✅ |
-| Count | x | ~0.4 | ~0.4 | ±0.3 | ✅ |
-| - | theta | ~2.0 | ~2.0 | ±1.0 | ✅ |
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
+**Rust tests** (the zero part is R-pinned as a binomial glm, `validation/methods/discrete_t3.json`; the
+truncated count part is not R-pinned: ECON-16, Tier 4):
 - `econometrics::discrete::count_models::tests::test_hurdle_negbin` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): the model type and that a theta is returned.
 - `econometrics::discrete::count_models::tests::test_hurdle_negbin_structure_properties` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, theta > 0 and a finite log-likelihood; no `pscl::hurdle` value is compared.
 
@@ -106,7 +97,8 @@ model_nb$theta  # Dispersion parameter
 
 **Data:** Uses test dataset with y increasing with x.
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-81):
+**Rust tests** (the zero part is R-pinned as a binomial glm, `validation/methods/discrete_t3.json`; the
+truncated count part is not R-pinned: ECON-16, Tier 4):
 - `econometrics::discrete::count_models::tests::test_hurdle_poisson_structure_properties` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, no theta, the zero and positive counts, and finite log-likelihoods; no `pscl::hurdle` value is compared.
 
 ## Missing values

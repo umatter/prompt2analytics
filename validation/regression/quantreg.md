@@ -114,7 +114,9 @@ coefficients and SEs, the same iterations and the same warnings); `test_rq_ci_us
 8. **Standard errors that cannot be computed** (iid with fewer than h + pz + 1 observations, a
    singular density-weighted design, a ker bandwidth of 0 because at least half the residuals are
    tied) leave the fit in place with NaN SEs, t, p and intervals and a warning; R's `rq` succeeds
-   and `summary.rq` stops.
+   and `summary.rq` stops. One edge case is not covered yet: when the halved ker bandwidth makes
+   `tau - h` or `tau + h` exactly 0 or 1, the normal quantile refuses that probability and the
+   whole fit returns `InvalidSpecification` instead of NaN SEs.
 9. **Automatic method** (the default): the simplex for n <= 5000 and Frisch-Newton above,
    quantreg's own advice for large problems; R's `rq` default is the simplex at every n. On unique
    problems the two agree within `Tol::iterative(1e-6)`. The nonunique flag is reported by the
