@@ -59,8 +59,8 @@
       "quantities": [
         "counterfactual means (always, never) and their EIC standard errors",
         "ATE and its standard error",
-        "no-variation Q nodes per regime",
-        "positivity and rare-events warnings",
+        "no-variation Q nodes and re-solved targeting steps per regime",
+        "positivity warning (pooled and per regime) and rare-events warning",
         "followers by node and subjects below the lower g bound at the last node"
       ],
       "tolerance": "default tolerance (1e-8) against ltmle itself: the always mean, its SE, the ATE and its SE 1e-6 relative (ltmle fits at glm epsilon 1e-8; its slack measured on 30 regular data sets is 2.9e-9 on means and ATE); the never mean and SE (about 4e-11 and 5e-12, a clamped prediction's distance from 0) 1e-8 absolute; nodes, flags and counts exact",

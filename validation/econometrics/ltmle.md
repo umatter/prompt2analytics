@@ -53,8 +53,12 @@ Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-base
    score equation with glm.fit's deviance rule (CAUS-101); after it the node's EIC term
    `sum_i H_t,i (Q*_{t+1,i} - Q*_t,i)` is checked against ltmle's trigger of 1e-3 (absolute, on the
    fitted [0, 1] scale), and above it the score equation is re-solved with the offsets bounded to
-   `logit([lb, 1 - lb])`, lb in 1e-8, 1e-4, 1e-3, 0.01 in turn (`ltmle:::FixScoreEquation`), by a
-   bracketed monotone root search to `1e-12 * sum_i H_t,i` instead of ltmle's nlminb to 1e-4.
+   `logit([1e-8, 1 - 1e-8])` (`ltmle:::FixScoreEquation`'s first bound), by a bracketed monotone
+   root search to `1e-12 * sum_i H_t,i` instead of ltmle's nlminb to 1e-4. With responses neither
+   all at 0 nor all at 1 the score changes sign in the bracket, so this search always ends at a
+   root, or at a bracket at rounding, on that first bound; ltmle's later bounds (1e-4, 1e-3, 0.01),
+   which it tries when nlminb fails, are kept only for the search's iteration limit. With every
+   response at 0 (or 1) the score has no root and every follower is predicted at the link's clamp.
 6. **Estimate and EIC (`CalcIC`).** `psi = mean(Q*_1)`,
    `EIC = sum_t H_t (Q*_{t+1} - Q*_t) + Q*_1 - psi`.
 
@@ -196,7 +200,7 @@ expensive are the saturated ones, which keep glm.fit's start ("Wall-clock agains
 
 A regime with a handful of followers at the last node (10 or fewer of thousands) has a
 targeting step that drives the later Q* towards 0 or 1. Measured on the sweep's 2,160 data sets
-(the fast-path grid above) at tolerances 1e-8, 1e-9, 1e-10, 1e-12 and 1e-14, before (3a7bc841)
+(the fast-path grid above) at tolerances 1e-8, 1e-9, 1e-10, 1e-12 and 1e-14, before
 and after the two rules below, with `ltmle::ltmle` 1.3-0 (`SL.library = "glm"`, `stratify =
 FALSE`, `variance.method = "ic"`) run on the exported data sets as the oracle. Means on the
 probability scale:
@@ -287,12 +291,13 @@ those scores without a re-solve.
 - rare outcome: a 0/1 outcome with a mean below 0.03 (the same ltmle check);
 - each constant Q node, with its range and constant (ltmle's no-variation rule);
 - each re-solved targeting step, with the score it left and the offset bound;
-- Q*_1 within 1e-8 of 0 or 1 for more than 1% of the subjects; propensities numerically 0 or 1
-  (glm.fit's `10 * eps` threshold).
+- Q*_1 within 1e-8 of 0 or 1 for more than 1% of the subjects (logistic Q model only: a linear
+  Q* is on the outcome's own scale); propensities numerically 0 or 1 (glm.fit's `10 * eps`
+  threshold), named by the treatment columns.
 
 **Default tolerance.** It stays 1e-8, ltmle's glm epsilon. With the rules, 1e-10 changes no count
 in the table above beyond the quasi-separated five and does not remove them, and costs up to 1.15x
-on the T = 10 rows ("Wall-clock against fe13b889").
+on the T = 10 rows ("Saturating regimes: before and after").
 
 ## 4. Regimes and contrasts
 
@@ -461,7 +466,7 @@ regime's first (Q and g steps 4, 4, 6, 5, 33, 5). This is accepted.
 
 **Growth T = 10 costs about 5.5x on a saturating regime and about 1.46x otherwise; both are
 accepted.** (Measured at 811c26bb, before ltmle's no-variation rule; the saturating rows have
-since dropped to about a fifth, see "Saturating regimes: lane-local before and after" below.) The row's dataset has about 20 followers of each regime at the last node, and the
+since dropped to about a fifth, see "Saturating regimes: before and after" below.) The row's dataset has about 20 followers of each regime at the last node, and the
 always-treat fluctuation there reaches `eps = 29.2`. Every earlier Q response of that regime is then
 within about `exp(-29)` of 1, and each of those nine fits takes 30 IRLS steps in `fit_glm` as its
 linear predictor climbs to the clamp, where the other regime's take 2. Of six data seeds at
@@ -486,34 +491,31 @@ A fit with a row past the `|eta| = 15` bound pays for the lean fit and then `fit
 `fit_glm`'s numbers and warnings. No fit in the rows above leaves that way. The bound's cost on such
 designs is measured on IPW (`treatment_ipw.md`) and C-TMLE (`ctmle.md`).
 
-### Saturating regimes: lane-local before and after (T3-LTMLE-TOL)
+### Saturating regimes: before and after
 
-Medians in ms over five interleaved rounds of the same harness (`wp27` plus a row for the three
-saturating fixtures), one core, one rayon thread, `release`, load average 2.5 to 3.4; "before" is
-3a7bc841 (no Rust change since bf130c8f), "after" the lane head. fe13b889 ratios are the
-integration's to measure; the last column projects them as the ratio above times after/before
-times the cost of a tolerance of 1e-10.
+Medians in ms over five interleaved rounds of the same harness (the rows above plus the three
+saturating fixtures), one core, one rayon thread, `release`, load average 2.5 to 3.4. "Before" is
+the code without the no-variation rule and the score re-solve, "after" the code with them, both
+at the default tolerance of 1e-8; the last column is the cost of a tolerance of 1e-10 instead.
 
-| Row | n | before | after | after/before | after at 1e-10 / after | projected vs fe13b889 at 1e-10 |
-|---|---|---:|---:|---:|---:|---:|
-| bench | 100 / 1,000 / 10,000 | 0.092 / 0.748 / 7.31 | 0.090 / 0.739 / 7.41 | 0.98 / 0.99 / 1.01 | 1.02 / 1.04 / 1.07 | 0.39 / 0.42 / 0.45 |
-| linear Q | 100 / 1,000 / 10,000 | 0.050 / 0.365 / 3.67 | 0.049 / 0.375 / 3.67 | 0.98 / 1.03 / 1.00 | 1.00 / 0.99 / 1.01 | 0.71 / 0.72 / 0.75 |
-| binary Y | 100 | 0.285 | 0.105 | 0.37 | 1.07 | 0.73 |
-| binary Y | 1,000 / 10,000 | 0.831 / 8.09 | 0.830 / 8.14 | 1.00 / 1.01 | 1.01 / 1.03 | 0.67 / 0.69 |
-| growth T = 2 / 3 / 5 | 10,000 | 7.12 / 13.6 / 23.4 | 7.14 / 13.6 / 23.7 | 1.00 / 1.00 / 1.01 | 1.02 / 1.02 / 1.02 | 0.70 / 0.97 / 1.00 |
-| growth T = 10 (seed 42) | 10,000 | 260.8 | 56.0 | 0.21 | 1.08 | 1.25 |
-| T = 10, seed 3 (saturates) | 10,000 | 264.7 | 57.7 | 0.22 | 1.09 | 1.31 |
-| T = 10, seeds 1 / 2 / 5 / 7 | 10,000 | 67.2 / 68.4 / 68.0 / 67.5 | 67.5 / 68.6 / 68.0 / 68.3 | 1.00 / 1.00 / 1.00 / 1.01 | 1.09 / 1.07 / 1.13 / 1.15 | 1.59 / 1.57 / 1.67 / 1.68 |
-| `shifted_outcome((5000, 10, 4), 3, false, 2)` | 5,000 | 528.5 | 24.4 | 0.05 | 1.07 | |
-| `sparse_followers(2500, 8, 20)` | 2,500 | 38.4 | 9.9 | 0.26 | 1.07 | |
-| `sparse_followers(4000, 10, 3)` | 4,000 | 101.0 | 28.2 | 0.28 | 1.05 | |
+| Row | n | before | after | after/before | 1e-10 / 1e-8 |
+|---|---|---:|---:|---:|---:|
+| bench | 100 / 1,000 / 10,000 | 0.092 / 0.748 / 7.31 | 0.090 / 0.739 / 7.41 | 0.98 / 0.99 / 1.01 | 1.02 / 1.04 / 1.07 |
+| linear Q | 100 / 1,000 / 10,000 | 0.050 / 0.365 / 3.67 | 0.049 / 0.375 / 3.67 | 0.98 / 1.03 / 1.00 | 1.00 / 0.99 / 1.01 |
+| binary Y | 100 | 0.285 | 0.105 | 0.37 | 1.07 |
+| binary Y | 1,000 / 10,000 | 0.831 / 8.09 | 0.830 / 8.14 | 1.00 / 1.01 | 1.01 / 1.03 |
+| growth T = 2 / 3 / 5 | 10,000 | 7.12 / 13.6 / 23.4 | 7.14 / 13.6 / 23.7 | 1.00 / 1.00 / 1.01 | 1.02 / 1.02 / 1.02 |
+| growth T = 10 (seed 42, saturates) | 10,000 | 260.8 | 56.0 | 0.21 | 1.08 |
+| T = 10, seed 3 (saturates) | 10,000 | 264.7 | 57.7 | 0.22 | 1.09 |
+| T = 10, seeds 1 / 2 / 5 / 7 | 10,000 | 67.2 / 68.4 / 68.0 / 67.5 | 67.5 / 68.6 / 68.0 / 68.3 | 1.00 / 1.00 / 1.00 / 1.01 | 1.09 / 1.07 / 1.13 / 1.15 |
+| `shifted_outcome((5000, 10, 4), 3, false, 2)` | 5,000 | 528.5 | 24.4 | 0.05 | 1.07 |
+| `sparse_followers(2500, 8, 20)` | 2,500 | 38.4 | 9.9 | 0.26 | 1.07 |
+| `sparse_followers(4000, 10, 3)` | 4,000 | 101.0 | 28.2 | 0.28 | 1.05 |
 
 At the default tolerance no row is slower, and the saturating rows lose the IRLS runs of their
-constant nodes: the T = 10 saturating seeds now cost about 1.2x of fe13b889 instead of the
-signed-off 5.5x (projected; the ATEs of those rows are unchanged to six digits). Binary Y at
-n = 100 drops to 0.37x because its 33-step Q fit had a response without variation. A default of
-1e-10 would cost 1.07x to 1.15x on the T = 10 non-saturating seeds, projected 1.57x to 1.68x of
-fe13b889 against their signed-off 1.45x to 1.47x.
+constant nodes (the ATEs of the T = 10 saturating seeds are unchanged to six digits). Binary Y at
+n = 100 drops to 0.37x because its 33-step Q fit had a response without variation. A tolerance of
+1e-10 costs 1.02x to 1.15x, most on the T = 10 rows that do not saturate.
 
 ## 13. References
 
@@ -560,7 +562,9 @@ registered): `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_a
 `test_ltmle_fast_paths_report_a_saturated_regime_through_the_shared_glm`,
 `test_ltmle_fast_paths_hold_the_gaps_measured_off_the_fixtures`,
 `test_ltmle_linear_q_matches_after_the_row_predictions`, `test_ltmle_saturation_is_reported_and_warned`,
-`test_ltmle_no_saturation_on_regular_data`, `test_ltmle_rare_outcome_is_warned`,
+`test_ltmle_no_saturation_on_regular_data`,
+`test_ltmle_linear_q_outcome_off_unit_interval_is_not_saturation`,
+`test_ltmle_propensity_at_bound_warning_names_the_treatment`, `test_ltmle_rare_outcome_is_warned`,
 `test_ltmle_constant_q_response_is_not_regressed`, `test_ltmle_constant_outcome_is_refused`,
 `test_ltmle_saturating_fixtures_agree_with_ltmle` (values quoted from ltmle 1.3-0 on the exported
 fixtures), `test_ltmle_targeting_solves_the_score_at_every_node`,

@@ -712,7 +712,7 @@ pub struct LtmleSaturation {
     /// `logit([lb, 1 - lb])`, as ltmle's `FixScoreEquation`).
     pub resolved_targeting: Vec<Vec<(usize, f64)>>,
     /// Per regime: the share of subjects whose Q*_1 is within 1e-8 of 0 or 1 (on the fitted
-    /// [0, 1] scale).
+    /// [0, 1] scale of the logistic Q model; 0 with the linear Q model, whose Q* has no bounds).
     pub share_q_star_at_bound: Vec<f64>,
     /// 0-based nodes with a fitted propensity within `10 * f64::EPSILON` of 0 or 1 (glm.fit's
     /// "numerically 0 or 1" threshold).
@@ -1161,7 +1161,15 @@ fn run_ltmle_with(
         estimates.push(e);
         parts.push(part);
     }
-    let saturation = saturation_checks(y, &g, &estimates, parts, config.gbounds.0, &mut notes);
+    let saturation = saturation_checks(
+        y,
+        &g,
+        &estimates,
+        parts,
+        config.gbounds.0,
+        &data.treatment_names,
+        &mut notes,
+    );
 
     let n_treated_by_time = data
         .treatments
@@ -1248,6 +1256,7 @@ fn saturation_checks(
     estimates: &[RegimeEstimate],
     parts: Vec<RegimeSaturation>,
     g_lower: f64,
+    treatment_names: &[String],
     notes: &mut FitNotes,
 ) -> LtmleSaturation {
     let mut s = LtmleSaturation::default();
@@ -1299,7 +1308,7 @@ fn saturation_checks(
         let nodes: Vec<String> = s
             .g_at_bound_nodes
             .iter()
-            .map(|t| format!("A{}", t + 1))
+            .map(|t| treatment_names[*t].clone())
             .collect();
         notes.warnings.push(format!(
             "LTMLE: fitted propensities numerically 0 or 1 at {}",
@@ -1586,18 +1595,16 @@ fn outcome_scale(y: &Array1<f64>, q_model: LtmleQModel) -> EconResult<OutcomeSca
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
             (lo.min(v), hi.max(v))
         });
-    if q_model == LtmleQModel::Logistic && max <= min {
+    // Also refuses a NaN range (no ordering).
+    if q_model == LtmleQModel::Logistic
+        && max.partial_cmp(&min) != Some(std::cmp::Ordering::Greater)
+    {
         return Err(spec_err(format!(
             "LTMLE: the outcome is constant ({min}); nothing to estimate"
         )));
     }
     if q_model == LtmleQModel::Logistic && (min < 0.0 || max > 1.0) {
         let width = max - min;
-        if width.is_nan() || width <= 0.0 {
-            return Err(spec_err(format!(
-                "LTMLE: the outcome is constant ({min}); nothing to estimate"
-            )));
-        }
         return Ok(OutcomeScale {
             lower: min,
             upper: max,
@@ -2072,11 +2079,17 @@ fn estimate_regime(
         q_star[t] = qs;
     }
     let psi_s = q_next.mean().unwrap_or(f64::NAN);
-    let share_q_star_at_bound = q_next
-        .iter()
-        .filter(|q| **q < Q_STAR_AT_BOUND || **q > 1.0 - Q_STAR_AT_BOUND)
-        .count() as f64
-        / n as f64;
+    // Only the logistic Q model keeps Q* on a [0, 1] scale; a linear Q* is on the outcome's own
+    // scale, where 0 and 1 are not bounds.
+    let share_q_star_at_bound = if config.q_model == LtmleQModel::Logistic {
+        q_next
+            .iter()
+            .filter(|q| **q < Q_STAR_AT_BOUND || **q > 1.0 - Q_STAR_AT_BOUND)
+            .count() as f64
+            / n as f64
+    } else {
+        0.0
+    };
     for i in 0..n {
         ic[i] = (ic[i] + q_next[i] - psi_s) * scale.width;
     }
@@ -2266,11 +2279,17 @@ struct Resolved {
 
 /// Solves the targeting step's score equation `S(eps) = sum_i h_i (y_i - linkinv(o_i + eps)) = 0`
 /// directly, as ltmle's `FixScoreEquation` does when the fluctuation glm leaves the score above
-/// [`TARGETING_SCORE_MAX`]: the offsets are bounded to `logit([lb, 1 - lb])` for `lb` in
-/// [`OFFSET_BOUNDS`] in turn. `S` is non-increasing in eps, so this is a bracketed one-dimensional
-/// root search (bisection with Newton steps inside the bracket) to
-/// `|S| <= 1e-12 * sum_i h_i`, not a port of ltmle's nlminb on `S^2`, which stops at
-/// `|S| < 1e-4`. Rows with `h_i = 0` do not enter.
+/// [`TARGETING_SCORE_MAX`], with the offsets bounded to `logit([lb, 1 - lb])`. `S` is
+/// non-increasing in eps, so this is a bracketed one-dimensional root search (bisection with
+/// Newton steps inside the bracket) to `|S| <= 1e-12 * sum_i h_i`, not a port of ltmle's nlminb
+/// on `S^2`, which stops at `|S| < 1e-4`. Rows with `h_i = 0` do not enter.
+///
+/// With responses neither all at 1 nor all at 0, `S` changes sign inside the initial bracket, so
+/// the search ends at the first bound, `lb = 1e-8`: at a root, or at a bracket two adjacent
+/// doubles wide that `S` crosses 0 in, which counts as solved (a bracket at rounding without a
+/// sign change is reported with `finite_root` false). The later bounds of [`OFFSET_BOUNDS`]
+/// mirror the sequence ltmle tries when nlminb fails and are reached only if the iteration limit
+/// is hit; ltmle's result is the same, since its first bound also succeeds.
 fn resolve_fluctuation(
     y: ArrayView1<f64>,
     offset: ArrayView1<f64>,
@@ -2294,6 +2313,34 @@ fn resolve_fluctuation(
         ));
     }
     let target = RESOLVE_REL_SCORE * sum_h;
+    // S tends to sum h (y - 1) and sum h y at the two ends: with every response at 1 (or 0) it has
+    // no root, and every follower goes to linkinv's clamp. The limits do not depend on the
+    // offsets, so no bound would help.
+    let no_root = if rows.iter().all(|r| r[0] >= 1.0) {
+        Some(1.0)
+    } else if rows.iter().all(|r| r[0] <= 0.0) {
+        Some(-1.0)
+    } else {
+        None
+    };
+    if let Some(side) = no_root {
+        let (blo, bhi) = offset_bounds(OFFSET_BOUNDS[0]);
+        let (omin, omax) = rows
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), r| {
+                let o = r[1].max(blo).min(bhi);
+                (a.min(o), b.max(o))
+            });
+        return Ok(Resolved {
+            epsilon: if side > 0.0 {
+                LINK_CLAMP - omin
+            } else {
+                -LINK_CLAMP - omax
+            },
+            offset_bound: OFFSET_BOUNDS[0],
+            finite_root: false,
+        });
+    }
     for lb in OFFSET_BOUNDS {
         let (blo, bhi) = offset_bounds(lb);
         let off: Vec<f64> = rows.iter().map(|r| r[1].max(blo).min(bhi)).collect();
@@ -2314,16 +2361,6 @@ fn resolve_fluctuation(
             });
         // Beyond this bracket every follower is at linkinv's clamp, where S no longer changes.
         let (mut lo, mut hi) = (-LINK_CLAMP - omax, LINK_CLAMP - omin);
-        // S tends to sum h (y - 1) and sum h y at the two ends: with every response at 1 (or 0)
-        // it has no root, and every follower goes to the clamp. The limits do not depend on the
-        // offsets, so no other bound would help.
-        if rows.iter().all(|r| r[0] >= 1.0) || rows.iter().all(|r| r[0] <= 0.0) {
-            return Ok(Resolved {
-                epsilon: if rows[0][0] >= 1.0 { hi } else { lo },
-                offset_bound: lb,
-                finite_root: false,
-            });
-        }
         let mut eps = 0.0f64.max(lo).min(hi);
         for _ in 0..RESOLVE_MAX_ITER {
             resource::checkpoint()?;
@@ -2347,11 +2384,14 @@ fn resolve_fluctuation(
                 0.5 * (lo + hi)
             };
             if hi - lo <= 4.0 * f64::EPSILON * (1.0 + eps.abs()) {
-                // the bracket is at rounding: S steps across 0 between two adjacent doubles
+                // The bracket is at rounding. S steps across 0 between adjacent doubles when it is
+                // positive at lo and negative at hi, as at the initial ends with mixed responses;
+                // without that the search has run into linkinv's clamp, not a root.
+                let crossed = eval(lo).0 > 0.0 && eval(hi).0 < 0.0;
                 return Ok(Resolved {
                     epsilon: eps,
                     offset_bound: lb,
-                    finite_root: true,
+                    finite_root: crossed,
                 });
             }
         }
@@ -2360,7 +2400,9 @@ fn resolve_fluctuation(
     Err(EconError::ConvergenceFailure {
         iterations: RESOLVE_MAX_ITER,
         last_change: f64::NAN,
-        suggestion: "LTMLE: the targeting step's score equation was not solved".into(),
+        suggestion: "LTMLE's targeting step was not solved: raise the lower g bound (gbounds) or \
+                     check how many subjects follow the regime at each node"
+            .into(),
     })
 }
 
@@ -3145,6 +3187,64 @@ mod tests {
     }
 
     #[test]
+    fn test_ltmle_linear_q_outcome_off_unit_interval_is_not_saturation() {
+        // The linear Q model keeps Q* on the outcome's own scale (Yc runs from about -3 to 9),
+        // where 0 and 1 are not bounds.
+        let data = case_data(&sim(), "Yc", &["A1", "A2"], &[&["L0"], &["L1"]]);
+        let y = &data.outcomes[1];
+        assert!(y.iter().filter(|v| **v > 1.0 || **v < 0.0).count() > y.len() / 2);
+        let mut c = LtmleConfig::default();
+        c.q_model = LtmleQModel::Linear;
+        let r = run_ltmle(&data, c).unwrap();
+        assert!(!r.saturation.flagged(), "{:?}", r.saturation);
+        assert!(r.saturation.share_q_star_at_bound.iter().all(|q| *q == 0.0));
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("Q* is within")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(!r.to_string().contains("Saturation"), "{r}");
+    }
+
+    #[test]
+    fn test_ltmle_propensity_at_bound_warning_names_the_treatment() {
+        // A treatment separated by its own covariate: its g fit reaches 0 and 1. The warning names
+        // the user's column, not a positional A<t>.
+        let base = long_horizon(400, 3, 7);
+        let mut treatments = base.treatments.clone();
+        treatments[1] = base.covariates[1]
+            .column(0)
+            .mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
+        let names: Vec<String> = ["dose_a", "dose_b", "dose_c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let covariate_names: Vec<Vec<String>> = base
+            .covariates
+            .iter()
+            .enumerate()
+            .map(|(t, l)| (0..l.ncols()).map(|j| format!("L{t}_{j}")).collect())
+            .collect();
+        let data = LtmleData::new(base.outcomes.clone(), treatments, base.covariates.clone())
+            .unwrap()
+            .with_names(names, covariate_names)
+            .unwrap();
+        let r = ltmle(&data).unwrap();
+        assert!(
+            r.saturation.g_at_bound_nodes.contains(&1),
+            "{:?}",
+            r.saturation
+        );
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.starts_with("LTMLE: fitted propensities numerically 0 or 1 at"))
+            .unwrap_or_else(|| panic!("{:?}", r.warnings));
+        assert!(w.contains("dose_b"), "{w}");
+        assert!(!w.contains("A2"), "{w}");
+    }
+
+    #[test]
     fn test_ltmle_no_saturation_on_regular_data() {
         // ltmle 1.3-0 gives no positivity or rare-events warning on these two
         for data in [two_period(&sim()), long_horizon(600, 3, 5)] {
@@ -3759,7 +3859,11 @@ mod tests {
         let never = r.contrast_estimate.as_ref().unwrap();
         let constant = &r.saturation.constant_q_nodes[1];
         assert!(!constant.is_empty(), "{:?}", r.saturation);
-        assert!(!constant.contains(&9), "the last node is never constant");
+        assert!(
+            !constant.contains(&9),
+            "this fixture's 0/1 outcome is never constant at the last node (a constant one is \
+             refused)"
+        );
         for &t in constant {
             let m = &never.q_models[t];
             let response = q_response(never, &y, t);
@@ -3860,6 +3964,12 @@ mod tests {
                 .map(|t| f64::from(u8::from(nodes.contains(&t))))
                 .collect()
         };
+        let resolved_nodes = |k: usize| -> Vec<usize> {
+            r.saturation.resolved_targeting[k]
+                .iter()
+                .map(|(t, _)| *t)
+                .collect()
+        };
         Check::new(&case)
             .scalar("psi_always_sat", r.psi_treated, Tol::iterative(1e-6))
             .scalar("se_always_sat", r.psi_treated_se, Tol::iterative(1e-6))
@@ -3885,6 +3995,32 @@ mod tests {
             .scalar(
                 "rare_warning",
                 f64::from(u8::from(r.saturation.rare_outcome)),
+                Tol::exact(),
+            )
+            // ltmle's check on one regime alone: that regime's share above 0.01
+            .scalar(
+                "positivity_warning_always",
+                f64::from(u8::from(
+                    r.saturation.share_below_gbound[0] > POSITIVITY_SHARE,
+                )),
+                Tol::exact(),
+            )
+            .scalar(
+                "positivity_warning_never",
+                f64::from(u8::from(
+                    r.saturation.share_below_gbound[1] > POSITIVITY_SHARE,
+                )),
+                Tol::exact(),
+            )
+            // ltmle re-solves no score here; neither may p2a
+            .vector(
+                "resolved_always",
+                &indicator(&resolved_nodes(0)),
+                Tol::exact(),
+            )
+            .vector(
+                "resolved_never",
+                &indicator(&resolved_nodes(1)),
                 Tol::exact(),
             )
             .vector(
@@ -4040,8 +4176,26 @@ mod tests {
         )
         .unwrap();
         assert!(!r.finite_root && o1[..2].iter().all(|o| o + r.epsilon <= -30.0));
+        // every response at linkinv's own lower clamp: S is 0 only at the clamp, and the search
+        // stops at the first bound once |S| is within its target, before reaching it
+        let floor = linkinv(-40.0);
+        let yc = [floor, floor, floor];
+        let oc = [0.5, -2.0, 1.0];
+        let hc = [1.0, 2.0, 3.0];
+        let r = resolve_fluctuation(
+            ArrayView1::from(&yc[..]),
+            ArrayView1::from(&oc[..]),
+            ArrayView1::from(&hc[..]),
+        )
+        .unwrap();
+        assert!(r.offset_bound == OFFSET_BOUNDS[0], "{r:?}");
+        assert!(
+            score(&yc, &oc, &hc, 1e-8, r.epsilon).abs() <= 1e-12 * 6.0,
+            "{r:?}"
+        );
 
-        // offsets at +-1e3 are bounded in ltmle's order, and the first bound with a root is used
+        // offsets at +-1e3 are bounded to logit([1e-8, 1 - 1e-8]); with mixed responses S changes
+        // sign in the bracket, so the first bound always solves
         let yb = [0.6, 0.3, 0.8];
         let ob = [1e3, -1e3, 0.0];
         let hb = [2.0, 2.0, 1.0];
