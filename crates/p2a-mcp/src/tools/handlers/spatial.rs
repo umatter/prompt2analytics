@@ -718,7 +718,7 @@ impl AnalyticsServer {
 
     /// Run Spatial GMM with heteroscedasticity robustness (sphet).
     #[tool(
-        description = "Run a spatial regression by GMM, robust to heteroskedasticity of unknown form, as sphet::spreg(het = TRUE). Models: 'lag' (SAR by spatial two-stage least squares, instruments X, WX, W^2X, ...), 'error' (SEM, the Kelejian-Prucha 2010 GM estimator of the spatial error parameter) and 'sarar' (both). Standard errors: 'robust' (White, the default), 'hac' (the spatial HAC of Kelejian-Prucha 2007 on distances between the units: set coord_x and coord_y to the coordinate columns; kernel picks one of sphet's seven kernels, default epanechnikov; each unit's bandwidth is its largest distance to its neighbours in the weights, sphet's variable bandwidth) or 'standard'. Unlike ML estimation, GMM does not require normally distributed errors. Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
+        description = "Run a spatial regression by GMM, robust to heteroskedasticity of unknown form, after sphet::spreg(het = TRUE). Models: 'lag' (SAR by spatial two-stage least squares, instruments X, WX, W^2X, ...), 'error' (SEM, the Kelejian-Prucha 2010 GM estimator of the spatial error parameter) and 'sarar' (both). Standard errors: 'robust' (White, the default), 'hac' (the spatial HAC of Kelejian-Prucha 2007 on distances between the units: set coord_x and coord_y to the coordinate columns; kernel picks one of sphet's seven kernels, default epanechnikov; each unit's bandwidth is its largest distance to its neighbours in the weights, sphet's variable bandwidth) or 'standard'. Unlike ML estimation, GMM does not require normally distributed errors. Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Differences from sphet: rho is the identity-weighted GM estimate (one GM step, not sphet's efficient step 2b), het = false (not exposed here: this tool always sets het = true) uses the Kelejian-Prucha (1999) three moments, and rho is searched in [-0.99, 0.99] (sphet: (-0.9, 0.9))."
     )]
     pub async fn sphet_model(
         &self,
@@ -1252,6 +1252,12 @@ mod tests {
     use crate::tools::limits::{self, Limits};
     use p2a_validation::{Tol, text::labelled};
     use polars::prelude::*;
+
+    /// The neighbour-method table has no spelling listed twice (the first would win).
+    #[test]
+    fn test_neighbor_method_table_validates() {
+        assert_eq!(NEIGHBOR_METHOD.validate(), Ok(()));
+    }
 
     /// A current-thread runtime: `limits::with_limits` is thread-local.
     fn runtime() -> tokio::runtime::Runtime {

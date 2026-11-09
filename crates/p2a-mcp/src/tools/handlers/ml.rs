@@ -222,6 +222,12 @@ fn required_then(required: &str, (left, cheapest): (String, u64)) -> EnsembleTie
     EnsembleTier { advice, cheapest }
 }
 
+/// Appended to a causal-forest refusal's advice that offers `max_depth`: the core's
+/// `max_depth` caps the causal trees only, so lowering it leaves the nuisance forests' part
+/// of the bound where it is.
+const MAX_DEPTH_SCOPE: &str =
+    "; max_depth caps only the causal trees, not the Y.hat/W.hat nuisance forests";
+
 /// What a refused `ml_causal_forest` request could change instead of its rows ([`Knob`]s:
 /// fewer or shallower trees and larger leaves, each listed only when it lowers the bound from
 /// the request's settings). Turning honest splitting off makes both of a tree's parts the
@@ -241,12 +247,16 @@ fn forest_change(
         }),
     ];
     let changes = |base: &CausalForestConfig| {
-        least_changes(
+        let (mut advice, cheapest) = least_changes(
             base,
             n_rows,
             |c: &CausalForestConfig| c.memory_bound(n_rows, n_covariates),
             &knobs,
-        )
+        );
+        if advice.contains("max_depth") {
+            advice.push_str(MAX_DEPTH_SCOPE);
+        }
+        (advice, cheapest)
     };
     let mut tiers = Vec::new();
     let (advice, cheapest) = changes(config);
@@ -387,7 +397,7 @@ impl AnalyticsServer {
         if let Some(name) = &request.output_column {
             let series = Series::new(name.as_str().into(), one_based.clone());
             match self
-                .write_output_columns(&request.dataset, n, vec![series])
+                .write_output_columns(&request.dataset, &dataset, &inputs, vec![series])
                 .await
             {
                 Ok(replaced) => text.push_str(&wrote_lines(
@@ -531,7 +541,7 @@ impl AnalyticsServer {
         if let Some(name) = &request.output_column {
             let series = Series::new(name.as_str().into(), one_based.clone());
             match self
-                .write_output_columns(&request.dataset, n, vec![series])
+                .write_output_columns(&request.dataset, &dataset, &inputs, vec![series])
                 .await
             {
                 Ok(replaced) => text.push_str(&wrote_lines(
@@ -646,6 +656,17 @@ impl AnalyticsServer {
             Ok(d) => d,
             Err(e) => return Ok(ml_error("", e)),
         };
+        // The generated names depend only on the request and the matrix's shape (the core's
+        // rule: n_components, else min(n, p); a larger value is refused by the core), so a
+        // collision with an input column is refused before the fit.
+        if let Some(prefix) = &request.output_column {
+            let most = data.nrows().min(data.ncols());
+            let m = request.n_components.unwrap_or(most).min(most);
+            let names: Vec<String> = (1..=m).map(|j| format!("{prefix}{j}")).collect();
+            if let Err(e) = check_output_names(&names, &inputs) {
+                return error_text(e);
+            }
+        }
 
         let result = match pca(
             data.view(),
@@ -658,6 +679,7 @@ impl AnalyticsServer {
             }
         };
         let m = result.n_components;
+        // A safety net: the names were checked before the fit from the same rule.
         let out_names: Vec<String> = match &request.output_column {
             Some(prefix) => (1..=m).map(|j| format!("{prefix}{j}")).collect(),
             None => Vec::new(),
@@ -674,7 +696,10 @@ impl AnalyticsServer {
                 .enumerate()
                 .map(|(j, name)| Series::new(name.as_str().into(), scores.column(j).to_vec()))
                 .collect();
-            match self.write_output_columns(&request.dataset, n, series).await {
+            match self
+                .write_output_columns(&request.dataset, &dataset, &inputs, series)
+                .await
+            {
                 Ok(replaced) => text.push_str(&wrote_lines(
                     &out_names,
                     &replaced,
@@ -716,7 +741,7 @@ impl AnalyticsServer {
 
     /// Run t-SNE dimensionality reduction.
     #[tool(
-        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization. Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed."
+        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization. Returns the final KL divergence and the first 5 embedded points (no per-row output). Seed: seed, else set_seed, else 42."
     )]
     pub async fn ml_tsne(
         &self,
@@ -863,7 +888,7 @@ impl AnalyticsServer {
         if let Some(name) = &request.output_column {
             let series = Series::new(name.as_str().into(), result.predictions.clone());
             match self
-                .write_output_columns(&request.dataset, n, vec![series])
+                .write_output_columns(&request.dataset, &dataset, &inputs, vec![series])
                 .await
             {
                 Ok(replaced) => text.push_str(&wrote_lines(
@@ -958,7 +983,7 @@ impl AnalyticsServer {
         if let Some(name) = &request.output_column {
             let series = Series::new(name.as_str().into(), per_row.clone());
             match self
-                .write_output_columns(&request.dataset, n_rows, vec![series])
+                .write_output_columns(&request.dataset, &dataset, &inputs, vec![series])
                 .await
             {
                 Ok(replaced) => out.push_str(&wrote_lines(
@@ -1174,7 +1199,7 @@ impl AnalyticsServer {
 
     /// Run Causal Forest for heterogeneous treatment effects (Wager & Athey 2018).
     #[tool(
-        description = "Causal forest as grf::causal_forest: local centering (out-of-bag Y.hat and W.hat regression forests), honest trees with grf's gradient splits, out-of-bag CATEs with little-bags variance estimates, and the AIPW average treatment effect with SE sd(scores)/sqrt(n). Returns the ATE with its CI, CATE summaries, variable importance (split frequency) and oob_error, the out-of-bag R-loss."
+        description = "Causal forest as grf::causal_forest: local centering (out-of-bag Y.hat and W.hat regression forests), honest trees with grf's gradient splits, out-of-bag CATEs with little-bags variance estimates, and the AIPW average treatment effect with SE sd(scores)/sqrt(n). Returns the ATE with its CI, CATE summaries, variable importance (split frequency) and oob_error, the out-of-bag R-loss. The default mtry is ceil(sqrt(p)), the mean of the Poisson number of candidate covariates per split (grf: min(ceil(sqrt(p) + 20), p))."
     )]
     pub async fn ml_causal_forest(
         &self,
@@ -2030,7 +2055,9 @@ impl AnalyticsServer {
         config.min_samples_split = request.min_samples_split.unwrap_or(5);
         config.cv_folds = request.cv_folds;
         config.center = request.center.unwrap_or(true);
-        config.seed = self.seed_or_global(request.seed).await;
+        // Seeded here, as ml_kmeans is, so the seed reported is the one the fit used.
+        let seed = self.seed_for(request.seed).await;
+        config.seed = Some(seed);
 
         // Convert column names to &str
         let x_cols: Vec<&str> = request.x_cols.iter().map(|s| s.as_str()).collect();
@@ -2057,8 +2084,8 @@ impl AnalyticsServer {
             "selected_variables": result.selected_variables,
             "selection_frequency": result.selection_frequency,
             "cv_optimal_mstop": result.cv_optimal_mstop,
-            // The CV fold seed the core used (its default when no seed reached it).
-            "seed": result.config.seed.unwrap_or(42),
+            // The CV fold seed the fit used.
+            "seed": seed,
             "feature_names": result.feature_names,
             "loss_history_summary": {
                 "initial": result.loss_history.first(),
@@ -2238,15 +2265,21 @@ impl AnalyticsServer {
         self.datasets.read().await.get(name).cloned()
     }
 
-    /// Writes `columns` into dataset `dataset` under a short write lock. Refuses a dataset that
-    /// is gone or whose height is no longer `n_rows` (it changed while the tool ran). Returns
+    /// Writes `columns` into dataset `dataset` under a short write lock. `snapshot` is the
+    /// dataset the tool read and `inputs` the columns it read from it. Refuses a dataset that
+    /// is gone, whose height is no longer the snapshot's, or in which an input column is
+    /// missing or no longer equal to the snapshot's (missing values compared as equal): a
+    /// concurrent call in the same session replaced, sorted or filtered it while the tool
+    /// ran, and the new column would not line up with the rows it was computed from. Returns
     /// the names that replaced an existing column.
     pub(crate) async fn write_output_columns(
         &self,
         dataset: &str,
-        n_rows: usize,
+        snapshot: &Dataset,
+        inputs: &[&str],
         columns: Vec<Series>,
     ) -> Result<Vec<String>, String> {
+        let n_rows = snapshot.nrows();
         let mut map = self.datasets.write().await;
         let current = map
             .get(dataset)
@@ -2257,6 +2290,19 @@ impl AnalyticsServer {
                  {n_rows}); the column was not written. Run the tool again.",
                 current.nrows()
             ));
+        }
+        for &name in inputs {
+            let unchanged = match (current.df().column(name), snapshot.df().column(name)) {
+                (Ok(now), Ok(then)) => now.equals_missing(then),
+                _ => false,
+            };
+            if !unchanged {
+                return Err(format!(
+                    "Dataset '{dataset}' changed while the tool ran (column '{name}' is no \
+                     longer the one the fit used); the column was not written. Run the tool \
+                     again."
+                ));
+            }
         }
         let mut updated = current.clone();
         let mut replaced = Vec::new();
@@ -2296,6 +2342,31 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The handler's own option tables have no spelling listed twice (the first would win);
+    /// spatial.rs checks its NEIGHBOR_METHOD table the same way.
+    #[test]
+    fn test_local_option_tables_validate() {
+        assert_eq!(HETTX_STAT.validate(), Ok(()));
+        assert_eq!(HETTX_EFFECT.validate(), Ok(()));
+    }
+
+    /// A causal-forest refusal that offers max_depth says it caps only the causal trees.
+    #[test]
+    fn test_forest_change_scopes_max_depth() {
+        let c = run_causal_forest_config(Some(2_000), Some(1), Some(true), Some(100), None);
+        let change = forest_change(&c, 400_000, 8);
+        let with_depth: Vec<&str> = change
+            .tiers
+            .iter()
+            .map(|t| t.advice.as_str())
+            .filter(|a| a.contains("max_depth"))
+            .collect();
+        assert!(!with_depth.is_empty(), "{:?}", change.tiers);
+        for a in with_depth {
+            assert!(a.contains(MAX_DEPTH_SCOPE), "{a}");
+        }
     }
 
     #[test]
@@ -2363,14 +2434,14 @@ mod tests {
             (Some(7), Some(3), 7)
         );
         assert!(s.global_seed.try_write().is_ok(), "no read guard is kept");
-        s.datasets.write().await.insert(
-            "d".into(),
-            Dataset::new(df!("a" => [1.1, 2.0, 2.9], "old" => [0i64, 0, 0]).unwrap()),
-        );
+        let snap =
+            Dataset::new(df!("a" => [Some(1.1), None, Some(2.9)], "old" => [0i64, 0, 0]).unwrap());
+        s.datasets.write().await.insert("d".into(), snap.clone());
         let replaced = s
             .write_output_columns(
                 "d",
-                3,
+                &snap,
+                &["a"],
                 vec![
                     Series::new("cl".into(), vec![1i64, 2, 1]),
                     Series::new("old".into(), vec![5i64, 6, 7]),
@@ -2391,14 +2462,61 @@ mod tests {
         };
         assert_eq!(ints("cl"), vec![Some(1), Some(2), Some(1)]);
         assert_eq!(ints("old"), vec![Some(5), Some(6), Some(7)]);
+        // a different height
+        let taller = Dataset::new(df!("a" => [1.1, 2.0, 2.9, 4.2]).unwrap());
         assert!(
-            s.write_output_columns("d", 4, vec![Series::new("x".into(), vec![1i64; 4])])
-                .await
-                .unwrap_err()
-                .contains("changed while the tool ran")
+            s.write_output_columns(
+                "d",
+                &taller,
+                &["a"],
+                vec![Series::new("x".into(), vec![1i64; 4])]
+            )
+            .await
+            .unwrap_err()
+            .contains("changed while the tool ran")
+        );
+        // the same height, the input column reordered by a concurrent call
+        s.datasets.write().await.insert(
+            "d".into(),
+            Dataset::new(df!("a" => [Some(2.9), None, Some(1.1)], "old" => [0i64, 0, 0]).unwrap()),
+        );
+        let err = s
+            .write_output_columns(
+                "d",
+                &snap,
+                &["a"],
+                vec![Series::new("x".into(), vec![1i64; 3])],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("column 'a' is no longer"), "{err}");
+        assert!(s.datasets.read().await["d"].df().column("x").is_err());
+        // the input column dropped
+        s.datasets.write().await.insert(
+            "d".into(),
+            Dataset::new(df!("b" => [1.1, 2.0, 2.9]).unwrap()),
         );
         assert!(
-            s.write_output_columns("gone", 3, vec![])
+            s.write_output_columns("d", &snap, &["a"], vec![])
+                .await
+                .unwrap_err()
+                .contains("column 'a' is no longer")
+        );
+        // NaN in an input compares equal to itself
+        let nan = Dataset::new(df!("a" => [1.1, f64::NAN, 2.9]).unwrap());
+        s.datasets.write().await.insert("d".into(), nan.clone());
+        assert!(
+            s.write_output_columns(
+                "d",
+                &nan,
+                &["a"],
+                vec![Series::new("x".into(), vec![1i64; 3])]
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            s.write_output_columns("gone", &snap, &[], vec![])
                 .await
                 .unwrap_err()
                 .contains("not found")
@@ -2696,8 +2814,9 @@ mod tests {
         );
         let (f, b) = (refusal_on(&f, rows), refusal_on(&b, rows));
         assert!(
-            f.ends_with("or lower n_trees or max_depth, or raise min_node_size.")
-                && !f.contains("honesty = false"),
+            f.ends_with(&format!(
+                "or lower n_trees or max_depth, or raise min_node_size{MAX_DEPTH_SCOPE}."
+            )) && !f.contains("honesty = false"),
             "{f}"
         );
         assert!(

@@ -1235,6 +1235,53 @@ async fn test_mcp_sphet_hac_field_rules() {
     )
     .await);
     assert!(t.contains("parzen kernel"), "{t}");
+    // The description states the core's differences from sphet (WP33-8).
+    let d = tool_description("sphet_model");
+    assert!(d.contains("efficient step"), "{d}");
+    assert!(d.contains("after sphet::spreg(het = TRUE)"), "{d}");
+    assert!(d.contains("[-0.99, 0.99]"), "{d}");
+}
+
+/// A PCA prefix whose generated names include an input column is refused before the fit:
+/// on one row the fit itself would fail, so the refusal seen is the name check's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mcp_pca_prefix_collision_refused_before_fit() {
+    let (s, server) = session_with_datasets(vec![(
+        "one",
+        dataset(df!("PC1" => [1.3], "b" => [0.7]).unwrap()),
+    )]);
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_pca",
+        json!({"dataset": "one", "columns": ["PC1", "b"], "output_column": "PC"}),
+    )
+    .await);
+    assert!(
+        e.contains("output_column 'PC1' is a column this call reads"),
+        "{e}"
+    );
+    // n_components larger than min(n, p) still checks the names min(n, p) would give
+    let e = err(&call(
+        &server,
+        &s,
+        "ml_pca",
+        json!({"dataset": "one", "columns": ["b", "PC1"], "n_components": 5, "output_column": "PC"}),
+    )
+    .await);
+    assert!(e.contains("output_column 'PC1'"), "{e}");
+}
+
+/// Descriptions agree with the fields and the core: t-SNE's seed fallback, the
+/// causal forest's default mtry.
+#[test]
+fn test_mcp_ml_descriptions_state_defaults() {
+    let d = tool_description("ml_tsne");
+    assert!(d.ends_with("Seed: seed, else set_seed, else 42."), "{d}");
+    assert!(field_description("ml_tsne", "seed").contains("42"));
+    let d = tool_description("ml_causal_forest");
+    assert!(d.contains("ceil(sqrt(p))"), "{d}");
+    assert!(d.contains("min(ceil(sqrt(p) + 20), p)"), "{d}");
 }
 
 // ----------------------------------------------------------------------------
