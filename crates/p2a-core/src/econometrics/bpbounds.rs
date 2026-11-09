@@ -56,6 +56,11 @@
 //! The Wald SE is the delta method with the within-arm covariance of P(Y=1|Z=z) and
 //! P(D=1|Z=z) (equal to 2SLS with HC0 on the expanded data).
 //!
+//! Both paths, with and without monotonicity, test Pearl's instrumental inequality: for each
+//! `d`, the result warns when `sum_y max_z P(Y = y, D = d | Z = z) > 1` ("the instrumental
+//! inequality fails ..."). The test is made directly, not inferred from the bounds, which need
+//! not cross when it fails.
+//!
 //! # References
 //!
 //! - Balke, A., & Pearl, J. (1997). Bounds on treatment effects from studies with

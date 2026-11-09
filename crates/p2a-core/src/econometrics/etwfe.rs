@@ -1687,7 +1687,10 @@ fn unidentified_cells(spec: &Spec, design: &Design, cols: &[usize]) -> Option<Ec
 /// column-order Cholesky of the Gram finds collinear ([`gram_aliased`]) are removed and the
 /// reduced normal equations decide again; the pivoted QR on the dense within-transformed
 /// design is the last resort (a cell that is not identified, or a Gram that stays
-/// ill-conditioned without collinear controls).
+/// ill-conditioned without collinear controls). The two paths drop collinear controls at
+/// different levels: the Gram path when a column's relative within residual norm is below
+/// 1e-5 (`GRAM_COLLIN_TOL` = 1e-10 on the squared pivot), the QR fallback below lm.fit's 1e-7,
+/// so a control between the two is removed on the first and kept on the second.
 fn fit_design(
     spec: &Spec,
     design: &Design,

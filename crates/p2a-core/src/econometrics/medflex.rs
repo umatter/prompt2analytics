@@ -1660,7 +1660,6 @@ fn robust_se(inp: &Inputs, est: &Estimate, plan: &Plan) -> EconResult<[f64; 3]> 
     }))
 }
 
-/// The reported mediator model `M ~ A + C` (least squares, R's column order; descriptive).
 // ============================================================================
 // Bootstrap
 // ============================================================================

@@ -31,8 +31,9 @@
 //! the treatment effect unidentified and is an error.
 //!
 //! Standard errors: the bootstrap (percentile intervals with R's type-7 quantiles) is the
-//! reference (each replicate refits coefficients only; see `fit_replicate`); the delta-method and sandwich SEs are approximations on the treatment
-//! coefficient (CAUS-39, Tier 4), not stdReg's stacked estimating equations.
+//! reference (each replicate refits coefficients only; see `fit_replicate`); the delta-method
+//! and sandwich SEs are approximations on the treatment coefficient (CAUS-39, Tier 4), not
+//! stdReg's stacked estimating equations.
 //!
 //! # Estimands
 //!

@@ -92,8 +92,8 @@ fn rank_key(v: f64) -> u64 {
 /// and `sizes` is [`midranks()`]'s second vector. The ranks are never stored: the values are
 /// sorted with their group (on an integer key with `total_cmp`'s order) and each tie run adds
 /// its midrank to its members' groups. Midranks are multiples of 1/2, so every partial sum is
-/// exact below 2^52 and the sums equal those of [`midranks()`] bit for bit, whatever the order
-/// of addition. NaN is refused as in [`midranks()`]; a group index of `n_groups` or more is
+/// exact below 2^52 (all ranks sum to n (n + 1) / 2, so n below about 9.5e7) and the sums equal
+/// those of [`midranks()`] bit for bit, whatever the order of addition. NaN is refused as in [`midranks()`]; a group index of `n_groups` or more is
 /// `InvalidSpecification`.
 pub(crate) fn rank_sums_by_group(
     x: &[f64],

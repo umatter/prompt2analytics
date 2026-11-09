@@ -2128,6 +2128,11 @@ pub fn fit_propensity(
 /// Two forms are common: the clever covariate `H` as the single column with no
 /// intercept (`glm(y ~ -1 + H, offset, quasibinomial)`), or a column of ones with the
 /// clever covariate as weights (`glm(y ~ 1, offset, weights = H, quasibinomial)`).
+///
+/// This builds and fits a full GLM. `ltmle` does not call it for its intercept-only form: it
+/// solves the same score equation with a scalar Newton iteration in O(n) per step, with
+/// glm.fit's stopping rule (`validation/econometrics/ltmle.md`, section 10, item 4); an
+/// intercept-only fast path here would let it share this helper.
 pub fn fit_logistic_fluctuation<'a>(
     y: ArrayView1<f64>,
     offset: ArrayView1<'a, f64>,
