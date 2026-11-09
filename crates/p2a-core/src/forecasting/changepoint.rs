@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
+use crate::options::Choices;
 
 /// Result of changepoint detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,32 @@ pub enum CostFunction {
     /// Changes in both mean and variance (`cpt.meanvar`)
     MeanAndVariance,
 }
+
+// The accepted spellings (changepoint's cpt.mean / cpt.var / cpt.meanvar); the first of each entry is canonical.
+crate::option_enum!(
+    CostFunction,
+    Choices {
+        option: "change_type",
+        values: &[
+            (&["mean", "cpt.mean"], CostFunction::MeanChange),
+            (
+                &["variance", "var", "cpt.var"],
+                CostFunction::VarianceChange
+            ),
+            (
+                &[
+                    "meanvar",
+                    "both",
+                    "mean_and_variance",
+                    "mean_var",
+                    "cpt.meanvar"
+                ],
+                CostFunction::MeanAndVariance,
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Detect changepoints in a time series using the PELT algorithm.
 ///
@@ -603,6 +630,32 @@ pub fn run_binary_segmentation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cost_function_parses_aliases_and_rejects_unknown() {
+        CostFunction::choices().validate().unwrap();
+        assert_eq!(
+            "Cpt.Var".parse::<CostFunction>().unwrap(),
+            CostFunction::VarianceChange
+        );
+        assert_eq!(
+            "both".parse::<CostFunction>().unwrap(),
+            CostFunction::MeanAndVariance
+        );
+        assert_eq!(
+            "mean-var".parse::<CostFunction>().unwrap(),
+            CostFunction::MeanAndVariance
+        );
+        match "trend".parse::<CostFunction>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown change_type 'trend'; expected one of: mean, variance, meanvar"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     use p2a_validation::{Check, Tol};
 

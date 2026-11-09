@@ -94,43 +94,6 @@ macro_rules! tool_try {
     };
 }
 
-/// twang's stopping rules (`stop.method`).
-static STOP_METHOD: Choices<StopMethod> = Choices {
-    option: "stop_method",
-    values: &[
-        (&["es.mean", "esmean"], StopMethod::ESMean),
-        (&["es.max", "esmax"], StopMethod::ESMax),
-        (&["ks.mean", "ksmean"], StopMethod::KSMean),
-        (&["ks.max", "ksmax"], StopMethod::KSMax),
-    ],
-};
-
-/// twang's estimands.
-static TWANG_ESTIMAND: Choices<TwangEstimand> = Choices {
-    option: "estimand",
-    values: &[
-        (&["att"], TwangEstimand::ATT),
-        (&["ate"], TwangEstimand::ATE),
-        (&["atc"], TwangEstimand::ATC),
-    ],
-};
-
-/// rd_multi's pooling weights across cutoffs.
-static POOLING_WEIGHTS: Choices<PoolingWeights> = Choices {
-    option: "pooling_weights",
-    values: &[
-        (
-            &["sample_size", "samplesize", "n"],
-            PoolingWeights::SampleSize,
-        ),
-        (
-            &["inverse_variance", "iv", "precision"],
-            PoolingWeights::InverseVariance,
-        ),
-        (&["equal", "uniform"], PoolingWeights::Equal),
-    ],
-};
-
 /// The models marginal_effects fits.
 static MARGINAL_MODEL: Choices<MarginalModel> = Choices {
     option: "model",
@@ -1135,13 +1098,11 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<TwangRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let stop_method = tool_try!(parse_choice(
-            &STOP_METHOD,
+        let stop_method = tool_try!(parse_option(
             request.stop_method.as_deref(),
             StopMethod::ESMean
         ));
-        let estimand = tool_try!(parse_choice(
-            &TWANG_ESTIMAND,
+        let estimand = tool_try!(parse_option(
             request.estimand.as_deref(),
             TwangEstimand::ATT
         ));
@@ -2354,8 +2315,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let pooling_weights = tool_try!(parse_choice(
-            &POOLING_WEIGHTS,
+        let pooling_weights = tool_try!(parse_option(
             request.pooling_weights.as_deref(),
             PoolingWeights::SampleSize
         ));
@@ -3469,23 +3429,16 @@ mod tests {
 
     #[test]
     fn test_local_option_tables_parse_aliases_and_reject_unknown() {
-        STOP_METHOD.validate().unwrap();
-        TWANG_ESTIMAND.validate().unwrap();
-        POOLING_WEIGHTS.validate().unwrap();
         MARGINAL_MODEL.validate().unwrap();
         EFFECT_MEASURE.validate().unwrap();
         LTMLE_CONTRAST.validate().unwrap();
-        assert_eq!(STOP_METHOD.parse("ES.Mean").unwrap(), StopMethod::ESMean);
-        assert_eq!(STOP_METHOD.parse("ksmax").unwrap(), StopMethod::KSMax);
-        assert_eq!(STOP_METHOD.parse("es-max").unwrap(), StopMethod::ESMax);
-        assert_eq!(TWANG_ESTIMAND.parse("ATT").unwrap(), TwangEstimand::ATT);
         assert_eq!(
-            POOLING_WEIGHTS.parse("iv").unwrap(),
-            PoolingWeights::InverseVariance
+            parse_option(Some("ES.Mean"), StopMethod::KSMax),
+            Ok(StopMethod::ESMean)
         );
         assert_eq!(
-            POOLING_WEIGHTS.parse("Sample Size").unwrap(),
-            PoolingWeights::SampleSize
+            parse_option(Some("iv"), PoolingWeights::SampleSize),
+            Ok(PoolingWeights::InverseVariance)
         );
         assert_eq!(
             MARGINAL_MODEL.parse("logistic").unwrap(),

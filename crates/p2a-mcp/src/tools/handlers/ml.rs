@@ -1401,16 +1401,12 @@ impl AnalyticsServer {
         // hettx's core draws from entropy without a seed: 42 keeps unseeded runs reproducible.
         let seed = self.seed_for(request.seed).await;
 
-        let test_statistic = match parse_choice(
-            &HETTX_STAT,
-            request.test_statistic.as_deref(),
-            HetTestStat::Variance,
-        ) {
-            Ok(t) => t,
-            Err(e) => return error_text(e),
-        };
-        let effect_method = match parse_choice(
-            &HETTX_EFFECT,
+        let test_statistic =
+            match parse_option(request.test_statistic.as_deref(), HetTestStat::Variance) {
+                Ok(t) => t,
+                Err(e) => return error_text(e),
+            };
+        let effect_method = match parse_option(
             request.effect_method.as_deref(),
             EffectEstimationMethod::Matching,
         ) {
@@ -2107,30 +2103,6 @@ impl AnalyticsServer {
 // Helpers shared by the ML and spatial handlers (seeds, option tables, output columns)
 // ============================================================================
 
-/// The spellings of hettx's test statistic (the canonical name first).
-static HETTX_STAT: Choices<HetTestStat> = Choices {
-    option: "test_statistic",
-    values: &[
-        (&["variance", "var"], HetTestStat::Variance),
-        (&["range"], HetTestStat::Range),
-        (&["iqr", "interquartile_range"], HetTestStat::IQR),
-        (
-            &["mad", "mean_abs_deviation", "mean_absolute_deviation"],
-            HetTestStat::MeanAbsDeviation,
-        ),
-    ],
-};
-
-/// The spellings of hettx's individual-effect estimator (the canonical name first).
-static HETTX_EFFECT: Choices<EffectEstimationMethod> = Choices {
-    option: "effect_method",
-    values: &[
-        (&["matching", "match"], EffectEstimationMethod::Matching),
-        (&["regression", "reg"], EffectEstimationMethod::Regression),
-        (&["stratified", "strat"], EffectEstimationMethod::Stratified),
-    ],
-};
-
 /// Rows of the Kernel SHAP background: all training rows up to this many, else this many rows
 /// evenly spaced in row order (shap.sample's size).
 pub(crate) const KERNEL_BACKGROUND_MAX: usize = 100;
@@ -2251,14 +2223,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// The handler's own option tables have no spelling listed twice (the first would win);
-    /// spatial.rs checks its NEIGHBOR_METHOD table the same way.
-    #[test]
-    fn test_local_option_tables_validate() {
-        assert_eq!(HETTX_STAT.validate(), Ok(()));
-        assert_eq!(HETTX_EFFECT.validate(), Ok(()));
     }
 
     /// A causal-forest refusal that offers max_depth says it caps only the causal trees.

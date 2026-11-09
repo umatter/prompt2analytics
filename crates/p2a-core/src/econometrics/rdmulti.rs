@@ -28,6 +28,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::options::Choices;
 use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::{
     SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided, z_critical,
@@ -71,17 +72,25 @@ pub enum PoolingWeights {
     Equal,
 }
 
-impl PoolingWeights {
-    /// Parse pooling weights from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "sample" | "sample_size" | "n" => Some(PoolingWeights::SampleSize),
-            "iv" | "inverse_variance" | "efficient" => Some(PoolingWeights::InverseVariance),
-            "equal" | "uniform" => Some(PoolingWeights::Equal),
-            _ => None,
-        }
-    }
-}
+// The accepted spellings of `pooling_weights`; the first of each entry is canonical.
+crate::option_enum!(
+    PoolingWeights,
+    Choices {
+        option: "pooling_weights",
+        values: &[
+            (
+                &["sample_size", "samplesize", "sample", "n"],
+                PoolingWeights::SampleSize,
+            ),
+            (
+                &["inverse_variance", "iv", "precision", "efficient"],
+                PoolingWeights::InverseVariance,
+            ),
+            (&["equal", "uniform"], PoolingWeights::Equal),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for PoolingWeights {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -981,6 +990,27 @@ mod tests {
     use super::*;
     use ndarray::array;
     use polars::prelude::*;
+
+    #[test]
+    fn test_pooling_weights_parses_aliases_and_rejects_unknown() {
+        PoolingWeights::choices().validate().unwrap();
+        for (v, want) in [
+            ("Sample Size", PoolingWeights::SampleSize),
+            ("sample", PoolingWeights::SampleSize),
+            ("IV", PoolingWeights::InverseVariance),
+            ("efficient", PoolingWeights::InverseVariance),
+            ("uniform", PoolingWeights::Equal),
+        ] {
+            assert_eq!(v.parse::<PoolingWeights>().unwrap(), want, "{v}");
+        }
+        match "median".parse::<PoolingWeights>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown pooling_weights 'median'; expected one of: sample_size, inverse_variance, equal"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     fn create_multi_cutoff_dataset() -> (Dataset, RdMultiConfig) {
         // Create synthetic data with two cutoffs at c1=0 and c2=2

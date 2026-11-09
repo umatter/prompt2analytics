@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::options::Choices;
 use crate::resource::{checkpoint, try_with_capacity};
 use crate::traits::estimator::{validate_level, z_critical};
 
@@ -33,6 +34,22 @@ pub enum SeasonalType {
     /// Multiplicative seasonality: Y = (Level + Trend) * Seasonal * Error
     Multiplicative,
 }
+
+// The accepted spellings (HoltWinters(seasonal = )); the first of each entry is canonical.
+crate::option_enum!(
+    SeasonalType,
+    Choices {
+        option: "seasonal",
+        values: &[
+            (&["additive", "add"], SeasonalType::Additive),
+            (
+                &["multiplicative", "mult", "multi"],
+                SeasonalType::Multiplicative,
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for Holt-Winters fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1266,6 +1283,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_seasonal_type_parses_aliases_and_rejects_unknown() {
+        SeasonalType::choices().validate().unwrap();
+        assert_eq!(
+            "Mult".parse::<SeasonalType>().unwrap(),
+            SeasonalType::Multiplicative
+        );
+        assert_eq!(
+            "multi".parse::<SeasonalType>().unwrap(),
+            SeasonalType::Multiplicative
+        );
+        assert_eq!(
+            "add".parse::<SeasonalType>().unwrap(),
+            SeasonalType::Additive
+        );
+        match "none".parse::<SeasonalType>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown seasonal 'none'; expected one of: additive, multiplicative"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     use p2a_validation::{Check, Tol};
 

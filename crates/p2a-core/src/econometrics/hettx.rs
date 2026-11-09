@@ -70,6 +70,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{xtx, xty};
 use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
+use crate::options::Choices;
 use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::stats::robust::{QuantileType, quantile_sorted};
@@ -96,6 +97,24 @@ pub enum HetTestStat {
     /// Robust alternative to variance.
     MeanAbsDeviation,
 }
+
+// The accepted spellings (hettx's HetTestStat); the first of each entry is canonical.
+crate::option_enum!(
+    HetTestStat,
+    Choices {
+        option: "test_statistic",
+        values: &[
+            (&["variance", "var"], HetTestStat::Variance),
+            (&["range"], HetTestStat::Range),
+            (&["iqr", "interquartile_range"], HetTestStat::IQR),
+            (
+                &["mad", "mean_abs_deviation", "mean_absolute_deviation"],
+                HetTestStat::MeanAbsDeviation,
+            ),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for HetTestStat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -124,6 +143,20 @@ pub enum EffectEstimationMethod {
     /// Requires pre-existing strata/blocks in the data.
     Stratified,
 }
+
+// The accepted spellings (hettx's EffectEstimationMethod); the first of each entry is canonical.
+crate::option_enum!(
+    EffectEstimationMethod,
+    Choices {
+        option: "effect_method",
+        values: &[
+            (&["matching", "match"], EffectEstimationMethod::Matching),
+            (&["regression", "reg"], EffectEstimationMethod::Regression),
+            (&["stratified", "strat"], EffectEstimationMethod::Stratified),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for EffectEstimationMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1281,6 +1314,52 @@ mod tests {
     use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array1;
     use polars::prelude::*;
+
+    #[test]
+    fn test_effect_estimation_method_parses_aliases_and_rejects_unknown() {
+        EffectEstimationMethod::choices().validate().unwrap();
+        assert_eq!(
+            "Reg".parse::<EffectEstimationMethod>().unwrap(),
+            EffectEstimationMethod::Regression
+        );
+        assert_eq!(
+            "strat".parse::<EffectEstimationMethod>().unwrap(),
+            EffectEstimationMethod::Stratified
+        );
+        assert_eq!(
+            "match".parse::<EffectEstimationMethod>().unwrap(),
+            EffectEstimationMethod::Matching
+        );
+        match "forest".parse::<EffectEstimationMethod>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown effect_method 'forest'; expected one of: matching, regression, stratified"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_het_test_stat_parses_aliases_and_rejects_unknown() {
+        HetTestStat::choices().validate().unwrap();
+        assert_eq!("IQR".parse::<HetTestStat>().unwrap(), HetTestStat::IQR);
+        assert_eq!(
+            "mean absolute deviation".parse::<HetTestStat>().unwrap(),
+            HetTestStat::MeanAbsDeviation
+        );
+        assert_eq!("var".parse::<HetTestStat>().unwrap(), HetTestStat::Variance);
+        match "sd".parse::<HetTestStat>() {
+            Err(crate::errors::EconError::InvalidSpecification { message }) => {
+                assert_eq!(
+                    message,
+                    "unknown test_statistic 'sd'; expected one of: variance, range, iqr, mad"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_validate_hettx_outcome_model_aliased_subset() {
