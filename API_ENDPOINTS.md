@@ -788,7 +788,7 @@ GET /health
 {
   "status": "ok",
   "server": "p2a-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "active_sessions": 0,
   "governor": {
     "in_flight": 0,
@@ -807,7 +807,7 @@ The `governor` object reports the tool calls running (`in_flight`), those past t
 {
   "status": "ok",
   "server": "p2a-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "active_sessions": 0,
   "governor": {
     "healthy": true,
