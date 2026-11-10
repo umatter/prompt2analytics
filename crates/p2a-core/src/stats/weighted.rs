@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_weighted_mean_equal_weights() {
+    fn test_weighted_mean_equal_weights_is_the_mean() {
         // R: weighted.mean(c(1.0, 2.0, 3.0, 4.0, 5.0), c(1.0, 1.0, 1.0, 1.0, 1.0)) -> 3.0
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let w = vec![1.0, 1.0, 1.0, 1.0, 1.0];
@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cov_wt_correlation() {
+    fn test_cov_wt_perfect_correlation_is_one() {
         // cov.wt with correlation should have cor[1,2] = 1.0 for perfect correlation
         let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
 

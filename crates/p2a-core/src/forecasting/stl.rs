@@ -510,7 +510,7 @@ mod tests {
 
     /// Validation test against R's stl() function
     #[test]
-    fn test_validate_stl_against_r() {
+    fn test_stl_recovers_dgp() {
         // R code:
         // set.seed(42)
         // x <- ts(100 + 0.5*(1:120) + 10*sin(2*pi*(1:120)/12), frequency=12)

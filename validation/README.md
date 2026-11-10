@@ -205,6 +205,19 @@ This is the workflow every new or fixed validation follows.
    `validation/run_validation.sh --write-status` before the change reaches main (during the
    review campaign: at the wave integration, not in a lane).
 
+**Naming rule** (X-10). A test whose name contains `test_validate` is R-pinned: it loads a
+committed case and a `validation/methods/*.json` entry lists it. A check that recovers a
+simulated truth is named `*_recovers_dgp` (or another descriptive name), never
+`test_validate_*`. The `test_validate_*` tests that compare with no committed case on purpose
+are listed, with their kind and the reason, in `tools/validate_property_tests.txt`: `quoted`
+(R output quoted in the test source, with the R call in its comment), `formula`, `exact` or
+`property`. A registered test that compares no R value (it checks properties on R's data, for
+example that non-convergence is reported) keeps its name and is listed there with kind
+`registered-property`. Neither a listed nor a `registered-property` test counts as R-pinned.
+`tools/tests/test_tier3_closure.py` enforces these rules in CI: every `test_validate_*` test in
+the cargo test lists is registered or listed, and a validation test cannot pass on `Err`, print
+instead of asserting, or guard its only comparison.
+
 A mismatch is a defect. Fix it, or record a deviation `{"finding", "quantity", "note"}` in the
 registry and keep that quantity out of the `Check` with a `// deviation <finding id>` comment.
 Never widen a tolerance to make it pass.

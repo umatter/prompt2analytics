@@ -98,7 +98,7 @@ def _walk_rust():
 
 def read_labels():
     """{test id: (kind, reason)} from validate_property_tests.txt."""
-    line_re = re.compile(r"^(?P<id>p2a-[a-z]+::\S+)\s*\|\s*(?P<kind>formula|exact|property|registered-property)\s*\|\s*(?P<reason>\S.*)$")
+    line_re = re.compile(r"^(?P<id>p2a-[a-z]+::\S+)\s*\|\s*(?P<kind>formula|exact|property|quoted|registered-property)\s*\|\s*(?P<reason>\S.*)$")
     out = {}
     for n, raw in enumerate(LABELS.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
@@ -969,6 +969,26 @@ class ValidateFilterTest(unittest.TestCase):
                 missing.append(test_id + ("" if sources else " (source not found)"))
         self.assertEqual(missing, [], "\n" + "\n".join(missing))
 
+    def test_readme_states_the_naming_rule(self):
+        text = (VALIDATION / "README.md").read_text(encoding="utf-8")
+        for phrase in ("tools/validate_property_tests.txt", "*_recovers_dgp", "test_tier3_closure.py",
+                       "registered-property", "`quoted`"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    @unittest.skipUnless(WITH_LISTS, NEEDS_LISTS)
+    def test_every_test_validate_test_is_pinned_or_labelled(self):
+        """Every test_validate_* test cargo lists is registered or labelled; a new unregistered one fails."""
+        ids, vs = load_test_lists()
+        self.assertTrue(ids, "no <package>-tests.txt list files found")
+        validate = {t for t in ids if "test_validate" in t.rsplit("::", 1)[-1] and not vs.is_excluded(t)
+                    and not t.startswith("p2a-validation::")}
+        registered = {t for e in registry_entries() for t in e["tests"]}
+        labels = read_labels()
+        self.assertEqual(sorted(set(labels) - set(ids)), [], "labelled tests that do not exist")
+        unlisted = sorted(validate - registered - set(labels))
+        self.assertEqual(unlisted, [], "register these tests, rename them (they compare no committed R case) "
+                         "or label them in validate_property_tests.txt:\n" + "\n".join(unlisted))
 
 
 # ---------------------------------------------------------------- Task 9: validation docs and tooling after the renames

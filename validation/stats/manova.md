@@ -54,7 +54,7 @@ summary(fit, test = "Roy")
 | Pillai's Trace | > 1.5 | > 1.5 | - |
 | p-value (Pillai) | < 0.05 | < 0.05 | - |
 
-**Rust Test:** `crates/p2a-core/src/stats/manova.rs::tests::test_validate_manova_against_r`
+**Rust Test:** `crates/p2a-core/src/stats/manova.rs::tests::test_manova_separated_groups_are_significant` (a property check: small Wilks' Lambda, significant Wilks and Pillai tests, non-negative eigenvalues; it compares no R value)
 
 ### Test 2: Two Groups - Basic MANOVA
 

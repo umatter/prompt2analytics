@@ -48,7 +48,7 @@ print(mp$residuals)
 | Col[1] | -1.0 | -1.0 | 1e-6 | PASS |
 | Col[2] | 0.5 | 0.5 | 1e-6 | PASS |
 
-**Rust Test**: `crates/p2a-core/src/stats/medpolish.rs::tests::test_validate_medpolish_against_r`
+**Rust Test**: `crates/p2a-core/src/stats/medpolish.rs::tests::test_medpolish_reconstructs_the_table` checks, on another 4 x 3 matrix, that overall + row + column + residual reconstructs the input exactly and that the overall effect is within 1.0 of R's 9.5. It compares no other R value, and no test asserts the table above.
 
 ### Test 2: Perfect Additive Model
 

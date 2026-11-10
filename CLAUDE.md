@@ -881,9 +881,10 @@ cd crates/p2a-dioxus && dx serve
 `p2a_validation::{Check, Tol}`. The others check properties, known DGPs or quoted values.
 Only the first kind may be described as matching R, and only for the quantities its registry entry lists as
 pinned (a `registered-property` test compares none). A test named `test_validate_*` is R-pinned and registered
-in `validation/methods/*.json`, or listed with its reason in `validation/tools/validate_property_tests.txt`;
-`validation/tools/tests/test_tier3_closure.py` enforces it for the tests the review findings cite (older
-unregistered `test_validate_*` tests remain until X-10 closes). `validation/README.md` explains both, the
+in `validation/methods/*.json`, or listed with its kind and reason in `validation/tools/validate_property_tests.txt`
+(`quoted` for R output quoted in the test source); `validation/tools/tests/test_tier3_closure.py` enforces it in CI
+(`test_every_test_validate_test_is_pinned_or_labelled` fails on a new unregistered, unlisted one). A check that
+recovers a simulated truth is named `*_recovers_dgp` or descriptively. `validation/README.md` explains both, the
 layout and the workflow.
 
 **Adding or fixing a method's validation** (the rules for Tiers 2-4):

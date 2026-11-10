@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_spearman_rho() {
+    fn test_spearman_rho_monotone_is_one() {
         // R: cor.test(x, y, method = "spearman")
         // R: rho = 1.0 (perfect monotonic relationship)
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
@@ -1049,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kendall_tau() {
+    fn test_kendall_tau_concordant_pairs_is_one() {
         // R: cor.test(x, y, method = "kendall")
         // R: tau = 1.0 (all pairs concordant)
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];

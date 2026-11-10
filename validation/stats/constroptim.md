@@ -49,7 +49,7 @@ print(result$value)
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
 - `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): x² + y² with x + y ≥ 1 from (1, 1); `quadratic_par` (0.500000000151549 twice) and `quadratic_value` (0.500000000303098), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
-- `stats::constroptim::tests::test_validate_constr_optim_nelder_mead` (`crates/p2a-core/src/stats/constroptim.rs`): Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5). Not R-pinned: p2a stops at (1.00211, 2.00106), value 5.6e-6, 2.1e-3 from R's (1.0000008855605316, 2.0000000235991697), value 7.8e-13 (`stat_constroptim_legacy`), outside 1e-4; registry deviation STAT-80. The test checks feasibility and a solution within 1e-2 of (1, 2).
+- `stats::constroptim::tests::test_constr_optim_nelder_mead_reaches_the_optimum` (`crates/p2a-core/src/stats/constroptim.rs`; renamed from `test_validate_constr_optim_nelder_mead`, since it compares no R value): Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5). Not R-pinned: p2a stops at (1.00211, 2.00106), value 5.6e-6, 2.1e-3 from R's (1.0000008855605316, 2.0000000235991697), value 7.8e-13 (`stat_constroptim_legacy`), outside 1e-4; registry deviation STAT-80. The test checks feasibility and a solution within 1e-2 of (1, 2).
 
 ### Test Case 2: Active Constraint
 

@@ -303,7 +303,7 @@
         {
           "finding": "STAT-80",
           "quantity": "Nelder-Mead problem: par and value (nelder_mead_par, nelder_mead_value)",
-          "note": "p2a's barrier with Nelder-Mead stops at (1.0021099915327514, 2.0010575190290307), value 5.570410765044598e-6; R at (1.0000008855605316, 2.0000000235991697), value 7.847743758893449e-13: 2.1e-3 relative, outside 1e-4; test_validate_constr_optim_nelder_mead checks feasibility only until STAT-80 (Tier 4)"
+          "note": "p2a's barrier with Nelder-Mead stops at (1.0021099915327514, 2.0010575190290307), value 5.570410765044598e-6; R at (1.0000008855605316, 2.0000000235991697), value 7.847743758893449e-13: 2.1e-3 relative, outside 1e-4; test_constr_optim_nelder_mead_reaches_the_optimum checks feasibility only until STAT-80 (Tier 4)"
         }
       ],
       "supersedes_legacy": []

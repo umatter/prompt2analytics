@@ -897,7 +897,7 @@ mod tests {
     /// summary(fit, test="Pillai")
     /// ```
     #[test]
-    fn test_validate_manova_against_r() {
+    fn test_manova_separated_groups_are_significant() {
         // Data with clear group separation and independent within-group variation
         let y = array![
             [1.0, 8.0],

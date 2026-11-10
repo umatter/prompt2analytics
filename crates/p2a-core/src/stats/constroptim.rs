@@ -858,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_constr_optim_nelder_mead() {
+    fn test_constr_optim_nelder_mead_reaches_the_optimum() {
         // R: constrOptim(c(0.5, 0.5), function(x) (x[1] - 1)^2 + (x[2] - 2)^2, grad = NULL,
         //                ui = diag(2), ci = c(0, 0))
         let f = |x: &[f64]| (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2);

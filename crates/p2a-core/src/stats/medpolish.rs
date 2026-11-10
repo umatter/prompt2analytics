@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_medpolish_against_r() {
+    fn test_medpolish_reconstructs_the_table() {
         // R code for validation:
         // x <- matrix(c(14, 7, 8, 15, 15, 4, 2, 9, 14, 7, 10, 10), nrow=4, byrow=FALSE)
         // result <- medpolish(x, trace.iter=FALSE)

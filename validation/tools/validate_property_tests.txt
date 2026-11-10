@@ -4,12 +4,15 @@
 #   kind:    formula  - a published or hand-derived reference value; the R package is not installed
 #            exact    - an exact identity of the input (no estimation)
 #            property - a stated property that no R function returns
+#            quoted   - compares R output quoted in the test source (the R call is in its comment),
+#                       not a committed case; it does not count as R-pinned
 #            registered-property - a registered test that loads its case but compares no R value
 #                       (properties on R's data); it does not count as R-pinned
 #   reason:  why the test keeps its test_validate name (at least 20 characters)
-# A test of kind formula, exact or property is never listed in validation/methods/*.json;
+# A test of kind formula, exact, property or quoted is never listed in validation/methods/*.json;
 # a registered-property test always is. Prefer renaming a DGP check to *_recovers_dgp.
-# Checked by validation/tools/tests/test_tier3_closure.py (ValidateFilterTest).
+# Checked by validation/tools/tests/test_tier3_closure.py (ValidateFilterTest): every test_validate_*
+# test in the cargo test lists is registered or listed here.
 p2a-cli::exhibits::test_validate_cli_data_head | registered-property | prints the case's dataset; each printed cell is compared with the committed CSV, not with R output
 p2a-cli::tier2::wp09_survival::test_validate_cli_survival_km_rejects_unknown_conf_type | registered-property | refusals and error messages on the case's data (cli survival km rejects unknown conf type); compares no R value
 p2a-cli::tier3::wp06_flags::test_validate_cli_quantreg_no_intercept_reaches_core | registered-property | the flag reaches the core and changes the result on the case's data (p2a against p2a); compares no R value
@@ -18,10 +21,14 @@ p2a-cli::tier3::wp06_flags::test_validate_cli_ts_stl_robust_flag | registered-pr
 p2a-cli::tier3::wp60_models::test_validate_cli_derived_dataset_names_replacement_and_errors | registered-property | refusals and error messages on the case's data (cli derived dataset names replacement and errors); compares no R value
 p2a-core::data::columns::tests::test_validate_columns_errors_name_the_column | registered-property | refusals and error messages on the case's data (columns errors name the column); compares no R value
 p2a-core::data::columns::tests::test_validate_columns_level_order | registered-property | a stated property on the case's data (columns level order); compares no R value
+p2a-core::econometrics::bacon::tests::test_validate_bacon_heterogeneous_effects_forbidden_comparisons | quoted | R output of bacondecomp::bacon weights and the fixest::feols TWFE estimate quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::econometrics::cbps::tests::test_validate_na_cbps_columns | registered-property | missing values and column types on the case's data (na cbps columns); compares no R value
 p2a-core::econometrics::ctmle::tests::test_validate_na_ctmle_columns | registered-property | missing values and column types on the case's data (na ctmle columns); compares no R value
 p2a-core::econometrics::feglm::tests::test_validate_feglm_families_report_convergence | registered-property | what a fit on the case's data reports (warnings, convergence) (feglm families report convergence); compares no R value
+p2a-core::econometrics::feglm::tests::test_validate_feglm_poisson_null_loglik_fixest_large_counts | quoted | R output of the Poisson log-likelihoods of glm and fixest::fepois quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::econometrics::feglm::tests::test_validate_feglm_poisson_null_loglik_fixest_non_integer | quoted | R output of the Poisson log-likelihoods of glm and fixest::fepois quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::econometrics::feglm::tests::test_validate_na_feglm_omit_and_missing_fe_ids | registered-property | missing values and column types on the case's data (na feglm omit and missing fe ids); compares no R value
+p2a-core::econometrics::feglm::tests::test_validate_poisson_log_lik_against_r | quoted | R output of the Poisson log-likelihoods of glm and fixest::fepois quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::econometrics::general_gmm::tests::test_validate_na_gmm_iv_omit_equals_complete_rows | registered-property | missing values and column types on the case's data (na gmm iv omit equals complete rows); compares no R value
 p2a-core::econometrics::glm::tests::test_validate_glm_fit_serde_round_trip | registered-property | round trip of a fit on the case's data (glm fit serde round trip); compares no R value
 p2a-core::econometrics::glm::tests::test_validate_glm_scale_equivariance | registered-property | equivariance on the case's data (p2a against p2a) (glm scale equivariance); compares no R value
@@ -31,6 +38,7 @@ p2a-core::econometrics::hdfe::tests::test_validate_hdfe_map_iteration_limit_is_r
 p2a-core::econometrics::hdfe::tests::test_validate_hdfe_map_scale_invariant_iterations | registered-property | equivariance on the case's data (p2a against p2a) (hdfe map scale invariant iterations); compares no R value
 p2a-core::econometrics::iv::tests::test_validate_na_iv_errors_name_the_column | registered-property | missing values and column types on the case's data (na iv errors name the column); compares no R value
 p2a-core::econometrics::matching::tests::test_validate_full_matching_rejects_infeasible_and_invalid_bounds | registered-property | refusals and error messages on the case's data (full matching rejects infeasible and invalid bounds); compares no R value
+p2a-core::econometrics::matching::tests::test_validate_ks_before_matching_vs_matchit | quoted | R output of the KS statistics of MatchIt summary() before matching quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::econometrics::matching::tests::test_validate_matching_rejects_invalid_options | registered-property | refusals and error messages on the case's data (matching rejects invalid options); compares no R value
 p2a-core::econometrics::matching::tests::test_validate_matchit_display_shows_the_balance_tables_and_notes | registered-property | printed output on the case's data; its values are pinned by the method's other tests (matchit display shows the balance tables and notes); compares no R value
 p2a-core::econometrics::matching::tests::test_validate_matchit_m_order_random_is_seeded | registered-property | a stated property on the case's data (matchit m order random is seeded); compares no R value
@@ -43,6 +51,7 @@ p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_mis
 p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_omit_equals_complete_rows | registered-property | missing values and column types on the case's data (na panel gls omit equals complete rows); compares no R value
 p2a-core::econometrics::panel::gls_models::tests::test_validate_panel_gls_fd_reports_aliased_first_step | registered-property | what a fit on the case's data reports (warnings, convergence) (panel gls fd reports aliased first step); compares no R value
 p2a-core::econometrics::panel::gls_models::tests::test_validate_panel_gls_within_reports_singular_error_covariance | registered-property | refusals and error messages on the case's data (panel gls within reports singular error covariance); compares no R value
+p2a-core::econometrics::panel::gls_models::tests::test_validate_pooled_gls_square_grunfeld_vs_plm | quoted | R output of plm::pggls on Grunfeld quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree | registered-property | missing values and column types on the case's data (na pvcm numeric and string ids agree); compares no R value
 p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_display_lists_entities_in_level_order | registered-property | printed output on the case's data; its values are pinned by the method's other tests (pvcm display lists entities in level order); compares no R value
 p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_skips_collinear_entity_with_warning | registered-property | what a fit on the case's data reports (warnings, convergence) (pvcm skips collinear entity with warning); compares no R value
@@ -61,30 +70,55 @@ p2a-core::econometrics::tmle::tests::test_validate_na_tmle_columns | registered-
 p2a-core::econometrics::twang::tests::test_validate_na_twang_columns | registered-property | missing values and column types on the case's data (na twang columns); compares no R value
 p2a-core::econometrics::weightit::tests::test_validate_na_entropy_balance_columns | registered-property | missing values and column types on the case's data (na entropy balance columns); compares no R value
 p2a-core::econometrics::weightit::tests::test_validate_na_weightit_columns | registered-property | missing values and column types on the case's data (na weightit columns); compares no R value
+p2a-core::forecasting::cpgram::tests::test_validate_cpgram_untapered_against_r | quoted | R output of stats::spec.pgram and cpgram quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::forecasting::cpgram::tests::test_validate_periodogram_against_r | quoted | R output of stats::spec.pgram and cpgram quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::forecasting::tsutils::tests::test_validate_diffinv_zero_xi_against_r | quoted | R output of stats::diffinv and embed quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::forecasting::tsutils::tests::test_validate_embed_against_r | quoted | R output of stats::diffinv and embed quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::linalg::solve::tests::test_validate_qr_factorization_properties | registered-property | a stated property on the case's data (qr factorization properties); compares no R value
+p2a-core::ml::advanced_clustering_mod::common::tests::test_validate_clara_silhouette_helper_matches_r | quoted | R output of cluster::silhouette quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_dynamic_tree_cut_defaults_and_fallback | registered-property | a stated property on the case's data (dynamic tree cut defaults and fallback); compares no R value
 p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_dynamic_tree_cut_options_change_the_result | registered-property | options change the result on the case's data (p2a against p2a) (dynamic tree cut options change the result); compares no R value
+p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_heights_match_r | quoted | R output of cluster::agnes merge heights quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::ml::causal_forest::tests::test_validate_cf_confounded_oob_error_is_the_r_loss | registered-property | refusals and error messages on the case's data (cf confounded oob error is the r loss); compares no R value
 p2a-core::ml::clustering::tests::test_validate_cutree_labels_deterministic_first_appearance | registered-property | a stated property on the case's data (cutree labels deterministic first appearance); compares no R value
 p2a-core::ml::clustering::tests::test_validate_kmeans_labels_match_final_centroids | registered-property | a stated property on the case's data (kmeans labels match final centroids); compares no R value
 p2a-core::ml::clustering::tests::test_validate_kmeans_not_converged | registered-property | what a fit on the case's data reports (warnings, convergence) (kmeans not converged); compares no R value
 p2a-core::ml::clustering::tests::test_validate_kmeans_scale_invariant | registered-property | equivariance on the case's data (p2a against p2a) (kmeans scale invariant); compares no R value
+p2a-core::ml::ctree::tests::test_validate_ctree_split_matches_rpart | quoted | R output of rpart split points and node sizes quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::ml::hclust::tests::test_validate_hclust_tree_conversions_round_trip | registered-property | round trip of a fit on the case's data (hclust tree conversions round trip); compares no R value
+p2a-core::ml::quantile_rf::tests::test_validate_qrf_split_matches_rpart | quoted | R output of rpart split points and node sizes quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::ml::reduction::tests::test_validate_cmdscale_is_scale_equivariant | registered-property | equivariance on the case's data (p2a against p2a) (cmdscale is scale equivariant); compares no R value
+p2a-core::ml::reduction::tests::test_validate_cmdscale_matches_r | quoted | R output of stats::cmdscale quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial_two_level_coding | registered-property | a stated property on the case's data (glmnet binomial two level coding); compares no R value
 p2a-core::regression::glmnet::tests::test_validate_glmnet_convergence_is_scale_free | registered-property | equivariance on the case's data (p2a against p2a) (glmnet convergence is scale free); compares no R value
 p2a-core::regression::glmnet::tests::test_validate_glmnet_display_prints_coefficients | registered-property | printed output on the case's data; its values are pinned by the method's other tests (glmnet display prints coefficients); compares no R value
 p2a-core::regression::glmnet::tests::test_validate_glmnet_maxit_truncates_path_with_warning | registered-property | what a fit on the case's data reports (warnings, convergence) (glmnet maxit truncates path with warning); compares no R value
+p2a-core::regression::gls::tests::test_validate_gls_fixed_correlation_vs_nlme | quoted | R output of nlme::gls with a fixed correlation quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::regression::ols::tests::test_validate_bootstrap_fixed_design_solve_matches_refit | registered-property | a stated property on the case's data (bootstrap fixed design solve matches refit); compares no R value
 p2a-core::stats::anova::tests::test_validate_na_one_way_anova_dtypes_and_errors | registered-property | missing values and column types on the case's data (na one way anova dtypes and errors); compares no R value
 p2a-core::stats::anova::tests::test_validate_na_two_way_anova_dtypes_and_errors | registered-property | missing values and column types on the case's data (na two way anova dtypes and errors); compares no R value
+p2a-core::stats::bartlett::tests::test_validate_bartlett_against_r | quoted | R output of bartlett.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::bartlett::tests::test_validate_na_bartlett_test_errors | registered-property | missing values and column types on the case's data (na bartlett test errors); compares no R value
+p2a-core::stats::boxtest::tests::test_validate_box_pierce_against_r | quoted | R output of Box.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::boxtest::tests::test_validate_comprehensive_against_r | quoted | R output of Box.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::boxtest::tests::test_validate_ljung_box_against_r | quoted | R output of Box.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::boxtest::tests::test_validate_ljung_box_with_fitdf_against_r | quoted | R output of Box.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::chisq::tests::test_validate_2x2_yates_against_r | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::chisq::tests::test_validate_chisq_gof_errors | registered-property | refusals and error messages on the case's data (chisq gof errors); compares no R value
+p2a-core::stats::chisq::tests::test_validate_gof_against_r | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::chisq::tests::test_validate_independence_against_r | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::chisq::tests::test_validate_run_chisq_gof_inside_tokio_runtime | registered-property | runs inside a tokio runtime on the case's data (run chisq gof inside tokio runtime); compares no R value
+p2a-core::stats::chisq::tests::test_validate_run_chisq_independence_counts_both_signed_zeros | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::chisq::tests::test_validate_run_chisq_independence_from_data_against_r | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::chisq::tests::test_validate_run_chisq_independence_on_categorical_and_enum_columns_against_r | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::chisq::tests::test_validate_run_chisq_independence_on_multi_chunk_frame_against_r | quoted | R output of chisq.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::contingency::tests::test_validate_contingency_table_inside_tokio_runtime | registered-property | runs inside a tokio runtime on the case's data (contingency table inside tokio runtime); compares no R value
 p2a-core::stats::contingency::tests::test_validate_na_contingency_int64_equals_float64 | registered-property | missing values and column types on the case's data (na contingency int64 equals float64); compares no R value
 p2a-core::stats::contingency::tests::test_validate_na_contingency_rejects_datetime_and_absent_columns | registered-property | missing values and column types on the case's data (na contingency rejects datetime and absent columns); compares no R value
+p2a-core::stats::cortest::tests::test_validate_kendall_tie_free_against_r | quoted | R output of cor.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::cortest::tests::test_validate_na_cor_test_columns | registered-property | missing values and column types on the case's data (na cor test columns); compares no R value
+p2a-core::stats::cortest::tests::test_validate_pearson_confidence_interval | quoted | R output of cor.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::cortest::tests::test_validate_pearson_correlation | quoted | R output of cor.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::fisher::tests::test_validate_fisher_needs_two_levels_per_column | registered-property | refusals and error messages on the case's data (fisher needs two levels per column); compares no R value
 p2a-core::stats::fisher::tests::test_validate_run_fisher_test_inside_tokio_runtime | registered-property | runs inside a tokio runtime on the case's data (run fisher test inside tokio runtime); compares no R value
 p2a-core::stats::fligner::tests::test_validate_na_fligner_test_errors | registered-property | missing values and column types on the case's data (na fligner test errors); compares no R value
@@ -92,18 +126,58 @@ p2a-core::stats::friedman::tests::test_validate_friedman_refuses_designs_r_refus
 p2a-core::stats::friedman::tests::test_validate_na_friedman_dtypes_and_errors | registered-property | missing values and column types on the case's data (na friedman dtypes and errors); compares no R value
 p2a-core::stats::kruskal::tests::test_validate_na_kruskal_dtypes_and_errors | registered-property | missing values and column types on the case's data (na kruskal dtypes and errors); compares no R value
 p2a-core::stats::ks::tests::test_validate_na_ks_test_missing_rows_and_errors | registered-property | missing values and column types on the case's data (na ks test missing rows and errors); compares no R value
+p2a-core::stats::loglin::tests::test_validate_loglin_decomposable_against_r | quoted | R output of stats::loglin quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::loglin::tests::test_validate_loglin_df_against_r | quoted | R output of stats::loglin quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::mahalanobis::tests::test_validate_na_mahalanobis_columns | registered-property | missing values and column types on the case's data (na mahalanobis columns); compares no R value
 p2a-core::stats::manova::tests::test_validate_na_manova_dtypes_and_errors | registered-property | missing values and column types on the case's data (na manova dtypes and errors); compares no R value
+p2a-core::stats::mantelhaen::tests::test_validate_mantelhaen_against_r | quoted | R output of mantelhaen.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::mcnemar::tests::test_validate_mcnemar_against_r | quoted | R output of mcnemar.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::mcnemar::tests::test_validate_mcnemar_no_correction | quoted | R output of mcnemar.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::mood::tests::test_validate_na_mood_test_missing_rows_and_errors | registered-property | missing values and column types on the case's data (na mood test missing rows and errors); compares no R value
 p2a-core::stats::oneway::tests::test_validate_na_oneway_dtypes_and_errors | registered-property | missing values and column types on the case's data (na oneway dtypes and errors); compares no R value
+p2a-core::stats::oneway::tests::test_validate_oneway_against_r_standard | quoted | R output of oneway.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::oneway::tests::test_validate_oneway_against_r_welch | quoted | R output of oneway.test quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::pairwise::tests::test_validate_na_pairwise_tests_missing_rows_and_errors | registered-property | missing values and column types on the case's data (na pairwise tests missing rows and errors); compares no R value
+p2a-core::stats::poissontest::tests::test_validate_poisson_rate_ratio_interval_at_levels_near_one | quoted | R output of poisson.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_f_upper_quantile | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_anova_astronomical_group_count | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_anova_many_groups_solve_n | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_anova_ten_million_per_group_is_full_power | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_prop_test_equal_proportions_at_the_smallest_f64 | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_t_test_infinite_non_centrality_is_full_power | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_t_test_non_centrality_beside_an_underflowing_standard_error | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_t_test_solve_delta_scales_with_sd | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_t_test_solve_delta_ten_million_per_group | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_t_test_ten_million_per_group | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_power_t_test_zero_effect_at_huge_n | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_quantiles_far_tail_at_small_df | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_quantiles_upper_tail_at_2_pow_minus_52 | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::power::tests::test_validate_t_quantile_large_df | quoted | R output of power.t.test, power.anova.test, power.prop.test, qt and qf quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::quade::tests::test_validate_na_quade_dtypes_and_errors | registered-property | missing values and column types on the case's data (na quade dtypes and errors); compares no R value
 p2a-core::stats::quade::tests::test_validate_quade_refuses_designs_r_refuses | registered-property | refusals and error messages on the case's data (quade refuses designs r refuses); compares no R value
+p2a-core::stats::robust::tests::test_validate_density_direct_path_against_r | quoted | R output of density and ecdf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::robust::tests::test_validate_ecdf | quoted | R output of density and ecdf quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::robust::tests::test_validate_ecdf_against_r | quoted | R output of density and ecdf quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::robust::tests::test_validate_quantile_rejects_type_0_and_12 | registered-property | refusals and error messages on the case's data (quantile rejects type 0 and 12); compares no R value
 p2a-core::stats::robust::tests::test_validate_quantiles_refuses_nan_and_bad_probabilities | registered-property | refusals and error messages on the case's data (quantiles refuses nan and bad probabilities); compares no R value
+p2a-core::stats::spectrum::tests::test_validate_daniell_interior_against_r | quoted | R output of spec.pgram with a Daniell kernel quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::spline::tests::test_validate_approx_against_r | quoted | R output of spline and approx quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::spline::tests::test_validate_approx_linear_against_r | quoted | R output of spline and approx quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::spline::tests::test_validate_natural_spline_against_r | quoted | R output of spline and approx quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::ttest::tests::test_validate_na_t_test_errors | registered-property | missing values and column types on the case's data (na t test errors); compares no R value
 p2a-core::stats::ttest::tests::test_validate_na_t_test_missing_rows | registered-property | missing values and column types on the case's data (na t test missing rows); compares no R value
+p2a-core::stats::ttest::tests::test_validate_one_sample_against_r | quoted | R output of t.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::ttest::tests::test_validate_paired_against_r | quoted | R output of t.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::ttest::tests::test_validate_welch_against_r | quoted | R output of t.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::tukey::tests::test_validate_tukey_against_r | quoted | R output of TukeyHSD quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::vartest::tests::test_validate_na_var_test_missing_rows_and_errors | registered-property | missing values and column types on the case's data (na var test missing rows and errors); compares no R value
+p2a-core::stats::vartest::tests::test_validate_var_test_against_r | quoted | R output of var.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::vartest::tests::test_validate_var_test_one_sided | quoted | R output of var.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::vartest::tests::test_validate_var_test_unequal_variance | quoted | R output of var.test quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::weighted::tests::test_validate_cov_wt_ml | quoted | R output of weighted.mean and cov.wt quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::weighted::tests::test_validate_cov_wt_unbiased | quoted | R output of weighted.mean and cov.wt quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::weighted::tests::test_validate_cov_wt_with_weights | quoted | R output of weighted.mean and cov.wt quoted in the test source, not a committed case; the R call is in the test's comment
+p2a-core::stats::weighted::tests::test_validate_weighted_mean | quoted | R output of weighted.mean and cov.wt quoted in the test source, not a committed case; the R call is in the test's comment
 p2a-core::stats::wilcoxon::tests::test_validate_na_wilcoxon_dtypes_and_errors | registered-property | missing values and column types on the case's data (na wilcoxon dtypes and errors); compares no R value
 p2a-mcp::tier2::wp13_causal::test_validate_mcp_treatment_ipw_null_outcome_is_named | registered-property | a stated property on the case's data (mcp treatment ipw null outcome is named); compares no R value
 p2a-mcp::tier3::wp55_causal::test_validate_mcp_causal_degenerate_parameters_are_tool_errors | registered-property | refusals and error messages on the case's data (mcp causal degenerate parameters are tool errors); compares no R value
