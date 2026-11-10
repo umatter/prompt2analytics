@@ -565,8 +565,9 @@ ms; the ratio is this tree over fe13b889.
 The saturating T = 10 seeds now cost 1.25x instead of the 5.5x accepted on 2026-11-07. The T = 10
 rows that do not saturate cost the same as at bf130c8f (1.00x), 1.47x to 1.50x of fe13b889 against
 the 1.45x to 1.47x measured at 811c26bb and accepted then. `sparse_followers(4000, 10, 3)`, a
-T = 10 data set of the same kind, had no fe13b889 figure before; its 1.48x (+8 ms) has not been
-signed off.
+T = 10 data set of the same kind, had no fe13b889 figure before; it costs 1.48x (+8 ms). The
+maintainer accepted both on 2026-11-10: 1.48x for `sparse_followers(4000, 10, 3)` and 1.47x to
+1.50x for the T = 10 rows that do not saturate.
 
 ## 13. References
 

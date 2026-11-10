@@ -60,6 +60,20 @@ df 2e7 its 0.975 point is 1.00061989 where the exact quantile is 1.00087691 (`pf
 `qf` values next to it (`qf_big`, `ci_big_estimate_1`) without comparing them. This is the entry's second
 deviation.
 
+## Wall-clock (accepted 2026-11-10)
+
+The exact upper tails cost a constant amount per call. `unified_benchmarks`, `release`, one P core, one rayon
+thread, medians of 15 runs against bf130c8f (the code before the exact tails), 2026-11-10:
+
+| Call | n | bf130c8f | this tree | ratio (median / fast mode) |
+|---|---|---:|---:|---|
+| `var.test` (F test) | 100 / 1,000 / 10,000 | 1.42 / 3.73 / 19.6 µs | 1.76 / 4.41 / 22.0 µs | 1.24 / 1.18 / 1.12; fast mode 1.21 / 1.17 / 1.09 |
+| `prop.trend.test` | 1,000 / 10,000 | 0.142 / 0.134 µs | 0.171 / 0.164 µs | 1.20 / 1.23; fast mode 1.13 / 1.15 |
+
+`var.test` takes 0.3 to 0.6 µs more per call: both tails go through `f_test_p_value` and the confidence limits
+through `f_upper_quantile`. `prop.trend.test` takes 20-30 ns more (1.02-1.08x at n = 100). The maintainer
+accepted 1.09-1.21x for `var.test` and 1.13-1.16x for `prop.trend.test` as the cost of the exact upper tails.
+
 ## Conversion rules
 
 | Pattern | Replacement |
