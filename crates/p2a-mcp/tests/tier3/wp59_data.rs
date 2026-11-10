@@ -494,7 +494,7 @@ async fn test_validate_mcp_describe_dataset_statistics() {
 
 /// DATA-25: viz_dendrogram cast JSON numbers with `as usize` (negative and NaN became 0, 0.5 became 0) and
 /// dropped short rows, so malformed linkages drew a wrong tree and reported success. (The out-of-range id
-/// panic of the finding was fixed by T0-WP20, 812a148; its error is checked here as a regression guard.)
+/// panic of the finding was fixed by T0-WP20, 5af67f5; its error is checked here as a regression guard.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_mcp_dendrogram_bad_linkage() {
     let (session, server) = session_with_datasets(vec![]);

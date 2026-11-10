@@ -1728,7 +1728,7 @@ mod tests {
 
     #[test]
     fn test_twang_results_unchanged_by_sweep() {
-        // Pinned from the naive stump search at 1fdb22f.
+        // Pinned from the naive stump search at bdfca3c.
         const OPT: usize = 51;
         const PS0: f64 = 0.7227379628293721;
         const PS25: f64 = 0.2772620371706279;

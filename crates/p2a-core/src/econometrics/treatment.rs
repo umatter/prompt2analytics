@@ -2366,7 +2366,7 @@ mod tests {
 
     #[test]
     fn test_seeded_bootstrap_unchanged() {
-        // Pinned from the pre-streaming implementation at 1fdb22f, seed 42. The propensity
+        // Pinned from the pre-streaming implementation at bdfca3c, seed 42. The propensity
         // scores from glm::fit_propensity since T3-WP23 differ at 1e-13 from that fit's, so
         // the standard errors are compared at 1e-9 relative. The interval is the type-7
         // percentile interval of the same draws since T3-WP23 (CAUS-111; it was effect

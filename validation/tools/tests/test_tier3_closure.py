@@ -802,7 +802,7 @@ class ValidateBodiesTest(unittest.TestCase):
 PENDING_TEST_CODE: set[tuple[str, str, str]] = set()
 
 
-# The test functions the findings cite (name at d6a3a3b). Each is gone (deleted or renamed), or it is
+# The test functions the findings cite (name at da1418f). Each is gone (deleted or renamed), or it is
 # registered in validation/methods/*.json (R-pinned) or labelled in validate_property_tests.txt.
 # (finding, module hint in the libtest path, name)
 CITED = [

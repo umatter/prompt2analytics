@@ -2400,7 +2400,7 @@ mod tests {
         }
     }
 
-    /// X-7, panel/utils.rs:202 (d6a3a3b): guarded since T0-WP14, site removed by T2-WP19;
+    /// X-7, panel/utils.rs:202 (da1418f): guarded since T0-WP14, site removed by T2-WP19;
     /// regression guard for the System path.
     #[test]
     fn test_sysgmm_rejects_max_lag_below_min_lag() {

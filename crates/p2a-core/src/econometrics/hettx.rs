@@ -1708,7 +1708,7 @@ mod tests {
     /// beats the observed one), so nearly any stream reproduces them. The
     /// observed statistic, the ATE, the first null draws and their sum depend on
     /// the matching and on every permutation. They were printed with `{:?}` from
-    /// the code before T0-WP13's hettx change (f59362c) and from 63801c5, which
+    /// the code before T0-WP13's hettx change (f29ae2b) and from c421c09, which
     /// agreed bit for bit on all 200 null draws.
     #[test]
     fn test_hettx_pinned_seed42() {
