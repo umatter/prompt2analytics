@@ -885,7 +885,7 @@ tests and lists them separately on the status page, and a method whose only test
 not in the R-pinned set). A test named `test_validate_*` is R-pinned and registered
 in `validation/methods/*.json`, or listed with its kind and reason in `validation/tools/validate_property_tests.txt`
 (`quoted` for R output quoted in the test source); `validation/tools/tests/test_tier3_closure.py` enforces it in CI
-(`test_every_test_validate_test_is_pinned_or_labelled` fails on a new unregistered, unlisted one). A check that
+(its list-based check fails on a new `test_validate_*` test that is neither registered nor listed). A check that
 recovers a simulated truth is named `*_recovers_dgp` or descriptively. `validation/README.md` explains both, the
 layout and the workflow.
 
