@@ -303,8 +303,8 @@ fn spearman_test(
     let n = x.len();
 
     // Rank the data
-    let x_ranks = crate::stats::ranks::midranks(x)?.0;
-    let y_ranks = crate::stats::ranks::midranks(y)?.0;
+    let x_ranks = crate::stats::ranks::midrank_values(x)?;
+    let y_ranks = crate::stats::ranks::midrank_values(y)?;
 
     // Spearman's rho is Pearson correlation of ranks
     let rho = pearson_correlation(&x_ranks, &y_ranks);

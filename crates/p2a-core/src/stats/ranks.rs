@@ -24,7 +24,7 @@ use crate::resource::{try_vec, try_with_capacity};
 pub fn midranks(x: &[f64]) -> EconResult<(Vec<f64>, Vec<usize>)> {
     let n = x.len();
     let mut pairs: Vec<(f64, usize)> = try_with_capacity(n, "midranks order")?;
-    let mut ranks: Vec<f64> = try_vec(n, 0.0, "midranks")?;
+    let mut ranks: Vec<f64> = try_with_capacity(n, "midranks")?;
     let mut sizes: Vec<usize> = Vec::new();
     midranks_into(x, &mut pairs, &mut ranks, &mut sizes)?;
     Ok((ranks, sizes))
@@ -42,6 +42,27 @@ pub(crate) fn midranks_into(
     ranks: &mut Vec<f64>,
     sizes: &mut Vec<usize>,
 ) -> EconResult<()> {
+    sizes.clear();
+    midranks_runs(x, pairs, ranks, |size| sizes.push(size))
+}
+
+/// [`midranks()`]'s first vector only, for callers that discard the tie sizes (Spearman's
+/// rho): the same ranks bit for bit, without growing a vector of sizes.
+pub(crate) fn midrank_values(x: &[f64]) -> EconResult<Vec<f64>> {
+    let mut pairs: Vec<(f64, usize)> = try_with_capacity(x.len(), "midranks order")?;
+    let mut ranks: Vec<f64> = try_with_capacity(x.len(), "midranks")?;
+    midranks_runs(x, &mut pairs, &mut ranks, |_| {})?;
+    Ok(ranks)
+}
+
+/// The ranking itself: refuses NaN, fills `ranks` with the midranks of `x` in input order and
+/// reports the size of every tie run, in ascending order of the value, to `on_run`.
+fn midranks_runs(
+    x: &[f64],
+    pairs: &mut Vec<(f64, usize)>,
+    ranks: &mut Vec<f64>,
+    mut on_run: impl FnMut(usize),
+) -> EconResult<()> {
     if let Some(i) = x.iter().position(|v| v.is_nan()) {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -57,7 +78,6 @@ pub(crate) fn midranks_into(
     pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     ranks.clear();
     ranks.resize(n, 0.0);
-    sizes.clear();
     let mut i = 0;
     while i < n {
         let mut j = i + 1;
@@ -68,7 +88,7 @@ pub(crate) fn midranks_into(
         for &(_, k) in &pairs[i..j] {
             ranks[k] = rank;
         }
-        sizes.push(j - i);
+        on_run(j - i);
         i = j;
     }
     Ok(())
@@ -274,6 +294,35 @@ mod tests {
             }
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_midrank_values_equals_midranks() {
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        for n in [0usize, 1, 2, 7, 50, 333] {
+            let x: Vec<f64> = (0..n)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    match state % 11 {
+                        0 => 0.0,
+                        1 => -0.0,
+                        2 => 1.5,
+                        _ => (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5,
+                    }
+                })
+                .collect();
+            assert_eq!(
+                midrank_values(&x).unwrap(),
+                midranks(&x).unwrap().0,
+                "n = {n}"
+            );
+        }
+        assert!(matches!(
+            midrank_values(&[1.0, f64::NAN]),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     #[test]

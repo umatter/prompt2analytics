@@ -310,8 +310,38 @@ pub fn medpolish(
     })
 }
 
+/// Length up to which [`compute_median`] sorts a stack copy instead of selecting.
+const SMALL_MEDIAN: usize = 20;
+
 /// Compute median of a slice, optionally removing NaN values.
 fn compute_median(data: &[f64], na_rm: bool) -> f64 {
+    if data.len() <= SMALL_MEDIAN {
+        // Short rows and columns: copy into a stack buffer and sort it in place (an insertion
+        // sort at this length), with no heap allocation.
+        let mut buf = [0.0f64; SMALL_MEDIAN];
+        let mut n = 0;
+        for &x in data {
+            if x.is_nan() {
+                if na_rm {
+                    continue;
+                }
+                // R's median(x) without na.rm
+                return f64::NAN;
+            }
+            buf[n] = x;
+            n += 1;
+        }
+        if n == 0 {
+            return f64::NAN;
+        }
+        let clean = &mut buf[..n];
+        clean.sort_unstable_by(f64::total_cmp);
+        return if n.is_multiple_of(2) {
+            (clean[n / 2 - 1] + clean[n / 2]) / 2.0
+        } else {
+            clean[n / 2]
+        };
+    }
     let mut clean: Vec<f64> = if na_rm {
         data.iter().filter(|x| !x.is_nan()).copied().collect()
     } else if data.iter().any(|x| x.is_nan()) {
@@ -325,13 +355,22 @@ fn compute_median(data: &[f64], na_rm: bool) -> f64 {
         return f64::NAN;
     }
 
-    clean.sort_by(f64::total_cmp);
-
     let n = clean.len();
-    if n % 2 == 0 {
-        (clean[n / 2 - 1] + clean[n / 2]) / 2.0
+    // Selection instead of a full sort: under the total order the k-th element is the same
+    // double a sort would put at k, and for even n the lower middle is the largest value left
+    // of the upper one.
+    let mid = n / 2;
+    let (lower, upper, _) = clean.select_nth_unstable_by(mid, f64::total_cmp);
+    let upper = *upper;
+    if n.is_multiple_of(2) {
+        let lower_mid = lower
+            .iter()
+            .copied()
+            .max_by(f64::total_cmp)
+            .expect("n is even and positive, so the lower part is not empty");
+        (lower_mid + upper) / 2.0
     } else {
-        clean[n / 2]
+        upper
     }
 }
 
@@ -735,6 +774,59 @@ mod tests {
         for i in 0..3 {
             for j in 0..3 {
                 assert!((original[i][j] - data[[i, j]]).abs() < 1e-10);
+            }
+        }
+    }
+
+    /// The selection median equals the sorted-reference median bit for bit, odd and even
+    /// lengths, ties, signed zeros and NaN under both na_rm settings.
+    #[test]
+    fn test_compute_median_matches_sorted_reference() {
+        fn reference(data: &[f64], na_rm: bool) -> f64 {
+            if !na_rm && data.iter().any(|x| x.is_nan()) {
+                return f64::NAN;
+            }
+            let mut v: Vec<f64> = data.iter().copied().filter(|x| !x.is_nan()).collect();
+            if v.is_empty() {
+                return f64::NAN;
+            }
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            if n % 2 == 0 {
+                (v[n / 2 - 1] + v[n / 2]) / 2.0
+            } else {
+                v[n / 2]
+            }
+        }
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for n in 0..60 {
+            for rep in 0..20 {
+                let data: Vec<f64> = (0..n)
+                    .map(|_| {
+                        let r = next();
+                        match r % 23 {
+                            0 if rep % 3 == 0 => f64::NAN,
+                            1 => 0.0,
+                            2 => -0.0,
+                            3 => 2.5,
+                            _ => (r >> 11) as f64 / (1u64 << 53) as f64 * 10.0 - 5.0,
+                        }
+                    })
+                    .collect();
+                for na_rm in [false, true] {
+                    let got = compute_median(&data, na_rm);
+                    let want = reference(&data, na_rm);
+                    assert!(
+                        got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                        "n = {n}, na_rm = {na_rm}: {got} vs {want}"
+                    );
+                }
             }
         }
     }
