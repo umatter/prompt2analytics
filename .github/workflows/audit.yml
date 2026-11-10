@@ -56,11 +56,13 @@ jobs:
           fi
           if ! features=$(cargo tree --locked --workspace --all-features --target all \
               -e features -i rmcp); then
-            echo "::error::cargo tree -i rmcp failed, so the RUSTSEC-2026-0189 (rmcp) exemption cannot be checked."
+            echo "::error::cargo tree -i rmcp failed, so the RUSTSEC-2026-0189 and RUSTSEC-2026-0462 (rmcp) exemptions cannot be checked."
             exit 1
           fi
-          if grep -E 'rmcp feature "[^"]*(streamable-http|server-side-http)' <<<"$features"; then
-            echo "::error::The RUSTSEC-2026-0189 exemption no longer holds: an rmcp HTTP transport feature is enabled."
+          # Matches the server (RUSTSEC-2026-0189) and the client
+          # (transport-streamable-http-client*, RUSTSEC-2026-0462) features.
+          if grep -E 'rmcp feature "[^"]*(streamable-http|server-side-http|client-side-sse|sse-client)' <<<"$features"; then
+            echo "::error::The RUSTSEC-2026-0189 and RUSTSEC-2026-0462 exemptions no longer hold: an rmcp HTTP transport feature is enabled."
             exit 1
           fi
           # RUSTSEC-2026-0398 is in zstd-safe's seekable module, which only its
@@ -120,6 +122,14 @@ jobs:
       #     if rmcp's features change; delete it, and the rmcp check above, when
       #     rmcp >= 1.4.
       #
+      #   RUSTSEC-2026-0462  rmcp 0.8.5: response bodies buffered without a
+      #     bound in the Streamable HTTP client transport, fixed in rmcp 3.9
+      #     (a breaking upgrade). Not compiled here: that transport needs
+      #     rmcp's `transport-streamable-http-client` feature, absent from the
+      #     feature list above (no `client` feature either). p2a-mcp is only an
+      #     MCP server, and p2a-chat talks to it over plain reqwest, not rmcp.
+      #     Same check as RUSTSEC-2026-0189; delete it when rmcp >= 3.9.
+      #
       #   RUSTSEC-2026-0235  rkyv 0.7.46: lockfile-only. rust_decimal names it in
       #     the weak feature `rkyv?/std`, but nothing enables rust_decimal's
       #     `rkyv` feature. Re-check if rust_decimal's features change.
@@ -170,6 +180,7 @@ jobs:
         run: |
           cargo audit \
             --ignore RUSTSEC-2026-0189 \
+            --ignore RUSTSEC-2026-0462 \
             --ignore RUSTSEC-2026-0235 \
             --ignore RUSTSEC-2026-0194 \
             --ignore RUSTSEC-2026-0195 \
