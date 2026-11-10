@@ -1289,6 +1289,13 @@ fn solve_exact(
     })
 }
 
+/// The value a Gauss-Newton run records when its predicted-decrease rule stops it: the predicted
+/// decrease `slope` of `g'Wg` relative to `q0 = g'Wg`, never negative, and 0 when `g'Wg` is
+/// already 0 (a run that starts at the exact solution), where `slope / q0` would be 0 / 0.
+fn decrement_ratio(slope: f64, q0: f64) -> f64 {
+    if q0 > 0.0 { slope.max(0.0) / q0 } else { 0.0 }
+}
+
 /// Over-identified CBPS (`gmm.loss` with W fixed): Gauss-Newton on `g' W g`.
 fn solve_over(
     u: &Array2<f64>,
@@ -1334,7 +1341,11 @@ fn solve_over(
         let slope = r.dot(&s);
         if change <= tol || slope <= DECREMENT_RTOL * q0 {
             if change > tol {
-                stop = Some((DECREMENT_CRITERION, slope / q0, DECREMENT_RTOL));
+                stop = Some((
+                    DECREMENT_CRITERION,
+                    decrement_ratio(slope, q0),
+                    DECREMENT_RTOL,
+                ));
             }
             beta = &beta - &s;
             converged = true;
@@ -1356,7 +1367,7 @@ fn solve_over(
             if slope <= FLOOR_RTOL * q0 {
                 // g'Wg cannot be lowered in floating point and its predicted decrease is
                 // negligible: the minimum to the precision g'Wg can be evaluated.
-                stop = Some((DECREMENT_CRITERION, slope / q0, FLOOR_RTOL));
+                stop = Some((DECREMENT_CRITERION, decrement_ratio(slope, q0), FLOOR_RTOL));
                 converged = true;
                 break;
             }
@@ -1979,6 +1990,26 @@ mod tests {
                 r.warnings.iter().all(|w| !w.contains("line search")),
                 "{e}: {:?}",
                 r.warnings
+            );
+        }
+    }
+
+    /// The predicted-decrease record is a ratio in [0, tolerance] when that rule stops a run: 0
+    /// rather than 0 / 0 = NaN when g'Wg is already 0, and 0 rather than a negative value when the
+    /// predicted decrease is negative.
+    #[test]
+    fn test_cbps_decrement_record_is_finite_and_non_negative() {
+        assert_eq!(decrement_ratio(0.0, 0.0), 0.0);
+        assert_eq!(decrement_ratio(-1e-30, 0.0), 0.0);
+        assert_eq!(decrement_ratio(-2e-12, 1.0), 0.0);
+        assert_eq!(decrement_ratio(0.0, 3.0), 0.0);
+        assert_eq!(decrement_ratio(2.0, 8.0), 0.25);
+        // Both stopping branches of solve_over record it, so the record meets its tolerance.
+        for (slope, q0) in [(0.0, 0.0), (-1.0, 1.0), (1e-15, 1.0)] {
+            let r = decrement_ratio(slope, q0);
+            assert!(
+                r.is_finite() && (0.0..=DECREMENT_RTOL).contains(&r),
+                "{slope}, {q0}: {r}"
             );
         }
     }

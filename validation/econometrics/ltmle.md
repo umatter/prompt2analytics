@@ -306,8 +306,11 @@ CAUS-101). Their |p2a - ltmle| on the regime means and the ATE, at tolerance 1e-
 | `shifted_outcome((150, 4, 2), -5, false, 0.3)` | 0.018 | 2.7e-4 | 0.018 |
 | `shifted_outcome((150, 4, 2), 3, false, 2)` | 2.8e-3 | 0.021 | 0.020 |
 | `shifted_outcome((150, 4, 4), 3, false, 2)` | 6.0e-3 | 5.6e-3 | 0.010 |
-| `shifted_outcome((300, 3, 4), -5, false, 0.3)` | 5.1e-5 | 7.1e-5 | 7.1e-5 |
-| `shifted_outcome((300, 8, 3), -5, false, 0.3)` | 5.2e-5 | 5.5e-5 | of the same order |
+| `shifted_outcome((300, 3, 4), -5, false, 0.3)` | 5.1e-5 | 7.1e-5 | 2.1e-4 |
+| `shifted_outcome((300, 8, 3), -5, false, 0.3)` | 5.2e-5 | 5.5e-5 | 5.5e-5 |
+
+The ATE standard errors differ from ltmle's too, by 9.9e-6 to 0.0125 at 1e-8 on the same five sets
+(CAUS-101 lists them with the means and the ATE).
 
 A tighter tolerance does not help: the gap does not shrink from 1e-8 to 1e-14 on any of the five
 and grows on four. Their last node's Q regression is quasi-separated, so the regime prediction

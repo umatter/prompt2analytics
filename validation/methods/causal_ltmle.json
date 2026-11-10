@@ -67,8 +67,8 @@
       "deviations": [
         {
           "finding": "CAUS-101",
-          "quantity": "regime means and ATE on five quasi-separated shifted_outcome data sets (scratch fixtures of the oracle sweep, not a case)",
-          "note": "|p2a - ltmle| 5.1e-5 to 0.018 at the default tolerance 1e-8 (up to 0.021 at 1e-10 and 1e-14); the last node's Q regression is quasi-separated, so the prediction depends on where the deviance rule stops, and on three of the five ltmle re-solves with bounded offsets where p2a's scalar fluctuation solves the score; a tighter tolerance does not close the gap. Default 1e-8 kept (decided 2026-11-09); the case's own quantities are pinned."
+          "quantity": "regime means, ATE and ATE standard error on five quasi-separated shifted_outcome data sets (scratch fixtures of the oracle sweep, not a case)",
+          "note": "|p2a - ltmle| 5.1e-5 to 0.018 at the default tolerance 1e-8 (up to 0.021 at 1e-10 and 1e-14); the last node's Q regression is quasi-separated, so the prediction depends on where the deviance rule stops, and on three of the five ltmle re-solves with bounded offsets where p2a's scalar fluctuation solves the score; a tighter tolerance does not close the gap. The ATE standard errors differ from ltmle's by 9.9e-6 to 0.0125 at 1e-8 on the same five sets. Default 1e-8 kept (decided 2026-11-09); the case's own quantities are pinned."
         }
       ],
       "supersedes_legacy": []
