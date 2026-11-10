@@ -791,7 +791,7 @@ fn open_sqlite_locked(path: &Path, opts: &QueryOptions) -> Result<SqliteConnecti
     use rusqlite::limits::Limit;
     let flags =
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(sqlite_open_path(path).as_ref(), flags)?;
+    let mut conn = rusqlite::Connection::open_with_flags(sqlite_open_path(path).as_ref(), flags)?;
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     if let Some(bytes) = opts.max_bytes {
         // A larger value could never be returned within the byte budget anyway.
@@ -815,7 +815,7 @@ fn open_sqlite_locked(path: &Path, opts: &QueryOptions) -> Result<SqliteConnecti
             Authorization::Deny
         }
         _ => Authorization::Allow,
-    }));
+    }))?;
 
     Ok(SqliteConnection {
         conn,
@@ -872,7 +872,7 @@ pub fn query_sqlite_with(
     // compiles only the first statement; the lexer above already refused any
     // second one.
     let SqliteConnection {
-        conn,
+        mut conn,
         denied_pragma,
     } = open_sqlite_locked(path, opts)?;
 
@@ -898,7 +898,7 @@ pub fn query_sqlite_with(
                     None => false,
                 }
             }),
-        );
+        )?;
     }
     let stopped = |e: rusqlite::Error| {
         // A PRAGMA refused by the authorizer surfaces as a "not authorized"
@@ -926,7 +926,7 @@ pub fn query_sqlite_with(
     }
 
     let column_count = stmt.column_count();
-    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let column_names: Vec<String> = stmt.column_names().map(str::to_string).collect();
 
     // SQLite streams: each `next` steps the statement once.
     let mut collector = RowCollector::new(column_count, opts);
@@ -944,7 +944,7 @@ pub fn query_sqlite_with(
         }
         let mut row_bytes = 0u64;
         for i in 0..column_count {
-            let value: rusqlite::types::Value = row.get_ref(i).map_err(stopped)?.into();
+            let value = sqlite_owned_value(row.get_ref(i).map_err(stopped)?);
             row_bytes = row_bytes.saturating_add(sqlite_value_bytes(&value));
             row_values.push(value);
         }
@@ -955,6 +955,20 @@ pub fn query_sqlite_with(
     drop(rows);
 
     finish_outcome(collector, column_names, sqlite_column_to_series)
+}
+
+/// One borrowed SQLite value as an owned one. Text is decoded lossily
+/// (`from_utf8_lossy`: invalid bytes become U+FFFD), as for DuckDB, so a
+/// non-UTF-8 TEXT value cannot fail or panic the query.
+fn sqlite_owned_value(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::Value {
+    use rusqlite::types::{Value, ValueRef};
+    match value {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(i) => Value::Integer(i),
+        ValueRef::Real(r) => Value::Real(r),
+        ValueRef::Text(b) => Value::Text(String::from_utf8_lossy(b).into_owned()),
+        ValueRef::Blob(b) => Value::Blob(b.to_vec()),
+    }
 }
 
 /// Estimated size of one SQLite value: numbers 8 bytes, text and blobs their length.
@@ -2909,6 +2923,21 @@ mod tests {
             r.warnings
         );
         assert!(r.to_string().contains("Warning: column 'note'"), "{r}");
+    }
+
+    #[test]
+    fn test_sqlite_invalid_utf8_text_is_decoded_lossily() {
+        // rusqlite <= 0.40 converted TEXT with `expect("invalid UTF-8")`.
+        let dir = tempfile::tempdir().unwrap();
+        let r = query_sqlite(
+            sales_db(dir.path()),
+            "SELECT CAST(x'61ff62' AS TEXT) AS t UNION ALL SELECT 'ok'",
+        )
+        .unwrap();
+        assert_eq!(
+            strs(&r.dataframe, "t"),
+            vec![Some("a\u{FFFD}b"), Some("ok")]
+        );
     }
 
     #[test]

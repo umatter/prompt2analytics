@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-yellow.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-blue.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-blue.svg)](https://www.rust-lang.org/)
 
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
@@ -13,7 +13,7 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 
 The demo runs the latest tagged release (check [`/health`](https://p2a-api.qamelab.org/health)) in open public mode with the hosted resource profile: there are no user accounts, per-visitor isolation relies on unguessable session IDs, the session-list and file-browser endpoints are disabled, and idle sessions end after 60 minutes (sooner when the server is full) (threat model and limits in [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)). Two caveats follow from it being a **public, shared instance**: do **not** upload confidential or personal data — for sensitive work use the desktop app or a self-hosted backend, the deployment mode the project is designed around — and treat sessions as **ephemeral**: the instance has no persistent volume, so uploaded data and results disappear whenever it restarts or is redeployed.
 
-**Requirements**: Rust 1.88+ (edition 2024)
+**Requirements**: Rust 1.89+ (edition 2024)
 
 ## Features
 

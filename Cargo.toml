@@ -1,5 +1,5 @@
 [workspace]
-# 3 = 2 + MSRV-aware updates: cargo update prefers versions whose rust-version fits 1.88.
+# 3 = 2 + MSRV-aware updates: cargo update prefers versions whose rust-version fits 1.89.
 resolver = "3"
 members = [
     "crates/p2a-core",
@@ -16,7 +16,7 @@ edition = "2024"
 authors = ["prompt2analytics contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/umatter/prompt2analytics"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.dependencies]
 # Char-boundary-safe text truncation (crates/p2a-text). Keep `version` equal to [workspace.package].version:
@@ -62,7 +62,9 @@ rand_distr = "0.4"
 calamine = "0.38"  # Excel file reading (xlsx, xls, xlsb, ods); 0.37 is the first release on zip >= 9, 0.38 the first with the security fixes of RUSTSEC-2026-0436
 
 # Database connectivity
-rusqlite = { version = "0.33", features = ["bundled", "hooks", "limits"] }
+# 0.41 is the first release on libsqlite3-sys >= 0.39 (bundled SQLite with the
+# fix for RUSTSEC-2026-0459); it needs Rust 1.89, hence the workspace MSRV.
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "limits"] }
 # parquet: compile the extension in, so Parquet queries never download it at
 # run time (the bundled build otherwise autoinstalls extensions on demand).
 # 1.10506.1 is the first release whose libduckdb-sys build script is on

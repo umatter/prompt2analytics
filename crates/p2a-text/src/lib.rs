@@ -18,7 +18,7 @@
 //! valid UTF-8 and no function here panics. The crate has no dependencies, uses only `core`/`std`
 //! string APIs and builds for `wasm32-unknown-unknown`.
 //!
-//! `str::floor_char_boundary` is not stable at the workspace MSRV (1.88), hence
+//! `str::floor_char_boundary` is not stable at the workspace MSRV (1.89), hence
 //! [`floor_char_boundary`].
 #![forbid(unsafe_code)]
 
