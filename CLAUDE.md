@@ -880,7 +880,9 @@ cd crates/p2a-dioxus && dx serve
 `p2a_validation::Case::load` (p2a-cli, p2a-mcp), and compare every reported number with
 `p2a_validation::{Check, Tol}`. The others check properties, known DGPs or quoted values.
 Only the first kind may be described as matching R, and only for the quantities its registry entry lists as
-pinned (a `registered-property` test compares none). A test named `test_validate_*` is R-pinned and registered
+pinned (a `registered-property` test compares none: `validation_status.py` counts those apart from the R-pinned
+tests and lists them separately on the status page, and a method whose only tests are `registered-property` is
+not in the R-pinned set). A test named `test_validate_*` is R-pinned and registered
 in `validation/methods/*.json`, or listed with its kind and reason in `validation/tools/validate_property_tests.txt`
 (`quoted` for R output quoted in the test source); `validation/tools/tests/test_tier3_closure.py` enforces it in CI
 (`test_every_test_validate_test_is_pinned_or_labelled` fails on a new unregistered, unlisted one). A check that

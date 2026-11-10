@@ -250,6 +250,25 @@ def is_validate(test_id: str) -> bool:
     return "test_validate" in test_id.rsplit("::", 1)[-1] and not is_excluded(test_id)
 
 
+LABELS = Path("validation") / "tools" / "validate_property_tests.txt"
+
+
+def load_labels(root: Path) -> dict:
+    """{test id: kind} from validation/tools/validate_property_tests.txt; empty when the file is absent.
+    A `registered-property` test is registered but compares no R value, so it does not count as R-pinned.
+    The format is checked by tools/tests/test_tier3_closure.py; lines that do not parse are skipped here."""
+    path = Path(root) / LABELS
+    if not path.is_file():
+        return {}
+    out = {}
+    for line in read_text(path).splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if line.lstrip().startswith("#") or len(parts) < 3 or not parts[0]:
+            continue
+        out[parts[0]] = parts[1]
+    return out
+
+
 def select_tests(list_text: str, package: str, category=None, all_tests=False) -> list:
     """Sorted [(target flag, raw libtest name)] to run."""
     if category is not None and category not in CATEGORIES:
@@ -1288,6 +1307,20 @@ def render(results: dict, root: Path) -> str:
         out.append(f"| {package} | {cat} | {p} | {f} | {i} |")
     out.append(f"| **Total** | | **{total[0]}** | **{total[1]}** | **{total[2]}** |")
     out.append("")
+    findings = []
+    methods = load_registry(root, findings)
+    labels = load_labels(root)
+    registered_all = {t for _, m, _ in methods for t in m["tests"]}
+    property_tests = {t for t in registered_all if labels.get(t) == "registered-property"}
+    validate_run = {t for t in tests if not t.startswith("p2a-validation::") and is_validate(t)}
+    n_pinned = len(validate_run & (registered_all - property_tests))
+    n_property = len(validate_run & property_tests)
+    out.append(
+        f"R-pinned tests (registered in `validation/methods/*.json` and comparing an R value): {n_pinned}. "
+        f"Registered tests that compare no R value (`registered-property`, listed below): {n_property}. "
+        f"Not registered: {len(validate_run) - n_pinned - n_property}."
+    )
+    out.append("")
     hp, hf, _ = _counts(s for t, s in tests.items() if t.startswith("p2a-validation::"))
     out.append(
         "`test_validate` tests only; the three `data::database` read-only SQL guards are not "
@@ -1305,8 +1338,6 @@ def render(results: dict, root: Path) -> str:
     out.append("")
 
     # Methods.
-    findings = []
-    methods = load_registry(root, findings)
     r_check = results.get("r_check") or {}
     r_cases = r_check.get("cases", {}) or {}
     out += ["## Methods pinned to R", ""]
@@ -1320,6 +1351,9 @@ def render(results: dict, root: Path) -> str:
         ]
         for _, m, _ in sorted(methods, key=lambda x: x[1]["id"]):
             registered_tests.update(m["tests"])
+            pinned_tests = [t for t in m["tests"] if t not in property_tests]
+            if not pinned_tests:
+                continue  # listed under "Registered tests that compare no R value"
             statuses = [tests.get(t) for t in m["tests"]]
             if "failed" in statuses or any(r_cases.get(c) == "failed" for c in m["cases"]):
                 status = "FAIL"
@@ -1338,7 +1372,7 @@ def render(results: dict, root: Path) -> str:
                         ", ".join(_code(c) for c in m["cases"]),
                         _cell(", ".join(m["quantities"])),
                         _cell(m["tolerance"]),
-                        "<br>".join(_code(t) for t in m["tests"]),
+                        "<br>".join(_code(t) for t in pinned_tests),
                         status,
                     ]
                 )
@@ -1351,6 +1385,33 @@ def render(results: dict, root: Path) -> str:
                 out.append(f"- {_code(mid)}: {d['finding']}, {_cell(d['quantity'])}: {_cell(d['note'])}")
         else:
             out.append("None.")
+    out.append("")
+
+    # Registered tests that compare no R value.
+    out += [
+        "## Registered tests that compare no R value",
+        "",
+        "Registered and run on their method's case, but they check properties on R's data "
+        "(kind `registered-property` in `validation/tools/validate_property_tests.txt`); "
+        "they do not count as R-pinned.",
+        "",
+    ]
+    rows = [(m["id"], t) for _, m, _ in sorted(methods, key=lambda x: x[1]["id"]) for t in m["tests"]
+            if t in property_tests]
+    if rows:
+        out += ["| Method | Test | Result |", "|---|---|---|"]
+        status_text = {"ok": "pass", "failed": "FAIL", "ignored": "ignored"}
+        for mid, t in rows:
+            out.append(f"| {_code(mid)} | {_code(t)} | {status_text.get(tests.get(t), 'not run')} |")
+        unpinned = sorted(m["id"] for _, m, _ in methods if m["tests"] and set(m["tests"]) <= property_tests)
+        out.append("")
+        if unpinned:
+            out.append("Registered methods with no R-pinned test (not in \"Methods pinned to R\"): "
+                       + ", ".join(_code(x) for x in unpinned) + ".")
+        else:
+            out.append("Every registered method has at least one R-pinned test.")
+    else:
+        out.append("None.")
     out.append("")
 
     # R reference check.

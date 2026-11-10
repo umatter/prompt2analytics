@@ -122,6 +122,8 @@ The non-numeric tests are:
 - `test_validate_mcp_causal_degenerate_parameters_are_tool_errors`: impossible values (negative or zero RD bandwidths, an
   empty cutoff list, a level outside (0, 1), `scaleregul < 0`, `n_grid` below 2, an unknown reference cohort,
   inverted gbounds, a risk-difference E-value without `baseline_risk`) are tool errors naming the parameter.
+  It is registered (`mcp_causal_parameters`) but compares no R value (`registered-property`), so that entry
+  is not R-pinned.
 - `test_mcp_causal_option_descriptions_list_accepted_values`: a drift guard. Every option field's schema description
   lists each canonical value of the core table it is parsed with, quoted as `'name'`.
 

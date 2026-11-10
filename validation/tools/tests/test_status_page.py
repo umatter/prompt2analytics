@@ -24,6 +24,23 @@ def registry_entries():
     return out
 
 
+def property_tests():
+    """Registered tests labelled `registered-property`: they compare no R value and do not count as R-pinned."""
+    out = set()
+    path = VALIDATION / "tools" / "validate_property_tests.txt"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if not line.lstrip().startswith("#") and len(parts) >= 3 and parts[1] == "registered-property":
+            out.add(parts[0])
+    return out
+
+
+def pinned_entries():
+    """Registry entries with at least one test that compares an R value (the R-pinned set)."""
+    prop = property_tests()
+    return [e for e in registry_entries() if any(t not in prop for t in e["tests"])]
+
+
 def section(text, fragment):
     """Body of the first ##/### heading containing `fragment`, up to the next heading of the same or higher level."""
     lines = text.splitlines()
@@ -49,7 +66,7 @@ class ReadmeIndexTest(unittest.TestCase):
     def setUp(self):
         self.index = section((VALIDATION / "README.md").read_text(encoding="utf-8"), "Method Index")
         self.by_doc = {}
-        for entry in registry_entries():
+        for entry in pinned_entries():
             self.by_doc.setdefault(os.path.normpath(entry["doc"]), []).append(entry)
 
     def expected(self, doc):
@@ -89,7 +106,8 @@ class ReadmeIndexTest(unittest.TestCase):
 
     def test_every_registered_doc_is_indexed(self):
         indexed = {os.path.normpath(os.path.join("validation", m.group(1))) for m in LINK.finditer(self.index)}
-        self.assertEqual(sorted(set(self.by_doc) - indexed), [])
+        docs = {os.path.normpath(e["doc"]) for e in registry_entries()}
+        self.assertEqual(sorted(docs - indexed), [])
 
 
 class Econ82DocsTest(unittest.TestCase):
@@ -187,10 +205,17 @@ class StatusPageTest(unittest.TestCase):
 
     def test_pinned_section_lists_only_registered_methods(self):  # REG-57
         pinned = section(self.page, "Methods pinned to R").lower()
-        entries = registry_entries()
+        entries = pinned_entries()
         for e in entries:
             with self.subTest(method=e["id"]):
                 self.assertTrue(e["id"].lower() in pinned or e["name"].lower() in pinned)
+        # A method whose tests all compare no R value leaves the R-pinned set (user decision 3).
+        unpinned = [e for e in registry_entries() if e not in entries]
+        no_r = section(self.page, "Registered tests that compare no R value")
+        for e in unpinned:
+            with self.subTest(unpinned=e["id"]):
+                self.assertNotIn(f"(`{e['id'].lower()}`;", pinned)
+                self.assertIn(f"`{e['id']}`", no_r)
         named = " ".join(f"{e['id']} {e['name']}".lower() for e in entries)
         registered = " ".join(f"{e['id']} {e['name']} {e.get('reference', '')}".lower() for e in entries)
         for name in REG57_NAMES:
@@ -215,7 +240,7 @@ class StatusPageTest(unittest.TestCase):
             if not line.startswith("|") or line.startswith("| Method |") or line.startswith("|---"):
                 continue
             rows.append((line.split("|", 2)[1].strip(), line.strip().rstrip("|").rsplit("|", 1)[-1].strip()))
-        self.assertEqual(len(rows), len(entries))
+        self.assertEqual(len(rows), len(pinned_entries()))
         for method, status in rows:
             with self.subTest(method=method):
                 self.assertNotIn(status, ("NOT RUN", "FAIL"))

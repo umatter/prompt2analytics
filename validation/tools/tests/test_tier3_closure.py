@@ -34,7 +34,10 @@ def registry_entries():
 def expected_status(doc, entries=None):
     """The README / method-doc status vocabulary of T1-WP06 for a repository-relative doc path."""
     entries = registry_entries() if entries is None else entries
-    mine = [e for e in entries if os.path.normpath(e["doc"]) == os.path.normpath(doc)]
+    prop = {t for t, (kind, _) in read_labels().items() if kind == "registered-property"}
+    # A method whose only tests compare no R value (registered-property) is not R-pinned.
+    mine = [e for e in entries if os.path.normpath(e["doc"]) == os.path.normpath(doc)
+            and any(t not in prop for t in e["tests"])]
     if not mine:
         return "not R-pinned"
     ids = sorted({d["finding"] for e in mine for d in e.get("deviations", [])})

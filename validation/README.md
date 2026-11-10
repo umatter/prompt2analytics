@@ -7,7 +7,10 @@ p2a's numbers are checked against R in two ways, and the generated status page
   (`validation/expected/<case>.json`, computed by `validation/r/cases/*.R` on a committed or
   generated dataset). It compares every number the method reports with
   `p2a_validation::Check` at the tolerances below, and it is registered in
-  `validation/methods/*.json`.
+  `validation/methods/*.json`. A registered test labelled `registered-property` (it checks
+  properties on R's data and compares no R value) is not R-pinned: the status page counts it
+  apart and lists it under "Registered tests that compare no R value", and a method whose
+  only tests are such tests is not in the R-pinned set.
 - **Other `test_validate_*` tests**: property, DGP-recovery or quoted-value checks. They are
   useful, but they compare no committed R output. `VALIDATION_STATUS.md` lists them as "not
   registered as R-pinned".
@@ -322,8 +325,8 @@ No `~` values in comparison tables, no hand-written `#[test]` code: cite the tes
 
 ## Method Index
 
-Status is derived from `validation/methods/*.json`: `R-pinned` means a registered test
-compares the method with committed R output; whether it passed at the last full run is on
+Status is derived from `validation/methods/*.json`: `R-pinned` means a registered test that
+is not labelled `registered-property` compares the method with committed R output; whether it passed at the last full run is on
 `VALIDATION_STATUS.md`. `R-pinned, known deviations (...)` lists the findings the registry
 records for quantities that are not pinned. Everything else is `not R-pinned`.
 

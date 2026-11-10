@@ -967,6 +967,34 @@ class TestRender(TreeCase):
         mean = next(ln for ln in page.splitlines() if "`demo_mean`" in ln and ln.startswith("|"))
         self.assertTrue(mean.endswith("| FAIL |"), mean)
 
+    def test_render_counts_registered_property_tests_apart(self):
+        # Without a label file every registered test that ran counts as R-pinned.
+        page = self.render()
+        self.assertIn("comparing an R value): 1.", page)
+        self.assertIn("## Registered tests that compare no R value", page)
+        self.assertIn("None.", page.split("## Registered tests that compare no R value")[1].split("## R reference")[0])
+        # demo_var's only test compares no R value: demo_var leaves the R-pinned set and is listed apart.
+        labels = self.path("validation/tools/validate_property_tests.txt")
+        labels.write_text(
+            "# comment | not | a label\n"
+            "demo::stats::tests::test_validate_demo_var | registered-property | checks a property on the case data\n"
+            "demo::stats::tests::test_validate_broken | quoted | quoted R output, not a committed case\n"
+        )
+        results = json.loads((FIX / "results/results.json").read_text())
+        results["tests"]["demo::stats::tests::test_validate_demo_var"] = "ok"
+        page = self.render(results)
+        pinned = page.split("## Methods pinned to R")[1].split("## Registered tests that compare no R value")[0]
+        self.assertIn("`demo_mean`", pinned)
+        self.assertNotIn("`demo_var`", pinned)
+        no_r = page.split("## Registered tests that compare no R value")[1].split("## R reference check")[0]
+        self.assertIn("| `demo_var` | `demo::stats::tests::test_validate_demo_var` | pass |", no_r)
+        self.assertIn("Registered methods with no R-pinned test (not in \"Methods pinned to R\"): `demo_var`.", no_r)
+        self.assertIn("comparing an R value): 1.", page)
+        self.assertIn("(`registered-property`, listed below): 1.", page)
+        self.assertIn("Not registered: 3.", page)
+        other = page.split("## Other `test_validate_*` tests")[1].split("## Legacy")[0]
+        self.assertNotIn("test_validate_demo_var", other)
+
     def test_render_without_registry_or_runs(self):
         shutil.rmtree(self.path("validation/methods"))
         results = {"schema": 1, "commit": "abc1234", "date": "2026-10-21T12:00:00Z", "tests": {}}
