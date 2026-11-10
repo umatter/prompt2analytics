@@ -543,6 +543,31 @@ constant nodes (the ATEs of the T = 10 saturating seeds are unchanged to six dig
 n = 100 drops to 0.37x because its 33-step Q fit had a response without variation. A tolerance of
 1e-10 costs 1.02x to 1.15x, most on the T = 10 rows that do not saturate.
 
+### Quiet re-time against fe13b889 (2026-11-10)
+
+The same harness at the default tolerance of 1e-8 on a quiet machine (load average 1.1 to 1.6 after
+the first round), `release`, one P core, one rayon thread, five interleaved rounds of fe13b889,
+bf130c8f (the code before the no-variation rule) and this tree. Medians of the round medians in
+ms; the ratio is this tree over fe13b889.
+
+| Row | n | fe13b889 | bf130c8f | this tree | ratio |
+|---|---|---:|---:|---:|---:|
+| bench | 100 / 1,000 / 10,000 | 0.225 / 1.75 / 16.9 | 0.087 / 0.725 / 7.11 | 0.087 / 0.729 / 7.19 | 0.39 / 0.42 / 0.43 |
+| linear Q | 100 / 1,000 / 10,000 | 0.065 / 0.481 / 4.71 | 0.048 / 0.358 / 3.59 | 0.049 / 0.361 / 3.57 | 0.75 / 0.75 / 0.76 |
+| binary Y | 100 / 1,000 / 10,000 | 0.152 / 1.21 / 11.9 | 0.286 / 0.828 / 7.93 | 0.105 / 0.822 / 8.05 | 0.69 / 0.68 / 0.68 |
+| growth T = 2 / 3 / 5 | 10,000 | 9.99 / 14.0 / 23.2 | 7.02 / 13.3 / 22.9 | 7.13 / 13.4 / 23.0 | 0.71 / 0.96 / 0.99 |
+| T = 10, seeds 42 / 3 (saturate) | 10,000 | 44.7 / 44.9 | 249.4 / 249.3 | 56.5 / 55.9 | 1.26 / 1.25 |
+| T = 10, seeds 1 / 2 / 5 / 7 | 10,000 | 44.5 / 44.7 / 44.4 / 44.7 | 65.6 / 66.7 / 66.2 / 65.8 | 65.7 / 66.9 / 66.2 / 65.8 | 1.48 / 1.50 / 1.49 / 1.47 |
+| `shifted_outcome((5000, 10, 4), 3, false, 2)` | 5,000 | 181.8 | 510.3 | 23.6 | 0.13 |
+| `sparse_followers(2500, 8, 20)` | 2,500 | 8.90 | 36.8 | 9.60 | 1.08 |
+| `sparse_followers(4000, 10, 3)` | 4,000 | 17.3 | 98.0 | 25.6 | 1.48 |
+
+The saturating T = 10 seeds now cost 1.25x instead of the 5.5x accepted on 2026-11-07. The T = 10
+rows that do not saturate cost the same as at bf130c8f (1.00x), 1.47x to 1.50x of fe13b889 against
+the 1.45x to 1.47x measured at 811c26bb and accepted then. `sparse_followers(4000, 10, 3)`, a
+T = 10 data set of the same kind, had no fe13b889 figure before; its 1.48x (+8 ms) has not been
+signed off.
+
 ## 13. References
 
 - van der Laan, M.J. & Gruber, S. (2012). "Targeted Minimum Loss Based Estimation of
