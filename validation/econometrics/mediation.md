@@ -346,14 +346,14 @@ Until T2-WP13 the covariate matrix was scrambled (CAUS-25): it was filled column
 and reshaped row-major, so the estimates depended on the row and covariate order (total
 effect 1.3683 on this case). The direct and indirect effects are not pinned (CAUS-26).
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
-Medians over three interleaved rounds, one P core, one rayon thread, `release`, at 811c26bb; ratio is
-this tree over fe13b889. The first rows are the timing harness (`wp26`), the last the Criterion group
+Medians over three interleaved rounds, one P core, one rayon thread, `release`, at 003af73a; ratio is
+this tree over ff8e7559. The first rows are the timing harness (`wp26`), the last the Criterion group
 `MediationAnalysis` (99 replicates, trim 0.05). Both `econometrics_benchmarks` binaries were built with
 the default features (`full`, which includes `database`).
 
-| Row | n | fe13b889 | this tree | ratio |
+| Row | n | ff8e7559 | this tree | ratio |
 |---|---|---:|---:|---:|
 | harness, 199 replicates (ms) | 100 | 3.98 | 2.33 | 0.59 |
 | harness, 199 replicates (ms) | 1,000 | 32.29 | 16.68 | 0.52 |

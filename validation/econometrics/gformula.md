@@ -199,12 +199,12 @@ Rscript validation/r/run.R --check gformula_hazard gformula_hazard_tv gformula_n
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::gformula::
 ```
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
 Medians over three interleaved rounds of the timing harness (`wp28`, one P core, one rayon thread,
-`release`) at 811c26bb; ratio is this tree over fe13b889.
+`release`) at 003af73a; ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 | this tree | ratio |
+| Row | n | ff8e7559 | this tree | ratio |
 |---|---|---:|---:|---:|
 | check 1 (ms) | 10,000 | 917.2 | 503.7 | 0.55 |
 | check 2 (ms) | 10,000 | 581.2 | 422.0 | 0.73 |

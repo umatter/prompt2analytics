@@ -152,7 +152,7 @@ unknown strategy as a warning; `preview_replace` counts typed matches in every c
 
 ## Wall-clock
 
-`release`, `ci` features, against `fe13b889`, five interleaved rounds (order alternating) on a quiet
+`release`, `ci` features, against `ff8e7559`, five interleaved rounds (order alternating) on a quiet
 machine, 2026-11-08. "One core": `taskset` on one P core with `RAYON_NUM_THREADS=1` and
 `POLARS_MAX_THREADS=1`; "pool": the default thread pool, no `taskset`. Each cell is the median of its
 round medians; "ratio" is the median of the per-round ratios (this tree over the base), "min ratio" the

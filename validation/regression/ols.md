@@ -206,7 +206,7 @@ is why no tolerance tighter than the README's is applied there.
 **Timing.** The common path (full rank, reciprocal condition at least 1e-8) runs the
 normal equations it ran before plus one O(k²) condition certificate. Release build, one P
 core (`taskset -c 2`), `RAYON_NUM_THREADS=1`; base is the code before this change
-(`fe13b889`) and head the merged tree, run interleaved three times each; medians of the
+(`ff8e7559`) and head the merged tree, run interleaved three times each; medians of the
 per-run medians. `unified_benchmarks` fits from a dataset (the `regression_n<n>` data, three
 regressors); criterion `OLS_Standard` calls `run_ols_raw` on a prepared matrix (five
 regressors and a constant).
@@ -245,7 +245,7 @@ the pairs bootstrap 12-13% more.
   every replicate equals `solve_ols` bit for bit).
 
 Timing after these changes: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three
-interleaved rounds against `fe13b889`; new / base as the ratio of medians.
+interleaved rounds against `ff8e7559`; new / base as the ratio of medians.
 
 | Fit | n | new / base |
 |---|---|---|
@@ -270,7 +270,7 @@ order, so the meat is bit for bit the old one (`test_hac_meat_matches_indexed_re
 now also over 60 and 300 lags, the latter across two blocks). The T3-PERF5 row was measured on
 a shared, loaded machine as user-space CPU cycles per call from the hardware counter
 (`perf_event_open`; median of 11 batches, one P core, three interleaved rounds) against
-`fe13b889`. Every row is within 1.1x. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians): the criterion
+`ff8e7559`. Every row is within 1.1x. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `ff8e7559`, medians): the criterion
 `vcovHAC` bench at n = 100 / 500 / 1,000 / 5,000 is 0.75 / 0.76 / 0.76 / 0.57 of base, and the
 unified OLS_HAC row at n = 100 / 1,000 / 10,000 0.96 / 0.88 / 0.67.
 

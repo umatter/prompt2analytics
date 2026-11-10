@@ -103,8 +103,8 @@ hold the two solves to 1e-10 relative on noisy simulated designs (K up to 10, p 
 check that a series proportional to another up to 1e-12 noise is still refused, naming the lags.
 
 Timing (release, one P core, `RAYON_NUM_THREADS=1`, medians of 6 interleaved runs, each a median
-of 21 samples; base = fe13b889, before the Tier 3 VAR and Granger changes; QR = the pivoted QR
-for every fit, 3070299f; now = the solve above). Simulated stationary VAR(1) with Gaussian
+of 21 samples; base = ff8e7559, before the Tier 3 VAR and Granger changes; QR = the pivoted QR
+for every fit, b4ce6a85; now = the solve above). Simulated stationary VAR(1) with Gaussian
 noise; Granger on its first two series:
 
 | Fit | n | base µs | QR µs (ratio) | now µs (ratio) |

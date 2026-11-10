@@ -30,7 +30,7 @@ at `Tol::coef(60)`; `test_filter_even_two_sided_matches_r_cfilter`, `test_filter
 `test_filter_rejects_missing_coefficients` hold the example and the refusals.
 
 **Wall-clock (signed off 2026-11-08).** Convolution with p = 3, medians of the round medians over five interleaved
-rounds against `fe13b889`, `release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0,
+rounds against `ff8e7559`, `release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0,
 2026-11-08). Ratio is this tree over the base.
 
 | Row | n | base (µs) | this tree (µs) | ratio (median) | ratio (min) |

@@ -139,7 +139,7 @@ The non-numeric tests are:
 
 ## Wall-clock
 
-`propensity_matching`, measured on 2026-11-09 against fe13b889 (release builds, one core, eight interleaved
+`propensity_matching`, measured on 2026-11-09 against ff8e7559 (release builds, one core, eight interleaved
 rounds, load average 1.4-2.1) and accepted by the maintainer the same day:
 
 - nearest and cem at 1,000 rows: 0.91 and 0.79 ms, 1.23x of the base each; the default request on

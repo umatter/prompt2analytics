@@ -33,7 +33,7 @@ The p-values for `less` and `greater`, and the estimates, are in the case too.
 
 ## Wall-clock (signed off 2026-11-08)
 
-Two-sample `prop_test_two`, medians of the round medians over five interleaved rounds against `fe13b889`,
+Two-sample `prop_test_two`, medians of the round medians over five interleaved rounds against `ff8e7559`,
 `release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0, 2026-11-08): 0.236 µs in
 the base and 0.269 µs here at n = 100 (1.14x, about 33 ns per call: the `conf_level` check and the continuity rule),
 1.04x at n = 1,000 and n = 10,000. The one-sample test is within 1.09x. Signed off by the user.

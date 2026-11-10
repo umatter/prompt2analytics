@@ -227,8 +227,8 @@ Tests:
 
 ## Timing
 
-Release build, one P core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds at 811c26bb against
-`fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
+Release build, one P core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds at 003af73a against
+`ff8e7559` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
 criterion `new_methods_benchmarks`).
 
 | Fit | n | new / base |

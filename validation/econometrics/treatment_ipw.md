@@ -103,12 +103,12 @@ Tests: `test_validate_na_ipw_columns`, `test_validate_na_ipw_nan_outcome_is_miss
 `validation/methods/causal_na.json`, id `weighting_na_refusal`). They pin the refused column
 and the missing count; the IPW estimates are pinned by the tests above.
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
 Medians in µs over three interleaved rounds of the timing harness (`wp23` and, for the far-row design,
-`wp6f`; one P core, one rayon thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
+`wp6f`; one P core, one rayon thread, `release`) at 003af73a; ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 | this tree | ratio |
+| Row | n | ff8e7559 | this tree | ratio |
 |---|---|---:|---:|---:|
 | IPW ATE, covariates on U(-2, 2) | 100 | 25.19 | 19.73 | 0.78 |
 | IPW ATE, covariates on U(-2, 2) | 1,000 | 150.49 | 123.22 | 0.82 |

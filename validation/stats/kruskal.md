@@ -125,7 +125,7 @@ absolute deviations, and turns ranks into scores with one standard-normal quanti
 (the argument `(1 + r / (n + 1)) / 2` lies in (0.5, 1), so it needs no check). The statistic is
 bit-identical to the version with a separate guard pass and a checked quantile. Release, one P
 core, `RAYON_NUM_THREADS=1`, medians of 6 interleaved runs (each a median of 21 samples), four
-normal groups with different spreads; base = fe13b889, before the Tier 3 rank changes:
+normal groups with different spreads; base = ff8e7559, before the Tier 3 rank changes:
 
 | n | base µs | separate guard, checked quantile µs (ratio) | now µs (ratio) |
 |---|---|---|---|
@@ -143,13 +143,13 @@ n(n+1)/2 < 2^52), the rank sums, tie sizes, statistic and p-value are bit-identi
 and heavily tied data, signed zeros, infinities and tiny distinct values). User-space CPU
 cycles per call from the hardware counter (`perf_event_open`; median of 11 batches, one P core,
 three interleaved rounds; the machine was shared and loaded, so wall clock was not usable),
-three groups as the criterion bench, against `fe13b889`:
+three groups as the criterion bench, against `ff8e7559`:
 
 | n | 100 | 1,000 | 10,000 | 100,000 |
 |---|---|---|---|---|
 | new / base | 0.85 | 0.78 | 0.74 | 0.74 |
 
-Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians): the criterion bench gives
+Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `ff8e7559`, medians): the criterion bench gives
 0.88 / 0.73 / 0.68 / 0.82 at the same sizes (base 2.5 / 21.3 / 292 / 4,391 µs), the unified
 runner 0.89 / 0.73 / 0.66 at n = 100 / 1,000 / 10,000.
 

@@ -210,7 +210,7 @@ residual vectors to 1e-10 of the QR's (relative to the residual norm) on noisy A
 with an intercept and with a trend.
 
 Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
-against `fe13b889` (before these changes); new / base as the ratio of medians.
+against `ff8e7559` (before these changes); new / base as the ratio of medians.
 `unified` rows use R's `panel_n<n>.csv` (y by entity and time, `floor(T^(1/3))` lags).
 Every row is within 1.1x of base.
 The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal

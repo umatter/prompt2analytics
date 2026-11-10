@@ -130,7 +130,7 @@ design at n = 100. A data-independent order also keeps the default reproducible 
 **Cost.** One long VAR(m) by its lagged cross products, O(n K^2 m + (K m)^3) with m about 2 ln n,
 where the old code fitted one VAR(p) (and no long VAR at all).
 
-**Timing.** Default VARMA(1, 1) against `fe13b889` (which fitted a VAR(1) and no long VAR):
+**Timing.** Default VARMA(1, 1) against `ff8e7559` (which fitted a VAR(1) and no long VAR):
 release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds; new / base as
 the ratio of medians.
 

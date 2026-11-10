@@ -79,12 +79,12 @@ missing values in every column the doubly robust estimator reads (checked for T2
 Tests: `test_validate_na_doubly_robust_columns` (case `causal_mediation_na`, registry
 `validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
 Medians in µs over three interleaved rounds of the timing harness (`wp23`, one P core, one rayon
-thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
+thread, `release`) at 003af73a; ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 | this tree | ratio |
+| Row | n | ff8e7559 | this tree | ratio |
 |---|---|---:|---:|---:|
 | AIPW | 100 | 25.98 | 16.86 | 0.65 |
 | AIPW | 1,000 | 162.20 | 103.86 | 0.64 |

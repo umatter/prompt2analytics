@@ -95,7 +95,7 @@ relative (`econometrics::glm::tests::test_glm_normal_equations_match_qr`), and a
 reaches the QR (`econometrics::glm::tests::test_glm_near_collinear_design_takes_qr`).
 
 Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds against
-`fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
+`ff8e7559` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
 criterion `econometrics_benchmarks`).
 
 | Bench | n | new / base |

@@ -104,7 +104,7 @@ fits took more steps from it, the most being 86 where glm.fit's start took 12
 lean fit leaves for `fit_glm` from glm.fit's start. At `max_iter` 50, 60 and 75 the warnings and
 convergence status are equal on all 1,716 data sets.
 
-The gap table and figures below were measured at bd5068dd, before the no-variation rule and the
+The gap table and figures below were measured at 2573f684, before the no-variation rule and the
 score re-solve; the columns with a regime near 0 or 1 describe fits that the rule now skips.
 
 Two reported things change, and both are accepted. `NodeModel::iterations` of a warm-started node
@@ -195,7 +195,7 @@ within 1e-8 at every tolerance; "Saturating regimes" has the measurements.
 There is no warm start across regimes. The last node's Q regression is fitted once for all
 regimes, and every earlier one already starts from its own regime's later node and takes about
 two steps, so a start from the other regime has few steps left to save. The fits that stay
-expensive are the saturated ones, which keep glm.fit's start ("Wall-clock against fe13b889").
+expensive are the saturated ones, which keep glm.fit's start ("Wall-clock against ff8e7559").
 
 ### Saturating regimes
 
@@ -466,15 +466,15 @@ not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_re
   ltmle differ there by 5e-5 to 0.018 ("Saturating regimes").
 - The full-history designs grow with the number of time points: node t has
   `1 + sum_{s <= t} k_s + t` columns, so the cost per regime grows as `T^3` (as in ltmle).
-  See "Wall-clock against fe13b889" for the cost when a fluctuation saturates a regime.
+  See "Wall-clock against ff8e7559" for the cost when a fluctuation saturates a regime.
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
 Medians in ms over three interleaved rounds of the timing harness (`wp27`, one P core, one rayon
-thread, `release`) at 811c26bb; ratio is this tree over fe13b889. fe13b889's estimator is not
+thread, `release`) at 003af73a; ratio is this tree over ff8e7559. ff8e7559's estimator is not
 comparable: it fitted shorter histories (its T = 2 growth ATE is -0.0029, this tree's 0.2397).
 
-| Row | n | fe13b889 | this tree | ratio |
+| Row | n | ff8e7559 | this tree | ratio |
 |---|---|---:|---:|---:|
 | bench | 100 | 0.23 | 0.09 | 0.39 |
 | bench | 1,000 | 1.78 | 0.73 | 0.41 |
@@ -494,14 +494,14 @@ Binary Y at n = 100 costs 1.86x because one Q fit takes 33 steps at that sample 
 regime's first (Q and g steps 4, 4, 6, 5, 33, 5). This is accepted.
 
 **Growth T = 10 costs about 5.5x on a saturating regime and about 1.46x otherwise; both are
-accepted.** (Measured at 811c26bb, before ltmle's no-variation rule; the saturating rows have
+accepted.** (Measured at 003af73a, before ltmle's no-variation rule; the saturating rows have
 since dropped to about a fifth, see "Saturating regimes: before and after" below.) The row's dataset has about 20 followers of each regime at the last node, and the
 always-treat fluctuation there reaches `eps = 29.2`. Every earlier Q response of that regime is then
 within about `exp(-29)` of 1, and each of those nine fits takes 30 IRLS steps in `fit_glm` as its
 linear predictor climbs to the clamp, where the other regime's take 2. Of six data seeds at
 T = 10, n = 10,000, two saturate this way:
 
-| Data seed | fe13b889 | this tree | ratio |
+| Data seed | ff8e7559 | this tree | ratio |
 |---|---:|---:|---:|
 | 42, saturates | 45.4 | 251.1 | 5.53 |
 | 3, saturates | 45.6 | 251.0 | 5.50 |
@@ -511,7 +511,7 @@ T = 10, n = 10,000, two saturate this way:
 | 7 | 45.5 | 65.9 | 1.45 |
 
 Those fits keep glm.fit's start. Starting `fit_glm` from `warm_start` on them is not done: at
-f89d777e it took seed 42 from 437 ms to 122 ms and seed 3 from 445 ms to 110 ms, with the ATE, SE,
+b62fdd2d it took seed 42 from 437 ms to 122 ms and seed 3 from 445 ms to 110 ms, with the ATE, SE,
 regime means, EIC, Q* and fluctuation coefficients within 5e-11 and equal warnings and convergence
 status, but the reported Q coefficients of the saturated nodes moved by up to 2.7, because their
 likelihood is flat.
@@ -546,14 +546,14 @@ constant nodes (the ATEs of the T = 10 saturating seeds are unchanged to six dig
 n = 100 drops to 0.37x because its 33-step Q fit had a response without variation. A tolerance of
 1e-10 costs 1.02x to 1.15x, most on the T = 10 rows that do not saturate.
 
-### Quiet re-time against fe13b889 (2026-11-10)
+### Quiet re-time against ff8e7559 (2026-11-10)
 
 The same harness at the default tolerance of 1e-8 on a quiet machine (load average 1.1 to 1.6 after
-the first round), `release`, one P core, one rayon thread, five interleaved rounds of fe13b889,
-bf130c8f (the code before the no-variation rule) and this tree. Medians of the round medians in
-ms; the ratio is this tree over fe13b889.
+the first round), `release`, one P core, one rayon thread, five interleaved rounds of ff8e7559,
+8e679c3b (the code before the no-variation rule) and this tree. Medians of the round medians in
+ms; the ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 | bf130c8f | this tree | ratio |
+| Row | n | ff8e7559 | 8e679c3b | this tree | ratio |
 |---|---|---:|---:|---:|---:|
 | bench | 100 / 1,000 / 10,000 | 0.225 / 1.75 / 16.9 | 0.087 / 0.725 / 7.11 | 0.087 / 0.729 / 7.19 | 0.39 / 0.42 / 0.43 |
 | linear Q | 100 / 1,000 / 10,000 | 0.065 / 0.481 / 4.71 | 0.048 / 0.358 / 3.59 | 0.049 / 0.361 / 3.57 | 0.75 / 0.75 / 0.76 |
@@ -566,9 +566,9 @@ ms; the ratio is this tree over fe13b889.
 | `sparse_followers(4000, 10, 3)` | 4,000 | 17.3 | 98.0 | 25.6 | 1.48 |
 
 The saturating T = 10 seeds now cost 1.25x instead of the 5.5x accepted on 2026-11-07. The T = 10
-rows that do not saturate cost the same as at bf130c8f (1.00x), 1.47x to 1.50x of fe13b889 against
-the 1.45x to 1.47x measured at 811c26bb and accepted then. `sparse_followers(4000, 10, 3)`, a
-T = 10 data set of the same kind, had no fe13b889 figure before; it costs 1.48x (+8 ms). The
+rows that do not saturate cost the same as at 8e679c3b (1.00x), 1.47x to 1.50x of ff8e7559 against
+the 1.45x to 1.47x measured at 003af73a and accepted then. `sparse_followers(4000, 10, 3)`, a
+T = 10 data set of the same kind, had no ff8e7559 figure before; it costs 1.48x (+8 ms). The
 maintainer accepted both on 2026-11-10: 1.48x for `sparse_followers(4000, 10, 3)` and 1.47x to
 1.50x for the T = 10 rows that do not saturate.
 

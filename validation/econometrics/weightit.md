@@ -123,12 +123,12 @@ Tests: `test_validate_na_weightit_columns`, `test_validate_na_entropy_balance_co
 `causal_mediation_na`, registry `validation/methods/causal_na.json`,
 id `weighting_na_refusal`).
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
 Medians in µs over three interleaved rounds of the timing harness (`wp23`, one P core, one rayon
-thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
+thread, `release`) at 003af73a; ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 | this tree | ratio |
+| Row | n | ff8e7559 | this tree | ratio |
 |---|---|---:|---:|---:|
 | logistic, covariates on U(-2, 2) | 100 | 18.14 | 9.97 | 0.55 |
 | logistic, covariates on U(-2, 2) | 1,000 | 122.08 | 73.48 | 0.60 |
@@ -141,7 +141,7 @@ thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
 The gains depend on the design's conditioning: uncentred covariates take the refinement on the
 propensity fit's last steps. Past a condition number of 1e4, or with a row its probability does
 not explain beyond `|eta| = 15`, the fit is `fit_glm`'s and pays for both loops. The entropy method
-does not use this fit; its row is not like for like, because fe13b889 solved one group for every
+does not use this fit; its row is not like for like, because ff8e7559 solved one group for every
 estimand and this tree solves both groups for the default ATE.
 
 Against `fit_glm` the shared lean logit fit differs by at most 4.5e-9 on a coefficient, 9.1e-8 on an SE and

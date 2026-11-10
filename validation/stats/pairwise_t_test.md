@@ -119,7 +119,7 @@ so ties keep input order), reads the value back from the key and writes each adj
 straight into the output; `test_p_adjust_matches_index_sort_reference_exactly` holds every
 method to the index-sort version bit for bit (ties, NaN, 0 and 1). Release build, one core
 (`taskset`, `RAYON_NUM_THREADS=1`), `unified_benchmarks` `P_Adjust` (BH on uniform p-values),
-three interleaved rounds against `fe13b889`: new / base as the ratio of medians 1.09 / 0.91 /
+three interleaved rounds against `ff8e7559`: new / base as the ratio of medians 1.09 / 0.91 /
 0.89 at n = 100 / 1,000 / 10,000.
 
 ### Test 2c: Pairwise Wilcoxon (R-pinned)

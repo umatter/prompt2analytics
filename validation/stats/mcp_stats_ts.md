@@ -142,7 +142,7 @@ deviation).
 
 ## Wall-clock
 
-Measured on 2026-11-09 against fe13b889 (release builds, one core, eight interleaved rounds, load average
+Measured on 2026-11-09 against ff8e7559 (release builds, one core, eight interleaved rounds, load average
 1.4-2.1) and accepted by the maintainer the same day:
 
 - `stats_spline` on 10,000 rows: 0.74 ms, 1.16x of the base (1.09x on minima), from the larger default

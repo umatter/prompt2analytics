@@ -288,7 +288,7 @@ two-way designs (k = 2 to 5, a column scaled by 1e4 or 1e-3);
 to 1e-6 noise reaches the QR and is kept, and that an exactly collinear one is still dropped.
 
 Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
-against `fe13b889` (before these changes); new / base as the ratio of medians.
+against `ff8e7559` (before these changes); new / base as the ratio of medians.
 `unified` rows use R's `panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows
 criterion's simulated panels.
 Every row is within 1.1x of base.

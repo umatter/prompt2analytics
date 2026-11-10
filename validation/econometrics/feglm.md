@@ -513,7 +513,7 @@ No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67
 These change no result: the R pins and the convergence tests pass at their tolerances.
 
 Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
-against `fe13b889` (before these changes); new / base as the ratio of medians.
+against `ff8e7559` (before these changes); new / base as the ratio of medians.
 Gaussian: the unified runner on R's `panel_n<n>.csv` (entity effects); logit and Poisson:
 criterion's simulated panels.
 The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal
@@ -532,7 +532,7 @@ machine was shared and loaded (load average 15-70), where criterion's wall-clock
 scattered by up to 2x, so the lane measured user-space CPU cycles per call from the hardware
 counter (`perf_event_open`; median of 11 batches, one P core, `RAYON_NUM_THREADS=1`, three
 interleaved rounds) on the criterion bench's data and a generated entity panel of the same
-shapes for the Gaussian rows, against `fe13b889`. The IRLS iteration counts of the two-way
+shapes for the Gaussian rows, against `ff8e7559`. The IRLS iteration counts of the two-way
 logit are 10 / 12 / 11 (base 13 / 17 / 11), and the fits equal the pre-PERF5 ones bit for bit.
 The two-way logit row at n = 1,000 was re-measured with these three interleaved cycle-counter
 rounds instead of the five wall-clock rounds planned; the quiet-machine re-time below decides.
@@ -545,7 +545,7 @@ rounds instead of the five wall-clock rounds planned; the quiet-machine re-time 
 Wall-clock on the unified runner (six interleaved rounds, load average about 25): Gaussian
 0.99 / 0.95 / 1.01.
 
-Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians):
+Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `ff8e7559`, medians):
 
 | Fit | n | new / base (wall clock) |
 |---|---|---|

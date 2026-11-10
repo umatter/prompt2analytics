@@ -297,7 +297,7 @@ The larger relative speedups for small datasets are expected because R's functio
 
 ### Wall-clock against the previous tree (signed off 2026-11-08)
 
-Medians of the round medians over five interleaved rounds against `fe13b889`, `release`, one P core,
+Medians of the round medians over five interleaved rounds against `ff8e7559`, `release`, one P core,
 `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0, 2026-11-08). Ratio is this tree over the base.
 
 | Row | n | base (µs) | this tree (µs) | ratio (median) |

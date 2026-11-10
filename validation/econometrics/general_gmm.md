@@ -92,7 +92,7 @@ planning gaps 1.2e-15 iterative, 1.3e-10 / 6.3e-10 CUE, 1.8e-11 / 6.9e-10 normal
 ## Timing
 
 Release build, one P core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds of the timing
-harness (linear IV, q = 5, k = 4) at 811c26bb against `fe13b889` (before the GMM rework); new / base as
+harness (linear IV, q = 5, k = 4) at 003af73a against `ff8e7559` (before the GMM rework); new / base as
 the ratio of medians.
 
 | Fit | n = 100 / 1,000 / 10,000 |

@@ -100,7 +100,7 @@ last digits follow the solve: on `panel_n10000` it is 0.0042165774106789 with th
 equations (base and now) and 0.0042165774064030 with a pivoted-QR solve (1e-9 relative).
 
 Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
-against `fe13b889` (before these changes); new / base as the ratio of medians.
+against `ff8e7559` (before these changes); new / base as the ratio of medians.
 The unified runner uses R's `panel_n<n>.csv` (x1, x2, entity effects).
 Every row is within 1.1x of base.
 The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal

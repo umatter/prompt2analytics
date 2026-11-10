@@ -50,7 +50,7 @@ and 0.001045). glm property: mean absolute difference below 0.085 and correlatio
 
 ## Wall-clock
 
-`release`, `ci` features, against `fe13b889`: one fit per process, nine rounds, base and this tree
+`release`, `ci` features, against `ff8e7559`: one fit per process, nine rounds, base and this tree
 interleaved per row with the order alternating, one P core (`taskset`), `RAYON_NUM_THREADS=1`, 2026-11-08,
 load average 1.5-4.2 (falling from a finished build; the fits run on their own core). Data: n x 5 uniform
 design, y = 2 x1 + 0.5 x2 + noise. Cells are medians; "ratio" is this tree over the base, "min ratio" the

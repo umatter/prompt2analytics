@@ -179,12 +179,12 @@ R: stdReg is not installed here; not verified.
 Tests: `test_validate_na_stdreg_columns` (case `causal_mediation_na`, registry
 `validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
-Medians over three interleaved rounds (`wp6f`, one P core, one rayon thread, `release`) at 811c26bb,
-logistic model, two covariates; ratio is this tree over fe13b889.
+Medians over three interleaved rounds (`wp6f`, one P core, one rayon thread, `release`) at 003af73a,
+logistic model, two covariates; ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 (ms) | this tree (ms) | ratio |
+| Row | n | ff8e7559 (ms) | this tree (ms) | ratio |
 |---|---|---:|---:|---:|
 | normal covariates | 1,000 | 157.6 | 63.2 | 0.40 |
 | normal covariates | 10,000 | 1,889.7 | 675.7 | 0.36 |

@@ -138,12 +138,12 @@ R: ctmle is not installed here; not verified.
 Tests: `test_validate_na_ctmle_columns` (case `causal_mediation_na`, registry
 `validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
-## Wall-clock against fe13b889
+## Wall-clock against ff8e7559
 
 Medians over three interleaved rounds (`wp6f`, one P core, one rayon thread, `release`, 5 repetitions
-a round) at 811c26bb, logistic outcome, two covariates; ratio is this tree over fe13b889.
+a round) at 003af73a, logistic outcome, two covariates; ratio is this tree over ff8e7559.
 
-| Row | n | fe13b889 (ms) | this tree (ms) | ratio |
+| Row | n | ff8e7559 (ms) | this tree (ms) | ratio |
 |---|---|---:|---:|---:|
 | normal covariates | 1,000 | 2.57 | 2.26 | 0.88 |
 | heavy-tailed covariate with far misfit rows | 1,000 | 3.02 | 5.55 | 1.84 |

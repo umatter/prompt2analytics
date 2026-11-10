@@ -93,7 +93,7 @@ Release build, same protocol as `loess.md`. Head/base: AR(1) with fixed rho 1.17
 5.0 on `gls_ar1` (REML by Brent instead of one lag-1 correlation; pre-approved, WP11-8); grouped CS
 REML on `gls_cs` 12.3x the old fixed-rho, ungrouped fit (a new estimator; WP11-9). Smoothing spline
 (GCV) 1.00 at n = 100 and 1,000; sensemakr 1.17 (n = 1,000), 1.35 (n = 10,000).
-Re-measured on the merged tree against `fe13b889` (one P core, three interleaved runs each,
+Re-measured on the merged tree against `ff8e7559` (one P core, three interleaved runs each,
 `unified_benchmarks`): AR(1) with fixed rho 1.14 (n = 100), 1.30 (n = 1,000); smoothing spline
 (GCV) 0.93 / 0.97; sensemakr 1.06 (n = 100), 1.20 (n = 1,000), 1.20 (n = 10,000).
 
@@ -114,7 +114,7 @@ X_{-j} (`test_partial_r2_normal_equations_match_pivoted_qr`, 1e-10 relative;
 `test_sensemakr_nearly_aliased_controls_reach_the_qr`), and builds X_{-j} without an
 intermediate copy of each column.
 
-Timing against `fe13b889`: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three
+Timing against `ff8e7559`: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three
 interleaved rounds; new / base as the ratio of medians. AR(1) with fixed rho (unified) 0.97 /
 0.93 at n = 100 / 1,000; sensemakr (unified) 1.00 / 0.96 / 0.98 at n = 100 / 1,000 / 10,000, and
 criterion `sensemakr` at n = 1,000 0.99.

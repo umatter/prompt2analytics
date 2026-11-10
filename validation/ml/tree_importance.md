@@ -51,7 +51,7 @@ gave shares 0.95513-0.95883 / 0.01079-0.01199 / 0.03037-0.03299 for the random f
 
 ## Wall-clock
 
-`release`, `ci` features, against `fe13b889`, five rounds with base and this tree interleaved per row (order
+`release`, `ci` features, against `ff8e7559`, five rounds with base and this tree interleaved per row (order
 alternating), one P core (`taskset`), one rayon and polars thread, 2026-11-08, load average 1.3-2.8. Cells are
 the median of the round medians; "ratio" is this tree over the base, "min ratio" the ratio of the minima. R
 (4.3, one BLAS thread) runs once per round on the same CSV, timed with `proc.time()`.

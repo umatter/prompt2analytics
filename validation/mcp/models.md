@@ -18,7 +18,7 @@ estimators are pinned in p2a-core; what the MCP path adds, and what these tests 
   coefficient pins read that form. On `glmnet_sim` the default replies are 6,055 (glmnet, lasso)
   and 8,705 bytes (ridge) with 8 predictors and 10,008 and 11,047 bytes with 30. The three tools
   run 0.80-0.97x of the base with 8 and 30 predictors and 100 to 1,000 rows (2026-11-09, against
-  fe13b889: release builds, one core, eight interleaved rounds, load average 1.4-2.1); with the
+  ff8e7559: release builds, one core, eight interleaved rounds, load average 1.4-2.1); with the
   coefficients at every lambda they had run 1.23-1.81x. `regression_gls` returns the
   coefficients, the correlation parameter and whether it was estimated (REML or ML) or
   user-supplied, the method, group and number of groups, sigma, the log-likelihood, AIC and

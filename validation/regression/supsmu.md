@@ -131,7 +131,7 @@ None: the port agrees with R on every case.
 Release build, same protocol as `loess.md`. Head/base at n = 50 / 200 / 1,000: automatic span 2.68 /
 3.13 / 3.28 (three running-line passes and the CV smoothing of R's algorithm; pre-approved, WP11-5);
 fixed span 0.1: 1.35 / 1.36 / 1.55.
-Re-measured on the merged tree against `fe13b889` (one P core, three interleaved runs each,
+Re-measured on the merged tree against `ff8e7559` (one P core, three interleaved runs each,
 criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, fixed span 0.1
 1.13 / 1.33 / 1.39.
 
@@ -159,7 +159,7 @@ criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, 
   by 1000 the error grew to up to 15 times that of the division form.
 
 Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), criterion `supsmu`, three
-interleaved rounds against `fe13b889`; new / base as the ratio of medians.
+interleaved rounds against `ff8e7559`; new / base as the ratio of medians.
 
 | Variant | n = 50 | n = 200 | n = 1,000 |
 |---|---|---|---|
@@ -189,14 +189,14 @@ wrap tests and bounds checks on every read of the leaving and entering point.
 The machine was shared and loaded (load average 15-70; criterion's wall-clock rounds
 scattered by up to 2x), so the lane measured user-space CPU cycles per call from the hardware
 counter (`perf_event_open`; median of 11 batches, one P core, three interleaved rounds) on the
-criterion bench's data, against `fe13b889`:
+criterion bench's data, against `ff8e7559`:
 
 | Variant | n = 50 | n = 200 | n = 1,000 |
 |---|---|---|---|
 | fixed span 0.1, before T3-PERF5 (criterion, above) | 0.96 | 1.13 | 1.18 |
 | fixed span 0.1, T3-PERF5 (cycles) | 0.80 | 0.92-0.94 | 0.88 |
 
-The fixed span is within 1.1x of base. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians):
+The fixed span is within 1.1x of base. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `ff8e7559`, medians):
 
 | Variant | n = 50 | n = 200 | n = 1,000 |
 |---|---|---|---|

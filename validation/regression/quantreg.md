@@ -142,7 +142,7 @@ above 5000 observations. The long loops (pivots, interior-point and IRLS iterati
 replicates) are cancellable through resource checkpoints.
 
 **Timing.** Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
-against `fe13b889`'s default, tau = 0.5 with three regressors and an intercept; new / base as the
+against `ff8e7559`'s default, tau = 0.5 with three regressors and an intercept; new / base as the
 ratio of medians. The new default (`Auto` with `nid` SEs) against the old default (IRLS with one
 sandwich standard error built on an Epanechnikov kernel density of the residuals at zero): 0.64 /
 1.40 / 2.88 at n = 100 / 1,000 / 10,000. The maintainer accepted this on 2026-11-05. The cost is

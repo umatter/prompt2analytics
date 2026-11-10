@@ -82,7 +82,7 @@ compares with R.
 
 ## Wall-clock (signed off 2026-11-08)
 
-Medians over five interleaved rounds against `fe13b889` (changepoint.rs there is the tree before this change),
+Medians over five interleaved rounds against `ff8e7559` (changepoint.rs there is the tree before this change),
 `release`, one P core, `RAYON_NUM_THREADS=1`, on a quiet machine (load average 1.1-2.0, 2026-11-08); MBIC default
 penalty, minimum segment 2. Series: `shift`, ten alternating mean regimes (0 and 2); `vshift`, ten alternating
 standard deviations (1 and 3); `white`, standard normal noise. Ratio is this tree over the base.

@@ -31,7 +31,7 @@ Not compared, and open:
 
 ## Wall-clock
 
-`release`, p2a-core without default features, against `fe13b889`, five rounds with the sides interleaved per row
+`release`, p2a-core without default features, against `ff8e7559`, five rounds with the sides interleaved per row
 (order rotated per round), one P core (`taskset`), one rayon thread, 2026-11-08, load average 1.2-1.5 from the
 second round on. Friedman-1 data, p = 5, noise sd 1, `MarsConfig` defaults except `fast`. Cells are the median of
 the round medians; "ratio" is this tree over the base, "min ratio" the ratio of the minima.

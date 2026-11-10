@@ -148,7 +148,7 @@ the first prefix of full rank and updates a QR factor of the prefix by Givens ro
 O(k²) per observation; `test_recursive_residuals_match_prefix_refits` checks every residual
 against a per-prefix least-squares refit within 1e-10.
 
-Wall-clock of MCP `regression_diagnostics` (y on three regressors; 2026-11-09, against fe13b889:
+Wall-clock of MCP `regression_diagnostics` (y on three regressors; 2026-11-09, against ff8e7559:
 release builds, one core, twelve interleaved rounds, load average 1.6-1.8): 0.13, 0.26 and 1.51 ms at
 100, 1,000 and 10,000 rows (0.94, 1.03 and 1.00x of the base), 0.13 ms on Grunfeld (0.97x). With two
 SVDs of the design for the raw and the scaled number it had been 1.26 and 1.43x at 1,000 and 10,000

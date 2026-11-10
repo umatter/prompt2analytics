@@ -210,7 +210,7 @@ count separation in that pass, and run the aliasing QR only when the normal-equa
 (`certainly_full_rank`) cannot certify full rank.
 
 Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds against
-`fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
+`ff8e7559` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
 criterion `new_methods_benchmarks`, and a scratch timing crate for the conditional logit with
 situations).
 
@@ -222,7 +222,7 @@ situations).
 | conditional logit, constants (3 alternatives, situations) | 300 / 1,000 / 3,000 | 1.06 / 1.04 / 1.01 |
 | conditional logit, no constants (base fits constants) | 300 / 1,000 / 3,000 | 0.91 / 0.85 / 0.86 |
 
-Within 1.1x of `fe13b889` at every size.
+Within 1.1x of `ff8e7559` at every size.
 
 ## References
 
