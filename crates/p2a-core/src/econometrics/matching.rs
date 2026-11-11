@@ -852,6 +852,8 @@ fn validate_match_options(
             cutpoints: Some(cuts),
             ..
         } => {
+            // A length mismatch between cutpoints and covariates is reported by
+            // validate_match_counts (extra entries are not checked here).
             for (name, c) in covariate_cols.iter().zip(cuts) {
                 if c.iter().any(|v| !v.is_finite()) {
                     return spec(format!(
@@ -1227,19 +1229,12 @@ fn estimate_propensity(
     let fit = fit_propensity(design.view(), treat.view(), link)?;
     // the record of the fit that ran (its max_iter and epsilon); the non-canonical links
     // also refine until the coefficients settle (fit_propensity)
-    let mut convergence = fit.fit.notes_convergence().unwrap_or_else(|| {
-        Convergence::new(
-            fit.fit.converged,
-            fit.fit.iterations,
-            fit.fit.max_iter,
-            "relative change in deviance",
-            f64::NAN,
-            fit.fit.epsilon,
-        )
-    });
+    let mut convergence = fit.fit.notes_convergence().ok_or_else(|| {
+        EconError::Computation("propensity glm returned no convergence record".into())
+    })?;
     if link != GlmLink::Logit {
         convergence.criterion = format!(
-            "relative change in deviance, then relative coefficient change < {}",
+            "relative change in deviance, then relative coefficient change < {:e}",
             crate::econometrics::glm::PROPENSITY_COEF_TOL
         );
     }
@@ -3319,6 +3314,15 @@ mod tests {
             )
             .finish();
         assert!(lg.convergence.converged && pr.convergence.converged && lg.warnings.is_empty());
+        // The probit record names the coefficient rule with its tolerance in scientific notation.
+        assert!(
+            pr.convergence
+                .criterion
+                .contains("relative coefficient change < 1e-10"),
+            "{}",
+            pr.convergence.criterion
+        );
+        assert!(!lg.convergence.criterion.contains("coefficient"));
     }
 
     /// CAUS-20: nearest-neighbour, full and subclass matching all use the probit MLE when
