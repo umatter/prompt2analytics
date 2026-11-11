@@ -108,7 +108,9 @@
 //! the feature-sign method (Lee, Battle, Raina & Ng 2007), with an Armijo search; the
 //! (k+1) x (k+1) Hessian sum_{i in S} a_i a_i' is regularised only when singular. Memory is
 //! O(n k). The solve stops when the KKT residual is below 1e-14 (1 + max r_j), or below
-//! tolerance (1 + max r_j) after an unregularised full step that kept S.
+//! tolerance (1 + max r_j) after an unregularised full step that kept S. When max_iter steps
+//! are used up, a residual within tolerance (1 + max r_j) stops as converged (as the exact
+//! solver rules); outside it the result is unconverged, with a note.
 //!
 //! Infeasibility: a band that misses a covariate's range (l >= 0), or a dual value above the
 //! largest primal objective on {w >= l, sum w = m} (weak duality), is an
@@ -141,6 +143,9 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::weightit::{
+    SdDenominator, balance_sd, finite_abs_mean_max, is_binary, weighted_var,
+};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse};
@@ -234,7 +239,8 @@ pub struct SBWConfig {
     /// Normalize weights to sum to n (true) or 1 (false)
     pub normalize_to_n: bool,
     /// Iteration cap, at least 1. Approximate balance: proximal Newton steps; running out
-    /// returns an unconverged result with a note. Exact balance: dual Newton steps, the
+    /// within `tolerance` stops as converged, otherwise it returns an unconverged result with
+    /// a note. Exact balance: dual Newton steps, the
     /// closed-form first step counting as one; running out within `tolerance` stops as
     /// converged, otherwise it is an `EconError::ConvergenceFailure` with
     /// `iterations = max_iter`.
@@ -274,13 +280,16 @@ impl Default for SBWConfig {
 pub struct BalanceStats {
     /// Covariate names
     pub covariate_names: Vec<String>,
-    /// Standardized mean differences for each covariate
+    /// Standardized mean differences for each covariate: (target - reweighted mean) / SD of the
+    /// unweighted sample (treated SD for ATT, control SD for ATC, pooled for ATE; binary
+    /// covariates p (1 - p); cobalt's s.d.denom)
     pub std_diff: Vec<f64>,
-    /// Maximum absolute standardized difference
+    /// Maximum absolute standardized difference over the finite values
     pub max_std_diff: f64,
-    /// Mean absolute standardized difference
+    /// Mean absolute standardized difference over the finite values
     pub mean_std_diff: f64,
-    /// Variance ratios (treated/control) for each covariate
+    /// Variance ratios (target / reweighted) of cobalt's weighted variances, NaN for binary
+    /// covariates
     pub var_ratio: Vec<f64>,
     /// Weighted mean in target group for each covariate
     pub mean_target: Vec<f64>,
@@ -723,24 +732,39 @@ pub(crate) fn run_sbw_inner(
             .map(|(_, w)| w.as_slice())
     };
 
-    // Balance before and after weighting ("target" = the treated for ATT and ATE).
+    // Balance before and after weighting ("target" = the treated for ATT and ATE), with the
+    // SMD denominators fixed from the unweighted sample (cobalt's s.d.denom).
+    let scale = BalanceScale::new(covariates, treatment, config.estimand);
     let (balance_before, balance_after) = match config.estimand {
         SBWEstimand::ATT => (
-            compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, None),
-            compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, weights_of(false)),
+            compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, None, &scale),
+            compute_balance_stats(
+                &x_t.view(),
+                &x_c.view(),
+                cov_names,
+                weights_of(false),
+                &scale,
+            ),
         ),
         SBWEstimand::ATC => (
-            compute_balance_stats(&x_c.view(), &x_t.view(), cov_names, None),
-            compute_balance_stats(&x_c.view(), &x_t.view(), cov_names, weights_of(true)),
+            compute_balance_stats(&x_c.view(), &x_t.view(), cov_names, None, &scale),
+            compute_balance_stats(
+                &x_c.view(),
+                &x_t.view(),
+                cov_names,
+                weights_of(true),
+                &scale,
+            ),
         ),
         SBWEstimand::ATE => (
-            compute_balance_stats_two(&x_t.view(), None, &x_c.view(), None, cov_names),
+            compute_balance_stats_two(&x_t.view(), None, &x_c.view(), None, cov_names, &scale),
             compute_balance_stats_two(
                 &x_t.view(),
                 weights_of(true),
                 &x_c.view(),
                 weights_of(false),
                 cov_names,
+                &scale,
             ),
         ),
     };
@@ -1357,6 +1381,9 @@ fn solve_sbw_approximate(
             break;
         }
         if it == config.max_iter {
+            // Running out of steps within tolerance is a stop within tolerance: converged, as
+            // the exact solver rules.
+            converged = res <= config.tolerance * bscale;
             break;
         }
 
@@ -1592,46 +1619,73 @@ fn compute_constraint_violation(
     max_violation
 }
 
+/// Per-covariate SMD denominators from the unweighted sample (treated SD for ATT, control SD
+/// for ATC, pooled for ATE; binary covariates `p (1 - p)`, cobalt's s.d.denom) and which
+/// covariates are binary (their variance ratio is NaN).
+struct BalanceScale {
+    sd: Vec<f64>,
+    binary: Vec<bool>,
+}
+
+impl BalanceScale {
+    fn new(covariates: &ArrayView2<f64>, treatment: &ArrayView1<f64>, est: SBWEstimand) -> Self {
+        let treated: Vec<bool> = treatment.iter().map(|&v| v >= 0.5).collect();
+        let denom = match est {
+            SBWEstimand::ATT => SdDenominator::Treated,
+            SBWEstimand::ATC => SdDenominator::Control,
+            SBWEstimand::ATE => SdDenominator::Pooled,
+        };
+        let (mut sd, mut binary) = (Vec::new(), Vec::new());
+        for col in covariates.columns() {
+            let col = col.to_vec();
+            sd.push(balance_sd(&col, &treated, denom, true));
+            binary.push(is_binary(&col));
+        }
+        Self { sd, binary }
+    }
+}
+
 /// Compute balance statistics of a reweighted group against an unweighted target group.
 fn compute_balance_stats(
     x_target: &ArrayView2<f64>,
     x_reweight: &ArrayView2<f64>,
     cov_names: &[String],
     weights: Option<&[f64]>,
+    scale: &BalanceScale,
 ) -> BalanceStats {
-    compute_balance_stats_two(x_target, None, x_reweight, weights, cov_names)
+    compute_balance_stats_two(x_target, None, x_reweight, weights, cov_names, scale)
 }
 
-/// Mean and variance of a column; weighted (`sum w (x - mean)^2 / sum w`) when weights with
-/// a positive sum are given, otherwise unweighted with the n - 1 denominator.
+/// Weighted mean of a column (unit weights when none are given) and cobalt's weighted variance.
 fn column_moments(col: ArrayView1<f64>, w: Option<&[f64]>) -> (f64, f64) {
-    let m = col.len();
-    if let Some(w) = w {
-        let w_sum: f64 = w.iter().sum();
-        if w_sum > 0.0 {
-            let mean = col.iter().zip(w).map(|(x, wi)| wi * x).sum::<f64>() / w_sum;
-            let var = col
-                .iter()
-                .zip(w)
-                .map(|(x, wi)| wi * (x - mean).powi(2))
-                .sum::<f64>()
-                / w_sum;
-            return (mean, var);
+    let x = col.to_vec();
+    let ones;
+    let w = match w {
+        Some(w) => w,
+        None => {
+            ones = vec![1.0; x.len()];
+            &ones
         }
-    }
-    let mean = col.sum() / m as f64;
-    let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (m.max(2) - 1) as f64;
-    (mean, var)
+    };
+    let w_sum: f64 = w.iter().sum();
+    let mean = if w_sum > 0.0 {
+        x.iter().zip(w).map(|(x, wi)| wi * x).sum::<f64>() / w_sum
+    } else {
+        f64::NAN
+    };
+    (mean, weighted_var(&x, w))
 }
 
 /// Balance statistics of group a (reported as "target") against group b, each optionally
-/// weighted.
+/// weighted: the SMD over the fixed denominators of `scale`, the ratio of cobalt's weighted
+/// variances (NaN for binary covariates), mean and max over the finite |SMD|.
 fn compute_balance_stats_two(
     x_a: &ArrayView2<f64>,
     w_a: Option<&[f64]>,
     x_b: &ArrayView2<f64>,
     w_b: Option<&[f64]>,
     cov_names: &[String],
+    scale: &BalanceScale,
 ) -> BalanceStats {
     let k = x_a.ncols();
     let mut std_diff = Vec::with_capacity(k);
@@ -1643,23 +1697,17 @@ fn compute_balance_stats_two(
         let (target_mean, target_var) = column_moments(x_a.column(j), w_a);
         let (reweight_mean, reweight_var) = column_moments(x_b.column(j), w_b);
 
-        // Pooled standard deviation
-        let pooled_sd = ((target_var + reweight_var) / 2.0).sqrt().max(1e-10);
-        let sd = (target_mean - reweight_mean) / pooled_sd;
-        let vr = if reweight_var > 1e-10 {
-            target_var / reweight_var
+        std_diff.push((target_mean - reweight_mean) / scale.sd[j]);
+        var_ratio.push(if scale.binary[j] {
+            f64::NAN
         } else {
-            1.0
-        };
-
-        std_diff.push(sd);
-        var_ratio.push(vr);
+            target_var / reweight_var
+        });
         mean_target.push(target_mean);
         mean_reweighted.push(reweight_mean);
     }
 
-    let max_std_diff = std_diff.iter().map(|d| d.abs()).fold(0.0, f64::max);
-    let mean_std_diff = std_diff.iter().map(|d| d.abs()).sum::<f64>() / k as f64;
+    let (mean_std_diff, max_std_diff) = finite_abs_mean_max(std_diff.iter().copied());
 
     BalanceStats {
         covariate_names: cov_names.to_vec(),
@@ -1991,6 +2039,35 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_sbw_balance_fixed_sd() {
+        // R: cobalt s.d.denom on weighting_sim (case weights_trim_balance): treated SD for ATT,
+        // control SD for ATC, pooled for ATE, binary covariates p (1 - p). CAUS-108: the SD was
+        // pooled from the weighted groups, so weighting changed the yardstick.
+        let (case, ds) = crate::test_support::load_case("weights_trim_balance");
+        for (est, key) in [
+            (SBWEstimand::ATT, "att_sd_denom"),
+            (SBWEstimand::ATC, "atc_sd_denom"),
+            (SBWEstimand::ATE, "ate_sd_denom"),
+        ] {
+            let r = sbw_fit(&ds, est, 0.0);
+            let n = r.weights.len();
+            let sd = case.vector(key);
+            let b = &r.balance_before;
+            for j in 0..3 {
+                let (p, d) = (b.std_diff[j] * sd[j], b.mean_target[j] - b.mean_reweighted[j]);
+                assert!(Tol::coef(n).allows(p, d), "{est:?} before {j}: {p} vs {d}");
+            }
+            let a = &r.balance_after;
+            for j in 0..3 {
+                let (p, d) = (a.std_diff[j] * sd[j], a.mean_target[j] - a.mean_reweighted[j]);
+                assert!((p - d).abs() <= 1e-12, "{est:?} after {j}: {p} vs {d}");
+                assert!(a.std_diff[j].abs() < 1e-10, "{est:?} after {j}: exact balance");
+            }
+            assert!(b.var_ratio[2].is_nan() && a.var_ratio[2].is_nan(), "binary x3");
+        }
+    }
+
+    #[test]
     fn test_sbw_ate_convergence_record_is_per_solve() {
         // ATE solves the two groups separately: the record reports the larger step count
         // (it summed them, exceeding max_iter) and the solver's relative residual, the
@@ -2010,14 +2087,15 @@ mod tests {
                 r.iterations,
                 conv.iterations
             );
-            if !r.converged {
-                assert!(
-                    conv.final_change > conv.tolerance,
-                    "max_iter {max_iter}: unconverged residual {} within tolerance {}",
-                    conv.final_change,
-                    conv.tolerance
-                );
-            }
+            // A stop within tolerance is converged, so an unconverged record lies above it.
+            assert_eq!(r.converged, conv.converged, "max_iter {max_iter}");
+            assert!(
+                r.converged || conv.final_change > conv.tolerance,
+                "max_iter {max_iter}: unconverged residual {} within tolerance {}",
+                conv.final_change,
+                conv.tolerance
+            );
+            assert!(conv.final_change.is_finite() && conv.final_change >= 0.0);
         }
         for tol in [0.0, 0.1] {
             let r = sbw_fit(&ds, SBWEstimand::ATE, tol);
@@ -2862,7 +2940,16 @@ mod tests {
         let x_reweight = array![[0.5, 0.2], [0.6, 0.3], [0.55, 0.25]];
         let names = vec!["x1".to_string(), "x2".to_string()];
 
-        let stats = compute_balance_stats(&x_target.view(), &x_reweight.view(), &names, None);
+        let x_all = ndarray::concatenate![Axis(0), x_target, x_reweight];
+        let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+        let scale = BalanceScale::new(&x_all.view(), &d.view(), SBWEstimand::ATT);
+        let stats = compute_balance_stats(
+            &x_target.view(),
+            &x_reweight.view(),
+            &names,
+            None,
+            &scale,
+        );
 
         // Target has higher means, so std_diff should be positive
         assert!(stats.std_diff[0] > 0.0);
