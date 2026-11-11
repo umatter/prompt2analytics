@@ -188,9 +188,25 @@ pub fn mood_test(x: &[f64], y: &[f64], alternative: Alternative) -> EconResult<M
     // Mean rank
     let mean_rank = (total_n as f64 + 1.0) / 2.0;
 
-    // Compute test statistic T = sum of (r_i - mean_rank)^2 for sample x
-    // Equation from Conover (1971), p. 234
-    let t_stat: f64 = ranks[..m].iter().map(|&r| (r - mean_rank).powi(2)).sum();
+    // T = sum over sample x of the scores (r_i - (N+1)/2)^2 (Conover 1971, p. 234). Under
+    // ties R averages the scores of the positions a tie block occupies (Mielke 1967): for a
+    // block of size t with midrank r that average is (r - (N+1)/2)^2 + (t^2 - 1)/12.
+    let t_stat: f64 = if has_ties {
+        let mut sorted: Vec<f64> = try_with_capacity(total_n, "Mood ranks")?;
+        sorted.extend_from_slice(&ranks);
+        sorted.sort_by(f64::total_cmp);
+        ranks[..m]
+            .iter()
+            .map(|&r| {
+                let lo = sorted.partition_point(|&v| v < r);
+                let hi = sorted.partition_point(|&v| v <= r);
+                let t = (hi - lo) as f64;
+                (r - mean_rank).powi(2) + (t * t - 1.0) / 12.0
+            })
+            .sum()
+    } else {
+        ranks[..m].iter().map(|&r| (r - mean_rank).powi(2)).sum()
+    };
 
     // Expected value under H0: E[T] = m(N² - 1)/12
     // Equation (3) from Conover (1971)
@@ -406,8 +422,13 @@ mod tests {
             .scalar("n_mj", r.n_y as f64, Tol::exact())
             .finish();
         assert!(!r.has_ties);
-        // deviation STAT-29: mood_z/mood_p on the tied xi/yi (R -2.667468897704627, Mielke's
-        // scores; p2a's midrank scores give -2.6983447236552882) are not pinned.
+        // the tied pair xi / yi (Mielke's averaged scores)
+        let t = run_mood_test(&ds, "xi", "yi", None).unwrap();
+        assert!(t.has_ties);
+        Check::new(&case)
+            .scalar("mood_z", t.z_score, Tol::stat(t.n_total))
+            .scalar("mood_p", t.p_value, Tol::p_value(t.n_total))
+            .finish();
     }
 
     #[test]
@@ -458,13 +479,18 @@ mod tests {
                 .push(mood_test(&x, &y, Alternative::Greater).unwrap().p_value);
             v.entry("t").or_default().push(two.statistic);
         }
-        for set in ["ties", "serum"] {
+        let ties = ["ties", "serum"];
+        for set in ties {
             let x = column_where(&ds, "value", &[("set", set), ("group", "x")]);
             let y = column_where(&ds, "value", &[("set", set), ("group", "y")]);
-            assert!(mood_test(&x, &y, Alternative::TwoSided).unwrap().has_ties);
-            // deviation STAT-29: mood_z_ties / mood_p_ties (R's Mielke scores) are not compared
+            let r = mood_test(&x, &y, Alternative::TwoSided).unwrap();
+            assert!(r.has_ties);
+            v.entry("z_ties").or_default().push(r.z_score);
+            v.entry("p_ties").or_default().push(r.p_value);
         }
         Check::new(&case)
+            .named("mood_z_ties", &ties, &v["z_ties"], Tol::stat(30))
+            .named("mood_p_ties", &ties, &v["p_ties"], Tol::p_value(30))
             .named("mood_z", &sets, &v["z"], Tol::stat(6))
             .named("mood_p", &sets, &v["p"], Tol::p_value(6))
             .named("mood_p_less", &sets, &v["less"], Tol::p_value(6))
@@ -486,6 +512,34 @@ mod tests {
             .scalar("mood_z", r.z_score, Tol::stat(14))
             .scalar("mood_p", r.p_value, Tol::p_value(14))
             .scalar("mood_T", r.statistic, Tol::exact())
+            .finish();
+    }
+
+    /// Heavy ties: T from R's averaged scores, z, and the three p-values. Fails before: T
+    /// summed the squared deviations of the midranks.
+    #[test]
+    fn test_validate_mood_heavy_ties_t4() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_scale_t4");
+        let x = column_where(&ds, "value", &[("set", "heavy"), ("group", "x")]);
+        let y = column_where(&ds, "value", &[("set", "heavy"), ("group", "y")]);
+        let r = mood_test(&x, &y, Alternative::TwoSided).unwrap();
+        assert!(r.has_ties);
+        Check::new(&case)
+            .scalar("mood_heavy_T", r.statistic, Tol::stat(12))
+            .scalar("mood_heavy_z", r.z_score, Tol::stat(12))
+            .scalar("mood_heavy_p", r.p_value, Tol::p_value(12))
+            .scalar(
+                "mood_heavy_p_less",
+                mood_test(&x, &y, Alternative::Less).unwrap().p_value,
+                Tol::p_value(12),
+            )
+            .scalar(
+                "mood_heavy_p_greater",
+                mood_test(&x, &y, Alternative::Greater).unwrap().p_value,
+                Tol::p_value(12),
+            )
             .finish();
     }
 }
