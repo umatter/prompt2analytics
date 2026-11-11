@@ -2670,9 +2670,8 @@ mod tests {
             .scalar("ks_d", num(&v["statistic_D"]), Tol::stat(38))
             .scalar("n_xi", num(&v["n"]), Tol::exact())
             .scalar("n_yi", num(&v["n_2"]), Tol::exact())
+            .scalar("ks_p", num(&v["p_value"]), Tol::p_value(38))
             .finish();
-        // deviation STAT-27: ks_p (R's exact p 0.1565386776017454; p2a's asymptotic p
-        // 0.19563779265722031) is not pinned.
         assert_eq!(
             v["missing"]["by_column"],
             serde_json::json!({"xi": 2, "yi": 4})
