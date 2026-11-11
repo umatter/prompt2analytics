@@ -1931,9 +1931,26 @@ fn run_hadri_test(
     let mut partial = Vec::with_capacity(n);
     let mut rss = Vec::with_capacity(n);
     let mut lrv = Vec::with_capacity(if long_lags.is_some() { n } else { 0 });
-    for (_, series) in panels {
+    for (label, series) in panels {
         resource::checkpoint()?;
         let e = kpss_residuals(series, model)?;
+        let scale = series.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let e_norm = e.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if e_norm <= 1e-10 * scale * tf.sqrt() {
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "Hadri: unit '{label}' has no variation around its {}",
+                    if model == PanelModel::Trend {
+                        "trend"
+                    } else {
+                        "mean"
+                    }
+                ),
+                suggestion: "drop units whose series is constant (or exactly linear with a \
+                             trend)"
+                    .to_string(),
+            });
+        }
         let mut cum = 0.0;
         let s2: f64 = e
             .iter()
@@ -3599,5 +3616,31 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Residual variance"), "{text}");
+    }
+
+    /// A constant unit has no residual variance: an error naming it, not an infinite LM.
+    #[test]
+    fn test_hadri_constant_unit_is_an_error() {
+        let mut df = noisy_panel(&[30; 5], 17).df().clone();
+        let flat = DataFrame::new(vec![
+            Column::new("unit".into(), vec![6i64; 30]),
+            Column::new("time".into(), (1..=30i64).collect::<Vec<_>>()),
+            Column::new("y".into(), vec![2.5; 30]),
+        ])
+        .unwrap();
+        df.vstack_mut(&flat).unwrap();
+        let e = run_panel_unit_root(
+            &Dataset::new(df),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::Hadri, PanelModel::Intercept, None),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::SingularMatrix { context, .. }
+                if context == "Hadri: unit '6' has no variation around its mean"),
+            "{e:?}"
+        );
     }
 }
