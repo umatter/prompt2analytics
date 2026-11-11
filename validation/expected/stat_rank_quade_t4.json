@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "stat_rank_quade_t4",
+  "area": "stats/quade",
+  "method": "Quade test when A == B: four blocks ranking three treatments identically with tied ranges (R: p = (k!)^(1 - b)), the same rankings with distinct ranges, and a design whose blocks are all constant",
+  "reference": "stats::quade.test (A == B branch: STATISTIC NaN, df NA, PVAL = gamma(k + 1)^(1 - b))",
+  "call": "quade.test(y_matrix)",
+  "dataset": "validation/datasets/generated/rank_quade_t4.csv",
+  "datasets": ["validation/datasets/generated/rank_quade_t4.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "conc_p": 0.0046296296296296294,
+    "conc_stat_is_nan": 1,
+    "dist_f": 15,
+    "dist_p": 0.0046296296296296294,
+    "const_p_r": 0.027777777777777776
+  }
+}

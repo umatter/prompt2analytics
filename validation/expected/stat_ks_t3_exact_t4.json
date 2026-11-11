@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "stat_ks_t3_exact_t4",
+  "area": "stats/ks",
+  "method": "ks.test on the stat_ks_t3 columns with R's default exact = NULL: one-sided exact p (one-sample Birnbaum-Tingey sum, two-sample psmirnov)",
+  "reference": "stats::ks.test(alternative = 'greater' | 'less'), exact = NULL (exact for these sizes, no ties)",
+  "call": "ks.test(x, 'pnorm', 2, 2, alternative = ...); ks.test(x, y, alternative = ...)",
+  "dataset": "validation/datasets/generated/ks_t3.csv",
+  "datasets": ["validation/datasets/generated/ks_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "norm_p_greater_exact": 0.98137405473460304,
+    "norm_p_less_exact": 0.063538511755149685,
+    "unif_p_greater_exact": 0.27140337488021915,
+    "unif_p_less_exact": 0.040967423367021749,
+    "exp_p_greater_exact": 0.94942764393952805,
+    "exp_p_less_exact": 0.014156635818072361,
+    "two5_p_greater_exact": 0.03968253968253968,
+    "two5_p_less_exact": 1,
+    "twol_p_greater_exact": 0.046109236265525877,
+    "twol_p_less_exact": 0.73297906108308486
+  }
+}
