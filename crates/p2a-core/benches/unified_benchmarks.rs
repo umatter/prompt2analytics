@@ -55,6 +55,7 @@ use p2a_core::forecasting::{
     holt_winters, kalman_filter, run_arima_with, stl, struct_ts,
 };
 use p2a_core::ml::{cmdscale_from_data, kmedoids, linear_svm, silhouette, tsne};
+use p2a_core::regression::quantreg::QuantRegSe;
 use p2a_core::regression::smooth_spline::SplineCriterion;
 use p2a_core::regression::{
     BgTestType, BootstrapType, CorrelationStructure, CovarianceType, HacKernel, ModelFn, ModelType,
@@ -3543,9 +3544,10 @@ fn main() {
 
     // Quantile Regression (slower - use slow_config)
     // Cap: no R benchmark at n=10000
-    // R fits the same regression_n<n> rows and times its kernel SEs too, since
-    // quantreg always computes them; R's fit is the exact simplex (rq "br"),
-    // this one IRLS, so the coefficients agree only to the IRLS tolerance.
+    // R fits the same regression_n<n> rows by the exact simplex (rq "br") and times its
+    // kernel SEs (summary.rq se = "ker"). At these n (<= 5,000) `Auto` is the same
+    // Barrodale-Roberts simplex, and the config asks for Powell's kernel SEs, so both
+    // sides time the same estimator; the coefficients agree to the LP's tolerance.
     for n in sizes_for(&["Quantile_Regression"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 3, 42));
@@ -3553,6 +3555,7 @@ fn main() {
 
         let qr_config = QuantRegConfig {
             tau: 0.5,
+            se: QuantRegSe::Ker,
             ..Default::default()
         };
         let mut result =
