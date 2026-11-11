@@ -267,8 +267,9 @@ fn aliased_regressors(
 /// estimates (Newton's method is affine-invariant). The step test is relative only for
 /// parameters above 1 in absolute value, so a change of units that makes a coefficient
 /// large tightens it and can cost an iteration. `converged == true` implies finite
-/// estimates and log-likelihood. A non-finite step, a failed line search and the
-/// iteration limit end the fit with `converged = false` and a message in `warnings`,
+/// estimates and log-likelihood. A non-finite log-likelihood, score or Hessian,
+/// observed information that is not positive definite even after damping, a non-finite
+/// step, a failed line search and the iteration limit end the fit with `converged = false` and a message in `warnings`,
 /// never with an error. Standard errors are the square roots of the diagonal of the
 /// inverse observed information; they are NaN, with a warning, when the information is
 /// not positive definite.
@@ -889,6 +890,14 @@ mod tests {
         r.category_counts.iter().map(|&c| c as f64).collect()
     }
 
+    /// n, the category counts and the null log-likelihood, which depend neither on the
+    /// link nor on the scale of x.
+    fn check_counts<'c, 'a>(c: &'c mut Check<'a>, r: &OrderedResult) -> &'c mut Check<'a> {
+        c.scalar("n", r.n_obs as f64, Tol::exact())
+            .named("counts", &r.categories, &counts(r), Tol::exact())
+            .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
+    }
+
     /// Every quantity of one polr fit; `p` is "logit_" or "probit_".
     fn check_polr(case: &Case, p: &str, r: &OrderedResult) {
         let n = r.n_obs;
@@ -995,31 +1004,28 @@ mod tests {
             );
             let zn = zeta_names(&r);
             let k = |s: &str| format!("{link}_{s}");
-            Check::new(case)
-                .named(
-                    &k("coef"),
-                    &r.variables,
-                    &r.coefficients,
-                    Tol::iterative(1e-6),
-                )
-                .named(&k("zeta"), &zn, &r.thresholds, Tol::iterative(1e-6))
-                .named(
-                    &k("se_coef"),
-                    &r.variables,
-                    &r.std_errors,
-                    Tol::iterative(1e-5),
-                )
-                .named(
-                    &k("se_zeta"),
-                    &zn,
-                    &r.threshold_std_errors,
-                    Tol::iterative(1e-5),
-                )
-                .scalar(&k("loglik"), r.log_likelihood, Tol::stat(n))
-                .scalar("n", n as f64, Tol::exact())
-                .named("counts", &r.categories, &counts(&r), Tol::exact())
-                .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
-                .finish();
+            let mut c = Check::new(case);
+            c.named(
+                &k("coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(&k("zeta"), &zn, &r.thresholds, Tol::iterative(1e-6))
+            .named(
+                &k("se_coef"),
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .named(
+                &k("se_zeta"),
+                &zn,
+                &r.threshold_std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar(&k("loglik"), r.log_likelihood, Tol::stat(n));
+            check_counts(&mut c, &r).finish();
         }
     }
 
@@ -1094,10 +1100,8 @@ mod tests {
                         base.iterations
                     );
                 }
-                Check::new(&case)
-                    .scalar("n", r.n_obs as f64, Tol::exact())
-                    .named("counts", &r.categories, &counts(&r), Tol::exact())
-                    .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
+                let mut c = Check::new(&case);
+                check_counts(&mut c, &r)
                     .named(
                         &format!("{link}_zeta"),
                         &zeta_names(&r),
