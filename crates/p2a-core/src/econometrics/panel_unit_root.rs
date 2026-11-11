@@ -256,6 +256,63 @@ impl fmt::Display for LagSelection {
     }
 }
 
+/// The residual variance of Hadri's statistic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HadriVariance {
+    /// Per-unit short-run variance, plm `Hcons = TRUE` (default).
+    #[default]
+    Heteroskedastic,
+    /// Pooled short-run variance, plm `Hcons = FALSE`.
+    Homoskedastic,
+    /// Per-unit Bartlett long-run variance with `lags` truncation lags (None:
+    /// `trunc(4 (T/100)^(1/4))`, `tseries::kpss.test`'s short rule).
+    LongRun { lags: Option<usize> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HadriVarianceName {
+    Heteroskedastic,
+    Homoskedastic,
+    LongRun,
+}
+
+static HADRI_VARIANCES: Choices<HadriVarianceName> = Choices {
+    option: "hadri_variance",
+    values: &[
+        (
+            &["heteroskedastic", "hcons", "het"],
+            HadriVarianceName::Heteroskedastic,
+        ),
+        (
+            &["homoskedastic", "homo", "iid"],
+            HadriVarianceName::Homoskedastic,
+        ),
+        (&["long_run", "lrv", "bartlett"], HadriVarianceName::LongRun),
+    ],
+};
+
+impl HadriVariance {
+    /// `name`: heteroskedastic (hcons, het) | homoskedastic (homo, iid) | long_run (lrv,
+    /// bartlett); case and separator insensitive. `lags` only with long_run. An unknown name
+    /// is `InvalidSpecification` listing the names.
+    pub fn from_option(name: &str, lags: Option<usize>) -> EconResult<HadriVariance> {
+        match (HADRI_VARIANCES.parse(name)?, lags) {
+            (HadriVarianceName::LongRun, lags) => Ok(HadriVariance::LongRun { lags }),
+            (v, Some(_)) => Err(invalid(format!(
+                "lags of the Hadri variance apply only to hadri_variance = long_run, not {}",
+                HADRI_VARIANCES.canonical(v)
+            ))),
+            (HadriVarianceName::Heteroskedastic, None) => Ok(HadriVariance::Heteroskedastic),
+            (HadriVarianceName::Homoskedastic, None) => Ok(HadriVariance::Homoskedastic),
+        }
+    }
+
+    /// "heteroskedastic | homoskedastic | long_run", for CLI help and tool descriptions.
+    pub fn names_help() -> String {
+        HADRI_VARIANCES.help()
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -283,6 +340,10 @@ pub struct PanelUnitRootConfig {
     /// default). Default: true.
     #[serde(default = "default_true")]
     pub dfcor: bool,
+    /// Hadri's residual variance; only with `test_type = Hadri` (a non-default value with
+    /// another test is an error). Module docs, "Hadri".
+    #[serde(default)]
+    pub hadri_variance: HadriVariance,
 }
 
 impl Default for PanelUnitRootConfig {
@@ -295,6 +356,7 @@ impl Default for PanelUnitRootConfig {
             lag_selection: None,
             pmax: None,
             dfcor: true,
+            hadri_variance: HadriVariance::Heteroskedastic,
         }
     }
 }
@@ -344,6 +406,10 @@ pub struct PanelUnitRootResult {
     /// ADF residual variance `rss/(n - K)` (true) or `rss/n` (false)
     #[serde(default = "default_true")]
     pub dfcor: bool,
+    /// Hadri: how the residual variance was computed, as printed after "Variance:" (empty
+    /// otherwise).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variance: String,
 }
 
 impl ResultNotes for PanelUnitRootResult {
@@ -389,6 +455,16 @@ impl fmt::Display for PanelUnitRootResult {
                     f,
                     "ADF residual variance: rss/n (dfcor = false, plm's default)"
                 )?;
+            }
+        }
+        if self.test_type == PanelUnitRootTest::Hadri {
+            writeln!(f, "Variance:   {}", self.variance)?;
+            if !self.variance.starts_with("long-run") {
+                if self.dfcor {
+                    writeln!(f, "Residual variance: rss/(T - k) (dfcor = true)")?;
+                } else {
+                    writeln!(f, "Residual variance: rss/T (dfcor = false, plm's default)")?;
+                }
             }
         }
         if self.test_type == PanelUnitRootTest::Fisher {
@@ -486,7 +562,7 @@ pub fn run_panel_unit_root(
     } = extract_panels(dataset, var_col, unit_col, time_col)?;
 
     let mut result = if config.test_type == PanelUnitRootTest::Hadri {
-        run_hadri_test(&panels, config.model)?
+        run_hadri_test(&panels, config.model, config.hadri_variance, config.dfcor)?
     } else {
         let (plan, label) = lag_plan(&config, &panels);
         let mut r = match config.test_type {
@@ -518,13 +594,21 @@ fn invalid(message: String) -> EconError {
 /// The option combinations that contradict each other (module docs, "Lag order").
 fn check_lag_options(config: &PanelUnitRootConfig) -> EconResult<()> {
     if config.test_type == PanelUnitRootTest::Hadri {
-        if config.lag_selection.is_some() || config.pmax.is_some() {
+        if config.lags.is_some() || config.lag_selection.is_some() || config.pmax.is_some() {
             return Err(invalid(
-                "the Hadri test uses no lagged differences; lag_selection and pmax do not apply"
+                "the Hadri test uses no lagged differences; lags, lag_selection and pmax do \
+                 not apply (the long-run variance's truncation lag is set with \
+                 hadri_variance = long_run)"
                     .to_string(),
             ));
         }
         return Ok(());
+    }
+    if config.hadri_variance != HadriVariance::default() {
+        return Err(invalid(format!(
+            "hadri_variance applies only to the Hadri test, not {}",
+            config.test_type
+        )));
     }
     match (config.lag_selection, config.lags) {
         (Some(LagSelection::Fixed(p)), Some(q)) if p != q => {
@@ -938,6 +1022,7 @@ fn unit_root_result(
         unit_lags,
         lag_selection: String::new(),
         dfcor: true,
+        variance: String::new(),
     }
 }
 
@@ -1772,37 +1857,122 @@ fn mackinnon_p(t: f64, model: PanelModel) -> f64 {
 // Hadri Test
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Hadri (2000) panel stationarity test.
+/// Hadri (2000) panel stationarity test, as `plm::purtest(test = "hadri")`.
 ///
 /// Tests H0: All panels are stationary
 /// vs H1: Some panels have unit roots
 ///
-/// Based on KPSS-type LM statistics averaged across panels.
+/// Each unit's KPSS statistic `sum (cumsum e)^2 / (T^2 sigma^2)` of its demeaned or detrended
+/// series, averaged and standardised with the moments of its limit. Needs a deterministic
+/// term and a balanced panel, as plm.
 fn run_hadri_test(
     panels: &[(String, Vec<f64>)],
     model: PanelModel,
+    variance: HadriVariance,
+    dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    let mut lm_stats: Vec<f64> = Vec::with_capacity(panels.len());
+    if model == PanelModel::None {
+        return Err(invalid(
+            "Hadri's test needs model intercept or trend (plm::purtest refuses exo = 'none'; \
+             without deterministic terms the KPSS limit has mean 1/2, not 1/6)"
+                .to_string(),
+        ));
+    }
+    let lens = panels.iter().map(|(_, s)| s.len());
+    let (t_min, t_max) = (lens.clone().min().unwrap_or(0), lens.max().unwrap_or(0));
+    if t_min != t_max {
+        return Err(invalid(format!(
+            "Hadri's test needs a balanced panel (every unit with the same number of \
+             observations, as plm::purtest); the units have {t_min} to {t_max} observations"
+        )));
+    }
+    let t_len = t_max;
+    let tf = t_len as f64;
+    let nd = n_det(model);
+    let short_df = if dfcor { (t_len - nd) as f64 } else { tf };
+    let long_lags = match variance {
+        HadriVariance::LongRun { lags } => {
+            let l = lags.unwrap_or((4.0 * (tf / 100.0).powf(0.25)).trunc() as usize);
+            if l >= t_len {
+                return Err(invalid(format!(
+                    "the long-run variance's truncation lag ({l}) must be below the number of \
+                     observations per unit ({t_len})"
+                )));
+            }
+            Some(l)
+        }
+        _ => None,
+    };
+
+    // Per unit: S_i = sum (cumsum e)^2 / T^2, e'e, and the long-run variance if asked.
+    let n = panels.len();
+    let mut partial = Vec::with_capacity(n);
+    let mut rss = Vec::with_capacity(n);
+    let mut lrv = Vec::with_capacity(if long_lags.is_some() { n } else { 0 });
     for (_, series) in panels {
         resource::checkpoint()?;
-        lm_stats.push(compute_kpss_statistic(series, model)?);
+        let e = kpss_residuals(series, model)?;
+        let mut cum = 0.0;
+        let s2: f64 = e
+            .iter()
+            .map(|x| {
+                cum += x;
+                cum * cum
+            })
+            .sum();
+        partial.push(s2 / (tf * tf));
+        rss.push(e.iter().map(|x| x * x).sum::<f64>());
+        if let Some(l) = long_lags {
+            lrv.push(bartlett_long_run_variance(&e, l));
+        }
     }
+    let nf = n as f64;
+    let (unit_lm, lm_bar, label) = match variance {
+        HadriVariance::Heteroskedastic => {
+            let lm: Vec<f64> = partial
+                .iter()
+                .zip(&rss)
+                .map(|(s, r)| s / (r / short_df))
+                .collect();
+            let bar = lm.iter().sum::<f64>() / nf;
+            (
+                lm,
+                bar,
+                "heteroskedasticity-consistent, per unit (plm Hcons = TRUE)".to_string(),
+            )
+        }
+        HadriVariance::Homoskedastic => {
+            let sigma2 = rss.iter().sum::<f64>() / (nf * short_df);
+            let lm: Vec<f64> = partial
+                .iter()
+                .zip(&rss)
+                .map(|(s, r)| s / (r / short_df))
+                .collect();
+            let bar = partial.iter().sum::<f64>() / nf / sigma2;
+            (
+                lm,
+                bar,
+                "homoskedastic, pooled (plm Hcons = FALSE)".to_string(),
+            )
+        }
+        HadriVariance::LongRun { .. } => {
+            let l = long_lags.unwrap_or(0);
+            let lm: Vec<f64> = partial.iter().zip(&lrv).map(|(s, v)| s / v).collect();
+            let bar = lm.iter().sum::<f64>() / nf;
+            (
+                lm,
+                bar,
+                format!("long-run, Bartlett kernel, {l} lag(s) (tseries::kpss.test)"),
+            )
+        }
+    };
 
-    let n_valid = lm_stats.len();
-    let used: Vec<usize> = (0..n_valid).collect();
-
-    // Average LM statistic
-    let lm_bar: f64 = lm_stats.iter().sum::<f64>() / n_valid as f64;
-
-    // Get moments for KPSS statistic
     let (mu, sigma2) = get_hadri_moments(model);
-
-    // Z-statistic
-    let z_stat = (n_valid as f64).sqrt() * (lm_bar - mu) / sigma2.sqrt();
-
-    // P-value (one-sided, upper tail)
+    let z_stat = nf.sqrt() * (lm_bar - mu) / sigma2.sqrt();
+    // One-sided, upper tail.
     let p_value = Normal::standard().sf(z_stat);
 
+    let used: Vec<usize> = (0..n).collect();
     let mut r = unit_root_result(
         PanelUnitRootTest::Hadri,
         model,
@@ -1814,83 +1984,55 @@ fn run_hadri_test(
         Vec::new(),
         Vec::new(),
     );
-    r.unit_statistics = Some(lm_stats);
+    r.unit_statistics = Some(unit_lm);
+    r.variance = label;
     Ok(r)
 }
 
-/// Compute KPSS-type LM statistic for a single series.
-fn compute_kpss_statistic(series: &[f64], model: PanelModel) -> EconResult<f64> {
-    let t = series.len();
-    if t < 3 {
-        return Err(EconError::InsufficientData {
-            required: 3,
-            provided: t,
-            context: "KPSS statistic".to_string(),
-        });
+/// A unit's series demeaned (intercept) or detrended on (1, 1..T) (trend), closed form.
+fn kpss_residuals(series: &[f64], model: PanelModel) -> EconResult<Vec<f64>> {
+    let tf = series.len() as f64;
+    let mean = series.iter().sum::<f64>() / tf;
+    let mut e = resource::try_with_capacity(series.len(), "Hadri residuals")?;
+    if model != PanelModel::Trend {
+        e.extend(series.iter().map(|x| x - mean));
+        return Ok(e);
     }
-
-    // Detrend the series
-    let residuals: Vec<f64> = match model {
-        PanelModel::None => series.to_vec(),
-        PanelModel::Intercept => {
-            let mean: f64 = series.iter().sum::<f64>() / t as f64;
-            series.iter().map(|&x| x - mean).collect()
-        }
-        PanelModel::Trend => {
-            // Regress on constant and trend (full rank for t >= 2)
-            let mut x = resource::try_zeros2(t, 2, "KPSS trend regression")?;
-            for i in 0..t {
-                x[[i, 0]] = 1.0;
-                x[[i, 1]] = (i + 1) as f64;
-            }
-            least_squares(x.view(), ArrayView1::from(series))?
-                .residuals
-                .to_vec()
-        }
-    };
-
-    // Compute partial sums S_t = Σ_{s=1}^{t} e_s
-    let mut s: Vec<f64> = Vec::with_capacity(t);
-    let mut cumsum = 0.0;
-    for e in &residuals {
-        cumsum += e;
-        s.push(cumsum);
+    let t_mean = (tf + 1.0) / 2.0;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for (j, x) in series.iter().enumerate() {
+        let tc = (j + 1) as f64 - t_mean;
+        sxy += tc * (x - mean);
+        sxx += tc * tc;
     }
-
-    // Long-run variance estimate (simple Newey-West with automatic bandwidth)
-    let bandwidth = ((t as f64).powf(1.0 / 3.0)).ceil() as usize;
-    let mut sigma2_lr = residuals.iter().map(|e| e * e).sum::<f64>() / t as f64;
-
-    for j in 1..=bandwidth {
-        let weight = 1.0 - j as f64 / (bandwidth + 1) as f64;
-        let mut gamma_j = 0.0;
-        for i in j..t {
-            gamma_j += residuals[i] * residuals[i - j];
-        }
-        gamma_j /= t as f64;
-        sigma2_lr += 2.0 * weight * gamma_j;
-    }
-
-    sigma2_lr = sigma2_lr.max(1e-10);
-
-    // LM statistic: η = (1/T²) Σ S_t² / σ²_LR
-    let sum_s2: f64 = s.iter().map(|si| si * si).sum();
-    let lm = sum_s2 / ((t * t) as f64 * sigma2_lr);
-
-    Ok(lm)
+    let slope = sxy / sxx;
+    e.extend(
+        series
+            .iter()
+            .enumerate()
+            .map(|(j, x)| x - mean - slope * ((j + 1) as f64 - t_mean)),
+    );
+    Ok(e)
 }
 
-/// Get Hadri (2000) moments for LM statistic under H0.
+/// The Bartlett long-run variance of residuals `e` with `l` lags, as `tseries::kpss.test`:
+/// `(1/T) e'e + (2/T) sum_j (1 - j/(l+1)) sum_t e_t e_{t-j}`.
+fn bartlett_long_run_variance(e: &[f64], l: usize) -> f64 {
+    let t = e.len();
+    let tf = t as f64;
+    let mut v = e.iter().map(|x| x * x).sum::<f64>() / tf;
+    for j in 1..=l {
+        let gamma: f64 = e[j..].iter().zip(&e[..t - j]).map(|(a, b)| a * b).sum();
+        v += 2.0 / tf * (1.0 - j as f64 / (l + 1) as f64) * gamma;
+    }
+    v
+}
+
+/// Hadri (2000) moments of the KPSS limit under H0 (model none is refused before).
 fn get_hadri_moments(model: PanelModel) -> (f64, f64) {
     match model {
-        PanelModel::None | PanelModel::Intercept => {
-            // Individual intercept: μ = 1/6, σ² = 1/45
-            (1.0 / 6.0, 1.0 / 45.0)
-        }
-        PanelModel::Trend => {
-            // Individual intercept and trend: μ = 1/15, σ² = 11/6300
-            (1.0 / 15.0, 11.0 / 6300.0)
-        }
+        PanelModel::Trend => (1.0 / 15.0, 11.0 / 6300.0),
+        _ => (1.0 / 6.0, 1.0 / 45.0),
     }
 }
 
@@ -2037,6 +2179,10 @@ mod tests {
         assert!(result.unit_lags.is_empty());
         assert!(result.statistic.is_finite());
         assert!((0.0..=1.0).contains(&result.p_value));
+        assert_eq!(
+            result.variance,
+            "heteroskedasticity-consistent, per unit (plm Hcons = TRUE)"
+        );
     }
 
     #[test]
@@ -2059,6 +2205,7 @@ mod tests {
             unit_lags: vec![1, 2, 1],
             lag_selection: "AIC per unit, pmax = 2".into(),
             dfcor: false,
+            variance: String::new(),
         };
 
         let display = format!("{}", result);
@@ -2574,7 +2721,8 @@ mod tests {
                 c.test_type = PanelUnitRootTest::Hadri;
                 c.lag_selection = Some(LagSelection::Aic);
             })),
-            "the Hadri test uses no lagged differences; lag_selection and pmax do not apply"
+            "the Hadri test uses no lagged differences; lags, lag_selection and pmax do not \
+             apply (the long-run variance's truncation lag is set with hadri_variance = long_run)"
         );
         assert_eq!(
             message(run(&|c| c.pmax = Some(2))),
@@ -3264,5 +3412,170 @@ mod tests {
         ));
         let v: Vec<f64> = (0..19).map(|t| 0.3 * f64::from(t % 4) - 0.45).collect();
         assert!(llc_unit_sigma(&series, &e, &v, PanelModel::Intercept, 0, true).is_ok());
+    }
+
+    /// Hadri's z of plm::purtest(test = "hadri", Hcons, dfcor) on the stationary and the
+    /// random-walk panels, with the per-unit LM.
+    #[test]
+    fn test_validate_purtest_stat_hadri() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    for (variance, v) in [
+                        (HadriVariance::Heteroskedastic, "hcons"),
+                        (HadriVariance::Homoskedastic, "homo"),
+                    ] {
+                        let key = format!("hadri_{}_{v}", stat_tag(col, exo, dfcor));
+                        let mut cf = cfg(PanelUnitRootTest::Hadri, *model, None);
+                        cf.dfcor = dfcor;
+                        cf.hadri_variance = variance;
+                        let r = run_panel_unit_root(&ds, col, "id", "t", cf).unwrap();
+                        c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(500))
+                            .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(500));
+                        if variance == HadriVariance::Heteroskedastic {
+                            c.vector(
+                                &format!("{key}_lm"),
+                                r.unit_statistics.as_deref().unwrap(),
+                                Tol::stat(500),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        c.finish();
+    }
+
+    /// Hadri's long-run option: the per-unit statistics are tseries::kpss.test's, with its
+    /// short truncation lag (3 at T = 50) or a given one (10, its long rule at T = 50).
+    #[test]
+    fn test_validate_purtest_stat_hadri_long_run() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, null) in [
+            (PanelModel::Intercept, "level"),
+            (PanelModel::Trend, "trend"),
+        ] {
+            for col in ["y", "y_rw"] {
+                let rw = if col == "y" { "" } else { "rw_" };
+                for (lags, len) in [(None, "short"), (Some(10), "long")] {
+                    let key = format!("kpss_{rw}{null}_{len}");
+                    let mut cf = cfg(PanelUnitRootTest::Hadri, model, None);
+                    cf.hadri_variance = HadriVariance::LongRun { lags };
+                    let r = run_panel_unit_root(&ds, col, "id", "t", cf).unwrap();
+                    c.vector(&key, r.unit_statistics.as_deref().unwrap(), Tol::stat(500));
+                    let lag = case.scalar(&format!("{key}_lag"));
+                    assert_eq!(
+                        r.variance,
+                        format!("long-run, Bartlett kernel, {lag} lag(s) (tseries::kpss.test)")
+                    );
+                }
+            }
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_hadri_refuses_model_none_unbalanced_and_lags() {
+        let message = |ds: &Dataset, f: &dyn Fn(&mut PanelUnitRootConfig)| {
+            let mut c = cfg(PanelUnitRootTest::Hadri, PanelModel::Intercept, None);
+            f(&mut c);
+            match run_panel_unit_root(ds, "y", "unit", "time", c) {
+                Err(EconError::InvalidSpecification { message }) => message,
+                other => panic!("{other:?}"),
+            }
+        };
+        let ds = noisy_panel(&[30; 6], 13);
+        assert!(
+            message(&ds, &|c| c.model = PanelModel::None)
+                .starts_with("Hadri's test needs model intercept or trend")
+        );
+        assert!(
+            message(&ds, &|c| c.lags = Some(2))
+                .starts_with("the Hadri test uses no lagged differences; lags,")
+        );
+        assert!(
+            message(&ds, &|c| {
+                c.hadri_variance = HadriVariance::LongRun { lags: Some(30) }
+            })
+            .contains("truncation lag (30) must be below")
+        );
+        let unbalanced = noisy_panel(&[30, 30, 30, 28], 14);
+        assert!(
+            message(&unbalanced, &|_| {}).contains(
+                "needs a balanced panel (every unit with the same number of observations"
+            )
+        );
+    }
+
+    #[test]
+    fn test_hadri_variance_option_parses_and_conflicts() {
+        HADRI_VARIANCES.validate().unwrap();
+        for (name, v) in [
+            ("heteroskedastic", HadriVariance::Heteroskedastic),
+            ("Hcons", HadriVariance::Heteroskedastic),
+            ("het", HadriVariance::Heteroskedastic),
+            ("homo", HadriVariance::Homoskedastic),
+            ("iid", HadriVariance::Homoskedastic),
+            ("long-run", HadriVariance::LongRun { lags: None }),
+            ("bartlett", HadriVariance::LongRun { lags: None }),
+        ] {
+            assert_eq!(HadriVariance::from_option(name, None).unwrap(), v, "{name}");
+        }
+        assert_eq!(
+            HadriVariance::from_option("lrv", Some(4)).unwrap(),
+            HadriVariance::LongRun { lags: Some(4) }
+        );
+        let e = HadriVariance::from_option("newey", None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("heteroskedastic, homoskedastic, long_run")),
+            "{e:?}"
+        );
+        assert!(HadriVariance::from_option("homo", Some(2)).is_err());
+        assert_eq!(
+            HadriVariance::names_help(),
+            "heteroskedastic | homoskedastic | long_run"
+        );
+        let mut c = cfg(PanelUnitRootTest::LLC, PanelModel::Intercept, Some(1));
+        c.hadri_variance = HadriVariance::Homoskedastic;
+        let e =
+            run_panel_unit_root(&noisy_panel(&[30; 6], 15), "y", "unit", "time", c).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message == "hadri_variance applies only to the Hadri test, not Levin-Lin-Chu"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_hadri_display_names_variance() {
+        let ds = noisy_panel(&[30; 6], 16);
+        let mut c = cfg(PanelUnitRootTest::Hadri, PanelModel::Trend, None);
+        let text = run_panel_unit_root(&ds, "y", "unit", "time", c.clone())
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains(
+                "Variance:   heteroskedasticity-consistent, per unit (plm Hcons = TRUE)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Residual variance: rss/(T - k) (dfcor = true)"),
+            "{text}"
+        );
+        assert!(!text.contains("ADF residual variance"), "{text}");
+        c.hadri_variance = HadriVariance::LongRun { lags: None };
+        let text = run_panel_unit_root(&ds, "y", "unit", "time", c)
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains("Variance:   long-run, Bartlett kernel, 2 lag(s) (tseries::kpss.test)"),
+            "{text}"
+        );
+        assert!(!text.contains("Residual variance"), "{text}");
     }
 }
