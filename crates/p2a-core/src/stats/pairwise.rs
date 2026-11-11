@@ -713,7 +713,8 @@ pub struct PairwiseWilcoxResult {
     pub p_values_raw: Vec<f64>,
     /// Adjusted p-values (lower triangular matrix stored as vector)
     pub p_values_adj: Vec<f64>,
-    /// W statistics for each comparison (lower triangular)
+    /// R's W statistic of each comparison (lower triangular): the Mann-Whitney U of the
+    /// later group against the earlier one, R1 - n1 (n1 + 1) / 2
     pub w_statistics: Vec<f64>,
     /// Sample sizes per group
     pub group_sizes: Vec<usize>,
@@ -1572,6 +1573,43 @@ mod tests {
         Check::new(&case)
             .vector("c_w_holm", &adj, Tol::p_value(15))
             .vector("c_w_none", &raw, Tol::p_value(15))
+            .finish();
+    }
+
+    /// Pairwise rank-sum p-values on tied data (R's tie-corrected variance), unadjusted
+    /// (exact = FALSE) and Holm (default exact rule; ties force the normal path).
+    #[test]
+    fn test_validate_pairwise_wilcox_ties_t4() {
+        use crate::stats::ranks::test_data::{column_where, levels_where};
+        let (case, ds) = crate::test_support::load_case("stat_rank_wilcoxon_t4");
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for level in levels_where(&ds, "group", &[("set", "pw")]) {
+            let v = column_where(&ds, "value", &[("set", "pw"), ("group", level.as_str())]);
+            g.extend(std::iter::repeat_n(level.clone(), v.len()));
+            x.extend(v);
+        }
+        let none = pairwise_wilcox_test(
+            &x,
+            &g,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+            Some(false),
+        )
+        .unwrap();
+        let holm = pairwise_wilcox_test(
+            &x,
+            &g,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+            None,
+        )
+        .unwrap();
+        assert_eq!(none.group_names, ["A", "B", "C"]);
+        assert!(!holm.exact);
+        Check::new(&case)
+            .vector("pw_p_none", &none.p_values_raw, Tol::p_value(16))
+            .vector("pw_p_holm", &holm.p_values_adj, Tol::p_value(16))
             .finish();
     }
 
