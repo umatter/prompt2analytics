@@ -1890,9 +1890,9 @@ pub(crate) mod dense_qp {
         // solver reads or rotates is a contiguous row of `jt`. Row i of L^{-1} is
         // (e_i - sum_{k<i} L[i,k] row_k(L^{-1})) / L[i,i], nonzero in 0..=i.
         let mut jt_arr = resource::try_zeros2(n, n, "QP inverse factor")?;
-        let jt = jt_arr
-            .as_slice_mut()
-            .expect("try_zeros2 returns a standard-layout array");
+        let jt = jt_arr.as_slice_mut().ok_or_else(|| {
+            EconError::Computation("QP inverse factor is not contiguous".to_string())
+        })?;
         for i in 0..n {
             if i % 64 == 0 {
                 resource::checkpoint()?;
