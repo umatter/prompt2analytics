@@ -238,6 +238,13 @@ pub struct OlsResult {
     /// nothing is aliased.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliased: Vec<String>,
+    /// The overall Wald F test of the slopes computed with the reported covariance
+    /// (HC0-HC3, clustered), as `lmtest::waldtest(fit, vcov = V, test = "F")`. `None` for
+    /// classical standard errors, where it equals [`f_statistic`](Self::f_statistic), and when
+    /// the slopes' covariance is singular or not positive semi-definite (with a warning).
+    /// [`f_statistic`](Self::f_statistic) stays the classical `summary.lm` F.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wald_f: Option<WaldF>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -264,6 +271,101 @@ pub struct OlsResult {
     /// with an intercept, about zero without (summary.lm).
     #[serde(skip)]
     pub sst: f64,
+    /// The solve the fit took (`None` after deserialisation).
+    #[serde(skip)]
+    pub(crate) path: Option<OlsPath>,
+}
+
+/// An overall F test of the slopes with a robust covariance V:
+/// `F = b_s' V_ss^{-1} b_s / q` over the q identified slopes s (every identified coefficient
+/// without an intercept), on q and `df_resid` degrees of freedom. This is
+/// `lmtest::waldtest(fit, vcov = V, test = "F")` and `car::linearHypothesis(fit, ..,
+/// vcov. = V, test = "F")`; for clustered covariances, too, the denominator df is n - k
+/// (Stata uses G - 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaldF {
+    /// The F statistic.
+    pub statistic: f64,
+    /// Numerator df: the number of identified slopes tested.
+    pub df1: usize,
+    /// Denominator df: the residual df of the fit.
+    pub df2: usize,
+    /// Upper-tail p-value of F(df1, df2).
+    pub p_value: f64,
+    /// The covariance used: "HC0" .. "HC3", "clustered" or "two-way clustered".
+    pub cov_label: String,
+}
+
+impl WaldF {
+    /// The Display line "F-statistic (Wald, <label>): F on q and df DF (p = ..)".
+    fn line(&self) -> String {
+        format!(
+            "F-statistic (Wald, {}): {:.4} on {} and {} DF (p = {:.4})",
+            self.cov_label, self.statistic, self.df1, self.df2, self.p_value
+        )
+    }
+}
+
+/// The Wald F of the identified slopes of `beta` with the covariance `vcov` (k x k, NaN rows
+/// and columns for aliased coefficients). `intercept_col` is the intercept's column, left
+/// out. `Ok(None)` when there is no slope; `Err(warning)` when the slopes' covariance cannot
+/// be inverted (the test is not reported). Cancellation and the allocation ceiling propagate.
+fn robust_wald_f(
+    beta: &Array1<f64>,
+    vcov: &Array2<f64>,
+    intercept_col: Option<usize>,
+    df_resid: usize,
+    label: &str,
+) -> EconResult<Result<Option<WaldF>, String>> {
+    let slopes: Vec<usize> = (0..beta.len())
+        .filter(|&j| Some(j) != intercept_col && !beta[j].is_nan())
+        .collect();
+    let q = slopes.len();
+    if q == 0 || df_resid == 0 {
+        return Ok(Ok(None));
+    }
+    let v = select_block(vcov, &slopes);
+    let b: Array1<f64> = slopes.iter().map(|&j| beta[j]).collect();
+    let inv = match sym_inverse(v.view(), SingularPolicy::Error, "robust Wald F") {
+        Ok(inv) => inv,
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+        Err(_) => {
+            return Ok(Err(format!(
+                "The Wald F test with the {label} covariance is not reported: the covariance \
+                 of the slopes is singular"
+            )));
+        }
+    };
+    let statistic = b.dot(&inv.inverse.dot(&b)) / q as f64;
+    if !statistic.is_finite() || statistic < 0.0 {
+        return Ok(Err(format!(
+            "The Wald F test with the {label} covariance is not reported: the covariance of \
+             the slopes is not positive definite"
+        )));
+    }
+    Ok(Ok(Some(WaldF {
+        statistic,
+        df1: q,
+        df2: df_resid,
+        p_value: f_test_p_value(statistic, q as f64, df_resid as f64),
+        cov_label: label.to_string(),
+    })))
+}
+
+/// The first constant, non-zero column of `x` (the intercept, in any position), when the
+/// model has an intercept.
+fn intercept_column(x: ndarray::ArrayView2<'_, f64>, intercept: bool) -> Option<usize> {
+    if !intercept || x.nrows() == 0 {
+        return None;
+    }
+    x.columns().into_iter().position(|col| {
+        let v0 = col[0];
+        if !v0.is_finite() || v0 == 0.0 {
+            return false;
+        }
+        let tol = 1e-10 * v0.abs().max(1.0);
+        col.iter().all(|&v| (v - v0).abs() <= tol)
+    })
 }
 
 impl LinearEstimator for OlsResult {
@@ -329,11 +431,21 @@ impl std::fmt::Display for OlsResult {
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
-        writeln!(
-            f,
-            "F-statistic: {:.4} (p = {:.4})",
-            self.f_statistic, self.f_p_value
-        )?;
+        match &self.wald_f {
+            Some(w) => {
+                writeln!(f, "{}", w.line())?;
+                writeln!(
+                    f,
+                    "F-statistic (classical): {:.4} (p = {:.4})",
+                    self.f_statistic, self.f_p_value
+                )?;
+            }
+            None => writeln!(
+                f,
+                "F-statistic: {:.4} (p = {:.4})",
+                self.f_statistic, self.f_p_value
+            )?,
+        }
         writeln!(f, "Standard Errors: {}", self.cov_type)?;
         writeln!(f)?;
         writeln!(f, "Coefficients:")?;
@@ -1076,6 +1188,7 @@ fn fit_ols(
         residuals,
         unscaled: xtx_inv,
         aliased: aliased_idx,
+        path,
         ..
     } = solve;
 
@@ -1103,6 +1216,32 @@ fn fit_ols(
         let u1 = select_block(&xtx_inv, &cols);
         let v1 = compute_vcov(&x1.view(), &residuals, &u1, cov_type, n, df_resid)?;
         embed_block(&v1, &cols, k)
+    };
+
+    // The overall Wald F with a robust covariance (the classical F is kept)
+    let wald_f = match cov_type {
+        CovarianceType::Standard => None,
+        _ => {
+            let label = match cov_type {
+                CovarianceType::HC0 => "HC0",
+                CovarianceType::HC1 => "HC1",
+                CovarianceType::HC2 => "HC2",
+                _ => "HC3",
+            };
+            match robust_wald_f(
+                &beta,
+                &vcov,
+                intercept_column(x, intercept),
+                df_resid,
+                label,
+            )? {
+                Ok(w) => w,
+                Err(w) => {
+                    warnings.push(w);
+                    None
+                }
+            }
+        }
     };
 
     // Extract standard errors from diagonal
@@ -1157,6 +1296,7 @@ fn fit_ols(
         warnings,
         missing: MissingSummary::none(n),
         aliased,
+        wald_f,
         beta,
         se,
         resid: residuals,
@@ -1164,6 +1304,7 @@ fn fit_ols(
         xtx_inv,
         ssr,
         sst,
+        path: Some(path),
     })
 }
 
@@ -1352,9 +1493,12 @@ impl std::fmt::Display for OlsClusteredResult {
         }
         writeln!(f, "R-squared: {:.4}", self.ols.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.ols.adj_r_squared)?;
+        if let Some(w) = &self.ols.wald_f {
+            writeln!(f, "{}", w.line())?;
+        }
         writeln!(
             f,
-            "F-statistic: {:.4} (p = {:.4})",
+            "F-statistic (classical): {:.4} (p = {:.4})",
             self.ols.f_statistic, self.ols.f_p_value
         )?;
         writeln!(f)?;
@@ -1560,6 +1704,22 @@ impl OlsClusteredResult {
                 }
             })
             .collect();
+
+        // The overall Wald F with the clustered covariance (the classical F is kept)
+        let label = if cluster2.is_some() {
+            "two-way clustered"
+        } else {
+            "clustered"
+        };
+        let intercept_col = intercept_column(design.data.view(), intercept);
+        base_result.wald_f =
+            match robust_wald_f(&base_result.beta, &vcov, intercept_col, df, label)? {
+                Ok(w) => w,
+                Err(w) => {
+                    base_result.warnings.push(w);
+                    None
+                }
+            };
 
         // Update the result
         base_result.coefficients = coefficients;
@@ -4439,6 +4599,123 @@ mod tests {
                 Tol::se(n),
             )
             .finish();
+    }
+
+    /// The overall Wald F with the reported covariance (case `ols_wald_f_grunfeld`):
+    /// lmtest::waldtest(m, vcov = vcovHC(type = ..) | vcovCL(..), test = "F").
+    #[test]
+    fn test_validate_ols_wald_f_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_wald_f_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let xs = ["value", "capital"];
+        let mut check = Check::new(&case);
+        let classical = run_ols(&ds, "inv", &xs, true, CovarianceType::Standard).unwrap();
+        assert!(classical.wald_f.is_none());
+        check
+            .scalar("f_classical", classical.f_statistic, Tol::stat(n))
+            .scalar("f_classical_p", classical.f_p_value, Tol::p_value(n))
+            .scalar("f_df2", classical.df_resid as f64, Tol::exact());
+        let mut wald = |key: &str, w: &WaldF| {
+            check
+                .scalar(key, w.statistic, Tol::stat(n))
+                .scalar(&format!("{key}_p"), w.p_value, Tol::p_value(n))
+                .scalar("f_df1", w.df1 as f64, Tol::exact())
+                .scalar("wald_df2", w.df2 as f64, Tol::exact());
+        };
+        for (key, cov) in [
+            ("wald_f_hc0", CovarianceType::HC0),
+            ("wald_f_hc1", CovarianceType::HC1),
+            ("wald_f_hc2", CovarianceType::HC2),
+            ("wald_f_hc3", CovarianceType::HC3),
+        ] {
+            let r = run_ols(&ds, "inv", &xs, true, cov).unwrap();
+            // the classical F is unchanged
+            assert_eq!(r.f_statistic, classical.f_statistic);
+            wald(key, r.wald_f.as_ref().unwrap());
+        }
+        let firm = run_ols_clustered(&ds, "inv", &xs, "firm", None).unwrap();
+        wald("wald_f_cl_firm", firm.ols.wald_f.as_ref().unwrap());
+        let two = run_ols_clustered(&ds, "inv", &xs, "firm", Some("year")).unwrap();
+        wald("wald_f_cl_firm_year", two.ols.wald_f.as_ref().unwrap());
+        assert_eq!(
+            two.ols.wald_f.as_ref().unwrap().cov_label,
+            "two-way clustered"
+        );
+        let origin = run_ols(&ds, "inv", &xs, false, CovarianceType::HC1).unwrap();
+        let w = origin.wald_f.as_ref().unwrap();
+        check
+            .scalar("wald_f_hc1_origin", w.statistic, Tol::stat(n))
+            .scalar("wald_f_hc1_origin_p", w.p_value, Tol::p_value(n))
+            .scalar("wald_origin_df2", w.df2 as f64, Tol::exact())
+            .finish();
+        assert_eq!(w.df1, 2);
+    }
+
+    /// The robust Wald F is printed before the classical F, which is labelled; the
+    /// R-squared lines the MCP handler rewrites are still there.
+    #[test]
+    fn test_wald_f_display_lines() {
+        let ds = create_test_dataset();
+        let hc1 = run_ols(&ds, "y", &["x1"], true, CovarianceType::HC1).unwrap();
+        let t = hc1.to_string();
+        let wald = t.find("F-statistic (Wald, HC1): ").expect(&t);
+        let classical = t.find("F-statistic (classical): ").expect(&t);
+        assert!(wald < classical, "{t}");
+        assert!(
+            t.contains("\nR-squared: ") && t.contains("\nAdj. R-squared: "),
+            "{t}"
+        );
+        assert!(t.contains(" on 1 and 8 DF (p = "), "{t}");
+        let std = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let t = std.to_string();
+        assert!(t.contains("\nF-statistic: ") && !t.contains("Wald"), "{t}");
+        let cl = run_ols_clustered(&ds, "y", &["x1"], "cluster", None).unwrap();
+        let t = cl.to_string();
+        assert!(
+            t.contains("F-statistic (Wald, clustered): ")
+                && t.contains("F-statistic (classical): "),
+            "{t}"
+        );
+        // JSON: the classical F stays; the Wald F is added
+        let json = serde_json::to_value(&hc1).unwrap();
+        assert!(json["f_statistic"].is_number() && json["wald_f"]["df1"] == 1);
+        assert!(serde_json::to_value(&std).unwrap().get("wald_f").is_none());
+    }
+
+    /// Aliased slopes are left out of the Wald F; a singular slope covariance (two clusters)
+    /// gives no Wald F and a warning.
+    #[test]
+    fn test_wald_f_singular_slope_vcov() {
+        let n = 30;
+        let e = perf3_noise(2 * n, 23);
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.41).cos() + e[i]).collect();
+        let dup: Vec<f64> = x.iter().map(|v| 3.0 * v).collect();
+        let z: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.77).sin() + e[n - 1 - i])
+            .collect();
+        let g: Vec<i64> = (0..n).map(|i| (i % 2) as i64).collect();
+        let y: Vec<f64> = (0..n).map(|i| 0.5 - x[i] + 0.3 * z[i] + e[n + i]).collect();
+        let ds =
+            Dataset::new(df! { "y" => y, "x" => x, "dup" => dup, "z" => z, "g" => g }.unwrap());
+        let aliased = run_ols(&ds, "y", &["x", "dup"], true, CovarianceType::HC1).unwrap();
+        assert_eq!(aliased.aliased, vec!["dup".to_string()]);
+        let plain = run_ols(&ds, "y", &["x"], true, CovarianceType::HC1).unwrap();
+        let (wa, wp) = (aliased.wald_f.unwrap(), plain.wald_f.unwrap());
+        assert_eq!(wa.df1, 1);
+        assert!((wa.statistic - wp.statistic).abs() <= 1e-8 * wp.statistic);
+        // two clusters: the meat is the outer product of two cluster scores that sum to
+        // zero, so the covariance has rank 1 and its 2 x 2 slope block is singular
+        let singular = run_ols_clustered(&ds, "y", &["x", "z"], "g", None).unwrap();
+        assert!(singular.ols.wald_f.is_none());
+        assert!(
+            singular
+                .ols
+                .warnings
+                .iter()
+                .any(|w| w.contains("Wald F") && w.contains("singular")),
+            "{:?}",
+            singular.ols.warnings
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════════

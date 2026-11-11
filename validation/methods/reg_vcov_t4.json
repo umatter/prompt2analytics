@@ -75,6 +75,28 @@
       "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n); counts and lags exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ols_wald_f",
+      "name": "Overall Wald F test of the OLS slopes with a robust covariance",
+      "category": "regression",
+      "reference": "lmtest::waldtest(m, vcov = sandwich::vcovHC(m, type = ...) | sandwich::vcovCL(m, cluster = ..., type = 'HC1'), test = 'F')",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": [
+        "ols_wald_f_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_wald_f_grunfeld"
+      ],
+      "quantities": [
+        "Wald F and p for HC0-HC3, clustered by firm and two-way clustered",
+        "numerator and denominator degrees of freedom",
+        "Wald F and p without an intercept (HC1)",
+        "classical F, unchanged"
+      ],
+      "tolerance": "validation/README.md: statistics Tol::stat(n), p-values Tol::p_value(n); degrees of freedom exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
