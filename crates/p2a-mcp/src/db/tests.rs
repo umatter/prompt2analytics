@@ -1148,6 +1148,28 @@ async fn an_orphan_sweep_of_dataset_meta_forgets_the_session_counter() {
     assert_eq!(counter_gap(&db, "s1").await, None);
 }
 
+/// An orphan sweep that deletes a session's dataset metadata rows forgets
+/// that session's byte counter and no other: a session without a session
+/// row whose counter is seeded but which has no orphaned row (one being
+/// created, say) keeps its counter.
+#[tokio::test]
+async fn orphan_sweep_keeps_the_counters_of_sessions_it_did_not_touch() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1 << 20),
+        ..Default::default()
+    })
+    .await;
+    let mut orphan = budget_meta("gone", 20);
+    orphan.session_id = "orphan".into();
+    db.save_dataset_meta(&orphan).await.unwrap();
+    db.reserve_session_bytes("young", 0).await.unwrap();
+    assert_eq!(db.session_bytes_entry("young"), Some(0));
+
+    assert_eq!(db.delete_orphans().await.unwrap(), 1);
+    assert_eq!(db.session_bytes_entry("orphan"), None);
+    assert_eq!(db.session_bytes_entry("young"), Some(0));
+}
+
 /// The refusal at the session byte budget names the limit key, and does not
 /// tell the caller that deleting a conversation is the only remedy (dataset
 /// metadata counts against the same budget).

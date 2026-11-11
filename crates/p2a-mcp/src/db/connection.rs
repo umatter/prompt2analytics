@@ -508,16 +508,6 @@ impl DbConnection {
         }
     }
 
-    /// Drop the byte counter of every session not in `with_row` (an orphan
-    /// sweep deleted rows of sessions without a session row); a later write
-    /// re-seeds it from the store.
-    pub(crate) fn forget_session_bytes_except(&self, with_row: &std::collections::HashSet<String>) {
-        if self.limits.session_db_bytes.is_some() {
-            self.session_bytes_map()
-                .retain(|session_id, _| with_row.contains(session_id));
-        }
-    }
-
     /// Whether the session's byte counter is seeded.
     pub(crate) fn has_session_bytes(&self, session_id: &str) -> bool {
         self.limits.session_db_bytes.is_some() && self.session_bytes_map().contains_key(session_id)
