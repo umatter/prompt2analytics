@@ -36,6 +36,12 @@ use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
 const MAX_ITER: usize = 100;
 /// Tolerance of the Newton-decrement rule of [`run_multinom`].
 const TOLERANCE: f64 = 1e-10;
+/// Largest relative component `|d_i| / (1 + |beta_i|)` of the polish step at the stop of a
+/// converged fit. A regular optimum gives a step at rounding level (measured on the pins:
+/// 4.0e-10 on `disc_multinom_mn8`, 7.0e-12 on `sep5`, below 1e-15 on `j4`); a step above
+/// this means the coefficients diverge (4.2e-2 on the quasi-separation fixture of
+/// `test_multinom_quasi_separation_is_not_converged`).
+const POLISH_STEP_TOL: f64 = 1e-6;
 
 /// Most outcome categories a multinomial logit accepts.
 ///
@@ -222,7 +228,11 @@ impl fmt::Display for MultinomResult {
 /// iterations), and one more full step to polish. A line search that finds no increase
 /// stops it as not converged. When some observation's fitted probability of its own
 /// category is numerically 0 or 1 (separation: no MLE exists), the fit is
-/// flagged (`separation`), warned and reported as not converged. A singular information
+/// flagged (`separation`), warned and reported as not converged. When the decrement rule
+/// is met but the polish step is not small (some component above 1e-6 relative to
+/// `1 + |beta_i|`), the coefficients diverge along a direction of quasi-separation that
+/// leaves every fitted probability inside (0, 1): the fit is warned ("may not exist") and
+/// reported as not converged. A singular information
 /// at the estimates gives `NaN` standard errors and a warning. Non-convergence is
 /// reported in the result, never as an error.
 ///
@@ -355,6 +365,8 @@ pub fn run_multinom(
     // full step of the line search is evaluated with its derivatives, which the next
     // iteration then reuses; the values are the ones a fresh pass gives, bit for bit).
     let mut at_beta: Option<MultinomDerivatives> = None;
+    // Largest relative component of the polish step at the stop, when it was taken.
+    let mut polish_step: Option<f64> = None;
     while iterations < MAX_ITER {
         resource::checkpoint()?;
         let MultinomDerivatives { ll, grad, info, .. } = match at_beta.take() {
@@ -375,6 +387,15 @@ pub fn run_multinom(
                 beta = full;
                 let (d2, _) =
                     equilibrated_newton_step(&at_full.info, &at_full.grad, what, &mut warnings)?;
+                // At a regular optimum Newton converges quadratically, so the polish step is
+                // at rounding level; along a direction of separation the likelihood is
+                // exponentially flat and the step stays of order 1.
+                let ratio = d2
+                    .iter()
+                    .zip(&beta)
+                    .map(|(s, b)| s.abs() / (1.0 + b.abs()))
+                    .fold(0.0_f64, |acc, r| if r.is_nan() { r } else { acc.max(r) });
+                polish_step = Some(ratio);
                 let polish: Vec<f64> = beta.iter().zip(&d2).map(|(b, s)| b + s).collect();
                 let at_polish = model.derivatives(&polish)?;
                 if at_polish.ll >= at_full.ll - 1e-12 * at_full.ll.abs() {
@@ -443,8 +464,23 @@ pub fn run_multinom(
         ));
     }
     let separated_stop = converged && separation;
+    // Divergence: the decrement rule was met, but the polish step from that point is not
+    // small, so the coefficients are still moving along a direction of separation that
+    // leaves no fitted probability at 0 or 1 (quasi-separation). Not evaluated when the
+    // full step was refused (no polish step was computed).
+    let diverging_stop =
+        converged && !separation && polish_step.is_some_and(|r| r.is_nan() || r > POLISH_STEP_TOL);
+    if diverging_stop {
+        warnings.push(format!(
+            "the Newton step at the stop is not small (largest relative change {:.1e}): the \
+             coefficients diverge, so the maximum likelihood estimates may not exist \
+             (separation)",
+            polish_step.unwrap_or(f64::NAN)
+        ));
+    }
     let converged = converged
         && !separation
+        && !diverging_stop
         && log_likelihood.is_finite()
         && beta.iter().all(|b| b.is_finite());
     let convergence = Convergence::new(
@@ -452,7 +488,7 @@ pub fn run_multinom(
         iterations,
         MAX_ITER,
         "Newton decrement (relative deviance change)",
-        if separated_stop {
+        if separated_stop || diverging_stop {
             f64::NAN
         } else {
             final_change
@@ -464,6 +500,8 @@ pub fn run_multinom(
             "multinomial logit stopped after {iterations} iterations without a maximum \
              likelihood estimate (separation); reported as not converged"
         ));
+    } else if diverging_stop {
+        // the divergence warning above says it; one warning, not two
     } else if let Some(note) = convergence.note("multinomial logit") {
         warnings.push(note);
     }
@@ -951,6 +989,45 @@ mod tests {
             !r.converged,
             "no MLE exists, yet converged after {} iterations (LL {}, null {})",
             r.iterations, r.log_likelihood, r.log_likelihood_null
+        );
+    }
+
+    /// Quasi-separation that leaves no fitted probability at 0 or 1: category A has all 8
+    /// rows at x = 0, and B and C interleave on x > 0. No MLE exists. R 4.3.3, nnet
+    /// 7.3-19, `multinom(factor(lab) ~ x, reltol = rt, maxit = 10000)`: the slopes grow as
+    /// reltol tightens (B: x 34.28468 at 1e-8, 50.97786 at 1e-12, 61.47094 at 1e-16; C
+    /// equal to 5 digits) and the deviance tends to 24 ln 2 = 16.635532 (16.63769,
+    /// 16.63557, 16.63553). Every B and C row's own-category probability tends to 1/2, and
+    /// A's tends to 1 only like 1 - 2 exp(intercept) (1 - 7.9e-8 at reltol 1e-16), far from
+    /// the separation rule's 10 eps when the Newton decrement meets its tolerance. The
+    /// polish step at that point is not small (4.2e-2 relative), which the divergence rule
+    /// reports.
+    #[test]
+    fn test_multinom_quasi_separation_is_not_converged() {
+        let mut x = vec![0.0; 8];
+        x.extend((0..12).map(|i| 0.5 + 0.25 * i as f64));
+        let mut lab: Vec<&str> = vec!["A"; 8];
+        lab.extend(["B", "C", "C", "B", "B", "C", "B", "C", "C", "B", "C", "B"]);
+        let ds = Dataset::new(df! { "y" => lab, "x" => x }.unwrap());
+        let r = run_multinom(&ds, "y", &["x"], None).unwrap();
+        assert!(
+            flat(&r.coefficients).iter().all(|b| b.is_finite()) && r.log_likelihood.is_finite(),
+            "{r}"
+        );
+        assert!(!r.converged, "no MLE exists, yet converged: {r}");
+        assert!(
+            r.warnings.iter().any(|w| w.contains("may not exist")),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(
+            r.warnings
+                .iter()
+                .filter(|w| w.contains("not converged") || w.contains("may not exist"))
+                .count(),
+            1,
+            "one warning, not two: {:?}",
+            r.warnings
         );
     }
 
