@@ -218,8 +218,11 @@ pub fn ansari_test_with(
     let want_exact = exact.unwrap_or(m < 50 && n < 50);
     let use_exact = want_exact && !has_ties;
     let mut warnings: Vec<&'static str> = Vec::new();
-    xs.sort_by(f64::total_cmp);
-    ys.sort_by(f64::total_cmp);
+    if conf_level.is_some() {
+        // the intervals work on the sorted samples; the test itself does not need them
+        xs.sort_by(f64::total_cmp);
+        ys.sort_by(f64::total_cmp);
+    }
 
     let mut interval = (None, None, None);
     let p_value;
@@ -363,18 +366,21 @@ impl AnsariDist {
         for i in 1..=nt {
             checkpoint()?;
             let score = i.min(nt + 1 - i);
-            let mut big = 0.0f64;
             for j in (1..=m.min(i)).rev() {
                 let (lo, hi) = dp.split_at_mut(j * width);
                 let prev = &lo[(j - 1) * width..];
                 let cur = &mut hi[..width];
                 for s in (score..width).rev() {
                     cur[s] += prev[s - score];
-                    big = big.max(cur[s]);
                 }
             }
-            if big > 1e250 {
-                dp.iter_mut().for_each(|v| *v *= 1e-250);
+            // every cell counts subsets of the first i scores, so it is at most 2^i: rescaling
+            // can only be needed once i passes 800 (2^800 < 1e250)
+            if i >= 800 {
+                let big = dp.iter().copied().fold(0.0f64, f64::max);
+                if big > 1e250 {
+                    dp.iter_mut().for_each(|v| *v *= 1e-250);
+                }
             }
         }
         let row = &dp[m * width..(m + 1) * width];
@@ -587,6 +593,36 @@ impl RatioSet {
         group(&self.pos.0, &self.pos.1) + group(&self.neg.0, &self.neg.1)
     }
 
+    /// The smallest ratio above `t` (infinity when there is none).
+    fn next_above(&self, t: f64) -> f64 {
+        let group = |a: &[f64], b: &[f64]| -> f64 {
+            // for b ascending the first a with a / b > t moves right
+            let mut i = 0usize;
+            let mut best = f64::INFINITY;
+            for &bj in b {
+                while i < a.len() && a[i] / bj <= t {
+                    i += 1;
+                }
+                if i < a.len() {
+                    best = best.min(a[i] / bj);
+                }
+            }
+            best
+        };
+        group(&self.pos.0, &self.pos.1).min(group(&self.neg.0, &self.neg.1))
+    }
+
+    /// The k-th and (k+1)-th smallest ratios (1-based), with one bisection.
+    fn kth_and_next(&self, k: usize) -> (f64, f64) {
+        let a = self.kth(k);
+        let b = if self.count_le(a) > k {
+            a
+        } else {
+            self.next_above(a)
+        };
+        (a, b)
+    }
+
     fn bounds(&self) -> (f64, f64) {
         let mut lo = f64::INFINITY;
         let mut hi = 0.0f64;
@@ -665,7 +701,7 @@ fn bauer_asymptotic_interval(
         if k >= total {
             return ab2(srange.1, zq);
         }
-        let (a, b) = (ratios.kth(k), ratios.kth(k + 1));
+        let (a, b) = ratios.kth_and_next(k);
         ab2(a + (b - a) / 2.0, zq)
     };
     // smallest k in 0..=total with pred(value_above(k)), assuming monotone
@@ -738,6 +774,29 @@ fn bauer_asymptotic_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ratio_selection_matches_naive_sort() {
+        // duplicated ratios (2 / 1 = 4 / 2) and both signs
+        let xs = [-3.0, -1.5, 0.0, 1.0, 2.0, 2.0, 4.0, 7.5];
+        let ys = [-2.0, -0.5, 1.0, 2.0, 3.0];
+        let set = RatioSet::new(&xs, &ys);
+        let mut naive: Vec<f64> = Vec::new();
+        for &a in &xs {
+            for &b in &ys {
+                if (a > 0.0 && b > 0.0) || (a < 0.0 && b < 0.0) {
+                    naive.push(a / b);
+                }
+            }
+        }
+        naive.sort_by(f64::total_cmp);
+        assert_eq!(set.len(), naive.len());
+        for k in 1..naive.len() {
+            let (a, b) = set.kth_and_next(k);
+            assert_eq!(a, naive[k - 1], "k = {k}");
+            assert_eq!(b, naive[k], "k = {k}");
+        }
+    }
 
     #[test]
     fn test_ansari_test_basic() {

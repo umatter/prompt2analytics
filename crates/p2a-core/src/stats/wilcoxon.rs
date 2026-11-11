@@ -348,10 +348,17 @@ pub fn wilcoxon_rank_sum(
     let exact_used = want_exact && !ties;
     let mut warnings: Vec<&'static str> = Vec::new();
 
-    let mut xs = x.clone();
-    xs.sort_by(f64::total_cmp);
-    let mut ys = y.clone();
-    ys.sort_by(f64::total_cmp);
+    // the sorted samples are needed only for the interval
+    let sorted = |v: &[f64]| {
+        let mut s = v.to_vec();
+        s.sort_by(f64::total_cmp);
+        s
+    };
+    let (xs, ys) = if config.conf_int {
+        (sorted(&x), sorted(&y))
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let (p_value, z_score, interval) = if exact_used {
         let dist = wilcox_dist(n1, n2)?;
@@ -580,9 +587,13 @@ pub fn wilcoxon_signed_rank(
     let mut warnings: Vec<&'static str> = Vec::new();
 
     // R adds mu back before the interval: the values whose Walsh averages are the jump points
-    let mut vs: Vec<f64> = try_with_capacity(n, "Wilcoxon interval")?;
-    vs.extend(nonzero.iter().map(|&d| d + mu));
-    vs.sort_by(f64::total_cmp);
+    // (needed only for the interval)
+    let mut vs: Vec<f64> = Vec::new();
+    if config.conf_int {
+        vs = try_with_capacity(n, "Wilcoxon interval")?;
+        vs.extend(nonzero.iter().map(|&d| d + mu));
+        vs.sort_by(f64::total_cmp);
+    }
 
     let (p_value, z_score, interval) = if exact_used {
         let dist = SignrankDist(signrank_probs(n)?);
