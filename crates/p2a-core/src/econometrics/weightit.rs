@@ -59,7 +59,7 @@
 //! - R package WeightIt: Greifer, N. (2024). WeightIt: Weighting for Covariate Balance
 //!   in Observational Studies. https://ngreifer.github.io/WeightIt/
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -2146,45 +2146,78 @@ impl WeightEstimand {
 }
 
 /// Whether every value is 0 or 1.
-pub(crate) fn is_binary(col: &[f64]) -> bool {
-    col.iter().all(|&v| v == 0.0 || v == 1.0)
+pub(crate) fn is_binary<'a>(col: impl Into<ArrayView1<'a, f64>>) -> bool {
+    col.into().iter().all(|&v| v == 0.0 || v == 1.0)
 }
 
-/// cobalt's weighted variance: with `v = w / sum w`, `sum v (x - m)^2 / (1 - sum v^2)`. NaN
-/// for fewer than two positive weights.
-pub(crate) fn weighted_var(x: &[f64], w: &[f64]) -> f64 {
-    if w.iter().filter(|&&v| v > 0.0).count() < 2 {
-        return f64::NAN;
+/// Weighted mean and cobalt's weighted variance (with `v = w / sum w`,
+/// `sum v (x - m)^2 / (1 - sum v^2)`) of the units `keep` selects, unit weights when `w` is
+/// `None`. The mean is NaN when the weights sum to 0, the variance NaN for fewer than two
+/// positive weights. Two passes, no allocation.
+pub(crate) fn group_mean_var(
+    x: ArrayView1<f64>,
+    w: Option<&[f64]>,
+    keep: impl Fn(usize) -> bool,
+) -> (f64, f64) {
+    let weight = |i: usize| w.map_or(1.0, |w| w[i]);
+    let (mut sw, mut swx, mut sw2, mut positive) = (0.0, 0.0, 0.0, 0usize);
+    for (i, &xi) in x.iter().enumerate() {
+        if keep(i) {
+            let wi = weight(i);
+            sw += wi;
+            swx += wi * xi;
+            sw2 += wi * wi;
+            positive += usize::from(wi > 0.0);
+        }
     }
-    crate::econometrics::matching::wvar(x, w, false)
+    let mean = if sw > 0.0 { swx / sw } else { f64::NAN };
+    if positive < 2 {
+        return (mean, f64::NAN);
+    }
+    let mut ss = 0.0;
+    for (i, &xi) in x.iter().enumerate() {
+        if keep(i) {
+            ss += weight(i) * (xi - mean) * (xi - mean);
+        }
+    }
+    (mean, (ss / sw) / (1.0 - sw2 / (sw * sw)))
+}
+
+/// cobalt's weighted variance of `x` with weights `w` (see [`group_mean_var`]). NaN for fewer
+/// than two positive weights.
+pub(crate) fn weighted_var(x: &[f64], w: &[f64]) -> f64 {
+    group_mean_var(ArrayView1::from(x), Some(w), |_| true).1
 }
 
 /// The SMD denominator from the unweighted sample: SD of the treated / control / full sample,
 /// or `sqrt((v1 + v0) / 2)`. Variances use n - 1; with `binary_as_proportion` a 0/1 column uses
 /// `p (1 - p)` (cobalt, `binary = "std"`). NaN when the SD is not positive and finite.
-pub(crate) fn balance_sd(
-    col: &[f64],
+pub(crate) fn balance_sd<'a>(
+    col: impl Into<ArrayView1<'a, f64>>,
     treated: &[bool],
     denom: SdDenominator,
     binary_as_proportion: bool,
 ) -> f64 {
+    let col = col.into();
     let bin = binary_as_proportion && is_binary(col);
     let var_of = |pick: Option<bool>| -> f64 {
-        let x: Vec<f64> = col
-            .iter()
-            .zip(treated)
-            .filter(|&(_, &t)| pick.is_none_or(|p| p == t))
-            .map(|(&v, _)| v)
-            .collect();
-        if x.is_empty() || (!bin && x.len() < 2) {
-            return f64::NAN;
-        }
+        let keep = |i: usize| pick.is_none_or(|p| p == treated[i]);
         if bin {
             // p (1 - p) from the exact count of ones
-            let p = x.iter().sum::<f64>() / x.len() as f64;
+            let (mut ones, mut count) = (0.0, 0usize);
+            for (i, &v) in col.iter().enumerate() {
+                if keep(i) {
+                    ones += v;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return f64::NAN;
+            }
+            let p = ones / count as f64;
             return p * (1.0 - p);
         }
-        crate::econometrics::matching::wvar(&x, &vec![1.0; x.len()], false)
+        group_mean_var(col, None, keep).1
     };
     let var = match denom {
         SdDenominator::Treated => var_of(Some(true)),
@@ -2226,38 +2259,18 @@ fn compute_balance_table(
     weights: Option<&[f64]>,
     estimand: WeightEstimand,
 ) -> WeightItBalanceTable {
-    let n = d.len();
     let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
-    let ones = vec![1.0; n];
-    let w = weights.unwrap_or(&ones);
 
     let covariates: Vec<WeightItCovariateBalance> = (0..x.ncols())
         .map(|j| {
-            let col = x.column(j).to_vec();
-            let (mut xt, mut wt, mut xc, mut wc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for i in 0..n {
-                if treated[i] {
-                    xt.push(col[i]);
-                    wt.push(w[i]);
-                } else {
-                    xc.push(col[i]);
-                    wc.push(w[i]);
-                }
-            }
-            let wmean = |x: &[f64], w: &[f64]| {
-                let sw: f64 = w.iter().sum();
-                if sw > 0.0 {
-                    x.iter().zip(w).map(|(a, b)| a * b).sum::<f64>() / sw
-                } else {
-                    f64::NAN
-                }
-            };
-            let (mean_t, mean_c) = (wmean(&xt, &wt), wmean(&xc, &wc));
-            let sd = balance_sd(&col, &treated, estimand.sd_denominator(), true);
-            let var_ratio = if is_binary(&col) {
+            let col = x.column(j);
+            let (mean_t, var_t) = group_mean_var(col, weights, |i| treated[i]);
+            let (mean_c, var_c) = group_mean_var(col, weights, |i| !treated[i]);
+            let sd = balance_sd(col, &treated, estimand.sd_denominator(), true);
+            let var_ratio = if is_binary(col) {
                 f64::NAN
             } else {
-                weighted_var(&xt, &wt) / weighted_var(&xc, &wc)
+                var_t / var_c
             };
             WeightItCovariateBalance {
                 variable: var_names

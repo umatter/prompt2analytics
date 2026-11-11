@@ -1399,7 +1399,7 @@ impl<'a> Criterion<'a> {
             TwangEstimand::ATC => SdDenominator::Control,
         };
         let sd = (0..x.ncols())
-            .map(|j| balance_sd(&x.column(j).to_vec(), &groups.treated, denom, false))
+            .map(|j| balance_sd(x.column(j), &groups.treated, denom, false))
             .collect();
         Criterion { groups, sorted, sd }
     }

@@ -60,7 +60,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmLink, GlmSpec, fit_glm, fit_propensity, plogis};
-use crate::econometrics::weightit::{SdDenominator, balance_sd, is_binary, weighted_var};
+use crate::econometrics::weightit::{SdDenominator, balance_sd, group_mean_var, is_binary};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, ndarray_to_faer};
@@ -1537,27 +1537,15 @@ fn compute_balance_table(
     };
 
     for j in start_col..k {
-        let col = x.column(j).to_vec();
-        let (mut xt, mut wt, mut xc, mut wc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for i in 0..n {
-            let w = weights.map(|ws| ws[i]).unwrap_or(1.0);
-            if treated[i] {
-                xt.push(col[i]);
-                wt.push(w);
-            } else {
-                xc.push(col[i]);
-                wc.push(w);
-            }
-        }
-
-        let mean_treated = weighted_mean(&xt, &wt);
-        let mean_control = weighted_mean(&xc, &wc);
-        let sd = balance_sd(&col, &treated, denom, true);
+        let col = x.column(j);
+        let (mean_treated, var_t) = group_mean_var(col, weights, |i| treated[i]);
+        let (mean_control, var_c) = group_mean_var(col, weights, |i| !treated[i]);
+        let sd = balance_sd(col, &treated, denom, true);
         let std_diff = (mean_treated - mean_control) / sd;
-        let var_ratio = if is_binary(&col) {
+        let var_ratio = if is_binary(col) {
             f64::NAN
         } else {
-            weighted_var(&xt, &wt) / weighted_var(&xc, &wc)
+            var_t / var_c
         };
 
         let balanced = std_diff.abs() < threshold;
@@ -1582,20 +1570,6 @@ fn compute_balance_table(
         .fold(0.0_f64, f64::max);
 
     table
-}
-
-/// Compute weighted mean.
-fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
-    let total_weight: f64 = weights.iter().sum();
-    if total_weight == 0.0 {
-        return 0.0;
-    }
-    let weighted_sum: f64 = values
-        .iter()
-        .zip(weights.iter())
-        .map(|(&v, &w)| v * w)
-        .sum();
-    weighted_sum / total_weight
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

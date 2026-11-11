@@ -144,7 +144,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::weightit::{
-    SdDenominator, balance_sd, finite_abs_mean_max, is_binary, weighted_var,
+    SdDenominator, balance_sd, finite_abs_mean_max, group_mean_var, is_binary,
 };
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -1637,9 +1637,8 @@ impl BalanceScale {
         };
         let (mut sd, mut binary) = (Vec::new(), Vec::new());
         for col in covariates.columns() {
-            let col = col.to_vec();
-            sd.push(balance_sd(&col, &treated, denom, true));
-            binary.push(is_binary(&col));
+            sd.push(balance_sd(col, &treated, denom, true));
+            binary.push(is_binary(col));
         }
         Self { sd, binary }
     }
@@ -1658,22 +1657,7 @@ fn compute_balance_stats(
 
 /// Weighted mean of a column (unit weights when none are given) and cobalt's weighted variance.
 fn column_moments(col: ArrayView1<f64>, w: Option<&[f64]>) -> (f64, f64) {
-    let x = col.to_vec();
-    let ones;
-    let w = match w {
-        Some(w) => w,
-        None => {
-            ones = vec![1.0; x.len()];
-            &ones
-        }
-    };
-    let w_sum: f64 = w.iter().sum();
-    let mean = if w_sum > 0.0 {
-        x.iter().zip(w).map(|(x, wi)| wi * x).sum::<f64>() / w_sum
-    } else {
-        f64::NAN
-    };
-    (mean, weighted_var(&x, w))
+    group_mean_var(col, w, |_| true)
 }
 
 /// Balance statistics of group a (reported as "target") against group b, each optionally
