@@ -1439,7 +1439,9 @@ mod tests {
             .map(|i| (i as f64 / n as f64) + 0.2 * noise(i, 5.1))
             .collect();
         let x4: Vec<f64> = (0..n).map(|i| noise(i, 7.9) * 3.0).collect();
-        // A large mean relative to the spread: the cancellation the centring avoids.
+        // A mean of 50 against a spread of about 1: enough to check that the projection and
+        // the refit agree on uncentred effects, though too small to show the cancellation
+        // that centring guards against.
         let tau: Array1<f64> = (0..n)
             .map(|i| 50.0 + 0.8 * x1[i] - 0.5 * x2[i] + 0.3 * x4[i] + 0.4 * noise(i, 11.3))
             .collect();

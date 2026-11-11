@@ -479,7 +479,7 @@ impl CubistTree {
         // Cubist does. The normal-equations solve skips OLS's refinement step, which would
         // add two passes over the design at every node: unrefined, the coefficients' relative
         // error is of order eps / rcond, at most about 1e-8 where the normal equations are
-        // accepted.
+        // accepted (the exception is named in the `regression::ols::NormalInverse` doc).
         let fit = match normal_equations_inverse(design.view()) {
             Ok(Some(ne)) => Ok(ne.inverse.dot(&xty(&design.view(), &y_sub))),
             Ok(None) => least_squares(design.view(), y_sub.view()).map(|ls| {

@@ -881,6 +881,12 @@ fn weighted_abs_sum(v: &[f64], w: &[f64]) -> f64 {
 
 /// The work of [`sym_inverse`] on a validated (square, finite, symmetric) matrix.
 /// `guarded`: run the budget checkpoint and allocate through the allocation ceiling.
+///
+/// For an indefinite matrix the verified LU's residual allowance is capped by
+/// `||m||_1 max s_i^2 / min |lambda(E)|`, an upper bound on `kappa_2(m)` that does not depend
+/// on the LU candidate. It can exceed `kappa_2(m)` by up to `max s_i^2 / min s_i^2` (when
+/// `E^-1`'s dominant direction lies on coordinates with small `s_i`), so on a badly scaled
+/// indefinite matrix the allowance is that much wider than the exact condition would give.
 fn sym_inverse_core(
     m: ArrayView2<f64>,
     policy: SingularPolicy,

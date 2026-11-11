@@ -810,7 +810,12 @@ const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 /// Built by [`normal_equations_inverse`]; the OLS fit ([`solve_ols`]) and every other
 /// least-squares fit that takes OLS's solve decision use it (panel FE and RE, HDFE, FEGLM,
 /// LLC, the GLM's IRLS, conditional and multinomial logit, GLS, sensemakr, VAR, Granger), so
-/// the thresholds and the refinement live here only.
+/// the thresholds and the refinement live here only. Two callers apply [`Self::inverse`]
+/// without the refinement step on purpose: the fixed-design bootstrap
+/// (`FixedDesignSolver`) and Cubist's leaf models (`ml::cubist`), which are refit and
+/// smoothed, so the refinement's last bits do not reach their predictions; unrefined, the
+/// coefficients' relative error is of order eps / rcond, at most about 1e-8 where the normal
+/// equations are accepted.
 #[derive(Debug, Clone)]
 pub(crate) struct NormalInverse {
     /// `(X'X)^{-1}` (k x k), the unscaled covariance of the coefficients.
