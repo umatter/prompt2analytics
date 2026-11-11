@@ -27,15 +27,14 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
 
-use super::conditional_logit::{
-    check_newton_control, covariance_from_information, equilibrated_newton_step,
-};
+use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
 use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
 
 /// Newton iterations of [`run_multinom`].
 const MAX_ITER: usize = 100;
 /// Tolerance of the Newton-decrement rule of [`run_multinom`].
 const TOLERANCE: f64 = 1e-10;
+const _: () = assert!(MAX_ITER > 0 && TOLERANCE > 0.0);
 /// Largest relative component `|d_i| / (1 + |beta_i|)` of the polish step at the stop of a
 /// converged fit. A regular optimum gives a step at rounding level (measured on the pins:
 /// 4.0e-10 on `disc_multinom_mn8`, 7.0e-12 on `sep5`, below 1e-15 on `j4`); a step above
@@ -218,6 +217,8 @@ impl fmt::Display for MultinomResult {
 /// `InvalidSpecification` (a method-level cap, like `nnet::multinom`'s `MaxNWts`).
 /// Regressors that are linear combinations of the others are refused with
 /// `SingularMatrix` naming them (`nnet::multinom` returns an arbitrary split).
+/// `InvalidSpecification` when the information matrix is not finite (the regressors are
+/// so large that its entries overflow), from the generalized-inverse fallback.
 ///
 /// # Convergence
 ///
@@ -347,7 +348,6 @@ pub fn run_multinom(
     let n_cats = j - 1; // Non-reference categories
     let n_params = n_cats * k;
     ensure_dense_inverse_fits(n_params, "multinomial logit Hessian")?;
-    check_newton_control(MAX_ITER, TOLERANCE)?;
     let model = MultinomModel {
         x,
         y_idx: &y_idx,
@@ -969,11 +969,10 @@ mod tests {
 
     /// One row per category is complete separation, so no MLE exists. Before Tier 1
     /// the 100-category fit was all NaN and reported `Converged: true (1 iterations)`
-    /// (RF-31). The estimates must be finite and `converged` false: the iteration
-    /// runs out of steps or stops at the first step that comes from the
-    /// pseudoinverse (singular information), never applying it. Measured on 20
-    /// categories (38 parameters): with pseudoinverse steps applied, the fit
-    /// reported `converged = true` with a log-likelihood of -1.5e18.
+    /// (RF-31). The estimates must be finite and `converged` false. On 20 categories
+    /// (38 parameters) the fit ends when the line search finds no step along the Newton
+    /// direction that increases the log-likelihood (iteration 34, before the decrement
+    /// rule is met), so neither the separation flag nor the divergence rule decides it.
     #[test]
     fn test_multinom_one_row_per_category_does_not_converge() {
         let r = run_multinom(&continuous_y_dataset(20), "y", &["x"], None).unwrap();
@@ -989,6 +988,13 @@ mod tests {
             !r.converged,
             "no MLE exists, yet converged after {} iterations (LL {}, null {})",
             r.iterations, r.log_likelihood, r.log_likelihood_null
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("line search failed")),
+            "{:?}",
+            r.warnings
         );
     }
 
@@ -1029,6 +1035,25 @@ mod tests {
             "one warning, not two: {:?}",
             r.warnings
         );
+    }
+
+    /// Regressors so large that the information matrix (x x' p (1 - p)) overflows: the
+    /// generalized-inverse fallback refuses its non-finite entries.
+    #[test]
+    fn test_multinom_non_finite_information_is_an_error() {
+        let x: Vec<f64> = [1.0, -2.0, 3.0, 0.5, -1.5, 2.5, -0.5, 1.5, -3.0, 2.0]
+            .iter()
+            .map(|v| v * 1e160)
+            .collect();
+        let y = vec!["a", "b", "c", "a", "c", "b", "a", "b", "c", "c"];
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        let r = run_multinom(&ds, "y", &["x"], None);
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("non-finite"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 
     #[test]
