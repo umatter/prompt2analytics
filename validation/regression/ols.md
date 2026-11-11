@@ -270,9 +270,58 @@ order, so the meat is bit for bit the old one (`test_hac_meat_matches_indexed_re
 now also over 60 and 300 lags, the latter across two blocks). The T3-PERF5 row was measured on
 a shared, loaded machine as user-space CPU cycles per call from the hardware counter
 (`perf_event_open`; median of 11 batches, one P core, three interleaved rounds) against
-`ff8e7559`. Every row is within 1.1x. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `ff8e7559`, medians): the criterion
+`ff8e7559`. Every row was within 1.1x of that base. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `ff8e7559`, medians): the criterion
 `vcovHAC` bench at n = 100 / 500 / 1,000 / 5,000 is 0.75 / 0.76 / 0.76 / 0.57 of base, and the
 unified OLS_HAC row at n = 100 / 1,000 / 10,000 0.96 / 0.88 / 0.67.
+
+**Variance estimators: lag convention, Quadratic Spectral, VAR(1) prewhitening, Driscoll-Kraay,
+Wald F.** Release build, `RAYON_NUM_THREADS=1`, one pinned core, against `f80b0131`; seven
+interleaved rounds of a scratch harness that fits from a dataset (three regressors and an
+intercept; Driscoll-Kraay with 10 units, so T = n/10; bootstrap B = 199), median of each
+round's median, head / base. The machine was shared and loaded (load average 30-60 on 12
+cores), so single ratios within about ±0.1 of 1 are noise; the bracketed ranges are the
+per-round ratios.
+
+| Fit | n = 100 | 200 | 1,000 | 10,000 |
+|---|---|---|---|---|
+| OLS standard | 0.98 | 0.99 | 0.98 | 0.99 |
+| OLS HC1 (adds the Wald F) | **1.18** [1.00-1.25] | 1.04 | 0.99 | 1.04 |
+| clustered, one-way (adds the Wald F) | **1.11** [1.05-1.23] | 1.06 | 1.05 | 0.72 |
+| clustered, two-way (adds the Wald F and the eigenvalue check) | 1.08 | **1.14** [1.00-1.19] | 1.07 | 0.88 |
+| HAC Bartlett, default lag | 0.94 | 0.93 | 0.69 | 0.73 |
+| HAC Parzen, lag 4 | 0.94 | 0.92 | 0.69 | 0.77 |
+| HAC Quadratic Spectral, lag 4 | **1.16** | **1.21** | **1.85** | **2.88** |
+| HAC Quadratic Spectral, default lag | **1.16** | **1.30** | **1.51** | **2.40** |
+| HAC Bartlett, default lag, prewhitened | **1.52** | **1.39** | **1.37** | **1.17** |
+| Driscoll-Kraay Bartlett, default lag | 0.96 | 0.94 | 0.86 | 0.79 |
+| Driscoll-Kraay Quadratic Spectral, lag 2 / default lag | 0.95 / 1.00 | 0.95 / 1.00 | 0.97 / 0.97 | 0.91 / 0.86 |
+| bootstrap pairs / residual / wild | 0.89 / 1.00 / 0.99 | 0.96 / 0.94 / 0.94 | 1.00 / 0.92 / 0.93 | 0.93 / 0.98 / 0.92 |
+| GLS AR(1), rho estimated | 1.01 | 0.99 | 0.95 | 1.12 [0.58-2.34] |
+| ARIMA(1,0,1) / (2,1,2) | 1.02 / 1.03 | 0.99 / 0.99 | 0.58 / 0.93 | 0.79 / 0.92 |
+| glmnet binomial path | 0.97 | 0.93 | 0.96 | 0.92 |
+
+`vcov_hac` alone on wider designs (k regressors plus an intercept, AR(1) regressors, Bartlett
+at the default lag, six to fifteen calls per round, three rounds):
+
+| Shape | head / base | max RSS head / base |
+|---|---|---|
+| n = 10,000, k = 30 | 0.28 | 18.2 / 17.8 MB |
+| n = 100,000, k = 30 | 0.29 | 86.3 / 107.8 MB |
+| n = 100,000, k = 50 | 0.31 | 133.2 / 170.3 MB |
+| n = 1,000 / 10,000, k = 3 (six rounds) | 0.88 / 0.70 | |
+| prewhitened, n = 100 / 1,000 / 10,000, k = 3 (six rounds) | **2.10 / 1.40 / 1.56** | |
+| prewhitened, n = 100 / 1,000 / 10,000, k = 30 | **1.82 / 1.25** / 0.70 | |
+| Quadratic Spectral, default lag, n = 1,000 / 10,000, k = 30 | 0.17 / 0.16 | |
+
+The rows in bold are above 1.1x. The Quadratic Spectral rows sum more lags than before, by
+design: the kernel's support is unbounded and `weightsAndrews` keeps every weight above 1e-7,
+which at these lags is all n - 1 lags, where the old code cut the sum at the bandwidth. The
+lag sums cost O(k² n L) directly; with the `spectral-analysis` feature (on in `ci` and `full`)
+a lag set of 64 or more is summed by FFT in O(k n log n + k² n), which is why the wide
+Quadratic Spectral rows are faster than the old truncated sum. Prewhitening fits a VAR(1)
+to the k score columns (a pivoted QR of the n - 1 lagged scores and k back-substitutions)
+where the old code fitted one scalar AR(1) to the residuals. The Wald F adds a constant
+k x k inverse and an F tail probability per fit, which shows only at n = 100-200.
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 
