@@ -1851,6 +1851,12 @@ impl HacKernel {
     }
 
     /// Compute the kernel weight for a given lag j and bandwidth m.
+    ///
+    /// Bartlett is evaluated at `j / (m + 1)`, every other kernel at `j / m`, and no kernel
+    /// has support beyond lag `m`. The OLS HAC and Driscoll-Kraay estimators use
+    /// [`HacKernel::lag_weight`] instead, which evaluates every kernel at `j / (m + 1)`
+    /// (sandwich's `NeweyWest(lag = m)` / `vcovPL(lag = m)`); this method is kept for the
+    /// general GMM's HAC weighting until that is moved to the same convention.
     pub fn weight(&self, j: usize, m: usize) -> f64 {
         if j == 0 {
             return 1.0;
@@ -1895,6 +1901,82 @@ impl HacKernel {
                 }
             }
         }
+    }
+}
+
+impl HacKernel {
+    /// The kernel `k(x)` at `x >= 0` (sandwich's `kweights`): Truncated 1 for `x <= 1`;
+    /// Bartlett `1 - x` for `x < 1`; Parzen `1 - 6x² + 6x³` for `x <= 1/2` and `2(1 - x)³` for
+    /// `x <= 1`; Tukey-Hanning `(1 + cos(πx)) / 2` for `x <= 1`; zero beyond those supports.
+    /// Quadratic Spectral `3/z² (sin z / z - cos z)` with `z = 6πx/5` has unbounded support
+    /// and is 1 at `x = 0`. (sandwich switches QS to an exponential approximation below
+    /// `|x| < 1e-3`, which only differs at lag counts of 1000 and more; it is not copied.)
+    fn at(self, x: f64) -> f64 {
+        if x == 0.0 {
+            return 1.0;
+        }
+        match self {
+            Self::Truncated => {
+                if x <= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Bartlett => {
+                if x < 1.0 {
+                    1.0 - x
+                } else {
+                    0.0
+                }
+            }
+            Self::Parzen => {
+                if x <= 0.5 {
+                    1.0 - 6.0 * x * x + 6.0 * x * x * x
+                } else if x <= 1.0 {
+                    2.0 * (1.0 - x).powi(3)
+                } else {
+                    0.0
+                }
+            }
+            Self::TukeyHanning => {
+                if x <= 1.0 {
+                    0.5 * (1.0 + (std::f64::consts::PI * x).cos())
+                } else {
+                    0.0
+                }
+            }
+            Self::QuadraticSpectral => {
+                let z = 6.0 * std::f64::consts::PI * x / 5.0;
+                3.0 / (z * z) * (z.sin() / z - z.cos())
+            }
+        }
+    }
+
+    /// The weight of lag `j` for the lag count `lags` = L: the kernel at `x = j / (L + 1)`,
+    /// for every kernel. This is the convention of sandwich's `NeweyWest(lag = L)` and
+    /// `vcovPL(lag = L)`, so p2a's lag count L is `kernHAC(bw = L + 1)`. Lag 0 has weight 1.
+    pub fn lag_weight(self, j: usize, lags: usize) -> f64 {
+        self.at(j as f64 / (lags as f64 + 1.0))
+    }
+
+    /// The weights of lags `0..n_rows` for the lag count `lags` ([`HacKernel::lag_weight`]),
+    /// cut after the last weight whose absolute value exceeds `tol` (lag 0 is always kept).
+    /// sandwich's `weightsAndrews` cuts at `tol = 1e-7` (the HAC estimator), `meatPL` after
+    /// the last non-zero weight (`tol = 0`, Driscoll-Kraay). Bartlett, Parzen and
+    /// Tukey-Hanning stop at lag L; Truncated at L + 1 (`x = 1` is inside its support);
+    /// Quadratic Spectral can keep every lag up to `n_rows - 1`.
+    pub(crate) fn lag_set(self, lags: usize, n_rows: usize, tol: f64) -> Vec<f64> {
+        let n = n_rows.max(1);
+        // Compactly supported kernels have no weight beyond lag L + 1.
+        let horizon = match self {
+            Self::QuadraticSpectral => n,
+            _ => lags.saturating_add(2).min(n),
+        };
+        let mut w: Vec<f64> = (0..horizon).map(|j| self.lag_weight(j, lags)).collect();
+        let last = w.iter().rposition(|v| v.abs() > tol).unwrap_or(0);
+        w.truncate(last + 1);
+        w
     }
 }
 
@@ -2029,97 +2111,14 @@ pub fn vcov_hac(
         (residuals.clone(), 0.0)
     };
 
-    // Compute score vectors: s_i = u_i * x_i, row-major (n × k). The sums below run over
-    // flat rows (no index arithmetic or bounds checks per term) in the same order as
-    // before, so the meat is unchanged bit for bit.
-    let mut scores = resource::try_vec(
-        resource::checked_len(&[n, k], "HAC scores")?,
-        0.0,
-        "HAC scores",
-    )?;
-    for (i, (row, &ui)) in x.rows().into_iter().zip(u.iter()).enumerate() {
-        for (s, &xij) in scores[i * k..(i + 1) * k].iter_mut().zip(row.iter()) {
-            *s = ui * xij;
-        }
-    }
+    // Score vectors s_i = u_i * x_i, stored once, column-reversed and column-major:
+    // rev[l * n + (n - 1 - i)] = s_il (see `hac_meat`).
+    let rev = reversed_scores(x.view(), u.view())?;
 
-    // Compute the meat of the sandwich: Ω̂ = Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
-    let mut omega = vec![0.0; k * k];
-
-    // Lag 0: Γ̂₀ = Σᵢ sᵢ sᵢ'
-    for si in scores.chunks_exact(k.max(1)).take(n) {
-        for (j, &sij) in si.iter().enumerate() {
-            for (o, &sil) in omega[j * k..(j + 1) * k].iter_mut().zip(si) {
-                *o += sij * sil;
-            }
-        }
-    }
-
-    // Lags 1 to bw: add cross-products with kernel weights. For each pair of columns
-    // (j, l), the sums Γ̂_lag[j, l] = Σᵢ s_ij s_(i-lag)l of a block of consecutive lags are
-    // accumulated together: with the columns stored reversed, the lagged scores of
-    // consecutive lags are consecutive, so each row adds s_ij times a contiguous slice to
-    // the block's sums (independent sums the compiler vectorises, where one sum per lag
-    // was a chain of dependent additions). Every sum still runs over the rows in
-    // ascending order, and the lags add to omega in lag order, so the meat is the same
-    // bit for bit as with one pass per lag.
-    let kk = k * k;
+    // The meat of the sandwich: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
     let max_lag = bw.min(n.saturating_sub(1));
-    // rev[l * n + t] = s_(n-1-t)l, so s_(i-lag)l = rev[l * n + n - 1 - i + lag]
-    let mut rev = resource::try_vec(
-        resource::checked_len(&[n, k], "HAC scores")?,
-        0.0,
-        "HAC lagged scores",
-    )?;
-    for (i, si) in scores.chunks_exact(k.max(1)).take(n).enumerate() {
-        for (l, &sil) in si.iter().enumerate() {
-            rev[l * n + n - 1 - i] = sil;
-        }
-    }
-    let block = (HAC_LAG_SUMS / kk.max(1))
-        .clamp(1, HAC_LAG_BLOCK)
-        .min(max_lag.max(1));
-    let mut acc = vec![0.0; block];
-    let mut gammas = vec![0.0; block * kk];
-    let mut lag0 = 1;
-    while lag0 <= max_lag {
-        resource::checkpoint()?;
-        let lag1 = (lag0 + block - 1).min(max_lag);
-        let nl = lag1 - lag0 + 1;
-        for j in 0..k {
-            for l in 0..k {
-                let acc = &mut acc[..nl];
-                acc.fill(0.0);
-                let rl = &rev[l * n..(l + 1) * n];
-                for i in lag0..n {
-                    let sij = scores[i * k + j];
-                    // the lags of the block with a row i - lag >= 0
-                    let m = (i + 1 - lag0).min(nl);
-                    let start = n - 1 - i + lag0;
-                    for (g, &sll) in acc[..m].iter_mut().zip(&rl[start..start + m]) {
-                        *g += sij * sll;
-                    }
-                }
-                for (t, &g) in acc.iter().enumerate() {
-                    gammas[t * kk + j * k + l] = g;
-                }
-            }
-        }
-
-        // Add symmetrically (Γ̂ⱼ + Γ̂ⱼ')
-        for (lag, gamma_lag) in (lag0..=lag1).zip(gammas.chunks_exact(kk.max(1))) {
-            let w = kernel.weight(lag, bw);
-            if w.abs() < 1e-15 {
-                continue;
-            }
-            for j in 0..k {
-                for l in 0..k {
-                    omega[j * k + l] += w * (gamma_lag[j * k + l] + gamma_lag[l * k + j]);
-                }
-            }
-        }
-        lag0 = lag1 + 1;
-    }
+    let weights: Vec<f64> = (0..=max_lag).map(|lag| kernel.weight(lag, bw)).collect();
+    let omega = hac_meat(&rev, n, k, &weights)?;
 
     // Scale by 1/n
     let mut omega = Array2::from_shape_vec((k, k), omega)
@@ -2186,6 +2185,109 @@ pub fn vcov_hac(
         df_resid: ols_result.df_resid,
         warnings,
     })
+}
+
+/// The scores `s_il = u_i x_il` of a design `x` (n x k) and weights `u`, stored once,
+/// column-major with each column reversed: `rev[l * n + (n - 1 - i)] = s_il`. The HAC meat
+/// reads its lagged cross-products as contiguous slices of this one copy.
+fn reversed_scores(
+    x: ndarray::ArrayView2<'_, f64>,
+    u: ndarray::ArrayView1<'_, f64>,
+) -> EconResult<Vec<f64>> {
+    let (n, k) = x.dim();
+    let mut rev = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC scores")?,
+        0.0,
+        "HAC scores",
+    )?;
+    for (i, (row, &ui)) in x.rows().into_iter().zip(u.iter()).enumerate() {
+        for (l, &xil) in row.iter().enumerate() {
+            rev[l * n + n - 1 - i] = ui * xil;
+        }
+    }
+    Ok(rev)
+}
+
+/// The unscaled HAC meat `Σ_ℓ w_ℓ (Γ_ℓ + Γ_ℓ')` (with `Γ_0` counted once) of the scores in
+/// `rev` (n rows, k columns, laid out by [`reversed_scores`]), where
+/// `Γ_ℓ[a, b] = Σ_{i ≥ ℓ} s_ia s_(i-ℓ)b` and `weights[ℓ]` is the weight of lag ℓ
+/// (`weights[0]` is ignored: lag 0 has weight 1). Lags whose weight is below 1e-15 in
+/// absolute value add nothing. Returned row-major (k x k).
+///
+/// Every sum runs over the rows in ascending order and the lags add in lag order. For each
+/// pair of columns `(a, b)`, the sums of a block of consecutive lags are accumulated together:
+/// with the columns stored reversed, the lagged scores of consecutive lags are consecutive, so
+/// each row adds `s_ia` times a contiguous slice to the block's sums (independent sums the
+/// compiler vectorises).
+fn hac_meat(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<f64>> {
+    let kk = k * k;
+    let mut omega = resource::try_vec(kk, 0.0, "HAC meat")?;
+    // Lag 0: Γ̂₀ = Σᵢ sᵢ sᵢ', rows in ascending order (descending in `rev`)
+    for a in 0..k {
+        let ra = &rev[a * n..(a + 1) * n];
+        for b in 0..k {
+            let rb = &rev[b * n..(b + 1) * n];
+            let mut g = 0.0;
+            for (&sa, &sb) in ra.iter().rev().zip(rb.iter().rev()) {
+                g += sa * sb;
+            }
+            omega[a * k + b] = g;
+        }
+    }
+    let max_lag = weights.len().saturating_sub(1).min(n.saturating_sub(1));
+    if max_lag == 0 {
+        return Ok(omega);
+    }
+    let block = (HAC_LAG_SUMS / kk.max(1))
+        .clamp(1, HAC_LAG_BLOCK)
+        .min(max_lag);
+    let mut acc = resource::try_vec(block, 0.0, "HAC lag sums")?;
+    let mut gammas = resource::try_vec(
+        resource::checked_len(&[block, kk], "HAC lag sums")?,
+        0.0,
+        "HAC lag sums",
+    )?;
+    let mut lag0 = 1;
+    while lag0 <= max_lag {
+        resource::checkpoint()?;
+        let lag1 = (lag0 + block - 1).min(max_lag);
+        let nl = lag1 - lag0 + 1;
+        for a in 0..k {
+            let ra = &rev[a * n..(a + 1) * n];
+            for b in 0..k {
+                let acc = &mut acc[..nl];
+                acc.fill(0.0);
+                let rb = &rev[b * n..(b + 1) * n];
+                // s_(i-lag)b = rb[n - 1 - i + lag]; s_ia = ra[n - 1 - i]
+                for i in lag0..n {
+                    let sia = ra[n - 1 - i];
+                    // the lags of the block with a row i - lag >= 0
+                    let m = (i + 1 - lag0).min(nl);
+                    let start = n - 1 - i + lag0;
+                    for (g, &sb) in acc[..m].iter_mut().zip(&rb[start..start + m]) {
+                        *g += sia * sb;
+                    }
+                }
+                for (t, &g) in acc.iter().enumerate() {
+                    gammas[t * kk + a * k + b] = g;
+                }
+            }
+        }
+        // Add symmetrically (Γ̂ⱼ + Γ̂ⱼ')
+        for (lag, gamma_lag) in (lag0..=lag1).zip(gammas.chunks_exact(kk.max(1))) {
+            let w = weights[lag];
+            if w.abs() < 1e-15 {
+                continue;
+            }
+            for a in 0..k {
+                for b in 0..k {
+                    omega[a * k + b] += w * (gamma_lag[a * k + b] + gamma_lag[b * k + a]);
+                }
+            }
+        }
+        lag0 = lag1 + 1;
+    }
+    Ok(omega)
 }
 
 /// Prewhiten residuals using AR(1) model.
@@ -5814,6 +5916,88 @@ mod tests {
             Ok(r) => assert!(r.coefficients[1].estimate.is_finite()),
             Err(_) => {}
         }
+    }
+
+    /// Every kernel is evaluated at j / (L + 1) (sandwich's NeweyWest(lag = L) convention).
+    #[test]
+    fn test_lag_weight_matches_newey_west_convention() {
+        let qs = |x: f64| {
+            let z = 6.0 * std::f64::consts::PI * x / 5.0;
+            3.0 / (z * z) * (z.sin() / z - z.cos())
+        };
+        for lags in [0usize, 1, 3, 7] {
+            for j in 0..=(lags + 3) {
+                let x = j as f64 / (lags as f64 + 1.0);
+                let expect = [
+                    (HacKernel::Bartlett, if x < 1.0 { 1.0 - x } else { 0.0 }),
+                    (HacKernel::Truncated, if x <= 1.0 { 1.0 } else { 0.0 }),
+                    (
+                        HacKernel::Parzen,
+                        if x <= 0.5 {
+                            1.0 - 6.0 * x * x + 6.0 * x.powi(3)
+                        } else if x <= 1.0 {
+                            2.0 * (1.0 - x).powi(3)
+                        } else {
+                            0.0
+                        },
+                    ),
+                    (
+                        HacKernel::TukeyHanning,
+                        if x <= 1.0 {
+                            0.5 * (1.0 + (std::f64::consts::PI * x).cos())
+                        } else {
+                            0.0
+                        },
+                    ),
+                    (
+                        HacKernel::QuadraticSpectral,
+                        if j == 0 { 1.0 } else { qs(x) },
+                    ),
+                ];
+                for (kernel, e) in expect {
+                    let w = kernel.lag_weight(j, lags);
+                    assert!((w - e).abs() <= 1e-15, "{kernel:?} L={lags} j={j}: {w} vs {e}");
+                }
+            }
+        }
+        // spot checks
+        let b: Vec<f64> = (1..=5).map(|j| HacKernel::Bartlett.lag_weight(j, 4)).collect();
+        for (w, e) in b.iter().zip([0.8, 0.6, 0.4, 0.2, 0.0]) {
+            assert!((w - e).abs() < 1e-15, "{b:?}");
+        }
+        assert_eq!(HacKernel::Truncated.lag_weight(6, 5), 1.0);
+        assert_eq!(HacKernel::Truncated.lag_weight(7, 5), 0.0);
+        let z = 6.0 * std::f64::consts::PI / 5.0;
+        let qs1 = 3.0 / (z * z) * (z.sin() / z - z.cos());
+        assert!((HacKernel::QuadraticSpectral.lag_weight(1, 0) - qs1).abs() < 1e-15);
+        for kernel in [
+            HacKernel::Bartlett,
+            HacKernel::Parzen,
+            HacKernel::QuadraticSpectral,
+            HacKernel::Truncated,
+            HacKernel::TukeyHanning,
+        ] {
+            assert_eq!(kernel.lag_weight(0, 0), 1.0);
+            assert_eq!(kernel.lag_weight(0, 5), 1.0);
+        }
+    }
+
+    /// The lag sets cut after the last weight above the tolerance (sandwich's weightsAndrews
+    /// at 1e-7; meatPL at 0).
+    #[test]
+    fn test_lag_set_tolerance() {
+        assert_eq!(HacKernel::QuadraticSpectral.lag_set(0, 3000, 1e-7).len(), 1451);
+        assert_eq!(HacKernel::QuadraticSpectral.lag_set(2, 3000, 1e-7).len(), 2999);
+        assert_eq!(HacKernel::Bartlett.lag_set(4, 3000, 1e-7).len(), 5);
+        assert_eq!(HacKernel::Truncated.lag_set(5, 3000, 1e-7).len(), 7);
+        assert_eq!(HacKernel::Parzen.lag_set(3, 3000, 0.0).len(), 4);
+        assert_eq!(HacKernel::TukeyHanning.lag_set(3, 3000, 0.0).len(), 4);
+        // lag 0: Bartlett, Parzen and Tukey-Hanning keep lag 0 only; Truncated keeps lag 1
+        assert_eq!(HacKernel::Bartlett.lag_set(0, 100, 1e-7), vec![1.0]);
+        assert_eq!(HacKernel::Truncated.lag_set(0, 100, 1e-7), vec![1.0, 1.0]);
+        // never longer than the number of rows
+        assert_eq!(HacKernel::Truncated.lag_set(5, 4, 0.0).len(), 4);
+        assert_eq!(HacKernel::QuadraticSpectral.lag_set(50, 20, 0.0).len(), 20);
     }
 
     /// The HAC meat over flat score rows, its lag sums accumulated a block of lags at a time,
