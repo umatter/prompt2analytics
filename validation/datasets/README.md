@@ -219,6 +219,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/loess_x10.csv` | 10 × 2 (x, y) | `loess_x10_direct` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:10, near-linear y |
 | `generated/loglin_2x3x4.csv` | 24 × 4 (Var1, Var2, Var3, Freq) | `stat_loglin_nodecomp` | `r/cases/stats_power_loglin.R` | seed 20261116 |
 | `generated/ltmle_sim.csv` | 600 × 13 (L0, A1, L1, A2, Y, Yc, R1, Lr, R2, Yr, L2, A3, Y3) | `ltmle_two_period` | `r/cases/causal_ltmle.R` | seed 20261206; integer treatments and binary outcomes |
+| `generated/mackinnon_grid.csv` | 191 × 1 (q) | `mackinnon_punitroot_grid` | `r/cases/econ_purtest_t4.R` | grid -6.5 to 3 by 0.05 |
 | `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
 | `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
 | `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
@@ -236,7 +237,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/pggls_panel.csv` | 200 × 5 (id, t, x1, x2, y) | `pggls_sim` | `r/cases/econ_panel_t3.R` | seed 20261101 |
 | `generated/ppr_sim.csv` | 200 × 5 (y, x1, x2, x3, w) | `ppr_methods` | `r/cases/ml_ppr_svm.R` | seed 20261125 |
 | `generated/ppr_smooth.csv` | 100 × 3 (x, y, w) | `ppr_smoothers` | `r/cases/ml_ppr_svm.R` | seed 20261127 |
+| `generated/purtest_ar05.csv` | 500 × 4 (id, t, y, y_rw) | `purtest_stat_ar05` | `r/cases/econ_purtest_t4.R` | seed 20261111; y = unit mean i plus a stationary AR(0.5), y_rw random walks |
 | `generated/purtest_panel.csv` | 480 × 3 (id, t, y) | `purtest_lag_selection` | `r/cases/econ_purtest.R` | seed 20261204 |
+| `generated/purtest_short.csv` | 120 × 3 (id, t, y) | `purtest_stat_short` | `r/cases/econ_purtest_t4.R` | seed 20261112; AR(0.3)-driven random walks, T = 15 |
 | `generated/pvcm_panel.csv` | 240 × 5 (id, t, x1, x2, y) | `pvcm_pmg_sim` | `r/cases/econ_panel_t3.R` | seed 20261102 |
 | `generated/rank_binom_grid.csv` | 23 × 5 (label, x, n, p, stat15) | `stat_rank_binom` | `r/cases/stats_rank_t3.R` | literal values: 23 (x, n, p) cells; `stat15` marks the cells of STAT-15 |
 | `generated/rank_fligner.csv` | 102 × 3 (set, group, value) | `stat_rank_fligner` | `r/cases/stats_rank_t3.R` | literal values: the two examples the old tests quoted, and `datasets::InsectSprays` |
