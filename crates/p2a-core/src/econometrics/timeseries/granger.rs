@@ -99,7 +99,9 @@ impl fmt::Display for GrangerResult {
 /// Under H0, F ~ F(p, n - 3p - 1), n = number of rows (each regression uses the n - p rows
 /// t = p + 1..n). Both regressions are solved as OLS solves them: the normal equations when
 /// the designs are of full rank and well conditioned, otherwise one pivoted QR of the
-/// unrestricted design (`lm.fit`'s, which decides rank and names aliased lags).
+/// unrestricted design (`lm.fit`'s, which decides rank and names aliased lags). Aliased lags
+/// are named as lmtest::grangertest's lag columns (`<series>_<lag>`, `(Intercept)`), not as
+/// `ts_var`'s `<var>.l<lag>`.
 ///
 /// # Requirements
 ///
@@ -579,6 +581,9 @@ mod tests {
         let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
         match granger_test(&ds, "y", "x", 2) {
             Err(EconError::SingularMatrix { context, .. }) => {
+                // lmtest::grangertest (0.9.40) names its lag columns paste("x", 1:order,
+                // sep = "_") and paste("y", ...), so R's coefficients read (Intercept),
+                // lagYy_1, ..., lagXx_1, ...; the message uses the series' own names.
                 assert!(
                     context.contains("unrestricted") && context.contains("x_1"),
                     "{context}"
