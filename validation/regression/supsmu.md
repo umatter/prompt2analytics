@@ -83,7 +83,9 @@ becoming 1.0, and a text weights column is an error instead of being ignored); `
 supsmu` does the same for x and y. Both report the drop (`missing` in JSON, a `Note:` line
 in the CLI text). With fewer than 4 complete rows they fail before `supsmu()` is reached,
 with `InsufficientData` naming the method and the columns and counting the dataset's rows
-("SuperSmoother of 'y' on 'x': 2 of 6 rows have no missing value").
+("SuperSmoother of 'y' on 'x': 2 of 6 rows have no missing value"). A ±Inf in x, y or the
+weights is refused by MCP and the CLI with `NonFiniteValues` naming the column before
+`supsmu()` is reached.
 
 R: case `reg_smoothers_na` of `validation/r/cases/regression_na.R`
 ([source](../r/cases/regression_na.R)): `supsmu(x, y)` on 60 points with 2 missing x and 2

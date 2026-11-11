@@ -304,7 +304,8 @@ relative). Measured: criteria within 2.7e-15 relative, t within 1.7e-14.
    reciprocal condition below 1e-8 are solved by pivoted QR, so the digits the normal
    equations lost there (Longley 3.6e-8, `ols_illcond` 2.8e-5) are recovered; see the
    section below. Well-conditioned designs keep the normal equations.
-2. **No-intercept models** report a centred R² (REG-19, Tier 4); R uses the uncentred one.
+2. **No-intercept models** report the uncentred R² (Σ ŷ² / Σ y²), as `summary.lm` does, and
+   adjusted R² uses the factor n / (n − k) (REG-19, fixed); case `ols_no_intercept_grunfeld`.
 3. **Tail p-values** below about 1e-16 are printed as 0 (X-17, Tier 3); the tests compare
    p-values with a 1e-12 absolute floor.
 4. **Stepwise**: backward and both never drop to the intercept-only model (REG-54,

@@ -35,8 +35,8 @@ Property tests (`crates/p2a-core/src/regression/ols.rs`):
 - `test_bootstrap_vcov_positive_semidefinite`: the diagonal of the covariance matrix is
   non-negative and equals the squared standard errors
 - `test_bootstrap_type_parsing`, `test_bootstrap_displays_correctly`
-- `test_bootstrap_pairs_and_wild_on_heteroskedastic_data`: pairs and wild standard errors on
-  heteroskedastic data are within a factor of 2 of each other, and more than 90% of the
+- `test_bootstrap_pairs_and_wild_on_heteroskedastic_data`: pairs and wild intercept standard
+  errors on heteroskedastic data are within a factor of 2 of each other, and more than 90% of the
   replications converge
 - `test_pinned_hac_dk_bootstrap_outputs` (Tier 0, `df73f11`): characterisation pin of the
   seeded output, so a change to the resampling code is visible
