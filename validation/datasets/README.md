@@ -211,7 +211,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/gsynth_staggered.csv` | 720 × 5 (id, time, Y, D, X) | `gsynth_staggered` | `r/cases/causal_gsynth.R` | seed 4231; 30 controls and 6 treated units (adoption at t = 11, 13, 15) × 20 periods, two factors |
 | `generated/hclust_60.csv` | 60 × 3 (a, b, c) | `hclust_methods`; read by `kmeans_lloyd_pca_mds`, `dynamic_tree_cut` | `r/cases/ml_hierarchical.R` | seed 20261110 |
 | `generated/hclust_ties.csv` | 40 × 2 (u, v) | `hclust_methods` | `r/cases/ml_hierarchical.R` | seed 7 |
-| `generated/hdfe_disconnected.csv` | 80 × 5 (firm, year, x, z, y) | `hdfe_disconnected` | `r/cases/econ_panel_t3.R` | seed 20261105 |
+| `generated/hdfe_disconnected.csv` | 80 × 5 (firm, year, x, z, y) | `hdfe_disconnected`, `hdfe_hc_leverage` | `r/cases/econ_panel_t3.R` | seed 20261105 |
+| `generated/hdfe_hc_short.csv` | 377 × 5 (id, t, x1, x2, y) | `hdfe_hc_leverage` | `r/cases/econ_panel_t4.R` | seed 20261112 |
 | `generated/hdfe_scale.csv` | 1000 × 5 (firm, year, x, y, y_big) | `hdfe_map_scale` | `r/cases/econ_panel_t3.R` | seed 20261103 |
 | `generated/holtwinters_series.csv` | 144 × 5 (t, airpass, co2, q, ns; trailing missing cells) | `ts_holtwinters_forecast` | `r/cases/ts_holtwinters.R` | AirPassengers, co2 to 1969, legacy seeds 42 and 123 |
 | `generated/line_outliers.csv` | 30 × 2 (x, y) | `line_tukey_outliers` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:30, the old line test's y with outliers at x = 5, 15 and 25 |
@@ -235,6 +236,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/pairwise_legacy.csv` | 36 × 3 (set, x, g) | `stat_pairwise_legacy` | `r/cases/stats_power_loglin.R` | literal values: the three sets of `pairwise.rs`'s legacy tests |
 | `generated/panel_absorbed.csv` | 180 × 8 (id, t, x1, x2, z, w, x3, y) | `panel_absorbed_regressors` | `r/cases/econ_panel_t3.R` | seed 20261104 |
 | `generated/pggls_panel.csv` | 200 × 5 (id, t, x1, x2, y) | `pggls_sim` | `r/cases/econ_panel_t3.R` | seed 20261101 |
+| `generated/pggls_unbalanced.csv` | 212 × 5 (id, t, x1, x2, y) | `pggls_unbalanced` | `r/cases/econ_panel_t4.R` | seed 20261111 |
 | `generated/ppr_sim.csv` | 200 × 5 (y, x1, x2, x3, w) | `ppr_methods` | `r/cases/ml_ppr_svm.R` | seed 20261125 |
 | `generated/ppr_smooth.csv` | 100 × 3 (x, y, w) | `ppr_smoothers` | `r/cases/ml_ppr_svm.R` | seed 20261127 |
 | `generated/purtest_ar05.csv` | 500 × 4 (id, t, y, y_rw) | `purtest_stat_ar05` | `r/cases/econ_purtest_t4.R` | seed 20261111; y = unit mean i plus a stationary AR(0.5), y_rw random walks |

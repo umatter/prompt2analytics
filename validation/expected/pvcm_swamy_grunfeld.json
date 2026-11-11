@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "id": "pvcm_swamy_grunfeld",
+  "area": "econometrics/pvcm",
+  "method": "plm::pvcm(model = 'random') on Grunfeld (Delta = D1 - D2 not positive semidefinite: plm uses D1) and plm::pmg(model = 'mg')",
+  "reference": "plm::pvcm(model = 'random') (Swamy 1970; Delta <- D1 when D1 - D2 has a negative eigenvalue); plm::pmg(model = 'mg') (Pesaran and Smith 1995)",
+  "call": "pvcm(inv ~ value + capital, data = pdata.frame(grunfeld, index = c('firm', 'year')), model = 'random'); pmg(..., model = 'mg')",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "random_coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-9.6292851374384369, 0.084587336604702884, 0.19941840334885841]
+    },
+    "random_se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [17.035039507438217, 0.019955905340885319, 0.052653358661123965]
+    },
+    "random_z": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-0.56526344615953983, 4.2387120584001661, 3.7873823896460532]
+    },
+    "random_p": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.57189458779129676, 2.2480577259978149e-05, 0.00015224270803196148]
+    },
+    "random_delta": [2344.2440224635279, -0.68523398065743324, -4.0276612476362947, -0.68523398065743324, 0.0031181788092462825, -0.0011846629952796635, -4.0276612476362947, -0.0011846629952796635, 0.024482424819622421],
+    "random_delta_diag": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [2344.2440224635279, 0.0031181788092462825, 0.024482424819622421]
+    },
+    "d1_minus_d2_eigenvalues": [0.033397395569125292, 0.0016333630479251279, -1120.4776419845743],
+    "random_chisq": 901.43023357553875,
+    "random_chisq_df": 27,
+    "random_chisq_p": 1.620844292764803e-172,
+    "mg_coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-21.367571257978714, 0.091285110403879252, 0.20526354089836218]
+    },
+    "mg_se": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [15.310924277990301, 0.017658365748976553, 0.049479717884828751]
+    },
+    "mg_z": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-1.3955768358605849, 5.1695106841452736, 4.1484379797019653]
+    },
+    "mg_p": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.16284196197540057, 2.3470771702590943e-07, 3.3475150695035627e-05]
+    },
+    "n_obs": 200,
+    "n_groups": 10
+  }
+}
