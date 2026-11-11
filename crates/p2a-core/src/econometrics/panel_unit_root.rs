@@ -391,6 +391,13 @@ impl fmt::Display for PanelUnitRootResult {
                 )?;
             }
         }
+        if self.test_type == PanelUnitRootTest::Fisher {
+            writeln!(
+                f,
+                "Unit p-values: MacKinnon (1994) response surface, asymptotic \
+                 (plm::purtest p.approx = \"MacKinnon1994\")"
+            )?;
+        }
         writeln!(f)?;
         writeln!(f, "H0: {}", self.null_hypothesis)?;
         writeln!(f, "H1: {}", self.alternative_hypothesis)?;
@@ -791,8 +798,6 @@ fn select_lag(
 struct AdfFit {
     /// t-statistic of the lagged level.
     t_stat: f64,
-    /// Residual degrees of freedom.
-    df_resid: usize,
 }
 
 /// The ADF regression of one unit with `lags` lagged differences on rows `lags + 1..T`;
@@ -829,7 +834,7 @@ fn adf_regression(
             },
         });
     }
-    Ok(AdfFit { t_stat, df_resid })
+    Ok(AdfFit { t_stat })
 }
 
 /// Runs `f` on every unit; a unit `f` cannot estimate is skipped and named in one warning,
@@ -1386,12 +1391,10 @@ fn run_fisher_test(
     let (used, unit_lags, fits, warnings) =
         unit_adf_fits(PanelUnitRootTest::Fisher, panels, model, plan, dfcor)?;
     let t_stats: Vec<f64> = fits.iter().map(|f| f.t_stat).collect();
-    let p_values: Vec<f64> = fits
+    // MacKinnon's p of a t far in the lower tail stays positive; the floor keeps ln p finite.
+    let p_values: Vec<f64> = t_stats
         .iter()
-        .map(|f| {
-            let df = u32::try_from(f.df_resid).unwrap_or(u32::MAX);
-            adf_p_value(f.t_stat, df, model).clamp(1e-10, 1.0 - 1e-10)
-        })
+        .map(|&t| mackinnon_p(t, model).max(f64::MIN_POSITIVE))
         .collect();
     let n_valid = p_values.len();
 
@@ -1420,20 +1423,72 @@ fn run_fisher_test(
     Ok(r)
 }
 
-/// Approximate p-value for ADF t-statistic using MacKinnon (1996) critical values.
-fn adf_p_value(t_stat: f64, _df: u32, model: PanelModel) -> f64 {
-    // MacKinnon (1996) response surface approximation
-    // For simplicity, use standard normal CDF with appropriate shift
-    // A more accurate implementation would use MacKinnon's tables
+/// MacKinnon's (1994) response surface for the asymptotic distribution of the Dickey-Fuller
+/// t of one series, as `plm:::padf(p.approx = "MacKinnon1994")` stores it:
+/// `p = Phi(small(t))` up to `limit`, `Phi(large(t))` above, with polynomial coefficients in
+/// increasing powers.
+struct MacKinnon94 {
+    small: [f64; 3],
+    large: [f64; 4],
+    limit: f64,
+}
 
-    let shift = match model {
-        PanelModel::None => 0.0,
-        PanelModel::Intercept => -2.86, // 5% critical value ≈ -2.86
-        PanelModel::Trend => -3.41,     // 5% critical value ≈ -3.41
+impl MacKinnon94 {
+    /// MacKinnon (1994), Table 3 (N = 1), rescaled as plm does (`small[, 3] / 100`,
+    /// `large[, 2:3] / 10`, `large[, 4] / 100`).
+    fn of(model: PanelModel) -> MacKinnon94 {
+        match model {
+            PanelModel::None => MacKinnon94 {
+                small: [0.6344, 1.2378, 3.2496 / 100.0],
+                large: [0.4797, 9.3557 / 10.0, -0.6999 / 10.0, 3.3066 / 100.0],
+                limit: -1.04,
+            },
+            PanelModel::Intercept => MacKinnon94 {
+                small: [2.1659, 1.4412, 3.8269 / 100.0],
+                large: [1.7339, 9.3202 / 10.0, -1.2745 / 10.0, -1.0368 / 100.0],
+                limit: -1.61,
+            },
+            PanelModel::Trend => MacKinnon94 {
+                small: [3.2512, 1.6047, 4.9588 / 100.0],
+                large: [2.5261, 6.1654 / 10.0, -3.7956 / 10.0, -6.0285 / 100.0],
+                limit: -2.89,
+            },
+        }
+    }
+
+    /// The range over which the surface rises: from the vertex of the quadratic to the local
+    /// maximum of the cubic (none without deterministic terms). These are MacKinnon's tau_min
+    /// and tau_max; outside them the polynomials turn back.
+    fn range(&self) -> (f64, f64) {
+        let [_, b1, b2] = self.small;
+        let lo = -b1 / (2.0 * b2);
+        let [_, c1, c2, c3] = self.large;
+        // c1 + 2 c2 t + 3 c3 t^2 = 0; with c3 < 0 the larger root is the maximum.
+        let disc = c2 * c2 - 3.0 * c3 * c1;
+        let hi = if c3 < 0.0 && disc >= 0.0 {
+            (-c2 - disc.sqrt()) / (3.0 * c3)
+        } else {
+            f64::INFINITY
+        };
+        (lo, hi)
+    }
+}
+
+/// MacKinnon's (1994) asymptotic p-value of an ADF t, as `plm::purtest(p.approx =
+/// "MacKinnon1994")`, with `t` held inside the range where the surface rises (so p is
+/// non-decreasing; plm evaluates the polynomials beyond it). It takes no degrees of freedom:
+/// the surface is the asymptotic one.
+fn mackinnon_p(t: f64, model: PanelModel) -> f64 {
+    let m = MacKinnon94::of(model);
+    let (lo, hi) = m.range();
+    let t = t.clamp(lo, hi);
+    let z = if t <= m.limit {
+        let [b0, b1, b2] = m.small;
+        b0 + b1 * t + b2 * (t * t)
+    } else {
+        let [c0, c1, c2, c3] = m.large;
+        c0 + c1 * t + c2 * (t * t) + c3 * (t * t * t)
     };
-
-    // Approximate p-value: transform to standard normal scale
-    let z = (t_stat - shift) / 0.8;
     normal_cdf(z)
 }
 
@@ -2015,7 +2070,8 @@ mod tests {
     #[test]
     fn test_validate_purtest_lag_selection_madwu() {
         let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
-        // deviation ECON-44: madwu_*_stat/_p and ptrho_* not compared
+        // deviation ECON-44: madwu_*_stat/_p and ptrho_* are plm's default p.approx =
+        // MacKinnon1996 (urca's tables); p2a uses MacKinnon (1994): asserted close, not pinned.
         let mut c = Check::new(&case);
         for (sel, rule) in RULES {
             for dfcor in [false, true] {
@@ -2038,6 +2094,12 @@ mod tests {
                     Tol::stat(480),
                 );
                 assert_eq!(r.n_panels, 12);
+                let m96 = case.scalar(&format!("madwu_{rule}{sfx}_stat"));
+                assert!(
+                    (r.statistic - m96).abs() <= 0.02 * m96,
+                    "{rule}{sfx}: {} vs MacKinnon (1996) {m96}",
+                    r.statistic
+                );
             }
         }
         let r = purtest(
@@ -2523,5 +2585,139 @@ mod tests {
             compute_llc_residuals(&line, PanelModel::Intercept, 2),
             Err(UnitError::Skip { .. })
         ));
+    }
+
+    // ── Statistics (validation/r/cases/econ_purtest_t4.R) ──
+
+    const EXOS: [(PanelModel, &str); 3] = [
+        (PanelModel::Intercept, "intercept"),
+        (PanelModel::Trend, "trend"),
+        (PanelModel::None, "none"),
+    ];
+
+    /// `test` on column `col` of a (id, t) panel with fixed `lags`.
+    fn stat_run(
+        ds: &Dataset,
+        col: &str,
+        test: PanelUnitRootTest,
+        model: PanelModel,
+        lags: Option<usize>,
+        dfcor: bool,
+    ) -> PanelUnitRootResult {
+        let mut c = cfg(test, model, lags);
+        c.dfcor = dfcor;
+        run_panel_unit_root(ds, col, "id", "t", c).unwrap()
+    }
+
+    /// The case key of a column, model and dfcor: "rw_trend_dfcor".
+    fn stat_tag(col: &str, exo: &str, dfcor: bool) -> String {
+        let rw = if col == "y" { "" } else { "rw_" };
+        let sfx = if dfcor { "_dfcor" } else { "" };
+        format!("{rw}{exo}{sfx}")
+    }
+
+    /// plm:::padf(q, exo, p.approx = "MacKinnon1994") on a grid from -6.5 to 3, inside the
+    /// range where the surface rises; outside it p is held at the turning point's value.
+    #[test]
+    fn test_validate_mackinnon_p_grid() {
+        let (case, _) = crate::test_support::load_case("mackinnon_punitroot_grid");
+        let q = case.vector("q");
+        let mut c = Check::new(&case);
+        c.vector("q", &q, Tol::exact());
+        let tol = Tol::p_value(191);
+        let mut failures = Vec::new();
+        let mut held = 0;
+        for (model, exo) in EXOS {
+            let expected = case.vector(&format!("p94_{exo}"));
+            let (lo, hi) = MacKinnon94::of(model).range();
+            let p: Vec<f64> = q.iter().map(|&t| mackinnon_p(t, model)).collect();
+            for (i, &t) in q.iter().enumerate() {
+                if (lo..=hi).contains(&t) {
+                    if !tol.allows(p[i], expected[i]) {
+                        failures.push(format!("{exo} q = {t}: {} vs {}", p[i], expected[i]));
+                    }
+                } else {
+                    // deviation ECON-44: plm evaluates the polynomial past its turning point
+                    held += 1;
+                    let edge = mackinnon_p(t.clamp(lo, hi), model);
+                    assert_eq!(p[i], edge, "{exo} q = {t}");
+                }
+            }
+            assert!(p.windows(2).all(|w| w[0] <= w[1]), "{exo}: {p:?}");
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Above 2.74 with an intercept (6 points) and above 0.70 with a trend (47).
+        assert_eq!(held, 53);
+        c.finish();
+    }
+
+    /// Non-decreasing in t over a wide grid for every model, and the turning points are
+    /// MacKinnon's (1994) tau_min and tau_max (N = 1): -19.04, -18.83, -16.18; inf, 2.74, 0.70.
+    #[test]
+    fn test_mackinnon_p_monotone_with_mackinnons_range() {
+        for (model, (tau_min, tau_max)) in [
+            (PanelModel::None, (-19.04, f64::INFINITY)),
+            (PanelModel::Intercept, (-18.83, 2.74)),
+            (PanelModel::Trend, (-16.18, 0.70)),
+        ] {
+            let (lo, hi) = MacKinnon94::of(model).range();
+            assert!((lo - tau_min).abs() < 0.01, "{model:?}: {lo}");
+            assert!(
+                hi == tau_max || (hi - tau_max).abs() < 0.01,
+                "{model:?}: {hi}"
+            );
+            let mut last = 0.0;
+            for k in 0..=30_000 {
+                let t = -25.0 + 0.001 * f64::from(k);
+                let p = mackinnon_p(t, model);
+                assert!(
+                    p >= last && p > 0.0 && p < 1.0,
+                    "{model:?} t = {t}: {p} < {last}"
+                );
+                last = p;
+            }
+        }
+    }
+
+    /// Maddala-Wu with MacKinnon's (1994) p-values: plm::purtest(test = "madwu", lags = 1,
+    /// p.approx = "MacKinnon1994"); the per-unit ADF t for every model and dfcor.
+    #[test]
+    fn test_validate_purtest_stat_madwu() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in EXOS {
+            let r = stat_run(&ds, "y", PanelUnitRootTest::Fisher, model, Some(1), false);
+            c.scalar(
+                &format!("madwu_{exo}_m94_stat"),
+                r.statistic,
+                Tol::stat(500),
+            )
+            .scalar(&format!("madwu_{exo}_m94_p"), r.p_value, Tol::p_value(500))
+            .vector(
+                &format!("madwu_{exo}_m94_ptrho"),
+                r.unit_p_values.as_deref().unwrap(),
+                Tol::p_value(500),
+            );
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    let tag = stat_tag(col, exo, dfcor);
+                    let r = stat_run(&ds, col, PanelUnitRootTest::Fisher, model, Some(1), dfcor);
+                    c.vector(
+                        &format!("madwu_{tag}_trho"),
+                        r.unit_statistics.as_deref().unwrap(),
+                        Tol::stat(500),
+                    );
+                    // deviation ECON-44: madwu_*_stat/_p/_ptrho without m94 are plm's default
+                    // p.approx = MacKinnon1996 (urca's tables); asserted close, not pinned.
+                    let m96 = case.scalar(&format!("madwu_{tag}_stat"));
+                    assert!(
+                        (r.statistic - m96).abs() <= 0.02 * m96,
+                        "{tag}: {} vs MacKinnon (1996) {m96}",
+                        r.statistic
+                    );
+                }
+            }
+        }
+        c.finish();
     }
 }

@@ -117,7 +117,7 @@
         {
           "finding": "ECON-44",
           "quantity": "madwu_*_stat, madwu_*_p, ptrho_*",
-          "note": "per-unit p-values come from a shifted normal, not MacKinnon's response surface"
+          "note": "p.approx = MacKinnon1994 (plm's default with urca is MacKinnon1996): p2a's per-unit p-values are MacKinnon's (1994) response surface (method mackinnon_p_values); the Maddala-Wu statistics are asserted within 2% of plm's default ones, outside the Check"
         },
         {
           "finding": "ECON-88",
