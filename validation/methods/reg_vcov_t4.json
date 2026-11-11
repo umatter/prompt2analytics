@@ -97,6 +97,30 @@
       "tolerance": "validation/README.md: statistics Tol::stat(n), p-values Tol::p_value(n); degrees of freedom exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "vcov_indefinite",
+      "name": "Covariances that are not positive semi-definite: Truncated-kernel HAC and two-way clustering",
+      "category": "regression",
+      "reference": "sandwich::kernHAC(kernel = 'Truncated', bw = 6, prewhite = FALSE, adjust = FALSE); sandwich::vcovCL(m, cluster = ~g1 + g2, type = 'HC1', fix = FALSE | TRUE)",
+      "doc": "validation/regression/ols_clustered.md",
+      "cases": [
+        "hac_truncated_indefinite",
+        "ols_twoway_indefinite"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_hac_truncated_indefinite",
+        "p2a-core::regression::ols::tests::test_validate_ols_twoway_indefinite"
+      ],
+      "quantities": [
+        "coefficients",
+        "covariance diagonal and entries (a negative variance gives a NaN SE)",
+        "smallest eigenvalue of the two-way covariance as printed in the warning (6 significant digits)",
+        "fix = TRUE SEs and covariance"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), covariance entries and SEs Tol::se(n)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

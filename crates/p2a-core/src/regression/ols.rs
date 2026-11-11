@@ -66,7 +66,7 @@ use crate::data::columns::{
     ColumnRequest, Columns, Factor, MissingSummary, NaPolicy, econ_error_from_design,
 };
 use crate::errors::{EconError, EconResult, EstimationWarning};
-use crate::linalg::matrix_ops::matrix_inverse;
+use crate::linalg::matrix_ops::{eig_symmetric, matrix_inverse};
 use crate::linalg::solve::{
     LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
 };
@@ -1581,6 +1581,32 @@ impl OlsClusteredResult {
         cluster2: Option<&str>,
         intercept: bool,
     ) -> EconResult<OlsClusteredResult> {
+        Self::fit_with(
+            dataset,
+            y_col,
+            x_cols,
+            cluster1,
+            cluster2,
+            intercept,
+            ClusteredOptions::default(),
+        )
+    }
+
+    /// [`OlsClusteredResult::fit`] with options. Two-way clustering (`V_1 + V_2 - V_12`)
+    /// need not give a positive semi-definite covariance: one that is not is reported with a
+    /// warning (its negative variances give NaN standard errors and no Wald F), and
+    /// `opts.fix = true` sets its negative eigenvalues to 0 and rebuilds it, as
+    /// `sandwich::vcovCL(fix = TRUE)`. One-way clustering is positive semi-definite by
+    /// construction and is not changed.
+    pub fn fit_with(
+        dataset: &Dataset,
+        y_col: &str,
+        x_cols: &[&str],
+        cluster1: &str,
+        cluster2: Option<&str>,
+        intercept: bool,
+        opts: ClusteredOptions,
+    ) -> EconResult<OlsClusteredResult> {
         // Cluster ids, with the rows whose id is missing left out.
         let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
         let context = match cluster2 {
@@ -1641,6 +1667,7 @@ impl OlsClusteredResult {
             );
         }
 
+        let mut indefinite = false;
         let (vcov, n_clusters_2, cluster_type) = if let Some(c2) = cluster2 {
             // Two-way clustering
             let factor2 = ids.factor(c2);
@@ -1656,7 +1683,7 @@ impl OlsClusteredResult {
             }
 
             let intersection = intersection_groups(factor1, factor2);
-            let vcov = compute_twoway_clustered_vcov(
+            let mut vcov = compute_twoway_clustered_vcov(
                 &id.x.view(),
                 &base_result.resid,
                 &id.unscaled,
@@ -1664,6 +1691,10 @@ impl OlsClusteredResult {
                 &clusters2,
                 &intersection,
             )?;
+            if let Some(w) = twoway_psd_check(&mut vcov, opts.fix)? {
+                indefinite = !opts.fix;
+                base_result.warnings.push(w);
+            }
 
             (
                 id.embed(&vcov),
@@ -1712,14 +1743,18 @@ impl OlsClusteredResult {
             "clustered"
         };
         let intercept_col = intercept_column(design.data.view(), intercept);
-        base_result.wald_f =
+        // (a Wald form on a covariance that is not positive semi-definite has no meaning)
+        base_result.wald_f = if indefinite {
+            None
+        } else {
             match robust_wald_f(&base_result.beta, &vcov, intercept_col, df, label)? {
                 Ok(w) => w,
                 Err(w) => {
                     base_result.warnings.push(w);
                     None
                 }
-            };
+            }
+        };
 
         // Update the result
         base_result.coefficients = coefficients;
@@ -1739,6 +1774,44 @@ impl OlsClusteredResult {
             cluster_var_2: cluster2.map(|s| s.to_string()),
         })
     }
+}
+
+/// Options of [`OlsClusteredResult::fit_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClusteredOptions {
+    /// Two-way clustering: set the negative eigenvalues of a covariance that is not
+    /// positive semi-definite to 0 and rebuild it (`sandwich::vcovCL(fix = TRUE)`).
+    pub fix: bool,
+}
+
+/// The eigenvalue check of a two-way clustered covariance (rank x rank): `None` when it is
+/// positive semi-definite, otherwise a warning naming its smallest eigenvalue; with `fix` the
+/// covariance is rebuilt as `Q max(Λ, 0) Q'`.
+fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
+    let sym = (&*vcov + &vcov.t()) * 0.5;
+    let (values, vectors) = eig_symmetric(&sym.view()).map_err(|e| {
+        EconError::Computation(format!(
+            "eigen-decomposition of the two-way clustered covariance failed: {e}"
+        ))
+    })?;
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    if min >= 0.0 || !min.is_finite() {
+        return Ok(None);
+    }
+    if !fix {
+        return Ok(Some(format!(
+            "Two-way cluster-robust covariance is not positive semi-definite (smallest \
+             eigenvalue {min:.6e}); set fix to clamp negative eigenvalues to 0 \
+             (sandwich::vcovCL(fix = TRUE))"
+        )));
+    }
+    let clamped = values.mapv(|v| v.max(0.0));
+    let scaled = &vectors * &clamped.view().insert_axis(ndarray::Axis(0));
+    *vcov = scaled.dot(&vectors.t());
+    Ok(Some(format!(
+        "Two-way cluster-robust covariance is not positive semi-definite (smallest \
+         eigenvalue {min:.6e}); negative eigenvalues clamped to 0 (sandwich::vcovCL(fix = TRUE))"
+    )))
 }
 
 /// The rows of `dataset` that `ids` kept, restricted to the columns `names` (each must
@@ -2318,12 +2391,8 @@ pub fn vcov_hac(
     let vcov_identified = &vcov_hac * (n as f64);
 
     // Extract standard errors (square root of diagonal); NaN for aliased columns
-    let identified_se: Vec<f64> = (0..k)
-        .map(|i| {
-            let var = vcov_identified[[i, i]];
-            if var >= 0.0 { var.sqrt() } else { 0.0 }
-        })
-        .collect();
+    let identified_se =
+        negative_variance_check(&vcov_identified, &id, ols_result, kernel, &mut warnings);
     let std_errors = id.embed_vec(&identified_se);
     let vcov_scaled = id.embed(&vcov_identified);
     let k = full_k;
@@ -2613,6 +2682,38 @@ pub(crate) fn var1_prewhiten_scores(
     let d = matrix_inverse(&i_minus_a.view())
         .map_err(|_| refuse("I - A is singular (the VAR(1) of the scores has a unit root)"))?;
     Ok((resid, d))
+}
+
+/// The standard errors `sqrt(v_ii)` of an identified covariance (rank x rank) from a kernel
+/// estimator. A negative variance (the Truncated and Tukey-Hanning kernels do not guarantee a
+/// positive semi-definite estimate) gives a NaN standard error and a warning naming the
+/// coefficient, never 0.
+fn negative_variance_check(
+    vcov: &Array2<f64>,
+    id: &IdentifiedDesign<'_>,
+    ols: &OlsResult,
+    kernel: HacKernel,
+    warnings: &mut Vec<String>,
+) -> Vec<f64> {
+    (0..id.rank())
+        .map(|i| {
+            let var = vcov[[i, i]];
+            if var >= 0.0 {
+                var.sqrt()
+            } else {
+                let name = ols
+                    .coefficients
+                    .get(id.cols[i])
+                    .map_or_else(|| format!("x{}", id.cols[i] + 1), |c| c.name.clone());
+                warnings.push(format!(
+                    "Variance estimate for '{name}' is negative ({var:.6e}); its standard error \
+                     is NaN. The {kernel} kernel does not guarantee a positive semi-definite \
+                     covariance; the Bartlett, Parzen or Quadratic Spectral kernel does."
+                ));
+                f64::NAN
+            }
+        })
+        .collect()
 }
 
 /// Convenience function to compute HAC standard errors for a dataset.
@@ -3030,7 +3131,8 @@ pub fn vcov_bootstrap(
     vcov_r /= divisor;
 
     // Standard errors from diagonal; NaN rows, columns and SEs for aliased columns
-    let se_r: Vec<f64> = (0..r).map(|i| vcov_r[[i, i]].max(0.0).sqrt()).collect();
+    // a sample variance; never negative
+    let se_r: Vec<f64> = (0..r).map(|i| vcov_r[[i, i]].sqrt()).collect();
     let std_errors = id.embed_vec(&se_r);
     let vcov_k = id.embed(&vcov_r);
     let vcov: Vec<Vec<f64>> = vcov_k.rows().into_iter().map(|row| row.to_vec()).collect();
@@ -3380,7 +3482,7 @@ pub fn vcov_driscoll_kraay(
         })?;
 
     // Extract standard errors and compute statistics; NaN for aliased columns
-    let identified_se: Vec<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
+    let identified_se = negative_variance_check(&vcov, &id, ols_result, kernel, &mut warnings);
     let std_errors = id.embed_vec(&identified_se);
     let vcov = id.embed(&vcov);
     let k = full_k;
@@ -3393,19 +3495,11 @@ pub fn vcov_driscoll_kraay(
         .collect();
 
     let df = df_periods as f64;
-    // Aliased columns: NaN (the se > 0 rule would turn them into t = 0, p = 1)
+    // b / se: NaN for aliased columns and negative variance estimates
     let t_stats: Vec<f64> = coefficients
         .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| {
-            if se.is_nan() {
-                f64::NAN
-            } else if se > 0.0 {
-                b / se
-            } else {
-                0.0
-            }
-        })
+        .map(|(&b, &se)| b / se)
         .collect();
 
     let p_values: Vec<f64> = t_stats
@@ -4951,6 +5045,123 @@ mod tests {
         assert!(run_vcov_hac(&ds, "y", &["x", "d"], Some(3), None, false).is_ok());
     }
 
+    /// A negative variance from the Truncated kernel (case `hac_truncated_indefinite`,
+    /// kernHAC(kernel = "Truncated", bw = 6)): NaN standard errors and a warning, not 0.
+    #[test]
+    fn test_validate_hac_truncated_indefinite() {
+        let (case, ds) = crate::test_support::load_case("hac_truncated_indefinite");
+        let n = case.scalar("n_obs") as usize;
+        let r = run_vcov_hac(&ds, "y", &["x"], Some(5), Some("truncated"), false).unwrap();
+        let diag: Vec<f64> = (0..2).map(|i| r.vcov[i][i]).collect();
+        Check::new(&case)
+            .named("coef", &r.names, &r.coefficients, Tol::coef(n))
+            .vector("kernhac_truncated_bw6_diag", &diag, Tol::se(n))
+            .vector("kernhac_truncated_bw6_vcov", &r.vcov.concat(), Tol::se(n))
+            .finish();
+        assert!(
+            r.std_errors.iter().all(|s| s.is_nan()),
+            "{:?}",
+            r.std_errors
+        );
+        for name in ["(Intercept)", "x"] {
+            assert!(
+                r.warnings.iter().any(
+                    |w| w.contains(&format!("'{name}' is negative")) && w.contains("Truncated")
+                ),
+                "{:?}",
+                r.warnings
+            );
+        }
+    }
+
+    /// A two-way clustered covariance with a negative eigenvalue (case
+    /// `ols_twoway_indefinite`): NaN SEs and a warning; fix clamps it as vcovCL(fix = TRUE).
+    #[test]
+    fn test_validate_ols_twoway_indefinite() {
+        let (case, ds) = crate::test_support::load_case("ols_twoway_indefinite");
+        let n = case.scalar("n_obs") as usize;
+        let r = OlsClusteredResult::fit(&ds, "y", &["x"], "a", Some("b"), true).unwrap();
+        let fixed = OlsClusteredResult::fit_with(
+            &ds,
+            "y",
+            &["x"],
+            "a",
+            Some("b"),
+            true,
+            ClusteredOptions { fix: true },
+        )
+        .unwrap();
+        let diag: Vec<f64> = (0..2).map(|i| r.ols.vcov[[i, i]]).collect();
+        let fix_se: Vec<f64> = fixed.ols.coefficients.iter().map(|c| c.std_error).collect();
+        let fix_vcov: Vec<f64> = fixed.ols.vcov.iter().copied().collect();
+        let eig = case.vector("cl_twoway_eigenvalues");
+        let warning = r
+            .ols
+            .warnings
+            .iter()
+            .find(|w| w.contains("not positive semi-definite"))
+            .expect("PSD warning");
+        // the smallest eigenvalue as printed ({:.6e})
+        let printed: f64 = warning
+            .split("smallest eigenvalue ")
+            .nth(1)
+            .and_then(|t| t.split(')').next())
+            .unwrap()
+            .parse()
+            .unwrap();
+        Check::new(&case)
+            .named(
+                "coef",
+                &r.ols.variable_names,
+                &col(&r.ols, |c| c.estimate),
+                Tol::coef(n),
+            )
+            .vector("cl_twoway_diag", &diag, Tol::se(n))
+            .vector("cl_twoway_fix_se", &fix_se, Tol::se(n))
+            .vector("cl_twoway_fix_vcov", &fix_vcov, Tol::se(n))
+            .finish();
+        assert!(
+            (printed - eig[1]).abs() <= 5e-7 * eig[1].abs(),
+            "{printed} vs {eig:?}"
+        );
+        assert!(r.ols.coefficients.iter().all(|c| c.std_error.is_nan()));
+        assert!(r.ols.wald_f.is_none());
+        assert!(fixed.ols.wald_f.is_some());
+        assert!(
+            fixed
+                .ols
+                .warnings
+                .iter()
+                .any(|w| w.contains("clamped to 0"))
+        );
+    }
+
+    /// A negative Driscoll-Kraay variance gives NaN se, t and p (not 0, 0 and 1).
+    #[test]
+    fn test_dk_nan_se_gives_nan_t() {
+        let (_, ds) = crate::test_support::load_case("vcov_dk_grunfeld_t10");
+        // Truncated at lag 8 of T = 10 periods weighs lags 1-9 by 1
+        let r = run_vcov_driscoll_kraay(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            "year",
+            Some(8),
+            Some("truncated"),
+        )
+        .unwrap();
+        let neg: Vec<usize> = (0..3).filter(|&i| r.vcov[i][i] < 0.0).collect();
+        assert!(!neg.is_empty(), "{:?}", r.vcov);
+        for &i in &neg {
+            assert!(r.std_errors[i].is_nan() && r.t_stats[i].is_nan() && r.p_values[i].is_nan());
+        }
+        assert!(
+            r.warnings.iter().any(|w| w.contains("is negative")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     /// The FFT meat equals the direct sum to rounding (noisy AR(0.5) scores).
     #[cfg(feature = "spectral-analysis")]
     #[test]
@@ -5311,9 +5522,15 @@ mod tests {
     fn test_hac_truncated_kernel_at_n_minus_1_collapses() {
         let ts = create_timeseries_dataset();
         let r = run_vcov_hac(&ts, "y", &["x"], Some(29), Some("truncated"), false).unwrap();
-        assert!(r.std_errors.iter().all(|&s| s < 1e-6), "{:?}", r.std_errors);
-        // the bandwidth-above-n/4 warning
-        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        // a variance of rounding noise is tiny, or negative (NaN SE with a warning)
+        assert!(
+            r.std_errors.iter().all(|&s| s.is_nan() || s < 1e-6),
+            "{:?}",
+            r.std_errors
+        );
+        let negative = r.std_errors.iter().filter(|s| s.is_nan()).count();
+        // the bandwidth-above-n/4 warning, plus one per negative variance
+        assert_eq!(r.warnings.len(), 1 + negative, "{:?}", r.warnings);
     }
 
     /// Characterisation test: the code before the T0-WP14 resource bounds gives
