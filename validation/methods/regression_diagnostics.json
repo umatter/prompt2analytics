@@ -71,15 +71,13 @@
       "id": "hac",
       "name": "HAC (kernel) covariance for OLS",
       "category": "regression",
-      "reference": "sandwich::NeweyWest(lag = L, prewhite = FALSE) for Bartlett; sandwich::kernHAC(kernel =, bw = L + 1, prewhite = FALSE, adjust = FALSE) for Parzen, Quadratic Spectral, Truncated, Tukey-Hanning (p2a's lag count L weights lag j by k(j / (L + 1)))",
+      "reference": "sandwich::NeweyWest(lag = L, prewhite = FALSE) for Bartlett; sandwich::kernHAC(kernel =, bw = L + 1, prewhite = FALSE, adjust = FALSE) for Parzen, Quadratic Spectral, Truncated, Tukey-Hanning; NeweyWest(lag = L, prewhite = TRUE) with prewhiten = true (p2a's lag count L weights lag j by k(j / (L + 1)))",
       "doc": "validation/regression/regression_legacy_cases.md",
       "cases": ["hac_ar1"],
       "tests": ["p2a-core::regression::ols::tests::test_validate_hac_ar1"],
-      "quantities": ["coefficients", "default bandwidth (floor(4 (n/100)^(2/9)))", "SE and covariance matrix: Bartlett (default and L = 4), Parzen, Quadratic Spectral, Truncated, Tukey-Hanning (L = 3 = kernHAC(bw = 4))"],
+      "quantities": ["coefficients", "default bandwidth (floor(4 (n/100)^(2/9)))", "SE and covariance matrix: Bartlett (default and L = 4), Parzen, Quadratic Spectral, Truncated, Tukey-Hanning (L = 3 = kernHAC(bw = 4))", "SE and covariance matrix with VAR(1) prewhitening: Bartlett L = 4 (NeweyWest(lag = 4, prewhite = TRUE))"],
       "tolerance": "validation/README.md, n = 100: coefficients 1e-8, SE and covariance entries 1e-6 relative; bandwidth exact",
-      "deviations": [
-        {"finding": "REG-22", "quantity": "prewhitened SEs", "note": "prewhiten = true fits a scalar AR(1) to the residuals: p2a 0.2908704449 / 0.3059566437 vs NeweyWest(lag = 4, prewhite = TRUE) 0.2858936714 / 0.1360607244 (neweywest_lag4_prewhite)"}
-      ],
+      "deviations": [],
       "supersedes_legacy": ["validation/expected/hac_test.csv"]
     },
     {

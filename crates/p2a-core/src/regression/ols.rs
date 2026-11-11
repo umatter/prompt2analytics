@@ -66,6 +66,7 @@ use crate::data::columns::{
     ColumnRequest, Columns, Factor, MissingSummary, NaPolicy, econ_error_from_design,
 };
 use crate::errors::{EconError, EconResult, EstimationWarning};
+use crate::linalg::matrix_ops::matrix_inverse;
 use crate::linalg::solve::{
     LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
 };
@@ -2111,34 +2112,35 @@ pub fn vcov_hac(
     let x = &id.x;
     let xtx_inv = &id.unscaled;
 
-    // Optionally prewhiten residuals with VAR(1)
-    let (u, rho) = if prewhiten {
-        prewhiten_residuals(residuals)
+    // The meat of the sandwich: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ') over weightsAndrews' lag set
+    // (every lag whose weight k(j / (bw + 1)) exceeds 1e-7), from the scores s_i = u_i x_i.
+    // With prewhitening (sandwich's meatHAC(prewhite = 1)) a VAR(1) is fitted to the scores,
+    // the meat is built from its n - 1 residuals and recoloured with D = (I - A)^{-1}:
+    // Ω̂ = D Ω̂* D'. Either way it is divided by the original n.
+    let (omega, n_lag_weights) = if prewhiten {
+        let mut scores = resource::try_zeros2(n, k, "HAC scores")?;
+        for ((mut srow, xrow), &ui) in scores.rows_mut().into_iter().zip(x.rows()).zip(residuals) {
+            srow.zip_mut_with(&xrow, |s, &xij| *s = ui * xij);
+        }
+        let (resid, d) = var1_prewhiten_scores(scores.view())?;
+        drop(scores);
+        let m = n - 1;
+        let rev = reversed_columns(resid.view())?;
+        let weights = kernel.lag_set(bw, m, 1e-7);
+        let star = hac_meat_dispatch(&rev, m, k, &weights)?;
+        let star = Array2::from_shape_vec((k, k), star)
+            .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
+        (d.dot(&star).dot(&d.t()), weights.len())
     } else {
-        (residuals.clone(), 0.0)
+        // Scores stored once, column-reversed and column-major (see `hac_meat`)
+        let rev = reversed_scores(x.view(), residuals.view())?;
+        let weights = kernel.lag_set(bw, n, 1e-7);
+        let omega = hac_meat_dispatch(&rev, n, k, &weights)?;
+        let omega = Array2::from_shape_vec((k, k), omega)
+            .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
+        (omega, weights.len())
     };
-
-    // Score vectors s_i = u_i * x_i, stored once, column-reversed and column-major:
-    // rev[l * n + (n - 1 - i)] = s_il (see `hac_meat`).
-    let rev = reversed_scores(x.view(), u.view())?;
-
-    // The meat of the sandwich: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ'), over weightsAndrews' lag set
-    // (every lag whose weight k(j / (bw + 1)) exceeds 1e-7)
-    let weights = kernel.lag_set(bw, n, 1e-7);
-    let n_lag_weights = weights.len();
-    let omega = hac_meat_dispatch(&rev, n, k, &weights)?;
-
-    // Scale by 1/n
-    let mut omega = Array2::from_shape_vec((k, k), omega)
-        .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
-    omega /= n as f64;
-
-    // If prewhitening was used, recolor the covariance matrix
-    if prewhiten && rho.abs() > 1e-10 {
-        // Recolor: V = (1 - ρ)^(-2) V_prewhitened
-        let recolor_factor: f64 = 1.0 / (1.0 - rho).powi(2);
-        omega *= recolor_factor;
-    }
+    let omega = omega / n as f64;
 
     // Compute the sandwich: V = (X'X)⁻¹ Ω̂ (X'X)⁻¹
     let meat_bread =
@@ -2396,41 +2398,61 @@ fn hac_meat_fft(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<
     Ok(omega)
 }
 
-/// Prewhiten residuals using AR(1) model.
-fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
-    let n = residuals.len();
-    if n < 3 {
-        return (residuals.clone(), 0.0);
+/// The columns of `m` (n x k) column-major with each column reversed:
+/// `rev[l * n + (n - 1 - i)] = m[i, l]` (the layout of [`reversed_scores`]).
+fn reversed_columns(m: ndarray::ArrayView2<'_, f64>) -> EconResult<Vec<f64>> {
+    let (n, k) = m.dim();
+    let mut rev = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC scores")?,
+        0.0,
+        "HAC scores",
+    )?;
+    for (i, row) in m.rows().into_iter().enumerate() {
+        for (l, &v) in row.iter().enumerate() {
+            rev[l * n + n - 1 - i] = v;
+        }
     }
+    Ok(rev)
+}
 
-    // Estimate AR(1) coefficient: ρ = Σᵢ u_{i} u_{i-1} / Σᵢ u_{i-1}²
-    let mut sum_lag_prod = 0.0;
-    let mut sum_lag_sq = 0.0;
-    for i in 1..n {
-        sum_lag_prod += residuals[i] * residuals[i - 1];
-        sum_lag_sq += residuals[i - 1] * residuals[i - 1];
-    }
-
-    let rho = if sum_lag_sq > 1e-15 {
-        (sum_lag_prod / sum_lag_sq).clamp(-0.99, 0.99)
-    } else {
-        0.0
+/// VAR(1) prewhitening of HAC scores (n x k), as sandwich's `meatHAC(prewhite = 1)`:
+/// `ar(scores, order.max = 1, aic = FALSE, demean = FALSE, method = "ols")`. Fits
+/// `s_i = A s_(i-1) + u_i` by least squares without a constant (`lm.fit`'s pivoted QR,
+/// one decomposition for all k columns) and returns the n - 1 residuals `u_i` and the
+/// recolouring matrix `D = (I - A)^{-1}`. Costs one n·k² decomposition and a k x k inverse.
+///
+/// A rank-deficient lagged score matrix (a score column that is zero, such as that of a
+/// regressor with leverage 1) or a singular `I - A` (a unit root) is an
+/// `InvalidSpecification` naming the prewhitening; sandwich stops there too.
+pub(crate) fn var1_prewhiten_scores(
+    scores: ndarray::ArrayView2<'_, f64>,
+) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (n, k) = scores.dim();
+    let refuse = |why: &str| EconError::InvalidSpecification {
+        message: format!(
+            "HAC prewhitening: {why}; the VAR(1) of the scores is not identified. Fit without \
+             prewhitening, or drop the regressor whose scores are zero"
+        ),
     };
-
-    // Prewhitened residuals: v_i = u_i - ρ u_{i-1}
-    let mut prewhitened = Array1::<f64>::zeros(n - 1);
-    for i in 1..n {
-        prewhitened[i - 1] = residuals[i] - rho * residuals[i - 1];
+    if n < k + 2 {
+        return Err(refuse("fewer observations than the VAR(1) needs"));
     }
-
-    // Pad to original length for consistency
-    let mut result = Array1::<f64>::zeros(n);
-    result[0] = residuals[0];
-    for i in 1..n {
-        result[i] = prewhitened[i - 1];
+    let lagged = scores.slice(ndarray::s![..n - 1, ..]);
+    let current = scores.slice(ndarray::s![1.., ..]);
+    let qr = Qr::decompose(lagged, LM_QR_TOL)?;
+    if qr.rank() < k {
+        return Err(refuse("the lagged scores are linearly dependent"));
     }
-
-    (result, rho)
+    // B = A' (k x k): current = lagged B + resid
+    let mut b = Array2::<f64>::zeros((k, k));
+    for c in 0..k {
+        b.column_mut(c).assign(&qr.coefficients(current.column(c))?);
+    }
+    let resid = &current - &lagged.dot(&b);
+    let i_minus_a = Array2::<f64>::eye(k) - b.t();
+    let d = matrix_inverse(&i_minus_a.view())
+        .map_err(|_| refuse("I - A is singular (the VAR(1) of the scores has a unit root)"))?;
+    Ok((resid, d))
 }
 
 /// Convenience function to compute HAC standard errors for a dataset.
@@ -4514,15 +4536,16 @@ mod tests {
                 .iter()
                 .all(|r| r.warnings.is_empty())
         );
-        // deviation REG-22: prewhiten = true is a scalar AR(1) on the residuals
-        //   (neweywest_lag4_prewhite).
+        // VAR(1) prewhitening of the scores (sandwich's meatHAC(prewhite = 1))
         let prewhitened = hac(Some(bw), "bartlett", true);
-        assert!(
-            prewhitened
-                .std_errors
-                .iter()
-                .all(|s| s.is_finite() && *s > 0.0)
-        );
+        Check::new(&case)
+            .named(
+                "neweywest_lag4_prewhite",
+                &prewhitened.names,
+                &prewhitened.std_errors,
+                Tol::se(n),
+            )
+            .finish();
         assert!(prewhitened.prewhiten && matches!(qs.kernel, HacKernel::QuadraticSpectral));
         assert!(
             matches!(auto.kernel, HacKernel::Bartlett)
@@ -4550,6 +4573,7 @@ mod tests {
             run_vcov_hac(&ds, "y", &["x"], Some(lag), Some(k), false).unwrap()
         };
         let (qs0, qs2, nw2) = (hac(0, "qs"), hac(2, "qs"), hac(2, "bartlett"));
+        let qs2_pw = run_vcov_hac(&ds, "y", &["x"], Some(2), Some("qs"), true).unwrap();
         let names = &qs0.names;
         Check::new(&case)
             .named("coef", names, &qs0.coefficients, Tol::coef(n))
@@ -4560,6 +4584,17 @@ mod tests {
             .vector("kernhac_qs_bw3_vcov", &qs2.vcov.concat(), Tol::se(n))
             .scalar("qs_bw3_n_weights", qs2.n_lag_weights as f64, Tol::exact())
             .named("nw_lag2", names, &nw2.std_errors, Tol::se(n))
+            .named(
+                "kernhac_qs_bw3_prewhite",
+                names,
+                &qs2_pw.std_errors,
+                Tol::se(n),
+            )
+            .vector(
+                "kernhac_qs_bw3_prewhite_vcov",
+                &qs2_pw.vcov.concat(),
+                Tol::se(n),
+            )
             .finish();
     }
 
@@ -4578,6 +4613,15 @@ mod tests {
             hac(Some(3), "qs"),
             hac(None, "bartlett"),
         );
+        let nw3_pw = run_vcov_hac(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            Some(3),
+            Some("bartlett"),
+            true,
+        )
+        .unwrap();
         let names = &nw3.names;
         Check::new(&case)
             .named("coef", names, &nw3.coefficients, Tol::coef(n))
@@ -4585,6 +4629,8 @@ mod tests {
             .named("kernhac_qs_bw3", names, &qs2.std_errors, Tol::se(n))
             .named("kernhac_qs_bw4", names, &qs3.std_errors, Tol::se(n))
             .named("nw_lag_rule", names, &auto.std_errors, Tol::se(n))
+            .named("nw_lag3_prewhite", names, &nw3_pw.std_errors, Tol::se(n))
+            .vector("nw_lag3_prewhite_vcov", &nw3_pw.vcov.concat(), Tol::se(n))
             .scalar("bw_rule", auto.bandwidth as f64, Tol::exact())
             .finish();
     }
@@ -4608,6 +4654,61 @@ mod tests {
             .vector("kernhac_qs_bw6_vcov", &qs.vcov.concat(), Tol::se(n))
             .scalar("qs_bw6_n_weights", qs.n_lag_weights as f64, Tol::exact())
             .finish();
+    }
+
+    /// VAR(1) prewhitening of the scores with every kernel (case `vcov_hac_prewhite_ts`):
+    /// NeweyWest(lag = 5, prewhite = TRUE) and kernHAC(bw = 6, prewhite = TRUE).
+    #[test]
+    fn test_validate_hac_prewhite_var1_ts() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_prewhite_ts");
+        let n = case.scalar("n_obs") as usize;
+        let lag = case.scalar("lag") as usize;
+        let hac =
+            |k: &str| run_vcov_hac(&ds, "y", &["x1", "x2"], Some(lag), Some(k), true).unwrap();
+        let mut check = Check::new(&case);
+        for (key, kernel) in [
+            ("nw_lag5_prewhite", "bartlett"),
+            ("kernhac_parzen_bw6_prewhite", "parzen"),
+            ("kernhac_qs_bw6_prewhite", "qs"),
+            ("kernhac_truncated_bw6_prewhite", "truncated"),
+            ("kernhac_tukey_hanning_bw6_prewhite", "tukey-hanning"),
+        ] {
+            let r = hac(kernel);
+            assert!(r.prewhiten);
+            check
+                .named(key, &r.names, &r.std_errors, Tol::se(n))
+                .vector(&format!("{key}_vcov"), &r.vcov.concat(), Tol::se(n));
+            if kernel == "qs" {
+                check.scalar(
+                    "qs_bw6_prewhite_n_weights",
+                    r.n_lag_weights as f64,
+                    Tol::exact(),
+                );
+            }
+        }
+        check.finish();
+    }
+
+    /// A regressor with leverage 1 has a zero score column, so the VAR(1) of the scores is
+    /// not identified: an error naming the prewhitening, as sandwich stops in solve().
+    #[test]
+    fn test_var1_prewhiten_singular_lag_matrix() {
+        let n = 40;
+        let e = perf3_noise(2 * n, 17);
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.3).sin() + e[i]).collect();
+        let d: Vec<f64> = (0..n).map(|i| if i == 17 { 1.0 } else { 0.0 }).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x[i] + 2.0 * d[i] + e[n + i])
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x, "d" => d }.unwrap());
+        match run_vcov_hac(&ds, "y", &["x", "d"], Some(3), None, true) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("prewhitening"), "{message}")
+            }
+            other => panic!("expected the prewhitening error, got {other:?}"),
+        }
+        // without prewhitening the fit is fine
+        assert!(run_vcov_hac(&ds, "y", &["x", "d"], Some(3), None, false).is_ok());
     }
 
     /// The FFT meat equals the direct sum to rounding (noisy AR(0.5) scores).
