@@ -95,15 +95,20 @@ for every kernel, also with `adjust = TRUE`; `kernHAC(m, kernel = "Bartlett", bw
 `NeweyWest(m, lag = 4, prewhite = FALSE | TRUE)`; and, for the legacy rows, `NeweyWest(m)` and
 `vcovHAC(m)`. kernHAC weights lag j by k(j / bw).
 
-Which R call each p2a kernel equals, at p2a bandwidth m:
+p2a's `bandwidth` is a lag count L: every kernel weighs lag j by k(j / (L + 1)), as
+`NeweyWest(lag = L)` and `vcovPL(lag = L)` do, so p2a's lag L equals `kernHAC(bw = L + 1)` for
+every kernel. The lags summed are `weightsAndrews`' (0..n-1, cut after the last weight above
+1e-7): 0..L for Bartlett, Parzen and Tukey-Hanning, 0..L+1 for Truncated (k(1) = 1), up to n
+for the Quadratic Spectral kernel, whose support is unbounded.
 
-| p2a kernel (m = 4) | p2a weight of lag j | Equals | Pinned |
+| p2a kernel | p2a lag | Equals | Pinned |
 |---|---|---|---|
-| `bartlett` | 1 - j/(m + 1) | `NeweyWest(lag = m, prewhite = FALSE)` = `kernHAC(kernel = "Bartlett", bw = m + 1)` | yes |
-| `parzen` | Parzen(j/m) | `kernHAC(kernel = "Parzen", bw = m)` | yes |
-| `truncated` | 1 for j <= m | `kernHAC(kernel = "Truncated", bw = m)` | yes |
-| `tukey-hanning` | Tukey-Hanning(j/m) | `kernHAC(kernel = "Tukey-Hanning", bw = m)` | yes |
-| `qs` | QS(j/m), truncated at j = m | none: kernHAC's QS uses every lag | no (REG-50) |
+| `bartlett` | 4 | `NeweyWest(lag = 4, prewhite = FALSE)` = `kernHAC(kernel = "Bartlett", bw = 5)` | yes |
+| `bartlett`, `prewhiten = true` | 4 | `NeweyWest(lag = 4, prewhite = TRUE)` (VAR(1) of the scores) | yes |
+| `parzen` | 3 | `kernHAC(kernel = "Parzen", bw = 4)` | yes |
+| `truncated` | 3 | `kernHAC(kernel = "Truncated", bw = 4)` | yes |
+| `tukey-hanning` | 3 | `kernHAC(kernel = "Tukey-Hanning", bw = 4)` | yes |
+| `qs` | 3 | `kernHAC(kernel = "Quadratic Spectral", bw = 4)` | yes |
 
 R values (standard errors; covariance matrices row-major):
 
@@ -112,30 +117,29 @@ R values (standard errors; covariance matrices row-major):
 | `coef` | 2.084173867 | 3.003896817 |
 | `neweywest_lag4` = `kernhac_bartlett_bw5` | 0.2204664393 | 0.1429954779 |
 | `neweywest_lag4_vcov` | 0.04860545086, 0.005265828526 | 0.005265828526, 0.02044770671 |
+| `neweywest_lag4_prewhite` | 0.2858936714 | 0.1360607244 |
 | `kernhac_parzen_bw4` | 0.1957529711 | 0.1418580397 |
 | `kernhac_parzen_bw4_vcov` | 0.03831922570, 0.004648265592 | 0.004648265592, 0.02012370342 |
 | `kernhac_truncated_bw4` | 0.2574611959 | 0.1282680350 |
 | `kernhac_truncated_bw4_vcov` | 0.06628626740, 0.006057068549 | 0.006057068549, 0.01645268880 |
 | `kernhac_tukey_hanning_bw4` | 0.2139224548 | 0.1417968863 |
 | `kernhac_tukey_hanning_bw4_vcov` | 0.04576281667, 0.005394890914 | 0.005394890914, 0.02010635695 |
+| `kernhac_qs_bw4` | 0.2300539548 | 0.1392422079 |
 | `neweywest_default` (legacy row "NeweyWest") | 0.2877355266 | 0.1353875952 |
 | `vcovhac_default` (what the legacy rows "Bartlett" and "Parzen" held before INF-16 was fixed) | 0.1903233734 | 0.1422489769 |
 
-Test: `test_validate_hac_ar1` pins the coefficients, the default bandwidth, and the standard
-errors and covariance matrices of the four pinned kernels at m = 4; it also checks that the
-default bandwidth gives the m = 4 Bartlett result and that no bandwidth warning fires.
-Tolerance: coefficients 1e-8, standard errors and covariance entries 1e-6 relative, bandwidth
-exact.
+Test: `test_validate_hac_ar1` pins the coefficients, the default lag, and the standard errors
+and covariance matrices of Bartlett at lag 4 (with and without prewhitening) and of Parzen,
+Truncated, Tukey-Hanning and Quadratic Spectral at lag 3; it also checks that the default lag
+gives the lag-4 Bartlett result and that no bandwidth warning fires. Tolerance: coefficients
+1e-8, standard errors and covariance entries 1e-6 relative, lag exact. The Quadratic Spectral
+kernel over a long series, more kernels with prewhitening, and Grunfeld are pinned by the
+`reg_vcov_t4` cases (`validation/r/cases/reg_vcov_t4.R`, registry `reg_vcov_t4.json`).
 
-Deviations (left out of the test, values in the registry):
-
-| Finding | Quantity | R | p2a |
-|---|---|---|---|
-| REG-50 | QS kernel, m = 4 (`kernhac_qs_bw4`) | 0.2300539548, 0.1392422079 | 0.2284575999, 0.1414513262 |
-| REG-50 | Bartlett at `kernHAC(bw = 4)` (`kernhac_bartlett_bw4`): p2a's m means bw = m + 1 | 0.2102028704, 0.1464461033 | 0.2204664393, 0.1429954779 (m = 4) |
-| REG-22 | prewhitened Bartlett, m = 4 (`neweywest_lag4_prewhite`): p2a fits a scalar AR(1) to the residuals | 0.2858936714, 0.1360607244 | 0.2908704449, 0.3059566437 |
-| REG-61 | default bandwidth (`bw_neweywest`; `bw_andrews_qs` 0.6261528081) | `bwNeweyWest` 2.513298742 | fixed rule, 4 |
-| REG-61 | `adjust = TRUE`, e.g. Parzen (`kernhac_parzen_bw4_adjust`) | 0.1977403619, 0.1432982597 | no option; 0.1957529711, 0.1418580397 |
+Not reproduced, by design: the default lag is the fixed rule floor(4 (n/100)^(2/9))
+(`vcovPL(lag = "NW1994")`), not `bwNeweyWest`'s data-driven bandwidth (`bw_neweywest`
+2.513298742, `bw_andrews_qs` 0.6261528081); and there is no `adjust = TRUE` option
+(`kernhac_*_bw4_adjust`, e.g. Parzen 0.1977403619, 0.1432982597).
 
 Bandwidth bounds since Tier 0 (REG-1, `428d7cf`): a user bandwidth of n or more is an
 `InvalidSpecification` error (sandwich truncates the lags with a warning instead; decision D12
@@ -151,8 +155,8 @@ effect `N(0, 1)` per firm, `y = 2 + 3 x + firm effect + N(0, 1)`; data
 
 R calls: `vcovPL(m, cluster = ~firm, order.by = ~time, lag = 2, adjust = FALSE | TRUE)`
 (sandwich 3.1.3) and `vcovSCC(plm(y ~ x, model = "pooling"), maxlag = 2)` (plm 2.6.7) as a
-cross-check; both aggregate the scores by period and weight lag j by 1 - j/(lag + 1), which is
-p2a's Bartlett weight at bandwidth 2.
+cross-check; both sum the scores within each period and weight lag j by k(j / (lag + 1)), which
+is p2a's weight at lag count 2 for every kernel.
 
 | Key | (Intercept) | x |
 |---|---|---|
@@ -165,13 +169,12 @@ p2a's Bartlett weight at bandwidth 2.
 `lag` = 2, `n_periods` = 20, `n_obs` = 200.
 
 Test: `test_validate_driscoll_kraay_panel` pins the coefficients, the classical OLS standard
-errors (a cross-check of the data), the default bandwidth, the number of periods and n; it also
+errors (a cross-check of the data), the default bandwidth, the number of periods, n and the
+Driscoll-Kraay standard errors at the default lag (`vcovpl_lag2` = `vcovscc_lag2`); it also
 checks the unit count, the kernel and that no bandwidth warning fires. Tolerance: coefficients
-1e-8, standard errors 1e-6 relative, counts exact.
-
-Deviation REG-24: p2a averages the scores within each period and multiplies the meat by T, so
-its standard errors, covariance, t and p are sqrt(T)/N = 0.4472135955 times vcovPL's: p2a
-0.02186774128, 0.04533713058 against 0.04889775602, 0.1013769059. They are not pinned.
+1e-8, standard errors 1e-6 relative, counts exact. The five kernels on Grunfeld (balanced,
+unbalanced, T = 10 with the default lag 1) are pinned by the `vcov_dk_grunfeld*` cases of
+`validation/r/cases/reg_vcov_t4.R`. p2a has no `adjust = TRUE` option (`vcovpl_lag2_adjust`).
 
 The legacy call `vcovPL(model_pool, cluster = ~time, order.by = ~time)` names the same variable
 twice. sandwich then keeps `cluster = time` and derives `order.by` from the occurrence index
@@ -260,7 +263,7 @@ documented in [gls.md](gls.md) and the `gls_estimated_correlation` registry entr
 | `reset_test.csv` | `diag_reset_quad` | values equal to 15 digits |
 | `harveycollier_test.csv` | `diag_harvtest_nonlin` | values equal to 15 digits |
 | `wald_test.csv` | `diag_wald_sim` | `p_value` is `NA`: `aod::wald.test` names its p-value `P`, not `P(> Chi2)`; the case records it |
-| `hac_test.csv` | `hac_ar1` | regenerated (INF-16): rows "Bartlett" and "Parzen" held `vcovHAC(m)`'s default quadratic-spectral estimate, because `vcovHAC` ignores a `kernel` argument; they now hold `kernhac_bartlett_bw4` and `kernhac_parzen_bw4`. Row "NeweyWest" equals `neweywest_default` |
+| `hac_test.csv` | `hac_ar1` | regenerated (INF-16): rows "Bartlett" and "Parzen" held `vcovHAC(m)`'s default quadratic-spectral estimate, because `vcovHAC` ignores a `kernel` argument; they now hold `kernhac_bartlett_bw4` and `kernhac_parzen_bw4` (kernHAC(bw = 4) = p2a's lag 3, for every kernel). Row "NeweyWest" equals `neweywest_default` |
 | `driscoll_kraay_test.csv` | `dk_panel` | coefficients and `ols_se` equal; `dk_se` sums the scores by firm, not by period (above), and is not a Driscoll-Kraay value |
 | `bootstrap_test.csv` | none | not asserted: `vcovBS` resamples with R's RNG (see `validation/regression/vcovBS.md`) |
 | `quantreg_test.csv` | `quantreg_hetero` | coefficients equal to 15 digits; coefficients, standard errors and objective are pinned |

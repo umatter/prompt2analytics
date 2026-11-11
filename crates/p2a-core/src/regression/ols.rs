@@ -2228,17 +2228,29 @@ const HAC_LAG_SUMS: usize = 65_536;
 
 /// Compute HAC (Heteroskedasticity and Autocorrelation Consistent) covariance matrix.
 ///
-/// Implements the Newey-West (1987) estimator with various kernel options.
-/// This is the R equivalent of `sandwich::vcovHAC()`.
+/// The Newey-West (1987) estimator and its kernel variants (Andrews, 1991), as sandwich
+/// computes them with a fixed lag count: `NeweyWest(lag = L, prewhite = prewhiten,
+/// adjust = FALSE)` for the Bartlett kernel and `kernHAC(kernel, bw = L + 1, prewhite =
+/// prewhiten, adjust = FALSE)` for the others.
 ///
 /// # Mathematical Background
 ///
-/// The HAC covariance estimator is:
-/// V_HAC = (X'X)⁻¹ Ω̂ (X'X)⁻¹
+/// The HAC covariance estimator is V_HAC = (X'X)⁻¹ Ω̂ (X'X)⁻¹ with
+/// Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ'), Γ̂ⱼ = Σᵢ sᵢ sᵢ₋ⱼ' and the scores sᵢ = uᵢ xᵢ.
+/// For the lag count L every kernel weighs lag j by k(j / (L + 1)) (sandwich's
+/// `NeweyWest(lag = L)` convention). The lags summed are those of sandwich's
+/// `weightsAndrews`: 0..n-1, cut after the last weight above 1e-7 in absolute value. So
+/// Bartlett, Parzen and Tukey-Hanning sum lags 0..L, Truncated 0..L+1 (k(1) = 1), and the
+/// Quadratic Spectral kernel, whose support is unbounded, sums up to all n lags (by FFT when
+/// the `spectral-analysis` feature is on, in O(k n log n + k² n); directly in O(k² n L)
+/// otherwise). `HacResult::n_lag_weights` reports the count.
 ///
-/// where Ω̂ = Σⱼ₌₋ₘᵐ w(j/m) Γ̂ⱼ
+/// With `prewhiten`, a VAR(1) is fitted to the scores without a constant, the meat is built
+/// from its n - 1 residuals and recoloured by D = (I - A)⁻¹ (sandwich's `meatHAC(prewhite =
+/// 1)`); a VAR(1) that is not identified is an `InvalidSpecification`.
 ///
-/// and Γ̂ⱼ = (1/n) Σᵢ uᵢ uᵢ₊ⱼ xᵢ xᵢ₊ⱼ'
+/// A negative variance (possible with the Truncated and Tukey-Hanning kernels, which do not
+/// guarantee a positive semi-definite estimate) gives a NaN standard error and a warning.
 ///
 /// # Arguments
 ///
@@ -2246,8 +2258,10 @@ const HAC_LAG_SUMS: usize = 65_536;
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
 ///   fit, not recomputed from `x`, and only the shape of `x` is checked.
-/// * `bandwidth` - Optional bandwidth (number of lags). If None, uses Newey-West automatic selection.
-///   A user bandwidth must be smaller than n (otherwise `InvalidSpecification`); one above n/4
+/// * `bandwidth` - Optional lag count L. `None` uses the fixed rule floor(4 (n/100)^(2/9))
+///   (sandwich's `vcovPL(lag = "NW1994")`), clamped to [1, n - 1]; this is not the
+///   data-driven bandwidth of `vcovHAC` or `bwNeweyWest`.
+///   A user lag count must be smaller than n (otherwise `InvalidSpecification`); one above n/4
 ///   adds an entry to `HacResult::warnings`.
 /// * `kernel` - Kernel type (default: Bartlett/Newey-West)
 /// * `prewhiten` - Whether to use VAR(1) prewhitening (default: false)
@@ -2266,7 +2280,8 @@ const HAC_LAG_SUMS: usize = 65_536;
 ///   Matrix Estimation. *Econometrica*, 59(3), 817-858.
 ///   <https://doi.org/10.2307/2938229>
 ///
-/// R equivalent: `sandwich::vcovHAC()`, `sandwich::NeweyWest()`
+/// R equivalent: `sandwich::NeweyWest(lag = L, adjust = FALSE)`,
+/// `sandwich::kernHAC(bw = L + 1, adjust = FALSE)`
 ///
 /// # Example
 ///
@@ -2723,8 +2738,9 @@ fn negative_variance_check(
 /// * `dataset` - The dataset
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
-/// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than n; one above n/4
-///   adds a warning (see [`vcov_hac`]).
+/// * `bandwidth` - Optional lag count L (lag j weighs k(j / (L + 1)) for every kernel; `None`
+///   is the fixed rule floor(4 (n/100)^(2/9))). Must be smaller than n; one above n/4 adds a
+///   warning (see [`vcov_hac`]).
 /// * `kernel` - Kernel name: `bartlett` (also `Newey-West`, `nw`), `parzen`,
 ///   `quadratic_spectral` (`Quadratic Spectral`, `qs`), `truncated` (`rectangular`),
 ///   `tukey_hanning` (`Tukey-Hanning`, `tukey`); case, spaces and dashes are ignored. `None`
@@ -2735,7 +2751,9 @@ fn negative_variance_check(
 ///
 /// `HacResult` with HAC-adjusted standard errors.
 ///
-/// R equivalent: `sandwich::NeweyWest(lm(y ~ x), lag = bandwidth, prewhite = prewhiten)`
+/// R equivalent: `sandwich::NeweyWest(lm(y ~ x), lag = bandwidth, prewhite = prewhiten)` for
+/// Bartlett, `sandwich::kernHAC(lm(y ~ x), kernel, bw = bandwidth + 1, prewhite = prewhiten,
+/// adjust = FALSE)` for the other kernels.
 ///
 /// This is [`HacResult::fit`] with an intercept.
 pub fn run_vcov_hac(
@@ -3328,8 +3346,8 @@ impl std::fmt::Display for DriscollKraayResult {
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
 ///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `time_ids` - Time period identifier for each observation
-/// * `bandwidth` - Optional bandwidth (None for automatic). A user bandwidth must be smaller than
-///   the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
+/// * `bandwidth` - Optional lag count L (None: floor(T^(1/4)), `vcovPL`'s `lag = "NW1987"`). A
+///   user lag count must be smaller than the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
 ///   entry to `DriscollKraayResult::warnings`.
 /// * `kernel` - Kernel type for HAC
 ///
@@ -3546,8 +3564,8 @@ pub fn vcov_driscoll_kraay(
 ///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
 ///   drop is reported in `DriscollKraayResult::missing` and as the first warning (no row
 ///   with an id is `InsufficientData` naming the column).
-/// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
-///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
+/// * `bandwidth` - Optional lag count L (None: floor(T^(1/4))). Must be smaller than the number
+///   of time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
 /// * `kernel` - Kernel name, as for [`run_vcov_hac`] (`None` is Bartlett; an unknown name is
 ///   `InvalidSpecification`)
 ///
@@ -3558,10 +3576,11 @@ pub fn vcov_driscoll_kraay(
 /// # R Equivalent
 ///
 /// ```r
-/// library(plm)
 /// library(sandwich)
-/// model <- plm(y ~ x, data = panel_data, model = "pooling")
-/// vcovPL(model, cluster = ~ firm + year)
+/// model <- lm(y ~ x, data = panel_data)
+/// vcovPL(model, cluster = ~ unit, order.by = ~ time, lag = L, kernel = "Bartlett",
+///        adjust = FALSE)
+/// # equivalently: plm::vcovSCC(plm(y ~ x, panel_data, model = "pooling"), maxlag = L)
 /// ```
 pub fn run_vcov_driscoll_kraay(
     dataset: &Dataset,

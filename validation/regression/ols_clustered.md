@@ -22,6 +22,19 @@ not pass it.
 t, p and the 95% CI use the clustered SE with n − k degrees of freedom, as
 `lmtest::coeftest(fit, vcov = vcovCL(...))` does.
 
+**Wald F.** The result's `wald_f` is the overall Wald test of the slopes with the clustered
+covariance (`lmtest::waldtest(fit, vcov = vcovCL(...), test = "F")`, n − k denominator
+degrees of freedom), printed as "F-statistic (Wald, clustered): ..." or "(Wald, two-way
+clustered)" before the classical F, which is labelled "F-statistic (classical): ...".
+
+**Indefinite two-way covariance.** V̂₁ + V̂₂ − V̂₁₂ need not be positive semi-definite. When
+its smallest eigenvalue is negative, p2a adds a warning naming it; a negative variance then
+gives a NaN standard error and no Wald F is reported. `OlsClusteredResult::fit_with(..,
+ClusteredOptions { fix: true })` sets the negative eigenvalues to 0 and rebuilds the
+covariance, as `vcovCL(fix = TRUE)` (case `ols_twoway_indefinite`,
+`test_validate_ols_twoway_indefinite`). One-way clustering is positive semi-definite by
+construction and is never changed.
+
 ## Reference Implementation
 
 `sandwich::vcovCL(m, cluster = ~firm | ~year | ~firm + year, type = "HC1")`, sandwich
@@ -117,8 +130,8 @@ row and value (1935.25 was truncated to period 1935 before); a text column is re
 row whose time id is missing is dropped, the model is re-estimated, and the drop is
 reported in `DriscollKraayResult::missing` and as the first warning. On `reg_cluster_na`
 with `time_col = year_na`: 198 rows in 20 periods (before: 200 rows and a bogus 21st
-period). The Driscoll-Kraay SEs are not R-pinned (REG-24, Tier 4: the DK meat is scaled
-differently from `sandwich::vcovPL`), so two property tests, not registered as R-pinned,
+period). The Driscoll-Kraay SEs themselves are R-pinned on complete data (see
+[ols_robust_se.md](ols_robust_se.md)); two property tests, not registered as R-pinned,
 pin the estimation sample on `validation/datasets/generated/grunfeld_cluster_na.csv`
 (loaded without a case):
 
