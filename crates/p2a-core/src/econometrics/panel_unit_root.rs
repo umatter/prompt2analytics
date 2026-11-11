@@ -68,8 +68,30 @@
 //! shorter unit, or one whose regressors are collinear (an exactly linear series), is
 //! skipped and named in the warnings. With no unit left the test is an error.
 //!
-//! The per-unit ADF regressions and the per-unit lag orders are validated against R
-//! (`urca::ur.df`, `plm::purtest`); the LLC, IPS, Fisher and Hadri statistics are not.
+//! # Statistics (as `plm::purtest`)
+//!
+//! - **LLC**: each unit's ADF residuals normalised by its ADF residual sd, pooled; the t of
+//!   the pooled coefficient corrected by `N T~ S_N sd(rho) / sigma~^2` (`S_N` the mean ratio of
+//!   long-run to short-run sd, Bartlett kernel with `round(3.21 T^(1/3))` lags) and the mean
+//!   and variance adjustments of LLC (2002) Table 2 (interpolated in T, clamped to T = 25 and
+//!   500 with a warning). Needs a balanced panel. Scale invariant.
+//! - **IPS**: W-tbar, the mean ADF t standardised by each unit's moments from IPS (2003)
+//!   Table 3 at `(T - lags - 1, lags)` (interpolated; clamped with a warning; an untabulated
+//!   combination is an error). Model `None` is refused.
+//! - **Fisher (Maddala-Wu)**: `-2 sum ln p_i` against chi-square(2N), with each unit's p from
+//!   MacKinnon's (1994) asymptotic response surface (plm's `p.approx = "MacKinnon1994"`; plm's
+//!   default with urca installed is the 1996 tables, which differ slightly).
+//! - **Hadri**: the mean of each unit's KPSS statistic of its demeaned or detrended series,
+//!   standardised with the moments of the limit; upper tail. `hadri_variance` chooses the
+//!   residual variance: [`HadriVariance::Heteroskedastic`] (per unit, plm `Hcons = TRUE`, the
+//!   default), [`HadriVariance::Homoskedastic`] (pooled, `Hcons = FALSE`), both `rss/(T - k)`
+//!   with `dfcor` and `rss/T` without, or [`HadriVariance::LongRun`] (Bartlett kernel,
+//!   `tseries::kpss.test`; default lags `trunc(4 (T/100)^(1/4))`). Lags, lag selection, model
+//!   `None` and unbalanced panels are refused. The output names the variance.
+//!
+//! The per-unit ADF regressions, the lag orders and the four statistics with their p-values
+//! are validated against R (`urca::ur.df`, `plm::purtest`, `tseries::kpss.test`;
+//! `validation/econometrics/panel_unit_root.md`).
 
 use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
