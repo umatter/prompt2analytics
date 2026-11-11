@@ -1,0 +1,125 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "weightit_trim_balance",
+      "name": "WeightIt balance tables (fixed unweighted SD) and weight trimming (WeightIt::trim)",
+      "category": "econometrics",
+      "reference": "cobalt::bal.tab(binary = 'std', s.d.denom = 'pooled' | 'treated' | 'control'); WeightIt::trim(w, at, lower, treat)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_trim_balance"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_weightit_balance_fixed_sd",
+        "p2a-core::econometrics::weightit::tests::test_validate_weightit_trim"
+      ],
+      "quantities": [
+        "SMD before/after (fixed unweighted SD, cobalt s.d.denom)",
+        "weighted variance ratios",
+        "mean/max |SMD|",
+        "trimmed weights, caps, number changed, group sums, ESS, SMD after trimming (ATE upper and lower, ATT, ATC)"
+      ],
+      "tolerance": "validation/README.md, n = 300: 1e-8 relative (Tol::coef); number of changed weights exact",
+      "deviations": [
+        {
+          "finding": "CAUS-108",
+          "quantity": "SMD of binary covariates",
+          "note": "standardised (cobalt binary = 'std', MatchIt); cobalt's default reports the raw difference"
+        },
+        {
+          "finding": "CAUS-96",
+          "quantity": "trim_quantile below 0.5",
+          "note": "refused; WeightIt maps at to max(at, 1 - at)"
+        },
+        {
+          "finding": "CAUS-96",
+          "quantity": "trim_quantile >= 1 as a count of top weights",
+          "note": "not supported; 1 means no trimming"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cbps_balance",
+      "name": "CBPS balance tables: SMD over the fixed unweighted SD",
+      "category": "econometrics",
+      "reference": "cobalt s.d.denom: sd(x[t1]), sqrt((var(x[t1]) + var(x[!t1])) / 2); binary sqrt(p (1 - p))",
+      "doc": "validation/econometrics/cbps.md",
+      "cases": [
+        "balance_sd_cbps_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_balance_fixed_sd"
+      ],
+      "quantities": [
+        "SMD denominators (pooled for ATE, treated for ATT)"
+      ],
+      "tolerance": "validation/README.md, n = 400: 1e-8 relative (Tol::coef) on SMD x SD against the weighted mean difference",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "sbw_balance",
+      "name": "Stable balancing weights balance tables: SMD over the fixed unweighted SD",
+      "category": "econometrics",
+      "reference": "cobalt s.d.denom: treated SD (ATT), control SD (ATC), pooled (ATE); binary sqrt(p (1 - p))",
+      "doc": "validation/econometrics/sbw.md",
+      "cases": [
+        "weights_trim_balance"
+      ],
+      "tests": [
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_balance_fixed_sd"
+      ],
+      "quantities": [
+        "SMD denominators (pooled for ATE, treated for ATT, control for ATC)"
+      ],
+      "tolerance": "validation/README.md, n = 300: 1e-8 relative (Tol::coef) on SMD x SD before weighting; 1e-12 absolute after exact balance",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "twang_gbm",
+      "name": "twang: gbm Bernoulli boosting (depth 1 and 3) and the balance-optimal iteration",
+      "category": "econometrics",
+      "reference": "gbm::gbm(distribution = 'bernoulli', bag.fraction = 1) + twang's ES/KS criterion (ps.summary.new2)",
+      "doc": "validation/econometrics/twang.md",
+      "cases": [
+        "twang_gbm_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::twang::tests::test_validate_twang_gbm_path",
+        "p2a-core::econometrics::twang::tests::test_validate_twang_selection"
+      ],
+      "quantities": [
+        "initF",
+        "link at iterations 1-3000 (depth 1, 3)",
+        "optimal iteration",
+        "criterion at the optimum",
+        "propensity scores",
+        "ES and KS after",
+        "ES before",
+        "ESS"
+      ],
+      "tolerance": "validation/README.md, n = 300: 1e-8 relative (Tol::coef); optimal iteration exact (runner-up gaps >= 2e-5)",
+      "deviations": [
+        {
+          "finding": "CAUS-93",
+          "quantity": "iteration search",
+          "note": "global argmin over 1..n_trees; twang searches a 25-point grid then refines between neighbours (never better than the global minimum)"
+        },
+        {
+          "finding": "CAUS-93",
+          "quantity": "defaults",
+          "note": "interaction_depth 1, n_trees 3000, estimand ATT (twang: 3, 10000, ATE)"
+        },
+        {
+          "finding": "CAUS-93",
+          "quantity": "reference",
+          "note": "twang itself not installed; its criterion is computed in R from twang's definitions on gbm's path"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

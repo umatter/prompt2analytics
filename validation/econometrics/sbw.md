@@ -103,8 +103,10 @@ quadratic model plus the l1 term exactly by the feature-sign method (Lee, Battle
 2007) and takes an Armijo step. The (k+1) x (k+1) Hessian `sum_{w_i > l} a_i a_i'` is
 regularised only when singular; memory is O(n k). The solve stops when the KKT residual is
 below 1e-14 (1 + max r_j), or below `tolerance` (1 + max r_j) after an unregularised full step
-that kept the set of units off the bound; running out of `max_iter` returns an unconverged
-result with a note.
+that kept the set of units off the bound. Running out of `max_iter` with the residual within
+`tolerance` (1 + max r_j) stops as converged, as the exact solver rules; outside it the result
+is unconverged, with a note (until v0.5.0 a stop within tolerance at `max_iter` was reported as
+unconverged).
 
 Infeasibility is reported, never returned as weights:
 - **Range check** (with `min_weight >= 0`): a band [t_j - delta_j, t_j + delta_j] that misses
@@ -126,6 +128,19 @@ means; `objective_treated` and `objective_control` report the two objectives
 (`objective_value` is their sum), `lambda_treated` the treated problem's multipliers, and the
 balance tables compare the weighted treated with the weighted controls. With
 `normalize_to_n` each reweighted group sums to its own size, otherwise to 1.
+
+### Balance tables
+
+`std_diff` = (target mean - reweighted mean) / an SD of the **unweighted** sample, the same for
+the before and after tables (cobalt's `s.d.denom`): the treated SD for ATT, the control SD for
+ATC, sqrt((v_t + v_c) / 2) for ATE; n - 1, a 0/1 covariate p (1 - p). `var_ratio` is the ratio
+of cobalt's weighted variances (NaN for binary covariates); `max_std_diff` and `mean_std_diff`
+are taken over the finite values. Until v0.5.0 the SD was pooled from the weighted groups, so
+the yardstick moved with the weights (CAUS-108). R-pinned on `weights_trim_balance`
+(`test_validate_sbw_balance_fixed_sd`, registry `validation/methods/causal_weighting_t4.json`,
+id `sbw_balance`): the before-table SMD times the R denominator equals the mean difference
+(`Tol::coef(300)`); after exact balance the same identity holds to 1e-12 and every SMD is below
+1e-10.
 
 ## Reference Implementation
 

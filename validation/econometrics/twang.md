@@ -2,33 +2,71 @@
 
 ## Method Overview
 
-The `twang` module implements propensity score estimation using gradient boosted decision stumps with automatic tuning for covariate balance. This is a simplified version of the R twang package approach.
+The `twang` module (`run_twang`) estimates propensity scores by gradient boosting as R's twang
+does with `gbm`, and picks the number of trees that minimises a covariate-balance criterion.
 
 ### Algorithm
 
-1. **Initialization**: F_0(x) = log(n_treated / n_control) (log-odds of being treated)
-2. **Boosting iterations** (m = 1 to M):
-   - Compute pseudo-residuals: r_i = y_i - sigmoid(F_{m-1}(x_i))
-   - Fit decision stump (single-split tree) to residuals
-   - Update: F_m(x) = F_{m-1}(x) + shrinkage * stump(x)
-   - Compute balance metrics with current propensity-based weights
-   - Track optimal stopping point based on balance metric
-3. **Return** propensity scores from optimal iteration
+`gbm(distribution = "bernoulli", bag.fraction = 1, train.fraction = 1)`:
+
+1. **Initialization**: F_0 = log(n_treated / n_control) (gbm's `initF`).
+2. **Boosting iterations** (m = 1 to `n_trees`):
+   - Residuals r_i = t_i - p_i, p_i = sigmoid(F_{m-1}(x_i)) (unclipped).
+   - Grow a regression tree on r best-first, as gbm: each terminal node keeps its best split
+     (improvement n_L n_R / n (mean_L - mean_R)^2 over the midpoints of consecutive distinct
+     values, left `x < midpoint`, both children with at least `min_node_size` rows,
+     `n.minobsinnode`), and the node with the largest improvement splits, `interaction_depth`
+     times or until no node can split. Every feature is sorted once per run; a split
+     partitions the sorted lists stably, so a tree costs O(depth k n).
+   - Newton leaf values: sum_leaf r / sum_leaf p (1 - p).
+   - F_m = F_{m-1} + shrinkage * tree(x).
+   - Evaluate the stop method's criterion with the weights of p_m (only that statistic per
+     iteration; KS swept along the presorted orders).
+3. **Optimal iteration**: the first minimum of the criterion over iterations
+   max(1, `min_iterations`)..=`n_trees`. An early stop is opt-in: with `balance_threshold > 0`
+   the run stops at the first iteration >= `min_iterations` below the threshold, and the
+   optimum is taken over the iterations run (with a warning). An optimum at the last
+   iteration gives the warning "the balance criterion was still decreasing at n_trees = N;
+   increase n_trees".
+
+The criterion follows twang's `ps.summary.new2`: ES = weighted mean difference / an SD fixed
+from the unweighted sample (treated SD for ATT, SD of the full sample for ATE, control SD for
+ATC; n - 1, every covariate continuous), KS = the weighted two-sample Kolmogorov-Smirnov
+statistic; es.mean / es.max / ks.mean / ks.max over the covariates.
 
 ### Key Differences from R twang
 
-| Feature | R twang | p2a-stats twang |
+| Feature | R twang | p2a twang |
 |---------|---------|-----------------|
-| Base learner | Full GBM trees | Decision stumps only |
-| Interaction depth | Configurable (default 3) | Fixed at 1 |
-| Stop methods | es.mean, es.max, ks.mean, ks.max | All four supported |
-| Cross-validation | For optimal trees | Not implemented |
+| Base learner | gbm trees, Bernoulli, Newton leaves | the same (R-pinned to gbm's link) |
+| Interaction depth | default 3 | honoured; default 1 |
+| Number of trees | default 10000 | default 3000 |
+| Estimand | default ATE | default ATT |
+| Iteration search | 25-point grid, then refined between neighbours | global argmin over every iteration (never worse) |
+| Early stop | none | opt-in (`balance_threshold > 0`) |
+| Stop methods | es.mean, es.max, ks.mean, ks.max | all four |
+| bag.fraction | default 1 | 1 (no subsampling) |
+
+Until v0.5.0 the leaves were mean residuals (about a quarter of gbm's step at the same
+shrinkage), `interaction_depth` was ignored, the run stopped at the first iteration after
+`min_iterations = 100` whose criterion fell below 0.1, and ES divided by the pooled SD of the
+weighted groups (CAUS-93, CAUS-108).
 
 ## Reference Implementation
 
-- **Package**: twang 2.6 (R)
-- **URL**: https://cran.r-project.org/package=twang
-- **Version validated against**: Conceptual alignment; simplified implementation
+- **Packages**: gbm 2.3.1 (R 4.3.3). twang itself is not installed here: its criterion is
+  computed in R from twang's definitions on gbm's path.
+- R code: `validation/r/cases/causal_weighting_t4.R`, case `twang_gbm_sim` (weighting_sim,
+  n = 300; shrinkage 0.01, n.minobsinnode 10, 3000 trees; depth 1 ATT es.mean, depth 3 ATE
+  ks.max, depth 1 ATC es.max).
+- Registry: `validation/methods/causal_weighting_t4.json`, id `twang_gbm`.
+
+**R-pinned** (`test_validate_twang_gbm_path`, `test_validate_twang_selection`, `Tol::coef(300)`):
+`initF`; gbm's link at iterations 1, 10, 100, 1000 and 3000 (rows 1-10, depth 1 and 3); the
+optimal iteration (exact: 3000, 389, 2980; the runner-up criterion values are at least 2e-5
+away); the criterion at the optimum, at iteration 1 and at 3000; the propensity scores at the
+optimum; ES and KS after weighting; ES before; ESS per group. The depth-1 ATT run has its
+optimum at the last iteration and carries the boundary warning.
 
 ## Test Cases
 
@@ -98,7 +136,12 @@ TwangConfig {
 | test_twang_basic | PASS | PS in (0,1), positive weights |
 | test_twang_stop_methods | PASS | All 4 methods work |
 | test_twang_estimands | PASS | ATT/ATE/ATC weights correct |
-| test_decision_stump | PASS | Correct split selection |
+| test_decision_stump | PASS | Correct split selection (depth-1 tree, Newton leaves) |
+| test_stump_sweep_matches_naive_search | PASS | Prefix-sum sweep equals the exhaustive stump search |
+| test_tree_growth_matches_naive_best_first | PASS | Best-first growth equals a port of gbm's growth at depth 1-6 |
+| test_twang_ks_presorted_matches_naive | PASS | Presorted KS equals the per-call sort, bit for bit |
+| test_twang_es_uses_fixed_sd | PASS | ES over the unweighted treated / full / control SD |
+| test_twang_early_stop_is_opt_in | PASS | Early stop only with balance_threshold > 0, with a warning |
 | test_ks_statistic | PASS | KS = 1.0 for separated groups |
 | test_ess_computation | PASS | ESS = n for uniform weights |
 | test_balance_history | PASS | Balance tracked per iteration |
@@ -109,17 +152,8 @@ TwangConfig {
 
 ## Limitations
 
-1. **Simplified base learner**: Uses decision stumps (depth=1) instead of full GBM trees
-2. **No cross-validation**: Optimal iteration selected by simple tracking, not CV
-3. **Fixed interaction depth**: Cannot capture complex covariate interactions
-4. **No bag fraction**: No subsampling for variance reduction
-
-## Usage Notes
-
-For production-quality GBM propensity scores with complex interactions, consider:
-- R twang package (full GBM)
-- Python `causalml` or `econml` packages
-- This implementation is suitable for educational purposes and simple use cases
+1. **No subsampling**: `bag.fraction = 1` only.
+2. **No cross-validation**: the iteration is chosen by balance, as twang does.
 
 ## Missing values and column types
 
@@ -131,7 +165,7 @@ column that exists is never reported as not found. Int64 and Boolean 0/1 treatme
 read as numbers and give the same result as Float64. Results on complete data are
 unchanged.
 
-R: twang is not installed here; not verified.
+R: twang is not installed here; the missing-value refusals are not verified against it.
 
 Tests: `test_validate_na_twang_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
 `weighting_na_refusal`).
