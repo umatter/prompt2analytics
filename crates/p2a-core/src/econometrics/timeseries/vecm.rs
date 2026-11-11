@@ -399,16 +399,7 @@ pub fn run_vecm_with(
     columns: &[&str],
     config: &VecmConfig,
 ) -> EconResult<VecmResult> {
-    if let Some(dup) = columns
-        .iter()
-        .enumerate()
-        .find(|(i, c)| columns[..*i].contains(c))
-        .map(|(_, c)| *c)
-    {
-        return Err(EconError::InvalidSpecification {
-            message: format!("VECM columns must be distinct; '{dup}' is given twice"),
-        });
-    }
+    // Repeated names are refused by johansen_vecm ("given twice").
     let (data, names) = df_to_array2(dataset.df(), columns)?;
     johansen_vecm(data.view(), &names, config)
 }
@@ -496,9 +487,23 @@ pub fn johansen_vecm(
         .checked_mul(big_k - 1)
         .and_then(|lagged| lagged.checked_add(usize::from(has_const)))
         .and_then(|m| big_k.checked_add(m)?.checked_add(k)?.checked_add(p1));
-    if !n_min.is_some_and(|required| n >= required) {
+    let Some(n_min) = n_min else {
+        // n_min = K (k + 1) + has_const + p1 overflows: name the largest K the sample admits.
+        let c = usize::from(has_const) + p1;
+        let kmax = n.saturating_sub(c) / (k + 1);
+        let bound = if kmax < 2 {
+            "the data support no K >= 2".to_string()
+        } else {
+            format!("so K is at most {kmax}")
+        };
+        return Err(invalid(format!(
+            "lag_order K = {big_k} is too large for N = {n} observations of k = {k} variables: N >= K (k + 1) + \
+             {c} is needed, {bound}"
+        )));
+    };
+    if n < n_min {
         return Err(EconError::InsufficientData {
-            required: n_min.unwrap_or(usize::MAX),
+            required: n_min,
             provided: n,
             context: format!(
                 "Johansen VECM with k = {k} variables, K = {big_k} and ecdet = {ecdet}: N must be at least K + \
@@ -1344,7 +1349,8 @@ mod tests {
         invalid(run_vecm_with(&ds, &DEN, &cfg(D::None, 2, Some(4))), "rank");
         invalid(run_vecm(&ds, &DEN, 2, 0), "rank");
         invalid(run_vecm_with(&ds, &["LRM"], &base), "at least 2 variables");
-        invalid(run_vecm_with(&ds, &["LRM", "LRM"], &base), "distinct");
+        // the duplicate reaches johansen_vecm (ColumnRequest builds both columns), which names it
+        invalid(run_vecm_with(&ds, &["LRM", "LRM"], &base), "given twice");
         let mut seed = 7_u64;
         let y12 = Array2::from_shape_fn((200, 12), |_| box_muller_ts(&mut seed));
         let names12: Vec<String> = (1..=12).map(|i| format!("v{i}")).collect();
@@ -1370,10 +1376,25 @@ mod tests {
                 "{ecdet}: N = 15 is enough"
             );
         }
-        assert!(matches!(
-            run_vecm_with(&ds, &DEN, &cfg(D::None, usize::MAX, Some(1))),
-            Err(EconError::InsufficientData { .. })
-        ));
+        // An order so large that the sample-size rule overflows names the largest admissible K
+        // (N = 55, k = 4, ecdet none: N >= 5 K + 5, so K <= 10).
+        match run_vecm_with(&ds, &DEN, &cfg(D::None, usize::MAX, Some(1))) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("lag_order") && message.contains("at most 10"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        match johansen_vecm(
+            y.slice(s![..6, ..]),
+            &names,
+            &cfg(D::None, usize::MAX, None),
+        ) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("no K >= 2"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
         // A constant series: its lagged difference is an all-zero short-run regressor (dqrdc2 marks IDE.dl1).
         let mut y_const = y.clone();
         y_const.column_mut(3).fill(0.1);
