@@ -291,6 +291,28 @@ fn check_shapes(y: &ArrayView1<f64>, x: &ArrayView2<f64>) -> EconResult<()> {
             context: "GLS regression".to_string(),
         });
     }
+    // nlme::gls refuses missing values (na.fail); a NaN is missing, ±Inf is refused
+    let refuse = |column: String, values: &mut dyn Iterator<Item = f64>| -> EconResult<()> {
+        let (mut nan, mut inf) = (0usize, 0usize);
+        for v in values {
+            if v.is_nan() {
+                nan += 1;
+            } else if v.is_infinite() {
+                inf += 1;
+            }
+        }
+        if nan > 0 {
+            return Err(EconError::NullValues { column, count: nan });
+        }
+        if inf > 0 {
+            return Err(EconError::NonFiniteValues { column, count: inf });
+        }
+        Ok(())
+    };
+    refuse("y".to_string(), &mut y.iter().copied())?;
+    for (j, col) in x.columns().into_iter().enumerate() {
+        refuse(format!("x column {}", j + 1), &mut col.iter().copied())?;
+    }
     Ok(())
 }
 
@@ -360,16 +382,33 @@ fn gls_engine(
             };
             // fail early (rank, shapes) at an interior rho
             // and take its SSE* as the reference of the centred objective
-            let sse_ref = engine
-                .fit_at(&structure_at(0.5 * (lo + hi)))?
-                .sse
-                .max(f64::MIN_POSITIVE);
+            let sse_mid = engine.fit_at(&structure_at(0.5 * (lo + hi)))?.sse;
+            // An exact fit (residuals at rounding level at every rho) leaves the profile
+            // objective at -inf: no correlation is identified. The bound allows for the
+            // rounding of n residuals and the scaling of the whitening.
+            let yy: f64 = y.iter().map(|v| v * v).sum();
+            if sse_mid <= 1e3 * n as f64 * f64::EPSILON * f64::EPSILON * yy {
+                return Err(EconError::InvalidSpecification {
+                    message: "y is fitted exactly; rho is not identified".to_string(),
+                });
+            }
+            let sse_ref = sse_mid.max(f64::MIN_POSITIVE);
             let objective = |rho: f64| -> EconResult<f64> {
                 resource::checkpoint()?;
-                let v = engine
-                    .fit_at(&structure_at(rho))?
-                    .profile_objective(sse_ref);
-                Ok(if v.is_finite() { v } else { f64::INFINITY })
+                let fit = engine.fit_at(&structure_at(rho))?;
+                if fit.sse == 0.0 {
+                    // the objective is -inf: an exact fit identifies no correlation
+                    return Err(EconError::InvalidSpecification {
+                        message: "y is fitted exactly; rho is not identified".to_string(),
+                    });
+                }
+                let v = fit.profile_objective(sse_ref);
+                if !v.is_finite() {
+                    return Err(EconError::Computation(format!(
+                        "GLS profile log-likelihood is not finite at rho = {rho}"
+                    )));
+                }
+                Ok(v)
             };
             let b = brent_fmin(lo + 1e-8, hi - 1e-8, objective, RHO_TOL, RHO_MAX_EVAL)?;
             let s = structure_at(b.x);
@@ -714,7 +753,14 @@ impl Engine<'_, '_> {
             GlsMethod::Ml => (nf, 0.5 * logdet),
             GlsMethod::Reml => {
                 // ½ ln det(X*'X*) = -½ ln det((X*'X*)^-1) = -Σ ln L_ii of its Cholesky factor
-                let l = cholesky_lower(&unscaled)?;
+                let l = cholesky_lower(&unscaled).map_err(|e| match e {
+                    EconError::SingularMatrix { .. } => EconError::SingularMatrix {
+                        context: "REML: X'V^-1 X is not positive definite".to_string(),
+                        suggestion: "the regressors are collinear after whitening; drop one"
+                            .to_string(),
+                    },
+                    e => e,
+                })?;
                 let half_logdet_xtx = -(0..p).map(|i| l[[i, i]].ln()).sum::<f64>();
                 (nf - pf, 0.5 * logdet + half_logdet_xtx)
             }
@@ -1184,6 +1230,44 @@ mod tests {
             .scalar("r2", r.r_squared, Tol::stat(n))
             .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
             .finish();
+    }
+
+    /// NaN and ±Inf in y or X are refused before any fit, naming the column.
+    #[test]
+    fn test_gls_refuses_non_finite_input() {
+        let x = array![[1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0], [1.0, 5.0]];
+        let y = array![1.0, f64::NAN, 2.9, 4.1, 5.0];
+        match gls(&y.view(), &x.view(), CorrelationStructure::AR1 { rho: 0.3 }) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("y", 1))
+            }
+            other => panic!("expected NullValues for y, got {other:?}"),
+        }
+        let y = array![1.0, 2.1, 2.9, 4.1, 5.0];
+        let mut xi = x.clone();
+        xi[[3, 1]] = f64::INFINITY;
+        match gls(&y.view(), &xi.view(), CorrelationStructure::Identity) {
+            Err(EconError::NonFiniteValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("x column 2", 1))
+            }
+            other => panic!("expected NonFiniteValues, got {other:?}"),
+        }
+    }
+
+    /// An exact fit leaves rho unidentified (the profile objective is -inf): an error, not a
+    /// boundary estimate.
+    #[test]
+    fn test_gls_exact_fit_rho_not_identified() {
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 });
+        let y = x.column(1).mapv(|v| 2.0 + 0.5 * v);
+        let mut spec = GlsSpec::default();
+        spec.correlation = GlsCorrelation::Ar1;
+        match gls_with(&y.view(), &x.view(), &spec) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("rho is not identified"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2060,7 +2144,7 @@ mod tests {
 
     /// A regressor equal to another up to noise far below lm.fit's tolerance is still
     /// refused (the normal equations leave such a design to the QR, which names it), and a
-    /// non-finite response is refused as before.
+    /// non-finite response is refused before the fit, naming the response.
     #[test]
     fn test_gls_nearly_collinear_and_non_finite_reach_the_qr() {
         let n = 50;
@@ -2082,9 +2166,11 @@ mod tests {
         let x2 = x.slice(ndarray::s![.., ..2]).to_owned();
         let mut y2 = y.clone();
         y2[7] = f64::INFINITY;
-        assert!(matches!(
-            gls(&y2.view(), &x2.view(), ar1).unwrap_err(),
-            EconError::InvalidSpecification { .. }
-        ));
+        match gls(&y2.view(), &x2.view(), ar1).unwrap_err() {
+            EconError::NonFiniteValues { column, count } => {
+                assert_eq!((column.as_str(), count), ("y", 1))
+            }
+            e => panic!("{e:?}"),
+        }
     }
 }
