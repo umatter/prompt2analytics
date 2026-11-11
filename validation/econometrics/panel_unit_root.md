@@ -329,7 +329,9 @@ non-decreasing from t = -25 to 5; the turning points are MacKinnon's tau_min, ta
 `test_ips_untabulated_moments_is_an_error` (T = 18, 5 lags), `test_ips_table_clamp_warnings`,
 `test_llc_refuses_unbalanced_panels`, `test_llc_long_run_lag_capped_on_very_short_series`,
 `test_llc_unit_sigma_skips_explained_level`, `test_hadri_refuses_model_none_unbalanced_and_lags`,
-`test_hadri_variance_option_parses_and_conflicts`, `test_hadri_display_names_variance`.
+`test_hadri_variance_option_parses_and_conflicts`, `test_hadri_display_names_variance`,
+`test_hadri_constant_unit_is_an_error` (a unit without residual variation is refused, not an
+infinite statistic).
 
 ## Solve and timing
 
@@ -352,6 +354,20 @@ relative for the Hausman statistic).
 | Fit | n | new / base |
 |---|---|---|
 | LLC, unified | 100 / 1,000 / 10,000 | 0.78 / 0.84 / 0.80 |
+
+Tier 4 statistics (release build, one core, `RAYON_NUM_THREADS=1`, seven interleaved rounds of
+200 calls after 5 warm-up calls, medians, against `f80b0131`; R's `panel_n<n>.csv`, 10 x 10,
+50 x 20 and 100 x 100, `floor(T^(1/3))` lags, Hadri without lags). The LLC long-run variance
+is O(T q) per unit; the Maddala-Wu p-value is a polynomial; IPS reads a table; the Hadri
+default drops the Bartlett loop. Peak resident memory is unchanged (11.4 / 11.6 / 12.3 MiB).
+Every row is within 1.1x of base.
+
+| Test | n | new / base |
+|---|---|---|
+| LLC | 100 / 1,000 / 10,000 | 1.06 / 1.03 / 1.04 |
+| IPS | 100 / 1,000 / 10,000 | 1.03 / 0.98 / 1.01 |
+| Maddala-Wu | 100 / 1,000 / 10,000 | 1.04 / 1.00 / 0.89 |
+| Hadri | 100 / 1,000 / 10,000 | 0.99 / 0.98 / 0.82 |
 
 ## Tolerances
 
