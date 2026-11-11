@@ -35,9 +35,9 @@
       "doc": "validation/stats/ks_test.md",
       "cases": ["stat_two_sample_na"],
       "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_ks_test_two_sample_na"],
-      "quantities": ["D", "n", "n_2", "missing"],
+      "quantities": ["D", "p (exact, conditional on ties)", "n", "n_2", "missing"],
       "tolerance": "validation/README.md, n = 38 (< 100): D 1e-5 relative; sizes exact",
-      "deviations": [{"finding": "STAT-27", "quantity": "KS p-value", "note": "p2a is asymptotic with Stephens' correction (0.19563779265722031); R's exact p conditional on ties is 0.1565386776017454; not pinned"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

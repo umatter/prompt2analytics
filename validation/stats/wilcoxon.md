@@ -67,8 +67,9 @@ All values in Tests 1-6 are R 4.3.3 from cases `stat_rank_wilcoxon` and `stat_ra
 (`validation/r/cases/stats_rank_t3.R`; datasets `validation/datasets/generated/rank_wilcoxon.csv`
 and `rank_small_groups.csv`), registry `validation/methods/stats_rank_t3.json`, id `wilcoxon_t3`.
 Tolerances: the `validation/README.md` rows for n < 100 (p `Tol::p_value`); statistics exact.
-p2a's rank-sum `statistic` is the rank sum R1; R's W = R1 − n₁(n₁ + 1)/2 is compared through that
-identity (STAT-72).
+The rank-sum `statistic` is R's W = R1 − n₁(n₁ + 1)/2 (R1 the rank sum of `x - mu` in the pooled
+sample `c(x - mu, y)`), `u_statistic` is the same W (the Mann-Whitney U of `x`), and R1 is reported
+as `rank_sum`; the signed-rank `statistic` is V. Display labels them `W` and `V`, as R.
 
 ### Test 1: Two-sample rank sum (x13a)
 
@@ -101,22 +102,22 @@ y <- c(110, 122, 125, 120, 140, 124, 123, 137, 135, 145)
 wilcox.test(x, y, paired = TRUE, exact = FALSE, correct = TRUE)
 ```
 
-R: V = 27 (pinned), p = 0.6352893188352069; p2a's p is 0.6308000140667467 (its tie variance
-uses the count of tied observations): known deviation STAT-42, not compared.
+R: V = 27, p = 0.6352893188352069. Both pinned; the tie correction of the variance is
+Σ(t³ − t)/48 over the tie groups of |d|, as R.
 
 **Rust test (Tests 1-4):** `stats::wilcoxon::tests::test_validate_wilcoxon_examples`
 
-### Test 5: N = 30 and n = 25: normal approximation, labelled
+### Test 5: N = 30 and n = 25: R's default exact test
 
 Rank sum on 15 + 15 tie-free values (set n30) and signed rank on 25 tie-free values without zeros
-(set sr25), with the default configuration. p2a's default asks for the exact test below N = 50,
-but its enumeration stops at N = 20, so it uses the normal approximation with continuity
-correction and reports `exact = false` (the label 5f86b49 fixed; reverting it fails the test).
+(set sr25). The default configuration follows R's rule (exact when each sample has fewer than 50
+values, signed rank when fewer than 50 non-zero differences, and no ties or zeros) and reports
+`exact = true`; `exact: Some(false)` gives the normal approximation with continuity correction.
 
-| Set | R (exact = FALSE, correct = TRUE) | pinned | R default (exact) |
+| Set | R default (exact) | R (exact = FALSE, correct = TRUE) | pinned |
 |---|---|---|---|
-| n30 | W 51 (rank sum 171), p 0.011400982911555176 | rank sum, W, p, `exact == false`, continuity flag | 0.009874822650594207 (STAT-73) |
-| sr25 | V 231, p 0.06729929952386755 | V, p, `exact == false`, continuity flag | 0.06670159101486205 (STAT-73) |
+| n30 | W 51 (rank sum 171), p 0.009874822650594207 | p 0.011400982911555176 | W, rank sum, both p, exact and continuity flags |
+| sr25 | V 231, p 0.06670159101486205 | p 0.06729929952386755 | V, both p, exact and continuity flags |
 
 **Rust test:** `stats::wilcoxon::tests::test_validate_wilcoxon_n30_exact_flag`
 
@@ -172,9 +173,7 @@ wilcox.test(d$x, d$y, exact = FALSE, correct = TRUE)       # rank sum
 The z values are recovered from R's p (`-qnorm(p / 2)` with the sign of the statistic minus its
 mean).
 
-**STAT-72 (registry deviation):** p2a's rank-sum `statistic` is the rank sum R1 of `x`; R reports
-W = R1 - n_x (n_x + 1) / 2. The test pins R1 and compares `statistic - n (n + 1) / 2` with R's W
-until STAT-72 (Tier 4) changes the reported statistic.
+The rank-sum test pins R's W (`statistic`) and R1 (`rank_sum`).
 
 **Rust tests** (`crates/p2a-core/src/stats/wilcoxon.rs`):
 - `stats::wilcoxon::tests::test_validate_wilcoxon_na_paired` (V and the pair count exact; p
@@ -188,30 +187,51 @@ until STAT-72 (Tier 4) changes the reported statistic.
 
 ## Numerical Precision Summary
 
-- Statistics (rank sum, W through the identity, V) are exact; p-values are pinned at the
+- Statistics (W, R1, V) are exact; p-values, bounds and estimates are pinned at the
   `validation/README.md` rows.
 - Ranks come from `stats::ranks::midranks` (R's `rank()`, exact ties); normal tails are computed
-  directly (no `1 - cdf`) and CI quantiles from `traits::estimator::normal_quantile`.
-- The Hodges-Lehmann estimate and the confidence interval are not R-pinned (STAT-74).
+  directly (no `1 - cdf`) and quantiles from `traits::estimator::normal_quantile`.
+
+## Tier 4 cases (R-pinned)
+
+Case `stat_rank_wilcoxon_t4` (`validation/r/cases/stats_rank_t4.R`, datasets
+`validation/datasets/generated/rank_*_t4.csv`), registry `validation/methods/stats_rank_t4.json`,
+ids `wilcoxon_t4` and `pairwise_wilcox_ties_t4`.
+
+| Test | Sets and quantities |
+|---|---|
+| `stats::wilcoxon::tests::test_validate_wilcoxon_rank_sum_t4` | `depr` at mu = 0.5 and 0, `tf` at mu = 0.3 (W, p for every alternative), `lik` and `heavy` with ties (W, p with and without continuity correction, z), `n4530` (R's default exact p: each sample below 50), `n5510` (normal: one sample of 55), `n60` (exact requested) |
+| `stats::wilcoxon::tests::test_validate_wilcoxon_signed_rank_t4` | `lik` paired with ties (V, p, non-zero count), `srt`, `sr40` (exact, less), `sr60` (exact requested), `srz` (zeros: normal path with R's warning; exact requested with `correct = FALSE`), `sr12` |
+| `stats::wilcoxon::tests::test_validate_wilcoxon_intervals_t4` | exact intervals and estimates (`tf` at levels 0.95 and 0.9 and one-sided, `sr40`), asymptotic intervals with ties (`depr`, `lik`, `srt`, `sr12`), with and without continuity correction |
+| `stats::pairwise::tests::test_validate_pairwise_wilcox_ties_t4` | `pairwise.wilcox.test` on three tied groups: p unadjusted and Holm |
+
+**Exact distributions.** The rank-sum null distribution is counted exactly (the coefficients of the
+Gaussian binomial, in 128-bit integers; above that range, which R's default never reaches, a
+probability recursion in f64); the signed-rank distribution by the halving recursion of R's
+`csignrank`. Both allocate through `resource::try_*` and check the call's budget once per factor.
+Tails are summed directly. Exact is used only without ties (and, for V, without zeros); a request
+for exact with ties or zeros falls back to the normal approximation with R's warning ("cannot
+compute exact p-value with ties" / "with zeroes").
+
+**Intervals and estimates.** Exact intervals are R's order statistics of the pairwise differences
+`x_i - y_j` (rank sum) or the Walsh averages (signed rank) at `qwilcox`/`qsignrank`, selected
+without materialising all m n (or n(n+1)/2) values; the estimate is their median. Asymptotic
+intervals invert the normal approximation as R does with `uniroot` on the step function; p2a
+returns the jump point of that step function, which R's root approximates to its tolerance
+(the case records both: `*_r` is R's printed root, the unsuffixed value the jump point it lies
+on). Where the step function is flat at zero the estimate is the midpoint of the flat interval
+(R's root lands inside it). The signed-rank asymptotic interval doubles alpha as R does when the
+requested level cannot be reached, with R's warning; an unreachable exact level returns R's
+"requested conf.level not achievable" warning and the achieved level.
 
 ## Known Differences
 
-1. **Statistic (STAT-72, registry deviation):** p2a reports the rank sum R1 as `statistic`; R's W
-   is R1 − n₁(n₁ + 1)/2 and is compared through that identity. `u_statistic` is not compared.
+1. **Continuity correction:** both apply the ±0.5 correction by default in the normal
+   approximation (`sign(z) * 0.5` two-sided).
 
-2. **Exact enumeration (STAT-73, registry deviation):** p2a enumerates the exact distribution
-   only for N ≤ 20; R uses the exact test for N < 50 without ties. Between, p2a uses the normal
-   approximation and says so (`exact = false`, Test 5).
-
-3. **Tie variance (STAT-42, registry deviation):** p2a's tie correction of the variance uses the
-   number of tied observations rather than Σ(t³ − t); statistics agree, p-values with ties
-   differ (Test 4).
-
-4. **Not yet pinned:** the sign of the `mu` shift in the rank-sum test (STAT-41) and the
-   confidence interval, an approximation rather than R's inversion (STAT-74).
-
-5. **Continuity correction:** both apply the ±0.5 correction by default in the normal
-   approximation.
+2. **Asymptotic bounds:** reported at the jump point rather than at R's `uniroot` approximation of
+   it; the difference is below R's root tolerance (1e-4 of the data range), and the case pins the
+   jump points.
 
 ## Performance Comparison
 
@@ -247,7 +267,8 @@ until STAT-72 (Tier 4) changes the reported statistic.
 | n=20         | 2.0       | ~500    | ~250x   |
 
 *Note: R timings approximate from `system.time()` resolution; microbenchmark recommended.*
-**Note: n=10 shows higher exact cost due to DP enumeration; larger n falls back to approximation.
+**Note: these timings predate the exact distributions of Tier 4 (exact now runs for each sample
+below 50, as R); the package report holds the current timing comparison.
 
 ## References
 

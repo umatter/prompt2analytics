@@ -48,11 +48,9 @@
         "p2a-core::stats::ks::tests::test_validate_ks_test_two_sample_na",
         "p2a-core::stats::ks::tests::test_validate_na_ks_test_missing_rows_and_errors"
       ],
-      "quantities": ["D", "n, m"],
+      "quantities": ["D", "exact p conditional on ties (ks_p)", "n, m"],
       "tolerance": "validation/README.md, n < 100: D 1e-5 relative; counts exact",
-      "deviations": [
-        {"finding": "STAT-27", "quantity": "p-value (ks_p)", "note": "p2a uses the asymptotic Kolmogorov distribution with Stephens' correction (0.19563779265722 on this case); R reports the exact p-value conditional on ties (0.15653867760174539). D is pinned."}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -82,11 +80,9 @@
         "p2a-core::stats::mood::tests::test_validate_mood_test_two_sample_na",
         "p2a-core::stats::mood::tests::test_validate_na_mood_test_missing_rows_and_errors"
       ],
-      "quantities": ["z", "p", "T (cross-check)", "n, m"],
+      "quantities": ["z", "p", "z and p with ties (mood_z, mood_p on xi/yi)", "T (cross-check)", "n, m"],
       "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; counts exact",
-      "deviations": [
-        {"finding": "STAT-29", "quantity": "z and p with ties (mood_z, mood_p on xi/yi)", "note": "R scores tied observations by Mielke's averaged positions; p2a squares the midrank deviation (z -2.6983447236552882 against R's -2.667468897704627). The tie-free pair mi/mj is pinned."}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

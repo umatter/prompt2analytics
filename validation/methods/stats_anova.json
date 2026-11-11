@@ -128,18 +128,12 @@
         "signed-rank V (paired, complete pairs)",
         "p (normal with continuity correction; exact)",
         "z",
-        "rank sum R1 and R's W",
+        "R's W (statistic) and rank sum R1 (rank_sum)",
         "sample sizes and values dropped",
         "Int64 column equals its Float64 cast (stat_friedman_quade)"
       ],
       "tolerance": "validation/README.md, n = 8-18 (< 100): z 1e-5 relative, p 1e-5 relative + 1e-12 absolute, rank statistics and counts exact",
-      "deviations": [
-        {
-          "finding": "STAT-72",
-          "quantity": "rank-sum statistic",
-          "note": "p2a's statistic is the rank sum R1 (pinned to ranksum_r1); R prints W = R1 - n_x (n_x + 1) / 2, compared as statistic - n (n + 1) / 2 until STAT-72 (Tier 4) changes the reported statistic"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

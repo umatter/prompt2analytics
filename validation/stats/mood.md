@@ -54,15 +54,19 @@ all within 1e-10 of each other): z -2.2857142857142856, p 0.0222709789592328, T 
 
 **Rust test:** `stats::mood::tests::test_validate_mood_small_scale`
 
-### Test 3: Data with ties (known deviation STAT-29)
+### Test 3: Data with ties (R-pinned)
 
-| Set | x, y | R z | R p | p2a z |
-|---|---|---|---|---|
-| ties | (1, 2, 2, 3, 4), (2, 3, 3, 4, 5) | 0.3293662746201299 | 0.7418788559147744 | 0.082341568655032477 |
-| serum | Hollander & Wolfe serum data (`?ansari.test`), 20 + 20 | 1.0371275614960966 | 0.2996764118570592 | 1.015427524079116 |
+| Set | x, y | R z | R p |
+|---|---|---|---|
+| ties | (1, 2, 2, 3, 4), (2, 3, 3, 4, 5) | 0.3293662746201299 | 0.7418788559147744 |
+| serum | Hollander & Wolfe serum data (`?ansari.test`), 20 + 20 | 1.0371275614960966 | 0.2996764118570592 |
 
-The test checks only that both sets are flagged as tied; R's values are kept in the case under
-`mood_z_ties` and `mood_p_ties` for the STAT-29 fix.
+A tied observation is scored as R does (Mielke 1967): the average of the squared rank deviations
+over the positions its tie group occupies, `(r - (N + 1)/2)² + (t² - 1)/12` for midrank r and
+group size t. `mood_z_ties` and `mood_p_ties` are pinned and both sets are flagged as tied.
+Case `stat_rank_scale_t4` adds a heavily tied pair (`mood_heavy_*`: T, z, p for every
+alternative; `stats::mood::tests::test_validate_mood_heavy_ties_t4`, registry
+`validation/methods/stats_rank_t4.json`, id `mood_heavy_t4`).
 
 ### Test 4: Missing values and integer columns (R-pinned)
 
@@ -86,14 +90,14 @@ own missing values (null or NaN), as `mood.test` does; the drop is reported in
 accepted; a text column is `NonNumericColumn`. Before T2-WP06, nulls were read as 0 and
 integer columns were refused.
 
-The tied integer pair `xi`/`yi` of the same case is not pinned: see STAT-29 under Known
-Differences.
+The tied integer pair `xi`/`yi` of the same case is pinned too: z -2.667468897704627,
+p 0.007642496253585789.
 
 **Rust tests:**
-- `stats::mood::tests::test_validate_mood_test_two_sample_na` (Z, p, T, n)
+- `stats::mood::tests::test_validate_mood_test_two_sample_na` (Z, p, T, n; z and p on `xi`/`yi`)
 - `stats::mood::tests::test_validate_na_mood_test_missing_rows_and_errors` (`missing`, Display line, text and absent columns)
 
-**Status:** R-pinned with a known deviation (registry `validation/methods/stats_onesample.json`,
+**Status:** R-pinned (registry `validation/methods/stats_onesample.json`,
 id `mood_test`).
 
 **MCP tool: missing values and integer columns.** `hypothesis_mood_test` calls
@@ -110,19 +114,15 @@ above at the same tolerances and checks `has_ties` and `missing` (registry
 
 - On tie-free data z and the three p-values are pinned at the `validation/README.md` rows
   (`Tol::stat`, `Tol::p_value`); T is exact.
-- With ties z and p differ from R (STAT-29, below).
+- With ties z and p are pinned too (R's averaged scores).
 
 ## Known Differences
 
 1. **Exact vs Asymptotic:** R uses asymptotic (normal) approximation for all sample sizes. Our implementation also uses asymptotic approximation.
 
-2. **Tie handling (known deviation STAT-29):** R scores each tied observation by Mielke's
-   (1967) average of the squared rank deviations over the positions the tie occupies; p2a
-   squares the deviation of the midrank. Only the variance correction for ties is shared. On
-   the tied integer pair `xi`/`yi` of case `stat_two_sample_na`, R gives z -2.667468897704627
-   (p 0.007642496253585789) and p2a -2.698344723655288 (p 0.006968523851116348). The tied
-   values are left out of the test's `Check` until STAT-29 is fixed; the tie-free pair
-   `mi`/`mj` is pinned.
+2. **Tie handling:** as R, each tied observation is scored by Mielke's (1967) average of the
+   squared rank deviations over the positions the tie occupies, and the variance carries R's
+   tie correction.
 
 ## Performance Comparison
 

@@ -5,13 +5,13 @@
       "id": "ks_test_t3",
       "name": "Kolmogorov-Smirnov test with reference-distribution parameters (one- and two-sample)",
       "category": "stats",
-      "reference": "stats::ks.test (exact = FALSE for the pinned p-values)",
+      "reference": "stats::ks.test (exact default and exact = FALSE)",
       "doc": "validation/stats/ks_test.md",
       "cases": ["stat_ks_t3"],
       "tests": ["p2a-core::stats::ks::tests::test_validate_ks_t3_one_sample", "p2a-core::stats::ks::tests::test_validate_ks_t3_two_sample"],
-      "quantities": ["D", "D+", "D-", "asymptotic p (one-sample two-sided and one-sided; two-sample one-sided)", "n"],
+      "quantities": ["D", "D+", "D-", "asymptotic p (one- and two-sample, all alternatives)", "exact p (*_p_exact)", "n"],
       "tolerance": "validation/README.md: statistics Tol::stat(n), p-values Tol::p_value(n), n = 5-60",
-      "deviations": [{"finding": "STAT-27", "quantity": "exact p-values (one- and two-sample); two-sided two-sample asymptotic p", "note": "p2a has no exact distribution and applies Stephens' factor; R values in *_p_exact and two*_p_asym"}, {"finding": "STAT-26", "quantity": "degenerate reference distribution", "note": "p2a refuses; ks.test evaluates a point mass (sd = 0) or warns and returns NaN"}],
+      "deviations": [{"finding": "STAT-26", "quantity": "degenerate reference distribution", "note": "p2a refuses; ks.test evaluates a point mass (sd = 0) or warns and returns NaN"}],
       "supersedes_legacy": []
     },
     {

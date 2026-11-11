@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "wilcoxon_t4",
+      "name": "Wilcoxon rank-sum and signed-rank tests: W and V, non-zero mu, tie-corrected variance, R's exact rule (per sample, zeros), exact and asymptotic intervals and estimates",
+      "category": "stats",
+      "reference": "stats::wilcox.test (exact = NULL, correct = TRUE, conf.int = TRUE; R 4.3.3); asymptotic bounds and estimates are the jump points of R's step function, to which R's uniroot(tol = 1e-4) root is asserted within 1e-4 (keys *_ci_r, *_est_root); where the two middle order statistics differ, R's estimate is any point of the flat interval and p2a reports its midpoint (property test, not R-pinned)",
+      "doc": "validation/stats/wilcoxon.md",
+      "cases": [
+        "stat_rank_wilcoxon_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_rank_sum_t4",
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_signed_rank_t4",
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_intervals_t4"
+      ],
+      "quantities": [
+        "W and V (statistic), exact",
+        "p (two-sided, less, greater; exact and normal paths, with and without correction)",
+        "z on the normal path",
+        "exact confidence bounds (order statistics of the pairwise differences and Walsh averages), 0.95 and 0.90, one-sided bounds",
+        "asymptotic confidence bounds at the jump point R's uniroot root lies within 1e-4 of",
+        "exact estimate (median of the differences or Walsh averages)",
+        "asymptotic estimate where the two middle order statistics coincide"
+      ],
+      "tolerance": "W, V exact; p Tol::p_value(n); z Tol::stat(n); bounds and estimates Tol::stat(n); n = n1 + n2 or the number of non-zero differences",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "pairwise_wilcox_ties_t4",
+      "name": "Pairwise Wilcoxon rank-sum tests with ties: unadjusted and Holm p",
+      "category": "stats",
+      "reference": "stats::pairwise.wilcox.test (exact = NULL, correct = TRUE)",
+      "doc": "validation/stats/wilcoxon.md",
+      "cases": [
+        "stat_rank_wilcoxon_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_ties_t4"
+      ],
+      "quantities": [
+        "p, none and holm (lower triangle B-A, C-A, C-B)"
+      ],
+      "tolerance": "Tol::p_value(n) with n the pooled size of the pair",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ansari_t4",
+      "name": "Ansari-Bradley test: exact p (both tails, m = n = 45), Bauer exact and asymptotic intervals and estimates, tie-corrected normal approximation",
+      "category": "stats",
+      "reference": "stats::ansari.test (R 4.3.3); asymptotic bounds and estimate are the jump points |x_i|/|y_j| of ab2, to which R's uniroot(tol = 1e-4) root is asserted within 1e-4 (keys big_ci_r, big_est_r)",
+      "doc": "validation/stats/ansari.md",
+      "cases": [
+        "stat_rank_scale_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::ansari::tests::test_validate_ansari_exact_t4",
+        "p2a-core::stats::ansari::tests::test_validate_ansari_intervals_t4"
+      ],
+      "quantities": [
+        "AB statistic",
+        "exact p (two-sided, less, greater; even and odd N)",
+        "normal p with ties (less, greater)",
+        "exact confidence bounds and estimate (Bauer)",
+        "asymptotic bounds and estimate (jump points)"
+      ],
+      "tolerance": "AB exact; p Tol::p_value(n); bounds and estimates Tol::stat(n)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mood_heavy_t4",
+      "name": "Mood two-sample scale test under heavy ties (Mielke scores)",
+      "category": "stats",
+      "reference": "stats::mood.test",
+      "doc": "validation/stats/mood.md",
+      "cases": [
+        "stat_rank_scale_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::mood::tests::test_validate_mood_heavy_ties_t4"
+      ],
+      "quantities": [
+        "T",
+        "z",
+        "p (two-sided, less, greater)"
+      ],
+      "tolerance": "Tol::stat(n), Tol::p_value(n)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ks_t4",
+      "name": "Kolmogorov-Smirnov tests: one-sample exact (two-sided and one-sided), asymptotic tails, two-sample exact with ties",
+      "category": "stats",
+      "reference": "stats::ks.test (exact = NULL; R 4.3.3)",
+      "doc": "validation/stats/ks_test.md",
+      "cases": [
+        "stat_rank_ks_t4",
+        "stat_ks_t3_exact_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::ks::tests::test_validate_ks_one_sample_exact_t4",
+        "p2a-core::stats::ks::tests::test_validate_ks_two_sample_exact_t4",
+        "p2a-core::stats::ks::tests::test_validate_ks_asymptotic_t4",
+        "p2a-core::stats::ks::tests::test_validate_ks_t3_one_sided_exact_t4"
+      ],
+      "quantities": [
+        "D, D+, D-",
+        "exact p (one-sample two-sided and one-sided; two-sample conditional on ties, two-sided and greater)",
+        "asymptotic p (one-sample, two-sample, one-sided)"
+      ],
+      "tolerance": "D Tol::stat(n); p Tol::p_value(n)",
+      "deviations": [
+        {
+          "finding": "STAT-27",
+          "quantity": "two-sample exact p, alternative less, with ties (t75_p_less_r)",
+          "note": "R evaluates the D+ distribution for both one-sided alternatives; with ties D- has a different distribution. p2a computes P(D- >= d) by swapping the samples (t75_p_less_exact, checked by full enumeration in the case). Without ties both agree."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quade_t4",
+      "name": "Quade test when A == B (identical rankings, tied ranges) and with all blocks constant",
+      "category": "stats",
+      "reference": "stats::quade.test",
+      "doc": "validation/stats/quade_test.md",
+      "cases": [
+        "stat_rank_quade_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::quade::tests::test_validate_quade_a_equals_b_t4"
+      ],
+      "quantities": [
+        "p = (k!)^(1 - b) and NaN statistic when A == B",
+        "F and p with distinct ranges"
+      ],
+      "tolerance": "Tol::stat(n), Tol::p_value(n)",
+      "deviations": [
+        {
+          "finding": "STAT-64",
+          "quantity": "all blocks constant (const_p_r)",
+          "note": "R returns p = (k!)^(1 - b) for a design with no information; p2a refuses with InvalidSpecification, as for Kruskal-Wallis and Friedman on constant data."
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
