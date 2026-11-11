@@ -782,7 +782,14 @@ where
 /// skip the blocking pool for the rows of every other session;
 /// [`remove_stored_session_dir`] checks again under its own lock.
 pub fn is_kept_session_dir(session_id: &str) -> bool {
-    SESSION_DIRS.load(Ordering::SeqCst) && is_in_kept_set(session_id)
+    is_kept_session_dir_when(SESSION_DIRS.load(Ordering::SeqCst), session_id)
+}
+
+/// [`is_kept_session_dir`] with the session-directory switch given as
+/// `enabled`, so tests can check both settings without flipping the
+/// process-wide switch.
+fn is_kept_session_dir_when(enabled: bool, session_id: &str) -> bool {
+    enabled && is_in_kept_set(session_id)
 }
 
 /// Whether [`KEPT_SESSIONS`] holds `id`.
@@ -1625,10 +1632,9 @@ mod tests {
         assert!(!is_in_kept_set(&other));
     }
 
-    /// Only a kept session whose directory may still need removing needs
-    /// the blocking pool when its rows go.
+    /// The kept set holds the kept ids only, until the directory is removed.
     #[test]
-    fn only_a_kept_session_dir_needs_removing_with_its_rows() {
+    fn the_kept_set_holds_only_kept_ids() {
         let (_t, data) = tmp_root();
         let kept = fresh_id();
         fs::create_dir_all(data.join("sessions").join(&kept)).unwrap();
@@ -1638,6 +1644,25 @@ mod tests {
         assert!(!is_in_kept_set("not-a-uuid") && !is_in_kept_set(&fresh_id()));
         remove_stored_session_dir_in(&data, &kept).unwrap();
         assert!(!is_in_kept_set(&kept));
+    }
+
+    /// Only a kept session's directory needs removing with its rows, and
+    /// only while session directories are on. The lib tests never turn the
+    /// process-wide switch on, so `is_kept_session_dir` is false here even
+    /// for a kept id: the condition on which the store skips the blocking
+    /// pool (`db::sessions::remove_stored_session_dir`).
+    #[test]
+    fn a_kept_dir_needs_removing_only_with_session_dirs_on() {
+        let (_t, data) = tmp_root();
+        let (kept, other) = (fresh_id(), fresh_id());
+        fs::create_dir_all(data.join("sessions").join(&kept)).unwrap();
+        keep_session_dirs_in(&data, [&kept], 1);
+        assert!(!is_kept_session_dir_when(false, &kept));
+        assert!(is_kept_session_dir_when(true, &kept));
+        assert!(!is_kept_session_dir_when(true, &other));
+        assert!(!is_kept_session_dir(&kept));
+        remove_stored_session_dir_in(&data, &kept).unwrap();
+        assert!(!is_kept_session_dir_when(true, &kept));
     }
 
     /// A sweep never takes the temporary file of a write in progress for a
