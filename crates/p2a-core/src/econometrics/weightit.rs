@@ -2272,8 +2272,7 @@ fn compute_balance_table(
         })
         .collect();
 
-    let (mean_std_diff, max_std_diff) =
-        finite_abs_mean_max(covariates.iter().map(|c| c.std_diff));
+    let (mean_std_diff, max_std_diff) = finite_abs_mean_max(covariates.iter().map(|c| c.std_diff));
 
     WeightItBalanceTable {
         covariates,
@@ -3222,13 +3221,17 @@ mod tests {
         let (upper, k) = trim_weights(&w, &treated, WeightEstimand::ATT, 0.8, false);
         assert_eq!(
             upper,
-            [0.1, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0]
+            [
+                0.1, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0
+            ]
         );
         assert_eq!(k, 2);
         let (both, k) = trim_weights(&w, &treated, WeightEstimand::ATT, 0.8, true);
         assert_eq!(
             both,
-            [0.2, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0]
+            [
+                0.2, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0
+            ]
         );
         assert_eq!(k, 3);
         // ATC trims the treated and leaves the controls; ATE pools both groups.
@@ -3284,7 +3287,12 @@ mod tests {
                     .map(|(w, _)| w)
                     .sum()
             };
-            let smd: Vec<f64> = r.balance_after.covariates.iter().map(|c| c.std_diff).collect();
+            let smd: Vec<f64> = r
+                .balance_after
+                .covariates
+                .iter()
+                .map(|c| c.std_diff)
+                .collect();
             check
                 .vector(&key("weights_head"), &r.weights[..12], Tol::coef(n))
                 .scalar(&key("max"), r.max_weight, Tol::coef(n))
@@ -3310,8 +3318,10 @@ mod tests {
                 );
             }
             assert!(
-                r.warnings.iter().any(|w| w.contains("WeightIt::trim")
-                    && w.contains(&format!("{changed} changed"))),
+                r.warnings
+                    .iter()
+                    .any(|w| w.contains("WeightIt::trim")
+                        && w.contains(&format!("{changed} changed"))),
                 "{tag}: {:?}",
                 r.warnings
             );

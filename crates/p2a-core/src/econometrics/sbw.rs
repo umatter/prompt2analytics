@@ -2054,16 +2054,28 @@ mod tests {
             let sd = case.vector(key);
             let b = &r.balance_before;
             for j in 0..3 {
-                let (p, d) = (b.std_diff[j] * sd[j], b.mean_target[j] - b.mean_reweighted[j]);
+                let (p, d) = (
+                    b.std_diff[j] * sd[j],
+                    b.mean_target[j] - b.mean_reweighted[j],
+                );
                 assert!(Tol::coef(n).allows(p, d), "{est:?} before {j}: {p} vs {d}");
             }
             let a = &r.balance_after;
             for j in 0..3 {
-                let (p, d) = (a.std_diff[j] * sd[j], a.mean_target[j] - a.mean_reweighted[j]);
+                let (p, d) = (
+                    a.std_diff[j] * sd[j],
+                    a.mean_target[j] - a.mean_reweighted[j],
+                );
                 assert!((p - d).abs() <= 1e-12, "{est:?} after {j}: {p} vs {d}");
-                assert!(a.std_diff[j].abs() < 1e-10, "{est:?} after {j}: exact balance");
+                assert!(
+                    a.std_diff[j].abs() < 1e-10,
+                    "{est:?} after {j}: exact balance"
+                );
             }
-            assert!(b.var_ratio[2].is_nan() && a.var_ratio[2].is_nan(), "binary x3");
+            assert!(
+                b.var_ratio[2].is_nan() && a.var_ratio[2].is_nan(),
+                "binary x3"
+            );
         }
     }
 
@@ -2943,13 +2955,8 @@ mod tests {
         let x_all = ndarray::concatenate![Axis(0), x_target, x_reweight];
         let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         let scale = BalanceScale::new(&x_all.view(), &d.view(), SBWEstimand::ATT);
-        let stats = compute_balance_stats(
-            &x_target.view(),
-            &x_reweight.view(),
-            &names,
-            None,
-            &scale,
-        );
+        let stats =
+            compute_balance_stats(&x_target.view(), &x_reweight.view(), &names, None, &scale);
 
         // Target has higher means, so std_diff should be positive
         assert!(stats.std_diff[0] > 0.0);
