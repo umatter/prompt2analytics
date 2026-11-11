@@ -1156,6 +1156,127 @@ async fn settings_require_a_live_session() {
     );
 }
 
+/// The desktop client's copy of a stored tool call (`p2a-dioxus`
+/// `api::types::PersistedToolCall`): every id and timestamp a string.
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+struct ClientToolCall {
+    id: String,
+    message_id: String,
+    conversation_id: String,
+    tool_name: String,
+    arguments: String,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    status: String,
+    started_at: String,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<i32>,
+}
+
+fn sorted_keys(v: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+fn assert_utc_rfc3339(v: &Value) {
+    let s = v
+        .as_str()
+        .unwrap_or_else(|| panic!("a string timestamp, got {v}"));
+    assert!(s.ends_with('Z'), "{s}");
+    chrono::DateTime::parse_from_rfc3339(s).unwrap_or_else(|e| panic!("{s}: {e}"));
+}
+
+/// Settings and stored tool calls answer plain string ids and timestamps, as
+/// every other conversation route does, never the store's record objects.
+#[tokio::test]
+async fn settings_and_tool_calls_answer_plain_ids() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let conv = new_conversation(&r, &sid, "tools").await;
+    let (st, body) = add_msg(&r, &sid, &conv, "run it").await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let msg = body["data"]["id"].as_str().unwrap().to_string();
+    let created = pm(&state)
+        .db()
+        .create_tool_call(&p2a_mcp::db::ToolCall::new(
+            msg.clone(),
+            conv.clone(),
+            "list_datasets".to_string(),
+            "{}".to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let settings_keys = [
+        "base_url",
+        "id",
+        "max_tokens",
+        "model",
+        "provider",
+        "session_id",
+        "system_prompt",
+        "temperature",
+        "updated_at",
+    ];
+    let uri = format!("/api/sessions/{sid}/settings");
+    let (st, got) = call(&r, "GET", &uri, Some(&sid), None).await;
+    assert_eq!(st, StatusCode::OK, "{got}");
+    let (st, put) = call(
+        &r,
+        "PUT",
+        &uri,
+        Some(&sid),
+        Some(json!({"provider": "openai", "model": "gpt-4o-mini"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{put}");
+    for data in [&got["data"], &put["data"]] {
+        assert_eq!(data["id"], json!(sid), "{data}");
+        assert_eq!(sorted_keys(data), settings_keys, "{data}");
+        assert_utc_rfc3339(&data["updated_at"]);
+    }
+    assert_eq!(put["data"]["provider"], "openai");
+    assert_eq!(put["data"]["model"], "gpt-4o-mini");
+
+    let call_keys = [
+        "arguments",
+        "completed_at",
+        "conversation_id",
+        "duration_ms",
+        "error",
+        "id",
+        "message_id",
+        "result",
+        "started_at",
+        "status",
+        "tool_name",
+    ];
+    for uri in [
+        format!("/api/conversations/{conv}/tool-calls"),
+        format!("/api/messages/{msg}/tool-calls"),
+    ] {
+        let (st, body) = call(&r, "GET", &uri, Some(&sid), None).await;
+        assert_eq!(st, StatusCode::OK, "{uri}: {body}");
+        let items = body["data"].as_array().expect("a list");
+        assert_eq!(items.len(), 1, "{body}");
+        let item = &items[0];
+        assert_eq!(item["id"], json!(created.id_string()), "{item}");
+        assert_eq!(sorted_keys(item), call_keys, "{item}");
+        assert_eq!(item["status"], "pending");
+        assert_eq!(item["message_id"], json!(msg));
+        assert_utc_rfc3339(&item["started_at"]);
+        let parsed: ClientToolCall = serde_json::from_value(item.clone())
+            .unwrap_or_else(|e| panic!("the desktop client cannot read {item}: {e}"));
+        assert_eq!(parsed.id, created.id_string());
+    }
+}
+
 // =============================================================================
 // Task 3: bounded persistence and deletion when a session ends (MCP-7)
 // =============================================================================
