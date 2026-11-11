@@ -2369,7 +2369,7 @@ fn star_sets(
 
 /// MatchIt's weighted variance (`col_w_var`): weights normalised to sum 1, `m (1 - m)` for a
 /// binary variable, else `sum w (x - m)^2 / (1 - sum w^2)`.
-fn wvar(x: &[f64], w: &[f64], bin: bool) -> f64 {
+pub(crate) fn wvar(x: &[f64], w: &[f64], bin: bool) -> f64 {
     let sw: f64 = w.iter().sum();
     let mut m = 0.0;
     let mut sw2 = 0.0;
