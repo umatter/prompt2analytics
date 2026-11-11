@@ -679,9 +679,9 @@ fn stop_label(m: StopMethod) -> &'static str {
 
 /// Run twang GBM propensity score estimation.
 ///
-/// This function estimates propensity scores using gradient boosted stumps
-/// and automatically selects the optimal number of iterations based on
-/// covariate balance.
+/// This function estimates propensity scores by gbm's Bernoulli boosting (trees of
+/// `interaction_depth` splits, Newton leaf values) and selects the iteration that minimises
+/// the balance criterion of `stop_method` over every evaluated iteration.
 ///
 /// # Arguments
 ///
