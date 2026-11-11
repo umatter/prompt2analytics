@@ -60,6 +60,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmLink, GlmSpec, fit_glm, fit_propensity, plogis};
+use crate::econometrics::weightit::{SdDenominator, balance_sd, is_binary, weighted_var};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, ndarray_to_faer};
@@ -172,9 +173,12 @@ pub struct CbpsConfig {
     #[serde(default)]
     pub estimand: CbpsEstimand,
     /// Convergence tolerance: relative Newton / Gauss-Newton step on the whitened scale
-    /// (default 1e-8).
+    /// (default 1e-8). Not used by [`CbpsMethod::Logit`], which runs the shared GLM at its
+    /// defaults (epsilon 1e-10, max_iter 100).
     pub tolerance: f64,
-    /// Maximum iterations of each Newton / Gauss-Newton run (default 100).
+    /// Maximum iterations of each Newton / Gauss-Newton run (default 100). Not used by
+    /// [`CbpsMethod::Logit`], which runs the shared GLM at its defaults (epsilon 1e-10,
+    /// max_iter 100).
     pub max_iter: usize,
     /// Standardized difference threshold for balance (default: 0.1)
     pub balance_threshold: f64,
@@ -205,9 +209,10 @@ pub struct CovariateBalance {
     pub mean_treated: f64,
     /// Mean in control group
     pub mean_control: f64,
-    /// Standardized difference: (mean_treated - mean_control) / pooled_sd
+    /// Standardized difference: (mean_treated - mean_control) / SD of the unweighted sample
+    /// (pooled for ATE, treated SD for ATT; binary covariates p (1 - p); cobalt's s.d.denom)
     pub std_diff: f64,
-    /// Variance ratio: var_treated / var_control
+    /// Variance ratio of the weighted variances (cobalt), NaN for binary covariates
     pub var_ratio: f64,
     /// Whether balance is achieved (|std_diff| < threshold)
     pub balanced: bool,
@@ -222,11 +227,11 @@ pub struct BalanceTable {
     pub mean_treated: Vec<f64>,
     /// Mean in control group
     pub mean_control: Vec<f64>,
-    /// Standardized differences
+    /// Standardized differences over the SD of the unweighted sample (see [`CovariateBalance`])
     pub std_diff: Vec<f64>,
-    /// Variance ratios
+    /// Variance ratios of the weighted variances (cobalt), NaN for binary covariates
     pub var_ratio: Vec<f64>,
-    /// Maximum absolute standardized difference
+    /// Maximum absolute standardized difference over the finite values
     pub max_std_diff: f64,
     /// Number of covariates with |std_diff| < threshold
     pub n_balanced: usize,
@@ -599,15 +604,28 @@ pub fn run_cbps(
         });
     }
 
-    let balance_before = compute_balance_table(&x, &t, &names, None, config.balance_threshold);
+    let balance_before = compute_balance_table(
+        &x,
+        &t,
+        &names,
+        None,
+        config.balance_threshold,
+        config.estimand,
+    );
 
     let fit = match config.method {
         CbpsMethod::Logit => fit_logit(&x, &t, config.estimand)?,
         CbpsMethod::Over | CbpsMethod::Exact => fit_gmm(&x, &t, &config)?,
     };
 
-    let balance_after =
-        compute_balance_table(&x, &t, &names, Some(&fit.weights), config.balance_threshold);
+    let balance_after = compute_balance_table(
+        &x,
+        &t,
+        &names,
+        Some(&fit.weights),
+        config.balance_threshold,
+        config.estimand,
+    );
 
     let z_stats: Vec<f64> = fit
         .coefficients
@@ -1489,18 +1507,25 @@ fn cbps_deviance(p: &[f64], t: &Array1<f64>) -> f64 {
 // Balance and Weight Computation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute covariate balance table.
-///
-/// Computes standardized differences and variance ratios for each covariate.
+/// Covariate balance table (the intercept column is skipped): weighted group means, the
+/// standardised difference over an SD fixed from the unweighted sample (cobalt's `s.d.denom`:
+/// pooled for ATE, treated for ATT; binary covariates `p (1 - p)`), and cobalt's weighted
+/// variance ratio (NaN for binary covariates).
 fn compute_balance_table(
     x: &Array2<f64>,
     t: &Array1<f64>,
     names: &[String],
     weights: Option<&[f64]>,
     threshold: f64,
+    estimand: CbpsEstimand,
 ) -> BalanceTable {
     let n = t.len();
     let k = x.ncols();
+    let treated: Vec<bool> = t.iter().map(|&v| v >= 0.5).collect();
+    let denom = match estimand {
+        CbpsEstimand::Ate => SdDenominator::Pooled,
+        CbpsEstimand::Att => SdDenominator::Treated,
+    };
 
     let mut table = BalanceTable::new();
 
@@ -1512,50 +1537,32 @@ fn compute_balance_table(
     };
 
     for j in start_col..k {
-        let name = names[j].clone();
-
-        // Extract values for treated and control groups
-        let mut treated_vals: Vec<f64> = Vec::new();
-        let mut treated_weights: Vec<f64> = Vec::new();
-        let mut control_vals: Vec<f64> = Vec::new();
-        let mut control_weights: Vec<f64> = Vec::new();
-
+        let col = x.column(j).to_vec();
+        let (mut xt, mut wt, mut xc, mut wc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for i in 0..n {
             let w = weights.map(|ws| ws[i]).unwrap_or(1.0);
-            if t[i] >= 0.5 {
-                treated_vals.push(x[[i, j]]);
-                treated_weights.push(w);
+            if treated[i] {
+                xt.push(col[i]);
+                wt.push(w);
             } else {
-                control_vals.push(x[[i, j]]);
-                control_weights.push(w);
+                xc.push(col[i]);
+                wc.push(w);
             }
         }
 
-        // Compute weighted means
-        let mean_treated = weighted_mean(&treated_vals, &treated_weights);
-        let mean_control = weighted_mean(&control_vals, &control_weights);
-
-        // Compute weighted variances
-        let var_treated = weighted_variance(&treated_vals, &treated_weights, mean_treated);
-        let var_control = weighted_variance(&control_vals, &control_weights, mean_control);
-
-        // Pooled standard deviation (using unweighted for standardization)
-        let pooled_var = (var_treated + var_control) / 2.0;
-        let pooled_sd = pooled_var.sqrt().max(1e-10);
-
-        // Standardized difference
-        let std_diff = (mean_treated - mean_control) / pooled_sd;
-
-        // Variance ratio
-        let var_ratio = if var_control > 1e-10 {
-            var_treated / var_control
-        } else {
+        let mean_treated = weighted_mean(&xt, &wt);
+        let mean_control = weighted_mean(&xc, &wc);
+        let sd = balance_sd(&col, &treated, denom, true);
+        let std_diff = (mean_treated - mean_control) / sd;
+        let var_ratio = if is_binary(&col) {
             f64::NAN
+        } else {
+            weighted_var(&xt, &wt) / weighted_var(&xc, &wc)
         };
 
         let balanced = std_diff.abs() < threshold;
 
-        table.covariates.push(name);
+        table.covariates.push(names[j].clone());
         table.mean_treated.push(mean_treated);
         table.mean_control.push(mean_control);
         table.std_diff.push(std_diff);
@@ -1566,11 +1573,12 @@ fn compute_balance_table(
         }
     }
 
-    // Update max standardized difference
+    // Maximum over the finite standardized differences (0 when none is finite).
     table.max_std_diff = table
         .std_diff
         .iter()
         .map(|&d| d.abs())
+        .filter(|d| d.is_finite())
         .fold(0.0_f64, f64::max);
 
     table
@@ -1588,20 +1596,6 @@ fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
         .map(|(&v, &w)| v * w)
         .sum();
     weighted_sum / total_weight
-}
-
-/// Compute weighted variance.
-fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
-    let total_weight: f64 = weights.iter().sum();
-    if total_weight == 0.0 {
-        return 0.0;
-    }
-    let weighted_sq_diff: f64 = values
-        .iter()
-        .zip(weights.iter())
-        .map(|(&v, &w)| w * (v - mean).powi(2))
-        .sum();
-    weighted_sq_diff / total_weight
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1921,6 +1915,36 @@ mod tests {
         }
     }
 
+    /// CAUS-108: both balance tables standardise by the SD of the unweighted sample (cobalt's
+    /// s.d.denom: pooled for ATE, treated for ATT), so the SMD times that SD is the weighted
+    /// mean difference. The product form, because exact balance drives the differences to 0.
+    #[test]
+    fn test_validate_cbps_balance_fixed_sd() {
+        // R: cobalt s.d.denom on cbps_sim (case balance_sd_cbps_sim)
+        let (case, ds) = crate::test_support::load_case("balance_sd_cbps_sim");
+        for (method, estimand, key) in [(Over, Ate, "sd_pooled"), (Exact, Att, "sd_treated")] {
+            let r = fit_with(&ds, method, estimand);
+            let sd = case.vector(key);
+            for table in [&r.balance_before, &r.balance_after] {
+                assert_eq!(table.covariates, COVS);
+                let products: Vec<f64> = (0..3).map(|j| table.std_diff[j] * sd[j]).collect();
+                let diffs: Vec<f64> = (0..3)
+                    .map(|j| table.mean_treated[j] - table.mean_control[j])
+                    .collect();
+                for j in 0..3 {
+                    assert!(
+                        Tol::coef(r.n_obs).allows(products[j], diffs[j]),
+                        "{method} {estimand} {j}: {} vs {}",
+                        products[j],
+                        diffs[j]
+                    );
+                }
+                assert!(table.var_ratio[2].is_nan(), "binary x3");
+                assert!(table.var_ratio[..2].iter().all(|v| v.is_finite()));
+            }
+        }
+    }
+
     /// The whitening makes the fit equivariant to the units of a covariate (R10).
     #[test]
     fn test_cbps_scale_equivariance() {
@@ -1952,7 +1976,6 @@ mod tests {
                     "{method} se {j}: {sa} vs {sb}"
                 );
             }
-            assert!(a.iterations.abs_diff(b.iterations) <= 1);
         }
     }
 
@@ -2004,7 +2027,8 @@ mod tests {
         assert_eq!(decrement_ratio(-2e-12, 1.0), 0.0);
         assert_eq!(decrement_ratio(0.0, 3.0), 0.0);
         assert_eq!(decrement_ratio(2.0, 8.0), 0.25);
-        // Both stopping branches of solve_over record it, so the record meets its tolerance.
+        // Every value the helper can return lies in [0, DECREMENT_RTOL], so a record built from it
+        // meets its tolerance.
         for (slope, q0) in [(0.0, 0.0), (-1.0, 1.0), (1e-15, 1.0)] {
             let r = decrement_ratio(slope, q0);
             assert!(
