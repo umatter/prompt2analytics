@@ -144,7 +144,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::weightit::{
-    SdDenominator, balance_sd, finite_abs_mean_max, group_mean_var, is_binary,
+    BalanceScale, SdDenominator, finite_abs_mean_max, group_mean_var,
 };
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -734,7 +734,7 @@ pub(crate) fn run_sbw_inner(
 
     // Balance before and after weighting ("target" = the treated for ATT and ATE), with the
     // SMD denominators fixed from the unweighted sample (cobalt's s.d.denom).
-    let scale = BalanceScale::new(covariates, treatment, config.estimand);
+    let scale = balance_scale(covariates, treatment, config.estimand);
     let (balance_before, balance_after) = match config.estimand {
         SBWEstimand::ATT => (
             compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, None, &scale),
@@ -1622,26 +1622,18 @@ fn compute_constraint_violation(
 /// Per-covariate SMD denominators from the unweighted sample (treated SD for ATT, control SD
 /// for ATC, pooled for ATE; binary covariates `p (1 - p)`, cobalt's s.d.denom) and which
 /// covariates are binary (their variance ratio is NaN).
-struct BalanceScale {
-    sd: Vec<f64>,
-    binary: Vec<bool>,
-}
-
-impl BalanceScale {
-    fn new(covariates: &ArrayView2<f64>, treatment: &ArrayView1<f64>, est: SBWEstimand) -> Self {
-        let treated: Vec<bool> = treatment.iter().map(|&v| v >= 0.5).collect();
-        let denom = match est {
-            SBWEstimand::ATT => SdDenominator::Treated,
-            SBWEstimand::ATC => SdDenominator::Control,
-            SBWEstimand::ATE => SdDenominator::Pooled,
-        };
-        let (mut sd, mut binary) = (Vec::new(), Vec::new());
-        for col in covariates.columns() {
-            sd.push(balance_sd(col, &treated, denom, true));
-            binary.push(is_binary(col));
-        }
-        Self { sd, binary }
-    }
+fn balance_scale(
+    covariates: &ArrayView2<f64>,
+    treatment: &ArrayView1<f64>,
+    est: SBWEstimand,
+) -> BalanceScale {
+    let treated: Vec<bool> = treatment.iter().map(|&v| v >= 0.5).collect();
+    let denom = match est {
+        SBWEstimand::ATT => SdDenominator::Treated,
+        SBWEstimand::ATC => SdDenominator::Control,
+        SBWEstimand::ATE => SdDenominator::Pooled,
+    };
+    BalanceScale::new(covariates.view(), &treated, denom)
 }
 
 /// Compute balance statistics of a reweighted group against an unweighted target group.
@@ -2938,7 +2930,7 @@ mod tests {
 
         let x_all = ndarray::concatenate![Axis(0), x_target, x_reweight];
         let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
-        let scale = BalanceScale::new(&x_all.view(), &d.view(), SBWEstimand::ATT);
+        let scale = balance_scale(&x_all.view(), &d.view(), SBWEstimand::ATT);
         let stats =
             compute_balance_stats(&x_target.view(), &x_reweight.view(), &names, None, &scale);
 

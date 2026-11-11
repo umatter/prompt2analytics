@@ -60,7 +60,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmLink, GlmSpec, fit_glm, fit_propensity, plogis};
-use crate::econometrics::weightit::{SdDenominator, balance_sd, group_mean_var, is_binary};
+use crate::econometrics::weightit::{SdDenominator, balance_sd, is_binary, two_group_mean_var};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, ndarray_to_faer};
@@ -1538,8 +1538,8 @@ fn compute_balance_table(
 
     for j in start_col..k {
         let col = x.column(j);
-        let (mean_treated, var_t) = group_mean_var(col, weights, |i| treated[i]);
-        let (mean_control, var_c) = group_mean_var(col, weights, |i| !treated[i]);
+        let [(mean_treated, var_t), (mean_control, var_c)] =
+            two_group_mean_var(col, weights, &treated);
         let sd = balance_sd(col, &treated, denom, true);
         let std_diff = (mean_treated - mean_control) / sd;
         let var_ratio = if is_binary(col) {

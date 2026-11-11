@@ -604,8 +604,10 @@ pub fn weightit(
     let var_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
     let x_bal = covariates_only(&x, config.intercept);
 
-    // Compute balance before weighting
-    let balance_before = compute_balance_table(&x_bal, &d, &var_names, None, config.estimand);
+    // Compute balance before weighting; the SMD denominators are fixed from this sample.
+    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+    let scale = BalanceScale::new(x_bal.view(), &treated, config.estimand.sd_denominator());
+    let balance_before = compute_balance_table(&x_bal, &d, &var_names, None, &scale);
 
     // Compute weights based on method
     let mut convergence = None;
@@ -735,7 +737,6 @@ pub fn weightit(
 
     // Apply weight trimming if requested
     let weights = if config.trim_quantile < 1.0 {
-        let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
         let (trimmed, changed) = trim_weights(
             &weights,
             &treated,
@@ -764,8 +765,7 @@ pub fn weightit(
     };
 
     // Compute balance after weighting
-    let balance_after =
-        compute_balance_table(&x_bal, &d, &var_names, Some(&weights), config.estimand);
+    let balance_after = compute_balance_table(&x_bal, &d, &var_names, Some(&weights), &scale);
 
     // Compute effective sample sizes
     let (ess_total, ess_treated, ess_control) = compute_ess(&weights, &d);
@@ -936,7 +936,9 @@ pub fn entropy_balance_with(
         }
     }
 
-    let balance = compute_balance_table(&x, &d, &names, Some(&weights), config.estimand);
+    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+    let scale = BalanceScale::new(x.view(), &treated, config.estimand.sd_denominator());
+    let balance = compute_balance_table(&x, &d, &names, Some(&weights), &scale);
     let (_, ess_treated, ess_control) = compute_ess(&weights, &d);
     let reweighted = |i: usize| match config.estimand {
         WeightEstimand::ATT => d[i] < 0.5,
@@ -2183,6 +2185,45 @@ pub(crate) fn group_mean_var(
     (mean, (ss / sw) / (1.0 - sw2 / (sw * sw)))
 }
 
+/// [`group_mean_var`] of the treated (`[0]`) and the control (`[1]`) units, fused into the
+/// same two passes.
+pub(crate) fn two_group_mean_var(
+    x: ArrayView1<f64>,
+    w: Option<&[f64]>,
+    treated: &[bool],
+) -> [(f64, f64); 2] {
+    let weight = |i: usize| w.map_or(1.0, |w| w[i]);
+    let group = |i: usize| usize::from(!treated[i]);
+    let (mut sw, mut swx, mut sw2, mut positive) = ([0.0; 2], [0.0; 2], [0.0; 2], [0usize; 2]);
+    for (i, &xi) in x.iter().enumerate() {
+        let (g, wi) = (group(i), weight(i));
+        sw[g] += wi;
+        swx[g] += wi * xi;
+        sw2[g] += wi * wi;
+        positive[g] += usize::from(wi > 0.0);
+    }
+    let mean = [0, 1].map(|g| {
+        if sw[g] > 0.0 {
+            swx[g] / sw[g]
+        } else {
+            f64::NAN
+        }
+    });
+    let mut ss = [0.0; 2];
+    for (i, &xi) in x.iter().enumerate() {
+        let g = group(i);
+        ss[g] += weight(i) * (xi - mean[g]) * (xi - mean[g]);
+    }
+    [0, 1].map(|g| {
+        let var = if positive[g] < 2 {
+            f64::NAN
+        } else {
+            (ss[g] / sw[g]) / (1.0 - sw2[g] / (sw[g] * sw[g]))
+        };
+        (mean[g], var)
+    })
+}
+
 /// cobalt's weighted variance of `x` with weights `w` (see [`group_mean_var`]). NaN for fewer
 /// than two positive weights.
 pub(crate) fn weighted_var(x: &[f64], w: &[f64]) -> f64 {
@@ -2200,36 +2241,42 @@ pub(crate) fn balance_sd<'a>(
 ) -> f64 {
     let col = col.into();
     let bin = binary_as_proportion && is_binary(col);
-    let var_of = |pick: Option<bool>| -> f64 {
-        let keep = |i: usize| pick.is_none_or(|p| p == treated[i]);
-        if bin {
-            // p (1 - p) from the exact count of ones
-            let (mut ones, mut count) = (0.0, 0usize);
-            for (i, &v) in col.iter().enumerate() {
-                if keep(i) {
-                    ones += v;
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                return f64::NAN;
-            }
-            let p = ones / count as f64;
-            return p * (1.0 - p);
+    // p (1 - p) from the unit-weight mean (the exact share of ones), else the n - 1 variance
+    let var = |(mean, var): (f64, f64)| if bin { mean * (1.0 - mean) } else { var };
+    let var = if denom == SdDenominator::All {
+        var(group_mean_var(col, None, |_| true))
+    } else {
+        let [t, c] = two_group_mean_var(col, None, treated);
+        match denom {
+            SdDenominator::Treated => var(t),
+            SdDenominator::Control => var(c),
+            _ => (var(t) + var(c)) / 2.0,
         }
-        group_mean_var(col, None, keep).1
-    };
-    let var = match denom {
-        SdDenominator::Treated => var_of(Some(true)),
-        SdDenominator::Control => var_of(Some(false)),
-        SdDenominator::Pooled => (var_of(Some(true)) + var_of(Some(false))) / 2.0,
-        SdDenominator::All => var_of(None),
     };
     let sd = var.sqrt();
     if sd.is_finite() && sd > 0.0 {
         sd
     } else {
         f64::NAN
+    }
+}
+
+/// Per-covariate SMD denominators ([`balance_sd`] with binary covariates as proportions) and
+/// which covariates are binary (their variance ratio is NaN), computed once per sample and
+/// shared by the tables before and after weighting.
+pub(crate) struct BalanceScale {
+    pub(crate) sd: Vec<f64>,
+    pub(crate) binary: Vec<bool>,
+}
+
+impl BalanceScale {
+    pub(crate) fn new(x: ArrayView2<f64>, treated: &[bool], denom: SdDenominator) -> Self {
+        let (sd, binary) = x
+            .columns()
+            .into_iter()
+            .map(|col| (balance_sd(col, treated, denom, true), is_binary(col)))
+            .unzip();
+        Self { sd, binary }
     }
 }
 
@@ -2249,25 +2296,24 @@ pub(crate) fn finite_abs_mean_max(values: impl Iterator<Item = f64>) -> (f64, f6
 }
 
 /// Balance table over the covariate columns of `x` (no intercept column): weighted group
-/// means, the SMD over an SD fixed from the unweighted sample (cobalt's `s.d.denom` for the
-/// estimand, binary covariates `p (1 - p)`), and cobalt's weighted variance ratio (NaN for
-/// binary covariates).
+/// means, the SMD over the SD `scale` fixes from the unweighted sample (cobalt's `s.d.denom`
+/// for the estimand, binary covariates `p (1 - p)`), and cobalt's weighted variance ratio (NaN
+/// for binary covariates).
 fn compute_balance_table(
     x: &Array2<f64>,
     d: &Array1<f64>,
     var_names: &[String],
     weights: Option<&[f64]>,
-    estimand: WeightEstimand,
+    scale: &BalanceScale,
 ) -> WeightItBalanceTable {
     let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
 
     let covariates: Vec<WeightItCovariateBalance> = (0..x.ncols())
         .map(|j| {
-            let col = x.column(j);
-            let (mean_t, var_t) = group_mean_var(col, weights, |i| treated[i]);
-            let (mean_c, var_c) = group_mean_var(col, weights, |i| !treated[i]);
-            let sd = balance_sd(col, &treated, estimand.sd_denominator(), true);
-            let var_ratio = if is_binary(col) {
+            let [(mean_t, var_t), (mean_c, var_c)] =
+                two_group_mean_var(x.column(j), weights, &treated);
+            let sd = scale.sd[j];
+            let var_ratio = if scale.binary[j] {
                 f64::NAN
             } else {
                 var_t / var_c
@@ -3198,6 +3244,15 @@ mod tests {
         close(weighted_var(&x, &w3), weighted_var(&x, &w));
         close(weighted_var(&x, &[1.0; 6]), va);
         assert!(weighted_var(&x, &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]).is_nan());
+        // The fused two-group moments equal the per-group ones, interleaved groups included.
+        let ti = [true, false, true, false, false, true];
+        let [mt, mc] = two_group_mean_var(ArrayView1::from(&x), Some(&w), &ti);
+        let xv = ArrayView1::from(&x);
+        for (got, keep) in [(mt, true), (mc, false)] {
+            let want = group_mean_var(xv, Some(&w), |i| ti[i] == keep);
+            close(got.0, want.0);
+            close(got.1, want.1);
+        }
     }
 
     #[test]
@@ -3212,7 +3267,9 @@ mod tests {
         let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         let var_names = vec!["x1".to_string(), "x2".to_string()];
 
-        let balance = compute_balance_table(&x, &d, &var_names, None, WeightEstimand::ATE);
+        let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+        let scale = BalanceScale::new(x.view(), &treated, SdDenominator::Pooled);
+        let balance = compute_balance_table(&x, &d, &var_names, None, &scale);
 
         // Treated has higher means
         assert!(balance.covariates[0].mean_treated > balance.covariates[0].mean_control);
