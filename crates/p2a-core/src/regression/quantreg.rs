@@ -398,7 +398,8 @@ fn validate_config(config: &QuantRegConfig) -> EconResult<()> {
 /// The fit is `config.algorithm`'s (the simplex by default up to 5000 rows), the standard
 /// errors are summary.rq's `config.se`. A singular design is an error, as in `rq`. When the
 /// standard errors cannot be computed (too few observations for the iid sparsity estimate, a
-/// singular density-weighted design), the coefficients are kept, the standard errors, t, p and
+/// singular density-weighted design, a ker kernel bandwidth that is zero or undefined), the
+/// coefficients are kept, the standard errors, t, p and
 /// intervals are NaN and a warning says why (R's `rq` succeeds and its `summary.rq` stops).
 ///
 /// # Example
@@ -1355,7 +1356,8 @@ fn density_sandwich(
 /// summary.rq's fuzz `eps = sqrt(.Machine$double.eps)` is multiplied by `mean |y -
 /// median(y)|` so that the iid and nid standard errors are scale-equivariant. Errors:
 /// `InsufficientData` (iid: fewer than h + pz + 1 observations, where R stops), `SingularMatrix`
-/// (a singular density-weighted design).
+/// (a singular density-weighted design; ker: a kernel bandwidth that is zero, because at least
+/// half the residuals are tied, or undefined, because tau ± h leaves (0, 1)).
 pub fn rq_se(
     x: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
@@ -1459,13 +1461,32 @@ pub fn rq_se(
             sorted.sort_by(f64::total_cmp);
             let iqr = quantile_sorted(&sorted, 0.75, QuantileType::T7)
                 - quantile_sorted(&sorted, 0.25, QuantileType::T7);
-            let hk = (normal_quantile(tau + h)? - normal_quantile(tau - h)?) * sd.min(iqr / 1.34);
-            if !(hk.is_finite() && hk > 0.0) {
+            // tau ± h must lie inside (0, 1) for the normal quantiles; outside it (tau close
+            // to 0 or 1 at a small n) the kernel bandwidth is not defined
+            if !(tau - h > 0.0 && tau + h < 1.0) {
                 return Err(EconError::SingularMatrix {
                     context: format!(
-                        "ker standard errors: Powell's kernel bandwidth is {hk} because the \
-                         residual scale min(sd, IQR / 1.34) is 0 (at least half the residuals \
-                         are tied)"
+                        "ker standard errors: Powell's kernel bandwidth is not defined because \
+                         tau ± h = {:.4} .. {:.4} (Hall-Sheather h = {h:.4}) leaves (0, 1)",
+                        tau - h,
+                        tau + h
+                    ),
+                    suggestion: "use se = nid, se = iid or se = boot".into(),
+                });
+            }
+            let scale = sd.min(iqr / 1.34);
+            let hk = (normal_quantile(tau + h)? - normal_quantile(tau - h)?) * scale;
+            if !(hk.is_finite() && hk > 0.0) {
+                let cause = if scale > 0.0 {
+                    "the bandwidth is zero or not finite".to_string()
+                } else {
+                    "the residual scale min(sd, IQR / 1.34) is 0 (at least half the residuals \
+                     are tied)"
+                        .to_string()
+                };
+                return Err(EconError::SingularMatrix {
+                    context: format!(
+                        "ker standard errors: Powell's kernel bandwidth is {hk} because {cause}"
                     ),
                     suggestion: "use se = nid, se = iid or se = boot".into(),
                 });
@@ -1842,6 +1863,7 @@ mod tests {
         let n = case.scalar("n_obs") as usize;
         let mut check = Check::new(&case);
         let mut slopes = Vec::new();
+        let mut median_fit = None;
         for (tau, tag) in [(0.25, "tau25"), (0.5, "tau50"), (0.75, "tau75")] {
             let r = run_quantreg(&ds, "y", &["x"], tau).unwrap();
             let key = format!("objective_{tag}");
@@ -1883,13 +1905,15 @@ mod tests {
                 Tol::se(n),
             );
             slopes.push(r.coefficients[1].estimate);
+            if tau == 0.5 {
+                median_fit = Some(r);
+            }
         }
-        let r = run_quantreg(&ds, "y", &["x"], 0.5).unwrap();
+        let r = median_fit.unwrap();
         check
             .scalar("rdf", r.df as f64, Tol::exact())
             .scalar("n_obs", r.n_obs as f64, Tol::exact())
             .finish();
-        // kept from the old test
         assert!(
             slopes[0] < slopes[1] && slopes[1] < slopes[2],
             "slopes increase with tau: {slopes:?}"
