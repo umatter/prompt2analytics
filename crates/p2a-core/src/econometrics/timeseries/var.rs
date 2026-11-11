@@ -1,6 +1,7 @@
 //! Vector autoregression VAR(p) by equation-wise OLS ([`run_var`]) and impulse responses ([`compute_irf`], [`run_var_irf`]).
 
-use ndarray::Array2;
+use ndarray::linalg::general_mat_mul;
+use ndarray::{Array2, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -298,7 +299,8 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     };
 
     let mut z = resource::try_zeros2(t, n_regressors, "VAR design")?;
-    let mut y = Array2::zeros((t, k));
+    // The responses are rows lags.. of the data, read in place.
+    let y = data.slice(s![lags.., ..]);
 
     for i in 0..t {
         let t_idx = i + lags;
@@ -312,11 +314,6 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
             for var in 0..k {
                 z[[i, 1 + lag * k + var]] = data[[lag_idx, var]];
             }
-        }
-
-        // Current values (response)
-        for var in 0..k {
-            y[[i, var]] = data[[t_idx, var]];
         }
     }
 
@@ -332,10 +329,13 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
                 .reversed_axes(),
             normal.inverse,
         ),
-        None => var_qr_solve(&z, &y, &coef_names)?,
+        None => var_qr_solve(&z, y, &coef_names)?,
     };
-    // U = Y - Z B' in one matrix product (cheaper than K more passes over the reflectors)
-    let residuals = &y - &z.dot(&coefficients.t());
+    // U = Y - Z B' in one matrix product (cheaper than K more passes over the reflectors),
+    // accumulated into a copy of Y without a temporary for Z B'
+    let mut residuals = resource::try_zeros2(t, k, "VAR residuals")?;
+    residuals.assign(&y);
+    general_mat_mul(-1.0, &z, &coefficients.t(), 1.0, &mut residuals);
 
     // Residual covariances: U'U / (T - K p - 1) for the SEs and the orthogonalised IRF
     // (vars' summary()$covres, ECON-90), U'U / T for the likelihood.
@@ -399,7 +399,7 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
 /// `(Z'Z)^{-1}`, or `SingularMatrix` naming the aliased lags when Z is rank-deficient.
 fn var_qr_solve(
     z: &Array2<f64>,
-    y: &Array2<f64>,
+    y: ArrayView2<'_, f64>,
     coef_names: &[String],
 ) -> EconResult<(Array2<f64>, Array2<f64>)> {
     let (k, n_regressors) = (y.ncols(), z.ncols());
@@ -703,7 +703,7 @@ mod tests {
                 normal_equations_inverse(z.view()).unwrap().is_some(),
                 "n = {n}, K = {k}, p = {p}: the design must take the normal equations"
             );
-            let (b_qr, u_qr) = var_qr_solve(&z, &y, &var_coef_names(&names, p)).unwrap();
+            let (b_qr, u_qr) = var_qr_solve(&z, y.view(), &var_coef_names(&names, p)).unwrap();
             let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-300);
             for eq in 0..k {
                 for j in 0..m {
