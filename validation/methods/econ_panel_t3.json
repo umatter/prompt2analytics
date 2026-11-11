@@ -101,15 +101,10 @@
         "per-unit lags: AIC, SIC, Hall with dfcor FALSE and TRUE (IPS, LLC, Maddala-Wu)",
         "per-unit lags: trend AIC dfcor TRUE, none SIC dfcor TRUE",
         "per-unit ADF t (IPS, Maddala-Wu; the six rules, trend, none)",
-        "IPS W-tbar and p (six rule and dfcor combinations)"
+        "IPS W-tbar and p, LLC z and p (six rule and dfcor combinations)"
       ],
       "tolerance": "lags exact; per-unit t validation/README.md statistics row, n = 480: 1e-6 relative; statistics and p-values 1e-6 relative",
       "deviations": [
-        {
-          "finding": "ECON-41",
-          "quantity": "levinlin_*_stat, levinlin_*_p",
-          "note": "the LLC adjustment uses approximate mu*/sigma* and a different long-run variance"
-        },
         {
           "finding": "ECON-44",
           "quantity": "madwu_*_stat, madwu_*_p, ptrho_*",

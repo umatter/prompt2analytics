@@ -1075,88 +1075,103 @@ fn extract_panels(
 // Levin-Lin-Chu Test
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Levin-Lin-Chu (2002) panel unit root test.
+/// Levin-Lin-Chu (2002) panel unit root test, as `plm::purtest(test = "levinlin")`.
 ///
 /// Tests H0: All panels have a unit root (common ρ = 0)
 /// vs H1: All panels are stationary (common ρ < 0)
 ///
-/// The LLC test assumes a common autoregressive parameter across panels
-/// and is based on a pooled ADF regression with panel-specific intercepts/trends.
+/// Each unit's ADF residuals are normalised by the unit's ADF residual sd, pooled into one
+/// regression whose t is corrected by the ratio of long-run to short-run sd and the mean and
+/// variance adjustments of LLC (2002) Table 2. Needs a balanced panel, as plm.
 fn run_llc_test(
     panels: &[(String, Vec<f64>)],
     model: PanelModel,
     plan: &LagPlan,
     dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    // Step 1: each unit's auxiliary regressions; units that cannot be estimated are skipped.
-    // dfcor enters only Hall's lag choice (plm's lagsel), not the auxiliary residuals.
-    let (units, warnings) = skip_or_propagate(PanelUnitRootTest::LLC, panels, |series| {
+    // Step 1: each unit's auxiliary regressions and ADF residual sd; units that cannot be
+    // estimated are skipped.
+    let (units, mut warnings) = skip_or_propagate(PanelUnitRootTest::LLC, panels, |series| {
         let p = unit_lag(series, plan, model, dfcor)?;
         let (e, v) = compute_llc_residuals(series, model, p)?;
-        Ok((p, e, v))
+        let sigma = llc_unit_sigma(series, &e, &v, model, p, dfcor)?;
+        Ok((p, e, v, sigma))
     })?;
-
-    let mut delta_y_tilde_all: Vec<f64> = Vec::new();
-    let mut y_lag_tilde_all: Vec<f64> = Vec::new();
-    let mut s2_all: Vec<f64> = Vec::with_capacity(units.len());
-    for (_, (_, e, v)) in &units {
-        // Panel-specific variance
-        let s2: f64 = e.iter().map(|ei| ei * ei).sum::<f64>() / e.len() as f64;
-        s2_all.push(s2.max(1e-10));
-
-        // Standardize residuals by sqrt(s2)
-        let s = s2.sqrt().max(1e-10);
-        delta_y_tilde_all.extend(e.iter().map(|ei| ei / s));
-        y_lag_tilde_all.extend(v.iter().map(|vi| vi / s));
-    }
     let used: Vec<usize> = units.iter().map(|(i, _)| *i).collect();
-    let unit_lags: Vec<usize> = units.iter().map(|(_, (p, _, _))| *p).collect();
-    let n = used.len();
-    let avg_t: f64 = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n as f64;
-
-    // Step 2: Pooled regression of standardized residuals
-    // Δ̃y = ρ * ṽ_{t-1} + error
-    let n_obs = delta_y_tilde_all.len();
-    let delta_y_tilde = Array1::from(delta_y_tilde_all);
-    let y_lag_tilde = Array1::from(y_lag_tilde_all);
-
-    // Simple regression: ρ̂ = Σ(ṽ·Δ̃y) / Σ(ṽ²)
-    let sum_vy: f64 = y_lag_tilde
-        .iter()
-        .zip(delta_y_tilde.iter())
-        .map(|(v, d)| v * d)
-        .sum();
-    let sum_vv: f64 = y_lag_tilde.iter().map(|v| v * v).sum();
-
-    if sum_vv.abs() < 1e-10 {
-        return Err(EconError::SingularMatrix {
-            context: "LLC: ṽ'ṽ near zero".to_string(),
-            suggestion: "Check for constant or near-constant series".to_string(),
-        });
+    let unit_lags: Vec<usize> = units.iter().map(|(_, (p, ..))| *p).collect();
+    let lens = used.iter().map(|&i| panels[i].1.len());
+    let (t_min, t_max) = (lens.clone().min().unwrap_or(0), lens.max().unwrap_or(0));
+    if t_min != t_max {
+        return Err(invalid(format!(
+            "the Levin-Lin-Chu test needs a balanced panel (every unit with the same number of \
+             observations, as plm::purtest); the units used have {t_min} to {t_max} \
+             observations; the Im-Pesaran-Shin and Maddala-Wu tests allow unbalanced panels"
+        )));
     }
+    let t_len = t_max;
+    let n = used.len();
+    let nf = n as f64;
 
-    let rho_hat = sum_vy / sum_vv;
+    // Step 2: the ratio of each unit's long-run sd of Δy (Bartlett kernel, q lags) to its
+    // ADF residual sd, averaged.
+    let q_rule = (3.21 * (t_len as f64).powf(1.0 / 3.0)).round_ties_even() as usize;
+    let q = q_rule.min(t_len - 2);
+    if q < q_rule {
+        warnings.push(format!(
+            "Levin-Lin-Chu: the long-run variance's truncation lag is capped at T - 2 = {q} \
+             (round(3.21 T^(1/3)) = {q_rule} exceeds the autocovariances of a series of {t_len})"
+        ));
+    }
+    let mut s_bar = 0.0;
+    for (&i, (_, (_, _, _, sigma))) in used.iter().zip(&units) {
+        resource::checkpoint()?;
+        s_bar += llc_long_run_variance(&panels[i].1, model, q)?.sqrt() / sigma;
+    }
+    s_bar /= nf;
 
-    // Compute standard error
-    let resid: Array1<f64> = &delta_y_tilde - &y_lag_tilde.mapv(|v| v * rho_hat);
-    let s2_resid: f64 = resid.iter().map(|r| r * r).sum::<f64>() / n_obs.saturating_sub(1) as f64;
-    let se_rho = (s2_resid / sum_vv).sqrt();
+    // Step 3: the pooled regression of the normalised residuals, d = e / σ on w = v / σ.
+    let (mut sum_wd, mut sum_ww, mut n_obs) = (0.0, 0.0, 0usize);
+    for (_, (_, e, v, sigma)) in &units {
+        for (ei, vi) in e.iter().zip(v) {
+            let (d, w) = (ei / sigma, vi / sigma);
+            sum_wd += w * d;
+            sum_ww += w * w;
+        }
+        n_obs += e.len();
+    }
+    let rho = sum_wd / sum_ww;
+    let mut rss = 0.0;
+    for (_, (_, e, v, sigma)) in &units {
+        for (ei, vi) in e.iter().zip(v) {
+            let r = ei / sigma - rho * (vi / sigma);
+            rss += r * r;
+        }
+    }
+    let s2 = if dfcor {
+        rss / (n_obs - 1) as f64
+    } else {
+        rss / n_obs as f64
+    };
+    let sd_rho = (s2 / sum_ww).sqrt();
+    let t_rho = rho / sd_rho;
 
-    // Compute t-statistic
-    let t_rho = rho_hat / se_rho.max(1e-10);
-
-    // Step 3: Bias adjustment (simplified)
-    // Use approximate adjustment factors from LLC (2002) tables
-    let (mu_star, sigma_star) = get_llc_adjustment_factors(avg_t, model);
-
-    // Adjusted t-statistic
-    let n_bar_t = n as f64 * avg_t;
-    let s_n_t = (s2_all.iter().sum::<f64>() / n as f64).sqrt();
-
-    // t*_ρ = (t_ρ - N̄T * S_N,T * μ*_m,T / σ̂²) / σ*_m,T
-    let t_star = (t_rho * se_rho - n_bar_t.sqrt() * s_n_t * mu_star) / sigma_star;
-
-    // P-value from standard normal
+    // Step 4: the adjusted t, z = (t_rho - N T~ S_N / σ~² sd(ρ) μ*) / σ*.
+    let mean_lag = unit_lags.iter().sum::<usize>() as f64 / nf;
+    let t_tilde = t_len as f64 - mean_lag - 1.0;
+    let sigma_eps2 = rss / (nf * t_tilde);
+    let (mu_star, sigma_star, edge) = llc_adjustment(t_len, model);
+    match edge {
+        Some(TableEdge::Below) => warnings.push(format!(
+            "Levin-Lin-Chu: T = {t_len} is below the shortest row (T = 25) of the LLC (2002) \
+             Table 2 adjustment; the T = 25 values are used, as plm::purtest does"
+        )),
+        Some(TableEdge::Above) => warnings.push(format!(
+            "Levin-Lin-Chu: T = {t_len} is above the longest row (T = 500) of the LLC (2002) \
+             Table 2 adjustment; the T = 500 values are used, as plm::purtest does"
+        )),
+        None => {}
+    }
+    let t_star = (t_rho - nf * t_tilde * s_bar / sigma_eps2 * sd_rho * mu_star) / sigma_star;
     let p_value = normal_cdf(t_star);
 
     Ok(unit_root_result(
@@ -1173,6 +1188,126 @@ fn run_llc_test(
         unit_lags,
         warnings,
     ))
+}
+
+/// One unit's ADF residual sd from its auxiliary residuals (Frisch-Waugh-Lovell: the ADF
+/// regression's rss is `e'e - (v'e)^2 / v'v`), with `rss/(n - K)` (`dfcor`) or `rss/n`, as
+/// plm's `tsadf`. A lagged level that the other regressors explain (`|v| < 1e-7 |y_{t-1}|`,
+/// the pivoted QR's rule) makes the ADF regression rank deficient and skips the unit.
+fn llc_unit_sigma(
+    series: &[f64],
+    e: &[f64],
+    v: &[f64],
+    model: PanelModel,
+    lags: usize,
+    dfcor: bool,
+) -> Result<f64, UnitError> {
+    let k = 1 + n_det(model) + lags;
+    let n = e.len();
+    let level = &series[lags..series.len() - 1];
+    let level_norm = level.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let vv: f64 = v.iter().map(|x| x * x).sum();
+    let full_rank = vv > 0.0 && vv.sqrt() >= 1e-7 * level_norm;
+    if !full_rank {
+        return Err(rank_deficient(
+            format!("the ADF regression with {lags} lag(s)"),
+            k - 1,
+            k,
+        ));
+    }
+    let ve: f64 = v.iter().zip(e).map(|(a, b)| a * b).sum();
+    let ee: f64 = e.iter().map(|x| x * x).sum();
+    let rss = ee - ve * ve / vv;
+    let df = if dfcor { n - k } else { n };
+    let sigma = (rss / df as f64).sqrt();
+    if sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        return Err(UnitError::Skip {
+            reason: "exact fit: no residual variation".to_string(),
+            error: EconError::SingularMatrix {
+                context: "ADF regression fits exactly (no residual variation)".to_string(),
+                suggestion: "the series is exactly linear or constant over the sample".to_string(),
+            },
+        });
+    }
+    Ok(sigma)
+}
+
+/// The long-run variance of one unit's first differences, as plm's `longrunvar`: Δy demeaned
+/// (intercept), detrended on (1, t) (trend) or raw (none), Bartlett kernel with `q` lags,
+/// autocovariances divided by T - 1.
+fn llc_long_run_variance(series: &[f64], model: PanelModel, q: usize) -> EconResult<f64> {
+    let m = series.len() - 1;
+    let mut dx = resource::try_with_capacity(m, "LLC long-run variance")?;
+    dx.extend(series.windows(2).map(|w| w[1] - w[0]));
+    let mf = m as f64;
+    match model {
+        PanelModel::None => {}
+        PanelModel::Intercept => {
+            let mean = dx.iter().sum::<f64>() / mf;
+            dx.iter_mut().for_each(|x| *x -= mean);
+        }
+        PanelModel::Trend => {
+            // Residuals of the regression on (1, 1..m), in closed form.
+            let t_mean = (mf + 1.0) / 2.0;
+            let x_mean = dx.iter().sum::<f64>() / mf;
+            let (mut sxy, mut sxx) = (0.0, 0.0);
+            for (j, x) in dx.iter().enumerate() {
+                let tc = (j + 1) as f64 - t_mean;
+                sxy += tc * (x - x_mean);
+                sxx += tc * tc;
+            }
+            let slope = sxy / sxx;
+            for (j, x) in dx.iter_mut().enumerate() {
+                *x -= x_mean + slope * ((j + 1) as f64 - t_mean);
+            }
+        }
+    }
+    let mut lrv = dx.iter().map(|x| x * x).sum::<f64>() / mf;
+    for lag in 1..=q {
+        let gamma: f64 = dx[lag..]
+            .iter()
+            .zip(&dx[..m - lag])
+            .map(|(a, b)| a * b)
+            .sum();
+        lrv += 2.0 * (1.0 - lag as f64 / (q + 1) as f64) * gamma / mf;
+    }
+    Ok(lrv)
+}
+
+/// The T rows of LLC (2002) Table 2 as `plm:::adj.levinlin` stores them.
+const LLC_TS: [f64; 13] = [
+    25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 250.0, 500.0,
+];
+
+/// LLC (2002) Table 2 (`plm:::adj.levinlin`): the mean adjustment mu* by T.
+#[rustfmt::skip]
+const LLC_MU: [[f64; 13]; 3] = [
+    // none
+    [0.004, 0.003, 0.002, 0.002, 0.001, 0.001, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    // intercept
+    [-0.554, -0.546, -0.541, -0.537, -0.533, -0.531, -0.527, -0.524, -0.521, -0.520, -0.518, -0.509, -0.500],
+    // trend
+    [-0.703, -0.674, -0.653, -0.637, -0.624, -0.614, -0.598, -0.587, -0.578, -0.571, -0.566, -0.533, -0.500],
+];
+
+/// LLC (2002) Table 2 (`plm:::adj.levinlin`): the standard deviation adjustment sigma* by T.
+#[rustfmt::skip]
+const LLC_SIGMA: [[f64; 13]; 3] = [
+    [1.049, 1.035, 1.027, 1.021, 1.017, 1.014, 1.011, 1.008, 1.007, 1.006, 1.005, 1.001, 1.000],
+    [0.919, 0.889, 0.867, 0.850, 0.837, 0.826, 0.810, 0.798, 0.789, 0.782, 0.776, 0.742, 0.707],
+    [1.003, 0.949, 0.906, 0.871, 0.842, 0.818, 0.780, 0.751, 0.728, 0.710, 0.695, 0.603, 0.500],
+];
+
+/// (mu*, sigma*) at T, interpolated between rows and clamped to T = 25 and 500 as
+/// `plm:::adj.levinlin.value` does, with the end clamped to, if any.
+fn llc_adjustment(t_len: usize, model: PanelModel) -> (f64, f64, Option<TableEdge>) {
+    let row = n_det(model);
+    let pos = select_t(t_len as f64, &LLC_TS);
+    (
+        pos.value(&LLC_MU[row], &LLC_TS),
+        pos.value(&LLC_SIGMA[row], &LLC_TS),
+        pos.edge,
+    )
 }
 
 /// LLC auxiliary regression residuals of one unit: Δy and y_{t-1} on the deterministic
@@ -1238,37 +1373,6 @@ fn compute_llc_residuals(
     }
     let v = least_squares(x.view(), ArrayView1::from(&ylag_vec))?;
     Ok((dy.residuals.to_vec(), v.residuals.to_vec()))
-}
-
-/// Get LLC adjustment factors (μ*, σ*) based on T and model.
-/// These are approximations from LLC (2002) simulation tables.
-fn get_llc_adjustment_factors(avg_t: f64, model: PanelModel) -> (f64, f64) {
-    // Simplified approximations based on LLC (2002) Table 2
-    // For more accuracy, use interpolation tables
-
-    match model {
-        PanelModel::None => {
-            // No deterministics
-            let mu = -0.5 / avg_t.sqrt();
-            let sigma = 1.0 + 0.5 / avg_t;
-            (mu, sigma)
-        }
-        PanelModel::Intercept => {
-            // Individual means
-            // μ* ≈ -0.71 - 1.61/T - 2.39/T²
-            let mu = -0.71 - 1.61 / avg_t - 2.39 / (avg_t * avg_t);
-            // σ* ≈ 1.0
-            let sigma = 1.0;
-            (mu, sigma)
-        }
-        PanelModel::Trend => {
-            // Individual means and trends
-            // μ* ≈ -1.04 - 4.69/T - 10.6/T²
-            let mu = -1.04 - 4.69 / avg_t - 10.6 / (avg_t * avg_t);
-            let sigma = 1.0;
-            (mu, sigma)
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1876,7 +1980,7 @@ mod tests {
 
         let result = run_panel_unit_root(&dataset, "y_ur", "unit", "time", config).unwrap();
 
-        // The value is not checked: the LLC statistic is ECON-41 (Tier 4).
+        // The LLC statistic is pinned to plm in test_validate_purtest_stat_llc.
         assert_eq!(result.n_panels, 10);
         assert_eq!(result.lags_used, 1);
         assert!(result.statistic.is_finite());
@@ -2223,7 +2327,6 @@ mod tests {
     #[test]
     fn test_validate_purtest_lag_selection_llc() {
         let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
-        // deviation ECON-41: levinlin_*_stat/_p not compared
         let mut c = Check::new(&case);
         for (sel, rule) in RULES {
             for dfcor in [false, true] {
@@ -2239,6 +2342,16 @@ mod tests {
                     &format!("levinlin_{rule}{sfx}_lags"),
                     &as_f64(&r.unit_lags),
                     Tol::exact(),
+                )
+                .scalar(
+                    &format!("levinlin_{rule}{sfx}_stat"),
+                    r.statistic,
+                    Tol::stat(480),
+                )
+                .scalar(
+                    &format!("levinlin_{rule}{sfx}_p"),
+                    r.p_value,
+                    Tol::p_value(480),
                 );
                 assert_eq!(r.lags_used, *r.unit_lags.iter().max().unwrap());
                 assert_eq!(r.lag_selection, rule_label(sel));
@@ -3032,5 +3145,124 @@ mod tests {
         );
         let (_, _, edge) = ips_moments(150, 1, PanelModel::Trend).unwrap();
         assert_eq!(edge, Some(TableEdge::Above));
+    }
+
+    /// The LLC z of plm::purtest(test = "levinlin", lags = 1): every model and dfcor, on the
+    /// stationary and the random-walk panels; the z of 1000 y (scale invariance); T = 15,
+    /// below the table's first row.
+    #[test]
+    fn test_validate_purtest_stat_llc() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in EXOS {
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    let key = format!("llc_{}", stat_tag(col, exo, dfcor));
+                    let r = stat_run(&ds, col, PanelUnitRootTest::LLC, model, Some(1), dfcor);
+                    c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(500))
+                        .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(500));
+                    assert!(
+                        !r.warnings.iter().any(|w| w.starts_with("Levin-Lin-Chu")),
+                        "{:?}",
+                        r.warnings
+                    );
+                }
+            }
+        }
+        let y: Vec<f64> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| 1000.0 * v.unwrap())
+            .collect();
+        let scaled = with_column(&ds, Column::new("y1000".into(), y));
+        let r = stat_run(
+            &scaled,
+            "y1000",
+            PanelUnitRootTest::LLC,
+            PanelModel::Intercept,
+            Some(1),
+            false,
+        );
+        c.scalar("llc_intercept_x1000_stat", r.statistic, Tol::stat(500));
+        c.finish();
+
+        let (case, ds) = crate::test_support::load_case("purtest_stat_short");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            let r = stat_run(&ds, "y", PanelUnitRootTest::LLC, *model, Some(1), true);
+            c.scalar(&format!("llc_{exo}_stat"), r.statistic, Tol::stat(120))
+                .scalar(&format!("llc_{exo}_p"), r.p_value, Tol::p_value(120));
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w
+                        .starts_with("Levin-Lin-Chu: T = 15 is below the shortest row (T = 25)")),
+                "{:?}",
+                r.warnings
+            );
+        }
+        c.finish();
+    }
+
+    /// plm::purtest refuses LLC on an unbalanced panel.
+    #[test]
+    fn test_llc_refuses_unbalanced_panels() {
+        let mut lengths = vec![40; 9];
+        lengths.push(38);
+        let e = run_panel_unit_root(
+            &noisy_panel(&lengths, 11),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::LLC, PanelModel::Intercept, Some(1)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("needs a balanced panel")
+                    && message.contains("38 to 40 observations")
+                    && message.contains("Im-Pesaran-Shin and Maddala-Wu")),
+            "{e:?}"
+        );
+    }
+
+    /// T = 7: round(3.21 * 7^(1/3)) = 6 exceeds T - 2 = 5 autocovariance lags.
+    #[test]
+    fn test_llc_long_run_lag_capped_on_very_short_series() {
+        let r = run_panel_unit_root(
+            &noisy_panel(&[7; 8], 12),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::LLC, PanelModel::Intercept, Some(0)),
+        )
+        .unwrap();
+        assert!(r.statistic.is_finite());
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with(
+                "Levin-Lin-Chu: the long-run variance's truncation lag is capped at T - 2 = 5 \
+                 (round(3.21 T^(1/3)) = 6"
+            )),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// A lagged level that the other regressors explain is a rank-deficient ADF regression.
+    #[test]
+    fn test_llc_unit_sigma_skips_explained_level() {
+        let series: Vec<f64> = (0..20).map(|t| 1.0 + 0.1 * f64::from(t % 3)).collect();
+        let e: Vec<f64> = (0..19).map(|t| 0.01 * f64::from(t % 5) - 0.02).collect();
+        let v = vec![0.0; 19];
+        assert!(matches!(
+            llc_unit_sigma(&series, &e, &v, PanelModel::Intercept, 0, true),
+            Err(UnitError::Skip { reason, .. }) if reason.starts_with("rank deficient")
+        ));
+        let v: Vec<f64> = (0..19).map(|t| 0.3 * f64::from(t % 4) - 0.45).collect();
+        assert!(llc_unit_sigma(&series, &e, &v, PanelModel::Intercept, 0, true).is_ok());
     }
 }

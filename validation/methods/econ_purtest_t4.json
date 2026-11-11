@@ -43,9 +43,11 @@
       ],
       "tests": [
         "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_madwu",
-        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_ips"
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_ips",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_llc"
       ],
       "quantities": [
+        "LLC z and p: intercept, trend, none; dfcor FALSE and TRUE; stationary and random-walk panels; T = 15 (table floor); z of 1000 y",
         "IPS W-tbar, p and the averaged table moments: intercept, trend; lags 1 and 3 (T = 50), 1, 2 and 4 (T = 15)",
         "Maddala-Wu chi-square, p and per-unit MacKinnon (1994) p: intercept, trend, none (dfcor FALSE); per-unit ADF t: intercept, trend, none, dfcor FALSE and TRUE, stationary and random-walk panels"
       ],
