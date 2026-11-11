@@ -277,18 +277,16 @@ impl DbConnection {
             "[DB_GET_DATASETS] Query returned datasets"
         );
 
+        // One debug event per row: a session's listing logs two info lines
+        // whatever its number of datasets.
         for (idx, ds) in datasets.iter().enumerate() {
-            tracing::info!(
+            tracing::debug!(
                 idx = idx,
                 id = %ds.id_string(),
                 name = %ds.name,
                 column_names_len = ds.column_names.len(),
-                "[DB_GET_DATASETS] Dataset record from SurrealDB"
-            );
-            tracing::debug!(
-                idx = idx,
                 column_names = ?ds.column_names,
-                "[DB_GET_DATASETS] Dataset record's column names"
+                "[DB_GET_DATASETS] Dataset record from SurrealDB"
             );
         }
 
@@ -434,13 +432,19 @@ impl DbConnection {
                     session_id, name
                 ))
             };
-            let Some(existing) = db.get_dataset_meta(&session_id, &name).await? else {
-                return Err(not_found());
-            };
-            let old = existing.source_path.as_deref().map_or(0, str::len);
-            db.reserve_session_bytes(&session_id, source_path.len().saturating_sub(old) as u64)
-                .await?;
-            let freed = old.saturating_sub(source_path.len()) as u64;
+            // The stored path's length is needed only for the session's
+            // byte counter; without a budget the update alone finds the row
+            // (or nothing, which is `NotFound`).
+            let mut freed = 0;
+            if db.tracks_session_bytes() {
+                let Some(existing) = db.get_dataset_meta(&session_id, &name).await? else {
+                    return Err(not_found());
+                };
+                let old = existing.source_path.as_deref().map_or(0, str::len);
+                db.reserve_session_bytes(&session_id, source_path.len().saturating_sub(old) as u64)
+                    .await?;
+                freed = old.saturating_sub(source_path.len()) as u64;
+            }
 
             let mut result = db
                 .db()
