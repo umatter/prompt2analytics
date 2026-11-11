@@ -44,11 +44,14 @@
 //!
 //! For one-sided tests, √(nm/(n+m)) × D± converges to half of this distribution.
 
+use ndarray::Array2;
 use serde::{Deserialize, Serialize};
+use statrs::function::gamma::ln_gamma;
 
 use crate::data::Dataset;
 use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checkpoint, try_vec, try_with_capacity, try_zeros2};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
 
@@ -74,7 +77,7 @@ pub struct KsTestResult {
     /// Alternative hypothesis
     pub alternative: Alternative,
 
-    /// Whether exact or asymptotic p-value was computed
+    /// Whether the exact p-value was computed (R's `exact`; `test_name` says the same)
     pub exact: bool,
 
     /// Sample size (first sample or only sample)
@@ -85,6 +88,9 @@ pub struct KsTestResult {
 
     /// Whether the null hypothesis is rejected at α = 0.05
     pub reject_null: bool,
+    /// R's warning (ties in the one-sample test, or an asymptotic two-sample p with ties)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     /// Rows dropped because of missing values (dataset wrapper; nothing for slices). Each
     /// sample drops its own missing values; the summary sums the two columns.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
@@ -127,6 +133,10 @@ impl std::fmt::Display for KsTestResult {
             if self.exact { "exact" } else { "asymptotic" }
         )?;
         writeln!(f)?;
+
+        if let Some(ref warn) = self.warning {
+            writeln!(f, "Warning: {warn}")?;
+        }
 
         if self.reject_null {
             writeln!(
@@ -391,10 +401,28 @@ pub fn ks_test_one_sample(
     distribution: TheoreticalDistribution,
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
+    ks_test_one_sample_with(x, distribution, alternative, None)
+}
+
+/// One-sample Kolmogorov-Smirnov test with R's `exact` argument.
+///
+/// `exact = None` is R's `exact = NULL`: the exact distribution for n < 100 without ties
+/// (Marsaglia-Tsang-Wang for the two-sided statistic, Birnbaum-Tingey for one-sided ones),
+/// the asymptotic one otherwise. Ties carry R's warning.
+///
+/// # References
+/// - R equivalent: `ks.test(x, "pnorm", alternative = , exact = )`
+pub fn ks_test_one_sample_with(
+    x: &[f64],
+    distribution: TheoreticalDistribution,
+    alternative: Alternative,
+    exact: Option<bool>,
+) -> EconResult<KsTestResult> {
     let cdf = distribution.reference_cdf()?;
 
     // Filter out NaN values
-    let mut data: Vec<f64> = x.iter().copied().filter(|v| !v.is_nan()).collect();
+    let mut data: Vec<f64> = try_with_capacity(x.len(), "KS sample")?;
+    data.extend(x.iter().copied().filter(|v| !v.is_nan()));
     let n = data.len();
 
     if n < 1 {
@@ -405,37 +433,48 @@ pub fn ks_test_one_sample(
         });
     }
 
-    // Sort data
     data.sort_by(f64::total_cmp);
+    let ties = data.windows(2).any(|w| w[0] == w[1]);
 
-    // Compute D statistic
-    let mut d_plus = 0.0_f64;
-    let mut d_minus = 0.0_f64;
-
+    // R: x <- F(sort(x)) - (0:(n-1))/n; D+ = max(1/n - x), D- = max(x)
+    let nf = n as f64;
+    let mut d_plus = f64::NEG_INFINITY;
+    let mut d_minus = f64::NEG_INFINITY;
     for (i, &xi) in data.iter().enumerate() {
-        let f_emp_upper = (i + 1) as f64 / n as f64; // F_n(x_i)
-        let f_emp_lower = i as f64 / n as f64; // F_n(x_i^-)
-        let f_theo = cdf.cdf(xi);
-
-        d_plus = d_plus.max(f_emp_upper - f_theo);
-        d_minus = d_minus.max(f_theo - f_emp_lower);
+        let v = cdf.cdf(xi) - i as f64 / nf;
+        d_plus = d_plus.max(1.0 / nf - v);
+        d_minus = d_minus.max(v);
     }
-
-    let (statistic, p_value) = match alternative {
-        Alternative::TwoSided => {
-            let d = d_plus.max(d_minus);
-            let p = kolmogorov_p_value_one_sample(d, n, true);
-            (d, p)
-        }
-        Alternative::Greater => (d_plus, kolmogorov_p_value_one_sample(d_plus, n, false)),
-        Alternative::Less => (d_minus, kolmogorov_p_value_one_sample(d_minus, n, false)),
+    let statistic = match alternative {
+        Alternative::TwoSided => d_plus.max(d_minus),
+        Alternative::Greater => d_plus,
+        Alternative::Less => d_minus,
     };
 
-    // Determine if using exact or asymptotic
-    let exact = n < 100;
+    let exact = exact.unwrap_or(n < 100 && !ties);
+    let p_value = if exact {
+        match alternative {
+            Alternative::TwoSided => {
+                // numeric-ok: R's exact two-sided p is the complement of the MTW cdf
+                1.0 - pkolmogorov_two_exact(statistic, n)?
+            }
+            _ => pkolmogorov_one_exact_upper(statistic, n),
+        }
+    } else {
+        match alternative {
+            Alternative::TwoSided => pkstwo_upper(nf.sqrt() * statistic),
+            _ => (-2.0 * nf * statistic * statistic).exp(),
+        }
+    }
+    .clamp(0.0, 1.0);
+    let warning =
+        ties.then(|| "ties should not be present for the Kolmogorov-Smirnov test".to_string());
 
     Ok(KsTestResult {
-        test_name: "One-sample Kolmogorov-Smirnov test".to_string(),
+        test_name: format!(
+            "{} one-sample Kolmogorov-Smirnov test",
+            if exact { "Exact" } else { "Asymptotic" }
+        ),
         statistic,
         p_value,
         significance: SignificanceLevel::from_p_value(p_value),
@@ -444,6 +483,7 @@ pub fn ks_test_one_sample(
         n,
         n_2: None,
         reject_null: p_value < 0.05,
+        warning,
         missing: MissingSummary::none(n),
     })
 }
@@ -492,6 +532,24 @@ pub fn ks_test_two_sample(
     y: &[f64],
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
+    ks_test_two_sample_with(x, y, alternative, None)
+}
+
+/// Two-sample Kolmogorov-Smirnov test with R's `exact` argument.
+///
+/// `exact = None` is R's `exact = NULL`: the exact distribution when n m < 10000, conditional
+/// on the tie pattern of the pooled sample (R's `psmirnov`); the asymptotic one otherwise,
+/// with R's warning under ties. For `alternative = less` with ties the exact p is that of D-
+/// (R evaluates the D+ distribution there; without ties both agree).
+///
+/// # References
+/// - R equivalent: `ks.test(x, y, alternative = , exact = )`
+pub fn ks_test_two_sample_with(
+    x: &[f64],
+    y: &[f64],
+    alternative: Alternative,
+    exact: Option<bool>,
+) -> EconResult<KsTestResult> {
     // Filter out NaN values
     let x_clean: Vec<f64> = x.iter().copied().filter(|v| !v.is_nan()).collect();
     let y_clean: Vec<f64> = y.iter().copied().filter(|v| !v.is_nan()).collect();
@@ -514,24 +572,56 @@ pub fn ks_test_two_sample(
         });
     }
 
-    // Compute D statistic using the combined sorted approach
     let (d_plus, d_minus) = compute_two_sample_d(&x_clean, &y_clean);
-
-    let (statistic, p_value) = match alternative {
-        Alternative::TwoSided => {
-            let d = d_plus.max(d_minus);
-            let p = kolmogorov_p_value_two_sample(d, n, m, true);
-            (d, p)
-        }
-        Alternative::Greater => (d_plus, kolmogorov_p_value_two_sample(d_plus, n, m, false)),
-        Alternative::Less => (d_minus, kolmogorov_p_value_two_sample(d_minus, n, m, false)),
+    let statistic = match alternative {
+        Alternative::TwoSided => d_plus.max(d_minus),
+        Alternative::Greater => d_plus,
+        Alternative::Less => d_minus,
     };
 
-    // Use exact for small samples (product < 10000)
-    let exact = n * m < 10000;
+    // block_end[k]: position k (1-based) of the sorted pooled sample ends a block of ties
+    let total = n + m;
+    let mut pooled: Vec<f64> = try_with_capacity(total, "KS pooled sample")?;
+    pooled.extend_from_slice(&x_clean);
+    pooled.extend_from_slice(&y_clean);
+    pooled.sort_by(f64::total_cmp);
+    let mut block_end: Vec<bool> = try_vec(total + 1, true, "KS pooled sample")?;
+    block_end[0] = false;
+    for k in 1..total {
+        block_end[k] = pooled[k - 1] != pooled[k];
+    }
+    let ties = block_end[1..total].iter().any(|&b| !b);
+
+    let exact = exact.unwrap_or((n as f64) * (m as f64) < 10000.0);
+    let p_value = if exact {
+        let side = match alternative {
+            Alternative::TwoSided => SmirnovSide::Both,
+            Alternative::Greater => SmirnovSide::Plus,
+            Alternative::Less => SmirnovSide::Minus,
+        };
+        psmirnov_exact_upper(statistic, n, m, &block_end, side)?
+    } else {
+        let n_eff = (n as f64) * (m as f64) / (total as f64);
+        match alternative {
+            Alternative::TwoSided => {
+                if statistic < f64::EPSILON {
+                    1.0
+                } else {
+                    pkstwo_upper(n_eff.sqrt() * statistic)
+                }
+            }
+            _ => (-2.0 * n_eff * statistic * statistic).exp(),
+        }
+    }
+    .clamp(0.0, 1.0);
+    let warning =
+        (ties && !exact).then(|| "p-value will be approximate in the presence of ties".to_string());
 
     Ok(KsTestResult {
-        test_name: "Two-sample Kolmogorov-Smirnov test".to_string(),
+        test_name: format!(
+            "{} two-sample Kolmogorov-Smirnov test",
+            if exact { "Exact" } else { "Asymptotic" }
+        ),
         statistic,
         p_value,
         significance: SignificanceLevel::from_p_value(p_value),
@@ -540,6 +630,7 @@ pub fn ks_test_two_sample(
         n,
         n_2: Some(m),
         reject_null: p_value < 0.05,
+        warning,
         missing: MissingSummary::none(n + m),
     })
 }
@@ -629,6 +720,18 @@ pub fn ks_test(
     distribution: Option<TheoreticalDistribution>,
     alternative: Alternative,
 ) -> EconResult<KsTestResult> {
+    ks_test_with(dataset, x_col, y_col, distribution, alternative, None)
+}
+
+/// [`ks_test`] with R's `exact` argument (`None`: R's default rule).
+pub fn ks_test_with(
+    dataset: &Dataset,
+    x_col: &str,
+    y_col: Option<&str>,
+    distribution: Option<TheoreticalDistribution>,
+    alternative: Alternative,
+    exact: Option<bool>,
+) -> EconResult<KsTestResult> {
     let df = dataset.df();
     let (x, missing_x) = sample_column(df, x_col, "Kolmogorov-Smirnov")?;
 
@@ -636,14 +739,14 @@ pub fn ks_test(
         Some(y_name) => {
             // Two-sample test
             let (y, missing_y) = sample_column(df, y_name, "Kolmogorov-Smirnov")?;
-            let mut result = ks_test_two_sample(&x, &y, alternative)?;
+            let mut result = ks_test_two_sample_with(&x, &y, alternative, exact)?;
             result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
             Ok(result)
         }
         None => {
             // One-sample test
             let dist = distribution.unwrap_or(TheoreticalDistribution::Normal);
-            let mut result = ks_test_one_sample(&x, dist, alternative)?;
+            let mut result = ks_test_one_sample_with(&x, dist, alternative, exact)?;
             result.missing = missing_x;
             Ok(result)
         }
@@ -664,89 +767,197 @@ pub fn run_ks_test(
 // P-Value Computation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute p-value for one-sample KS test using asymptotic approximation.
-///
-/// Uses the Kolmogorov distribution with the transformation √n × D.
-fn kolmogorov_p_value_one_sample(d: f64, n: usize, two_sided: bool) -> f64 {
-    if d <= 0.0 {
-        return 1.0;
+/// R's tolerance for the asymptotic Kolmogorov series (`C_pKS2`, `tol = 1e-06`).
+const PKS2_TOL: f64 = 1e-6;
+
+/// Upper tail P(K > x) of the limiting Kolmogorov distribution, with R's two series
+/// (`pkstwo`, tolerance 1e-6): for x < 1 the complement of
+/// `sqrt(2 pi) / x sum_{k odd < k_max} exp(-k^2 pi^2 / (8 x^2))`, else the alternating series
+/// `2 sum (-1)^(k-1) exp(-2 k^2 x^2)` summed directly until a term is below the tolerance.
+pub(crate) fn pkstwo_upper(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
     }
-    if d >= 1.0 {
-        return 0.0;
-    }
-
-    let sqrt_n = (n as f64).sqrt();
-    let z = sqrt_n * d;
-
-    if two_sided {
-        kolmogorov_cdf_complement(z)
-    } else {
-        // One-sided: P(D+ > d) = exp(-2 * n * d^2) for large n
-        // This is the asymptotic formula
-        (-2.0 * (n as f64) * d * d).exp().min(1.0)
-    }
-}
-
-/// Compute p-value for two-sample KS test using asymptotic approximation.
-///
-/// Uses effective sample size √(n*m/(n+m)).
-fn kolmogorov_p_value_two_sample(d: f64, n: usize, m: usize, two_sided: bool) -> f64 {
-    if d <= 0.0 {
-        return 1.0;
-    }
-    if d >= 1.0 {
-        return 0.0;
-    }
-
-    let nf = n as f64;
-    let mf = m as f64;
-
-    // Effective sample size
-    let en = (nf * mf / (nf + mf)).sqrt();
-    let z = (en + 0.12 + 0.11 / en) * d; // Stephens (1970) correction
-
-    if two_sided {
-        kolmogorov_cdf_complement(z)
-    } else {
-        // One-sided asymptotic formula
-        let lambda = en * d;
-        (-2.0 * lambda * lambda).exp().min(1.0)
-    }
-}
-
-/// Compute the complement of the Kolmogorov CDF: P(K > x).
-///
-/// Uses the series expansion from Marsaglia, Tsang & Wang (2003):
-/// P(K > x) = 2 * sum_{k=1}^∞ (-1)^{k+1} * exp(-2 * k^2 * x^2)
-///
-/// This converges very quickly for x > 0.
-fn kolmogorov_cdf_complement(x: f64) -> f64 {
     if x <= 0.0 {
         return 1.0;
     }
-    if x >= 3.0 {
-        // For large x, the tail probability is essentially 0
+    if x < 1.0 {
+        let k_max = (2.0 - PKS2_TOL.ln()).sqrt() as usize;
+        let z = -(std::f64::consts::FRAC_PI_2 * std::f64::consts::FRAC_PI_4) / (x * x);
+        let w = x.ln();
+        let mut s = 0.0;
+        let mut k = 1usize;
+        while k < k_max {
+            let kf = k as f64;
+            s += (kf * kf * z - w).exp();
+            k += 2;
+        }
+        let cdf = s * (2.0 * std::f64::consts::PI).sqrt();
+        // numeric-ok: the x < 1 series is the cdf, at most 0.73 here, so no tail is lost
+        (1.0 - cdf).clamp(0.0, 1.0)
+    } else {
+        let z = -2.0 * x * x;
+        let mut sign = 1.0;
+        let mut tail = 0.0;
+        let mut k = 1u32;
+        loop {
+            let kf = f64::from(k);
+            let term = 2.0 * sign * (z * kf * kf).exp();
+            tail += term;
+            if term.abs() <= PKS2_TOL || k > 100_000 {
+                break;
+            }
+            sign = -sign;
+            k += 1;
+        }
+        tail.clamp(0.0, 1.0)
+    }
+}
+
+/// Marsaglia, Tsang and Wang (2003) exact cdf P(D_n < d) of the two-sided one-sample
+/// statistic, as R's `C_pKolmogorov2x` (matrix power with decimal exponent rescaling; R omits
+/// the quick right-tail approximation, and so does this).
+pub(crate) fn pkolmogorov_two_exact(d: f64, n: usize) -> EconResult<f64> {
+    let nf = n as f64;
+    let k = (nf * d) as usize + 1;
+    let m = 2 * k - 1;
+    let h = k as f64 - nf * d;
+    let mut hm = try_zeros2(m, m, "Kolmogorov exact distribution")?;
+    for i in 0..m {
+        for j in 0..m {
+            hm[[i, j]] = if i + 1 < j { 0.0 } else { 1.0 };
+        }
+    }
+    for i in 0..m {
+        hm[[i, 0]] -= h.powi(i as i32 + 1);
+        hm[[m - 1, i]] -= h.powi((m - i) as i32);
+    }
+    if 2.0 * h - 1.0 > 0.0 {
+        hm[[m - 1, 0]] += (2.0 * h - 1.0).powi(m as i32);
+    }
+    for i in 0..m {
+        for j in 0..m {
+            if i + 1 > j {
+                for g in 1..=(i + 1 - j) {
+                    hm[[i, j]] /= g as f64;
+                }
+            }
+        }
+    }
+    let (q, mut eq) = matrix_power(&hm, n)?;
+    let mut s = q[[k - 1, k - 1]];
+    for i in 1..=n {
+        s = s * i as f64 / nf;
+        if s < 1e-140 {
+            s *= 1e140;
+            eq -= 140;
+        }
+    }
+    Ok(s * 10f64.powi(eq))
+}
+
+/// `A^n` with R's rescaling by 1e-140 when the centre element passes 1e140; returns the
+/// matrix and its decimal exponent.
+fn matrix_power(a: &Array2<f64>, n: usize) -> EconResult<(Array2<f64>, i32)> {
+    checkpoint()?;
+    if n == 1 {
+        return Ok((a.clone(), 0));
+    }
+    let (v, ev) = matrix_power(a, n / 2)?;
+    let b = v.dot(&v);
+    let eb = 2 * ev;
+    let (mut out, mut e) = if n.is_multiple_of(2) {
+        (b, eb)
+    } else {
+        (a.dot(&b), eb)
+    };
+    let c = a.nrows() / 2;
+    if out[[c, c]] > 1e140 {
+        out.mapv_inplace(|x| x * 1e-140);
+        e += 140;
+    }
+    Ok((out, e))
+}
+
+/// Exact upper tail P(D+_n >= d) of the one-sided one-sample statistic (Birnbaum and
+/// Tingey), summed directly: `d sum_j exp(lchoose(n, j) + (n - j) log(1 - d - j/n) +
+/// (j - 1) log(d + j/n))`, j = 0..floor(n (1 - d)).
+pub(crate) fn pkolmogorov_one_exact_upper(d: f64, n: usize) -> f64 {
+    if d <= 0.0 {
+        return 1.0;
+    }
+    if d >= 1.0 {
         return 0.0;
     }
+    let nf = n as f64;
+    let jmax = (nf * (1.0 - d)).floor() as usize;
+    let lnf = ln_gamma(nf + 1.0);
+    let s: f64 = (0..=jmax)
+        .map(|j| {
+            let jf = j as f64;
+            let lchoose = lnf - ln_gamma(jf + 1.0) - ln_gamma(nf - jf + 1.0);
+            (lchoose + (nf - jf) * (1.0 - d - jf / nf).ln() + (jf - 1.0) * (d + jf / nf).ln()).exp()
+        })
+        .sum();
+    (d * s).clamp(0.0, 1.0)
+}
 
-    let x_sq = x * x;
-    let mut sum = 0.0;
-    let mut sign = 1.0;
+/// Which lattice boundary the two-sample exact distribution counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SmirnovSide {
+    /// |F_x - F_y| (two-sided D)
+    Both,
+    /// F_x - F_y (D+, alternative "greater")
+    Plus,
+    /// F_y - F_x (D-, alternative "less")
+    Minus,
+}
 
-    // Series converges very fast - typically 3-5 terms are enough
-    for k in 1..=100 {
-        let kf = k as f64;
-        let term = sign * (-2.0 * kf * kf * x_sq).exp();
-
-        if term.abs() < 1e-15 {
-            break;
+/// Exact P(D >= d) of the two-sample Smirnov statistic, conditional on the tie pattern of
+/// the pooled sample (`block_end[k]`: position k of the sorted pooled sample, k = 1..N, ends
+/// a block of equal values). Paths from (0, 0) to (m, n) are weighted uniformly; `h(i, j)`
+/// is the share of paths to (i, j) that have reached the boundary
+/// `|i n - j m| > floor(d m n - 1e-7)` (signed for one side) at a block end, so the tail is
+/// accumulated directly.
+pub(crate) fn psmirnov_exact_upper(
+    d: f64,
+    m: usize,
+    n: usize,
+    block_end: &[bool],
+    side: SmirnovSide,
+) -> EconResult<f64> {
+    let (mi, ni) = (m as i128, n as i128);
+    let bound = (d * m as f64 * n as f64 - 1e-7).floor() as i128;
+    let hit = |i: usize, j: usize| -> bool {
+        if !block_end[i + j] {
+            return false;
         }
-
-        sum += term;
-        sign = -sign;
+        let diff = i as i128 * ni - j as i128 * mi;
+        match side {
+            SmirnovSide::Both => diff.abs() > bound,
+            SmirnovSide::Plus => diff > bound,
+            SmirnovSide::Minus => -diff > bound,
+        }
+    };
+    let mut row: Vec<f64> = try_vec(n + 1, 0.0f64, "Smirnov exact distribution")?;
+    // i = 0
+    row[0] = 0.0;
+    for j in 1..=n {
+        row[j] = if hit(0, j) { 1.0 } else { row[j - 1] };
     }
-
-    (2.0 * sum).clamp(0.0, 1.0)
+    for i in 1..=m {
+        checkpoint()?;
+        row[0] = if hit(i, 0) { 1.0 } else { row[0] };
+        for j in 1..=n {
+            row[j] = if hit(i, j) {
+                1.0
+            } else {
+                let t = (i + j) as f64;
+                (i as f64 / t) * row[j] + (j as f64 / t) * row[j - 1]
+            };
+        }
+    }
+    Ok(row[n].clamp(0.0, 1.0))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -919,15 +1130,16 @@ mod tests {
 
     #[test]
     fn test_kolmogorov_cdf() {
-        // Test the Kolmogorov CDF complement
-        // For z = 0, P(K > 0) = 1
-        assert!((kolmogorov_cdf_complement(0.0) - 1.0).abs() < 1e-10);
-
-        // For very large z, P(K > z) ≈ 0
-        assert!(kolmogorov_cdf_complement(3.0) < 1e-10);
-
+        // P(K > 0) = 1; the tail stays positive past x = 3 (it returned 0 there before)
+        assert!((pkstwo_upper(0.0) - 1.0).abs() < 1e-10);
+        let p3 = pkstwo_upper(3.0);
+        assert!(
+            p3 > 0.0 && (p3 - 2.0 * (-18.0f64).exp()).abs() < 1e-20,
+            "{p3}"
+        );
+        assert!(pkstwo_upper(5.0) > 0.0);
         // For z = 1.36, P(K > z) ≈ 0.05 (critical value at α = 0.05)
-        let p = kolmogorov_cdf_complement(1.36);
+        let p = pkstwo_upper(1.36);
         assert!(p > 0.04 && p < 0.06, "p={}", p);
     }
 
@@ -946,9 +1158,12 @@ mod tests {
             .scalar("ks_d", r.statistic, Tol::stat(38))
             .scalar("n_xi", r.n as f64, Tol::exact())
             .scalar("n_yi", r.n_2.unwrap() as f64, Tol::exact())
+            .scalar("ks_p", r.p_value, Tol::p_value(38))
             .finish();
-        // deviation STAT-27: ks_p (R's exact p conditional on ties 0.15653867760174539;
-        // p2a's asymptotic p with Stephens' correction 0.19563779265722) is not pinned.
+        assert!(
+            r.exact && r.warning.is_none(),
+            "exact conditional on ties, as R"
+        );
     }
 
     #[test]
@@ -1096,8 +1311,8 @@ mod tests {
         );
     }
 
-    /// STAT-67: one-sample KS against R (ks.test(x, "pnorm"/"punif"/"pexp", ...)). The asymptotic p is R's
-    /// exact = FALSE value (sqrt(n) D >= 1 in every case, where R's pKS2 with tol 1e-6 is exact to ~1e-15).
+    /// STAT-67: one-sample KS against R (ks.test(x, "pnorm"/"punif"/"pexp", ...)): the asymptotic p
+    /// through exact = false, the exact p through R's default.
     #[test]
     fn test_validate_ks_t3_one_sample() {
         use super::TheoreticalDistribution::*;
@@ -1108,10 +1323,15 @@ mod tests {
             ("unif", "xu", UniformParams { a: -1.5, b: 3.0 }),
             ("exp", "xe", Exponential { rate: 0.8 }),
         ] {
-            let two = ks_test(&ds, col, None, Some(dist), Alternative::TwoSided).unwrap();
-            let gt = ks_test(&ds, col, None, Some(dist), Alternative::Greater).unwrap();
-            let lt = ks_test(&ds, col, None, Some(dist), Alternative::Less).unwrap();
+            let asym = |alt| ks_test_with(&ds, col, None, Some(dist), alt, Some(false)).unwrap();
+            let two = asym(Alternative::TwoSided);
+            let gt = asym(Alternative::Greater);
+            let lt = asym(Alternative::Less);
+            let def = ks_test(&ds, col, None, Some(dist), Alternative::TwoSided).unwrap();
+            assert!(def.exact && !two.exact);
+            assert_eq!(def.test_name, "Exact one-sample Kolmogorov-Smirnov test");
             let n = two.n;
+            c.scalar(&format!("{tag}_p_exact"), def.p_value, Tol::p_value(n));
             c.scalar(&format!("{tag}_d"), two.statistic, Tol::stat(n))
                 .scalar(&format!("{tag}_p_asym"), two.p_value, Tol::p_value(n))
                 .scalar(&format!("{tag}_dplus"), gt.statistic, Tol::stat(n))
@@ -1123,23 +1343,27 @@ mod tests {
                 .scalar(&format!("{tag}_dminus"), lt.statistic, Tol::stat(n))
                 .scalar(&format!("{tag}_p_less_asym"), lt.p_value, Tol::p_value(n))
                 .scalar(&format!("n_{col}"), n as f64, Tol::exact());
-            // deviation STAT-27: {tag}_p_exact (R's default exact p; norm 0.12705346811680995) is not pinned.
         }
         c.finish();
     }
 
-    /// STAT-67, X-13: two-sample KS against R. D, D+ and D- and the one-sided asymptotic p-values are R's;
-    /// the two-sided p-values are deviations.
+    /// STAT-67, X-13: two-sample KS against R: D, D+ and D-, the asymptotic p-values through exact =
+    /// false, the exact p through R's default.
     #[test]
     fn test_validate_ks_t3_two_sample() {
         let (case, ds) = crate::test_support::load_case("stat_ks_t3");
         let mut c = Check::new(&case);
         for (tag, x, y) in [("two5", "x5", "y5"), ("twol", "xa", "ya")] {
-            let two = ks_test(&ds, x, Some(y), None, Alternative::TwoSided).unwrap();
-            let gt = ks_test(&ds, x, Some(y), None, Alternative::Greater).unwrap();
-            let lt = ks_test(&ds, x, Some(y), None, Alternative::Less).unwrap();
+            let asym = |alt| ks_test_with(&ds, x, Some(y), None, alt, Some(false)).unwrap();
+            let two = asym(Alternative::TwoSided);
+            let gt = asym(Alternative::Greater);
+            let lt = asym(Alternative::Less);
+            let def = ks_test(&ds, x, Some(y), None, Alternative::TwoSided).unwrap();
+            assert!(def.exact);
             let n = two.n.min(two.n_2.unwrap());
             c.scalar(&format!("{tag}_d"), two.statistic, Tol::stat(n))
+                .scalar(&format!("{tag}_p_asym"), two.p_value, Tol::p_value(n))
+                .scalar(&format!("{tag}_p_exact"), def.p_value, Tol::p_value(n))
                 .scalar(&format!("{tag}_dplus"), gt.statistic, Tol::stat(n))
                 .scalar(
                     &format!("{tag}_p_greater_asym"),
@@ -1148,8 +1372,6 @@ mod tests {
                 )
                 .scalar(&format!("{tag}_dminus"), lt.statistic, Tol::stat(n))
                 .scalar(&format!("{tag}_p_less_asym"), lt.p_value, Tol::p_value(n));
-            // deviation STAT-27: {tag}_p_exact (R exact; two5 0.07936507936507936) and {tag}_p_asym
-            // (R 0.08151888641220961; p2a applies Stephens' factor: 0.036146190769284631) are not pinned.
         }
         c.scalar(
             "n_xa",
@@ -1326,5 +1548,243 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("'y'") && e.contains("Kolmogorov-Smirnov"), "{e}");
+    }
+
+    fn t4(ds: &Dataset, set: &str, group: &str) -> Vec<f64> {
+        crate::stats::ranks::test_data::column_where(ds, "value", &[("set", set), ("group", group)])
+    }
+
+    /// Exact one-sample p (MTW two-sided, Birnbaum-Tingey one-sided) under R's default.
+    /// Fails before: the asymptotic p was labelled exact.
+    #[test]
+    fn test_validate_ks_one_sample_exact_t4() {
+        let (case, ds) = crate::test_support::load_case("stat_rank_ks_t4");
+        let std = TheoreticalDistribution::Normal;
+        let run = |set: &str, alt| ks_test_one_sample(&t4(&ds, set, "x"), std, alt).unwrap();
+        let two = run("o30", Alternative::TwoSided);
+        let gt = run("o30", Alternative::Greater);
+        let lt = run("o30", Alternative::Less);
+        let o99 = run("o99", Alternative::TwoSided);
+        let o99b = run("o99b", Alternative::TwoSided);
+        for r in [&two, &gt, &lt, &o99, &o99b] {
+            assert!(r.exact && r.warning.is_none());
+            assert_eq!(r.test_name, "Exact one-sample Kolmogorov-Smirnov test");
+        }
+        Check::new(&case)
+            .scalar("o30_D", two.statistic, Tol::stat(30))
+            .scalar("o30_p_exact", two.p_value, Tol::p_value(30))
+            .scalar("o30_Dplus", gt.statistic, Tol::stat(30))
+            .scalar("o30_p_greater_exact", gt.p_value, Tol::p_value(30))
+            .scalar("o30_Dminus", lt.statistic, Tol::stat(30))
+            .scalar("o30_p_less_exact", lt.p_value, Tol::p_value(30))
+            .scalar("o99_D", o99.statistic, Tol::stat(99))
+            .scalar("o99_p_exact", o99.p_value, Tol::p_value(99))
+            .scalar("o99b_p_exact", o99b.p_value, Tol::p_value(99))
+            .finish();
+    }
+
+    /// Exact two-sample p conditional on ties (R's psmirnov). `less` with ties is the D-
+    /// distribution, checked against the enumeration in the case. Fails before: asymptotic
+    /// p with Stephens' factor.
+    #[test]
+    fn test_validate_ks_two_sample_exact_t4() {
+        let (case, ds) = crate::test_support::load_case("stat_rank_ks_t4");
+        let run = |set: &str, alt| {
+            ks_test_two_sample(&t4(&ds, set, "x"), &t4(&ds, set, "y"), alt).unwrap()
+        };
+        let (tt, gt, lt) = (
+            Alternative::TwoSided,
+            Alternative::Greater,
+            Alternative::Less,
+        );
+        let t75 = run("t75", tt);
+        let t75_l = run("t75", lt);
+        let e99 = run("e99", tt);
+        for r in [&t75, &t75_l, &e99] {
+            assert!(r.exact && r.warning.is_none());
+            assert_eq!(r.test_name, "Exact two-sample Kolmogorov-Smirnov test");
+        }
+        // deviation STAT-27: t75_p_less_r (R evaluates the D+ distribution for "less") is not
+        // compared; t75_p_less_exact is the enumerated permutation p of D-.
+        Check::new(&case)
+            .scalar("t75_D", t75.statistic, Tol::stat(11))
+            .scalar("t75_p_exact", t75.p_value, Tol::p_value(11))
+            .scalar(
+                "t75_p_greater_exact",
+                run("t75", gt).p_value,
+                Tol::p_value(11),
+            )
+            .scalar("t75_Dminus", t75_l.statistic, Tol::stat(11))
+            .scalar("t75_p_less_exact", t75_l.p_value, Tol::p_value(11))
+            .scalar("t57_p_exact", run("t57", tt).p_value, Tol::p_value(12))
+            .scalar(
+                "t57_p_greater_exact",
+                run("t57", gt).p_value,
+                Tol::p_value(12),
+            )
+            .scalar("e99_D", e99.statistic, Tol::stat(198))
+            .scalar("e99_p_exact", e99.p_value, Tol::p_value(198))
+            .scalar(
+                "e99_p_greater_exact",
+                run("e99", gt).p_value,
+                Tol::p_value(198),
+            )
+            .scalar(
+                "e99_p_less_exact",
+                run("e99", lt).p_value,
+                Tol::p_value(198),
+            )
+            .finish();
+    }
+
+    /// Asymptotic p-values: ties in the one-sample test (R's warning), R's pkstwo series with
+    /// no cut-off at x >= 3, and no Stephens factor in the two-sample test.
+    #[test]
+    fn test_validate_ks_asymptotic_t4() {
+        let (case, ds) = crate::test_support::load_case("stat_rank_ks_t4");
+        let std = TheoreticalDistribution::Normal;
+        let one = |set: &str, alt, exact| {
+            ks_test_one_sample_with(&t4(&ds, set, "x"), std, alt, exact).unwrap()
+        };
+        let o20t = one("o20t", Alternative::TwoSided, None);
+        assert!(!o20t.exact);
+        assert_eq!(
+            o20t.test_name,
+            "Asymptotic one-sample Kolmogorov-Smirnov test"
+        );
+        assert_eq!(
+            o20t.warning.as_deref(),
+            Some("ties should not be present for the Kolmogorov-Smirnov test")
+        );
+        let a150 = one("a150", Alternative::TwoSided, Some(false));
+        let a400 = one("a400", Alternative::TwoSided, Some(false));
+        assert!(400f64.sqrt() * a400.statistic > 3.0 && a400.p_value > 0.0);
+        let a400_g = one("a400", Alternative::Greater, Some(false));
+        let two =
+            |alt| ks_test_two_sample(&t4(&ds, "a100", "x"), &t4(&ds, "a100", "y"), alt).unwrap();
+        let a100 = two(Alternative::TwoSided);
+        assert!(!a100.exact && a100.warning.is_none());
+        assert_eq!(
+            a100.test_name,
+            "Asymptotic two-sample Kolmogorov-Smirnov test"
+        );
+        Check::new(&case)
+            .scalar("o20t_D", o20t.statistic, Tol::stat(20))
+            .scalar("o20t_p_asym", o20t.p_value, Tol::p_value(20))
+            .scalar("a150_p_asym", a150.p_value, Tol::p_value(150))
+            .scalar("a400_p_asym", a400.p_value, Tol::p_value(400))
+            .scalar("a400_p_greater_asym", a400_g.p_value, Tol::p_value(400))
+            .scalar("a100_D", a100.statistic, Tol::stat(200))
+            .scalar("a100_p_asym", a100.p_value, Tol::p_value(200))
+            .scalar(
+                "a100_p_less_asym",
+                two(Alternative::Less).p_value,
+                Tol::p_value(200),
+            )
+            .finish();
+    }
+
+    /// One-sided exact p-values on the stat_ks_t3 columns (R's default exact).
+    #[test]
+    fn test_validate_ks_t3_one_sided_exact_t4() {
+        use super::TheoreticalDistribution::*;
+        let (case, ds) = crate::test_support::load_case("stat_ks_t3_exact_t4");
+        let mut c = Check::new(&case);
+        for (tag, col, dist) in [
+            ("norm", "xn", NormalParams { mean: 2.0, sd: 2.0 }),
+            ("unif", "xu", UniformParams { a: -1.5, b: 3.0 }),
+            ("exp", "xe", Exponential { rate: 0.8 }),
+        ] {
+            for (alt, side) in [
+                (Alternative::Greater, "greater"),
+                (Alternative::Less, "less"),
+            ] {
+                let r = ks_test(&ds, col, None, Some(dist), alt).unwrap();
+                assert!(r.exact);
+                c.scalar(
+                    &format!("{tag}_p_{side}_exact"),
+                    r.p_value,
+                    Tol::p_value(r.n),
+                );
+            }
+        }
+        for (tag, x, y) in [("two5", "x5", "y5"), ("twol", "xa", "ya")] {
+            for (alt, side) in [
+                (Alternative::Greater, "greater"),
+                (Alternative::Less, "less"),
+            ] {
+                let r = ks_test(&ds, x, Some(y), None, alt).unwrap();
+                assert!(r.exact);
+                c.scalar(
+                    &format!("{tag}_p_{side}_exact"),
+                    r.p_value,
+                    Tol::p_value(r.n),
+                );
+            }
+        }
+        c.finish();
+    }
+
+    /// The exact two-sample distribution equals the permutation distribution of D, D+ and
+    /// D- over all splits of small pooled samples with ties.
+    #[test]
+    fn test_psmirnov_exact_matches_enumeration() {
+        let cases: [(&[f64], &[f64]); 3] = [
+            (&[1.5, 2.0, 2.0, 3.5, 5.0, 5.5, 8.0], &[2.0, 3.0, 3.0, 4.0]),
+            (
+                &[1.0, 2.0, 2.0, 3.0, 5.0],
+                &[2.0, 3.0, 3.0, 4.0, 6.0, 6.0, 7.0],
+            ),
+            (&[0.3, 1.1, 1.1, 2.4], &[0.3, 0.9, 1.1, 2.4, 2.4, 3.8]),
+        ];
+        for (x, y) in cases {
+            let (m, n) = (x.len(), y.len());
+            let pooled: Vec<f64> = x.iter().chain(y).copied().collect();
+            let total = m + n;
+            let stat = |sel: u32| {
+                let xs: Vec<f64> = (0..total)
+                    .filter(|i| sel >> i & 1 == 1)
+                    .map(|i| pooled[i])
+                    .collect();
+                let ys: Vec<f64> = (0..total)
+                    .filter(|i| sel >> i & 1 == 0)
+                    .map(|i| pooled[i])
+                    .collect();
+                compute_two_sample_d(&xs, &ys)
+            };
+            let observed = compute_two_sample_d(x, y);
+            let observed_sel: u32 = (1u32 << m) - 1;
+            assert_eq!(stat(observed_sel), observed);
+            let (mut hit_two, mut hit_plus, mut hit_minus, mut count) = (0, 0, 0, 0);
+            for sel in 0u32..(1 << total) {
+                if sel.count_ones() as usize != m {
+                    continue;
+                }
+                count += 1;
+                let (dp, dm) = stat(sel);
+                if dp.max(dm) >= observed.0.max(observed.1) - 1e-12 {
+                    hit_two += 1;
+                }
+                if dp >= observed.0 - 1e-12 {
+                    hit_plus += 1;
+                }
+                if dm >= observed.1 - 1e-12 {
+                    hit_minus += 1;
+                }
+            }
+            for (alt, hits) in [
+                (Alternative::TwoSided, hit_two),
+                (Alternative::Greater, hit_plus),
+                (Alternative::Less, hit_minus),
+            ] {
+                let r = ks_test_two_sample(x, y, alt).unwrap();
+                let want = hits as f64 / count as f64;
+                assert!(
+                    (r.p_value - want).abs() < 1e-12,
+                    "{alt:?}: {} vs {want}",
+                    r.p_value
+                );
+            }
+        }
     }
 }
