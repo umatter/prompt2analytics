@@ -75,6 +75,7 @@ use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::options::Choices;
 use crate::regression::ols::certainly_full_rank;
 use crate::resource;
+use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// Energy balancing refuses more reweighted units than this (decision WP23-A): the QP is
@@ -183,9 +184,13 @@ pub struct WeightItConfig {
     /// for the balancing methods, as in WeightIt). Multiplies weights by P(D=1) for treated
     /// and P(D=0) for control
     pub stabilize: bool,
-    /// Trim extreme weights at this quantile (e.g., 0.99 trims at 1st and 99th percentile);
-    /// must be in (0.5, 1]. Set to 1.0 for no trimming (default: 1.0)
+    /// Cap weights above this quantile (R type 3) of the weights outside the focal group (the
+    /// controls for ATT, the treated for ATC, all units for ATE), as WeightIt::trim(at); must
+    /// be in (0.5, 1], 1 = no trimming (default)
     pub trim_quantile: f64,
+    /// Also trim the lower tail at the (1 - trim_quantile) quantile, raising weights below it
+    /// (WeightIt::trim(lower = TRUE)). Default false
+    pub trim_lower: bool,
     /// Maximum iterations for iterative methods (default: 200)
     pub max_iter: usize,
     /// Convergence tolerance (default: 1e-8)
@@ -200,6 +205,7 @@ impl Default for WeightItConfig {
             intercept: true,
             stabilize: false,
             trim_quantile: 1.0,
+            trim_lower: false,
             max_iter: 200,
             tolerance: 1e-8,
         }
@@ -552,7 +558,7 @@ pub fn weightit(
     {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "trim_quantile must be in (0.5, 1] (1 = no trimming; 0.99 trims at the 1st and 99th percentiles); got {}",
+                "trim_quantile must be in (0.5, 1] (1 = no trimming; 0.99 caps weights above their 99th percentile); got {}",
                 config.trim_quantile
             ),
         });
@@ -729,7 +735,30 @@ pub fn weightit(
 
     // Apply weight trimming if requested
     let weights = if config.trim_quantile < 1.0 {
-        trim_weights(&weights, config.trim_quantile)
+        let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+        let (trimmed, changed) = trim_weights(
+            &weights,
+            &treated,
+            config.estimand,
+            config.trim_quantile,
+            config.trim_lower,
+        );
+        let pct = |q: f64| (q * 100.0 * 1e6).round() / 1e6;
+        let group = match config.estimand {
+            WeightEstimand::ATT => "control",
+            WeightEstimand::ATC => "treated",
+            WeightEstimand::ATE => "all",
+        };
+        let lower = if config.trim_lower {
+            format!(" and from below at {}%", pct(1.0 - config.trim_quantile))
+        } else {
+            String::new()
+        };
+        warnings.push(format!(
+            "weights trimmed at the {}% quantile of the {group} weights{lower} (WeightIt::trim): {changed} changed",
+            pct(config.trim_quantile)
+        ));
+        trimmed
     } else {
         weights
     };
@@ -2301,24 +2330,50 @@ fn compute_ess(weights: &[f64], d: &Array1<f64>) -> (f64, f64, f64) {
     (ess_all, ess_t, ess_c)
 }
 
-/// Trim extreme weights at specified quantile.
-fn trim_weights(weights: &[f64], quantile: f64) -> Vec<f64> {
-    let mut sorted: Vec<f64> = weights.to_vec();
+/// Trim weights as WeightIt 2.0.0's `trim(at, lower)` with the focal group left alone: the
+/// trimmed units are those outside the focal group (the controls for ATT, the treated for ATC,
+/// every unit for ATE). Weights above the type-3 `quantile` of those units' weights are set to
+/// it; with `lower`, weights below the type-3 `1 - quantile` are raised to that. Returns the
+/// trimmed weights and how many changed.
+fn trim_weights(
+    weights: &[f64],
+    treated: &[bool],
+    estimand: WeightEstimand,
+    quantile: f64,
+    lower: bool,
+) -> (Vec<f64>, usize) {
+    let trimmed = |i: usize| match estimand {
+        WeightEstimand::ATT => !treated[i],
+        WeightEstimand::ATC => treated[i],
+        WeightEstimand::ATE => true,
+    };
+    let mut sorted: Vec<f64> = (0..weights.len())
+        .filter(|&i| trimmed(i))
+        .map(|i| weights[i])
+        .collect();
+    let mut out = weights.to_vec();
+    if sorted.is_empty() || quantile >= 1.0 {
+        return (out, 0);
+    }
     sorted.sort_by(f64::total_cmp);
-
-    let n = sorted.len();
-    // Not R's rule: WeightIt's trim(at) caps above at quantile(w, at, type = 7) and trims
-    // no lower tail; these floor/ceil order statistics and the lower cap stay (X-18, Tier 4).
-    let lower_idx = ((1.0 - quantile) * n as f64).floor() as usize;
-    let upper_idx = (quantile * n as f64).ceil() as usize;
-
-    let lower_bound = sorted[lower_idx.min(n - 1)];
-    let upper_bound = sorted[upper_idx.min(n - 1)];
-
-    weights
-        .iter()
-        .map(|&w| w.max(lower_bound).min(upper_bound))
-        .collect()
+    let upper = quantile_sorted(&sorted, quantile, QuantileType::T3);
+    let floor = if lower {
+        quantile_sorted(&sorted, 1.0 - quantile, QuantileType::T3)
+    } else {
+        f64::NEG_INFINITY
+    };
+    let mut changed = 0;
+    for (i, w) in out.iter_mut().enumerate() {
+        if !trimmed(i) {
+            continue;
+        }
+        let v = w.min(upper).max(floor);
+        if v != *w {
+            *w = v;
+            changed += 1;
+        }
+    }
+    (out, changed)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3157,11 +3212,111 @@ mod tests {
 
     #[test]
     fn test_weight_trimming() {
-        let weights = vec![0.1, 0.5, 1.0, 2.0, 10.0];
-        let trimmed = trim_weights(&weights, 0.8);
+        // Checked against WeightIt 2.0.0's .trim_weights(.., groups.not.to.trim = 1): ten
+        // control weights, three focal (treated) weights, ATT, at = 0.8. The type-3 0.8 quantile
+        // of the controls is 3 and the 0.2 quantile 0.2.
+        let w = [
+            0.1, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 5.0, 10.0, 1.0, 1.0, 1.0,
+        ];
+        let treated: Vec<bool> = (0..13).map(|i| i >= 10).collect();
+        let (upper, k) = trim_weights(&w, &treated, WeightEstimand::ATT, 0.8, false);
+        assert_eq!(
+            upper,
+            [0.1, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0]
+        );
+        assert_eq!(k, 2);
+        let (both, k) = trim_weights(&w, &treated, WeightEstimand::ATT, 0.8, true);
+        assert_eq!(
+            both,
+            [0.2, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0]
+        );
+        assert_eq!(k, 3);
+        // ATC trims the treated and leaves the controls; ATE pools both groups.
+        let (atc, _) = trim_weights(&w, &treated, WeightEstimand::ATC, 0.8, false);
+        assert_eq!(&atc[..10], &w[..10]);
+        let (ate, k) = trim_weights(&w, &treated, WeightEstimand::ATE, 0.8, false);
+        assert!(k > 0 && ate.iter().all(|&v| v <= 3.0));
+        // Equal weights and q = 1 change nothing.
+        let (same, k) = trim_weights(&[2.0; 13], &treated, WeightEstimand::ATE, 0.8, true);
+        assert_eq!((same, k), (vec![2.0; 13], 0));
+        let (same, k) = trim_weights(&w, &treated, WeightEstimand::ATE, 1.0, true);
+        assert_eq!((same, k), (w.to_vec(), 0));
+    }
 
-        // Extreme values should be trimmed
-        assert!(trimmed.iter().all(|&w| (0.1..=10.0).contains(&w)));
+    #[test]
+    fn test_validate_weightit_trim() {
+        // R: WeightIt::trim(w, at, lower, treat) on glm weights (case weights_trim_balance):
+        // a type-3 cap over the weights outside the focal group. CAUS-96: the old rule pooled
+        // every weight, used floor/ceil order statistics and raised the lower tail too.
+        let (case, ds) = crate::test_support::load_case("weights_trim_balance");
+        let treated: Vec<bool> = col(&ds, "treat").iter().map(|&v| v >= 0.5).collect();
+        let mut check = Check::new(&case);
+        let runs = [
+            (WeightEstimand::ATE, 0.95, false, "ate_trim95"),
+            (WeightEstimand::ATE, 0.95, true, "ate_trim95_lower"),
+            (WeightEstimand::ATE, 0.9, false, "ate_trim9"),
+            (WeightEstimand::ATT, 0.95, false, "att_trim95"),
+            (WeightEstimand::ATT, 0.9, false, "att_trim9"),
+            (WeightEstimand::ATC, 0.95, false, "atc_trim95"),
+            (WeightEstimand::ATC, 0.9, false, "atc_trim9"),
+        ];
+        for (est, q, lower, tag) in runs {
+            let mut c = WeightItConfig::default();
+            c.estimand = est;
+            let untrimmed = weightit(&ds, "treat", &COVS, c.clone()).unwrap();
+            c.trim_quantile = q;
+            c.trim_lower = lower;
+            let r = weightit(&ds, "treat", &COVS, c).unwrap();
+            let n = r.n_obs;
+            let key = |s: &str| format!("{tag}_{s}");
+            let changed = r
+                .weights
+                .iter()
+                .zip(&untrimmed.weights)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(changed as f64, case.scalar(&key("n_changed")), "{tag}");
+            let sum = |t: bool| -> f64 {
+                r.weights
+                    .iter()
+                    .zip(&treated)
+                    .filter(|(_, g)| **g == t)
+                    .map(|(w, _)| w)
+                    .sum()
+            };
+            let smd: Vec<f64> = r.balance_after.covariates.iter().map(|c| c.std_diff).collect();
+            check
+                .vector(&key("weights_head"), &r.weights[..12], Tol::coef(n))
+                .scalar(&key("max"), r.max_weight, Tol::coef(n))
+                .scalar(&key("min"), r.min_weight, Tol::coef(n))
+                .scalar(&key("sum_t"), sum(true), Tol::coef(n))
+                .scalar(&key("sum_c"), sum(false), Tol::coef(n))
+                .scalar(&key("ess_t"), r.ess_treated, Tol::coef(n))
+                .scalar(&key("ess_c"), r.ess_control, Tol::coef(n))
+                .vector(&key("smd_after"), &smd, Tol::coef(n));
+            let focal: Option<bool> = match est {
+                WeightEstimand::ATT => Some(true),
+                WeightEstimand::ATC => Some(false),
+                WeightEstimand::ATE => None,
+            };
+            if let Some(f) = focal {
+                assert!(
+                    r.weights
+                        .iter()
+                        .zip(&treated)
+                        .filter(|(_, g)| **g == f)
+                        .all(|(w, _)| *w == 1.0),
+                    "{tag}: focal weights untouched"
+                );
+            }
+            assert!(
+                r.warnings.iter().any(|w| w.contains("WeightIt::trim")
+                    && w.contains(&format!("{changed} changed"))),
+                "{tag}: {:?}",
+                r.warnings
+            );
+        }
+        check.finish();
     }
 
     #[test]
