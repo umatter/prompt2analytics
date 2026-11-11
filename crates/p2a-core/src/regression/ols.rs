@@ -799,9 +799,9 @@ pub(crate) fn certainly_full_rank(x: ndarray::ArrayView2<'_, f64>) -> EconResult
 /// they meet `Tol::coef(n)` (1e-10 relative for n > 1000) across the range the normal
 /// equations accept (checked at 1e-10 relative against the QR at reciprocal conditions
 /// 2.7e-5, `ols_year_trend`, and about 1e-7, `test_ols_solve_path_threshold`, near the
-/// 1e-8 edge). The fixed-design bootstrap solver skips this step
-/// (see `FixedDesignSolver`). At or above it the unrefined error is below about 1e-12 and the solve
-/// is left as it was, bit for bit.
+/// 1e-8 edge). At or above it the unrefined error is below about 1e-12 and the solve is left
+/// as it was, bit for bit. The fixed-design bootstrap solver skips this step (see
+/// `FixedDesignSolver`).
 const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 
 /// `(X'X)^{-1}` of a full-rank, well-conditioned design and whether solves with it take a
@@ -1023,22 +1023,50 @@ impl<'a> IdentifiedDesign<'a> {
             });
         }
         let cols: Vec<usize> = (0..k).filter(|&j| !ols.beta[j].is_nan()).collect();
-        if cols.len() == k {
-            return Ok(IdentifiedDesign {
+        let id = if cols.len() == k {
+            IdentifiedDesign {
                 cols,
                 k,
                 x: ndarray::CowArray::from(x),
                 unscaled: ols.xtx_inv.clone(),
-            });
+            }
+        } else {
+            let x1 = select_columns(x, &cols)?;
+            let unscaled = select_block(&ols.xtx_inv, &cols);
+            IdentifiedDesign {
+                cols,
+                k,
+                x: ndarray::CowArray::from(x1),
+                unscaled,
+            }
+        };
+        #[cfg(debug_assertions)]
+        id.debug_check_normal_equations(ols);
+        Ok(id)
+    }
+
+    /// Debug builds: `x` must be the fitted design, which the normal equations of the fit
+    /// make orthogonal to the residuals: ‖X₁'e‖∞ ≤ 1e-6 ‖X₁‖_F (‖X₁b₁‖₂ + ‖e‖₂). The bound
+    /// scales with the size of y, since the rounding in X'e of a correct fit is of order
+    /// eps ‖X‖ (‖X‖ ‖b‖ + ‖y‖) whatever ‖e‖ is. (An exact fit cannot be told from a wrong X.)
+    #[cfg(debug_assertions)]
+    fn debug_check_normal_equations(&self, ols: &OlsResult) {
+        let e = &ols.resid;
+        if e.len() != self.x.nrows() || e.iter().any(|v| !v.is_finite()) {
+            return;
         }
-        let x1 = select_columns(x, &cols)?;
-        let unscaled = select_block(&ols.xtx_inv, &cols);
-        Ok(IdentifiedDesign {
-            cols,
-            k,
-            x: ndarray::CowArray::from(x1),
-            unscaled,
-        })
+        let b1: Array1<f64> = self.cols.iter().map(|&j| ols.beta[j]).collect();
+        let xb = self.x.dot(&b1);
+        let norm = |v: &Array1<f64>| v.iter().map(|a| a * a).sum::<f64>().sqrt();
+        let x_f = self.x.iter().map(|a| a * a).sum::<f64>().sqrt();
+        let xte = self.x.t().dot(e);
+        let max = xte.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let bound = 1e-6 * x_f * (norm(&xb) + norm(e)) + f64::MIN_POSITIVE;
+        debug_assert!(
+            !(max > bound),
+            "IdentifiedDesign: the design is not the one the OLS fit was computed on \
+             (max |X'e| = {max:e} > {bound:e})"
+        );
     }
 
     /// Number of identified columns (the rank of the fit).
@@ -1088,6 +1116,19 @@ impl FixedDesignSolver {
             Some(u) => FixedDesignSolver::Normal(u.inverse),
             None => FixedDesignSolver::Qr(Qr::decompose(x, LM_QR_TOL)?),
         })
+    }
+
+    /// The solver of a fitted model's identified design: the fit's own `(X'X)^{-1}` when the
+    /// fit took the normal equations (the same matrix [`FixedDesignSolver::new`] would form
+    /// again), [`FixedDesignSolver::new`]'s decision on the identified columns otherwise (an
+    /// aliased fit's identified columns can pass the normal-equations test).
+    fn for_fit(id: &IdentifiedDesign<'_>, path: Option<OlsPath>) -> EconResult<Self> {
+        match path {
+            Some(OlsPath::NormalEquations) if id.rank() == id.k => {
+                Ok(FixedDesignSolver::Normal(id.unscaled.clone()))
+            }
+            _ => FixedDesignSolver::new(id.x.view()),
+        }
     }
 
     /// Coefficients of `y` on `x` (the design this solver was built from).
@@ -3046,7 +3087,7 @@ pub fn vcov_bootstrap(
     // replicate. The pairs bootstrap refits each resampled design.
     let fixed = match bootstrap_type {
         BootstrapType::Pairs => None,
-        _ => Some(FixedDesignSolver::new(x1)?),
+        _ => Some(FixedDesignSolver::for_fit(&id, ols_result.path)?),
     };
 
     // Storage for bootstrap coefficient estimates
@@ -4289,6 +4330,7 @@ mod tests {
 
     /// summary.lm / logLik / AIC / BIC, from the struct fields.
     fn pin_fit(check: &mut Check<'_>, r: &OlsResult) {
+        // Not pinned here: extract_aic, extract_bic, compared by the stepwise tests.
         let n = r.n_obs;
         check
             .scalar("r2", r.r_squared, Tol::stat(n))
@@ -6972,6 +7014,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The residual and wild bootstraps reuse the base fit's normal-equations inverse:
+    /// bit-identical to a solver that forms it again.
+    #[test]
+    fn test_fixed_design_solver_reuses_base_factor() {
+        let ds = create_test_dataset();
+        let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        assert_eq!(ols.path, Some(OlsPath::NormalEquations));
+        let dm = DesignMatrix::from_dataframe(ds.df(), &["x1"], true).unwrap();
+        let id = IdentifiedDesign::of(dm.data.view(), &ols).unwrap();
+        let (reused, fresh) = (
+            FixedDesignSolver::for_fit(&id, ols.path).unwrap(),
+            FixedDesignSolver::new(id.x.view()).unwrap(),
+        );
+        match (&reused, &fresh) {
+            (FixedDesignSolver::Normal(a), FixedDesignSolver::Normal(b)) => {
+                assert!(a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits()))
+            }
+            _ => panic!("both solvers should take the normal equations"),
+        }
+        // a deserialised fit has no path and decides again
+        assert!(matches!(
+            FixedDesignSolver::for_fit(&id, None).unwrap(),
+            FixedDesignSolver::Normal(_)
+        ));
+    }
+
+    /// Debug builds refuse a design that is not the fitted one.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "not the one the OLS fit")]
+    fn test_identified_design_rejects_other_design() {
+        let ds = create_test_dataset();
+        let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let e = perf3_noise(10, 3);
+        let other = Array2::from_shape_fn((10, 2), |(i, j)| {
+            if j == 0 {
+                1.0
+            } else {
+                (i as f64 * 0.9).sin() * 4.0 + e[i]
+            }
+        });
+        let _ = IdentifiedDesign::of(other.view(), &ols);
     }
 
     /// The pairs bootstrap takes solve_ols's coefficients without forming residuals: every
