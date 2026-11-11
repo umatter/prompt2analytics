@@ -100,15 +100,11 @@
       "quantities": [
         "per-unit lags: AIC, SIC, Hall with dfcor FALSE and TRUE (IPS, LLC, Maddala-Wu)",
         "per-unit lags: trend AIC dfcor TRUE, none SIC dfcor TRUE",
-        "per-unit ADF t (IPS, Maddala-Wu; the six rules, trend, none)"
+        "per-unit ADF t (IPS, Maddala-Wu; the six rules, trend, none)",
+        "IPS W-tbar and p (six rule and dfcor combinations)"
       ],
-      "tolerance": "lags exact; per-unit t validation/README.md statistics row, n = 480: 1e-6 relative",
+      "tolerance": "lags exact; per-unit t validation/README.md statistics row, n = 480: 1e-6 relative; statistics and p-values 1e-6 relative",
       "deviations": [
-        {
-          "finding": "ECON-43",
-          "quantity": "ips_*_stat, ips_*_p",
-          "note": "the IPS W-tbar statistic standardises with ad-hoc moments, not plm's tabulated E/Var of t"
-        },
         {
           "finding": "ECON-41",
           "quantity": "levinlin_*_stat, levinlin_*_p",

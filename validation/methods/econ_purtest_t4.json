@@ -42,9 +42,11 @@
         "purtest_stat_short"
       ],
       "tests": [
-        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_madwu"
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_madwu",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_ips"
       ],
       "quantities": [
+        "IPS W-tbar, p and the averaged table moments: intercept, trend; lags 1 and 3 (T = 50), 1, 2 and 4 (T = 15)",
         "Maddala-Wu chi-square, p and per-unit MacKinnon (1994) p: intercept, trend, none (dfcor FALSE); per-unit ADF t: intercept, trend, none, dfcor FALSE and TRUE, stationary and random-walk panels"
       ],
       "tolerance": "validation/README.md, n = 500 (120 for the short case): statistics 1e-6 relative, p-values 1e-6 relative (abs 1e-12); table moments 1e-14",

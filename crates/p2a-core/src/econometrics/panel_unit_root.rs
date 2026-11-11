@@ -1311,22 +1311,58 @@ fn run_ips_test(
     plan: &LagPlan,
     dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
+    if model == PanelModel::None {
+        return Err(invalid(
+            "the Im-Pesaran-Shin test needs model intercept or trend (its W-tbar moments are \
+             tabulated only for those; plm::purtest refuses exo = 'none')"
+                .to_string(),
+        ));
+    }
     let (used, unit_lags, fits, warnings) =
         unit_adf_fits(PanelUnitRootTest::IPS, panels, model, plan, dfcor)?;
     let t_stats: Vec<f64> = fits.iter().map(|f| f.t_stat).collect();
     let n_valid = t_stats.len();
-    let avg_t: f64 = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n_valid as f64;
 
-    // Compute average t-statistic
+    // Each unit's E and Var of t from IPS (2003) Table 3 at (T_i - p_i - 1, p_i), averaged.
+    let (mut e_sum, mut v_sum) = (0.0, 0.0);
+    let (mut below, mut above, mut many_lags) = (0usize, 0usize, 0usize);
+    for (&i, &p) in used.iter().zip(&unit_lags) {
+        let l = panels[i].1.len() - p - 1;
+        let (e, v, edge) = ips_moments(l, p, model)?;
+        e_sum += e;
+        v_sum += v;
+        match edge {
+            Some(TableEdge::Below) => below += 1,
+            Some(TableEdge::Above) => above += 1,
+            None => {}
+        }
+        many_lags += usize::from(p > IPS_MAX_LAG);
+    }
+    let e_t = e_sum / n_valid as f64;
+    let var_t = v_sum / n_valid as f64;
+    let mut warnings = warnings;
+    if many_lags > 0 {
+        warnings.push(format!(
+            "Im-Pesaran-Shin: {many_lags} unit(s) use more than {IPS_MAX_LAG} lags; the \
+             {IPS_MAX_LAG}-lag moments of IPS (2003) Table 3 are used, as plm::purtest does"
+        ));
+    }
+    if below > 0 {
+        warnings.push(format!(
+            "Im-Pesaran-Shin: {below} unit(s) have T - lags - 1 below 10 (the shortest row of \
+             IPS (2003) Table 3); the T = 10 moments are used, as plm::purtest does"
+        ));
+    }
+    if above > 0 {
+        warnings.push(format!(
+            "Im-Pesaran-Shin: {above} unit(s) have T - lags - 1 above 100 (the longest row of \
+             IPS (2003) Table 3); the T = 100 moments are used, as plm::purtest does"
+        ));
+    }
+
     let t_bar: f64 = t_stats.iter().sum::<f64>() / n_valid as f64;
-
-    // Get moments E[t] and Var[t] from IPS (2003) tables
-    let (e_t, var_t) = get_ips_moments(avg_t, model);
-
-    // W-statistic: standardized t-bar
+    // W-tbar: the standardised t-bar, lower tail.
     let w_stat = (n_valid as f64).sqrt() * (t_bar - e_t) / var_t.sqrt();
-
-    // P-value from standard normal
     let p_value = normal_cdf(w_stat);
 
     let mut r = unit_root_result(
@@ -1347,29 +1383,165 @@ fn run_ips_test(
     Ok(r)
 }
 
-/// Get IPS (2003) expected mean and variance of t-statistic.
-/// These are approximations based on Table 2 of IPS (2003).
-fn get_ips_moments(avg_t: f64, model: PanelModel) -> (f64, f64) {
-    match model {
-        PanelModel::None => {
-            // No constant: E[t] ≈ 0, Var[t] ≈ 1
-            (0.0, 1.0)
-        }
-        PanelModel::Intercept => {
-            // Individual intercept only
-            // Approximation: E[t] ≈ -1.52 - 0.5/T, Var[t] ≈ 0.96 + 0.56/T
-            let e_t = -1.52 - 0.5 / avg_t;
-            let var_t = 0.96 + 0.56 / avg_t;
-            (e_t, var_t)
-        }
-        PanelModel::Trend => {
-            // Individual intercept and trend
-            // E[t] ≈ -2.15 - 2.0/T, Var[t] ≈ 0.89 + 0.91/T
-            let e_t = -2.15 - 2.0 / avg_t;
-            let var_t = 0.89 + 0.91 / avg_t;
-            (e_t, var_t)
-        }
+/// Which end of a table a value was clamped to (plm's `selectT` warns "the time series is
+/// short" or "long").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableEdge {
+    Below,
+    Above,
+}
+
+/// plm's `selectT` over the tabulated `ts` (increasing): the row of `x`, the two rows around
+/// it, or the first or last row when `x` lies outside.
+struct TablePos {
+    lo: usize,
+    hi: usize,
+    x: f64,
+    edge: Option<TableEdge>,
+}
+
+fn select_t(x: f64, ts: &[f64]) -> TablePos {
+    let last = ts.len() - 1;
+    if let Some(i) = ts.iter().position(|&t| t == x) {
+        return TablePos {
+            lo: i,
+            hi: i,
+            x,
+            edge: None,
+        };
     }
+    if x < ts[0] {
+        return TablePos {
+            lo: 0,
+            hi: 0,
+            x: ts[0],
+            edge: Some(TableEdge::Below),
+        };
+    }
+    if x > ts[last] {
+        return TablePos {
+            lo: last,
+            hi: last,
+            x: ts[last],
+            edge: Some(TableEdge::Above),
+        };
+    }
+    let hi = ts.partition_point(|&t| t <= x);
+    TablePos {
+        lo: hi - 1,
+        hi,
+        x,
+        edge: None,
+    }
+}
+
+impl TablePos {
+    /// The tabulated value of `row` at `x`, linearly interpolated between rows as plm does
+    /// (NaN when either end is not tabulated).
+    fn value(&self, row: &[f64], ts: &[f64]) -> f64 {
+        if self.lo == self.hi {
+            return row[self.lo];
+        }
+        let (t0, t1) = (ts[self.lo], ts[self.hi]);
+        row[self.lo] + (self.x - t0) / (t1 - t0) * (row[self.hi] - row[self.lo])
+    }
+}
+
+/// The largest lag order of IPS (2003) Table 3; larger orders use its row.
+const IPS_MAX_LAG: usize = 8;
+
+/// The T columns of IPS (2003) Table 3 (T - lags - 1 of the ADF regression).
+const IPS_TS: [f64; 10] = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 100.0];
+
+const NA: f64 = f64::NAN;
+
+/// IPS (2003) Table 3 as `plm:::adj.ips.wtbar` stores it: mean of the ADF t by lag order
+/// (rows 0..=8) and T (`IPS_TS`), individual intercepts; NaN = not tabulated.
+#[rustfmt::skip]
+const IPS_INTERCEPT_MEAN: [[f64; 10]; 9] = [
+    [-1.504, -1.514, -1.522, -1.520, -1.526, -1.523, -1.527, -1.519, -1.524, -1.532],
+    [-1.488, -1.503, -1.516, -1.514, -1.519, -1.520, -1.524, -1.519, -1.522, -1.530],
+    [-1.319, -1.387, -1.428, -1.443, -1.460, -1.476, -1.493, -1.490, -1.498, -1.514],
+    [-1.306, -1.366, -1.413, -1.433, -1.453, -1.471, -1.489, -1.486, -1.495, -1.512],
+    [-1.171, -1.260, -1.329, -1.363, -1.394, -1.428, -1.454, -1.458, -1.470, -1.495],
+    [NA, NA, -1.313, -1.351, -1.384, -1.421, -1.451, -1.454, -1.467, -1.494],
+    [NA, NA, NA, -1.289, -1.331, -1.380, -1.418, -1.427, -1.444, -1.476],
+    [NA, NA, NA, -1.273, -1.319, -1.371, -1.411, -1.423, -1.441, -1.474],
+    [NA, NA, NA, -1.212, -1.266, -1.329, -1.377, -1.393, -1.415, -1.456],
+];
+
+/// As [`IPS_INTERCEPT_MEAN`], the variance of t.
+#[rustfmt::skip]
+const IPS_INTERCEPT_VAR: [[f64; 10]; 9] = [
+    [1.069, 0.923, 0.851, 0.809, 0.789, 0.770, 0.760, 0.749, 0.736, 0.735],
+    [1.255, 1.011, 0.915, 0.861, 0.831, 0.803, 0.781, 0.770, 0.753, 0.745],
+    [1.421, 1.078, 0.969, 0.905, 0.865, 0.830, 0.798, 0.789, 0.766, 0.754],
+    [1.759, 1.181, 1.037, 0.952, 0.907, 0.858, 0.819, 0.802, 0.782, 0.761],
+    [2.080, 1.279, 1.097, 1.005, 0.946, 0.886, 0.842, 0.819, 0.801, 0.771],
+    [NA, NA, 1.171, 1.055, 0.980, 0.912, 0.863, 0.839, 0.814, 0.781],
+    [NA, NA, NA, 1.114, 1.023, 0.942, 0.886, 0.858, 0.834, 0.795],
+    [NA, NA, NA, 1.164, 1.062, 0.968, 0.910, 0.875, 0.851, 0.806],
+    [NA, NA, NA, 1.217, 1.105, 0.996, 0.929, 0.896, 0.871, 0.818],
+];
+
+/// As [`IPS_INTERCEPT_MEAN`], individual intercepts and trends.
+#[rustfmt::skip]
+const IPS_TREND_MEAN: [[f64; 10]; 9] = [
+    [-2.166, -2.167, -2.168, -2.167, -2.172, -2.173, -2.176, -2.174, -2.174, -2.177],
+    [-2.173, -2.169, -2.172, -2.172, -2.173, -2.177, -2.180, -2.178, -2.176, -2.179],
+    [-1.914, -1.999, -2.047, -2.074, -2.095, -2.120, -2.137, -2.143, -2.146, -2.158],
+    [-1.922, -1.977, -2.032, -2.065, -2.091, -2.117, -2.137, -2.142, -2.146, -2.158],
+    [-1.750, -1.823, -1.911, -1.968, -2.009, -2.057, -2.091, -2.103, -2.114, -2.135],
+    [NA, NA, -1.888, -1.955, -1.998, -2.051, -2.087, -2.101, -2.111, -2.135],
+    [NA, NA, NA, -1.868, -1.923, -1.995, -2.042, -2.065, -2.081, -2.113],
+    [NA, NA, NA, -1.851, -1.912, -1.986, -2.036, -2.063, -2.079, -2.112],
+    [NA, NA, NA, -1.761, -1.835, -1.925, -1.987, -2.024, -2.046, -2.088],
+];
+
+/// As [`IPS_TREND_MEAN`], the variance of t.
+#[rustfmt::skip]
+const IPS_TREND_VAR: [[f64; 10]; 9] = [
+    [1.132, 0.869, 0.763, 0.713, 0.690, 0.655, 0.633, 0.621, 0.610, 0.597],
+    [1.453, 0.975, 0.845, 0.769, 0.734, 0.687, 0.654, 0.641, 0.627, 0.605],
+    [1.627, 1.036, 0.882, 0.796, 0.756, 0.702, 0.661, 0.653, 0.634, 0.613],
+    [2.482, 1.214, 0.983, 0.861, 0.808, 0.735, 0.688, 0.674, 0.650, 0.625],
+    [3.947, 1.332, 1.052, 0.913, 0.845, 0.759, 0.705, 0.685, 0.662, 0.629],
+    [NA, NA, 1.165, 0.991, 0.899, 0.792, 0.730, 0.705, 0.673, 0.638],
+    [NA, NA, NA, 1.055, 0.945, 0.828, 0.753, 0.725, 0.689, 0.650],
+    [NA, NA, NA, 1.145, 1.009, 0.872, 0.786, 0.747, 0.713, 0.661],
+    [NA, NA, NA, 1.208, 1.063, 0.902, 0.808, 0.766, 0.728, 0.670],
+];
+
+/// The mean and variance of one unit's ADF t under the null, from IPS (2003) Table 3 at
+/// `l = T - lags - 1` and the lag order (8 for more), as `plm:::adj.ips.wtbar.value`; with
+/// the table end it was clamped to, if any. Untabulated (lags, T) is an error (plm: NA).
+fn ips_moments(
+    l: usize,
+    lags: usize,
+    model: PanelModel,
+) -> EconResult<(f64, f64, Option<TableEdge>)> {
+    let (mean, var) = match model {
+        PanelModel::Intercept => (&IPS_INTERCEPT_MEAN, &IPS_INTERCEPT_VAR),
+        PanelModel::Trend => (&IPS_TREND_MEAN, &IPS_TREND_VAR),
+        PanelModel::None => {
+            return Err(invalid(
+                "the Im-Pesaran-Shin moments are tabulated only for model intercept or trend"
+                    .to_string(),
+            ));
+        }
+    };
+    let row = lags.min(IPS_MAX_LAG);
+    let pos = select_t(l as f64, &IPS_TS);
+    let e = pos.value(&mean[row], &IPS_TS);
+    let v = pos.value(&var[row], &IPS_TS);
+    if e.is_nan() || v.is_nan() {
+        return Err(invalid(format!(
+            "Im-Pesaran-Shin: the W-tbar moments are not tabulated for {row} lags at T - lags \
+             - 1 = {l} (IPS 2003 Table 3 has 5 lags from 20 and 6 to 8 lags from 25 periods); \
+             use fewer lags or a longer panel"
+        )));
+    }
+    Ok((e, v, pos.edge))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1994,7 +2166,6 @@ mod tests {
     #[test]
     fn test_validate_purtest_lag_selection_ips() {
         let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
-        // deviation ECON-43: the W-tbar statistic uses ad-hoc moments; ips_*_stat/_p are not compared
         let mut c = Check::new(&case);
         for (sel, rule) in RULES {
             for dfcor in [false, true] {
@@ -2015,6 +2186,16 @@ mod tests {
                     &format!("trho_{rule}{sfx}"),
                     r.unit_statistics.as_deref().unwrap(),
                     Tol::stat(480),
+                )
+                .scalar(
+                    &format!("ips_{rule}{sfx}_stat"),
+                    r.statistic,
+                    Tol::stat(480),
+                )
+                .scalar(
+                    &format!("ips_{rule}{sfx}_p"),
+                    r.p_value,
+                    Tol::p_value(480),
                 );
                 assert_eq!(r.n_panels, 12);
                 assert_eq!(r.lags_used, *r.unit_lags.iter().max().unwrap());
@@ -2719,5 +2900,137 @@ mod tests {
             }
         }
         c.finish();
+    }
+
+    /// IPS W-tbar with IPS (2003) Table 3 moments: plm::purtest(test = "ips", lags = 1 | 3)
+    /// on T = 50 and lags = 1 | 2 | 4 on T = 15 (rows 10 and 15, interpolation between).
+    #[test]
+    fn test_validate_purtest_stat_ips() {
+        // The averaged table moments plm reports (rowMeans(adjval)).
+        let moments = |ds: &Dataset, r: &PanelUnitRootResult, model| {
+            let lens: Vec<usize> = (1..=r.n_panels)
+                .map(|i| {
+                    let ids = ds.df().column("id").unwrap().i64().unwrap();
+                    ids.iter().filter(|&v| v == Some(i as i64)).count()
+                })
+                .collect();
+            let (mut e, mut v) = (0.0, 0.0);
+            for (len, &p) in lens.iter().zip(&r.unit_lags) {
+                let (a, b, _) = ips_moments(len - p - 1, p, model).unwrap();
+                e += a;
+                v += b;
+            }
+            let n = r.n_panels as f64;
+            vec![e / n, v / n]
+        };
+        let tight = Tol::new(1e-14, 1e-14);
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    for lags in [1, 3] {
+                        let key = format!("ips_{}_lags{lags}", stat_tag(col, exo, dfcor));
+                        let r =
+                            stat_run(&ds, col, PanelUnitRootTest::IPS, *model, Some(lags), dfcor);
+                        c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(500))
+                            .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(500))
+                            .vector(&format!("{key}_moments"), &moments(&ds, &r, *model), tight);
+                    }
+                }
+            }
+        }
+        c.finish();
+        let (case, ds) = crate::test_support::load_case("purtest_stat_short");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            for lags in [1, 2, 4] {
+                let key = format!("ips_{exo}_lags{lags}");
+                let r = stat_run(&ds, "y", PanelUnitRootTest::IPS, *model, Some(lags), true);
+                c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(120))
+                    .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(120))
+                    .vector(&format!("{key}_moments"), &moments(&ds, &r, *model), tight);
+            }
+        }
+        c.finish();
+    }
+
+    /// plm::purtest refuses exo = "none" for IPS.
+    #[test]
+    fn test_ips_refuses_model_none() {
+        let ds = noisy_panel(&[30; 6], 7);
+        let e = run_panel_unit_root(
+            &ds,
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::None, Some(1)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("Im-Pesaran-Shin test needs model intercept or trend")),
+            "{e:?}"
+        );
+    }
+
+    /// T = 18 with 5 lags: T - lags - 1 = 12 lies between rows 10 and 15, where 5 lags are not
+    /// tabulated (plm returns NA).
+    #[test]
+    fn test_ips_untabulated_moments_is_an_error() {
+        let ds = noisy_panel(&[18; 6], 8);
+        let e = run_panel_unit_root(
+            &ds,
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(5)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("not tabulated for 5 lags at T - lags - 1 = 12")),
+            "{e:?}"
+        );
+    }
+
+    /// Clamped table rows and lag orders above 8 are used as plm does, with a warning.
+    #[test]
+    fn test_ips_table_clamp_warnings() {
+        let short = run_panel_unit_root(
+            &noisy_panel(&[9; 6], 9),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(1)),
+        )
+        .unwrap();
+        assert!(
+            short
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("Im-Pesaran-Shin: 6 unit(s) have T - lags - 1 below 10")),
+            "{:?}",
+            short.warnings
+        );
+        let (e, v, edge) = ips_moments(7, 1, PanelModel::Intercept).unwrap();
+        assert_eq!((e, v, edge), (-1.488, 1.255, Some(TableEdge::Below)));
+        let many = run_panel_unit_root(
+            &noisy_panel(&[60; 6], 10),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(9)),
+        )
+        .unwrap();
+        assert!(
+            many.warnings
+                .iter()
+                .any(|w| w.starts_with("Im-Pesaran-Shin: 6 unit(s) use more than 8 lags")),
+            "{:?}",
+            many.warnings
+        );
+        let (_, _, edge) = ips_moments(150, 1, PanelModel::Trend).unwrap();
+        assert_eq!(edge, Some(TableEdge::Above));
     }
 }
