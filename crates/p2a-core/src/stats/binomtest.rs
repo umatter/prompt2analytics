@@ -17,15 +17,14 @@
 //! For H₀: p = p₀, the exact p-value is calculated using the binomial distribution:
 //!
 //! ### Two-sided test
+//! As R's `binom.test`, the p-value sums the probabilities of every outcome no more likely
+//! than the observed one, with R's relative tolerance:
 //! ```text
-//! P = 2 × min(P(X ≤ x), P(X ≥ x))
+//! P = Σ P(X = k) over k with P(X = k) ≤ P(X = x) (1 + 1e-7)
 //! ```
-//! where X ~ Binomial(n, p₀)
-//!
-//! More precisely, R uses:
-//! ```text
-//! P = Σ P(X = k) for all k where P(X = k) ≤ P(X = x)
-//! ```
+//! where X ~ Binomial(n, p₀). It is 1 when x = n p₀. The tail opposite x is found by binary
+//! search over the side of the mean it lies on, and adds nothing when no outcome there is as
+//! unlikely as x.
 //!
 //! ### One-sided tests
 //! ```text
@@ -242,97 +241,97 @@ fn exact_binom_p_value(x: u64, n: u64, p0: f64, alternative: Alternative) -> f64
             // P(X >= x) = P(X > x - 1), the survival function (no 1 - cdf cancellation)
             if x == 0 { 1.0 } else { binom.sf(x - 1) }
         }
-        Alternative::TwoSided => {
-            // Optimized two-sided p-value using binary search
-            // Instead of iterating through all k, find tail boundaries
-            two_sided_binom_p_value(&binom, x, n, p0)
-        }
+        Alternative::TwoSided => binom_two_sided_p(&binom, x, n, p0),
     }
 }
 
-/// Optimized two-sided binomial p-value calculation.
+/// R's relative tolerance for "as likely as the observed value" in the two-sided exact tests
+/// (`relErr <- 1 + 1e-07` in `binom.test` and `poisson.test`).
+pub(crate) const MINLIKE_REL_ERR: f64 = 1.0 + 1e-7;
+
+/// R's `binom.test` two-sided p-value: the probability of every outcome no more likely than the
+/// observed one (up to the relative tolerance [`MINLIKE_REL_ERR`]).
 ///
-/// Uses the fact that binomial PMF is unimodal - we only need to find
-/// where in the opposite tail the PMF drops below the observed value.
-fn two_sided_binom_p_value(binom: &statrs::distribution::Binomial, x: u64, n: u64, p0: f64) -> f64 {
+/// With `m = n p0` and `d = pmf(x)`: `x == m` gives 1. For `x < m` the observed tail is
+/// `P(X <= x)` and the opposite tail is the suffix of `[ceil(m), n]` whose cells are at most
+/// `d (1 + 1e-7)`; for `x > m` it is the matching prefix of `[0, floor(m)]` plus `P(X >= x)`.
+/// An empty opposite tail adds nothing. The pmf does not increase on `[ceil(m), n]` and does not
+/// decrease on `[0, floor(m)]` (the mode, `floor((n + 1) p0)`, lies between `floor(m)` and
+/// `ceil(m)`), so each boundary is a binary search: O(log n) pmf evaluations.
+pub(crate) fn binom_two_sided_p(
+    binom: &statrs::distribution::Binomial,
+    x: u64,
+    n: u64,
+    p0: f64,
+) -> f64 {
     use statrs::distribution::{Discrete, DiscreteCDF};
 
-    let observed_prob = binom.pmf(x);
-    let mean = n as f64 * p0;
+    let m = n as f64 * p0;
     let x_f = x as f64;
-
-    // Handle edge cases
-    if x == 0 {
-        // Lower tail is just P(X=0), find upper boundary
-        let upper = find_upper_boundary(binom, n, observed_prob);
-        return binom.cdf(0) + binom.sf(upper.saturating_sub(1));
-    }
-    if x == n {
-        // Upper tail is just P(X=n), find lower boundary
-        let lower = find_lower_boundary(binom, n, observed_prob);
-        return binom.cdf(lower) + binom.sf(n - 1);
-    }
-
-    if x_f < mean {
-        // Observed is below mean - we have lower tail P(X <= x)
-        // Find upper boundary where P(X = k) <= observed_prob
-        let upper = find_upper_boundary(binom, n, observed_prob);
-
-        // P-value = P(X <= x) + P(X >= upper)
-        let p_lower = binom.cdf(x);
-        let p_upper = if upper > n {
-            0.0
-        } else {
-            binom.sf(upper.saturating_sub(1))
-        };
-        (p_lower + p_upper).min(1.0)
-    } else if x_f > mean {
-        // Observed is above mean - we have upper tail P(X >= x)
-        // Find lower boundary where P(X = k) <= observed_prob
-        let lower = find_lower_boundary(binom, n, observed_prob);
-
-        // P-value = P(X <= lower) + P(X >= x)
-        let p_lower = binom.cdf(lower);
-        let p_upper = binom.sf(x.saturating_sub(1));
-        (p_lower + p_upper).min(1.0)
-    } else {
-        // x == mean (rare for discrete), p-value = 1
+    let thr = binom.pmf(x) * MINLIKE_REL_ERR;
+    let pmf = |i: u64| binom.pmf(i);
+    let p = if x_f == m {
         1.0
-    }
+    } else if x_f < m {
+        // ceil(m) <= n because m < n (p0 < 1); i >= ceil(m) >= 1, so i - 1 does not wrap
+        let lo = (m.ceil() as u64).min(n);
+        let upper = first_at_or_below(lo, n, thr, pmf).map_or(0.0, |i| binom.sf(i - 1));
+        binom.cdf(x) + upper
+    } else {
+        let hi = (m.floor() as u64).min(n);
+        let lower = last_at_or_below(0, hi, thr, pmf).map_or(0.0, |i| binom.cdf(i));
+        // x > m >= 0, so x >= 1
+        lower + binom.sf(x - 1)
+    };
+    p.min(1.0)
 }
 
-/// Binary search to find the smallest k >= mean where P(X=k) <= threshold.
-fn find_upper_boundary(binom: &statrs::distribution::Binomial, n: u64, threshold: f64) -> u64 {
-    use statrs::distribution::Discrete;
-    use statrs::statistics::Distribution;
-
-    // The mode is around n*p, search from there to n
-    let mean = binom.mean().unwrap_or(n as f64 / 2.0) as u64;
-
-    // Linear search from mean upward (PMF decreases monotonically after mode)
-    // This is typically O(sqrt(n)) iterations
-    for k in mean.max(1)..=n {
-        if binom.pmf(k) <= threshold * (1.0 + 1e-10) {
-            return k;
+/// First `i` in `[lo, hi]` with `pmf(i) <= threshold`, for a `pmf` that does not increase on
+/// `[lo, hi]`; `None` when no cell qualifies (or the range is empty). Binary search.
+pub(crate) fn first_at_or_below(
+    lo: u64,
+    hi: u64,
+    threshold: f64,
+    pmf: impl Fn(u64) -> f64,
+) -> Option<u64> {
+    if lo > hi || pmf(hi) > threshold {
+        return None;
+    }
+    // invariant: pmf(hi) <= threshold; the answer lies in [lo, hi]
+    let (mut a, mut b) = (lo, hi);
+    while a < b {
+        let mid = a + (b - a) / 2;
+        if pmf(mid) <= threshold {
+            b = mid;
+        } else {
+            a = mid + 1;
         }
     }
-    n + 1 // No boundary found
+    Some(a)
 }
 
-/// Binary search to find the largest k <= mean where P(X=k) <= threshold.
-fn find_lower_boundary(binom: &statrs::distribution::Binomial, n: u64, threshold: f64) -> u64 {
-    use statrs::distribution::Discrete;
-    use statrs::statistics::Distribution;
-
-    let mean = binom.mean().unwrap_or(n as f64 / 2.0) as u64;
-
-    // Linear search from mean downward (PMF decreases monotonically before mode)
-    for k in (0..=mean.min(n)).rev() {
-        if binom.pmf(k) <= threshold * (1.0 + 1e-10) {
-            return k;
+/// Last `i` in `[lo, hi]` with `pmf(i) <= threshold`, for a `pmf` that does not decrease on
+/// `[lo, hi]`; `None` when no cell qualifies (or the range is empty). Binary search.
+pub(crate) fn last_at_or_below(
+    lo: u64,
+    hi: u64,
+    threshold: f64,
+    pmf: impl Fn(u64) -> f64,
+) -> Option<u64> {
+    if lo > hi || pmf(lo) > threshold {
+        return None;
+    }
+    // invariant: pmf(a) <= threshold; the answer lies in [a, b]
+    let (mut a, mut b) = (lo, hi);
+    while a < b {
+        let mid = a + (b - a).div_ceil(2);
+        if pmf(mid) <= threshold {
+            a = mid;
+        } else {
+            b = mid - 1;
         }
     }
-    0 // Return 0 if no boundary found (include nothing from lower tail)
+    Some(a)
 }
 
 /// Compute Clopper-Pearson exact confidence interval.
@@ -455,7 +454,7 @@ mod tests {
             .na(NaPolicy::Fail)
             .extract()
             .unwrap();
-        let (mut all, mut ok) = (Vec::new(), Vec::new());
+        let (mut all, mut ok, mut s15) = (Vec::new(), Vec::new(), Vec::new());
         let mut v: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
         for i in 0..cols.n() {
             let label = cols.factor("label").label(i).to_string();
@@ -470,7 +469,10 @@ mod tests {
             if cols.numeric("stat15")[i] == 0.0 {
                 ok.push(label.clone());
                 v.entry("p_two").or_default().push(two.p_value);
-            } // deviation STAT-15: the stat15 cells keep R's two-sided p under p_two_stat15
+            } else {
+                s15.push(label.clone());
+                v.entry("p_two_stat15").or_default().push(two.p_value);
+            }
             all.push(label);
             for (k, val) in [
                 ("p_less", less.p_value),
@@ -487,6 +489,7 @@ mod tests {
         // the smallest n in the grid is 10: README tolerances at n = 10
         Check::new(&case)
             .named("p_two", &ok, &v["p_two"], Tol::p_value(10))
+            .named("p_two_stat15", &s15, &v["p_two_stat15"], Tol::p_value(10))
             .named("p_less", &all, &v["p_less"], Tol::p_value(10))
             .named("p_greater", &all, &v["p_greater"], Tol::p_value(10))
             .named("ci_two_lower", &all, &v["ci_two_lower"], Tol::stat(10))
@@ -500,6 +503,63 @@ mod tests {
             .named("ci_less_upper", &all, &v["ci_less_upper"], Tol::stat(10))
             .named("estimate", &all, &v["estimate"], Tol::coef(10))
             .finish();
+    }
+
+    #[test]
+    fn test_validate_binom_minlike_t4() {
+        use crate::data::columns::{ColumnRequest, NaPolicy};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_binom_minlike_t4");
+        let cols = ColumnRequest::new(ds.df())
+            .factor("label")
+            .numerics(&["x", "n", "p"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let mut check = Check::new(&case);
+        for i in 0..cols.n() {
+            let label = cols.factor("label").label(i).to_string();
+            let (x, n, p) = (
+                cols.numeric("x")[i] as u64,
+                cols.numeric("n")[i] as u64,
+                cols.numeric("p")[i],
+            );
+            let two = binom_test(x, n, p, Alternative::TwoSided, 0.95).unwrap();
+            check.named_subset(
+                "p_two",
+                &[label.as_str()],
+                &[label.as_str()],
+                &[two.p_value],
+                Tol::p_value(n as usize),
+            );
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_binom_two_sided_empty_tail_adds_nothing() {
+        // (1, 10, 0.05): m = 0.5, x > m, and no cell of [0, floor(m)] = {0} is as unlikely as
+        // x = 1 (pmf(0) = 0.599 > pmf(1) = 0.315), so R's p is P(X >= 1) with no P(X = 0) term.
+        use statrs::distribution::{Binomial, DiscreteCDF};
+        let p = binom_test(1, 10, 0.05, Alternative::TwoSided, 0.95)
+            .unwrap()
+            .p_value;
+        let sf0 = Binomial::new(0.05, 10).unwrap().sf(0);
+        assert_eq!(p, sf0);
+    }
+
+    #[test]
+    fn test_binom_search_helpers() {
+        let pmf = |i: u64| 1.0 / (1.0 + i as f64); // decreasing
+        assert_eq!(first_at_or_below(0, 10, 0.25, pmf), Some(3));
+        assert_eq!(first_at_or_below(0, 10, 0.01, pmf), None);
+        assert_eq!(first_at_or_below(5, 4, 1.0, pmf), None);
+        assert_eq!(first_at_or_below(0, 10, 2.0, pmf), Some(0));
+        let inc = |i: u64| i as f64; // increasing
+        assert_eq!(last_at_or_below(0, 10, 3.5, inc), Some(3));
+        assert_eq!(last_at_or_below(2, 10, 1.0, inc), None);
+        assert_eq!(last_at_or_below(0, 10, 20.0, inc), Some(10));
+        assert_eq!(last_at_or_below(0, 0, 0.0, inc), Some(0));
     }
 
     #[test]
