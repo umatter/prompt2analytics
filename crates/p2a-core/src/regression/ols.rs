@@ -2985,7 +2985,7 @@ pub struct DriscollKraayResult {
     pub n_periods: usize,
     /// Number of cross-sectional units.
     pub n_units: usize,
-    /// Bandwidth used.
+    /// Lag count L used: lag j has weight k(j / (L + 1)) (`vcovPL(lag = L)`).
     pub bandwidth: usize,
     /// Kernel type used.
     pub kernel: HacKernel,
@@ -3047,15 +3047,17 @@ impl std::fmt::Display for DriscollKraayResult {
 ///
 /// # Algorithm
 ///
-/// 1. Aggregate moment conditions (score vectors) by time period:
-///    h̄_t = (1/N_t) Σᵢ uᵢₜ xᵢₜ
+/// 1. Sum the scores within each time period: h_t = Σᵢ∈t uᵢₜ xᵢₜ.
 ///
-/// 2. Apply Newey-West HAC estimation to the time series of aggregated moments:
-///    Ω̂ = Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
-///    where Γ̂ⱼ = (1/T) Σₜ h̄_t h̄_{t-j}'
+/// 2. Apply the kernel to the time series of period sums (sorted by period):
+///    Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ'), Γ̂ⱼ = Σₜ h_t h_{t-j}', with w(j) = k(j / (L + 1)) for
+///    the lag count L over lags 0..T-1, cut after the last non-zero weight (sandwich's
+///    `meatPL`; Quadratic Spectral keeps every lag).
 ///
-/// 3. Scale and compute sandwich:
-///    V = (X'X)⁻¹ (T × Ω̂) (X'X)⁻¹
+/// 3. The sandwich V = (X'X)⁻¹ Ω̂ (X'X)⁻¹, with no small-sample factor: this is
+///    `sandwich::vcovPL(cluster = ~unit, order.by = ~time, lag = L, adjust = FALSE)`
+///    (`vcovPL`'s default `adjust = TRUE` multiplies by n/(n - k)) and
+///    `plm::vcovSCC(maxlag = L)`. The t tests use T - rank degrees of freedom.
 ///
 /// # Arguments
 ///
@@ -3175,74 +3177,35 @@ pub fn vcov_driscoll_kraay(
     let x = &id.x;
     let xtx_inv = &id.unscaled;
 
-    // Step 1: Aggregate score vectors by time period
-    // h̄_t = (1/N_t) Σᵢ∈t uᵢ xᵢ
-    let mut h_bar: Vec<Array1<f64>> = Vec::with_capacity(n_periods);
-
-    for t in &time_periods {
-        let indices = &time_map[t];
-        let n_t = indices.len();
-
-        let mut h_t = Array1::<f64>::zeros(k);
-        for &i in indices {
+    // Step 1: sum the scores within each period, h_t = Σᵢ∈t uᵢ xᵢ (sandwich's meatPL),
+    // stored column-reversed and column-major over the sorted periods (see `hac_meat`)
+    let mut h = resource::try_vec(
+        resource::checked_len(&[n_periods, k], "Driscoll-Kraay period scores")?,
+        0.0,
+        "Driscoll-Kraay period scores",
+    )?;
+    for (t, period) in time_periods.iter().enumerate() {
+        for &i in &time_map[period] {
             for j in 0..k {
-                h_t[j] += residuals[i] * x[[i, j]];
+                h[j * n_periods + n_periods - 1 - t] += residuals[i] * x[[i, j]];
             }
         }
-        // Average within time period
-        h_t /= n_t as f64;
-        h_bar.push(h_t);
     }
 
     // Step 2: Automatic bandwidth selection
     let bw = bandwidth.unwrap_or_else(|| {
-        // Newey-West 1987 rule: floor(T^(1/4))
+        // Newey-West 1987 rule: floor(T^(1/4)) (vcovPL's lag = "NW1987")
         let nw_bw = (n_periods as f64).powf(0.25).floor() as usize;
         nw_bw.max(1).min(n_periods - 1)
     });
 
-    // Step 3: Compute HAC-adjusted covariance of aggregated moments
-    // Ω̂ = Γ̂₀ + Σⱼ₌₁ᵐ w(j)(Γ̂ⱼ + Γ̂ⱼ')
-    let mut omega = Array2::<f64>::zeros((k, k));
-
-    // Lag 0: Γ̂₀ = (1/T) Σₜ h̄_t h̄_t'
-    for t in 0..n_periods {
-        for j in 0..k {
-            for l in 0..k {
-                omega[[j, l]] += h_bar[t][j] * h_bar[t][l];
-            }
-        }
-    }
-
-    // Lags 1 to bw
-    for lag in 1..=bw.min(n_periods - 1) {
-        resource::checkpoint()?;
-        let w = kernel.weight(lag, bw);
-        if w.abs() < 1e-15 {
-            continue;
-        }
-
-        let mut gamma_lag = Array2::<f64>::zeros((k, k));
-        for t in lag..n_periods {
-            for j in 0..k {
-                for l in 0..k {
-                    gamma_lag[[j, l]] += h_bar[t][j] * h_bar[t - lag][l];
-                }
-            }
-        }
-
-        // Add symmetrically
-        for j in 0..k {
-            for l in 0..k {
-                omega[[j, l]] += w * (gamma_lag[[j, l]] + gamma_lag[[l, j]]);
-            }
-        }
-    }
-
-    // Scale by T (number of periods) to get consistent estimator
-    // The aggregation by N already accounted for cross-sectional dimension
-    // Final formula: V = (X'X)⁻¹ × (T × Ω̂) × (X'X)⁻¹
-    let scaled_omega = &omega * (n_periods as f64);
+    // Step 3: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ') with Γ̂ⱼ = Σₜ h_t h_{t-j}', over meatPL's lag set:
+    // k(j / (bw + 1)) for j = 0..T-1, cut after the last non-zero weight
+    let weights = kernel.lag_set(bw, n_periods, 0.0);
+    let omega = hac_meat_dispatch(&h, n_periods, k, &weights)?;
+    let scaled_omega = Array2::from_shape_vec((k, k), omega).map_err(|e| {
+        EconError::Computation(format!("Driscoll-Kraay meat has the wrong shape: {e}"))
+    })?;
 
     // Sandwich: V = (X'X)⁻¹ Ω (X'X)⁻¹
     let meat_bread =
@@ -4815,10 +4778,9 @@ mod tests {
     }
 
     /// Case `dk_panel` (sandwich::vcovPL / plm::vcovSCC on the legacy Test 10 DGP;
-    /// validation/r/cases/regression_legacy.R). Only the parts p2a reproduces are pinned.
+    /// validation/r/cases/regression_legacy.R).
     #[test]
     fn test_validate_driscoll_kraay_panel() {
-        use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("dk_panel");
         let n = case.scalar("n_obs") as usize;
         let dk = run_vcov_driscoll_kraay(&ds, "y", &["x"], "time", None, None).unwrap();
@@ -4827,24 +4789,101 @@ mod tests {
         Check::new(&case)
             .named("coef", &dk.names, &dk.coefficients, Tol::coef(n))
             .named("se_ols", &dk.names, &ols_se, Tol::se(n))
-            // default bandwidth floor(T^(1/4)) = vcovPL's lag = "NW1987"; Bartlett
-            // 1 - j/(m + 1) = vcovPL's bw = lag + 1
+            // default lag floor(T^(1/4)) = vcovPL's lag = "NW1987"; Bartlett
+            // 1 - j/(L + 1) = vcovPL's bw = lag + 1
             .scalar("lag", dk.bandwidth as f64, Tol::exact())
             .scalar("n_periods", dk.n_periods as f64, Tol::exact())
             .scalar("n_obs", dk.n_obs as f64, Tol::exact())
+            .named("vcovpl_lag2", &dk.names, &dk.std_errors, Tol::se(n))
+            .named("vcovscc_lag2", &dk.names, &dk.std_errors, Tol::se(n))
             .finish();
-        // deviation REG-24: std_errors, vcov, t_stats and p_values average the scores within
-        //   period and scale by T; here they are sqrt(T)/N = 0.4472 times vcovpl_lag2
-        //   (= vcovscc_lag2).
         assert_eq!(dk.n_units, 10);
         assert!(matches!(dk.kernel, HacKernel::Bartlett));
         // Tier 0 (REG-1, 428d7cf) warns only for a user bandwidth above T/4
         assert!(dk.warnings.is_empty());
-        let ratio = dk.std_errors[0] / ols_se[0];
-        assert!(
-            (ratio - 1.0).abs() > 0.01,
-            "DK and OLS SEs should differ: ratio={ratio:.3}"
-        );
+    }
+
+    /// The Driscoll-Kraay estimates of `case` for every kernel at `lag`, against
+    /// `vcovpl_<kernel>_lag<lag>` (SEs and covariance).
+    fn check_dk_kernels(
+        case_id: &str,
+        lag: Option<usize>,
+        expect_lag: usize,
+    ) -> (p2a_validation::Case, Vec<DriscollKraayResult>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let n = case.scalar("n_obs") as usize;
+        let mut check = Check::new(&case);
+        let mut out = Vec::new();
+        for (key, kernel) in [
+            ("bartlett", "bartlett"),
+            ("parzen", "parzen"),
+            ("qs", "qs"),
+            ("truncated", "truncated"),
+            ("tukey_hanning", "tukey-hanning"),
+        ] {
+            let r = run_vcov_driscoll_kraay(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                "year",
+                lag,
+                Some(kernel),
+            )
+            .unwrap();
+            assert_eq!(r.bandwidth, expect_lag);
+            let k = format!("vcovpl_{key}_lag{expect_lag}");
+            check.named(&k, &r.names, &r.std_errors, Tol::se(n)).vector(
+                &format!("{k}_vcov"),
+                &r.vcov.concat(),
+                Tol::se(n),
+            );
+            if key == "bartlett" {
+                check
+                    .named("coef", &r.names, &r.coefficients, Tol::coef(n))
+                    .named(
+                        &format!("vcovscc_lag{expect_lag}"),
+                        &r.names,
+                        &r.std_errors,
+                        Tol::se(n),
+                    )
+                    .scalar("n_periods", r.n_periods as f64, Tol::exact())
+                    .scalar("n_obs", r.n_obs as f64, Tol::exact());
+            }
+            out.push(r);
+        }
+        check.finish();
+        drop(check);
+        (case, out)
+    }
+
+    /// Driscoll-Kraay on Grunfeld, five kernels at lag 2 (case `vcov_dk_grunfeld`):
+    /// vcovPL(cluster = ~firm, order.by = ~year, lag = 2, adjust = FALSE).
+    #[test]
+    fn test_validate_driscoll_kraay_grunfeld_kernels() {
+        let (case, r) = check_dk_kernels("vcov_dk_grunfeld", Some(2), 2);
+        let (_, ds) = crate::test_support::load_case("vcov_dk_grunfeld");
+        let auto =
+            run_vcov_driscoll_kraay(&ds, "inv", &["value", "capital"], "year", None, None).unwrap();
+        assert_eq!(auto.bandwidth as f64, case.scalar("lag_rule"));
+        assert_eq!(auto.std_errors, r[0].std_errors);
+    }
+
+    /// Unbalanced Grunfeld, five kernels at lag 2 (case `vcov_dk_grunfeld_unbal`).
+    #[test]
+    fn test_validate_driscoll_kraay_grunfeld_unbalanced() {
+        check_dk_kernels("vcov_dk_grunfeld_unbal", Some(2), 2);
+    }
+
+    /// Grunfeld 1935-1944 (T = 10): the default lag floor(T^(1/4)) = 1, five kernels
+    /// (case `vcov_dk_grunfeld_t10`). At lag 1 Tukey-Hanning equals Bartlett (both weigh
+    /// lag 1 by 1/2).
+    #[test]
+    fn test_validate_driscoll_kraay_grunfeld_t10_default_lag() {
+        let (case, r) = check_dk_kernels("vcov_dk_grunfeld_t10", None, 1);
+        assert_eq!(case.scalar("lag_rule"), 1.0);
+        for (b, t) in r[0].std_errors.iter().zip(&r[4].std_errors) {
+            assert!((b - t).abs() <= 1e-12 * b.abs(), "{b} vs {t}");
+        }
     }
 
     // ========================================
@@ -5039,8 +5078,10 @@ mod tests {
                 // 3.1.3: 0.1407363667278248 / 0.0068974507714703115)
                 0.1407363667278248,
                 0.0068974507714703115,
-                0.01250309685000187,
-                0.0011882147319589296,
+                // Driscoll-Kraay lag 9: vcovPL(cluster = ~unit, order.by = ~time, lag = 9,
+                // adjust = FALSE) is 0.019769131925837232 / 0.0018787324511785868 (R 4.3.3)
+                0.019769131925837232,
+                0.0018787324511785868,
                 0.09631970723095434,
                 0.01566998133541119,
                 1.0,

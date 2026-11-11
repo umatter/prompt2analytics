@@ -884,8 +884,8 @@ async fn test_validate_mcp_regression_diagnostics_tests() {
 }
 
 /// hac_ar1 and dk_panel: Parzen kernel at lag 3 as sandwich::kernHAC(bw = 4) (lag L weights
-/// lag j by k(j / (L + 1))); Driscoll-Kraay coefficients and the number of periods (its SEs
-/// are REG-24, Tier 4: not pinned).
+/// lag j by k(j / (L + 1))); Driscoll-Kraay coefficients, SEs (vcovPL(lag = 2,
+/// adjust = FALSE) at the default lag) and the number of periods.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_regression_hac_dk() {
     let (hac, dk) = (Case::load("hac_ar1"), Case::load("dk_panel"));
@@ -943,7 +943,12 @@ async fn test_validate_mcp_regression_hac_dk() {
         .await,
     );
     for v in ["(Intercept)", "x"] {
-        assert_row(v, row(&t, v), &[dk.named("coef", v)], Tol::printed(4));
+        assert_row(
+            v,
+            row(&t, v),
+            &[dk.named("coef", v), dk.named("vcovpl_lag2", v)],
+            Tol::printed(4),
+        );
     }
     assert_shows("T", after(&t, "T ="), dk.scalar("n_periods"), Tol::exact());
 }

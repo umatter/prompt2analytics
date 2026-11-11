@@ -88,12 +88,9 @@
       "doc": "validation/regression/regression_legacy_cases.md",
       "cases": ["dk_panel"],
       "tests": ["p2a-core::regression::ols::tests::test_validate_driscoll_kraay_panel"],
-      "quantities": ["coefficients", "default bandwidth (floor(T^(1/4)))", "number of periods", "n", "classical OLS SE (cross-check)"],
+      "quantities": ["coefficients", "default bandwidth (floor(T^(1/4)))", "number of periods", "n", "classical OLS SE (cross-check)", "Driscoll-Kraay SEs at the default lag 2 (vcovpl_lag2 = vcovscc_lag2)"],
       "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE 1e-6 relative; counts exact",
-      "deviations": [
-        {"finding": "REG-24", "quantity": "Driscoll-Kraay SEs, covariance, t and p", "note": "scores are averaged within period and the meat is multiplied by T: p2a 0.02186774128 / 0.04533713058 = sqrt(T)/N (0.4472135955) x vcovPL 0.04889775602 / 0.1013769059 (vcovpl_lag2 = vcovscc_lag2). The legacy reference vcovPL(cluster = ~time, order.by = ~time) aggregates by firm, not period (legacy_vcovpl_cluster_time), and is not a Driscoll-Kraay value"},
-        {"finding": "REG-50", "quantity": "non-Bartlett kernels", "note": "Parzen, Tukey-Hanning and QS use the j/m bandwidth convention while vcovPL uses bw = lag + 1; not pinned, and no case holds a vcovPL value for them, so there is no R or p2a value to record"}
-      ],
+      "deviations": [],
       "supersedes_legacy": ["validation/expected/driscoll_kraay_test.csv"]
     },
     {

@@ -46,16 +46,11 @@
         "quantreg coefficients and nid/iid/ker SEs at tau 0.25, 0.5, 0.75",
         "aliased OLS rows",
         "JB, BP, DW, condition number, bgtest F, RESET princomp, Wald F, Harvey-Collier",
-        "HAC Parzen SEs (lag 3 = kernHAC(bw = 4)), DK coefficients",
+        "HAC Parzen SEs (lag 3 = kernHAC(bw = 4)), DK coefficients and SEs (vcovPL(lag = 2, adjust = FALSE))",
         "loess fitted values, supsmu smooths, step criteria, nls estimates and SEs"
       ],
       "tolerance": "glmnet coefficients 1e-3 absolute at MCP's thresh 1e-7 (an R port of p2a's coordinate descent lies at most 1.7e-4 from the exact minimiser on these fits), deviance ratios 1e-5 absolute, default path lambdas Tol::coef(150), df exact; GLS coefficients Tol::coef(n), SEs Tol::se(n), sigma, log-likelihood, AIC, BIC Tol::stat(n), rho 1e-6 relative; text at the printed precision (Tol::printed: half a unit of the last printed digit); loess Tol::coef(10) / Tol::coef(100), supsmu Tol::coef(100), step Tol::stat(n)",
       "deviations": [
-        {
-          "finding": "REG-24",
-          "quantity": "Driscoll-Kraay SEs",
-          "note": "not pinned through MCP (Tier 4)"
-        },
         {
           "finding": "REG-29",
           "quantity": "smooth.spline fit, df, lambda, criterion",

@@ -1938,8 +1938,9 @@ mod tests {
     }
 
     /// REG-21 (Driscoll-Kraay): a missing time id drops its row; a fractional time id
-    /// is a tool error instead of being truncated to a period. A property test (the DK
-    /// SEs are not R-pinned, REG-24), so it loads the dataset without a case.
+    /// is a tool error instead of being truncated to a period. A property test of the
+    /// estimation sample (no R case holds the missing-id data), so it loads the dataset
+    /// without a case.
     #[test]
     fn test_mcp_regression_driscoll_kraay_missing_time() {
         use p2a_core::data::columns::{NaPolicy, numeric_column};

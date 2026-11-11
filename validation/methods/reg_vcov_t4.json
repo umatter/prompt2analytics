@@ -49,6 +49,32 @@
       "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n); weight counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "driscoll_kraay_kernels",
+      "name": "Driscoll-Kraay covariance for OLS, five kernels, balanced and unbalanced panels",
+      "category": "regression",
+      "reference": "sandwich::vcovPL(m, cluster = ~firm, order.by = ~year, lag = L, kernel = ..., adjust = FALSE); plm::vcovSCC (Bartlett cross-check)",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": [
+        "vcov_dk_grunfeld",
+        "vcov_dk_grunfeld_unbal",
+        "vcov_dk_grunfeld_t10"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_driscoll_kraay_grunfeld_kernels",
+        "p2a-core::regression::ols::tests::test_validate_driscoll_kraay_grunfeld_unbalanced",
+        "p2a-core::regression::ols::tests::test_validate_driscoll_kraay_grunfeld_t10_default_lag"
+      ],
+      "quantities": [
+        "coefficients",
+        "Driscoll-Kraay SEs and covariance for Bartlett, Parzen, Quadratic Spectral, Truncated and Tukey-Hanning",
+        "default lag floor(T^(1/4))",
+        "number of periods and n"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n); counts and lags exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
