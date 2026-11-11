@@ -16,7 +16,7 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::{Array1, Array2, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis, s};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -26,8 +26,9 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::cholesky_inverse;
+use crate::linalg::matrix_ops::{cholesky_inverse, xtx};
 use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
+use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
 use crate::traits::estimator::logistic_cdf;
 
@@ -211,6 +212,40 @@ impl fmt::Display for OrderedResult {
     }
 }
 
+/// Indices (0-based among `x_cols`) of the regressors that are linear combinations of
+/// the others and of the intercept the cut points stand for. A design whose [1, X]
+/// cross-product passes OLS's normal-equations test has none (`certainly_full_rank`'s
+/// argument: a design certified there has no column the pivoted QR at `LM_QR_TOL` would
+/// alias); only otherwise is [1, X] built and decomposed (pivoted QR, `LM_QR_TOL`).
+fn aliased_regressors(
+    cols: &Columns,
+    dm: ArrayView2<f64>,
+    x_cols: &[&str],
+) -> EconResult<Vec<usize>> {
+    let (n, k) = dm.dim();
+    if n > k + 1 {
+        let xx = xtx(&dm);
+        let mut g = resource::try_zeros2(k + 1, k + 1, "ordered model cross-product")?;
+        g[[0, 0]] = n as f64;
+        for j in 0..k {
+            let s = dm.column(j).sum();
+            g[[0, j + 1]] = s;
+            g[[j + 1, 0]] = s;
+        }
+        g.slice_mut(s![1.., 1..]).assign(&xx);
+        if normal_inverse_from_gram(g.view())?.is_some() {
+            return Ok(Vec::new());
+        }
+    }
+    let with_intercept = cols.matrix(x_cols, true)?;
+    let qr = Qr::decompose(with_intercept.view(), LM_QR_TOL)?;
+    Ok(qr
+        .aliased()
+        .into_iter()
+        .filter_map(|a| a.checked_sub(1))
+        .collect())
+}
+
 /// Run ordered logit regression (proportional odds model).
 ///
 /// R equivalent: `MASS::polr()`: `P(y <= j) = F(zeta_j - x'beta)` with the logistic
@@ -361,14 +396,7 @@ pub fn run_ordered_model_with(
     // Aliased regressors (linear combinations of the others and the intercept the cut
     // points stand for) are dropped and reported as NaN, as polr drops them ("design
     // appears to be rank-deficient").
-    let aliased_idx: Vec<usize> = {
-        let with_intercept = cols.matrix(x_cols, true)?;
-        let qr = Qr::decompose(with_intercept.view(), LM_QR_TOL)?;
-        qr.aliased()
-            .into_iter()
-            .filter_map(|a| a.checked_sub(1))
-            .collect()
-    };
+    let aliased_idx = aliased_regressors(&cols, dm.view(), x_cols)?;
     let identified: Vec<usize> = (0..k_full).filter(|c| !aliased_idx.contains(c)).collect();
     let mut warnings: Vec<String> = Vec::new();
     let x_identified;
@@ -1598,6 +1626,127 @@ mod tests {
             EconError::ResourceLimit(m) => assert!(m.contains("Hessian"), "{m}"),
             other => panic!("expected ResourceLimit, got {other:?}"),
         }
+    }
+
+    /// A deterministic N(0, 1) stream (xorshift64* and Box-Muller), so the designs below
+    /// are noisy and reproducible.
+    fn normals(seed: u64, n: usize) -> Vec<f64> {
+        let mut s = seed.max(1);
+        let mut unif = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            ((s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                let (u1, u2) = (unif(), unif());
+                (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+            })
+            .collect()
+    }
+
+    /// Three ordered categories from a latent logit index on `x1` and `x2`.
+    fn three_category_dataset(x1: &[f64], x2: &[f64], seed: u64) -> Dataset {
+        let e = normals(seed, x1.len());
+        let y: Vec<i64> = (0..x1.len())
+            .map(|i| {
+                let z = 0.8 * x1[i] - 0.5 * x2[i] + e[i];
+                if z < -0.5 {
+                    1
+                } else if z < 0.7 {
+                    2
+                } else {
+                    3
+                }
+            })
+            .collect();
+        Dataset::new(df! { "y" => y, "x1" => x1.to_vec(), "x2" => x2.to_vec() }.unwrap())
+    }
+
+    /// The aliasing check certifies a full-rank design from its cross-product, so a fit
+    /// never needs a second n x (k + 1) copy of the design (with the intercept) or the
+    /// QR's working copy of it: under a per-allocation ceiling that admits the n x k
+    /// design itself, the fit succeeds.
+    #[test]
+    fn test_ordered_full_rank_design_is_not_copied() {
+        let (n, k) = (2000, 2);
+        let ds = three_category_dataset(&normals(11, n), &normals(12, n), 13);
+        let r = resource::with_alloc_ceiling(Some(n * k * 8), || {
+            run_ordered_logit(&ds, "y", &["x1", "x2"])
+        });
+        let r = r.unwrap();
+        assert!(r.converged, "{r}");
+        assert!(r.coefficients.iter().all(|v| v.is_finite()), "{r}");
+    }
+
+    /// The cross-product shortcut gives the pivoted QR's verdict: on each design the
+    /// aliased regressors equal those of `Qr::decompose` on [1, X] at `LM_QR_TOL`.
+    #[test]
+    fn test_ordered_aliasing_check_matches_the_qr() {
+        let n = 400;
+        let x1 = normals(21, n);
+        let noise = normals(22, n);
+        let other = normals(23, n);
+        let designs: Vec<(&str, Vec<f64>, Vec<f64>)> = vec![
+            ("well conditioned", x1.clone(), other.clone()),
+            (
+                "scaled by 1e6",
+                x1.iter().map(|v| v * 1e6).collect(),
+                other.iter().map(|v| v * 1e6).collect(),
+            ),
+            (
+                "x2 = x1 + 1e-6 noise",
+                x1.clone(),
+                x1.iter().zip(&noise).map(|(a, e)| a + 1e-6 * e).collect(),
+            ),
+            (
+                "x2 = x1 + 1e-9 noise",
+                x1.clone(),
+                x1.iter().zip(&noise).map(|(a, e)| a + 1e-9 * e).collect(),
+            ),
+            (
+                "x2 = 2 x1",
+                x1.clone(),
+                x1.iter().map(|v| 2.0 * v).collect(),
+            ),
+            ("x2 = 3", x1.clone(), vec![3.0; n]),
+            (
+                "x2 = 1 - x1",
+                x1.clone(),
+                x1.iter().map(|v| 1.0 - v).collect(),
+            ),
+        ];
+        let names = ["x1", "x2"];
+        let mut fallback_kept_both = false;
+        for (label, a, b) in designs {
+            let df = df! { "x1" => a, "x2" => b }.unwrap();
+            let cols = ColumnRequest::new(&df)
+                .numerics(&names)
+                .na(NaPolicy::Omit)
+                .extract()
+                .unwrap();
+            let dm = cols.matrix(&names, false).unwrap();
+            let got = aliased_regressors(&cols, dm.view(), &names).unwrap();
+            let with_intercept = cols.matrix(&names, true).unwrap();
+            let want: Vec<usize> = Qr::decompose(with_intercept.view(), LM_QR_TOL)
+                .unwrap()
+                .aliased()
+                .into_iter()
+                .filter_map(|a| a.checked_sub(1))
+                .collect();
+            assert_eq!(got, want, "{label}");
+            if label == "x2 = x1 + 1e-6 noise" {
+                fallback_kept_both = want.is_empty();
+            }
+            if label == "x2 = x1 + 1e-9 noise" || label.starts_with("x2 = 2") {
+                assert_eq!(want, vec![1], "{label}");
+            }
+        }
+        assert!(
+            fallback_kept_both,
+            "the 1e-6 design should keep both columns"
+        );
     }
 
     /// xb = 2 x: polr warns "design appears to be rank-deficient, so dropping some
