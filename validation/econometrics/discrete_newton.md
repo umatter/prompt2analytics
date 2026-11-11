@@ -151,7 +151,9 @@ The case files also carry every threshold (`logit_zeta`, `probit_zeta`, named
 What is pinned for both links: the coefficient and every cut point (`Tol::iterative(1e-6)`),
 their standard errors (`Tol::iterative(1e-5)`), the log-likelihood and the null
 log-likelihood (`Tol::stat(n)`: 1e-5 relative for n = 30 and 96, 1e-6 for n = 180), n and
-the category counts (exact), and `converged = true` with no warning. The case values are
+the category counts (exact), `converged = true` with no warning, and, under rescaling of x
+by 1e-6, 1e4, 1e6 or 1e12, the coefficient times the scale, the cut points and the
+log-likelihood equal to the unscaled fit's to 1e-9 relative. The case values are
 polr's own optimum (BFGS at `reltol = 1e-14`), not re-solved. Against the Newton-polished
 MLE (each fit polished with `.polish` and `.polr_grad` of `validation/r/cases/discrete.R`
 until max |grad| < 1e-9, SEs from its `.polr_hess`; R 4.3.3, MASS 7.3.60.0.1) they are

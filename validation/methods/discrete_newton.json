@@ -33,7 +33,7 @@
         "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_j5_regressor_scale"
       ],
       "quantities": ["coefficients", "cut points", "SE (coefficient, cut points)", "log-likelihood", "n", "category counts", "null log-likelihood", "converged", "converged and the fit unchanged when x is multiplied by 1e-6, 1e4, 1e6 or 1e12 (coefficient divided by the scale)"],
-      "tolerance": "the cases hold polr's own BFGS optimum, within 8.6e-9 (coefficients), 1.2e-7 (cut points) and 1.8e-6 (SEs) relative of the MLE (polr's fit polished with .polish and .polr_grad of validation/r/cases/discrete.R, see the doc): coefficients and cut points Tol::iterative(1e-6), SEs Tol::iterative(1e-5), log-likelihood and null log-likelihood Tol::stat(n) (1e-5 for n = 30 and 96, 1e-6 for n = 180); counts exact",
+      "tolerance": "the cases hold polr's own BFGS optimum, within 8.6e-9 (coefficients), 1.2e-7 (cut points) and 1.8e-6 (SEs) relative of the MLE (polr's fit polished with .polish and .polr_grad of validation/r/cases/discrete.R, see the doc): coefficients and cut points Tol::iterative(1e-6), SEs Tol::iterative(1e-5), log-likelihood and null log-likelihood Tol::stat(n) (1e-5 for n = 30 and 96, 1e-6 for n = 180); counts exact; regressor-scale property (x times 1e-6, 1e4, 1e6, 1e12): coefficient times the scale, cut points and log-likelihood equal to the unscaled fit's to 1e-9 relative",
       "deviations": [],
       "supersedes_legacy": []
     }
