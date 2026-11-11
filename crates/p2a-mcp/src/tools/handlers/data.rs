@@ -1252,6 +1252,10 @@ impl<'a> PageWalk<'a> {
             compression,
             &body,
             &mut page,
+            // A fresh context for every page: the RUSTSEC-2026-0391
+            // exemption in .github/workflows/audit.yml rests on no zstd
+            // context outliving one file. Never cache it on the server or a
+            // session.
             &mut DecompressionContext::Unset,
         )
         .ok()?;
