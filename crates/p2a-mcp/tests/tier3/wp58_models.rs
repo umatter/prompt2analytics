@@ -883,8 +883,9 @@ async fn test_validate_mcp_regression_diagnostics_tests() {
     );
 }
 
-/// hac_ar1 and dk_panel: Parzen kernel at bandwidth 4 as sandwich::kernHAC; Driscoll-Kraay
-/// coefficients and the number of periods (its SEs are REG-24, Tier 4: not pinned).
+/// hac_ar1 and dk_panel: Parzen kernel at lag 3 as sandwich::kernHAC(bw = 4) (lag L weights
+/// lag j by k(j / (L + 1))); Driscoll-Kraay coefficients and the number of periods (its SEs
+/// are REG-24, Tier 4: not pinned).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_regression_hac_dk() {
     let (hac, dk) = (Case::load("hac_ar1"), Case::load("dk_panel"));
@@ -897,7 +898,7 @@ async fn test_validate_mcp_regression_hac_dk() {
             &server,
             &session,
             "regression_hac",
-            json!({"dataset": "hac_ar1", "y": "y", "x": ["x"], "kernel": "parzen", "bandwidth": 4}),
+            json!({"dataset": "hac_ar1", "y": "y", "x": ["x"], "kernel": "parzen", "bandwidth": 3}),
         )
         .await,
     );

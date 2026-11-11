@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "ols_twoway_indefinite",
+  "area": "regression/ols",
+  "method": "Two-way clustered OLS whose CGM covariance has a negative variance (3 x 3 clusters, n = 36), with and without vcovCL(fix = TRUE)",
+  "reference": "sandwich::vcovCL(cluster = ~a + b, type = 'HC1', fix = FALSE | TRUE)",
+  "call": "vcovCL(lm(y ~ x, data = ols_twoway_indefinite), cluster = ~a + b, type = 'HC1', fix = TRUE)",
+  "dataset": "validation/datasets/generated/ols_twoway_indefinite.csv",
+  "datasets": ["validation/datasets/generated/ols_twoway_indefinite.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.236479006866962, 0.47796635127532305]
+    },
+    "n_obs": 36,
+    "cl_twoway_diag": {
+      "names": ["(Intercept)", "x"],
+      "values": [-0.00075369034323855347, -0.0025388932764116206]
+    },
+    "cl_twoway_vcov": [-0.00075369034323855347, -0.0084255646271956721, -0.0084255646271956738, -0.0025388932764116206],
+    "cl_twoway_eigenvalues": [0.0068264218443239424, -0.010119005463974116],
+    "cl_twoway_fix_se": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.061423066751381143, 0.05525964816373085]
+    },
+    "cl_twoway_fix_vcov": [0.0037727931291446238, -0.0033942170578186762, -0.0033942170578186762, 0.0030536287151793221]
+  }
+}

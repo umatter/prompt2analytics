@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "hac_truncated_indefinite",
+  "area": "regression/hac",
+  "method": "HAC, truncated kernel, lag 5 (kernHAC bw = 6), errors AR(-0.7), n = 40: a negative variance",
+  "reference": "sandwich::kernHAC(kernel = 'Truncated', bw = 6, prewhite = FALSE, adjust = FALSE)",
+  "call": "kernHAC(lm(y ~ x, data = hac_truncated_indefinite), kernel = 'Truncated', bw = 6, prewhite = FALSE, adjust = FALSE)",
+  "dataset": "validation/datasets/generated/hac_truncated_indefinite.csv",
+  "datasets": ["validation/datasets/generated/hac_truncated_indefinite.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.1422959657175531, 0.6457123859164976]
+    },
+    "n_obs": 40,
+    "kernhac_truncated_bw6_diag": {
+      "names": ["(Intercept)", "x"],
+      "values": [-0.0074551840043874289, -0.0098474742665068705]
+    },
+    "kernhac_truncated_bw6_vcov": [-0.0074551840043874289, -0.031229598733015958, -0.031229598733015951, -0.0098474742665068705]
+  }
+}

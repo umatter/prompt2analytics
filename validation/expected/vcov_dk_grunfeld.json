@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "id": "vcov_dk_grunfeld",
+  "area": "regression/hac",
+  "method": "Driscoll-Kraay on Grunfeld (pooled inv ~ value + capital, N = 10, T = 20), five kernels at lag 2",
+  "reference": "sandwich::vcovPL(cluster = ~firm, order.by = ~year, lag = 2, kernel =, adjust = FALSE); plm::vcovSCC(maxlag = 2)",
+  "call": "vcovPL(lm(inv ~ value + capital, data = grunfeld), cluster = ~firm, order.by = ~year, lag = 2, adjust = FALSE)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "plm": "2.6.7"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-42.714369436559359, 0.11556215636055213, 0.23067848873196961]
+    },
+    "n_obs": 200,
+    "n_periods": 20,
+    "lag_rule": 2,
+    "rdf_periods": 17,
+    "vcovpl_bartlett_lag2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.295068507936588, 0.011522809398392724, 0.048375587018597829]
+    },
+    "vcovpl_bartlett_lag2_vcov": [151.16870961485401, -0.045555549513288142, -0.39957613469188213, -0.045555549513288149, 0.00013277513643168769, -0.00025522199285790161, -0.39957613469188225, -0.00025522199285790139, 0.0023401974193939306],
+    "vcovpl_parzen_lag2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.016835951009154, 0.010374634090936703, 0.046251371922884206]
+    },
+    "vcovpl_parzen_lag2_vcov": [144.4043462734661, -0.036046718529380239, -0.39927559853710604, -0.036046718529380246, 0.00010763303252082603, -0.00020283464929034091, -0.39927559853710615, -0.0002028346492903408, 0.0021391894047489615],
+    "vcovpl_qs_lag2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.738840891061985, 0.01270326436336314, 0.051203706491412974]
+    },
+    "vcovpl_qs_lag2_vcov": [162.2780672477929, -0.057155968077064329, -0.41423585936808383, -0.057155968077064322, 0.00016137292548549194, -0.00031198423335374324, -0.41423585936808383, -0.00031198423335374335, 0.0026218195584587671],
+    "vcovpl_truncated_lag2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.208253759652209, 0.015536858215164538, 0.052265878025381081]
+    },
+    "vcovpl_truncated_lag2_vcov": [149.04145986006228, -0.091351687183122796, -0.26785955259037919, -0.091351687183122796, 0.00024139396319812576, -0.00048881682495392417, -0.26785955259037925, -0.00048881682495392406, 0.0027317220057640128],
+    "vcovpl_tukey_hanning_lag2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.602301120754719, 0.011582385534277741, 0.04928546563534468]
+    },
+    "vcovpl_tukey_hanning_lag2_vcov": [158.81799353817564, -0.046278246667028893, -0.42369759323648382, -0.046278246667028872, 0.00013415165466464625, -0.00025553141817631208, -0.42369759323648398, -0.00025553141817631197, 0.0024290571228927416],
+    "vcovscc_lag2": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [12.295068507936572, 0.011522809398392744, 0.048375587018597836]
+    }
+  }
+}

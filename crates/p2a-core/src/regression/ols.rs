@@ -1732,7 +1732,8 @@ pub struct HacResult {
     pub vcov: Vec<Vec<f64>>,
     /// HAC-adjusted standard errors
     pub std_errors: Vec<f64>,
-    /// Bandwidth (number of lags) used
+    /// Lag count L: lag j has weight k(j / (L + 1)) for every kernel (sandwich's
+    /// `NeweyWest(lag = L)`, `kernHAC(bw = L + 1)`)
     pub bandwidth: usize,
     /// Kernel type used
     pub kernel: HacKernel,
@@ -1752,6 +1753,12 @@ pub struct HacResult {
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Number of lag weights in the meat, lag 0 included: the lags 0..n-1 (0..n-2 with
+    /// prewhitening) up to the last whose weight exceeds 1e-7 in absolute value
+    /// (sandwich's `weightsAndrews`). L + 1 for Bartlett, Parzen and Tukey-Hanning, L + 2
+    /// for Truncated, up to n for Quadratic Spectral.
+    #[serde(default)]
+    pub n_lag_weights: usize,
 }
 
 impl std::fmt::Display for HacResult {
@@ -2115,10 +2122,11 @@ pub fn vcov_hac(
     // rev[l * n + (n - 1 - i)] = s_il (see `hac_meat`).
     let rev = reversed_scores(x.view(), u.view())?;
 
-    // The meat of the sandwich: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
-    let max_lag = bw.min(n.saturating_sub(1));
-    let weights: Vec<f64> = (0..=max_lag).map(|lag| kernel.weight(lag, bw)).collect();
-    let omega = hac_meat(&rev, n, k, &weights)?;
+    // The meat of the sandwich: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ'), over weightsAndrews' lag set
+    // (every lag whose weight k(j / (bw + 1)) exceeds 1e-7)
+    let weights = kernel.lag_set(bw, n, 1e-7);
+    let n_lag_weights = weights.len();
+    let omega = hac_meat_dispatch(&rev, n, k, &weights)?;
 
     // Scale by 1/n
     let mut omega = Array2::from_shape_vec((k, k), omega)
@@ -2184,6 +2192,7 @@ pub fn vcov_hac(
         prewhiten,
         df_resid: ols_result.df_resid,
         warnings,
+        n_lag_weights,
     })
 }
 
@@ -2286,6 +2295,103 @@ fn hac_meat(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<
             }
         }
         lag0 = lag1 + 1;
+    }
+    Ok(omega)
+}
+
+/// Lag sets longer than this use the FFT meat ([`hac_meat_fft`]) when the
+/// `spectral-analysis` feature is on.
+#[cfg(feature = "spectral-analysis")]
+const HAC_FFT_MIN_LAGS: usize = 64;
+
+/// [`hac_meat`], or [`hac_meat_fft`] for a long lag set (the Quadratic Spectral kernel keeps
+/// up to n lags) when the `spectral-analysis` feature is on. The two agree to about 1e-12
+/// relative.
+fn hac_meat_dispatch(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<f64>> {
+    #[cfg(feature = "spectral-analysis")]
+    if weights.len() > HAC_FFT_MIN_LAGS {
+        return hac_meat_fft(rev, n, k, weights);
+    }
+    hac_meat(rev, n, k, weights)
+}
+
+/// The meat of [`hac_meat`] as `Ω[a, b] = s_a' W s_b`, with `W` the symmetric Toeplitz matrix
+/// `W[i, j] = w_|i-j|` (`w_0 = 1`, zero beyond the lag set). `W s_b` is a linear convolution,
+/// computed as a circular one of length `N >= n + max_lag` (a power of two) by FFT, two real
+/// columns per complex transform: O(k N log N + k² n), against O(k² n L) summed directly.
+/// The scores are read reversed, which leaves `s_a' W s_b` unchanged (W is persymmetric).
+#[cfg(feature = "spectral-analysis")]
+fn hac_meat_fft(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<f64>> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let max_lag = weights.len().saturating_sub(1).min(n.saturating_sub(1));
+    let len = n
+        .checked_add(max_lag)
+        .and_then(|m| m.checked_next_power_of_two())
+        .ok_or_else(|| EconError::ResourceLimit("HAC FFT length overflows".to_string()))?;
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(len);
+    let ifft = planner.plan_fft_inverse(len);
+    // The kernel's spectrum (real: the kernel is real and even)
+    let mut h = resource::try_vec(len, Complex::new(0.0, 0.0), "HAC FFT kernel")?;
+    h[0].re = 1.0;
+    for (d, &w) in weights.iter().enumerate().take(max_lag + 1).skip(1) {
+        h[d].re = w;
+        h[len - d].re = w;
+    }
+    fft.process(&mut h);
+    let scale = 1.0 / len as f64;
+    let spectrum: Vec<f64> = h.iter().map(|c| c.re * scale).collect();
+    drop(h);
+    // W s_b for every column, packed two columns per transform
+    let mut ws = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC FFT products")?,
+        0.0,
+        "HAC FFT products",
+    )?;
+    let mut buf = resource::try_vec(len, Complex::new(0.0, 0.0), "HAC FFT buffer")?;
+    let mut b = 0;
+    while b < k {
+        resource::checkpoint()?;
+        let pair = b + 1 < k;
+        buf.fill(Complex::new(0.0, 0.0));
+        for (z, &v) in buf.iter_mut().zip(&rev[b * n..(b + 1) * n]) {
+            z.re = v;
+        }
+        if pair {
+            for (z, &v) in buf.iter_mut().zip(&rev[(b + 1) * n..(b + 2) * n]) {
+                z.im = v;
+            }
+        }
+        fft.process(&mut buf);
+        for (z, &g) in buf.iter_mut().zip(&spectrum) {
+            *z *= g;
+        }
+        ifft.process(&mut buf);
+        for (o, z) in ws[b * n..(b + 1) * n].iter_mut().zip(&buf) {
+            *o = z.re;
+        }
+        if pair {
+            for (o, z) in ws[(b + 1) * n..(b + 2) * n].iter_mut().zip(&buf) {
+                *o = z.im;
+            }
+        }
+        b += if pair { 2 } else { 1 };
+    }
+    let mut omega = resource::try_vec(k * k, 0.0, "HAC meat")?;
+    for a in 0..k {
+        let ra = &rev[a * n..(a + 1) * n];
+        for c in 0..k {
+            let wc = &ws[c * n..(c + 1) * n];
+            omega[a * k + c] = ra.iter().zip(wc).map(|(x, y)| x * y).sum();
+        }
+    }
+    // symmetric up to rounding; make it exactly so, as the direct sum is
+    for a in 0..k {
+        for c in (a + 1)..k {
+            let m = 0.5 * (omega[a * k + c] + omega[c * k + a]);
+            omega[a * k + c] = m;
+            omega[c * k + a] = m;
+        }
     }
     Ok(omega)
 }
@@ -4354,10 +4460,11 @@ mod tests {
     // VALIDATION TESTS - HAC and Driscoll-Kraay (R cases); bootstrap property test
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Pinned to case `hac_ar1` (sandwich::NeweyWest / kernHAC on the legacy Test 8 DGP; validation/r/cases/regression_legacy.R).
+    /// Pinned to case `hac_ar1` (sandwich::NeweyWest / kernHAC on the legacy Test 8 DGP;
+    /// validation/r/cases/regression_legacy.R). p2a's lag count L weights lag j by
+    /// k(j / (L + 1)) for every kernel: NeweyWest(lag = L) = kernHAC(bw = L + 1).
     #[test]
     fn test_validate_hac_ar1() {
-        use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("hac_ar1");
         let n = case.scalar("n_obs") as usize;
         let bw = case.scalar("bw_rule") as usize; // 4 = floor(4 (n/100)^(2/9))
@@ -4366,14 +4473,15 @@ mod tests {
         };
         let auto = hac(None, "bartlett", false);
         let bartlett = hac(Some(bw), "bartlett", false);
-        let parzen = hac(Some(bw), "parzen", false);
-        let truncated = hac(Some(bw), "truncated", false);
-        let tukey = hac(Some(bw), "tukey-hanning", false);
-        Check::new(&case)
+        // kernHAC(bw = 4) is p2a's lag 3
+        let parzen = hac(Some(3), "parzen", false);
+        let truncated = hac(Some(3), "truncated", false);
+        let tukey = hac(Some(3), "tukey-hanning", false);
+        let qs = hac(Some(3), "qs", false);
+        let mut check = Check::new(&case);
+        check
             .named("coef", &auto.names, &auto.coefficients, Tol::coef(n))
             .scalar("bw_rule", auto.bandwidth as f64, Tol::exact())
-            // p2a's Bartlett bandwidth m weights lag j by 1 - j/(m + 1):
-            // NeweyWest(lag = m) = kernHAC(bw = m + 1)
             .named(
                 "neweywest_lag4",
                 &bartlett.names,
@@ -4386,57 +4494,33 @@ mod tests {
                 &bartlett.names,
                 &bartlett.std_errors,
                 Tol::se(n),
-            )
-            .named(
-                "kernhac_parzen_bw4",
-                &parzen.names,
-                &parzen.std_errors,
-                Tol::se(n),
-            )
-            .vector("kernhac_parzen_bw4_vcov", &parzen.vcov.concat(), Tol::se(n))
-            .named(
-                "kernhac_truncated_bw4",
-                &truncated.names,
-                &truncated.std_errors,
-                Tol::se(n),
-            )
-            .vector(
-                "kernhac_truncated_bw4_vcov",
-                &truncated.vcov.concat(),
-                Tol::se(n),
-            )
-            .named(
-                "kernhac_tukey_hanning_bw4",
-                &tukey.names,
-                &tukey.std_errors,
-                Tol::se(n),
-            )
-            .vector(
-                "kernhac_tukey_hanning_bw4_vcov",
-                &tukey.vcov.concat(),
-                Tol::se(n),
-            )
-            .finish();
+            );
+        for (key, r) in [
+            ("kernhac_parzen_bw4", &parzen),
+            ("kernhac_truncated_bw4", &truncated),
+            ("kernhac_tukey_hanning_bw4", &tukey),
+            ("kernhac_qs_bw4", &qs),
+        ] {
+            check
+                .named(key, &r.names, &r.std_errors, Tol::se(n))
+                .vector(&format!("{key}_vcov"), &r.vcov.concat(), Tol::se(n));
+        }
+        check.finish();
         assert_eq!(auto.std_errors, bartlett.std_errors); // default bandwidth = bw_rule
         // Tier 0 (REG-1, 428d7cf): a user bandwidth above n/4 warns; 4 <= 100/4, and the
         // default never warns
         assert!(
-            [&auto, &bartlett, &parzen, &truncated, &tukey]
+            [&auto, &bartlett, &parzen, &truncated, &tukey, &qs]
                 .iter()
                 .all(|r| r.warnings.is_empty())
         );
-        // deviation REG-50: "qs" truncates the QS kernel at the bandwidth (kernhac_qs_bw4),
-        //   and p2a's Bartlett bandwidth m is kernHAC(bw = m + 1), not kernhac_bartlett_bw4.
         // deviation REG-22: prewhiten = true is a scalar AR(1) on the residuals
         //   (neweywest_lag4_prewhite).
-        // deviation REG-61: default bandwidth is the fixed rule, not bwNeweyWest
-        //   (bw_neweywest); no adjust = TRUE (kernhac_*_adjust).
-        let qs = hac(Some(bw), "qs", false);
         let prewhitened = hac(Some(bw), "bartlett", true);
         assert!(
-            qs.std_errors
+            prewhitened
+                .std_errors
                 .iter()
-                .chain(&prewhitened.std_errors)
                 .all(|s| s.is_finite() && *s > 0.0)
         );
         assert!(prewhitened.prewhiten && matches!(qs.kernel, HacKernel::QuadraticSpectral));
@@ -4445,6 +4529,117 @@ mod tests {
                 && matches!(parzen.kernel, HacKernel::Parzen)
         );
         assert_eq!((auto.n_obs, auto.n_params), (n, 2));
+        // Bartlett, Parzen, Tukey-Hanning keep lags 0..L; Truncated 0..L+1
+        assert_eq!(
+            (
+                bartlett.n_lag_weights,
+                parzen.n_lag_weights,
+                truncated.n_lag_weights
+            ),
+            (5, 4, 5)
+        );
+    }
+
+    /// The Quadratic Spectral kernel over a long series (case `vcov_hac_qs_long`): at lag 0 it
+    /// still sums every lag whose weight exceeds 1e-7, at lag 2 all n.
+    #[test]
+    fn test_validate_hac_qs_long() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_qs_long");
+        let n = case.scalar("n_obs") as usize;
+        let hac = |lag: usize, k: &str| {
+            run_vcov_hac(&ds, "y", &["x"], Some(lag), Some(k), false).unwrap()
+        };
+        let (qs0, qs2, nw2) = (hac(0, "qs"), hac(2, "qs"), hac(2, "bartlett"));
+        let names = &qs0.names;
+        Check::new(&case)
+            .named("coef", names, &qs0.coefficients, Tol::coef(n))
+            .named("kernhac_qs_bw1", names, &qs0.std_errors, Tol::se(n))
+            .vector("kernhac_qs_bw1_vcov", &qs0.vcov.concat(), Tol::se(n))
+            .scalar("qs_bw1_n_weights", qs0.n_lag_weights as f64, Tol::exact())
+            .named("kernhac_qs_bw3", names, &qs2.std_errors, Tol::se(n))
+            .vector("kernhac_qs_bw3_vcov", &qs2.vcov.concat(), Tol::se(n))
+            .scalar("qs_bw3_n_weights", qs2.n_lag_weights as f64, Tol::exact())
+            .named("nw_lag2", names, &nw2.std_errors, Tol::se(n))
+            .finish();
+    }
+
+    /// HAC on Grunfeld in file order (case `vcov_hac_grunfeld`): Newey-West lag 3 and the
+    /// default rule, the Quadratic Spectral kernel at lag 2 and 3.
+    #[test]
+    fn test_validate_hac_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let hac = |lag: Option<usize>, k: &str| {
+            run_vcov_hac(&ds, "inv", &["value", "capital"], lag, Some(k), false).unwrap()
+        };
+        let (nw3, qs2, qs3, auto) = (
+            hac(Some(3), "bartlett"),
+            hac(Some(2), "qs"),
+            hac(Some(3), "qs"),
+            hac(None, "bartlett"),
+        );
+        let names = &nw3.names;
+        Check::new(&case)
+            .named("coef", names, &nw3.coefficients, Tol::coef(n))
+            .named("nw_lag3", names, &nw3.std_errors, Tol::se(n))
+            .named("kernhac_qs_bw3", names, &qs2.std_errors, Tol::se(n))
+            .named("kernhac_qs_bw4", names, &qs3.std_errors, Tol::se(n))
+            .named("nw_lag_rule", names, &auto.std_errors, Tol::se(n))
+            .scalar("bw_rule", auto.bandwidth as f64, Tol::exact())
+            .finish();
+    }
+
+    /// Newey-West and the Quadratic Spectral kernel without prewhitening on a series with
+    /// three regressors (case `vcov_hac_prewhite_ts`).
+    #[test]
+    fn test_validate_hac_kernels_ts() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_prewhite_ts");
+        let n = case.scalar("n_obs") as usize;
+        let lag = case.scalar("lag") as usize;
+        let hac =
+            |k: &str| run_vcov_hac(&ds, "y", &["x1", "x2"], Some(lag), Some(k), false).unwrap();
+        let (nw, qs) = (hac("bartlett"), hac("qs"));
+        let names = &nw.names;
+        Check::new(&case)
+            .named("coef", names, &nw.coefficients, Tol::coef(n))
+            .named("nw_lag5", names, &nw.std_errors, Tol::se(n))
+            .vector("nw_lag5_vcov", &nw.vcov.concat(), Tol::se(n))
+            .named("kernhac_qs_bw6", names, &qs.std_errors, Tol::se(n))
+            .vector("kernhac_qs_bw6_vcov", &qs.vcov.concat(), Tol::se(n))
+            .scalar("qs_bw6_n_weights", qs.n_lag_weights as f64, Tol::exact())
+            .finish();
+    }
+
+    /// The FFT meat equals the direct sum to rounding (noisy AR(0.5) scores).
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn test_hac_qs_fft_matches_direct() {
+        for n in [200usize, 1500] {
+            for k in [1usize, 3, 6] {
+                let e = perf3_noise(n * (k + 1), (n + k) as u64);
+                let mut s = vec![0.0; n * k];
+                for a in 0..k {
+                    let mut prev = 0.0;
+                    for i in 0..n {
+                        prev = 0.5 * prev + e[a * n + i] * (1.0 + 0.3 * a as f64);
+                        s[a * n + n - 1 - i] = prev;
+                    }
+                }
+                for lag in [0usize, 2, 10] {
+                    let w = HacKernel::QuadraticSpectral.lag_set(lag, n, 1e-7);
+                    assert!(w.len() > HAC_FFT_MIN_LAGS);
+                    let direct = hac_meat(&s, n, k, &w).unwrap();
+                    let fft = hac_meat_fft(&s, n, k, &w).unwrap();
+                    for a in 0..k {
+                        for b in 0..k {
+                            let scale = (direct[a * k + a] * direct[b * k + b]).sqrt();
+                            let d = (fft[a * k + b] - direct[a * k + b]).abs();
+                            assert!(d <= 1e-10 * scale, "n {n} k {k} lag {lag}: {d} vs {scale}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Property test, not R-pinned: sandwich::vcovBS resamples with R's RNG, which cannot be
@@ -4690,7 +4885,7 @@ mod tests {
         }
     }
 
-    /// The truncated kernel at bandwidth n - 1 gives every lag weight 1, so the
+    /// The truncated kernel at lag n - 1 gives every lag 1..n-1 weight 1, so the
     /// meat is (X'u)(X'u)'/n, which the OLS normal equations make zero up to
     /// rounding. The variances are then noise of about 1e-17 whose sign depends
     /// on the machine's floating-point path, so they are bounded here, not
@@ -4707,12 +4902,13 @@ mod tests {
     /// Characterisation test: the code before the T0-WP14 resource bounds gives
     /// the same numbers, and later refactors must not move them.
     ///
-    /// The truncated kernel is pinned at bandwidth 5, where its SEs are 0.148
-    /// and 0.0072. At bandwidth n - 1 = 29 they collapse to rounding noise
+    /// The truncated kernel is pinned at lag 5 (lags 1-6 at weight 1, kernHAC(bw = 6)), where
+    /// its SEs are 0.141 and 0.0069. At lag n - 1 = 29 they collapse to rounding noise
     /// (see `test_hac_truncated_kernel_at_n_minus_1_collapses`). A numpy
     /// re-implementation of the lag loop reproduces the three HAC pins to
     /// 2e-14, and moving beta by up to 10 ulp changes their variances by at
-    /// most 3e-13 relative.
+    /// most 3e-13 relative. The Bartlett and Truncated values equal sandwich's
+    /// NeweyWest(lag = L) and kernHAC(bw = L + 1).
     #[test]
     fn test_pinned_hac_dk_bootstrap_outputs() {
         let ts = create_timeseries_dataset();
@@ -4738,8 +4934,10 @@ mod tests {
                 0.0067448421041296615,
                 0.10055839075154051,
                 0.005817042539300054,
-                0.14772400250120787,
-                0.007223766353723901,
+                // Truncated lag 5 = kernHAC(bw = 6): lags 1-6 at weight 1 (R 4.3.3, sandwich
+                // 3.1.3: 0.1407363667278248 / 0.0068974507714703115)
+                0.1407363667278248,
+                0.0068974507714703115,
                 0.01250309685000187,
                 0.0011882147319589296,
                 0.09631970723095434,
@@ -5956,12 +6154,17 @@ mod tests {
                 ];
                 for (kernel, e) in expect {
                     let w = kernel.lag_weight(j, lags);
-                    assert!((w - e).abs() <= 1e-15, "{kernel:?} L={lags} j={j}: {w} vs {e}");
+                    assert!(
+                        (w - e).abs() <= 1e-15,
+                        "{kernel:?} L={lags} j={j}: {w} vs {e}"
+                    );
                 }
             }
         }
         // spot checks
-        let b: Vec<f64> = (1..=5).map(|j| HacKernel::Bartlett.lag_weight(j, 4)).collect();
+        let b: Vec<f64> = (1..=5)
+            .map(|j| HacKernel::Bartlett.lag_weight(j, 4))
+            .collect();
         for (w, e) in b.iter().zip([0.8, 0.6, 0.4, 0.2, 0.0]) {
             assert!((w - e).abs() < 1e-15, "{b:?}");
         }
@@ -5986,8 +6189,14 @@ mod tests {
     /// at 1e-7; meatPL at 0).
     #[test]
     fn test_lag_set_tolerance() {
-        assert_eq!(HacKernel::QuadraticSpectral.lag_set(0, 3000, 1e-7).len(), 1451);
-        assert_eq!(HacKernel::QuadraticSpectral.lag_set(2, 3000, 1e-7).len(), 2999);
+        assert_eq!(
+            HacKernel::QuadraticSpectral.lag_set(0, 3000, 1e-7).len(),
+            1451
+        );
+        assert_eq!(
+            HacKernel::QuadraticSpectral.lag_set(2, 3000, 1e-7).len(),
+            2999
+        );
         assert_eq!(HacKernel::Bartlett.lag_set(4, 3000, 1e-7).len(), 5);
         assert_eq!(HacKernel::Truncated.lag_set(5, 3000, 1e-7).len(), 7);
         assert_eq!(HacKernel::Parzen.lag_set(3, 3000, 0.0).len(), 4);
@@ -6000,9 +6209,9 @@ mod tests {
         assert_eq!(HacKernel::QuadraticSpectral.lag_set(50, 20, 0.0).len(), 20);
     }
 
-    /// The HAC meat over flat score rows, its lag sums accumulated a block of lags at a time,
-    /// equals, bit for bit, the indexed one-pass-per-lag loop it replaced (same terms, same
-    /// summation order), with and without an aliased column.
+    /// The HAC meat over one reversed score copy, its lag sums accumulated a block of lags at a
+    /// time, equals, bit for bit, the indexed one-pass-per-lag loop it replaced (same terms,
+    /// same summation order), with and without an aliased column.
     #[test]
     fn test_hac_meat_matches_indexed_reference_exactly() {
         let n = 600;
@@ -6053,8 +6262,9 @@ mod tests {
                         }
                     }
                 }
-                for lag in 1..=hac.bandwidth.min(n - 1) {
-                    let w = kernel.weight(lag, hac.bandwidth);
+                let weights = kernel.lag_set(hac.bandwidth, n, 1e-7);
+                assert_eq!(hac.n_lag_weights, weights.len());
+                for (lag, &w) in weights.iter().enumerate().skip(1) {
                     if w.abs() < 1e-15 {
                         continue;
                     }
@@ -6072,6 +6282,15 @@ mod tests {
                         }
                     }
                 }
+                // the direct meat equals the reference bit for bit, whichever path vcov_hac takes
+                let x_view = x.view();
+                let rev = reversed_scores(x_view, u.view()).unwrap();
+                let direct = hac_meat(&rev, n, k, &weights).unwrap();
+                for a in 0..k {
+                    for b in 0..k {
+                        assert_eq!(direct[a * k + b].to_bits(), omega[[a, b]].to_bits());
+                    }
+                }
                 omega /= n as f64;
                 let bread = Array2::from_shape_fn((k, k), |(a, b)| ols.xtx_inv[[keep[a], keep[b]]]);
                 let v = matmul(
@@ -6080,14 +6299,20 @@ mod tests {
                 )
                 .unwrap()
                     * (n as f64);
+                // the FFT meat (long lag sets with spectral-analysis) agrees to rounding
+                let exact = !cfg!(feature = "spectral-analysis") || weights.len() <= 64;
                 for (a, &ca) in keep.iter().enumerate() {
-                    assert_eq!(
-                        hac.std_errors[ca].to_bits(),
-                        v[[a, a]].sqrt().to_bits(),
-                        "{cols:?} {bw:?} {kernel:?} {a}"
-                    );
                     for (b, &cb) in keep.iter().enumerate() {
-                        assert_eq!(hac.vcov[ca][cb].to_bits(), v[[a, b]].to_bits());
+                        let (got, want) = (hac.vcov[ca][cb], v[[a, b]]);
+                        if exact {
+                            assert_eq!(got.to_bits(), want.to_bits(), "{cols:?} {bw:?} {kernel:?}");
+                        } else {
+                            let scale = (v[[a, a]] * v[[b, b]]).sqrt();
+                            assert!((got - want).abs() <= 1e-10 * scale, "{got} vs {want}");
+                        }
+                    }
+                    if exact {
+                        assert_eq!(hac.std_errors[ca].to_bits(), v[[a, a]].sqrt().to_bits());
                     }
                 }
             }

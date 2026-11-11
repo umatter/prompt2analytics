@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "vcov_hac_grunfeld",
+  "area": "regression/hac",
+  "method": "HAC on Grunfeld (inv ~ value + capital, file order): Newey-West lag 3 with and without prewhitening, QS at lag 2 and 3",
+  "reference": "sandwich::NeweyWest(lag =, prewhite = FALSE | TRUE, adjust = FALSE); sandwich::kernHAC(kernel = 'Quadratic Spectral', bw = 3 | 4, prewhite = FALSE, adjust = FALSE)",
+  "call": "NeweyWest(lm(inv ~ value + capital, data = grunfeld), lag = 3, prewhite = TRUE)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-42.714369436559359, 0.11556215636055213, 0.23067848873196961]
+    },
+    "n_obs": 200,
+    "bw_rule": 4,
+    "nw_lag3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [14.776490225894271, 0.010714415153351881, 0.063294201650839432]
+    },
+    "nw_lag3_prewhite": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [19.202038196059451, 0.016015940982196171, 0.073996783320983139]
+    },
+    "nw_lag3_prewhite_vcov": [368.71827088292616, 0.053914391593437604, -0.9903088947801415, 0.05391439159343886, 0.00025651036554519085, -6.1390371379315694e-05, -0.9903088947801465, -6.1390371379313336e-05, 0.0054755239418525295],
+    "kernhac_qs_bw3": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [15.179992751553414, 0.010708881017105222, 0.064553376178834054]
+    },
+    "kernhac_qs_bw4": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [15.377119607520875, 0.011782708964435264, 0.066614107490490265]
+    },
+    "nw_lag_rule": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [14.96055999553516, 0.011439367137655802, 0.064731145735685544]
+    }
+  }
+}

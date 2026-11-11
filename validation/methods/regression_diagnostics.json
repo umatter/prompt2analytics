@@ -71,17 +71,14 @@
       "id": "hac",
       "name": "HAC (kernel) covariance for OLS",
       "category": "regression",
-      "reference": "sandwich::NeweyWest(lag = m, prewhite = FALSE) for Bartlett; sandwich::kernHAC(kernel =, bw = m, prewhite = FALSE, adjust = FALSE) for Parzen, Truncated, Tukey-Hanning",
+      "reference": "sandwich::NeweyWest(lag = L, prewhite = FALSE) for Bartlett; sandwich::kernHAC(kernel =, bw = L + 1, prewhite = FALSE, adjust = FALSE) for Parzen, Quadratic Spectral, Truncated, Tukey-Hanning (p2a's lag count L weights lag j by k(j / (L + 1)))",
       "doc": "validation/regression/regression_legacy_cases.md",
       "cases": ["hac_ar1"],
       "tests": ["p2a-core::regression::ols::tests::test_validate_hac_ar1"],
-      "quantities": ["coefficients", "default bandwidth (floor(4 (n/100)^(2/9)))", "SE and covariance matrix: Bartlett (default and m = 4), Parzen, Truncated, Tukey-Hanning (m = 4)"],
+      "quantities": ["coefficients", "default bandwidth (floor(4 (n/100)^(2/9)))", "SE and covariance matrix: Bartlett (default and L = 4), Parzen, Quadratic Spectral, Truncated, Tukey-Hanning (L = 3 = kernHAC(bw = 4))"],
       "tolerance": "validation/README.md, n = 100: coefficients 1e-8, SE and covariance entries 1e-6 relative; bandwidth exact",
       "deviations": [
-        {"finding": "REG-50", "quantity": "Quadratic Spectral SEs", "note": "the QS kernel is truncated at the bandwidth: p2a 0.2284575999 / 0.1414513262 vs kernHAC(kernel = 'Quadratic Spectral', bw = 4, prewhite = FALSE, adjust = FALSE) 0.2300539548 / 0.1392422079 (kernhac_qs_bw4)"},
-        {"finding": "REG-50", "quantity": "Bartlett bandwidth convention", "note": "p2a's Bartlett bandwidth m weights lag j by 1 - j/(m + 1), i.e. NeweyWest(lag = m) = kernHAC(bw = m + 1) (pinned); kernHAC(kernel = 'Bartlett', bw = 4) is 0.2102028704 / 0.1464461033 (kernhac_bartlett_bw4) where p2a's m = 4 gives 0.2204664393 / 0.1429954779. Parzen, Truncated and Tukey-Hanning use j/m and match kernHAC(bw = m)"},
-        {"finding": "REG-22", "quantity": "prewhitened SEs", "note": "prewhiten = true fits a scalar AR(1) to the residuals: p2a 0.2908704449 / 0.3059566437 vs NeweyWest(lag = 4, prewhite = TRUE) 0.2858936714 / 0.1360607244 (neweywest_lag4_prewhite)"},
-        {"finding": "REG-61", "quantity": "default bandwidth and small-sample adjustment", "note": "the default bandwidth is the fixed rule floor(4 (n/100)^(2/9)) = 4, not bwNeweyWest (2.513298742, bw_neweywest); there is no adjust = TRUE option: kernhac_*_bw4_adjust hold the adjusted values, e.g. Parzen 0.1977403619 / 0.1432982597 where p2a gives the unadjusted 0.1957529711 / 0.1418580397"}
+        {"finding": "REG-22", "quantity": "prewhitened SEs", "note": "prewhiten = true fits a scalar AR(1) to the residuals: p2a 0.2908704449 / 0.3059566437 vs NeweyWest(lag = 4, prewhite = TRUE) 0.2858936714 / 0.1360607244 (neweywest_lag4_prewhite)"}
       ],
       "supersedes_legacy": ["validation/expected/hac_test.csv"]
     },

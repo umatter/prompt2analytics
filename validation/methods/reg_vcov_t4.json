@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "hac_kernels_qs",
+      "name": "HAC covariance for OLS: lag-count kernel convention and the untruncated Quadratic Spectral kernel",
+      "category": "regression",
+      "reference": "sandwich::NeweyWest(lag = L, prewhite = FALSE); sandwich::kernHAC(kernel = 'Quadratic Spectral', bw = L + 1, prewhite = FALSE, adjust = FALSE); sandwich::weightsAndrews (number of lag weights)",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": [
+        "vcov_hac_qs_long",
+        "vcov_hac_grunfeld",
+        "vcov_hac_prewhite_ts"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_hac_qs_long",
+        "p2a-core::regression::ols::tests::test_validate_hac_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_hac_kernels_ts"
+      ],
+      "quantities": [
+        "coefficients",
+        "default lag rule floor(4 (n/100)^(2/9)) and its SEs (Grunfeld)",
+        "Newey-West SEs and covariance (lags 2, 3, 5)",
+        "Quadratic Spectral SEs and covariance at lags 0, 2, 3 and 5",
+        "number of Quadratic Spectral lag weights above 1e-7"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n) (n = 200, 300, 3000); weight counts and the lag rule exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
