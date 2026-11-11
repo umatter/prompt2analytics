@@ -455,7 +455,7 @@ pub fn ks_test_one_sample_with(
     let p_value = if exact {
         match alternative {
             Alternative::TwoSided => {
-                // numeric-ok: R's exact two-sided p is the complement of the MTW cdf
+                // R's exact two-sided p is the complement of the MTW cdf
                 1.0 - pkolmogorov_two_exact(statistic, n)?
             }
             _ => pkolmogorov_one_exact_upper(statistic, n),
@@ -572,24 +572,13 @@ pub fn ks_test_two_sample_with(
         });
     }
 
-    let (d_plus, d_minus) = compute_two_sample_d(&x_clean, &y_clean);
+    let (d_plus, d_minus, block_end) = compute_two_sample_d(&x_clean, &y_clean)?;
     let statistic = match alternative {
         Alternative::TwoSided => d_plus.max(d_minus),
         Alternative::Greater => d_plus,
         Alternative::Less => d_minus,
     };
-
-    // block_end[k]: position k (1-based) of the sorted pooled sample ends a block of ties
     let total = n + m;
-    let mut pooled: Vec<f64> = try_with_capacity(total, "KS pooled sample")?;
-    pooled.extend_from_slice(&x_clean);
-    pooled.extend_from_slice(&y_clean);
-    pooled.sort_by(f64::total_cmp);
-    let mut block_end: Vec<bool> = try_vec(total + 1, true, "KS pooled sample")?;
-    block_end[0] = false;
-    for k in 1..total {
-        block_end[k] = pooled[k - 1] != pooled[k];
-    }
     let ties = block_end[1..total].iter().any(|&b| !b);
 
     let exact = exact.unwrap_or((n as f64) * (m as f64) < 10000.0);
@@ -643,14 +632,25 @@ pub fn ks_test_two_sample_with(
 ///   (x tends to be smaller)
 /// - D- = max[G_m(x) - F_n(x)]: alternative "less", the CDF of x lies below that of y
 ///   (x tends to be larger)
-fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
+///
+/// Also returns `block_end`: `block_end[k]` is whether position k (1-based) of the sorted
+/// pooled sample ends a block of tied values (`block_end[0]` is false), which the exact
+/// distribution conditions on.
+fn compute_two_sample_d(x: &[f64], y: &[f64]) -> EconResult<(f64, f64, Vec<bool>)> {
     let n = x.len() as f64;
     let m = y.len() as f64;
+    let total = x.len() + y.len();
 
     // Combined sorted array with labels; tied values are processed together below
-    let mut combined: Vec<(f64, bool)> = x.iter().map(|&v| (v, true)).collect();
+    let mut combined: Vec<(f64, bool)> = try_with_capacity(total, "KS pooled sample")?;
+    combined.extend(x.iter().map(|&v| (v, true)));
     combined.extend(y.iter().map(|&v| (v, false)));
     combined.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut block_end: Vec<bool> = try_vec(total + 1, true, "KS pooled sample")?;
+    block_end[0] = false;
+    for k in 1..total {
+        block_end[k] = combined[k - 1].0 != combined[k].0;
+    }
 
     let mut d_plus = 0.0_f64;
     let mut d_minus = 0.0_f64;
@@ -684,7 +684,7 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
         d_minus = d_minus.max(fm_y - fn_x);
     }
 
-    (d_plus, d_minus)
+    Ok((d_plus, d_minus, block_end))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -793,7 +793,7 @@ pub(crate) fn pkstwo_upper(x: f64) -> f64 {
             k += 2;
         }
         let cdf = s * (2.0 * std::f64::consts::PI).sqrt();
-        // numeric-ok: the x < 1 series is the cdf, at most 0.73 here, so no tail is lost
+        // the x < 1 series is the cdf, at most 0.73 here, so no tail is lost
         (1.0 - cdf).clamp(0.0, 1.0)
     } else {
         let z = -2.0 * x * x;
@@ -1750,9 +1750,11 @@ mod tests {
                     .filter(|i| sel >> i & 1 == 0)
                     .map(|i| pooled[i])
                     .collect();
-                compute_two_sample_d(&xs, &ys)
+                let (dp, dm, _) = compute_two_sample_d(&xs, &ys).unwrap();
+                (dp, dm)
             };
-            let observed = compute_two_sample_d(x, y);
+            let (op, om, _) = compute_two_sample_d(x, y).unwrap();
+            let observed = (op, om);
             let observed_sel: u32 = (1u32 << m) - 1;
             assert_eq!(stat(observed_sel), observed);
             let (mut hit_two, mut hit_plus, mut hit_minus, mut count) = (0, 0, 0, 0);
