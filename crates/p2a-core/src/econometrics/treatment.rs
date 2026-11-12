@@ -412,7 +412,15 @@ impl fmt::Display for DoublyRobustResult {
         writeln!(f, "Doubly Robust Treatment Effect Estimation")?;
         writeln!(f, "==========================================")?;
         writeln!(f, "Method:   {}", self.method)?;
-        writeln!(f, "Estimand: {}", self.estimand)?;
+        if self.method == DRMethod::Regression && self.estimand == Estimand::ATT {
+            writeln!(
+                f,
+                "Estimand: {} (regression adjustment: average over treated units)",
+                self.estimand
+            )?;
+        } else {
+            writeln!(f, "Estimand: {}", self.estimand)?;
+        }
         writeln!(f)?;
         writeln!(f, "Treatment Effect:")?;
         writeln!(f, "  Effect:     {:>12.4}", self.effect)?;
@@ -1533,12 +1541,7 @@ pub fn run_doubly_robust(
             compute_aipw_effect(&y_trim, &d_trim, &ps_trim, &mu_1, &mu_0, config.estimand)
         }
         DRMethod::IPW => compute_ipw_effect(&y_trim, &d_trim, &ps_trim, config.estimand, true),
-        DRMethod::Regression => {
-            // Simple difference in predicted means
-            let mean_mu1: f64 = mu_1.iter().sum::<f64>() / n_trim as f64;
-            let mean_mu0: f64 = mu_0.iter().sum::<f64>() / n_trim as f64;
-            mean_mu1 - mean_mu0
-        }
+        DRMethod::Regression => ra_effect(&mu_1, &mu_0, &d_trim, config.estimand),
     };
 
     // Propensity score summary
@@ -1625,9 +1628,7 @@ pub fn run_doubly_robust(
                         // Reuse cached outcome model predictions (resample them).
                         let mu_1_boot: Array1<f64> = indices.iter().map(|&i| mu_1[i]).collect();
                         let mu_0_boot: Array1<f64> = indices.iter().map(|&i| mu_0[i]).collect();
-                        let mean_mu1: f64 = mu_1_boot.iter().sum::<f64>() / n_trim as f64;
-                        let mean_mu0: f64 = mu_0_boot.iter().sum::<f64>() / n_trim as f64;
-                        mean_mu1 - mean_mu0
+                        ra_effect(&mu_1_boot, &mu_0_boot, &d_boot, estimand)
                     };
 
                     Ok(effect_boot.is_finite().then_some(effect_boot))
@@ -1683,6 +1684,19 @@ pub fn run_doubly_robust(
         warnings,
         se_method,
     })
+}
+
+/// Regression adjustment: the mean of the predicted contrast `mu_1 - mu_0` over the
+/// estimand's units (all units for the ATE, the treated for the ATT).
+fn ra_effect(mu_1: &Array1<f64>, mu_0: &Array1<f64>, d: &Array1<f64>, estimand: Estimand) -> f64 {
+    let (mut sum, mut count) = (0.0, 0usize);
+    for i in 0..d.len() {
+        if estimand == Estimand::ATE || d[i] >= 0.5 {
+            sum += mu_1[i] - mu_0[i];
+            count += 1;
+        }
+    }
+    sum / count as f64
 }
 
 /// Compute AIPW (Augmented IPW) treatment effect estimate.
@@ -3526,6 +3540,26 @@ mod tests {
         assert_eq!(r.se_method, "bootstrap (200 replicates)");
         assert_eq!(r.bootstrap_reps, 200);
         assert!(r.std_error.is_finite());
+    }
+
+    #[test]
+    fn test_validate_dr_regression_att() {
+        // Regression adjustment over all units (ATE) and over the treated (ATT), OLS per arm
+        // (case ra_ipw_t4). Fails before: the ATT averaged over every unit, i.e. was the ATE.
+        let (case, ds) = crate::test_support::load_case("ra_ipw_t4");
+        for (estimand, key) in [(Estimand::ATE, "ra_ate"), (Estimand::ATT, "ra_att")] {
+            let c = DoublyRobustConfig {
+                method: DRMethod::Regression,
+                estimand,
+                trim: 0.0,
+                bootstrap: 2,
+                ..Default::default()
+            };
+            let r = run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap();
+            Check::new(&case)
+                .scalar(key, r.effect, Tol::coef(r.n_obs))
+                .finish();
+        }
     }
 
     #[test]
