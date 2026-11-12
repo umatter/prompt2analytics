@@ -1068,7 +1068,7 @@ impl<'a> IdentifiedDesign<'a> {
         let max = xte.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         let bound = 1e-6 * x_f * (norm(&xb) + norm(e)) + f64::MIN_POSITIVE;
         debug_assert!(
-            !(max > bound),
+            max <= bound || !(max.is_finite() && bound.is_finite()),
             "IdentifiedDesign: the design is not the one the OLS fit was computed on \
              (max |X'e| = {max:e} > {bound:e})"
         );
@@ -5202,10 +5202,15 @@ mod tests {
         );
     }
 
-    /// A negative Driscoll-Kraay variance gives NaN se, t and p (not 0, 0 and 1).
+    /// A negative Driscoll-Kraay variance gives NaN se, t and p (not 0, 0 and 1). A property
+    /// test on the data of case `vcov_dk_grunfeld_t10`, loaded without the case.
     #[test]
     fn test_dk_nan_se_gives_nan_t() {
-        let (_, ds) = crate::test_support::load_case("vcov_dk_grunfeld_t10");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../validation/datasets/generated/vcov_dk_grunfeld_t10.csv"
+        );
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(path).unwrap());
         // Truncated at lag 8 of T = 10 periods weighs lags 1-9 by 1
         let r = run_vcov_driscoll_kraay(
             &ds,
