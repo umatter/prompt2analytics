@@ -714,7 +714,9 @@ fn hr_common_to_rr(hr: f64) -> f64 {
     if hr == 1.0 {
         return 1.0;
     }
-    (1.0 - 0.5f64.powf(hr.sqrt())) / (1.0 - 0.5f64.powf((1.0 / hr).sqrt()))
+    // 0.5^x = 2^-x; -expm1(-x ln 2) = 1 - 2^-x without cancellation near HR = 1
+    let one_minus_half_pow = |x: f64| -(-x * std::f64::consts::LN_2).exp_m1();
+    one_minus_half_pow(hr.sqrt()) / one_minus_half_pow((1.0 / hr).sqrt())
 }
 
 /// The bounding factor of a confounder whose two associations both equal `evalue`.
