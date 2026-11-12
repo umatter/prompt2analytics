@@ -110,8 +110,9 @@ primary_region = "fra"          # Frankfurt — EU
   auto_start_machines = true
   # Deliberately 1, and not just to avoid cold starts. There is no [[mounts]]
   # block and P2A_DB_PATH is unset, so persistent_session.rs falls through to
-  # connect_memory(): every session, uploaded dataset, and result lives only in
-  # this machine's RAM and ephemeral disk. Letting auto_stop_machines take it to
+  # connect_memory(): the conversation store is SurrealDB's in-memory engine
+  # (kv-mem), with nothing on disk, and every session, uploaded dataset, and
+  # result lives only in this machine's RAM and ephemeral disk. Letting auto_stop_machines take it to
   # zero would therefore discard a visitor's work whenever they idle long
   # enough, and they would see "dataset not found" rather than anything
   # explaining why.
