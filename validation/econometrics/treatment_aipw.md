@@ -20,12 +20,17 @@ Three methods:
 | Method | Effect | Standard error |
 |--------|--------|----------------|
 | `AIPW` (default) | ATE: mean of psi_i = m1 - m0 + D (Y - m1)/e - (1-D)(Y - m0)/(1-e); ATT: sum phi / n1 with phi = D (Y - m0) - (1-D) e/(1-e) (Y - m0) | analytic: sd(IF)/sqrt(n), n - 1 denominator, with IF = psi (ATE) or (phi - D tau) n/n1 (ATT); `bootstrap_reps = 0`, `se_method` "analytic influence function" |
-| `IPW` | Hajek IPW | bootstrap SD, `se_method` "bootstrap (B replicates)" |
-| `Regression` | mean(m1 - m0) | bootstrap SD |
+| `IPW` | Hajek IPW | `bootstrap = 0`: the M-estimation SE with the propensity estimated, `se_method` "M-estimation (propensity estimated)"; `bootstrap >= 2` (default 999): bootstrap SD, "bootstrap (B replicates; models refitted)" |
+| `Regression` | ATE: mean(m1 - m0) over all kept units; ATT: over the kept treated units | `bootstrap = 0`: the sandwich of the stacked estimating equations of the two arm regressions and the averaged contrast (HC0, the trimmed set fixed), "analytic (stacked estimating equations, trimming fixed)"; `bootstrap >= 2`: bootstrap SD |
 
 The AIPW SE ignores the estimation of the nuisance models (the usual influence-function SE of
-the R AIPW and tmle packages). `bootstrap` must be at least 2 for `IPW` and `Regression`; it is
-ignored by `AIPW`. Bootstrap intervals are type-7 percentile intervals (normal interval below
+the R AIPW and tmle packages). For `IPW` and `Regression`, `bootstrap` is 0 (analytic) or at
+least 2; 1 is an error. Each bootstrap replicate resamples every row, refits the propensity model
+(when trimming or weighting needs it) and both arm regressions, and re-applies the trimming; a
+replicate whose refit fails or leaves an arm empty is dropped and counted. The default stays 999
+replicates; `bootstrap` is ignored by `AIPW`. Regression adjustment for the ATT averages the
+predicted contrast over the treated (before it averaged over every unit, which is the ATE: on
+`weighting_sim` 1.43074 against R's ATT 1.56333). Bootstrap intervals are type-7 percentile intervals (normal interval below
 20 successful replicates); an unseeded bootstrap uses `DEFAULT_BOOTSTRAP_SEED` (42). Analytic
 intervals use `qnorm(0.975)`, p-values the normal survival function. `trim` must be in
 [0, 0.5).
@@ -41,6 +46,8 @@ intervals use `qnorm(0.975)`, p-values the normal survival function. `trim` must
 | AIPW ATE, SE | 1.4265452600187223, 0.12280740322389656 |
 | AIPW ATT, SE | 1.5121321048221326, 0.13667714475644796 |
 | Regression adjustment ATE | 1.4307395308757216 |
+| Regression adjustment ATT / ATC (case `ra_ipw_t4`) | 1.5633310471356239 / 1.2963682627197133 |
+| Regression adjustment sandwich SE: ATE / ATT (case `ra_ipw_t4`) | 0.12164156911903133 / 0.1294302125002856 |
 | Outcome R² treated / control | 0.6566631288592546 / 0.6176147190812733 |
 
 ## Tests and tolerances
@@ -50,18 +57,24 @@ intervals use `qnorm(0.975)`, p-values the normal survival function. `trim` must
 | `test_validate_aipw` | AIPW ATE, SE, outcome R², `bootstrap_reps = 0`, CI/t/p | effect `Tol::coef(n)`, SE `Tol::se(n)`, R² `Tol::stat(n)` |
 | `test_validate_aipw_att` | AIPW ATT and SE | as above |
 | `test_validate_dr_regression` | regression-adjustment effect; bootstrap SE reported as such (not pinned) | `Tol::coef(n)` |
+| `test_validate_dr_regression_att` | regression-adjustment ATT over the treated (registry `causal_effects_t4.json`, entry `treatment_regression_adjustment_t4`) | `Tol::coef(n)` |
+| `test_validate_dr_regression_sandwich_se` | regression-adjustment ATE and ATT with the analytic sandwich SE at `bootstrap = 0` | effect `Tol::coef(n)`, SE `Tol::se(n)` |
+| `test_validate_dr_ipw_mest` | method `ipw` at `bootstrap = 0`: Hajek effect and M-estimation SE | as above |
 
 Property tests (no case): `test_dr_reports_se_method`, `test_dr_ipw_matches_ipw` (DR IPW and
 IPW agree to 1e-12), `test_dr_regression_recovers_dgp`,
-`test_unseeded_bootstrap_is_reproducible`, `test_ipw_rejects_bad_trim`.
+`test_unseeded_bootstrap_is_reproducible`, `test_ipw_rejects_bad_trim`,
+`test_dr_bootstrap_replicate_refits_models`, `test_dr_regression_bootstrap_se_near_sandwich`,
+`test_dr_bootstrap_one_is_refused`.
 
 ## Known Differences
 
 1. Outcome models are OLS per arm; packages such as AIPW or tmle default to machine-learning
    learners.
 2. No cross-fitting (DoubleML cross-fits).
-3. The bootstrap resamples units with the fitted propensity scores and outcome predictions
-   held fixed.
+3. The bootstrap refits every model in each replicate; its draws are not R's, so bootstrap SEs
+   are not pinned. The analytic `Regression` SE holds the trimmed set fixed; with `trim = 0` it is
+   the fully interacted `lm`'s standardised contrast.
 
 ## Missing values and column types
 
