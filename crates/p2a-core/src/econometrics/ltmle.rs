@@ -713,7 +713,9 @@ pub struct RegimeEstimate {
     pub clever_covariates: Vec<Vec<f64>>,
     /// `[t][i]` Q*_t on the outcome scale.
     pub targeted_predictions: Vec<Vec<f64>>,
-    /// Fluctuation coefficient eps_t per node.
+    /// Fluctuation coefficient eps_t per node: Q*_t = linkinv(eta + eps_t), and after a re-solve
+    /// Q*_t = linkinv(clamp(eta, logit([lb, 1 - lb])) + eps_t), with `lb` the offset bound in
+    /// [`LtmleSaturation::resolved_targeting`].
     pub fluctuation_coefs: Vec<f64>,
     /// Subjects with Abar_t = dbar_t.
     pub n_following: Vec<usize>,
@@ -811,7 +813,8 @@ pub struct LtmleResult {
     pub clever_covariates: Vec<Vec<f64>>,
     /// The intervention's targeted predictions Q*_t on the outcome scale
     pub targeted_predictions: Vec<Vec<f64>>,
-    /// The intervention's fluctuation coefficients eps_t
+    /// The intervention's fluctuation coefficients eps_t (after a re-solve, on the bounded
+    /// offsets, as [`RegimeEstimate::fluctuation_coefs`])
     pub fluctuation_coefs: Vec<f64>,
 
     /// Number of observations
@@ -1734,7 +1737,7 @@ const CONSTANT_Q_BOUNDS: (f64, f64) = (1e-4, 0.9999);
 /// undercut. Fits that can take the warm path (a response mean off [`SATURATED_MEAN`]) need well
 /// under this many steps from glm.fit's start: Fisher scoring gains about one unit of logit per
 /// step, and the most measured at the default tolerance, counting all 11,292 such fits of a
-/// sweep, is 42 (validation/econometrics/ltmle.md, "Nuisance fits").
+/// sweep, is 42 of these 50 (validation/econometrics/ltmle.md, "Nuisance fits").
 const WARM_MIN_MAX_ITER: usize = 50;
 
 /// One logistic nuisance fit: the coefficients (NaN for aliased columns), the fitted values
@@ -2338,7 +2341,8 @@ fn halved_step(
 }
 
 /// ltmle's trigger for re-solving a targeting step: `|sum_i H_i (Q*_{t+1,i} - Q*_{t,i})|` above
-/// this (absolute, on the fitted [0, 1] scale).
+/// this (absolute, on the fitted [0, 1] scale). ltmle divides the sum by the number of regimes it
+/// targets together; each regime is targeted alone here, so the divisor is 1.
 const TARGETING_SCORE_MAX: f64 = 1e-3;
 /// The offset bounds ltmle's `FixScoreEquation` tries in turn: offsets bounded to
 /// `logit([lb, 1 - lb])`.
@@ -2634,7 +2638,7 @@ mod tests {
     #[test]
     fn test_validate_ltmle_default_control() {
         // The default glm control (epsilon 1e-8) against the tight (1e-14) reference values:
-        // measured gaps 2.8e-13 (psi_always), 1.1e-11 (psi_never), 6.0e-15 (ATE SE).
+        // measured gaps 0 (psi_always, psi_never), 5.2e-16 relative (ATE SE).
         let (case, ds) = crate::test_support::load_case("ltmle_two_period");
         let r = run_ltmle(&two_period(&ds), LtmleConfig::default()).unwrap();
         Check::new(&case)
@@ -2642,7 +2646,7 @@ mod tests {
             .scalar("psi_never", r.psi_control, Tol::iterative(1e-8))
             .scalar("ate_se", r.se, Tol::iterative(1e-8))
             .finish();
-        // the tight eps_never at the default control: measured gap 4.1e-10 relative
+        // the tight eps_never at the default control: measured gap 2.0e-12 relative
         Check::new(&case)
             .vector(
                 "eps_never",

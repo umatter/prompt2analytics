@@ -60,6 +60,8 @@ Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-base
    root, or at a bracket at rounding, on that first bound; ltmle's later bounds (1e-4, 1e-3, 0.01),
    which it tries when nlminb fails, are kept only for the search's iteration limit. With every
    response at 0 (or 1) the score has no root and every follower is predicted at the link's clamp.
+   ltmle divides the EIC sum by the number of regimes it targets at once before comparing it with
+   1e-3; p2a targets one regime at a time, so the divisor is 1 and the trigger is the sum itself.
 6. **Estimate and EIC (`CalcIC`).** `psi = mean(Q*_1)`,
    `EIC = sum_t H_t (Q*_{t+1} - Q*_t) + Q*_1 - psi`.
 
@@ -97,7 +99,7 @@ and IRLS corrects it. The fit takes glm.fit's start instead when `max_iter` is b
 decides what is reported as not converged, on the step count from glm.fit's start, which a warm
 start would undercut. Of the 11,292 Q fits with a response mean off the 1e-6 guard in the sweep
 below, counting all of them at the default tolerance, the most any took from glm.fit's start is
-42, and the most among those whose warm and cold step counts differ is 16. A response mean within
+42 of the 50, and the most among those whose warm and cold step counts differ is 16. A response mean within
 1e-6 of 0 or 1 never takes the warm path. The warm start is not always the shorter: 589 of those
 fits took more steps from it, the most being 86 where glm.fit's start took 12
 (`shifted_outcome((4000, 12, 1), 4.0, true, 0.3)`, node 7); at a limit below such a count the
@@ -120,7 +122,7 @@ gap is the largest over the data sets, relative to the largest entry of the same
 data sets a regime's mean is within 1e-6 of 0 or 1 at the default tolerance; they have their own
 columns. "Warm off" is the lean path with the warm start off, the same set of data sets:
 
-| Quantity | tolerance 1e-8 | warm off | 1e-8, regime mean within 1e-6 of 0 or 1 | warm off | tolerance 1e-14 | near-duplicate at 1e-7 |
+| Quantity | tolerance 1e-8 | warm off | 1e-8, regime mean within 1e-6 of 0 or 1 | warm off | tolerance 1e-14 | near-duplicate (jitter 1e-7) |
 |---|---:|---:|---:|---:|---:|---:|
 | ATE | 5.3e-10 | 1e-13 | 2.1e-10 | 5e-12 | 6e-12 | 2e-11 |
 | z | 5.3e-10 | 3e-13 | 4.6e-10 | 5e-12 | 1.1e-12 | 3e-11 |
@@ -312,8 +314,8 @@ CAUS-101). Their |p2a - ltmle| on the regime means and the ATE, at tolerance 1e-
 The ATE standard errors differ from ltmle's too, by 9.9e-6 to 0.0125 at 1e-8 on the same five sets
 (CAUS-101 lists them with the means and the ATE).
 
-A tighter tolerance does not help: the gap does not shrink from 1e-8 to 1e-14 on any of the five
-and grows on four. Their last node's Q regression is quasi-separated, so the regime prediction
+A tighter tolerance does not help: from 1e-8 to 1e-14 the gap shrinks only on the first set (0.0180
+to 0.0179) and grows on the other four. Their last node's Q regression is quasi-separated, so the regime prediction
 depends on where the deviance rule stops at every tolerance; on three of them ltmle re-solves its
 targeting step with bounded offsets where p2a's scalar fluctuation solves the score, and on the
 other two a regime mean within 0.02 of 0 leaves a nearly flat score on which the two fluctuations
@@ -396,8 +398,9 @@ The registry entry is `validation/methods/causal_ltmle.json` (method `causal_ltm
 n = 600: coefficients, means, epsilons, H and cumulative g 1e-8 relative; SEs, z and CI bounds
 1e-6; p-values 1e-6 relative / 1e-12 absolute; counts exact. p2a runs at `tolerance = 1e-14`,
 the case's `glm.control(epsilon = 1e-14)`; the default tolerance 1e-8 is checked against the
-same tight values at `Tol::iterative(1e-8)` (measured gaps: 2.8e-13, 1.1e-11, 6.0e-15 and
-4.1e-10 for psi always, psi never, the ATE SE and the never epsilons).
+same tight values at `Tol::iterative(1e-8)` (measured gaps, re-measured on 2026-11-12 with
+`P2A_VALIDATION_VERBOSE=1`: 0 for psi always and psi never, 5.2e-16 relative for the ATE SE and at
+most 2.0e-12 relative for the never epsilons).
 
 `test_validate_ltmle_saturation_matches_ltmle` (registry entry `causal_ltmle_saturation`, case
 `ltmle_saturation`) runs the default tolerance against ltmle itself: the always mean, its SE, the
@@ -499,7 +502,9 @@ since dropped to about a fifth, see "Saturating regimes: before and after" below
 always-treat fluctuation there reaches `eps = 29.2`. Every earlier Q response of that regime is then
 within about `exp(-29)` of 1, and each of those nine fits takes 30 IRLS steps in `fit_glm` as its
 linear predictor climbs to the clamp, where the other regime's take 2. Of six data seeds at
-T = 10, n = 10,000, two saturate this way:
+T = 10, n = 10,000, two saturate this way (measured in a separate session from the table above,
+so each ratio is over that session's ff8e7559 time: 45.4 ms for seed 42 here against 46.3 ms for
+the growth row, which is seed 42 too):
 
 | Data seed | ff8e7559 | this tree | ratio |
 |---|---:|---:|---:|
@@ -623,7 +628,11 @@ registered): `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_a
 `test_ltmle_constant_q_response_is_not_regressed`, `test_ltmle_constant_outcome_is_refused`,
 `test_ltmle_saturating_fixtures_agree_with_ltmle` (values quoted from ltmle 1.3-0 on the exported
 fixtures), `test_ltmle_targeting_solves_the_score_at_every_node`,
-`test_resolve_fluctuation_monotone_root`.
+`test_resolve_fluctuation_monotone_root`, `test_ltmle_node_after_a_resolve_matches_the_cold_path`
+(after a re-solved node the next fit takes glm.fit's start; fluctuation coefficients and targeted
+predictions within 1e-10 of the cold path, no more Q steps than it),
+`test_ltmle_fluctuation_halving_stops_at_a_non_finite_deviance`,
+`test_ltmle_shared_history_designs_match_per_node_designs`.
 
 ## 15. Status
 
