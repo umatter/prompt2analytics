@@ -119,11 +119,14 @@ async fn test_validate_mcp_hypothesis_alternative_aliases() {
         )
         .await,
     );
-    // x10_less_ci is not pinned: p2a-core's one-sample poisson_test returns the two-sided
-    // interval for every alternative (R: [0, 3.392443847144379] for "less"). New observation,
-    // reported to the core owners; the handler passes the alternative through.
+    let ci = &j["confidence_interval"];
     Check::new(&p)
         .scalar("x10_less_p", f(&j["p_value"]), Tol::p_value(10))
+        .vector(
+            "x10_less_ci",
+            &[f(&ci["lower"]), f(&ci["upper"])],
+            Tol::stat(10),
+        )
         .finish();
     assert!(
         refused(
@@ -2218,13 +2221,25 @@ async fn test_validate_mcp_poisson_one_sided() {
         )
         .await,
     );
-    // deviation STAT-58: the two-sided p-value is not pinned here.
-    // deviation new observation (core): the one-sided calls report the two-sided interval
-    // (R: x10_greater_ci, rr_less_ci), so the interval bounds are not pinned.
+    let two = json_of(&ok(&s, &se, "hypothesis_poisson", json!({"x": [10], "t": [5]})).await);
+    let (gci, lci) = (&g["confidence_interval"], &l["confidence_interval"]);
+    // The infinite upper bound of the "greater" interval serialises as null; R stores NA, read
+    // as NaN, so only the lower bound is compared.
     Check::new(&case)
         .scalar("x10_greater_p", f(&g["p_value"]), Tol::p_value(10))
+        .vector(
+            "x10_greater_ci",
+            &[f(&gci["lower"]), f64::NAN],
+            Tol::stat(10),
+        )
         .scalar("rr_less_p", f(&l["p_value"]), Tol::p_value(10))
+        .vector(
+            "rr_less_ci",
+            &[f(&lci["lower"]), f(&lci["upper"])],
+            Tol::stat(32),
+        )
         .scalar("rr_est", f(&l["estimate"]["value"]), Tol::coef(10))
+        .scalar("x10_two_p", f(&two["p_value"]), Tol::p_value(10))
         .finish();
 }
 
