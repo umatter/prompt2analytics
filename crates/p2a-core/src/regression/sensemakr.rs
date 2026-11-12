@@ -197,20 +197,16 @@ impl std::fmt::Display for SensemakrResult {
         writeln!(f, "  Partial R²(Y~D|X): {:>8.4}", self.partial_r2_yd)?;
         writeln!(
             f,
-            "  H0: q = {:.0}, reduce = {:.0}%",
+            "  H0: q = {}, reduce = {:.0}%",
             self.rv_q,
             self.rv_q * 100.0
         )?;
         writeln!(f)?;
         writeln!(f, "Robustness Values:")?;
+        writeln!(f, "  RV(q={}): {:>12.4}", self.rv_q, self.robustness_value)?;
         writeln!(
             f,
-            "  RV(q={:.0}): {:>12.4}",
-            self.rv_q, self.robustness_value
-        )?;
-        writeln!(
-            f,
-            "  RV(q={:.0}, α={:.2}): {:>6.4}",
+            "  RV(q={}, α={:.2}): {:>6.4}",
             self.rv_q, self.rv_alpha, self.robustness_value_alpha
         )?;
         writeln!(f)?;
@@ -238,6 +234,21 @@ impl std::fmt::Display for SensemakrResult {
                     bound.adjusted_estimate
                 )?;
             }
+        }
+
+        if let Some(c) = &self.contour_data {
+            writeln!(f)?;
+            writeln!(
+                f,
+                "Contour data: {} x {} grid of adjusted estimates and t-statistics (rows \
+                 R²(D~Z|X) {}..{}, columns R²(Y~Z|D,X) {}..{}); serialise the result to read it.",
+                c.r2_xz_values.len(),
+                c.r2_yd_values.len(),
+                c.r2_xz_values.first().copied().unwrap_or(f64::NAN),
+                c.r2_xz_values.last().copied().unwrap_or(f64::NAN),
+                c.r2_yd_values.first().copied().unwrap_or(f64::NAN),
+                c.r2_yd_values.last().copied().unwrap_or(f64::NAN),
+            )?;
         }
 
         writeln!(f)?;
@@ -965,6 +976,17 @@ pub fn generate_contour_data(
     let grid_size = grid_size.unwrap_or(20);
     let max_r2 = max_r2.unwrap_or(0.5);
     require_classical_fit(ols_result)?;
+    if grid_size < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("contour grid_size must be at least 2, got {grid_size}"),
+        });
+    }
+    if !(max_r2.is_finite() && max_r2 > 0.0 && max_r2 < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("contour max_r2 must lie in (0, 1), got {max_r2}"),
+        });
+    }
+    crate::resource::checked_len(&[grid_size, grid_size], "sensemakr contour grid")?;
 
     // Find treatment coefficient
     let treatment_idx = ols_result
@@ -990,6 +1012,7 @@ pub fn generate_contour_data(
     let mut adjusted_t_stats = Vec::with_capacity(grid_size);
 
     for &r2_xz in &r2_xz_values {
+        crate::resource::checkpoint()?;
         let mut row_estimates = Vec::with_capacity(grid_size);
         let mut row_t_stats = Vec::with_capacity(grid_size);
 
@@ -1555,6 +1578,49 @@ mod tests {
         // First point should be original estimate (no confounding)
         let original = ols.coefficients.iter().find(|c| c.name == "x").unwrap();
         assert!((contour.adjusted_estimates[0][0] - original.estimate).abs() < 1e-6);
+    }
+
+    /// q is printed as given (q = 0.5 printed as "0" before), and contour data on the result
+    /// is announced in the text.
+    #[test]
+    fn test_display_prints_q_and_contour_data() {
+        let df = df! {
+            "y" => [1.0, 2.1, 2.9, 4.2, 5.0, 5.8, 7.1, 8.0, 9.2, 10.1],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        }
+        .unwrap();
+        let ols = run_ols(
+            &Dataset::new(df),
+            "y",
+            &["x"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let mut r = sensemakr(&ols, "x", None, None, None, 0.5, 0.05).unwrap();
+        let out = r.to_string();
+        assert!(out.contains("H0: q = 0.5, reduce = 50%"), "{out}");
+        assert!(
+            out.contains("RV(q=0.5):") && out.contains("RV(q=0.5, α=0.05):"),
+            "{out}"
+        );
+        assert!(!out.contains("Contour data"), "{out}");
+        let one = sensemakr(&ols, "x", None, None, None, 1.0, 0.05)
+            .unwrap()
+            .to_string();
+        assert!(
+            one.contains("H0: q = 1, reduce = 100%") && one.contains("RV(q=1):"),
+            "{one}"
+        );
+        r.contour_data = Some(generate_contour_data(&ols, "x", Some(4), Some(0.3)).unwrap());
+        for (g, m) in [(1, 0.5), (0, 0.5), (4, 0.0), (4, 1.0), (4, f64::NAN)] {
+            assert!(matches!(
+                generate_contour_data(&ols, "x", Some(g), Some(m)),
+                Err(EconError::InvalidSpecification { .. })
+            ));
+        }
+        let out = r.to_string();
+        assert!(out.contains("Contour data: 4 x 4 grid"), "{out}");
     }
 
     /// REG-17 (sensemakr.rs): benchmark names over 20 bytes were cut at byte 17; '²' spans bytes 16..18.
