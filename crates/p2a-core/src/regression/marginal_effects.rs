@@ -1386,7 +1386,7 @@ mod tests {
         no_fit.fit = None;
         invalid(contrasts(&bin, &no_fit, "x1", &[0.0, 1.0]).unwrap_err());
         // an aliased regressor has no comparison
-        let (_, tail) = crate::test_support::load_case("tail_marginal_logit");
+        let (_, tail) = case_data("tail_marginal_logit");
         let al = marginal_effects(&tail, "y", &["x1", "x2", "x3"], ModelType::Logit).unwrap();
         invalid(contrasts(&tail, &al, "x3", &[0.0, 1.0]).unwrap_err());
         assert!(contrasts(&tail, &al, "x2", &[0.0, 1.0]).is_ok());

@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "evalue_hr_common",
+      "name": "E-values of hazard ratios with a common outcome",
+      "category": "regression",
+      "reference": "EValue::evalues.HR(est, lo, hi, rare = FALSE) (4.1.4); RR = (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) (VanderWeele 2020)",
+      "doc": "validation/regression/evalue.md",
+      "cases": [
+        "evalue_hr_common"
+      ],
+      "tests": [
+        "p2a-core::regression::evalue::tests::test_validate_evalue_hr_common"
+      ],
+      "quantities": [
+        "RR-scale estimate and limits",
+        "E-value of the estimate",
+        "E-value of the confidence limit closest to the null (one limit missing in hr3)"
+      ],
+      "tolerance": "closed forms: 1e-12 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "sensemakr_bounds",
+      "name": "sensemakr benchmark bounds, adjusted estimates and robustness values at alpha",
+      "category": "regression",
+      "reference": "sensemakr::sensemakr(lm, treatment, benchmark_covariates, kd, ky, q, alpha)$bounds (ovb_partial_r2_bound, adjusted_estimate, adjusted_se, adjusted_t with h0 = (1 - q) estimate, CI with qt(alpha/2, df)); sensemakr::robustness_value(t, dof, q, alpha); adjusted_estimate and adjusted_t on a grid (0.1.6)",
+      "doc": "validation/regression/sensemakr.md",
+      "cases": [
+        "sensemakr_darfur_bounds",
+        "sensemakr_rv_alpha"
+      ],
+      "tests": [
+        "p2a-core::regression::sensemakr::tests::test_validate_sensemakr_darfur_bounds",
+        "p2a-core::regression::sensemakr::tests::test_validate_sensemakr_rv_alpha"
+      ],
+      "quantities": [
+        "RV_q and RV_alpha at five settings of kd, ky, q, alpha",
+        "benchmark bounds r2dz.x and r2yz.dx (female, age)",
+        "adjusted estimate, SE, t and CI",
+        "the clamp of an implied r2yz.dx above 1 (adjusted SE 0, t infinite)",
+        "contour grid of adjusted estimates and t-statistics",
+        "robustness_value on six inputs, one in the extreme branch"
+      ],
+      "tolerance": "validation/README.md, n = 1276: coefficients 1e-10, SEs and statistics 1e-8; robustness_value inputs 1e-10 relative (closed form through a t quantile, see the test)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "marginal_effects_mem_contrasts",
+      "name": "Logit and probit marginal effects at the mean and average comparisons",
+      "category": "regression",
+      "reference": "stats::glm(binomial(logit | probit), epsilon = 1e-14) with the delta method: MEM SE with G = f(zbar) I + beta f'(zbar) xbar'; average comparisons mean(F(z2) - F(z1)) with gradient mean(f(z2) X2 - f(z1) X1); cross-checked in the case against marginaleffects::slopes(newdata = 'mean') and avg_comparisons",
+      "doc": "validation/regression/marginal_effects.md",
+      "cases": [
+        "me_mem_contrast"
+      ],
+      "tests": [
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_mem",
+        "p2a-core::regression::marginal_effects::tests::test_validate_contrasts_avg_comparisons"
+      ],
+      "quantities": [
+        "coefficients",
+        "MEM, its SE, z and p (intercept included)",
+        "average comparisons of x1 over the pairs of 0, 1, 2.5: estimate, SE, p"
+      ],
+      "tolerance": "iterative (GLM stopping rule): logit 1e-8, probit 1e-6 (Fisher scoring stops about 2e-7 from glm); p 1e-6 (logit) and 1e-4 (probit), z^2 times the z error with |z| <= 9",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

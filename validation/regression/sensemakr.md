@@ -31,6 +31,20 @@ estimate 0.04888549597934379, se 0.01839185800844235, t 2.6579965959341383, dof 
 0.019338593626010935; benchmark female: `female_r2dxj` 0.002574930988431467, `female_r2yxj`
 0.11546024184356445.
 
+## Tier 4: benchmark bounds and RV_alpha (`sensemakr_darfur_bounds`, `sensemakr_rv_alpha`)
+
+Registry entry `sensemakr_bounds` (`validation/methods/regression_sensitivity_t4.json`). R:
+`sensemakr(m, "directlyharmed", benchmark_covariates = c("female", "age"), kd, ky, q, alpha)$bounds`
+on the darfur model above at (kd, ky, q, alpha) = (1, 1, 1, .05), (2, 2, 1, .05), (3, 3, 1, .05),
+(2, 1, 1, .05), (1, 1, .5, .10); `ky = 8` for the clamp (sensemakr warns and sets r2yz.dx to 1, the
+adjusted SE is 0 and the t infinite); `kd = 400` is an error; `adjusted_estimate` and
+`adjusted_t` on the grid 0, 0.125, ..., 0.5 for the contour data. `sensemakr_rv_alpha`:
+`robustness_value(t, dof, q, alpha)` on six inputs (`sensemakr_rv_inputs.csv`). Example (k2, female):
+r2dz.x 0.005163156749174512, r2yz.dx 0.2624177681941485, adjusted estimate 0.02471622362736591, SE
+0.01584259125464841, t 1.5601124355281129. Tests: `test_validate_sensemakr_darfur_bounds`,
+`test_validate_sensemakr_rv_alpha`, and `test_sensemakr_impossible_kd_is_an_error` (kd = 400, kd <= 0,
+ky < 0, non-finite multipliers).
+
 ## Tolerances
 
 `Tol::coef(n)` for the estimate, `Tol::se(n)`, `Tol::stat(n)` for t, partial R^2 and RV, dof exact;

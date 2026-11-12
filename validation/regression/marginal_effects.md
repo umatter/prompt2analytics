@@ -240,6 +240,19 @@ standard errors use the full delta-method gradient `G = f(z̄) I + β f'(z̄) x�
 `test_validate_marginal_effects_mem` (registry entry `marginal_effects_mem_contrasts`, case
 `me_mem_contrast`).
 
+## Tier 4: marginal effects at the mean and average comparisons (`me_mem_contrast`)
+
+Registry entry `marginal_effects_mem_contrasts` (`validation/methods/regression_sensitivity_t4.json`).
+Simulated logit DGP (seed 20261111, n = 400, `me_mem_contrast.csv`), fitted by
+`glm(y ~ x1 + x2, binomial(logit | probit), control = glm.control(epsilon = 1e-14))`. The MEM and its
+SE are written out with `G = f(zbar) I + beta f'(zbar) xbar'` and checked in the case against
+`marginaleffects::slopes(fit, newdata = "mean")`; the average comparisons of x1 over the pairs of
+(0, 1, 2.5) against `avg_comparisons(fit, variables = list(x1 = c(v1, v2)))`. Logit x1: MEM
+0.14950681354342418, SE 0.02064274459380112 (the old diagonal approximation gave 0.0225); comparison
+0 -> 1: 0.12147309044715224, SE 0.01360617098791531. Tests: `test_validate_marginal_effects_mem`,
+`test_validate_contrasts_avg_comparisons`; tolerances iterative 1e-8 (logit) and 1e-6 (probit), p-values
+1e-6 and 1e-4.
+
 ## Status
 
 - [x] Core implementation complete

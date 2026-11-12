@@ -1491,11 +1491,16 @@ mod tests {
             .finish();
     }
 
+    /// Case data for tests that compare no R value.
+    fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
+        crate::test_support::load_case(id)
+    }
+
     /// An impossible benchmark multiplier (implied R²(D~Z|X) >= 1) is an error, as in
     /// sensemakr; so are kd <= 0, ky < 0 and non-finite multipliers.
     #[test]
     fn test_sensemakr_impossible_kd_is_an_error() {
-        let (_case, ds) = crate::test_support::load_case("sensemakr_darfur_bounds");
+        let (_case, ds) = case_data("sensemakr_darfur_bounds");
         for (kd, ky, what) in [
             (400.0, 400.0, "kd"),
             (0.0, 1.0, "kd"),

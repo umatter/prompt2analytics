@@ -28,6 +28,21 @@ Standardised mean differences: `RR = exp(0.91 d)` (Chinn 2000).
 
 `evalue_rr(3.9)` = 7.263034344160047.
 
+## Tier 4: hazard ratios with a common outcome (`evalue_hr_common`)
+
+Registry entry `evalue_hr_common` (`validation/methods/regression_sensitivity_t4.json`). R:
+`evalues.HR(0.6, 0.4, 0.9, rare = FALSE)`, `evalues.HR(1.3, 0.9, 1.8, rare = FALSE)`,
+`evalues.HR(0.5, NA, 0.8, rare = FALSE)` (inputs `evalue_hr_inputs.csv`).
+
+| row | HR (CI) | RR | E (point) | E (CI) |
+|---|---|---|---|---|
+| hr1 | 0.6 (0.4, 0.9) | 0.7025644572836847 | 2.199622395659878 | 1.3612206313389328 |
+| hr2 | 1.3 (0.9, 1.8) | 1.1992701292249968 | 1.6881246204862959 | 1 |
+| hr3 | 0.5 (-, 0.8) | 0.620136837873846 | 2.6064092655308877 | 1.6088913483778375 |
+
+`test_validate_evalue_hr_common` pins RR, both E-values and the RR-scale limits (through the
+conversion; `EValueResult` carries no limits), `Tol::new(1e-12, 1e-14)`.
+
 ## Tolerances
 
 Closed forms: `Tol::new(1e-12, 1e-14)`.

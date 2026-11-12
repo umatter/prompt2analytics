@@ -184,3 +184,12 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- regression::
 - Koenker, R. (1981). "A Note on Studentizing a Test for Heteroscedasticity". *Journal of Econometrics*, 17(1), 107-112.
 - Durbin, J. & Watson, G.S. (1950). "Testing for Serial Correlation in Least Squares Regression: I". *Biometrika*, 37(3/4), 409-428.
 - Belsley, D.A., Kuh, E. & Welsch, R.E. (1980). *Regression Diagnostics*. Wiley.
+
+## Tier 4
+
+- Wald test, Chisq form (`test_validate_wald_sim`, `test_validate_wald_grunfeld`,
+  `test_validate_wald_aliased_rank_q`): `lmtest::waldtest(test = "Chisq")` = q F, pinned on
+  `diag_wald_sim` and `ols_diagnostics_grunfeld` (drop capital: 81.98954629331581, p
+  1.3680836872216867e-19).
+- Durbin-Watson: the reading says what the 1.5 / 2.5 cut-offs suggest, calls them a rule of thumb, not a
+  test, and points to `lmtest::bgtest` (`test_durbin_watson_wording_is_a_rule_of_thumb`).
