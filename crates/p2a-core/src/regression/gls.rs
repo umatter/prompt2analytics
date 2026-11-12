@@ -410,6 +410,13 @@ fn gls_engine(
             let b = brent_fmin(lo + 1e-8, hi - 1e-8, objective, RHO_TOL, RHO_MAX_EVAL)?;
             let s = structure_at(b.x);
             let fit = engine.fit_at(&s)?;
+            // non-finite at every rho Brent tried: the search ended without a likelihood
+            if !fit.profile_objective(sse_ref).is_finite() {
+                return Err(EconError::Computation(format!(
+                    "the GLS profile log-likelihood is not finite at the selected rho ({})",
+                    b.x
+                )));
+            }
             let mut r = engine.result(&fit, &s, corr, true)?;
             let conv = Convergence::new(
                 b.converged,
@@ -2137,6 +2144,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The rho objective maps a non-finite profile value to +inf; Brent then moves away
+    /// from the region where it is not finite and still converges on the interior minimum.
+    #[test]
+    fn test_brent_fmin_steers_around_non_finite_values() {
+        let objective = |rho: f64| -> EconResult<f64> {
+            let v = if rho > 0.8 {
+                f64::NAN
+            } else {
+                (rho - 0.3).powi(2) + 0.05 * rho.sin()
+            };
+            Ok(if v.is_finite() { v } else { f64::INFINITY })
+        };
+        let b = brent_fmin(-1.0 + 1e-8, 1.0 - 1e-8, objective, RHO_TOL, RHO_MAX_EVAL).unwrap();
+        assert!(b.converged);
+        // minimum of (rho - 0.3)^2 + 0.05 sin(rho): 2 (rho - 0.3) + 0.05 cos(rho) = 0
+        let g = 2.0 * (b.x - 0.3) + 0.05 * b.x.cos();
+        assert!(g.abs() < 1e-4, "rho {} gradient {g}", b.x);
     }
 
     /// REML on a design whose third regressor is twice the second plus noise below lm.fit's

@@ -2348,7 +2348,8 @@ const HAC_LAG_SUMS: usize = 65_536;
 /// * `ols_result` - OLS regression result
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
-///   fit, not recomputed from `x`, and only the shape of `x` is checked.
+///   fit, not recomputed from `x`. Its shape is checked, and an `x` that is clearly not the
+///   fitted design (`X'e` far from 0) is an `InvalidSpecification`.
 /// * `bandwidth` - Optional lag count L. `None` uses the fixed rule floor(4 (n/100)^(2/9))
 ///   (sandwich's `vcovPL(lag = "NW1994")`), clamped to [1, n - 1]; this is not the
 ///   data-driven bandwidth of `vcovHAC` or `bwNeweyWest`.
@@ -3050,7 +3051,8 @@ impl std::fmt::Display for BootstrapResult {
 /// * `ols_result` - Result from OLS estimation
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
-///   fit, not recomputed from `x`, and only the shape of `x` is checked.
+///   fit, not recomputed from `x`. Its shape is checked, and an `x` that is clearly not the
+///   fitted design (`X'e` far from 0) is an `InvalidSpecification`.
 /// * `y` - Response vector (n)
 /// * `n_boot` - Number of bootstrap replications (default: 999). At least 10, otherwise
 ///   `InvalidSpecification`; replicate storage above the allocation ceiling is `ResourceLimit`.
@@ -3441,7 +3443,8 @@ impl std::fmt::Display for DriscollKraayResult {
 /// * `ols_result` - Result from OLS estimation
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
-///   fit, not recomputed from `x`, and only the shape of `x` is checked.
+///   fit, not recomputed from `x`. Its shape is checked, and an `x` that is clearly not the
+///   fitted design (`X'e` far from 0) is an `InvalidSpecification`.
 /// * `time_ids` - Time period identifier for each observation
 /// * `bandwidth` - Optional lag count L (None: floor(T^(1/4)), `vcovPL`'s `lag = "NW1987"`). A
 ///   user lag count must be smaller than the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
@@ -4906,8 +4909,9 @@ mod tests {
             .collect();
         let g: Vec<i64> = (0..n).map(|i| (i % 2) as i64).collect();
         let y: Vec<f64> = (0..n).map(|i| 0.5 - x[i] + 0.3 * z[i] + e[n + i]).collect();
-        let ds =
-            Dataset::new(df! { "y" => y, "x" => x, "dup" => dup, "z" => z, "g" => g }.unwrap());
+        let ds = Dataset::new(
+            df! { "y" => y.clone(), "x" => x.clone(), "dup" => dup, "z" => z, "g" => g }.unwrap(),
+        );
         let aliased = run_ols(&ds, "y", &["x", "dup"], true, CovarianceType::HC1).unwrap();
         assert_eq!(aliased.aliased, vec!["dup".to_string()]);
         let plain = run_ols(&ds, "y", &["x"], true, CovarianceType::HC1).unwrap();
@@ -4927,6 +4931,25 @@ mod tests {
             "{:?}",
             singular.ols.warnings
         );
+        // HC0 with the dummy d of one observation j: its hat value is 1 and its residual is
+        // zero up to rounding, so the meat has a zero row and column for d and the HC0
+        // covariance has a zero eigenvalue (vcovHC(type = "HC0") in R), with null vector
+        // X'X e_d = x_j. Without an intercept every column is a slope: V_ss = V is singular.
+        // With one, x_j has a non-zero intercept entry, so the slope block stays regular.
+        let d: Vec<f64> = (0..n).map(|i| if i == 7 { 1.0 } else { 0.0 }).collect();
+        let ds_d = Dataset::new(df! { "y" => y, "x" => x, "d" => d }.unwrap());
+        let hc0 = run_ols(&ds_d, "y", &["x", "d"], false, CovarianceType::HC0).unwrap();
+        assert!(hc0.wald_f.is_none(), "{:?}", hc0.wald_f);
+        assert!(
+            hc0.warnings.iter().any(|w| w.contains("Wald F")
+                && (w.contains("singular") || w.contains("not positive definite"))),
+            "{:?}",
+            hc0.warnings
+        );
+        let with_intercept = run_ols(&ds_d, "y", &["x", "d"], true, CovarianceType::HC0).unwrap();
+        let w = with_intercept.wald_f.expect("regular slope block");
+        assert_eq!(w.df1, 2);
+        assert!(w.statistic.is_finite() && w.statistic > 0.0);
     }
 
     // ════════════════════════════════════════════════════════════════════════════
