@@ -16,7 +16,7 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::{Array1, Array2, ArrayView2, Axis, s};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -26,7 +26,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{cholesky_inverse, xtx};
+use crate::linalg::matrix_ops::cholesky_inverse;
 use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
 use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
@@ -224,15 +224,24 @@ fn aliased_regressors(
 ) -> EconResult<Vec<usize>> {
     let (n, k) = dm.dim();
     if n > k + 1 {
-        let xx = xtx(&dm);
+        // [1, X]'[1, X], lower triangle accumulated row by row (no product workspace), then
+        // mirrored
         let mut g = resource::try_zeros2(k + 1, k + 1, "ordered model cross-product")?;
         g[[0, 0]] = n as f64;
-        for j in 0..k {
-            let s = dm.column(j).sum();
-            g[[0, j + 1]] = s;
-            g[[j + 1, 0]] = s;
+        for row in dm.rows() {
+            for a in 0..k {
+                let xa = row[a];
+                g[[a + 1, 0]] += xa;
+                for b in 0..=a {
+                    g[[a + 1, b + 1]] += xa * row[b];
+                }
+            }
         }
-        g.slice_mut(s![1.., 1..]).assign(&xx);
+        for a in 0..=k {
+            for b in 0..a {
+                g[[b, a]] = g[[a, b]];
+            }
+        }
         if normal_inverse_from_gram(g.view())?.is_some() {
             return Ok(Vec::new());
         }
