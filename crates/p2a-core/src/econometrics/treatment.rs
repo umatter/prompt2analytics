@@ -161,10 +161,13 @@ pub struct DoublyRobustConfig {
     pub estimand: Estimand,
     /// Trimming threshold for propensity scores, in [0, 0.5)
     pub trim: f64,
-    /// Number of bootstrap replications. Methods `IPW` and `Regression` take their
-    /// standard errors from the bootstrap and need at least 2; `AIPW` uses the analytic
-    /// influence function and ignores this field. A count whose result buffer cannot be
-    /// allocated is refused with `EconError::ResourceLimit`.
+    /// Number of bootstrap replications for methods `IPW` and `Regression`: 0 gives analytic
+    /// SEs (IPW: the M-estimation SE with the propensity estimated, as
+    /// [`run_ipw_treatment`]; Regression: the sandwich of the stacked estimating equations,
+    /// the trimmed set held fixed); 2 or more a bootstrap whose replicates resample all rows,
+    /// refit the propensity and outcome models and re-apply the trimming; 1 is refused.
+    /// `AIPW` uses the analytic influence function and ignores this field. A count whose
+    /// result buffer cannot be allocated is refused with `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Random seed for the bootstrap; `None` uses [`DEFAULT_BOOTSTRAP_SEED`] (42), so
     /// results are reproducible.
@@ -369,7 +372,7 @@ pub struct DoublyRobustResult {
     /// Estimated treatment effect
     pub effect: f64,
     /// Standard error: AIPW the analytic influence-function SE sd(IF)/sqrt(n); IPW and
-    /// Regression the bootstrap SD; `se_method` names it
+    /// Regression analytic at `bootstrap = 0`, else the bootstrap SD; `se_method` names it
     pub std_error: f64,
     /// 95% confidence interval lower bound
     pub ci_lower: f64,
@@ -401,8 +404,9 @@ pub struct DoublyRobustResult {
     pub bootstrap_reps: usize,
     /// Warnings
     pub warnings: Vec<String>,
-    /// How `std_error` was computed: "analytic influence function" or "bootstrap (B
-    /// replicates)"
+    /// How `std_error` was computed: "analytic influence function" (AIPW), "M-estimation
+    /// (propensity estimated)" (IPW), "analytic (stacked estimating equations, trimming
+    /// fixed)" (Regression) or "bootstrap (B replicates; models refitted)"
     #[serde(default)]
     pub se_method: String,
 }
@@ -633,22 +637,8 @@ pub fn run_ipw_treatment(
     }
 
     // Standard errors. All three analytic SEs are computed on every path.
-    let keep_mask: Vec<bool> = {
-        let mut m = vec![false; n];
-        for &i in &keep_idx {
-            m[i] = true;
-        }
-        m
-    };
-    // The propensity design without its aliased columns (a copy only when some are).
-    let x_ps = if ps_fit.fit.aliased.is_empty() {
-        CowArray::from(x.view())
-    } else {
-        let ps_cols: Vec<usize> = (0..x.ncols())
-            .filter(|j| !ps_fit.fit.aliased.contains(j))
-            .collect();
-        CowArray::from(x.select(ndarray::Axis(1), &ps_cols))
-    };
+    let keep_mask = kept_mask(n, &keep_idx);
+    let x_ps = propensity_design(&x, &ps_fit.fit.aliased);
     let kind = IpwKind::of(config.estimand, config.normalized);
     let not_contiguous = || EconError::Internal("IPW columns are not contiguous".into());
     let ys = y.as_slice().ok_or_else(not_contiguous)?;
@@ -1439,17 +1429,10 @@ pub fn run_doubly_robust(
     let mut warnings = Vec::new();
 
     validate_trim(config.trim)?;
-    if matches!(config.method, DRMethod::IPW | DRMethod::Regression) && config.bootstrap < 2 {
-        let method = if config.method == DRMethod::IPW {
-            "ipw"
-        } else {
-            "regression"
-        };
+    if matches!(config.method, DRMethod::IPW | DRMethod::Regression) && config.bootstrap == 1 {
         return Err(EconError::InvalidSpecification {
-            message: format!(
-                "bootstrap must be at least 2 for method {method} (its standard errors come from the bootstrap); got {}",
-                config.bootstrap
-            ),
+            message: "bootstrap must be 0 (analytic standard errors) or at least 2; got 1"
+                .to_string(),
         });
     }
 
@@ -1488,14 +1471,11 @@ pub fn run_doubly_robust(
     }
 
     // Apply trimming
-    let trim_lower = config.trim;
-    let trim_upper = 1.0 - config.trim;
-
     let mut keep_idx: Vec<usize> = Vec::new();
     let mut n_trimmed = 0;
 
     for i in 0..n {
-        if ps[i] >= trim_lower && ps[i] <= trim_upper {
+        if dr_keeps(ps[i], config.trim) {
             keep_idx.push(i);
         } else {
             n_trimmed += 1;
@@ -1525,10 +1505,10 @@ pub fn run_doubly_robust(
 
     // Fit outcome models for treated and control separately
     let x_names = design_names(covariates);
-    let (mu_1, r2_treated, alias1) =
-        fit_outcome_model(x_trim.view(), &y_trim, &d_trim, true, &x_names)?;
-    let (mu_0, r2_control, alias0) =
-        fit_outcome_model(x_trim.view(), &y_trim, &d_trim, false, &x_names)?;
+    let (mu_1, r2_treated, alias1, aliased1) =
+        fit_outcome_model_cols(x_trim.view(), &y_trim, &d_trim, true, &x_names)?;
+    let (mu_0, r2_control, alias0, aliased0) =
+        fit_outcome_model_cols(x_trim.view(), &y_trim, &d_trim, false, &x_names)?;
     for (group, a) in [("treated", alias1), ("control", alias0)] {
         if let Some(text) = a {
             warnings.push(format!("outcome model ({group}): {text}"));
@@ -1548,8 +1528,8 @@ pub fn run_doubly_robust(
     let ps_summary = compute_ps_summary(&ps_trim);
 
     // Compute standard error, CI, and inference.
-    // For AIPW: use analytic influence function variance (no bootstrap needed).
-    // For IPW/Regression: use parallel bootstrap with cached propensity scores.
+    // AIPW: the analytic influence-function variance. IPW and Regression: analytic with
+    // bootstrap = 0, else a bootstrap that refits the models in every replicate.
     let (std_error, ci_lower, ci_upper, se_method, bootstrap_reps) = match config.method {
         DRMethod::AIPW => {
             // Analytic influence-function SE sd(IF) / sqrt(n) (n - 1 denominator, as the R
@@ -1593,46 +1573,75 @@ pub fn run_doubly_robust(
                 0,
             )
         }
+        DRMethod::IPW | DRMethod::Regression if config.bootstrap == 0 => {
+            let z = z_critical(0.95)?;
+            let (se, method) = if config.method == DRMethod::Regression {
+                // Stacked estimating equations of the two arm regressions and the averaged
+                // contrast (HC0 meat; the trimmed set is held fixed).
+                let e1 = &y_trim - &mu_1;
+                let e0 = &y_trim - &mu_0;
+                let m_diff = &mu_1 - &mu_0;
+                let se = ra_sandwich_se(
+                    x_trim.view(),
+                    &d_trim,
+                    [&e0, &e1],
+                    &m_diff,
+                    config.estimand,
+                    effect,
+                    [&aliased0, &aliased1],
+                )?;
+                (
+                    se,
+                    "analytic (stacked estimating equations, trimming fixed)".to_string(),
+                )
+            } else {
+                // Hajek IPW: the M-estimation SE of run_ipw_treatment (propensity estimated).
+                let keep_mask = kept_mask(n, &keep_idx);
+                let x_ps = propensity_design(&x, &ps_fit.fit.aliased);
+                let kind = IpwKind::of(config.estimand, true);
+                let not_contiguous =
+                    || EconError::Internal("IPW columns are not contiguous".into());
+                let ys = y.as_slice().ok_or_else(not_contiguous)?;
+                let ds = d.as_slice().ok_or_else(not_contiguous)?;
+                let es = ps.as_slice().ok_or_else(not_contiguous)?;
+                let arms = weighted_arm_means(ys, ds, es, &keep_mask, kind)?;
+                match ipw_mest_se(x_ps.view(), ys, ds, es, &keep_mask, kind, effect, &arms) {
+                    Ok(v) => (v, "M-estimation (propensity estimated)".to_string()),
+                    Err(e @ EconError::SingularMatrix { .. }) => {
+                        warnings.push(format!(
+                            "M-estimation SE not computed: {e}; the SE treats the propensity scores as known"
+                        ));
+                        (
+                            ipw_naive_se(ys, ds, es, &keep_mask, kind, effect, &arms),
+                            "propensity treated as known".to_string(),
+                        )
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            (se, effect - z * se, effect + z * se, method, 0)
+        }
         DRMethod::IPW | DRMethod::Regression => {
-            // Parallel bootstrap with cached propensity scores for IPW/Regression.
-            // Index sets are drawn sequentially (one bounded chunk at a time) for
-            // reproducibility, then evaluated in parallel reusing cached ps/outcome models.
+            // Full-procedure bootstrap: every replicate resamples all n rows, refits the
+            // propensity model (IPW, or Regression with trimming), re-trims and refits the
+            // arm regressions (Regression) on the kept rows. Index sets are drawn
+            // sequentially for reproducibility and evaluated in parallel.
             let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
-
-            let method = config.method;
-            let estimand = config.estimand;
-
+            let rep = DrReplicate {
+                y: &y,
+                d: &d,
+                x: &x,
+                names: &x_names,
+                method: config.method,
+                estimand: config.estimand,
+                trim: config.trim,
+            };
             let boot_effects: Vec<f64> = streamed_bootstrap(
                 &mut rng,
-                n_trim,
+                n,
                 config.bootstrap,
-                boot_chunk_len(n_trim),
-                |indices| {
-                    let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
-                    let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
-
-                    // Check bootstrap sample has both treated and control
-                    let n_t_boot = d_boot.iter().filter(|&&v| v >= 0.5).count();
-                    if n_t_boot == 0 || n_t_boot == n_trim {
-                        return Ok(None);
-                    }
-
-                    // The outer match arm restricts `method` to IPW or Regression;
-                    // an `if/else` keeps that contract explicit and removes the
-                    // `unreachable!()` AIPW arm that used to be a maintenance trap.
-                    let effect_boot = if method == DRMethod::IPW {
-                        // Reuse cached propensity scores (resample them).
-                        let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
-                        compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, true)
-                    } else {
-                        // Reuse cached outcome model predictions (resample them).
-                        let mu_1_boot: Array1<f64> = indices.iter().map(|&i| mu_1[i]).collect();
-                        let mu_0_boot: Array1<f64> = indices.iter().map(|&i| mu_0[i]).collect();
-                        ra_effect(&mu_1_boot, &mu_0_boot, &d_boot, estimand)
-                    };
-
-                    Ok(effect_boot.is_finite().then_some(effect_boot))
-                },
+                boot_chunk_len(n),
+                |indices| rep.effect(indices),
             )?;
 
             if boot_effects.len() < config.bootstrap / 2 {
@@ -1647,7 +1656,10 @@ pub fn run_doubly_robust(
                 se,
                 lo,
                 hi,
-                format!("bootstrap ({} replicates)", config.bootstrap),
+                format!(
+                    "bootstrap ({} replicates; models refitted)",
+                    config.bootstrap
+                ),
                 config.bootstrap,
             )
         }
@@ -1684,6 +1696,163 @@ pub fn run_doubly_robust(
         warnings,
         se_method,
     })
+}
+
+/// Whether the doubly robust estimators keep a unit with propensity `ps` at `trim` (both
+/// tails, for every estimand).
+fn dr_keeps(ps: f64, trim: f64) -> bool {
+    ps >= trim && ps <= 1.0 - trim
+}
+
+/// `true` at the indices `keep` of `n` units.
+fn kept_mask(n: usize, keep: &[usize]) -> Vec<bool> {
+    let mut m = vec![false; n];
+    for &i in keep {
+        m[i] = true;
+    }
+    m
+}
+
+/// The propensity design without its aliased columns (a copy only when some are).
+fn propensity_design<'a>(x: &'a Array2<f64>, aliased: &[usize]) -> CowArray<'a, f64, Ix2> {
+    if aliased.is_empty() {
+        CowArray::from(x.view())
+    } else {
+        let cols: Vec<usize> = (0..x.ncols()).filter(|j| !aliased.contains(j)).collect();
+        CowArray::from(x.select(ndarray::Axis(1), &cols))
+    }
+}
+
+/// The IPW and regression-adjustment estimators of [`run_doubly_robust`] as one bootstrap
+/// replicate runs them on the resampled rows: the propensity model is refitted (skipped for
+/// Regression without trimming, whose scores are then unused), the scores trimmed, and for
+/// Regression both arm regressions refitted on the kept rows. `None` when fewer than 10 rows
+/// are kept, an arm is empty, a fit fails or the effect is not finite.
+struct DrReplicate<'a> {
+    y: &'a Array1<f64>,
+    d: &'a Array1<f64>,
+    x: &'a Array2<f64>,
+    names: &'a [String],
+    method: DRMethod,
+    estimand: Estimand,
+    trim: f64,
+}
+
+impl DrReplicate<'_> {
+    fn effect(&self, idx: &[usize]) -> EconResult<Option<f64>> {
+        let (yb, db, xb) = resampled_rows(self.y, self.d, self.x, idx)?;
+        let n = idx.len();
+        let n_t = db.iter().filter(|&&v| v >= 0.5).count();
+        if n_t == 0 || n_t == n {
+            return Ok(None);
+        }
+        let ps = if self.method == DRMethod::IPW || self.trim > 0.0 {
+            match fit_propensity_lean(xb.view(), db.view()) {
+                Ok(f) => Some(f.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10))),
+                Err(e) => return dropped_replicate(e),
+            }
+        } else {
+            None
+        };
+        let keep: Vec<usize> = match &ps {
+            Some(ps) => (0..n).filter(|&i| dr_keeps(ps[i], self.trim)).collect(),
+            None => (0..n).collect(),
+        };
+        let n_tk = keep.iter().filter(|&&i| db[i] >= 0.5).count();
+        if keep.len() < 10 || n_tk == 0 || n_tk == keep.len() {
+            return Ok(None);
+        }
+        let yk: Array1<f64> = keep.iter().map(|&i| yb[i]).collect();
+        let dk: Array1<f64> = keep.iter().map(|&i| db[i]).collect();
+        let e = match (self.method, &ps) {
+            (DRMethod::IPW, Some(ps)) => {
+                let pk: Array1<f64> = keep.iter().map(|&i| ps[i]).collect();
+                compute_ipw_effect(&yk, &dk, &pk, self.estimand, true)
+            }
+            _ => {
+                let xk = kept_rows(&xb, &keep)?;
+                let fit = |treated| fit_outcome_model(xk.view(), &yk, &dk, treated, self.names);
+                let (mu_1, mu_0) = match (fit(true), fit(false)) {
+                    (Ok(a), Ok(b)) => (a.0, b.0),
+                    (Err(e), _) | (_, Err(e)) => return dropped_replicate(e),
+                };
+                ra_effect(&mu_1, &mu_0, &dk, self.estimand)
+            }
+        };
+        Ok(e.is_finite().then_some(e))
+    }
+}
+
+/// Sandwich SE of regression adjustment from the stacked estimating equations
+/// `[D x (y - x b1); (1 - D) x (y - x b0); t (x (b1 - b0) - tau)]`, with `t` the estimand's
+/// units (HC0 meat; the kept rows are held fixed). Its influence function is
+/// `IF_i = t_i (m1_i - m0_i - tau) n / n_S + c' (A1^-1 x_i D_i e1_i - A0^-1 x_i (1 - D_i) e0_i)`
+/// with `A_a` the arm's `X'X / n` and `c` the mean of `x` over the estimand's units, and
+/// `Var = sum IF_i^2 / n^2`. Each arm's bread runs over its identified columns.
+/// `resid` and `aliased` are indexed by arm (0 control, 1 treated).
+fn ra_sandwich_se(
+    x: ArrayView2<f64>,
+    d: &Array1<f64>,
+    resid: [&Array1<f64>; 2],
+    m_diff: &Array1<f64>,
+    estimand: Estimand,
+    tau: f64,
+    aliased: [&[usize]; 2],
+) -> EconResult<f64> {
+    let (n, k) = x.dim();
+    let nf = n as f64;
+    let in_s = |i: usize| estimand == Estimand::ATE || d[i] >= 0.5;
+    let n_s = (0..n).filter(|&i| in_s(i)).count() as f64;
+    // v_a = A_a^-1 c on the arm's identified columns
+    let mut v: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    let mut cols: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+    for arm in 0..2 {
+        let c_a: Vec<usize> = (0..k).filter(|j| !aliased[arm].contains(j)).collect();
+        let q = c_a.len();
+        let mut bread = resource::try_zeros2(q, q, "outcome model bread")?;
+        let mut c = Array1::<f64>::zeros(q);
+        for i in 0..n {
+            let row = x.row(i);
+            if usize::from(d[i] >= 0.5) == arm {
+                for (a, &ja) in c_a.iter().enumerate() {
+                    let xa = row[ja] / nf;
+                    for (b, &jb) in c_a.iter().enumerate().take(a + 1) {
+                        bread[[a, b]] += xa * row[jb];
+                    }
+                }
+            }
+            if in_s(i) {
+                for (a, &ja) in c_a.iter().enumerate() {
+                    c[a] += row[ja] / n_s;
+                }
+            }
+        }
+        for a in 0..q {
+            for b in 0..a {
+                bread[[b, a]] = bread[[a, b]];
+            }
+        }
+        let inv = sym_inverse(bread.view(), SingularPolicy::Error, "outcome model bread")?;
+        v[arm] = inv.inverse.dot(&c).to_vec();
+        cols[arm] = c_a;
+    }
+    let mut sum_sq = 0.0;
+    for i in 0..n {
+        let row = x.row(i);
+        let arm = usize::from(d[i] >= 0.5);
+        let proj: f64 = cols[arm]
+            .iter()
+            .zip(&v[arm])
+            .map(|(&j, vj)| row[j] * vj)
+            .sum();
+        let sign = if arm == 1 { 1.0 } else { -1.0 };
+        let mut f = sign * resid[arm][i] * proj;
+        if in_s(i) {
+            f += (m_diff[i] - tau) * nf / n_s;
+        }
+        sum_sq += f * f;
+    }
+    Ok(sum_sq.sqrt() / nf)
 }
 
 /// Regression adjustment: the mean of the predicted contrast `mu_1 - mu_0` over the
@@ -1786,6 +1955,18 @@ fn fit_outcome_model(
     treated: bool,
     names: &[String],
 ) -> EconResult<(Array1<f64>, f64, Option<String>)> {
+    fit_outcome_model_cols(x, y, d, treated, names).map(|(mu, r2, alias, _)| (mu, r2, alias))
+}
+
+/// [`fit_outcome_model`] that also returns the aliased columns (empty unless the pivoted QR
+/// dropped some).
+fn fit_outcome_model_cols(
+    x: ArrayView2<f64>,
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    treated: bool,
+    names: &[String],
+) -> EconResult<(Array1<f64>, f64, Option<String>, Vec<usize>)> {
     let n = y.len();
     let indices: Vec<usize> = (0..n)
         .filter(|&i| if treated { d[i] >= 0.5 } else { d[i] < 0.5 })
@@ -1813,13 +1994,16 @@ fn fit_outcome_model(
             sst += t * t;
         }
         let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-        return Ok((mu, r2, None));
+        return Ok((mu, r2, None, Vec::new()));
     }
 
     let x_group = select_rows(x, &indices)?;
     let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
     // `lm.fit`'s pivoted QR, with its aliasing: the design failed OLS's normal-equations test.
     let fit = least_squares(x_group.view(), y_group.view())?;
+    let aliased: Vec<usize> = (0..fit.coefficients.len())
+        .filter(|&j| fit.coefficients[j].is_nan())
+        .collect();
     let beta = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
     let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
     let alias = fit.aliasing_warning(names);
@@ -1830,7 +2014,7 @@ fn fit_outcome_model(
     let sst: f64 = y_group.iter().map(|&yi| (yi - y_group_mean).powi(2)).sum();
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
-    Ok((mu, r2, alias))
+    Ok((mu, r2, alias, aliased))
 }
 
 /// The OLS coefficients of one arm and the sum of its `y`, from X'X and X'y in one pass over the
@@ -2174,7 +2358,7 @@ mod tests {
         );
         expect_invalid_spec(err, "bootstrap");
         for method in [DRMethod::IPW, DRMethod::Regression] {
-            for b in [0, 1] {
+            for b in [1] {
                 let err = run_doubly_robust(
                     &ds,
                     "y",
@@ -2446,40 +2630,6 @@ mod tests {
             .unwrap_err(),
             "0/1",
         );
-    }
-
-    #[test]
-    fn test_seeded_bootstrap_unchanged() {
-        // Pinned from the pre-streaming implementation at bdfca3c, seed 42. The propensity
-        // scores from glm::fit_propensity since T3-WP23 differ at 1e-13 from that fit's, so
-        // the standard errors are compared at 1e-9 relative. The interval is the type-7
-        // percentile interval of the same draws since T3-WP23 (CAUS-111; it was effect
-        // +- qnorm(0.975) SE).
-        const DR_IPW_SE: f64 = 0.11590718872111475;
-        const DR_REG_SE: f64 = 0.011033127368161828;
-        // The IPW bootstrap refits the propensity model in every replicate since T4 (its
-        // reproducibility is checked by test_ipw_bootstrap_seed_is_reproducible).
-        let ds = create_treatment_dataset();
-        for (method, se) in [
-            (DRMethod::IPW, DR_IPW_SE),
-            (DRMethod::Regression, DR_REG_SE),
-        ] {
-            let dr = run_doubly_robust(
-                &ds,
-                "y",
-                "treatment",
-                &["x1", "x2"],
-                DoublyRobustConfig {
-                    method,
-                    estimand: Estimand::ATE,
-                    trim: 0.01,
-                    bootstrap: 200,
-                    seed: Some(42),
-                },
-            )
-            .unwrap();
-            assert!(((dr.std_error - se) / se).abs() < 1e-9, "{method:?}");
-        }
     }
 
     #[test]
@@ -3461,8 +3611,96 @@ mod tests {
         let r = fit(0.1);
         assert!(r.n_trimmed > 0);
         assert_eq!(r.se_mest, Some(r.std_error));
-        assert!(r.std_error.is_finite() && r.std_error > 0.0);
         assert!(r.se_eif.is_some());
+        // The value: the stacked sandwich A^-1 B A^-T / n of (logit score over all units,
+        // the two Hajek arm-mean equations over the kept units), written out densely.
+        let (y, d, x) = columns(&ds, "y", "treatment", &["x1", "x2"]);
+        let e = fit_propensity_lean(x.view(), d.view())
+            .unwrap()
+            .scores
+            .mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
+        let (n, p) = x.dim();
+        let keep: Vec<bool> = (0..n).map(|i| e[i] >= 0.1 && e[i] <= 0.9).collect();
+        let hajek = |treated: bool| {
+            let (mut sw, mut swy) = (0.0, 0.0);
+            for i in (0..n).filter(|&i| keep[i] && (d[i] >= 0.5) == treated) {
+                let w = if treated {
+                    1.0 / e[i]
+                } else {
+                    1.0 / (1.0 - e[i])
+                };
+                sw += w;
+                swy += w * y[i];
+            }
+            swy / sw
+        };
+        let (mu1, mu0) = (hajek(true), hajek(false));
+        let q = p + 2;
+        let mut a = Array2::<f64>::zeros((q, q));
+        let mut b = Array2::<f64>::zeros((q, q));
+        for i in 0..n {
+            let xi = x.row(i);
+            let k = if keep[i] { 1.0 } else { 0.0 };
+            let (t, c) = (k * d[i], k * (1.0 - d[i]));
+            let mut psi = vec![0.0; q];
+            for j in 0..p {
+                psi[j] = xi[j] * (d[i] - e[i]);
+            }
+            psi[p] = t * (y[i] - mu1) / e[i];
+            psi[p + 1] = c * (y[i] - mu0) / (1.0 - e[i]);
+            // A = -(1/n) sum d psi_i / d theta
+            for j in 0..p {
+                for l in 0..p {
+                    a[[j, l]] += e[i] * (1.0 - e[i]) * xi[j] * xi[l] / n as f64;
+                }
+                a[[p, j]] += t * (y[i] - mu1) * (1.0 - e[i]) / e[i] * xi[j] / n as f64;
+                a[[p + 1, j]] -= c * (y[i] - mu0) * e[i] / (1.0 - e[i]) * xi[j] / n as f64;
+            }
+            a[[p, p]] += t / e[i] / n as f64;
+            a[[p + 1, p + 1]] += c / (1.0 - e[i]) / n as f64;
+            for j in 0..q {
+                for l in 0..q {
+                    b[[j, l]] += psi[j] * psi[l] / n as f64;
+                }
+            }
+        }
+        let ai = dense_inverse(&a);
+        let v = ai.dot(&b).dot(&ai.t()) / n as f64;
+        let want = (v[[p, p]] + v[[p + 1, p + 1]] - 2.0 * v[[p, p + 1]]).sqrt();
+        assert!(
+            ((r.std_error - want) / want).abs() < 1e-10,
+            "se_mest {} dense {want}",
+            r.std_error
+        );
+    }
+
+    /// Gauss-Jordan inverse with partial pivoting (a small dense reference).
+    fn dense_inverse(a: &Array2<f64>) -> Array2<f64> {
+        let m = a.nrows();
+        let mut w = a.clone();
+        let mut inv = Array2::<f64>::eye(m);
+        for col in 0..m {
+            let piv = (col..m)
+                .max_by(|&i, &j| w[[i, col]].abs().total_cmp(&w[[j, col]].abs()))
+                .unwrap();
+            for c in 0..m {
+                w.swap([col, c], [piv, c]);
+                inv.swap([col, c], [piv, c]);
+            }
+            let s = w[[col, col]];
+            for c in 0..m {
+                w[[col, c]] /= s;
+                inv[[col, c]] /= s;
+            }
+            for r in (0..m).filter(|&r| r != col) {
+                let f = w[[r, col]];
+                for c in 0..m {
+                    w[[r, c]] -= f * w[[col, c]];
+                    inv[[r, c]] -= f * inv[[col, c]];
+                }
+            }
+        }
+        inv
     }
 
     #[test]
@@ -3537,7 +3775,7 @@ mod tests {
         Check::new(&case)
             .scalar("ra_ate", r.effect, Tol::coef(n))
             .finish();
-        assert_eq!(r.se_method, "bootstrap (200 replicates)");
+        assert_eq!(r.se_method, "bootstrap (200 replicates; models refitted)");
         assert_eq!(r.bootstrap_reps, 200);
         assert!(r.std_error.is_finite());
     }
@@ -3559,6 +3797,148 @@ mod tests {
             Check::new(&case)
                 .scalar(key, r.effect, Tol::coef(r.n_obs))
                 .finish();
+        }
+    }
+
+    #[test]
+    fn test_validate_dr_regression_sandwich_se() {
+        // Regression adjustment at bootstrap 0: the stacked-equation sandwich SE (case
+        // ra_ipw_t4). Fails before: bootstrap 0 was refused for method regression.
+        let (case, ds) = crate::test_support::load_case("ra_ipw_t4");
+        for (estimand, eff, se) in [
+            (Estimand::ATE, "ra_ate", "ra_ate_se_sandwich"),
+            (Estimand::ATT, "ra_att", "ra_att_se_sandwich"),
+        ] {
+            let c = DoublyRobustConfig {
+                method: DRMethod::Regression,
+                estimand,
+                trim: 0.0,
+                bootstrap: 0,
+                ..Default::default()
+            };
+            let r = run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap();
+            assert_eq!(
+                (r.bootstrap_reps, r.se_method.as_str()),
+                (0, "analytic (stacked estimating equations, trimming fixed)")
+            );
+            Check::new(&case)
+                .scalar(eff, r.effect, Tol::coef(r.n_obs))
+                .scalar(se, r.std_error, Tol::se(r.n_obs))
+                .finish();
+            assert_inference(
+                r.effect,
+                r.std_error,
+                r.ci_lower,
+                r.ci_upper,
+                r.t_stat,
+                r.p_value,
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_dr_ipw_mest() {
+        // Doubly robust method IPW at bootstrap 0: Hajek IPW with the M-estimation SE, as
+        // run_ipw_treatment (case ipw_aipw_sim). Fails before: bootstrap 0 was refused.
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        for (estimand, eff, se) in [
+            (Estimand::ATE, "ipw_ate_hajek", "ipw_ate_se_mest"),
+            (Estimand::ATT, "ipw_att", "ipw_att_se_mest"),
+        ] {
+            let c = DoublyRobustConfig {
+                method: DRMethod::IPW,
+                estimand,
+                trim: 0.0,
+                bootstrap: 0,
+                ..Default::default()
+            };
+            let r = run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap();
+            assert_eq!(r.se_method, "M-estimation (propensity estimated)");
+            Check::new(&case)
+                .scalar(eff, r.effect, Tol::coef(r.n_obs))
+                .scalar(se, r.std_error, Tol::se(r.n_obs))
+                .finish();
+        }
+    }
+
+    #[test]
+    fn test_dr_bootstrap_replicate_refits_models() {
+        // A replicate is the bootstrap-0 estimator on the resampled rows. Fails before: the
+        // replicates reused the fitted scores and the fitted outcome predictions.
+        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let (y, d, x) = columns(&ds, "y", "treat", &COVS);
+        let names = design_names(&COVS);
+        let idx = one_draw(y.len(), 7);
+        let boot = resample(&ds, &idx);
+        for (method, trim) in [
+            (DRMethod::Regression, 0.0),
+            (DRMethod::Regression, 0.05),
+            (DRMethod::IPW, 0.05),
+        ] {
+            for estimand in [Estimand::ATE, Estimand::ATT] {
+                let rep = DrReplicate {
+                    y: &y,
+                    d: &d,
+                    x: &x,
+                    names: &names,
+                    method,
+                    estimand,
+                    trim,
+                };
+                let got = rep.effect(&idx).unwrap().unwrap();
+                let c = DoublyRobustConfig {
+                    method,
+                    estimand,
+                    trim,
+                    bootstrap: 0,
+                    ..Default::default()
+                };
+                let want = run_doubly_robust(&boot, "y", "treat", &COVS, c)
+                    .unwrap()
+                    .effect;
+                assert!(
+                    (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                    "{method:?} {estimand:?} trim {trim}: replicate {got}, estimator {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dr_regression_bootstrap_se_near_sandwich() {
+        // Fails before: the cached-prediction bootstrap was about a fifth of the sandwich SE.
+        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let fit = |bootstrap| {
+            let c = DoublyRobustConfig {
+                method: DRMethod::Regression,
+                trim: 0.0,
+                bootstrap,
+                seed: Some(42),
+                ..Default::default()
+            };
+            run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap()
+        };
+        let (boot, sandwich) = (fit(999), fit(0));
+        let ratio = boot.std_error / sandwich.std_error;
+        assert!(
+            (ratio - 1.0).abs() < 0.15,
+            "bootstrap / sandwich SE = {ratio}"
+        );
+    }
+
+    #[test]
+    fn test_dr_bootstrap_one_is_refused() {
+        let ds = create_treatment_dataset();
+        for method in [DRMethod::IPW, DRMethod::Regression] {
+            let c = DoublyRobustConfig {
+                method,
+                bootstrap: 1,
+                ..Default::default()
+            };
+            expect_invalid_spec(
+                run_doubly_robust(&ds, "y", "treatment", &["x1", "x2"], c).unwrap_err(),
+                "at least 2",
+            );
         }
     }
 
@@ -3586,7 +3966,7 @@ mod tests {
             (0, "analytic influence function")
         );
         let b = dr(DRMethod::IPW, 50);
-        assert_eq!(b.se_method, "bootstrap (50 replicates)");
+        assert_eq!(b.se_method, "bootstrap (50 replicates; models refitted)");
         let ipw = |trim| {
             run_ipw_treatment(
                 &ds,
