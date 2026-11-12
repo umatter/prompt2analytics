@@ -189,7 +189,10 @@ odds ratio. Registry: `validation/methods/stats_power_loglin.json`, method `fish
    few percent at `N = 1e12`. R's `dhyper` computes the weights with `dbinom_raw` (`stirlerr`
    and `bd0`) and stays accurate there. No pinned case is affected (`N <= 4000`);
    `test_fisher_one_sided_p_does_not_walk_below_the_support` is the `N = 1e12` example, and
-   needs an absolute tolerance of 0.05 on its one-sided p-value.
+   needs an absolute tolerance of 0.05 on its one-sided p-value. Once that error exceeds R's
+   relErr of 1e-7 (N of order 1e8), a table exactly as likely as the observed one, such as its
+   mirror table, can fall on the other side of the `d <= d_obs (1 + 1e-7)` comparison, so the
+   two-sided p-value can gain or lose that table's probability.
 
 ## Performance
 

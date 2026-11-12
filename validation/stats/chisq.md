@@ -52,7 +52,7 @@ categorical variable to given probabilities, and independence of two categorical
   over `k` observed categories costs O(k + e). The MCP tool refuses a map with more entries
   than its `array_length` budget (the limit `probs` has as an array).
   The categories are reported as the observed levels in factor order, then the declared
-  categories that never occur, in the order given (MCP: key order). This is R's
+  categories that never occur, in the order given (MCP: the map's keys in byte order, since the request map is sorted). This is R's
   `table(factor(x, levels = ...))` when the declared order is the observed order followed by
   the extras; the statistic does not depend on the order.
 - Probabilities must be finite and non-negative and sum to 1 within

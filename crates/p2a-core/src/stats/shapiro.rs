@@ -563,6 +563,11 @@ mod tests {
                     .scalar(&format!("{col}_p"), r.p_value, Tol::p_value(r.n))
                     .scalar(&format!("{col}_n"), r.n as f64, Tol::exact());
                 assert_eq!(
+                    r.reject_normality,
+                    case.scalar(&format!("{col}_p")) < 0.05,
+                    "{col}"
+                );
+                assert_eq!(
                     (r.missing.n_total, r.missing.n_used, r.missing.n_dropped),
                     (rows, r.n, rows - r.n),
                     "{col}"

@@ -292,7 +292,8 @@ pub(crate) fn values_by_level(
     factor: &Factor,
 ) -> EconResult<Vec<(String, Vec<f64>)>> {
     let counts = factor.counts();
-    let mut groups: Vec<(String, Vec<f64>)> = Vec::with_capacity(factor.n_levels());
+    let mut groups: Vec<(String, Vec<f64>)> =
+        resource::try_with_capacity(factor.n_levels(), "groups")?;
     for (label, &count) in factor.levels.iter().zip(&counts) {
         groups.push((
             label.clone(),
