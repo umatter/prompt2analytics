@@ -160,6 +160,10 @@ EXAMPLES:
         /// Control variable columns (optional)
         #[arg(short = 'x', long, num_args = 0..)]
         controls: Vec<String>,
+
+        /// Cluster standard errors on this column (CR1, as sandwich::vcovCL); HC1 without it
+        #[arg(long)]
+        cluster: Option<String>,
     },
 
     /// Synthetic Control Method (Abadie et al.)
@@ -246,10 +250,14 @@ EXAMPLES:
         trim: f64,
 
         /// Standard errors: 0 (default) gives the M-estimation SE with the propensity score
-        /// estimated, as WeightIt; N >= 2 a bootstrap of the weighted means with the fitted
-        /// propensity scores held fixed (conservative)
+        /// estimated, as WeightIt; N >= 2 a bootstrap that resamples every row and refits the
+        /// propensity model and the trimming in each replicate
         #[arg(long, default_value = "0")]
         bootstrap: usize,
+
+        /// Seed of the bootstrap draws (default: 42)
+        #[arg(long)]
+        seed: Option<u64>,
     },
 
     /// Doubly robust treatment effect (AIPW)
@@ -290,10 +298,16 @@ EXAMPLES:
         #[arg(long, default_value = "0.05")]
         trim: f64,
 
-        /// Bootstrap replications for the SEs of --method ipw and regression (at least 2;
-        /// default: 999); aipw uses its analytic influence-function SE and ignores it
+        /// Bootstrap replications for the SEs of --method ipw and regression (default: 999),
+        /// each refitting the propensity and outcome models; 0 gives analytic SEs
+        /// (M-estimation for ipw, the stacked-equation sandwich for regression) and 1 is an
+        /// error. aipw uses its analytic influence-function SE and ignores it
         #[arg(long, default_value = "999")]
         bootstrap: usize,
+
+        /// Seed of the bootstrap draws (default: 42)
+        #[arg(long)]
+        seed: Option<u64>,
     },
 
     /// Causal mediation analysis
@@ -325,6 +339,10 @@ EXAMPLES:
         /// Number of bootstrap replications (default: 999)
         #[arg(long, default_value = "999")]
         bootstrap: usize,
+
+        /// Seed of the bootstrap draws (default: 42)
+        #[arg(long)]
+        seed: Option<u64>,
     },
 
     /// Regression Discontinuity (sharp design)
@@ -502,6 +520,10 @@ EXAMPLES:
         /// 0 gives analytic influence-function SEs (DRDID's with covariates).
         #[arg(long, default_value = "999")]
         bootstrap: usize,
+
+        /// Seed of the bootstrap draws (default: 42)
+        #[arg(long)]
+        seed: Option<u64>,
     },
 
     /// Targeted Maximum Likelihood Estimation (TMLE)
@@ -703,6 +725,10 @@ EXAMPLES:
         /// Include treatment-covariate interactions in outcome model
         #[arg(long)]
         interactions: bool,
+
+        /// Seed of the bootstrap draws (default: 42)
+        #[arg(long)]
+        seed: Option<u64>,
     },
 }
 
@@ -726,7 +752,17 @@ pub fn execute(
             treat,
             post,
             controls,
-        } => execute_did(dataset, outcome, treat, post, controls, format, session),
+            cluster,
+        } => execute_did(
+            dataset,
+            outcome,
+            treat,
+            post,
+            controls,
+            cluster.as_deref(),
+            format,
+            session,
+        ),
         CausalCommands::Synth {
             dataset,
             outcome,
@@ -758,8 +794,10 @@ pub fn execute(
             estimand,
             trim,
             bootstrap,
+            seed,
         } => execute_ipw(
-            dataset, outcome, treatment, covariates, *estimand, *trim, *bootstrap, format, session,
+            dataset, outcome, treatment, covariates, *estimand, *trim, *bootstrap, *seed, format,
+            session,
         ),
         CausalCommands::DoublyRobust {
             dataset,
@@ -770,9 +808,10 @@ pub fn execute(
             estimand,
             trim,
             bootstrap,
+            seed,
         } => execute_dr(
-            dataset, outcome, treatment, covariates, *method, *estimand, *trim, *bootstrap, format,
-            session,
+            dataset, outcome, treatment, covariates, *method, *estimand, *trim, *bootstrap, *seed,
+            format, session,
         ),
         CausalCommands::Mediation {
             dataset,
@@ -781,8 +820,9 @@ pub fn execute(
             mediator,
             covariates,
             bootstrap,
+            seed,
         } => execute_mediation(
-            dataset, outcome, treatment, mediator, covariates, *bootstrap, format, session,
+            dataset, outcome, treatment, mediator, covariates, *bootstrap, *seed, format, session,
         ),
         CausalCommands::Rd {
             dataset,
@@ -851,6 +891,7 @@ pub fn execute(
             method,
             anticipation,
             bootstrap,
+            seed,
         } => execute_staggered_did(
             dataset,
             outcome,
@@ -862,6 +903,7 @@ pub fn execute(
             *method,
             *anticipation,
             *bootstrap,
+            *seed,
             format,
             session,
         ),
@@ -946,6 +988,7 @@ pub fn execute(
             se_method,
             bootstrap,
             interactions,
+            seed,
         } => execute_stdreg(
             dataset,
             outcome,
@@ -956,6 +999,7 @@ pub fn execute(
             *se_method,
             *bootstrap,
             *interactions,
+            *seed,
             format,
             session,
         ),
@@ -1101,6 +1145,7 @@ fn execute_did(
     treat: &str,
     post: &str,
     controls: &[String],
+    cluster: Option<&str>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1124,7 +1169,7 @@ fn execute_did(
                 Some(control_refs.as_slice())
             };
 
-            match run_did(ds, outcome, treat, post, controls_opt, None) {
+            match run_did(ds, outcome, treat, post, controls_opt, cluster) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let mut json = serde_json::json!({
@@ -1139,6 +1184,8 @@ fn execute_did(
                             "control_pre_mean": result.control_pre_mean,
                             "control_post_mean": result.control_post_mean,
                             "df": result.df,
+                            "cluster_var": result.cluster_var,
+                            "n_clusters": result.n_clusters,
                             "aliased": result.aliased,
                             "diagnostics": identification_json(&did_diagnostics(&result)),
                         });
@@ -1156,6 +1203,9 @@ fn execute_did(
                         println!("t-statistic: {:.4}", result.t_stat);
                         println!("p-value: {:.4}", result.p_value);
                         println!("\nObservations: {}", result.n_obs);
+                        if let (Some(cvar), Some(nc)) = (&result.cluster_var, result.n_clusters) {
+                            println!("Clustered SEs: {cvar} ({nc} clusters)");
+                        }
                         println!("\nGroup means:");
                         println!("  Pre-treatment (treated): {:.4}", result.treated_pre_mean);
                         println!(
@@ -1303,6 +1353,7 @@ fn execute_ipw(
     est: Estimand,
     trim: f64,
     bootstrap: usize,
+    seed: Option<u64>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1322,7 +1373,7 @@ fn execute_ipw(
             config.trim = trim;
             config.bootstrap = bootstrap;
             config.normalized = true;
-            config.seed = None;
+            config.seed = Some(seed.unwrap_or(42));
 
             match run_ipw_treatment(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1343,6 +1394,7 @@ fn execute_ipw(
                             "n_obs": result.n_obs,
                             "n_treated": result.n_treated,
                             "n_control": result.n_control,
+                            "n_trimmed": result.n_trimmed,
                             "diagnostics": identification_json(&ipw_diagnostics(&result)),
                         });
                         add_result_notes(&mut json, &result);
@@ -1360,8 +1412,8 @@ fn execute_ipw(
                             result.t_stat, result.p_value
                         );
                         println!(
-                            "N: {} (treated: {}, control: {})",
-                            result.n_obs, result.n_treated, result.n_control
+                            "N: {} (treated: {}, control: {}; trimmed: {})",
+                            result.n_obs, result.n_treated, result.n_control, result.n_trimmed
                         );
                         print_result_notes(&result, format);
 
@@ -1387,6 +1439,7 @@ fn execute_dr(
     est: Estimand,
     trim: f64,
     bootstrap: usize,
+    seed: Option<u64>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1406,7 +1459,7 @@ fn execute_dr(
             config.estimand = est;
             config.trim = trim;
             config.bootstrap = bootstrap;
-            config.seed = None;
+            config.seed = Some(seed.unwrap_or(42));
 
             match run_doubly_robust(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1459,6 +1512,7 @@ fn execute_mediation(
     mediator: &str,
     covariates: &[String],
     bootstrap: usize,
+    seed: Option<u64>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1476,7 +1530,7 @@ fn execute_mediation(
             let mut config = MediationConfig::default();
             config.bootstrap = bootstrap;
             config.trim = 0.05;
-            config.seed = None;
+            config.seed = Some(seed.unwrap_or(42));
 
             match run_mediation_analysis(ds, outcome, treatment, mediator, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1493,6 +1547,12 @@ fn execute_mediation(
                             "p_total": result.p_total,
                             "p_direct": result.p_direct,
                             "p_indirect": result.p_indirect,
+                            "direct_effect_treated": result.direct_effect_treated,
+                            "indirect_effect_control": result.indirect_effect_control,
+                            "se_direct_treated": result.se_direct_treated,
+                            "se_indirect_control": result.se_indirect_control,
+                            "p_direct_treated": result.p_direct_treated,
+                            "p_indirect_control": result.p_indirect_control,
                             "n_obs": result.n_obs,
                         });
                         add_result_notes(&mut json, &result);
@@ -1515,6 +1575,18 @@ fn execute_mediation(
                         println!(
                             "Indirect Effect (NIE): {:.6} (SE: {:.6}, p: {:.4})",
                             result.indirect_effect, result.se_indirect, result.p_indirect
+                        );
+                        println!(
+                            "Direct Effect θ(1): {:.6} (SE: {:.6}, p: {:.4})",
+                            result.direct_effect_treated,
+                            result.se_direct_treated,
+                            result.p_direct_treated
+                        );
+                        println!(
+                            "Indirect Effect δ(0): {:.6} (SE: {:.6}, p: {:.4})",
+                            result.indirect_effect_control,
+                            result.se_indirect_control,
+                            result.p_indirect_control
                         );
                         println!(
                             "Proportion Mediated: {:.2}%",
@@ -1826,6 +1898,7 @@ fn execute_staggered_did(
     estimation_method: AttEstimationMethod,
     anticipation: usize,
     bootstrap: usize,
+    seed: Option<u64>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1851,6 +1924,7 @@ fn execute_staggered_did(
             config.estimation_method = estimation_method;
             config.anticipation = anticipation;
             config.bootstrap = bootstrap;
+            config.seed = Some(seed.unwrap_or(42));
 
             match run_staggered_did(
                 ds,
@@ -2227,6 +2301,7 @@ fn execute_stdreg(
     se_meth: SEMethod,
     bootstrap: usize,
     interactions: bool,
+    seed: Option<u64>,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -2248,6 +2323,7 @@ fn execute_stdreg(
             config.se_method = se_meth;
             config.n_bootstrap = bootstrap;
             config.include_interactions = interactions;
+            config.seed = Some(seed.unwrap_or(42));
 
             match run_stdreg(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
