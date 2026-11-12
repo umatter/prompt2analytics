@@ -26,8 +26,11 @@ y_it - ybar_i = (x_it - xbar_i)' beta + (e_it - ebar_i)
   covariance has rank at most `G - 1`: with `K >= G` slopes, or whenever the slope
   covariance is singular (judged by its rank, not by whether an inverse succeeds), the F
   test is not computed. `f_stat` and its p-value are then NaN, a warning says why, and the
-  text output has no F line; plm's `pwaldtest` stops with "system is computationally
-  singular" there.
+  text output has no F line; plm's `pwaldtest` usually stops there ("system is
+  computationally singular" or "exactly singular") and otherwise returns a meaningless F of
+  order 1e17. An exact within fit (SSR = 0) has zero standard errors: t, p and F are NaN,
+  with a warning; random effects refuses an outcome without within-entity variation
+  (`sigma_e^2 = 0`).
 - Refused: a non-finite value in `y` or a regressor.
 - Regressors that the fixed effects absorb are dropped and reported: see
   [hdfe.md](hdfe.md#regressors-absorbed-by-the-fixed-effects).
@@ -284,7 +287,9 @@ relative for the Hausman statistic).
   (`plm(y ~ x1 + z, model = "within")` reports `x1` only). p2a refuses the model with
   `SingularMatrix`, naming the columns involved, until drop-and-warn lands (ECON-72).
 - With a clustered `vcov` and `K >= G`, p2a reports the coefficients and SEs without an F
-  test (NaN and a warning); plm's `pwaldtest` stops with an error.
+  test (NaN and a warning); plm's `pwaldtest` usually stops there ("system is
+  computationally singular" or "exactly singular") and otherwise returns a meaningless F of
+  order 1e17.
 
 `panel_fe_synthetic.csv` in `validation/expected/` is a legacy file that no test asserts.
 

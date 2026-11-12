@@ -51,7 +51,9 @@ use crate::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy};
 use crate::econometrics::hdfe::screen_regressors;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::eig_symmetric;
-use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, least_squares, sym_inverse};
+use crate::linalg::solve::{
+    LM_QR_TOL, LeastSquares, Qr, SingularPolicy, least_squares, sym_inverse,
+};
 use crate::regression::ols::{certainly_full_rank, normal_equations_inverse};
 use crate::resource;
 use crate::traits::estimator::{
@@ -224,7 +226,16 @@ pub fn run_fixed_effects_with(
     // The entity scores sum to X~'e~ = 0, so the cluster meat has rank at most
     // G - 1 and the clustered covariance is singular when K > G - 1.
     let f_df2 = f_test_df2(config.vcov, df, n_groups);
+    // An exact within fit has zero standard errors: t, p and F are not defined
+    let exact_fit = ssr == 0.0;
+    if exact_fit {
+        warnings.push(format!(
+            "the within fit of '{y_col}' is exact (SSR = 0): the standard errors are zero, so \
+             t, p and F are not defined"
+        ));
+    }
     let (f_stat, f_p_value) = match config.vcov {
+        _ if exact_fit => (f64::NAN, f64::NAN),
         PanelVcov::Classical => {
             let f = if k > 0 && ssr > 0.0 {
                 (sst - ssr) / (k as f64) / (ssr / df as f64)
@@ -242,7 +253,7 @@ pub fn run_fixed_effects_with(
             ));
             (f64::NAN, f64::NAN)
         }
-        PanelVcov::Arellano(_) => match wald_statistic(&beta.view(), &vcov.view()) {
+        PanelVcov::Arellano(_) => match wald_statistic(&beta.view(), &vcov.view())? {
             Some(w) => {
                 let f = w / k as f64;
                 (f, f_test_p_value(f, k as f64, f_df2 as f64))
@@ -263,7 +274,7 @@ pub fn run_fixed_effects_with(
     let t_stats: Vec<f64> = beta_vec
         .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
+        .map(|(&b, &se)| if se > 0.0 { b / se } else { f64::NAN })
         .collect();
     let p_values: Vec<f64> = t_stats
         .iter()
@@ -475,6 +486,14 @@ pub fn run_random_effects_with(
         });
     }
     let sigma2_nu = within.rss(&y_w)? / (n - n_groups - k_w) as f64;
+    if !(sigma2_nu > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "'{y_col}' has no residual variation within entities (sigma_e^2 = 0), so the \
+                 random-effects transformation is not defined"
+            ),
+        });
+    }
 
     // Step 2: per-entity sums in one pass over the observations
     let what = "random effects group means";
@@ -566,8 +585,9 @@ pub fn run_random_effects_with(
     }
 
     // Step 5: OLS on the transformed model. X* c = 0 exactly when X c = 0
-    // (average over t: (1 - theta_i) xbar_i'c = 0 with theta_i < 1), so its rank
-    // is that of the data with the intercept, which step 0 made full. OLS's solve
+    // (average over t: (1 - theta_i) xbar_i'c = 0 with theta_i < 1, which holds
+    // because sigma_e^2 > 0 was checked above), so its rank is that of the data with
+    // the intercept, which step 0 made full; a rank below that is a numerical failure. OLS's solve
     // decision: the normal equations when well conditioned, the pivoted QR otherwise.
     let (bread, beta, fitted, residuals) = match normal_equations_inverse(x_q.view())? {
         Some(normal) => {
@@ -579,11 +599,7 @@ pub fn run_random_effects_with(
         None => {
             let ls = least_squares(x_q.view(), y_q.view())?;
             if ls.rank < p {
-                return Err(EconError::Internal(format!(
-                    "random effects: the quasi-demeaned design has rank {} of {p} after the \
-                     collinear regressors were dropped",
-                    ls.rank
-                )));
+                return Err(quasi_demeaned_rank_error(&ls, p, &var_names));
             }
             (ls.unscaled_cov, ls.coefficients, ls.fitted, ls.residuals)
         }
@@ -631,7 +647,7 @@ pub fn run_random_effects_with(
     // its F form W/K (plm's pwaldtest(test = "F")), whose df2 is G - 1 for a
     // cluster vcov (pwaldtest's df2adj)
     let f_df2 = f_test_df2(config.vcov, df, n_groups);
-    let wald = wald_statistic(&beta.slice(s![1..]), &vcov.slice(s![1.., 1..]));
+    let wald = wald_statistic(&beta.slice(s![1..]), &vcov.slice(s![1.., 1..]))?;
     let (wald_chi2, wald_df, wald_p_value, f_stat, f_p_value) = match wald {
         Some(w) => {
             let kf = k_s as f64;
@@ -710,15 +726,18 @@ pub fn run_random_effects_with(
 /// matrix). At full rank the statistic comes from the same eigen-pairs,
 /// `Σ_j (u_j' S b)² / λ_j`, which is `b' V⁻¹ b` because
 /// `V⁻¹ = S (S V S)⁻¹ S`.
-fn wald_statistic(b: &ArrayView1<f64>, v: &ArrayView2<f64>) -> Option<f64> {
+///
+/// `Ok(None)` when the covariance is singular; an eigen-decomposition failure is an
+/// error.
+fn wald_statistic(b: &ArrayView1<f64>, v: &ArrayView2<f64>) -> EconResult<Option<f64>> {
     let p = v.nrows();
     if p == 0 || v.ncols() != p || b.len() != p {
-        return None;
+        return Ok(None);
     }
     let sym = Array2::from_shape_fn((p, p), |(i, j)| 0.5 * (v[[i, j]] + v[[j, i]]));
-    let e = scaled_eigen(&sym).ok()?;
+    let e = scaled_eigen(&sym)?;
     if e.rank < p {
-        return None;
+        return Ok(None);
     }
     let sb: Vec<f64> = (0..p).map(|i| e.s[i] * b[i]).collect();
     let w: f64 = e
@@ -730,7 +749,24 @@ fn wald_statistic(b: &ArrayView1<f64>, v: &ArrayView2<f64>) -> Option<f64> {
             proj * proj / l
         })
         .sum();
-    w.is_finite().then_some(w)
+    Ok(w.is_finite().then_some(w))
+}
+
+/// The error of a quasi-demeaned random-effects design that the pivoted QR finds rank
+/// deficient (step 5), naming the aliased regressors.
+fn quasi_demeaned_rank_error(ls: &LeastSquares, p: usize, names: &[String]) -> EconError {
+    EconError::SingularMatrix {
+        context: format!(
+            "random effects: quasi-demeaned design rank {} of {p} after the collinear \
+             regressors were dropped",
+            ls.rank
+        ),
+        suggestion: ls.aliasing_warning(names).unwrap_or_else(|| {
+            "check the regressors for near-collinearity after the random-effects \
+             transformation"
+                .to_string()
+        }),
+    }
 }
 
 /// The unit-diagonal scaling `S A S`, `S = diag(A_jj^-1/2)` (0 for a zero
@@ -1283,8 +1319,10 @@ mod tests {
     /// `K >= G` slopes the clustered slope covariance is singular. Cholesky
     /// still accepted some of these matrices (a last pivot that rounds to a
     /// tiny positive number) and the Wald F came out as 1e15 or more, highly
-    /// significant on noise; plm's `pwaldtest` stops there. The F test is now
-    /// not computed, with a warning naming K and G, and Display has no F line.
+    /// significant on noise; plm's `pwaldtest` usually stops there ('system is
+    /// computationally singular' or 'exactly singular') and otherwise returns a
+    /// meaningless F of order 1e17. The F test is now not computed, with a warning
+    /// naming K and G, and Display has no F line.
     #[test]
     fn test_fixed_effects_cluster_f_not_computed_when_k_reaches_g() {
         let config = PanelConfig {
@@ -1324,12 +1362,16 @@ mod tests {
         for (ds, names) in panels_with_k_at_least_g() {
             let x: Vec<&str> = names.iter().map(String::as_str).collect();
             let r = run_fixed_effects_with(&ds, "y", &x, "entity", &config).unwrap();
-            let w = wald_statistic(&r.coef_arr.view(), &r.vcov.view());
+            let w = wald_statistic(&r.coef_arr.view(), &r.vcov.view()).unwrap();
             assert!(w.is_none(), "G = {}, K = {}: {w:?}", r.n_groups, x.len());
         }
         // A zero variance is singular whatever the other entries
         let v = Array2::from_shape_vec((2, 2), vec![4.0, 0.0, 0.0, 0.0]).unwrap();
-        assert!(wald_statistic(&Array1::from(vec![1.0, 2.0]).view(), &v.view()).is_none());
+        assert!(
+            wald_statistic(&Array1::from(vec![1.0, 2.0]).view(), &v.view())
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// The degrees of freedom `PanelResult::f_df` reports are those the
@@ -1369,11 +1411,11 @@ mod tests {
     fn test_wald_statistic_full_rank() {
         let b = Array1::from(vec![1.0, -2.0]);
         let v = Array2::from_shape_vec((2, 2), vec![4.0, 1.0, 1.0, 3.0]).unwrap();
-        let w = wald_statistic(&b.view(), &v.view()).unwrap();
+        let w = wald_statistic(&b.view(), &v.view()).unwrap().unwrap();
         assert!((w - 23.0 / 11.0).abs() <= 1e-14, "{w}");
         let b = Array1::from(vec![1.0, -2e-7]);
         let v = Array2::from_shape_vec((2, 2), vec![4.0, 1e-7, 1e-7, 3e-14]).unwrap();
-        let w = wald_statistic(&b.view(), &v.view()).unwrap();
+        let w = wald_statistic(&b.view(), &v.view()).unwrap().unwrap();
         assert!((w - 23.0 / 11.0).abs() <= 1e-13, "{w}");
     }
 
@@ -1469,5 +1511,138 @@ mod tests {
             matches!(&e, EconError::InvalidSpecification { message } if message.contains("empty")),
             "{e:?}"
         );
+    }
+
+    /// A copy of `ds` with column `name` replaced by `values`.
+    fn with_column(ds: &Dataset, name: &str, values: Vec<f64>) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(polars::prelude::Column::new(name.into(), values))
+            .unwrap();
+        Dataset::new(df)
+    }
+
+    /// The `wald_statistic` branch that finds the clustered slope covariance singular
+    /// with K <= G - 1: `x2` varies only within entity 0, so the FE normal equations
+    /// force entity 0's score of `x2` to zero and the meat has a zero row and column.
+    #[test]
+    fn test_fixed_effects_cluster_f_not_computed_when_slope_covariance_singular() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let (ds, _) = small_noisy_panel(6, 5, 2, 77);
+        let x2 = numeric_column(ds.df(), "x2", NaPolicy::Fail).unwrap().0;
+        let x2: Vec<f64> = x2
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i < 5 { v } else { 0.25 * (i / 5) as f64 })
+            .collect();
+        let ds = with_column(&ds, "x2", x2);
+        let config = PanelConfig {
+            vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
+        };
+        let r = run_fixed_effects_with(&ds, "y", &["x1", "x2"], "entity", &config).unwrap();
+        assert!(r.f_stat.is_nan() && r.f_p_value.is_nan(), "{r}");
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "F test not computed: the clustered covariance matrix of the slopes is \
+                    singular"),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.std_errors.iter().all(|s| s.is_finite()),
+            "{:?}",
+            r.std_errors
+        );
+        assert!(!r.to_string().contains("F-statistic"), "{r}");
+    }
+
+    /// A panel whose outcome is constant within each entity (whole numbers, so the
+    /// entity means are exact) with a noisy regressor.
+    fn constant_within_panel() -> Dataset {
+        let (ds, _) = small_noisy_panel(6, 5, 1, 91);
+        let y: Vec<f64> = (0..30).map(|i| (3 * (i / 5) + 1) as f64).collect();
+        with_column(&ds, "y", y)
+    }
+
+    #[test]
+    fn test_fixed_effects_exact_within_fit_reports_undefined_inference() {
+        let ds = constant_within_panel();
+        for vcov in [
+            PanelVcov::Classical,
+            PanelVcov::Arellano(ClusterAdjustment::Stata),
+        ] {
+            let r =
+                run_fixed_effects_with(&ds, "y", &["x1"], "entity", &PanelConfig { vcov }).unwrap();
+            assert!(
+                r.t_stats[0].is_nan() && r.p_values[0].is_nan(),
+                "{vcov:?}: {:?} {:?}",
+                r.t_stats,
+                r.p_values
+            );
+            assert!(r.f_stat.is_nan() && r.f_p_value.is_nan(), "{vcov:?}");
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("the within fit of 'y' is exact (SSR = 0)")),
+                "{vcov:?}: {:?}",
+                r.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_random_effects_refuses_no_within_variation() {
+        let ds = constant_within_panel();
+        match run_random_effects(&ds, "y", &["x1"], "entity") {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("'y'") && message.contains("sigma_e^2 = 0"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// A rank-deficient quasi-demeaned design is a SingularMatrix whose suggestion names
+    /// the aliased regressor.
+    #[test]
+    fn test_quasi_demeaned_rank_error_names_aliased_regressors() {
+        let a = [0.3, 1.7, -0.4, 2.2, 0.9, -1.1];
+        let x = Array2::from_shape_fn((6, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => a[i],
+            _ => 2.0 * a[i],
+        });
+        let y = Array1::from(vec![1.2, 0.4, 2.9, -0.3, 1.8, 0.7]);
+        let ls = least_squares(x.view(), y.view()).unwrap();
+        assert_eq!(ls.rank, 2);
+        let names = ["(Intercept)", "x1", "x2"].map(String::from);
+        match quasi_demeaned_rank_error(&ls, 3, &names) {
+            EconError::SingularMatrix {
+                context,
+                suggestion,
+            } => {
+                assert!(
+                    context.contains("random effects: quasi-demeaned design rank 2 of 3"),
+                    "{context}"
+                );
+                assert!(suggestion.contains("x2"), "{suggestion}");
+            }
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+    }
+
+    /// A NaN F test (clustered FE with K >= G) is written as null and read back as NaN.
+    #[test]
+    fn test_panel_result_json_round_trips_nan_f() {
+        let config = PanelConfig {
+            vcov: PanelVcov::Arellano(ClusterAdjustment::Stata),
+        };
+        let (ds, names) = panels_with_k_at_least_g().remove(0);
+        let x: Vec<&str> = names.iter().map(String::as_str).collect();
+        let r = run_fixed_effects_with(&ds, "y", &x, "entity", &config).unwrap();
+        assert!(r.f_stat.is_nan());
+        let json = serde_json::to_string(&r).unwrap();
+        let back: PanelResult = serde_json::from_str(&json).unwrap();
+        assert!(back.f_stat.is_nan() && back.f_p_value.is_nan());
+        assert_eq!(back.coefficients, r.coefficients);
     }
 }
