@@ -153,7 +153,11 @@ Minimal case with only 2 groups (single comparison).
 
 2. **Studentized Range CDF**: We use `r_mathlib` (port of R's nmath) for the studentized range distribution, ensuring identical p-values.
 
-3. **Conservative for Unequal n**: Like R, the Tukey-Kramer method is conservative when sample sizes are unequal - actual confidence level is ≥ stated level.
+3. **Interval label**: each comparison row prints the interval at the level of the call ("99% CI"
+   at `conf_level = 0.99`; STAT-86, fixed in Tier 4), as the table header does.
+   `stats::tukey::tests::test_tukey_row_label_uses_the_level`.
+
+4. **Conservative for Unequal n**: Like R, the Tukey-Kramer method is conservative when sample sizes are unequal - actual confidence level is ≥ stated level.
 
 ## Performance Comparison
 

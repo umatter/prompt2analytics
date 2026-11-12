@@ -314,11 +314,6 @@
           "note": "centres pinned only"
         },
         {
-          "finding": "STAT-58",
-          "quantity": "Poisson two-sided p",
-          "note": "one-sided p and the rate-ratio estimate pinned; the one-sided intervals are not (the tool returns the two-sided interval for every alternative, a core observation recorded in the method document)"
-        },
-        {
           "finding": "STAT-75",
           "quantity": "model-table SEs",
           "note": "means, grand mean and group sizes pinned"

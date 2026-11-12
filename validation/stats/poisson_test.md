@@ -14,13 +14,16 @@ The exact Poisson test evaluates hypotheses about the rate parameter of a Poisso
 
 For one-sample tests, given X ~ Poisson(λT):
 - Test statistic is X itself
-- P-value computed exactly from Poisson distribution
-- CI derived from chi-squared distribution relationship
+- P-value computed exactly from Poisson distribution; the two-sided p-value is R's: the sum of
+  P(X = k) over the counts with P(X = k) <= P(X = x) (1 + 1e-7)
+- CI derived from chi-squared distribution relationship; one-sided for a one-sided alternative
+  (`(0, upper)` for less, `(lower, Inf)` for greater, each at `conf_level`)
 
 For two-sample tests, given X₁ ~ Poisson(λ₁T₁) and X₂ ~ Poisson(λ₂T₂):
 - Under H₀: λ₁/λ₂ = r, conditioned on X₁ + X₂ = n:
 - X₁ | n ~ Binomial(n, p) where p = rT₁/(rT₁ + T₂)
-- P-value from binomial distribution
+- P-value from binomial distribution (two-sided: `binom.test`'s rule); the interval is the
+  binomial interval mapped to the rate ratio, one-sided for a one-sided alternative
 
 ## Reference Implementations
 
@@ -42,8 +45,13 @@ All values are from case `stat_poisson_t3` in `validation/r/cases/stats_misc_t3.
 | | expected count | 24.19893 |
 | | 95% CI | 4.753124804848748, 6.692709334176071 |
 | `poisson.test(10, 5)` | 95% CI | 0.9590777392264869, 3.678071208403556 |
+| | p, two-sided | 0.03856600430529028 |
 | | p, less | 0.986304731401617 |
+| | 95% CI, less | 0, 3.392443847144379 |
 | | p, greater | 0.03182805730620481 |
+| | 95% CI, greater | 1.085081139418259, Inf |
+| `poisson.test(137, 24.19893)` | p, two-sided | 2.8452272641144545e-56 |
+| `poisson.test(2, 1, r = 5)` | p, two-sided | 0.25802369355308846 |
 | `poisson.test(150, 1)` | 95% CI | 126.95616130124485, 176.01716609707458 |
 | `poisson.test(1e6, 1)` | 95% CI | 998040.9833402939, 1001961.9119454322 |
 
@@ -58,10 +66,28 @@ gave (4.744084, 6.681476) for the first call and (126.7548828, 175.6572266) for 
 | `poisson.test(c(11, 21), c(800, 3011))` | rate ratio | 1.9714880952380953 |
 | | expected count | 6.717397008659145 |
 | | 95% CI | 0.8584264033916392, 4.277265943654071 |
+| | p, two-sided | 0.07966863303332952 |
 | | p, less | 0.975931823227312 |
+| | 95% CI, less | 0, 3.827386407850879 |
 | | p, greater | 0.05600865978769969 |
+| | 95% CI, greater | 0.9775843474967454, Inf |
+| `poisson.test(c(11, 21), c(800, 3011), r = 2)` | p, two-sided | 1 |
 | `poisson.test(c(3, 10), c(1, 1))` (symmetric null) | p | 0.09228515625000003 |
 | | 95% CI | 0.05305399048476324, 1.1651186104840492 |
+
+### Two-sided minlike p and one-sided intervals (Tier 4)
+
+Case `stat_poisson_minlike_t4` (`validation/r/cases/stats_exact_t4.R`), pinned by
+`stats::poissontest::tests::test_validate_poisson_minlike_t4` (registry
+`validation/methods/stats_exact_t4.json`, id `poisson_minlike_t4`): the one-sample two-sided p at
+eight (x, T) cells, among them x = 0, x = rT and counts of 1,000 and 10,000; the two-sample
+two-sided p and interval with a zero count; and the one-sided p and interval at 0.95 and 0.90 for
+one and two samples, e.g. `poisson.test(10, 2, r = 3, alternative = "greater")` (2.7127028485456472,
+Inf). An infinite bound is stored as NA in the case and compared as such.
+
+When P(X = x) underflows to 0 for x below rT, the opposite tail's probabilities underflow too
+(their total is below 1e-300) and the p-value is P(X <= x) alone. A two-sided one-sample test whose
+opposite tail would pass the largest supported count (2^52) is refused.
 
 ### Confidence levels and alternatives
 
@@ -79,11 +105,10 @@ expected direction: `stats::poissontest::tests::test_poisson_alternatives`.
 
 ## Known Differences
 
-1. **STAT-58: two-sided p-value.** R sums the outcomes no more likely than the observed one; p2a doubles the smaller tail. They agree only for a symmetric null (`sym_p`). R's values: `big_p` 2.8452272641144545e-56, `x10_two_p` 0.03856600430529028, `x2_r5_p` 0.25802369355308846, `rr_two_p` 0.07966863303332952. Not compared.
+STAT-58 (two-sided p-value) and STAT-59 (one-sided intervals) were fixed in Tier 4; their values
+are now pinned (above).
 
-2. **STAT-59: one-sided intervals.** p2a reports the two-sided interval for every alternative; R reports a one-sided one. R's values are `x10_less_ci`, `x10_greater_ci`, `rr_less_ci` and `rr_greater_ci` in the case. Not compared.
-
-3. **Expected count at r != 1 (observation, no finding).** R's `parameter` for a two-sample test at `r = 2` is 7.505130460275579 (`rr_r2_r_parameter`, its own formula); p2a reports the null binomial's mean, 11.103882021253524 (`rr_r2_binomial_mean`). Not compared.
+1. **Expected count at r != 1 (observation, no finding).** R's `parameter` for a two-sample test at `r = 2` is 7.505130460275579 (`rr_r2_r_parameter`, its own formula); p2a reports the null binomial's mean, 11.103882021253524 (`rr_r2_binomial_mean`). Not compared.
 
 ## Performance Comparison
 

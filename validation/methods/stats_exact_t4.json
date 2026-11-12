@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "binom_minlike_t4",
+      "name": "Exact binomial test: two-sided relative-likelihood p at x = m and at n = 1,000 and 10,000",
+      "category": "stats",
+      "reference": "stats::binom.test(x, n, p) (two-sided, relErr 1 + 1e-7)",
+      "doc": "validation/stats/binom.md",
+      "cases": ["stat_binom_minlike_t4"],
+      "tests": ["p2a-core::stats::binomtest::tests::test_validate_binom_minlike_t4"],
+      "quantities": ["two-sided p (6 cells, n = 10 to 10,000)"],
+      "tolerance": "validation/README.md per cell: Tol::p_value(n) with n the number of trials",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "poisson_minlike_t4",
+      "name": "Exact Poisson test: two-sided minlike p (one and two samples) and one-sided intervals at 0.95 and 0.90",
+      "category": "stats",
+      "reference": "stats::poisson.test (one sample: minlike p, qgamma bounds; two samples: binom.test)",
+      "doc": "validation/stats/poisson_test.md",
+      "cases": ["stat_poisson_minlike_t4"],
+      "tests": ["p2a-core::stats::poissontest::tests::test_validate_poisson_minlike_t4"],
+      "quantities": ["one-sample two-sided p (8 cells, x = m included)", "two-sample two-sided p and CI (zero counts, r230)", "one-sided p and one-sided CI (less, greater) at 0.95 and 0.90, one and two samples"],
+      "tolerance": "Tol::p_value(n), Tol::stat(n) with n the total count (at least 10)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mantelhaen_alternatives_t4",
+      "name": "Cochran-Mantel-Haenszel test: one-sided p-values and intervals, conf_level 0.90, DELTA = 0",
+      "category": "stats",
+      "reference": "stats::mantelhaen.test (2 x 2 x K)",
+      "doc": "validation/stats/mantelhaen_test.md",
+      "cases": ["stat_mantelhaen_alt_t4"],
+      "tests": ["p2a-core::stats::mantelhaen::tests::test_validate_mantelhaen_alternatives_t4"],
+      "quantities": ["X-squared with and without correction", "p (two.sided, less, greater)", "CI (two.sided, less, greater) at 0.95 and 0.90", "common odds ratio", "DELTA = 0: statistic, p, CI"],
+      "tolerance": "validation/README.md, n = 54 (Rabbits): Tol::stat(54), Tol::p_value(54)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "prop_ci_t4",
+      "name": "Test of proportions: continuity-corrected and one-sided intervals, Yates caps, boundaries, conf_level 0.90",
+      "category": "stats",
+      "reference": "stats::prop.test (k = 1 corrected Wilson; k = 2 Wald +- YATES sum(1/n))",
+      "doc": "validation/stats/prop_test.md",
+      "cases": ["stat_prop_ci_t4"],
+      "tests": ["p2a-core::stats::proptest::tests::test_validate_prop_ci_t4"],
+      "quantities": ["X-squared", "p (two.sided, less, greater)", "CI (two.sided, less, greater) with and without correction, 3 one-sample and 4 two-sample cells"],
+      "tolerance": "Tol::stat(n), Tol::p_value(n) with n the total trials of the cell",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "se_contrast_poly_t4",
+      "name": "Orthogonal polynomial contrasts (contr.poly) and their standard errors (se.contrast)",
+      "category": "stats",
+      "reference": "stats::contr.poly; stats::se.contrast(aov(y ~ factor(dose)))",
+      "doc": "validation/stats/secontrast.md",
+      "cases": ["stat_secontrast_poly_t4"],
+      "tests": ["p2a-core::stats::secontrast::tests::test_validate_se_contrast_poly_t4"],
+      "quantities": ["contr.poly(k) for k = 2, 3, 4, 6", "SE of the 3 contr.poly(4) contrasts", "contrast estimates", "MSE", "df"],
+      "tolerance": "Tol::coef(24) for coefficients and estimates, Tol::se(24) for SEs, df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "anova2_rcbd_t4",
+      "name": "Additive two-way ANOVA on a subject x condition layout (unbalanced)",
+      "category": "stats",
+      "reference": "stats::anova(lm(y ~ subj + cond)), anova(lm(y ~ cond + subj)), drop1(test = 'F')",
+      "doc": "validation/stats/anova.md",
+      "cases": ["stat_anova2_rcbd_t4"],
+      "tests": ["p2a-core::stats::anova::tests::test_validate_anova2_rcbd_t4"],
+      "quantities": ["Type I SS, df, F, p in both orders", "Type II SS, F, p", "residual SS and df"],
+      "tolerance": "validation/README.md, n = 115: Tol::stat(115), Tol::p_value(115), df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

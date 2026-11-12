@@ -208,7 +208,11 @@ Rows used: 33; group sizes g1 11, g2 11, g3 11. The F approximations are those o
 
 1. **F-Approximation Methods**: R uses specific approximation formulas that may differ slightly from our implementation. All four statistics converge for large samples.
 
-2. **Exact vs Approximate**: F-tests are exact when s = min(p, v_h) ≤ 2, otherwise approximate.
+2. **Exact vs Approximate**: `is_exact` is true for Pillai's trace, the Hotelling-Lawley trace
+   and Roy's largest root only when s = min(p, v_h) = 1, and for Wilks' lambda (Rao's F) when
+   s ≤ 2; otherwise the F is an approximation (Roy's an upper bound). Before Tier 4, Pillai and
+   Hotelling-Lawley were marked exact at s = 2 (STAT-55).
+   `stats::manova::tests::test_manova_exactness_flags`.
 
 3. **Eigenvalue Computation**: We use the Cholesky decomposition method (E = LL^T, then compute eigenvalues of L⁻¹HL⁻ᵀ) for numerical stability.
 

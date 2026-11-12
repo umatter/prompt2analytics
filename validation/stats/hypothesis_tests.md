@@ -317,7 +317,11 @@ call and the ratio varies with the data. Signed off by the user.
 
 ## Known Differences
 
-None identified. Both implementations produce numerically identical results within floating-point precision.
+- **Essentially constant data.** As R's `t.test`, the t-tests refuse data whose standard error is
+  at or below 10 machine epsilons times the (larger absolute) mean, with "data are essentially
+  constant" (STAT-85). R's rule is a strict `<`, so all-zero data reach R's t = NaN; p2a refuses
+  them as well (registry deviation in `validation/methods/stats_onesample.json`, id `t_test`).
+  `stats::ttest::tests::test_t_tests_refuse_essentially_constant_data`.
 
 ---
 
