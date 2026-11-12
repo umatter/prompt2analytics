@@ -189,16 +189,12 @@
       ],
       "quantities": [
         "RR-scale estimate",
+        "RR-scale limits of the HR common-outcome row",
         "E-value of the estimate",
         "E-value of the confidence limit closest to the null"
       ],
       "tolerance": "closed forms: 1e-12 relative",
       "deviations": [
-        {
-          "finding": "REG-5",
-          "quantity": "row7 (HR, common outcome)",
-          "note": "p2a uses sqrt(HR); EValue (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) (Tier 4)"
-        },
         {
           "finding": "REG-39",
           "quantity": "could_explain_away",

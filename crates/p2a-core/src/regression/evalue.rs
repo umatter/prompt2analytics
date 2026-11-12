@@ -31,9 +31,12 @@
 //!
 //! For rare outcomes, HR approximates RR, so use the RR formula directly.
 //!
-//! For common outcomes, apply the square root transformation:
+//! For common outcomes, use VanderWeele's (2020) conversion:
 //!
-//! RR_approx = sqrt(HR)
+//! RR_approx = (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))
+//!
+//! (VanderWeele, T. J. (2020). Optimal approximate conversions of odds ratios and hazard
+//! ratios to risk ratios. Biometrics 76(3), 746-752; `EValue::evalues.HR(rare = FALSE)`.)
 //!
 //! ## E-value for Standardized Mean Difference
 //!
@@ -165,10 +168,14 @@ impl std::fmt::Display for EValueResult {
                     self.effect_type
                 )?;
             } else {
+                let conversion = match self.effect_type {
+                    EffectType::HazardRatio => "(1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))",
+                    _ => "sqrt(OR)",
+                };
                 writeln!(
                     f,
-                    "  Note: Common outcome transformation (sqrt) was applied to {}.",
-                    self.effect_type
+                    "  Note: Common outcome conversion {} was applied to {}.",
+                    conversion, self.effect_type
                 )?;
             }
         }
@@ -443,7 +450,9 @@ pub fn evalue_or(
 /// Compute E-value from a hazard ratio.
 ///
 /// For rare outcomes (< 15% event rate), HR approximates RR.
-/// For common outcomes, apply square root transformation first.
+/// For common outcomes, HR is converted with VanderWeele's (2020) formula
+/// RR = (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) first, as `EValue::evalues.HR(rare = FALSE)`
+/// (Biometrics 76(3)).
 ///
 /// # Arguments
 /// * `point` - Point estimate of the hazard ratio
@@ -451,7 +460,7 @@ pub fn evalue_or(
 /// * `ci_upper` - Upper bound of confidence interval (optional)
 /// * `rare` - Whether the outcome is rare (< 15% event rate).
 ///            If true, HR is used directly as RR approximation.
-///            If false, sqrt(HR) is used as RR approximation.
+///            If false, (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) is used.
 ///
 /// # Returns
 /// An `EValueResult` containing E-values for point and CI.
@@ -474,8 +483,7 @@ pub fn evalue_hr(
         });
     }
 
-    // Same transformation logic as OR
-    let transform = |hr: f64| -> f64 { if rare { hr } else { hr.sqrt() } };
+    let transform = |hr: f64| -> f64 { if rare { hr } else { hr_common_to_rr(hr) } };
 
     let rr_point = transform(point);
     let rr_lower = ci_lower.map(transform);
@@ -700,6 +708,15 @@ pub fn evalue_rd(rd: f64, baseline_risk: f64, se: Option<f64>) -> EconResult<EVa
     })
 }
 
+/// VanderWeele's (2020) conversion of a hazard ratio with a common outcome to a risk ratio,
+/// (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)); 1 at HR = 1, where the formula is 0/0.
+fn hr_common_to_rr(hr: f64) -> f64 {
+    if hr == 1.0 {
+        return 1.0;
+    }
+    (1.0 - 0.5f64.powf(hr.sqrt())) / (1.0 - 0.5f64.powf((1.0 / hr).sqrt()))
+}
+
 /// Compute the minimum bias factor required to explain away an observed effect.
 ///
 /// The bias factor B is defined such that B >= E-value would suffice to
@@ -919,9 +936,10 @@ mod tests {
         assert_eq!(result_rare.effect_type, EffectType::HazardRatio);
         assert!((result_rare.risk_ratio - 1.5).abs() < 1e-10);
 
-        // Common outcome
+        // Common outcome: VanderWeele (2020), (1 - 0.5^2) / (1 - 0.5^0.5)
         let result_common = evalue_hr(4.0, None, None, false).unwrap();
-        assert!((result_common.risk_ratio - 2.0).abs() < 1e-10);
+        assert!((result_common.risk_ratio - 2.5606601717798219).abs() < 1e-12);
+        assert!(result_common.to_string().contains("0.5^sqrt(HR)"));
     }
 
     /// Test E-value for standardized mean difference.
@@ -1027,6 +1045,8 @@ mod tests {
             // sqrt(OR)
             (5, evalue_or(4.0, Some(2.0), Some(8.0), false).unwrap()),
             (6, evalue_hr(1.5, Some(1.2), Some(1.9), true).unwrap()),
+            // common outcome: VanderWeele (2020)
+            (7, evalue_hr(4.0, Some(2.0), Some(8.0), false).unwrap()),
         ];
         let mut c = Check::new(&case);
         for (k, r) in &rows {
@@ -1039,10 +1059,43 @@ mod tests {
             .scalar("row8_e_point", smd.evalue_point, tol)
             .scalar("row8_e_ci", smd.evalue_ci.unwrap(), tol)
             .scalar("evalue_rr_3_9", evalue_rr(3.9), tol)
+            // EValueResult carries no RR limits: pin them through the conversion
+            .vector(
+                "row7_rr_ci",
+                &[hr_common_to_rr(2.0), hr_common_to_rr(8.0)],
+                tol,
+            )
             .finish();
-        // deviation REG-5: row7 (HR 4, common outcome): EValue RR 2.560660171779822, E
-        //   4.559740046011876; p2a sqrt(HR).
-        // deviation REG-39: could_explain_away is not pinned.
+        // REG-39: could_explain_away is a property (test_could_explain_away_at_the_evalue).
+    }
+
+    /// Case `evalue_hr_common`: EValue 4.1.4 `evalues.HR(est, lo, hi, rare = FALSE)`
+    /// (inputs as `evalue_hr_inputs.csv`; hr3 has no lower limit). Closed forms.
+    #[test]
+    fn test_validate_evalue_hr_common() {
+        use p2a_validation::Check;
+        let (case, _ds) = crate::test_support::load_case("evalue_hr_common");
+        let tol = p2a_validation::Tol::new(1e-12, 1e-14);
+        let rows: [(usize, f64, Option<f64>, Option<f64>); 3] = [
+            (1, 0.6, Some(0.4), Some(0.9)),
+            (2, 1.3, Some(0.9), Some(1.8)),
+            (3, 0.5, None, Some(0.8)),
+        ];
+        let mut c = Check::new(&case);
+        for (k, est, lo, hi) in rows {
+            let r = evalue_hr(est, lo, hi, false).unwrap();
+            let rr_ci: Vec<f64> = [lo, hi]
+                .into_iter()
+                .flatten()
+                .map(hr_common_to_rr)
+                .collect();
+            c.scalar(&format!("hr{k}_rr"), r.risk_ratio, tol)
+                .scalar(&format!("hr{k}_e_point"), r.evalue_point, tol)
+                .scalar(&format!("hr{k}_e_ci"), r.evalue_ci.unwrap(), tol)
+                .vector(&format!("hr{k}_rr_ci"), &rr_ci, tol);
+        }
+        c.finish();
+        assert_eq!(hr_common_to_rr(1.0), 1.0);
     }
 
     /// Test Display implementation.

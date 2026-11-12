@@ -4,7 +4,8 @@
 
 VanderWeele & Ding (2017): `E = RR + sqrt(RR (RR - 1))` for `RR >= 1` (the reciprocal below 1), at
 the point estimate and at the confidence limit closer to 1 (1 when the interval contains 1). Odds
-ratios: RR = OR for a rare outcome, `sqrt(OR)` otherwise. Hazard ratios: RR = HR for a rare outcome.
+ratios: RR = OR for a rare outcome, `sqrt(OR)` otherwise. Hazard ratios: RR = HR for a rare outcome,
+`(1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))` otherwise (VanderWeele 2020, Biometrics 76(3)).
 Standardised mean differences: `RR = exp(0.91 d)` (Chinn 2000).
 
 ## R reference
@@ -38,8 +39,6 @@ Closed forms: `Tol::new(1e-12, 1e-14)`.
 
 ## Deviations
 
-- REG-5: row 7 (HR, common outcome): EValue converts by `(1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))`;
-  p2a uses `sqrt(HR)`.
-- Not pinned (new observation): `row8_e_ci`. EValue uses `exp(0.91 d - 1.78 se)` (1.9680373469882557),
-  p2a `exp(0.91 (d - 1.96 se))` (1.9669630004308964).
+None for the pinned rows. Row 7 (HR, common outcome) uses EValue's conversion and is pinned with its
+RR-scale limits; `row8_e_ci` uses EValue's `exp(0.91 d - 1.78 se)` and is pinned.
 - REG-39: `could_explain_away` is not pinned.
