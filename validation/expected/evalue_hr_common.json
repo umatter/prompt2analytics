@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "evalue_hr_common",
+  "area": "regression/evalue",
+  "method": "EValue evalues.HR with a common outcome (VanderWeele 2020 conversion)",
+  "reference": "EValue::evalues.HR(est, lo, hi, rare = FALSE); RR = (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) (VanderWeele 2020)",
+  "call": "evalues.HR(0.6, 0.4, 0.9, rare = FALSE); evalues.HR(1.3, 0.9, 1.8, rare = FALSE); evalues.HR(0.5, NA, 0.8, rare = FALSE)",
+  "dataset": "validation/datasets/generated/evalue_hr_inputs.csv",
+  "datasets": ["validation/datasets/generated/evalue_hr_inputs.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "EValue": "4.1.4"
+  },
+  "values": {
+    "hr1_rr": 0.70256445728368466,
+    "hr1_rr_ci": [0.53309108634533575, 0.92958129259268363],
+    "hr1_e_point": 2.1996223956598779,
+    "hr1_e_ci": 1.3612206313389328,
+    "hr2_rr": 1.1992701292249968,
+    "hr2_rr_ci": [0.92958129259268363, 1.5005188281430941],
+    "hr2_e_point": 1.6881246204862959,
+    "hr2_e_ci": 1,
+    "hr3_rr": 0.62013683787384599,
+    "hr3_rr_ci": [0.85677257834328779],
+    "hr3_e_point": 2.6064092655308877,
+    "hr3_e_ci": 1.6088913483778375
+  }
+}

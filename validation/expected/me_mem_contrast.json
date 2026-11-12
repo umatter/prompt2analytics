@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "id": "me_mem_contrast",
+  "area": "regression/marginal_effects",
+  "method": "Logit and probit marginal effects at the mean (full delta-method gradient) and average comparisons",
+  "reference": "stats::glm(binomial(logit | probit)); MEM and SE by the delta method with G = f(zbar) I + beta f'(zbar) xbar'; average comparisons of x1 (pairs of 0, 1, 2.5) with gradient mean(f(z2) X2 - f(z1) X1); cross-checked against marginaleffects::slopes(newdata = 'mean') and avg_comparisons",
+  "call": "glm(y ~ x1 + x2, binomial(link), epsilon = 1e-14); slopes(fit, newdata = 'mean'); avg_comparisons(fit, variables = list(x1 = c(0, 1)))",
+  "dataset": "validation/datasets/generated/me_mem_contrast.csv",
+  "datasets": ["validation/datasets/generated/me_mem_contrast.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "marginaleffects": "1.0.0"
+  },
+  "values": {
+    "logit_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-1.1013582860402775, 0.99021160865746716, -0.61328775862009044]
+    },
+    "logit_mem": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.1662882625045938, 0.14950681354342418, -0.092597074983591654]
+    },
+    "logit_mem_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.03820745660313974, 0.02064274459380112, 0.017418871363069771]
+    },
+    "logit_mem_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-4.352246322801002, 7.2425840887611468, -5.3159055517172753]
+    },
+    "logit_mem_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [1.3474974417727166e-05, 4.4021532359760018e-13, 1.0612819093217585e-07]
+    },
+    "logit_contrast_est": [0.12147309044715224, 0.42161662177803211, 0.30014353133087984],
+    "logit_contrast_se": [0.013606170987915309, 0.058131587605338, 0.046428228398669759],
+    "logit_contrast_p": [4.3458832011763726e-19, 4.0825082549207167e-13, 1.015149616206239e-10],
+    "probit_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.6278846396659834, 0.56045149126073857, -0.35517053269784171]
+    },
+    "probit_mem": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.17317275616326003, 0.15457446050768461, -0.097957261843477916]
+    },
+    "probit_mem_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.040770787513025299, 0.021669463685097243, 0.018351624609041241]
+    },
+    "probit_mem_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-4.2474714550935628, 7.1332850112940376, -5.337797820647312]
+    },
+    "probit_mem_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [2.1619670015238919e-05, 9.8001332133561743e-13, 9.4082284073066405e-08]
+    },
+    "probit_contrast_est": [0.12540969705420743, 0.41013226708026379, 0.28472257002605633],
+    "probit_contrast_se": [0.014523642091405426, 0.057033417192743963, 0.043720219220834987],
+    "probit_contrast_p": [5.8796139183275518e-18, 6.4277488083817845e-13, 7.3970555486752009e-11],
+    "contrast_values": [0, 1, 2.5],
+    "n": 400
+  }
+}
