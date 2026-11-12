@@ -120,7 +120,7 @@
     },
     {
       "id": "panel_gls",
-      "name": "Panel GLS (pggls): pooled coefficients; within and FD warnings",
+      "name": "Panel GLS (pggls): pooling, within and first-difference coefficients, SEs and fit",
       "category": "econometrics",
       "reference": "plm::pggls(model = 'pooling' | 'within' | 'fd') (unrestricted T x T FGLS)",
       "doc": "validation/econometrics/pggls.md",
@@ -130,34 +130,23 @@
       ],
       "tests": [
         "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_pooling_sim",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_within_sim",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_fd_sim",
         "p2a-core::econometrics::panel::gls_models::tests::test_validate_panel_gls_within_reports_singular_error_covariance",
-        "p2a-core::econometrics::panel::gls_models::tests::test_validate_panel_gls_fd_reports_aliased_first_step",
         "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_missing_firm_id"
       ],
       "quantities": [
-        "pooled coefficients",
-        "pooled RSS",
-        "pooled R2",
-        "pooled df",
-        "within df",
+        "pooled, within and first-difference coefficients",
+        "pooled, within and first-difference SEs",
+        "RSS",
+        "R2",
+        "df",
         "n, N, T",
         "singular Omega warning (within)",
-        "aliased first-step warning (FD)",
         "rows with a missing text entity id dropped, not fitted as an extra entity (panel_grunfeld_na; property)"
       ],
       "tolerance": "validation/README.md, n = 200: coefficients 1e-8, statistics 1e-6 relative; counts exact",
-      "deviations": [
-        {
-          "finding": "ECON-33",
-          "quantity": "pooling_se",
-          "note": "p2a scales (X'Omega^-1 X)^-1 by rss/df; pggls reports its diagonal unscaled"
-        },
-        {
-          "finding": "ECON-33",
-          "quantity": "within_coef, within_se, within_rss, within_r2, fd_coef, fd_se, fd_rss, fd_r2, fd_df_resid",
-          "note": "p2a's GLS step runs on the untransformed data and an intercept, not on the within or first-differenced model"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_gls_unbalanced",
+      "name": "Panel GLS (pggls) on an unbalanced panel: per-entity covariance blocks, generalized Cholesky",
+      "category": "econometrics",
+      "reference": "plm::pggls(model = 'pooling' | 'within' | 'fd') (unrestricted T x T FGLS, per-entity blocks Omega_ii)",
+      "doc": "validation/econometrics/pggls.md",
+      "cases": [
+        "pggls_unbalanced"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_unbalanced_pooling",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_unbalanced_within",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_unbalanced_fd"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs",
+        "z",
+        "p-values",
+        "RSS",
+        "R2",
+        "df",
+        "observations (FD: differenced rows)",
+        "indefinite-covariance warning (within; property)"
+      ],
+      "tolerance": "validation/README.md, n = 212: coefficients 1e-8, SE and statistics 1e-6 relative, p-values Tol::p_value; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
