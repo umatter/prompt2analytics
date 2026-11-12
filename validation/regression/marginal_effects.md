@@ -246,7 +246,9 @@ standard errors use the full delta-method gradient `G = f(z̄) I + β f'(z̄) x�
 - [x] OLS marginal effects
 - [x] Logit/Probit AME with delta method SEs
 - [x] Marginal effects at the mean (MEM)
-- [x] Contrasts
+- [x] Contrasts: average comparisons (logit/probit: `mean(F(z2) - F(z1))` with the delta-method SE,
+  as `marginaleffects::avg_comparisons`; OLS: `beta_j (v2 - v1)`), pinned in
+  `test_validate_contrasts_avg_comparisons`
 - [x] Unit tests
 - [ ] MCP tool integration (pending server.rs stabilization)
 - [ ] Cross-validation with R marginaleffects package
