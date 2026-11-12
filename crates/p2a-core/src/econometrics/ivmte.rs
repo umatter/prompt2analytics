@@ -98,6 +98,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::econometrics::general_gmm::wald_z;
 use crate::econometrics::glm::{GlmSpec, PROPENSITY_COEF_TOL, fit_glm};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{aliasing_message, least_squares};
@@ -823,12 +824,17 @@ pub(crate) fn boot_summary(draws: ArrayView1<f64>, level: f64) -> EconResult<Boo
     let v = draws.to_vec();
     let (ci_lower, ci_upper) = percentile_interval(&v, level)?;
     let n = v.len() as f64;
-    let mean = v.iter().sum::<f64>() / n;
-    // identical draws have SD exactly 0 (the rounded mean would leave ~1e-17)
-    let sd = if v.iter().all(|&x| x == v[0]) {
-        0.0
-    } else {
-        (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+    // identical draws have mean exactly the draw and SD exactly 0 (the rounded mean
+    // would differ in the last digit and leave an SD of ~1e-17)
+    let (mean, sd) = match v.first() {
+        Some(&v0) if v.iter().all(|&x| x == v0) => (v0, 0.0),
+        _ => {
+            let mean = v.iter().sum::<f64>() / n;
+            (
+                mean,
+                (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt(),
+            )
+        }
     };
     Ok(BootSummary {
         mean,
@@ -1355,16 +1361,6 @@ fn quad(g: &[f64], v: &Array2<f64>) -> f64 {
     s
 }
 
-/// `estimate / se`, or NaN when the SE is zero or not finite: a degenerate variance is not
-/// evidence of infinite significance.
-fn wald_z(estimate: f64, se: f64) -> f64 {
-    if se.is_finite() && se > 0.0 {
-        estimate / se
-    } else {
-        f64::NAN
-    }
-}
-
 /// An estimate with its delta-method inference (normal reference).
 fn te_estimate(name: &str, estimate: f64, se: f64, z: f64) -> TreatmentEffectEstimate {
     let t_stat = wald_z(estimate, se);
@@ -1519,8 +1515,18 @@ mod tests {
     use crate::data::Dataset;
     use crate::regression::ols::na_fixtures::{nan_vec, repo_dataset};
     use crate::resource::{Budget, CancelToken, with_budget};
+
     use ndarray::array;
     use p2a_validation::{Check, Tol};
+
+    /// Identical bootstrap draws have mean exactly the draw and SD exactly 0.
+    #[test]
+    fn test_boot_summary_identical_draws_exact() {
+        let draws = Array1::from_elem(7, 0.1);
+        let s = boot_summary(draws.view(), 0.95).unwrap();
+        assert_eq!(s.mean, 0.1);
+        assert_eq!(s.sd, 0.0);
+    }
 
     fn cancelled() -> Budget {
         let token = CancelToken::new();
