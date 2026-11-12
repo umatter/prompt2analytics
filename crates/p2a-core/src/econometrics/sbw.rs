@@ -734,10 +734,15 @@ pub(crate) fn run_sbw_inner(
 
     // Balance before and after weighting ("target" = the treated for ATT and ATE), with the
     // SMD denominators fixed from the unweighted sample (cobalt's s.d.denom).
-    let scale = balance_scale(covariates, treatment, config.estimand);
+    // The unweighted group moments serve both the denominators and the table before weighting.
+    let (mom_t, mom_c) = (
+        group_moments(&x_t.view(), None),
+        group_moments(&x_c.view(), None),
+    );
+    let scale = balance_scale(covariates, treatment, config.estimand, &mom_t, &mom_c);
     let (balance_before, balance_after) = match config.estimand {
         SBWEstimand::ATT => (
-            compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, None, &scale),
+            stats_from_moments(&mom_t, &mom_c, cov_names, &scale),
             compute_balance_stats(
                 &x_t.view(),
                 &x_c.view(),
@@ -747,7 +752,7 @@ pub(crate) fn run_sbw_inner(
             ),
         ),
         SBWEstimand::ATC => (
-            compute_balance_stats(&x_c.view(), &x_t.view(), cov_names, None, &scale),
+            stats_from_moments(&mom_c, &mom_t, cov_names, &scale),
             compute_balance_stats(
                 &x_c.view(),
                 &x_t.view(),
@@ -757,7 +762,7 @@ pub(crate) fn run_sbw_inner(
             ),
         ),
         SBWEstimand::ATE => (
-            compute_balance_stats_two(&x_t.view(), None, &x_c.view(), None, cov_names, &scale),
+            stats_from_moments(&mom_t, &mom_c, cov_names, &scale),
             compute_balance_stats_two(
                 &x_t.view(),
                 weights_of(true),
@@ -1621,11 +1626,14 @@ fn compute_constraint_violation(
 
 /// Per-covariate SMD denominators from the unweighted sample (treated SD for ATT, control SD
 /// for ATC, pooled for ATE; binary covariates `p (1 - p)`, cobalt's s.d.denom) and which
-/// covariates are binary (their variance ratio is NaN).
+/// covariates are binary (their variance ratio is NaN), from the unweighted (mean, variance)
+/// of each covariate among the treated (`mom_t`) and the controls (`mom_c`).
 fn balance_scale(
     covariates: &ArrayView2<f64>,
     treatment: &ArrayView1<f64>,
     est: SBWEstimand,
+    mom_t: &[(f64, f64)],
+    mom_c: &[(f64, f64)],
 ) -> BalanceScale {
     let treated: Vec<bool> = treatment.iter().map(|&v| v >= 0.5).collect();
     let denom = match est {
@@ -1633,7 +1641,7 @@ fn balance_scale(
         SBWEstimand::ATC => SdDenominator::Control,
         SBWEstimand::ATE => SdDenominator::Pooled,
     };
-    BalanceScale::new(covariates.view(), &treated, denom)
+    BalanceScale::from_moments(covariates.view(), &treated, mom_t, mom_c, denom)
 }
 
 /// Compute balance statistics of a reweighted group against an unweighted target group.
@@ -1647,9 +1655,13 @@ fn compute_balance_stats(
     compute_balance_stats_two(x_target, None, x_reweight, weights, cov_names, scale)
 }
 
-/// Weighted mean of a column (unit weights when none are given) and cobalt's weighted variance.
-fn column_moments(col: ArrayView1<f64>, w: Option<&[f64]>) -> (f64, f64) {
-    group_mean_var(col, w, |_| true)
+/// Weighted mean of each column (unit weights when none are given) and cobalt's weighted
+/// variance.
+fn group_moments(x: &ArrayView2<f64>, w: Option<&[f64]>) -> Vec<(f64, f64)> {
+    x.columns()
+        .into_iter()
+        .map(|col| group_mean_var(col, w, |_| true))
+        .collect()
 }
 
 /// Balance statistics of group a (reported as "target") against group b, each optionally
@@ -1663,15 +1675,29 @@ fn compute_balance_stats_two(
     cov_names: &[String],
     scale: &BalanceScale,
 ) -> BalanceStats {
-    let k = x_a.ncols();
+    stats_from_moments(
+        &group_moments(x_a, w_a),
+        &group_moments(x_b, w_b),
+        cov_names,
+        scale,
+    )
+}
+
+/// [`compute_balance_stats_two`] from the per-covariate (mean, variance) of group a and group b.
+fn stats_from_moments(
+    a: &[(f64, f64)],
+    b: &[(f64, f64)],
+    cov_names: &[String],
+    scale: &BalanceScale,
+) -> BalanceStats {
+    let k = a.len();
     let mut std_diff = Vec::with_capacity(k);
     let mut var_ratio = Vec::with_capacity(k);
     let mut mean_target = Vec::with_capacity(k);
     let mut mean_reweighted = Vec::with_capacity(k);
 
     for j in 0..k {
-        let (target_mean, target_var) = column_moments(x_a.column(j), w_a);
-        let (reweight_mean, reweight_var) = column_moments(x_b.column(j), w_b);
+        let ((target_mean, target_var), (reweight_mean, reweight_var)) = (a[j], b[j]);
 
         std_diff.push((target_mean - reweight_mean) / scale.sd[j]);
         var_ratio.push(if scale.binary[j] {
@@ -2930,7 +2956,13 @@ mod tests {
 
         let x_all = ndarray::concatenate![Axis(0), x_target, x_reweight];
         let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
-        let scale = balance_scale(&x_all.view(), &d.view(), SBWEstimand::ATT);
+        let scale = balance_scale(
+            &x_all.view(),
+            &d.view(),
+            SBWEstimand::ATT,
+            &group_moments(&x_target.view(), None),
+            &group_moments(&x_reweight.view(), None),
+        );
         let stats =
             compute_balance_stats(&x_target.view(), &x_reweight.view(), &names, None, &scale);
 
