@@ -163,7 +163,7 @@ pub fn oneway_test(groups: &[(String, Vec<f64>)], var_equal: bool) -> EconResult
         // Welch's ANOVA (not assuming equal variances). Its weights n_i / v_i are undefined
         // for a constant group, where R's oneway.test returns F = NaN.
         for ((name, vals), &v) in clean_groups.iter().zip(&group_variances) {
-            if !(v > 0.0) || vals.iter().all(|&x| x == vals[0]) {
+            if v.is_nan() || v <= 0.0 || vals.iter().all(|&x| x == vals[0]) {
                 return Err(EconError::InvalidSpecification {
                     message: format!(
                         "Welch's test needs a positive variance in every group; group '{name}' \
