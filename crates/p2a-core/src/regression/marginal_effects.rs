@@ -511,14 +511,20 @@ pub fn marginal_effects_discrete(
 
     let mem: Array1<f64> = &beta * f_z_mean;
 
-    // MEM standard errors (simpler since evaluated at fixed point)
-    // SE(MEM_j) = |f(z_bar)| * SE(beta_j) approximately
-    // More precisely, use delta method with gradient at mean
+    // MEM standard errors by the delta method at x̄: MEM_j = β_j f(z̄) with z̄ = x̄'β, so
+    // G[j][l] = d MEM_j / d β_l = I(j = l) f(z̄) + β_j f'(z̄) x̄_l and SE_j = sqrt(G_j V G_j')
+    // (marginaleffects::slopes(newdata = "mean")).
+    let f_prime_mean = match discrete_result.model_type {
+        DiscreteModelType::Logit => f_z_mean * (1.0 - 2.0 * logistic_cdf(z_mean)),
+        DiscreteModelType::Probit => -z_mean * f_z_mean,
+    };
     let mut mem_se = Array1::zeros(k);
     for j in 0..k {
-        // Simpler approximation: SE(MEM_j) = sqrt(Var(beta_j)) * f(z_mean)
-        // This ignores covariance but is a reasonable approximation
-        mem_se[j] = vcov[[j, j]].max(0.0).sqrt() * f_z_mean.abs();
+        let g_j: Array1<f64> = Array1::from_shape_fn(k, |l| {
+            let indicator = if j == l { f_z_mean } else { 0.0 };
+            indicator + beta[j] * f_prime_mean * x_mean[l]
+        });
+        mem_se[j] = g_j.dot(&vcov.dot(&g_j)).max(0.0).sqrt();
     }
 
     // =========================================================================
@@ -887,6 +893,56 @@ mod tests {
         let z = crate::traits::estimator::z_critical(0.95).unwrap();
         let m = &me.average_marginal[1];
         assert!((m.ci_upper - (m.estimate + z * m.std_error)).abs() < 1e-15);
+    }
+
+    /// Case `me_mem_contrast`: logit and probit marginal effects at the mean with the full
+    /// delta-method gradient G = f(z̄) I + β f'(z̄) x̄' (glm at epsilon 1e-14, cross-checked
+    /// against marginaleffects::slopes(newdata = "mean") in the case).
+    #[test]
+    fn test_validate_marginal_effects_mem() {
+        use p2a_validation::Check;
+        let (case, ds) = crate::test_support::load_case("me_mem_contrast");
+        let mut c = Check::new(&case);
+        // The GLM stopping rule bounds coefficients, effects, SEs and z (the iterative row):
+        // 1e-8 for logit (Newton on the canonical link converges quadratically), 1e-6 for
+        // probit (Fisher scoring stops about 2e-7 relative from glm at epsilon 1e-14, as in
+        // test_validate_probit_na_rows_dropped). The relative error of p is about z^2 times
+        // that of z, and |z| <= 7.3 here: 1e-6 and 1e-4.
+        for (link, fit, tol, tol_p) in [
+            (
+                "logit",
+                run_logit(&ds, "y", &["x1", "x2"]).unwrap(),
+                Tol::iterative(1e-8),
+                Tol::iterative(1e-6),
+            ),
+            (
+                "probit",
+                run_probit(&ds, "y", &["x1", "x2"]).unwrap(),
+                Tol::iterative(1e-6),
+                Tol::iterative(1e-4),
+            ),
+        ] {
+            let me = marginal_effects_discrete(&fit, &ds, &["x1", "x2"]).unwrap();
+            let mem = me.at_means.as_ref().unwrap();
+            let names: Vec<&str> = mem.iter().map(|m| m.variable.as_str()).collect();
+            let col = |f: fn(&MarginalEffect) -> f64| mem.iter().map(f).collect::<Vec<_>>();
+            c.named(
+                &format!("{link}_coef"),
+                &fit.variables,
+                &fit.coefficients,
+                tol,
+            )
+            .named(&format!("{link}_mem"), &names, &col(|m| m.estimate), tol)
+            .named(
+                &format!("{link}_mem_se"),
+                &names,
+                &col(|m| m.std_error),
+                tol,
+            )
+            .named(&format!("{link}_mem_z"), &names, &col(|m| m.z_value), tol)
+            .named(&format!("{link}_mem_p"), &names, &col(|m| m.p_value), tol_p);
+        }
+        c.finish();
     }
 
     #[test]

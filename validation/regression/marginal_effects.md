@@ -236,7 +236,9 @@ Registry entry `marginal_effects_logit_ame` in `validation/methods/numeric_hygie
 combination of the others; `coef_aliased` in the case) gets `NaN` effects, standard error, z and p and
 a warning, and the other effects equal those of the fit without it. Tests:
 `test_validate_marginal_effects_logit_tail`, `test_validate_marginal_effects_aliased_regressor_is_nan`. The MEM
-standard errors are not pinned (their approximation drops a gradient term).
+standard errors use the full delta-method gradient `G = f(z̄) I + β f'(z̄) x̄'` and are pinned in
+`test_validate_marginal_effects_mem` (registry entry `marginal_effects_mem_contrasts`, case
+`me_mem_contrast`).
 
 ## Status
 
