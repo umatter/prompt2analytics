@@ -398,9 +398,9 @@ fn validate_config(config: &QuantRegConfig) -> EconResult<()> {
 /// The fit is `config.algorithm`'s (the simplex by default up to 5000 rows), the standard
 /// errors are summary.rq's `config.se`. A singular design is an error, as in `rq`. When the
 /// standard errors cannot be computed (too few observations for the iid sparsity estimate, a
-/// singular density-weighted design, a ker kernel bandwidth that is zero or undefined), the
-/// coefficients are kept, the standard errors, t, p and
-/// intervals are NaN and a warning says why (R's `rq` succeeds and its `summary.rq` stops).
+/// singular density-weighted design, (se = "ker") a kernel bandwidth that is zero or
+/// undefined), the coefficients are kept, the standard errors, t, p and intervals are NaN and
+/// a warning says why (R's `rq` succeeds and its `summary.rq` stops).
 ///
 /// # Example
 ///
@@ -1272,6 +1272,24 @@ fn halved_bandwidth(tau: f64, n: usize) -> EconResult<f64> {
     Ok(h)
 }
 
+/// Powell's kernel bandwidth needs the normal quantiles at tau ± h, so both must lie inside
+/// (0, 1). [`halved_bandwidth`] brings them into [0, 1]; this refuses the closed ends, which
+/// the halving reaches only when tau - h or tau + h lands on 0 or 1 exactly.
+fn ker_quantile_range(tau: f64, h: f64) -> EconResult<()> {
+    if tau - h > 0.0 && tau + h < 1.0 {
+        return Ok(());
+    }
+    Err(EconError::SingularMatrix {
+        context: format!(
+            "ker standard errors: Powell's kernel bandwidth is not defined because tau ± h = \
+             {:.4} .. {:.4} (Hall-Sheather h = {h:.4}) leaves (0, 1)",
+            tau - h,
+            tau + h
+        ),
+        suggestion: "use se = nid, se = iid or se = boot".into(),
+    })
+}
+
 /// Standard errors of a quantile-regression fit; see [`rq_se`].
 #[derive(Debug, Clone)]
 pub struct RqSe {
@@ -1461,19 +1479,7 @@ pub fn rq_se(
             sorted.sort_by(f64::total_cmp);
             let iqr = quantile_sorted(&sorted, 0.75, QuantileType::T7)
                 - quantile_sorted(&sorted, 0.25, QuantileType::T7);
-            // tau ± h must lie inside (0, 1) for the normal quantiles; outside it (tau close
-            // to 0 or 1 at a small n) the kernel bandwidth is not defined
-            if !(tau - h > 0.0 && tau + h < 1.0) {
-                return Err(EconError::SingularMatrix {
-                    context: format!(
-                        "ker standard errors: Powell's kernel bandwidth is not defined because \
-                         tau ± h = {:.4} .. {:.4} (Hall-Sheather h = {h:.4}) leaves (0, 1)",
-                        tau - h,
-                        tau + h
-                    ),
-                    suggestion: "use se = nid, se = iid or se = boot".into(),
-                });
-            }
+            ker_quantile_range(tau, h)?;
             let scale = sd.min(iqr / 1.34);
             let hk = (normal_quantile(tau + h)? - normal_quantile(tau - h)?) * scale;
             if !(hk.is_finite() && hk > 0.0) {
@@ -2974,6 +2980,43 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    /// se = ker at an extreme tau: at tau = 0.02 and n = 20 the Hall-Sheather h exceeds tau,
+    /// and the halving brings tau ± h back inside (0, 1), so the standard errors are finite.
+    /// The "leaves (0, 1)" refusal is for a tau ± h that the halving lands exactly on 0 or 1,
+    /// which no data reach; it is pinned on the range check itself.
+    #[test]
+    fn test_rq_ker_extreme_tau_bandwidth_range() {
+        let n = 20;
+        let tau = 0.02;
+        assert!(hall_sheather_bandwidth(tau, n).unwrap() > tau);
+        let h = halved_bandwidth(tau, n).unwrap();
+        assert!(tau - h > 0.0 && tau + h < 1.0, "h = {h}");
+        let x: Vec<f64> = (0..n).map(|i| i as f64 / 4.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x[i] + ((i * 7919) % 13) as f64 / 6.0 - 1.0)
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        let mut cfg = QuantRegConfig::default();
+        cfg.tau = tau;
+        cfg.se = QuantRegSe::Ker;
+        let r = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+        assert!(
+            r.coefficients.iter().all(|c| c.std_error.is_finite()),
+            "{:?}",
+            r.warnings
+        );
+
+        assert!(ker_quantile_range(0.25, 0.125).is_ok());
+        for (tau, h) in [(0.25, 0.25), (0.75, 0.25)] {
+            match ker_quantile_range(tau, h) {
+                Err(EconError::SingularMatrix { context, .. }) => {
+                    assert!(context.contains("leaves (0, 1)"), "{context}")
+                }
+                other => panic!("tau {tau}, h {h}: {other:?}"),
+            }
+        }
     }
 
     /// nid after a Frisch-Newton fit: an auxiliary tau -/+ h outside (tol, 1 - tol) runs the
