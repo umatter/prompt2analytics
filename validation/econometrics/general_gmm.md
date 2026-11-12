@@ -91,29 +91,53 @@ planning gaps 1.2e-15 iterative, 1.3e-10 / 6.3e-10 CUE, 1.8e-11 / 6.9e-10 normal
 
 ## Timing
 
-Release build, one P core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds of the timing
-harness (linear IV, q = 5, k = 4) at 003af73a against `ff8e7559` (before the GMM rework); new / base as
-the ratio of medians.
+Release builds of three trees: `ff8e7559` (before the GMM rework), v0.5.0 (`f80b0131`) and this
+version. The timing harness fits linear IV with q = 5 instruments and k = 4 coefficients on simulated
+data at n = 100, 1,000 and 10,000, on one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), in nine rounds
+that interleave the three builds. Each round reports the median of 41 calls (21 at n = 10,000) after
+one warm-up call; the table gives the median of the nine medians. The run shared the machine with
+other builds (load average 33-36 on 12 logical CPUs), so ratios within about 0.05 of 1 are noise. In
+`ff8e7559` the MDS rows are its `IID` setting, which summed `z z' e^2`, the MDS form.
 
-| Fit | n = 100 / 1,000 / 10,000 |
-|---|---|
-| one-step, identity W (`vcov = Fixed`) | 0.88 / 0.90 / 0.51 |
-| two-step MDS | 1.21 / 0.84 / 0.54 |
-| iterative MDS | 0.75 / 0.48 / 0.38 |
-| two-step IID | 1.07 / 0.63 / 0.63 |
-| two-step HAC | 1.06 / 0.77 / 0.59 |
-| CUE MDS (accepted as a correctness change) | 2.85 / 1.72 / 1.15 |
+| Fit | n | `ff8e7559` µs | v0.5.0 µs | new µs | new / `ff8e7559` | new / v0.5.0 |
+|---|---|---|---|---|---|---|
+| one-step, identity W (`vcov = Fixed`) | 100 | 15.5 | 14.7 | 14.3 | 0.92 | 0.97 |
+| one-step, identity W (`vcov = Fixed`) | 1,000 | 52.8 | 46.0 | 46.7 | 0.88 | 1.02 |
+| one-step, identity W (`vcov = Fixed`) | 10,000 | 1,662 | 920.8 | 916.8 | 0.55 | 1.00 |
+| two-step MDS (not signed off) | 100 | 24.1 | 31.4 | 30.2 | 1.25 | 0.96 |
+| two-step MDS | 1,000 | 111.6 | 90.2 | 88.9 | 0.80 | 0.99 |
+| two-step MDS | 10,000 | 2,254 | 1,420 | 1,404 | 0.62 | 0.99 |
+| iterative MDS | 100 | 126.5 | 95.4 | 91.2 | 0.72 | 0.96 |
+| iterative MDS | 1,000 | 307.2 | 142.8 | 140.7 | 0.46 | 0.99 |
+| iterative MDS | 10,000 | 4,128 | 2,150 | 2,071 | 0.50 | 0.96 |
+| two-step IID | 100 | 24.7 | 27.3 | 26.2 | 1.06 | 0.96 |
+| two-step IID | 1,000 | 110.7 | 66.4 | 65.4 | 0.59 | 0.99 |
+| two-step IID | 10,000 | 2,286 | 1,636 | 1,652 | 0.72 | 1.01 |
+| two-step HAC | 100 | 48.5 | 52.1 | 50.4 | 1.04 | 0.97 |
+| two-step HAC | 1,000 | 507.3 | 419.2 | 402.7 | 0.79 | 0.96 |
+| two-step HAC | 10,000 | 8,866 | 5,159 | 5,137 | 0.58 | 1.00 |
+| iterative HAC | 100 | 926.7 | 613.3 | 592.2 | 0.64 | 0.97 |
+| iterative HAC | 1,000 | 1,688 | 697.8 | 680.8 | 0.40 | 0.98 |
+| iterative HAC | 10,000 | 29,525 | 8,980 | 8,886 | 0.30 | 0.99 |
+| CUE MDS (accepted as a correctness change) | 100 | 126.5 | 390.3 | 373.5 | 2.95 | 0.96 |
+| CUE MDS (accepted as a correctness change) | 1,000 | 305.1 | 664.2 | 648.3 | 2.13 | 0.98 |
+| CUE MDS (accepted as a correctness change) | 10,000 | 4,030 | 8,399 | 8,843 | 2.19 | 1.05 |
+| CUE HAC | 100 | 903.3 | 476.8 | 459.6 | 0.51 | 0.96 |
+| CUE HAC | 1,000 | 1,732 | 1,557 | 1,479 | 0.85 | 0.95 |
+| CUE HAC | 10,000 | 30,524 | 27,340 | 28,696 | 0.94 | 1.05 |
 
 For q <= 8 the MDS moment covariance of linear IV is formed column by column (`LinearIv::mds_omega`:
 each moment `z_j * e` as one contiguous vector, centred by its own mean, then q (q + 1) / 2 dot
-products) instead of the n x q moment matrix and a matrix product of its transpose; it is about twice
-as fast at q = 5 and equals the matrix form to rounding. CUE's variance reuses the Omega and the
-weighting matrix it computed at the estimate.
+products) instead of the n x q moment matrix and a matrix product of its transpose. It equals the
+matrix form to rounding. CUE's variance reuses the Omega and the weighting matrix it computed at the
+estimate.
 
-Two-step MDS at n = 100 costs 1.21x of base, which is accepted. The variance re-evaluates Omega at the
-two-step estimate, as `gmm::gmm` does (the base reused the first-step weighting matrix and did not
-match R's standard errors), so a two-step fit forms two moment covariances and inverts six small
-matrices (Z'Z, X'Z W Z'X twice, Omega twice, G' Omega^-1 G) where the base inverted four. At q = 5 each
-`sym_inverse` costs about 2.5 µs, most of it faer's per-call Cholesky overhead (about 1.6 µs for a 5 x 5
-factorisation), which is shared linear algebra outside this method; the second covariance adds about
-2 µs. No cheaper form gives the same values and the same singularity refusals.
+Two-step MDS at n = 100 costs 1.25x of `ff8e7559` (30.2 µs against 24.1 µs) and is not signed off.
+The variance re-evaluates Omega at the two-step estimate, as `gmm::gmm` does (`ff8e7559` reused the
+first-step weighting matrix and did not match R's standard errors), so a two-step fit forms two
+moment covariances and inverts six small matrices (Z'Z, X'Z W Z'X twice, Omega twice,
+G' Omega^-1 G) where `ff8e7559` inverted four. No moment covariance or inverse is computed twice at
+the same estimate in this path. Within this method no cheaper form with the same values and
+singularity refusals was found (a fused row loop and a const-generic accumulator were tried earlier); a
+small-dimension Cholesky path in shared linear algebra could reduce the cost and would need its own
+package and sign-off.
