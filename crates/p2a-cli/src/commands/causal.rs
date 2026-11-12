@@ -61,6 +61,10 @@ use crate::session::SessionManager;
 use p2a_core::diagnostics::IdentificationReport;
 use p2a_core::econometrics::matching::{MOrder, MatchMethodKind, MatchOptions, match_it_with};
 
+/// Bootstrap seed for `causal staggered-did` when `--seed` is not given. The core estimator
+/// falls back to an unseeded generator for `seed: None`, so the CLI sets one itself.
+const STAGGERED_DID_DEFAULT_SEED: u64 = 42;
+
 /// Identification warnings of severity Caution and above, as
 /// `[{"code", "severity", "title", "message"}]`.
 fn identification_json(report: &IdentificationReport) -> serde_json::Value {
@@ -1373,7 +1377,7 @@ fn execute_ipw(
             config.trim = trim;
             config.bootstrap = bootstrap;
             config.normalized = true;
-            config.seed = Some(seed.unwrap_or(42));
+            config.seed = seed; // None: the core default seed
 
             match run_ipw_treatment(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1459,7 +1463,7 @@ fn execute_dr(
             config.estimand = est;
             config.trim = trim;
             config.bootstrap = bootstrap;
-            config.seed = Some(seed.unwrap_or(42));
+            config.seed = seed; // None: the core default seed
 
             match run_doubly_robust(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1530,7 +1534,7 @@ fn execute_mediation(
             let mut config = MediationConfig::default();
             config.bootstrap = bootstrap;
             config.trim = 0.05;
-            config.seed = Some(seed.unwrap_or(42));
+            config.seed = seed; // None: the core default seed
 
             match run_mediation_analysis(ds, outcome, treatment, mediator, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1924,7 +1928,7 @@ fn execute_staggered_did(
             config.estimation_method = estimation_method;
             config.anticipation = anticipation;
             config.bootstrap = bootstrap;
-            config.seed = Some(seed.unwrap_or(42));
+            config.seed = Some(seed.unwrap_or(STAGGERED_DID_DEFAULT_SEED));
 
             match run_staggered_did(
                 ds,
@@ -2323,7 +2327,7 @@ fn execute_stdreg(
             config.se_method = se_meth;
             config.n_bootstrap = bootstrap;
             config.include_interactions = interactions;
-            config.seed = Some(seed.unwrap_or(42));
+            config.seed = seed; // None: the core default seed
 
             match run_stdreg(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {

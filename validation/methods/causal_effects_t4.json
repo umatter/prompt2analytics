@@ -87,7 +87,7 @@
         "its CR1 SE",
         "cluster count"
       ],
-      "tolerance": "validation/README.md, n = 1200",
+      "tolerance": "CLI test: validation/README.md, n = 1200; MCP test: the 4-decimal values the text prints, absolute 5e-5 plus the README tolerance",
       "deviations": [],
       "supersedes_legacy": []
     }

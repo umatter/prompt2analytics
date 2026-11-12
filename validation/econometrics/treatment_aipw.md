@@ -25,15 +25,15 @@ Three methods:
 
 The AIPW SE ignores the estimation of the nuisance models (the usual influence-function SE of
 the R AIPW and tmle packages). For `IPW` and `Regression`, `bootstrap` is 0 (analytic) or at
-least 2; 1 is an error. Each bootstrap replicate resamples every row, refits the propensity model
-(when trimming or weighting needs it) and both arm regressions, and re-applies the trimming; a
-replicate whose refit fails or leaves an arm empty is dropped and counted. The default stays 999
-replicates; `bootstrap` is ignored by `AIPW`. Regression adjustment for the ATT averages the
-predicted contrast over the treated (before it averaged over every unit, which is the ATE: on
-`weighting_sim` 1.43074 against R's ATT 1.56333). Bootstrap intervals are type-7 percentile intervals (normal interval below
-20 successful replicates); an unseeded bootstrap uses `DEFAULT_BOOTSTRAP_SEED` (42). Analytic
-intervals use `qnorm(0.975)`, p-values the normal survival function. `trim` must be in
-[0, 0.5).
+least 2; 1 is an error. Each bootstrap replicate resamples every row, refits the propensity
+model (when trimming or weighting needs it) and both arm regressions, and re-applies the
+trimming; a replicate whose refit fails or leaves an arm empty is dropped and counted. The
+default stays 999 replicates; `bootstrap` is ignored by `AIPW`. Regression adjustment for the
+ATT averages the predicted contrast over the treated (before it averaged over every unit, which
+is the ATE: on `weighting_sim` 1.43074 against R's ATT 1.56333). Bootstrap intervals are type-7
+percentile intervals (normal interval below 20 successful replicates); an unseeded bootstrap
+uses `DEFAULT_BOOTSTRAP_SEED` (42). Analytic intervals use `qnorm(0.975)`, p-values the normal
+survival function. `trim` must be in [0, 0.5).
 
 ## Reference
 

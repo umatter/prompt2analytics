@@ -42,14 +42,14 @@ is an `InsufficientData` error naming the arm and the trim. The outcome models o
 ("bootstrap (B replicates; propensity model refitted and trimming re-applied in each)") and the
 interval the type-7 percentile interval (normal interval below 20 successful replicates). Each
 replicate resamples every row, refits the logistic propensity model and re-applies the trimming
-to the refitted scores, so the bootstrap SD carries the propensity estimation as the M-estimation
-SE does (on `weighting_sim`, ATE: close to the M-estimation 0.1226, and R's refit bootstrap gives
-0.1286; the replicates that held the fitted scores fixed gave 0.2068). A replicate whose refit fails or leaves an arm empty is
-dropped and counted; a cancelled or over-budget replicate stops the call. An unseeded bootstrap
-uses `DEFAULT_BOOTSTRAP_SEED` (42), so results are reproducible (Tier 3 R13). The positivity
-diagnostics read the propensity scores before trimming (`ps_summary_untrimmed`) and report the
-share the trim dropped. Analytic intervals use `qnorm(0.975)`; p-values the normal
-survival function.
+to the refitted scores, so the bootstrap SD carries the propensity estimation as the
+M-estimation SE does (on `weighting_sim`, ATE: close to the M-estimation 0.1226, and R's refit
+bootstrap gives 0.1286; the replicates that held the fitted scores fixed gave 0.2068). A
+replicate whose refit fails or leaves an arm empty is dropped and counted; a cancelled or
+over-budget replicate stops the call. An unseeded bootstrap uses `DEFAULT_BOOTSTRAP_SEED` (42),
+so results are reproducible (Tier 3 R13). The positivity diagnostics read the propensity scores
+before trimming (`ps_summary_untrimmed`) and report the share the trim dropped. Analytic
+intervals use `qnorm(0.975)`; p-values the normal survival function.
 
 ## Reference
 
@@ -75,15 +75,14 @@ survival function.
 | `test_validate_ipw_hajek_se` | Hajek effect; `std_error` = `se_mest`, `se_eif`, `se_naive`; CI, t and p from `qnorm(0.975)` | effect `Tol::coef(n)`; SEs `Tol::se(n)`; WeightIt cross-check 1e-6 relative |
 | `test_validate_ipw_ht_se` | HT effect and the three SEs | as above |
 | `test_validate_ipw_att_se` | ATT effect and the three SEs | as above |
-
 | `test_validate_dr_ipw_mest` | `treatment_doubly_robust` method `ipw` at `bootstrap = 0`: Hajek ATE/ATT and the M-estimation SE (registry `causal_effects_t4.json`, entry `treatment_regression_adjustment_t4`) | as above |
 
 Property tests (no case): `test_ipw_mest_se_with_a_fixed_trimmed_set`,
 `test_dr_reports_se_method`, `test_unseeded_bootstrap_is_reproducible`,
 `test_ipw_rejects_bad_trim`, `test_ipw_bootstrap_replicate_refits_the_propensity_model`,
 `test_ipw_bootstrap_se_near_mest_se`, `test_ipw_bootstrap_replicate_propagates_cancellation`,
-`test_ipw_bootstrap_seed_is_reproducible`, `test_ipw_propensity_summary_in_range`, `test_ipw_trimming_reduces_sample`,
-`test_ipw_t_stat_and_p_value_consistent`.
+`test_ipw_bootstrap_seed_is_reproducible`, `test_ipw_propensity_summary_in_range`,
+`test_ipw_trimming_reduces_sample`, `test_ipw_t_stat_and_p_value_consistent`.
 
 ## Known Differences
 

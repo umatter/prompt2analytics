@@ -2975,10 +2975,25 @@ mod tests {
         let term = "training_group:post_training";
         let att = case.named("tenure_coef", term);
         let se = case.named("tenure_se_cl", term);
-        // the text prints both to 4 decimals
+        // The text prints both to 4 decimals: parse them and compare within half a unit in
+        // the fourth decimal (plus the README tolerance at n = 1200).
+        let rest = out
+            .split_once("ATT = ")
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("no ATT line\n{out}"));
+        let (att_txt, rest) = rest.split_once(" (SE: ").expect("ATT (SE: ...)");
+        let se_txt = rest.split_once(',').expect("SE: <v>,").0;
+        let (got_att, got_se): (f64, f64) = (
+            att_txt.trim().parse().unwrap(),
+            se_txt.trim().parse().unwrap(),
+        );
         assert!(
-            out.contains(&format!("ATT = {att:.4} (SE: {se:.4},")),
-            "{att} {se}\n{out}"
+            (got_att - att).abs() <= 5e-5 + 1e-8 * att.abs(),
+            "ATT {got_att} vs R {att}\n{out}"
+        );
+        assert!(
+            (got_se - se).abs() <= 5e-5 + 1e-6 * se.abs(),
+            "SE {got_se} vs R {se}\n{out}"
         );
         let nc = case.scalar("n_clusters");
         assert!(
