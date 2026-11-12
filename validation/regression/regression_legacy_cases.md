@@ -70,19 +70,17 @@ which equals the Chisq form; the case records both and checks that they agree.
 | | RSS: unrestricted, drop x2, drop x2 and x3 | 18.87075804, 18.87311469, 116.0534541 |
 | | parameters: unrestricted, drop x2, drop x2 and x3 | 4, 3, 2 |
 | `ols_diagnostics_grunfeld` | drop capital: F (p) | 81.98954629 (1.347370105e-16); df (1, 197) |
+| `diag_wald_sim` | drop x2: Chisq (p) | 0.01198882273 (0.9128110908) |
+| | drop x2 and x3: Chisq (p) | 494.3913116 (4.408498779e-108) |
+| `ols_diagnostics_grunfeld` | drop capital: Chisq (p) | 81.98954629 (1.368083687e-19) |
 
 Tests: `test_validate_wald_sim` (every `diag_wald_sim` value above, and n) and
-`test_validate_wald_grunfeld` (the Grunfeld F and p; df asserted directly). Tolerance:
+`test_validate_wald_grunfeld` (the Grunfeld F, Chisq and p; df asserted directly). Tolerance:
 statistics and RSS 1e-6 relative, p-values 1e-6 relative or 1e-12 absolute, counts exact.
 
-Deviation REG-37: p2a's Chisq form is n (RSS_r - RSS_u) / RSS_u; lmtest's and aod's is
-q F = (n - k) (RSS_r - RSS_u) / RSS_u. It is left out of both tests.
-
-| Restriction | R Chisq (`waldtest`, `aod::wald.test`) | p2a Chisq |
-|---|---|---|
-| `diag_wald_sim`, drop x2 | 0.01198882273 | 0.01248835701 |
-| `diag_wald_sim`, drop x2 and x3 | 494.3913116 | 514.9909496 |
-| Grunfeld, drop capital | 81.98954629 | 83.23811806 |
+The Chisq form is q F = (RSS_r - RSS_u) / (RSS_u / (n - k)), as `waldtest(test = "Chisq")` and
+`aod::wald.test` (whose statistics `aod_chi2_*` are pinned too). aod's p for dropping x2 and x3
+underflows to 0, so the lmtest p (4.4e-108) is the pin there.
 
 ## HAC (hac_ar1)
 

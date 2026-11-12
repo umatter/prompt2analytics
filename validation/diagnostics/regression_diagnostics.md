@@ -109,8 +109,8 @@ counts, a repeated name gave F = 0, and swapped or longer restricted lists under
 | `test_validate_wald_aliased_rank_q` | `ols_aliased` | `anova(lm(y ~ x1), lm(y ~ x1 + x2 + x3))`, x2 = 2 x1: F 11.38526696929829, df (1, 117), p 0.001004720010233427 |
 
 Registry entry `waldtest_nested_rank` (`validation/methods/reg_rank_qr.json`). Measured:
-F within 3.9e-15 relative, p within 9.6e-14. The χ² form remains n (RSS_r − RSS_u)/RSS_u
-(REG-37, Tier 4), not lmtest's.
+F within 3.9e-15 relative, p within 9.6e-14. The χ² form is q F, as `waldtest(test = "Chisq")`;
+the test asserts that identity.
 
 ## Diagnostics on aliased models (T3-WP09)
 
