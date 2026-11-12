@@ -1217,10 +1217,10 @@ fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>>
     let mut cells: Vec<(usize, f64)> = Vec::new();
     let mut scratch = resource::try_vec(n1, 0usize, what)?;
     let mut touched: Vec<usize> = Vec::new();
-    // S = diag(c_b) - sum_a C_a C_a' / c_a
-    let mut s = resource::try_zeros2(n1, n1, what)?;
+    // S = diag(c_b) - sum_a C_a C_a' / c_a, row-major n1 x n1
+    let mut s = resource::try_vec(resource::checked_len(&[n1, n1], what)?, 0.0, what)?;
     for (b, &c) in fb.counts.iter().enumerate() {
-        s[[b, b]] = c as f64;
+        s[b * n1 + b] = c as f64;
     }
     for a in 0..na {
         if a % 256 == 0 {
@@ -1233,7 +1233,7 @@ fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>>
             }
             scratch[b] += 1;
         }
-        let ca = fa.counts[a] as f64;
+        let inv_ca = 1.0 / fa.counts[a] as f64;
         let first = cells.len();
         for &b in &touched {
             cells.push((b, scratch[b] as f64));
@@ -1242,8 +1242,10 @@ fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>>
         touched.clear();
         let block = &cells[first..];
         for &(b, cb) in block {
+            let w = cb * inv_ca;
+            let row = &mut s[b * n1..(b + 1) * n1];
             for &(d, cd) in block {
-                s[[b, d]] -= cb * cd / ca;
+                row[d] -= w * cd;
             }
         }
         cell_start[a + 1] = cells.len();
@@ -1262,7 +1264,7 @@ fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>>
         let Some(i) = *pb else { continue };
         for (d, pd) in pos.iter().enumerate() {
             if let Some(j) = *pd {
-                block[[i, j]] = s[[b, d]];
+                block[[i, j]] = s[b * n1 + d];
             }
         }
     }
@@ -1279,33 +1281,36 @@ fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>>
     };
 
     // h_i = 1 / c_a + q_a - 2 v_a[b] + Sp[b, b], v_a = Sp u_a, q_a = u_a' v_a (a dropped
-    // b-level has a zero row and column in Sp)
+    // b-level has a zero row and column in Sp); v_a gathers the rows of Sp (symmetric)
+    let sp = sp.as_standard_layout();
+    let sp_flat = sp.as_slice().expect("standard layout");
     let mut h = resource::try_zeros1(n, what)?;
     let mut v = resource::try_vec(r, 0.0, what)?;
     for a in 0..na {
         if a % 256 == 0 {
             resource::checkpoint()?;
         }
-        let ca = fa.counts[a] as f64;
+        let inv_ca = 1.0 / fa.counts[a] as f64;
         let block = &cells[cell_start[a]..cell_start[a + 1]];
-        for (i, vi) in v.iter_mut().enumerate() {
-            let row = sp.row(i);
-            *vi = block
-                .iter()
-                .filter_map(|&(b, cb)| pos[b].map(|j| row[j] * cb))
-                .sum::<f64>()
-                / ca;
+        v.fill(0.0);
+        for &(b, cb) in block {
+            if let Some(j) = pos[b] {
+                let w = cb * inv_ca;
+                for (vi, &x) in v.iter_mut().zip(&sp_flat[j * r..(j + 1) * r]) {
+                    *vi += w * x;
+                }
+            }
         }
         let q: f64 = block
             .iter()
             .filter_map(|&(b, cb)| pos[b].map(|j| cb * v[j]))
             .sum::<f64>()
-            / ca;
+            * inv_ca;
         for &i in &order[start[a]..start[a + 1]] {
-            h[i] = 1.0 / ca
+            h[i] = inv_ca
                 + q
                 + match pos[fb.ids[i]] {
-                    Some(j) => sp[[j, j]] - 2.0 * v[j],
+                    Some(j) => sp_flat[j * r + j] - 2.0 * v[j],
                     None => 0.0,
                 };
         }
