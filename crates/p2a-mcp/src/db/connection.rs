@@ -832,6 +832,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS na_strings ON dataset_meta TYPE option<array<string>>;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session ON dataset_meta COLUMNS session_id;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_id ON dataset_meta COLUMNS id UNIQUE;
+            DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session_name ON dataset_meta COLUMNS session_id, name UNIQUE;
         "#;
 
         db.query(schema).await?;

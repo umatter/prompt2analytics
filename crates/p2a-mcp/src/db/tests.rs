@@ -3821,3 +3821,89 @@ async fn v2_store_is_set_aside() {
     }
     assert_eq!(db.stats().await.unwrap().conversation_count, 0);
 }
+
+/// The lookup a save makes for the row it replaces (session and name) is
+/// served by an index on both columns, not by a scan of the session's rows.
+#[tokio::test]
+async fn dataset_meta_lookup_uses_the_session_name_index() {
+    let db = test_db().await;
+    db.save_dataset_meta(&budget_meta("d000", 2)).await.unwrap();
+    let mut result = db
+        .db()
+        .query("SELECT * FROM dataset_meta WHERE session_id = $s AND name = $n EXPLAIN")
+        .bind(("s", "s1".to_string()))
+        .bind(("n", "d000".to_string()))
+        .await
+        .unwrap();
+    let plan: surrealdb::types::Value = result.take(0).unwrap();
+    let plan = format!("{plan:?}");
+    assert!(
+        plan.contains("idx_dataset_meta_session_name"),
+        "the lookup does not use the (session_id, name) index: {plan}"
+    );
+}
+
+/// Under a `session_db_bytes` budget a session keeps at most
+/// [`MAX_DATASET_META_ROWS_PER_SESSION`] dataset metadata rows: a save under
+/// a new name past them is refused and names the bound, a save that
+/// replaces a row under its name is not, and without a budget there is no
+/// such bound.
+#[tokio::test]
+async fn dataset_meta_rows_per_session_are_capped_under_a_budget() {
+    use super::MAX_DATASET_META_ROWS_PER_SESSION as CAP;
+    let limited = limited_db(PersistenceLimits {
+        session_db_bytes: Some(16 << 20),
+        ..Default::default()
+    })
+    .await;
+    for i in 0..CAP {
+        limited
+            .save_dataset_meta(&budget_meta(&format!("d{i:04}"), 1))
+            .await
+            .unwrap();
+    }
+    let used = limited.session_bytes_entry("s1");
+    match limited.save_dataset_meta(&budget_meta("one_more", 1)).await {
+        Err(DbError::QuotaExceeded(text)) => {
+            assert!(text.contains(&CAP.to_string()), "{text}");
+            assert!(text.contains("datasets"), "{text}");
+        }
+        other => panic!("expected QuotaExceeded, got {other:?}"),
+    }
+    assert_eq!(
+        limited.session_bytes_entry("s1"),
+        used,
+        "a refused save reserves nothing"
+    );
+    assert!(
+        limited
+            .get_dataset_meta("s1", "one_more")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    limited
+        .save_dataset_meta(&budget_meta("d0000", 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        limited.get_datasets_for_session("s1").await.unwrap().len(),
+        CAP
+    );
+
+    let unlimited = test_db().await;
+    for i in 0..=CAP {
+        unlimited
+            .save_dataset_meta(&budget_meta(&format!("d{i:04}"), 1))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        unlimited
+            .get_datasets_for_session("s1")
+            .await
+            .unwrap()
+            .len(),
+        CAP + 1
+    );
+}

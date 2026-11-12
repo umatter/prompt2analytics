@@ -43,7 +43,9 @@ mod tool_calls;
 mod tests;
 
 pub use connection::{DbConnection, DbError, DbStats, PersistenceLimits};
-pub use dataset_meta::{MAX_STORED_COLUMN_NAME_BYTES, MAX_STORED_COLUMN_NAMES};
+pub use dataset_meta::{
+    MAX_DATASET_META_ROWS_PER_SESSION, MAX_STORED_COLUMN_NAME_BYTES, MAX_STORED_COLUMN_NAMES,
+};
 pub use models::{
     Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole, Settings,
     ToolCall, ToolCallStatus,
