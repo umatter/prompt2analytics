@@ -22,7 +22,8 @@
 //!
 //! - **Treatment vs Control**: Compare each treatment to a control group
 //! - **Helmert**: Compare each level to the mean of subsequent levels
-//! - **Polynomial**: Test for linear, quadratic, etc. trends
+//! - **Polynomial**: Test for linear, quadratic, etc. trends: the k - 1 orthonormal columns of
+//!   R's `contr.poly(k)` ([`contr_poly`])
 //! - **Deviation**: Compare each level to the grand mean
 //!
 //! ## Confidence Intervals and Tests
@@ -48,6 +49,7 @@
 //!
 //! R equivalent: `stats::se.contrast()`
 
+use crate::errors::{EconError, EconResult};
 use crate::stats::AnovaResult;
 use serde::{Deserialize, Serialize};
 
@@ -231,7 +233,8 @@ crate::option_enum!(
 /// Generate a standard contrast matrix for k groups.
 ///
 /// k < 2 has no contrasts (R's contr.* stop with 'not enough degrees of freedom to define
-/// contrasts'); an empty set is returned.
+/// contrasts'); an empty set is returned. [`ContrastType::Poly`] is [`contr_poly`], and also an
+/// empty set where that is an error (more than 95 levels).
 pub fn generate_contrasts(k: usize, contrast_type: ContrastType) -> Vec<Vec<f64>> {
     if k < 2 {
         return Vec::new();
@@ -279,39 +282,71 @@ pub fn generate_contrasts(k: usize, contrast_type: ContrastType) -> Vec<Vec<f64>
                 })
                 .collect()
         }
-        ContrastType::Poly => {
-            // Linear, quadratic, cubic... polynomial contrasts
-            // For simplicity, just return linear contrast
-            if k < 2 {
-                return vec![];
-            }
-            let mut contrasts = Vec::new();
-
-            // Linear contrast
-            let mut linear = vec![0.0; k];
-            for i in 0..k {
-                linear[i] = (2.0 * i as f64 - (k - 1) as f64) / (k - 1) as f64;
-            }
-            contrasts.push(linear);
-
-            // Quadratic contrast (if k >= 3)
-            if k >= 3 {
-                let mut quad = vec![0.0; k];
-                for i in 0..k {
-                    let x = (2.0 * i as f64 - (k - 1) as f64) / (k - 1) as f64;
-                    quad[i] = 3.0 * x * x - 1.0;
-                }
-                // Normalize to sum to zero
-                let sum: f64 = quad.iter().sum();
-                for val in &mut quad {
-                    *val -= sum / k as f64;
-                }
-                contrasts.push(quad);
-            }
-
-            contrasts
-        }
+        ContrastType::Poly => contr_poly(k).unwrap_or_default(),
     }
+}
+
+/// Largest number of levels `contr_poly` accepts: R's `contr.poly` stops beyond 95 ("orthogonal
+/// polynomials cannot be represented accurately enough for 95 degrees of freedom").
+const CONTR_POLY_MAX_LEVELS: usize = 95;
+
+/// R's `contr.poly(k)`: the k - 1 orthonormal polynomial contrasts on the scores 1..k, returned
+/// as rows (row j - 1 is R's column j, the degree-j polynomial).
+///
+/// The centred scores' powers `y^0 .. y^(k-1)` are orthogonalised by Gram-Schmidt with
+/// re-orthogonalisation (two passes), normalised, and the constant column dropped. Each column's
+/// sign is R's: positive on its own power of the scores.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for k < 2 (R: "contrasts not defined for 0 degrees of freedom") and
+/// k > 95 (R: "orthogonal polynomials cannot be represented accurately enough for 95 degrees of
+/// freedom").
+pub fn contr_poly(k: usize) -> EconResult<Vec<Vec<f64>>> {
+    if k < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "polynomial contrasts need at least 2 levels, got {k} (R's contr.poly: \
+                 contrasts not defined for 0 degrees of freedom)"
+            ),
+        });
+    }
+    if k > CONTR_POLY_MAX_LEVELS {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "polynomial contrasts are limited to {CONTR_POLY_MAX_LEVELS} levels, got {k} \
+                 (R's contr.poly: orthogonal polynomials cannot be represented accurately \
+                 enough for 95 degrees of freedom)"
+            ),
+        });
+    }
+    let centre = (k as f64 + 1.0) / 2.0;
+    let y: Vec<f64> = (1..=k).map(|i| i as f64 - centre).collect();
+    let mut basis: Vec<Vec<f64>> = Vec::with_capacity(k);
+    let mut power = vec![1.0; k];
+    for degree in 0..k {
+        if degree > 0 {
+            for (p, &yi) in power.iter_mut().zip(&y) {
+                *p *= yi;
+            }
+        }
+        let mut v = power.clone();
+        for _pass in 0..2 {
+            for q in &basis {
+                let d: f64 = q.iter().zip(&v).map(|(a, b)| a * b).sum();
+                for (vi, qi) in v.iter_mut().zip(q) {
+                    *vi -= d * qi;
+                }
+            }
+        }
+        let norm = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+        for vi in v.iter_mut() {
+            *vi /= norm;
+        }
+        basis.push(v);
+    }
+    basis.remove(0);
+    Ok(basis)
 }
 
 /// Run se.contrast (convenience wrapper).
@@ -513,6 +548,66 @@ mod tests {
             generate_contrasts(2, ContrastType::Sum),
             vec![vec![0.5, -0.5]]
         ); // unchanged for k >= 2
+    }
+
+    /// contr.poly(k) for k = 2, 3, 4, 6 (R's columns, column-major), and se.contrast and the
+    /// estimates of the contr.poly(4) columns on four numeric dose levels in factor order.
+    #[test]
+    fn test_validate_se_contrast_poly_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_secontrast_poly_t4");
+        let mut check = Check::new(&case);
+        for k in [2usize, 3, 4, 6] {
+            let flat: Vec<f64> = contr_poly(k).unwrap().into_iter().flatten().collect();
+            check.vector(&format!("poly{k}"), &flat, Tol::coef(24));
+        }
+        let anova = run_one_way_anova(&ds, "y", "dose").unwrap();
+        let names: Vec<&str> = anova.groups.iter().map(|g| g.group.as_str()).collect();
+        assert_eq!(names, ["5", "10", "20", "40"]);
+        let cp = contr_poly(4).unwrap();
+        let r = se_contrast(&anova, &cp).unwrap();
+        let est: Vec<f64> = cp
+            .iter()
+            .map(|c| estimate_contrast(&anova, c).unwrap())
+            .collect();
+        check
+            .vector("se4", &r.se, Tol::se(24))
+            .vector("est4", &est, Tol::coef(24))
+            .scalar("mse", r.mse, Tol::stat(24))
+            .scalar("df_mse", r.df_mse, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_contr_poly_bounds() {
+        for k in [0usize, 1, 96] {
+            assert!(
+                matches!(contr_poly(k), Err(EconError::InvalidSpecification { .. })),
+                "k = {k}"
+            );
+        }
+        assert!(generate_contrasts(96, ContrastType::Poly).is_empty());
+        for k in 2..=20usize {
+            let rows = contr_poly(k).unwrap();
+            assert_eq!(rows.len(), k - 1);
+            for (i, a) in rows.iter().enumerate() {
+                assert_eq!(a.len(), k);
+                assert!(a.iter().sum::<f64>().abs() < 1e-12, "k = {k}, row {i} sum");
+                for (j, b) in rows.iter().enumerate() {
+                    let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!((dot - want).abs() < 1e-12, "k = {k}, rows {i}, {j}: {dot}");
+                }
+            }
+            // R's sign: the degree-j column rises with the j-th power, so the last cell is positive
+            for (j, row) in rows.iter().enumerate() {
+                assert!(row[k - 1] > 0.0, "k = {k}, degree {}", j + 1);
+            }
+        }
+        assert_eq!(
+            generate_contrasts(4, ContrastType::Poly),
+            contr_poly(4).unwrap()
+        );
     }
 
     #[test]
