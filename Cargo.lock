@@ -7428,6 +7428,7 @@ dependencies = [
  "serde",
  "serde_json",
  "surrealdb",
+ "surrealkv-compat-rocksdb",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

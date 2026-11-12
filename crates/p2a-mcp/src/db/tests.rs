@@ -3705,3 +3705,119 @@ async fn test_long_message_preview_truncation() {
     assert!(preview.len() <= 103); // 100 chars + "..."
     assert!(preview.ends_with("..."));
 }
+
+/// The directories beside `path` that a store written by an older engine was
+/// moved to (`<name>.surrealdb2-<timestamp>`).
+fn set_aside_beside(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!(
+        "{}.surrealdb2-",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    let mut found: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Copy the files of directory `from` into a new directory `to`.
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+}
+
+/// A store directory holding RocksDB's files (a `CURRENT` file and a
+/// `MANIFEST-*` file), which SurrealDB 2 wrote and SurrealDB 4 refuses to
+/// open, is moved aside to `<path>.surrealdb2-<timestamp>` with its files
+/// as they were, and a fresh store is opened at `path`.
+#[tokio::test]
+async fn a_store_written_by_surrealdb_2_is_set_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("CURRENT"), "MANIFEST-000005\n").unwrap();
+    std::fs::write(path.join("MANIFEST-000005"), b"\x00manifest").unwrap();
+    std::fs::write(path.join("000004.log"), b"rows of an old store").unwrap();
+
+    let db = DbConnection::connect_surrealkv(&path).await.unwrap();
+    let aside = set_aside_beside(&path);
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(
+        std::fs::read(aside[0].join("000004.log")).unwrap(),
+        b"rows of an old store"
+    );
+    assert!(aside[0].join("CURRENT").is_file());
+    assert!(!path.join("CURRENT").exists());
+    let id = db
+        .create_conversation("s1", "fresh")
+        .await
+        .unwrap()
+        .id_string();
+    assert_eq!(db.get_conversation(&id).await.unwrap().title, "fresh");
+}
+
+/// A store that fails to open for any other reason is left where it is: a
+/// second connection to a store a live connection holds fails, and nothing
+/// is moved.
+#[tokio::test]
+async fn a_store_in_use_is_not_set_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let live = DbConnection::connect_surrealkv(&path).await.unwrap();
+    let id = live
+        .create_conversation("s1", "kept")
+        .await
+        .unwrap()
+        .id_string();
+    let files = |p: &std::path::Path| {
+        let mut names: Vec<_> = std::fs::read_dir(p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = files(&path);
+
+    let second = DbConnection::connect_surrealkv(&path).await;
+    assert!(
+        matches!(second, Err(DbError::Connection(_))),
+        "{:?}",
+        second.err()
+    );
+    assert!(set_aside_beside(&path).is_empty());
+    assert_eq!(files(&path), before);
+    assert_eq!(live.get_conversation(&id).await.unwrap().title, "kept");
+}
+
+/// A real store written by v0.5.0 (SurrealDB 2.4, RocksDB): set aside with
+/// every file as it was, and a fresh, empty store opened in its place.
+#[tokio::test]
+#[ignore = "needs a SurrealDB 2.x store: set P2A_V2_STORE to one written by v0.5.0"]
+async fn v2_store_is_set_aside() {
+    let source = std::path::PathBuf::from(std::env::var("P2A_V2_STORE").unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    copy_dir(&source, &path);
+
+    let db = DbConnection::connect_surrealkv(&path).await.unwrap();
+    let aside = set_aside_beside(&path);
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert_eq!(
+            std::fs::read(source.join(&name)).unwrap(),
+            std::fs::read(aside[0].join(&name)).unwrap(),
+            "{name:?}"
+        );
+    }
+    assert_eq!(db.stats().await.unwrap().conversation_count, 0);
+}

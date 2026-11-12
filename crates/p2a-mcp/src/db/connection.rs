@@ -313,9 +313,54 @@ pub(super) fn failed_statement(
         .map(|(_, error)| error)
 }
 
+/// Whether directory `path` holds RocksDB's files: a `CURRENT` file and a
+/// `MANIFEST-*` file, the test SurrealDB 4 refuses a directory on.
+fn holds_rocksdb_files(path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    let (mut current, mut manifest) = (false, false);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        current |= name == "CURRENT";
+        manifest |= name.starts_with("MANIFEST-");
+    }
+    current && manifest
+}
+
+/// Rename the RocksDB store at `path` to `<path>.surrealdb2-<UTC
+/// timestamp>` and return the new path, holding RocksDB's lock on it
+/// meanwhile; the reason when it cannot (a live process holds the store,
+/// the new name is taken, or the rename fails).
+fn set_aside_rocksdb_store(path: &Path) -> Result<std::path::PathBuf, String> {
+    let lock = surrealkv_compat_rocksdb::lock_directory(path).map_err(|e| e.to_string())?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".surrealdb2-{stamp}"));
+    let aside = std::path::PathBuf::from(aside);
+    if aside.exists() {
+        return Err(format!("{} already exists", aside.display()));
+    }
+    std::fs::rename(path, &aside).map_err(|e| e.to_string())?;
+    drop(lock);
+    Ok(aside)
+}
+
 impl DbConnection {
     /// Connect to the SurrealKV store at `path`, creating it (and its parent
     /// directories) when it does not exist.
+    ///
+    /// A store written by SurrealDB 2 (p2a 0.5 and earlier), which kept its
+    /// rows in RocksDB, is refused by SurrealDB 4. When the open fails on a
+    /// directory that holds RocksDB's files (a `CURRENT` file and a
+    /// `MANIFEST-*` file, which is what SurrealDB 4 refuses), the directory
+    /// is renamed to `<path>.surrealdb2-<UTC timestamp>`, with a warning that
+    /// names both paths, and a fresh store is opened at `path`; the old one
+    /// can be exported with SurrealDB 2's `surreal export`. A RocksDB
+    /// directory that a live process holds (RocksDB's lock on its `LOCK`
+    /// file) is left alone, and so is a store that fails to open for any
+    /// other reason: the error is returned.
     pub async fn connect_surrealkv(path: impl AsRef<Path>) -> Result<Self, DbError> {
         let path = path.as_ref();
         tracing::info!("Connecting to SurrealDB SurrealKV at {:?}", path);
@@ -327,9 +372,30 @@ impl DbConnection {
             })?;
         }
 
-        let db = Surreal::new::<SurrealKv>(path)
-            .await
-            .map_err(|e| DbError::Connection(e.to_string()))?;
+        let db = match Surreal::new::<SurrealKv>(path).await {
+            Ok(db) => db,
+            Err(e) if holds_rocksdb_files(path) => {
+                let aside = set_aside_rocksdb_store(path).map_err(|reason| {
+                    DbError::Connection(format!(
+                        "{e}; the store at {} was written by an older release \
+                         (SurrealDB 2, RocksDB) and was not moved aside: {reason}",
+                        path.display()
+                    ))
+                })?;
+                tracing::warn!(
+                    old_store = %aside.display(),
+                    new_store = %path.display(),
+                    "The conversation store was written by an older release (SurrealDB 2, \
+                     RocksDB), which this one cannot read. It was moved aside, and a new, \
+                     empty store was started in its place; export the old one with \
+                     SurrealDB 2's `surreal export`"
+                );
+                Surreal::new::<SurrealKv>(path)
+                    .await
+                    .map_err(|e| DbError::Connection(e.to_string()))?
+            }
+            Err(e) => return Err(DbError::Connection(e.to_string())),
+        };
 
         Self::setup(db).await
     }

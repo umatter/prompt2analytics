@@ -77,6 +77,10 @@ uuid = { version = "1.11", features = ["v4"] }
 # RocksDB engine). The default features add the remote WebSocket client and
 # its TLS stack (protocol-ws, rustls), which nothing here uses.
 surrealdb = { version = "4", default-features = false, features = ["kv-surrealkv", "kv-mem"], optional = true }
+# RocksDB's own directory lock, taken before a store written by SurrealDB 2
+# (RocksDB) is moved aside, so that a store a live older server still holds
+# is left alone (db/connection.rs). surrealkv already compiles it.
+surrealkv-compat-rocksdb = { version = "0.2.3", optional = true }
 
 # JWT authentication (optional)
 jsonwebtoken = { version = "9.3", optional = true }
@@ -117,7 +121,7 @@ http = ["axum", "tower", "tower-http", "tokio-stream", "futures", "async-stream"
 websocket = ["http", "tokio-tungstenite"]
 auth = ["jsonwebtoken"]
 llm = ["async-trait", "reqwest", "futures"]
-db = ["surrealdb"]
+db = ["surrealdb", "surrealkv-compat-rocksdb"]
 full = ["http", "websocket", "auth", "llm", "db", "database"]
 # Embedded feature for desktop/mobile apps - includes everything needed for standalone operation
 embedded = ["http", "llm", "db", "database"]
