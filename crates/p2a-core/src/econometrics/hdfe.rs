@@ -1757,9 +1757,10 @@ mod tests {
     //            The R Journal, 5(2), 104-117.
     // =========================================================================
 
-    /// Test data replicating the felm() documentation example.
+    /// A small two-way panel shaped like the felm() documentation example (DGP
+    /// recovery only; no R value is compared).
     ///
-    /// R code to generate this data and expected values:
+    /// R code that generates the same data:
     /// ```r
     /// library(lfe)
     /// set.seed(42)
@@ -1791,7 +1792,7 @@ mod tests {
     /// here (x1 0.99766, se 0.02834) are not what R gives on this data (fixest:
     /// x1 0.9802154032, se 0.01506135460; x2 0.4826382350, se 0.02363228724;
     /// 13 residual df). An R-pinned version needs its own reference case.
-    fn create_felm_validation_data() -> Dataset {
+    fn create_recovery_panel() -> Dataset {
         let df = df! {
             "x1" => [0.37, -0.56, 0.36, 0.63, 0.40, -0.11, 1.51, -0.09, 2.02, -0.06,
                      1.30, 2.29, -1.39, -0.28, -0.13, 0.64, -0.28, -2.66, 2.40, -0.13],
@@ -1829,14 +1830,13 @@ mod tests {
     }
 
     #[test]
-    fn test_against_felm_coefficients_recovers_dgp() {
-        // DGP recovery on the felm()-style example of
-        // create_felm_validation_data() (no R output is compared).
+    fn test_hdfe_coefficients_recovers_dgp() {
+        // DGP recovery on create_recovery_panel() (no R output is compared).
         //
         // The key validation is that we recover coefficients close to
         // the true DGP values (beta1=1.0, beta2=0.5), which demonstrates
         // that the MAP algorithm correctly removes the fixed effects.
-        let dataset = create_felm_validation_data();
+        let dataset = create_recovery_panel();
 
         let result = run_hdfe(
             &dataset,
@@ -1867,8 +1867,7 @@ mod tests {
             result.coefficients[1]
         );
 
-        // Document actual computed values for reference
-        // These can be compared with R's felm() by running the documented code
+        // The computed values, for reference (not compared with R)
         println!(
             "HDFE Coefficients: x1={:.6}, x2={:.6}",
             result.coefficients[0], result.coefficients[1]
@@ -1877,14 +1876,14 @@ mod tests {
     }
 
     #[test]
-    fn test_against_felm_standard_errors_properties() {
+    fn test_hdfe_standard_errors_properties() {
         // This test validates SE computation and degrees of freedom.
         //
         // For a model with n=20, k=2 regressors, and two FE dimensions
         // (3 id levels + 3 firm levels), the degrees of freedom are:
         //   df_absorbed = 3 + 3 - 1 = 5 (subtract 1 for redundant grand mean)
         //   df_resid = 20 - 2 - 5 = 13
-        let dataset = create_felm_validation_data();
+        let dataset = create_recovery_panel();
 
         let result = run_hdfe(
             &dataset,
@@ -1936,7 +1935,7 @@ mod tests {
             result.t_stats[1]
         );
 
-        // Document actual computed values for comparison with R
+        // The computed values, for reference (not compared with R)
         println!(
             "HDFE Standard Errors: x1={:.6}, x2={:.6}",
             result.std_errors[0], result.std_errors[1]
@@ -1948,11 +1947,11 @@ mod tests {
     }
 
     #[test]
-    fn test_against_felm_r_squared_properties() {
+    fn test_hdfe_r_squared_properties() {
         // DGP check: with coefficients 1.0 and 0.5 and small noise, the within
         // R² (after projecting out the fixed effects) is high. No R value is
         // compared.
-        let dataset = create_felm_validation_data();
+        let dataset = create_recovery_panel();
 
         let result = run_hdfe(
             &dataset,

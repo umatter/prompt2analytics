@@ -73,9 +73,9 @@ feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
   short panel, one- and two-way) and
   `econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_disconnected` (two connected
   components): coefficients, HC0, HC1, HC2 and HC3 SEs and `df_resid`. See "HC2 and HC3".
-- DGP recovery (no R values compared): `econometrics::hdfe::tests::test_against_felm_coefficients_recovers_dgp`,
-  `econometrics::hdfe::tests::test_against_felm_standard_errors_properties`,
-  `econometrics::hdfe::tests::test_against_felm_r_squared_properties`,
+- DGP recovery (no R values compared): `econometrics::hdfe::tests::test_hdfe_coefficients_recovers_dgp`,
+  `econometrics::hdfe::tests::test_hdfe_standard_errors_properties`,
+  `econometrics::hdfe::tests::test_hdfe_r_squared_properties`,
   `econometrics::hdfe::tests::test_single_fe_against_within_estimator_recovers_dgp`,
   `econometrics::hdfe::tests::test_large_panel_coefficient_recovery_recovers_dgp`. They check
   that known coefficients and degrees of freedom are recovered on simulated panels.
