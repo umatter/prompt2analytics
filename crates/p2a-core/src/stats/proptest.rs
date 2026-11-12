@@ -5,8 +5,6 @@
 //!
 //! # References
 //!
-//! - Newcombe, R. G. (1998). Two-sided confidence intervals for the single
-//!   proportion: comparison of seven methods. *Statistics in Medicine*, 17(8), 857-872.
 //! - Wilson, E. B. (1927). Probable inference, the law of succession, and
 //!   statistical inference. *Journal of the American Statistical Association*, 22(158), 209-212.
 //! - R Core Team. `stats::prop.test()` function.
@@ -37,13 +35,18 @@
 //!
 //! ## Confidence Interval
 //!
-//! For one sample, uses Wilson's score interval:
+//! As R's `prop.test`. For one sample, Wilson's score interval, evaluated at p̂ ± Y/n for the
+//! upper and lower bound, with Y = min(0.5, |x - n p₀|) under the continuity correction (0
+//! otherwise):
 //!
 //! ```text
-//! CI = (p̂ + z²/(2n) ± z·√(p̂(1-p̂)/n + z²/(4n²))) / (1 + z²/n)
+//! bound = (p_c + z²/(2n) ± z·√(p_c(1-p_c)/n + z²/(4n²))) / (1 + z²/n),  p_c = p̂ ± Y/n
 //! ```
 //!
-//! For two samples, the CI is for the difference p₁ - p₂.
+//! For two samples, the Wald interval for p₁ - p₂ widened by Y·(1/n₁ + 1/n₂), with
+//! Y = min(0.5, |p̂₁ - p̂₂| / (1/n₁ + 1/n₂)) under the correction. z is
+//! `qnorm((1 + conf_level) / 2)` for a two-sided interval and `qnorm(conf_level)` for a
+//! one-sided one, which keeps the far limit.
 
 use serde::{Deserialize, Serialize};
 
@@ -230,7 +233,7 @@ pub fn prop_test_one(
     let p_value = compute_prop_p_value(chi_sq, 1, alternative, p_hat, p);
 
     // Compute confidence interval using Wilson score method
-    let (ci_lower, ci_upper) = wilson_ci(x, n, conf_level, alternative)?;
+    let (ci_lower, ci_upper) = wilson_ci(x, n, p, conf_level, alternative, correct)?;
 
     let correction_str = if correct {
         "with continuity correction"
@@ -319,7 +322,7 @@ pub fn prop_test_two(
     let p_value = compute_prop_p_value(chi_sq, 1, alternative, p1, p2);
 
     // Confidence interval for difference p1 - p2
-    let (ci_lower, ci_upper) = prop_diff_ci(x1, n1, x2, n2, conf_level, correct)?;
+    let (ci_lower, ci_upper) = prop_diff_ci(x1, n1, x2, n2, conf_level, alternative, correct)?;
 
     let correction_str = if correct {
         "with continuity correction"
@@ -480,53 +483,83 @@ fn compute_prop_p_value(
     }
 }
 
-/// Wilson score confidence interval for a single proportion.
-fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> EconResult<(f64, f64)> {
+/// The normal quantile of a `prop.test` interval: `qnorm((1 + conf_level) / 2)` two-sided,
+/// `qnorm(conf_level)` one-sided.
+fn interval_quantile(conf_level: f64, alternative: Alternative) -> EconResult<f64> {
+    match alternative {
+        Alternative::TwoSided => z_critical(conf_level),
+        Alternative::Greater | Alternative::Less => normal_quantile(conf_level),
+    }
+}
+
+/// `prop.test`'s interval for one proportion: the Wilson score interval, with the continuity
+/// correction `YATES = min(0.5, |x - n p0|)` moving the estimate to `p ± YATES / n` for the
+/// upper and the lower bound when `correct`. A bound whose shifted estimate reaches 1 (upper) or
+/// 0 (lower) is that limit; a one-sided interval keeps the far limit (0 or 1).
+fn wilson_ci(
+    x: u64,
+    n: u64,
+    p0: f64,
+    conf_level: f64,
+    alternative: Alternative,
+    correct: bool,
+) -> EconResult<(f64, f64)> {
     let n_f = n as f64;
-    let p_hat = x as f64 / n_f;
-
-    let z = match alternative {
-        Alternative::TwoSided => z_critical(conf_level)?,
-        Alternative::Greater | Alternative::Less => normal_quantile(conf_level)?,
+    let x_f = x as f64;
+    let est = x_f / n_f;
+    let z = interval_quantile(conf_level, alternative)?;
+    let yates = if correct {
+        0.5_f64.min((x_f - n_f * p0).abs())
+    } else {
+        0.0
     };
-    let z_sq = z * z;
-    let denom = 1.0 + z_sq / n_f;
-    let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-    let margin = z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
-
+    let z22n = z * z / (2.0 * n_f);
+    let bound = |pc: f64, sign: f64| {
+        (pc + z22n + sign * z * (pc * (1.0 - pc) / n_f + z22n / (2.0 * n_f)).sqrt())
+            / (1.0 + 2.0 * z22n)
+    };
+    let pc = est + yates / n_f;
+    let upper = if pc >= 1.0 { 1.0 } else { bound(pc, 1.0) };
+    let pc = est - yates / n_f;
+    let lower = if pc <= 0.0 { 0.0 } else { bound(pc, -1.0) };
     Ok(match alternative {
-        Alternative::TwoSided => ((center - margin).max(0.0), (center + margin).min(1.0)),
-        Alternative::Greater => ((center - margin).max(0.0), 1.0),
-        Alternative::Less => (0.0, (center + margin).min(1.0)),
+        Alternative::TwoSided => (lower.max(0.0), upper.min(1.0)),
+        Alternative::Less => (0.0, upper.min(1.0)),
+        Alternative::Greater => (lower.max(0.0), 1.0),
     })
 }
 
-/// Confidence interval for difference of two proportions (Newcombe-Wilson method).
+/// `prop.test`'s interval for the difference of two proportions: the Wald interval
+/// `DELTA ± (z sqrt(sum p (1 - p) / n) + YATES sum(1 / n))`, with
+/// `YATES = min(0.5, |DELTA| / sum(1 / n))` when `correct`, clipped to [-1, 1]; a one-sided
+/// interval keeps the far limit (-1 or 1).
 fn prop_diff_ci(
     x1: u64,
     n1: u64,
     x2: u64,
     n2: u64,
     conf_level: f64,
-    _correct: bool,
+    alternative: Alternative,
+    correct: bool,
 ) -> EconResult<(f64, f64)> {
     let n1_f = n1 as f64;
     let n2_f = n2 as f64;
     let p1 = x1 as f64 / n1_f;
     let p2 = x2 as f64 / n2_f;
-    let diff = p1 - p2;
-
-    let z = z_critical(conf_level)?;
-
-    // Newcombe-Wilson method using score intervals for each proportion
-    let (l1, u1) = wilson_ci(x1, n1, conf_level, Alternative::TwoSided)?;
-    let (l2, u2) = wilson_ci(x2, n2, conf_level, Alternative::TwoSided)?;
-
-    // Newcombe's method 10 (hybrid score)
-    let lower = diff - z * ((l1 * (1.0 - l1) / n1_f) + (u2 * (1.0 - u2) / n2_f)).sqrt();
-    let upper = diff + z * ((u1 * (1.0 - u1) / n1_f) + (l2 * (1.0 - l2) / n2_f)).sqrt();
-
-    Ok((lower.max(-1.0), upper.min(1.0)))
+    let delta = p1 - p2;
+    let inv_n = 1.0 / n1_f + 1.0 / n2_f;
+    let yates = if correct {
+        0.5_f64.min(delta.abs() / inv_n)
+    } else {
+        0.0
+    };
+    let z = interval_quantile(conf_level, alternative)?;
+    let width = z * (p1 * (1.0 - p1) / n1_f + p2 * (1.0 - p2) / n2_f).sqrt() + yates * inv_n;
+    Ok(match alternative {
+        Alternative::TwoSided => ((delta - width).max(-1.0), (delta + width).min(1.0)),
+        Alternative::Less => (-1.0, (delta + width).min(1.0)),
+        Alternative::Greater => ((delta - width).max(-1.0), 1.0),
+    })
 }
 
 #[cfg(test)]
@@ -593,8 +626,7 @@ mod tests {
         }
     }
 
-    /// STAT-67 (prop.test): statistics and p-values for every alternative, with and without correction; the Wilson CI
-    /// without correction. The corrected and the two-sample CIs are deviations (STAT-63, STAT-59).
+    /// STAT-67 (prop.test): statistics, p-values and intervals for every alternative, with and without correction.
     #[test]
     fn test_validate_prop_test_t3() {
         use p2a_validation::{Check, Tol};
@@ -616,15 +648,16 @@ mod tests {
                     .scalar(&format!("one_{tag}_p"), one.p_value, Tol::p_value(100))
                     .scalar(&format!("two_{tag}_stat"), two.chi_squared, Tol::stat(100))
                     .scalar(&format!("two_{tag}_p"), two.p_value, Tol::p_value(100));
-                if !correct {
-                    c.vector(
-                        &format!("one_{tag}_ci"),
-                        &[one.conf_int_lower, one.conf_int_upper],
-                        Tol::stat(100),
-                    );
-                }
-                // deviation STAT-63: one_cc_*_ci (continuity-corrected Wilson) and two_*_ci (Wald +- Yates);
-                // deviation STAT-59: two-sample one-sided CIs.
+                c.vector(
+                    &format!("one_{tag}_ci"),
+                    &[one.conf_int_lower, one.conf_int_upper],
+                    Tol::stat(100),
+                )
+                .vector(
+                    &format!("two_{tag}_ci"),
+                    &[two.conf_int_lower, two.conf_int_upper],
+                    Tol::stat(100),
+                );
             }
         }
         let one = prop_test_one(x, n, p0, Alternative::TwoSided, 0.95, true).unwrap();
@@ -638,5 +671,57 @@ mod tests {
             .scalar("k_df", k.df as f64, Tol::exact())
             .scalar("k_p", k.p_value, Tol::p_value(300))
             .finish();
+    }
+
+    /// prop.test's intervals where the correction is capped (|x - n p| below 0.5, |DELTA| below
+    /// half of sum(1/n)), at the boundaries 0 and 1, and at the 0.90 level.
+    #[test]
+    fn test_validate_prop_ci_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds) = crate::test_support::load_case("stat_prop_ci_t4");
+        let one: [(&str, u64, u64, f64, f64); 3] = [
+            ("o10", 10, 100, 0.1, 0.95),
+            ("o15", 15, 100, 0.1, 0.90),
+            ("o0", 0, 20, 0.2, 0.95),
+        ];
+        let two: [(&str, [u64; 2], [u64; 2], f64); 4] = [
+            ("t1525", [15, 25], [50, 50], 0.95),
+            ("t3030", [30, 30], [100, 100], 0.95),
+            ("t3031", [30, 31], [100, 100], 0.95),
+            ("t119", [1, 19], [20, 20], 0.90),
+        ];
+        let mut c = Check::new(&case);
+        for correct in [true, false] {
+            for (alt_tag, alt) in [
+                ("two", Alternative::TwoSided),
+                ("less", Alternative::Less),
+                ("greater", Alternative::Greater),
+            ] {
+                let tag = format!("{alt_tag}_{}", if correct { "cc" } else { "nocc" });
+                for (nm, x, n, p0, lv) in one {
+                    let r = prop_test_one(x, n, p0, alt, lv, correct).unwrap();
+                    let nn = n as usize;
+                    c.scalar(&format!("{nm}_{tag}_stat"), r.chi_squared, Tol::stat(nn))
+                        .scalar(&format!("{nm}_{tag}_p"), r.p_value, Tol::p_value(nn))
+                        .vector(
+                            &format!("{nm}_{tag}_ci"),
+                            &[r.conf_int_lower, r.conf_int_upper],
+                            Tol::stat(nn),
+                        );
+                }
+                for (nm, x, n, lv) in two {
+                    let r = prop_test_two(x[0], n[0], x[1], n[1], alt, lv, correct).unwrap();
+                    let nn = (n[0] + n[1]) as usize;
+                    c.scalar(&format!("{nm}_{tag}_stat"), r.chi_squared, Tol::stat(nn))
+                        .scalar(&format!("{nm}_{tag}_p"), r.p_value, Tol::p_value(nn))
+                        .vector(
+                            &format!("{nm}_{tag}_ci"),
+                            &[r.conf_int_lower, r.conf_int_upper],
+                            Tol::stat(nn),
+                        );
+                }
+            }
+        }
+        c.finish();
     }
 }
