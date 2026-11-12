@@ -679,12 +679,19 @@ mod tails {
         let z = -normal_quantile(q).abs();
         let tail = |u: f64| t_ln_lower_tail(exp_or_inf(u), u, df);
         let dens = |u: f64| t_ln_pdf(exp_or_inf(u), u, df);
+        let cf = cornish_fisher_t(z, df);
+        // Away from the far tail and from df < 3 the Cornish-Fisher value is close to the
+        // root, so Newton starts from it without comparing the other starts (each comparison
+        // costs a full incomplete-beta tail). The stopping rule is the same, so is the root.
+        if cf.is_finite() && cf < 0.0 && q >= 1e-8 && df >= 3.0 {
+            let u = solve_log_tail((-cf).ln(), None, lq, tail, dens, false)?;
+            return Ok(-exp_or_inf(u));
+        }
         let mut starts = [
             (LN_HALF + ln_gamma(a + 0.5) - ln_gamma(a + 1.0) - LN_SQRT_PI + a * df.ln() - lq) / df,
             (-z).ln(),
             f64::NAN,
         ];
-        let cf = cornish_fisher_t(z, df);
         let n_starts = if cf.is_finite() && cf < 0.0 {
             starts[2] = (-cf).ln();
             3
@@ -904,6 +911,30 @@ pub fn logistic_pdf(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `t_quantile` inverts the t tail: on a grid of probabilities and degrees of freedom,
+    /// the lower tail at -|q| equals min(p, 1 - p) to a relative 1e-12 (the lower tail of
+    /// a positive quantile's mirror image, so p > 1/2 is checked through 1 - p).
+    #[test]
+    fn test_t_quantile_inverts_the_tail_on_a_grid() {
+        let ps = [
+            1e-12, 1e-8, 1e-4, 0.01, 0.025, 0.1, 0.4, 0.6, 0.9, 0.975, 0.995, 0.9999,
+        ];
+        let dfs = [0.5, 1.0, 2.5, 3.0, 10.0, 30.0, 99.0, 500.0, 999.0, 5000.0];
+        let mut worst = (0.0_f64, 0.0, 0.0);
+        for &p in &ps {
+            for &df in &dfs {
+                let q = t_quantile(p, df).unwrap();
+                let ax = q.abs();
+                let lt = tails::t_ln_lower_tail(ax, ax.ln(), df).unwrap().exp();
+                let rel = (lt / p.min(1.0 - p) - 1.0).abs();
+                if rel > worst.0 {
+                    worst = (rel, p, df);
+                }
+            }
+        }
+        assert!(worst.0 <= 1e-12, "worst {worst:?}");
+    }
 
     #[test]
     fn test_significance_level() {
