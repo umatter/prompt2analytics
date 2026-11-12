@@ -315,7 +315,8 @@ pub struct GFormulaConfig {
     /// Number of Monte Carlo simulations (at least 1; a count whose outcome buffer
     /// cannot be allocated is refused with `EconError::ResourceLimit`)
     pub n_simulations: usize,
-    /// Number of time points in the analysis
+    /// Number of time points in the analysis: 0 (the default) takes it from the data; any
+    /// other value must equal the data's number of periods (a check, not a truncation)
     pub time_points: usize,
     /// Intervention to evaluate
     pub intervention: GFormulaIntervention,
@@ -339,7 +340,7 @@ impl Default for GFormulaConfig {
     fn default() -> Self {
         Self {
             n_simulations: 1000,
-            time_points: 2,
+            time_points: 0,
             intervention: GFormulaIntervention::Static { treat_all: true },
             outcome_type: GFormulaOutcomeType::Binary,
             n_bootstrap: 200,
@@ -1187,11 +1188,12 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     let risk_intervention = est.intervention.mean;
 
     let risk_difference = risk_intervention - risk_natural;
-    let risk_ratio = if risk_natural > 0.0 {
-        risk_intervention / risk_natural
-    } else {
-        f64::INFINITY
-    };
+    let risk_ratio = risk_ratio(
+        risk_natural,
+        risk_intervention,
+        config.outcome_type == GFormulaOutcomeType::Continuous,
+        &mut warnings,
+    );
 
     let odds_ratio = if risk_natural > 0.0
         && risk_natural < 1.0
@@ -1398,7 +1400,16 @@ fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<(
             message: "Data must have at least one time point".to_string(),
         });
     }
-    // A literal bypasses the constructors: re-check the shapes (cheap) and the subject count.
+    if config.time_points != 0 && config.time_points != data.n_time_points() {
+        return Err(spec_err(format!(
+            "time_points must equal the data's number of periods ({}) or be 0 (from the \
+             data); got {}",
+            data.n_time_points(),
+            config.time_points
+        )));
+    }
+    // A literal bypasses the constructors: re-check the shapes (cheap), the subject count and,
+    // once the names and follow-up times are checked, the cells.
     check_shapes(
         &data.baseline_covariates,
         &data.time_varying_covariates,
@@ -1437,6 +1448,7 @@ fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<(
             )));
         }
     }
+    check_cells(data)?;
     match (config.outcome_type, data.is_survival()) {
         (GFormulaOutcomeType::Survival, false) => {
             return Err(spec_err(
@@ -1452,6 +1464,16 @@ fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<(
                  outcome_type survival"
                     .into(),
             ));
+        }
+        (GFormulaOutcomeType::Binary, false) => {
+            if let Some(i) = data.outcome.iter().position(|v| *v != 0.0 && *v != 1.0) {
+                return Err(spec_err(format!(
+                    "outcome_type binary needs an outcome coded 0 or 1; row {} has {} (use \
+                     outcome_type continuous for other values)",
+                    i + 1,
+                    data.outcome[i]
+                )));
+            }
         }
         _ => {}
     }
@@ -1999,9 +2021,10 @@ fn simulate(
         let mut surv_prob = 1.0;
         hist.clear();
         for t in 0..t_max {
+            // every covariate model of period t reads the same row
+            cov_row(&mut buf, t, &b, &l_prev, a_prev);
             for j in 0..n_tv {
                 let m = &models.covariates[t][j];
-                cov_row(&mut buf, t, &b, &l_prev, a_prev);
                 let lp = m.eta(&buf);
                 l_cur[j] = if m.binary {
                     let u: f64 = rng.gen_range(0.0..1.0);
@@ -2237,6 +2260,32 @@ fn rd_inference(rd: f64, draws: &[f64], level: f64) -> EconResult<RdInference> {
 
 /// Log-normal interval `exp(ln rr -/+ z se)` with the exact normal quantile; `NaN`s when
 /// `rr <= 0` or the SE is not finite.
+/// `intervention / natural`, or NaN with a note when the ratio is undefined: a continuous
+/// outcome with a non-positive mean, or a natural-course risk of 0 (0 / 0 is NaN; a positive
+/// risk over 0 is Inf, also with the note).
+fn risk_ratio(natural: f64, intervention: f64, continuous: bool, notes: &mut Vec<String>) -> f64 {
+    if continuous && (natural <= 0.0 || intervention <= 0.0) {
+        notes.push(format!(
+            "Risk ratio undefined: a ratio of means needs positive means (natural course \
+             {natural:.6}, intervention {intervention:.6}); reported as NaN"
+        ));
+        return f64::NAN;
+    }
+    if natural > 0.0 {
+        return intervention / natural;
+    }
+    let rr = if intervention > 0.0 {
+        f64::INFINITY
+    } else {
+        f64::NAN
+    };
+    notes.push(format!(
+        "Risk ratio undefined: the natural-course risk is 0 (intervention risk \
+         {intervention:.6}); reported as {rr}"
+    ));
+    rr
+}
+
 fn rr_interval(rr: f64, se_log_rr: f64, level: f64) -> EconResult<(f64, f64)> {
     let z = z_critical(level)?;
     if rr.is_nan() || rr <= 0.0 || !se_log_rr.is_finite() {
@@ -2445,6 +2494,71 @@ mod tests {
         for n in needles {
             assert!(msg.contains(n), "message {msg:?} lacks {n:?}");
         }
+    }
+
+    #[test]
+    fn test_gformula_literal_data_cells_are_checked() {
+        // A struct literal bypasses the constructor's cell check; run_gformula repeats it.
+        let mut data = create_test_data();
+        data.time_varying_covariates[1][[4, 0]] = f64::NAN;
+        let err = run_gformula(&data, base_config()).unwrap_err();
+        expect_invalid(err, &["time-varying covariate 1 (L1)", "row 5", "period 2"]);
+        let mut data = create_test_data();
+        data.treatments[0][2] = 0.5;
+        let err = run_gformula(&data, base_config()).unwrap_err();
+        expect_invalid(err, &["period 1", "0 or 1"]);
+    }
+
+    #[test]
+    fn test_gformula_binary_outcome_must_be_0_or_1() {
+        let data = create_test_data();
+        let mut cfg = base_config();
+        cfg.outcome_type = GFormulaOutcomeType::Binary;
+        let err = run_gformula(&data, cfg).unwrap_err();
+        expect_invalid(err, &["outcome_type binary", "0 or 1", "continuous"]);
+    }
+
+    #[test]
+    fn test_gformula_time_points_is_checked() {
+        let data = create_test_data();
+        let mut cfg = base_config();
+        cfg.time_points = 3;
+        let err = run_gformula(&data, cfg).unwrap_err();
+        expect_invalid(err, &["time_points", "(2)", "got 3"]);
+        for tp in [0, 2] {
+            let mut cfg = base_config();
+            cfg.time_points = tp;
+            assert_eq!(run_gformula(&data, cfg).unwrap().n_time_points, 2);
+        }
+    }
+
+    #[test]
+    fn test_gformula_undefined_risk_ratio_is_nan_with_a_note() {
+        // a continuous outcome with negative means: no ratio of means
+        let mut data = create_test_data();
+        data.outcome.mapv_inplace(|v| v - 5.0);
+        let r = run_gformula(&data, base_config()).unwrap();
+        assert!(r.risk_ratio.is_nan(), "{}", r.risk_ratio);
+        assert!(r.ci_lower_rr.is_nan() && r.ci_upper_rr.is_nan());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("Risk ratio undefined")),
+            "{:?}",
+            r.warnings
+        );
+        // a natural-course risk of 0: 0 / 0 is NaN, a positive risk over 0 is Inf, both noted
+        let mut notes = Vec::new();
+        assert!(risk_ratio(0.0, 0.0, false, &mut notes).is_nan());
+        assert_eq!(risk_ratio(0.0, 0.2, false, &mut notes), f64::INFINITY);
+        assert_eq!(risk_ratio(0.4, 0.2, false, &mut notes), 0.5);
+        assert!(risk_ratio(2.0, -1.0, true, &mut notes).is_nan());
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes[0].contains("natural-course risk is 0") && notes[1].contains("inf"));
+        // a positive continuous outcome keeps its ratio and adds no note
+        let r = run_gformula(&create_test_data(), base_config()).unwrap();
+        assert!(r.risk_ratio.is_finite() && r.risk_ratio > 0.0);
+        assert!(!r.warnings.iter().any(|w| w.contains("Risk ratio")));
     }
 
     #[test]
