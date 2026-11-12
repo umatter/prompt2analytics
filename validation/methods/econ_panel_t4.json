@@ -62,7 +62,9 @@
       "reference": "sandwich::vcovHC(lm(y ~ x + factor(fe1) [+ factor(fe2)]), type = 'HC0' | 'HC1' | 'HC2' | 'HC3')",
       "doc": "validation/econometrics/hdfe.md",
       "cases": [
-        "hdfe_hc_leverage"
+        "hdfe_hc_leverage",
+        "panel_hdfe_grunfeld",
+        "hdfe_disconnected"
       ],
       "tests": [
         "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_grunfeld",

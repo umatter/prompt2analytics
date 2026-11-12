@@ -1292,9 +1292,9 @@ mod tests {
 
     /// One model of pggls_unbalanced against its R pins (coefficients, SEs, z, p, df,
     /// RSS, R-squared, observations).
-    fn check_unbalanced(model: PanelGlsModel, prefix: &str) -> PanelGlsResult {
+    fn check_unbalanced(case_id: &str, model: PanelGlsModel, prefix: &str) -> PanelGlsResult {
         use p2a_validation::{Check, Tol};
-        let (case, ds) = crate::test_support::load_case("pggls_unbalanced");
+        let (case, ds) = crate::test_support::load_case(case_id);
         let r = run_panel_gls(&ds, "y", &["x1", "x2"], "id", "t", Some(model)).unwrap();
         let key = |s: &str| format!("{prefix}_{s}");
         Check::new(&case)
@@ -1315,7 +1315,7 @@ mod tests {
     /// the inverse of its own observed-period block of Omega.
     #[test]
     fn test_validate_pggls_unbalanced_pooling() {
-        let r = check_unbalanced(PanelGlsModel::Pooling, "pooling");
+        let r = check_unbalanced("pggls_unbalanced", PanelGlsModel::Pooling, "pooling");
         assert!(
             !r.warnings
                 .iter()
@@ -1329,7 +1329,7 @@ mod tests {
     /// differenced row takes the period of its later row.
     #[test]
     fn test_validate_pggls_unbalanced_fd() {
-        let r = check_unbalanced(PanelGlsModel::FirstDifference, "fd");
+        let r = check_unbalanced("pggls_unbalanced", PanelGlsModel::FirstDifference, "fd");
         assert_eq!(r.error_cov_dim, 5);
     }
 
@@ -1337,7 +1337,7 @@ mod tests {
     /// indefinite, and the generalized Cholesky drops the non-positive pivots.
     #[test]
     fn test_validate_pggls_unbalanced_within() {
-        let r = check_unbalanced(PanelGlsModel::FixedEffects, "within");
+        let r = check_unbalanced("pggls_unbalanced", PanelGlsModel::FixedEffects, "within");
         assert!(
             r.warnings.iter().any(|w| w.starts_with(
                 "panel GLS: the error covariance averaged over the entities observed in each \

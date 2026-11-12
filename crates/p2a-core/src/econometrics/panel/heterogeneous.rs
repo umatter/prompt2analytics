@@ -887,7 +887,15 @@ mod tests {
     /// keys in byte order and the entity count alone.
     #[test]
     fn test_pvcm_display_without_entities_field() {
-        let (_case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        // 12 entities (ids 1-12) of 8 noisy rows
+        let n = 96;
+        let id: Vec<i64> = (0..n).map(|i| (i / 8 + 1) as i64).collect();
+        let x1: Vec<f64> = (0..n).map(|i| ((i * 37) % 23) as f64 / 7.0).collect();
+        let x2: Vec<f64> = (0..n).map(|i| ((i * 53) % 19) as f64 / 5.0 - 1.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.8 * x1[i] - 0.3 * x2[i] + ((i * 7919) % 101) as f64 / 120.0)
+            .collect();
+        let ds = Dataset::new(polars::df! {"id" => id, "x1" => x1, "x2" => x2, "y" => y}.unwrap());
         let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Within).unwrap();
         let mut json = serde_json::to_value(&r).unwrap();
         let obj = json.as_object_mut().unwrap();
