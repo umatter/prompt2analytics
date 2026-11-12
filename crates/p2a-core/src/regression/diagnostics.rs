@@ -1115,6 +1115,9 @@ fn first_principal_component(
     let means: Vec<f64> = (0..p).map(|j| z.column(j).sum() / n as f64).collect();
     let mut cov = Array2::<f64>::zeros((p, p));
     for i in 0..n {
+        if i % 256 == 0 {
+            resource::checkpoint()?;
+        }
         for a in 0..p {
             let da = z[[i, a]] - means[a];
             for b in a..p {
@@ -2485,6 +2488,22 @@ mod tests {
         let text = d.to_string();
         assert!(text.contains("Durbin-Watson Statistic"), "{text}");
         assert!(!text.contains("Durbin-Watson Test"), "{text}");
+    }
+
+    /// The covariance loop over the rows checks the budget (`eig_symmetric` has none).
+    #[test]
+    fn test_first_principal_component_checks_the_budget() {
+        let cancelled = || {
+            let t = resource::CancelToken::new();
+            t.cancel();
+            resource::Budget::new(None, t)
+        };
+        let z = Array2::from_shape_fn((300, 3), |(i, j)| {
+            ((i * 7 + j * 3) % 11) as f64 + 0.1 * (i as f64).sin()
+        });
+        let e =
+            resource::with_budget(cancelled(), || first_principal_component(z.view())).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     #[test]
