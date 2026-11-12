@@ -486,7 +486,7 @@ pub fn run_random_effects_with(
         });
     }
     let sigma2_nu = within.rss(&y_w)? / (n - n_groups - k_w) as f64;
-    if !(sigma2_nu > 0.0) {
+    if sigma2_nu.is_nan() || sigma2_nu <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "'{y_col}' has no residual variation within entities (sigma_e^2 = 0), so the \
