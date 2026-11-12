@@ -625,11 +625,11 @@ async fn concurrent_deletes_release_a_conversations_bytes_once() {
     assert_eq!(db.store_turns_in_use(), 0);
 }
 
-/// Without the byte budget, on RocksDB (which fails one of two conflicting
+/// Without the byte budget, on SurrealKV (which fails one of two conflicting
 /// transactions): two parallel deletes of one conversation take turns, so
 /// the second finds nothing instead of failing on a write conflict.
 #[tokio::test(flavor = "multi_thread")]
-async fn parallel_deletes_on_rocksdb_do_not_conflict() {
+async fn parallel_deletes_on_surrealkv_do_not_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let db = DbConnection::connect_surrealkv(dir.path().join("db"))
         .await
@@ -1267,7 +1267,7 @@ async fn the_message_cap_counts_the_stored_messages() {
 }
 
 /// An add refused at the message cap brings the conversation's stored
-/// `message_count` in step with its rows, in memory and on RocksDB. The add
+/// `message_count` in step with its rows, in memory and on SurrealKV. The add
 /// that reached the cap can store its row and then fail its counter update
 /// (here the store refuses the conversation row's update; a process that
 /// stops between the two statements does the same), and every add after it
@@ -1365,14 +1365,14 @@ async fn assert_conversation_whole(db: &DbConnection, id: &str) {
 enum Engine {
     /// In memory.
     Memory,
-    /// RocksDB, whose rollback is an optimistic transaction's cancel.
+    /// SurrealKV, whose rollback is an optimistic transaction's cancel.
     SurrealKv,
 }
 
 /// The engines the rollback tests run on.
 const ENGINES: [Engine; 2] = [Engine::Memory, Engine::SurrealKv];
 
-/// A store on `engine` (RocksDB in `dir`) with `limits`.
+/// A store on `engine` (SurrealKV in `dir`) with `limits`.
 async fn engine_db(
     engine: Engine,
     dir: &std::path::Path,
@@ -1565,7 +1565,7 @@ async fn a_transactions_failed_statement_is_found_behind_not_executed() {
 /// A clear is one transaction. When its last step, the counter reset, fails
 /// (standing in for the process stopping between the row deletes and the
 /// reset), the rows are not deleted either, with and without the byte
-/// budget, in memory and on RocksDB: before, the messages went and
+/// budget, in memory and on SurrealKV: before, the messages went and
 /// `message_count` kept the old count. The error is the failed statement's.
 #[tokio::test]
 async fn a_clear_that_stops_part_way_deletes_nothing() {
@@ -1603,7 +1603,7 @@ async fn a_clear_that_stops_part_way_deletes_nothing() {
 
 /// A conversation delete is one transaction. When its last step, deleting
 /// the conversation row, fails, its messages and tool calls are not deleted
-/// either, in memory and on RocksDB: before, they went and the conversation
+/// either, in memory and on SurrealKV: before, they went and the conversation
 /// stayed listed with its old `message_count`. The error is the failed
 /// statement's.
 #[tokio::test]
@@ -1811,7 +1811,7 @@ async fn a_dropped_clear_or_delete_leaves_the_count_in_step() {
 /// A clear or delete sent again at once after its first call was dropped
 /// (a client that disconnects and retries) waits for the first one, which
 /// keeps the conversation's turn until the store has finished, and then
-/// finds nothing: on RocksDB, which fails one of two conflicting
+/// finds nothing: on SurrealKV, which fails one of two conflicting
 /// transactions, it does not fail on a write conflict. Before, the turn
 /// ended with the dropped caller, the retry ran alongside the transaction
 /// still in the store, and one of them failed.
@@ -2034,7 +2034,7 @@ async fn only_tool_call(db: &DbConnection, id: &str) -> ToolCall {
 /// A tool-call write sent while a clear of its conversation runs in the
 /// store (a chat stream finishing a tool call while its client clears the
 /// conversation) waits for the clear's turn and then finds the row gone
-/// (`NotFound`, and nothing counted against the byte budget): on RocksDB,
+/// (`NotFound`, and nothing counted against the byte budget): on SurrealKV,
 /// which fails one of two conflicting transactions, the clear does not
 /// fail. Before, the tool-call writes took no turn, the write committed on
 /// a row the clear's transaction had deleted, and the clear failed whole on
@@ -2090,7 +2090,7 @@ async fn a_tool_call_write_during_a_clear_waits_for_it() {
 /// A tool-call write holds its conversation's turn until the store has
 /// written it, also when its caller is dropped part way (a chat stream
 /// whose client disconnects): a clear sent meanwhile waits for it, and both
-/// succeed on RocksDB, with the byte counter in step with the store. Before,
+/// succeed on SurrealKV, with the byte counter in step with the store. Before,
 /// the write took no turn, and the clear's transaction, which then ran
 /// alongside it, failed on a write conflict when it committed.
 #[tokio::test(flavor = "multi_thread")]
@@ -2289,7 +2289,7 @@ async fn a_tool_call_update_keeps_its_message() {
 /// keeps its turn until the store has written the row and, for a message,
 /// the conversation's `message_count`: the same call sent at once after it,
 /// one row below the cap, counts the dropped call's row and is refused, in
-/// memory and on RocksDB. Before, the turn ended with the dropped caller,
+/// memory and on SurrealKV. Before, the turn ended with the dropped caller,
 /// the next call counted the rows before the dropped call's row was
 /// committed, and both got in, one past the cap (and the dropped add's
 /// `message_count` update never ran).
@@ -2370,7 +2370,7 @@ enum RowWrite {
 /// A title change, an archive or a content update whose caller is dropped
 /// while the store writes it keeps the conversation's turn until the store
 /// is done: a clear sent at once after it waits for it and succeeds on
-/// RocksDB, the write lands, and the byte counter stays in step with the
+/// SurrealKV, the write lands, and the byte counter stays in step with the
 /// store. Before, the turn ended with the dropped caller, and the clear's
 /// transaction ran alongside the write still in the store and failed on a
 /// write conflict when it committed.
