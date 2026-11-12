@@ -169,24 +169,14 @@
         "individual coefficients and SEs (12 entities)",
         "Swamy coefficients and SEs",
         "Delta diagonal",
-        "mean-group coefficients",
+        "mean-group coefficients and SEs",
+        "homogeneity chi-square and df (random)",
         "n",
         "skipped-entity warnings (property)",
         "entity order of the text output (property)"
       ],
       "tolerance": "validation/README.md, n = 240: coefficients 1e-8, SE and statistics 1e-6 relative",
-      "deviations": [
-        {
-          "finding": "ECON-34",
-          "quantity": "mg_se",
-          "note": "p2a reports the cross-entity standard deviation with the 1/N variance, not pmg's standard error sd/sqrt(N) with 1/(N - 1)"
-        },
-        {
-          "finding": "ECON-35",
-          "quantity": "random_chisq",
-          "note": "the homogeneity test is centred on the unweighted mean of the b_i, not on plm's weighted estimate; a non-positive-definite Delta is clamped on its diagonal only"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

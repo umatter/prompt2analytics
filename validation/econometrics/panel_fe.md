@@ -232,9 +232,8 @@ HDFE uses the 193 rows complete in every column.
 | n used, entities | 195, 10 |
 | mean group (`plm::pmg(model = "mg")`) coef (Intercept), value, capital | -20.012397699749485, 0.089450800955623466, 0.20409095049720219 |
 
-The mean-group standard errors (`mg_se`) are not compared: p2a reports the cross-entity
-standard deviation of the per-entity coefficients, not its standard error (registry
-deviation ECON-34, Tier 4).
+The mean-group standard errors (`mg_se`, the standard error of the mean of the per-entity
+coefficients) are pinned too.
 
 Tests (registered as `panel_missing_values` in `validation/methods/econ_iv_panel_na.json`):
 `econometrics::panel::linear_models::tests::test_validate_panel_fe_re_grunfeld_na` (FE and

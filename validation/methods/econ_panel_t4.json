@@ -29,6 +29,31 @@
       "tolerance": "validation/README.md, n = 212: coefficients 1e-8, SE and statistics 1e-6 relative, p-values Tol::p_value; counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "panel_pvcm_swamy_non_psd",
+      "name": "Swamy random coefficients when D1 - D2 is not positive semidefinite (D1 fallback); mean-group SEs and z tests",
+      "category": "econometrics",
+      "reference": "plm::pvcm(model = 'random'); plm::pmg(model = 'mg')",
+      "doc": "validation/econometrics/pvcm.md",
+      "cases": [
+        "pvcm_swamy_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_random_grunfeld_non_psd_delta",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld"
+      ],
+      "quantities": [
+        "Swamy coefficients, SEs, z, p",
+        "Delta diagonal (D1)",
+        "homogeneity chi-square, df",
+        "mean-group coefficients, SEs, z, p",
+        "n, N",
+        "D1 fallback warning (property)"
+      ],
+      "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE, z, Delta and statistics 1e-6 relative, p-values Tol::p_value; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -11,17 +11,26 @@ OLS regression per entity, `y_it = X_it b_i + e_it`, and combine the entity esti
 - **Random** (`PvcmType::Random`, Swamy 1970, R `pvcm(model = "random")`): with
   `Delta = (1/(N-1)) sum (b_i - b_bar)(b_i - b_bar)' - (1/N) sum Var(b_i)`, the GLS
   estimate `b = (sum W_i)^-1 sum W_i b_i`, `W_i = (Var(b_i) + Delta)^-1`, and its variance
-  `(sum W_i)^-1`.
+  `(sum W_i)^-1`. When `D1 - D2` (the two terms of Delta) has a negative eigenvalue, Delta
+  is `D1`, as plm, with a warning.
 - **Mean group** (`run_pmg`, Pesaran and Smith 1995, R `pmg(model = "mg")`): the unweighted
-  mean of the `b_i`.
+  mean of the `b_i`, with the standard error of that mean,
+  `sqrt(sum (b_i - b_bar)^2 / (N (N - 1)))` over the N entities fitted.
+- **Homogeneity test** (both models, plm's `chisq.test`):
+  `sum (b_i - b*)' Var(b_i)^-1 (b_i - b*)` with `b*` the estimate weighted by the
+  `Var(b_i)^-1`, on `k (N - 1)` degrees of freedom.
+- **Inference**: z statistics with normal p-values, as `summary.pvcm` and `summary.pmg`.
+  `PvcmResult` reports the number of entities fitted (`n_entities_used`) next to all entity
+  levels (`n_entities`), and the text shows "No. Entities: 12 (11 used)" when they differ.
 
 Entities are fitted in R `factor()` order of the ids (numbers numerically, text in byte
 order), so the Swamy sums are deterministic.
 
-**Status**: R-pinned with known deviations (method `panel_pvcm_pmg` in
-`validation/methods/econ_panel_t3.json`): the individual coefficients and SEs, the Swamy
-coefficients, SEs and the diagonal of Delta, and the mean-group coefficients. Not pinned: the
-mean-group SE (ECON-34) and the homogeneity test (ECON-35), Tier 4.
+**Status**: R-pinned (methods `panel_pvcm_pmg` in `validation/methods/econ_panel_t3.json`
+and `panel_pvcm_swamy_non_psd` in `validation/methods/econ_panel_t4.json`): the individual
+coefficients and SEs, the Swamy coefficients, SEs, z, p-values and the diagonal of Delta
+(positive-definite and D1 fallback), the homogeneity chi-square, and the mean-group
+coefficients, SEs, z and p-values.
 
 ## Entities that cannot be estimated
 
@@ -54,16 +63,30 @@ pmg(y ~ x1 + x2, data = pd, model = "mg")
 | random: coefficients | 0.6795444326, 0.5815089351, -0.4981040760 |
 | random: SE | 0.4418901474, 0.1564522983, 0.08254980597 |
 | random: Delta diagonal | 2.282425182, 0.2799281991, 0.06846336377 |
-| random: homogeneity chi2 (df 33), not pinned | 3385.234629 |
+| random: homogeneity chi2 (df 33) | 3385.234629 |
 | mg: coefficients | 0.6755447018, 0.5829283539, -0.4969613022 |
-| mg: SE, not pinned | 0.4420557664, 0.1565954001, 0.08313141715 |
+| mg: SE | 0.4420557664, 0.1565954001, 0.08313141715 |
 
 The case file holds the coefficients and SEs of all twelve entities, and the full Delta
 (off-diagonals -0.1129477848, -0.06503953957, 0.06155671950).
 
-p2a's Swamy estimator reproduces `pvcm(model = "random")` when Delta is positive definite,
-as here. When the estimated Delta is not positive definite, p2a clamps only its diagonal at
-0, so the two can differ (ECON-35).
+## Delta not positive semidefinite (D1 fallback)
+
+Case `pvcm_swamy_grunfeld` (`validation/r/cases/econ_panel_t4.R`; Grunfeld, N = 10, T = 20,
+`inv ~ value + capital`): the eigenvalues of `D1 - D2` are 0.0334, 0.00163 and -1120.48, so
+plm uses `Delta = D1` (the case checks `r$Delta == D1`). p2a does the same and warns
+"Swamy: Delta = D1 - D2 is not positive semidefinite (smallest eigenvalue -1.120478e3); D1 is
+used, as plm". Before, p2a clamped the diagonal of `D1 - D2` at 0, which left the weights
+indefinite and an intercept SE of 0.
+
+| Quantity ((Intercept), value, capital) | R |
+|---|---|
+| random: coefficients | -9.629285137, 0.08458733660, 0.1994184033 |
+| random: SE | 17.03503951, 0.01995590534, 0.05265335866 |
+| random: Delta diagonal (D1) | 2344.244022, 0.003118178809, 0.02448242482 |
+| homogeneity chi2 (df 27) | 901.4302336 |
+| mg: coefficients | -21.36757126, 0.09128511040, 0.2052635409 |
+| mg: SE | 15.31092428, 0.01765836575, 0.04947971788 |
 
 ## Tests
 
@@ -72,18 +95,27 @@ Registered (method `panel_pvcm_pmg`):
 - `econometrics::panel::heterogeneous::tests::test_validate_pvcm_within_sim`: every
   entity's coefficients (`within_coef_<i>`) and SEs (`within_se_<i>`), and n;
 - `econometrics::panel::heterogeneous::tests::test_validate_pvcm_random_sim`: the Swamy
-  coefficients, SEs and Delta diagonal;
+  coefficients, SEs and Delta diagonal, and the homogeneity chi-square and its df;
 - `econometrics::panel::heterogeneous::tests::test_validate_pmg_sim`: the mean-group
-  coefficients and n;
+  coefficients and SEs, and n;
 - `econometrics::panel::heterogeneous::tests::test_validate_pvcm_skips_collinear_entity_with_warning`:
   on the case data with entity 3's `x2` set to `2 * x1`, the within fit has 11 entities and
-  the collinear warning; with entity 12 cut to 3 rows, the short-entity warning (no R value
-  compared).
+  the collinear warning, 12 entities of which 11 used, and the mean-group SE over the 11;
+  with entity 12 cut to 3 rows, the short-entity warning (no R value compared).
+
+Registered (method `panel_pvcm_swamy_non_psd`):
+
+- `econometrics::panel::heterogeneous::tests::test_validate_pvcm_random_grunfeld_non_psd_delta`:
+  the Swamy coefficients, SEs, z, p-values, Delta diagonal, homogeneity chi-square and df on
+  Grunfeld, and the D1 warning;
+- `econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld`: the mean-group
+  coefficients, SEs, z and p-values, and the homogeneity chi-square (it does not depend on
+  Delta).
 
 The tests of Tier 2's missing-value case `panel_grunfeld_na`
 (`econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld_na`,
 `econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree`)
-pin the mean-group coefficients on Grunfeld with missing cells and check that text and
+pin the mean-group coefficients and SEs on Grunfeld with missing cells and check that text and
 numeric ids agree. With the numeric id the output's last line is then "Missing values: 5
 of 200 rows dropped because of missing values (inv: 2, value: 1, firm_id: 2)".
 
@@ -95,13 +127,10 @@ at tolerances up to 30, were deleted in Tier 3.
 `validation/README.md`, n = 240: coefficients 1e-8 relative, SE and statistics 1e-6
 relative; n exact.
 
-## Known differences (registry deviations)
+## Known differences
 
-- **Mean-group SE (ECON-34).** p2a reports the cross-entity standard deviation of the `b_i`
-  with the 1/N variance (1.466133, 0.5193682, 0.2757157 here, from an R replica of p2a's
-  algorithm); pmg reports the standard error `sd / sqrt(N)` with the 1/(N - 1) variance.
-- **Homogeneity test (ECON-35).** p2a centres the test on the unweighted mean of the `b_i`
-  (3492.654 here) where plm uses its weighted estimate (3385.234629).
+- The CLI and MCP tables still print `t` headers over the z statistics (to be relabelled
+  there).
 
 ## References
 
