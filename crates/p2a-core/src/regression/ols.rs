@@ -1861,6 +1861,12 @@ pub struct ClusteredOptions {
 /// indefinite: the caller withholds the Wald F, which the warning says.
 fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
     let sym = (&*vcov + &vcov.t()) * 0.5;
+    // A Cholesky factorisation with positive pivots shows the covariance is positive
+    // definite, so without `fix` the eigenvalues are not needed (they are with `fix`, which
+    // also rebuilds a covariance whose negative eigenvalues are at rounding level)
+    if !fix && positive_definite_by_cholesky(&sym) {
+        return Ok(None);
+    }
     let (values, vectors) = eig_symmetric(&sym.view()).map_err(|e| {
         EconError::Computation(format!(
             "eigen-decomposition of the two-way clustered covariance failed: {e}"
@@ -1891,6 +1897,32 @@ fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<Stri
              eigenvalue {min:.6e}); negative eigenvalues clamped to 0 (sandwich::vcovCL(fix = TRUE))"
         )
     }))
+}
+
+/// `true` when the Cholesky factorisation of the symmetric `m` (its lower triangle) runs to
+/// the end with finite, positive pivots, i.e. `m` is numerically positive definite.
+fn positive_definite_by_cholesky(m: &Array2<f64>) -> bool {
+    let k = m.nrows();
+    let mut l = vec![0.0_f64; k * k];
+    for j in 0..k {
+        let mut d = m[[j, j]];
+        for p in 0..j {
+            d -= l[j * k + p] * l[j * k + p];
+        }
+        if !(d > 0.0 && d.is_finite()) {
+            return false;
+        }
+        let djj = d.sqrt();
+        l[j * k + j] = djj;
+        for i in j + 1..k {
+            let mut v = m[[i, j]];
+            for p in 0..j {
+                v -= l[i * k + p] * l[j * k + p];
+            }
+            l[i * k + j] = v / djj;
+        }
+    }
+    true
 }
 
 /// The rows of `dataset` that `ids` kept, restricted to the columns `names` (each must
@@ -4898,6 +4930,27 @@ mod tests {
 
     /// Aliased slopes are left out of the Wald F; a singular slope covariance (two clusters)
     /// gives no Wald F and a warning.
+    /// The Cholesky shortcut of the two-way PSD check agrees with the eigenvalues: a
+    /// positive-definite matrix passes, an indefinite one, one with a zero pivot and a
+    /// non-finite one go on to the eigen-decomposition.
+    #[test]
+    fn test_positive_definite_by_cholesky() {
+        let pd = ndarray::array![[4.0, 1.2, 0.3], [1.2, 2.5, -0.4], [0.3, -0.4, 1.1]];
+        assert!(positive_definite_by_cholesky(&pd));
+        let indefinite = ndarray::array![[1.0, 2.0], [2.0, 1.0]];
+        assert!(!positive_definite_by_cholesky(&indefinite));
+        let singular = ndarray::array![[1.0, 1.0], [1.0, 1.0]];
+        assert!(!positive_definite_by_cholesky(&singular));
+        let nan = ndarray::array![[1.0, f64::NAN], [f64::NAN, 1.0]];
+        assert!(!positive_definite_by_cholesky(&nan));
+        let mut v = pd.clone();
+        assert_eq!(twoway_psd_check(&mut v, false).unwrap(), None);
+        assert_eq!(v, pd);
+        let mut w = indefinite.clone();
+        let warning = twoway_psd_check(&mut w, false).unwrap().unwrap();
+        assert!(warning.contains("not positive semi-definite"), "{warning}");
+    }
+
     #[test]
     fn test_wald_f_singular_slope_vcov() {
         let n = 30;
