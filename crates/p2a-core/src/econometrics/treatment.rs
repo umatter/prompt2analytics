@@ -237,8 +237,12 @@ pub struct IpwResult {
     pub n_control: usize,
     /// Number of observations trimmed
     pub n_trimmed: usize,
-    /// Propensity score summary statistics
+    /// Propensity score summary statistics of the kept (trimmed) units
     pub ps_summary: PropensityScoreSummary,
+    /// Summary of the fitted propensity scores of every unit, before trimming (the positivity
+    /// diagnostics read this)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ps_summary_untrimmed: Option<PropensityScoreSummary>,
     /// Mean outcome in treated group
     pub mean_y_treated: f64,
     /// Mean outcome in control group
@@ -625,14 +629,23 @@ pub fn run_ipw_treatment(
         config.normalized,
     );
 
-    // Compute propensity score summary
+    // Propensity score summaries of the kept units and of every unit
     let ps_summary = compute_ps_summary(&ps_trim);
+    let ps_untrimmed = compute_ps_summary(&ps);
 
-    // Check for extreme propensity scores
-    if ps_summary.min < 0.01 || ps_summary.max > 0.99 {
+    // Check for extreme propensity scores, before trimming
+    if ps_untrimmed.min < 0.01 || ps_untrimmed.max > 0.99 {
+        let trimmed = if config.trim > 0.0 {
+            format!(
+                "trimmed at {}: {} of {} units dropped",
+                config.trim, n_trimmed, n
+            )
+        } else {
+            "no trimming".to_string()
+        };
         warnings.push(format!(
-            "Extreme propensity scores detected: min={:.4}, max={:.4}. Consider stronger trimming.",
-            ps_summary.min, ps_summary.max
+            "Extreme propensity scores detected: min={:.4}, max={:.4} before trimming ({trimmed}). Consider stronger trimming.",
+            ps_untrimmed.min, ps_untrimmed.max
         ));
     }
 
@@ -820,6 +833,7 @@ pub fn run_ipw_treatment(
         n_control,
         n_trimmed,
         ps_summary,
+        ps_summary_untrimmed: Some(ps_untrimmed),
         mean_y_treated,
         mean_y_control,
         normalized: config.normalized,
