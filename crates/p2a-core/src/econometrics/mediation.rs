@@ -741,6 +741,12 @@ mod tests {
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
+    /// `validation/datasets/generated/<file>` as data only (no R value is compared).
+    fn generated_data(file: &str) -> crate::data::Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{file}"));
+        crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
     fn expect_invalid_spec(err: EconError, needle: &str) {
         match err {
             EconError::InvalidSpecification { message } => {
@@ -1039,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_mediation_both_decompositions_add_up() {
-        let (_, ds) = crate::test_support::load_case("mediation_huber_sim");
+        let ds = generated_data("mediation_huber_sim.csv");
         let c = MediationConfig {
             bootstrap: 2,
             trim: 0.05,
@@ -1053,7 +1059,7 @@ mod tests {
 
     #[test]
     fn test_mediation_bootstrap_carries_all_four() {
-        let (_, ds) = crate::test_support::load_case("mediation_huber_sim");
+        let ds = generated_data("mediation_huber_sim.csv");
         let c = MediationConfig {
             bootstrap: 99,
             trim: 0.05,

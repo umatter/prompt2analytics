@@ -147,13 +147,15 @@ Property tests (read `doubleml_sim.csv` without `load_case`, not registered):
 `test_doubleml_is_scale_equivariant`, `test_doubleml_display_names_learners_and_jacobian`,
 `test_doubleml_ridge_closed_form_matches_glmnet` (closed form against `glmnet(alpha = 0)` at
 thresh 1e-14 with and without an intercept, and the dual against the primal),
+`test_doubleml_ridge_faer_cholesky_matches_the_hand_solve` (faer's Cholesky against the
+hand-written solve it replaced, primal and dual, 1e-12 relative),
 `test_doubleml_irm_jacobian_is_not_the_score_variance`,
 `test_doubleml_irm_rejects_non_binary_treatment`, `test_doubleml_iv_models_need_an_instrument`.
 
 DGP recovery and unit tests (simulated data): `test_doubleml_plr_recovers_dgp`,
 `test_doubleml_crossfitting_structure`, `test_doubleml_irm_recovers_dgp`,
 `test_doubleml_null_effect_recovers_dgp`, `test_plr_basic`, `test_irm_basic`,
-`test_fold_assignments`, `test_add_intercept`, `test_insufficient_data_error`, `test_display`,
+`test_fold_assignments`, `test_insufficient_data_error`, `test_display`,
 `test_reproducibility_with_seed`.
 
 ### Differences from DoubleML

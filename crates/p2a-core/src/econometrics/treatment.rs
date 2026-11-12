@@ -2225,6 +2225,12 @@ mod tests {
     use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
 
+    /// `validation/datasets/generated/<file>` as data only (no R value is compared).
+    fn generated_data(file: &str) -> crate::data::Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{file}"));
+        crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
     fn expect_invalid_spec(err: EconError, needle: &str) {
         match err {
             EconError::InvalidSpecification { message } => {
@@ -3486,7 +3492,7 @@ mod tests {
     fn test_ipw_bootstrap_replicate_refits_the_propensity_model() {
         // A replicate is the whole estimator on the resampled rows: propensity refitted,
         // trimming re-applied. Fails before: replicates reused the fitted, trimmed scores.
-        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let ds = generated_data("weighting_sim.csv");
         let (y, d, x) = columns(&ds, "y", "treat", &COVS);
         let idx = one_draw(y.len(), 7);
         let boot = resample(&ds, &idx);
@@ -3529,7 +3535,7 @@ mod tests {
     fn test_ipw_bootstrap_se_near_mest_se() {
         // The refit bootstrap estimates the same sampling variance as the M-estimation SE.
         // Fails before: the cached-score bootstrap was about 1.7 times the M-estimation SE.
-        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let ds = generated_data("weighting_sim.csv");
         let fit = |bootstrap| {
             run_ipw_treatment(
                 &ds,
@@ -3562,7 +3568,7 @@ mod tests {
     fn test_ipw_bootstrap_replicate_propagates_cancellation() {
         // Cancellation inside a replicate's propensity fit ends the bootstrap; it is not a
         // dropped replicate.
-        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let ds = generated_data("weighting_sim.csv");
         let (y, d, x) = columns(&ds, "y", "treat", &COVS);
         let idx = one_draw(y.len(), 7);
         let rep = IpwReplicate {
@@ -3879,7 +3885,7 @@ mod tests {
     fn test_dr_bootstrap_replicate_refits_models() {
         // A replicate is the bootstrap-0 estimator on the resampled rows. Fails before: the
         // replicates reused the fitted scores and the fitted outcome predictions.
-        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let ds = generated_data("weighting_sim.csv");
         let (y, d, x) = columns(&ds, "y", "treat", &COVS);
         let names = design_names(&COVS);
         let idx = one_draw(y.len(), 7);
@@ -3921,7 +3927,7 @@ mod tests {
     #[test]
     fn test_dr_regression_bootstrap_se_near_sandwich() {
         // Fails before: the cached-prediction bootstrap was about a fifth of the sandwich SE.
-        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let ds = generated_data("weighting_sim.csv");
         let fit = |bootstrap| {
             let c = DoublyRobustConfig {
                 method: DRMethod::Regression,

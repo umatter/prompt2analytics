@@ -2047,8 +2047,8 @@ mod tests {
         ("pois", "yp", StdRegModel::Poisson, false),
     ];
 
-    fn check_se_t4(se_method: SEMethod, key: &str) {
-        let (case, ds) = crate::test_support::load_case("stdreg_se_t4");
+    fn check_se_t4(case_id: &str, se_method: SEMethod, key: &str) {
+        let (case, ds) = crate::test_support::load_case(case_id);
         let mut check = Check::new(&case);
         for (p, y, model, inter) in SE_T4_FITS {
             for (est, e) in [
@@ -2088,14 +2088,14 @@ mod tests {
         // covariance (case stdreg_se_t4). Fails before: the SE was the variance of the last
         // identified column (an interaction term with interactions; sigma^2 = 1 on (X'X)^-1 for
         // the GLMs) and E[Y(a)]'s SEs were that SE / sqrt(2).
-        check_se_t4(SEMethod::Delta, "delta");
+        check_se_t4("stdreg_se_t4", SEMethod::Delta, "delta");
     }
 
     #[test]
     fn test_validate_stdreg_sandwich_se() {
         // stdReg's stacked estimating equations, HC0 meat (case stdreg_se_t4). Fails before:
         // an HC0 sandwich of the last identified column on the OLS bread.
-        check_se_t4(SEMethod::Sandwich, "sandwich");
+        check_se_t4("stdreg_se_t4", SEMethod::Sandwich, "sandwich");
     }
 
     #[test]
