@@ -66,6 +66,13 @@ feols(inv ~ value + capital | firm, g, vcov = "iid")   # firm effects only
     against fixest's `hetero`.
   - `econometrics::hdfe::tests::test_validate_hdfe_grunfeld_firm_only`: firm effects only,
     coefficients and iid SEs (the one-way within estimator).
+- R-pinned HC0-HC3 (registered as method `hdfe_hc_leverage` in
+  `validation/methods/econ_panel_t4.json`, case `hdfe_hc_leverage`):
+  `econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_grunfeld` (firm and firm + year),
+  `econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_short_panel` (the unbalanced
+  short panel, one- and two-way) and
+  `econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_disconnected` (two connected
+  components): coefficients, HC0, HC1, HC2 and HC3 SEs and `df_resid`. See "HC2 and HC3".
 - DGP recovery (no R values compared): `econometrics::hdfe::tests::test_against_felm_coefficients_recovers_dgp`,
   `econometrics::hdfe::tests::test_against_felm_standard_errors_properties`,
   `econometrics::hdfe::tests::test_against_felm_r_squared_properties`,
@@ -303,12 +310,52 @@ relative for the Hausman statistic).
 
 FE, RE and the Hausman test: `panel_fe.md`, `panel_re.md`, `hausman.md`.
 
+## HC2 and HC3: leverage of the fixed effects
+
+HC2 and HC3 weight each squared residual by `1 / (1 - h_i)` or `1 / (1 - h_i)^2`, where `h_i`
+is the leverage of the dummy-variable regression, as `sandwich::vcovHC` on
+`lm(y ~ x + factor(fe1) [+ factor(fe2)])`. By Frisch-Waugh-Lovell that leverage is
+`x̃_i' (X̃'X̃)^-1 x̃_i` of the demeaned regressors plus the diagonal of the projection on the
+fixed-effect dummies; before, p2a used the first term only, so HC2/HC3 came out below HC1
+(Grunfeld two-way HC3 SE of capital 0.0648 against R's 0.0801).
+
+- One fixed effect: the dummy projection's diagonal is `1 / T_g`, `T_g` the size of the
+  observation's level.
+- Two fixed effects `a` and `b`, `b` the one with fewer levels: with `S = B' M_A B` (the
+  dummies of `b` after the within-`a` projection),
+  `h_i = 1 / c_a + (e_b - u_a)' S^+ (e_b - u_a)`, `u_a` the `b`-level shares of `a`'s level.
+  `e_b - u_a` lies in the range of `S`, so any generalized inverse gives the same value;
+  several connected components make `S` singular (the disconnected test checks this).
+  `S` is dense of the order of `b`'s levels, so the cost is `O(n_b * cells + n_b^3)`; HC2/HC3
+  are computed when the smaller fixed effect has at most 1,000 levels and refused above that
+  (`InvalidSpecification`, pointing to HC1).
+- Three or more fixed effects: HC2/HC3 are refused, as fixest and reghdfe do not offer them;
+  use HC1.
+- An observation with leverage 1 (a singleton level) has a zero residual; R's `sandwich`
+  returns NaN for it, fixest drops singletons. p2a gives it weight 0 and warns "1 observation
+  has leverage 1 (a singleton fixed-effect level) and contributes nothing to the HC2/HC3
+  meat".
+
+| design (case `hdfe_hc_leverage`) | HC3 SEs (R) |
+|---|---|
+| Grunfeld firm | 0.02271635868, 0.05521871232 |
+| Grunfeld firm + year | 0.02362378903, 0.08011549708 |
+| short one-way (377 rows, 100 ids) | 0.1911267528, 0.1835377347 |
+| short two-way | 0.1759447724, 0.1639754516 |
+| disconnected (2 components) | 0.1354492321, 0.1429941406 |
+
+Further tests: `econometrics::hdfe::tests::test_hdfe_fe_leverage_matches_dense_projection`
+(the leverage against the dense projection on an unbalanced two-way design),
+`econometrics::hdfe::tests::test_hdfe_hc2_refuses_three_fixed_effects`,
+`econometrics::hdfe::tests::test_hdfe_hc3_refuses_too_many_levels` and
+`econometrics::hdfe::tests::test_hdfe_hc3_singleton_group_contributes_nothing`.
+
 ## Known differences
 
 - The adjusted within R-squared follows plm (0.6704668484), not fixest's `war2`
   (0.7168333220), which uses a different degrees-of-freedom convention.
 - No cluster option, so fixest's firm-clustered SEs are not compared.
-- HC2 and HC3 are not pinned (ECON-22).
+- HC2 and HC3 need at most two fixed effects, the smaller with at most 1,000 levels.
 
 ## How to run
 

@@ -54,6 +54,29 @@
       "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE, z, Delta and statistics 1e-6 relative, p-values Tol::p_value; counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "hdfe_hc_leverage",
+      "name": "HDFE HC0-HC3 with the fixed-effect leverage (one-way 1/T_g, two-way Schur complement)",
+      "category": "econometrics",
+      "reference": "sandwich::vcovHC(lm(y ~ x + factor(fe1) [+ factor(fe2)]), type = 'HC0' | 'HC1' | 'HC2' | 'HC3')",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "hdfe_hc_leverage"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_grunfeld",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_short_panel",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_disconnected"
+      ],
+      "quantities": [
+        "coefficients",
+        "HC0, HC1, HC2, HC3 SEs (one-way, two-way, two components)",
+        "df"
+      ],
+      "tolerance": "validation/README.md at each design's n: coefficients 1e-6 (disconnected, n = 80) / 1e-8 (Grunfeld n = 200, short panel n = 377), SE 1e-5 / 1e-6 relative; df exact. The alternating projections converge to these on the unbalanced two-way designs, so the deterministic tolerance applies",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
