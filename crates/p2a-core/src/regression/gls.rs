@@ -402,13 +402,10 @@ fn gls_engine(
                         message: "y is fitted exactly; rho is not identified".to_string(),
                     });
                 }
+                // a non-finite profile value (an overflow at one rho) steers Brent away from
+                // that rho instead of failing a fit that converges elsewhere
                 let v = fit.profile_objective(sse_ref);
-                if !v.is_finite() {
-                    return Err(EconError::Computation(format!(
-                        "GLS profile log-likelihood is not finite at rho = {rho}"
-                    )));
-                }
-                Ok(v)
+                Ok(if v.is_finite() { v } else { f64::INFINITY })
             };
             let b = brent_fmin(lo + 1e-8, hi - 1e-8, objective, RHO_TOL, RHO_MAX_EVAL)?;
             let s = structure_at(b.x);
@@ -2139,6 +2136,34 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// REML on a design whose third regressor is twice the second plus noise below lm.fit's
+    /// tolerance. The REML term's Cholesky of (X*'X*)^-1 names X'V^-1 X when it fails, but
+    /// the pivoted QR of the whitened design refuses such a design first, at every noise
+    /// level from about 1e-6 of the regressor's scale down: a design the QR accepts leaves
+    /// (X*'X*)^-1 positive definite, so the REML message is a guard no data reach. The test
+    /// pins that the REML fit ends in the QR's SingularMatrix, never a panic or a fit.
+    #[test]
+    fn test_gls_reml_collinear_design_refused_by_the_qr() {
+        let n = 50;
+        let e = perf3_noise(2 * n, 7);
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => i as f64 / 10.0 + e[i],
+            _ => 2.0 * (i as f64 / 10.0 + e[i]) + 1e-9 * e[n + i],
+        });
+        let y = Array1::from_shape_fn(n, |i| 1.0 + x[[i, 1]] + e[n + i]);
+        let mut spec = GlsSpec::default();
+        spec.correlation = GlsCorrelation::Ar1;
+        spec.method = GlsMethod::Reml;
+        match gls_with(&y.view(), &x.view(), &spec) {
+            Err(EconError::SingularMatrix { context, .. }) => assert!(
+                context.contains("rank 2 of 3") || context.contains("X'V^-1 X"),
+                "{context}"
+            ),
+            other => panic!("expected SingularMatrix, got {other:?}"),
         }
     }
 
