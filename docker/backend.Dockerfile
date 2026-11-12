@@ -3,9 +3,9 @@
 
 # Stage 1: Build
 # Pinned to a specific Rust version (not the floating `rust:latest`) so a given
-# release tag rebuilds reproducibly. Requires Rust 1.89+ (edition 2024 +
-# let-chains); bump this deliberately.
-FROM rust:1.90-bookworm AS builder
+# release tag rebuilds reproducibly. Requires Rust 1.95+ (the workspace MSRV,
+# set by surrealdb 4's dependencies); bump this deliberately.
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 

@@ -16,6 +16,12 @@ edition = "2024"
 authors = ["prompt2analytics contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/umatter/prompt2analytics"
+# The MSRV is set by the conversation store: surrealdb 4 pulls in sysinfo 0.39,
+# which needs Rust 1.95. Checked with `cargo +1.95.0 check` for p2a-mcp's
+# `full` set and its CI set (`http,llm,auth,websocket`), p2a-core's `ci` set,
+# p2a-cli's defaults and p2a-dioxus's `desktop` set (the embedded server), and
+# with `cargo +1.95.0 test -p p2a-mcp --features full --lib db::`. Not checked:
+# `cuda` (no CUDA toolkit) and the wasm and mobile builds of p2a-dioxus.
 rust-version = "1.95"
 
 [workspace.dependencies]
@@ -63,7 +69,7 @@ calamine = "0.38"  # Excel file reading (xlsx, xls, xlsb, ods); 0.37 is the firs
 
 # Database connectivity
 # 0.41 is the first release on libsqlite3-sys >= 0.39 (bundled SQLite with the
-# fix for RUSTSEC-2026-0459); it needs Rust 1.89, hence the workspace MSRV.
+# fix for RUSTSEC-2026-0459); it needs Rust 1.89.
 rusqlite = { version = "0.41", features = ["bundled", "hooks", "limits"] }
 # parquet: compile the extension in, so Parquet queries never download it at
 # run time (the bundled build otherwise autoinstalls extensions on demand).
