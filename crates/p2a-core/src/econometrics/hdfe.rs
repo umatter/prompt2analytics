@@ -1250,34 +1250,122 @@ fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>>
     }
     drop(scratch);
 
-    let sp = sym_inverse(
-        s.view(),
-        SingularPolicy::Generalized,
-        "the two-way fixed-effect leverage matrix",
-    )?
-    .inverse;
+    // S has rank n1 less the connected components (its null space is the indicator of
+    // each component's b-levels). Dropping one b-level per component leaves a
+    // positive-definite block whose inverse, padded with zeros, is a generalized
+    // inverse of S; a Cholesky of the block is much cheaper than an eigendecomposition
+    // of S. `pos[b]` is the b-level's index in the block, or None when dropped.
+    let pos = schur_block_positions(fa.n_levels, fb.n_levels, &cells, &cell_start)?;
+    let r = pos.iter().flatten().count();
+    let mut block = resource::try_zeros2(r, r, what)?;
+    for (b, pb) in pos.iter().enumerate() {
+        let Some(i) = *pb else { continue };
+        for (d, pd) in pos.iter().enumerate() {
+            if let Some(j) = *pd {
+                block[[i, j]] = s[[b, d]];
+            }
+        }
+    }
     drop(s);
+    let sp = if r == 0 {
+        block
+    } else {
+        sym_inverse(
+            block.view(),
+            SingularPolicy::Generalized,
+            "the two-way fixed-effect leverage matrix",
+        )?
+        .inverse
+    };
 
-    // h_i = 1 / c_a + q_a - 2 v_a[b] + Sp[b, b], v_a = Sp u_a, q_a = u_a' v_a
+    // h_i = 1 / c_a + q_a - 2 v_a[b] + Sp[b, b], v_a = Sp u_a, q_a = u_a' v_a (a dropped
+    // b-level has a zero row and column in Sp)
     let mut h = resource::try_zeros1(n, what)?;
-    let mut v = resource::try_vec(n1, 0.0, what)?;
+    let mut v = resource::try_vec(r, 0.0, what)?;
     for a in 0..na {
         if a % 256 == 0 {
             resource::checkpoint()?;
         }
         let ca = fa.counts[a] as f64;
         let block = &cells[cell_start[a]..cell_start[a + 1]];
-        for (r, vr) in v.iter_mut().enumerate() {
-            let row = sp.row(r);
-            *vr = block.iter().map(|&(b, cb)| row[b] * cb).sum::<f64>() / ca;
+        for (i, vi) in v.iter_mut().enumerate() {
+            let row = sp.row(i);
+            *vi = block
+                .iter()
+                .filter_map(|&(b, cb)| pos[b].map(|j| row[j] * cb))
+                .sum::<f64>()
+                / ca;
         }
-        let q: f64 = block.iter().map(|&(b, cb)| cb * v[b]).sum::<f64>() / ca;
+        let q: f64 = block
+            .iter()
+            .filter_map(|&(b, cb)| pos[b].map(|j| cb * v[j]))
+            .sum::<f64>()
+            / ca;
         for &i in &order[start[a]..start[a + 1]] {
-            let b = fb.ids[i];
-            h[i] = 1.0 / ca + q - 2.0 * v[b] + sp[[b, b]];
+            h[i] = 1.0 / ca
+                + q
+                + match pos[fb.ids[i]] {
+                    Some(j) => sp[[j, j]] - 2.0 * v[j],
+                    None => 0.0,
+                };
         }
     }
     Ok(h)
+}
+
+/// For [`two_way_leverage`]: the index of each b-level in the Schur block with one
+/// b-level per connected component of the a-b graph left out (the highest-numbered
+/// b-level of each component), or None for the left-out levels. `cells` holds each
+/// a-level's `(b, count)` cells from `cell_start[a]`.
+fn schur_block_positions(
+    na: usize,
+    n1: usize,
+    cells: &[(usize, f64)],
+    cell_start: &[usize],
+) -> EconResult<Vec<Option<usize>>> {
+    let what = "HDFE two-way fixed-effect leverage";
+    // Union-find over the b-levels: the b-levels of one a-level are connected
+    let mut parent: Vec<usize> = resource::try_with_capacity(n1, what)?;
+    parent.extend(0..n1);
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for a in 0..na {
+        let block = &cells[cell_start[a]..cell_start[a + 1]];
+        if let Some(&(b0, _)) = block.first() {
+            let r0 = find(&mut parent, b0);
+            for &(b, _) in &block[1..] {
+                let rb = find(&mut parent, b);
+                if rb != r0 {
+                    parent[rb] = r0;
+                }
+            }
+        }
+    }
+    // Every b-level occurs in some cell (its count is positive), so each component's
+    // b-levels are found; leave out the last one of each component
+    let mut last_of_root: Vec<usize> = resource::try_vec(n1, usize::MAX, what)?;
+    for b in 0..n1 {
+        let root = find(&mut parent, b);
+        last_of_root[root] = b;
+    }
+    let mut drop_b: Vec<bool> = resource::try_vec(n1, false, what)?;
+    for &b in last_of_root.iter().filter(|&&b| b != usize::MAX) {
+        drop_b[b] = true;
+    }
+    let mut pos = resource::try_vec(n1, None, what)?;
+    let mut next = 0;
+    for b in 0..n1 {
+        if !drop_b[b] {
+            pos[b] = Some(next);
+            next += 1;
+        }
+    }
+    Ok(pos)
 }
 
 /// Compute heteroskedasticity-consistent variance-covariance matrix.

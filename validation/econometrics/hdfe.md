@@ -324,9 +324,12 @@ fixed-effect dummies; before, p2a used the first term only, so HC2/HC3 came out 
 - Two fixed effects `a` and `b`, `b` the one with fewer levels: with `S = B' M_A B` (the
   dummies of `b` after the within-`a` projection),
   `h_i = 1 / c_a + (e_b - u_a)' S^+ (e_b - u_a)`, `u_a` the `b`-level shares of `a`'s level.
-  `e_b - u_a` lies in the range of `S`, so any generalized inverse gives the same value;
-  several connected components make `S` singular (the disconnected test checks this).
-  `S` is dense of the order of `b`'s levels, so the cost is `O(n_b * cells + n_b^3)`; HC2/HC3
+  `e_b - u_a` lies in the range of `S`, so any generalized inverse gives the same value.
+  `S` is singular, with one null vector per connected component of the two effects; p2a
+  leaves out one `b`-level per component and inverts the remaining positive-definite block
+  by Cholesky, which padded with zeros is a generalized inverse of `S` (the disconnected
+  test checks two components). `S` is dense of the order of `b`'s levels, so the cost is
+  `O(n_b * cells + n_b^3)`; HC2/HC3
   are computed when the smaller fixed effect has at most 1,000 levels and refused above that
   (`InvalidSpecification`, pointing to HC1).
 - Three or more fixed effects: HC2/HC3 are refused, as fixest and reghdfe do not offer them;
