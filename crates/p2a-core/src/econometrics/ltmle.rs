@@ -482,6 +482,10 @@ impl LtmleData {
             }
         }
 
+        // Missing and infinite treatment values are reported as such before the binary check.
+        for (t, a) in treatments.iter().enumerate() {
+            check_finite(a.iter(), &format!("treatment (time point {})", t + 1))?;
+        }
         // Validate treatments are binary
         for (t, a) in treatments.iter().enumerate() {
             for val in a.iter() {
@@ -1210,7 +1214,9 @@ fn run_ltmle_with(
     } else {
         None
     };
-    let regime_estimate = estimates.pop().expect("the intervention's estimate");
+    let regime_estimate = estimates.pop().ok_or_else(|| {
+        EconError::Computation("LTMLE: no estimate for the intervention regime".into())
+    })?;
 
     let (contrast, contrast_label) = match &contrast_estimate {
         Some(b) => (
@@ -1500,13 +1506,17 @@ fn followers(data: &LtmleData, d: &[Vec<u8>], label: &str) -> EconResult<Vec<Vec
     Ok(out)
 }
 
-/// The observed-history designs, built once and shared by every regime: `q[t]` has the
-/// columns "(Intercept)", L_1.., A_1, ..., L_t.., A_t (R's `reformulate` order); the g design
-/// of node t is `q[t]` without its last column. `a_cols[t][s]` is the column of A_s in `q[t]`
-/// (s <= t), and `l_means[t]` the means of the covariates L_t.
+/// The observed-history designs, built once and shared by every regime: the Q design of node
+/// t has the columns "(Intercept)", L_1.., A_1, ..., L_t.., A_t (R's `reformulate` order), so
+/// each design is a column prefix of the next, and one n x p matrix (the last node's design)
+/// holds them all; the g design of node t is its Q design without the last column.
+/// `a_cols[t][s]` is the column of A_s (s <= t), and `l_means[t]` the means of the covariates
+/// L_t.
 struct HistoryDesigns {
-    q: Vec<Array2<f64>>,
-    names: Vec<Vec<String>>,
+    x: Array2<f64>,
+    /// `widths[t]`: the number of columns of node t's Q design.
+    widths: Vec<usize>,
+    names: Vec<String>,
     a_cols: Vec<Vec<usize>>,
     l_means: Vec<Vec<f64>>,
 }
@@ -1515,60 +1525,58 @@ impl HistoryDesigns {
     fn new(data: &LtmleData) -> EconResult<Self> {
         let n = data.n_obs();
         let t_max = data.time_points();
-        let mut q: Vec<Array2<f64>> = Vec::with_capacity(t_max);
-        let mut names: Vec<Vec<String>> = Vec::with_capacity(t_max);
+        let mut widths: Vec<usize> = Vec::with_capacity(t_max);
+        let mut p = 1usize;
+        for l in &data.covariates {
+            p = checked_add(p, checked_add(l.ncols(), 1)?)?;
+            widths.push(p);
+        }
+        let mut x = resource::try_zeros2(n, p, "LTMLE history design")?;
+        x.column_mut(0).fill(1.0);
+        let mut names = vec!["(Intercept)".to_string()];
         let mut a_cols: Vec<Vec<usize>> = Vec::with_capacity(t_max);
         let mut l_means = Vec::with_capacity(t_max);
+        let mut col = 1usize;
         for node in 0..t_max {
             resource::checkpoint()?;
             let l = &data.covariates[node];
-            // Each design extends the previous one: its rows are that row, L_node and A_node.
-            let prev = node.checked_sub(1).map(|s| &q[s]);
-            let p0 = prev.map_or(1, |x| x.ncols());
-            let p = checked_add(p0, checked_add(l.ncols(), 1)?)?;
-            let mut x = resource::try_zeros2(n, p, "LTMLE history design")?;
-            for (i, mut row) in x.rows_mut().into_iter().enumerate() {
-                let (mut head, mut tail) = row.view_mut().split_at(ndarray::Axis(0), p0);
-                match prev {
-                    Some(px) => head.assign(&px.row(i)),
-                    None => head.fill(1.0),
-                }
-                let last = l.ncols();
-                for (v, c) in tail.iter_mut().zip(l.row(i)) {
-                    *v = *c;
-                }
-                tail[last] = data.treatments[node][i];
+            for (j, c) in l.columns().into_iter().enumerate() {
+                x.column_mut(col + j).assign(&c);
             }
-            let mut nm = names
-                .last()
-                .cloned()
-                .unwrap_or_else(|| vec!["(Intercept)".to_string()]);
-            nm.extend(data.covariate_names[node].iter().cloned());
-            nm.push(data.treatment_names[node].clone());
+            col += l.ncols();
+            x.column_mut(col).assign(&data.treatments[node]);
+            names.extend(data.covariate_names[node].iter().cloned());
+            names.push(data.treatment_names[node].clone());
             let mut ac = a_cols.last().cloned().unwrap_or_default();
-            ac.push(p - 1);
+            ac.push(col);
+            col += 1;
             l_means.push(
                 l.columns()
                     .into_iter()
                     .map(|c| c.sum() / n as f64)
                     .collect::<Vec<f64>>(),
             );
-            q.push(x);
-            names.push(nm);
             a_cols.push(ac);
         }
         Ok(Self {
-            q,
+            x,
+            widths,
             names,
             a_cols,
             l_means,
         })
     }
 
+    /// The Q design of node t and its names.
+    fn q(&self, t: usize) -> (ArrayView2<'_, f64>, &[String]) {
+        let p = self.widths[t];
+        (self.x.slice(ndarray::s![.., ..p]), &self.names[..p])
+    }
+
     /// The g design of node t (the Q design without A_t) and its names.
     fn g(&self, t: usize) -> (ArrayView2<'_, f64>, &[String]) {
-        let p = self.q[t].ncols() - 1;
-        (self.q[t].slice(ndarray::s![.., ..p]), &self.names[t][..p])
+        let p = self.widths[t] - 1;
+        (self.x.slice(ndarray::s![.., ..p]), &self.names[..p])
     }
 }
 
@@ -1828,6 +1836,14 @@ fn fit_treatment_models(
     Ok(out)
 }
 
+/// One Q regression: its coefficients and record, and for the logistic model the response's
+/// (min, max).
+struct QFit {
+    coefficients: Array1<f64>,
+    model: NodeModel,
+    range: Option<(f64, f64)>,
+}
+
 /// The Q regression of node t: `q_next` on the observed history through A_t, from `start`
 /// when given (logistic model).
 #[allow(clippy::too_many_arguments)]
@@ -1840,9 +1856,8 @@ fn fit_q(
     start: Option<ArrayView1<f64>>,
     paths: FitPaths,
     notes: &mut FitNotes,
-) -> EconResult<(Array1<f64>, NodeModel)> {
-    let x = designs.q[t].view();
-    let names = &designs.names[t];
+) -> EconResult<QFit> {
+    let (x, names) = designs.q(t);
     let what = format!("Q model at {}", treatment_names[t]);
     match config.q_model {
         LtmleQModel::Logistic => {
@@ -1861,13 +1876,17 @@ fn fit_q(
                 coefficients[0] = (c / (1.0 - c)).ln();
                 let model = NodeModel {
                     node: t,
-                    names: names.clone(),
+                    names: names.to_vec(),
                     coefficients: coefficients.to_vec(),
                     converged: true,
                     iterations: 0,
                     constant_prediction: Some(max),
                 };
-                return Ok((coefficients, model));
+                return Ok(QFit {
+                    coefficients,
+                    model,
+                    range: Some((min, max)),
+                });
             }
             let fit = fit_logit_node(
                 x,
@@ -1882,13 +1901,17 @@ fn fit_q(
             )?;
             let model = NodeModel {
                 node: t,
-                names: names.clone(),
+                names: names.to_vec(),
                 coefficients: fit.coefficients.to_vec(),
                 converged: fit.converged,
                 iterations: fit.iterations,
                 constant_prediction: None,
             };
-            Ok((fit.coefficients, model))
+            Ok(QFit {
+                coefficients: fit.coefficients,
+                model,
+                range: Some((min, max)),
+            })
         }
         LtmleQModel::Linear => {
             let fit = solve_ols(x, q_next)?;
@@ -1899,13 +1922,17 @@ fn fit_q(
             }
             let model = NodeModel {
                 node: t,
-                names: names.clone(),
+                names: names.to_vec(),
                 coefficients: fit.beta.to_vec(),
                 converged: true,
                 iterations: 0,
                 constant_prediction: None,
             };
-            Ok((fit.beta, model))
+            Ok(QFit {
+                coefficients: fit.beta,
+                model,
+                range: None,
+            })
         }
     }
 }
@@ -1924,7 +1951,7 @@ fn warm_start(
     eps: f64,
     d_t: &[u8],
 ) -> Option<Array1<f64>> {
-    let p0 = designs.q[t - 1].ncols();
+    let p0 = designs.widths[t - 1];
     let p = coefficients.len();
     let d_mean = d_t.iter().map(|v| f64::from(*v)).sum::<f64>() / d_t.len() as f64;
     let l: f64 = coefficients
@@ -1947,7 +1974,7 @@ fn estimate_regime(
     follow: &[Vec<bool>],
     designs: &HistoryDesigns,
     g: &TreatmentModels,
-    last_q: &(Array1<f64>, NodeModel),
+    last_q: &QFit,
     y: &Array1<f64>,
     scale: &OutcomeScale,
     config: &LtmleConfig,
@@ -2010,8 +2037,11 @@ fn estimate_regime(
     for t in (0..t_max).rev() {
         resource::checkpoint()?;
         let fitted;
-        let (coef, model) = if t == t_max - 1 {
-            (&last_q.0, &last_q.1)
+        // The last node's model is shared by every regime and copied into this one's record;
+        // the other nodes' models move into it.
+        let (coef, range) = if t == t_max - 1 {
+            q_models[t] = last_q.model.clone();
+            (&last_q.coefficients, last_q.range)
         } else {
             fitted = fit_q(
                 designs,
@@ -2023,16 +2053,12 @@ fn estimate_regime(
                 paths,
                 notes,
             )?;
-            (&fitted.0, &fitted.1)
+            q_models[t] = fitted.model;
+            (&fitted.coefficients, fitted.range)
         };
-        q_models[t] = model.clone();
-        if let Some(c) = model.constant_prediction {
+        if let Some(c) = q_models[t].constant_prediction {
             constant_q_nodes.push(t);
-            let (rmin, rmax) = q_next
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                    (a.min(v), b.max(v))
-                });
+            let (rmin, rmax) = range.unwrap_or((f64::NAN, f64::NAN));
             notes.warnings.push(format!(
                 "LTMLE: {label}: Q response at {} has range {:.1e} < {CONSTANT_Q_RANGE:e}; \
                  predicted as the constant {c:.6} (ltmle's no-variation rule)",
@@ -2040,19 +2066,22 @@ fn estimate_regime(
                 rmax - rmin
             ));
         }
-        let eta = identified_linear_predictor(
-            designs.q[t].view(),
-            coef.view(),
-            &designs.a_cols[t],
-            Some(d),
-        );
+        let eta =
+            identified_linear_predictor(designs.q(t).0, coef.view(), &designs.a_cols[t], Some(d));
         let ht = ArrayView1::from(&h[t][..]);
         let qs = match config.q_model {
             LtmleQModel::Logistic => {
                 let f = fit_fluctuation(q_next.view(), eta.view(), ht, config)?;
                 notes.n_fits += 1;
                 notes.all_converged &= f.converged;
-                if !f.converged {
+                if f.non_finite {
+                    notes.warnings.push(format!(
+                        "fluctuation at {} ({label}): the deviance stayed non-finite after \
+                         {MAX_HALVINGS} step halvings in iteration {}; stopped at the last finite \
+                         epsilon",
+                        data.treatment_names[t], f.iterations
+                    ));
+                } else if !f.converged {
                     notes.warnings.push(format!(
                         "fluctuation at {} ({label}): did not converge in {} iterations",
                         data.treatment_names[t], f.iterations
@@ -2188,6 +2217,8 @@ struct Fluctuation {
     epsilon: f64,
     converged: bool,
     iterations: usize,
+    /// The step halvings ran out with the deviance still not finite.
+    non_finite: bool,
 }
 
 /// For one coefficient on the canonical link, glm.fit's IRLS step is Newton's step
@@ -2242,19 +2273,19 @@ fn fit_fluctuation(
                 epsilon: eps,
                 converged: score == 0.0,
                 iterations: iter,
+                non_finite: false,
             });
         }
-        let mut step = score / info;
-        let mut new_eps = eps + step;
-        let mut new = eval(new_eps);
-        let mut halvings = 0;
-        // glm.fit halves the step only when the deviance is not finite.
-        while !new.0.is_finite() && halvings < 30 {
-            step /= 2.0;
-            new_eps = eps + step;
-            new = eval(new_eps);
-            halvings += 1;
-        }
+        // glm.fit halves the step only when the deviance is not finite; when 30 halvings do not
+        // reach a finite deviance, the last finite eps is kept and the fit stops unconverged.
+        let Some((new_eps, new)) = halved_step(eps, score / info, &eval) else {
+            return Ok(Fluctuation {
+                epsilon: eps,
+                converged: false,
+                iterations: iter,
+                non_finite: true,
+            });
+        };
         let change = (new.0 - dev).abs() / (new.0.abs() + 0.1);
         eps = new_eps;
         (dev, score, info) = new;
@@ -2271,6 +2302,7 @@ fn fit_fluctuation(
                 epsilon: eps,
                 converged: true,
                 iterations: iter,
+                non_finite: false,
             });
         }
     }
@@ -2278,7 +2310,31 @@ fn fit_fluctuation(
         epsilon: eps,
         converged: false,
         iterations: config.max_iter,
+        non_finite: false,
     })
+}
+
+/// Step halvings glm.fit allows when the deviance is not finite.
+const MAX_HALVINGS: usize = 30;
+
+/// `eps + step`, halved up to [`MAX_HALVINGS`] times while the deviance (the first element of
+/// `eval`) is not finite: the new eps and its evaluation, or `None` when no trial is finite (at
+/// most `MAX_HALVINGS + 1` evaluations).
+fn halved_step(
+    eps: f64,
+    mut step: f64,
+    eval: &impl Fn(f64) -> (f64, f64, f64),
+) -> Option<(f64, (f64, f64, f64))> {
+    for halvings in 0..=MAX_HALVINGS {
+        if halvings > 0 {
+            step /= 2.0;
+        }
+        let new = eval(eps + step);
+        if new.0.is_finite() {
+            return Some((eps + step, new));
+        }
+    }
+    None
 }
 
 /// ltmle's trigger for re-solving a targeting step: `|sum_i H_i (Q*_{t+1,i} - Q*_{t,i})|` above
@@ -2379,7 +2435,8 @@ fn resolve_fluctuation(
     }
     for lb in OFFSET_BOUNDS {
         let (blo, bhi) = offset_bounds(lb);
-        let off: Vec<f64> = rows.iter().map(|r| r[1].max(blo).min(bhi)).collect();
+        let mut off: Vec<f64> = resource::try_with_capacity(rows.len(), "LTMLE re-solve")?;
+        off.extend(rows.iter().map(|r| r[1].max(blo).min(bhi)));
         // (score, information) at eps
         let eval = |eps: f64| -> (f64, f64) {
             let (mut score, mut info) = (0.0, 0.0);
@@ -2809,6 +2866,139 @@ mod tests {
         y[1][4] = f64::NAN;
         let e = LtmleData::new(y, a, l).unwrap_err().to_string();
         assert!(e.contains("outcome"), "{e}");
+
+        // the variant, and a treatment's missing or infinite value is reported as such rather
+        // than as a non-binary value
+        let (y, mut a, l) = base();
+        a[0][2] = f64::NAN;
+        match LtmleData::new(y, a, l) {
+            Err(EconError::NullValues { column, count: 1 }) => {
+                assert!(column.contains("treatment (time point 1)"), "{column}")
+            }
+            other => panic!("expected NullValues, got {other:?}"),
+        }
+        let (y, mut a, l) = base();
+        a[1][2] = f64::INFINITY;
+        match LtmleData::new(y, a, l) {
+            Err(EconError::NonFiniteValues { column, count: 1 }) => {
+                assert!(column.contains("treatment (time point 2)"), "{column}")
+            }
+            other => panic!("expected NonFiniteValues, got {other:?}"),
+        }
+        let (y, a, mut l) = base();
+        l[0][[1, 0]] = f64::NEG_INFINITY;
+        assert!(matches!(
+            LtmleData::new(y, a, l),
+            Err(EconError::NonFiniteValues { count: 1, .. })
+        ));
+        let (mut y, a, l) = base();
+        y[1][0] = f64::INFINITY;
+        match LtmleData::new(y, a, l) {
+            Err(EconError::NonFiniteValues { column, count: 1 }) => {
+                assert!(column.contains("outcome"), "{column}")
+            }
+            other => panic!("expected NonFiniteValues, got {other:?}"),
+        }
+        let (mut y, a, l) = base();
+        y[0][0] = f64::NAN;
+        assert!(matches!(
+            LtmleData::new(y, a, l),
+            Err(EconError::NullValues { count: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn test_ltmle_fluctuation_halving_stops_at_a_non_finite_deviance() {
+        // A deviance that is never finite: the halvings stop after MAX_HALVINGS + 1 evaluations
+        // and report no step, so the fit keeps the last finite eps.
+        let calls = std::cell::Cell::new(0usize);
+        let eval = |_: f64| {
+            calls.set(calls.get() + 1);
+            (f64::INFINITY, 0.0, 0.0)
+        };
+        assert!(halved_step(0.25, 1.0, &eval).is_none());
+        assert_eq!(calls.get(), MAX_HALVINGS + 1);
+        // finite after three halvings: the step is 1/8
+        calls.set(0);
+        let eval = |e: f64| {
+            calls.set(calls.get() + 1);
+            if e > 0.3 {
+                (f64::NAN, 0.0, 0.0)
+            } else {
+                (1.0, 2.0, 3.0)
+            }
+        };
+        let (eps, new) = halved_step(0.1, 1.6, &eval).unwrap();
+        assert_eq!(calls.get(), 5);
+        assert!((eps - 0.2).abs() < 1e-15, "{eps}");
+        assert_eq!(new, (1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn test_ltmle_shared_history_designs_match_per_node_designs() {
+        // Each node's design is a column prefix of the shared matrix; it equals the design
+        // built for that node alone, and a fit on the prefix view is bit-identical to a fit on
+        // a contiguous copy.
+        let data = long_horizon(300, 4, 17);
+        let designs = HistoryDesigns::new(&data).unwrap();
+        let n = data.n_obs();
+        let mut own: Vec<Array2<f64>> = Vec::new();
+        for t in 0..data.time_points() {
+            let l = &data.covariates[t];
+            let p0 = own.last().map_or(1, |x| x.ncols());
+            let mut x = Array2::<f64>::zeros((n, p0 + l.ncols() + 1));
+            for i in 0..n {
+                for j in 0..p0 {
+                    x[[i, j]] = own.last().map_or(1.0, |px| px[[i, j]]);
+                }
+                for j in 0..l.ncols() {
+                    x[[i, p0 + j]] = l[[i, j]];
+                }
+                x[[i, p0 + l.ncols()]] = data.treatments[t][i];
+            }
+            own.push(x);
+        }
+        let config = LtmleConfig::default();
+        let paths = FitPaths {
+            lean: true,
+            warm: true,
+        };
+        for (t, x) in own.iter().enumerate() {
+            let (view, names) = designs.q(t);
+            assert_eq!(view.dim(), x.dim());
+            assert!(
+                view.iter()
+                    .zip(x.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+            assert_eq!(names.len(), x.ncols());
+            let (g, _) = designs.g(t);
+            let fit = |x: ArrayView2<f64>| {
+                let mut notes = FitNotes {
+                    warnings: Vec::new(),
+                    n_fits: 0,
+                    all_converged: true,
+                };
+                fit_logit_node(
+                    x,
+                    data.treatments[t].view(),
+                    GlmFamily::Binomial,
+                    None,
+                    &config,
+                    "g",
+                    names,
+                    paths,
+                    &mut notes,
+                )
+                .unwrap()
+            };
+            let shared = fit(g);
+            let contiguous = fit(x.slice(ndarray::s![.., ..x.ncols() - 1]).to_owned().view());
+            for (a, b) in shared.coefficients.iter().zip(&contiguous.coefficients) {
+                assert_eq!(a.to_bits(), b.to_bits(), "node {t}");
+            }
+            assert_eq!(shared.iterations, contiguous.iterations);
+        }
     }
 
     fn regime_run(data: &LtmleData, regime: Regime) -> LtmleResult {
@@ -4199,20 +4389,44 @@ mod tests {
             },
         )
         .unwrap();
-        let t_max = data.time_points();
+        // a re-solved node that is not the first: the backward pass fits node t - 1 next, from
+        // glm.fit's start (`t < t_max` alone held for every node)
         assert!(
             fast.saturation
                 .resolved_targeting
                 .iter()
                 .flatten()
-                .any(|(t, _)| *t > 0 && *t < t_max),
+                .any(|(t, _)| *t > 0),
             "{:?}",
             fast.saturation.resolved_targeting
         );
         assert_eq!(
-            fast.saturation.resolved_targeting.len(),
-            cold.saturation.resolved_targeting.len()
+            fast.saturation.resolved_targeting,
+            cold.saturation.resolved_targeting
         );
+        for (f, c) in regime_estimates(&fast)
+            .into_iter()
+            .zip(regime_estimates(&cold))
+        {
+            for (a, b) in f.fluctuation_coefs.iter().zip(&c.fluctuation_coefs) {
+                assert!((a - b).abs() <= 1e-10, "{}: {a} vs {b}", f.label);
+            }
+            for (a, b) in f.targeted_predictions.iter().zip(&c.targeted_predictions) {
+                for (x, y) in a.iter().zip(b) {
+                    assert!((x - y).abs() <= 1e-10, "{}: {x} vs {y}", f.label);
+                }
+            }
+            for (a, b) in f.q_models.iter().zip(&c.q_models) {
+                assert!(
+                    a.iterations <= b.iterations,
+                    "{} node {}: warm {} > cold {}",
+                    f.label,
+                    a.node,
+                    a.iterations,
+                    b.iterations
+                );
+            }
+        }
         for (a, b) in [
             (fast.psi_treated, cold.psi_treated),
             (fast.psi_control, cold.psi_control),
