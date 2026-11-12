@@ -675,7 +675,7 @@ fn compute_discrete_vcov(
     let vcov = sym_inverse(
         info_matrix.view(),
         SingularPolicy::Error,
-        "information matrix for marginal effects",
+        "information matrix",
     )
     .map_err(|e| {
         singular_in(
@@ -847,10 +847,7 @@ mod tests {
                 context,
                 suggestion,
             }) => {
-                assert_eq!(
-                    context,
-                    "information matrix for marginal effects: rank 2 of 3; marginal effects"
-                );
+                assert_eq!(context, "information matrix: rank 2 of 3; marginal effects");
                 assert_eq!(suggestion, "Model may have separation or multicollinearity");
             }
             other => panic!("expected SingularMatrix, got {other:?}"),
