@@ -2904,7 +2904,12 @@ mod tests {
             fit_rd(xv, &[y], 0.0, &config).map(|f| f.h)
         });
         match r {
-            Err(EconError::ResourceLimit(m)) => assert!(!m.contains("RD outcome"), "{m}"),
+            // the first allocation on the given-h path is the estimation window, not a copy of
+            // the strided outcome column
+            Err(EconError::ResourceLimit(m)) => assert!(
+                m.contains("RD estimation window") && !m.contains("RD outcome"),
+                "{m}"
+            ),
             other => panic!("{other:?}"),
         }
     }
