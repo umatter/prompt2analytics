@@ -562,7 +562,7 @@ impl AnalyticsServer {
             base_period: request.base_period.unwrap_or(-1),
             bootstrap: request.bootstrap.unwrap_or(999),
             anticipation: request.anticipation.unwrap_or(0),
-            seed: self.seed_or_global(None).await,
+            seed: Some(self.seed_for(None).await),
             ..Default::default()
         };
 
@@ -701,7 +701,7 @@ impl AnalyticsServer {
 
     /// Run IPW treatment effect estimation.
     #[tool(
-        description = "Estimate the ATE or ATT by inverse probability weighting with a logistic propensity score (normalised Hajek weights, scores trimmed at trim and 1 - trim). Standard errors: the M-estimation SE with the propensity score estimated (default, bootstrap = 0); the efficient-influence-function value is also reported (se_eif); bootstrap > 0 gives the SD of seeded replicates that hold the fitted propensity scores fixed (the propensity is treated as known). The output names the SE method. For matched samples with balance diagnostics, use propensity_matching instead."
+        description = "Estimate the ATE or ATT by inverse probability weighting with a logistic propensity score (normalised Hajek weights, scores trimmed at trim and 1 - trim). Standard errors: analytic M-estimation SE with the propensity score estimated (default, bootstrap = 0); the efficient-influence-function value is also reported (se_eif); bootstrap > 0 resamples every row and refits the propensity model and the trimming in each replicate, seeded by the session seed (default 42). The output names the SE method; positivity diagnostics judge the scores before trimming. For matched samples with balance diagnostics, use propensity_matching instead."
     )]
     pub async fn treatment_ipw(
         &self,
@@ -747,7 +747,7 @@ impl AnalyticsServer {
 
     /// Run Doubly Robust (AIPW) treatment effect estimation.
     #[tool(
-        description = "Estimate the ATE or ATT by augmented IPW (doubly robust: consistent if either the logistic propensity model or the linear outcome model is correct), or by weighting ('ipw') or outcome regression ('regression') alone. AIPW reports the analytic influence-function SE (bootstrap is not used for it); 'ipw' and 'regression' use the seeded bootstrap, whose replicates reuse the fitted propensity scores or outcome predictions. Returns the effect, its SE and confidence interval, and model fit diagnostics."
+        description = "Estimate the ATE or ATT by augmented IPW (doubly robust: consistent if either the logistic propensity model or the linear outcome model is correct), or by weighting ('ipw') or outcome regression ('regression') alone. Regression adjustment averages the predicted contrast over the treated for ATT. AIPW uses its influence-function SE; 'ipw' and 'regression' use a bootstrap (default 999 replicates) that resamples every row and refits the propensity and outcome models in each replicate, seeded by the session seed (default 42), or analytic SEs with bootstrap = 0 (M-estimation for 'ipw', the stacked-equation sandwich for 'regression'). Returns the effect, its SE and confidence interval, and model fit diagnostics."
     )]
     pub async fn treatment_doubly_robust(
         &self,
@@ -996,6 +996,7 @@ impl AnalyticsServer {
         config.intercept = true;
         config.stabilize = request.stabilize.unwrap_or(false);
         config.trim_quantile = request.trim_quantile.unwrap_or(1.0);
+        config.trim_lower = request.trim_lower.unwrap_or(false);
         config.max_iter = 200;
         config.tolerance = 1e-8;
 
@@ -1117,9 +1118,9 @@ impl AnalyticsServer {
         config.shrinkage = request.shrinkage.unwrap_or(0.01);
         config.stop_method = stop_method;
         config.estimand = estimand;
-        config.balance_threshold = request.balance_threshold.unwrap_or(0.1);
-        config.min_iterations = 100;
-        config.interaction_depth = 1;
+        config.balance_threshold = request
+            .balance_threshold
+            .unwrap_or(TwangConfig::default().balance_threshold);
         config.min_node_size = 10;
 
         let result = match run_twang(dataset, &request.treatment, &cov_refs, Some(config)) {
@@ -1646,7 +1647,7 @@ impl AnalyticsServer {
 
     /// Run causal mediation analysis.
     #[tool(
-        description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference. Bootstrap draws are seeded by the session seed."
+        description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns θ(0) (the natural direct effect, NDE) and δ(1) (the natural indirect effect, NIE), and the reverse decomposition θ(1), δ(0), with the proportion mediated and bootstrap inference. Bootstrap draws are seeded by the session seed (default 42)."
     )]
     pub async fn mediation_analysis(
         &self,
@@ -2402,7 +2403,7 @@ impl AnalyticsServer {
 
     /// Run Difference-in-Differences estimation.
     #[tool(
-        description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment. For staggered treatment adoption across multiple periods, use staggered_did instead."
+        description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment, with optional controls and clustered SEs. For staggered treatment adoption across multiple periods, use staggered_did instead."
     )]
     pub async fn diff_in_diff(
         &self,
@@ -2412,12 +2413,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
+        let control_refs: Option<Vec<&str>> = request
+            .controls
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
         let result = match run_did(
             dataset,
             &request.dep_var,
             &request.treatment_var,
             &request.post_var,
-            None,
+            control_refs.as_deref(),
             request.cluster_var.as_deref(),
         ) {
             Ok(r) => r,
@@ -2736,7 +2741,7 @@ impl AnalyticsServer {
 
     /// Run Regression Standardization (G-computation) for causal effect estimation.
     #[tool(
-        description = "Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT."
+        description = "Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls); bootstrap, delta-method and sandwich SEs over the estimand's units, the bootstrap seeded by the session seed (default 42). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT."
     )]
     pub async fn regression_standardization(
         &self,
@@ -2767,7 +2772,7 @@ impl AnalyticsServer {
         config.n_bootstrap = request.n_bootstrap.unwrap_or(999);
         config.confidence_level = request.confidence_level.unwrap_or(0.95);
         config.include_interactions = request.interactions.unwrap_or(false);
-        config.seed = None;
+        config.seed = Some(self.seed_for(None).await);
         config.max_iter = 100;
         config.tolerance = 1e-8;
 
@@ -2946,6 +2951,115 @@ mod tests {
             v[k] = x.clone();
         }
         v
+    }
+
+    /// A server holding the CSV `path` (repo-relative) as `name`.
+    fn csv_server(name: &str, path: &str) -> (tokio::runtime::Runtime, AnalyticsServer) {
+        let df = p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(path)).unwrap();
+        server_with(vec![(name, df)])
+    }
+
+    #[test]
+    fn test_validate_mcp_diff_in_diff_controls() {
+        // lm(performance ~ training_group * post_training + tenure) with CR1 SEs clustered on
+        // employee_id (case did_2x2_training). Fails before: the request had no controls.
+        let (case, rt, server) = case_server("did_2x2_training");
+        let req: DiDRequest = serde_json::from_value(json!({
+            "dataset": "rd", "dep_var": "performance", "treatment_var": "training_group",
+            "post_var": "post_training", "controls": ["tenure"], "cluster_var": "employee_id"
+        }))
+        .unwrap();
+        let r = rt.block_on(server.diff_in_diff(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        let term = "training_group:post_training";
+        let att = case.named("tenure_coef", term);
+        let se = case.named("tenure_se_cl", term);
+        // the text prints both to 4 decimals
+        assert!(
+            out.contains(&format!("ATT = {att:.4} (SE: {se:.4},")),
+            "{att} {se}\n{out}"
+        );
+        let nc = case.scalar("n_clusters");
+        assert!(
+            out.contains(&format!("Clustered SEs: employee_id ({nc} clusters)")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_stdreg_and_staggered_seeded_without_set_seed() {
+        // Fails before: both tools drew OS entropy (stdreg) or thread_rng (staggered DiD)
+        // when the session had no seed.
+        let (rt, server) = csv_server("s", "validation/datasets/generated/stdreg_sim.csv");
+        let run = || {
+            let req: StdRegRequest = serde_json::from_value(json!({
+                "dataset": "s", "outcome": "yc", "treatment": "a", "covariates": ["x1", "x2"],
+                "se_method": "bootstrap", "n_bootstrap": 50
+            }))
+            .unwrap();
+            text(
+                &rt.block_on(server.regression_standardization(Parameters(req)))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(run(), run());
+        let (rt, server) = csv_server("cs", "validation/datasets/generated/cs_panel.csv");
+        let run = || {
+            let req: StaggeredDiDRequest = serde_json::from_value(json!({
+                "dataset": "cs", "outcome": "y", "treatment_time": "first_treat",
+                "time_col": "time", "unit_col": "unit", "bootstrap": 50
+            }))
+            .unwrap();
+            let r = rt.block_on(server.staggered_did(Parameters(req))).unwrap();
+            assert_ne!(r.is_error, Some(true), "{}", text(&r));
+            text(&r)
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn test_mcp_twang_small_n_trees_runs() {
+        // The handler no longer forces 100 minimum iterations, which core refuses above
+        // n_trees.
+        let (rt, server) = csv_server("w", "validation/datasets/generated/weighting_sim.csv");
+        let req: TwangRequest = serde_json::from_value(json!({
+            "dataset": "w", "treatment": "treat", "covariates": ["x1", "x2", "x3"],
+            "n_trees": 50
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.treatment_twang(Parameters(req)))
+            .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    }
+
+    #[test]
+    fn test_mcp_weightit_trim_lower_reaches_core() {
+        let (rt, server) = csv_server("w", "validation/datasets/generated/weighting_sim.csv");
+        let req: WeightItRequest = serde_json::from_value(json!({
+            "dataset": "w", "treatment": "treat", "covariates": ["x1", "x2", "x3"],
+            "trim_quantile": 0.9, "trim_lower": true
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.treatment_weightit(Parameters(req)))
+            .unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        let df = p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/weighting_sim.csv",
+        ))
+        .unwrap();
+        let ds = p2a_core::data::Dataset::new(df);
+        let mut config = WeightItConfig::default();
+        config.intercept = true;
+        config.trim_quantile = 0.9;
+        config.trim_lower = true;
+        config.max_iter = 200;
+        config.tolerance = 1e-8;
+        let core = weightit(&ds, "treat", &["x1", "x2", "x3"], config).unwrap();
+        assert_eq!(out, core.to_string());
     }
 
     #[test]
