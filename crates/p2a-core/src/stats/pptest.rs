@@ -48,8 +48,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{NaPolicy, numeric_column};
+use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
 use crate::errors::{EconError, EconResult};
+use crate::stats::cortest::MIN_ACCURATE_SQUARES;
 use crate::traits::SignificanceLevel;
 
 /// Result of Phillips-Perron unit root test.
@@ -210,8 +211,6 @@ const EXACT_FIT_TOL: f64 = 1e-12;
 /// Rounding error per value, in units of `f64::EPSILON * max|x|`, that a series on a level far
 /// above its movements carries. Differences of two rounded values reach about 1 unit.
 const ROUNDING_ULPS: f64 = 4.0;
-/// Below this a sum of squares has lost digits to subnormal numbers.
-const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
 
 /// Perform the Phillips-Perron unit root test on a time series.
 ///
@@ -229,7 +228,8 @@ const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
 /// # Errors
 ///
 /// - `InsufficientData`: fewer than 5 observations (the regression needs a positive residual df).
-/// - `InvalidSpecification`: non-finite values; squares of the values that do not fit a double;
+/// - `NullValues` / `NonFiniteValues` (column `x`): a NaN or an infinite value.
+/// - `InvalidSpecification`: squares of the values that do not fit a double;
 ///   an exact fit, where the residuals are rounding error next to Δy or to the level of the
 ///   series. For an exact fit `PP.test` warns and returns a statistic made of that rounding error.
 /// - `SingularMatrix`: `y_{t-1}` is constant or a linear trend up to rounding, whatever the scale
@@ -268,12 +268,8 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
         });
     }
 
-    // Check for missing values
-    if x.iter().any(|v| v.is_nan() || v.is_infinite()) {
-        return Err(EconError::InvalidSpecification {
-            message: "Missing or infinite values are not allowed".to_string(),
-        });
-    }
+    // A missing (NaN) or infinite value is refused, naming the series.
+    refuse_non_finite(x, "x")?;
 
     let n_reg = n - 1; // Number of observations in regression
 
@@ -434,6 +430,27 @@ pub fn run_pp_test(dataset: &Dataset, column: &str, lshort: bool) -> EconResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pp_test_names_the_non_finite_series() {
+        let mut x: Vec<f64> = (0..30)
+            .map(|i| (i as f64 * 0.7).sin() + 0.1 * i as f64)
+            .collect();
+        x[4] = f64::NAN;
+        match pp_test(&x, true) {
+            Err(EconError::NullValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("x", 1))
+            }
+            other => panic!("expected NullValues, got {other:?}"),
+        }
+        x[4] = f64::INFINITY;
+        match pp_test(&x, true) {
+            Err(EconError::NonFiniteValues { column, count }) => {
+                assert_eq!((column.as_str(), count), ("x", 1))
+            }
+            other => panic!("expected NonFiniteValues, got {other:?}"),
+        }
+    }
     use polars::prelude::*;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -624,7 +641,8 @@ mod tests {
     /// STAT-67 (PP): the regression and Newey-West internals of PP.test, pinned where both lag rules agree (n = 200).
     #[test]
     fn test_validate_pp_test_t3_internals() {
-        use crate::data::columns::{NaPolicy, numeric_column};
+        use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
+        use crate::stats::cortest::MIN_ACCURATE_SQUARES;
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("stat_pp_t3");
         let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Omit).unwrap().0;
@@ -673,7 +691,8 @@ mod tests {
     /// from R's table, on the five fits of stat_pp_t3.
     #[test]
     fn test_validate_pp_test_t3_statistic() {
-        use crate::data::columns::{NaPolicy, numeric_column};
+        use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
+        use crate::stats::cortest::MIN_ACCURATE_SQUARES;
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("stat_pp_t3");
         let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Omit).unwrap().0;
@@ -717,7 +736,8 @@ mod tests {
     /// lambda2 1.1002914390310594 < sigma2 1.1623414925199784, so the statistic exceeds sqrt(ssqru/ssqrtl) t.
     #[test]
     fn test_pp_correction_keeps_sign() {
-        use crate::data::columns::{NaPolicy, numeric_column};
+        use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
+        use crate::stats::cortest::MIN_ACCURATE_SQUARES;
         let path = p2a_validation::repo_path("validation/datasets/generated/pp_t3.csv");
         let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
         let x = numeric_column(ds.df(), "ar", NaPolicy::Omit).unwrap().0;

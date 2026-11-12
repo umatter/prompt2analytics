@@ -9,6 +9,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, refuse_non_f
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::Alternative;
+use crate::stats::ttest::one_sided_p;
 use crate::traits::estimator::{
     normal_p_value_two_sided, normal_quantile, t_test_p_value, validate_level, z_critical,
 };
@@ -40,7 +41,7 @@ crate::option_enum!(
 );
 
 /// Below this a sum of squares has lost digits to subnormal numbers.
-const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+pub(crate) const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
 
 /// Refuse a constant column, whose correlation is undefined. `what` names it in the message.
 fn refuse_constant(values: &[f64], what: &str) -> EconResult<()> {
@@ -55,17 +56,6 @@ fn refuse_constant(values: &[f64], what: &str) -> EconResult<()> {
             })
         }
         _ => Ok(()),
-    }
-}
-
-/// One-sided p-value from a two-sided one, for a statistic symmetric under the null.
-fn one_sided(p2: f64, statistic: f64, alternative: Alternative) -> f64 {
-    match alternative {
-        Alternative::TwoSided => p2,
-        Alternative::Greater if statistic > 0.0 => p2 / 2.0,
-        Alternative::Greater => 1.0 - p2 / 2.0,
-        Alternative::Less if statistic < 0.0 => p2 / 2.0,
-        Alternative::Less => 1.0 - p2 / 2.0,
     }
 }
 
@@ -242,7 +232,7 @@ fn pearson_test(
             }
         }
     } else {
-        one_sided(t_test_p_value(t_stat, df), t_stat, alternative)
+        one_sided_p(t_test_p_value(t_stat, df), t_stat, alternative)
     };
 
     // Confidence interval using Fisher's z-transformation
@@ -327,7 +317,7 @@ fn spearman_test(
     let p_value = if t_stat.is_infinite() {
         0.0
     } else {
-        one_sided(t_test_p_value(t_stat, df), t_stat, alternative)
+        one_sided_p(t_test_p_value(t_stat, df), t_stat, alternative)
     };
 
     // Note: R uses S statistic, but we use t for simplicity
@@ -388,7 +378,7 @@ fn kendall_test(
         0.0
     };
 
-    let p_value = one_sided(normal_p_value_two_sided(z_stat), z_stat, alternative);
+    let p_value = one_sided_p(normal_p_value_two_sided(z_stat), z_stat, alternative);
 
     Ok(CorTestResult {
         estimate: tau,
@@ -655,7 +645,7 @@ mod tests {
         };
 
         // the same tail helper as the code under test: this reference checks S, tau and z
-        let p_value = one_sided(normal_p_value_two_sided(z_stat), z_stat, alternative);
+        let p_value = one_sided_p(normal_p_value_two_sided(z_stat), z_stat, alternative);
 
         Ok(CorTestResult {
             estimate: tau,
