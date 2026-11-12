@@ -34,9 +34,12 @@
 //! For q=1 (nullifying the effect):
 //! - f = |t| / sqrt(df)
 //!
-//! For statistical significance at level α:
-//! - t_α is the critical value at level α
-//! - f = (|t| - t_α) / sqrt(df) for |t| > t_α
+//! For statistical significance at level α (`robustness_value(t, dof, q, alpha)`):
+//! - f_c = |qt(α/2, df - 1)| / sqrt(df - 1) and f_qa = q|t| / sqrt(df) - f_c
+//! - RV_{q,α} = 0.5 * (sqrt(f_qa⁴ + 4f_qa²) - f_qa²) for f_qa > 0 (0 otherwise), or the
+//!   extreme robustness value (f_q² - f_c²) / (1 + f_q²) when f_q > 1/f_c
+//!
+//! Every statistic here uses the classical OLS t-statistic (`CovarianceType::Standard`).
 //!
 //! ## Bias-adjusted estimate
 //!
@@ -299,39 +302,50 @@ pub fn robustness_value(t_stat: f64, df: f64, q: f64) -> f64 {
 
 /// Compute robustness value for statistical significance.
 ///
-/// RV_{q,α} is the minimum confounding needed to bring the t-statistic
-/// below the critical value at level α.
+/// RV_{q,α} is the minimum strength of confounding (partial R² with both treatment and
+/// outcome) that would make the bias-adjusted estimate, reduced by q·100%, not significant
+/// at level α. As `sensemakr::robustness_value(t, dof, q, alpha)`:
+///
+/// - f_q = q|t| / sqrt(df), f_c = |qt(α/2, df - 1)| / sqrt(df - 1) (0 at α = 1),
+///   f_qa = f_q - f_c;
+/// - RV = 0 when f_qa <= 0 (already not significant at that reduction);
+/// - RV = (f_q² - f_c²) / (1 + f_q²) when f_c > 0 and f_q > 1/f_c (the extreme
+///   robustness value, where a confounder explaining all the residual variance of the
+///   outcome is needed);
+/// - otherwise RV = 2 / (1 + sqrt(1 + 4/f_qa²)).
 ///
 /// # Arguments
-/// * `t_stat` - The t-statistic
-/// * `df` - Residual degrees of freedom
-/// * `q` - Proportion of effect to explain away
-/// * `alpha` - Significance level (default 0.05)
+/// * `t_stat` - The classical OLS t-statistic
+/// * `df` - Residual degrees of freedom (must exceed 1)
+/// * `q` - Proportion of effect to explain away (non-negative)
+/// * `alpha` - Significance level, 0 < alpha <= 1
+///
+/// Returns NaN for inputs outside those ranges.
 ///
 /// # References
-/// Cinelli & Hazlett (2020), Section 3.2
+/// Cinelli & Hazlett (2020), Section 4.1 and Appendix
 pub fn robustness_value_alpha(t_stat: f64, df: f64, q: f64, alpha: f64) -> f64 {
-    if df <= 0.0 {
+    if !(t_stat.is_finite() && df.is_finite() && q.is_finite() && alpha.is_finite())
+        || df <= 1.0
+        || q < 0.0
+        || !(alpha > 0.0 && alpha <= 1.0)
+    {
         return f64::NAN;
     }
-
-    // Critical t-value for significance
-    let t_crit = t_critical(alpha, df);
-
-    // Adjusted t-stat: we need |t_adj| = |t| - (1-q)*|t| = q*|t|
-    // But for alpha version, we need confounding to make |t_adj| < t_crit
-    // So f = (q*|t| - t_crit) / sqrt(df) if q*|t| > t_crit
-    let t_adj = q * t_stat.abs() - t_crit;
-
-    if t_adj <= 0.0 {
-        // Already insignificant at this reduction level
-        return 0.0;
+    let fq = q * t_stat.abs() / df.sqrt();
+    let fc = if alpha == 1.0 {
+        0.0
+    } else {
+        t_critical(alpha, df - 1.0) / (df - 1.0).sqrt()
+    };
+    let fqa = fq - fc;
+    if fqa.is_nan() || fqa <= 0.0 {
+        return if fqa.is_nan() { f64::NAN } else { 0.0 };
     }
-
-    let f = t_adj / df.sqrt();
-    let f2 = f.powi(2);
-    let f4 = f.powi(4);
-    0.5 * ((f4 + 4.0 * f2).sqrt() - f2)
+    if fc > 0.0 && fq > 1.0 / fc {
+        return (fq * fq - fc * fc) / (1.0 + fq * fq);
+    }
+    2.0 / (1.0 + (1.0 + 4.0 / (fqa * fqa)).sqrt())
 }
 
 /// Compute the bias from a hypothetical unobserved confounder.
@@ -513,12 +527,29 @@ fn partial_r2_covariate_treatment(
     partial_r2_covariate_outcome(treatment, x, covariate_idx, name)
 }
 
+/// sensemakr's statistics use the classical OLS t: the partial R² identity t² / (t² + df),
+/// the robustness values and the bias formula do not hold for a heteroskedasticity-robust t.
+fn require_classical_fit(ols_result: &OlsResult) -> EconResult<()> {
+    if ols_result.cov_type != CovarianceType::Standard {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "sensemakr needs the classical OLS fit (CovarianceType::Standard), got {}: \
+                 its partial R², robustness values and bias bounds are defined for the \
+                 classical t-statistic",
+                ols_result.cov_type
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Run sensitivity analysis from an existing OLS result.
 ///
 /// This is the main entry point when you already have OLS results.
 ///
 /// # Arguments
-/// * `ols_result` - Result from a previous OLS regression
+/// * `ols_result` - Result from a previous OLS regression with `CovarianceType::Standard`
+///   (any other covariance type is an `InvalidSpecification`)
 /// * `treatment` - Name of the treatment variable to analyze
 /// * `benchmark_covariates` - Optional list of covariates to use as sensitivity benchmarks
 /// * `kd` - Multiplier for treatment benchmark partial R² (default 1.0)
@@ -528,7 +559,7 @@ fn partial_r2_covariate_treatment(
 ///
 /// # Example
 /// ```ignore
-/// let ols_result = run_ols(&dataset, "y", &["treatment", "x1", "x2"], true, CovarianceType::HC1)?;
+/// let ols_result = run_ols(&dataset, "y", &["treatment", "x1", "x2"], true, CovarianceType::Standard)?;
 /// let sens = sensemakr(&ols_result, "treatment", Some(&["x1", "x2"]), None, None, 1.0, 0.05)?;
 /// println!("{}", sens);
 /// ```
@@ -583,6 +614,7 @@ fn sensemakr_impl(
             available: ols_result.variable_names.clone(),
         })?;
 
+    require_classical_fit(ols_result)?;
     let coef = &ols_result.coefficients[treatment_idx];
     let estimate = coef.estimate;
     let se = coef.std_error;
@@ -740,8 +772,8 @@ pub fn run_sensemakr(
     let mut x_cols: Vec<&str> = vec![treatment_col];
     x_cols.extend(covariate_cols);
 
-    // Run OLS with HC1 robust standard errors
-    let ols_result = run_ols(dataset, y_col, &x_cols, true, CovarianceType::HC1)?;
+    // sensemakr works on the classical lm fit
+    let ols_result = run_ols(dataset, y_col, &x_cols, true, CovarianceType::Standard)?;
 
     // Compute the exact benchmark partial R² of the treatment on each benchmark
     // covariate, R²_{D~X_j|X_{-j}}, by regressing the treatment on the control
@@ -802,7 +834,7 @@ pub fn run_sensemakr(
 /// the adjusted estimate and t-statistic at each point.
 ///
 /// # Arguments
-/// * `ols_result` - The OLS result
+/// * `ols_result` - The OLS result, with `CovarianceType::Standard`
 /// * `treatment` - Name of the treatment variable
 /// * `grid_size` - Number of points in each dimension (default 20)
 /// * `max_r2` - Maximum partial R² value for the grid (default 0.5)
@@ -814,6 +846,7 @@ pub fn generate_contour_data(
 ) -> EconResult<ContourData> {
     let grid_size = grid_size.unwrap_or(20);
     let max_r2 = max_r2.unwrap_or(0.5);
+    require_classical_fit(ols_result)?;
 
     // Find treatment coefficient
     let treatment_idx = ols_result
@@ -1056,8 +1089,68 @@ mod tests {
             .scalar("rv_q05", robustness_value(t, dof, 0.5), Tol::stat(n))
             .finish();
         assert!((partial_r2(t, dof) - case.scalar("r2yd_x")).abs() <= 1e-14);
-        // deviation REG-28: rv_qa 0.019338593626010935 (R: qt(alpha/2, dof - 1) / sqrt(dof - 1)
-        // and the extreme-RV branch); p2a's robustness_value_alpha gives 0.019359950325335992.
+        Check::new(&case)
+            .scalar("rv_qa", s.robustness_value_alpha, Tol::stat(n))
+            .finish();
+    }
+
+    /// Case `sensemakr_rv_alpha`: sensemakr's `robustness_value(t, dof, q, alpha)` on six
+    /// inputs (`sensemakr_rv_inputs.csv`), row 1 in the extreme-RV branch. Closed forms.
+    #[test]
+    fn test_validate_sensemakr_rv_alpha() {
+        use crate::data::columns::ColumnRequest;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("sensemakr_rv_alpha");
+        let cols = ColumnRequest::new(ds.df())
+            .numerics(&["t", "dof", "q", "alpha"])
+            .extract()
+            .unwrap();
+        let (t, dof, q, alpha) = (
+            cols.numeric("t"),
+            cols.numeric("dof"),
+            cols.numeric("q"),
+            cols.numeric("alpha"),
+        );
+        let rv: Vec<f64> = (0..t.len())
+            .map(|i| robustness_value_alpha(t[i], dof[i], q[i], alpha[i]))
+            .collect();
+        // A closed form, but through a t quantile: p2a's and R's qt(0.95, 49) differ by
+        // 5.5e-13 relative, and f_q - f_c amplifies that about 2 f_c / f_qa = 11 times in
+        // row 5 (3.0e-12 relative), so 1e-10 rather than the closed-form 1e-12.
+        Check::new(&case)
+            .vector("rv", &rv, Tol::new(1e-10, 1e-14))
+            .finish();
+        // is_xrv: row 1 is the extreme branch (fq^2 - fc^2) / (1 + fq^2)
+        assert_eq!(case.vector("is_xrv")[0], 1.0);
+        let fq = q[0] * t[0].abs() / dof[0].sqrt();
+        let fc = t_critical(alpha[0], dof[0] - 1.0) / (dof[0] - 1.0).sqrt();
+        assert!(fq > 1.0 / fc);
+        let xrv = (fq * fq - fc * fc) / (1.0 + fq * fq);
+        assert!((rv[0] - xrv).abs() <= 1e-15, "{} vs {xrv}", rv[0]);
+        // invalid inputs
+        assert!(robustness_value_alpha(3.0, 1.0, 1.0, 0.05).is_nan());
+        assert!(robustness_value_alpha(3.0, 10.0, 1.0, 0.0).is_nan());
+        assert!(robustness_value_alpha(3.0, 10.0, 1.0, 1.5).is_nan());
+    }
+
+    /// sensemakr's statistics (t^2 / (t^2 + df), RV, the bias formula) hold for the classical
+    /// t only: a fit with another covariance type is refused.
+    #[test]
+    fn test_sensemakr_refuses_robust_ols() {
+        let df = df! {
+            "y" => [1.0, 2.1, 2.9, 4.2, 5.0, 5.8, 7.1, 8.0, 9.2, 10.1],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        }
+        .unwrap();
+        let ols = run_ols(&Dataset::new(df), "y", &["x"], true, CovarianceType::HC1).unwrap();
+        let check = |e: EconError| match e {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("CovarianceType::Standard"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        };
+        check(sensemakr(&ols, "x", None, None, None, 1.0, 0.05).unwrap_err());
+        check(generate_contour_data(&ols, "x", Some(5), Some(0.5)).unwrap_err());
     }
 
     /// Case `sensemakr_darfur`, X-16: run_sensemakr's benchmark partial R^2 of the treatment on
@@ -1083,16 +1176,24 @@ mod tests {
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         Check::new(&case)
             .scalar("estimate", r.estimate, Tol::coef(n))
+            .scalar("se", r.std_error, Tol::se(n))
+            .scalar("t", r.t_statistic, Tol::stat(n))
+            .scalar("r2yd_x", r.partial_r2_yd, Tol::stat(n))
+            .scalar("rv_q", r.robustness_value, Tol::stat(n))
+            .scalar("rv_qa", r.robustness_value_alpha, Tol::stat(n))
             .scalar(
                 "female_r2dxj",
                 r.benchmark_bounds[0].r2_xz_benchmark,
                 Tol::stat(n),
             )
+            .scalar(
+                "female_r2yxj",
+                r.benchmark_bounds[0].r2_yd_benchmark,
+                Tol::stat(n),
+            )
             .finish();
-        // deviation REG-28: run_sensemakr's se, t, partial R^2, RV and r2_yd_benchmark use HC1 t
-        // (R: classical; female_r2yxj 0.11546024184356445, p2a 0.1204729846). deviation REG-27:
-        // bound_r2dz_x, bound_r2yz_dx and bound_adjusted_* (the bound formulas, adjusted SE and
-        // CI).
+        // deviation REG-27: bound_r2dz_x, bound_r2yz_dx and bound_adjusted_* (the bound
+        // formulas, adjusted SE and CI).
     }
 
     /// A benchmark covariate in the span of the others is an error naming it.
@@ -1126,7 +1227,7 @@ mod tests {
         .unwrap();
 
         let dataset = Dataset::new(df);
-        let ols = run_ols(&dataset, "y", &["x"], true, CovarianceType::HC1).unwrap();
+        let ols = run_ols(&dataset, "y", &["x"], true, CovarianceType::Standard).unwrap();
 
         let contour = generate_contour_data(&ols, "x", Some(10), Some(0.3)).unwrap();
 

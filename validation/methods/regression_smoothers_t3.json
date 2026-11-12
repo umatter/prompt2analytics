@@ -158,15 +158,12 @@
         "estimate, SE, t, dof (classical OLS)",
         "partial R2 of the treatment",
         "RV_q (q = 1, 0.5)",
-        "benchmark partial R2 of the treatment on female"
+        "RV_alpha",
+        "run_sensemakr's classical se, t, partial R2, RV",
+        "benchmark partial R2 of the treatment and of the outcome on female"
       ],
       "tolerance": "validation/README.md, n = 1276: coefficients 1e-10, statistics 1e-8",
       "deviations": [
-        {
-          "finding": "REG-28",
-          "quantity": "rv_qa; run_sensemakr's se, t, partial R2, RV and female_r2yxj",
-          "note": "RV_alpha formula; HC1 t in run_sensemakr (Tier 4)"
-        },
         {
           "finding": "REG-27",
           "quantity": "bound_r2dz_x, bound_r2yz_dx, bound_adjusted_estimate, bound_adjusted_se, bound CI",
