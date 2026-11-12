@@ -631,7 +631,12 @@ pub fn run_ipw_treatment(
 
     // Propensity score summaries of the kept units and of every unit
     let ps_summary = compute_ps_summary(&ps_trim);
-    let ps_untrimmed = compute_ps_summary(&ps);
+    // With no unit trimmed both summaries describe the same scores.
+    let ps_untrimmed = if ps_trim.len() == ps.len() {
+        ps_summary.clone()
+    } else {
+        compute_ps_summary(&ps)
+    };
 
     // Check for extreme propensity scores, before trimming
     if ps_untrimmed.min < 0.01 || ps_untrimmed.max > 0.99 {

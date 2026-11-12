@@ -117,7 +117,7 @@
 //! println!("E[Y(1)]: {:.4}, E[Y(0)]: {:.4}", result.ey1, result.ey0);
 //! ```
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use rand::SeedableRng;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -778,10 +778,15 @@ pub fn run_stdreg(
         })
         .collect();
     let analytic = |kind| {
+        // The identified columns; with every column identified (the usual case) the designs
+        // are read in place.
+        let all = identified.len() == x_full.ncols();
+        let pick = |m: &Array2<f64>| (!all).then(|| m.select(Axis(1), &identified));
+        let (xs, x1s, x0s) = (pick(&x_full), pick(&x_1), pick(&x_0));
         standardisation_ses(
-            &x_full.select(Axis(1), &identified),
-            &x_1.select(Axis(1), &identified),
-            &x_0.select(Axis(1), &identified),
+            view_or(&xs, &x_full),
+            view_or(&x1s, &x_1),
+            view_or(&x0s, &x_0),
             &beta.select(Axis(0), &identified),
             &y,
             &y_hat,
@@ -1564,6 +1569,11 @@ fn variance_fn(mu: f64, model_type: StdRegModel) -> f64 {
     }
 }
 
+/// `sel` when it holds a column selection, else `m` itself.
+fn view_or<'a>(sel: &'a Option<Array2<f64>>, m: &'a Array2<f64>) -> ArrayView2<'a, f64> {
+    sel.as_ref().map_or_else(|| m.view(), |s| s.view())
+}
+
 /// Which analytic standard error [`standardisation_ses`] computes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AnalyticSe {
@@ -1588,10 +1598,10 @@ enum AnalyticSe {
 ///   `IF_{a,i} = t_i u_{a,i} n / n_S + G_a' A^-1 score_i` with `A = X'WX / n`, and
 ///   `Var = sum IF^2 / n^2`.
 #[allow(clippy::too_many_arguments)]
-fn standardisation_ses(
-    x: &Array2<f64>,
-    x1: &Array2<f64>,
-    x0: &Array2<f64>,
+fn standardisation_ses<'a>(
+    x: ArrayView2<'a, f64>,
+    x1: ArrayView2<'a, f64>,
+    x0: ArrayView2<'a, f64>,
     beta: &Array1<f64>,
     y: &Array1<f64>,
     mu: &Array1<f64>,
@@ -1602,40 +1612,50 @@ fn standardisation_ses(
     let (n, k) = x.dim();
     let nf = n as f64;
     let n_s = subset.iter().filter(|&&t| t).count() as f64;
-    let eta = x.dot(beta);
-    // X'WX (working weights) and the scores' scale mu.eta (y - mu) / V(mu)
-    let mut info = resource::try_zeros2(k, k, "stdreg information matrix")?;
-    let mut score_scale = Array1::<f64>::zeros(n);
-    for i in 0..n {
-        let me = mu_eta(eta[i], model_type);
-        let v = variance_fn(mu[i], model_type);
-        let w = me * me / v;
-        score_scale[i] = me * (y[i] - mu[i]) / v;
-        let r = x.row(i);
-        for a in 0..k {
-            let xa = w * r[a];
-            for b in 0..=a {
-                info[[a, b]] += xa * r[b];
+    // X'WX (working weights) and, for the sandwich, the scores' scale mu.eta (y - mu) / V(mu).
+    // X'WX is the cross-product of the rows scaled by sqrt(w); the linear model's w is 1 and
+    // its score scale the residual.
+    let sandwich = kind == AnalyticSe::Sandwich;
+    let mut score_scale = Array1::<f64>::zeros(if sandwich { n } else { 0 });
+    let info = if model_type == StdRegModel::Linear {
+        if sandwich {
+            score_scale = y - mu;
+        }
+        x.t().dot(&x)
+    } else {
+        let eta = x.dot(beta);
+        if sandwich {
+            score_scale = resource::try_zeros1(n, "stdreg score scale")?;
+        }
+        let mut xw = resource::try_zeros2(n, k, "stdreg weighted design")?;
+        xw.assign(&x);
+        for i in 0..n {
+            let me = mu_eta(eta[i], model_type);
+            let v = variance_fn(mu[i], model_type);
+            xw.row_mut(i).mapv_inplace(|e| e * (me * me / v).sqrt());
+            if sandwich {
+                score_scale[i] = me * (y[i] - mu[i]) / v;
             }
         }
-    }
-    for a in 0..k {
-        for b in 0..a {
-            info[[b, a]] = info[[a, b]];
-        }
-    }
+        xw.t().dot(&xw)
+    };
     // G_a and the centred predictions u_a over the subset
     let mut g = [Array1::<f64>::zeros(k), Array1::<f64>::zeros(k)];
     let mut m = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
     let mut means = [0.0; 2];
+    let mut gw = resource::try_zeros1(n, "stdreg gradient weights")?;
     for (arm, xa) in [x0, x1].into_iter().enumerate() {
         let eta_a = xa.dot(beta);
-        for i in (0..n).filter(|&i| subset[i]) {
-            let me = mu_eta(eta_a[i], model_type);
-            g[arm].scaled_add(me / n_s, &xa.row(i));
-            m[arm][i] = inverse_link(eta_a[i], model_type);
-            means[arm] += m[arm][i] / n_s;
+        for i in 0..n {
+            if subset[i] {
+                gw[i] = mu_eta(eta_a[i], model_type) / n_s;
+                m[arm][i] = inverse_link(eta_a[i], model_type);
+                means[arm] += m[arm][i] / n_s;
+            } else {
+                gw[i] = 0.0;
+            }
         }
+        g[arm] = xa.t().dot(&gw);
     }
     let u = |arm: usize, i: usize| {
         if subset[i] {
@@ -1681,12 +1701,11 @@ fn standardisation_ses(
             let a = info / nf;
             let a_inv =
                 sym_inverse(a.view(), SingularPolicy::Error, "stdreg stacked bread")?.inverse;
-            let h = [a_inv.dot(&g[0]), a_inv.dot(&g[1])];
+            let h = [x.dot(&a_inv.dot(&g[0])), x.dot(&a_inv.dot(&g[1]))];
             let (mut s1, mut s0, mut sd) = (0.0, 0.0, 0.0);
             for i in 0..n {
-                let r = x.row(i);
-                let f1 = u(1, i) * nf / n_s + h[1].dot(&r) * score_scale[i];
-                let f0 = u(0, i) * nf / n_s + h[0].dot(&r) * score_scale[i];
+                let f1 = u(1, i) * nf / n_s + h[1][i] * score_scale[i];
+                let f0 = u(0, i) * nf / n_s + h[0][i] * score_scale[i];
                 s1 += f1 * f1;
                 s0 += f0 * f0;
                 sd += (f1 - f0) * (f1 - f0);
