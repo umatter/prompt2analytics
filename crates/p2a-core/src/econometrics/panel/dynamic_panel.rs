@@ -369,7 +369,13 @@ impl GmmResult {
     /// "y lags 2..all, one column per period and lag; D.x": what the instruments are; for
     /// system GMM the differenced and the level parts.
     fn instrument_description(&self) -> String {
-        let y = self.dep_var.strip_prefix("D.").unwrap_or(&self.dep_var);
+        // Difference GMM names the outcome without the "D." it added; system GMM keeps
+        // the outcome's own name (its level equations use it as given)
+        let y = if self.transform == GmmTransform::System {
+            self.dep_var.as_str()
+        } else {
+            self.dep_var.strip_prefix("D.").unwrap_or(&self.dep_var)
+        };
         if self.transform == GmmTransform::System {
             let difference = Self::difference_instruments(
                 y,
@@ -1017,8 +1023,14 @@ pub fn run_gmm(
         } else {
             ("entities", "contribute")
         };
+        // An equation needs its instruments: a differenced equation sits at position
+        // TL1 = max(lags + 1, min_lag) of the time span or later, a level equation at
+        // TL1 - 1 or later (0-based; the message counts periods from 1)
+        let tl1 = (lags + 1).max(config.min_lag);
+        let first = if system { tl1 - 1 } else { tl1 } + 1;
         warnings.push(format!(
-            "{m} {noun} {verb} no equation (no {} consecutive periods): {}",
+            "{m} {noun} {verb} no equation (no {} consecutive periods ending at or after \
+             period {first} of the time span): {}",
             if system { lags + 1 } else { lags + 2 },
             label_list(&eq.entities_without_equations)
         ));
@@ -2559,5 +2571,88 @@ mod tests {
             [("id".to_string(), 2), ("year".to_string(), 1)]
         );
         assert_eq!((a.missing.n_dropped, a.missing.n_total), (3, 800));
+    }
+
+    /// An outcome whose own name starts with "D." keeps it in the system-GMM instrument
+    /// text; difference GMM strips only the "D." it added.
+    #[test]
+    fn test_system_gmm_instrument_text_keeps_d_prefixed_outcome() {
+        let mut df = repo_dataset(AB_BALANCED).df().clone();
+        df.rename("y", "D.gdp".into()).unwrap();
+        let ds = Dataset::new(df);
+        let s = sys_fit(
+            &ds,
+            "D.gdp",
+            &["x"],
+            "id",
+            "year",
+            1,
+            GmmStep::TwoStep,
+            true,
+            2,
+            None,
+            false,
+        );
+        let text = s.to_string();
+        assert!(text.contains("D.gdp lags 2..all"), "{text}");
+        assert!(text.contains("level equations: D.D.gdp lag 1"), "{text}");
+        assert!(!text.contains(" gdp lags"), "{text}");
+        let d = fit(
+            &ds,
+            "D.gdp",
+            &["x"],
+            "id",
+            "year",
+            1,
+            GmmStep::TwoStep,
+            true,
+            2,
+            None,
+            false,
+        );
+        let text = d.to_string();
+        assert!(text.contains("(D.gdp lags 2..all"), "{text}");
+    }
+
+    /// The no-equation warning states the first period an equation can end in, which
+    /// `min_lag` moves.
+    #[test]
+    fn test_gmm_no_equation_warning_names_min_lag() {
+        use crate::data::columns::numeric_column;
+        use polars::prelude::{BooleanChunked, NewChunkedArray};
+        let ds = repo_dataset(AB_BALANCED);
+        let id = numeric_column(ds.df(), "id", NaPolicy::Fail).unwrap().0;
+        let year = numeric_column(ds.df(), "year", NaPolicy::Fail).unwrap().0;
+        // entity 1 only in the first 4 periods (2000-2003)
+        let keep: Vec<bool> = id
+            .iter()
+            .zip(&year)
+            .map(|(&i, &y)| !(i == 1.0 && y > 2003.0))
+            .collect();
+        let ds = Dataset::new(
+            ds.df()
+                .filter(&BooleanChunked::from_slice("keep".into(), &keep))
+                .unwrap(),
+        );
+        let r = fit(
+            &ds,
+            "y",
+            &["x"],
+            "id",
+            "year",
+            1,
+            GmmStep::OneStep,
+            true,
+            4,
+            None,
+            false,
+        );
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "1 entity contributes no equation (no 3 consecutive periods ending at or \
+                    after period 5 of the time span): '1'"),
+            "{:?}",
+            r.warnings
+        );
     }
 }
