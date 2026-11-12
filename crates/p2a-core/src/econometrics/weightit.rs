@@ -602,12 +602,16 @@ pub fn weightit(
 
     // Balance tables cover the covariates only (no intercept row).
     let var_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
-    let x_bal = covariates_only(&x, config.intercept);
+    let x_bal = if config.intercept {
+        x.slice(ndarray::s![.., 1..])
+    } else {
+        x.view()
+    };
 
     // Compute balance before weighting; the SMD denominators are fixed from this sample.
     let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
-    let scale = BalanceScale::new(x_bal.view(), &treated, config.estimand.sd_denominator());
-    let balance_before = compute_balance_table(&x_bal, &d, &var_names, None, &scale);
+    let scale = BalanceScale::new(x_bal, &treated, config.estimand.sd_denominator());
+    let balance_before = compute_balance_table(x_bal, &treated, &var_names, None, &scale);
 
     // Compute weights based on method
     let mut convergence = None;
@@ -765,7 +769,7 @@ pub fn weightit(
     };
 
     // Compute balance after weighting
-    let balance_after = compute_balance_table(&x_bal, &d, &var_names, Some(&weights), &scale);
+    let balance_after = compute_balance_table(x_bal, &treated, &var_names, Some(&weights), &scale);
 
     // Compute effective sample sizes
     let (ess_total, ess_treated, ess_control) = compute_ess(&weights, &d);
@@ -938,7 +942,7 @@ pub fn entropy_balance_with(
 
     let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
     let scale = BalanceScale::new(x.view(), &treated, config.estimand.sd_denominator());
-    let balance = compute_balance_table(&x, &d, &names, Some(&weights), &scale);
+    let balance = compute_balance_table(x.view(), &treated, &names, Some(&weights), &scale);
     let (_, ess_treated, ess_control) = compute_ess(&weights, &d);
     let reweighted = |i: usize| match config.estimand {
         WeightEstimand::ATT => d[i] < 0.5,
@@ -2240,7 +2244,12 @@ pub(crate) fn balance_sd<'a>(
     binary_as_proportion: bool,
 ) -> f64 {
     let col = col.into();
-    let bin = binary_as_proportion && is_binary(col);
+    unweighted_sd(col, treated, denom, binary_as_proportion && is_binary(col))
+}
+
+/// [`balance_sd`] with the binary test already made (`bin`: the column is 0/1 and is
+/// standardised as a proportion).
+fn unweighted_sd(col: ArrayView1<f64>, treated: &[bool], denom: SdDenominator, bin: bool) -> f64 {
     // p (1 - p) from the unit-weight mean (the exact share of ones), else the n - 1 variance
     let var = |(mean, var): (f64, f64)| if bin { mean * (1.0 - mean) } else { var };
     let var = if denom == SdDenominator::All {
@@ -2274,7 +2283,10 @@ impl BalanceScale {
         let (sd, binary) = x
             .columns()
             .into_iter()
-            .map(|col| (balance_sd(col, treated, denom, true), is_binary(col)))
+            .map(|col| {
+                let bin = is_binary(col);
+                (unweighted_sd(col, treated, denom, bin), bin)
+            })
             .unzip();
         Self { sd, binary }
     }
@@ -2300,18 +2312,16 @@ pub(crate) fn finite_abs_mean_max(values: impl Iterator<Item = f64>) -> (f64, f6
 /// for the estimand, binary covariates `p (1 - p)`), and cobalt's weighted variance ratio (NaN
 /// for binary covariates).
 fn compute_balance_table(
-    x: &Array2<f64>,
-    d: &Array1<f64>,
+    x: ArrayView2<f64>,
+    treated: &[bool],
     var_names: &[String],
     weights: Option<&[f64]>,
     scale: &BalanceScale,
 ) -> WeightItBalanceTable {
-    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
-
     let covariates: Vec<WeightItCovariateBalance> = (0..x.ncols())
         .map(|j| {
             let [(mean_t, var_t), (mean_c, var_c)] =
-                two_group_mean_var(x.column(j), weights, &treated);
+                two_group_mean_var(x.column(j), weights, treated);
             let sd = scale.sd[j];
             let var_ratio = if scale.binary[j] {
                 f64::NAN
@@ -3269,7 +3279,7 @@ mod tests {
 
         let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
         let scale = BalanceScale::new(x.view(), &treated, SdDenominator::Pooled);
-        let balance = compute_balance_table(&x, &d, &var_names, None, &scale);
+        let balance = compute_balance_table(x.view(), &treated, &var_names, None, &scale);
 
         // Treated has higher means
         assert!(balance.covariates[0].mean_treated > balance.covariates[0].mean_control);
