@@ -3516,21 +3516,21 @@ mod tests {
                 .scalar(&key("ess_t"), r.ess_treated, Tol::coef(n))
                 .scalar(&key("ess_c"), r.ess_control, Tol::coef(n))
                 .vector(&key("smd_after"), &smd, Tol::coef(n));
-            let focal: Option<bool> = match est {
-                WeightEstimand::ATT => Some(true),
-                WeightEstimand::ATC => Some(false),
-                WeightEstimand::ATE => None,
+            // The focal group (the treated for ATT, the controls for ATC, nobody for ATE) keeps
+            // its weights of 1.
+            let focal = |g: bool| match est {
+                WeightEstimand::ATT => g,
+                WeightEstimand::ATC => !g,
+                WeightEstimand::ATE => false,
             };
-            if let Some(f) = focal {
-                assert!(
-                    r.weights
-                        .iter()
-                        .zip(&treated)
-                        .filter(|(_, g)| **g == f)
-                        .all(|(w, _)| *w == 1.0),
-                    "{tag}: focal weights untouched"
-                );
-            }
+            assert!(
+                r.weights
+                    .iter()
+                    .zip(&treated)
+                    .filter(|(_, g)| focal(**g))
+                    .all(|(w, _)| *w == 1.0),
+                "{tag}: focal weights untouched"
+            );
             assert!(
                 r.warnings
                     .iter()
