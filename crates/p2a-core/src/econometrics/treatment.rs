@@ -4,6 +4,13 @@
 //! - **IPW (Inverse Probability Weighting)**: Estimates ATE/ATT using propensity score weighting
 //! - **AIPW (Augmented IPW)**: Doubly robust estimation combining IPW with outcome regression
 //!
+//! # Inference
+//!
+//! The analytic SEs are the default. A bootstrap (`bootstrap >= 2`) resamples all rows and runs
+//! the whole procedure in every replicate: the propensity model is refitted, the trimming rule
+//! re-applied and (doubly robust methods) the outcome models refitted on the kept rows. The
+//! replicates are seeded (`seed`, else [`DEFAULT_BOOTSTRAP_SEED`]).
+//!
 //! # References
 //!
 //! - Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement
@@ -117,8 +124,10 @@ pub struct IpwConfig {
     pub trim: f64,
     /// Number of bootstrap replications for standard errors (default: 0 = analytic).
     /// When 0, `std_error` is the M-estimation SE that accounts for the estimated logit
-    /// propensity (`se_mest`). Set to e.g. 999 to use the bootstrap instead. Must be 0 or at least 2; a count whose
-    /// result buffer cannot be allocated is refused with `EconError::ResourceLimit`.
+    /// propensity (`se_mest`). Set to e.g. 999 to use the bootstrap instead: every replicate
+    /// resamples all n rows, refits the propensity model and re-applies the trimming rule, so
+    /// the SE covers the whole procedure. Must be 0 or at least 2; a count whose result buffer
+    /// cannot be allocated is refused with `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Use normalized (Hajek) weights (default: true)
     /// If false, uses Horvitz-Thompson weights
@@ -461,7 +470,8 @@ impl fmt::Display for DoublyRobustResult {
 /// logit-score and weighted-mean equations (`se_mest`; the propensity estimation is
 /// accounted for, and a trimmed set is held fixed); the result also carries the
 /// efficient-influence-function SE (`se_eif`) and the SE with the propensity treated as known
-/// (`se_naive`). With `bootstrap >= 2` it is the bootstrap SD.
+/// (`se_naive`). With `bootstrap >= 2` it is the SD of a full-procedure bootstrap: each
+/// replicate resamples all n rows, refits the propensity model and re-applies the trimming.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing outcome, treatment, and covariates
@@ -546,27 +556,11 @@ pub fn run_ipw_treatment(
     }
 
     // Apply trimming
-    let trim_lower = config.trim;
-    let trim_upper = 1.0 - config.trim;
-
     let mut keep_idx: Vec<usize> = Vec::new();
     let mut n_trimmed = 0;
 
     for i in 0..n {
-        let ps_i = ps[i];
-        let should_keep = match config.estimand {
-            Estimand::ATE => ps_i >= trim_lower && ps_i <= trim_upper,
-            // For ATT, only trim the upper tail for treated, and both tails for control
-            Estimand::ATT => {
-                if d[i] >= 0.5 {
-                    ps_i <= trim_upper
-                } else {
-                    ps_i >= trim_lower && ps_i <= trim_upper
-                }
-            }
-        };
-
-        if should_keep {
+        if ipw_keeps(config.estimand, d[i], ps[i], config.trim) {
             keep_idx.push(i);
         } else {
             n_trimmed += 1;
@@ -748,30 +742,23 @@ pub fn run_ipw_treatment(
         let z = z_critical(0.95)?;
         (se, effect - z * se, effect + z * se, method)
     } else {
-        // Bootstrap for standard errors using cached propensity scores (parallel via rayon)
+        // Full-procedure bootstrap: every replicate resamples all n rows, refits the
+        // propensity model and re-applies the trimming rule (parallel via rayon).
         let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
-
-        let estimand = config.estimand;
-        let normalized = config.normalized;
+        let rep = IpwReplicate {
+            y: &y,
+            d: &d,
+            x: &x,
+            estimand: config.estimand,
+            trim: config.trim,
+            normalized: config.normalized,
+        };
         let boot_effects: Vec<f64> = streamed_bootstrap(
             &mut rng,
-            n_trim,
+            n,
             config.bootstrap,
-            boot_chunk_len(n_trim),
-            |indices| {
-                let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
-                let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
-                let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
-
-                let effect_boot =
-                    compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, normalized);
-
-                if effect_boot.is_finite() {
-                    Some(effect_boot)
-                } else {
-                    None
-                }
-            },
+            boot_chunk_len(n),
+            |indices| rep.effect(indices),
         )?;
 
         if boot_effects.len() < config.bootstrap / 2 {
@@ -784,7 +771,10 @@ pub fn run_ipw_treatment(
             se,
             lo,
             hi,
-            format!("bootstrap ({} replicates)", config.bootstrap),
+            format!(
+                "bootstrap ({} replicates; propensity model refitted and trimming re-applied in each)",
+                config.bootstrap
+            ),
         )
     };
 
@@ -1175,7 +1165,8 @@ fn boot_chunk_len(n: usize) -> usize {
 
 /// Draws `reps` bootstrap index sets of size `n` from `rng`, in replicate order and with the
 /// same draws as building all sets up front, holding at most `chunk` sets at a time. `stat`
-/// is evaluated in parallel within a chunk. Returns the `Some` values in replicate order.
+/// is evaluated in parallel within a chunk. Returns the `Some` values in replicate order; a
+/// replicate that returns `Ok(None)` is dropped (counted by the caller), an error ends the run.
 ///
 /// The result buffer is reserved fallibly (an unallocatable `reps` is
 /// `EconError::ResourceLimit`), and the installed cooperative-cancellation budget is checked
@@ -1188,7 +1179,7 @@ fn streamed_bootstrap<F>(
     stat: F,
 ) -> EconResult<Vec<f64>>
 where
-    F: Fn(&[usize]) -> Option<f64> + Sync,
+    F: Fn(&[usize]) -> EconResult<Option<f64>> + Sync,
 {
     let mut out = resource::try_with_capacity::<f64>(reps, "bootstrap replications")?;
     let budget = resource::current_budget();
@@ -1208,13 +1199,94 @@ where
                 if let Some(b) = &budget {
                     b.check()?;
                 }
-                Ok(stat(s))
+                stat(s)
             })
             .collect::<EconResult<Vec<Option<f64>>>>()?;
         out.extend(values.into_iter().flatten());
         done += m;
     }
     Ok(out)
+}
+
+/// Whether IPW keeps a unit with treatment `d` and propensity `ps` at `trim`: both tails for
+/// the ATE; for the ATT the upper tail only for treated units, both tails for controls.
+fn ipw_keeps(estimand: Estimand, d: f64, ps: f64, trim: f64) -> bool {
+    let (lower, upper) = (trim, 1.0 - trim);
+    match estimand {
+        Estimand::ATE => ps >= lower && ps <= upper,
+        Estimand::ATT => {
+            if d >= 0.5 {
+                ps <= upper
+            } else {
+                ps >= lower && ps <= upper
+            }
+        }
+    }
+}
+
+/// A replicate that failed: cancellation and resource limits end the bootstrap, any other
+/// error (a propensity or outcome fit that fails on the resampled rows) drops the replicate.
+fn dropped_replicate(e: EconError) -> EconResult<Option<f64>> {
+    match e {
+        EconError::Cancelled(_) | EconError::ResourceLimit(_) => Err(e),
+        _ => Ok(None),
+    }
+}
+
+/// The resampled rows `idx` of `y`, `d` and `x` (allocated fallibly).
+fn resampled_rows(
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    x: &Array2<f64>,
+    idx: &[usize],
+) -> EconResult<(Array1<f64>, Array1<f64>, Array2<f64>)> {
+    let mut yb = resource::try_with_capacity(idx.len(), "bootstrap outcome")?;
+    let mut db = resource::try_with_capacity(idx.len(), "bootstrap treatment")?;
+    for &i in idx {
+        yb.push(y[i]);
+        db.push(d[i]);
+    }
+    Ok((
+        Array1::from(yb),
+        Array1::from(db),
+        select_rows(x.view(), idx)?,
+    ))
+}
+
+/// The IPW estimator as one bootstrap replicate runs it: on the resampled rows, the propensity
+/// model is refitted, the scores clamped and trimmed as in [`run_ipw_treatment`], and the
+/// effect computed on the kept rows. `None` when fewer than 10 rows are kept, an arm is empty,
+/// the fit fails or the effect is not finite.
+struct IpwReplicate<'a> {
+    y: &'a Array1<f64>,
+    d: &'a Array1<f64>,
+    x: &'a Array2<f64>,
+    estimand: Estimand,
+    trim: f64,
+    normalized: bool,
+}
+
+impl IpwReplicate<'_> {
+    fn effect(&self, idx: &[usize]) -> EconResult<Option<f64>> {
+        let (yb, db, xb) = resampled_rows(self.y, self.d, self.x, idx)?;
+        let fit = match fit_propensity_lean(xb.view(), db.view()) {
+            Ok(f) => f,
+            Err(e) => return dropped_replicate(e),
+        };
+        let ps = fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
+        let keep: Vec<usize> = (0..idx.len())
+            .filter(|&i| ipw_keeps(self.estimand, db[i], ps[i], self.trim))
+            .collect();
+        let n_t = keep.iter().filter(|&&i| db[i] >= 0.5).count();
+        if keep.len() < 10 || n_t == 0 || n_t == keep.len() {
+            return Ok(None);
+        }
+        let yk: Array1<f64> = keep.iter().map(|&i| yb[i]).collect();
+        let dk: Array1<f64> = keep.iter().map(|&i| db[i]).collect();
+        let pk: Array1<f64> = keep.iter().map(|&i| ps[i]).collect();
+        let e = compute_ipw_effect(&yk, &dk, &pk, self.estimand, self.normalized);
+        Ok(e.is_finite().then_some(e))
+    }
 }
 
 /// Compute IPW treatment effect estimate.
@@ -1539,7 +1611,7 @@ pub fn run_doubly_robust(
                     // Check bootstrap sample has both treated and control
                     let n_t_boot = d_boot.iter().filter(|&&v| v >= 0.5).count();
                     if n_t_boot == 0 || n_t_boot == n_trim {
-                        return None;
+                        return Ok(None);
                     }
 
                     // The outer match arm restricts `method` to IPW or Regression;
@@ -1558,11 +1630,7 @@ pub fn run_doubly_robust(
                         mean_mu1 - mean_mu0
                     };
 
-                    if effect_boot.is_finite() {
-                        Some(effect_boot)
-                    } else {
-                        None
-                    }
+                    Ok(effect_boot.is_finite().then_some(effect_boot))
                 },
             )?;
 
@@ -2003,18 +2071,20 @@ mod tests {
     #[test]
     fn test_streamed_bootstrap_matches_materialised_draws() {
         // stat rejects some sets so the filtering path is covered
-        let stat = |idx: &[usize]| {
+        let stat = |idx: &[usize]| -> EconResult<Option<f64>> {
             if idx[0].is_multiple_of(5) {
-                None
+                Ok(None)
             } else {
-                Some(idx.iter().map(|&i| ((i * 7919) % 101) as f64).sum::<f64>())
+                Ok(Some(
+                    idx.iter().map(|&i| ((i * 7919) % 101) as f64).sum::<f64>(),
+                ))
             }
         };
         let mut rng = StdRng::seed_from_u64(7);
         let sets: Vec<Vec<usize>> = (0..101)
             .map(|_| (0..37).map(|_| rng.gen_range(0..37)).collect())
             .collect();
-        let reference: Vec<f64> = sets.iter().filter_map(|s| stat(s)).collect();
+        let reference: Vec<f64> = sets.iter().filter_map(|s| stat(s).unwrap()).collect();
         assert!(
             reference.len() < 101,
             "precondition: some sets are rejected"
@@ -2371,28 +2441,11 @@ mod tests {
         // the standard errors are compared at 1e-9 relative. The interval is the type-7
         // percentile interval of the same draws since T3-WP23 (CAUS-111; it was effect
         // +- qnorm(0.975) SE).
-        const IPW_SE: f64 = 0.11590718872111475;
-        const IPW_CI: (f64, f64) = (0.25515833348085837, 0.6746370453016588);
         const DR_IPW_SE: f64 = 0.11590718872111475;
         const DR_REG_SE: f64 = 0.011033127368161828;
+        // The IPW bootstrap refits the propensity model in every replicate since T4 (its
+        // reproducibility is checked by test_ipw_bootstrap_seed_is_reproducible).
         let ds = create_treatment_dataset();
-        let ipw = run_ipw_treatment(
-            &ds,
-            "y",
-            "treatment",
-            &["x1", "x2"],
-            IpwConfig {
-                estimand: Estimand::ATE,
-                trim: 0.01,
-                bootstrap: 200,
-                normalized: true,
-                seed: Some(42),
-            },
-        )
-        .unwrap();
-        assert!(((ipw.std_error - IPW_SE) / IPW_SE).abs() < 1e-9);
-        assert!(((ipw.ci_lower - IPW_CI.0) / IPW_CI.0).abs() < 1e-9);
-        assert!(((ipw.ci_upper - IPW_CI.1) / IPW_CI.1).abs() < 1e-9);
         for (method, se) in [
             (DRMethod::IPW, DR_IPW_SE),
             (DRMethod::Regression, DR_REG_SE),
@@ -3221,6 +3274,153 @@ mod tests {
             r.t_stat,
             r.p_value,
         );
+    }
+
+    /// The rows `idx` of `ds`, in order (a bootstrap sample built by hand).
+    fn resample(ds: &Dataset, idx: &[usize]) -> Dataset {
+        let take = IdxCa::from_vec("rows".into(), idx.iter().map(|&i| i as IdxSize).collect());
+        Dataset::new(ds.df().take(&take).unwrap())
+    }
+
+    /// One index set of the seeded stream `streamed_bootstrap` draws from.
+    fn one_draw(n: usize, seed: u64) -> Vec<usize> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..n).map(|_| rng.gen_range(0..n)).collect()
+    }
+
+    /// Outcome, treatment and the design (intercept first) as the estimators read them.
+    fn columns(
+        ds: &Dataset,
+        y: &str,
+        d: &str,
+        covs: &[&str],
+    ) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+        (
+            DesignMatrix::extract_column(ds.df(), y).unwrap(),
+            DesignMatrix::extract_column(ds.df(), d).unwrap(),
+            DesignMatrix::from_dataframe(ds.df(), covs, true)
+                .unwrap()
+                .data,
+        )
+    }
+
+    #[test]
+    fn test_ipw_bootstrap_replicate_refits_the_propensity_model() {
+        // A replicate is the whole estimator on the resampled rows: propensity refitted,
+        // trimming re-applied. Fails before: replicates reused the fitted, trimmed scores.
+        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let (y, d, x) = columns(&ds, "y", "treat", &COVS);
+        let idx = one_draw(y.len(), 7);
+        let boot = resample(&ds, &idx);
+        for (estimand, trim, normalized) in [
+            (Estimand::ATE, 0.05, true),
+            (Estimand::ATT, 0.05, true),
+            (Estimand::ATE, 0.0, false),
+        ] {
+            let rep = IpwReplicate {
+                y: &y,
+                d: &d,
+                x: &x,
+                estimand,
+                trim,
+                normalized,
+            };
+            let got = rep.effect(&idx).unwrap().unwrap();
+            let want = run_ipw_treatment(
+                &boot,
+                "y",
+                "treat",
+                &COVS,
+                IpwConfig {
+                    estimand,
+                    trim,
+                    normalized,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .effect;
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{estimand:?} trim {trim}: replicate {got}, estimator {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ipw_bootstrap_se_near_mest_se() {
+        // The refit bootstrap estimates the same sampling variance as the M-estimation SE.
+        // Fails before: the cached-score bootstrap was about 1.7 times the M-estimation SE.
+        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let fit = |bootstrap| {
+            run_ipw_treatment(
+                &ds,
+                "y",
+                "treat",
+                &COVS,
+                IpwConfig {
+                    trim: 0.0,
+                    bootstrap,
+                    seed: Some(42),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let (boot, mest) = (fit(999), fit(0));
+        let ratio = boot.std_error / mest.std_error;
+        assert!(
+            (ratio - 1.0).abs() < 0.15,
+            "bootstrap / M-estimation SE = {ratio}"
+        );
+        assert!(
+            boot.se_method.contains("propensity model refitted"),
+            "{}",
+            boot.se_method
+        );
+    }
+
+    #[test]
+    fn test_ipw_bootstrap_replicate_propagates_cancellation() {
+        // Cancellation inside a replicate's propensity fit ends the bootstrap; it is not a
+        // dropped replicate.
+        let (_, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let (y, d, x) = columns(&ds, "y", "treat", &COVS);
+        let idx = one_draw(y.len(), 7);
+        let rep = IpwReplicate {
+            y: &y,
+            d: &d,
+            x: &x,
+            estimand: Estimand::ATE,
+            trim: 0.05,
+            normalized: true,
+        };
+        let got = resource::with_budget(cancelled_budget(), || rep.effect(&idx));
+        assert!(matches!(got, Err(EconError::Cancelled(_))), "got {got:?}");
+    }
+
+    #[test]
+    fn test_ipw_bootstrap_seed_is_reproducible() {
+        let ds = create_treatment_dataset();
+        let fit = |seed| {
+            run_ipw_treatment(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                IpwConfig {
+                    trim: 0.01,
+                    bootstrap: 60,
+                    seed,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let (a, b, c, other) = (fit(Some(42)), fit(Some(42)), fit(None), fit(Some(7)));
+        assert_eq!(a.std_error.to_bits(), b.std_error.to_bits());
+        assert_eq!(a.std_error.to_bits(), c.std_error.to_bits());
+        assert_ne!(a.std_error.to_bits(), other.std_error.to_bits());
     }
 
     #[test]
