@@ -194,13 +194,7 @@
         "E-value of the confidence limit closest to the null"
       ],
       "tolerance": "closed forms: 1e-12 relative",
-      "deviations": [
-        {
-          "finding": "REG-39",
-          "quantity": "could_explain_away",
-          "note": "not pinned (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

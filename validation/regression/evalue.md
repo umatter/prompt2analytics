@@ -41,4 +41,8 @@ Closed forms: `Tol::new(1e-12, 1e-14)`.
 
 None for the pinned rows. Row 7 (HR, common outcome) uses EValue's conversion and is pinned with its
 RR-scale limits; `row8_e_ci` uses EValue's `exp(0.91 d - 1.78 se)` and is pinned.
-- REG-39: `could_explain_away` is not pinned.
+`could_explain_away(observed_rr, rr_eu, rr_ud)` and `bias_factor` have no R function; they are
+checked as properties (`test_could_explain_away_at_the_evalue`): a confounder with both associations
+at the E-value explains the observed RR away, B(E, E) = E^2 / (2E - 1) = RR (RR 3.9 and 0.6), B(8, 8) =
+4.27 explains RR 3.9 away while B(3, 3) = 1.8 does not, and `bias_factor(evalue_rr(x)) = x` within
+1e-12 for x = 1.2, 2.5, 3.9.
