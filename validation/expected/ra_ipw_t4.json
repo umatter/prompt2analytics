@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "ra_ipw_t4",
+  "area": "econometrics/treatment",
+  "method": "Regression adjustment ATE/ATT/ATC with OLS outcome models per arm and the stacked-equation sandwich SE (weighting_sim)",
+  "reference": "OLS per arm (qr), regression adjustment over all / treated / controls; stacked estimating-equation sandwich (HC0) written out; equals the fully interacted lm's standardised contrast",
+  "call": "lm(y ~ x1 + x2 + x3, subset = treat == d) for d in 1, 0; mean(m1 - m0) over S",
+  "dataset": "validation/datasets/generated/weighting_sim.csv",
+  "datasets": ["validation/datasets/generated/weighting_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "ra_ate": 1.4307395308757218,
+    "ra_att": 1.5633310471356239,
+    "ra_atc": 1.2963682627197133,
+    "ra_ate_se_sandwich": 0.12164156911903133,
+    "ra_att_se_sandwich": 0.12943021250028561,
+    "ra_atc_se_sandwich": 0.13419498321855181,
+    "n": 300,
+    "n_treated": 151
+  }
+}
