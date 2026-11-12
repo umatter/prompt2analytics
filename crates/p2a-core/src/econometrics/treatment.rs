@@ -2377,25 +2377,7 @@ mod tests {
             "the message names the analytic SE IPW reports: {err}"
         );
         expect_invalid_spec(err, "bootstrap");
-        for method in [DRMethod::IPW, DRMethod::Regression] {
-            for b in [1] {
-                let err = run_doubly_robust(
-                    &ds,
-                    "y",
-                    "treatment",
-                    &["x1", "x2"],
-                    DoublyRobustConfig {
-                        method,
-                        estimand: Estimand::ATE,
-                        trim: 0.01,
-                        bootstrap: b,
-                        seed: Some(42),
-                    },
-                )
-                .unwrap_err();
-                expect_invalid_spec(err, "bootstrap");
-            }
-        }
+        // DR IPW/Regression with bootstrap 1: test_dr_bootstrap_one_is_refused.
         // AIPW uses the influence function and ignores `bootstrap`
         assert!(
             run_doubly_robust(

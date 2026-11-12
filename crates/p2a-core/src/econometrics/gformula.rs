@@ -2258,8 +2258,6 @@ fn rd_inference(rd: f64, draws: &[f64], level: f64) -> EconResult<RdInference> {
     })
 }
 
-/// Log-normal interval `exp(ln rr -/+ z se)` with the exact normal quantile; `NaN`s when
-/// `rr <= 0` or the SE is not finite.
 /// `intervention / natural`, or NaN with a note when the ratio is undefined: a continuous
 /// outcome with a non-positive mean, or a natural-course risk of 0 (0 / 0 is NaN; a positive
 /// risk over 0 is Inf, also with the note).
@@ -2286,6 +2284,8 @@ fn risk_ratio(natural: f64, intervention: f64, continuous: bool, notes: &mut Vec
     rr
 }
 
+/// Log-normal interval `exp(ln rr -/+ z se)` with the exact normal quantile; `NaN`s when
+/// `rr <= 0` or the SE is not finite.
 fn rr_interval(rr: f64, se_log_rr: f64, level: f64) -> EconResult<(f64, f64)> {
     let z = z_critical(level)?;
     if rr.is_nan() || rr <= 0.0 || !se_log_rr.is_finite() {

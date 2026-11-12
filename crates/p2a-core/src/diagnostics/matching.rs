@@ -273,7 +273,6 @@ pub fn ipw_diagnostics(result: &IpwResult) -> IdentificationReport {
     report
 }
 
-/// Check positivity assumption using propensity score distribution.
 /// Level of one tail of the propensity distribution: 0 none, 1 potential (within
 /// [`EXTREME_PS_THRESHOLD`] of the boundary), 2 likely (within 0.01). `distance` is the
 /// distance of the extreme score from its boundary (the minimum, or 1 - the maximum).
@@ -287,6 +286,8 @@ fn tail_level(distance: f64) -> u8 {
     }
 }
 
+/// Check the positivity assumption from the propensity score distribution.
+///
 /// Positivity from the fitted propensity scores before trimming (`ps_summary_untrimmed`; the
 /// kept units' summary for a result that does not carry it): the status is the worse of the
 /// two tails.
@@ -329,11 +330,25 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             issue_parts.push(format!("max = {:.4}", ps_max));
         }
 
-        // Compute implied maximum weight (for ATE weighting)
-        let max_weight = if ps_min > 0.0 && ps_max < 1.0 {
-            f64::max(1.0 / ps_min, 1.0 / (1.0 - ps_max))
+        // Largest ATE weight the scores imply: before trimming from the untrimmed summary,
+        // and, when units were trimmed, the largest weight the estimator actually used.
+        let implied_max_weight = |min: f64, max: f64| {
+            if min > 0.0 && max < 1.0 {
+                f64::max(1.0 / min, 1.0 / (1.0 - max))
+            } else {
+                f64::INFINITY
+            }
+        };
+        let max_weight = implied_max_weight(ps_min, ps_max);
+        let weights = if result.ps_summary_untrimmed.is_some() && result.trim > 0.0 {
+            format!(
+                "IPW weights up to ≈ {:.1} before trimming; the kept units' largest weight is \
+                 ≈ {:.1}",
+                max_weight,
+                implied_max_weight(result.ps_summary.min, result.ps_summary.max)
+            )
         } else {
-            f64::INFINITY
+            format!("IPW weights up to ≈ {max_weight:.1}")
         };
 
         let n_all = result.n_obs + result.n_trimmed;
@@ -354,10 +369,9 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             format!(
                 "Propensity scores before trimming approach boundary values ({}), indicating \
                  near-deterministic treatment assignment for some units. This implies extreme \
-                 IPW weights (max ≈ {:.1}) where a few observations dominate the estimate \
-                 ({}).",
+                 {}, where a few observations dominate the estimate ({}).",
                 issue_parts.join(", "),
-                max_weight,
+                weights,
                 trimming
             ),
             "Positivity",
@@ -647,6 +661,11 @@ mod tests {
             .find(|w| w.code == "POSITIVITY_VIOLATION")
             .expect("positivity warning");
         assert!(w.message.contains("before trimming"), "{}", w.message);
+        // The weight the estimator used is bounded by the trim, and the message says so.
+        let kept = f64::max(1.0 / r.ps_summary.min, 1.0 / (1.0 - r.ps_summary.max));
+        assert!(kept <= 1.0 / 0.05 + 1e-9);
+        let want = format!("the kept units' largest weight is ≈ {kept:.1}");
+        assert!(w.message.contains(&want), "{}", w.message);
         assert_eq!(
             positivity_status(&report),
             AssumptionStatus::LikelyViolation

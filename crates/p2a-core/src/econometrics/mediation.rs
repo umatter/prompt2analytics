@@ -680,8 +680,10 @@ fn compute_mediation_effects(
     if !acc.iter().all(|a| a[1] > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "mediation needs treated and control units after trimming (treated weight {}, control weight {})",
-                acc[0][1], acc[1][1]
+                "mediation needs a positive weight sum for each potential-outcome mean after \
+                 trimming (weights E[Y(1,M(1))] {}, E[Y(0,M(0))] {}, E[Y(1,M(0))] {}, \
+                 E[Y(0,M(1))] {})",
+                acc[0][1], acc[1][1], acc[2][1], acc[3][1]
             ),
         });
     }
