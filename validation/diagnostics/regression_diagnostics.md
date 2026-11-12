@@ -160,11 +160,13 @@ rows.
    (pinned above). The scaled number, on which Belsley's thresholds are judged, is
    2.872962 on Grunfeld, as `kappa(sweep(X, 2, sqrt(colSums(X^2)), "/"), exact = TRUE)` gives
    (quoted in `test_scaled_condition_number_ignores_units`, not R-pinned); no warning is
-   printed there. The Durbin-Watson wording (REG-34, Tier 4) is unchanged.
+   printed there.
 2. **VIF of the intercept**: p2a lists an `(Intercept)` row with VIF NaN; `car::vif` has
    no such row, and the test compares the regressors only (T1-WP05 drops the row from the
    text output).
-3. **Durbin-Watson**: no p-value is computed (R's `dwtest` gives 2.1e-32 here).
+3. **Durbin-Watson**: no p-value is computed (R's `dwtest` gives 2.1e-32 here). The text
+   reads the statistic with the 1.5 / 2.5 cut-offs, calls that a rule of thumb, not a test,
+   and points to the Breusch-Godfrey test (`lmtest::bgtest`) for a p-value.
 4. **Breusch-Pagan**: only the studentized version is offered.
 5. **Jarque-Bera p-value**: p2a uses the closed form exp(−JB/2) of the χ²(2) survival
    function, `tseries` uses 1 − pchisq, which is 0 here; they agree within 1e-12 absolute.

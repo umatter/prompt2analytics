@@ -12,7 +12,7 @@ Breusch-Pagan Test (Heteroskedasticity):
   P-value: 0.0000
 
 Durbin-Watson Statistic: 0.3582
-  Positive autocorrelation detected
+  Below 1.5: suggests positive autocorrelation (rule of thumb, not a test; the Breusch-Godfrey test gives a p-value)
 
 Variance Inflation Factors:
   value: 1.3138
