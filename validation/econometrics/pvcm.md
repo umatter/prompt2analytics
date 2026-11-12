@@ -127,6 +127,27 @@ at tolerances up to 30, were deleted in Tier 3.
 `validation/README.md`, n = 240: coefficients 1e-8 relative, SE and statistics 1e-6
 relative; n exact.
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this version, on one core (`taskset -c 2`,
+`RAYON_NUM_THREADS=1`), nine rounds interleaving the two builds; each round reports the median
+of at least 41 calls after ten warm-up calls, and the table gives the median of the nine. The
+machine was shared with other builds (load average 12-50 on 12 logical CPUs), so ratios
+within about 0.05 of 1 are noise. Simulated panels of n / 20 entities over 20 periods with two regressors.
+
+| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 |
+|---|---|---|---|---|
+| within (one OLS per entity) | 100 | 54.1 | 57.1 | 1.06 |
+| within (one OLS per entity) | 1,000 | 481.0 | 519.7 | 1.08 |
+| within (one OLS per entity) | 10,000 | 4,416 | 4,826 | 1.09 |
+| random (Swamy) | 100 | 91.7 | 87.4 | 0.95 |
+| random (Swamy) | 1,000 | 639.7 | 700.0 | 1.09 |
+| random (Swamy) | 10,000 | 5,688 | 6,093 | 1.07 |
+
+Both fits stay below 1.1x of v0.5.0. The added cost is the per-entity bookkeeping
+(`entities`, `n_entities_used`), the eigen check of Delta in the Swamy fit and the weighted
+homogeneity statistic; none of it grows faster than the number of entities.
+
 ## Known differences
 
 - The CLI and MCP tables still print `t` headers over the z statistics (to be relabelled

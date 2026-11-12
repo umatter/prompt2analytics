@@ -199,6 +199,41 @@ These compare fits with each other; the R pins are the cases above.
 2. **Text output**: p2a's core text labels the statistics `z` and `P>|z|`; the CLI and MCP
    tables still print `t` headers over the same numbers (to be relabelled there).
 
+## Timing
+
+Release builds of v0.5.0 (`f80b0131`) and this version, on one core (`taskset -c 2`,
+`RAYON_NUM_THREADS=1`), nine rounds interleaving the two builds; each round reports the median
+of at least 41 calls after ten warm-up calls, and the table gives the median of the nine. The
+machine was shared with other builds (load average 12-50 on 12 logical CPUs), so ratios
+within about 0.05 of 1 are noise. Simulated panels of n / 5 entities over 5 periods with two regressors, AR(1)
+errors and entity effects; the unbalanced rows drop every tenth row.
+
+| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 |
+|---|---|---|---|---|
+| pooling, balanced | 100 | 77.8 | 59.4 | 0.76 |
+| pooling, balanced | 1,000 | 509.6 | 495.2 | 0.97 |
+| pooling, balanced | 10,000 | 6,053 | 4,699 | 0.78 |
+| pooling, unbalanced | 100 | 73.9 | 57.9 | 0.78 |
+| pooling, unbalanced | 1,000 | 491.3 | 364.2 | 0.74 |
+| pooling, unbalanced | 10,000 | 5,766 | 3,594 | 0.62 |
+| within, balanced | 100 | 93.3 | 58.9 | 0.63 |
+| within, balanced | 1,000 | 540.7 | 485.3 | 0.90 |
+| within, balanced | 10,000 | 6,282 | 4,512 | 0.72 |
+| within, unbalanced | 100 | 89.5 | 57.2 | 0.64 |
+| within, unbalanced | 1,000 | 520.1 | 351.3 | 0.68 |
+| within, unbalanced | 10,000 | 5,974 | 3,572 | 0.60 |
+| first differences, balanced | 100 | 98.5 | 58.4 | 0.59 |
+| first differences, balanced | 1,000 | 675.3 | 381.0 | 0.56 |
+| first differences, balanced | 10,000 | 8,166 | 4,298 | 0.53 |
+| first differences, unbalanced | 100 | 91.3 | 55.7 | 0.61 |
+| first differences, unbalanced | 1,000 | 634.6 | 357.4 | 0.56 |
+| first differences, unbalanced | 10,000 | 7,700 | 3,974 | 0.52 |
+
+The transformed-model fit is faster than v0.5.0's in every row: the within model reuses the
+demeaned arrays, and Omega is factorised once per pattern of observed periods instead of
+once per entity. Peak resident memory of a process fitting the three models at n = 10,000:
+11.1 MB balanced and 11.3 MB unbalanced, against 11.8 MB and 12.0 MB for v0.5.0.
+
 ## Performance Comparison
 
 No speed comparison with R is claimed here. Speed comparisons with R come from the benchmark pipeline in the

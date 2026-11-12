@@ -353,6 +353,63 @@ Further tests: `econometrics::hdfe::tests::test_hdfe_fe_leverage_matches_dense_p
 `econometrics::hdfe::tests::test_hdfe_hc3_refuses_too_many_levels` and
 `econometrics::hdfe::tests::test_hdfe_hc3_singleton_group_contributes_nothing`.
 
+### Timing of HC2/HC3
+
+Release builds of v0.5.0 (`f80b0131`) and this version, on one core (`taskset -c 2`,
+`RAYON_NUM_THREADS=1`), nine rounds interleaving the two builds; each round reports the median
+of at least 41 calls after ten warm-up calls, and the table gives the median of the nine. The
+machine was shared with other builds (load average 12-50 on 12 logical CPUs), so ratios
+within about 0.05 of 1 are noise. Simulated panels of n / 10 entities over 10 periods with two regressors; the
+two-way rows absorb entity and period.
+
+| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 |
+|---|---|---|---|---|
+| HC1, one-way | 100 | 32.2 | 33.5 | 1.04 |
+| HC1, one-way | 1,000 | 173.3 | 194.6 | 1.12 |
+| HC1, one-way | 10,000 | 2,758 | 2,848 | 1.03 |
+| HC3, one-way | 100 | 42.0 | 36.9 | 0.88 |
+| HC3, one-way | 1,000 | 257.3 | 206.0 | 0.80 |
+| HC3, one-way | 10,000 | 3,498 | 3,312 | 0.95 |
+| HC1, two-way | 100 | 48.7 | 50.0 | 1.03 |
+| HC1, two-way | 1,000 | 283.6 | 248.3 | 0.88 |
+| HC1, two-way | 10,000 | 3,929 | 3,558 | 0.91 |
+| HC3, two-way | 100 | 56.9 | 69.8 | 1.23 |
+| HC3, two-way | 1,000 | 343.7 | 405.6 | 1.18 |
+| HC3, two-way | 10,000 | 4,739 | 4,237 | 0.89 |
+
+One-way HC3 is faster than before; its fixed-effect leverage is `1 / T_g`. Two-way HC3 at n = 100 and 1,000 costs 1.23x and 1.18x of v0.5.0: v0.5.0 omitted the
+fixed-effect leverage and so reported wrong standard errors (see above), and the new cost is
+building and inverting the Schur complement of the 10 period levels. This is above the 1.1x
+rule and is not signed off. At n = 10,000 the row is 0.89x.
+
+Peak resident memory (`/usr/bin/time -v`), whole process:
+
+| Run | v0.5.0 | new |
+|---|---|---|
+| data only, 10,000 rows | 6.4 MB | 6.4 MB |
+| two-way HC3, 10,000 rows, 10 levels | 6.5 MB | 6.7 MB |
+| data only, 20,000 rows, 1,000 x 1,000 levels | 8.1 MB | 8.0 MB |
+| two-way HC3, 20,000 rows, 1,000 x 1,000 levels | 12.1 MB | 49.1 MB |
+
+At the 1,000-level ceiling the dense Schur complement, its positive-definite block and the
+inverse hold three 1,000 x 1,000 matrices (about 8 MB each); the fit took 0.29 s against 0.03 s
+for v0.5.0's incorrect HC3.
+
+### Timing of the one-way demeaning
+
+Columns of a one-way design are demeaned in parallel again when there is more than one
+column and enough rows. Same setup, n = 100,000 rows, 10 periods per level:
+
+| Fit | k | threads | v0.5.0 µs | new µs | new / v0.5.0 |
+|---|---|---|---|---|---|
+| HC1, one-way | 5 | 1 | 97,071 | 82,940 | 0.85 |
+| HC1, one-way | 20 | 1 | 598,057 | 553,806 | 0.93 |
+| HC1, one-way | 5 | all | 100,289 | 97,186 | 0.97 |
+| HC1, one-way | 20 | all | 563,844 | 526,035 | 0.93 |
+| FEGLM Poisson, one-way | 5 | 1 | 513,486 | 521,324 | 1.02 |
+
+The multi-threaded rows ran on the shared machine and show little parallel gain there.
+
 ## Known differences
 
 - The adjusted within R-squared follows plm (0.6704668484), not fixest's `war2`
