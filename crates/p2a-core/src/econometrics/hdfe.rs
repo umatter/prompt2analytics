@@ -266,15 +266,15 @@ fn demean_map(
     Ok((Array1::from_vec(current), max_iter, final_change, converged))
 }
 
-/// Rows from which [`demean_matrix_map`] demeans the columns of a multi-way design in
-/// parallel; below it they run on the calling thread.
+/// Rows from which [`demean_matrix_map`] demeans the columns of a design in parallel;
+/// below it they run on the calling thread.
 const PARALLEL_DEMEAN_MIN_ROWS: usize = 2_000;
 
 /// Demean a matrix column-wise using the Method of Alternating Projections.
 ///
 /// Columns are independent under the alternating-projections algorithm, so
-/// from [`PARALLEL_DEMEAN_MIN_ROWS`] rows with two or more factors and columns
-/// we process them in parallel via `rayon` and reduce their per-column
+/// from [`PARALLEL_DEMEAN_MIN_ROWS`] rows and two or more columns we process
+/// them in parallel via `rayon` and reduce their per-column
 /// convergence statistics at the end. The caller's budget is installed on each
 /// worker, so every sweep honours it.
 pub(crate) fn demean_matrix_map(
@@ -298,24 +298,24 @@ pub(crate) fn demean_matrix_map(
         )
     };
     // Small problems run on the calling thread: handing columns to the pool costs a
-    // wake-up per call, more than the sweeps over short columns, and one factor is a
-    // single pass. Columns are independent, so the result is the same either way.
-    let per_column: Vec<(Array1<f64>, usize, f64, bool)> =
-        if k <= 1 || factors.len() <= 1 || n < PARALLEL_DEMEAN_MIN_ROWS {
-            (0..k).map(demean_column).collect::<EconResult<Vec<_>>>()?
-        } else {
-            // Rayon workers do not see the caller's thread-local budget: capture it
-            // here and install it inside each closure. Each call to `demean_map`
-            // allocates its own scratch buffers, so workers share no mutable state.
-            let budget = resource::current_budget();
-            (0..k)
-                .into_par_iter()
-                .map(|j| match &budget {
-                    Some(b) => resource::with_budget(b.clone(), || demean_column(j)),
-                    None => demean_column(j),
-                })
-                .collect::<EconResult<Vec<_>>>()?
-        };
+    // wake-up per call, more than the sweeps over short columns. Columns are
+    // independent, so the result is the same either way.
+    let per_column: Vec<(Array1<f64>, usize, f64, bool)> = if k <= 1 || n < PARALLEL_DEMEAN_MIN_ROWS
+    {
+        (0..k).map(demean_column).collect::<EconResult<Vec<_>>>()?
+    } else {
+        // Rayon workers do not see the caller's thread-local budget: capture it
+        // here and install it inside each closure. Each call to `demean_map`
+        // allocates its own scratch buffers, so workers share no mutable state.
+        let budget = resource::current_budget();
+        (0..k)
+            .into_par_iter()
+            .map(|j| match &budget {
+                Some(b) => resource::with_budget(b.clone(), || demean_column(j)),
+                None => demean_column(j),
+            })
+            .collect::<EconResult<Vec<_>>>()?
+    };
 
     let mut x_demeaned = Array2::<f64>::zeros((n, k));
     let mut max_iterations: usize = 0;
@@ -2458,6 +2458,38 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             demean_matrix_map(&x, &[factor1, factor2], 1e-8, 1000, true)
         }));
+    }
+
+    /// One factor from PARALLEL_DEMEAN_MIN_ROWS rows: the columns, demeaned in
+    /// parallel, equal the column-by-column result bit for bit.
+    #[test]
+    fn test_demean_matrix_map_one_factor_parallel_equals_serial() {
+        let (n, k) = (5_000, 4);
+        let levels = 437;
+        let ids: Vec<usize> = (0..n).map(|i| (i * 7919 + i / 13) % levels).collect();
+        let mut counts = vec![0; levels];
+        for &g in &ids {
+            counts[g] += 1;
+        }
+        let factor = FactorInfo {
+            name: "g".to_string(),
+            n_levels: levels,
+            ids,
+            counts,
+        };
+        let x = Array2::from_shape_fn((n, k), |(i, j)| {
+            ((i * (j + 3) * 104_729) % 1_009) as f64 / 97.0 + 0.01 * (i % (j + 5)) as f64
+        });
+        let factors = [factor];
+        let (all, _, _, converged) = demean_matrix_map(&x, &factors, 1e-8, 1000, true).unwrap();
+        assert!(converged);
+        for j in 0..k {
+            let (col, _, _, _) =
+                demean_map(&x.column(j).to_owned(), &factors, 1e-8, 1000, true).unwrap();
+            for i in 0..n {
+                assert_eq!(all[[i, j]].to_bits(), col[i].to_bits(), "({i}, {j})");
+            }
+        }
     }
 
     // =========================================================================
