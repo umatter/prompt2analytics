@@ -1005,8 +1005,17 @@ struct IdentifiedDesign<'a> {
 
 impl<'a> IdentifiedDesign<'a> {
     /// The identified part of `x`, the design `ols` was fitted on. Refuses an `x` whose shape
-    /// is not the fit's.
+    /// is not the fit's, or whose columns are clearly not orthogonal to the fit's residuals
+    /// ([`IdentifiedDesign::check_normal_equations`]).
     fn of(x: ndarray::ArrayView2<'a, f64>, ols: &OlsResult) -> EconResult<Self> {
+        let id = Self::of_fitted(x, ols)?;
+        id.check_normal_equations(ols)?;
+        Ok(id)
+    }
+
+    /// [`IdentifiedDesign::of`] for an `x` the caller built from the fit's own data (the
+    /// clustered fit), where the normal-equations check cannot fail and is skipped.
+    fn of_fitted(x: ndarray::ArrayView2<'a, f64>, ols: &OlsResult) -> EconResult<Self> {
         let k = ols.n_params;
         if x.nrows() != ols.n_obs || x.ncols() != k {
             return Err(EconError::InvalidSpecification {
@@ -1045,33 +1054,45 @@ impl<'a> IdentifiedDesign<'a> {
                 unscaled,
             }
         };
-        #[cfg(debug_assertions)]
-        id.debug_check_normal_equations(ols);
         Ok(id)
     }
 
-    /// Debug builds: `x` must be the fitted design, which the normal equations of the fit
-    /// make orthogonal to the residuals: ‖X₁'e‖∞ ≤ 1e-6 ‖X₁‖_F (‖X₁b₁‖₂ + ‖e‖₂). The bound
-    /// scales with the size of y, since the rounding in X'e of a correct fit is of order
-    /// eps ‖X‖ (‖X‖ ‖b‖ + ‖y‖) whatever ‖e‖ is. (An exact fit cannot be told from a wrong X.)
-    #[cfg(debug_assertions)]
-    fn debug_check_normal_equations(&self, ols: &OlsResult) {
+    /// `x` must be the fitted design, which the normal equations of the fit make orthogonal
+    /// to the residuals. The rounding in X'e of a correct fit is of order
+    /// eps ‖X‖ (‖X‖ ‖b‖ + ‖y‖) whatever ‖e‖ is, and 1e-6 ‖X₁‖_F (‖X₁‖_F ‖b₁‖₂ + ‖e‖₂) bounds
+    /// it with room for ill-conditioned designs fitted by the normal equations; `x` is
+    /// refused only when ‖X₁'e‖∞ exceeds that bound a thousandfold, which no correct fit comes
+    /// near. One pass over `x`. (An exact fit, or one with non-finite residuals, cannot be
+    /// checked and passes.)
+    fn check_normal_equations(&self, ols: &OlsResult) -> EconResult<()> {
         let e = &ols.resid;
+        let r = self.cols.len();
         if e.len() != self.x.nrows() || e.iter().any(|v| !v.is_finite()) {
-            return;
+            return Ok(());
         }
-        let b1: Array1<f64> = self.cols.iter().map(|&j| ols.beta[j]).collect();
-        let xb = self.x.dot(&b1);
-        let norm = |v: &Array1<f64>| v.iter().map(|a| a * a).sum::<f64>().sqrt();
-        let x_f = self.x.iter().map(|a| a * a).sum::<f64>().sqrt();
-        let xte = self.x.t().dot(e);
+        // X'e and ‖X‖_F² in one pass over the rows
+        let mut xte = resource::try_vec(r, 0.0_f64, "normal-equations check")?;
+        let mut x_ss = 0.0;
+        for (row, &ei) in self.x.rows().into_iter().zip(e.iter()) {
+            for (acc, &v) in xte.iter_mut().zip(row.iter()) {
+                *acc += v * ei;
+                x_ss += v * v;
+            }
+        }
+        let b_ss: f64 = self.cols.iter().map(|&j| ols.beta[j] * ols.beta[j]).sum();
+        let e_ss: f64 = e.iter().map(|v| v * v).sum();
+        let x_f = x_ss.sqrt();
         let max = xte.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        let bound = 1e-6 * x_f * (norm(&xb) + norm(e)) + f64::MIN_POSITIVE;
-        debug_assert!(
-            max <= bound || !(max.is_finite() && bound.is_finite()),
-            "IdentifiedDesign: the design is not the one the OLS fit was computed on \
-             (max |X'e| = {max:e} > {bound:e})"
-        );
+        let bound = 1e-6 * x_f * (x_f * b_ss.sqrt() + e_ss.sqrt()) + f64::MIN_POSITIVE;
+        if max.is_finite() && bound.is_finite() && max > 1e3 * bound {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "x is not the design the OLS fit was computed on (its columns are not \
+                     orthogonal to the fit's residuals: max |X'e| = {max:.3e})"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Number of identified columns (the rank of the fit).
@@ -1265,15 +1286,16 @@ fn fit_ols(
     };
 
     // The overall Wald F with a robust covariance (the classical F is kept)
-    let wald_f = match cov_type {
+    let robust_label = match cov_type {
         CovarianceType::Standard => None,
-        _ => {
-            let label = match cov_type {
-                CovarianceType::HC0 => "HC0",
-                CovarianceType::HC1 => "HC1",
-                CovarianceType::HC2 => "HC2",
-                _ => "HC3",
-            };
+        CovarianceType::HC0 => Some("HC0"),
+        CovarianceType::HC1 => Some("HC1"),
+        CovarianceType::HC2 => Some("HC2"),
+        CovarianceType::HC3 => Some("HC3"),
+    };
+    let wald_f = match robust_label {
+        None => None,
+        Some(label) => {
             match robust_wald_f(
                 &beta,
                 &vcov,
@@ -1679,7 +1701,7 @@ impl OlsClusteredResult {
         // identified columns and the fit's (X'X)^{-1} block, as sandwich::vcovCL does.
         let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
             .map_err(|e| econ_error_from_design(e, df))?;
-        let id = IdentifiedDesign::of(design.data.view(), &base_result)?;
+        let id = IdentifiedDesign::of_fitted(design.data.view(), &base_result)?;
 
         // Row indices (into the sample) of each cluster
         let factor1 = ids.factor(cluster1);
@@ -1831,8 +1853,12 @@ pub struct ClusteredOptions {
 }
 
 /// The eigenvalue check of a two-way clustered covariance (rank x rank): `None` when it is
-/// positive semi-definite, otherwise a warning naming its smallest eigenvalue; with `fix` the
-/// covariance is rebuilt as `Q max(Λ, 0) Q'`.
+/// positive semi-definite, otherwise a warning naming its smallest eigenvalue. A smallest
+/// eigenvalue above `-16 k eps max|λ|` is rounding on a covariance that is positive
+/// semi-definite in exact arithmetic (a rank-deficient one with few clusters, say) and is not
+/// reported. With `fix` the covariance is rebuilt as `Q max(Λ, 0) Q'` whenever an eigenvalue
+/// is negative, rounding-level ones included. Without `fix` a reported covariance is
+/// indefinite: the caller withholds the Wald F, which the warning says.
 fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
     let sym = (&*vcov + &vcov.t()) * 0.5;
     let (values, vectors) = eig_symmetric(&sym.view()).map_err(|e| {
@@ -1844,20 +1870,27 @@ fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<Stri
     if min >= 0.0 || !min.is_finite() {
         return Ok(None);
     }
+    let scale = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let tol = 16.0 * values.len() as f64 * f64::EPSILON * scale;
+    let reported = min < -tol;
     if !fix {
-        return Ok(Some(format!(
-            "Two-way cluster-robust covariance is not positive semi-definite (smallest \
-             eigenvalue {min:.6e}); set fix to clamp negative eigenvalues to 0 \
-             (sandwich::vcovCL(fix = TRUE))"
-        )));
+        return Ok(reported.then(|| {
+            format!(
+                "Two-way cluster-robust covariance is not positive semi-definite (smallest \
+                 eigenvalue {min:.6e}), so no Wald F is reported; set fix to clamp negative \
+                 eigenvalues to 0 (sandwich::vcovCL(fix = TRUE))"
+            )
+        }));
     }
     let clamped = values.mapv(|v| v.max(0.0));
     let scaled = &vectors * &clamped.view().insert_axis(ndarray::Axis(0));
     *vcov = scaled.dot(&vectors.t());
-    Ok(Some(format!(
-        "Two-way cluster-robust covariance is not positive semi-definite (smallest \
-         eigenvalue {min:.6e}); negative eigenvalues clamped to 0 (sandwich::vcovCL(fix = TRUE))"
-    )))
+    Ok(reported.then(|| {
+        format!(
+            "Two-way cluster-robust covariance is not positive semi-definite (smallest \
+             eigenvalue {min:.6e}); negative eigenvalues clamped to 0 (sandwich::vcovCL(fix = TRUE))"
+        )
+    }))
 }
 
 /// The rows of `dataset` that `ids` kept, restricted to the columns `names` (each must
@@ -2168,10 +2201,7 @@ impl HacKernel {
                 }
             }
             Self::QuadraticSpectral => {
-                let z = 6.0 * std::f64::consts::PI * j as f64 / (5.0 * m as f64);
-                let t1 = 3.0 / z.powi(2);
-                let t2 = z.sin() / z - z.cos();
-                t1 * t2
+                quadratic_spectral(6.0 * std::f64::consts::PI * j as f64 / (5.0 * m as f64))
             }
             Self::Truncated => {
                 if j <= m {
@@ -2191,13 +2221,31 @@ impl HacKernel {
     }
 }
 
+/// The Quadratic Spectral kernel `3/z² (sin z / z - cos z)` at `z > 0`. Below `z = 1e-2` the
+/// two terms cancel to `z²/3` and the closed form keeps only about `eps / z²` relative
+/// accuracy, so the Taylor series `1 - z²/10 + z⁴/280` is used there; its first omitted term
+/// is below `z⁶ / 15000`, under rounding at the switch.
+fn quadratic_spectral(z: f64) -> f64 {
+    if z < QS_SERIES_BELOW {
+        let z2 = z * z;
+        1.0 - z2 / 10.0 + z2 * z2 / 280.0
+    } else {
+        3.0 / (z * z) * (z.sin() / z - z.cos())
+    }
+}
+
+/// Where [`quadratic_spectral`] switches from its Taylor series to the closed form.
+const QS_SERIES_BELOW: f64 = 1e-2;
+
 impl HacKernel {
     /// The kernel `k(x)` at `x >= 0` (sandwich's `kweights`): Truncated 1 for `x <= 1`;
     /// Bartlett `1 - x` for `x < 1`; Parzen `1 - 6x² + 6x³` for `x <= 1/2` and `2(1 - x)³` for
     /// `x <= 1`; Tukey-Hanning `(1 + cos(πx)) / 2` for `x <= 1`; zero beyond those supports.
     /// Quadratic Spectral `3/z² (sin z / z - cos z)` with `z = 6πx/5` has unbounded support
-    /// and is 1 at `x = 0`. (sandwich switches QS to an exponential approximation below
-    /// `|x| < 1e-3`, which only differs at lag counts of 1000 and more; it is not copied.)
+    /// and is 1 at `x = 0`; below `z = 1e-2` the closed form loses digits to cancellation and
+    /// its Taylor series `1 - z²/10 + z⁴/280` is used instead (exact to rounding there).
+    /// (sandwich switches QS to an exponential approximation below `|x| < 1e-3`; that is not
+    /// copied.)
     fn at(self, x: f64) -> f64 {
         if x == 0.0 {
             return 1.0;
@@ -2233,10 +2281,7 @@ impl HacKernel {
                     0.0
                 }
             }
-            Self::QuadraticSpectral => {
-                let z = 6.0 * std::f64::consts::PI * x / 5.0;
-                3.0 / (z * z) * (z.sin() / z - z.cos())
-            }
+            Self::QuadraticSpectral => quadratic_spectral(6.0 * std::f64::consts::PI * x / 5.0),
         }
     }
 
@@ -2632,7 +2677,10 @@ fn hac_meat_fft(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<
     }
     fft.process(&mut h);
     let scale = 1.0 / len as f64;
-    let spectrum: Vec<f64> = h.iter().map(|c| c.re * scale).collect();
+    let mut spectrum = resource::try_vec(len, 0.0, "HAC FFT spectrum")?;
+    for (g, c) in spectrum.iter_mut().zip(&h) {
+        *g = c.re * scale;
+    }
     drop(h);
     // W s_b for every column, packed two columns per transform
     let mut ws = resource::try_vec(
@@ -2738,7 +2786,10 @@ pub(crate) fn var1_prewhiten_scores(
     for c in 0..k {
         b.column_mut(c).assign(&qr.coefficients(current.column(c))?);
     }
-    let resid = &current - &lagged.dot(&b);
+    let mut resid = resource::try_zeros2(n - 1, k, "HAC prewhitening residuals")?;
+    resid.assign(&current);
+    // resid = current - lagged B, in place (no second n x k temporary)
+    ndarray::linalg::general_mat_mul(-1.0, &lagged, &b, 1.0, &mut resid);
     let i_minus_a = Array2::<f64>::eye(k) - b.t();
     let d = matrix_inverse(&i_minus_a.view())
         .map_err(|_| refuse("I - A is singular (the VAR(1) of the scores has a unit root)"))?;
@@ -5140,6 +5191,107 @@ mod tests {
         }
     }
 
+    /// A smallest eigenvalue at rounding level (-1e-20 against 1e-2) is not an indefinite
+    /// covariance: no warning, the covariance untouched without fix (so the caller keeps the
+    /// Wald F), clamped silently with fix. A genuine negative eigenvalue is still reported,
+    /// and the warning says the Wald F is withheld.
+    #[test]
+    fn test_twoway_psd_check_ignores_rounding_level_negative() {
+        let base = Array2::from_diag(&ndarray::arr1(&[1e-2, 5e-3, -1e-20]));
+        let mut v = base.clone();
+        assert_eq!(twoway_psd_check(&mut v, false).unwrap(), None);
+        assert_eq!(v, base);
+        let mut v = base.clone();
+        assert_eq!(twoway_psd_check(&mut v, true).unwrap(), None);
+        assert!(v[[2, 2]] >= 0.0);
+
+        let mut v = Array2::from_diag(&ndarray::arr1(&[1e-2, 5e-3, -1e-4]));
+        let w = twoway_psd_check(&mut v, false)
+            .unwrap()
+            .expect("indefinite");
+        assert!(w.contains("no Wald F is reported"), "{w}");
+        let mut v = Array2::from_diag(&ndarray::arr1(&[1e-2, 5e-3, -1e-4]));
+        let w = twoway_psd_check(&mut v, true).unwrap().expect("indefinite");
+        assert!(w.contains("clamped"), "{w}");
+    }
+
+    /// A rank-deficient positive semi-definite covariance (v v' of rank 1, exact in floating
+    /// point) is not reported, whatever sign rounding gives its zero eigenvalues.
+    #[test]
+    fn test_twoway_psd_check_rank_deficient_psd_does_not_warn() {
+        let u = ndarray::arr1(&[0.5, -0.25, 0.125]);
+        let base = Array2::from_shape_fn((3, 3), |(i, j)| u[i] * u[j]);
+        let mut v = base.clone();
+        assert_eq!(twoway_psd_check(&mut v, false).unwrap(), None);
+        assert_eq!(v, base);
+    }
+
+    /// Two-way clustering on two copies of one cluster column with fewer clusters than
+    /// parameters: V_a + V_b - V_ab is the (rank-deficient, positive semi-definite) one-way
+    /// covariance, which draws no "not positive semi-definite" warning.
+    #[test]
+    fn test_twoway_rank_deficient_psd_fit_does_not_warn() {
+        let n = 24;
+        let e = perf3_noise(3 * n, 11);
+        let x1: Vec<f64> = (0..n).map(|i| i as f64 / 5.0 + e[i]).collect();
+        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).cos() + e[n + i]).collect();
+        let x3: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.3).sin() + e[2 * n + i])
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x1[i] - x2[i] + 0.2 * x3[i] + e[(5 * i) % (3 * n)])
+            .collect();
+        let g: Vec<i64> = (0..n as i64).map(|i| i % 3).collect();
+        let df = df! {
+            "y" => y, "x1" => x1, "x2" => x2, "x3" => x3, "a" => g.clone(), "b" => g,
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let r = OlsClusteredResult::fit_with(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            "a",
+            Some("b"),
+            true,
+            ClusteredOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            !r.ols
+                .warnings
+                .iter()
+                .any(|w| w.contains("not positive semi-definite")),
+            "{:?}",
+            r.ols.warnings
+        );
+    }
+
+    /// The Quadratic Spectral kernel's Taylor branch below z = 1e-2 agrees with the closed
+    /// form at the switch and is continuous across it; at small z it keeps the digits the
+    /// closed form loses.
+    #[test]
+    fn test_quadratic_spectral_small_z_series() {
+        let closed = |z: f64| 3.0 / (z * z) * (z.sin() / z - z.cos());
+        let z = QS_SERIES_BELOW;
+        let series = {
+            let z2 = z * z;
+            1.0 - z2 / 10.0 + z2 * z2 / 280.0
+        };
+        // the closed form at 1e-2 carries about eps / z^2 = 2e-12 relative error
+        assert!((series - closed(z)).abs() < 1e-10, "{series} {}", closed(z));
+        let below = quadratic_spectral(z * (1.0 - 1e-12));
+        let above = quadratic_spectral(z * (1.0 + 1e-12));
+        assert!((below - above).abs() < 1e-10, "{below} {above}");
+        // 1 - z^2/10 to within z^4/280 at small z, where the closed form cancels
+        let z = 1e-5;
+        assert!((quadratic_spectral(z) - (1.0 - z * z / 10.0)).abs() < 1e-18);
+        assert!(quadratic_spectral(z) < 1.0);
+        // through the lag weights: a huge lag count gives weights just below 1
+        let w = HacKernel::QuadraticSpectral.lag_weight(1, 100_000);
+        assert!(w < 1.0 && 1.0 - w < 1e-9, "{w}");
+    }
+
     /// A two-way clustered covariance with a negative eigenvalue (case
     /// `ols_twoway_indefinite`): NaN SEs and a warning; fix clamps it as vcovCL(fix = TRUE).
     #[test]
@@ -5211,18 +5363,20 @@ mod tests {
             "/../../validation/datasets/generated/vcov_dk_grunfeld_t10.csv"
         );
         let ds = Dataset::new(crate::data::DataLoader::load_csv(path).unwrap());
-        // Truncated at lag 8 of T = 10 periods weighs lags 1-9 by 1
+        // Truncated at lag 7 of T = 10 periods weighs lags 1-8 by 1 (at lag 8 every lag has
+        // weight 1 and the meat collapses to (X'u)(X'u)' = 0, whose sign is rounding); here
+        // the slope variances are negative by orders of magnitude more than rounding
         let r = run_vcov_driscoll_kraay(
             &ds,
             "inv",
             &["value", "capital"],
             "year",
-            Some(8),
+            Some(7),
             Some("truncated"),
         )
         .unwrap();
         let neg: Vec<usize> = (0..3).filter(|&i| r.vcov[i][i] < 0.0).collect();
-        assert!(!neg.is_empty(), "{:?}", r.vcov);
+        assert_eq!(neg, vec![1, 2], "{:?}", r.vcov);
         for &i in &neg {
             assert!(r.std_errors[i].is_nan() && r.t_stats[i].is_nan() && r.p_values[i].is_nan());
         }
@@ -7052,22 +7206,32 @@ mod tests {
         ));
     }
 
-    /// Debug builds refuse a design that is not the fitted one.
-    #[cfg(debug_assertions)]
+    /// A design that is not the fitted one is an InvalidSpecification in every build (the
+    /// public vcov_* functions take a caller's x), never a panic.
     #[test]
-    #[should_panic(expected = "not the one the OLS fit")]
     fn test_identified_design_rejects_other_design() {
         let ds = create_test_dataset();
         let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
-        let e = perf3_noise(10, 3);
+        // x1 plus a multiple of the residuals: X'e is 100 ‖e‖², far from 0
         let other = Array2::from_shape_fn((10, 2), |(i, j)| {
             if j == 0 {
                 1.0
             } else {
-                (i as f64 * 0.9).sin() * 4.0 + e[i]
+                (i + 1) as f64 + 100.0 * ols.resid[i]
             }
         });
-        let _ = IdentifiedDesign::of(other.view(), &ols);
+        match IdentifiedDesign::of(other.view(), &ols) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("not the design the OLS fit"), "{message}")
+            }
+            Err(e) => panic!("wrong error: {e}"),
+            Ok(_) => panic!("another design was accepted"),
+        }
+        // the public estimators pass the error on
+        assert!(matches!(
+            vcov_hac(&ols, &other, Some(2), HacKernel::Bartlett, false),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     /// The pairs bootstrap takes solve_ols's coefficients without forming residuals: every

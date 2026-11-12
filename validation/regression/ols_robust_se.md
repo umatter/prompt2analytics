@@ -122,7 +122,7 @@ otherwise `InsufficientData`. Its t and p use T − r degrees of freedom; R's
 `coeftest(lm, vcov = vcovPL)` uses n − r. p2a keeps T − r because the estimator is
 asymptotic in T. The meat sums the scores within each period and weighs lag j by
 k(j / (L + 1)) over the lags with a non-zero weight, with no further scaling: lag L equals
-`sandwich::vcovPL(m, cluster = ~time, lag = L, kernel = ..., adjust = FALSE)` and
+`sandwich::vcovPL(m, cluster = ~unit, order.by = ~time, lag = L, kernel = ..., adjust = FALSE)` and
 `plm::vcovSCC` for every kernel. The default lag is floor(T^(1/4))
 (`vcovPL(lag = "NW1987")`). The Driscoll-Kraay SEs are R-pinned
 (`test_validate_driscoll_kraay_panel`, and the five kernels on Grunfeld in the
