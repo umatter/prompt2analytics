@@ -7,7 +7,7 @@
 //! conversation in its turn, or, when left behind for a deleted
 //! conversation, by the orphan sweeps.
 
-use surrealdb::RecordId;
+use surrealdb::types::{RecordId, SurrealValue};
 
 use super::connection::{DbConnection, DbError, run_to_end};
 use super::models::{ToolCall, ToolCallStatus};
@@ -27,9 +27,9 @@ impl DbConnection {
     /// a dropped caller does not stop ([`run_to_end`]), like a tool call's
     /// update and status changes; a call dropped while it waits for the turn
     /// does nothing. A delete or clear of the conversation runs wholly
-    /// before such a write or wholly after it, never alongside it: on
-    /// RocksDB, which validates an optimistic transaction's writes when it
-    /// commits, a tool-call write committed on a row a clear's transaction
+    /// before such a write or wholly after it, never alongside it: the store
+    /// validates an optimistic transaction's writes when it commits, so a
+    /// tool-call write committed on a row a clear's transaction
     /// deletes would fail the clear whole on a write conflict. A write that
     /// comes after a delete finds no conversation, and one after a clear
     /// finds no message or, for an update or status change, no row: it is
@@ -225,7 +225,7 @@ impl DbConnection {
             let mut result = db
                 .db()
                 .query(query)
-                .bind(("id", RecordId::from(("tool_calls", id.as_str()))))
+                .bind(("id", RecordId::new("tool_calls", id.as_str())))
                 .bind(("status", status))
                 .bind(("text", text.map(|(_, text)| text)))
                 .bind(("duration_ms", duration_ms))

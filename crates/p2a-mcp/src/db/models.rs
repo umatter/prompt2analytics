@@ -7,23 +7,20 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::RecordId;
-use surrealdb::sql::Datetime;
+use surrealdb::types::{Datetime, RecordId, RecordIdKey, SurrealValue, ToSql};
 
 /// The key part of a record id as the rows that point at the record store it
-/// (a message's `conversation_id`, for one), without SurrealDB's formatting.
+/// (a message's `conversation_id`, for one), without SurrealDB's formatting:
+/// a string key as it is, any other key as SurrealQL writes it.
 pub(super) fn key_string(id: &RecordId) -> String {
-    // RecordIdKey.to_string() may wrap string IDs in angle brackets ⟨⟩
-    // We need to extract the raw string value
-    let key_str = id.key().to_string();
-    key_str
-        .trim_start_matches('⟨')
-        .trim_end_matches('⟩')
-        .to_string()
+    match &id.key {
+        RecordIdKey::String(key) => key.clone(),
+        other => other.to_sql(),
+    }
 }
 
 /// A conversation (chat session)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct Conversation {
     /// Unique conversation ID
     pub id: RecordId,
@@ -46,13 +43,13 @@ pub struct Conversation {
 impl Conversation {
     /// Create a new conversation
     pub fn new(session_id: String, title: String) -> Self {
-        let now = Datetime::from(Utc::now());
+        let now = Datetime::now();
         let id = uuid::Uuid::new_v4().to_string();
         Self {
-            id: RecordId::from(("conversations", id.as_str())),
+            id: RecordId::new("conversations", id.as_str()),
             session_id,
             title,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
             is_archived: false,
             message_count: 0,
@@ -67,17 +64,17 @@ impl Conversation {
 
     /// Get created_at as chrono DateTime
     pub fn created_at_chrono(&self) -> DateTime<Utc> {
-        DateTime::from(self.created_at.clone())
+        DateTime::from(self.created_at)
     }
 
     /// Get updated_at as chrono DateTime
     pub fn updated_at_chrono(&self) -> DateTime<Utc> {
-        DateTime::from(self.updated_at.clone())
+        DateTime::from(self.updated_at)
     }
 }
 
 /// A chat message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct Message {
     /// Unique message ID
     pub id: RecordId,
@@ -98,8 +95,9 @@ pub struct Message {
 }
 
 /// Message role enumeration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[surreal(untagged, lowercase)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -111,11 +109,11 @@ impl Message {
     pub fn user(conversation_id: String, content: String) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         Self {
-            id: RecordId::from(("messages", id.as_str())),
+            id: RecordId::new("messages", id.as_str()),
             conversation_id,
             role: MessageRole::User,
             content,
-            created_at: Datetime::from(Utc::now()),
+            created_at: Datetime::now(),
             token_count: None,
             model: None,
             finish_reason: None,
@@ -126,11 +124,11 @@ impl Message {
     pub fn assistant(conversation_id: String, content: String, model: Option<String>) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         Self {
-            id: RecordId::from(("messages", id.as_str())),
+            id: RecordId::new("messages", id.as_str()),
             conversation_id,
             role: MessageRole::Assistant,
             content,
-            created_at: Datetime::from(Utc::now()),
+            created_at: Datetime::now(),
             token_count: None,
             model,
             finish_reason: Some("stop".to_string()),
@@ -141,11 +139,11 @@ impl Message {
     pub fn system(conversation_id: String, content: String) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         Self {
-            id: RecordId::from(("messages", id.as_str())),
+            id: RecordId::new("messages", id.as_str()),
             conversation_id,
             role: MessageRole::System,
             content,
-            created_at: Datetime::from(Utc::now()),
+            created_at: Datetime::now(),
             token_count: None,
             model: None,
             finish_reason: None,
@@ -159,12 +157,12 @@ impl Message {
 
     /// Get created_at as chrono DateTime
     pub fn created_at_chrono(&self) -> DateTime<Utc> {
-        DateTime::from(self.created_at.clone())
+        DateTime::from(self.created_at)
     }
 }
 
 /// A tool call made by the assistant
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct ToolCall {
     /// Unique tool call ID
     pub id: RecordId,
@@ -191,8 +189,9 @@ pub struct ToolCall {
 }
 
 /// Tool call status enumeration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[surreal(untagged, lowercase)]
 pub enum ToolCallStatus {
     Pending,
     Running,
@@ -210,7 +209,7 @@ impl ToolCall {
     ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         Self {
-            id: RecordId::from(("tool_calls", id.as_str())),
+            id: RecordId::new("tool_calls", id.as_str()),
             message_id,
             conversation_id,
             tool_name,
@@ -218,7 +217,7 @@ impl ToolCall {
             result: None,
             error: None,
             status: ToolCallStatus::Pending,
-            started_at: Datetime::from(Utc::now()),
+            started_at: Datetime::now(),
             completed_at: None,
             duration_ms: None,
         }
@@ -233,9 +232,9 @@ impl ToolCall {
     pub fn complete(&mut self, result: String) {
         self.result = Some(result);
         self.status = ToolCallStatus::Success;
-        let completed = Datetime::from(Utc::now());
-        let started: DateTime<Utc> = DateTime::from(self.started_at.clone());
-        let completed_chrono: DateTime<Utc> = DateTime::from(completed.clone());
+        let completed = Datetime::now();
+        let started: DateTime<Utc> = DateTime::from(self.started_at);
+        let completed_chrono: DateTime<Utc> = DateTime::from(completed);
         self.duration_ms = Some((completed_chrono - started).num_milliseconds() as i32);
         self.completed_at = Some(completed);
     }
@@ -244,16 +243,16 @@ impl ToolCall {
     pub fn fail(&mut self, error: String) {
         self.error = Some(error);
         self.status = ToolCallStatus::Error;
-        let completed = Datetime::from(Utc::now());
-        let started: DateTime<Utc> = DateTime::from(self.started_at.clone());
-        let completed_chrono: DateTime<Utc> = DateTime::from(completed.clone());
+        let completed = Datetime::now();
+        let started: DateTime<Utc> = DateTime::from(self.started_at);
+        let completed_chrono: DateTime<Utc> = DateTime::from(completed);
         self.duration_ms = Some((completed_chrono - started).num_milliseconds() as i32);
         self.completed_at = Some(completed);
     }
 }
 
 /// Persisted session data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct DbSession {
     /// Session ID
     pub id: RecordId,
@@ -274,11 +273,11 @@ pub struct DbSession {
 impl DbSession {
     /// Create a new session record
     pub fn new(id: String, user_id: Option<String>) -> Self {
-        let now = Datetime::from(Utc::now());
+        let now = Datetime::now();
         Self {
-            id: RecordId::from(("sessions", id.as_str())),
+            id: RecordId::new("sessions", id.as_str()),
             user_id,
-            created_at: now.clone(),
+            created_at: now,
             last_accessed: now,
             global_seed: None,
             active_conversation_id: None,
@@ -293,17 +292,17 @@ impl DbSession {
 
     /// Get created_at as chrono DateTime
     pub fn created_at_chrono(&self) -> DateTime<Utc> {
-        DateTime::from(self.created_at.clone())
+        DateTime::from(self.created_at)
     }
 
     /// Get last_accessed as chrono DateTime
     pub fn last_accessed_chrono(&self) -> DateTime<Utc> {
-        DateTime::from(self.last_accessed.clone())
+        DateTime::from(self.last_accessed)
     }
 }
 
 /// User settings stored in the database
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct Settings {
     /// Settings ID (same as session_id for 1:1 mapping)
     pub id: RecordId,
@@ -329,7 +328,7 @@ impl Settings {
     /// Create default settings for a session
     pub fn default_for_session(session_id: String) -> Self {
         Self {
-            id: RecordId::from(("settings", session_id.as_str())),
+            id: RecordId::new("settings", session_id.as_str()),
             session_id: session_id.clone(),
             provider: "ollama".to_string(),
             model: "llama3.1".to_string(),
@@ -337,7 +336,7 @@ impl Settings {
             temperature: 0.7,
             max_tokens: 4096,
             system_prompt: None,
-            updated_at: Datetime::from(Utc::now()),
+            updated_at: Datetime::now(),
         }
     }
 
@@ -348,7 +347,7 @@ impl Settings {
 }
 
 /// Metadata about a loaded dataset (not the actual data)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct DatasetMeta {
     /// Unique ID
     pub id: RecordId,
@@ -393,7 +392,7 @@ impl DatasetMeta {
     ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         Self {
-            id: RecordId::from(("dataset_meta", id.as_str())),
+            id: RecordId::new("dataset_meta", id.as_str()),
             session_id,
             name,
             source_path: None,
@@ -401,7 +400,7 @@ impl DatasetMeta {
             row_count,
             column_count,
             column_names,
-            loaded_at: Datetime::from(Utc::now()),
+            loaded_at: Datetime::now(),
             file_size_bytes: None,
             na_strings: None,
         }
@@ -414,7 +413,7 @@ impl DatasetMeta {
 }
 
 /// Response type for conversation with messages
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct ConversationWithMessages {
     pub conversation: Conversation,
     pub messages: Vec<Message>,

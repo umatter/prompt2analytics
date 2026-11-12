@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use surrealdb::error::Db as SurrealDbError;
+use surrealdb::types::{QueryError, SurrealValue};
 
 use super::connection::{
     DbConnection, DbError, PersistenceLimits, failed_statement, truncate_in_place, truncate_to,
@@ -631,7 +631,7 @@ async fn concurrent_deletes_release_a_conversations_bytes_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn parallel_deletes_on_rocksdb_do_not_conflict() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+    let db = DbConnection::connect_surrealkv(dir.path().join("db"))
         .await
         .unwrap();
     for _ in 0..5 {
@@ -1246,7 +1246,7 @@ async fn the_message_cap_counts_the_stored_messages() {
         .query("UPDATE conversations SET message_count = 0 WHERE id = $id")
         .bind((
             "id",
-            surrealdb::RecordId::from(("conversations", id.as_str())),
+            surrealdb::types::RecordId::new("conversations", id.as_str()),
         ))
         .await
         .unwrap()
@@ -1366,11 +1366,11 @@ enum Engine {
     /// In memory.
     Memory,
     /// RocksDB, whose rollback is an optimistic transaction's cancel.
-    RocksDb,
+    SurrealKv,
 }
 
 /// The engines the rollback tests run on.
-const ENGINES: [Engine; 2] = [Engine::Memory, Engine::RocksDb];
+const ENGINES: [Engine; 2] = [Engine::Memory, Engine::SurrealKv];
 
 /// A store on `engine` (RocksDB in `dir`) with `limits`.
 async fn engine_db(
@@ -1380,7 +1380,7 @@ async fn engine_db(
 ) -> DbConnection {
     match engine {
         Engine::Memory => limited_db(limits).await,
-        Engine::RocksDb => DbConnection::connect_rocksdb(dir.join("db"))
+        Engine::SurrealKv => DbConnection::connect_surrealkv(dir.join("db"))
             .await
             .unwrap()
             .with_limits(limits),
@@ -1397,108 +1397,119 @@ fn assert_refused(engine: Engine, error: DbError) {
     );
 }
 
+/// `key_string` gives a string key as it is stored, whatever characters it
+/// holds (SurrealQL would quote a UUID or a key with `-` or `⟨`), so a row
+/// that points at the record by its key finds it again.
+#[test]
+fn key_string_returns_the_raw_key() {
+    use super::models::key_string;
+    use surrealdb::types::RecordId;
+    for key in ["51963a14-0d6f-4a0a-9a51-6b8f0c5f9e21", "a-b⟨c⟩", "plain"] {
+        assert_eq!(key_string(&RecordId::new("conversations", key)), key);
+    }
+}
+
 /// What [`failed_statement`] picks from the errors `make` builds, once for
 /// each of several maps of them. `take_errors` returns a `HashMap`, and two
 /// maps of the same entries iterate in different orders, so a pick that
 /// depended on that order would differ between the maps.
-fn failed_statements(make: &[(usize, fn() -> SurrealDbError)]) -> Vec<Option<surrealdb::Error>> {
+fn failed_statements(make: &[(usize, fn() -> surrealdb::Error)]) -> Vec<Option<surrealdb::Error>> {
     (0..16)
         .map(|_| {
             let errors: HashMap<usize, surrealdb::Error> = make
                 .iter()
-                .map(|(index, error)| (*index, surrealdb::Error::Db(error())))
+                .map(|(index, error)| (*index, error()))
                 .collect();
             failed_statement(errors)
         })
         .collect()
 }
 
-/// A transaction's failed statement is told apart from the
-/// `QueryNotExecuted` the store gives the statements before and after it,
-/// whatever the order the map of errors iterates in.
+fn not_executed() -> surrealdb::Error {
+    surrealdb::Error::query(
+        "The query was not executed due to a failed transaction".to_string(),
+        QueryError::NotExecuted,
+    )
+}
+
+fn cancelled() -> surrealdb::Error {
+    surrealdb::Error::query(
+        "The query was not executed due to a cancelled transaction".to_string(),
+        QueryError::Cancelled,
+    )
+}
+
+fn timed_out() -> surrealdb::Error {
+    surrealdb::Error::query(
+        "Timed out: 1s".to_string(),
+        QueryError::TimedOut {
+            duration: std::time::Duration::from_secs(1),
+        },
+    )
+}
+
+/// The message of the error [`failed_statement`] picked.
+fn picked_message(picked: &Option<surrealdb::Error>) -> Option<&str> {
+    picked.as_ref().map(surrealdb::Error::message)
+}
+
+/// A transaction's failed statement is told apart from the `NotExecuted`
+/// the store gives the statements before it and the `COMMIT`, and the
+/// `Cancelled` it gives those after it, whatever the order the map of errors
+/// iterates in.
 #[test]
 fn failed_statement_picks_the_cause_over_the_not_executed() {
     for picked in failed_statements(&[
-        (0, || SurrealDbError::QueryNotExecuted),
-        (1, || SurrealDbError::Thrown("refused".to_string())),
-        (2, || SurrealDbError::QueryNotExecuted),
+        (0, not_executed),
+        (1, || surrealdb::Error::thrown("refused".to_string())),
+        (2, cancelled),
+        (3, not_executed),
     ]) {
-        assert!(
-            matches!(
-                &picked,
-                Some(surrealdb::Error::Db(SurrealDbError::Thrown(message))) if message == "refused"
-            ),
-            "{picked:?}"
-        );
+        assert_eq!(picked_message(&picked), Some("refused"), "{picked:?}");
+        assert!(picked.as_ref().is_some_and(surrealdb::Error::is_thrown));
     }
 }
 
-/// When no error is a plain `QueryNotExecuted` (a failed commit, which gives
-/// each statement a `QueryNotExecutedDetail`; a transaction cancelled or
-/// timed out between statements, which gives the statements that ran
-/// `QueryCancelled` and the rest `QueryCancelled` or `QueryTimedout`), the
-/// lowest index wins, so a timeout comes back as `QueryCancelled`.
+/// Among causes the lowest index wins: a timeout found after the first
+/// statement ran (that one is cancelled) comes back as the timeout, and of
+/// two thrown errors the first.
 #[test]
 fn failed_statement_takes_the_lowest_index_among_causes() {
     for picked in failed_statements(&[
-        (0, || SurrealDbError::QueryNotExecutedDetail {
-            message: "a".to_string(),
-        }),
-        (1, || SurrealDbError::QueryNotExecutedDetail {
-            message: "b".to_string(),
-        }),
+        (0, || surrealdb::Error::thrown("a".to_string())),
+        (1, || surrealdb::Error::thrown("b".to_string())),
     ]) {
-        assert!(
-            matches!(
-                &picked,
-                Some(surrealdb::Error::Db(SurrealDbError::QueryNotExecutedDetail { message }))
-                    if message == "a"
-            ),
-            "{picked:?}"
-        );
+        assert_eq!(picked_message(&picked), Some("a"), "{picked:?}");
     }
-    for picked in failed_statements(&[
-        (0, || SurrealDbError::QueryTimedout),
-        (1, || SurrealDbError::QueryTimedout),
-    ]) {
+    for picked in failed_statements(&[(0, cancelled), (1, timed_out), (2, timed_out)]) {
         assert!(
             matches!(
-                picked,
-                Some(surrealdb::Error::Db(SurrealDbError::QueryTimedout))
-            ),
-            "{picked:?}"
-        );
-    }
-    // A timeout found after the first statement ran: that one is cancelled.
-    for picked in failed_statements(&[
-        (0, || SurrealDbError::QueryCancelled),
-        (1, || SurrealDbError::QueryTimedout),
-        (2, || SurrealDbError::QueryTimedout),
-    ]) {
-        assert!(
-            matches!(
-                picked,
-                Some(surrealdb::Error::Db(SurrealDbError::QueryCancelled))
+                picked.as_ref().and_then(surrealdb::Error::query_details),
+                Some(QueryError::TimedOut { .. })
             ),
             "{picked:?}"
         );
     }
 }
 
-/// Only `QueryNotExecuted` errors still give an error (all alike, so which
-/// index is returned cannot be seen in it), and no errors give none.
+/// A failed commit answers every statement with `NotExecuted` and names the
+/// cause only at the `COMMIT`, the highest index: that one is picked. No
+/// errors give none.
 #[test]
 fn failed_statement_with_no_cause_or_no_error() {
     for picked in failed_statements(&[
-        (0, || SurrealDbError::QueryNotExecuted),
-        (1, || SurrealDbError::QueryNotExecuted),
-        (2, || SurrealDbError::QueryNotExecuted),
+        (0, not_executed),
+        (1, not_executed),
+        (2, || {
+            surrealdb::Error::query(
+                "Cannot COMMIT: the disk is full".to_string(),
+                QueryError::NotExecuted,
+            )
+        }),
     ]) {
-        assert!(
-            matches!(
-                picked,
-                Some(surrealdb::Error::Db(SurrealDbError::QueryNotExecuted))
-            ),
+        assert_eq!(
+            picked_message(&picked),
+            Some("Cannot COMMIT: the disk is full"),
             "{picked:?}"
         );
     }
@@ -1507,10 +1518,10 @@ fn failed_statement_with_no_cause_or_no_error() {
 
 /// The layout [`failed_statement`] relies on, from the store itself: in a
 /// `BEGIN`/`COMMIT` query of two counts with a failing statement between
-/// them, both counts report `QueryNotExecuted`, so `Response::check` (the
-/// first error by index; what the orphan sweep's range counts used) gives
-/// that and loses the cause, while `failed_statement` gives the cause. In
-/// memory and on RocksDB.
+/// them, the count before reports `NotExecuted`, so `IndexedResults::check`
+/// (the first error by index; what the orphan sweep's range counts used)
+/// gives that and loses the cause, while `failed_statement` gives the cause.
+/// In memory and on SurrealKV.
 #[tokio::test]
 async fn a_transactions_failed_statement_is_found_behind_not_executed() {
     for engine in ENGINES {
@@ -1529,36 +1540,23 @@ async fn a_transactions_failed_statement_is_found_behind_not_executed() {
 
         let checked = transaction().await.unwrap().check().unwrap_err();
         assert!(
-            matches!(
-                checked,
-                surrealdb::Error::Db(SurrealDbError::QueryNotExecuted)
-            ),
+            matches!(checked.query_details(), Some(QueryError::NotExecuted)),
             "{engine:?}: check: {checked:?}"
         );
 
         let mut response = transaction().await.unwrap();
         let errors = response.take_errors();
-        let not_executed: Vec<usize> = errors
+        let thrown: Vec<usize> = errors
             .iter()
-            .filter(|(_, error)| {
-                matches!(
-                    error,
-                    surrealdb::Error::Db(SurrealDbError::QueryNotExecuted)
-                )
-            })
+            .filter(|(_, error)| error.is_thrown())
             .map(|(index, _)| *index)
             .collect();
-        assert_eq!(
-            (errors.len(), not_executed.len()),
-            (3, 2),
-            "{engine:?}: {errors:?}"
-        );
+        let first_error = errors.keys().min().copied();
+        assert_eq!(thrown.len(), 1, "{engine:?}: {errors:?}");
+        assert!(first_error < Some(thrown[0]), "{engine:?}: {errors:?}");
         let picked = failed_statement(errors);
         assert!(
-            matches!(
-                &picked,
-                Some(surrealdb::Error::Db(SurrealDbError::Thrown(message))) if message == "refused"
-            ),
+            picked_message(&picked).is_some_and(|m| m.contains("refused")),
             "{engine:?}: failed_statement: {picked:?}"
         );
     }
@@ -1648,7 +1646,7 @@ async fn a_delete_that_stops_part_way_deletes_nothing() {
 /// message rows it holds, read in one transaction, so both come from one
 /// snapshot of the store.
 async fn listed_and_stored(db: &DbConnection, id: &str) -> (i64, i64) {
-    #[derive(serde::Deserialize)]
+    #[derive(SurrealValue)]
     struct CountRow {
         count: i64,
     }
@@ -1658,14 +1656,15 @@ async fn listed_and_stored(db: &DbConnection, id: &str) -> (i64, i64) {
         .query("SELECT VALUE message_count FROM $conv")
         .query("SELECT count() FROM messages WHERE conversation_id = $id GROUP ALL")
         .query("COMMIT TRANSACTION")
-        .bind(("conv", surrealdb::RecordId::from(("conversations", id))))
+        .bind(("conv", surrealdb::types::RecordId::new("conversations", id)))
         .bind(("id", id.to_string()))
         .await
         .unwrap()
         .check()
         .unwrap();
-    let listed: Vec<i64> = response.take(0).unwrap();
-    let stored: Option<CountRow> = response.take(1).unwrap();
+    // BEGIN takes result slot 0.
+    let listed: Vec<i64> = response.take(1).unwrap();
+    let stored: Option<CountRow> = response.take(2).unwrap();
     (
         listed.first().copied().unwrap_or(0),
         stored.map_or(0, |row| row.count),
@@ -1823,7 +1822,7 @@ async fn a_retry_after_a_dropped_clear_or_delete_waits_for_it() {
         session_db_bytes: Some(100_000),
         ..Default::default()
     };
-    let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+    let db = engine_db(Engine::SurrealKv, dir.path(), limits).await;
     slow_message_deletes(&db).await;
     for op in [Op::Clear, Op::Delete] {
         let id = filled_conversation(&db, "s1", &format!("{op:?}")).await;
@@ -2049,7 +2048,7 @@ async fn a_tool_call_write_during_a_clear_waits_for_it() {
             session_db_bytes,
             ..Default::default()
         };
-        let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+        let db = engine_db(Engine::SurrealKv, dir.path(), limits).await;
         slow_message_deletes(&db).await;
         for write in ToolCallWrite::ALL {
             let case = format!("{write:?} (budget {session_db_bytes:?})");
@@ -2101,7 +2100,7 @@ async fn a_clear_during_a_tool_call_write_waits_for_it() {
         session_db_bytes: Some(100_000),
         ..Default::default()
     };
-    let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+    let db = engine_db(Engine::SurrealKv, dir.path(), limits).await;
     // The clear's transaction outlasts the write's, so a write that ran
     // alongside it commits while it is still open.
     slow_writes(&db, "tool_calls", "UPDATE", 300).await;
@@ -2382,7 +2381,7 @@ async fn a_clear_after_a_dropped_write_waits_for_it() {
         session_db_bytes: Some(100_000),
         ..Default::default()
     };
-    let db = engine_db(Engine::RocksDb, dir.path(), limits).await;
+    let db = engine_db(Engine::SurrealKv, dir.path(), limits).await;
     let writes = [RowWrite::Title, RowWrite::Archive, RowWrite::Content];
     let mut ids = Vec::new();
     for write in writes {
@@ -2732,7 +2731,7 @@ fn owners_around(known: &[String]) -> Vec<String> {
 
 /// Rows of `table`.
 async fn rows_in(db: &DbConnection, table: &str) -> usize {
-    #[derive(serde::Deserialize)]
+    #[derive(SurrealValue)]
     struct Count {
         count: usize,
     }
@@ -2843,7 +2842,7 @@ async fn check_orphans_between_owners(db: &DbConnection) {
 async fn full_orphan_sweep_finds_orphans_between_the_owners_that_exist() {
     check_orphans_between_owners(&test_db().await).await;
     let dir = tempfile::tempdir().unwrap();
-    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+    let db = DbConnection::connect_surrealkv(dir.path().join("db"))
         .await
         .unwrap();
     check_orphans_between_owners(&db).await;
@@ -2910,15 +2909,25 @@ fn share_callsite_interest() {
 }
 
 /// Store `n` conversations of the rowless session "no-row" whose keys do not
-/// survive `key_string` (the server writes UUID keys only), so that
+/// survive `key_string` (numbers, which the schema's `id` field refuses until
+/// this widens it; the server writes string UUID keys only), so that
 /// `delete_conversation` cannot find them by the id the sweep reads.
 async fn insert_odd_key_conversations(db: &DbConnection, n: usize) {
     use super::models::{Conversation, key_string};
+    use surrealdb::types::RecordId;
+    db.db()
+        .query("DEFINE FIELD OVERWRITE id ON conversations TYPE string | int")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
     for i in 0..n {
-        let key = format!("odd⟩{i:03}");
         let mut conv = Conversation::new("no-row".into(), "t".into());
-        conv.id = surrealdb::RecordId::from(("conversations", key.as_str()));
-        assert_ne!(key_string(&conv.id), key);
+        conv.id = RecordId::new("conversations", i64::try_from(i).unwrap());
+        assert_ne!(
+            RecordId::new("conversations", key_string(&conv.id)),
+            conv.id
+        );
         let _: Option<Conversation> = db.db().create(conv.id.clone()).content(conv).await.unwrap();
     }
 }
@@ -3446,7 +3455,7 @@ async fn test_touch_session() {
         .await
         .expect("Failed to upsert session");
 
-    let original_accessed = created.last_accessed.clone();
+    let original_accessed = created.last_accessed;
 
     // Small delay to ensure time difference
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

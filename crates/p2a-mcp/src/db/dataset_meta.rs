@@ -1,5 +1,6 @@
 //! Dataset metadata CRUD operations
 
+use surrealdb::types::SurrealValue;
 use tracing;
 
 use super::connection::{DbConnection, DbError, run_to_end};
@@ -9,13 +10,14 @@ use super::models::DatasetMeta;
 /// first ones; `column_count` keeps its width).
 ///
 /// The names are for display (the dataset sidebar and inspector, the chat
-/// input's suggestions). The store's work on a row is quadratic in the
-/// length of an array field: `column_names TYPE array<string>` implicitly
-/// defines `column_names[*]`, and the schema check of a SCHEMAFULL row
-/// (surrealdb-core 2.4 `cleanup_table_fields`) looks each element's path up
-/// in a list of every element's path. The embedded engine runs each query
-/// in a task on the server's async runtime, whoever awaits it, so an
-/// unbounded list let one wide dataset hold a runtime worker for minutes.
+/// input's suggestions). Measured on SurrealDB 2.4, the store's work on a
+/// row was quadratic in the length of an array field: `column_names TYPE
+/// array<string>` implicitly defines `column_names[*]`, and the schema check
+/// of a SCHEMAFULL row (surrealdb-core 2.4 `cleanup_table_fields`) looked
+/// each element's path up in a list of every element's path. The embedded
+/// engine runs each query in a task on the server's async runtime, whoever
+/// awaits it, so an unbounded list let one wide dataset hold a runtime worker
+/// for minutes. The bound stays on SurrealDB 4: the names are for display.
 pub const MAX_STORED_COLUMN_NAMES: usize = 1_000;
 
 /// The most bytes of column names one dataset's metadata row keeps: a few
@@ -44,14 +46,14 @@ const DATASET_META_FIXED_BYTES: u64 = 128;
 
 /// The texts of a stored dataset metadata row that the `session_db_bytes`
 /// budget counts. Other fields of the row are ignored.
-#[derive(serde::Deserialize)]
+#[derive(SurrealValue)]
 struct DatasetMetaText {
     session_id: String,
     name: String,
     source_path: Option<String>,
     source_type: String,
     column_names: Vec<String>,
-    #[serde(default)]
+    #[surreal(default)]
     na_strings: Option<Vec<String>>,
 }
 
@@ -124,7 +126,7 @@ fn stored_meta(meta: &DatasetMeta) -> DatasetMeta {
         row_count: meta.row_count,
         column_count: meta.column_count,
         column_names: stored_column_names(&meta.column_names),
-        loaded_at: meta.loaded_at.clone(),
+        loaded_at: meta.loaded_at,
         file_size_bytes: meta.file_size_bytes,
         na_strings: meta.na_strings.clone(),
     }

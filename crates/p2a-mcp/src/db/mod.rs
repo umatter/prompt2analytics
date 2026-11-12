@@ -1,7 +1,8 @@
 //! Database persistence layer using SurrealDB
 //!
 //! This module provides persistent storage for sessions, conversations,
-//! messages, and settings using SurrealDB with an embedded RocksDB backend.
+//! messages, and settings using SurrealDB 4 with an embedded SurrealKV backend
+//! (or in memory).
 //!
 //! # Features
 //!
@@ -18,7 +19,7 @@
 //! use p2a_mcp::db::{DbConnection, Conversation, Message};
 //!
 //! // Connect to database
-//! let db = DbConnection::connect_rocksdb("./data/p2a.db").await?;
+//! let db = DbConnection::connect_surrealkv("./data/p2a.db").await?;
 //!
 //! // Create a conversation
 //! let conv = db.create_conversation("session-123", "My Chat").await?;
