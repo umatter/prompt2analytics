@@ -160,16 +160,11 @@
         "RV_q (q = 1, 0.5)",
         "RV_alpha",
         "run_sensemakr's classical se, t, partial R2, RV",
-        "benchmark partial R2 of the treatment and of the outcome on female"
+        "benchmark partial R2 of the treatment and of the outcome on female",
+        "benchmark bounds, adjusted estimate, adjusted SE and CI"
       ],
       "tolerance": "validation/README.md, n = 1276: coefficients 1e-10, statistics 1e-8",
-      "deviations": [
-        {
-          "finding": "REG-27",
-          "quantity": "bound_r2dz_x, bound_r2yz_dx, bound_adjusted_estimate, bound_adjusted_se, bound CI",
-          "note": "bound formulas and adjusted SE (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

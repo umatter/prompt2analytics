@@ -11,7 +11,12 @@ benchmark collinear with the other covariates is an error naming it). Both use t
 (`CovarianceType::Standard`; another covariance type is refused). `RV_{q,alpha}` is sensemakr's
 `robustness_value(t, dof, q, alpha)`: `f_c = |qt(alpha/2, dof - 1)| / sqrt(dof - 1)`,
 `f_qa = f_q - f_c`, 0 for `f_qa <= 0`, the extreme robustness value `(f_q^2 - f_c^2) / (1 + f_q^2)`
-when `f_q > 1 / f_c`, and `2 / (1 + sqrt(1 + 4 / f_qa^2))` otherwise.
+when `f_q > 1 / f_c`, and `2 / (1 + sqrt(1 + 4 / f_qa^2))` otherwise. Benchmark bounds follow
+`ovb_partial_r2_bound`: `r2dz.x = kd r2dxj / (1 - r2dxj)` and the implied `r2yz.dx` (an impossible
+kd is an error; an `r2yz.dx` above 1 is set to 1 with a warning), the adjusted SE is
+`sqrt((1 - r2yz.dx) / (1 - r2dz.x)) se sqrt(dof / (dof - 1))`, the adjusted t is taken against
+`h0 = (1 - q) estimate`, and the interval uses `qt(alpha/2, dof)`, as the bounds table of
+`sensemakr()`.
 
 ## R reference
 
@@ -39,14 +44,15 @@ and X-16: the exact benchmark partial R^2 of the treatment on female, a revert t
 `0.5 * R^2_{Y~X_j}` fails it; `female_r2yxj`), `test_validate_sensemakr_rv_alpha` (case
 `sensemakr_rv_alpha`: six inputs of `robustness_value(t, dof, q, alpha)`, row 1 in the extreme
 branch; 1e-10 relative, because p2a's and R's t quantiles differ by about 5e-13 and `f_q - f_c`
-amplifies that). `test_sensemakr_refuses_robust_ols` checks the refusal of an HC1 fit. Registry entry `sensemakr`. The old R test
+amplifies that). `test_sensemakr_refuses_robust_ols` checks the refusal of an HC1 fit. The darfur benchmark test
+also pins the female bound (`bound_*`). Registry entry `sensemakr`. The old R test
 asserted RV in 0.10-0.20 at a dof of 1276, which is not the
 dataset's, and is deleted. `test_sensemakr_benchmark_collinear_is_an_error` checks the collinearity
 error.
 
 ## Deviations
 
-- REG-27: `bound_r2dz_x`, `bound_r2yz_dx`, `bound_adjusted_*` (bound formulas, adjusted SE and CI).
+None.
 
 ## Timing
 
