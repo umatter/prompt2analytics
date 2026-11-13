@@ -404,7 +404,9 @@ pub struct PanelUnitRootResult {
     pub avg_time_periods: f64,
     /// Lags used: the largest unit lag order (the common order when it is fixed)
     pub lags_used: usize,
-    /// Individual unit test statistics (if available)
+    /// Individual unit test statistics (if available). Hadri: plm's `idres$LM`, each unit's LM
+    /// on its own short-run (or long-run) variance. Under `HadriVariance::Homoskedastic` the
+    /// z statistic uses the pooled variance, so there their mean is not the LM of the z.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit_statistics: Option<Vec<f64>>,
     /// Individual unit p-values (for Fisher test)
@@ -616,10 +618,14 @@ fn invalid(message: String) -> EconError {
 /// The option combinations that contradict each other (module docs, "Lag order").
 fn check_lag_options(config: &PanelUnitRootConfig) -> EconResult<()> {
     if config.test_type == PanelUnitRootTest::Hadri {
-        if config.lags.is_some() || config.lag_selection.is_some() || config.pmax.is_some() {
+        if config.lags.is_some()
+            || config.lag_selection.is_some()
+            || config.pmax.is_some()
+            || config.max_lags.is_some()
+        {
             return Err(invalid(
-                "the Hadri test uses no lagged differences; lags, lag_selection and pmax do \
-                 not apply (the long-run variance's truncation lag is set with \
+                "the Hadri test uses no lagged differences; lags, lag_selection, pmax and \
+                 max_lags do not apply (the long-run variance's truncation lag is set with \
                  hadri_variance = long_run)"
                     .to_string(),
             ));
@@ -1406,7 +1412,7 @@ const LLC_SIGMA: [[f64; 13]; 3] = [
 ];
 
 /// (mu*, sigma*) at T, interpolated between rows and clamped to T = 25 and 500 as
-/// `plm:::adj.levinlin.value` does, with the end clamped to, if any.
+/// `plm:::adj.levinlin.value` does, and the table end T was clamped to, if any.
 fn llc_adjustment(t_len: usize, model: PanelModel) -> (f64, f64, Option<TableEdge>) {
     let row = n_det(model);
     let pos = select_t(t_len as f64, &LLC_TS);
@@ -1747,9 +1753,14 @@ fn ips_moments(
     let v = pos.value(&var[row], &IPS_TS);
     if e.is_nan() || v.is_nan() {
         return Err(invalid(format!(
-            "Im-Pesaran-Shin: the W-tbar moments are not tabulated for {row} lags at T - lags \
+            "Im-Pesaran-Shin: the W-tbar moments are not tabulated for {lags} lags{} at T - lags \
              - 1 = {l} (IPS 2003 Table 3 has 5 lags from 20 and 6 to 8 lags from 25 periods); \
-             use fewer lags or a longer panel"
+             use fewer lags or a longer panel",
+            if lags > IPS_MAX_LAG {
+                format!(" (the {IPS_MAX_LAG}-lag row stands in above {IPS_MAX_LAG})")
+            } else {
+                String::new()
+            }
         )));
     }
     Ok((e, v, pos.edge))
@@ -1981,6 +1992,8 @@ fn run_hadri_test(
             )
         }
         HadriVariance::Homoskedastic => {
+            // plm's idres$LM: each unit's LM on its own variance, as in the heteroskedastic
+            // arm; the z uses the pooled variance, so their mean is not the LM below
             let sigma2 = rss.iter().sum::<f64>() / (nf * short_df);
             let lm: Vec<f64> = partial
                 .iter()
@@ -2760,8 +2773,9 @@ mod tests {
                 c.test_type = PanelUnitRootTest::Hadri;
                 c.lag_selection = Some(LagSelection::Aic);
             })),
-            "the Hadri test uses no lagged differences; lags, lag_selection and pmax do not \
-             apply (the long-run variance's truncation lag is set with hadri_variance = long_run)"
+            "the Hadri test uses no lagged differences; lags, lag_selection, pmax and max_lags \
+             do not apply (the long-run variance's truncation lag is set with hadri_variance = \
+             long_run)"
         );
         assert_eq!(
             message(run(&|c| c.pmax = Some(2))),
@@ -3533,6 +3547,10 @@ mod tests {
         );
         assert!(
             message(&ds, &|c| c.lags = Some(2))
+                .starts_with("the Hadri test uses no lagged differences; lags,")
+        );
+        assert!(
+            message(&ds, &|c| c.max_lags = Some(2))
                 .starts_with("the Hadri test uses no lagged differences; lags,")
         );
         assert!(

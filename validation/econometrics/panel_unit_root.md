@@ -130,8 +130,8 @@ lagged differences, on the unit's rows `p + 2..T`.
   separators ' ', '-', '.', '_' do not matter; anything else is an error listing the names.
 - Contradicting options are errors: `lags` with a criterion ("use pmax"), `lags` and
   `fixed (p)` that differ, `pmax = 0` with a criterion, `pmax` and `max_lags` that differ,
-  `pmax` without a criterion, and `lag_selection` or `pmax` for Hadri (it has no lagged
-  differences).
+  `pmax` without a criterion, and `lags`, `lag_selection`, `pmax` or `max_lags` for Hadri (it
+  has no lagged differences).
 
 **Short and degenerate units.** A unit needs `T >= 3 + n_det + 2p` observations for `p`
 lags (`n_det` = 0, 1 or 2), so that its ADF regression keeps a residual degree of freedom;
@@ -249,9 +249,13 @@ p_i` columns. The ADF residual variance is `rss/(n - K)` with `dfcor` and `rss/n
   most 0.004 in p on the grid inside the monotone range (ECON-44, decided for the 1994
   surface, which needs no table).
 - **Hadri** (`purtest(test = "hadri")`). Model `none` is refused ("without deterministic terms
-  the KPSS limit has mean 1/2, not 1/6"), as are unbalanced panels and `lags`, `lag_selection`
-  or `pmax` (Hadri has no lagged differences; before, `lags` was ignored silently). Residuals
-  `e_i` demeaned or detrended on (1, 1..T); `S_i = sum (cumsum e_i)^2 / T^2`. `hadri_variance`:
+  the KPSS limit has mean 1/2, not 1/6"), as are unbalanced panels and `lags`, `lag_selection`,
+  `pmax` or `max_lags` (Hadri has no lagged differences; before, `lags` was ignored silently). Residuals
+  `e_i` demeaned or detrended on (1, 1..T); `S_i = sum (cumsum e_i)^2 / T^2`. A unit whose
+  residual norm is at most `1e-10 max|y_i| sqrt(T)` is refused as constant (or exactly linear
+  with a trend), with an error naming it (before, its statistic was infinite); the bound is
+  relative to the series' level, so a unit with a very large mean and tiny variation (spread
+  below about 1e-10 of the level) is refused too. `hadri_variance`:
   - `heteroskedastic` (default, plm `Hcons = TRUE`): `sigma_i^2 = e'e / (T - nd)` with dfcor,
     `/ T` without; `LM = mean(S_i / sigma_i^2)`;
   - `homoskedastic` (`Hcons = FALSE`): `sigma^2 = sum e'e / (N (T - nd))` (or `N T`);
@@ -261,8 +265,9 @@ p_i` columns. The ADF residual variance is `rss/(n - K)` with `dfcor` and `rss/n
     an error. Before Tier 4 this was the undisclosed default, with `ceil(T^(1/3))` lags.
 
   `z = sqrt(N) (LM - mu) / sigma` with `(mu, sigma^2)` = (1/6, 1/45) or (1/15, 11/6300),
-  `p = 1 - Phi(z)` (direct upper tail). `unit_statistics` holds `S_i / sigma_i^2` with each
-  variant's per-unit variance (plm's `idres$LM` for both short-run variants). The output prints
+  `p = Phi(-z)` (the upper normal tail, computed directly). `unit_statistics` holds
+  `S_i / sigma_i^2` with each unit's own variance (plm's `idres$LM` for both short-run variants;
+  under `homoskedastic` their mean is therefore not the pooled `LM` of the z). The output prints
   `Variance:` and, for the short-run variants, the dfcor line. `hadri_variance` with another
   test is an error; the option is in core only (the MCP and CLI surfaces do not expose it yet).
 
