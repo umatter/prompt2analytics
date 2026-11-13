@@ -279,8 +279,10 @@ fn test_validate_cli_step_no_intercept() {
         v["final_variables"],
         serde_json::json!(["value", "capital"])
     );
-    // only the initial model: no term is dropped (`n_steps` counts the search rounds, here 1)
+    // only the initial model: no term is dropped (`n_steps` counts the accepted moves, here 0)
     assert_eq!(v["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(v["n_steps"], 0, "{v}");
+    assert_eq!(v["final_criterion"], v["steps"][0]["criterion"], "{v}");
     assert!(v["steps"][0]["action"].is_null(), "{v}");
     Check::new(&case)
         .scalar(

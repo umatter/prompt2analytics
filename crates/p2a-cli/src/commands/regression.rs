@@ -1507,6 +1507,7 @@ fn execute_step(
                             "final_variables": result.final_variables,
                             "n_steps": result.n_steps,
                             "final_aic": result.final_model.aic,
+                            "final_criterion": result.steps.last().map(|s| s.criterion),
                             "final_r_squared": result.final_model.r_squared,
                             "steps": result.steps.iter().map(|s| {
                                 serde_json::json!({

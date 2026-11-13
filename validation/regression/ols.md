@@ -346,7 +346,12 @@ passes, far below that difference, so its cause is not identified yet; it is not
 criterion, n ln(RSS/n) + k·p, with p the number of coefficients and k = 2 (AIC) or ln n
 (BIC). It differs from `AIC()` by the constant n(1 + ln 2π) + k, so the selections are
 those of `stats::step`, and `StepRecord::criterion` and `TermEvaluation::criterion` are
-the "AIC" column R prints. `StepResult.final_model.aic` is R's `AIC()` of the final model.
+the "AIC" column R prints. `StepResult.final_model.aic` is R's `AIC()` of the final model; the
+CLI's JSON gives the step criterion of the final model as `final_criterion`. With an intercept,
+backward and both can drop the last term and end at `y ~ 1`, and `drop1` lists that row (REG-54).
+A candidate model that cannot be fitted is an error naming its formula, not a skipped move;
+BIC's ln n counts the rows the initial model is fitted on; `n_steps` counts the accepted moves
+(`steps.len() - 1`, the rows of `step()$anova` after the first) (REG-65).
 Before Tier 1 (REG-20) the criterion penalised each regressor by about 3 and dropped
 regressors that `step()` keeps.
 
@@ -364,6 +369,15 @@ variables (exact), the final criterion of each direction and of backward BIC (th
 `run_step`, the MCP/CLI wrapper), and the full model's t, logLik, AIC and BIC (1e-6
 relative). Measured: criteria within 2.7e-15 relative, t within 1.7e-14.
 
+Case `step_null_t4` (`validation/r/cases/regression_smoothers_t4.R`; pure noise, n = 60, y ~ x1 +
+x2 + x3): backward and both drop x2, x1, x3 and end at `y ~ 1`; forward from `y ~ 1` makes no
+move; backward BIC ends at `y ~ 1` too. Tests (registry entry `step_null`,
+`regression_smoothers_t4.json`): `test_validate_step_null_backward`, `_both`, `_forward`, `_bic`
+(the criterion path, the dropped order, the final model size) and `test_validate_drop1_last_term`
+(drop1's rows on `y ~ x3`), statistics row (n = 60: 1e-5). `test_step_failed_candidate_is_an_error`
+covers the error. Release note: backward and both can now select `y ~ 1`, and `n_steps` is one
+lower than before.
+
 ## Known Differences
 
 1. **Solve path** (REG-18, fixed in T3-WP09): designs whose equilibrated X'X has a
@@ -374,9 +388,6 @@ relative). Measured: criteria within 2.7e-15 relative, t within 1.7e-14.
    adjusted R² uses the factor n / (n − k) (REG-19, fixed); case `ols_no_intercept_grunfeld`.
 3. **Tail p-values** below about 1e-16 are printed as 0 (X-17, Tier 3); the tests compare
    p-values with a 1e-12 absolute floor.
-4. **Stepwise**: backward and both never drop to the intercept-only model (REG-54,
-   Tier 4), and an unknown direction string in `run_step` becomes "both" (REG-65, Tier 4).
-   The cases do not reach either.
 
 ## Running the Tests
 

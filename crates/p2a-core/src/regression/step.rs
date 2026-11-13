@@ -74,7 +74,9 @@ pub struct StepRecord {
 /// Result of stepwise model selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
-    /// The final selected model result
+    /// The final selected model, fitted by `run_ols`: its `aic`/`bic` are on R's `AIC()`/`BIC()`
+    /// scale, which differs by a constant from the step criterion (`steps[..].criterion`, R's
+    /// `extractAIC`)
     pub final_model: OlsResult,
     /// Direction used for selection
     pub direction: StepDirection,
@@ -88,7 +90,8 @@ pub struct StepResult {
     pub final_variables: Vec<String>,
     /// History of steps taken
     pub steps: Vec<StepRecord>,
-    /// Total number of steps
+    /// Number of accepted moves (`steps.len() - 1`; the rows of R's `step()$anova` after the
+    /// first)
     pub n_steps: usize,
     /// Scope: lower bound variables (always included)
     pub scope_lower: Vec<String>,
@@ -239,24 +242,6 @@ pub fn step(
         }
     }
 
-    // Determine n for BIC calculation
-    let n = dataset.nrows() as f64;
-
-    // Determine k (penalty parameter)
-    let k = if config.use_bic {
-        n.ln()
-    } else {
-        config.k.unwrap_or(2.0)
-    };
-
-    let criterion_name = if (k - 2.0).abs() < 0.01 {
-        "AIC".to_string()
-    } else if (k - n.ln()).abs() < 0.01 {
-        "BIC".to_string()
-    } else {
-        format!("IC(k={:.2})", k)
-    };
-
     // Determine initial model
     let initial_vars: Vec<String> = match initial {
         Some(vars) => vars.iter().map(|s| s.to_string()).collect(),
@@ -279,6 +264,21 @@ pub fn step(
 
     // Fit initial model
     let initial_model = fit_model(dataset, y_col, &current_vars, intercept)?;
+
+    // k (penalty): BIC's ln n counts the rows the model is fitted on
+    let n = initial_model.n_obs as f64;
+    let k = if config.use_bic {
+        n.ln()
+    } else {
+        config.k.unwrap_or(2.0)
+    };
+    let criterion_name = if (k - 2.0).abs() < 0.01 {
+        "AIC".to_string()
+    } else if (k - n.ln()).abs() < 0.01 {
+        "BIC".to_string()
+    } else {
+        format!("IC(k={:.2})", k)
+    };
     let mut current_criterion = compute_criterion(&initial_model, k);
 
     steps.push(StepRecord {
@@ -354,8 +354,8 @@ pub fn step(
         criterion_name,
         initial_variables: initial_vars,
         final_variables: current_vars,
+        n_steps: steps.len() - 1,
         steps,
-        n_steps: step_num,
         scope_lower: lower,
         scope_upper: upper,
     })
@@ -386,14 +386,13 @@ fn find_best_move(
                 let mut new_vars = current_vars.to_vec();
                 new_vars.push(var.clone());
 
-                if let Ok(model) = fit_model(dataset, y_col, &new_vars, intercept) {
-                    let criterion = compute_criterion(&model, k);
-                    if criterion < best_criterion {
-                        best_criterion = criterion;
-                        best_vars = new_vars;
-                        best_action = Some(format!("+ {}", var));
-                        best_model = Some(model);
-                    }
+                let model = fit_candidate(dataset, y_col, &new_vars, intercept)?;
+                let criterion = compute_criterion(&model, k);
+                if criterion < best_criterion {
+                    best_criterion = criterion;
+                    best_vars = new_vars;
+                    best_action = Some(format!("+ {}", var));
+                    best_model = Some(model);
                 }
             }
         }
@@ -411,19 +410,18 @@ fn find_best_move(
             let new_vars: Vec<String> =
                 current_vars.iter().filter(|v| *v != var).cloned().collect();
 
-            // Can't drop all variables
-            if new_vars.is_empty() {
+            // Without an intercept the empty model has nothing to fit; with one it is y ~ 1
+            if new_vars.is_empty() && !intercept {
                 continue;
             }
 
-            if let Ok(model) = fit_model(dataset, y_col, &new_vars, intercept) {
-                let criterion = compute_criterion(&model, k);
-                if criterion < best_criterion {
-                    best_criterion = criterion;
-                    best_vars = new_vars;
-                    best_action = Some(format!("- {}", var));
-                    best_model = Some(model);
-                }
+            let model = fit_candidate(dataset, y_col, &new_vars, intercept)?;
+            let criterion = compute_criterion(&model, k);
+            if criterion < best_criterion {
+                best_criterion = criterion;
+                best_vars = new_vars;
+                best_action = Some(format!("- {}", var));
+                best_model = Some(model);
             }
         }
     }
@@ -451,6 +449,44 @@ fn fit_model(
 ) -> EconResult<OlsResult> {
     let x_cols: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
     run_ols(dataset, y_col, &x_cols, intercept, CovarianceType::Standard)
+}
+
+/// The formula of a model, for messages: `y ~ x1 + x2`, `y ~ 1`, `y ~ x1 - 1`.
+fn formula(y_col: &str, vars: &[&str], intercept: bool) -> String {
+    match (vars.is_empty(), intercept) {
+        (true, true) => format!("{y_col} ~ 1"),
+        (true, false) => format!("{y_col} ~ 0"),
+        (false, true) => format!("{y_col} ~ {}", vars.join(" + ")),
+        (false, false) => format!("{y_col} ~ {} - 1", vars.join(" + ")),
+    }
+}
+
+/// Fit a candidate model of a step, add1 or drop1; a failure is an error naming the
+/// candidate (R's step() stops too), not a silently skipped move.
+fn fit_candidate_strs(
+    dataset: &Dataset,
+    y_col: &str,
+    vars: &[&str],
+    intercept: bool,
+) -> EconResult<OlsResult> {
+    run_ols(dataset, y_col, vars, intercept, CovarianceType::Standard).map_err(|e| {
+        EconError::InvalidSpecification {
+            message: format!(
+                "the candidate model {} could not be fitted: {e}",
+                formula(y_col, vars, intercept)
+            ),
+        }
+    })
+}
+
+fn fit_candidate(
+    dataset: &Dataset,
+    y_col: &str,
+    vars: &[String],
+    intercept: bool,
+) -> EconResult<OlsResult> {
+    let x_cols: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
+    fit_candidate_strs(dataset, y_col, &x_cols, intercept)
 }
 
 /// Compute the information criterion as R's `extractAIC.lm` does:
@@ -520,7 +556,8 @@ pub fn run_step(
 /// Result of evaluating single term additions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Add1Result {
-    /// Current model AIC/BIC
+    /// The current model's criterion `n ln(RSS/n) + k p` (R's `extractAIC`, the `<none>` row
+    /// of `add1()`), not `AIC()`/`BIC()`
     pub current_criterion: f64,
     /// Results for each candidate variable
     pub candidates: Vec<TermEvaluation>,
@@ -529,7 +566,8 @@ pub struct Add1Result {
 /// Result of evaluating single term deletions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drop1Result {
-    /// Current model AIC/BIC
+    /// The current model's criterion `n ln(RSS/n) + k p` (R's `extractAIC`, the `<none>` row
+    /// of `drop1()`), not `AIC()`/`BIC()`
     pub current_criterion: f64,
     /// Results for each droppable variable
     pub candidates: Vec<TermEvaluation>,
@@ -584,22 +622,15 @@ pub fn add1(
         let mut new_vars: Vec<&str> = current_vars.to_vec();
         new_vars.push(var);
 
-        if let Ok(model) = run_ols(
-            dataset,
-            y_col,
-            &new_vars,
-            intercept,
-            CovarianceType::Standard,
-        ) {
-            let criterion = compute_criterion(&model, k);
-            results.push(TermEvaluation {
-                variable: var.to_string(),
-                df: model.n_params,
-                rss: compute_rss(&model),
-                criterion,
-                delta_criterion: criterion - current_criterion,
-            });
-        }
+        let model = fit_candidate_strs(dataset, y_col, &new_vars, intercept)?;
+        let criterion = compute_criterion(&model, k);
+        results.push(TermEvaluation {
+            variable: var.to_string(),
+            df: model.n_params,
+            rss: compute_rss(&model),
+            criterion,
+            delta_criterion: criterion - current_criterion,
+        });
     }
 
     // Sort by criterion (best first)
@@ -648,26 +679,19 @@ pub fn drop1(
             .copied()
             .collect();
 
-        if new_vars.is_empty() {
+        if new_vars.is_empty() && !intercept {
             continue;
         }
 
-        if let Ok(model) = run_ols(
-            dataset,
-            y_col,
-            &new_vars,
-            intercept,
-            CovarianceType::Standard,
-        ) {
-            let criterion = compute_criterion(&model, k);
-            results.push(TermEvaluation {
-                variable: var.to_string(),
-                df: model.n_params,
-                rss: compute_rss(&model),
-                criterion,
-                delta_criterion: criterion - current_criterion,
-            });
-        }
+        let model = fit_candidate_strs(dataset, y_col, &new_vars, intercept)?;
+        let criterion = compute_criterion(&model, k);
+        results.push(TermEvaluation {
+            variable: var.to_string(),
+            df: model.n_params,
+            rss: compute_rss(&model),
+            criterion,
+            delta_criterion: criterion - current_criterion,
+        });
     }
 
     // Sort by criterion (best first)
@@ -968,5 +992,148 @@ mod tests {
             ),
             e => panic!("{e:?}"),
         }
+    }
+
+    /// Case `step_null_t4` (REG-54): pure noise, y ~ x1 + x2 + x3, n = 60.
+    fn step_null(direction: StepDirection, use_bic: bool) -> (p2a_validation::Case, StepResult) {
+        let (case, ds) = crate::test_support::load_case("step_null_t4");
+        let r = step(
+            &ds,
+            "y",
+            &[],
+            &CAND,
+            None,
+            true,
+            StepConfig {
+                direction,
+                use_bic,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (case, r)
+    }
+
+    /// The criterion path, R's anova "AIC" column.
+    fn path(r: &StepResult) -> Vec<f64> {
+        r.steps.iter().map(|s| s.criterion).collect()
+    }
+
+    /// Backward from the full model drops x2, x1, x3 and ends at y ~ 1 (REG-54).
+    #[test]
+    fn test_validate_step_null_backward() {
+        use p2a_validation::{Check, Tol};
+        let (case, r) = step_null(StepDirection::Backward, false);
+        let dropped: Vec<f64> = r.steps[1..]
+            .iter()
+            .map(|s| {
+                let v = s.action.as_deref().unwrap().trim_start_matches("- ");
+                (CAND.iter().position(|c| *c == v).unwrap() + 1) as f64
+            })
+            .collect();
+        Check::new(&case)
+            .vector("backward_aic", &path(&r), Tol::stat(60))
+            .vector("backward_dropped", &dropped, Tol::exact())
+            .scalar(
+                "backward_final_p",
+                r.final_model.n_params as f64,
+                Tol::exact(),
+            )
+            .scalar("null_extract_aic", final_criterion(&r), Tol::stat(60))
+            .scalar("full_extract_aic", r.steps[0].criterion, Tol::stat(60))
+            .finish();
+        assert!(r.final_variables.is_empty());
+        assert_eq!(r.n_steps, 3);
+    }
+
+    /// Both directions from the full model reach y ~ 1 too (REG-54).
+    #[test]
+    fn test_validate_step_null_both() {
+        use p2a_validation::{Check, Tol};
+        let (case, r) = step_null(StepDirection::Both, false);
+        Check::new(&case)
+            .vector("both_aic", &path(&r), Tol::stat(60))
+            .scalar("both_final_p", r.final_model.n_params as f64, Tol::exact())
+            .finish();
+    }
+
+    /// Forward from y ~ 1 makes no move; n_steps counts accepted moves (0).
+    #[test]
+    fn test_validate_step_null_forward() {
+        use p2a_validation::{Check, Tol};
+        let (case, r) = step_null(StepDirection::Forward, false);
+        Check::new(&case)
+            .vector("forward_aic", &path(&r), Tol::stat(60))
+            .scalar(
+                "forward_final_p",
+                r.final_model.n_params as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(r.n_steps, 0);
+    }
+
+    /// Backward by BIC (k = ln 60) ends at y ~ 1.
+    #[test]
+    fn test_validate_step_null_bic() {
+        use p2a_validation::{Check, Tol};
+        let (case, r) = step_null(StepDirection::Backward, true);
+        Check::new(&case)
+            .vector("bic_aic", &path(&r), Tol::stat(60))
+            .scalar("bic_final_p", r.final_model.n_params as f64, Tol::exact())
+            .scalar("null_extract_bic", final_criterion(&r), Tol::stat(60))
+            .finish();
+        assert_eq!(r.criterion_name, "BIC");
+    }
+
+    /// drop1 on y ~ x3 includes dropping the last term (REG-54): R's drop1 rows <none> and x3.
+    #[test]
+    fn test_validate_drop1_last_term() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("step_null_t4");
+        let d1 = drop1(&ds, "y", &["x3"], &[], true, None).unwrap();
+        let rss3 = run_ols(&ds, "y", &["x3"], true, CovarianceType::Standard)
+            .unwrap()
+            .ssr;
+        assert_eq!(d1.candidates.len(), 1);
+        Check::new(&case)
+            .vector(
+                "drop1_last_aic",
+                &[d1.current_criterion, d1.candidates[0].criterion],
+                Tol::stat(60),
+            )
+            .vector(
+                "drop1_last_rss",
+                &[rss3, d1.candidates[0].rss],
+                Tol::stat(60),
+            )
+            .finish();
+    }
+
+    /// REG-65: a candidate model that cannot be fitted is an error naming it, not a skipped
+    /// candidate (forward from y ~ 1; the scope column x2 has a missing value).
+    #[test]
+    fn test_step_failed_candidate_is_an_error() {
+        let mut ds = create_test_dataset();
+        let x2: Vec<Option<f64>> = (0..100)
+            .map(|i| if i == 7 { None } else { Some((i as f64).sin()) })
+            .collect();
+        ds.df_mut()
+            .with_column(Column::new("x2".into(), x2))
+            .unwrap();
+        let e = step(
+            &ds,
+            "y",
+            &[],
+            &["x1", "x2"],
+            None,
+            true,
+            StepConfig {
+                direction: StepDirection::Forward,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("x2"), "{e}");
     }
 }

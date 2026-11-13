@@ -69,6 +69,32 @@
       "tolerance": "Tol::iterative: coefficients and fits 1e-6, SEs and t 1e-5, p 1e-3, RSS and sigma 1e-8 (as nls_expdecay)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "step_null",
+      "name": "Stepwise selection reaching the intercept-only model",
+      "category": "regression",
+      "reference": "stats::step (k = 2 and log(n)); stats::drop1; stats::extractAIC",
+      "doc": "validation/regression/ols.md",
+      "cases": [
+        "step_null_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::step::tests::test_validate_step_null_backward",
+        "p2a-core::regression::step::tests::test_validate_step_null_both",
+        "p2a-core::regression::step::tests::test_validate_step_null_forward",
+        "p2a-core::regression::step::tests::test_validate_step_null_bic",
+        "p2a-core::regression::step::tests::test_validate_drop1_last_term"
+      ],
+      "quantities": [
+        "criterion path (anova AIC column)",
+        "order of the dropped terms",
+        "final model size",
+        "drop1 rows of the last term"
+      ],
+      "tolerance": "validation/README.md statistic row (n = 60: 1e-5); terms and sizes exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
