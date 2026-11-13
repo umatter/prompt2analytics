@@ -487,15 +487,15 @@ pub fn johansen_vecm(
         .checked_mul(big_k - 1)
         .and_then(|lagged| lagged.checked_add(usize::from(has_const)))
         .and_then(|m| big_k.checked_add(m)?.checked_add(k)?.checked_add(p1));
+    // The largest K the sample admits (n_min = K (k + 1) + has_const + p1), named by both refusals.
+    let c = usize::from(has_const) + p1;
+    let kmax = n.saturating_sub(c) / (k + 1);
+    let bound = if kmax < 2 {
+        "the data support no K >= 2".to_string()
+    } else {
+        format!("so K is at most {kmax}")
+    };
     let Some(n_min) = n_min else {
-        // n_min = K (k + 1) + has_const + p1 overflows: name the largest K the sample admits.
-        let c = usize::from(has_const) + p1;
-        let kmax = n.saturating_sub(c) / (k + 1);
-        let bound = if kmax < 2 {
-            "the data support no K >= 2".to_string()
-        } else {
-            format!("so K is at most {kmax}")
-        };
         return Err(invalid(format!(
             "lag_order K = {big_k} is too large for N = {n} observations of k = {k} variables: N >= K (k + 1) + \
              {c} is needed, {bound}"
@@ -507,7 +507,8 @@ pub fn johansen_vecm(
             provided: n,
             context: format!(
                 "Johansen VECM with k = {k} variables, K = {big_k} and ecdet = {ecdet}: N must be at least K + \
-                 (short-run regressors) + k + (level terms), or the squared canonical correlations are 1 by construction"
+                 (short-run regressors) + k + (level terms), or the squared canonical correlations are 1 by construction; \
+                 {bound}"
             ),
         });
     }
@@ -562,7 +563,7 @@ pub fn johansen_vecm(
     drop(qr1);
     resource::checkpoint()?;
     let tf = t as f64;
-    let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf);
+    let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf)?;
     drop(effects);
     sym_inverse(
         s00.view(),
@@ -794,9 +795,9 @@ fn concentrated_moments(
     k: usize,
     skip: usize,
     t: f64,
-) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
+) -> EconResult<(Array2<f64>, Array2<f64>, Array2<f64>)> {
     let p = effects.len();
-    let mut all = Array2::zeros((p, p));
+    let mut all = resource::try_zeros2(p, p, "VECM moment matrix")?;
     for a in 0..p {
         let ea = effects[a].slice(s![skip..]);
         for b in 0..=a {
@@ -805,11 +806,11 @@ fn concentrated_moments(
             all[[b, a]] = v;
         }
     }
-    (
+    Ok((
         all.slice(s![..k, ..k]).to_owned(),
         all.slice(s![..k, k..]).to_owned(),
         all.slice(s![k.., k..]).to_owned(),
-    )
+    ))
 }
 
 #[derive(Default)]
@@ -1057,7 +1058,7 @@ mod tests {
             let qr1 = Qr::from_columns(buf, t, m, LM_QR_TOL).unwrap();
             assert_eq!(qr1.rank(), m);
             let effects = concentrated_effects(&qr1, y.view(), big_k, ecdet).unwrap();
-            let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf);
+            let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf).unwrap();
             let got = [s00, s0k, skk];
             let d0: Vec<f64> = (0..k).map(|i| want[0][[i, i]]).collect();
             let dk: Vec<f64> = (0..p1).map(|i| want[2][[i, i]]).collect();

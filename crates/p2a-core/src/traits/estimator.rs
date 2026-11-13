@@ -670,9 +670,10 @@ mod tails {
             })
         }
     }
-    /// x < 0 with P(T_df <= x) = q, 0 < q < 1/2. Start: the best of the tail asymptote, the normal
-    /// quantile and the Cornish-Fisher value (statrs StudentsT::inverse_cdf is not used: it hangs and
-    /// panics, see the module docs).
+    /// x < 0 with P(T_df <= x) = q, 0 < q < 1/2. Start: the Cornish-Fisher value for q >= 1e-8 and
+    /// df >= 3; otherwise, or when Newton from it does not converge, the best of the tail asymptote,
+    /// the normal quantile and the Cornish-Fisher value (statrs StudentsT::inverse_cdf is not used:
+    /// it hangs and panics, see the module docs).
     pub(super) fn t_lower_quantile(q: f64, df: f64) -> R {
         let lq = q.ln();
         let a = 0.5 * df;
@@ -682,9 +683,15 @@ mod tails {
         let cf = cornish_fisher_t(z, df);
         // Away from the far tail and from df < 3 the Cornish-Fisher value is close to the
         // root, so Newton starts from it without comparing the other starts (each comparison
-        // costs a full incomplete-beta tail). The stopping rule is the same, so is the root.
-        if cf.is_finite() && cf < 0.0 && q >= 1e-8 && df >= 3.0 {
-            let u = solve_log_tail((-cf).ln(), None, lq, tail, dens, false)?;
+        // costs a full incomplete-beta tail). The stopping rule is the same, so the root is the
+        // same to the stopping tolerance. If Newton does not converge from it, the start
+        // selection below runs as before.
+        if cf.is_finite()
+            && cf < 0.0
+            && q >= 1e-8
+            && df >= 3.0
+            && let Ok(u) = solve_log_tail((-cf).ln(), None, lq, tail, dens, false)
+        {
             return Ok(-exp_or_inf(u));
         }
         let mut starts = [

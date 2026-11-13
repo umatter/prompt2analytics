@@ -269,19 +269,19 @@ fn aliased_regressors(
 /// log-likelihood does not fall; where the observed information is not positive
 /// definite the step is damped (Levenberg). The fit has converged when the Newton
 /// decrement `g'(-H)^-1 g` is at most `1e-12 (1 + |ll|)`, the relative change of the
-/// log-likelihood below `1e-10` and every component of the Newton step at most
-/// `1e-10 (1 + |theta_k|)`; after a damped step, which can be short far from the
-/// optimum, also every score component below `1e-8 (1 + |ll|)`. The decrement and the
-/// log-likelihood change do not depend on the units of a regressor, and neither do the
-/// estimates (Newton's method is affine-invariant). The step test is relative only for
-/// parameters above 1 in absolute value, so a change of units that makes a coefficient
-/// large tightens it and can cost an iteration. `converged == true` implies finite
-/// estimates and log-likelihood. A non-finite log-likelihood, score or Hessian,
-/// observed information that is not positive definite even after damping, a non-finite
-/// step, a failed line search and the iteration limit end the fit with `converged = false` and a message in `warnings`,
-/// never with an error. Standard errors are the square roots of the diagonal of the
-/// inverse observed information; they are NaN, with a warning, when the information is
-/// not positive definite.
+/// log-likelihood below `1e-10` and every component of the Newton step at most `1e-10
+/// (1 + |theta_k|)`; after a damped step, which can be short far from the optimum, also
+/// every score component below `1e-8 (1 + |ll|)`. The decrement and the log-likelihood
+/// change do not depend on the units of a regressor, and neither do the estimates
+/// (Newton's method is affine-invariant). The step test is relative only for parameters
+/// above 1 in absolute value, so a change of units that makes a coefficient large
+/// tightens it and can cost an iteration. `converged == true` implies finite estimates
+/// and log-likelihood. A non-finite log-likelihood, score or Hessian, observed
+/// information that is not positive definite even after damping, a non-finite step, a
+/// failed line search and the iteration limit end the fit with `converged = false` and
+/// a message in `warnings`, never with an error. Standard errors are the square roots
+/// of the diagonal of the inverse observed information; they are NaN, with a warning,
+/// when the information is not positive definite.
 ///
 /// # Errors
 ///

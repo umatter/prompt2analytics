@@ -191,6 +191,17 @@ impl fmt::Display for MultinomResult {
     }
 }
 
+/// The larger of `acc` and `r`, NaN once either is: `f64::max` returns the
+/// other operand of a NaN, so a fold with it would lose a NaN in any but the
+/// last element.
+fn nan_absorbing_max(acc: f64, r: f64) -> f64 {
+    if acc.is_nan() || r.is_nan() {
+        f64::NAN
+    } else {
+        acc.max(r)
+    }
+}
+
 /// Run multinomial logit regression.
 ///
 /// # Arguments
@@ -394,7 +405,7 @@ pub fn run_multinom(
                     .iter()
                     .zip(&beta)
                     .map(|(s, b)| s.abs() / (1.0 + b.abs()))
-                    .fold(0.0_f64, |acc, r| if r.is_nan() { r } else { acc.max(r) });
+                    .fold(0.0_f64, nan_absorbing_max);
                 polish_step = Some(ratio);
                 let polish: Vec<f64> = beta.iter().zip(&d2).map(|(b, s)| b + s).collect();
                 let at_polish = model.derivatives(&polish)?;
@@ -709,6 +720,16 @@ struct MultinomDerivatives {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_polish_ratio_fold_keeps_a_nan_anywhere() {
+        let fold = |v: &[f64]| v.iter().copied().fold(0.0_f64, super::nan_absorbing_max);
+        assert!(fold(&[f64::NAN, 0.5, 0.25]).is_nan());
+        assert!(fold(&[0.5, f64::NAN, 0.25]).is_nan());
+        assert!(fold(&[0.5, 0.25, f64::NAN]).is_nan());
+        assert_eq!(fold(&[0.5, 0.25, 2.0]), 2.0);
+        assert_eq!(fold(&[]), 0.0);
+    }
+
     use super::*;
     use crate::linalg::design::DesignMatrix;
     use crate::linalg::matrix_ops::safe_inverse;

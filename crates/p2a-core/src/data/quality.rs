@@ -487,8 +487,8 @@ fn compute_numeric_stats(present: Vec<f64>) -> Option<NumericStats> {
     let mut zero_count = 0;
     let mut negative_count = 0;
 
-    // one chunk without a validity bitmap (built from a Vec), so the slice is available
-    for &val in ca.cont_slice().ok()? {
+    // Built from a Vec, so no value is null; iterating cannot fail on a chunk layout.
+    for val in ca.iter().flatten() {
         if val < outlier_lower_bound || val > outlier_upper_bound {
             outlier_count += 1;
         }
