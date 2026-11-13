@@ -68,16 +68,11 @@
       "quantities": [
         "complete pairs (56)",
         "NA data = complete pairs",
-        "missing counts"
+        "missing counts",
+        "line coefficients on the complete pairs (line_coef)"
       ],
-      "tolerance": "exact",
-      "deviations": [
-        {
-          "finding": "REG-12",
-          "quantity": "line coefficients (line_coef)",
-          "note": "R 0.441594195008563728 / 0.053890384144849528; p2a's resistant line is a different variant (-0.514777229630535849 / 0.062911296831234101 on the same 56 pairs by an R transcription of line.rs), Tier 4"
-        }
-      ],
+      "tolerance": "exact; line_coef validation/README.md coefficient row (n = 56: 1e-6)",
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

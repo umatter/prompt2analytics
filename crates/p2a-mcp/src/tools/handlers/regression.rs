@@ -959,7 +959,7 @@ impl AnalyticsServer {
             .numerics(&names)
             .na(NaPolicy::Omit)
             .min_rows(
-                4,
+                p2a_core::regression::supsmu::MIN_OBSERVATIONS,
                 &match request.weights.as_deref() {
                     Some(w) => format!(
                         "SuperSmoother of '{}' on '{}' with weights '{}'",
@@ -1032,7 +1032,7 @@ impl AnalyticsServer {
             .numeric(&request.y)
             .na(NaPolicy::Omit)
             .min_rows(
-                3,
+                p2a_core::regression::line::MIN_PAIRS,
                 &format!(
                     "Tukey's resistant line of '{}' on '{}'",
                     request.y, request.x

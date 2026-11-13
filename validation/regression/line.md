@@ -2,38 +2,42 @@
 
 ## Method
 
-The x values are split into thirds; the slope is `(median(y_R) - median(y_L)) / (median(x_R) -
-median(x_L))`, polished `iter` times on the residuals, and the intercept is taken from the three
-summary points. Related to R's `stats::line`; R >= 3.5's `tukeyline` differs (iteration count, the
-intercept as `median(y - b x)`, its third cut points; REG-12, open).
+R's `stats::line` (R >= 3.5, `tukeyline`): with `z` the sorted x and `q(p) = (z[floor((n - 1) p)]
++ z[ceil((n - 1) p)]) / 2`, the left third is `x <= q(1/3)` and the right third `x >= q(2/3)`.
+From slope 0, each of the `iter` steps (default 1, at least 1) adds `(median(r_R) - median(r_L)) /
+(median(x_R) - median(x_L))` with `r = y - slope x`; the intercept is `median(y - slope x)`.
+Outer thirds whose x medians are equal leave the line without a slope: an error (R divides by
+zero and returns a non-finite slope). At least `MIN_PAIRS` (3) complete pairs.
 
 ## R reference
 
-Case `line_tukey_outliers` (`validation/r/cases/regression_smoothers_t3.R`): `stats::line(x, y,
-iter)` for iter 1, 2, 3 and `stats::lm(y ~ x)` on the old test's 30 points (y = 2 + 0.5 x + noise with
-three outliers).
+- Case `line_tukey_t4` (`validation/r/cases/regression_smoothers_t4.R`): `line(x, y, iter)` for
+  iter 1, 2, 3 on the eleven-point example, on tied x (20 rows on 0..4) and on n = 31, with the
+  fitted values and residuals of the n = 31 fit.
+- Case `line_tukey_outliers` (`regression_smoothers_t3.R`): `line(x, y, iter)` for iter 1, 2, 3
+  and `lm(y ~ x)` on the old test's 30 points (y = 2 + 0.5 x + noise with three outliers).
 
 ## Values
 
-`iter1_coef` 1.739 / 0.513, `iter2_coef` 1.763 / 0.511, `iter3_coef` 1.763 / 0.511 (awaiting REG-12);
-`ols_coef` 2.0836551724137866 / 0.5208609566184653; n = 30. The values the old test quoted
-(2.42169727298821 / 0.475089391721295) are R's output on other data (set.seed(42)), not on this y.
+`line_tukey_outliers`: `iter1_coef` 1.739 / 0.513, `iter2_coef` 1.763 / 0.511, `iter3_coef` 1.763 /
+0.511 (printed to 3 decimals); `ols_coef` 2.0836551724137866 / 0.5208609566184653; n = 30.
 
 ## Tolerances
 
-`ols_coef` `Tol::coef(30)`, n exact. The line coefficients are not compared with R (REG-12).
+`line_tukey_t4`: the coefficient row of `validation/README.md` (`Tol::coef(n)`).
+`line_tukey_outliers`: the line coefficients `Tol::printed(3)` (the case stores R's printed
+values), `ols_coef` `Tol::coef(30)`, n exact.
 
 ## Tests
 
-- `test_validate_line_resists_outliers` (registry entry `line`): pins `ols_coef` and n through
-  `run_ols`, and asserts that the resistant slope is within 0.03 of 0.5 and closer to 0.5 than R's OLS
-  slope.
-- `test_line_clean_data_recovers_dgp`: the slope within 0.1 of 0.5 and the intercept within 0.5 of
-  2.0 on clean data.
+- `test_validate_line_tukey_t4` (registry entry `line_tukey`, `regression_smoothers_t4.json`).
+- `test_validate_line_resists_outliers` (registry entry `line`): R's coefficients for iter 1-3,
+  `ols_coef` and n through `run_ols`, and the resistant slope closer to 0.5 than R's OLS slope.
+- `test_line_refuses_equal_third_medians`; `test_line_clean_data_recovers_dgp`.
 
 ## Deviations
 
-REG-12: `iter1_coef`, `iter2_coef`, `iter3_coef`.
+None. Release note: the line coefficients changed to R's.
 
 ## Missing and Non-finite Values (REG-13)
 
@@ -69,13 +73,8 @@ Property tests, not registered (no R value):
 `test_cli_reg_line_supsmu_too_few_complete_rows` check the too-few-rows error of line and
 supsmu through MCP and the CLI.
 
-### Known difference (REG-12)
-
-p2a's resistant line is a different variant of Tukey's line (the iteration count is off by
-one and the intercept comes from the middle group). On the 56 complete pairs R gives
-intercept 0.441594195008563728 and slope 0.053890384144849528; p2a gives
--0.514777229630535849 and 0.062911296831234101 (equal to an R transcription of `line.rs`).
-The coefficients are a registry deviation until REG-12 (Tier 4) ports `tukeyline`.
+`test_validate_line_na` also pins R's coefficients on the 56 complete pairs (`line_coef`,
+intercept 0.441594195008563728, slope 0.053890384144849528; `Tol::coef(56)`).
 
 ### Known difference: infinite values
 

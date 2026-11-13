@@ -6,13 +6,13 @@
 //!
 //! # Mathematical Background
 //!
-//! The algorithm proceeds as follows:
+//! The algorithm is R's `stats::line` (R >= 3.5, `tukeyline`):
 //!
-//! 1. **Partition**: Divide data into three groups (L, M, R) based on x-values
-//! 2. **Summarize**: Compute median x and y for left (L) and right (R) groups
-//! 3. **Slope**: β₁ = (median(y_R) - median(y_L)) / (median(x_R) - median(x_L))
-//! 4. **Intercept**: β₀ computed using overall summary points
-//! 5. **Polish**: Iteratively adjust using residuals from middle group
+//! 1. **Thirds**: the left third is `x <= q(1/3)`, the right third `x >= q(2/3)`, with
+//!    `q(p) = (z[floor((n - 1) p)] + z[ceil((n - 1) p)]) / 2` on the sorted x `z`
+//! 2. **Slope**: from 0, each of `iter` steps adds
+//!    `(median(r_R) - median(r_L)) / (median(x_R) - median(x_L))`, `r = y - slope x`
+//! 3. **Intercept**: `median(y - slope x)`
 //!
 //! ## Resistance to Outliers
 //!
@@ -46,9 +46,7 @@
 //! Pairs with a missing (NaN) or infinite x or y are deleted first (R's `line()` uses the
 //! complete pairs too) and reported in [`LineResult::missing`].
 //!
-//! Related to R's `stats::line()`; R >= 3.5's `tukeyline` differs (iteration count, the intercept
-//! as `median(y - b x)`, its third cut points; REG-12, open). The R values for the old test data
-//! are in case `line_tukey_outliers`: iter 1: 1.739 / 0.513.
+//! The fit is R's `stats::line()` (R >= 3.5): case `line_tukey_t4` pins it.
 
 use serde::{Deserialize, Serialize};
 
@@ -94,23 +92,30 @@ impl LineResult {
     }
 }
 
-/// Fit Tukey's resistant line to data.
+/// Fewest complete (x, y) pairs [`line`] fits.
+pub const MIN_PAIRS: usize = 3;
+
+/// Fit Tukey's resistant line to data, as R's `stats::line` (R >= 3.5, `tukeyline`).
 ///
-/// The algorithm divides the data into three groups based on x-values and uses
-/// the median x and y within each group to determine the fitted line. The slope
-/// is computed from the outer groups, and the line is adjusted to pass through
-/// the middle group median.
+/// With `z` the sorted x and `q(p) = (z[floor((n - 1) p)] + z[ceil((n - 1) p)]) / 2`, the left
+/// third is `x <= q(1/3)` and the right third `x >= q(2/3)`; `xL` and `xR` are the medians of x
+/// in them. Starting from slope 0, each of the `iter` steps adds
+/// `(median of the right third's residuals - median of the left third's) / (xR - xL)` to the
+/// slope, the residuals being `y - slope x`. The intercept is the median of `y - slope x`.
 ///
 /// # Arguments
 /// * `x` - Predictor values
 /// * `y` - Response values (must have same length as x)
-/// * `iter` - Number of polishing iterations (default 1)
+/// * `iter` - Number of slope steps (default 1, at least 1)
 ///
-/// Pairs with a NaN or infinite x or y are deleted before the fit; at least 3 pairs
-/// must remain.
+/// Pairs with a NaN or infinite x or y are deleted before the fit; at least [`MIN_PAIRS`]
+/// pairs must remain.
 ///
-/// # Returns
-/// A `LineResult` containing the fitted line parameters
+/// # Errors
+///
+/// A message for unequal lengths, `iter = 0`, fewer than [`MIN_PAIRS`] complete pairs, or
+/// outer thirds whose x medians are equal (R divides by zero there and returns a non-finite
+/// slope).
 ///
 /// # Example
 /// ```
@@ -124,6 +129,10 @@ impl LineResult {
 pub fn line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, String> {
     if x.len() != y.len() {
         return Err("x and y must have the same length".to_string());
+    }
+    let iter_count = iter.unwrap_or(1);
+    if iter_count == 0 {
+        return Err("iter must be at least 1".to_string());
     }
 
     // Delete the pairs with a missing or infinite value
@@ -148,139 +157,49 @@ pub fn line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, Str
             .map(|(name, k)| (name.to_string(), k))
             .collect(),
     };
-    if n < 3 {
+    if n < MIN_PAIRS {
         return Err(format!(
-            "Need at least 3 complete (x, y) pairs for line fitting; {n} of {n_total} pairs \
-             are complete (pairs with a missing or infinite value are dropped)"
+            "Need at least {MIN_PAIRS} complete (x, y) pairs for line fitting; {n} of {n_total} \
+             pairs are complete (pairs with a missing or infinite value are dropped)"
         ));
     }
 
-    let iter_count = iter.unwrap_or(1).max(1);
-
-    // Sort data by x values
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
-
-    let sorted_x: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-    let sorted_y: Vec<f64> = indices.iter().map(|&i| y[i]).collect();
-
-    // Compute quantile indices for splitting into three groups
-    // Following R's method: q1 at 1/3, q2 at 2/3
-    let (_q1_idx, _q2_idx) = compute_split_indices(n);
-
-    // Compute quantile values for splitting
-    let q1 = crate::stats::robust::quantile_sorted(
-        &sorted_x,
-        1.0 / 3.0,
-        crate::stats::robust::QuantileType::T7,
-    );
-    let q2 = crate::stats::robust::quantile_sorted(
-        &sorted_x,
-        2.0 / 3.0,
-        crate::stats::robust::QuantileType::T7,
-    );
-
-    // Split into three groups
-    let (group1_x, group1_y): (Vec<f64>, Vec<f64>) = sorted_x
-        .iter()
-        .zip(sorted_y.iter())
-        .filter(|(xi, _)| **xi <= q1)
-        .map(|(xi, yi)| (*xi, *yi))
-        .unzip();
-
-    let (group2_x, group2_y): (Vec<f64>, Vec<f64>) = sorted_x
-        .iter()
-        .zip(sorted_y.iter())
-        .filter(|(xi, _)| **xi > q1 && **xi < q2)
-        .map(|(xi, yi)| (*xi, *yi))
-        .unzip();
-
-    let (group3_x, group3_y): (Vec<f64>, Vec<f64>) = sorted_x
-        .iter()
-        .zip(sorted_y.iter())
-        .filter(|(xi, _)| **xi >= q2)
-        .map(|(xi, yi)| (*xi, *yi))
-        .unzip();
-
-    // Handle edge case where groups might be empty or too small
-    // In such cases, use a simpler three-way split
-    let (g1_x, g1_y, g2_x, g2_y, g3_x, g3_y) =
-        if group1_x.is_empty() || group2_x.is_empty() || group3_x.is_empty() {
-            // Fall back to equal-size groups
-            let third = n / 3;
-            let two_thirds = 2 * n / 3;
-
-            let g1_x: Vec<f64> = sorted_x[..third.max(1)].to_vec();
-            let g1_y: Vec<f64> = sorted_y[..third.max(1)].to_vec();
-            let g2_x: Vec<f64> = sorted_x[third.max(1)..two_thirds.max(third.max(1) + 1)].to_vec();
-            let g2_y: Vec<f64> = sorted_y[third.max(1)..two_thirds.max(third.max(1) + 1)].to_vec();
-            let g3_x: Vec<f64> = sorted_x[two_thirds.max(third.max(1) + 1)..].to_vec();
-            let g3_y: Vec<f64> = sorted_y[two_thirds.max(third.max(1) + 1)..].to_vec();
-
-            (g1_x, g1_y, g2_x, g2_y, g3_x, g3_y)
-        } else {
-            (group1_x, group1_y, group2_x, group2_y, group3_x, group3_y)
-        };
-
-    // Compute medians for each group
-    let med_x1 = median(&g1_x);
-    let med_y1 = median(&g1_y);
-    let med_x2 = median(&g2_x);
-    let med_y2 = median(&g2_y);
-    let med_x3 = median(&g3_x);
-    let med_y3 = median(&g3_y);
-
-    // Compute initial slope from outer groups
-    let mut slope = if (med_x3 - med_x1).abs() > 1e-10 {
-        (med_y3 - med_y1) / (med_x3 - med_x1)
-    } else {
-        0.0
+    let mut z = x.to_vec();
+    z.sort_by(f64::total_cmp);
+    let xb = r_quantile(&z, 1.0 / 3.0);
+    let xt = r_quantile(&z, 2.0 / 3.0);
+    let left: Vec<usize> = (0..n).filter(|&i| x[i] <= xb).collect();
+    let right: Vec<usize> = (0..n).filter(|&i| x[i] >= xt).collect();
+    let mut work = Vec::with_capacity(n);
+    let mut median_of = |idx: &[usize], v: &[f64]| {
+        work.clear();
+        work.extend(idx.iter().map(|&i| v[i]));
+        work.sort_by(f64::total_cmp);
+        r_quantile(&work, 0.5)
     };
-
-    // Compute initial intercept from middle group median
-    let mut intercept = med_y2 - slope * med_x2;
-
-    // Compute initial residuals
-    let current_y = sorted_y.clone();
-
-    // Polishing iterations
-    for _ in 0..iter_count {
-        // Compute residuals
-        let residuals: Vec<f64> = sorted_x
-            .iter()
-            .zip(current_y.iter())
-            .map(|(&xi, &yi)| yi - (intercept + slope * xi))
-            .collect();
-
-        // Re-split residuals into three groups and compute median residuals
-        let res1: Vec<f64> = residuals[..g1_x.len().min(residuals.len())].to_vec();
-        let res2: Vec<f64> = if g1_x.len() + g2_x.len() <= residuals.len() {
-            residuals[g1_x.len()..g1_x.len() + g2_x.len()].to_vec()
-        } else {
-            vec![]
-        };
-        let res3: Vec<f64> = if g1_x.len() + g2_x.len() < residuals.len() {
-            residuals[g1_x.len() + g2_x.len()..].to_vec()
-        } else {
-            vec![]
-        };
-
-        // Compute median residuals
-        let med_res1 = if !res1.is_empty() { median(&res1) } else { 0.0 };
-        let med_res2 = if !res2.is_empty() { median(&res2) } else { 0.0 };
-        let med_res3 = if !res3.is_empty() { median(&res3) } else { 0.0 };
-
-        // Adjust slope based on residual pattern
-        if (med_x3 - med_x1).abs() > 1e-10 {
-            let slope_adj = (med_res3 - med_res1) / (med_x3 - med_x1);
-            slope += slope_adj;
-        }
-
-        // Adjust intercept
-        intercept += med_res2;
+    let x_left = median_of(&left, x);
+    let x_right = median_of(&right, x);
+    if x_left == x_right {
+        return Err(format!(
+            "the medians of x in the outer thirds are equal ({x_left}); the resistant line has no \
+             slope (too many tied x values)"
+        ));
     }
 
-    // Compute final fitted values and residuals in original order
+    let mut slope = 0.0;
+    let mut w = y.to_vec();
+    for _ in 0..iter_count {
+        let y_left = median_of(&left, &w);
+        let y_right = median_of(&right, &w);
+        slope += (y_right - y_left) / (x_right - x_left);
+        for i in 0..n {
+            w[i] = y[i] - slope * x[i];
+        }
+    }
+    w.sort_by(f64::total_cmp);
+    let intercept = r_quantile(&w, 0.5);
+
+    // Final fitted values and residuals in input order
     let fitted: Vec<f64> = x.iter().map(|&xi| intercept + slope * xi).collect();
     let residuals: Vec<f64> = y
         .iter()
@@ -301,33 +220,21 @@ pub fn line(x: &[f64], y: &[f64], iter: Option<usize>) -> Result<LineResult, Str
     })
 }
 
+/// line.c's quantile of sorted `z`: `(z[floor((n - 1) p)] + z[ceil((n - 1) p)]) / 2`.
+fn r_quantile(z: &[f64], p: f64) -> f64 {
+    let h = (z.len() - 1) as f64 * p;
+    0.5 * (z[h.floor() as usize] + z[h.ceil() as usize])
+}
+
 /// Compute the median of a slice.
+#[cfg(test)]
 fn median(data: &[f64]) -> f64 {
     if data.is_empty() {
         return f64::NAN;
     }
-
     let mut sorted = data.to_vec();
     sorted.sort_by(f64::total_cmp);
-
-    let n = sorted.len();
-    if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    } else {
-        sorted[n / 2]
-    }
-}
-
-/// Compute split indices for the three-group method.
-fn compute_split_indices(n: usize) -> (usize, usize) {
-    // R uses floor(p * (n-1)) and ceiling(p * (n-1)) for p = 1/3 and 2/3
-    let p1 = 1.0 / 3.0;
-    let p2 = 2.0 / 3.0;
-
-    let j1_low = ((p1 * (n as f64 - 1.0)).floor() as usize).min(n - 1);
-    let j2_low = ((p2 * (n as f64 - 1.0)).floor() as usize).min(n - 1);
-
-    (j1_low, j2_low)
+    r_quantile(&sorted, 0.5)
 }
 
 /// Run Tukey's line fitting (convenience wrapper).
@@ -479,10 +386,10 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Case `line_tukey_outliers` (three outliers in 30 points, y = 2 + 0.5 x + noise): the
-    /// resistant slope is near 0.5 and closer to it than the OLS slope R's `lm` gives on the same
-    /// data (`ols_coef`, pinned here through `run_ols`). The line coefficients themselves are not
-    /// pinned: R's `line` differs (REG-12, open).
+    /// Case `line_tukey_outliers` (three outliers in 30 points, y = 2 + 0.5 x + noise): R's
+    /// `line` coefficients for iter = 1, 2, 3 (the case stores them printed to 3 decimals), and
+    /// the resistant slope closer to 0.5 than the OLS slope R's `lm` gives on the same data
+    /// (`ols_coef`, pinned here through `run_ols`).
     #[test]
     fn test_validate_line_resists_outliers() {
         use crate::regression::ols::{CovarianceType, run_ols};
@@ -490,7 +397,21 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("line_tukey_outliers");
         let n = case.scalar("n") as usize;
         let ols = run_ols(&ds, "y", &["x"], true, CovarianceType::Standard).unwrap();
+        let df = ds.df();
+        let num = |c: &str| {
+            crate::data::columns::numeric_column(df, c, crate::data::columns::NaPolicy::Fail)
+                .unwrap()
+                .0
+        };
+        let (x, y) = (num("x"), num("y"));
+        let coef = |it| {
+            let r = line(&x, &y, Some(it)).unwrap();
+            [r.intercept, r.slope]
+        };
         Check::new(&case)
+            .vector("iter1_coef", &coef(1), Tol::printed(3))
+            .vector("iter2_coef", &coef(2), Tol::printed(3))
+            .vector("iter3_coef", &coef(3), Tol::printed(3))
             .vector(
                 "ols_coef",
                 &ols.coefficients
@@ -501,14 +422,7 @@ mod tests {
             )
             .scalar("n", ols.n_obs as f64, Tol::exact())
             .finish();
-        let df = ds.df();
-        let num = |c: &str| {
-            crate::data::columns::numeric_column(df, c, crate::data::columns::NaPolicy::Fail)
-                .unwrap()
-                .0
-        };
-        let result = line(&num("x"), &num("y"), Some(1)).unwrap();
-        // deviation REG-12: iter1_coef, iter2_coef, iter3_coef (R's tukeyline).
+        let result = line(&x, &y, Some(1)).unwrap();
         let ols_slope = case.vector("ols_coef")[1];
         assert!((result.slope - 0.5).abs() < 0.03, "slope {}", result.slope);
         assert!(
@@ -613,11 +527,9 @@ mod tests {
         );
         assert!(c.missing.is_empty());
         assert!(serde_json::to_value(&c).unwrap().get("missing").is_none());
-        // deviation REG-12: R's line_coef (0.441594195008563728, 0.053890384144849528) is
-        // not compared; p2a's resistant line is another variant (Tier 4), so only R's NA
-        // handling is pinned: the number of complete pairs, and NA data = complete pairs.
         Check::new(&case)
             .scalar("n_complete", r.n as f64, Tol::exact())
+            .vector("line_coef", &[r.intercept, r.slope], Tol::coef(56))
             .finish();
         // +Inf in a complete row is deleted too (the array API; datasets refuse Inf
         // earlier). Row 0 of the case is complete, so xc[1..] drops exactly that row.
@@ -635,5 +547,54 @@ mod tests {
             e.contains("at least 3 complete") && e.contains("2 of 3"),
             "{e}"
         );
+    }
+
+    fn t4_xy(file: &str) -> (Vec<f64>, Vec<f64>) {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let ds = crate::regression::ols::na_fixtures::repo_dataset(&format!(
+            "validation/datasets/generated/{file}.csv"
+        ));
+        let c = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
+        (c("x"), c("y"))
+    }
+
+    /// Case `line_tukey_t4` (REG-12): stats::line (R >= 3.5 tukeyline) with iter = 1, 2, 3 on
+    /// the eleven-point example, tied x (20 rows on 0..4) and n = 31.
+    #[test]
+    fn test_validate_line_tukey_t4() {
+        use p2a_validation::{Check, Tol};
+        let case = p2a_validation::Case::load("line_tukey_t4");
+        let mut c = Check::new(&case);
+        for (tag, file) in [
+            ("eleven", "line_t4_eleven"),
+            ("ties", "line_t4_ties"),
+            ("n31", "line_t4_n31"),
+        ] {
+            let (x, y) = t4_xy(file);
+            for it in 1..=3 {
+                let r = line(&x, &y, Some(it)).unwrap();
+                c.vector(
+                    &format!("{tag}_iter{it}_coef"),
+                    &[r.intercept, r.slope],
+                    Tol::coef(x.len()),
+                );
+                if tag == "n31" && it == 1 {
+                    c.vector("n31_iter1_fitted", &r.fitted, Tol::coef(31))
+                        .vector("n31_iter1_residuals", &r.residuals, Tol::coef(31));
+                }
+            }
+        }
+        c.finish();
+    }
+
+    /// Outer thirds whose x medians are equal give the line no slope: an error naming them (R
+    /// divides by zero and returns a non-finite slope).
+    #[test]
+    fn test_line_refuses_equal_third_medians() {
+        let x = [1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0];
+        let y = [0.3, 1.1, 0.7, 1.9, 0.2, 1.4, 0.8];
+        let e = line(&x, &y, Some(1)).unwrap_err();
+        assert!(e.contains("outer thirds"), "{e}");
+        assert!(line(&[1.0, 2.0, 3.0], &[1.0, 2.5, 2.9], Some(0)).is_err());
     }
 }

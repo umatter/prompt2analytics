@@ -28,6 +28,26 @@
       "tolerance": "given spar or lambda: validation/README.md coefficient row (n = 120: 1e-8); searched: Tol::iterative(1e-6) (Brent stops at 1e-4 in spar; both sides run the same search, largest measured gap about 1.4e-9)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "line_tukey",
+      "name": "Tukey's resistant line",
+      "category": "regression",
+      "reference": "stats::line(iter) (R >= 3.5 tukeyline)",
+      "doc": "validation/regression/line.md",
+      "cases": [
+        "line_tukey_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::line::tests::test_validate_line_tukey_t4"
+      ],
+      "quantities": [
+        "intercept and slope for iter = 1, 2, 3 (eleven points, tied x, n = 31)",
+        "fitted values and residuals"
+      ],
+      "tolerance": "validation/README.md coefficient row (n <= 31: 1e-6)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -100,15 +100,12 @@
       "tests": [
         "p2a-core::regression::line::tests::test_validate_line_resists_outliers"
       ],
-      "quantities": [],
-      "tolerance": "to be pinned with REG-12",
-      "deviations": [
-        {
-          "finding": "REG-12",
-          "quantity": "iter1_coef, iter2_coef, iter3_coef",
-          "note": "R 1.739 / 0.513 at iter = 1; p2a's variant differs (Tier 4)"
-        }
+      "quantities": [
+        "intercept and slope for iter = 1, 2, 3 (R's printed values)",
+        "OLS coefficients and n"
       ],
+      "tolerance": "line coefficients Tol::printed(3) (R's values printed to 3 decimals); ols_coef validation/README.md coefficient row; n exact",
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

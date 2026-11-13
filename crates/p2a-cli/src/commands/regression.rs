@@ -1671,7 +1671,10 @@ fn execute_supsmu(
                 .numeric(indep_var)
                 .numeric(dep_var)
                 .na(NaPolicy::Omit)
-                .min_rows(4, &format!("SuperSmoother of '{dep_var}' on '{indep_var}'"))
+                .min_rows(
+                    p2a_core::regression::supsmu::MIN_OBSERVATIONS,
+                    &format!("SuperSmoother of '{dep_var}' on '{indep_var}'"),
+                )
                 .extract()
             {
                 Ok(c) => c,
@@ -1752,7 +1755,7 @@ fn execute_line(
                 .numeric(dep_var)
                 .na(NaPolicy::Omit)
                 .min_rows(
-                    3,
+                    p2a_core::regression::line::MIN_PAIRS,
                     &format!("Tukey's resistant line of '{dep_var}' on '{indep_var}'"),
                 )
                 .extract()
