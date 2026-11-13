@@ -2065,7 +2065,7 @@ fn outcome_normal_coefficients(
     let rows = xs
         .as_slice()
         .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
-    let mut gram = Array2::<f64>::zeros((k, k));
+    let mut gram = crate::resource::try_zeros2(k, k, "outcome cross-product")?;
     let g = gram
         .as_slice_mut()
         .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;

@@ -238,6 +238,10 @@ pub struct GlmFit {
     /// `epsilon` of the spec (0 when read from JSON written before this field existed).
     #[serde(default)]
     pub epsilon: f64,
+    /// [`GlmSpec::coef_tol`] of the spec: the fit kept iterating after the deviance rule
+    /// until the relative coefficient change was below it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coef_tol: Option<f64>,
     /// The last iteration had to halve its step.
     pub boundary: bool,
     /// Binomial families: some fitted probability is within `10 eps` of 0 or 1.
@@ -1283,6 +1287,7 @@ fn fit_glm_solved(
         iterations: fit.iterations,
         max_iter: spec.max_iter,
         epsilon: spec.epsilon,
+        coef_tol: spec.coef_tol,
         boundary: fit.boundary,
         separation,
         warnings,
@@ -1296,11 +1301,17 @@ impl ResultNotes for GlmFit {
     }
 
     fn notes_convergence(&self) -> Option<Convergence> {
+        let criterion = match self.coef_tol {
+            Some(tol) => {
+                format!("relative change in deviance, then relative coefficient change < {tol:e}")
+            }
+            None => "relative change in deviance".to_string(),
+        };
         Some(Convergence::new(
             self.converged,
             self.iterations,
             self.max_iter,
-            "relative change in deviance",
+            &criterion,
             f64::NAN,
             self.epsilon,
         ))
@@ -1442,9 +1453,19 @@ fn lean_logit_within(
         return Ok(None);
     }
     let from_zero = matches!(start, LeanStart::Zero);
-    let xs = x.as_standard_layout();
-    let Some(xrows) = xs.as_slice() else {
-        return Ok(None);
+    // A standard-layout design is read in place; any other is copied once into a guarded buffer
+    let x_copy;
+    let xrows: &[f64] = match x.as_slice() {
+        Some(rows) => rows,
+        None => {
+            let mut copy = resource::try_zeros2(n, k, "logit IRLS workspace")?;
+            copy.assign(&x);
+            x_copy = copy;
+            let Some(rows) = x_copy.as_slice() else {
+                return Ok(None);
+            };
+            rows
+        }
     };
     let y = y.as_standard_layout();
     let Some(y) = y.as_slice() else {
@@ -1556,9 +1577,10 @@ fn lean_logit_within(
     let Some(mut devold) = first_dev else {
         return Ok(None);
     };
-    let mut g = vec![0.0; k * k];
-    let mut inverse = Array2::<f64>::zeros((k, k));
-    let mut chol = vec![0.0; k * k];
+    let kk = resource::checked_len(&[k, k], "logit IRLS workspace")?;
+    let mut g = resource::try_vec(kk, 0.0, "logit IRLS workspace")?;
+    let mut inverse = resource::try_zeros2(k, k, "logit IRLS workspace")?;
+    let mut chol = resource::try_vec(kk, 0.0, "logit IRLS workspace")?;
     let mut rhs = vec![0.0; k];
     let (mut solve_scratch, mut scale_scratch) = (vec![0.0; k], vec![0.0; k]);
     let mut b = Array1::<f64>::zeros(k);
@@ -1988,7 +2010,9 @@ fn inverse_and_condition(
 /// and warnings included.
 ///
 /// The fields of a lean fit: `vcov` is the inverse of the last step's `X'WX` (dispersion 1),
-/// `deviance` and `null_deviance` are computed with fewer logarithms (a few ulps), and the
+/// `deviance` and `null_deviance` are computed with fewer logarithms (the error is a few ulps
+/// of `sum |y eta|` in absolute terms, so the relative error grows as the deviance approaches
+/// 0), and the
 /// log-likelihood and AIC follow from the deviance, which for a 0/1 response is `-2` times the
 /// binomial log-likelihood.
 pub(crate) fn fit_logit_lean(
@@ -2046,6 +2070,7 @@ fn logit_lean_path(
                 iterations: fit.iterations,
                 max_iter: spec.max_iter,
                 epsilon: spec.epsilon,
+                coef_tol: None,
                 boundary: false,
                 separation: false,
                 warnings: Vec::new(),
@@ -3682,6 +3707,8 @@ mod tests {
         for (n, seed) in [(40, 5), (300, 17), (2500, 41)] {
             let d = sim_data(n, seed);
             let glm = fit_glm(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
+            let on_path = logit_lean_path(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
+            assert!(on_path.is_some(), "logit n {n} left the lean path");
             let lean = fit_logit_lean(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
             assert!(glm.warnings.is_empty() && lean.warnings.is_empty());
             assert_fits_agree(&format!("logit n {n}"), &lean, &glm, 1e-12);
@@ -3695,6 +3722,8 @@ mod tests {
             let mut spec = GlmSpec::logit();
             spec.start = Some(start.view());
             let glm_s = fit_glm(d.x.view(), d.yb.view(), &spec).unwrap();
+            let on_path = logit_lean_path(d.x.view(), d.yb.view(), &spec).unwrap();
+            assert!(on_path.is_some(), "logit start n {n} left the lean path");
             let lean_s = fit_logit_lean(d.x.view(), d.yb.view(), &spec).unwrap();
             assert_fits_agree(&format!("logit start n {n}"), &lean_s, &glm_s, 1e-12);
         }
@@ -3712,6 +3741,8 @@ mod tests {
                 .iter()
                 .any(|&m| !(1e-3..=1.0 - 1e-3).contains(&m))
         );
+        let on_path = logit_lean_path(x.view(), y.view(), &GlmSpec::logit()).unwrap();
+        assert!(on_path.is_some(), "near separation left the lean path");
         let lean = fit_logit_lean(x.view(), y.view(), &GlmSpec::logit()).unwrap();
         assert_fits_agree("near separation", &lean, &glm, 1e-12);
         // complete separation: fit_glm's fit, warnings and flags, bit for bit
@@ -3765,5 +3796,107 @@ mod tests {
         let ea = fit_glm(bad.view(), d.yb.view(), &GlmSpec::logit()).unwrap_err();
         let eb = fit_logit_lean(bad.view(), d.yb.view(), &GlmSpec::logit()).unwrap_err();
         assert_eq!(ea.to_string(), eb.to_string());
+    }
+
+    /// A 100 x 11 logit design with an intercept (below the blocked cross-product, which
+    /// allocates its own guarded n x k buffer), in standard layout, its 0/1 response, and
+    /// the same design as a strided view of a 12-column matrix (`HistoryDesigns::g`'s shape).
+    fn wide_logit_design() -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+        let (n, k) = (100, 11);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut u = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let x = Array2::from_shape_fn((n, k), |(_, j)| if j == 0 { 1.0 } else { u() - 0.5 });
+        let y = Array1::from_iter((0..n).map(|i| {
+            let e = 0.4 * x[[i, 1]] - 0.3 * x[[i, 2]] + 0.1;
+            f64::from(u() < 1.0 / (1.0 + (-e).exp()))
+        }));
+        let mut q = Array2::zeros((n, k + 1));
+        q.slice_mut(ndarray::s![.., ..k]).assign(&x);
+        q.column_mut(k).fill(0.25);
+        (x, y, q)
+    }
+
+    fn lean_ctl() -> GlmControl {
+        GlmControl {
+            epsilon: 1e-8,
+            max_iter: 25,
+        }
+    }
+
+    /// The lean logit's k x k workspaces and the copy of a strided design go through the
+    /// fallible allocators, so a per-allocation ceiling refuses them.
+    #[test]
+    fn test_lean_logit_workspace_respects_alloc_ceiling() {
+        let (x, y, q) = wide_logit_design();
+        // above the n-vectors (800 bytes), below a k x k buffer (968 bytes)
+        let r = crate::resource::with_alloc_ceiling(Some(900), || {
+            lean_logit(x.view(), y.view(), None, LeanStart::Mustart, lean_ctl())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.as_ref().err()
+        );
+        // above k x k, below the n x k copy of the strided view (8,800 bytes)
+        let view = q.slice(ndarray::s![.., ..11]);
+        assert!(!view.is_standard_layout());
+        let r = crate::resource::with_alloc_ceiling(Some(5_000), || {
+            lean_logit(view, y.view(), None, LeanStart::Mustart, lean_ctl())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.as_ref().err()
+        );
+    }
+
+    /// A strided design gives the fit of its owned copy, bit for bit.
+    #[test]
+    fn test_lean_logit_non_standard_layout_matches() {
+        let (x, y, q) = wide_logit_design();
+        let view = q.slice(ndarray::s![.., ..11]);
+        let a = lean_logit(view, y.view(), None, LeanStart::Mustart, lean_ctl()).unwrap();
+        let b = lean_logit(x.view(), y.view(), None, LeanStart::Mustart, lean_ctl()).unwrap();
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                assert_eq!(a.iterations, b.iterations);
+                for (p, q) in a.coefficients.iter().zip(&b.coefficients) {
+                    assert_eq!(p.to_bits(), q.to_bits());
+                }
+                for (p, q) in a.fitted.iter().zip(&b.fitted) {
+                    assert_eq!(p.to_bits(), q.to_bits());
+                }
+            }
+            (None, None) => {}
+            (a, b) => panic!(
+                "one path left the lean fit: {:?} vs {:?}",
+                a.is_some(),
+                b.is_some()
+            ),
+        }
+    }
+
+    /// A fit that ran with a coefficient rule says so in its convergence note; one without
+    /// does not.
+    #[test]
+    fn test_glm_notes_name_coef_tol_rule() {
+        let d = sim_data(300, 17);
+        let probit = fit_propensity(d.x.view(), d.yb.view(), GlmLink::Probit).unwrap();
+        let c = probit.fit.notes_convergence().unwrap();
+        assert_eq!(
+            c.criterion,
+            format!(
+                "relative change in deviance, then relative coefficient change < {:e}",
+                PROPENSITY_COEF_TOL
+            )
+        );
+        let logit = fit_propensity(d.x.view(), d.yb.view(), GlmLink::Logit).unwrap();
+        let c = logit.fit.notes_convergence().unwrap();
+        assert_eq!(c.criterion, "relative change in deviance");
     }
 }
