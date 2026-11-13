@@ -152,10 +152,13 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
             );
         }
         Some(test) => {
-            // Determine status based on p-value
-            let status = if test.p_value >= 0.10 {
+            // At the user's level alpha = 1 - confidence_level: a rejection is a
+            // likely violation, p below 2 alpha a potential one; a warning below
+            // alpha / 5 (alpha = 0.05: the 10%, 5% and 1% breaks).
+            let alpha = 1.0 - result.config.confidence_level;
+            let status = if test.p_value >= 2.0 * alpha {
                 AssumptionStatus::NoViolation
-            } else if test.p_value >= 0.05 {
+            } else if test.p_value >= alpha {
                 AssumptionStatus::PotentialViolation
             } else {
                 AssumptionStatus::LikelyViolation
@@ -168,8 +171,8 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
             ));
 
             // Generate warning if pre-trends test rejects
-            if test.p_value < 0.05 {
-                let severity = if test.p_value < 0.01 {
+            if test.p_value < alpha {
+                let severity = if test.p_value < alpha / 5.0 {
                     WarningSeverity::Warning
                 } else {
                     WarningSeverity::Caution
@@ -198,7 +201,7 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
                 )
                 .with_diagnostics(
                     WarningDiagnostics::new(stat_name, stat)
-                        .with_threshold(pretrend_critical_value(test, 0.95), true),
+                        .with_threshold(pretrend_critical_value(test, 1.0 - alpha), true),
                 )
                 .with_remediation(vec![
                     "Examine event study plot for divergence patterns".to_string(),
@@ -529,8 +532,10 @@ mod tests {
             "{}",
             w[0].message
         );
-        // no estimable lead: no warning
+        // a NaN p-value is no evidence: no warning
         let r = with_leads(&[(-1, 0.0, f64::NAN)]);
+        assert!(anticipation_warnings(&r).is_empty());
+        // no estimable lead (NaN SE): no warning
         let mut r2 = r.clone();
         r2.event_study.iter_mut().for_each(|e| {
             if e.key < 0 {
@@ -571,6 +576,42 @@ mod tests {
             .expect("warning");
         let th = w.diagnostics.as_ref().unwrap().threshold.unwrap();
         assert!(th > 2.9 && th < 3.1, "F(2, 180) 95% quantile, got {th}");
+    }
+
+    /// The pre-trend diagnostic tests at the user's level, as the anticipation check:
+    /// at 0.99, p = 0.02 is a potential violation without a warning, and p = 0.005
+    /// warns with the 99% chi-squared quantile as its threshold.
+    #[test]
+    fn test_pretrend_warning_uses_confidence_level() {
+        let at = |p: f64| {
+            let mut r = create_mock_staggered_result(Some(p), false);
+            r.config.confidence_level = 0.99;
+            staggered_did_diagnostics(&r)
+        };
+        let status = |rep: &IdentificationReport| {
+            rep.assumptions
+                .iter()
+                .find(|a| a.name == "Parallel pre-trends")
+                .map(|a| a.status)
+                .expect("assumption")
+        };
+        let warned = |rep: &IdentificationReport| {
+            rep.warnings
+                .iter()
+                .find(|w| w.code == "PARALLEL_TRENDS_VIOLATED")
+                .cloned()
+        };
+        let rep = at(0.02);
+        assert!(warned(&rep).is_none());
+        assert_eq!(status(&rep), AssumptionStatus::PotentialViolation);
+        let rep = at(0.005);
+        assert_eq!(status(&rep), AssumptionStatus::LikelyViolation);
+        let w = warned(&rep).expect("warning");
+        assert_eq!(w.severity, WarningSeverity::Caution);
+        let want = crate::traits::estimator::chi_squared_quantile(0.99, 2.0).unwrap();
+        let th = w.diagnostics.as_ref().unwrap().threshold.unwrap();
+        assert!((th - want).abs() < 1e-12, "{th} vs {want}");
+        assert_eq!(status(&at(0.03)), AssumptionStatus::NoViolation);
     }
 
     /// CAUS-51: under no effect and no anticipation the warning fires at about
