@@ -61,6 +61,22 @@ known-DGP tests `test_synth_weight_recovery_recovers_dgp`, `test_synth_treatment
 The California tobacco example (`Synth::synth` on `smoking`) and its placebo inference are not part
 of the pins; p2a's placebo ranks are tested by `test_synth_placebo_inference_ranks_every_unit`.
 
+## Placebo inference (CAUS-89)
+
+Every donor is fitted as if treated; each fit's statistic is its post- over pre-treatment RMSPE
+ratio, and the treated unit's ratio is the main fit's (no refit). The p-value is Abadie et al.
+(2010)'s: rank = the number of fitted units, the treated unit included, whose ratio is at least
+the treated unit's, and p = rank / fitted units, so ties count against the treated unit (before,
+the treated unit was ranked ahead of every placebo it tied with). A pre-treatment RMSPE at or
+below 1e-8 times the unit's scale (the RMS of its pre-treatment outcomes, 1 when that is 0) is an
+exact fit: its ratio is 0 when the post-treatment RMSPE is also below that floor (0/0) and
+infinite otherwise; before, the floor was an absolute 1e-10 and 0/0 was infinite. A placebo whose
+fit fails is counted (`n_failed`, `failed_units`), left out of the p-value's denominator and named
+in a warning ("1 of 3 placebo fits failed and are left out of the p-value (rank / 3 fitted units):
+B"); before, it was dropped silently. Fixture tests, not R-pinned:
+`test_placebo_ties_count_against_treated`, `test_placebo_failed_fits_are_reported`, `test_placebo_uses_main_fit_for_treated`,
+`test_rmspe_ratio_rule`.
+
 ## Missing values and column types
 
 Data requirements of `run_synthetic_control` (MCP `synthetic_control`, CLI `causal synth`):

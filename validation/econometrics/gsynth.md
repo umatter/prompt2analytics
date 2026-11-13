@@ -5,8 +5,8 @@
 
 ## What p2a computes
 
-`run_gsynth` (`crates/p2a-core/src/econometrics/synth.rs`) reproduces gsynth 1.4.0 (`gsynth::gsynth`,
-which calls fect 2.4.5) for its two estimators:
+`run_gsynth` (`crates/p2a-core/src/econometrics/synth.rs`) reproduces gsynth 1.4.0
+(`gsynth::gsynth`, which calls fect 2.4.5) for its two estimators:
 
 - **`ife`** (gsynth `estimator = "gsynth"`, fect `method = "gsynth"`; not gsynth 1.4's EM `"ife"`).
   Bai's (2009) interactive fixed effects are fitted on the never-treated units over all periods:
@@ -152,8 +152,8 @@ seven rounds, medians), copies of the two steps timed on their own take 0.089 ms
 eigendecomposition, factors, loadings and common component) and 0.006 ms (the base's
 `extract_factors_svd`, on its 10 pre-periods). Of the whole fits, 0.239 ms new and 0.213 ms base,
 that leaves 0.150 ms and 0.207 ms for everything else: the factor step adds 0.084 ms, the other
-steps give back 0.058 ms, and the difference is the 0.026 ms above the base. A solver for the leading eigenvectors only has not been
-tried: its vectors would match the full decomposition only to its own tolerance, and whether that
+steps give back 0.058 ms, and the difference is the 0.026 ms above the base. A solver for the
+leading eigenvectors only has not been tried: its vectors would match the full decomposition only to its own tolerance, and whether that
 holds the fits to their tests has not been measured.
 
 Without covariates the fit has no iteration, and its fixed parts are computed once: the panel is
