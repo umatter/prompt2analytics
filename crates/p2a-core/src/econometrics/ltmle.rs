@@ -99,8 +99,11 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
+#[cfg(test)]
+use crate::econometrics::glm::halved_step;
 use crate::econometrics::glm::{
-    GlmControl, GlmFamily, GlmLink, GlmSpec, LeanStart, fit_glm, lean_logit_refined,
+    FLUCTUATION_MAX_HALVINGS, GlmControl, GlmFamily, GlmLink, GlmSpec, InterceptFluctuation,
+    LeanStart, fit_glm, fit_intercept_fluctuation, lean_logit_refined,
 };
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
@@ -1749,6 +1752,13 @@ struct LogitNode {
     iterations: usize,
 }
 
+// The shared-GLM fits of `fit_logit_node` on this thread (tests read it: `run_ltmle` fits
+// its nodes on the calling thread).
+#[cfg(test)]
+thread_local! {
+    static GLM_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// `glm(y ~ x - 1, family)` with logit link: the lean IRLS when the fit stays on its path, from
 /// `start` or glm.fit's start; otherwise the shared GLM from glm.fit's start, with its warnings
 /// and rank handling.
@@ -1788,6 +1798,8 @@ fn fit_logit_node(
             });
         }
     }
+    #[cfg(test)]
+    GLM_FALLBACKS.with(|c| c.set(c.get() + 1));
     let fit = fit_glm(x, y, &glm_spec(family, config))?;
     notes.push_glm(what, &fit, names);
     Ok(LogitNode {
@@ -2080,7 +2092,7 @@ fn estimate_regime(
                 if f.non_finite {
                     notes.warnings.push(format!(
                         "fluctuation at {} ({label}): the deviance stayed non-finite after \
-                         {MAX_HALVINGS} step halvings in iteration {}; stopped at the last finite \
+                         {FLUCTUATION_MAX_HALVINGS} step halvings in iteration {}; stopped at the last finite \
                          epsilon",
                         data.treatment_names[t], f.iterations
                     ));
@@ -2213,131 +2225,14 @@ fn linkinv(eta: f64) -> f64 {
     t / (1.0 + t)
 }
 
-/// The fluctuation of one node: epsilon of the intercept-only quasibinomial logit fit of
-/// `y` with offset `offset` and prior weights `h` (`glm(y ~ 1, offset, weights = h,
-/// quasibinomial)` among the followers, zero weights dropping the rest).
-struct Fluctuation {
-    epsilon: f64,
-    converged: bool,
-    iterations: usize,
-    /// The step halvings ran out with the deviance still not finite.
-    non_finite: bool,
-}
-
-/// For one coefficient on the canonical link, glm.fit's IRLS step is Newton's step
-/// `score / information`; this solves the same score equation
-/// `sum_i h_i (y_i - plogis(offset_i + eps)) = 0` in O(n) per iteration instead of a
-/// general GLM fit, with glm.fit's stopping rule `|dev - dev_old| / (|dev| + 0.1) <
-/// tolerance`, glm.fit's step halving when the deviance is not finite, and one polishing
-/// Newton step after the rule is met. One pass over the followers per trial value gives its
-/// deviance, score and information.
+/// The fluctuation of one node: [`fit_intercept_fluctuation`] with the LTMLE controls.
 fn fit_fluctuation(
     y: ArrayView1<f64>,
     offset: ArrayView1<f64>,
     h: ArrayView1<f64>,
     config: &LtmleConfig,
-) -> EconResult<Fluctuation> {
-    // (y, offset, h) of the followers
-    let mut rows: Vec<[f64; 3]> = resource::try_with_capacity(h.len(), "LTMLE fluctuation")?;
-    for (&hi, (&yi, &oi)) in h.iter().zip(y.iter().zip(offset.iter())) {
-        if hi > 0.0 {
-            rows.push([yi, oi, hi]);
-        }
-    }
-    // (deviance, score, information) at eps; the deviance is the binomial deviance in its
-    // quasi-binomial working form, 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
-    let eval = |eps: f64| -> (f64, f64, f64) {
-        let (mut d, mut score, mut info) = (0.0, 0.0, 0.0);
-        for &[yi, oi, wi] in &rows {
-            let p = linkinv(oi + eps);
-            let a = if yi > 0.0 { yi * (yi / p).ln() } else { 0.0 };
-            let b = if yi < 1.0 {
-                (1.0 - yi) * ((1.0 - yi) / (1.0 - p)).ln()
-            } else {
-                0.0
-            };
-            d += 2.0 * wi * (a + b);
-            score += wi * (yi - p);
-            info += wi * p * (1.0 - p);
-        }
-        (d, score, info)
-    };
-    let mut eps = 0.0;
-    let (mut dev, mut score, mut info) = eval(eps);
-    if !dev.is_finite() {
-        return Err(EconError::Computation(
-            "LTMLE: the fluctuation's starting deviance is not finite".into(),
-        ));
-    }
-    for iter in 1..=config.max_iter {
-        resource::checkpoint()?;
-        if info.is_nan() || info <= 0.0 || score == 0.0 {
-            return Ok(Fluctuation {
-                epsilon: eps,
-                converged: score == 0.0,
-                iterations: iter,
-                non_finite: false,
-            });
-        }
-        // glm.fit halves the step only when the deviance is not finite; when 30 halvings do not
-        // reach a finite deviance, the last finite eps is kept and the fit stops unconverged.
-        let Some((new_eps, new)) = halved_step(eps, score / info, &eval) else {
-            return Ok(Fluctuation {
-                epsilon: eps,
-                converged: false,
-                iterations: iter,
-                non_finite: true,
-            });
-        };
-        let change = (new.0 - dev).abs() / (new.0.abs() + 0.1);
-        eps = new_eps;
-        (dev, score, info) = new;
-        if change < config.tolerance {
-            // One more Newton step: the deviance rule leaves an O(sqrt(tolerance)) error in
-            // eps when the weights are large, and Newton's step squares it at O(n) cost.
-            if info > 0.0 {
-                let polished = eps + score / info;
-                if eval(polished).0.is_finite() {
-                    eps = polished;
-                }
-            }
-            return Ok(Fluctuation {
-                epsilon: eps,
-                converged: true,
-                iterations: iter,
-                non_finite: false,
-            });
-        }
-    }
-    Ok(Fluctuation {
-        epsilon: eps,
-        converged: false,
-        iterations: config.max_iter,
-        non_finite: false,
-    })
-}
-
-/// Step halvings glm.fit allows when the deviance is not finite.
-const MAX_HALVINGS: usize = 30;
-
-/// `eps + step`, halved up to [`MAX_HALVINGS`] times while the deviance (the first element of
-/// `eval`) is not finite: the new eps and its evaluation, or `None` when no trial is finite (at
-/// most `MAX_HALVINGS + 1` evaluations).
-fn halved_step(
-    eps: f64,
-    mut step: f64,
-    eval: &impl Fn(f64) -> (f64, f64, f64),
-) -> Option<(f64, (f64, f64, f64))> {
-    for halvings in 0..=MAX_HALVINGS {
-        if halvings > 0 {
-            step /= 2.0;
-        }
-        let new = eval(eps + step);
-        if new.0.is_finite() {
-            return Some((eps + step, new));
-        }
-    }
-    None
+) -> EconResult<InterceptFluctuation> {
+    fit_intercept_fluctuation(y, offset, h, config.tolerance, config.max_iter)
 }
 
 /// ltmle's trigger for re-solving a targeting step: `|sum_i H_i (Q*_{t+1,i} - Q*_{t,i})|` above
@@ -2913,7 +2808,7 @@ mod tests {
 
     #[test]
     fn test_ltmle_fluctuation_halving_stops_at_a_non_finite_deviance() {
-        // A deviance that is never finite: the halvings stop after MAX_HALVINGS + 1 evaluations
+        // A deviance that is never finite: the halvings stop after FLUCTUATION_MAX_HALVINGS + 1 evaluations
         // and report no step, so the fit keeps the last finite eps.
         let calls = std::cell::Cell::new(0usize);
         let eval = |_: f64| {
@@ -2921,7 +2816,7 @@ mod tests {
             (f64::INFINITY, 0.0, 0.0)
         };
         assert!(halved_step(0.25, 1.0, &eval).is_none());
-        assert_eq!(calls.get(), MAX_HALVINGS + 1);
+        assert_eq!(calls.get(), FLUCTUATION_MAX_HALVINGS + 1);
         // finite after three halvings: the step is 1/8
         calls.set(0);
         let eval = |e: f64| {
@@ -4383,7 +4278,13 @@ mod tests {
         // After a re-solved targeting step the next node takes glm.fit's start rather than a warm
         // start built from the re-solved epsilon; the fast path then agrees with the cold one.
         let data = sparse_followers(4000, 10, 3);
+        GLM_FALLBACKS.with(|c| c.set(0));
         let fast = run_ltmle(&data, LtmleConfig::default()).unwrap();
+        // The node after the re-solve stays on the lean path from glm.fit's start; a warm start
+        // built from the re-solved epsilon would start deep in the link's clamp and leave it
+        // for the shared GLM.
+        let fallbacks = GLM_FALLBACKS.with(|c| c.get());
+        assert_eq!(fallbacks, 0, "shared-GLM fallbacks on the fast path");
         let cold = run_ltmle_with(
             &data,
             LtmleConfig::default(),

@@ -431,11 +431,13 @@ two-regime call, whose ATE differs from the difference of its single-regime mean
    the case data; the case pins `(0.1, 0.5)`, which binds.
 3. The case keeps its id but also pins a continuous outcome, a randomized design with a known
    effect, three time points and the mixed static regimes (1, 0) and (1, 0, 1).
-4. The logistic fluctuation is not fitted through `econometrics::glm`: it is a scalar Newton
-   iteration on the intercept-only quasibinomial score equation with offset `logit Q_t(d)` and
+4. The logistic fluctuation is not fitted through the general GLM: it is
+   `econometrics::glm::fit_intercept_fluctuation`, a scalar Newton iteration on the intercept-only quasibinomial score equation with offset `logit Q_t(d)` and
    weights `H_t`, with glm.fit's deviance stopping rule, its step halving on a non-finite
    deviance and R's +/-30 clamp of the logit inverse, and one polishing Newton step. It solves
-   the same equation in O(n) per iteration without building a design; the R pins hold.
+   the same equation in O(n) per iteration without building a design; the R pins hold, and
+   `test_intercept_fluctuation_matches_glm` checks it against the full quasi-binomial GLM fit
+   (`fit_logistic_fluctuation`) to 1e-10.
 
 ## MCP extraction (T2-WP11)
 

@@ -2147,6 +2147,150 @@ pub fn fit_propensity(
     })
 }
 
+// ═══ The intercept-only fluctuation (ltmle's targeting step) ═══
+
+/// The logit link's inverse as R's `binomial()$linkinv` computes it: `eta` beyond +/-30 gives
+/// `eps / (1 + eps)` or `1 / (1 + eps)`, so a probability is never exactly 0 or 1.
+fn fluctuation_linkinv(eta: f64) -> f64 {
+    const THRESH: f64 = 30.0;
+    let t = if eta < -THRESH {
+        f64::EPSILON
+    } else if eta > THRESH {
+        1.0 / f64::EPSILON
+    } else {
+        eta.exp()
+    };
+    t / (1.0 + t)
+}
+
+/// An intercept-only fluctuation: epsilon of the intercept-only quasibinomial logit fit of
+/// `y` with offset `offset` and prior weights `h` (`glm(y ~ 1, offset, weights = h,
+/// quasibinomial)` among the followers, zero weights dropping the rest).
+pub(crate) struct InterceptFluctuation {
+    pub epsilon: f64,
+    pub converged: bool,
+    pub iterations: usize,
+    /// The step halvings ran out with the deviance still not finite.
+    pub non_finite: bool,
+}
+
+/// For one coefficient on the canonical link, glm.fit's IRLS step is Newton's step
+/// `score / information`; this solves the same score equation
+/// `sum_i h_i (y_i - plogis(offset_i + eps)) = 0` in O(n) per iteration instead of a
+/// general GLM fit, with glm.fit's stopping rule `|dev - dev_old| / (|dev| + 0.1) <
+/// tolerance`, glm.fit's step halving when the deviance is not finite, and one polishing
+/// Newton step after the rule is met. One pass over the followers per trial value gives its
+/// deviance, score and information.
+pub(crate) fn fit_intercept_fluctuation(
+    y: ArrayView1<f64>,
+    offset: ArrayView1<f64>,
+    h: ArrayView1<f64>,
+    tolerance: f64,
+    max_iter: usize,
+) -> EconResult<InterceptFluctuation> {
+    // (y, offset, h) of the followers
+    let mut rows: Vec<[f64; 3]> = resource::try_with_capacity(h.len(), "LTMLE fluctuation")?;
+    for (&hi, (&yi, &oi)) in h.iter().zip(y.iter().zip(offset.iter())) {
+        if hi > 0.0 {
+            rows.push([yi, oi, hi]);
+        }
+    }
+    // (deviance, score, information) at eps; the deviance is the binomial deviance in its
+    // quasi-binomial working form, 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
+    let eval = |eps: f64| -> (f64, f64, f64) {
+        let (mut d, mut score, mut info) = (0.0, 0.0, 0.0);
+        for &[yi, oi, wi] in &rows {
+            let p = fluctuation_linkinv(oi + eps);
+            let a = if yi > 0.0 { yi * (yi / p).ln() } else { 0.0 };
+            let b = if yi < 1.0 {
+                (1.0 - yi) * ((1.0 - yi) / (1.0 - p)).ln()
+            } else {
+                0.0
+            };
+            d += 2.0 * wi * (a + b);
+            score += wi * (yi - p);
+            info += wi * p * (1.0 - p);
+        }
+        (d, score, info)
+    };
+    let mut eps = 0.0;
+    let (mut dev, mut score, mut info) = eval(eps);
+    if !dev.is_finite() {
+        return Err(EconError::Computation(
+            "LTMLE: the fluctuation's starting deviance is not finite".into(),
+        ));
+    }
+    for iter in 1..=max_iter {
+        resource::checkpoint()?;
+        if info.is_nan() || info <= 0.0 || score == 0.0 {
+            return Ok(InterceptFluctuation {
+                epsilon: eps,
+                converged: score == 0.0,
+                iterations: iter,
+                non_finite: false,
+            });
+        }
+        // glm.fit halves the step only when the deviance is not finite; when 30 halvings do not
+        // reach a finite deviance, the last finite eps is kept and the fit stops unconverged.
+        let Some((new_eps, new)) = halved_step(eps, score / info, &eval) else {
+            return Ok(InterceptFluctuation {
+                epsilon: eps,
+                converged: false,
+                iterations: iter,
+                non_finite: true,
+            });
+        };
+        let change = (new.0 - dev).abs() / (new.0.abs() + 0.1);
+        eps = new_eps;
+        (dev, score, info) = new;
+        if change < tolerance {
+            // One more Newton step: the deviance rule leaves an O(sqrt(tolerance)) error in
+            // eps when the weights are large, and Newton's step squares it at O(n) cost.
+            if info > 0.0 {
+                let polished = eps + score / info;
+                if eval(polished).0.is_finite() {
+                    eps = polished;
+                }
+            }
+            return Ok(InterceptFluctuation {
+                epsilon: eps,
+                converged: true,
+                iterations: iter,
+                non_finite: false,
+            });
+        }
+    }
+    Ok(InterceptFluctuation {
+        epsilon: eps,
+        converged: false,
+        iterations: max_iter,
+        non_finite: false,
+    })
+}
+
+/// Step halvings glm.fit allows when the deviance is not finite.
+pub(crate) const FLUCTUATION_MAX_HALVINGS: usize = 30;
+
+/// `eps + step`, halved up to [`FLUCTUATION_MAX_HALVINGS`] times while the deviance (the first element of
+/// `eval`) is not finite: the new eps and its evaluation, or `None` when no trial is finite (at
+/// most `FLUCTUATION_MAX_HALVINGS + 1` evaluations).
+pub(crate) fn halved_step(
+    eps: f64,
+    mut step: f64,
+    eval: &impl Fn(f64) -> (f64, f64, f64),
+) -> Option<(f64, (f64, f64, f64))> {
+    for halvings in 0..=FLUCTUATION_MAX_HALVINGS {
+        if halvings > 0 {
+            step /= 2.0;
+        }
+        let new = eval(eps + step);
+        if new.0.is_finite() {
+            return Some((eps + step, new));
+        }
+    }
+    None
+}
+
 /// The logistic fluctuation of TMLE: a quasi-binomial logit fit of `y` (in [0, 1]) on
 /// `covariates` with `offset` (the initial fit on the logit scale), optionally weighted.
 ///
@@ -2154,10 +2298,8 @@ pub fn fit_propensity(
 /// intercept (`glm(y ~ -1 + H, offset, quasibinomial)`), or a column of ones with the
 /// clever covariate as weights (`glm(y ~ 1, offset, weights = H, quasibinomial)`).
 ///
-/// This builds and fits a full GLM. `ltmle` does not call it for its intercept-only form: it
-/// solves the same score equation with a scalar Newton iteration in O(n) per step, with
-/// glm.fit's stopping rule (`validation/econometrics/ltmle.md`, section 10, item 4); an
-/// intercept-only fast path here would let it share this helper.
+/// This builds and fits a full GLM. The intercept-only form with weights has its own O(n) solver,
+/// [`fit_intercept_fluctuation`], which `ltmle` uses.
 pub fn fit_logistic_fluctuation<'a>(
     y: ArrayView1<f64>,
     offset: ArrayView1<'a, f64>,
@@ -3898,5 +4040,27 @@ mod tests {
         let logit = fit_propensity(d.x.view(), d.yb.view(), GlmLink::Logit).unwrap();
         let c = logit.fit.notes_convergence().unwrap();
         assert_eq!(c.criterion, "relative change in deviance");
+    }
+
+    /// The intercept-only weighted fluctuation solver equals the full quasi-binomial GLM
+    /// `glm(y ~ 1, offset, weights = h)` on a noisy 200-row case with some zero weights.
+    #[test]
+    fn test_intercept_fluctuation_matches_glm() {
+        let d = sim_data(200, 29);
+        let n = 200;
+        let y = Array1::from_iter((0..n).map(|i| (0.1 + 0.8 * d.offset[i]).clamp(0.01, 0.99)));
+        let offset = Array1::from_iter((0..n).map(|i| 0.7 * d.x[[i, 1]] - 0.2));
+        let h = Array1::from_iter((0..n).map(|i| if i % 9 == 0 { 0.0 } else { d.weights[i] }));
+        let f = fit_intercept_fluctuation(y.view(), offset.view(), h.view(), 1e-12, 50).unwrap();
+        assert!(f.converged && !f.non_finite);
+        let ones = Array2::ones((n, 1));
+        let g =
+            fit_logistic_fluctuation(y.view(), offset.view(), ones.view(), Some(h.view())).unwrap();
+        assert!(
+            (f.epsilon - g.coefficients[0]).abs() <= 1e-10,
+            "{} vs {}",
+            f.epsilon,
+            g.coefficients[0]
+        );
     }
 }
