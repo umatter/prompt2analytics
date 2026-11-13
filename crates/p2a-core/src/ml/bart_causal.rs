@@ -406,6 +406,9 @@ pub struct BartCausalResult {
     ensemble_treated: Option<TreeEnsemble>,
     #[serde(skip)]
     ensemble_control: Option<TreeEnsemble>,
+    /// The propensity model, with `include_propensity`: new rows are scored with it
+    #[serde(skip)]
+    ensemble_propensity: Option<TreeEnsemble>,
 }
 
 impl fmt::Display for BartCausalResult {
@@ -1049,8 +1052,8 @@ pub fn bart_causal_arrays(
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Optionally compute and add propensity scores
-    let (x_aug, covariate_names_aug) = if config.include_propensity {
-        let propensity = estimate_propensity(x.view(), treatment.view(), &mut rng_state)?;
+    let (x_aug, covariate_names_aug, ensemble_propensity) = if config.include_propensity {
+        let (propensity, model) = estimate_propensity(x.view(), treatment.view(), &mut rng_state)?;
         let mut x_new = Array2::zeros((n, p + 1));
         for i in 0..n {
             for j in 0..p {
@@ -1060,9 +1063,9 @@ pub fn bart_causal_arrays(
         }
         let mut names = covariate_names.clone();
         names.push("propensity".to_string());
-        (x_new, names)
+        (x_new, names, Some(model))
     } else {
-        (x.to_owned(), covariate_names.clone())
+        (x.to_owned(), covariate_names.clone(), None)
     };
 
     // Extract treated and control data
@@ -1183,6 +1186,7 @@ pub fn bart_causal_arrays(
         config: config.clone(),
         ensemble_treated: Some(ensemble_treated),
         ensemble_control: Some(ensemble_control),
+        ensemble_propensity,
     })
 }
 
@@ -1280,46 +1284,60 @@ pub fn bart_causal_predict(
 }
 
 /// Predict CATE using array inputs.
+///
+/// `x` holds the training covariates, in the training order and without the propensity score.
+/// A model fitted with `include_propensity` scores each new row's propensity with the fitted
+/// propensity model, clipped to [0.01, 0.99] as at fit time, and uses it as the last covariate,
+/// so the training rows get back the in-sample CATEs. A result read back from JSON holds no
+/// ensembles and cannot predict.
 pub fn bart_causal_predict_arrays(
     result: &BartCausalResult,
     x: ArrayView2<f64>,
 ) -> EconResult<Vec<f64>> {
-    let ensemble_treated =
-        result
-            .ensemble_treated
-            .as_ref()
-            .ok_or_else(|| EconError::InvalidSpecification {
-                message: "Model has no fitted ensemble (may have been deserialized)".to_string(),
-            })?;
+    let no_ensemble = || EconError::InvalidSpecification {
+        message: "Model has no fitted ensemble (may have been deserialized)".to_string(),
+    };
+    let ensemble_treated = result.ensemble_treated.as_ref().ok_or_else(no_ensemble)?;
+    let ensemble_control = result.ensemble_control.as_ref().ok_or_else(no_ensemble)?;
 
-    let ensemble_control =
-        result
-            .ensemble_control
-            .as_ref()
-            .ok_or_else(|| EconError::InvalidSpecification {
-                message: "Model has no fitted ensemble (may have been deserialized)".to_string(),
-            })?;
+    let with_propensity = result.config.include_propensity;
+    let expected = result.covariate_names.len() - usize::from(with_propensity);
+    if x.ncols() != expected {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x has {} columns; the model was fitted on {expected} covariates{}",
+                x.ncols(),
+                if with_propensity {
+                    " (the propensity score is computed, not supplied)"
+                } else {
+                    ""
+                }
+            ),
+        });
+    }
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
 
-    // If propensity was included, we need to estimate it for new data
-    // For simplicity, we just use covariates as-is (propensity column not included)
-    let x_to_use = if result.config.include_propensity && x.ncols() < result.covariate_names.len() {
-        // Need to add propensity column (use 0.5 as placeholder for prediction)
-        let n = x.nrows();
-        let p = x.ncols();
-        let mut x_aug = Array2::zeros((n, p + 1));
-        for i in 0..n {
-            for j in 0..p {
-                x_aug[[i, j]] = x[[i, j]];
-            }
-            x_aug[[i, p]] = 0.5; // Placeholder propensity
-        }
+    let x_aug = if with_propensity {
+        let model = result
+            .ensemble_propensity
+            .as_ref()
+            .ok_or_else(no_ensemble)?;
+        let scores = propensity_scores(model, x);
+        let (n, p) = (x.nrows(), x.ncols());
+        let mut x_aug = try_zeros2(n, p + 1, "BART causal prediction covariates")?;
+        x_aug.slice_mut(s![.., ..p]).assign(&x);
+        x_aug.column_mut(p).assign(&scores);
         x_aug
     } else {
         x.to_owned()
     };
 
-    let y1_pred = ensemble_treated.predict(x_to_use.view());
-    let y0_pred = ensemble_control.predict(x_to_use.view());
+    let y1_pred = ensemble_treated.predict(x_aug.view());
+    let y0_pred = ensemble_control.predict(x_aug.view());
 
     let cate = &y1_pred - &y0_pred;
     Ok(cate.to_vec())
@@ -1367,16 +1385,13 @@ fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
     result
 }
 
-/// Estimate propensity scores using logistic regression approximation.
-///
-/// This uses a simplified approach: fit a regression tree to predict treatment.
+/// Estimate propensity scores with a regression-tree ensemble on the treatment indicator,
+/// clipped to [0.01, 0.99]; returns the scores and the ensemble, which scores new rows.
 fn estimate_propensity(
     x: ArrayView2<f64>,
     treatment: ArrayView1<f64>,
     rng_state: &mut u64,
-) -> EconResult<Array1<f64>> {
-    let n = x.nrows();
-
+) -> EconResult<(Array1<f64>, TreeEnsemble)> {
     // Use a simple ensemble to predict propensity; `None` draws the default number of
     // covariates per split (`default_mtry`), as the response surfaces do by default.
     let mut ensemble = TreeEnsemble::new();
@@ -1391,14 +1406,13 @@ fn estimate_propensity(
         rng_state,
     )?;
 
-    let mut propensity = ensemble.predict(x);
+    let propensity = propensity_scores(&ensemble, x);
+    Ok((propensity, ensemble))
+}
 
-    // Clip propensity to [0.01, 0.99] for numerical stability
-    for i in 0..n {
-        propensity[i] = propensity[i].max(0.01).min(0.99);
-    }
-
-    Ok(propensity)
+/// The propensity model's scores, clipped to [0.01, 0.99] for numerical stability.
+fn propensity_scores(model: &TreeEnsemble, x: ArrayView2<f64>) -> Array1<f64> {
+    model.predict(x).mapv(|p| p.clamp(0.01, 0.99))
 }
 
 /// Bootstrap CATE estimation.
@@ -2480,6 +2494,50 @@ mod tests {
         let base = at(3).memory_bound(n, p);
         assert!(base > 3 * pair, "{base} vs pair {pair}");
         assert_eq!(at(5).memory_bound(n, p) - at(4).memory_bound(n, p), pair);
+    }
+
+    /// A model fitted with the propensity score as a covariate scores new rows' propensity
+    /// with the fitted model; the training rows get back the in-sample CATEs exactly. The
+    /// propensity column used to be filled with 0.5.
+    #[test]
+    fn bart_causal_predict_repeats_the_in_sample_cate_with_propensity() {
+        let (y, w, x) = generate_test_data(150, 123);
+        let cfg = BartCausalConfig {
+            n_trees: 30,
+            max_depth: 3,
+            n_bootstrap: 4,
+            include_propensity: true,
+            seed: Some(123),
+            ..Default::default()
+        };
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+        let again = bart_causal_predict_arrays(&r, x.view()).unwrap();
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&again), bits(&r.cate));
+        // without the propensity score too
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small()).unwrap();
+        let again = bart_causal_predict_arrays(&r, x.view()).unwrap();
+        assert_eq!(bits(&again), bits(&r.cate));
+    }
+
+    #[test]
+    fn bart_causal_predict_arrays_checks_the_column_count() {
+        let (y, w, x) = generate_test_data(80, 5);
+        for include_propensity in [false, true] {
+            let cfg = BartCausalConfig {
+                include_propensity,
+                ..small()
+            };
+            let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+            for cols in [2, 4] {
+                let xn = Array2::from_elem((5, cols), 0.5);
+                let e = bart_causal_predict_arrays(&r, xn.view()).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.contains("fitted on 3 covariates")),
+                    "{include_propensity} {cols}: {e}"
+                );
+            }
+        }
     }
 
     #[test]
