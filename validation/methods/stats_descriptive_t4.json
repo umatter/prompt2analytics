@@ -25,6 +25,27 @@
       "tolerance": "validation/README.md by n: r, rho, tau Tol::coef(n); t, z, S, interval bounds Tol::stat(n); p Tol::p_value(n) (abs 1e-12, so R's 0 from the clamped Edgeworth tail and p2a's tail below 1e-12 compare equal); T and df exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "correlation_matrix_t4",
+      "name": "Pearson correlation matrix of the numeric columns with missing values (pairwise-complete observations)",
+      "category": "stats",
+      "reference": "stats::cor(use = 'pairwise.complete.obs'); pair counts crossprod(!is.na(m))",
+      "doc": "validation/stats/descriptive.md",
+      "cases": [
+        "stat_cor_matrix_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::correlation::tests::test_validate_correlation_matrix_pairwise_t4"
+      ],
+      "quantities": [
+        "4 x 4 correlation matrix (double and Int64 columns, text column skipped)",
+        "observations per pair, rows",
+        "two-column case where one row is missing in one column"
+      ],
+      "tolerance": "n = 35-40 (< 100): coefficients Tol::coef(n); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

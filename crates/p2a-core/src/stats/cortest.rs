@@ -721,7 +721,7 @@ fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<KendallCounts> {
 
 /// Pearson correlation coefficient. NaN for a constant column and for squares a double cannot hold
 /// accurately (infinite, or lost to underflow).
-fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
+pub(crate) fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
     let n = x.len() as f64;
     let x_mean: f64 = x.iter().sum::<f64>() / n;
     let y_mean: f64 = y.iter().sum::<f64>() / n;

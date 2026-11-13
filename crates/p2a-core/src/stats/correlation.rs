@@ -1,6 +1,8 @@
 //! Correlation analysis for datasets.
 
 use crate::data::Dataset;
+use crate::resource;
+use crate::stats::cortest::pearson_correlation;
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -25,11 +27,22 @@ fn is_numeric_dtype(dtype: &DataType) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrelationMatrix {
     pub columns: Vec<String>,
+    /// Pearson correlations, each over the rows where both of its columns are present (R's
+    /// `cor(use = "pairwise.complete.obs")`). NaN for a pair with fewer than two complete rows,
+    /// an infinite value or a constant column, as R.
     pub matrix: Vec<Vec<f64>>,
+    /// Rows where both columns of each pair are present (`pair_n[i][i]`: the present values of
+    /// column i).
+    #[serde(default)]
+    pub pair_n: Vec<Vec<usize>>,
+    /// Rows of the dataset.
+    #[serde(default)]
+    pub n_rows: usize,
 }
 
 impl CorrelationMatrix {
-    /// Format the correlation matrix as a readable string.
+    /// Format the correlation matrix as a readable string. When a missing value dropped rows from
+    /// some pair, a last line gives how many rows the entries use.
     pub fn to_string_table(&self) -> String {
         let mut result = String::new();
 
@@ -52,94 +65,117 @@ impl CorrelationMatrix {
             result.push('\n');
         }
 
+        if let Some(note) = self.pairwise_note() {
+            result.push_str(&note);
+            result.push('\n');
+        }
+
         result
+    }
+
+    /// "Pairwise complete observations: 35 to 38 of 40 rows" when some pair dropped rows.
+    fn pairwise_note(&self) -> Option<String> {
+        let min = self.pair_n.iter().flatten().min().copied()?;
+        let max = self.pair_n.iter().flatten().max().copied()?;
+        if min >= self.n_rows {
+            return None;
+        }
+        let range = if min == max {
+            min.to_string()
+        } else {
+            format!("{min} to {max}")
+        };
+        Some(format!(
+            "Pairwise complete observations: {range} of {} rows",
+            self.n_rows
+        ))
     }
 }
 
-/// Compute the correlation matrix for numeric columns in a dataset.
+/// Compute the Pearson correlation matrix of the numeric columns of a dataset.
+///
+/// Each entry uses the rows where both of its columns are present (null and NaN cells are
+/// missing), as R's `cor(use = "pairwise.complete.obs")`; `pair_n` reports how many. A pair with
+/// fewer than two complete rows, an infinite value among them or a constant column is NaN, as in
+/// R; the diagonal is 1 for a column with at least two present values, all finite and not all
+/// equal, and NaN otherwise.
 pub fn correlation_matrix(dataset: &Dataset) -> PolarsResult<CorrelationMatrix> {
     let df = dataset.df();
+    let n_rows = df.height();
 
     // Select only numeric columns
-    let numeric_cols: Vec<String> = df
+    let numeric: Vec<&Column> = df
         .get_columns()
         .iter()
         .filter(|col| is_numeric_dtype(col.dtype()))
-        .map(|col| col.name().to_string())
         .collect();
+    let numeric_cols: Vec<String> = numeric.iter().map(|c| c.name().to_string()).collect();
+    let k = numeric.len();
 
-    if numeric_cols.is_empty() {
-        return Ok(CorrelationMatrix {
-            columns: vec![],
-            matrix: vec![],
-        });
+    // Each column as f64 with missing cells (null or NaN) as NaN
+    let mut values: Vec<Vec<f64>> = Vec::with_capacity(k);
+    let mut has_missing: Vec<bool> = Vec::with_capacity(k);
+    for col in &numeric {
+        let cast = col.as_materialized_series().cast(&DataType::Float64)?;
+        let ca = cast.f64()?;
+        let mut v: Vec<f64> =
+            resource::try_with_capacity(n_rows, "correlation column").map_err(to_polars)?;
+        v.extend(ca.iter().map(|x| x.unwrap_or(f64::NAN)));
+        has_missing.push(v.iter().any(|x| x.is_nan()));
+        values.push(v);
     }
 
-    let numeric_df = df.select(numeric_cols.iter().map(|s| s.as_str()))?;
-    let n = numeric_cols.len();
-
-    // Cast all columns to f64 for correlation computation
-    let float_cols: Vec<Series> = numeric_df
-        .get_columns()
-        .iter()
-        .map(|col| col.as_materialized_series().cast(&DataType::Float64))
-        .collect::<PolarsResult<Vec<_>>>()?;
-
-    // Compute correlation matrix
-    let mut matrix = vec![vec![0.0f64; n]; n];
-
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                matrix[i][j] = 1.0;
-            } else if j > i {
-                let corr = pearson_correlation(&float_cols[i], &float_cols[j])?;
-                matrix[i][j] = corr;
-                matrix[j][i] = corr;
-            }
+    let mut matrix = vec![vec![f64::NAN; k]; k];
+    let mut pair_n = vec![vec![0usize; k]; k];
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    if has_missing.iter().any(|&m| m) {
+        xs = resource::try_with_capacity(n_rows, "correlation pair").map_err(to_polars)?;
+        ys = resource::try_with_capacity(n_rows, "correlation pair").map_err(to_polars)?;
+    }
+    for i in 0..k {
+        resource::checkpoint().map_err(to_polars)?;
+        for j in i..k {
+            let (r, count) = if !has_missing[i] && !has_missing[j] {
+                (pair_correlation(&values[i], &values[j]), n_rows)
+            } else {
+                xs.clear();
+                ys.clear();
+                for (&a, &b) in values[i].iter().zip(&values[j]) {
+                    if !a.is_nan() && !b.is_nan() {
+                        xs.push(a);
+                        ys.push(b);
+                    }
+                }
+                (pair_correlation(&xs, &ys), xs.len())
+            };
+            let r = if i == j && !r.is_nan() { 1.0 } else { r };
+            matrix[i][j] = r;
+            matrix[j][i] = r;
+            pair_n[i][j] = count;
+            pair_n[j][i] = count;
         }
     }
 
     Ok(CorrelationMatrix {
         columns: numeric_cols,
         matrix,
+        pair_n,
+        n_rows,
     })
 }
 
-/// Compute Pearson correlation between two series.
-fn pearson_correlation(x: &Series, y: &Series) -> PolarsResult<f64> {
-    let x_f64 = x.f64()?; // na-legacy(T4): STAT-19 (pairwise vs complete-case NA handling)
-    let y_f64 = y.f64()?;
-
-    let n = x_f64.len();
-    if n == 0 {
-        return Ok(f64::NAN);
+/// Pearson r of two complete, equally long samples; NaN below two rows, for an infinite value or
+/// a constant sample (R's `cor`).
+fn pair_correlation(x: &[f64], y: &[f64]) -> f64 {
+    if x.len() < 2 {
+        return f64::NAN;
     }
+    pearson_correlation(x, y)
+}
 
-    let x_mean = x_f64.mean().unwrap_or(f64::NAN);
-    let y_mean = y_f64.mean().unwrap_or(f64::NAN);
-
-    let mut sum_xy = 0.0;
-    let mut sum_x2 = 0.0;
-    let mut sum_y2 = 0.0;
-    let mut valid_count = 0;
-
-    for (x_opt, y_opt) in x_f64.iter().zip(y_f64.iter()) {
-        if let (Some(x_val), Some(y_val)) = (x_opt, y_opt) {
-            let dx = x_val - x_mean;
-            let dy = y_val - y_mean;
-            sum_xy += dx * dy;
-            sum_x2 += dx * dx;
-            sum_y2 += dy * dy;
-            valid_count += 1;
-        }
-    }
-
-    if valid_count == 0 || sum_x2 == 0.0 || sum_y2 == 0.0 {
-        return Ok(f64::NAN);
-    }
-
-    Ok(sum_xy / (sum_x2.sqrt() * sum_y2.sqrt()))
+fn to_polars(e: crate::errors::EconError) -> PolarsError {
+    PolarsError::ComputeError(e.to_string().into())
 }
 
 #[cfg(test)]
@@ -161,6 +197,8 @@ mod tests {
                 vec![0.42137, 1.0, 0.30561],
                 vec![-0.16752, 0.30561, 1.0],
             ],
+            pair_n: vec![],
+            n_rows: 0,
         };
         assert_eq!(
             cm.to_string_table(),
@@ -174,10 +212,107 @@ mod tests {
         let ascii = CorrelationMatrix {
             columns: vec!["income_total_usd".into()],
             matrix: vec![vec![1.0]],
+            pair_n: vec![],
+            n_rows: 0,
         };
         assert_eq!(
             ascii.to_string_table(),
             "              income_...\n  income_...      1.0000\n"
+        );
+    }
+
+    /// R's cor(use = "pairwise.complete.obs") and the pair counts (case stat_cor_matrix_t4).
+    /// Fails before: means over all present values of a column, sums over complete pairs.
+    #[test]
+    fn test_validate_correlation_matrix_pairwise_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cor_matrix_t4");
+        let ds = Dataset::new(ds.df().drop("id").unwrap());
+        let cm = correlation_matrix(&ds).unwrap();
+        assert_eq!(cm.columns, ["a", "b", "c", "i"]);
+        let flat: Vec<f64> = cm.matrix.concat();
+        let counts: Vec<f64> = cm.pair_n.concat().iter().map(|&c| c as f64).collect();
+        let small = crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/cor_matrix_small_t4.csv",
+        ))
+        .unwrap();
+        let small = Dataset::new(small.drop("id").unwrap());
+        let sm = correlation_matrix(&small).unwrap();
+        Check::new(&case)
+            .vector("pairwise", &flat, Tol::coef(35))
+            .vector("pair_n", &counts, Tol::exact())
+            .scalar("n_rows", cm.n_rows as f64, Tol::exact())
+            .scalar("small_ab", sm.matrix[0][1], Tol::coef(4))
+            .finish();
+        assert_eq!(sm.pair_n, vec![vec![5, 4], vec![4, 4]]);
+    }
+
+    /// An infinite value makes every pair it enters NaN, diagonal included (R's cor); a row
+    /// another column misses does not enter that pair. A NaN cell is missing.
+    #[test]
+    fn test_correlation_matrix_infinite_and_nan_cells() {
+        let df = df!(
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.1],
+            "inf" => [2.1, f64::INFINITY, 2.9, 4.2, 4.8, 6.3],
+            "y" => [1.3, 1.8, 3.4, 3.9, 5.2, 5.7],
+            "gap" => [Some(0.5), None, Some(1.7), Some(1.1), Some(2.6), Some(2.2)],
+            "nan" => [0.3, 0.9, f64::NAN, 1.6, 1.2, 2.4],
+        )
+        .unwrap();
+        let cm = correlation_matrix(&Dataset::new(df)).unwrap();
+        let at = |a: &str, b: &str| {
+            let i = cm.columns.iter().position(|c| c == a).unwrap();
+            let j = cm.columns.iter().position(|c| c == b).unwrap();
+            (cm.matrix[i][j], cm.pair_n[i][j])
+        };
+        for other in ["x", "y", "nan", "inf"] {
+            assert!(at("inf", other).0.is_nan(), "inf-{other}");
+        }
+        // the infinite cell sits in the row `gap` misses
+        let (r, n) = at("inf", "gap");
+        assert!(r.is_finite() && n == 5, "{r} {n}");
+        // the NaN cell is missing: 5 rows, and the same r as without that row
+        let (r, n) = at("x", "nan");
+        assert_eq!(n, 5);
+        let x = [1.0, 2.0, 4.0, 5.0, 6.1];
+        let v = [0.3, 0.9, 1.6, 1.2, 2.4];
+        assert!((r - pearson_correlation(&x, &v)).abs() < 1e-15);
+        assert_eq!(at("x", "x"), (1.0, 6));
+        assert_eq!(at("nan", "nan"), (1.0, 5));
+    }
+
+    #[test]
+    fn test_correlation_matrix_pair_with_one_row_is_nan() {
+        let df = df!(
+            "a" => [Some(1.0), None, Some(3.0)],
+            "b" => [None, Some(2.0), Some(1.5)],
+        )
+        .unwrap();
+        let cm = correlation_matrix(&Dataset::new(df)).unwrap();
+        assert!(cm.matrix[0][1].is_nan());
+        assert_eq!(cm.pair_n[0][1], 1);
+        assert_eq!(cm.matrix[0][0], 1.0);
+    }
+
+    /// The pair-count line appears only when some pair dropped rows.
+    #[test]
+    fn test_to_string_table_pairwise_note() {
+        let full = df!("a" => [1.0, 2.0, 3.5, 4.0], "b" => [2.0, 1.0, 3.0, 4.5]).unwrap();
+        let t = correlation_matrix(&Dataset::new(full))
+            .unwrap()
+            .to_string_table();
+        assert!(!t.contains("Pairwise"), "{t}");
+        let gaps = df!(
+            "a" => [Some(1.0), Some(2.0), None, Some(4.0), Some(5.0)],
+            "b" => [Some(2.0), Some(1.0), Some(3.0), Some(4.5), Some(4.0)],
+        )
+        .unwrap();
+        let t = correlation_matrix(&Dataset::new(gaps))
+            .unwrap()
+            .to_string_table();
+        assert!(
+            t.ends_with("Pairwise complete observations: 4 to 5 of 5 rows\n"),
+            "{t}"
         );
     }
 }
