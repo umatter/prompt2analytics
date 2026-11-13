@@ -152,23 +152,7 @@
         "FE coefficients and SEs with a dropped regressor"
       ],
       "tolerance": "text at the printed precision (4 decimals; lag means 2)",
-      "deviations": [
-        {
-          "finding": "ECON-41",
-          "quantity": "LLC / IPS / Maddala-Wu statistics",
-          "note": "not pinned (ECON-41, ECON-43, ECON-44, Tier 4)"
-        },
-        {
-          "finding": "ECON-33",
-          "quantity": "pooled-GLS SEs",
-          "note": "not pinned (Tier 4)"
-        },
-        {
-          "finding": "ECON-34",
-          "quantity": "mean-group SEs",
-          "note": "not pinned (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

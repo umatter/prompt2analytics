@@ -1996,7 +1996,7 @@ async fn test_validate_mcp_panel_gmm_system() {
 }
 
 /// purtest_lag_selection (econ_purtest.R): per-unit AIC and SIC lags up to pmax = 4 as
-/// plm::purtest; the IPS/LLC/MW statistics are ECON-41/43/44 (Tier 4) and are not pinned.
+/// plm::purtest; the IPS/LLC/MW statistics are pinned in the core tests (econ_purtest_t4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_panel_unit_root_aic() {
     let case = Case::load("purtest_lag_selection");
@@ -2097,7 +2097,7 @@ async fn test_validate_mcp_panel_unit_root_aic() {
 }
 
 /// pvcm_pmg_sim and pggls_sim (econ_panel_t3.R): Swamy random coefficients, mean group and
-/// pooled FGLS coefficients (the MG and pooled-GLS SEs are ECON-34 and ECON-33, Tier 4).
+/// pooled FGLS coefficients (the MG and pooled-GLS SEs are pinned in the core tests).
 /// panel_pmg accepts only model 'within'.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_panel_heterogeneous_and_gls() {

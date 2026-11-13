@@ -134,8 +134,8 @@ case("dpd_ab_grunfeld", "econometrics/panel", "Arellano-Bond difference GMM (pgm
 # Panel unit-root extraction (ECON-40): per-unit ADF tau (intercept, one lagged difference) on each
 # unit's observations in time order, with the rows that miss y dropped and gaps spliced, as
 # plm::purtest does (its IPS statistic is the same on the gapped and on the relabelled panel).
-# The panel statistics themselves (LLC, the IPS standardisation, Fisher p-values) are Tier 4
-# (ECON-41/43/44) and are not pinned here.
+# The panel statistics themselves (LLC, the IPS standardisation, Fisher p-values) are pinned by
+# econ_purtest_t4.R's cases, not here.
 case("panel_pur_extraction", "econometrics/panel", "Panel unit root: per-unit ADF tau after extraction (text unit ids, missing cells, a year no unit observes)", function(ctx) {
   suppressPackageStartupMessages(library(urca))
   d <- ctx$dataset("datasets/generated/ab_common_gap.csv")

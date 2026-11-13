@@ -142,9 +142,11 @@ Registry deviations (quantities not pinned through MCP):
   differ).
 - ECON-16: the hurdle count part.
 - ECON-20: FEGLM standard errors and deviance.
-- ECON-33, ECON-34: pooled-GLS and mean-group standard errors.
-- ECON-41, ECON-43, ECON-44: the LLC, IPS and Maddala-Wu statistics.
 - Smoke tests only: Holt-Winters forecasts (TS-23, TS-24), VAR IRF, factanal (STAT-23, STAT-49).
+
+Compared with R in the core tests rather than through MCP: the pooled-GLS and mean-group
+standard errors ([pggls.md](../econometrics/pggls.md), [pvcm.md](../econometrics/pvcm.md)) and
+the LLC, IPS and Maddala-Wu statistics ([panel_unit_root.md](../econometrics/panel_unit_root.md)).
 
 Conventions where p2a differs from R's defaults (stated in the tool descriptions):
 

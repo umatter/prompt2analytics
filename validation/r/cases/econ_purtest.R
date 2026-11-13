@@ -3,8 +3,8 @@
 # on the common sample t = pmax + 2..T (plm:::lagsel), then the per-unit ADF regression with the chosen order
 # (plm:::tsadf). dfcor = FALSE (plm's default) divides the residual sum of squares by n, dfcor = TRUE by n - K
 # (urca::ur.df's convention, p2a's default); Hall's t-rule depends on it, AIC/SIC do not.
-# The IPS, LLC and Maddala-Wu statistics are recorded for Tier 4 (ECON-43, ECON-41, ECON-44); T3 pins the lags
-# and the per-unit ADF t-statistics.
+# The IPS, LLC and Maddala-Wu statistics recorded here are pinned by econ_purtest_t4.R's cases; this case pins
+# the lags and the per-unit ADF t-statistics.
 suppressPackageStartupMessages(library(plm))
 case("purtest_lag_selection", "econometrics/panel_unit_root", "plm::purtest IPS / LLC / Maddala-Wu with lags = 'AIC' | 'SIC' | 'Hall', pmax = 4", function(ctx) {
   set.seed(20261204)
