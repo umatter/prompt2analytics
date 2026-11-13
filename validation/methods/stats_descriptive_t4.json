@@ -46,6 +46,26 @@
       "tolerance": "n = 35-40 (< 100): coefficients Tol::coef(n); counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "describe_t4",
+      "name": "Descriptive statistics of numeric columns: count, mean, sd, min, type-7 quartiles and median, max over the present values",
+      "category": "stats",
+      "reference": "base mean, sd, min, max; stats::quantile(type = 7) (summary() quartiles), all over the non-missing values",
+      "doc": "validation/stats/descriptive.md",
+      "cases": [
+        "stat_describe_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::descriptive::tests::test_validate_describe_quantiles_t4"
+      ],
+      "quantities": [
+        "present-value count, mean, sd, min, q25, median, q75, max for an even-length double column, a double column with one missing cell and an Int64 column with two",
+        "quartiles of 1:4"
+      ],
+      "tolerance": "n = 4-12 (< 100): every statistic, sd included, Tol::coef(n); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
