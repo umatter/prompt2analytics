@@ -171,9 +171,15 @@ controls and the cluster id through one `ColumnRequest`:
   dates): every distinct value is one cluster for the CR1 sandwich. Numeric ids were keyed by
   `format!("{:.0}")` before, which merged fractional ids (0.0 .. 1.9 became 3 clusters);
 - a text outcome is `NonNumericColumn`, an absent column `ColumnNotFound`, and fewer complete
-  rows than regressors plus one is `InsufficientData`.
+  rows than regressors plus one is `InsufficientData`;
+- the treatment and post columns must be 0/1 indicators (Boolean and integer 0/1 columns are
+  read as numbers): the interaction coefficient of R's `lm(y ~ treat * post)` is the ATT only
+  then. Any other value is `InvalidSpecification` naming the column, the value and its row
+  ("column 'treat' must be 0/1 ...; found 2 (row 5 of the rows used)"). An empty cell of the
+  four group means is NaN, never 0 (unreachable after this check and the identification check).
 
 Fixture tests, not R-pinned (`crates/p2a-core/src/econometrics/did.rs`):
+`test_did_refuses_non_binary_treatment`, `test_did_group_means_empty_cell_is_nan`,
 `test_na_did_cluster_ids_are_factors` (integer, string and fractional ids of 20 clusters give one
 result), `test_na_did_omits_missing_rows`, `test_na_did_errors_name_the_column`.
 

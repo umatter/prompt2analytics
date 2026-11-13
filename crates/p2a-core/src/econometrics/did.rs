@@ -294,6 +294,10 @@ pub fn run_did(
     let treatment = cols.numeric_array(treatment_var);
     let post = cols.numeric_array(post_var);
     let n = cols.n();
+    // R's `lm(y ~ treat * post)` reads the interaction as the ATT only for 0/1
+    // indicators (CAUS-59).
+    require_binary(&treatment, treatment_var)?;
+    require_binary(&post, post_var)?;
 
     // Create interaction term: treatment × post
     let interaction: Array1<f64> = treatment
@@ -458,7 +462,24 @@ pub fn run_did(
     })
 }
 
-/// Compute group means for the four cells of the DiD design.
+/// Refuse an indicator column with a value other than 0 or 1, naming the column,
+/// the value and its row among the rows used (1-based).
+fn require_binary(values: &Array1<f64>, name: &str) -> EconResult<()> {
+    match values.iter().position(|&v| v != 0.0 && v != 1.0) {
+        Some(i) => Err(EconError::InvalidSpecification {
+            message: format!(
+                "column '{name}' must be 0/1 (the 2x2 difference-in-differences indicator); \
+                 found {} (row {} of the rows used)",
+                values[i],
+                i + 1
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Compute group means for the four cells of the DiD design; an empty cell's mean is
+/// NaN (unreachable after the 0/1 check and the identification check).
 fn compute_group_means(
     y: &Array1<f64>,
     treatment: &Array1<f64>,
@@ -496,22 +517,22 @@ fn compute_group_means(
     let control_pre_mean = if control_pre.1 > 0 {
         control_pre.0 / control_pre.1 as f64
     } else {
-        0.0
+        f64::NAN
     };
     let control_post_mean = if control_post.1 > 0 {
         control_post.0 / control_post.1 as f64
     } else {
-        0.0
+        f64::NAN
     };
     let treated_pre_mean = if treated_pre.1 > 0 {
         treated_pre.0 / treated_pre.1 as f64
     } else {
-        0.0
+        f64::NAN
     };
     let treated_post_mean = if treated_post.1 > 0 {
         treated_post.0 / treated_post.1 as f64
     } else {
-        0.0
+        f64::NAN
     };
 
     (
@@ -1133,6 +1154,56 @@ mod tests {
             }
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
+    }
+
+    /// CAUS-59: treatment and post must be 0/1 (R's `lm(y ~ treat * post)` reads the
+    /// interaction as the ATT only then); Boolean and integer 0/1 columns still run.
+    #[test]
+    fn test_did_refuses_non_binary_treatment() {
+        let y = [10.2, 9.7, 12.1, 11.8, 10.4, 9.9, 15.3, 14.6];
+        let bad_treat = Dataset::new(
+            df!("y" => y, "treat" => [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                "post" => [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0])
+            .unwrap(),
+        );
+        match run_did(&bad_treat, "y", "treat", "post", None, None) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("'treat'"), "{message}");
+                assert!(message.contains("found 2"), "{message}");
+                assert!(message.contains("must be 0/1"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let bad_post = Dataset::new(
+            df!("y" => y, "treat" => [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                "post" => [0.0, 0.0, 3.0, 3.0, 0.0, 0.0, 3.0, 3.0])
+            .unwrap(),
+        );
+        match run_did(&bad_post, "y", "treat", "post", None, None) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("'post'"), "{message}");
+                assert!(message.contains("found 3"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let typed = Dataset::new(
+            df!("y" => y, "treat" => [false, false, false, false, true, true, true, true],
+                "post" => [0i64, 0, 1, 1, 0, 0, 1, 1])
+            .unwrap(),
+        );
+        let r = run_did(&typed, "y", "treat", "post", None, None).unwrap();
+        assert!(r.att.is_finite());
+    }
+
+    /// An empty cell has no mean: NaN, never 0.0.
+    #[test]
+    fn test_did_group_means_empty_cell_is_nan() {
+        let y = Array1::from(vec![1.1, 2.3, 3.2]);
+        let treatment = Array1::from(vec![0.0, 0.0, 1.0]);
+        let post = Array1::from(vec![0.0, 1.0, 0.0]);
+        let (cp, cpo, tp, tpo) = compute_group_means(&y, &treatment, &post);
+        assert!(cp.is_finite() && cpo.is_finite() && tp.is_finite());
+        assert!(tpo.is_nan(), "empty treated-post cell gave {tpo}");
     }
 
     // ════════════════════════════════════════════════════════════════════════════
