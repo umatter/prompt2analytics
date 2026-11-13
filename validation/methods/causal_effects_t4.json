@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "treatment_regression_adjustment_t4",
+      "name": "Regression adjustment (OLS outcome model per arm) ATE/ATT with the stacked-equation sandwich SE; doubly robust IPW with the M-estimation SE",
+      "category": "econometrics",
+      "reference": "stats::lm per arm; regression adjustment over all / treated units; stacked estimating-equation sandwich (HC0, trimming fixed) written out; equal to the fully interacted lm's standardised contrast. DR-IPW: WeightIt lm_weightit vcov = 'asympt' (case ipw_aipw_sim)",
+      "doc": "validation/econometrics/treatment_aipw.md",
+      "cases": [
+        "ra_ipw_t4",
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_dr_regression_att",
+        "p2a-core::econometrics::treatment::tests::test_validate_dr_regression_sandwich_se",
+        "p2a-core::econometrics::treatment::tests::test_validate_dr_ipw_mest"
+      ],
+      "quantities": [
+        "RA ATE, ATT",
+        "RA sandwich SE (ATE, ATT)",
+        "DR-IPW Hajek ATE/ATT and M-estimation SE"
+      ],
+      "tolerance": "validation/README.md, n = 300: effects 1e-8 (Tol::coef), SEs 1e-6 (Tol::se)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mediation_huber_t4",
+      "name": "IPW causal mediation (Huber 2014): theta(0), delta(1), theta(1), delta(0) and the total effect",
+      "category": "econometrics",
+      "reference": "Huber (2014) normalised IPW weights with glm(binomial) propensities p(X), p(M, X), as causalweight::medweight's effects (written out; causalweight not installed); p2a's trimming rule",
+      "doc": "validation/econometrics/mediation.md",
+      "cases": [
+        "mediation_huber_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_huber_decomposition"
+      ],
+      "quantities": [
+        "total effect",
+        "theta(0) (NDE), delta(1) (NIE)",
+        "theta(1), delta(0)",
+        "kept count at trim 0 and 0.05"
+      ],
+      "tolerance": "Tol::iterative(1e-8): p2a's propensity fits stop at the GLM default, R's at epsilon 1e-14",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "causal_stdreg_se_t4",
+      "name": "Regression standardisation SEs: delta method and stacked-equation sandwich for E[Y(1)], E[Y(0)] and ATE/ATT/ATC",
+      "category": "econometrics",
+      "reference": "stats::lm / stats::glm (epsilon 1e-14); delta method with vcov(fit) plus the averaging term (G V G' = marginaleffects::avg_comparisons, checked); stdReg::stdGlm's stacked sandwich written out",
+      "doc": "validation/econometrics/stdreg.md",
+      "cases": [
+        "stdreg_se_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_delta_se",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_sandwich_se"
+      ],
+      "quantities": [
+        "E[Y(1)], E[Y(0)], effect for lm, lm with A x W, logit, logit with A x W, Poisson over all / treated / controls",
+        "their delta-method SEs",
+        "their sandwich SEs"
+      ],
+      "tolerance": "validation/README.md, n = 300: estimates 1e-8, SEs 1e-6 (config tolerance 1e-14)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "did_2x2_surface_t4",
+      "name": "2x2 DiD with controls and clustered SEs through MCP diff_in_diff and p2a causal did",
+      "category": "econometrics",
+      "reference": "stats::lm; sandwich::vcovCL(cluster = ~employee_id, type = 'HC1') (case did_2x2_training)",
+      "doc": "validation/econometrics/did.md",
+      "cases": [
+        "did_2x2_training"
+      ],
+      "tests": [
+        "p2a-mcp::tools::handlers::causal::tests::test_validate_mcp_diff_in_diff_controls",
+        "p2a-cli::t4_causal::test_validate_cli_causal_did_cluster"
+      ],
+      "quantities": [
+        "ATT with tenure control",
+        "its CR1 SE",
+        "cluster count"
+      ],
+      "tolerance": "CLI test: validation/README.md, n = 1200; MCP test: the 4-decimal values the text prints, absolute 5e-5 plus the README tolerance",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

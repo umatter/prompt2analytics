@@ -16,17 +16,52 @@ IPW-based causal mediation analysis for decomposing treatment effects into natur
 - **Bootstrap percentile rule:** SD (n - 1) and the 95% type-7 percentile interval of a fixed
   199-draw vector (`medflex_scales`, `pct_ci` [1.8825599511963476, 20.7409494752895], `pct_sd`
   5.773974522368977; `Tol::coef(199)`).
-- **Not pinned:** the direct and indirect effects (and hence the proportion mediated). The NDE
-  weight is CAUS-26 (Tier 4). Nothing in this page was produced by causalweight or mediation.
+- **Huber's decomposition (Tier 4):** total, θ(0) (NDE, `direct_effect`), δ(1) (NIE,
+  `indirect_effect`), θ(1) (`direct_effect_treated`), δ(0) (`indirect_effect_control`) and the
+  rows kept, at trim 0 and 0.05: case `mediation_huber_sim` (n 800, a treatment-mediator
+  interaction; registry `validation/methods/causal_effects_t4.json`, id `mediation_huber_t4`;
+  `Tol::iterative(1e-8)`, rows exact). At trim 0: total 1.693693779178835, θ(0)
+  0.5739670558020316, δ(1) 1.1197267233768033, θ(1) 1.2305951663827461, δ(0)
+  0.46309861279608877. Nothing in this page was produced by causalweight or mediation; the
+  formulas are written out in R.
 
 Tests (p2a-core, `econometrics::mediation`): `test_validate_mediation_total_effect_medflex_scales`,
-`test_validate_mediation_percentile_rule_medflex_scales` and the T2 tests listed under "R reference
+`test_validate_mediation_percentile_rule_medflex_scales`, `test_validate_mediation_huber_decomposition` and the T2 tests listed under "R reference
 (T2-WP13)". Property tests with no R value: `test_mediation_recovers_dgp` (total effect near the
 DGP's 0.7), `test_mediation_decomposition_identity`, `test_mediation_proportion_mediated_identity`,
 `test_mediation_bootstrap_ses_positive`, `test_mediation_percentile_cis_ordered`,
 `test_mediation_p_values_in_unit_interval`, `test_mediation_seeded_bootstrap_reproducible`,
 `test_mediation_propensity_separation_warns`, `test_mediation_default_seed_is_fixed`,
-`test_mediation_rejects_bad_trim`.
+`test_mediation_rejects_bad_trim`, `test_mediation_both_decompositions_add_up`,
+`test_mediation_bootstrap_carries_all_four`.
+
+## Estimator
+
+With p = P(D = 1 | X) and pM = P(D = 1 | M, X) (logistic GLMs), each potential-outcome mean is
+the Hajek-normalised IPW mean hm(w) = Σ w Y / Σ w over the kept units, with weights (Huber 2014):
+
+| Mean | Weight |
+|---|---|
+| E[Y(1, M(1))] | D / p |
+| E[Y(0, M(0))] | (1 - D) / (1 - p) |
+| E[Y(1, M(0))] | D (1 - pM) / (pM (1 - p)) |
+| E[Y(0, M(1))] | (1 - D) pM / ((1 - pM) p) |
+
+Total = E[Y(1,M(1))] - E[Y(0,M(0))] decomposes two ways: θ(0) + δ(1), with θ(0) =
+E[Y(1,M(0))] - E[Y(0,M(0))] (the NDE) and δ(1) = E[Y(1,M(1))] - E[Y(1,M(0))] (the NIE), and
+θ(1) + δ(0), with θ(1) = E[Y(1,M(1))] - E[Y(0,M(1))] and δ(0) = E[Y(0,M(1))] - E[Y(0,M(0))]. The
+two differ when treatment and mediator interact. A unit is kept when both scores lie in
+(trim, 1 - trim); trimming on pM conditions on a post-treatment variable, as Huber's estimator
+does. The bootstrap resamples the kept units and carries all five effects.
+
+## Tier 4 changes
+
+- **Direct and indirect effects (CAUS-26).** The direct effect weighted the controls by
+  pM / ((1 - p)(1 - pM)), which identifies neither θ(0) nor θ(1), and the indirect effect was
+  total minus that. `direct_effect` is now θ(0) and `indirect_effect` δ(1), and θ(1) and δ(0)
+  are added with SEs, intervals and p-values (Display rows "Direct θ(1)", "Indirect δ(0)").
+  On `mediation_huber_sim` at trim 0 the old direct effect was 0.773059; θ(0) is 0.573967.
+- **Proportion mediated** on `medflex_scales`' `yo` is now δ(1) / total = -2.993.
 
 ## Tier 3 changes
 
@@ -46,13 +81,14 @@ DGP's 0.7), `test_mediation_decomposition_identity`, `test_mediation_proportion_
   the first error; fewer than 50 usable replicates (or, when fewer than 50 are
   requested, any failed one) is an error, as in medflex.
 - **Proportion mediated** `NIE / ATE` is never clamped (it was clamped to [-1, 1]; on
-  `medflex_scales`' `yo` it is -7.891, shown as -1 before), with a warning outside [0, 1].
+  `medflex_scales`' `yo` it was -7.891 with the old direct-effect weight, shown as -1 before),
+  with a warning outside [0, 1].
 - **`trim`** must lie in [0, 0.5); a treated or control arm emptied by trimming is an error.
 
 **Estimands**:
 - Total Effect (ATE)
-- Natural Direct Effect (NDE)
-- Natural Indirect Effect (NIE)
+- Natural Direct Effect (NDE) θ(0), and θ(1)
+- Natural Indirect Effect (NIE) δ(1), and δ(0)
 - Proportion Mediated (NIE/ATE)
 
 ## Reference Implementations
@@ -259,7 +295,7 @@ cat("NIE should be ~0.48:", result$indir0, "\n")
 
 ## Known Differences from causalweight
 
-1. **Effect definitions**: causalweight returns `dir0`, `dir1`, `indir0`, `indir1`. p2a returns NDE and NIE (corresponding to `dir0` and `indir1` in the paper's notation, but there are subtleties in the identification strategy).
+1. **Effect definitions**: causalweight returns `dir0`, `dir1`, `indir0`, `indir1`. p2a returns all four: `direct_effect` = θ(0) (`dir0`), `indirect_effect` = δ(1) (`indir1`), `direct_effect_treated` = θ(1) (`dir1`), `indirect_effect_control` = δ(0) (`indir0`).
 
 2. **Bootstrap**: causalweight may use different resampling strategy.
 
@@ -344,7 +380,8 @@ MCP (`crates/p2a-mcp/tests/tier2/wp13_causal.rs`): `test_validate_mcp_mediation_
 
 Until T2-WP13 the covariate matrix was scrambled (CAUS-25): it was filled column by column
 and reshaped row-major, so the estimates depended on the row and covariate order (total
-effect 1.3683 on this case). The direct and indirect effects are not pinned (CAUS-26).
+effect 1.3683 on this case). The direct and indirect effects are pinned on
+`mediation_huber_sim` (above).
 
 ## Wall-clock against ff8e7559
 

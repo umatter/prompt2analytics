@@ -971,7 +971,7 @@ fn peak_rss_bytes() -> Option<u64> {
 
 /// The tools that read the session seed (`set_seed`), as `set_seed`'s description and
 /// `get_seed`'s reply list them; a test checks the list against the handlers.
-const SEED_TOOLS_TEXT: &str = "ml_kmeans, ml_random_forest, ml_tsne, ml_c50, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_shap_values, heterogeneity_test, sar_probit_model, sem_probit_model, regression_cv_glmnet, regression_bootstrap_cov, regression_quantreg, mixed_logit, gformula, propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation and generate_random_data";
+const SEED_TOOLS_TEXT: &str = "ml_kmeans, ml_random_forest, ml_tsne, ml_c50, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_shap_values, heterogeneity_test, sar_probit_model, sem_probit_model, regression_cv_glmnet, regression_bootstrap_cov, regression_quantreg, mixed_logit, gformula, propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation, regression_standardization and generate_random_data";
 
 #[tool_router(router = utils_router, vis = "pub")]
 impl AnalyticsServer {
@@ -981,7 +981,7 @@ impl AnalyticsServer {
 
     /// Set the global random seed for ML reproducibility.
     #[tool(
-        description = "Set the session random seed. Every tool that draws random numbers and was given no seed of its own uses it: ml_kmeans, ml_random_forest, ml_tsne, ml_c50, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_shap_values, heterogeneity_test, sar_probit_model, sem_probit_model, regression_cv_glmnet, regression_bootstrap_cov, regression_quantreg, mixed_logit, gformula, propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation and generate_random_data. Without a session seed each of them uses its fixed default seed, so repeated calls agree, except generate_random_data, which then draws new data on every call. Clear by calling with no seed value."
+        description = "Set the session random seed. Every tool that draws random numbers and was given no seed of its own uses it: ml_kmeans, ml_random_forest, ml_tsne, ml_c50, ml_causal_forest, ml_bart_causal, ml_ctree, ml_cubist, ml_mboost, ml_shap_values, heterogeneity_test, sar_probit_model, sem_probit_model, regression_cv_glmnet, regression_bootstrap_cov, regression_quantreg, mixed_logit, gformula, propensity_matching, treatment_ipw, treatment_doubly_robust, treatment_double_ml, staggered_did, gsynth, iv_mte, mediation_analysis, natural_effects_mediation, regression_standardization and generate_random_data. Without a session seed each of them uses its fixed default seed, so repeated calls agree, except generate_random_data, which then draws new data on every call. Clear by calling with no seed value."
     )]
     pub async fn set_seed(
         &self,

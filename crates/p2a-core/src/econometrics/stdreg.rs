@@ -30,10 +30,18 @@
 //! treatment column, or a treatment interaction aliased while its covariate is not, leaves
 //! the treatment effect unidentified and is an error.
 //!
-//! Standard errors: the bootstrap (percentile intervals with R's type-7 quantiles) is the
-//! reference (each replicate refits coefficients only; see `fit_replicate`); the delta-method
-//! and sandwich SEs are approximations on the treatment coefficient (CAUS-39, Tier 4), not
-//! stdReg's stacked estimating equations.
+//! Standard errors, all over the estimand's units (all units for ATE and Levels, the treated
+//! for ATT, the controls for ATC), for the effect and for `E[Y(1)]` and `E[Y(0)]`:
+//!
+//! - **Delta**: `G V G' + sum_S (m_i - mu)^2 / n_S^2`, with `V` the model covariance
+//!   (`sigma^2 (X'X)^-1` for the linear model, `(X'WX)^-1` for the GLMs) and `G` the mean
+//!   gradient of the standardised prediction; the second term accounts for averaging over the
+//!   sample's covariates.
+//! - **Sandwich**: stdReg's stacked estimating equations (the model's score and the
+//!   standardisation equations), HC0 meat.
+//! - **Bootstrap**: each replicate refits the outcome model's coefficients (`fit_replicate`);
+//!   percentile intervals with R's type-7 quantiles; seed [`DEFAULT_BOOTSTRAP_SEED`] when none
+//!   is given.
 //!
 //! # Estimands
 //!
@@ -109,7 +117,7 @@
 //! println!("E[Y(1)]: {:.4}, E[Y(0)]: {:.4}", result.ey1, result.ey0);
 //! ```
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use rand::SeedableRng;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -121,7 +129,6 @@ use crate::econometrics::glm::{GlmSpec, fit_glm, plogis};
 use crate::econometrics::tmle::{GlmControl, LeanStart, check_binary_treatment, lean_logit};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::{xtx, xty};
 use crate::linalg::solve::{SingularPolicy, aliasing_message, sym_inverse};
 use crate::options::Choices;
 use crate::regression::ols::{normal_equations_inverse, solve_ols};
@@ -257,6 +264,9 @@ crate::option_enum!(
     no_display
 );
 
+/// Seed of the bootstrap when `StdRegConfig::seed` is `None`.
+pub const DEFAULT_BOOTSTRAP_SEED: u64 = 42;
+
 /// Configuration for regression standardization.
 #[derive(Debug, Clone)]
 pub struct StdRegConfig {
@@ -272,7 +282,8 @@ pub struct StdRegConfig {
     pub n_bootstrap: usize,
     /// Confidence level for intervals, in (0, 1) (default: 0.95)
     pub confidence_level: f64,
-    /// Random seed for reproducibility
+    /// Bootstrap seed; `None` uses [`DEFAULT_BOOTSTRAP_SEED`] (42), so results are
+    /// reproducible
     pub seed: Option<u64>,
     /// `glm.fit`'s `maxit` for the logistic and Poisson fits; at least 1 (default 100)
     pub max_iter: usize,
@@ -757,7 +768,33 @@ pub fn run_stdreg(
     let identified: Vec<usize> = (0..x_full.ncols())
         .filter(|j| !fit.aliased.contains(j))
         .collect();
-    let x_id = x_full.select(Axis(1), &identified);
+    // the estimand's units
+    let subset: Vec<bool> = a
+        .iter()
+        .map(|&ai| match config.estimand {
+            StdRegEstimand::ATE | StdRegEstimand::Levels => true,
+            StdRegEstimand::ATT => ai >= 0.5,
+            StdRegEstimand::ATC => ai < 0.5,
+        })
+        .collect();
+    let analytic = |kind| {
+        // The identified columns; with every column identified (the usual case) the designs
+        // are read in place.
+        let all = identified.len() == x_full.ncols();
+        let pick = |m: &Array2<f64>| (!all).then(|| m.select(Axis(1), &identified));
+        let (xs, x1s, x0s) = (pick(&x_full), pick(&x_1), pick(&x_0));
+        standardisation_ses(
+            view_or(&xs, &x_full),
+            view_or(&x1s, &x_1),
+            view_or(&x0s, &x_0),
+            &beta.select(Axis(0), &identified),
+            &y,
+            &y_hat,
+            config.model_type,
+            &subset,
+            kind,
+        )
+    };
 
     let (se, ey1_se, ey0_se, boot) = match config.se_method {
         SEMethod::Bootstrap => {
@@ -798,11 +835,11 @@ pub fn run_stdreg(
             (boot.se, boot.ey1_se, boot.ey0_se, Some(boot))
         }
         SEMethod::Delta => {
-            let (se, s1, s0) = compute_delta_se(&x_id, &y, &y_hat, config.model_type)?;
+            let (se, s1, s0) = analytic(AnalyticSe::Delta)?;
             (se, s1, s0, None)
         }
         SEMethod::Sandwich => {
-            let (se, s1, s0) = compute_sandwich_se(&x_id, &y, &y_hat)?;
+            let (se, s1, s0) = analytic(AnalyticSe::Sandwich)?;
             (se, s1, s0, None)
         }
     };
@@ -1267,10 +1304,7 @@ fn compute_bootstrap_se(
 ) -> EconResult<BootDraws> {
     let n = y.len();
 
-    let mut rng: rand::rngs::StdRng = match seed {
-        Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-        None => rand::rngs::StdRng::from_entropy(),
-    };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
 
     let what = "bootstrap replications (n_bootstrap)";
     let mut boot_ates = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
@@ -1401,10 +1435,9 @@ struct ReplicateFit {
 /// fitted values, R-squared or warnings):
 ///
 /// - Linear: the normal equations on a full-rank, well-conditioned design (OLS's decision,
-///   `normal_equations_inverse`) without OLS's refinement step, as the fixed-design
-///   bootstrap of `regression::ols` does: a replicate's coefficients then carry a relative
-///   error of order `eps / rcond` (at most about 1e-8 at the decision's threshold), far below
-///   the Monte Carlo error of the standard error. `solve_ols` (the pivoted QR) otherwise.
+///   `normal_equations_inverse`) with OLS's refinement step when the decision asks for it
+///   (`NormalInverse::coefficients`), so a replicate's coefficients are OLS's; `solve_ols`
+///   (the pivoted QR) otherwise.
 /// - Logistic: `tmle::lean_logit` from `start` (glm.fit's deviance rule and iterates, without
 ///   the shared GLM's covariance, deviances and warnings), and the shared GLM when the fit
 ///   leaves that path (separation, aliasing, ill conditioning, no convergence, a converged fit
@@ -1430,7 +1463,7 @@ fn fit_replicate(
             resource::checkpoint()?;
             if let Some(normal) = normal_equations_inverse(x.view())? {
                 return Ok(ReplicateFit {
-                    coefficients: normal.inverse.dot(&xty(&x.view(), y)),
+                    coefficients: normal.coefficients(x.view(), y),
                     aliased: Vec::new(),
                     converged: true,
                     separation: false,
@@ -1514,97 +1547,172 @@ fn bootstrap_ci(draws: &[f64], level: f64) -> EconResult<(f64, f64)> {
     percentile_interval(&finite, level)
 }
 
-/// `(X'X)^{-1}` of the identified columns.
-fn identified_bread(x_id: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let xtx_mat = xtx(&x_id.view());
-    Ok(sym_inverse(
-        xtx_mat.view(),
-        SingularPolicy::Error,
-        "stdreg outcome model X'X",
-    )?
-    .inverse)
-}
-
-/// Compute delta method standard errors on the identified columns `x_id`.
-/// For linear model: SE(ATE) derived from coefficient variance.
-// CAUS-39 (Tier 4): the formula is an approximation (the treatment coefficient's variance,
-// the last identified column; with interactions that is not the effect's SE), unchanged here.
-fn compute_delta_se(
-    x_id: &Array2<f64>,
-    y: &Array1<f64>,
-    y_hat: &Array1<f64>,
-    model_type: StdRegModel,
-) -> EconResult<(f64, f64, f64)> {
-    let n = y.len();
-    let rank = x_id.ncols();
-    let xtx_inv = identified_bread(x_id)?;
-
-    let sigma2 = match model_type {
-        StdRegModel::Linear => {
-            let df = n.checked_sub(rank).filter(|&d| d > 0).ok_or_else(|| {
-                EconError::InsufficientData {
-                    required: rank + 1,
-                    provided: n,
-                    context: "stdreg delta-method residual variance".to_string(),
-                }
-            })?;
-            let sse: f64 = y
-                .iter()
-                .zip(y_hat.iter())
-                .map(|(&yi, &yhi)| (yi - yhi).powi(2))
-                .sum();
-            sse / df as f64
+/// The outcome model's derivative of the inverse link, `mu.eta(eta)`.
+fn mu_eta(eta: f64, model_type: StdRegModel) -> f64 {
+    match model_type {
+        StdRegModel::Linear => 1.0,
+        StdRegModel::Logistic => {
+            let p = plogis(eta);
+            p * (1.0 - p)
         }
-        // For GLMs, use asymptotic variance approximation
-        _ => 1.0,
-    };
-
-    let a_col_idx = rank - 1;
-    let se = (sigma2 * xtx_inv[[a_col_idx, a_col_idx]]).sqrt();
-
-    // For potential outcomes, rough approximation
-    let ey1_se = se / 2.0_f64.sqrt();
-    let ey0_se = se / 2.0_f64.sqrt();
-
-    Ok((se, ey1_se, ey0_se))
+        // R's poisson()$mu.eta: pmax(exp(eta), .Machine$double.eps)
+        StdRegModel::Poisson => eta.exp().max(f64::EPSILON),
+    }
 }
 
-/// Compute sandwich (robust) standard errors on the identified columns `x_id`.
-// CAUS-39 (Tier 4): an HC0 sandwich on the treatment coefficient (the last identified column),
-// unchanged here.
-fn compute_sandwich_se(
-    x_id: &Array2<f64>,
+/// The family's variance function `V(mu)` (dispersion aside).
+fn variance_fn(mu: f64, model_type: StdRegModel) -> f64 {
+    match model_type {
+        StdRegModel::Linear => 1.0,
+        StdRegModel::Logistic => mu * (1.0 - mu),
+        StdRegModel::Poisson => mu,
+    }
+}
+
+/// `sel` when it holds a column selection, else `m` itself.
+fn view_or<'a>(sel: &'a Option<Array2<f64>>, m: &'a Array2<f64>) -> ArrayView2<'a, f64> {
+    sel.as_ref().map_or_else(|| m.view(), |s| s.view())
+}
+
+/// Which analytic standard error [`standardisation_ses`] computes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnalyticSe {
+    /// `G V G' + sum_S (m_i - mu)^2 / n_S^2`, `V` the model covariance.
+    Delta,
+    /// stdReg's stacked estimating equations, HC0 meat.
+    Sandwich,
+}
+
+/// Standard errors of the standardised effect, `E[Y(1)]` and `E[Y(0)]` over the units in
+/// `subset`, from the fit's identified columns: `x` the design, `x1`/`x0` the counterfactual
+/// designs and `beta` the coefficients (all restricted to those columns), `mu` the fitted
+/// means. Returns `(se_effect, se_ey1, se_ey0)`.
+///
+/// With `G_a = sum_S mu.eta(x_{a,i} b) x_{a,i} / n_S` and `u_{a,i} = m_i(a) - mu_a` on `S`:
+///
+/// - Delta: `Var(mu_a) = G_a V G_a' + sum_S u_{a,i}^2 / n_S^2`, `V = sigma^2 (X'X)^-1` (lm,
+///   df `n - k`) or `(X'WX)^-1` with `W = mu.eta^2 / V(mu)` (binomial and Poisson,
+///   dispersion 1); the contrast uses `G_1 - G_0` and `u_1 - u_0`.
+/// - Sandwich: the influence functions of stdReg's stacked equations (score
+///   `x mu.eta (y - mu) / V(mu)`, then `t (m(a) - mu_a)`),
+///   `IF_{a,i} = t_i u_{a,i} n / n_S + G_a' A^-1 score_i` with `A = X'WX / n`, and
+///   `Var = sum IF^2 / n^2`.
+#[allow(clippy::too_many_arguments)]
+fn standardisation_ses<'a>(
+    x: ArrayView2<'a, f64>,
+    x1: ArrayView2<'a, f64>,
+    x0: ArrayView2<'a, f64>,
+    beta: &Array1<f64>,
     y: &Array1<f64>,
-    y_hat: &Array1<f64>,
+    mu: &Array1<f64>,
+    model_type: StdRegModel,
+    subset: &[bool],
+    kind: AnalyticSe,
 ) -> EconResult<(f64, f64, f64)> {
-    let n = y.len();
-    let k = x_id.ncols();
-
-    // Bread: (X'X)^{-1}
-    let bread = identified_bread(x_id)?;
-
-    // Meat: X' diag(e^2) X
-    let residuals: Array1<f64> = y - y_hat;
-    let mut meat = Array2::zeros((k, k));
-    for i in 0..n {
-        let e_i_sq = residuals[i].powi(2);
-        for j in 0..k {
-            for l in 0..k {
-                meat[[j, l]] += e_i_sq * x_id[[i, j]] * x_id[[i, l]];
+    let (n, k) = x.dim();
+    let nf = n as f64;
+    let n_s = subset.iter().filter(|&&t| t).count() as f64;
+    // X'WX (working weights) and, for the sandwich, the scores' scale mu.eta (y - mu) / V(mu).
+    // X'WX is the cross-product of the rows scaled by sqrt(w); the linear model's w is 1 and
+    // its score scale the residual.
+    let sandwich = kind == AnalyticSe::Sandwich;
+    let mut score_scale = Array1::<f64>::zeros(if sandwich { n } else { 0 });
+    let info = if model_type == StdRegModel::Linear {
+        if sandwich {
+            score_scale = y - mu;
+        }
+        x.t().dot(&x)
+    } else {
+        let eta = x.dot(beta);
+        if sandwich {
+            score_scale = resource::try_zeros1(n, "stdreg score scale")?;
+        }
+        let mut xw = resource::try_zeros2(n, k, "stdreg weighted design")?;
+        xw.assign(&x);
+        for i in 0..n {
+            let me = mu_eta(eta[i], model_type);
+            let v = variance_fn(mu[i], model_type);
+            xw.row_mut(i).mapv_inplace(|e| e * (me * me / v).sqrt());
+            if sandwich {
+                score_scale[i] = me * (y[i] - mu[i]) / v;
             }
         }
+        xw.t().dot(&xw)
+    };
+    // G_a and the centred predictions u_a over the subset
+    let mut g = [Array1::<f64>::zeros(k), Array1::<f64>::zeros(k)];
+    let mut m = [Array1::<f64>::zeros(n), Array1::<f64>::zeros(n)];
+    let mut means = [0.0; 2];
+    let mut gw = resource::try_zeros1(n, "stdreg gradient weights")?;
+    for (arm, xa) in [x0, x1].into_iter().enumerate() {
+        let eta_a = xa.dot(beta);
+        for i in 0..n {
+            if subset[i] {
+                gw[i] = mu_eta(eta_a[i], model_type) / n_s;
+                m[arm][i] = inverse_link(eta_a[i], model_type);
+                means[arm] += m[arm][i] / n_s;
+            } else {
+                gw[i] = 0.0;
+            }
+        }
+        g[arm] = xa.t().dot(&gw);
     }
-
-    // Sandwich: (X'X)^{-1} X'diag(e^2)X (X'X)^{-1}
-    let sandwich = bread.dot(&meat).dot(&bread);
-
-    let a_col_idx = k - 1;
-    let se = sandwich[[a_col_idx, a_col_idx]].sqrt();
-
-    let ey1_se = se / 2.0_f64.sqrt();
-    let ey0_se = se / 2.0_f64.sqrt();
-
-    Ok((se, ey1_se, ey0_se))
+    let u = |arm: usize, i: usize| {
+        if subset[i] {
+            m[arm][i] - means[arm]
+        } else {
+            0.0
+        }
+    };
+    let gd = &g[1] - &g[0];
+    match kind {
+        AnalyticSe::Delta => {
+            let (cov, scale) = if model_type == StdRegModel::Linear {
+                let df = n.checked_sub(k).filter(|&d| d > 0).ok_or_else(|| {
+                    EconError::InsufficientData {
+                        required: k + 1,
+                        provided: n,
+                        context: "stdreg delta-method residual variance".to_string(),
+                    }
+                })?;
+                let sse: f64 = y.iter().zip(mu).map(|(&yi, &mi)| (yi - mi).powi(2)).sum();
+                (info, sse / df as f64)
+            } else {
+                (info, 1.0)
+            };
+            let v =
+                sym_inverse(cov.view(), SingularPolicy::Error, "stdreg model covariance")?.inverse;
+            let quad = |gv: &Array1<f64>| scale * gv.dot(&v.dot(gv));
+            let (mut s1, mut s0, mut sd) = (0.0, 0.0, 0.0);
+            for i in 0..n {
+                let (u1, u0) = (u(1, i), u(0, i));
+                s1 += u1 * u1;
+                s0 += u0 * u0;
+                sd += (u1 - u0) * (u1 - u0);
+            }
+            let n_s2 = n_s * n_s;
+            Ok((
+                (quad(&gd) + sd / n_s2).sqrt(),
+                (quad(&g[1]) + s1 / n_s2).sqrt(),
+                (quad(&g[0]) + s0 / n_s2).sqrt(),
+            ))
+        }
+        AnalyticSe::Sandwich => {
+            let a = info / nf;
+            let a_inv =
+                sym_inverse(a.view(), SingularPolicy::Error, "stdreg stacked bread")?.inverse;
+            let h = [x.dot(&a_inv.dot(&g[0])), x.dot(&a_inv.dot(&g[1]))];
+            let (mut s1, mut s0, mut sd) = (0.0, 0.0, 0.0);
+            for i in 0..n {
+                let f1 = u(1, i) * nf / n_s + h[1][i] * score_scale[i];
+                let f0 = u(0, i) * nf / n_s + h[0][i] * score_scale[i];
+                s1 += f1 * f1;
+                s0 += f0 * f0;
+                sd += (f1 - f0) * (f1 - f0);
+            }
+            Ok((sd.sqrt() / nf, s1.sqrt() / nf, s0.sqrt() / nf))
+        }
+    }
 }
 
 /// Compute additional effect measures for binary outcomes.
@@ -1949,10 +2057,119 @@ mod tests {
         assert_eq!(result.estimand, StdRegEstimand::ATC);
     }
 
+    /// The fits of case stdreg_se_t4: (prefix, outcome, model, interactions).
+    const SE_T4_FITS: [(&str, &str, StdRegModel, bool); 5] = [
+        ("lin", "yc", StdRegModel::Linear, false),
+        ("lin_int", "yc", StdRegModel::Linear, true),
+        ("logit", "yb", StdRegModel::Logistic, false),
+        ("logit_int", "yb", StdRegModel::Logistic, true),
+        ("pois", "yp", StdRegModel::Poisson, false),
+    ];
+
+    fn check_se_t4(case_id: &str, se_method: SEMethod, key: &str) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let mut check = Check::new(&case);
+        for (p, y, model, inter) in SE_T4_FITS {
+            for (est, e) in [
+                (StdRegEstimand::ATE, "ate"),
+                (StdRegEstimand::ATT, "att"),
+                (StdRegEstimand::ATC, "atc"),
+            ] {
+                let c = StdRegConfig {
+                    model_type: model,
+                    estimand: est,
+                    include_interactions: inter,
+                    se_method,
+                    tolerance: 1e-14,
+                    ..Default::default()
+                };
+                let r = run_stdreg(&ds, y, "a", &["x1", "x2"], c).unwrap();
+                let n = r.n_obs;
+                check
+                    .vector(
+                        &format!("{p}_{e}_est"),
+                        &[r.ey1, r.ey0, r.ate],
+                        Tol::coef(n),
+                    )
+                    .vector(
+                        &format!("{p}_{e}_{key}"),
+                        &[r.ey1_se, r.ey0_se, r.se],
+                        Tol::se(n),
+                    );
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_stdreg_delta_se() {
+        // Delta method over the estimand's units: G V G' plus the averaging term, V the model
+        // covariance (case stdreg_se_t4). Fails before: the SE was the variance of the last
+        // identified column (an interaction term with interactions; sigma^2 = 1 on (X'X)^-1 for
+        // the GLMs) and E[Y(a)]'s SEs were that SE / sqrt(2).
+        check_se_t4("stdreg_se_t4", SEMethod::Delta, "delta");
+    }
+
+    #[test]
+    fn test_validate_stdreg_sandwich_se() {
+        // stdReg's stacked estimating equations, HC0 meat (case stdreg_se_t4). Fails before:
+        // an HC0 sandwich of the last identified column on the OLS bread.
+        check_se_t4("stdreg_se_t4", SEMethod::Sandwich, "sandwich");
+    }
+
+    #[test]
+    fn test_stdreg_bootstrap_seed_none_is_42() {
+        // Fails before: seed None drew OS entropy.
+        let ds = create_stdreg_test_dataset();
+        let fit = |seed| {
+            let c = StdRegConfig {
+                n_bootstrap: 50,
+                seed,
+                ..Default::default()
+            };
+            run_stdreg(&ds, "y", "treatment", &["x1", "x2"], c).unwrap()
+        };
+        let (a, b) = (fit(None), fit(Some(DEFAULT_BOOTSTRAP_SEED)));
+        assert_eq!(a.se.to_bits(), b.se.to_bits());
+        assert_eq!(a.ci_lower.to_bits(), b.ci_lower.to_bits());
+    }
+
+    #[test]
+    fn test_stdreg_linear_replicate_refines() {
+        // An ill-conditioned design that still takes the normal equations, with the
+        // refinement step: the replicate's coefficients are OLS's. Fails before: the
+        // replicate skipped the refinement (relative error of order eps / rcond).
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(29);
+        let n = 200;
+        let mut x = Array2::<f64>::zeros((n, 3));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x1: f64 = rng.r#gen::<f64>() * 4.0 - 2.0;
+            let x2 = x1 + 1e-3 * (rng.r#gen::<f64>() - 0.5);
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = x1;
+            x[[i, 2]] = x2;
+            y[i] = 1.0 + 0.5 * x1 - 0.3 * x2 + (rng.r#gen::<f64>() - 0.5);
+        }
+        let normal = normal_equations_inverse(x.view())
+            .unwrap()
+            .expect("normal equations");
+        assert!(normal.refine, "precondition: the solve refines");
+        let ctl = GlmControl {
+            epsilon: 1e-10,
+            max_iter: 100,
+        };
+        let got = fit_replicate(&x, &y, StdRegModel::Linear, ctl, None).unwrap();
+        let want = crate::linalg::solve::least_squares(x.view(), y.view()).unwrap();
+        for (g, w) in got.coefficients.iter().zip(want.coefficients.iter()) {
+            assert!(((g - w) / w).abs() < 1e-12, "replicate {g}, QR {w}");
+        }
+    }
+
     #[test]
     fn test_stdreg_delta_se_runs() {
-        // the delta-method formula is CAUS-39 (Tier 4); stdReg's values are recorded in
-        // the case stdreg_glm (*_stdreg_ate_se)
+        // the delta-method values are pinned by test_validate_stdreg_delta_se
         let dataset = create_stdreg_test_dataset();
         let config = StdRegConfig {
             model_type: StdRegModel::Linear,
@@ -2232,7 +2449,7 @@ mod tests {
             model_type: model,
             estimand: est,
             include_interactions: inter,
-            // point estimates only; the SEs are CAUS-39 (Tier 4)
+            // point estimates; the sandwich SEs are pinned by test_validate_stdreg_sandwich_se
             se_method: SEMethod::Sandwich,
             tolerance,
             ..Default::default()

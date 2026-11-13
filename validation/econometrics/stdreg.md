@@ -11,7 +11,8 @@ ATT, the controls for the ATC).
 
 ## Mathematical Framework
 
-Under the assumptions of consistency, no unmeasured confounding (conditional exchangeability), and positivity:
+Under the assumptions of consistency, no unmeasured confounding (conditional exchangeability),
+and positivity:
 
 ```
 E[Y(a)] = sum_x E[Y|A=a, X=x] * P(X=x)
@@ -56,20 +57,32 @@ ATC = E[Y(1) - Y(0) | A=0]
   predictions use the identified columns (as `predict.lm` on estimable rows). An aliased
   treatment, or an interaction `A:W_j` aliased while `W_j` is not, is an error: the
   treatment effect is not identified.
-- **Standard errors.** The bootstrap (`n_bootstrap` replicates, each refitting the outcome
-  model; non-converged, separated and failed replicates are counted in warnings) is the
-  reference. A replicate computes coefficients only: the linear model by the normal equations
-  without OLS's refinement step (the pivoted QR when the design is rank-deficient or ill
-  conditioned), the logistic model by TMLE's lean logit IRLS from the full-sample fit (the
-  shared GLM when a replicate separates, is aliased, does not converge or has a converged fit
-  with a row beyond the path's bound, `y < 1` above `eta = 15` or `y > 0` below -15, so those
-  counts are the shared GLM's, and a replicate past the bound can count as not converged where
-  the lean path alone would have converged), the Poisson model by the shared GLM; its
-  percentile intervals for the effect, risk ratio and odds ratio use R's type-7 quantiles of
-  the finite draws (`stats::robust::percentile_interval`). The delta-method and sandwich SEs
-  are approximations on the treatment coefficient (CAUS-39, Tier 4), computed on the identified
-  columns with a rank-checked inverse and a checked residual df. Normal intervals and p-values
-  use `z_critical` and `normal_p_value_two_sided`.
+- **Standard errors.** All three are computed over the estimand's units S (every unit for
+  ATE and Levels, the treated for ATT, the controls for ATC), for the effect and for E[Y(1)]
+  and E[Y(0)], on the identified columns. With m_i(a) = g(x_{a,i} b), mu_a their mean over S,
+  u_{a,i} = m_i(a) - mu_a and G_a = sum_S g'(x_{a,i} b) x_{a,i} / n_S:
+  - **Delta**: Var(mu_a) = G_a V G_a' + sum_S u_{a,i}^2 / n_S^2, with V the model covariance
+    (sigma^2 (X'X)^-1 with residual df n - k for the linear model; (X'WX)^-1 with the working
+    weights W = g'(eta)^2 / V(mu) and dispersion 1 for the logistic and Poisson models). The
+    contrast uses G_1 - G_0 and u_1 - u_0. G V G' alone is `marginaleffects::avg_comparisons`'
+    SE; the second term accounts for averaging over the sample's covariates.
+  - **Sandwich**: stdReg's stacked estimating equations, the model's score
+    x g'(eta) (y - mu) / V(mu) and t_i (m_i(a) - mu_a), HC0 meat:
+    IF_{a,i} = t_i u_{a,i} n / n_S + G_a' A^-1 score_i with A = X'WX / n, Var = sum IF^2 / n^2.
+  - **Bootstrap**: `n_bootstrap` replicates, each refitting the outcome model (non-converged,
+    separated and failed replicates are counted in warnings), seeded by `seed`, else 42
+    (`DEFAULT_BOOTSTRAP_SEED`). A replicate computes coefficients only: the linear model by
+    the normal equations with OLS's refinement step when the conditioning asks for it (the
+    pivoted QR when the design is rank-deficient or ill conditioned), the logistic model by
+    TMLE's lean logit IRLS from the full-sample fit (the shared GLM when a replicate
+    separates, is aliased, does not converge or has a converged fit with a row beyond the
+    path's bound, `y < 1` above `eta = 15` or `y > 0` below -15, so those counts are the
+    shared GLM's, and a replicate past the bound can count as not converged where the lean
+    path alone would have converged), the Poisson model by the shared GLM. Its percentile
+    intervals for the effect, risk ratio and odds ratio use R's type-7 quantiles of the
+    finite draws (`stats::robust::percentile_interval`).
+
+  Normal intervals and p-values use `z_critical` and `normal_p_value_two_sided`.
 
 ## R reference
 
@@ -99,10 +112,14 @@ interaction, `yb` binary, `yp` Poisson with mean 222.4, `ys` = 1{x1 > 0.3}, `x1d
 Before the fix, the Poisson model (mean 222) returned E[Y(1)] = E[Y(0)] = 1e10 and ATE 0 (the
 clipped mean), and the separated logistic fit returned ATE 0 and SE 0 without a warning.
 
-**Delta-method SEs (recorded, not asserted).** stdReg's stacked estimating equations, written
-out in the case: `logit_stdreg_ate_se` 0.05312617119409766, `logit_int_stdreg_ate_se`
-0.053540593969082506, `pois_stdreg_ate_se` 1.7444188478832212. p2a's delta and sandwich SEs
-are approximations until CAUS-39 (Tier 4).
+**Delta-method and sandwich SEs.** Case `stdreg_se_t4` (registry
+`validation/methods/causal_effects_t4.json`, id `causal_stdreg_se_t4`) records E[Y(1)], E[Y(0)]
+and the effect, with their delta-method and sandwich SEs, for lm, lm with A x W, logit, logit
+with A x W and Poisson over all, treated and control units (glm epsilon 1e-14). For example,
+logit ATE: delta SE 0.05333924763176867, sandwich SE 0.05312617119409765 (equal to case
+`stdreg_glm`'s `logit_stdreg_ate_se`). Until Tier 4 both SEs were the variance of the last
+identified column (an interaction term when interactions are included; sigma^2 = 1 on the OLS
+bread for the GLMs), and the E[Y(a)] SEs were that value / sqrt(2).
 
 **Default control.** At `StdRegConfig::default()` (R's `glm.control()` epsilon 1e-8) the logit
 and Poisson coefficients and ATEs are within about 6e-10 of the tight values above, and the
@@ -111,7 +128,9 @@ fits converge.
 ## Tests and tolerances
 
 R-pinned: `test_validate_stdreg_glm` (logit with and without interactions and Poisson;
-coefficients, E[Y(1)], E[Y(0)], ATE, ATT, ATC, R2), `test_validate_stdreg_glm_default_control`,
+coefficients, E[Y(1)], E[Y(0)], ATE, ATT, ATC, R2), `test_validate_stdreg_delta_se` and
+`test_validate_stdreg_sandwich_se` (case `stdreg_se_t4`; `Tol::coef(300)` for the estimates,
+`Tol::se(300)` = 1e-6 for the SEs), `test_validate_stdreg_glm_default_control`,
 `test_validate_stdreg_linear` (interactions; the aliased covariate with its NA coefficient and
 warning), `test_validate_stdreg_separation_warns` and `test_validate_stdreg_poisson_scale_free`
 (covariates scaled by 1e-6 and 1e6).
@@ -137,7 +156,8 @@ percentile rule against R's `quantile(1:10, c(.05, .95))`;
 
 | Option | Strings |
 |---|---|
-| `model_type` | `linear` (`ols`, `gaussian`, `continuous`), `logistic` (`logit`, `binomial`, `binary`), `poisson` (`count`, `counts`, `log_linear`) |
+| `model_type` | `linear` (`ols`, `gaussian`, `continuous`), `logistic` (`logit`, `binomial`, |
+| | `binary`), `poisson` (`count`, `counts`, `log_linear`) |
 | `estimand` | `ate`, `att`, `atc`, `levels` (`potential_outcomes`) |
 | `se_method` | `bootstrap` (`boot`), `delta` (`delta_method`), `sandwich` (`robust`) |
 
@@ -190,15 +210,20 @@ logistic model, two covariates; ratio is this tree over ff8e7559.
 | normal covariates | 10,000 | 1,889.7 | 675.7 | 0.36 |
 | heavy-tailed covariate with far misfit rows | 10,000 | 2,383.7 | 2,307.3 | 0.97 |
 
-Replicates with a row past `|eta| = 15` are refitted by the shared GLM, which takes the far-row design
-back to about the base's time.
+Replicates with a row past `|eta| = 15` are refitted by the shared GLM, which takes the far-row
+design back to about the base's time.
 
 ## References
 
-1. Robins, J.M. (1986). "A new approach to causal inference in mortality studies with a sustained exposure period -- application to control of the healthy worker survivor effect." *Mathematical Modelling*, 7(9-12), 1393-1512.
+1. Robins, J.M. (1986). "A new approach to causal inference in mortality studies with a
+   sustained exposure period -- application to control of the healthy worker survivor
+   effect." *Mathematical Modelling*, 7(9-12), 1393-1512.
 
-2. Snowden, J.M., Rose, S., & Mortimer, K.M. (2011). "Implementation of G-computation on a simulated dataset: Demonstration of a causal inference technique." *American Journal of Epidemiology*, 173(7), 731-738.
+2. Snowden, J.M., Rose, S., & Mortimer, K.M. (2011). "Implementation of G-computation on a
+   simulated dataset: Demonstration of a causal inference technique." *American Journal of
+   Epidemiology*, 173(7), 731-738.
 
 3. Hernan, M.A. & Robins, J.M. (2020). *Causal Inference: What If*. Chapman & Hall/CRC. Chapter 13.
 
-4. Sjolander, A. (2016). "Regression standardization with the R package stdReg." *European Journal of Epidemiology*, 31(6), 563-574.
+4. Sjolander, A. (2016). "Regression standardization with the R package stdReg." *European
+   Journal of Epidemiology*, 31(6), 563-574.

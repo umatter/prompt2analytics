@@ -11,9 +11,9 @@
 //! # Key Concepts
 //!
 //! - **Total Effect (ATE)**: Overall effect of treatment on outcome
-//! - **Natural Direct Effect (NDE)**: Effect NOT through the mediator
-//! - **Natural Indirect Effect (NIE)**: Effect through the mediator
-//! - **Decomposition**: ATE = NDE + NIE
+//! - **Natural Direct Effect (NDE)**: Effect NOT through the mediator, θ(0)
+//! - **Natural Indirect Effect (NIE)**: Effect through the mediator, δ(1)
+//! - **Decomposition**: ATE = NDE + NIE = θ(0) + δ(1) = θ(1) + δ(0)
 //!
 //! # Estimation
 //!
@@ -21,7 +21,9 @@
 //! fitted by the shared GLM (`glm.fit`'s IRLS); their warnings (non-convergence, fitted
 //! probabilities numerically 0 or 1, aliased covariates) are reported in
 //! `MediationResult::warnings`. Units whose scores lie outside `(trim, 1 - trim)` are
-//! dropped; the effects are Hajek-normalised IPW means. Standard errors come from a
+//! dropped (trimming on `p(D = 1 | X, M)` conditions on a post-treatment variable, as
+//! Huber's estimator does); the effects are differences of Huber's four Hajek-normalised IPW
+//! means of the potential outcomes E[Y(d, M(d'))]. Standard errors come from a
 //! bootstrap over the kept units (seed [`DEFAULT_BOOTSTRAP_SEED`] when none is given),
 //! with type-7 percentile intervals; failed replicates are counted and reported. The
 //! proportion mediated is `NIE / ATE`, never clamped, with a warning outside [0, 1].
@@ -73,7 +75,8 @@ fn min_valid_bootstrap(requested: usize) -> usize {
 #[derive(Debug, Clone)]
 pub struct MediationConfig {
     /// Number of bootstrap replications for standard errors (default: 999). Must be at
-    /// least 2; a count whose result buffers cannot be allocated is refused with
+    /// least 2. With 2 to 49 replicates every replicate must be usable; with 50 or more, at
+    /// least 50 must be. A count whose result buffers cannot be allocated is refused with
     /// `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
@@ -95,12 +98,16 @@ impl Default for MediationConfig {
 /// Result from causal mediation analysis.
 #[derive(Debug, Clone)]
 pub struct MediationResult {
-    /// Total effect (ATE)
+    /// Total effect (ATE): E[Y(1,M(1))] - E[Y(0,M(0))]
     pub total_effect: f64,
-    /// Natural direct effect (NDE)
+    /// Natural direct effect θ(0) = E[Y(1,M(0))] - E[Y(0,M(0))] (NDE)
     pub direct_effect: f64,
-    /// Natural indirect effect (NIE)
+    /// Natural indirect effect δ(1) = E[Y(1,M(1))] - E[Y(1,M(0))] (NIE)
     pub indirect_effect: f64,
+    /// Direct effect under the treated's mediator, θ(1) = E[Y(1,M(1))] - E[Y(0,M(1))]
+    pub direct_effect_treated: f64,
+    /// Indirect effect under control, δ(0) = E[Y(0,M(1))] - E[Y(0,M(0))]
+    pub indirect_effect_control: f64,
     /// Proportion of total effect mediated (NIE / ATE); never clamped, `NaN` at a zero
     /// total effect
     pub proportion_mediated: f64,
@@ -110,18 +117,30 @@ pub struct MediationResult {
     pub se_direct: f64,
     /// Standard error of indirect effect
     pub se_indirect: f64,
+    /// Standard error of θ(1)
+    pub se_direct_treated: f64,
+    /// Standard error of δ(0)
+    pub se_indirect_control: f64,
     /// 95% CI for total effect (type-7 bootstrap percentiles)
     pub ci_total: (f64, f64),
     /// 95% CI for direct effect
     pub ci_direct: (f64, f64),
     /// 95% CI for indirect effect
     pub ci_indirect: (f64, f64),
+    /// 95% CI for θ(1)
+    pub ci_direct_treated: (f64, f64),
+    /// 95% CI for δ(0)
+    pub ci_indirect_control: (f64, f64),
     /// p-value for total effect
     pub p_total: f64,
     /// p-value for direct effect
     pub p_direct: f64,
     /// p-value for indirect effect
     pub p_indirect: f64,
+    /// p-value for θ(1)
+    pub p_direct_treated: f64,
+    /// p-value for δ(0)
+    pub p_indirect_control: f64,
     /// Number of observations used
     pub n_obs: usize,
     /// Number of complete rows trimmed for extreme propensity scores
@@ -208,7 +227,35 @@ impl fmt::Display for MediationResult {
 
         writeln!(
             f,
+            "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
+            "Direct θ(1)",
+            self.direct_effect_treated,
+            self.se_direct_treated,
+            self.ci_direct_treated.0,
+            self.ci_direct_treated.1,
+            self.p_direct_treated,
+            stars(self.p_direct_treated)
+        )?;
+
+        writeln!(
+            f,
+            "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
+            "Indirect δ(0)",
+            self.indirect_effect_control,
+            self.se_indirect_control,
+            self.ci_indirect_control.0,
+            self.ci_indirect_control.1,
+            self.p_indirect_control,
+            stars(self.p_indirect_control)
+        )?;
+
+        writeln!(
+            f,
             "─────────────────────────────────────────────────────────────"
+        )?;
+        writeln!(
+            f,
+            "NDE = θ(0), NIE = δ(1); Total = θ(0) + δ(1) = θ(1) + δ(0) (Huber 2014)"
         )?;
         writeln!(f)?;
         writeln!(
@@ -256,15 +303,20 @@ impl fmt::Display for MediationResult {
 /// ```
 ///
 /// Where:
-/// - NDE = E[Y(1,M(0))] - E[Y(0,M(0))]: effect of treatment holding mediator at control level
-/// - NIE = E[Y(1,M(1))] - E[Y(1,M(0))]: effect of mediator change under treatment
+/// - NDE = θ(0) = E[Y(1,M(0))] - E[Y(0,M(0))]: effect of treatment holding mediator at control level
+/// - NIE = δ(1) = E[Y(1,M(1))] - E[Y(1,M(0))]: effect of mediator change under treatment
+///
+/// The reverse decomposition ATE = θ(1) + δ(0), with θ(1) = E[Y(1,M(1))] - E[Y(0,M(1))] and
+/// δ(0) = E[Y(0,M(1))] - E[Y(0,M(0))], is reported as well; the two differ when treatment
+/// and mediator interact. With p = P(D = 1 | X) and pM = P(D = 1 | M, X), the four means are
+/// Hajek-normalised IPW means with weights D/p (E[Y(1,M(1))]), (1-D)/(1-p) (E[Y(0,M(0))]),
+/// D (1-pM)/(pM (1-p)) (E[Y(1,M(0))]) and (1-D) pM/((1-pM) p) (E[Y(0,M(1))]) (Huber 2014).
 ///
 /// # Key Assumptions
 ///
 /// 1. **Sequential ignorability**: Treatment assignment and mediator are ignorable
 ///    given observed covariates
-/// 2. **No treatment-mediator interaction** (for simple decomposition)
-/// 3. **Positivity**: All units have positive probability of treatment and mediator values
+/// 2. **Positivity**: All units have positive probability of treatment and mediator values
 ///
 /// # Missing values and column types
 ///
@@ -332,6 +384,8 @@ pub fn run_mediation_analysis(
         total,
         direct,
         indirect,
+        direct_treated,
+        indirect_control,
         keep_idx,
         notes: fit_notes,
     } = compute_mediation_effects(y, d, m, &x, config.trim, &names)?;
@@ -366,6 +420,8 @@ pub fn run_mediation_analysis(
         total: boot_total,
         direct: boot_direct,
         indirect: boot_indirect,
+        direct_treated: boot_direct_treated,
+        indirect_control: boot_indirect_control,
         failed,
         first_error,
         warned,
@@ -375,11 +431,15 @@ pub fn run_mediation_analysis(
     let (se_total, ci_total) = bootstrap_stats(&boot_total)?;
     let (se_direct, ci_direct) = bootstrap_stats(&boot_direct)?;
     let (se_indirect, ci_indirect) = bootstrap_stats(&boot_indirect)?;
+    let (se_direct_treated, ci_direct_treated) = bootstrap_stats(&boot_direct_treated)?;
+    let (se_indirect_control, ci_indirect_control) = bootstrap_stats(&boot_indirect_control)?;
 
     // Compute p-values (two-sided test of H0: effect = 0)
     let p_total = compute_p_value(total, se_total);
     let p_direct = compute_p_value(direct, se_direct);
     let p_indirect = compute_p_value(indirect, se_indirect);
+    let p_direct_treated = compute_p_value(direct_treated, se_direct_treated);
+    let p_indirect_control = compute_p_value(indirect_control, se_indirect_control);
 
     // Proportion mediated (never clamped)
     let proportion_mediated = if total == 0.0 {
@@ -402,16 +462,24 @@ pub fn run_mediation_analysis(
         total_effect: total,
         direct_effect: direct,
         indirect_effect: indirect,
+        direct_effect_treated: direct_treated,
+        indirect_effect_control: indirect_control,
         proportion_mediated,
         se_total,
         se_direct,
         se_indirect,
+        se_direct_treated,
+        se_indirect_control,
         ci_total,
         ci_direct,
         ci_indirect,
+        ci_direct_treated,
+        ci_indirect_control,
         p_total,
         p_direct,
         p_indirect,
+        p_direct_treated,
+        p_indirect_control,
         n_obs,
         n_trimmed,
         missing: cols.missing().clone(),
@@ -419,11 +487,13 @@ pub fn run_mediation_analysis(
     })
 }
 
-/// Bootstrap draws of the three effects and the replicate accounting.
+/// Bootstrap draws of the five effects and the replicate accounting.
 struct BootDraws {
     total: Vec<f64>,
     direct: Vec<f64>,
     indirect: Vec<f64>,
+    direct_treated: Vec<f64>,
+    indirect_control: Vec<f64>,
     failed: usize,
     first_error: Option<String>,
     warned: usize,
@@ -447,6 +517,8 @@ fn bootstrap_draws(
         total: resource::try_with_capacity::<f64>(n_boot, what)?,
         direct: resource::try_with_capacity::<f64>(n_boot, what)?,
         indirect: resource::try_with_capacity::<f64>(n_boot, what)?,
+        direct_treated: resource::try_with_capacity::<f64>(n_boot, what)?,
+        indirect_control: resource::try_with_capacity::<f64>(n_boot, what)?,
         failed: 0,
         first_error: None,
         warned: 0,
@@ -473,10 +545,12 @@ fn bootstrap_draws(
 
         // Compute effects on bootstrap sample (no further trimming)
         match compute_mediation_effects(&y_boot, &d_boot, &m_boot, &x_boot, 0.0, names) {
-            Ok(e) if e.total.is_finite() && e.direct.is_finite() && e.indirect.is_finite() => {
+            Ok(e) if e.is_finite() => {
                 out.total.push(e.total);
                 out.direct.push(e.direct);
                 out.indirect.push(e.indirect);
+                out.direct_treated.push(e.direct_treated);
+                out.indirect_control.push(e.indirect_control);
                 if let Some(first) = e.notes.into_iter().next() {
                     out.warned += 1;
                     out.first_warning.get_or_insert(first);
@@ -511,13 +585,29 @@ fn require_usable(d: &BootDraws, requested: usize) -> EconResult<()> {
 }
 
 /// The IPW effects of one sample, the rows kept after trimming and the propensity-model
-/// notes.
+/// notes. `direct` is θ(0), `indirect` δ(1), `direct_treated` θ(1), `indirect_control` δ(0).
 struct Effects {
     total: f64,
     direct: f64,
     indirect: f64,
+    direct_treated: f64,
+    indirect_control: f64,
     keep_idx: Vec<usize>,
     notes: Vec<String>,
+}
+
+impl Effects {
+    fn is_finite(&self) -> bool {
+        [
+            self.total,
+            self.direct,
+            self.indirect,
+            self.direct_treated,
+            self.indirect_control,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+    }
 }
 
 /// Compute mediation effects using IPW.
@@ -569,79 +659,42 @@ fn compute_mediation_effects(
         });
     }
 
-    // Step 4: Compute IPW estimates following Huber (2014)
-    //
-    // Total Effect (ATE):
-    //   E[D*Y/p(X)] - E[(1-D)*Y/(1-p(X))]
-    //
-    // For the mediated effects, we use the following identification:
-    //
-    // NDE (Natural Direct Effect) under d=1:
-    //   θ(1) = E[D*Y/p(X)] - E[(1-D)*p(M,X)*Y / ((1-p(X))*(1-p(M,X)))]
-    //
-    // This compares treated outcomes to a reweighted control group where
-    // the mediator distribution is shifted to match the treated distribution.
-
-    let mut sum_w1_y = 0.0;
-    let mut sum_w1 = 0.0;
-    let mut sum_w0_y = 0.0;
-    let mut sum_w0 = 0.0;
-    let mut sum_w0_nde_y = 0.0;
-    let mut sum_w0_nde = 0.0;
-
+    // Step 4: Huber's (2014) normalised IPW means, with p = p(X) and pM = p(M, X):
+    //   E[Y(1,M(1))]: D / p                 E[Y(0,M(0))]: (1-D) / (1-p)
+    //   E[Y(1,M(0))]: D (1-pM) / (pM (1-p)) E[Y(0,M(1))]: (1-D) pM / ((1-pM) p)
+    // [sum w y, sum w] for y11, y00, y10, y01
+    let mut acc = [[0.0_f64; 2]; 4];
     for &i in &keep_idx {
-        let yi = y[i];
-        let di = d[i];
-        let ps1 = ps_x[i];
-        let ps2 = ps_mx[i];
-
-        if di >= 0.5 {
-            // Treated observation
-            let w = 1.0 / ps1;
-            sum_w1_y += w * yi;
-            sum_w1 += w;
+        let (yi, p, pm) = (y[i], ps_x[i], ps_mx[i]);
+        let (w, slots) = if d[i] >= 0.5 {
+            ([1.0 / p, (1.0 - pm) / (pm * (1.0 - p))], [0, 2])
         } else {
-            // Control observation
-            let w_ate = 1.0 / (1.0 - ps1);
-            sum_w0_y += w_ate * yi;
-            sum_w0 += w_ate;
-
-            // NDE weight: reweight controls by ratio of propensity scores
-            // This shifts the mediator distribution in the control group
-            // to match what it would be if they were treated
-            let w_nde = ps2 / ((1.0 - ps1) * (1.0 - ps2));
-            sum_w0_nde_y += w_nde * yi;
-            sum_w0_nde += w_nde;
+            ([1.0 / (1.0 - p), pm / ((1.0 - pm) * p)], [1, 3])
+        };
+        for (wj, slot) in w.into_iter().zip(slots) {
+            acc[slot][0] += wj * yi;
+            acc[slot][1] += wj;
         }
     }
 
-    if !(sum_w1 > 0.0 && sum_w0 > 0.0 && sum_w0_nde > 0.0) {
+    if !acc.iter().all(|a| a[1] > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "mediation needs treated and control units after trimming (treated weight {sum_w1}, control weight {sum_w0})"
+                "mediation needs a positive weight sum for each potential-outcome mean after \
+                 trimming (weights E[Y(1,M(1))] {}, E[Y(0,M(0))] {}, E[Y(1,M(0))] {}, \
+                 E[Y(0,M(1))] {})",
+                acc[0][1], acc[1][1], acc[2][1], acc[3][1]
             ),
         });
     }
 
-    // Normalized (Hajek) estimates
-    let mu1 = sum_w1_y / sum_w1;
-    let mu0 = sum_w0_y / sum_w0;
-    let mu0_nde = sum_w0_nde_y / sum_w0_nde;
-
-    // Total effect (ATE)
-    let total = mu1 - mu0;
-
-    // Natural direct effect (NDE): effect of treatment holding mediator at M(0)
-    // Comparing treated to reweighted controls with shifted mediator distribution
-    let direct = mu1 - mu0_nde;
-
-    // Natural indirect effect (NIE) = Total - Direct
-    let indirect = total - direct;
-
+    let [y11, y00, y10, y01] = acc.map(|a| a[0] / a[1]);
     Ok(Effects {
-        total,
-        direct,
-        indirect,
+        total: y11 - y00,
+        direct: y10 - y00,
+        indirect: y11 - y10,
+        direct_treated: y11 - y01,
+        indirect_control: y01 - y00,
         keep_idx,
         notes,
     })
@@ -689,6 +742,12 @@ mod tests {
     use crate::resource::{self, Budget, CancelToken};
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// `validation/datasets/generated/<file>` as data only (no R value is compared).
+    fn generated_data(file: &str) -> crate::data::Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{file}"));
+        crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
 
     fn expect_invalid_spec(err: EconError, needle: &str) {
         match err {
@@ -961,6 +1020,76 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_mediation_huber_decomposition() {
+        // Huber (2014): total, theta(0) (NDE), delta(1) (NIE), theta(1), delta(0), and the kept
+        // count, at trim 0 and 0.05 (case mediation_huber_sim). Fails before: the direct
+        // effect used a weight that identifies neither theta(0) nor theta(1).
+        let (case, ds) = crate::test_support::load_case("mediation_huber_sim");
+        for (trim, s) in [(0.0, "trim0"), (0.05, "trim05")] {
+            let c = MediationConfig {
+                bootstrap: 2,
+                trim,
+                seed: Some(1),
+            };
+            let r = run_mediation_analysis(&ds, "y", "d", "m", &["x1", "x2"], c).unwrap();
+            // glm.fit to epsilon 1e-10 here vs R 1e-14
+            let tol = Tol::iterative(1e-8);
+            Check::new(&case)
+                .scalar(&format!("total_{s}"), r.total_effect, tol)
+                .scalar(&format!("theta0_{s}"), r.direct_effect, tol)
+                .scalar(&format!("delta1_{s}"), r.indirect_effect, tol)
+                .scalar(&format!("theta1_{s}"), r.direct_effect_treated, tol)
+                .scalar(&format!("delta0_{s}"), r.indirect_effect_control, tol)
+                .scalar(&format!("kept_{s}"), r.n_obs as f64, Tol::exact())
+                .finish();
+        }
+    }
+
+    #[test]
+    fn test_mediation_both_decompositions_add_up() {
+        let ds = generated_data("mediation_huber_sim.csv");
+        let c = MediationConfig {
+            bootstrap: 2,
+            trim: 0.05,
+            seed: Some(1),
+        };
+        let r = run_mediation_analysis(&ds, "y", "d", "m", &["x1", "x2"], c).unwrap();
+        let t = r.total_effect;
+        assert!((r.direct_effect + r.indirect_effect - t).abs() < 1e-12);
+        assert!((r.direct_effect_treated + r.indirect_effect_control - t).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_mediation_bootstrap_carries_all_four() {
+        let ds = generated_data("mediation_huber_sim.csv");
+        let c = MediationConfig {
+            bootstrap: 99,
+            trim: 0.05,
+            seed: Some(42),
+        };
+        let r = run_mediation_analysis(&ds, "y", "d", "m", &["x1", "x2"], c).unwrap();
+        for (se, ci, p) in [
+            (r.se_direct, r.ci_direct, r.p_direct),
+            (r.se_indirect, r.ci_indirect, r.p_indirect),
+            (r.se_direct_treated, r.ci_direct_treated, r.p_direct_treated),
+            (
+                r.se_indirect_control,
+                r.ci_indirect_control,
+                r.p_indirect_control,
+            ),
+        ] {
+            assert!(se.is_finite() && se > 0.0, "se {se}");
+            assert!(ci.0 < ci.1, "ci {ci:?}");
+            assert!((0.0..=1.0).contains(&p), "p {p}");
+        }
+        let text = r.to_string();
+        assert!(
+            text.contains("Direct θ(1)") && text.contains("Indirect δ(0)"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn test_mediation_display() {
         let ds = create_mediation_validation_dataset();
 
@@ -1073,8 +1202,9 @@ mod tests {
 
     #[test]
     fn test_mediation_recovers_dgp() {
-        // No R value: the direct and indirect effects are not checked against the DGP
-        // because the NDE weight is CAUS-26 (Tier 4); the emulated total effect is 0.590.
+        // No R value: only the total effect is checked against the DGP here (the emulated
+        // total effect is 0.590); the direct and indirect effects are pinned by
+        // test_validate_mediation_huber_decomposition.
 
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -1451,8 +1581,8 @@ mod tests {
             .scalar("ipw_yo_total", r.total_effect, Tol::iterative(1e-8))
             .scalar("ipw_yo_kept", r.n_obs as f64, Tol::exact())
             .finish();
-        // never clamped: with today's NDE weight (CAUS-26, Tier 4) NIE/TE is -7.891 (R
-        // emulation); it was shown as -1
+        // never clamped: with Huber's weights NIE/TE = delta(1)/total is -2.993 here (R, the
+        // case formulas of mediation_huber_sim on this data); it was shown as -1
         assert_eq!(
             r.proportion_mediated.to_bits(),
             (r.indirect_effect / r.total_effect).to_bits()

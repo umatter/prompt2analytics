@@ -90,6 +90,7 @@ use std::fmt;
 
 use crate::econometrics::glm::{GlmLink, bound, fit_propensity, plogis};
 use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::ndarray_to_faer;
 use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
 use crate::options::Choices;
 use crate::regression::glmnet::{GlmnetConfig, glmnet, glmnet_predict};
@@ -97,6 +98,7 @@ use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided, z_critical};
+use faer::linalg::solvers::Solve;
 
 // =============================================================================
 // Configuration Types
@@ -1294,28 +1296,6 @@ fn create_fold_assignments(n: usize, k_folds: usize, seed: u64) -> Vec<usize> {
     fold_ids
 }
 
-/// Add intercept column (column of ones) to design matrix.
-fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
-    let n = x.nrows();
-    let p = x.ncols();
-
-    let mut x_with_intercept = Array2::zeros((n, p + 1));
-
-    // First column is intercept
-    for i in 0..n {
-        x_with_intercept[[i, 0]] = 1.0;
-    }
-
-    // Copy original columns
-    for i in 0..n {
-        for j in 0..p {
-            x_with_intercept[[i, j + 1]] = x[[i, j]];
-        }
-    }
-
-    x_with_intercept
-}
-
 // =============================================================================
 // Cross-fitting
 // =============================================================================
@@ -1685,28 +1665,22 @@ impl RidgeFit {
         self.usable.len() <= self.z.nrows()
     }
 
-    /// `(Z'Z / n + l2 I)^-1 Z'yc / n`.
+    /// `(Z'Z / n + l2 I)^-1 Z'yc / n`, with `gram` = Z'Z / n (at most as many columns as rows).
     fn solve_primal(&self, yc: &Array1<f64>, l2: f64) -> EconResult<Array1<f64>> {
+        debug_assert!(self.primal(), "the primal solve needs Z'Z / n");
         let nf = yc.len() as f64;
-        let mut a = if self.primal() {
-            self.gram.clone()
-        } else {
-            self.z.t().dot(&self.z) / nf
-        };
+        let mut a = self.gram.clone();
         a.diag_mut().mapv_inplace(|v| v + l2);
-        spd_solve(a, self.z.t().dot(yc) / nf)
+        spd_solve(&a, &(self.z.t().dot(yc) / nf))
     }
 
-    /// `Z' (Z Z' / n + l2 I)^-1 yc / n`.
+    /// `Z' (Z Z' / n + l2 I)^-1 yc / n`, with `gram` = Z Z' / n (more columns than rows).
     fn solve_dual(&self, yc: &Array1<f64>, l2: f64) -> EconResult<Array1<f64>> {
+        debug_assert!(!self.primal(), "the dual solve needs Z Z' / n");
         let nf = yc.len() as f64;
-        let mut a = if self.primal() {
-            self.z.dot(&self.z.t()) / nf
-        } else {
-            self.gram.clone()
-        };
+        let mut a = self.gram.clone();
         a.diag_mut().mapv_inplace(|v| v + l2);
-        let w = spd_solve(a, yc / nf)?;
+        let w = spd_solve(&a, &(yc / nf))?;
         Ok(self.z.t().dot(&w))
     }
 
@@ -1736,46 +1710,23 @@ impl RidgeFit {
     }
 }
 
-/// Solve `a x = b` for a symmetric positive definite `a` by Cholesky.
-fn spd_solve(mut a: Array2<f64>, mut b: Array1<f64>) -> EconResult<Array1<f64>> {
-    let m = a.nrows();
-    for j in 0..m {
-        let mut d = a[[j, j]];
-        for k in 0..j {
-            d -= a[[j, k]] * a[[j, k]];
-        }
-        if d.is_nan() || d <= 0.0 {
-            return Err(EconError::SingularMatrix {
-                context: "ridge learner: the penalised Gram matrix is not positive definite"
-                    .to_string(),
-                suggestion: "use a larger lambda or rescale the covariates".to_string(),
-            });
-        }
-        let d = d.sqrt();
-        a[[j, j]] = d;
-        for i in j + 1..m {
-            let mut s = a[[i, j]];
-            for k in 0..j {
-                s -= a[[i, k]] * a[[j, k]];
-            }
-            a[[i, j]] = s / d;
-        }
+/// Solve `a x = b` for a symmetric positive definite `a` by faer's Cholesky factorisation.
+fn spd_solve(a: &Array2<f64>, b: &Array1<f64>) -> EconResult<Array1<f64>> {
+    let not_pd = || EconError::SingularMatrix {
+        context: "ridge learner: the penalised Gram matrix is not positive definite".to_string(),
+        suggestion: "use a larger lambda or rescale the covariates".to_string(),
+    };
+    resource::checkpoint()?;
+    let chol = ndarray_to_faer(&a.view())
+        .llt(faer::Side::Lower)
+        .map_err(|_| not_pd())?;
+    let rhs = faer::Mat::from_fn(b.len(), 1, |i, _| b[i]);
+    let x = chol.solve(&rhs);
+    let out = Array1::from_iter((0..b.len()).map(|i| x[(i, 0)]));
+    if out.iter().any(|v| !v.is_finite()) {
+        return Err(not_pd());
     }
-    for i in 0..m {
-        let mut s = b[i];
-        for k in 0..i {
-            s -= a[[i, k]] * b[k];
-        }
-        b[i] = s / a[[i, i]];
-    }
-    for i in (0..m).rev() {
-        let mut s = b[i];
-        for k in i + 1..m {
-            s -= a[[k, i]] * b[k];
-        }
-        b[i] = s / a[[i, i]];
-    }
-    Ok(b)
+    Ok(out)
 }
 
 // =============================================================================
@@ -1939,21 +1890,6 @@ mod tests {
         for c in counts {
             assert!((15..=25).contains(&c), "Fold count {} is unbalanced", c);
         }
-    }
-
-    #[test]
-    fn test_add_intercept() {
-        let x = Array2::from_shape_vec((3, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let x_int = add_intercept(&x.view());
-
-        assert_eq!(x_int.dim(), (3, 3));
-        // First column should be ones
-        assert!((x_int[[0, 0]] - 1.0).abs() < 1e-10);
-        assert!((x_int[[1, 0]] - 1.0).abs() < 1e-10);
-        assert!((x_int[[2, 0]] - 1.0).abs() < 1e-10);
-        // Original values preserved
-        assert!((x_int[[0, 1]] - 1.0).abs() < 1e-10);
-        assert!((x_int[[0, 2]] - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -2768,11 +2704,100 @@ mod tests {
         let yw = y.slice(ndarray::s![..30]).to_owned();
         let fit = RidgeFit::new(wide.view(), true).unwrap();
         let (yc, _, ys) = fit.response(yw.view()).unwrap();
-        let primal = fit.solve_primal(&yc, 0.05 / ys).unwrap();
+        let nf = yc.len() as f64;
+        let mut a = fit.z.t().dot(&fit.z) / nf;
+        a.diag_mut().mapv_inplace(|v| v + 0.05 / ys);
+        let primal = spd_solve(&a, &(fit.z.t().dot(&yc) / nf)).unwrap();
         let dual = fit.solve_dual(&yc, 0.05 / ys).unwrap();
         for (a, e) in primal.iter().zip(dual.iter()) {
             assert!(Tol::new(1e-10, 1e-14).allows(*a, *e), "{a} vs {e}");
         }
+    }
+
+    /// The hand-written Cholesky solve the ridge learner used before faer's.
+    fn reference_spd_solve(mut a: Array2<f64>, mut b: Array1<f64>) -> EconResult<Array1<f64>> {
+        let m = a.nrows();
+        for j in 0..m {
+            let mut d = a[[j, j]];
+            for k in 0..j {
+                d -= a[[j, k]] * a[[j, k]];
+            }
+            if d.is_nan() || d <= 0.0 {
+                return Err(EconError::SingularMatrix {
+                    context: "ridge learner: the penalised Gram matrix is not positive definite"
+                        .to_string(),
+                    suggestion: "use a larger lambda or rescale the covariates".to_string(),
+                });
+            }
+            let d = d.sqrt();
+            a[[j, j]] = d;
+            for i in j + 1..m {
+                let mut s = a[[i, j]];
+                for k in 0..j {
+                    s -= a[[i, k]] * a[[j, k]];
+                }
+                a[[i, j]] = s / d;
+            }
+        }
+        for i in 0..m {
+            let mut s = b[i];
+            for k in 0..i {
+                s -= a[[i, k]] * b[k];
+            }
+            b[i] = s / a[[i, i]];
+        }
+        for i in (0..m).rev() {
+            let mut s = b[i];
+            for k in i + 1..m {
+                s -= a[[k, i]] * b[k];
+            }
+            b[i] = s / a[[i, i]];
+        }
+        Ok(b)
+    }
+
+    #[test]
+    fn test_doubleml_ridge_faer_cholesky_matches_the_hand_solve() {
+        // faer's Cholesky against the hand-written solve it replaced, on the PLR fixture's
+        // training design (primal) and on a wide design (dual), relative 1e-12
+        let ds = sim();
+        let (y, x) = (col(&ds, "y"), covariates(&ds));
+        let check = |x: ArrayView2<f64>, y: ArrayView1<f64>| {
+            let fit = RidgeFit::new(x, true).unwrap();
+            let (yc, _, ys) = fit.response(y).unwrap();
+            let nf = yc.len() as f64;
+            let mut a = fit.gram.clone();
+            a.diag_mut().mapv_inplace(|v| v + 0.05 / ys);
+            let rhs = if fit.primal() {
+                fit.z.t().dot(&yc) / nf
+            } else {
+                &yc / nf
+            };
+            let ours = spd_solve(&a, &rhs).unwrap();
+            let theirs = reference_spd_solve(a.clone(), rhs.clone()).unwrap();
+            for (u, v) in ours.iter().zip(theirs.iter()) {
+                assert!(Tol::new(1e-12, 0.0).allows(*u, *v), "{u} vs {v}");
+            }
+            fit.primal()
+        };
+        assert!(check(x.view(), y.view()));
+        let sub = x.slice(ndarray::s![..8, ..]).to_owned();
+        let wide = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[
+                sub.view(),
+                sub.mapv(|v| v * v).view(),
+                sub.mapv(f64::sin).view(),
+            ],
+        )
+        .unwrap();
+        assert!(!check(wide.view(), y.slice(ndarray::s![..8])));
+        // not positive definite: the SingularMatrix text
+        let bad = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 2.0, 1.0]).unwrap();
+        assert!(matches!(
+            spd_solve(&bad, &Array1::ones(2)),
+            Err(EconError::SingularMatrix { .. })
+        ));
     }
 
     /// IRM on the case data with the case folds.

@@ -326,6 +326,13 @@ pub struct DiDRequest {
     )]
     #[serde(default, alias = "cluster", alias = "cluster_id")]
     pub cluster_var: Option<String>,
+
+    /// Optional control covariates
+    #[schemars(
+        description = "Optional control covariate columns added to the DiD regression (y ~ treat + post + treat:post + controls)."
+    )]
+    #[serde(default, alias = "covariates")]
+    pub controls: Option<Vec<String>>,
 }
 
 /// Request for Callaway-Sant'Anna staggered DiD estimation.
@@ -596,7 +603,7 @@ pub struct DoublyRobustRequest {
 
     /// Number of bootstrap replications for standard errors
     #[schemars(
-        description = "Bootstrap replicates for 'ipw' and 'regression' (default 999; seeded by the session seed): the replicates reuse the fitted propensity scores (ipw) or outcome predictions (regression), so the SE ignores their estimation. AIPW reports the analytic influence-function SE and runs no replicates."
+        description = "Bootstrap replicates for 'ipw' and 'regression' (default 999; seeded by the session seed, else 42). Each replicate resamples every row, refits the propensity model and the outcome models and re-applies the trimming. 0 gives analytic SEs: the M-estimation SE with the propensity estimated ('ipw') or the stacked-estimating-equation sandwich with the trimmed set fixed ('regression'); 1 is an error. AIPW reports the analytic influence-function SE and runs no replicates."
     )]
     pub bootstrap: Option<usize>,
 }
@@ -746,9 +753,15 @@ pub struct WeightItRequest {
 
     /// Trimming quantile for extreme weights
     #[schemars(
-        description = "Quantile at which extreme weights are trimmed (e.g. 0.99 trims at the 1st and 99th percentiles). Default 1.0 (no trimming). Must be in (0.5, 1]."
+        description = "Cap weights above this quantile of the weights outside the focal group (the controls for ATT, the treated for ATC, all units for ATE), as WeightIt::trim. Default 1.0 (no trimming). Must be in (0.5, 1]."
     )]
     pub trim_quantile: Option<f64>,
+
+    /// Also trim the lower tail
+    #[schemars(
+        description = "Also raise weights below the (1 - trim_quantile) quantile to it, as WeightIt::trim(lower = TRUE). Default false."
+    )]
+    pub trim_lower: Option<bool>,
 }
 
 /// Request for entropy balancing.
@@ -868,8 +881,10 @@ pub struct TwangRequest {
     )]
     pub shrinkage: Option<f64>,
 
-    /// Balance threshold for early stopping (default: 0.1)
-    #[schemars(description = "Balance threshold below which to stop early. Default is 0.1.")]
+    /// Optional early-stop balance threshold
+    #[schemars(
+        description = "Optional early stop: stop at the first iteration whose balance criterion falls below this value. By default every iteration up to n_trees is evaluated and the balance-optimal one is chosen."
+    )]
     pub balance_threshold: Option<f64>,
 }
 
@@ -1158,13 +1173,13 @@ pub struct StdRegRequest {
 
     /// SE method: 'bootstrap' (default), 'delta', or 'sandwich'
     #[schemars(
-        description = "Standard errors: 'bootstrap' (default), 'delta' or 'sandwich' ('robust'). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Standard errors over the estimand's units: 'bootstrap' (default), 'delta' (model covariance plus the averaging term) or 'sandwich' ('robust'; stacked estimating equations, HC0). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub se_method: Option<String>,
 
     /// Number of bootstrap replications (if using bootstrap SE)
     #[schemars(
-        description = "Number of bootstrap replications for SE estimation. Default is 999."
+        description = "Number of bootstrap replications for SE estimation, seeded by the session seed, else 42. Default is 999."
     )]
     pub n_bootstrap: Option<usize>,
 

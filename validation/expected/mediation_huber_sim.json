@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "mediation_huber_sim",
+  "area": "econometrics/mediation",
+  "method": "Huber (2014) IPW mediation: total, theta(0) (NDE), delta(1) (NIE), theta(1), delta(0) and the four potential-outcome means, trim 0 and 0.05, treatment-mediator interaction",
+  "reference": "Huber (2014) normalised IPW weights with glm(binomial, epsilon 1e-14) propensities p(X) and p(M, X) (causalweight::medweight's effects; causalweight not installed, written out), p2a's trimming rule",
+  "call": "glm(d ~ x1 + x2, binomial); glm(d ~ x1 + x2 + m, binomial); weighted means of y",
+  "dataset": "validation/datasets/generated/mediation_huber_sim.csv",
+  "datasets": ["validation/datasets/generated/mediation_huber_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "total_trim0": 1.6936937791788349,
+    "theta0_trim0": 0.57396705580203156,
+    "delta1_trim0": 1.1197267233768033,
+    "theta1_trim0": 1.2305951663827461,
+    "delta0_trim0": 0.46309861279608877,
+    "means_trim0": [2.9139717871334687, 1.7942450637566654, 1.2202780079546338, 1.6833766207507226],
+    "kept_trim0": 800,
+    "total_trim05": 1.640696229969042,
+    "theta0_trim05": 0.56549052818918155,
+    "delta1_trim05": 1.0752057017798604,
+    "theta1_trim05": 1.1805747909068511,
+    "delta0_trim05": 0.46012143906219083,
+    "means_trim05": [2.8644211959422434, 1.789215494162383, 1.2237249659732015, 1.6838464050353923],
+    "kept_trim05": 792,
+    "n": 800,
+    "n_treated": 426
+  }
+}

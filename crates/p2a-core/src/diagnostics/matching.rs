@@ -273,23 +273,40 @@ pub fn ipw_diagnostics(result: &IpwResult) -> IdentificationReport {
     report
 }
 
-/// Check positivity assumption using propensity score distribution.
+/// Level of one tail of the propensity distribution: 0 none, 1 potential (within
+/// [`EXTREME_PS_THRESHOLD`] of the boundary), 2 likely (within 0.01). `distance` is the
+/// distance of the extreme score from its boundary (the minimum, or 1 - the maximum).
+fn tail_level(distance: f64) -> u8 {
+    if distance < 0.01 {
+        2
+    } else if distance < EXTREME_PS_THRESHOLD {
+        1
+    } else {
+        0
+    }
+}
+
+/// Check the positivity assumption from the propensity score distribution.
+///
+/// Positivity from the fitted propensity scores before trimming (`ps_summary_untrimmed`; the
+/// kept units' summary for a result that does not carry it): the status is the worse of the
+/// two tails.
 fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
-    let ps_summary = &result.ps_summary;
+    let ps_summary = result
+        .ps_summary_untrimmed
+        .as_ref()
+        .unwrap_or(&result.ps_summary);
     let ps_min = ps_summary.min;
     let ps_max = ps_summary.max;
 
-    // Check for extreme propensity scores
-    let has_extreme_low = ps_min < EXTREME_PS_THRESHOLD;
-    let has_extreme_high = ps_max > (1.0 - EXTREME_PS_THRESHOLD);
+    let (low, high) = (tail_level(ps_min), tail_level(1.0 - ps_max));
+    let has_extreme_low = low > 0;
+    let has_extreme_high = high > 0;
 
-    // Determine status
-    let status = if !has_extreme_low && !has_extreme_high {
-        AssumptionStatus::NoViolation
-    } else if (has_extreme_low && ps_min > 0.01) || (has_extreme_high && ps_max < 0.99) {
-        AssumptionStatus::PotentialViolation
-    } else {
-        AssumptionStatus::LikelyViolation
+    let status = match low.max(high) {
+        0 => AssumptionStatus::NoViolation,
+        1 => AssumptionStatus::PotentialViolation,
+        _ => AssumptionStatus::LikelyViolation,
     };
 
     report.add_assumption(Assumption::testable(
@@ -299,7 +316,7 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
     ));
 
     if has_extreme_low || has_extreme_high {
-        let severity = if ps_min < 0.01 || ps_max > 0.99 {
+        let severity = if low.max(high) == 2 {
             WarningSeverity::Warning
         } else {
             WarningSeverity::Caution
@@ -313,11 +330,36 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             issue_parts.push(format!("max = {:.4}", ps_max));
         }
 
-        // Compute implied maximum weight (for ATE weighting)
-        let max_weight = if ps_min > 0.0 && ps_max < 1.0 {
-            f64::max(1.0 / ps_min, 1.0 / (1.0 - ps_max))
+        // Largest ATE weight the scores imply: before trimming from the untrimmed summary,
+        // and, when units were trimmed, the largest weight the estimator actually used.
+        let implied_max_weight = |min: f64, max: f64| {
+            if min > 0.0 && max < 1.0 {
+                f64::max(1.0 / min, 1.0 / (1.0 - max))
+            } else {
+                f64::INFINITY
+            }
+        };
+        let max_weight = implied_max_weight(ps_min, ps_max);
+        let weights = if result.ps_summary_untrimmed.is_some() && result.trim > 0.0 {
+            format!(
+                "IPW weights up to ≈ {:.1} before trimming; the kept units' largest weight is \
+                 ≈ {:.1}",
+                max_weight,
+                implied_max_weight(result.ps_summary.min, result.ps_summary.max)
+            )
         } else {
-            f64::INFINITY
+            format!("IPW weights up to ≈ {max_weight:.1}")
+        };
+
+        let n_all = result.n_obs + result.n_trimmed;
+        let trimming = if result.trim > 0.0 {
+            let share = 100.0 * result.n_trimmed as f64 / n_all.max(1) as f64;
+            format!(
+                "trimmed at {}: {} of {} units ({:.1}%) dropped",
+                result.trim, result.n_trimmed, n_all, share
+            )
+        } else {
+            "no trimming".to_string()
         };
 
         let warning = IdentificationWarning::new(
@@ -325,13 +367,12 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             severity,
             "Extreme Propensity Scores Detected",
             format!(
-                "Propensity scores approach boundary values ({}), indicating near-deterministic \
-                 treatment assignment for some units. This implies extreme IPW weights \
-                 (max ≈ {:.1}) where a few observations dominate the estimate. Trimmed \
-                 propensity scores were used (threshold: {:.2}).",
+                "Propensity scores before trimming approach boundary values ({}), indicating \
+                 near-deterministic treatment assignment for some units. This implies extreme \
+                 {}, where a few observations dominate the estimate ({}).",
                 issue_parts.join(", "),
-                max_weight,
-                result.trim
+                weights,
+                trimming
             ),
             "Positivity",
         )
@@ -479,6 +520,7 @@ mod tests {
                 p10: ps_min + 0.05,
                 p90: ps_max - 0.05,
             },
+            ps_summary_untrimmed: None,
             mean_y_treated: 10.0,
             mean_y_control: 7.5,
             normalized: true,
@@ -553,6 +595,106 @@ mod tests {
             .find(|w| w.code == "POSITIVITY_VIOLATION");
         assert!(pos_warning.is_some());
         assert!(pos_warning.unwrap().severity >= WarningSeverity::Warning);
+    }
+
+    fn positivity_status(report: &IdentificationReport) -> AssumptionStatus {
+        report
+            .assumptions
+            .iter()
+            .find(|a| a.name == "Positivity (overlap)")
+            .expect("positivity assumption")
+            .status
+    }
+
+    #[test]
+    fn test_positivity_status_takes_the_worse_tail() {
+        // Fails before: one badly extreme tail with a mildly extreme other tail was only a
+        // potential violation.
+        for (min, max, want) in [
+            (0.005, 0.985, AssumptionStatus::LikelyViolation),
+            (0.015, 0.6, AssumptionStatus::PotentialViolation),
+            (0.4, 0.985, AssumptionStatus::PotentialViolation),
+            (0.1, 0.9, AssumptionStatus::NoViolation),
+        ] {
+            let report = ipw_diagnostics(&create_mock_ipw_result(min, max));
+            assert_eq!(positivity_status(&report), want, "({min}, {max})");
+        }
+    }
+
+    /// Scores near 0 and 1 (logit slope 4 on a standard normal covariate), seeded.
+    fn extreme_scores_dataset() -> crate::data::Dataset {
+        use polars::prelude::*;
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(20261111);
+        let n = 400;
+        let (mut y, mut d, mut x) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..n {
+            let xi: f64 = rand_distr::Distribution::sample(&rand_distr::StandardNormal, &mut rng);
+            let p = 1.0 / (1.0 + (-4.0 * xi).exp());
+            let di = if rng.r#gen::<f64>() < p { 1.0 } else { 0.0 };
+            let noise: f64 =
+                rand_distr::Distribution::sample(&rand_distr::StandardNormal, &mut rng);
+            x.push(xi);
+            d.push(di);
+            y.push(1.0 + 0.5 * di + xi + noise);
+        }
+        crate::data::Dataset::new(df! { "y" => y, "d" => d, "x" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_positivity_uses_untrimmed_scores() {
+        // Fails before: the diagnostics read the trimmed scores, which the default trim
+        // (0.05) keeps away from the 0.02 threshold, so the check could never fire.
+        use crate::econometrics::{IpwConfig, run_ipw_treatment};
+        let ds = extreme_scores_dataset();
+        let r = run_ipw_treatment(&ds, "y", "d", &["x"], IpwConfig::default()).unwrap();
+        assert!(
+            r.ps_summary.min >= 0.05,
+            "precondition: the kept scores are trimmed"
+        );
+        let untrimmed = r.ps_summary_untrimmed.as_ref().unwrap();
+        assert!(untrimmed.min < 0.01 || untrimmed.max > 0.99);
+        let report = ipw_diagnostics(&r);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "POSITIVITY_VIOLATION")
+            .expect("positivity warning");
+        assert!(w.message.contains("before trimming"), "{}", w.message);
+        // The weight the estimator used is bounded by the trim, and the message says so.
+        let kept = f64::max(1.0 / r.ps_summary.min, 1.0 / (1.0 - r.ps_summary.max));
+        assert!(kept <= 1.0 / 0.05 + 1e-9);
+        let want = format!("the kept units' largest weight is ≈ {kept:.1}");
+        assert!(w.message.contains(&want), "{}", w.message);
+        assert_eq!(
+            positivity_status(&report),
+            AssumptionStatus::LikelyViolation
+        );
+    }
+
+    #[test]
+    fn test_positivity_reports_trimmed_share() {
+        use crate::econometrics::{IpwConfig, run_ipw_treatment};
+        let ds = extreme_scores_dataset();
+        let r = run_ipw_treatment(&ds, "y", "d", &["x"], IpwConfig::default()).unwrap();
+        let n_all = r.n_obs + r.n_trimmed;
+        assert!(
+            r.n_trimmed * 10 > n_all,
+            "precondition: more than 10% trimmed"
+        );
+        let report = ipw_diagnostics(&r);
+        let msg = &report
+            .warnings
+            .iter()
+            .find(|w| w.code == "POSITIVITY_VIOLATION")
+            .unwrap()
+            .message;
+        let share = 100.0 * r.n_trimmed as f64 / n_all as f64;
+        let want = format!(
+            "trimmed at 0.05: {} of {} units ({:.1}%) dropped",
+            r.n_trimmed, n_all, share
+        );
+        assert!(msg.contains(&want), "{msg}");
     }
 
     #[test]
