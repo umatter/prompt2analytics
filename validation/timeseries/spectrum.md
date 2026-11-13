@@ -78,7 +78,24 @@ and `padding_truncates_as_r` the `trunc` of the padding.
 `SpectrumResult::confidence_interval_multipliers(level)` is R's `plot.spec` rule: the two tails are
 split in proportion to `P(X <= df)` and `P(X > df)` for `X ~ chi^2(df)`, so the multipliers are
 `df / qchisq(1 - (1 - level) P(X > df), df)` and `df / qchisq((1 - level) P(X <= df), df)`. The level
-is validated. The df that goes in is p2a's own (STAT-39, below).
+is validated.
+
+### Degrees of freedom and bandwidth
+
+As `spec.pgram`: the combined modified Daniell kernel `k` of the spans gives `df.kernel = 2 / sum(k^2)`
+and `bandwidth.kernel = sqrt(sum((1/12 + i^2) k_i))` (2 and `sqrt(1/12)` unsmoothed); the df is divided
+by the taper factor `u4 / u2^2`, `u4 = 1 - (93/128) 2 taper`, and scaled by `n / n.used`, the bandwidth
+divided by `n.used`. `_df` and `_bw` of every `stat_spectrum_t4` variant and `df`, `bandwidth`,
+`raw_df`, `raw_bandwidth` of `stat_spectrum_t3` are pinned (`Tol::se(96)`).
+
+### AR spectrum
+
+`spectrum_ar` evaluates at `spec.ar`'s grid `seq(0, 0.5, length.out = n.freq)` (frequency 0 included)
+with `ar.yw`'s `var.pred`, the Levinson innovation variance times `n / (n - (order + 1))` (the AIC
+uses the unscaled variance, as `ar.yw`). `test_validate_spectrum_ar_fixed_order` pins frequencies,
+ordinates, coefficients and `var.pred` of `spec.ar(x, n.freq = 50, order = 2)`;
+`test_validate_spectrum_ar_aic` the AIC order, ordinates and `var.pred` of `spec.ar(x, n.freq = 50)`
+(registry `spectrum_ar_t4`).
 
 **AR spectra report no interval.** R's `spec.ar` has no df. `spectrum_ar` sets df to infinity,
 `confidence_interval_multipliers` returns `Ok(None)` for it, the older `confidence_multipliers` returns
@@ -97,12 +114,6 @@ These compare no R number: `test_spectrum_sine_peak_property`, `test_raw_periodo
 `spectrum` and `spec.ar` do under `na.action = na.fail`, naming the column and the number of
 missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 ([acf.md](../stats/acf.md)).
-
-## Known Differences from R
-
-**STAT-39 (df and bandwidth):** on the case above R gives df 6.552102376599634 and bandwidth
-0.01084201041388611; p2a gives 18 and 0.03125. The interval multipliers are pinned at given df, so
-they carry p2a's df until STAT-39 is fixed.
 
 ## Performance Comparison
 

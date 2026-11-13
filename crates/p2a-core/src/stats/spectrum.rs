@@ -118,27 +118,29 @@ impl SpectrumConfig {
 /// Contains the estimated spectral density at a set of Fourier frequencies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectrumResult {
-    /// Frequency values (cycles per unit time).
-    /// Range: (0, 0.5] for normalized frequencies (Nyquist frequency = 0.5).
+    /// Frequency values (cycles per unit time): `j / n_used`, `j = 1..floor(n_used / 2)`, for a
+    /// periodogram; `seq(0, 0.5, length.out = n_freq)` for an AR spectrum.
     pub freq: Vec<f64>,
 
     /// Spectral density estimates at each frequency.
     /// Units: variance per unit frequency (or per Hz if data has time units).
     pub spec: Vec<f64>,
 
-    /// Smoothing bandwidth (in frequency units).
+    /// Smoothing bandwidth (in frequency units), R's `bandwidth`: the smoothing kernel's
+    /// `sqrt(sum((1/12 + i^2) k_i))` (`sqrt(1/12)` unsmoothed) divided by `n_used`.
     /// Larger bandwidth = more smoothing, lower variance, lower resolution.
     pub bandwidth: f64,
 
-    /// Degrees of freedom for confidence interval computation.
-    /// For smoothed periodogram: df ≈ 2 × bandwidth × n.
+    /// Degrees of freedom for confidence interval computation, R's `df`: the kernel's
+    /// `2 / sum(k^2)` (2 unsmoothed) divided by the taper factor `u4 / u2^2` and scaled by
+    /// `n_obs / n_used`.
     /// `f64::INFINITY` for AR spectra, which have no chi-square interval.
     pub df: f64,
 
     /// Number of observations in the original series.
     pub n_obs: usize,
 
-    /// Length of the padded series used for computation.
+    /// Length of the padded series used for computation (R's `n.used`).
     pub n_used: usize,
 
     /// Method used for estimation.
@@ -172,7 +174,7 @@ impl SpectrumResult {
     /// R's `stats:::plot.spec` rule (`spec.ci`): for `X ~ chi^2(df)` the tail `1 - level` is split
     /// in proportion to `P(X > df)` above and `P(X <= df)` below, so the multipliers are
     /// `df / qchisq(1 - (1 - level) P(X > df), df)` and `df / qchisq((1 - level) P(X <= df), df)`.
-    /// The df is p2a's own, which is not `spec.pgram`'s (STAT-39).
+    /// The df is `spec.pgram`'s.
     ///
     /// `Ok(None)` when the df is not finite and positive: an AR spectrum has no chi-square
     /// interval (R's `spec.ar` reports no df). A level outside (0, 1) is an error.
@@ -427,27 +429,17 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
     }
     let spec = pgram;
     let freq: Vec<f64> = (1..=half).map(|j| j as f64 / n_used as f64).collect();
-    let n_freq = half;
 
-    let (bandwidth, df) = if let Some(ref spans) = config.spans {
-        // Compute bandwidth and degrees of freedom
-        // Bandwidth = sum of span weights / n_used
-        // For modified Daniell: effective width = (span - 1)/2 at half-weight
-        let total_width: f64 = spans.iter().map(|&s| s as f64).product::<f64>().sqrt();
-        let bw = total_width / n_used as f64;
-
-        // Degrees of freedom ≈ 2 * n_used / L where L is effective kernel length
-        // For convolved Daniell kernels: df ≈ 2 * product of spans
-        let kernel_df: f64 = 2.0 * spans.iter().map(|&s| s as f64).product::<f64>();
-        let effective_df = kernel_df.min(2.0 * n_freq as f64);
-
-        (bw, effective_df)
-    } else {
-        // Raw periodogram - no smoothing
-        // df = 2 for chi-squared(2) distribution of periodogram ordinates
-        let bw = 1.0 / n_used as f64; // Frequency resolution
-        (bw, 2.0)
+    // R's df and bandwidth: those of the combined kernel (df.kernel = 2 / sum(k^2),
+    // bandwidth.kernel = sqrt(sum((1/12 + i^2) k_i)); 2 and sqrt(1/12) unsmoothed), corrected
+    // for the taper and the padding.
+    let (kernel_df, kernel_bw) = match config.spans {
+        Some(ref spans) => kernel_df_bandwidth(spans)?,
+        None => (2.0, (1.0f64 / 12.0).sqrt()),
     };
+    let u4 = 1.0 - (93.0 / 128.0) * config.taper * 2.0;
+    let df = kernel_df / (u4 / (u2 * u2)) * (n as f64 / n_used as f64);
+    let bandwidth = kernel_bw / n_used as f64;
 
     Ok(SpectrumResult {
         freq,
@@ -490,6 +482,48 @@ fn nextn(n: usize) -> Option<usize> {
         p5 *= 5;
     }
     usize::try_from(best).ok()
+}
+
+/// The degrees of freedom `2 / sum(k^2)` and bandwidth `sqrt(sum((1/12 + i^2) k_i))` of the
+/// convolution `k` of the modified Daniell kernels of `spans` (R's `df.kernel` and
+/// `bandwidth.kernel` of `kernel("modified.daniell", spans %/% 2)`). The spans are validated, so
+/// the kernel is no longer than the series.
+fn kernel_df_bandwidth(spans: &[usize]) -> EconResult<(f64, f64)> {
+    let total: usize = spans.iter().map(|s| s / 2).sum();
+    let mut k = try_vec(2 * total + 1, 0.0, "the smoothing kernel")?;
+    let mut next = try_vec(2 * total + 1, 0.0, "the smoothing kernel")?;
+    k[0] = 1.0;
+    let mut len = 1;
+    for &span in spans {
+        checkpoint()?;
+        let m = span / 2;
+        if m == 0 {
+            continue;
+        }
+        let inner = 1.0 / (2 * m) as f64;
+        let new_len = len + 2 * m;
+        next[..new_len].fill(0.0);
+        for (i, &ki) in k[..len].iter().enumerate() {
+            for j in 0..=2 * m {
+                let w = if j == 0 || j == 2 * m {
+                    0.5 * inner
+                } else {
+                    inner
+                };
+                next[i + j] += ki * w;
+            }
+        }
+        std::mem::swap(&mut k, &mut next);
+        len = new_len;
+    }
+    let half = (len - 1) as f64 / 2.0;
+    let sum_sq: f64 = k[..len].iter().map(|v| v * v).sum();
+    let moment: f64 = k[..len]
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (1.0 / 12.0 + (i as f64 - half).powi(2)) * v)
+        .sum();
+    Ok((2.0 / sum_sq, moment.sqrt()))
 }
 
 /// The mean and slope of R's `spec.pgram` detrending: the detrended value at
@@ -672,7 +706,7 @@ fn daniell_pass_mirrored(x: &[f64], n_full: usize, m: usize, out: &mut [f64]) {
 /// * `order` - `Some(k)` fits AR(k) with k clamped to `1..=n/2 - 1`; `None`
 ///   selects by AIC among orders 0 to `floor(10·log10 n)`, that maximum
 ///   clamped the same way.
-/// * `n_freq` - Number of frequency points (default: 500)
+/// * `n_freq` - Number of frequency points from 0 to 0.5 (default: 500, as R)
 ///
 /// # Mathematical Details
 ///
@@ -681,6 +715,9 @@ fn daniell_pass_mirrored(x: &[f64], n_full: usize, m: usize, out: &mut [f64]) {
 /// The spectral density is:
 ///
 /// S(f) = σ² / |1 - Σ_{k=1}^p φ_k exp(-2πi f k)|²
+///
+/// with `σ²` `ar.yw`'s prediction variance (the Levinson innovation variance times
+/// `n / (n - (p + 1))`), at R's `spec.ar` frequencies `seq(0, 0.5, length.out = n_freq)`.
 ///
 /// # Errors
 ///
@@ -735,8 +772,11 @@ pub fn spectrum_ar(
     let p = ar_coefs.len();
     let n_pts = n_freq.unwrap_or(500);
 
+    // ar.yw's var.pred: the Levinson innovation variance times n / (n - (order + 1)).
+    let var_pred = ar_var_pred(innovation_var, n, p);
+
     // Compute spectral density at frequencies
-    let (freq, spec) = ar_spectrum_grid(&ar_coefs, innovation_var, n_pts)?;
+    let (freq, spec) = ar_spectrum_grid(&ar_coefs, var_pred, n_pts)?;
 
     Ok(SpectrumResult {
         freq,
@@ -754,8 +794,9 @@ pub fn spectrum_ar(
 }
 
 /// The AR spectral density `σ² / |1 - Σ_k φ_k exp(-2πi f k)|²` at the
-/// `n_pts` frequencies `f_j = j / (2 n_pts)`, `j = 1, ..., n_pts`; returns
-/// `(freq, spec)`.
+/// `n_pts` frequencies `f_j = 0.5 j / (n_pts - 1)`, `j = 0, ..., n_pts - 1`
+/// (R's `seq(0, 0.5, length.out = n.freq)`; one point is frequency 0);
+/// returns `(freq, spec)`.
 fn ar_spectrum_grid(
     ar_coefs: &[f64],
     innovation_var: f64,
@@ -766,11 +807,15 @@ fn ar_spectrum_grid(
 
     // Each point costs O(p), and p can be as large as n / 2.
     let stride = checkpoint_stride(ar_coefs.len());
-    for j in 1..=n_pts {
+    for j in 0..n_pts {
         if j % stride == 0 {
             checkpoint()?;
         }
-        let f = j as f64 / (2.0 * n_pts as f64); // Frequencies in (0, 0.5]
+        let f = if n_pts > 1 {
+            0.5 * j as f64 / (n_pts - 1) as f64
+        } else {
+            0.0
+        };
         freq.push(f);
 
         // Compute |1 - Σ φ_k exp(-2πi f k)|²
@@ -795,9 +840,16 @@ fn ar_spectrum_grid(
     Ok((freq, spec))
 }
 
+/// `ar.yw`'s prediction variance: the Levinson innovation variance `v` of an AR(`p`) fit to `n`
+/// observations times `n / (n - (p + 1))`.
+fn ar_var_pred(v: f64, n: usize, p: usize) -> f64 {
+    v * n as f64 / (n - (p + 1)) as f64
+}
+
 /// Fit AR(p) model using Yule-Walker equations.
 ///
-/// Returns (coefficients, innovation variance)
+/// Returns (coefficients, innovation variance of the Levinson recursion, unscaled; the AIC uses
+/// it, and [`ar_var_pred`] scales it as `ar.yw`)
 fn fit_ar_yule_walker(x: &[f64], p: usize) -> EconResult<(Vec<f64>, f64)> {
     let n = x.len();
 
@@ -1573,7 +1625,9 @@ mod tests {
         ));
         // Without a budget the grid is computed as before.
         let (freq, spec) = ar_spectrum_grid(&[0.5], 2.0, 4).unwrap();
-        assert_eq!(freq, vec![0.125, 0.25, 0.375, 0.5]);
+        assert_eq!(freq, vec![0.0, 0.5 / 3.0, 1.0 / 3.0, 0.5]);
+        // f = 0: |1 - 0.5|² = 0.25
+        assert!((spec[0] - 2.0 / 0.25).abs() < 1e-12, "{spec:?}");
         // f = 0.5: |1 - 0.5 e^{-iπ}|² = 1.5² = 2.25
         assert!((spec[3] - 2.0 / 2.25).abs() < 1e-12, "{spec:?}");
     }
@@ -1800,7 +1854,9 @@ mod tests {
         check
             .vector(&format!("{key}_freq"), &r.freq, Tol::coef(96))
             .vector(&format!("{key}_spec"), &r.spec, Tol::coef(96))
-            .scalar(&format!("{key}_n_used"), r.n_used as f64, Tol::exact());
+            .scalar(&format!("{key}_n_used"), r.n_used as f64, Tol::exact())
+            .scalar(&format!("{key}_df"), r.df, Tol::se(96))
+            .scalar(&format!("{key}_bw"), r.bandwidth, Tol::se(96));
     }
 
     /// spec.pgram(x, taper = 0.1) on n = 96 and spec.pgram(z75, taper = 0) (odd n).
@@ -1884,6 +1940,79 @@ mod tests {
         );
     }
 
+    /// spec.ar(x, n.freq = 50, order = 2) and ar(x, aic = FALSE, order.max = 2) (Yule-Walker).
+    #[test]
+    fn test_validate_spectrum_ar_fixed_order() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let r = run_spectrum_ar(&ds, "x", Some(2), Some(50)).unwrap();
+        let x = extract_column(&ds, "x").unwrap();
+        let (coef, v) = fit_ar_yule_walker(&x, 2).unwrap();
+        assert_eq!(r.method, "ar(2)");
+        Check::new(&case)
+            .vector("ar2_freq", &r.freq, Tol::coef(96))
+            .vector("ar2_spec", &r.spec, Tol::coef(96))
+            .vector("ar2_coef", &coef, Tol::coef(96))
+            .scalar("ar2_var_pred", ar_var_pred(v, x.len(), 2), Tol::se(96))
+            .finish();
+    }
+
+    /// spec.ar(x, n.freq = 50) with the order chosen by AIC, and ar(x)'s var.pred.
+    #[test]
+    fn test_validate_spectrum_ar_aic() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let r = run_spectrum_ar(&ds, "x", None, Some(50)).unwrap();
+        let x = extract_column(&ds, "x").unwrap();
+        let max_order = (10.0 * (x.len() as f64).log10()).floor() as usize;
+        let (coef, v) = select_ar_order_aic(&x, max_order).unwrap();
+        assert_eq!(r.method, format!("ar({})", coef.len()));
+        Check::new(&case)
+            .scalar("aic_order", coef.len() as f64, Tol::exact())
+            .vector("aic_spec", &r.spec, Tol::coef(96))
+            .scalar(
+                "aic_var_pred",
+                ar_var_pred(v, x.len(), coef.len()),
+                Tol::se(96),
+            )
+            .finish();
+    }
+
+    /// `kernel_df_bandwidth` against direct sums over one modified Daniell kernel, and the df of the
+    /// (3, 3) convolution (1, 4, 6, 4, 1) / 16; a span of 1 is no smoothing (df 2).
+    #[test]
+    fn kernel_df_bandwidth_matches_direct_sums() {
+        for m in 1..6usize {
+            let w: Vec<f64> = (0..=2 * m)
+                .map(|j| {
+                    if j == 0 || j == 2 * m {
+                        0.25 / m as f64
+                    } else {
+                        0.5 / m as f64
+                    }
+                })
+                .collect();
+            let df = 2.0 / w.iter().map(|v| v * v).sum::<f64>();
+            let bw = w
+                .iter()
+                .enumerate()
+                .map(|(j, v)| (1.0 / 12.0 + (j as f64 - m as f64).powi(2)) * v)
+                .sum::<f64>()
+                .sqrt();
+            let (a, b) = kernel_df_bandwidth(&[2 * m + 1]).unwrap();
+            assert!(
+                (a - df).abs() <= 1e-12 * df && (b - bw).abs() <= 1e-12 * bw,
+                "m={m}"
+            );
+        }
+        // spans (3, 3): k = (1, 4, 6, 4, 1) / 16
+        let k = [1.0, 4.0, 6.0, 4.0, 1.0].map(|v| v / 16.0);
+        let df = 2.0 / k.iter().map(|v| v * v).sum::<f64>();
+        let (a, _) = kernel_df_bandwidth(&[3, 3]).unwrap();
+        assert!((a - df).abs() <= 1e-12 * df);
+        assert_eq!(kernel_df_bandwidth(&[1, 1]).unwrap().0, 2.0);
+    }
+
     /// The series of case `stat_spectrum_t3`, read without loading the case.
     fn t3_dataset() -> Dataset {
         let path = p2a_validation::repo_path("validation/datasets/generated/spectrum_t3.csv");
@@ -1937,9 +2066,12 @@ mod tests {
             .scalar("peak_freq", r.peak_frequency().unwrap().0, Tol::coef(96))
             .vector("spec", &r.spec, Tol::coef(96))
             .vector("raw_spec", &raw.spec, Tol::coef(96))
+            .scalar("df", r.df, Tol::se(96))
+            .scalar("bandwidth", r.bandwidth, Tol::se(96))
+            .scalar("raw_df", raw.df, Tol::se(96))
+            .scalar("raw_bandwidth", raw.bandwidth, Tol::se(96))
             .vector("ci95_at_df", &ci95, CI_TOL)
             .vector("ci90_at_df", &ci90, CI_TOL)
             .finish();
-        // deviation STAT-39: df 6.552102376599634 and bandwidth 0.01084201041388611 (p2a 18 and 0.03125).
     }
 }

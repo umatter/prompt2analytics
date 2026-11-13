@@ -3,19 +3,51 @@
   "methods": [
     {
       "id": "spectrum_pgram_t4",
-      "name": "Smoothed and raw periodogram (spec.pgram): ordinates, frequencies and padded length over taper, spans, detrending, padding, odd n and fast padding",
+      "name": "Smoothed and raw periodogram (spec.pgram): ordinates, frequencies, padded length, df and bandwidth over taper, spans, detrending, padding, odd n and fast padding",
       "category": "stats",
       "reference": "stats::spec.pgram",
       "doc": "validation/timeseries/spectrum.md",
-      "cases": ["stat_spectrum_t4"],
+      "cases": [
+        "stat_spectrum_t4"
+      ],
       "tests": [
         "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_raw_tapered",
         "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_smoothed_taper_demean",
         "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_padding",
         "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_odd_and_fast"
       ],
-      "quantities": ["freq", "spec", "n.used"],
-      "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative; n.used exact",
+      "quantities": [
+        "freq",
+        "spec",
+        "n.used",
+        "df",
+        "bandwidth"
+      ],
+      "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative, df and bandwidth 1e-5 relative; n.used exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spectrum_ar_t4",
+      "name": "AR spectrum (spec.ar): frequency grid, ordinates, Yule-Walker coefficients and var.pred at a fixed order and with the AIC order",
+      "category": "stats",
+      "reference": "stats::spec.ar; stats::ar.yw",
+      "doc": "validation/timeseries/spectrum.md",
+      "cases": [
+        "stat_spectrum_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_ar_fixed_order",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_ar_aic"
+      ],
+      "quantities": [
+        "freq",
+        "spec",
+        "ar coefficients",
+        "var.pred",
+        "AIC order"
+      ],
+      "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative, var.pred 1e-5 relative; order exact",
       "deviations": [],
       "supersedes_legacy": []
     }

@@ -1267,7 +1267,7 @@ async fn test_validate_mcp_stats_loglin_nondecomposable() {
 }
 
 /// STAT-38's MCP surface: an AR spectrum has no chi-square interval; the periodogram's is R's
-/// spec.ci at the reported df. Before: confidence_interval_95 always carried two multipliers
+/// spec.ci at spec.pgram's df, and its first ordinates are spec.pgram's. Before: confidence_interval_95 always carried two multipliers
 /// (a NaN pair for AR).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_timeseries_spectrum_ci() {
@@ -1283,16 +1283,29 @@ async fn test_validate_mcp_timeseries_spectrum_ci() {
         .await,
     );
     let ci = &p["confidence_interval_95"];
-    // deviation STAT-39: p2a's df for spans c(3, 3) is 18 where spec.pgram reports
-    // 6.552102376599634; the multipliers are pinned to R's spec.ci at p2a's df (ci_df[2] = 18)
-    assert_eq!(f(&ci["degrees_of_freedom"]), case.vector("ci_df")[2]);
+    // spec.pgram's df for spans c(3, 3) (ci_df[0] = 6.552102376599634) and R's spec.ci at it
+    let df = f(&ci["degrees_of_freedom"]);
+    assert!(
+        Tol::se(96).allows(df, case.vector("ci_df")[0]),
+        "df rust={df}"
+    );
     let want = case.vector("ci95_at_df");
     for (got, w) in [
-        (f(&ci["multiplier_lower"]), want[4]),
-        (f(&ci["multiplier_upper"]), want[5]),
+        (f(&ci["multiplier_lower"]), want[0]),
+        (f(&ci["multiplier_upper"]), want[1]),
     ] {
         // the core's spec.ci reproduces R to 1e-10 relative
         assert!(Tol::new(1e-10, 0.0).allows(got, w), "rust={got} R={w}");
+    }
+    let first5: Vec<f64> = p["spectrum_sample"]["first_5"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| f(&e["spec"]))
+        .collect();
+    let spec = case.vector("spec");
+    for (got, w) in first5.iter().zip(&spec[..5]) {
+        assert!(Tol::coef(96).allows(*got, *w), "spec rust={got} R={w}");
     }
     Check::new(&case)
         .scalar("peak_freq", f(&p["peak"]["frequency"]), Tol::coef(96))
