@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "step_null_t4",
+  "area": "regression/step",
+  "method": "stats::step when no predictor helps: backward and both from the full model reach y ~ 1; forward stays there",
+  "reference": "stats::step(direction = 'backward' | 'both' | 'forward', k = 2 | log(n)); stats::drop1; stats::extractAIC",
+  "call": "step(lm(y ~ x1 + x2 + x3), direction = 'backward')",
+  "dataset": "validation/datasets/generated/step_null_t4.csv",
+  "datasets": ["validation/datasets/generated/step_null_t4.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n": 60,
+    "backward_aic": [13.030655796568283, 11.135463244583606, 9.7204827601562052, 8.9249256447426717],
+    "backward_dropped": [2, 1, 3],
+    "backward_final_p": 1,
+    "both_aic": [13.030655796568283, 11.135463244583606, 9.7204827601562052, 8.9249256447426717],
+    "both_final_p": 1,
+    "forward_aic": [8.9249256447426717],
+    "forward_final_p": 1,
+    "bic_aic": [21.408034045456684, 17.418496931249905, 13.909171884600404, 11.019270206964773],
+    "bic_final_p": 1,
+    "null_extract_aic": 8.9249256447426717,
+    "full_extract_aic": 13.030655796568283,
+    "null_extract_bic": 11.019270206964773,
+    "drop1_last_aic": [9.7204827601562052, 8.9249256447426717],
+    "drop1_last_rss": [66.002059201209278, 67.340375482257215]
+  }
+}
