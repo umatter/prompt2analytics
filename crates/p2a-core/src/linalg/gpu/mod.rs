@@ -1,7 +1,9 @@
 //! Optional GPU acceleration via CUDA.
 //!
 //! This module provides GPU-accelerated versions of core linear algebra
-//! operations using cuBLAS (GEMM, GEMV) and cuSOLVER (Cholesky, SVD).
+//! operations using cuBLAS (DGEMM, DSYRK, DGEMV) and a custom distance kernel. The solver
+//! module runs the sandwich meat through cuBLAS; its Cholesky inverse is a CPU passthrough,
+//! and no cuSOLVER routine is called.
 //!
 //! # Architecture
 //!

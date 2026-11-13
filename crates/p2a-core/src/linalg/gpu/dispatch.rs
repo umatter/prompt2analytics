@@ -34,7 +34,8 @@ pub struct GpuThresholds {
     /// Disabled by default: set very high because GPU DGEMV is consistently
     /// slower than CPU OpenBLAS on Grace Blackwell. Default: usize::MAX.
     pub xty_min_n: usize,
-    /// Minimum k for safe_inverse via cuSOLVER DPOTRF+DPOTRI.
+    /// Minimum k for the GPU path of the Cholesky inverse. That path is a CPU passthrough
+    /// (no cuSOLVER routine is called), so the threshold only selects which CPU call runs.
     /// Default: 100.
     pub inverse_min_k: usize,
     /// Minimum m*n*k for matmul via cuBLAS DGEMM.
@@ -50,11 +51,14 @@ pub struct GpuThresholds {
     /// Minimum d (dimensions) for K-means GPU dispatch.
     /// GPU hurts for d <= ~15. Default: 20.
     pub kmeans_min_d: usize,
-    /// Minimum bootstrap replications to use batched GPU path.
+    /// Minimum bootstrap replications for a batched GPU path. Still parsed from
+    /// `P2A_GPU_BOOTSTRAP_MIN_B`, but no dispatch path reads it.
+    #[deprecated(note = "not used by any dispatch path")]
     pub bootstrap_min_b: usize,
 }
 
 impl Default for GpuThresholds {
+    #[allow(deprecated)] // bootstrap_min_b is still filled in
     fn default() -> Self {
         Self {
             xtx_min_nkk: 20_000_000,
@@ -82,7 +86,8 @@ impl GpuThresholds {
     /// - `P2A_GPU_MATMUL_MIN_SHAPE_RATIO` (default: 0.1)
     /// - `P2A_GPU_KMEANS_MIN_N` (default: 10000)
     /// - `P2A_GPU_KMEANS_MIN_D` (default: 20)
-    /// - `P2A_GPU_BOOTSTRAP_MIN_B` (default: 100)
+    /// - `P2A_GPU_BOOTSTRAP_MIN_B` (default: 100; read by no dispatch path)
+    #[allow(deprecated)] // bootstrap_min_b is still parsed
     pub fn from_env() -> Self {
         let defaults = Self::default();
         Self {
