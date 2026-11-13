@@ -23,9 +23,10 @@
 //!
 //! ## Two-Stage Fitting
 //!
-//! 1. **Forward Pass**: Greedy addition of basis function pairs that maximize
-//!    reduction in residual sum of squares (RSS). Adds both h(x-t) and h(t-x)
-//!    to maintain model symmetry.
+//! 1. **Forward Pass**: Greedy addition of the basis function pair (h(x-t) and h(t-x)) with the
+//!    largest reduction in GCV; the pass stops when the relative GCV reduction falls below
+//!    `thresh` or the model reaches `nk` terms. (earth selects pairs on RSS and stops on the
+//!    gain in R-squared.)
 //!
 //! 2. **Backward Pass**: Prunes basis functions using Generalized Cross-Validation
 //!    (GCV) criterion to avoid overfitting.
@@ -63,9 +64,9 @@
 //!
 //! - Milborrow, S. (2024). earth: Multivariate Adaptive Regression Splines.
 //!   R package version 5.3.3. <https://CRAN.R-project.org/package=earth>
-//!   Reference implementation used for validation.
 //!
-//! R equivalent: `earth::earth()`
+//! R equivalent: `earth::earth()`; not installed on the validation machine, so nothing is
+//! pinned to it.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -78,7 +79,8 @@ use crate::resource;
 #[derive(Debug, Clone)]
 pub struct MarsConfig {
     /// Maximum degree of interaction (1 = additive, 2 = two-way interactions, etc.)
-    /// Default: 1 (additive model)
+    /// Default: 1 (additive model). earth's default penalty depends on the degree: a caller
+    /// raising `degree` sets `penalty: MarsConfig::earth_penalty(degree)` for earth's value.
     pub degree: usize,
 
     /// A cap: the pruned model has at most `nprune` terms (intercept included), chosen by GCV among
@@ -91,28 +93,32 @@ pub struct MarsConfig {
     /// Default: min(200, max(20, 2 * n_features + n / 10))
     pub nk: Option<usize>,
 
-    /// Threshold for the forward pass: minimum GCV improvement to add a term.
+    /// Threshold for the forward pass: it stops when the best pair reduces the GCV by less than
+    /// this share of the current GCV (earth's `thresh` is a gain in R-squared).
     /// Default: 0.001
     pub thresh: f64,
 
     /// Minimum number of observations between knots (per predictor).
-    /// Default: 0 (auto-calculate based on n)
+    /// Default: `None`, Friedman (1991) eq. 43 with alpha = 0.05,
+    /// `floor(-log2(-ln(1 - alpha) / (n p)) / 2.5)`, at least 1, on the full sample.
     pub minspan: Option<usize>,
 
     /// Minimum number of observations before first and after last knot.
-    /// Default: 0 (auto-calculate based on n)
+    /// Default: `None`, Friedman (1991) eq. 45 with alpha = 0.05, `floor(3 - log2(alpha / p))`,
+    /// at most `(n - 1) / 2`.
     pub endspan: Option<usize>,
 
-    /// Penalty per knot when calculating GCV.
-    /// d = 1 recovers AIC; d = 2 recovers BIC-like penalty.
-    /// Default: 3.0 (Friedman's recommended value)
+    /// GCV penalty per knot (earth's `penalty`; Friedman 1991, eq. 32).
+    /// Default: 2.0, earth's value for the default `degree: 1`; earth uses 3 for `degree > 1`,
+    /// see [`MarsConfig::earth_penalty`].
     pub penalty: f64,
 
     /// Use fast MARS algorithm (subsampling for knot search).
     /// Default: true for n > 200
     pub fast: Option<bool>,
 
-    /// Number of candidate knots to consider per variable in fast mode.
+    /// Number of candidate knots kept per predictor in fast mode, evenly spaced over the whole
+    /// candidate list (not earth's `fast.k`, which limits the parent terms considered).
     /// Default: 20
     pub fast_k: usize,
 
@@ -120,6 +126,14 @@ pub struct MarsConfig {
     /// `lm(y ~ 0 + ...)`.
     /// Default: true
     pub intercept: bool,
+}
+
+impl MarsConfig {
+    /// earth's default GCV penalty for a maximum interaction degree: 2 for additive models
+    /// (`degree <= 1`), 3 otherwise.
+    pub fn earth_penalty(degree: usize) -> f64 {
+        if degree <= 1 { 2.0 } else { 3.0 }
+    }
 }
 
 impl Default for MarsConfig {
@@ -131,7 +145,7 @@ impl Default for MarsConfig {
             thresh: 0.001,
             minspan: None,
             endspan: None,
-            penalty: 3.0,
+            penalty: 2.0,
             fast: None,
             fast_k: 20,
             intercept: true,
@@ -366,6 +380,13 @@ impl std::fmt::Display for MarsResult {
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "Features: {}", self.n_features)?;
         writeln!(f, "Terms: {}", self.basis_functions.len())?;
+        if self.config.fast.unwrap_or(self.n_obs > 200) {
+            writeln!(
+                f,
+                "Knot search: fast (fast_k = {} knots per predictor)",
+                self.config.fast_k
+            )?;
+        }
         writeln!(f)?;
         writeln!(f, "Fit Statistics:")?;
         writeln!(f, "  RSS:            {:.4}", self.rss)?;
@@ -525,6 +546,11 @@ pub fn mars(
             y.iter().all(|&yi| yi == 0.0),
         )
     };
+    if !null_rss.is_finite() {
+        return Err(
+            "MARS: the response's sum of squares overflows; rescale the response".to_string(),
+        );
+    }
     if constant {
         return Err("Response variable has zero variance".to_string());
     }
@@ -536,10 +562,10 @@ pub fn mars(
     });
 
     let use_fast = config.fast.unwrap_or(n > 200);
-    let minspan = config.minspan.unwrap_or_else(|| compute_minspan(n));
+    let minspan = config.minspan.unwrap_or_else(|| compute_minspan(n, p));
     let endspan = config
         .endspan
-        .unwrap_or_else(|| compute_endspan(n).min((n - 1) / 2));
+        .unwrap_or_else(|| compute_endspan(p).min((n - 1) / 2));
 
     // Find candidate knots for each variable
     let candidate_knots = find_candidate_knots(&x, minspan, endspan, use_fast, config.fast_k);
@@ -693,20 +719,29 @@ fn validate_config(
     Ok(())
 }
 
-/// Compute minimum span between knots.
-/// Formula from Friedman (1991): floor(-log2(-1/n * log(1-0.05)) / 2.5)
-fn compute_minspan(n: usize) -> usize {
-    if n <= 10 {
-        return 1;
-    }
-    let term = -1.0 / (n as f64) * (1.0 - 0.05_f64).ln();
-    let span = (-term.ln() / 2.5_f64.ln()).floor() as usize;
-    span.max(1)
+/// Significance level of Friedman's (1991) span rules.
+const SPAN_ALPHA: f64 = 0.05;
+
+/// Friedman (1991) eq. 43 before flooring: `-log2(-ln(1 - alpha) / (n p)) / 2.5`.
+fn minspan_raw(n: usize, p: usize) -> f64 {
+    let rate = -(1.0 - SPAN_ALPHA).ln() / (n as f64 * p.max(1) as f64);
+    -rate.log2() / 2.5
 }
 
-/// Compute end span (same formula as minspan in most implementations).
-fn compute_endspan(n: usize) -> usize {
-    compute_minspan(n)
+/// Minimum span between knots: eq. 43 floored, at least 1. earth counts a parent's non-zero
+/// cases where this uses the full sample.
+fn compute_minspan(n: usize, p: usize) -> usize {
+    (minspan_raw(n, p).floor() as usize).max(1)
+}
+
+/// Friedman (1991) eq. 45 before flooring: `3 - log2(alpha / p)`.
+fn endspan_raw(p: usize) -> f64 {
+    3.0 - (SPAN_ALPHA / p.max(1) as f64).log2()
+}
+
+/// End span (observations before the first and after the last knot): eq. 45 floored.
+fn compute_endspan(p: usize) -> usize {
+    (endspan_raw(p).floor() as usize).max(1)
 }
 
 /// Candidate knots closer than this share of their value are one knot: rounding, not data.
@@ -742,38 +777,47 @@ fn find_candidate_knots(
 
         // Apply minspan: space out knots
         let mut selected: Vec<f64> = Vec::new();
-        let mut last_idx: Option<usize> = None;
+        // (index in valid_range, value) of the last selected knot
+        let mut last: Option<(usize, f64)> = None;
 
         for (i, &val) in valid_range.iter().enumerate() {
-            let Some(li) = last_idx else {
+            let Some((li, last_value)) = last else {
                 selected.push(val);
-                last_idx = Some(i);
-                continue;
-            };
-            let Some(&last) = selected.last() else {
+                last = Some((i, val));
                 continue;
             };
             // A value differs from the last selected by more than its rounding, at any scale of x.
-            if i >= li + minspan && val - last > KNOT_ROUNDING * val.abs().max(last.abs()) {
+            if i >= li + minspan
+                && val - last_value > KNOT_ROUNDING * val.abs().max(last_value.abs())
+            {
                 selected.push(val);
-                last_idx = Some(i);
+                last = Some((i, val));
             }
         }
 
-        // Subsample if using fast mode
-        if use_fast && selected.len() > fast_k {
-            let step = selected.len() / fast_k;
-            selected = selected
-                .into_iter()
-                .step_by(step.max(1))
-                .take(fast_k)
-                .collect();
+        // Fast mode: keep fast_k candidates spread over the whole range
+        if use_fast {
+            selected = subsample_even(&selected, fast_k);
         }
 
         knots.push(selected);
     }
 
     knots
+}
+
+/// `k` of the sorted `values`, evenly spaced over all of them, the first and last included
+/// (`values[i (len - 1) / (k - 1)]`); the middle one for `k = 1`; all of them when `len <= k`.
+fn subsample_even(values: &[f64], k: usize) -> Vec<f64> {
+    let len = values.len();
+    if len <= k {
+        return values.to_vec();
+    }
+    if k == 1 {
+        return vec![values[(len - 1) / 2]];
+    }
+    // Strictly increasing indices for len > k, so no knot repeats.
+    (0..k).map(|i| values[i * (len - 1) / (k - 1)]).collect()
 }
 
 /// One candidate pair against the current model.
@@ -1194,7 +1238,8 @@ fn compute_variable_importance(
 /// # Arguments
 /// * `x` - Feature matrix
 /// * `y` - Response vector
-/// * `degree` - Maximum interaction degree (default: 1)
+/// * `degree` - Maximum interaction degree (default: 1); the GCV penalty is earth's for it
+///   ([`MarsConfig::earth_penalty`])
 /// * `nprune` - A cap: the pruned model has at most nprune terms (intercept included), chosen by GCV
 ///   among sizes <= nprune, as earth (default: the best GCV of any size)
 /// * `thresh` - GCV improvement threshold (default: 0.001)
@@ -1206,10 +1251,12 @@ pub fn run_mars(
     thresh: Option<f64>,
     feature_names: Option<Vec<String>>,
 ) -> Result<MarsResult, String> {
+    let degree = degree.unwrap_or(1);
     let config = MarsConfig {
-        degree: degree.unwrap_or(1),
+        degree,
         nprune,
         thresh: thresh.unwrap_or(0.001),
+        penalty: MarsConfig::earth_penalty(degree),
         ..Default::default()
     };
     mars(x, y, config, feature_names)
@@ -1474,6 +1521,87 @@ mod tests {
         (x, Array1::from_vec(y))
     }
 
+    /// Uniform draws on [0, 1) and normal noise (Box-Muller) from the ML module's LCG.
+    fn lcg_uniform(state: &mut u64) -> f64 {
+        (super::super::lcg_random(state) % 1_000_000_007) as f64 / 1_000_000_007.0
+    }
+
+    fn lcg_normal(state: &mut u64) -> f64 {
+        let u1 = lcg_uniform(state).max(1e-12);
+        let u2 = lcg_uniform(state);
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+
+    #[test]
+    fn test_mars_fast_subsample_is_even() {
+        let values: Vec<f64> = (0..58).map(|i| i as f64).collect();
+        let want: Vec<f64> = (0..20).map(|i| (3 * i) as f64).collect();
+        assert_eq!(subsample_even(&values, 20), want); // 0, 3, ..., 57
+        assert_eq!(subsample_even(&values, 1), vec![28.0]);
+        assert_eq!(subsample_even(&values[..5], 20), values[..5].to_vec());
+        assert_eq!(subsample_even(&values[..20], 20), values[..20].to_vec());
+    }
+
+    #[test]
+    fn test_mars_spans_follow_friedman() {
+        // Unfloored values from base R (Friedman 1991, eqs. 43 and 45, alpha = 0.05).
+        for (n, p, raw, floored) in [
+            (100, 1, 4.371576858415926, 4),
+            (100, 5, 5.30034809637087, 5),
+            (300, 1, 5.0055618587043877, 5),
+            (1000, 10, 7.0291193343258156, 7),
+            (10000, 5, 7.9578905722807605, 7),
+        ] {
+            assert_relative_eq!(minspan_raw(n, p), raw, max_relative = 1e-14);
+            assert_eq!(compute_minspan(n, p), floored, "n = {n}, p = {p}");
+        }
+        for (p, raw, floored) in [
+            (1, 7.3219280948873626, 7),
+            (5, 9.6438561897747235, 9),
+            (10, 10.643856189774723, 10),
+        ] {
+            assert_relative_eq!(endspan_raw(p), raw, max_relative = 1e-14);
+            assert_eq!(compute_endspan(p), floored, "p = {p}");
+        }
+    }
+
+    #[test]
+    fn test_mars_default_penalty_is_earth() {
+        assert_eq!(MarsConfig::default().penalty, 2.0);
+        assert_eq!(MarsConfig::earth_penalty(1), 2.0);
+        assert_eq!(MarsConfig::earth_penalty(2), 3.0);
+    }
+
+    /// WT-3: fast mode (on by default above 200 rows) kept only the lowest candidate knots.
+    #[test]
+    fn test_mars_fast_mode_finds_upper_kink() {
+        let mut state = 2026u64;
+        let n = 300;
+        let x = Array2::from_shape_fn((n, 1), |_| lcg_uniform(&mut state));
+        let y = Array1::from_shape_fn(n, |i| {
+            10.0 * (x[[i, 0]] - 0.8).max(0.0) + 0.05 * lcg_normal(&mut state)
+        });
+        let r = mars(x.view(), y.view(), MarsConfig::default(), None).unwrap();
+        let knots = r.cuts.get(&0).cloned().unwrap_or_default();
+        assert!(
+            knots.iter().any(|&k| (0.75..=0.85).contains(&k)),
+            "knots = {knots:?}"
+        );
+        assert!(r.r_squared > 0.9, "R-squared = {}", r.r_squared);
+    }
+
+    /// T3-WP45-5: a response whose sum of squares overflows is refused, not fitted on Inf.
+    #[test]
+    fn test_mars_refuses_overflowing_response() {
+        let (x, y) = two_kink(120, 0);
+        let y = y.mapv(|v| 10.0 * v); // |y| <= 10
+        let huge = y.mapv(|v| v * 1e160);
+        let err = mars(x.view(), huge.view(), MarsConfig::default(), None).unwrap_err();
+        assert!(err.contains("rescale the response"), "{err}");
+        let big = y.mapv(|v| v * 1e150);
+        assert!(mars(x.view(), big.view(), MarsConfig::default(), None).is_ok());
+    }
+
     /// WT-12: nprune is a cap on the pruned model (earth). Before: the best-GCV model of any size.
     #[test]
     fn test_mars_respects_nprune() {
@@ -1555,7 +1683,8 @@ mod tests {
                 .skip(1)
                 .all(|b| b.hinges.len() == 1)
         );
-        let d = m + 3.0 * (m - 1.0) / 2.0;
+        // The default penalty, earth's 2 for an additive model.
+        let d = m + 2.0 * (m - 1.0) / 2.0;
         assert_eq!(d, r.effective_df());
         let want = r.rss / (120.0 * (1.0 - d / 120.0).powi(2));
         assert!((r.gcv - want).abs() <= 1e-12 * want, "{} vs {want}", r.gcv);
