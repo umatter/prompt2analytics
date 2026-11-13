@@ -56,7 +56,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
 /// Saving a dataset's metadata twice (a create, then an update of the same
 /// row) and listing its session logs the counts of its column names at info
 /// level, and the names themselves only at debug: a wide dataset's names
-/// are up to `MAX_STORED_COLUMN_NAME_BYTES` on one line.
+/// are up to `MAX_STORED_COLUMN_NAME_BYTES` on one line. Listing logs one
+/// info line before and one after its query, and each stored row at debug
+/// only, so a session with many datasets does not fill the info log.
 #[tokio::test]
 async fn dataset_meta_logs_its_column_names_only_at_debug() {
     let logs = Logs::default();
@@ -90,7 +92,6 @@ async fn dataset_meta_logs_its_column_names_only_at_debug() {
         "[DB_SAVE_META] Found existing record, will update",
         "[DB_SAVE_META] Content being sent to UPDATE",
         "[DB_SAVE_META] UPDATE returned successfully",
-        "[DB_GET_DATASETS] Dataset record from SurrealDB",
     ] {
         assert!(
             info.iter().any(|line| line.contains(message)),
@@ -98,6 +99,30 @@ async fn dataset_meta_logs_its_column_names_only_at_debug() {
             lines.join("\n")
         );
     }
+    // Listing logs two info lines per call and each stored row at debug only.
+    let listing: Vec<_> = info
+        .iter()
+        .filter(|line| line.contains("[DB_GET_DATASETS]"))
+        .collect();
+    assert_eq!(listing.len(), 2, "listing info lines: {listing:#?}");
+    assert!(
+        listing[0].contains("[DB_GET_DATASETS] Querying datasets for session"),
+        "{listing:#?}"
+    );
+    assert!(
+        listing[1].contains("[DB_GET_DATASETS] Query returned datasets")
+            && listing[1].contains("num_datasets=1"),
+        "{listing:#?}"
+    );
+    assert!(
+        debug.iter().any(|line| {
+            line.contains("[DB_GET_DATASETS] Dataset record from SurrealDB")
+                && line.contains("column_names_len=40")
+                && line.contains("logcol000_q")
+        }),
+        "no debug line for the stored row:\n{}",
+        lines.join("\n")
+    );
     let named: Vec<_> = info.iter().filter(|line| line.contains("logcol")).collect();
     assert!(named.is_empty(), "column names on info lines: {named:#?}");
     assert!(

@@ -12,7 +12,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use common::parquet::{levels_parquet, rewrite_footer};
 use p2a_mcp::config::ServerConfig;
@@ -40,17 +40,23 @@ async fn call(
     (status, body)
 }
 
-/// [`call`], also returning the response headers.
-async fn call_with_headers(
+/// The one request primitive of this file: `session` sets the
+/// `X-P2A-Session-Id` header, `bearer` the `Authorization` header, and a
+/// body is sent as JSON. Returns the raw response body.
+async fn send(
     r: &Router,
     method: &str,
     uri: &str,
     session: Option<&str>,
+    bearer: Option<&str>,
     body: Option<Value>,
-) -> (StatusCode, HeaderMap, Value) {
+) -> (StatusCode, HeaderMap, Bytes) {
     let mut req = Request::builder().method(method).uri(uri);
     if let Some(sid) = session {
         req = req.header("x-p2a-session-id", sid);
+    }
+    if let Some(t) = bearer {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
     }
     let req = match body {
         Some(b) => req
@@ -65,6 +71,18 @@ async fn call_with_headers(
     let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20)
         .await
         .unwrap();
+    (status, headers, bytes)
+}
+
+/// [`call`], also returning the response headers.
+async fn call_with_headers(
+    r: &Router,
+    method: &str,
+    uri: &str,
+    session: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, HeaderMap, Value) {
+    let (status, headers, bytes) = send(r, method, uri, session, None, body).await;
     (
         status,
         headers,
@@ -569,9 +587,11 @@ async fn reload_refuses_a_parquet_source_it_will_not_read_under_a_quota() {
 /// What a reload's check before decoding reserves against the total quota
 /// is released once the file is in or refused. A regression guard, not
 /// evidence of the check: without it nothing is reserved. Five reloads of a
-/// 300,000-row parquet file (2.4 MB decoded, admitted at 3.2 MB with what
-/// decoding it allocates) under a 6 MiB total each replace the dataset by
-/// name; a reservation the first left behind would refuse the second.
+/// 350,000-row parquet file (admitted at 3.56 MiB with what decoding it
+/// allocates, measured) under a 6 MiB total each replace the dataset by
+/// name: one admission leaves about 40 % of the total free, and a
+/// reservation the first left behind would take the second to 7.13 MiB,
+/// about 19 % past the total, so the second is refused.
 #[tokio::test]
 async fn reload_releases_what_its_check_before_decoding_reserves() {
     let mut cfg = ServerConfig::default();
@@ -583,7 +603,7 @@ async fn reload_releases_what_its_check_before_decoding_reserves() {
         .tempdir_in(allowed_data_root().unwrap())
         .unwrap();
     let stored = dir.path().join("p.parquet");
-    levels_parquet(&stored, 300_000, None);
+    levels_parquet(&stored, 350_000, None);
     store_meta(&state, &sid, "p", &stored, 0).await;
     for round in 0..5 {
         let body = reload(&r, &sid).await;
@@ -927,6 +947,59 @@ async fn get_session_answers_capacity_when_adoption_finds_the_registry_full() {
     assert_eq!(headers[header::RETRY_AFTER], "60");
 }
 
+/// The tool and chat routes adopt a stored session as `GET
+/// /api/sessions/{id}` does, so a full registry answers them 503 `capacity`
+/// with `Retry-After` too, not a 404 or a 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_and_chat_routes_answer_capacity_when_adoption_finds_the_registry_full() {
+    let mut cfg = ServerConfig::default();
+    cfg.session.max_sessions = 1;
+    let (r, state) = app(cfg).await;
+    new_session(&r).await;
+    let stored_session = || async {
+        // A row accessed now, so it is within the TTL.
+        let id = uuid::Uuid::new_v4().to_string();
+        pm(&state)
+            .db()
+            .upsert_session(&p2a_mcp::db::DbSession::new(id.clone(), None))
+            .await
+            .unwrap();
+        id
+    };
+    let assert_capacity = |route: &str, st: StatusCode, headers: &HeaderMap, body: &Value| {
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{route}: {body}");
+        assert_eq!(body["code"], "capacity", "{route}: {body}");
+        assert_eq!(headers[header::RETRY_AFTER], "60", "{route}");
+    };
+
+    let id = stored_session().await;
+    let (st, headers, body) = call_with_headers(
+        &r,
+        "POST",
+        "/api/tools/list_datasets",
+        None,
+        Some(json!({"session_id": id, "arguments": {}})),
+    )
+    .await;
+    assert_capacity("tool route", st, &headers, &body);
+
+    #[cfg(feature = "llm")]
+    {
+        let base_url = ollama_stub().await;
+        let id = stored_session().await;
+        let (st, headers, body) = call_with_headers(
+            &r,
+            "POST",
+            "/api/llm/chat",
+            None,
+            Some(json!({"session_id": id, "message": "hi",
+                "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}})),
+        )
+        .await;
+        assert_capacity("chat route", st, &headers, &body);
+    }
+}
+
 /// A store failure while looking a session up is a 500 `internal` with a
 /// generic text, not a 404 that tells the client to abandon the session.
 #[tokio::test]
@@ -1154,6 +1227,127 @@ async fn settings_require_a_live_session() {
         .0,
         StatusCode::NOT_FOUND
     );
+}
+
+/// The desktop client's copy of a stored tool call (`p2a-dioxus`
+/// `api::types::PersistedToolCall`): every id and timestamp a string.
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+struct ClientToolCall {
+    id: String,
+    message_id: String,
+    conversation_id: String,
+    tool_name: String,
+    arguments: String,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    status: String,
+    started_at: String,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<i32>,
+}
+
+fn sorted_keys(v: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+fn assert_utc_rfc3339(v: &Value) {
+    let s = v
+        .as_str()
+        .unwrap_or_else(|| panic!("a string timestamp, got {v}"));
+    assert!(s.ends_with('Z'), "{s}");
+    chrono::DateTime::parse_from_rfc3339(s).unwrap_or_else(|e| panic!("{s}: {e}"));
+}
+
+/// Settings and stored tool calls answer plain string ids and timestamps, as
+/// every other conversation route does, never the store's record objects.
+#[tokio::test]
+async fn settings_and_tool_calls_answer_plain_ids() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let conv = new_conversation(&r, &sid, "tools").await;
+    let (st, body) = add_msg(&r, &sid, &conv, "run it").await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let msg = body["data"]["id"].as_str().unwrap().to_string();
+    let created = pm(&state)
+        .db()
+        .create_tool_call(&p2a_mcp::db::ToolCall::new(
+            msg.clone(),
+            conv.clone(),
+            "list_datasets".to_string(),
+            "{}".to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let settings_keys = [
+        "base_url",
+        "id",
+        "max_tokens",
+        "model",
+        "provider",
+        "session_id",
+        "system_prompt",
+        "temperature",
+        "updated_at",
+    ];
+    let uri = format!("/api/sessions/{sid}/settings");
+    let (st, got) = call(&r, "GET", &uri, Some(&sid), None).await;
+    assert_eq!(st, StatusCode::OK, "{got}");
+    let (st, put) = call(
+        &r,
+        "PUT",
+        &uri,
+        Some(&sid),
+        Some(json!({"provider": "openai", "model": "gpt-4o-mini"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{put}");
+    for data in [&got["data"], &put["data"]] {
+        assert_eq!(data["id"], json!(sid), "{data}");
+        assert_eq!(sorted_keys(data), settings_keys, "{data}");
+        assert_utc_rfc3339(&data["updated_at"]);
+    }
+    assert_eq!(put["data"]["provider"], "openai");
+    assert_eq!(put["data"]["model"], "gpt-4o-mini");
+
+    let call_keys = [
+        "arguments",
+        "completed_at",
+        "conversation_id",
+        "duration_ms",
+        "error",
+        "id",
+        "message_id",
+        "result",
+        "started_at",
+        "status",
+        "tool_name",
+    ];
+    for uri in [
+        format!("/api/conversations/{conv}/tool-calls"),
+        format!("/api/messages/{msg}/tool-calls"),
+    ] {
+        let (st, body) = call(&r, "GET", &uri, Some(&sid), None).await;
+        assert_eq!(st, StatusCode::OK, "{uri}: {body}");
+        let items = body["data"].as_array().expect("a list");
+        assert_eq!(items.len(), 1, "{body}");
+        let item = &items[0];
+        assert_eq!(item["id"], json!(created.id_string()), "{item}");
+        assert_eq!(sorted_keys(item), call_keys, "{item}");
+        assert_eq!(item["status"], "pending");
+        assert_eq!(item["message_id"], json!(msg));
+        assert_utc_rfc3339(&item["started_at"]);
+        let parsed: ClientToolCall = serde_json::from_value(item.clone())
+            .unwrap_or_else(|e| panic!("the desktop client cannot read {item}: {e}"));
+        assert_eq!(parsed.id, created.id_string());
+    }
 }
 
 // =============================================================================
@@ -1463,64 +1657,39 @@ async fn open_public_mode_ignores_user_id() {
 }
 
 /// `GET {uri}` with an optional bearer token: the status and the body as text.
-async fn get_raw(r: &Router, uri: &str, bearer: Option<&str>) -> (StatusCode, String) {
-    let mut req = Request::get(uri);
-    if let Some(t) = bearer {
-        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
-    }
-    let resp = r
-        .clone()
-        .oneshot(req.body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-        .await
-        .unwrap();
+async fn get_raw(
+    r: &Router,
+    uri: &str,
+    session: Option<&str>,
+    bearer: Option<&str>,
+) -> (StatusCode, String) {
+    let (status, _, bytes) = send(r, "GET", uri, session, bearer, None).await;
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// A session with one conversation holding one message, created with an
 /// optional bearer token.
 async fn session_with_one_message(r: &Router, bearer: Option<&str>) -> String {
-    let send = |method: &str, uri: String, sid: Option<&str>, body: Value| {
-        let mut req = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header(header::CONTENT_TYPE, "application/json");
-        if let Some(t) = bearer {
-            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
-        }
-        if let Some(sid) = sid {
-            req = req.header("x-p2a-session-id", sid);
-        }
-        let req = req.body(Body::from(body.to_string())).unwrap();
-        let r = r.clone();
-        async move {
-            let resp = r.oneshot(req).await.unwrap();
-            let status = resp.status();
-            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-                .await
-                .unwrap();
-            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            assert_eq!(status, StatusCode::CREATED, "{body}");
-            body
-        }
+    let created = |method: &'static str, uri: String, sid: Option<String>, body: Value| async move {
+        let (status, _, bytes) = send(r, method, &uri, sid.as_deref(), bearer, Some(body)).await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body
     };
-    let body = send("POST", "/api/sessions".into(), None, json!({})).await;
+    let body = created("POST", "/api/sessions".into(), None, json!({})).await;
     let sid = body["data"]["session_id"].as_str().unwrap().to_string();
-    let body = send(
+    let body = created(
         "POST",
         "/api/conversations".into(),
-        Some(&sid),
+        Some(sid.clone()),
         json!({"session_id": sid, "title": "t"}),
     )
     .await;
     let conv = body["data"]["id"].as_str().unwrap();
-    send(
+    created(
         "POST",
         format!("/api/conversations/{conv}/messages"),
-        Some(&sid),
+        Some(sid.clone()),
         json!({"role": "user", "content": "hello"}),
     )
     .await;
@@ -1540,15 +1709,17 @@ async fn db_stats_is_not_served_in_open_public_mode() {
     let (r, _) = app(open).await;
     let sid = session_with_one_message(&r, None).await;
     assert_eq!(
-        get_raw(&r, "/api/db/stats", None).await,
+        get_raw(&r, "/api/db/stats", None, None).await,
         (StatusCode::NOT_FOUND, String::new())
     );
     assert_eq!(
-        get_raw(&r, &format!("/api/db/stats?session_id={sid}"), None).await,
+        get_raw(&r, &format!("/api/db/stats?session_id={sid}"), None, None).await,
         (StatusCode::NOT_FOUND, String::new())
     );
-    let (st, _, body) = call_with_headers(&r, "GET", "/api/db/stats", Some(&sid), None).await;
-    assert_eq!((st, body), (StatusCode::NOT_FOUND, Value::Null));
+    assert_eq!(
+        get_raw(&r, "/api/db/stats", Some(&sid), None).await,
+        (StatusCode::NOT_FOUND, String::new())
+    );
     let (st, body) = call(&r, "GET", "/api/db/health", None, None).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["data"]["healthy"], json!(true));
@@ -1557,7 +1728,7 @@ async fn db_stats_is_not_served_in_open_public_mode() {
     // Local (the default configuration) and Authenticated keep the route.
     let (r, _) = app(ServerConfig::default()).await;
     session_with_one_message(&r, None).await;
-    let (st, body) = get_raw(&r, "/api/db/stats", None).await;
+    let (st, body) = get_raw(&r, "/api/db/stats", None, None).await;
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["data"], counts);
@@ -1567,10 +1738,10 @@ async fn db_stats_is_not_served_in_open_public_mode() {
     let (r, _) = app(authenticated).await;
     session_with_one_message(&r, Some("test-token")).await;
     assert_eq!(
-        get_raw(&r, "/api/db/stats", None).await.0,
+        get_raw(&r, "/api/db/stats", None, None).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let (st, body) = get_raw(&r, "/api/db/stats", Some("test-token")).await;
+    let (st, body) = get_raw(&r, "/api/db/stats", None, Some("test-token")).await;
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["data"], counts);

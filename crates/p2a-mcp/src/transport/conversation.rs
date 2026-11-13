@@ -26,7 +26,10 @@ use tracing::Instrument;
 use super::http::ApiResponse;
 use super::routes_sessions::capacity_response;
 use crate::config::DeploymentMode;
-use crate::db::{Conversation, ConversationWithMessages, DatasetMeta, DbError, Message};
+use crate::db::{
+    Conversation, ConversationWithMessages, DatasetMeta, DbError, Message, Settings, ToolCall,
+    ToolCallStatus,
+};
 use crate::exec::{ToolCallError, ToolGovernor};
 use crate::persistent_session::{
     DatasetQuotas, PersistentSessionError, PersistentSessionManager, RELOAD_LABEL, ReloadFailure,
@@ -348,6 +351,85 @@ impl From<Message> for MessageResponse {
     }
 }
 
+/// A store timestamp as RFC 3339 in UTC with a `Z` suffix and only the
+/// sub-second digits it needs.
+fn utc_string(t: impl Into<chrono::DateTime<chrono::Utc>>) -> String {
+    t.into()
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+}
+
+/// Session settings for API responses: the id is the session id, a string,
+/// not the store's record object.
+#[derive(Debug, Serialize)]
+pub(crate) struct SettingsResponse {
+    pub id: String,
+    pub session_id: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub temperature: f64,
+    pub max_tokens: i32,
+    pub system_prompt: Option<String>,
+    pub updated_at: String,
+}
+
+impl From<Settings> for SettingsResponse {
+    fn from(s: Settings) -> Self {
+        let id = s.id_string();
+        Self {
+            id,
+            session_id: s.session_id,
+            provider: s.provider,
+            model: s.model,
+            base_url: s.base_url,
+            temperature: s.temperature,
+            max_tokens: s.max_tokens,
+            system_prompt: s.system_prompt,
+            updated_at: utc_string(s.updated_at),
+        }
+    }
+}
+
+/// A stored tool call for API responses: string id and timestamps, the
+/// shape the desktop client reads.
+#[derive(Debug, Serialize)]
+pub(crate) struct ToolCallResponse {
+    pub id: String,
+    pub message_id: String,
+    pub conversation_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub status: ToolCallStatus,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i32>,
+}
+
+impl From<ToolCall> for ToolCallResponse {
+    fn from(c: ToolCall) -> Self {
+        let id = c.id_string();
+        Self {
+            id,
+            message_id: c.message_id,
+            conversation_id: c.conversation_id,
+            tool_name: c.tool_name,
+            arguments: c.arguments,
+            result: c.result,
+            error: c.error,
+            status: c.status,
+            started_at: utc_string(c.started_at),
+            completed_at: c.completed_at.map(utc_string),
+            duration_ms: c.duration_ms,
+        }
+    }
+}
+
+fn tool_call_responses(calls: Vec<ToolCall>) -> Vec<ToolCallResponse> {
+    calls.into_iter().map(ToolCallResponse::from).collect()
+}
+
 /// Conversation with messages for API responses
 #[derive(Debug, Serialize)]
 pub struct ConversationWithMessagesResponse {
@@ -622,7 +704,11 @@ async fn get_settings(
     }
     respond(
         StatusCode::OK,
-        state.session_manager.get_settings(&session_id).await,
+        state
+            .session_manager
+            .get_settings(&session_id)
+            .await
+            .map(SettingsResponse::from),
     )
 }
 
@@ -645,7 +731,8 @@ async fn update_settings(
             request.temperature,
             request.max_tokens,
         )
-        .await;
+        .await
+        .map(SettingsResponse::from);
     respond(StatusCode::OK, result)
 }
 
@@ -680,7 +767,9 @@ async fn get_conversation_tool_calls(
     }
     respond(
         StatusCode::OK,
-        pm.get_tool_calls_for_conversation(&id).await,
+        pm.get_tool_calls_for_conversation(&id)
+            .await
+            .map(tool_call_responses),
     )
 }
 
@@ -694,7 +783,12 @@ async fn get_message_tool_calls(
     if let Err(e) = pm.authorize_message(&caller, &id).await {
         return error_response(e);
     }
-    respond(StatusCode::OK, pm.get_tool_calls_for_message(&id).await)
+    respond(
+        StatusCode::OK,
+        pm.get_tool_calls_for_message(&id)
+            .await
+            .map(tool_call_responses),
+    )
 }
 
 // =============================================================================

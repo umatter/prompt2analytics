@@ -4,7 +4,9 @@
 # Features:
 # - Volume mounts for hot reload
 # - Development commands
-# - Exposed debug ports
+#
+# Only the backend is containerized. The Dioxus frontend runs natively:
+#   cd crates/p2a-dioxus && dx serve  # or dx serve --platform desktop
 
 services:
   # Backend with cargo-watch for hot reload
@@ -16,6 +18,8 @@ services:
     volumes:
       - ./crates/p2a-core:/app/crates/p2a-core:cached
       - ./crates/p2a-mcp:/app/crates/p2a-mcp:cached
+      # p2a-mcp and p2a-core build from it.
+      - ./crates/p2a-text:/app/crates/p2a-text:cached
       - cargo-cache:/usr/local/cargo/registry
       - target-cache:/app/target
     command: >
@@ -32,27 +36,6 @@ services:
       start_period: 120s
       retries: 5
 
-  # Frontend with Next.js dev server
-  frontend:
-    build:
-      context: .
-      dockerfile: docker/frontend.Dockerfile
-      target: deps
-    volumes:
-      - ./p2a-web:/app:cached
-      - node-modules:/app/node_modules
-    command: npm run dev
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8080
-      - WATCHPACK_POLLING=true
-    depends_on:
-      - backend
-    # Less strict dependency in dev mode
-    # depends_on:
-    #   backend:
-    #     condition: service_started
-
 volumes:
   cargo-cache:
   target-cache:
-  node-modules:

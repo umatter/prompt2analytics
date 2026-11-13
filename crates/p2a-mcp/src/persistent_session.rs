@@ -738,7 +738,7 @@ pub struct ReloadSource {
 /// loaded with. It blocks, and runs the async part of the parquet check on
 /// `handle`; run it on the blocking pool inside the session's path-jail
 /// scope and under the server's request limits (`ToolGovernor::run_blocking`
-/// does both). The error is a fixed text, the budget refusal with the file's
+/// does all three). The error is a fixed text, the budget refusal with the file's
 /// size and the limit, the quota refusal `load_dataset` gives, or
 /// `the file could not be loaded: <reason>` for a parquet file the check
 /// will not read; none holds a server path. The details are logged at debug
@@ -752,7 +752,10 @@ pub struct ReloadSource {
 /// decode more than `load_dataset` would admit. What the check admits stays
 /// reserved against the server's total until the caller drops the returned
 /// guard: hold it until [`insert_reloaded_dataset`] has inserted the
-/// dataset or refused it, and drop it on this thread. With no quotas
+/// dataset or refused it, and drop it on this thread and before the next
+/// source is loaded: dropping a guard restores the admission installed
+/// before it, so guards must drop in the reverse order they were taken
+/// (`reload_sources` drops each before the next load). With no quotas
 /// (`DatasetQuotas::default()`) there is no guard and only the footer is
 /// checked. Other formats are charged only once decoded, by
 /// [`insert_reloaded_dataset`].

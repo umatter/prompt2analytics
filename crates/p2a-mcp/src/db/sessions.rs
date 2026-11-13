@@ -505,16 +505,17 @@ impl DbConnection {
     /// accessed first.
     pub async fn adoptable_session_ids(&self, ttl_minutes: u64) -> Result<Vec<String>, DbError> {
         let now = Utc::now();
-        let mut rows = self.list_sessions().await?;
-        // Most recently accessed first, whatever order the query returned.
-        rows.sort_by_cached_key(|row| std::cmp::Reverse(row.last_accessed_chrono()));
-        Ok(rows
+        let mut rows: Vec<(DateTime<Utc>, String)> = self
+            .list_sessions()
+            .await?
             .iter()
-            .filter(|row| {
-                !crate::session::is_past_ttl(row.last_accessed_chrono(), now, ttl_minutes)
-            })
-            .map(DbSession::id_string)
-            .collect())
+            .map(|row| (row.last_accessed_chrono(), row.id_string()))
+            .filter(|(accessed, _)| !crate::session::is_past_ttl(*accessed, now, ttl_minutes))
+            .collect();
+        // Most recently accessed first, whatever order the query returned
+        // (stable: ties keep the query's order).
+        rows.sort_by_key(|(accessed, _)| std::cmp::Reverse(*accessed));
+        Ok(rows.into_iter().map(|(_, id)| id).collect())
     }
 
     /// Ids of the session rows whose `last_accessed` is before `cutoff`.
@@ -652,7 +653,7 @@ impl DbConnection {
 
         // Settings and dataset metadata of sessions without a row.
         for (table, stamp) in [("settings", "updated_at"), ("dataset_meta", "loaded_at")] {
-            let rows = self
+            let (rows, owners) = self
                 .delete_unowned(
                     table,
                     "session_id",
@@ -662,10 +663,14 @@ impl DbConnection {
                     SweptBy::Every,
                 )
                 .await?;
-            if table == "dataset_meta" && rows > 0 {
-                // Their sessions have no row any more; their counters go
-                // too (a dataset metadata row counts against the budget).
-                self.forget_session_bytes_except(&session_ids);
+            if table == "dataset_meta" {
+                // The sessions whose rows were deleted have no session row
+                // any more; their counters go too (a dataset metadata row
+                // counts against the budget). Other counters stay: a session
+                // being created has a counter before its row.
+                for owner in &owners {
+                    self.forget_session_bytes(owner);
+                }
             }
             deleted += rows;
         }
@@ -700,7 +705,7 @@ impl DbConnection {
                 // the `stamp` condition keeps.
                 let conversation_ids = self.conversation_ids_of(&session_ids).await?;
                 for (table, stamp) in [("messages", "created_at"), ("tool_calls", "started_at")] {
-                    deleted += self
+                    let (rows, _) = self
                         .delete_unowned(
                             table,
                             "conversation_id",
@@ -710,6 +715,7 @@ impl DbConnection {
                             SweptBy::Full,
                         )
                         .await?;
+                    deleted += rows;
                 }
             }
         }
@@ -888,7 +894,8 @@ impl DbConnection {
 
     /// Delete the rows of `table` written before `started` (by their `stamp`
     /// column) whose `owner` column (`session_id` or `conversation_id`) names
-    /// none of `known`, and return how many there were. The gaps between the
+    /// none of `known`, and return how many there were and the owners they
+    /// named (at most one per deleted row). The gaps between the
     /// owners in `known` that hold rows are found through the index on
     /// `owner` ([`gaps_with_rows`](Self::gaps_with_rows)); only the rows in
     /// those gaps are read, [`ORPHAN_BATCH`] per statement, to delete them.
@@ -901,45 +908,61 @@ impl DbConnection {
         known: &HashSet<String>,
         started: &Datetime,
         swept_by: SweptBy,
-    ) -> Result<usize, DbError> {
+    ) -> Result<(usize, HashSet<String>), DbError> {
         let mut deleted = 0usize;
+        let owners = std::sync::Mutex::new(HashSet::new());
         for (gap, rows) in self.gaps_with_rows(table, owner, known).await? {
             let select = format!(
-                "SELECT VALUE id FROM {table} WHERE {} AND {stamp} < $started \
+                "SELECT id, {owner} AS owner FROM {table} WHERE {} AND {stamp} < $started \
                  LIMIT {ORPHAN_BATCH}",
                 gap.condition(owner)
             );
             deleted += drain_gap(table, swept_by, rows, || {
-                self.delete_selected(&select, gap, started)
+                self.delete_selected(&select, gap, started, &owners)
             })
             .await?;
         }
-        Ok(deleted)
+        let owners = owners
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok((deleted, owners))
     }
 
-    /// Delete the rows whose ids `select` returns (a `SELECT VALUE id` on
+    /// Delete the rows `select` returns (a `SELECT id, <owner> AS owner` on
     /// `$lo`, `$hi` and `$started`, at most [`ORPHAN_BATCH`] rows) in one
-    /// statement.
+    /// statement, adding their owners to `owners` once they are deleted.
     async fn delete_selected(
         &self,
         select: &str,
         gap: OwnerGap<'_>,
         started: &Datetime,
+        owners: &std::sync::Mutex<HashSet<String>>,
     ) -> Result<Batch, DbError> {
+        #[derive(serde::Deserialize)]
+        struct OwnedRow {
+            id: RecordId,
+            owner: String,
+        }
         let mut result = self
             .db()
             .query(select)
             .bind(gap.bounds())
             .bind(("started", started.clone()))
             .await?;
-        let ids: Vec<RecordId> = result.take(0)?;
-        let read = ids.len();
+        let rows: Vec<OwnedRow> = result.take(0)?;
+        let read = rows.len();
+        let (ids, names): (Vec<RecordId>, Vec<String>) =
+            rows.into_iter().map(|row| (row.id, row.owner)).unzip();
         if read > 0 {
             self.db()
                 .query("DELETE $ids")
                 .bind(("ids", ids))
                 .await?
                 .check()?;
+            owners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(names);
         }
         Ok(Batch {
             read,

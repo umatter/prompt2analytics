@@ -1148,6 +1148,87 @@ async fn an_orphan_sweep_of_dataset_meta_forgets_the_session_counter() {
     assert_eq!(counter_gap(&db, "s1").await, None);
 }
 
+/// An orphan sweep that deletes a session's dataset metadata rows forgets
+/// that session's byte counter and no other: a session without a session
+/// row whose counter is seeded but which has no orphaned row (one being
+/// created, say) keeps its counter.
+#[tokio::test]
+async fn orphan_sweep_keeps_the_counters_of_sessions_it_did_not_touch() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(1 << 20),
+        ..Default::default()
+    })
+    .await;
+    let mut orphan = budget_meta("gone", 20);
+    orphan.session_id = "orphan".into();
+    db.save_dataset_meta(&orphan).await.unwrap();
+    db.reserve_session_bytes("young", 0).await.unwrap();
+    assert_eq!(db.session_bytes_entry("young"), Some(0));
+
+    assert_eq!(db.delete_orphans().await.unwrap(), 1);
+    assert_eq!(db.session_bytes_entry("orphan"), None);
+    assert_eq!(db.session_bytes_entry("young"), Some(0));
+}
+
+/// The refusal at the session byte budget names the limit key, and does not
+/// tell the caller that deleting a conversation is the only remedy (dataset
+/// metadata counts against the same budget).
+#[tokio::test]
+async fn session_db_bytes_refusal_names_the_budget() {
+    let db = limited_db(PersistenceLimits {
+        session_db_bytes: Some(200),
+        ..Default::default()
+    })
+    .await;
+    // 128 + 2 + 4 + 3 + 16 * 20 = 457 bytes against a budget of 200.
+    let refused = db.save_dataset_meta(&budget_meta("d000", 20)).await;
+    let Err(DbError::QuotaExceeded(text)) = refused else {
+        panic!("expected a quota refusal, got {refused:?}");
+    };
+    assert!(text.contains("session_db_bytes"), "{text}");
+    assert!(!text.contains("first"), "{text}");
+}
+
+/// Updating the source path of a row that does not exist is `NotFound`,
+/// with and without a session byte budget, and stores nothing.
+#[tokio::test]
+async fn source_path_update_of_a_missing_row_is_not_found_with_and_without_a_budget() {
+    for limits in [
+        PersistenceLimits::default(),
+        PersistenceLimits {
+            session_db_bytes: Some(100_000),
+            ..Default::default()
+        },
+    ] {
+        let budgeted = limits.session_db_bytes.is_some();
+        let db = limited_db(limits).await;
+        db.save_dataset_meta(&budget_meta("there", 2))
+            .await
+            .unwrap();
+        let missing = db.update_dataset_source_path("s1", "absent", "a.csv").await;
+        assert!(
+            matches!(missing, Err(DbError::NotFound(_))),
+            "budget {budgeted}: {missing:?}"
+        );
+        let other = db.update_dataset_source_path("s2", "there", "a.csv").await;
+        assert!(
+            matches!(other, Err(DbError::NotFound(_))),
+            "budget {budgeted}: {other:?}"
+        );
+        let rows = db.get_datasets_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_path, None);
+        if budgeted {
+            assert_eq!(counter_gap(&db, "s1").await, None);
+        }
+        let updated = db
+            .update_dataset_source_path("s1", "there", "b.csv")
+            .await
+            .unwrap();
+        assert_eq!(updated.source_path.as_deref(), Some("b.csv"));
+    }
+}
+
 /// The message cap counts the conversation's message rows, not its stored
 /// `message_count`: a counter left one or more below the truth (a recount
 /// that lost a write) does not let a message past the cap.

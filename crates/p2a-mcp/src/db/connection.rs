@@ -458,8 +458,9 @@ impl DbConnection {
             if used.saturating_add(n) > limit {
                 return Err(DbError::QuotaExceeded(format!(
                     "this session already stores {used} bytes of conversation history and \
-                     dataset metadata, and this server keeps at most {limit} bytes per session; \
-                     delete a conversation first"
+                     dataset metadata, and this server keeps at most {limit} bytes per session \
+                     (session_db_bytes); delete a conversation, or start a new session if most \
+                     of it is dataset metadata"
                 )));
             }
             *used += n;
@@ -504,16 +505,6 @@ impl DbConnection {
     pub(crate) fn forget_session_bytes(&self, session_id: &str) {
         if self.limits.session_db_bytes.is_some() {
             self.session_bytes_map().remove(session_id);
-        }
-    }
-
-    /// Drop the byte counter of every session not in `with_row` (an orphan
-    /// sweep deleted rows of sessions without a session row); a later write
-    /// re-seeds it from the store.
-    pub(crate) fn forget_session_bytes_except(&self, with_row: &std::collections::HashSet<String>) {
-        if self.limits.session_db_bytes.is_some() {
-            self.session_bytes_map()
-                .retain(|session_id, _| with_row.contains(session_id));
         }
     }
 
@@ -609,7 +600,8 @@ impl DbConnection {
         Some(ids)
     }
 
-    /// Conversations and sessions with a store turn held or awaited.
+    /// Conversations, sessions and dataset-metadata sessions
+    /// (`datasets:<id>`) with a store turn held or awaited.
     #[cfg(test)]
     pub(crate) fn store_turns_in_use(&self) -> usize {
         self.store_turns
@@ -643,8 +635,8 @@ impl DbConnection {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Whether a call holds the store turn `key` (a conversation id, or
-    /// `session:<id>`), as opposed to only being registered for it:
+    /// Whether a call holds the store turn `key` (a conversation id,
+    /// `session:<id>` or `datasets:<id>`), as opposed to only being registered for it:
     /// [`turn`](Self::turn) counts a call in `users` before it waits for the
     /// lock.
     #[cfg(test)]

@@ -38,6 +38,9 @@ primary_region = "fra"          # Frankfurt — EU
   P2A_CORS_ORIGINS = "https://p2a.qamelab.org"
   # Request-body cap in MiB; it also caps websocket messages and frames. It
   # must be a positive whole number: 0 or an invalid value means the default 32.
+  # In the hosted profile (this file) HTTP JSON bodies stay at most 2 MiB
+  # whatever this value, so raising it does not allow bigger uploads
+  # (DEPLOYMENT.md, HTTP surface).
   P2A_MAX_HTTP_BODY_MB = "32"
 
   # The only hosts the LLM routes may contact (bare hostnames, matched exactly
