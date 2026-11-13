@@ -846,7 +846,8 @@ impl RSeq {
             self.from
         } else if i == self.last {
             self.to
-        } else if i < (self.last + 1) / 2 {
+        } else if i < self.last.div_ceil(2) {
+            // i < len / 2
             self.from + i as f64 * self.by
         } else {
             self.to - (self.last - i) as f64 * self.by
