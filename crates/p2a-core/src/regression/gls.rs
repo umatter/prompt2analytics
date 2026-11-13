@@ -411,12 +411,7 @@ fn gls_engine(
             let s = structure_at(b.x);
             let fit = engine.fit_at(&s)?;
             // non-finite at every rho Brent tried: the search ended without a likelihood
-            if !fit.profile_objective(sse_ref).is_finite() {
-                return Err(EconError::Computation(format!(
-                    "the GLS profile log-likelihood is not finite at the selected rho ({})",
-                    b.x
-                )));
-            }
+            require_finite_profile(fit.profile_objective(sse_ref), b.x)?;
             let mut r = engine.result(&fit, &s, corr, true)?;
             let conv = Convergence::new(
                 b.converged,
@@ -1204,14 +1199,27 @@ fn spec_from_strings(correlation_type: &str, rho: Option<f64>) -> EconResult<Gls
     })
 }
 
+/// The profile log-likelihood at the selected rho must be finite: Brent steers away from a
+/// non-finite value, so one here means every rho it tried gave one.
+fn require_finite_profile(v: f64, rho: f64) -> EconResult<()> {
+    if v.is_finite() {
+        return Ok(());
+    }
+    Err(EconError::Computation(format!(
+        "the GLS profile log-likelihood is not finite at the selected rho ({rho}): the whitened \
+         residual sum of squares overflows or vanishes at every rho tried"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::linalg::matrix_ops::safe_inverse;
     use ndarray::array;
 
-    /// GLS with identity correlation is OLS: pinned to lm without intercept (ols_no_intercept_grunfeld)
-    /// and, for the centered R² with intercept, to ols_grunfeld. REG-19.
+    /// GLS with identity correlation is OLS: pinned to lm without intercept
+    /// (ols_no_intercept_grunfeld) and, for the centered R² with intercept, to ols_grunfeld.
+    /// REG-19.
     #[test]
     fn test_validate_gls_identity_no_intercept_grunfeld() {
         use p2a_validation::{Check, Tol};
@@ -1696,8 +1704,8 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Case `gls_ar1` (nlme::gls REML on the legacy Test 2 DGP; validation/r/cases/regression_legacy.R):
-    /// coefficients, SEs, t, p and sigma at nlme's phi.
+    /// Case `gls_ar1` (nlme::gls REML on the legacy Test 2 DGP;
+    /// validation/r/cases/regression_legacy.R): coefficients, SEs, t, p and sigma at nlme's phi.
     #[test]
     fn test_validate_gls_ar1_nlme() {
         use p2a_validation::{Check, Tol};
@@ -2222,6 +2230,20 @@ mod tests {
                 assert_eq!((column.as_str(), count), ("y", 1))
             }
             e => panic!("{e:?}"),
+        }
+    }
+
+    /// The GLS profile check refuses a NaN or infinite profile value and names the rho.
+    #[test]
+    fn test_require_finite_profile() {
+        assert!(require_finite_profile(-12.5, 0.3).is_ok());
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            match require_finite_profile(v, 0.25) {
+                Err(EconError::Computation(m)) => {
+                    assert!(m.contains("0.25") && m.contains("every rho tried"), "{m}")
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 }
