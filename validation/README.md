@@ -342,12 +342,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Bootstrap covariance (vcovBS) | [vcovBS.md](regression/vcovBS.md) | not R-pinned |
 | LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-60) |
 | Nonlinear least squares | [nls.md](regression/nls.md) | R-pinned |
-| Tukey's Resistant Line | [line.md](regression/line.md) | R-pinned, known deviations (REG-12) |
+| Tukey's Resistant Line | [line.md](regression/line.md) | R-pinned |
 | Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned |
 | Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | R-pinned |
 | E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | R-pinned |
 | GLS with grouped AR(1) / compound-symmetry errors, rho by REML or ML | [gls.md](regression/gls.md) | R-pinned |
-| Smoothing spline (GCV / CV selection) | [smooth_spline.md](regression/smooth_spline.md) | not R-pinned |
+| Smoothing spline (GCV / CV selection) | [smooth_spline.md](regression/smooth_spline.md) | R-pinned |
 | Lasso, ridge and elastic net (glmnet gaussian and binomial paths, cv.glmnet, predict) | [glmnet.md](regression/glmnet.md) | R-pinned |
 | Quantile regression (Barrodale-Roberts simplex, Frisch-Newton, summary.rq iid/nid/ker SEs, xy bootstrap) | [quantreg.md](regression/quantreg.md) | R-pinned, known deviations (REG-26) |
 | Logit average marginal effects (delta-method SEs, aliased regressors) | [marginal_effects.md](regression/marginal_effects.md) | R-pinned |
