@@ -1033,13 +1033,13 @@ pub fn run_hdfe(
             match n_unit {
                 0 => {}
                 1 => warnings.push(
-                    "1 observation has leverage 1 (a singleton fixed-effect level) and \
-                     contributes nothing to the HC2/HC3 meat"
+                    "1 observation has leverage 1 (it is fitted exactly, e.g. a singleton \
+                     fixed-effect level) and contributes nothing to the HC2/HC3 meat"
                         .to_string(),
                 ),
                 m => warnings.push(format!(
-                    "{m} observations have leverage 1 (singleton fixed-effect levels) and \
-                     contribute nothing to the HC2/HC3 meat"
+                    "{m} observations have leverage 1 (they are fitted exactly, e.g. singleton \
+                     fixed-effect levels) and contribute nothing to the HC2/HC3 meat"
                 )),
             }
             v
@@ -3284,8 +3284,8 @@ mod tests {
             );
             assert!(
                 r.warnings.iter().any(|w| w
-                    == "1 observation has leverage 1 (a singleton fixed-effect level) and \
-                        contributes nothing to the HC2/HC3 meat"),
+                    == "1 observation has leverage 1 (it is fitted exactly, e.g. a singleton \
+                        fixed-effect level) and contributes nothing to the HC2/HC3 meat"),
                 "{cov:?}: {:?}",
                 r.warnings
             );

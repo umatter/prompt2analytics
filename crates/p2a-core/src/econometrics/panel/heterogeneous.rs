@@ -202,11 +202,21 @@ impl fmt::Display for PvcmResult {
 
         writeln!(f, "Individual Coefficients (first 5 entities shown):")?;
         // The fitted entities in R factor order, the order of the fit; JSON written
-        // before `entities` existed lists the keys in byte order
+        // before `entities` existed lists the keys numerically when they are numbers (as R's
+        // factor() orders them), else in byte order
         let mut entities: Vec<&String> = self.entities.iter().collect();
         if entities.is_empty() {
             entities = self.individual_coefficients.keys().collect();
-            entities.sort();
+            let numbers: Option<Vec<f64>> = entities.iter().map(|e| e.parse().ok()).collect();
+            match numbers {
+                Some(numbers) => {
+                    let mut keyed: Vec<(f64, &String)> =
+                        numbers.into_iter().zip(entities).collect();
+                    keyed.sort_by(|(x, a), (y, b)| x.total_cmp(y).then_with(|| a.cmp(b)));
+                    entities = keyed.into_iter().map(|(_, e)| e).collect();
+                }
+                None => entities.sort(),
+            }
         }
         let mut count = 0;
         for entity in entities {
@@ -812,7 +822,7 @@ mod tests {
             .scalar("random_chisq", r.homogeneity_stat, Tol::stat(240))
             .scalar(
                 "random_chisq_df",
-                (r.n_entities - 1) as f64 * r.variables.len() as f64,
+                (r.n_entities_used - 1) as f64 * r.variables.len() as f64,
                 Tol::exact(),
             )
             .finish();
@@ -850,9 +860,10 @@ mod tests {
             .scalar("random_chisq", r.homogeneity_stat, Tol::stat(200))
             .scalar(
                 "random_chisq_df",
-                (r.n_entities - 1) as f64 * r.variables.len() as f64,
+                (r.n_entities_used - 1) as f64 * r.variables.len() as f64,
                 Tol::exact(),
             )
+            .scalar("random_chisq_p", r.homogeneity_pvalue, Tol::p_value(200))
             .scalar("n_obs", r.n_obs as f64, Tol::exact())
             .scalar("n_groups", r.n_entities as f64, Tol::exact())
             .finish();
@@ -912,7 +923,7 @@ mod tests {
             .filter_map(|l| l.trim().split_once(':').map(|(id, _)| id))
             .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
             .collect();
-        assert_eq!(ids, ["1", "10", "11", "12", "2"], "{text}");
+        assert_eq!(ids, ["1", "2", "3", "4", "5"], "{text}");
     }
 
     #[test]

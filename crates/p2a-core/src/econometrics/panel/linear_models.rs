@@ -109,6 +109,15 @@ pub fn run_fixed_effects(
     run_fixed_effects_with(dataset, y_col, x_cols, entity_col, &PanelConfig::default())
 }
 
+/// Whether a within fit with residual sum of squares `ssr` is exact up to rounding: at most
+/// (64 eps)^2 times the sum of squares of the outcome `y`. Demeaning an outcome that is constant
+/// within entities leaves rounding residues of about eps |y| per observation, so `ssr == 0.0`
+/// alone misses fractional entity constants and reports t statistics of 1e13 and more.
+fn exact_within_fit(ssr: f64, y: &Array1<f64>) -> bool {
+    let tol = (64.0 * f64::EPSILON).powi(2) * y.iter().map(|v| v * v).sum::<f64>();
+    ssr <= tol
+}
+
 /// Run Fixed Effects (within) panel estimation, as `plm::plm(model = "within")`.
 ///
 /// The covariance is `config.vcov`: classical `s² (X̃'X̃)⁻¹` of the within model
@@ -226,12 +235,13 @@ pub fn run_fixed_effects_with(
     // The entity scores sum to X~'e~ = 0, so the cluster meat has rank at most
     // G - 1 and the clustered covariance is singular when K > G - 1.
     let f_df2 = f_test_df2(config.vcov, df, n_groups);
-    // An exact within fit has zero standard errors: t, p and F are not defined
-    let exact_fit = ssr == 0.0;
+    // An exact within fit has zero standard errors (up to rounding): t, p and F are not
+    // defined
+    let exact_fit = exact_within_fit(ssr, &y);
     if exact_fit {
         warnings.push(format!(
-            "the within fit of '{y_col}' is exact (SSR = 0): the standard errors are zero, so \
-             t, p and F are not defined"
+            "the within fit of '{y_col}' is exact (SSR = 0 up to rounding): the standard errors \
+             are zero, so t, p and F are not defined"
         ));
     }
     let (f_stat, f_p_value) = match config.vcov {
@@ -274,7 +284,13 @@ pub fn run_fixed_effects_with(
     let t_stats: Vec<f64> = beta_vec
         .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { f64::NAN })
+        .map(|(&b, &se)| {
+            if se > 0.0 && !exact_fit {
+                b / se
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
     let p_values: Vec<f64> = t_stats
         .iter()
@@ -485,8 +501,9 @@ pub fn run_random_effects_with(
                 .to_string(),
         });
     }
-    let sigma2_nu = within.rss(&y_w)? / (n - n_groups - k_w) as f64;
-    if sigma2_nu.is_nan() || sigma2_nu <= 0.0 {
+    let rss_w = within.rss(&y_w)?;
+    let sigma2_nu = rss_w / (n - n_groups - k_w) as f64;
+    if sigma2_nu.is_nan() || exact_within_fit(rss_w, &y) {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "'{y_col}' has no residual variation within entities (sigma_e^2 = 0), so the \
@@ -1582,10 +1599,37 @@ mod tests {
             assert!(
                 r.warnings
                     .iter()
-                    .any(|w| w.starts_with("the within fit of 'y' is exact (SSR = 0)")),
+                    .any(|w| w
+                        .starts_with("the within fit of 'y' is exact (SSR = 0 up to rounding)")),
                 "{vcov:?}: {:?}",
                 r.warnings
             );
+        }
+    }
+
+    /// A fractional entity constant leaves rounding residues, not SSR = 0: still exact.
+    #[test]
+    fn test_fractional_constant_within_outcome_is_an_exact_fit() {
+        let (ds, _) = small_noisy_panel(6, 5, 1, 91);
+        let y: Vec<f64> = (0..30).map(|i| 0.1 * (i / 5) as f64 + 1.0 / 3.0).collect();
+        let ds = with_column(&ds, "y", y);
+        let r =
+            run_fixed_effects_with(&ds, "y", &["x1"], "entity", &PanelConfig::default()).unwrap();
+        assert!(
+            r.t_stats[0].is_nan() && r.p_values[0].is_nan(),
+            "{:?}",
+            r.t_stats
+        );
+        assert!(
+            r.warnings.iter().any(|w| w.contains("is exact")),
+            "{:?}",
+            r.warnings
+        );
+        match run_random_effects(&ds, "y", &["x1"], "entity") {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("sigma_e^2 = 0"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
         }
     }
 

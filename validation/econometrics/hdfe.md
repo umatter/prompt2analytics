@@ -334,10 +334,10 @@ fixed-effect dummies; before, p2a used the first term only, so HC2/HC3 came out 
   (`InvalidSpecification`, pointing to HC1).
 - Three or more fixed effects: HC2/HC3 are refused, as fixest and reghdfe do not offer them;
   use HC1.
-- An observation with leverage 1 (a singleton level) has a zero residual; R's `sandwich`
-  returns NaN for it, fixest drops singletons. p2a gives it weight 0 and warns "1 observation
-  has leverage 1 (a singleton fixed-effect level) and contributes nothing to the HC2/HC3
-  meat".
+- An observation with leverage 1 (a singleton level, or in a two-way design one that alone
+  links two levels) has a zero residual; R's `sandwich` returns NaN for it, fixest drops
+  singletons. p2a gives it weight 0 and warns "1 observation has leverage 1 (it is fitted
+  exactly, e.g. a singleton fixed-effect level) and contributes nothing to the HC2/HC3 meat".
 
 | design (case `hdfe_hc_leverage`) | HC3 SEs (R) |
 |---|---|

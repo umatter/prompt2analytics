@@ -683,6 +683,9 @@ struct GcholInverse {
 /// `G = L^-T D^+ L^-1`. `negative` is set when a pivot is below `-8 eps` (survival's
 /// `cholesky2` flag). On a positive-definite matrix this is the inverse.
 fn gchol_inverse(a: ArrayView2<f64>, eps: f64) -> EconResult<GcholInverse> {
+    // bdsmatrix's cholesky2: a zero tolerance (an all-zero Omega, an exact first step) falls
+    // back to the bare tolerance, so a zero pivot is dropped rather than divided by
+    let eps = if eps > 0.0 { eps } else { GCHOL_TOLERANCE };
     let m = a.nrows();
     let what = "panel GLS generalized Cholesky";
     let mut l = resource::try_zeros2(m, m, what)?;
@@ -1417,5 +1420,11 @@ mod tests {
         let g = gchol_inverse(ind.view(), eps(&ind)).unwrap();
         assert!(g.negative);
         assert_eq!(g.rank, 3);
+
+        // all zero (an exact first step): rank 0, no NaN, as bdsmatrix with eps = 0
+        let zero = Array2::<f64>::zeros((4, 4));
+        let g = gchol_inverse(zero.view(), eps(&zero)).unwrap();
+        assert_eq!((g.rank, g.negative), (0, false));
+        assert!(g.inverse.iter().all(|v| *v == 0.0), "{:?}", g.inverse);
     }
 }
