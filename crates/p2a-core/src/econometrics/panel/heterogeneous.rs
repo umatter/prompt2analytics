@@ -31,7 +31,9 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
-use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided};
+
+use super::linear_models::symmetric_eigen_pairs;
 
 /// Result from a variable coefficients model (pvcm).
 ///
@@ -47,11 +49,14 @@ pub struct PvcmResult {
     pub variables: Vec<String>,
     /// Overall GLS coefficients (for random model)
     pub coefficients: Vec<f64>,
-    /// Overall standard errors
+    /// Overall standard errors: Swamy, `sqrt(diag((sum W_i)^-1))`; mean group, the
+    /// standard error of the mean of the entity estimates,
+    /// `sqrt(sum (b_i - bbar)^2 / (N (N - 1)))` over the entities fitted
     pub std_errors: Vec<f64>,
-    /// t-statistics
+    /// z statistics (`coef / se`, as `summary.pvcm` and `summary.pmg`; NaN when the SE is
+    /// not positive)
     pub t_stats: Vec<f64>,
-    /// p-values
+    /// Two-sided normal p-values of the z statistics
     pub p_values: Vec<f64>,
     /// Significance levels
     pub significance: Vec<SignificanceLevel>,
@@ -59,16 +64,27 @@ pub struct PvcmResult {
     pub individual_coefficients: HashMap<String, Vec<f64>>,
     /// Individual-specific standard errors
     pub individual_std_errors: HashMap<String, Vec<f64>>,
-    /// Estimated variance of random coefficients (Delta matrix diagonal)
+    /// Random: the diagonal of the Swamy Delta (`D1 - D2`, or `D1` when that is not
+    /// positive semidefinite). Within: the cross-entity variance of the b_i
+    /// (`sum (b_i - bbar)^2 / N`)
     pub delta: Vec<f64>,
-    /// Test for coefficient homogeneity (chi-squared statistic)
+    /// Test for coefficient homogeneity (chi-squared statistic):
+    /// `sum (b_i - b*)' Var(b_i)^-1 (b_i - b*)` with `b*` the `Var(b_i)^-1`-weighted mean,
+    /// on `k (N - 1)` degrees of freedom over the entities fitted
     pub homogeneity_stat: f64,
     /// p-value for homogeneity test
     pub homogeneity_pvalue: f64,
     /// Number of observations
     pub n_obs: usize,
-    /// Number of entities
+    /// Number of entities (every level of the entity id, fitted or skipped)
     pub n_entities: usize,
+    /// Number of entities fitted (0 in JSON written before this field existed)
+    #[serde(default)]
+    pub n_entities_used: usize,
+    /// The fitted entities in R factor order (empty in JSON written before this field
+    /// existed)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<String>,
     /// Degrees of freedom
     pub df: usize,
     /// Entity variable name
@@ -130,7 +146,15 @@ impl fmt::Display for PvcmResult {
         writeln!(f, "Model: {:?}", self.model_type)?;
         writeln!(f, "Dep. Variable: {}", self.dep_var)?;
         writeln!(f, "No. Observations: {}", self.n_obs)?;
-        writeln!(f, "No. Entities: {}", self.n_entities)?;
+        if self.n_entities_used > 0 && self.n_entities_used != self.n_entities {
+            writeln!(
+                f,
+                "No. Entities: {} ({} used)",
+                self.n_entities, self.n_entities_used
+            )?;
+        } else {
+            writeln!(f, "No. Entities: {}", self.n_entities)?;
+        }
         writeln!(f)?;
 
         if matches!(self.model_type, PvcmType::Random) {
@@ -138,7 +162,7 @@ impl fmt::Display for PvcmResult {
             writeln!(
                 f,
                 "{:<20} {:>12} {:>12} {:>10} {:>10}",
-                "Variable", "Coef", "Std Err", "t", "P>|t|"
+                "Variable", "Coef", "Std Err", "z", "P>|z|"
             )?;
             writeln!(f, "{}", "-".repeat(70))?;
 
@@ -177,24 +201,18 @@ impl fmt::Display for PvcmResult {
         writeln!(f)?;
 
         writeln!(f, "Individual Coefficients (first 5 entities shown):")?;
-        // R factor() order, the order of the fit: numerically when every id is a number,
-        // else in byte order.
-        let mut entities: Vec<&String> = self.individual_coefficients.keys().collect();
-        let numeric: Option<Vec<f64>> = entities.iter().map(|k| k.parse::<f64>().ok()).collect();
-        if numeric.is_some() {
-            entities.sort_by(|a, b| {
-                let (x, y) = (
-                    a.parse::<f64>().unwrap_or(0.0),
-                    b.parse::<f64>().unwrap_or(0.0),
-                );
-                x.total_cmp(&y).then_with(|| a.cmp(b))
-            });
-        } else {
+        // The fitted entities in R factor order, the order of the fit; JSON written
+        // before `entities` existed lists the keys in byte order
+        let mut entities: Vec<&String> = self.entities.iter().collect();
+        if entities.is_empty() {
+            entities = self.individual_coefficients.keys().collect();
             entities.sort();
         }
         let mut count = 0;
         for entity in entities {
-            let coeffs = &self.individual_coefficients[entity];
+            let Some(coeffs) = self.individual_coefficients.get(entity) else {
+                continue;
+            };
             if count >= 5 {
                 break;
             }
@@ -284,6 +302,8 @@ pub fn run_pvcm(
     let mut individual_std_errors: HashMap<String, Vec<f64>> = HashMap::new();
     let mut all_betas: Vec<Array1<f64>> = Vec::new();
     let mut all_vcovs: Vec<Array2<f64>> = Vec::new();
+    // Var(b_i)^-1, for the homogeneity test
+    let mut all_vcov_invs: Vec<Array2<f64>> = Vec::new();
     let mut all_labels: Vec<&str> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -327,10 +347,18 @@ pub fn run_pvcm(
         let vcov_i = &ls.unscaled_cov * sigma2_i;
         let std_err_i: Vec<f64> = vcov_i.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
 
+        let vcov_inv_i = sym_inverse(
+            vcov_i.view(),
+            SingularPolicy::Error,
+            &format!("Var(b_i) of entity '{entity_label}'"),
+        )?
+        .inverse;
+
         individual_coefficients.insert(entity_label.clone(), beta_i.to_vec());
         individual_std_errors.insert(entity_label.clone(), std_err_i);
         all_betas.push(beta_i);
         all_vcovs.push(vcov_i);
+        all_vcov_invs.push(vcov_inv_i);
         all_labels.push(entity_label);
     }
 
@@ -346,6 +374,14 @@ pub fn run_pvcm(
     // Compute results based on model type
     let (coefficients, std_errors, delta) = match model {
         PvcmType::Within => {
+            if n_valid_entities < 2 {
+                return Err(EconError::InsufficientData {
+                    required: 2,
+                    provided: n_valid_entities,
+                    context: "the mean-group standard error needs at least 2 fitted entities"
+                        .to_string(),
+                });
+            }
             // Simple average of individual coefficients
             let mut avg_coef: Array1<f64> = Array1::zeros(k);
             for beta in &all_betas {
@@ -353,14 +389,17 @@ pub fn run_pvcm(
             }
             avg_coef /= n_valid_entities as f64;
 
-            // Standard error as std dev of individual coefficients
-            let mut var_coef: Array1<f64> = Array1::zeros(k);
+            // Sum of squared deviations of the entity estimates
+            let mut ss: Array1<f64> = Array1::zeros(k);
             for beta in &all_betas {
                 let diff = beta - &avg_coef;
-                var_coef = &var_coef + &diff.mapv(|d: f64| d * d);
+                ss = &ss + &diff.mapv(|d: f64| d * d);
             }
-            var_coef /= n_valid_entities.max(1) as f64;
-            let se_coef = var_coef.mapv(|v: f64| v.max(0.0).sqrt());
+            let nv = n_valid_entities as f64;
+            // The standard error of the mean (plm::pmg): sqrt(ss / (N (N - 1)))
+            let se_coef = ss.mapv(|v: f64| (v / (nv * (nv - 1.0))).sqrt());
+            // The cross-entity variance of the b_i
+            let var_coef = ss / nv;
 
             (avg_coef.to_vec(), se_coef.to_vec(), var_coef.to_vec())
         }
@@ -392,11 +431,18 @@ pub fn run_pvcm(
                 avg_var = &avg_var + vcov;
             }
             avg_var /= n_valid_entities as f64;
+            let d1 = delta_mat.clone();
             delta_mat = delta_mat - avg_var;
 
-            // Ensure non-negative diagonal
-            for j in 0..k {
-                delta_mat[[j, j]] = delta_mat[[j, j]].max(0.0);
+            // plm: Delta = D1 - D2 unless it has a negative eigenvalue, then D1
+            let (eigenvalues, _) = symmetric_eigen_pairs(&delta_mat)?;
+            let smallest = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+            if smallest < 0.0 {
+                warnings.push(format!(
+                    "Swamy: Delta = D1 - D2 is not positive semidefinite (smallest eigenvalue \
+                     {smallest:.6e}); D1 is used, as plm"
+                ));
+                delta_mat = d1;
             }
 
             // GLS weights: W_i = (Var(beta_i) + Delta)^(-1)
@@ -425,7 +471,16 @@ pub fn run_pvcm(
             .inverse;
 
             let beta_gls: Array1<f64> = sum_w_inv.dot(&sum_wb);
-            let se_gls: Vec<f64> = sum_w_inv.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
+            let mut se_gls = Vec::with_capacity(k);
+            for (j, &v) in sum_w_inv.diag().iter().enumerate() {
+                if !(v.is_finite() && v >= 0.0) {
+                    return Err(EconError::Computation(format!(
+                        "Swamy: the variance of '{}' is {v}",
+                        var_names[j]
+                    )));
+                }
+                se_gls.push(v.sqrt());
+            }
             let delta_diag = delta_mat.diag().to_vec();
 
             (beta_gls.to_vec(), se_gls, delta_diag)
@@ -440,39 +495,47 @@ pub fn run_pvcm(
             provided: n,
             context: "pvcm: fewer rows than coefficients".to_string(),
         })?;
+    // z statistics and normal p-values (summary.pvcm, summary.pmg)
     let t_stats: Vec<f64> = coefficients
         .iter()
         .zip(std_errors.iter())
-        .map(|(b, se): (&f64, &f64)| if *se > 1e-10 { b / se } else { 0.0 })
+        .map(|(&b, &se)| {
+            if se.is_finite() && se > 0.0 {
+                b / se
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
     let p_values: Vec<f64> = t_stats
         .iter()
-        .map(|t: &f64| t_test_p_value(*t, df as f64))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
-    // Homogeneity test: H0: all beta_i are equal
-    // Test statistic: sum_i (beta_i - beta_bar)' * Var(beta_i)^(-1) * (beta_i - beta_bar)
-    // Distributed as chi-squared with (N-1)*k degrees of freedom
-    let mut beta_bar_test: Array1<f64> = Array1::zeros(k);
-    for beta in &all_betas {
-        beta_bar_test = &beta_bar_test + beta;
+    // Homogeneity test (plm), H0: all beta_i are equal:
+    // sum_i (b_i - b*)' Var(b_i)^-1 (b_i - b*), with b* = (sum Var(b_i)^-1)^-1 sum
+    // Var(b_i)^-1 b_i, chi-squared with (N - 1) k degrees of freedom
+    let mut sum_vinv: Array2<f64> = Array2::zeros((k, k));
+    let mut sum_vinv_b: Array1<f64> = Array1::zeros(k);
+    for (vinv, beta) in all_vcov_invs.iter().zip(&all_betas) {
+        sum_vinv += vinv;
+        sum_vinv_b += &vinv.dot(beta);
     }
-    let beta_bar_test = beta_bar_test / n_valid_entities as f64;
-
+    let b_star = sym_inverse(
+        sum_vinv.view(),
+        SingularPolicy::Error,
+        "the homogeneity-test weight sum (sum of Var(b_i)^-1)",
+    )?
+    .inverse
+    .dot(&sum_vinv_b);
     let mut homogeneity_stat = 0.0;
-    for (i, beta) in all_betas.iter().enumerate() {
-        let diff = beta - &beta_bar_test;
-        let vcov_inv = sym_inverse(
-            all_vcovs[i].view(),
-            SingularPolicy::Error,
-            &format!("Var(b_i) of entity '{}'", all_labels[i]),
-        )?
-        .inverse;
-        homogeneity_stat += diff.dot(&vcov_inv.dot(&diff));
+    for (vinv, beta) in all_vcov_invs.iter().zip(&all_betas) {
+        let diff = beta - &b_star;
+        homogeneity_stat += diff.dot(&vinv.dot(&diff));
     }
 
     let homogeneity_df = ((n_valid_entities - 1) * k) as f64;
@@ -507,6 +570,8 @@ pub fn run_pvcm(
         homogeneity_pvalue,
         n_obs: n,
         n_entities,
+        n_entities_used: n_valid_entities,
+        entities: all_labels.iter().map(|s| s.to_string()).collect(),
         df,
         entity_var: entity_col.to_string(),
         warnings,
@@ -521,7 +586,10 @@ pub fn run_pvcm(
 /// Run Mean Group (MG) estimator for heterogeneous panels.
 ///
 /// The Mean Group estimator computes the simple average of individual-specific
-/// OLS estimates. This is a special case of pvcm with equal weights.
+/// OLS estimates. This is a special case of pvcm with equal weights. Its standard
+/// errors are those of the mean, `sqrt(sum (b_i - bbar)^2 / (N (N - 1)))` over the
+/// entities fitted, with z statistics and normal p-values (`plm::pmg(model = "mg")`).
+/// At least 2 entities must be fitted.
 pub fn run_pmg(
     dataset: &Dataset,
     y_col: &str,
@@ -539,8 +607,7 @@ mod tests {
 
     /// The mean-group estimator on Grunfeld with missing cells and two missing ids,
     /// pinned to `plm::pmg(model = "mg")` on the 195 complete rows, for a numeric and
-    /// a text id. Not compared: `mg_se` (p2a reports the cross-entity standard
-    /// deviation, not its standard error; registry deviation ECON-34).
+    /// a text id.
     #[test]
     fn test_validate_pmg_grunfeld_na() {
         let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
@@ -548,6 +615,7 @@ mod tests {
             let r = run_pmg(&ds, "inv", &["value", "capital"], id).unwrap();
             Check::new(&case)
                 .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(195))
+                .named("mg_se", &r.variables, &r.std_errors, Tol::se(195))
                 .scalar("n_complete_fe", r.n_obs as f64, Tol::exact())
                 .scalar("n_groups", r.n_entities as f64, Tol::exact())
                 .finish();
@@ -666,6 +734,20 @@ mod tests {
         .unwrap();
         assert_eq!(r.individual_coefficients.len(), 11);
         assert!(!r.individual_coefficients.contains_key("3"));
+        assert_eq!((r.n_entities, r.n_entities_used), (12, 11));
+        // the mean-group SE over the 11 entities fitted
+        for j in 0..r.variables.len() {
+            let b: Vec<f64> = r.individual_coefficients.values().map(|c| c[j]).collect();
+            let mean = b.iter().sum::<f64>() / 11.0;
+            let ss: f64 = b.iter().map(|v| (v - mean).powi(2)).sum();
+            let se = (ss / (11.0 * 10.0)).sqrt();
+            assert!(
+                (r.std_errors[j] - se).abs() <= 1e-12 * se,
+                "{j}: {} vs {se}",
+                r.std_errors[j]
+            );
+        }
+        assert!(r.to_string().contains("No. Entities: 12 (11 used)"));
         assert!(
             r.warnings
                 .iter()
@@ -723,12 +805,22 @@ mod tests {
     fn test_validate_pvcm_random_sim() {
         let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
         let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Random).unwrap();
-        // deviation ECON-35: random_chisq (homogeneity test around the unweighted mean); Delta clamp when not PD
         Check::new(&case)
             .named("random_coef", &r.variables, &r.coefficients, Tol::coef(240))
             .named("random_se", &r.variables, &r.std_errors, Tol::se(240))
             .named("random_delta_diag", &r.variables, &r.delta, Tol::stat(240))
+            .scalar("random_chisq", r.homogeneity_stat, Tol::stat(240))
+            .scalar(
+                "random_chisq_df",
+                (r.n_entities - 1) as f64 * r.variables.len() as f64,
+                Tol::exact(),
+            )
             .finish();
+        assert!(
+            !r.warnings.iter().any(|w| w.starts_with("Swamy:")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     /// plm::pmg(model = "mg") on pvcm_pmg_sim.
@@ -736,11 +828,91 @@ mod tests {
     fn test_validate_pmg_sim() {
         let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
         let r = run_pmg(&ds, "y", &["x1", "x2"], "id").unwrap();
-        // deviation ECON-34: mg_se
         Check::new(&case)
             .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(240))
+            .named("mg_se", &r.variables, &r.std_errors, Tol::se(240))
             .scalar("n_obs", r.n_obs as f64, Tol::exact())
             .finish();
+    }
+
+    /// plm::pvcm(model = "random") on Grunfeld, where D1 - D2 has a negative eigenvalue:
+    /// plm uses Delta = D1 (pvcm_swamy_grunfeld).
+    #[test]
+    fn test_validate_pvcm_random_grunfeld_non_psd_delta() {
+        let (case, ds) = crate::test_support::load_case("pvcm_swamy_grunfeld");
+        let r = run_pvcm(&ds, "inv", &["value", "capital"], "firm", PvcmType::Random).unwrap();
+        Check::new(&case)
+            .named("random_coef", &r.variables, &r.coefficients, Tol::coef(200))
+            .named("random_se", &r.variables, &r.std_errors, Tol::se(200))
+            .named("random_z", &r.variables, &r.t_stats, Tol::se(200))
+            .named("random_p", &r.variables, &r.p_values, Tol::p_value(200))
+            .named("random_delta_diag", &r.variables, &r.delta, Tol::se(200))
+            .scalar("random_chisq", r.homogeneity_stat, Tol::stat(200))
+            .scalar(
+                "random_chisq_df",
+                (r.n_entities - 1) as f64 * r.variables.len() as f64,
+                Tol::exact(),
+            )
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .scalar("n_groups", r.n_entities as f64, Tol::exact())
+            .finish();
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with(
+                "Swamy: Delta = D1 - D2 is not positive semidefinite (smallest eigenvalue -1.12"
+            ) && w.ends_with("D1 is used, as plm")),
+            "{:?}",
+            r.warnings
+        );
+        let text = r.to_string();
+        assert!(text.contains("P>|z|"), "{text}");
+    }
+
+    /// plm::pmg(model = "mg") on Grunfeld: the standard error of the mean of the firm
+    /// estimates, z and normal p-values (pvcm_swamy_grunfeld).
+    #[test]
+    fn test_validate_pmg_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("pvcm_swamy_grunfeld");
+        let r = run_pmg(&ds, "inv", &["value", "capital"], "firm").unwrap();
+        Check::new(&case)
+            .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(200))
+            .named("mg_se", &r.variables, &r.std_errors, Tol::se(200))
+            .named("mg_z", &r.variables, &r.t_stats, Tol::se(200))
+            .named("mg_p", &r.variables, &r.p_values, Tol::p_value(200))
+            // the homogeneity statistic does not depend on Delta
+            .scalar("random_chisq", r.homogeneity_stat, Tol::stat(200))
+            .finish();
+    }
+
+    /// JSON written before `entities` and `n_entities_used` existed still prints: the
+    /// keys in byte order and the entity count alone.
+    #[test]
+    fn test_pvcm_display_without_entities_field() {
+        // 12 entities (ids 1-12) of 8 noisy rows
+        let n = 96;
+        let id: Vec<i64> = (0..n).map(|i| (i / 8 + 1) as i64).collect();
+        let x1: Vec<f64> = (0..n).map(|i| ((i * 37) % 23) as f64 / 7.0).collect();
+        let x2: Vec<f64> = (0..n).map(|i| ((i * 53) % 19) as f64 / 5.0 - 1.0).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 0.8 * x1[i] - 0.3 * x2[i] + ((i * 7919) % 101) as f64 / 120.0)
+            .collect();
+        let ds = Dataset::new(polars::df! {"id" => id, "x1" => x1, "x2" => x2, "y" => y}.unwrap());
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Within).unwrap();
+        let mut json = serde_json::to_value(&r).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        assert!(obj.remove("entities").is_some());
+        assert!(obj.remove("n_entities_used").is_some());
+        let old: PvcmResult = serde_json::from_value(json).unwrap();
+        assert!(old.entities.is_empty());
+        assert_eq!(old.n_entities_used, 0);
+        let text = old.to_string();
+        assert!(text.contains("No. Entities: 12\n"), "{text}");
+        let block = text.split("Individual Coefficients").nth(1).unwrap();
+        let ids: Vec<&str> = block
+            .lines()
+            .filter_map(|l| l.trim().split_once(':').map(|(id, _)| id))
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        assert_eq!(ids, ["1", "10", "11", "12", "2"], "{text}");
     }
 
     #[test]
@@ -759,5 +931,6 @@ mod tests {
             .take(5)
             .collect();
         assert_eq!(ids, ["1", "2", "3", "4", "5"], "{text}");
+        assert_eq!(r.entities[..5], ["1", "2", "3", "4", "5"]);
     }
 }

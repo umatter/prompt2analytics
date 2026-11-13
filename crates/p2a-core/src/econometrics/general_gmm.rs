@@ -584,9 +584,10 @@ impl<'a> LinearIv<'a> {
     /// The MDS moment covariance `sum_i (g_i - c)(g_i - c)' / n` with `g_i = z_i e_i` and `c`
     /// the column means of the moments (`centered`) or zero, formed column by column: moment
     /// `j` is the contiguous vector `z_j * e`, centred by its own mean as
-    /// [`centre_columns`] does, and `Omega_jl` is one dot product. For `q` up to
-    /// [`MDS_COLUMNWISE_MAX_Q`] this is faster than the n x q moment matrix and its matrix
-    /// product (no broadcasting passes, no packing of a transposed operand).
+    /// [`centre_columns`] does, and `Omega_jl` is one dot product (no broadcasting passes,
+    /// no packing of a transposed operand). Against the n x q moment matrix and its matrix
+    /// product it is clearly faster up to q = 5 and about equal at q = 8 (measured with the
+    /// GMM timing harness); above [`MDS_COLUMNWISE_MAX_Q`] the matrix form is kept.
     fn mds_omega(&self, theta: ArrayView1<f64>, centered: bool) -> EconResult<Array2<f64>> {
         let (n, q) = self.z.dim();
         // e = y - X theta in the buffer of X theta (the same operations as `residuals`)
@@ -697,8 +698,9 @@ impl MomentModel for LinearIv<'_> {
 }
 
 /// Up to this many moment conditions the MDS covariance of linear IV is formed column by
-/// column ([`LinearIv::mds_omega`]); above it the n x q moment matrix and one matrix product
-/// are as fast or faster.
+/// column ([`LinearIv::mds_omega`]): clearly faster up to q = 5, about equal at q = 8
+/// (measured with the GMM timing harness); above 8 the n x q moment matrix and one matrix
+/// product are kept.
 const MDS_COLUMNWISE_MAX_Q: usize = 8;
 
 /// An estimated moment covariance `Omega` and the HAC lags it used.
@@ -729,7 +731,9 @@ fn moment_covariance(
     {
         return Ok(MomentCov { omega, lags: None });
     }
-    if config.vcov != GmmVcov::HAC
+    // MDS and Fixed take the column-wise form for linear IV. IID never reaches it there:
+    // linear IV's `iid_omega` always returns Some above.
+    if matches!(config.vcov, GmmVcov::MDS | GmmVcov::Fixed)
         && let Some(lin) = model.as_linear()
         && lin.q() <= MDS_COLUMNWISE_MAX_Q
     {
@@ -979,7 +983,7 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
 
 /// `b / se`, or NaN when the SE is zero or not finite (a degenerate sandwich), so that a zero
 /// variance is not reported as infinite significance.
-fn wald_z(b: f64, se: f64) -> f64 {
+pub(crate) fn wald_z(b: f64, se: f64) -> f64 {
     if se.is_finite() && se > 0.0 {
         b / se
     } else {
@@ -1016,11 +1020,16 @@ fn finish_fit(
         let t1 = bread.dot(&gw);
         symmetrize(&(t1.dot(&cov.omega).dot(&t1.t()) / nf))
     } else {
+        // CUE's Omega^-1 is borrowed; the other paths form it here
+        let computed;
         let oinv = match oinv {
-            Some(w) => w.clone(),
-            None => weight_from(&cov.omega)?,
+            Some(w) => w,
+            None => {
+                computed = weight_from(&cov.omega)?;
+                &computed
+            }
         };
-        let m = symmetrize(&g.t().dot(&oinv).dot(&g));
+        let m = symmetrize(&g.t().dot(oinv).dot(&g));
         sym_inverse(m.view(), SingularPolicy::Error, "G' Omega^-1 G")?.inverse / nf
     };
     let gbar = model.gbar(theta.view())?;

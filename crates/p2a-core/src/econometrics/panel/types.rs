@@ -15,6 +15,20 @@ use crate::errors::EconError;
 use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::{LinearEstimator, SignificanceLevel, t_critical};
 
+/// NaN, the serde default of a statistic that may be undefined.
+pub(crate) fn nan() -> f64 {
+    f64::NAN
+}
+
+/// Deserialize an `f64` that JSON may hold as null (how `serde_json` writes NaN) as
+/// NaN.
+pub(crate) fn nan_from_null<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or(f64::NAN))
+}
+
 /// Small-sample factor of the entity-clustered (Arellano) covariance
 /// `c · B M B`, with `n` observations, `k` coefficients and `G` entities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -138,9 +152,12 @@ pub struct PanelResult {
     /// covariance the second degrees of freedom are `G - 1`, as plm's `df2adj`
     /// for a cluster vcov. NaN when the Wald statistic is not computed: the
     /// slope covariance is singular, as the clustered one always is for
-    /// fixed effects with `K >= G` (its rank is at most `G - 1`).
+    /// fixed effects with `K >= G` (its rank is at most `G - 1`), and for an exact
+    /// within fit. JSON writes NaN as null, which reads back as NaN.
+    #[serde(default = "nan", deserialize_with = "nan_from_null")]
     pub f_stat: f64,
     /// p-value of `f_stat` on [`PanelResult::f_df`] degrees of freedom
+    #[serde(default = "nan", deserialize_with = "nan_from_null")]
     pub f_p_value: f64,
     /// Number of observations
     pub n_obs: usize,

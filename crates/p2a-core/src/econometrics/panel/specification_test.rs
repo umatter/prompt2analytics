@@ -160,9 +160,10 @@ fn hausman_quadratic_form(
     d: &Array1<f64>,
     v_fe: &Array2<f64>,
     v_re: &Array2<f64>,
+    names: &[String],
 ) -> EconResult<HausmanForm> {
     let k = d.len();
-    if k == 0 || v_fe.dim() != (k, k) || v_re.dim() != (k, k) {
+    if k == 0 || v_fe.dim() != (k, k) || v_re.dim() != (k, k) || names.len() != k {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Hausman test: need at least one slope and {k} x {k} covariance matrices \
@@ -178,9 +179,9 @@ fn hausman_quadratic_form(
         if !(v.is_finite() && v > 0.0) {
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "Hausman test: the fixed-effects variance of slope {} is {v}; it must be \
+                    "Hausman test: the fixed-effects variance of '{}' is {v}; it must be \
                      finite and positive",
-                    j + 1
+                    names[j]
                 ),
             });
         }
@@ -287,7 +288,11 @@ pub fn run_hausman_test(
     let v_fe = Array2::from_shape_fn((k, k), |(a, b)| fe_result.vcov[[fe_idx[a], fe_idx[b]]]);
     let v_re = Array2::from_shape_fn((k, k), |(a, b)| re_result.vcov[[re_idx[a], re_idx[b]]]);
 
-    let form = hausman_quadratic_form(&d, &v_fe, &v_re)?;
+    let slope_names: Vec<String> = fe_idx
+        .iter()
+        .map(|&i| fe_result.variables[i].clone())
+        .collect();
+    let form = hausman_quadratic_form(&d, &v_fe, &v_re, &slope_names)?;
     let chi2_statistic = form.statistic;
     let df = form.df;
     let p_value = chi_squared_p_value(chi2_statistic, df as f64);
@@ -353,6 +358,27 @@ mod tests {
         (a - b).abs() <= 1e-14 * b.abs()
     }
 
+    fn names2() -> Vec<String> {
+        vec!["x1".to_string(), "x2".to_string()]
+    }
+
+    /// A non-finite fixed-effects variance is refused, naming the slope.
+    #[test]
+    fn test_hausman_form_names_the_slope_with_bad_variance() {
+        match hausman_quadratic_form(
+            &array![1.0, 1.0],
+            &array![[f64::NAN, 0.0], [0.0, 1.0]],
+            &array![[0.5, 0.0], [0.0, 0.5]],
+            &names2(),
+        ) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("fixed-effects variance of 'x1' is NaN"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
     /// d' D^-1 d with D = [[3, 0.5], [0.5, 2]] and d = (1, -2): 64/23.
     #[test]
     fn test_hausman_form_full_rank() {
@@ -360,6 +386,7 @@ mod tests {
             &array![1.0, -2.0],
             &array![[4.0, 1.0], [1.0, 3.0]],
             &array![[1.0, 0.5], [0.5, 1.0]],
+            &names2(),
         )
         .unwrap();
         assert!(close(f.statistic, 64.0 / 23.0), "{}", f.statistic);
@@ -374,6 +401,7 @@ mod tests {
             &array![2.0, 1.0],
             &array![[1.0, 0.0], [0.0, 1.0]],
             &array![[2.0, 0.0], [0.0, 0.5]],
+            &names2(),
         )
         .unwrap();
         assert!(close(f.statistic, 2.0), "{}", f.statistic);
@@ -389,6 +417,7 @@ mod tests {
             &array![1.0, 1.0],
             &array![[2.0, 1.0], [1.0, 2.0]],
             &array![[1.0, 0.0], [0.0, 1.0]],
+            &names2(),
         )
         .unwrap();
         assert!(close(f.statistic, 1.0), "{}", f.statistic);
@@ -400,7 +429,7 @@ mod tests {
     #[test]
     fn test_hausman_form_zero_difference_is_an_error() {
         let eye = array![[1.0, 0.0], [0.0, 1.0]];
-        match hausman_quadratic_form(&array![1.0, 1.0], &eye, &eye) {
+        match hausman_quadratic_form(&array![1.0, 1.0], &eye, &eye, &names2()) {
             Err(EconError::InvalidSpecification { message }) => {
                 assert!(message.contains("no testable difference"), "{message}")
             }
@@ -417,6 +446,7 @@ mod tests {
             &array![1.0, -2e-7],
             &array![[4.0, 1e-7], [1e-7, 3e-14]],
             &array![[1.0, 5e-8], [5e-8, 1e-14]],
+            &names2(),
         )
         .unwrap();
         assert!(close(f.statistic, 64.0 / 23.0), "{}", f.statistic);

@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_gls_unbalanced",
+      "name": "Panel GLS (pggls) on an unbalanced panel: per-entity covariance blocks, generalized Cholesky",
+      "category": "econometrics",
+      "reference": "plm::pggls(model = 'pooling' | 'within' | 'fd') (unrestricted T x T FGLS, per-entity blocks Omega_ii)",
+      "doc": "validation/econometrics/pggls.md",
+      "cases": [
+        "pggls_unbalanced"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_unbalanced_pooling",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_unbalanced_within",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_unbalanced_fd"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs",
+        "z",
+        "p-values",
+        "RSS",
+        "R2",
+        "df",
+        "observations (FD: differenced rows)",
+        "indefinite-covariance warning (within; property)"
+      ],
+      "tolerance": "validation/README.md, n = 212: coefficients 1e-8, SE and statistics 1e-6 relative, p-values Tol::p_value; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_pvcm_swamy_non_psd",
+      "name": "Swamy random coefficients when D1 - D2 is not positive semidefinite (D1 fallback); mean-group SEs and z tests",
+      "category": "econometrics",
+      "reference": "plm::pvcm(model = 'random'); plm::pmg(model = 'mg')",
+      "doc": "validation/econometrics/pvcm.md",
+      "cases": [
+        "pvcm_swamy_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_random_grunfeld_non_psd_delta",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld"
+      ],
+      "quantities": [
+        "Swamy coefficients, SEs, z, p",
+        "Delta diagonal (D1)",
+        "homogeneity chi-square, df",
+        "mean-group coefficients, SEs, z, p",
+        "n, N",
+        "D1 fallback warning (property)"
+      ],
+      "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE, z, Delta and statistics 1e-6 relative, p-values Tol::p_value; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "hdfe_hc_leverage",
+      "name": "HDFE HC0-HC3 with the fixed-effect leverage (one-way 1/T_g, two-way Schur complement)",
+      "category": "econometrics",
+      "reference": "sandwich::vcovHC(lm(y ~ x + factor(fe1) [+ factor(fe2)]), type = 'HC0' | 'HC1' | 'HC2' | 'HC3')",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "hdfe_hc_leverage",
+        "panel_hdfe_grunfeld",
+        "hdfe_disconnected"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_grunfeld",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_short_panel",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_hc_leverage_disconnected"
+      ],
+      "quantities": [
+        "coefficients",
+        "HC0, HC1, HC2, HC3 SEs (one-way, two-way, two components)",
+        "df"
+      ],
+      "tolerance": "validation/README.md at each design's n: coefficients 1e-6 (disconnected, n = 80) / 1e-8 (Grunfeld n = 200, short panel n = 377), SE 1e-5 / 1e-6 relative; df exact. The alternating projections converge to these on the unbalanced two-way designs, so the deterministic tolerance applies",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

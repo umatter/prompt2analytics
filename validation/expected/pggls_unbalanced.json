@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "id": "pggls_unbalanced",
+  "area": "econometrics/panel_gls",
+  "method": "plm::pggls pooling / within / fd on an unbalanced N = 40, T = 6 panel (AR(1), heteroskedastic errors; first, last and interior periods missing)",
+  "reference": "plm::pggls(model = 'pooling' | 'within' | 'fd') (unrestricted T x T FGLS, per-entity blocks Omega_ii)",
+  "call": "pggls(y ~ x1 + x2, data = pdata.frame(d, index = c('id', 't')), model)",
+  "dataset": "validation/datasets/generated/pggls_unbalanced.csv",
+  "datasets": ["validation/datasets/generated/pggls_unbalanced.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "pooling_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.85241290967767191, 0.97740227935606627, -0.5579418163223776]
+    },
+    "pooling_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.19365110924617956, 0.055887933077357663, 0.048389308978415042]
+    },
+    "pooling_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [4.4017971959770152, 17.488610251575921, -11.530270386197456]
+    },
+    "pooling_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [1.0735788385654921e-05, 1.7497232315450313e-68, 9.2851637282300047e-31]
+    },
+    "pooling_df_resid": 209,
+    "pooling_rss": 608.20108656497644,
+    "pooling_r2": 0.23709451386679681,
+    "pooling_nobs": 212,
+    "pooling_omega_min_eigenvalue": 0.1187441740581701,
+    "within_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.95487362547519428, -0.53433195544482159]
+    },
+    "within_se": {
+      "names": ["x1", "x2"],
+      "values": [0.064264634332804757, 0.056077863462417228]
+    },
+    "within_z": {
+      "names": ["x1", "x2"],
+      "values": [14.85846197350517, -9.5283936022798912]
+    },
+    "within_p": {
+      "names": ["x1", "x2"],
+      "values": [6.1316771833451952e-50, 1.5973575576877302e-21]
+    },
+    "within_df_resid": 210,
+    "within_rss": 174.57239264724365,
+    "within_r2": 0.78102269295476923,
+    "within_nobs": 212,
+    "within_omega_min_eigenvalue": -0.13409486503754034,
+    "fd_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.0074458923204173324, 0.97772009736865573, -0.55463336307902811]
+    },
+    "fd_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.049114833464716665, 0.06671992960779552, 0.058883756420593257]
+    },
+    "fd_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.15160170146492191, 14.654093658612306, -9.4191233167498414]
+    },
+    "fd_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.87950109134559062, 1.2683783221995144e-48, 4.5486994992802213e-21]
+    },
+    "fd_df_resid": 169,
+    "fd_rss": 253.60937543801612,
+    "fd_r2": 0.68188155508037318,
+    "fd_nobs": 172,
+    "fd_omega_min_eigenvalue": 0.28683106740023051,
+    "n_obs": 212
+  }
+}

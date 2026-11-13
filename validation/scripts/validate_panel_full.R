@@ -232,11 +232,12 @@ cat(sprintf("\nPanel GLS subset: %d firms, %d years (p2a-core refuses T > N)\n",
 # =============================================================================
 # Test 6: Panel GLS - Fixed Effects (FEGLS/pggls within)
 # =============================================================================
-# Reference values only: no p2a-core test compares FE panel GLS with pggls yet
-# (ECON-33). On full Grunfeld p2a-core refuses it
-# (test_panel_gls_fe_full_grunfeld_is_refused).
-# The within residuals sum to zero in every firm, so Omega is singular on
-# any panel and these values are a generalised-inverse fit here too.
+# Reference values only. FE, FD and pooled pggls are pinned in p2a-core by the
+# R cases pggls_sim and pggls_unbalanced (validation/r/cases/econ_panel_t3.R,
+# econ_panel_t4.R; the panel GLS fix of ECON-33). On full Grunfeld p2a-core
+# refuses FE panel GLS (test_panel_gls_fe_full_grunfeld_is_refused).
+# The within residuals sum to zero in every firm of a balanced panel, so Omega
+# is singular and these values are a generalised-inverse fit here too.
 cat("\n=== Test 6: Panel GLS - Fixed Effects (Grunfeld 1935-1944) ===\n")
 
 fegls_result <- tryCatch({
@@ -266,11 +267,9 @@ if (!is.null(fegls_result)) {
 # =============================================================================
 # Test 7: Panel GLS - Pooled (pggls pooling)
 # =============================================================================
-# The coefficients are the ones test_validate_pooled_gls_square_grunfeld_vs_plm
-# (gls_models.rs) checks to 1e-8. That test does not compare standard
-# errors: p2a-core's covariance carries an extra rss/df factor, so its
-# standard errors are sqrt(rss/df) times pggls's (ECON-33). On full
-# Grunfeld p2a-core refuses pooled GLS
+# The coefficients and standard errors are the ones
+# test_validate_pooled_gls_square_grunfeld_vs_plm (gls_models.rs) checks to
+# 1e-8. On full Grunfeld p2a-core refuses pooled GLS
 # (test_pooled_gls_full_grunfeld_is_refused).
 cat("\n=== Test 7: Panel GLS - Pooled (Grunfeld 1935-1944) ===\n")
 

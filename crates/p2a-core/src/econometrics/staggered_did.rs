@@ -3123,7 +3123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_staggered_did_group_time_atts_recover_true_effects_recovers_dgp() {
+    fn test_staggered_did_group_time_atts_recovers_dgp() {
         // Validate that group-time ATT estimates recover the true ATTs
         // from the DGP within tolerance.
         //

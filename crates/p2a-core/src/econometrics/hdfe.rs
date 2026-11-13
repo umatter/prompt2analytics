@@ -38,7 +38,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::solve::{LM_QR_TOL, Qr};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::regression::CovarianceType;
 use crate::regression::ols::{NormalInverse, normal_equations_inverse};
 use crate::resource;
@@ -266,15 +266,15 @@ fn demean_map(
     Ok((Array1::from_vec(current), max_iter, final_change, converged))
 }
 
-/// Rows from which [`demean_matrix_map`] demeans the columns of a multi-way design in
-/// parallel; below it they run on the calling thread.
+/// Rows from which [`demean_matrix_map`] demeans the columns of a design in parallel;
+/// below it they run on the calling thread.
 const PARALLEL_DEMEAN_MIN_ROWS: usize = 2_000;
 
 /// Demean a matrix column-wise using the Method of Alternating Projections.
 ///
 /// Columns are independent under the alternating-projections algorithm, so
-/// from [`PARALLEL_DEMEAN_MIN_ROWS`] rows with two or more factors and columns
-/// we process them in parallel via `rayon` and reduce their per-column
+/// from [`PARALLEL_DEMEAN_MIN_ROWS`] rows and two or more columns we process
+/// them in parallel via `rayon` and reduce their per-column
 /// convergence statistics at the end. The caller's budget is installed on each
 /// worker, so every sweep honours it.
 pub(crate) fn demean_matrix_map(
@@ -298,24 +298,24 @@ pub(crate) fn demean_matrix_map(
         )
     };
     // Small problems run on the calling thread: handing columns to the pool costs a
-    // wake-up per call, more than the sweeps over short columns, and one factor is a
-    // single pass. Columns are independent, so the result is the same either way.
-    let per_column: Vec<(Array1<f64>, usize, f64, bool)> =
-        if k <= 1 || factors.len() <= 1 || n < PARALLEL_DEMEAN_MIN_ROWS {
-            (0..k).map(demean_column).collect::<EconResult<Vec<_>>>()?
-        } else {
-            // Rayon workers do not see the caller's thread-local budget: capture it
-            // here and install it inside each closure. Each call to `demean_map`
-            // allocates its own scratch buffers, so workers share no mutable state.
-            let budget = resource::current_budget();
-            (0..k)
-                .into_par_iter()
-                .map(|j| match &budget {
-                    Some(b) => resource::with_budget(b.clone(), || demean_column(j)),
-                    None => demean_column(j),
-                })
-                .collect::<EconResult<Vec<_>>>()?
-        };
+    // wake-up per call, more than the sweeps over short columns. Columns are
+    // independent, so the result is the same either way.
+    let per_column: Vec<(Array1<f64>, usize, f64, bool)> = if k <= 1 || n < PARALLEL_DEMEAN_MIN_ROWS
+    {
+        (0..k).map(demean_column).collect::<EconResult<Vec<_>>>()?
+    } else {
+        // Rayon workers do not see the caller's thread-local budget: capture it
+        // here and install it inside each closure. Each call to `demean_map`
+        // allocates its own scratch buffers, so workers share no mutable state.
+        let budget = resource::current_budget();
+        (0..k)
+            .into_par_iter()
+            .map(|j| match &budget {
+                Some(b) => resource::with_budget(b.clone(), || demean_column(j)),
+                None => demean_column(j),
+            })
+            .collect::<EconResult<Vec<_>>>()?
+    };
 
     let mut x_demeaned = Array2::<f64>::zeros((n, k));
     let mut max_iterations: usize = 0;
@@ -935,6 +935,14 @@ pub fn run_hdfe(
         .map(|col| factor_info(col, cols.factor(col)))
         .collect::<EconResult<Vec<_>>>()?;
 
+    // HC2/HC3 need the fixed-effect leverage; a design it is not available for is
+    // refused before any demeaning
+    let h_fe = if matches!(cov_type, CovarianceType::HC2 | CovarianceType::HC3) {
+        Some(fe_leverage(&factors)?)
+    } else {
+        None
+    };
+
     // Compute absorbed degrees of freedom
     let df_absorbed = compute_absorbed_df(&factors);
 
@@ -1002,19 +1010,39 @@ pub fn run_hdfe(
     let sigma2 = ssr / df_resid as f64;
 
     // Compute variance-covariance matrix based on cov_type
+    let hc = |hc_type| {
+        compute_hc_vcov(
+            &x_demeaned.view(),
+            &residuals,
+            &xtx_inv,
+            hc_type,
+            df_resid,
+            h_fe.as_ref(),
+        )
+    };
     let vcov = match cov_type {
         CovarianceType::Standard => &xtx_inv * sigma2,
-        CovarianceType::HC0 => {
-            compute_hc_vcov(&x_demeaned.view(), &residuals, &xtx_inv, 0, df_resid)
-        }
-        CovarianceType::HC1 => {
-            compute_hc_vcov(&x_demeaned.view(), &residuals, &xtx_inv, 1, df_resid)
-        }
-        CovarianceType::HC2 => {
-            compute_hc_vcov(&x_demeaned.view(), &residuals, &xtx_inv, 2, df_resid)
-        }
-        CovarianceType::HC3 => {
-            compute_hc_vcov(&x_demeaned.view(), &residuals, &xtx_inv, 3, df_resid)
+        CovarianceType::HC0 => hc(0)?.0,
+        CovarianceType::HC1 => hc(1)?.0,
+        CovarianceType::HC2 | CovarianceType::HC3 => {
+            let (v, n_unit) = hc(if cov_type == CovarianceType::HC2 {
+                2
+            } else {
+                3
+            })?;
+            match n_unit {
+                0 => {}
+                1 => warnings.push(
+                    "1 observation has leverage 1 (a singleton fixed-effect level) and \
+                     contributes nothing to the HC2/HC3 meat"
+                        .to_string(),
+                ),
+                m => warnings.push(format!(
+                    "{m} observations have leverage 1 (singleton fixed-effect levels) and \
+                     contribute nothing to the HC2/HC3 meat"
+                )),
+            }
+            v
         }
     };
 
@@ -1101,25 +1129,273 @@ pub fn run_hdfe(
 // Heteroskedasticity-Consistent Covariance
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Largest number of levels of the smaller of two fixed effects for which the HC2/HC3
+/// leverage is computed (the Schur complement is a dense square matrix of this order).
+const HDFE_LEVERAGE_MAX_LEVELS: usize = 1_000;
+
+/// Leverage at or above `1 - LEVERAGE_ONE_TOL` counts as 1.
+const LEVERAGE_ONE_TOL: f64 = 1e-10;
+
+/// The diagonal of the fixed-effect projection (the leverage of the dummies), for
+/// HC2/HC3.
+///
+/// - One fixed effect: `1 / T_g`, the size of the observation's level.
+/// - Two: with `A` the dummies of the factor with more levels and `B` the other,
+///   `h_i = 1 / c_a + (e_b - u_a)' S^+ (e_b - u_a)`, where `S = B' M_A B =
+///   diag(c_b) - sum_a C_a C_a' / c_a` is the Schur complement on `B` (`C_a` the cell
+///   counts of level `a`, `u_a = C_a / c_a`). `e_b - u_a` lies in the range of `S`, so
+///   any generalized inverse gives the same value, also for a design with several
+///   connected components. Refused when the smaller factor has more than
+///   [`HDFE_LEVERAGE_MAX_LEVELS`] levels.
+/// - Three or more: refused (as fixest and reghdfe, which offer no HC2/HC3 there).
+pub(crate) fn fe_leverage(factors: &[FactorInfo]) -> EconResult<Array1<f64>> {
+    match factors {
+        [] => Err(EconError::InvalidSpecification {
+            message: "HC2/HC3 need at least one fixed effect".to_string(),
+        }),
+        [f] => {
+            let n = f.ids.len();
+            let mut h = resource::try_zeros1(n, "HDFE fixed-effect leverage")?;
+            for (hi, &g) in h.iter_mut().zip(&f.ids) {
+                *hi = 1.0 / f.counts[g] as f64;
+            }
+            Ok(h)
+        }
+        [f1, f2] => {
+            let (fa, fb) = if f1.n_levels >= f2.n_levels {
+                (f1, f2)
+            } else {
+                (f2, f1)
+            };
+            let n1 = fb.n_levels;
+            if n1 > HDFE_LEVERAGE_MAX_LEVELS {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "HC2/HC3 need the fixed-effect leverage, computed for two fixed \
+                         effects when the smaller one has at most {HDFE_LEVERAGE_MAX_LEVELS} \
+                         levels ('{}' has {n1}); use HC1",
+                        fb.name
+                    ),
+                });
+            }
+            two_way_leverage(fa, fb)
+        }
+        _ => Err(EconError::InvalidSpecification {
+            message: format!(
+                "HC2/HC3 with three or more fixed effects are not available, as in fixest and \
+                 reghdfe ({} given); use HC1",
+                factors.len()
+            ),
+        }),
+    }
+}
+
+/// [`fe_leverage`] for two factors, `fb` the one with fewer levels.
+fn two_way_leverage(fa: &FactorInfo, fb: &FactorInfo) -> EconResult<Array1<f64>> {
+    let what = "HDFE two-way fixed-effect leverage";
+    let n = fa.ids.len();
+    let (na, n1) = (fa.n_levels, fb.n_levels);
+
+    // The rows of each a-level (counting sort)
+    let mut start = resource::try_vec(na + 1, 0usize, what)?;
+    for &a in &fa.ids {
+        start[a + 1] += 1;
+    }
+    for a in 0..na {
+        start[a + 1] += start[a];
+    }
+    let mut order = resource::try_vec(n, 0usize, what)?;
+    let mut next = start.clone();
+    for (i, &a) in fa.ids.iter().enumerate() {
+        order[next[a]] = i;
+        next[a] += 1;
+    }
+    drop(next);
+
+    // Cells (b, count) of each a-level, gathered through a dense scratch row
+    let mut cell_start = resource::try_vec(na + 1, 0usize, what)?;
+    let mut cells: Vec<(usize, f64)> = Vec::new();
+    let mut scratch = resource::try_vec(n1, 0usize, what)?;
+    let mut touched: Vec<usize> = Vec::new();
+    // S = diag(c_b) - sum_a C_a C_a' / c_a, row-major n1 x n1
+    let mut s = resource::try_vec(resource::checked_len(&[n1, n1], what)?, 0.0, what)?;
+    for (b, &c) in fb.counts.iter().enumerate() {
+        s[b * n1 + b] = c as f64;
+    }
+    for a in 0..na {
+        if a % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        for &i in &order[start[a]..start[a + 1]] {
+            let b = fb.ids[i];
+            if scratch[b] == 0 {
+                touched.push(b);
+            }
+            scratch[b] += 1;
+        }
+        let inv_ca = 1.0 / fa.counts[a] as f64;
+        let first = cells.len();
+        for &b in &touched {
+            cells.push((b, scratch[b] as f64));
+            scratch[b] = 0;
+        }
+        touched.clear();
+        let block = &cells[first..];
+        for &(b, cb) in block {
+            let w = cb * inv_ca;
+            let row = &mut s[b * n1..(b + 1) * n1];
+            for &(d, cd) in block {
+                row[d] -= w * cd;
+            }
+        }
+        cell_start[a + 1] = cells.len();
+    }
+    drop(scratch);
+
+    // S has rank n1 less the connected components (its null space is the indicator of
+    // each component's b-levels). Dropping one b-level per component leaves a
+    // positive-definite block whose inverse, padded with zeros, is a generalized
+    // inverse of S; a Cholesky of the block is much cheaper than an eigendecomposition
+    // of S. `pos[b]` is the b-level's index in the block, or None when dropped.
+    let pos = schur_block_positions(fa.n_levels, fb.n_levels, &cells, &cell_start)?;
+    let r = pos.iter().flatten().count();
+    let mut block = resource::try_zeros2(r, r, what)?;
+    for (b, pb) in pos.iter().enumerate() {
+        let Some(i) = *pb else { continue };
+        for (d, pd) in pos.iter().enumerate() {
+            if let Some(j) = *pd {
+                block[[i, j]] = s[b * n1 + d];
+            }
+        }
+    }
+    drop(s);
+    let sp = if r == 0 {
+        block
+    } else {
+        sym_inverse(
+            block.view(),
+            SingularPolicy::Generalized,
+            "the two-way fixed-effect leverage matrix",
+        )?
+        .inverse
+    };
+
+    // h_i = 1 / c_a + q_a - 2 v_a[b] + Sp[b, b], v_a = Sp u_a, q_a = u_a' v_a (a dropped
+    // b-level has a zero row and column in Sp); v_a gathers the rows of Sp (symmetric)
+    let sp = sp.as_standard_layout();
+    let sp_flat = sp.as_slice().expect("standard layout");
+    let mut h = resource::try_zeros1(n, what)?;
+    let mut v = resource::try_vec(r, 0.0, what)?;
+    for a in 0..na {
+        if a % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        let inv_ca = 1.0 / fa.counts[a] as f64;
+        let block = &cells[cell_start[a]..cell_start[a + 1]];
+        v.fill(0.0);
+        for &(b, cb) in block {
+            if let Some(j) = pos[b] {
+                let w = cb * inv_ca;
+                for (vi, &x) in v.iter_mut().zip(&sp_flat[j * r..(j + 1) * r]) {
+                    *vi += w * x;
+                }
+            }
+        }
+        let q: f64 = block
+            .iter()
+            .filter_map(|&(b, cb)| pos[b].map(|j| cb * v[j]))
+            .sum::<f64>()
+            * inv_ca;
+        for &i in &order[start[a]..start[a + 1]] {
+            h[i] = inv_ca
+                + q
+                + match pos[fb.ids[i]] {
+                    Some(j) => sp_flat[j * r + j] - 2.0 * v[j],
+                    None => 0.0,
+                };
+        }
+    }
+    Ok(h)
+}
+
+/// For [`two_way_leverage`]: the index of each b-level in the Schur block with one
+/// b-level per connected component of the a-b graph left out (the highest-numbered
+/// b-level of each component), or None for the left-out levels. `cells` holds each
+/// a-level's `(b, count)` cells from `cell_start[a]`.
+fn schur_block_positions(
+    na: usize,
+    n1: usize,
+    cells: &[(usize, f64)],
+    cell_start: &[usize],
+) -> EconResult<Vec<Option<usize>>> {
+    let what = "HDFE two-way fixed-effect leverage";
+    // Union-find over the b-levels: the b-levels of one a-level are connected
+    let mut parent: Vec<usize> = resource::try_with_capacity(n1, what)?;
+    parent.extend(0..n1);
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for a in 0..na {
+        let block = &cells[cell_start[a]..cell_start[a + 1]];
+        if let Some(&(b0, _)) = block.first() {
+            let r0 = find(&mut parent, b0);
+            for &(b, _) in &block[1..] {
+                let rb = find(&mut parent, b);
+                if rb != r0 {
+                    parent[rb] = r0;
+                }
+            }
+        }
+    }
+    // Every b-level occurs in some cell (its count is positive), so each component's
+    // b-levels are found; leave out the last one of each component
+    let mut last_of_root: Vec<usize> = resource::try_vec(n1, usize::MAX, what)?;
+    for b in 0..n1 {
+        let root = find(&mut parent, b);
+        last_of_root[root] = b;
+    }
+    let mut drop_b: Vec<bool> = resource::try_vec(n1, false, what)?;
+    for &b in last_of_root.iter().filter(|&&b| b != usize::MAX) {
+        drop_b[b] = true;
+    }
+    let mut pos = resource::try_vec(n1, None, what)?;
+    let mut next = 0;
+    for b in 0..n1 {
+        if !drop_b[b] {
+            pos[b] = Some(next);
+            next += 1;
+        }
+    }
+    Ok(pos)
+}
+
 /// Compute heteroskedasticity-consistent variance-covariance matrix.
 ///
-/// Implements HC0-HC3 robust standard errors.
+/// Implements HC0-HC3 robust standard errors. For HC2/HC3 the leverage of an
+/// observation is that of the demeaned regressors plus `fe_leverage`, the diagonal of
+/// the fixed-effect projection; an observation with leverage 1 gets weight 0 (it has a
+/// zero residual), and their number is returned with the matrix.
 fn compute_hc_vcov(
     x: &ndarray::ArrayView2<f64>,
     residuals: &Array1<f64>,
     xtx_inv: &Array2<f64>,
     hc_type: usize,
     df_resid: usize,
-) -> Array2<f64> {
+    fe_leverage: Option<&Array1<f64>>,
+) -> EconResult<(Array2<f64>, usize)> {
     let (n, k) = x.dim();
 
-    // Compute leverage (hat matrix diagonal) for HC2/HC3
+    // Leverage (hat matrix diagonal) for HC2/HC3: rowwise (x A) . x plus the
+    // fixed-effect part
     let leverage: Option<Array1<f64>> = if hc_type >= 2 {
-        let mut h = Array1::zeros(n);
-        for i in 0..n {
-            let xi = x.row(i);
-            let xi_xtx_inv: Array1<f64> = xtx_inv.dot(&xi.to_owned());
-            h[i] = xi.dot(&xi_xtx_inv);
+        let xa = x.dot(xtx_inv);
+        let mut h = resource::try_zeros1(n, "HDFE leverage")?;
+        for (i, hi) in h.iter_mut().enumerate() {
+            *hi = xa.row(i).dot(&x.row(i)) + fe_leverage.map_or(0.0, |f| f[i]);
         }
         Some(h)
     } else {
@@ -1128,27 +1404,29 @@ fn compute_hc_vcov(
 
     // Compute meat of sandwich: X' * diag(u^2 * weight) * X
     let mut meat = Array2::zeros((k, k));
+    let mut n_unit = 0usize;
 
     for i in 0..n {
         let e_i = residuals[i];
         let xi = x.row(i);
 
         // Compute weight based on HC type
-        let weight = match hc_type {
-            0 => 1.0,
-            1 => n as f64 / df_resid as f64,
-            2 => {
-                let h_ii = leverage.as_ref().unwrap()[i];
-                1.0 / (1.0 - h_ii).max(1e-10)
+        let weight = match (hc_type, &leverage) {
+            (0, _) => 1.0,
+            (1, _) => n as f64 / df_resid as f64,
+            (_, Some(h)) if h[i] >= 1.0 - LEVERAGE_ONE_TOL => {
+                n_unit += 1;
+                0.0
             }
-            3 => {
-                let h_ii = leverage.as_ref().unwrap()[i];
-                1.0 / (1.0 - h_ii).max(1e-10).powi(2)
-            }
+            (2, Some(h)) => 1.0 / (1.0 - h[i]),
+            (3, Some(h)) => 1.0 / (1.0 - h[i]).powi(2),
             _ => 1.0,
         };
 
         let e_weighted = e_i * e_i * weight;
+        if e_weighted == 0.0 {
+            continue;
+        }
 
         for j in 0..k {
             for l in 0..k {
@@ -1159,7 +1437,7 @@ fn compute_hc_vcov(
 
     // Sandwich: (X'X)^{-1} * meat * (X'X)^{-1}
     let temp = xtx_inv.dot(&meat);
-    temp.dot(xtx_inv)
+    Ok((temp.dot(xtx_inv), n_unit))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1572,9 +1850,10 @@ mod tests {
     //            The R Journal, 5(2), 104-117.
     // =========================================================================
 
-    /// Test data replicating the felm() documentation example.
+    /// A small two-way panel shaped like the felm() documentation example (DGP
+    /// recovery only; no R value is compared).
     ///
-    /// R code to generate this data and expected values:
+    /// R code that generates the same data:
     /// ```r
     /// library(lfe)
     /// set.seed(42)
@@ -1606,7 +1885,7 @@ mod tests {
     /// here (x1 0.99766, se 0.02834) are not what R gives on this data (fixest:
     /// x1 0.9802154032, se 0.01506135460; x2 0.4826382350, se 0.02363228724;
     /// 13 residual df). An R-pinned version needs its own reference case.
-    fn create_felm_validation_data() -> Dataset {
+    fn create_recovery_panel() -> Dataset {
         let df = df! {
             "x1" => [0.37, -0.56, 0.36, 0.63, 0.40, -0.11, 1.51, -0.09, 2.02, -0.06,
                      1.30, 2.29, -1.39, -0.28, -0.13, 0.64, -0.28, -2.66, 2.40, -0.13],
@@ -1644,14 +1923,13 @@ mod tests {
     }
 
     #[test]
-    fn test_against_felm_coefficients_recovers_dgp() {
-        // DGP recovery on the felm()-style example of
-        // create_felm_validation_data() (no R output is compared).
+    fn test_hdfe_coefficients_recovers_dgp() {
+        // DGP recovery on create_recovery_panel() (no R output is compared).
         //
         // The key validation is that we recover coefficients close to
         // the true DGP values (beta1=1.0, beta2=0.5), which demonstrates
         // that the MAP algorithm correctly removes the fixed effects.
-        let dataset = create_felm_validation_data();
+        let dataset = create_recovery_panel();
 
         let result = run_hdfe(
             &dataset,
@@ -1682,8 +1960,7 @@ mod tests {
             result.coefficients[1]
         );
 
-        // Document actual computed values for reference
-        // These can be compared with R's felm() by running the documented code
+        // The computed values, for reference (not compared with R)
         println!(
             "HDFE Coefficients: x1={:.6}, x2={:.6}",
             result.coefficients[0], result.coefficients[1]
@@ -1692,14 +1969,14 @@ mod tests {
     }
 
     #[test]
-    fn test_against_felm_standard_errors_properties() {
+    fn test_hdfe_standard_errors_properties() {
         // This test validates SE computation and degrees of freedom.
         //
         // For a model with n=20, k=2 regressors, and two FE dimensions
         // (3 id levels + 3 firm levels), the degrees of freedom are:
         //   df_absorbed = 3 + 3 - 1 = 5 (subtract 1 for redundant grand mean)
         //   df_resid = 20 - 2 - 5 = 13
-        let dataset = create_felm_validation_data();
+        let dataset = create_recovery_panel();
 
         let result = run_hdfe(
             &dataset,
@@ -1751,7 +2028,7 @@ mod tests {
             result.t_stats[1]
         );
 
-        // Document actual computed values for comparison with R
+        // The computed values, for reference (not compared with R)
         println!(
             "HDFE Standard Errors: x1={:.6}, x2={:.6}",
             result.std_errors[0], result.std_errors[1]
@@ -1763,11 +2040,11 @@ mod tests {
     }
 
     #[test]
-    fn test_against_felm_r_squared_properties() {
+    fn test_hdfe_r_squared_properties() {
         // DGP check: with coefficients 1.0 and 0.5 and small noise, the within
         // R² (after projecting out the fixed effects) is high. No R value is
         // compared.
-        let dataset = create_felm_validation_data();
+        let dataset = create_recovery_panel();
 
         let result = run_hdfe(
             &dataset,
@@ -2028,7 +2305,6 @@ mod tests {
     }
 
     /// HC1 (n / df_resid) standard errors, t and p against fixest's "hetero".
-    /// HC2/HC3 are not pinned (ECON-22).
     #[test]
     fn test_validate_hdfe_grunfeld_hc1() {
         use p2a_validation::{Check, Tol};
@@ -2274,6 +2550,38 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             demean_matrix_map(&x, &[factor1, factor2], 1e-8, 1000, true)
         }));
+    }
+
+    /// One factor from PARALLEL_DEMEAN_MIN_ROWS rows: the columns, demeaned in
+    /// parallel, equal the column-by-column result bit for bit.
+    #[test]
+    fn test_demean_matrix_map_one_factor_parallel_equals_serial() {
+        let (n, k) = (5_000, 4);
+        let levels = 437;
+        let ids: Vec<usize> = (0..n).map(|i| (i * 7919 + i / 13) % levels).collect();
+        let mut counts = vec![0; levels];
+        for &g in &ids {
+            counts[g] += 1;
+        }
+        let factor = FactorInfo {
+            name: "g".to_string(),
+            n_levels: levels,
+            ids,
+            counts,
+        };
+        let x = Array2::from_shape_fn((n, k), |(i, j)| {
+            ((i * (j + 3) * 104_729) % 1_009) as f64 / 97.0 + 0.01 * (i % (j + 5)) as f64
+        });
+        let factors = [factor];
+        let (all, _, _, converged) = demean_matrix_map(&x, &factors, 1e-8, 1000, true).unwrap();
+        assert!(converged);
+        for j in 0..k {
+            let (col, _, _, _) =
+                demean_map(&x.column(j).to_owned(), &factors, 1e-8, 1000, true).unwrap();
+            for i in 0..n {
+                assert_eq!(all[[i, j]].to_bits(), col[i].to_bits(), "({i}, {j})");
+            }
+        }
     }
 
     // =========================================================================
@@ -2711,5 +3019,276 @@ mod tests {
         assert_eq!(screen2.kept, vec![0, 1]);
         assert_eq!(screen2.dropped, vec!["x3".to_string()]);
         assert_eq!(screen2.x.ncols(), 2);
+    }
+
+    // ── HC2/HC3 with the fixed-effect leverage (hdfe_hc_leverage: sandwich::vcovHC on
+    // lm with factor dummies)
+
+    /// HC0-HC3 SEs, coefficients and df of one design against `<prefix>_*` of the case.
+    fn check_hc_design(
+        case: &p2a_validation::Case,
+        prefix: &str,
+        ds: &Dataset,
+        y: &str,
+        x: &[&str],
+        fe: &[&str],
+        coef_tol: p2a_validation::Tol,
+        se_tol: p2a_validation::Tol,
+    ) {
+        use p2a_validation::{Check, Tol};
+        for (cov, key) in [
+            (CovarianceType::HC0, "hc0"),
+            (CovarianceType::HC1, "hc1"),
+            (CovarianceType::HC2, "hc2"),
+            (CovarianceType::HC3, "hc3"),
+        ] {
+            let r = run_hdfe(ds, y, x, fe, None, cov).unwrap_or_else(|e| panic!("{key}: {e}"));
+            Check::new(case)
+                .named(
+                    &format!("{prefix}_coef"),
+                    &r.variables,
+                    &r.coefficients,
+                    coef_tol,
+                )
+                .named(
+                    &format!("{prefix}_se_{key}"),
+                    &r.variables,
+                    &r.std_errors,
+                    se_tol,
+                )
+                .scalar(
+                    &format!("{prefix}_df_resid"),
+                    r.df_resid as f64,
+                    Tol::exact(),
+                )
+                .finish();
+            assert!(
+                !r.warnings.iter().any(|w| w.contains("leverage 1")),
+                "{prefix} {key}: {:?}",
+                r.warnings
+            );
+        }
+    }
+
+    /// Grunfeld, firm and firm + year (MAP exact on the balanced panel).
+    #[test]
+    fn test_validate_hdfe_hc_leverage_grunfeld() {
+        use p2a_validation::Tol;
+        let (case, _) = crate::test_support::load_case("hdfe_hc_leverage");
+        let (_, ds) = crate::test_support::load_case("panel_hdfe_grunfeld");
+        let x = ["value", "capital"];
+        for (prefix, fe) in [
+            ("grunfeld_firm", &["firm"][..]),
+            ("grunfeld_twoway", &["firm", "year"][..]),
+        ] {
+            check_hc_design(
+                &case,
+                prefix,
+                &ds,
+                "inv",
+                &x,
+                fe,
+                Tol::coef(200),
+                Tol::se(200),
+            );
+        }
+    }
+
+    /// A short unbalanced panel (377 rows, 100 ids with 2 to 4 periods), one- and
+    /// two-way.
+    #[test]
+    fn test_validate_hdfe_hc_leverage_short_panel() {
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("hdfe_hc_leverage");
+        assert_eq!(ds.df().height(), 377);
+        let x = ["x1", "x2"];
+        check_hc_design(
+            &case,
+            "short_oneway",
+            &ds,
+            "y",
+            &x,
+            &["id"],
+            Tol::coef(377),
+            Tol::se(377),
+        );
+        check_hc_design(
+            &case,
+            "short_twoway",
+            &ds,
+            "y",
+            &x,
+            &["id", "t"],
+            Tol::coef(377),
+            Tol::se(377),
+        );
+    }
+
+    /// Two connected components: the leverage matrix is singular and its generalized
+    /// inverse gives the same leverage.
+    #[test]
+    fn test_validate_hdfe_hc_leverage_disconnected() {
+        use p2a_validation::Tol;
+        let (case, _) = crate::test_support::load_case("hdfe_hc_leverage");
+        let (_, ds) = crate::test_support::load_case("hdfe_disconnected");
+        check_hc_design(
+            &case,
+            "disconnected",
+            &ds,
+            "y",
+            &["x", "z"],
+            &["firm", "year"],
+            Tol::coef(80),
+            Tol::se(80),
+        );
+    }
+
+    /// A noisy panel with three fixed effects (24 rows).
+    fn three_way_panel() -> Dataset {
+        let n = 24;
+        let a: Vec<i64> = (0..n).map(|i| (i % 4) as i64).collect();
+        let b: Vec<i64> = (0..n).map(|i| (i % 3) as i64).collect();
+        let c: Vec<i64> = (0..n).map(|i| (i / 12) as i64).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 37) % 11) as f64 * 0.3 + 0.1 * i as f64)
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.7 * x[i] + ((i * 7919) % 101) as f64 / 101.0 + a[i] as f64)
+            .collect();
+        Dataset::new(df! {"a" => a, "b" => b, "c" => c, "x" => x, "y" => y}.unwrap())
+    }
+
+    #[test]
+    fn test_hdfe_hc2_refuses_three_fixed_effects() {
+        let ds = three_way_panel();
+        for cov in [CovarianceType::HC2, CovarianceType::HC3] {
+            expect_invalid(
+                run_hdfe(&ds, "y", &["x"], &["a", "b", "c"], None, cov),
+                "three or more fixed effects",
+            );
+        }
+        let r = run_hdfe(
+            &ds,
+            "y",
+            &["x"],
+            &["a", "b", "c"],
+            None,
+            CovarianceType::HC1,
+        )
+        .unwrap();
+        assert!(r.std_errors[0].is_finite());
+    }
+
+    #[test]
+    fn test_hdfe_hc3_refuses_too_many_levels() {
+        // 1,001 x 1,001 levels, connected: cells (i, i) and (i, i + 1 mod 1001), twice each
+        let m = 1001usize;
+        let mut fa = Vec::with_capacity(4 * m);
+        let mut fb = Vec::with_capacity(4 * m);
+        for _ in 0..2 {
+            for i in 0..m {
+                fa.push(i as i64);
+                fb.push(i as i64);
+                fa.push(i as i64);
+                fb.push(((i + 1) % m) as i64);
+            }
+        }
+        let n = fa.len();
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 7919) % 1009) as f64 / 1009.0)
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.5 * x[i] + ((i * 104_729) % 997) as f64 / 997.0)
+            .collect();
+        let ds = Dataset::new(df! {"fa" => fa, "fb" => fb, "x" => x, "y" => y}.unwrap());
+        for cov in [CovarianceType::HC2, CovarianceType::HC3] {
+            match run_hdfe(&ds, "y", &["x"], &["fa", "fb"], None, cov) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("at most 1000 levels") && message.contains("use HC1"),
+                    "{message}"
+                ),
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
+        }
+        let r = run_hdfe(&ds, "y", &["x"], &["fa", "fb"], None, CovarianceType::HC1).unwrap();
+        // connected: 2m - 1 absorbed, one slope
+        assert_eq!(r.df_resid, n - (2 * m - 1) - 1);
+        assert!(r.std_errors[0].is_finite());
+    }
+
+    /// The fixed-effect leverage equals the diagonal of `D (D'D)^+ D'` with `D` the
+    /// dummies of both factors, on a noisy unbalanced two-way design.
+    #[test]
+    fn test_hdfe_fe_leverage_matches_dense_projection() {
+        let n = 30;
+        let a: Vec<usize> = (0..n).map(|i| (i * 11 + i / 3) % 6).collect();
+        let b: Vec<usize> = (0..n).map(|i| (i * 3 + i / 4) % 4).collect();
+        let info = |name: &str, ids: &[usize], levels: usize| {
+            let mut counts = vec![0; levels];
+            for &g in ids {
+                counts[g] += 1;
+            }
+            FactorInfo {
+                name: name.to_string(),
+                n_levels: levels,
+                ids: ids.to_vec(),
+                counts,
+            }
+        };
+        let factors = [info("a", &a, 6), info("b", &b, 4)];
+        assert!(factors.iter().all(|f| f.counts.iter().all(|&c| c > 0)));
+        let h = fe_leverage(&factors).unwrap();
+        let mut d = Array2::<f64>::zeros((n, 10));
+        for i in 0..n {
+            d[[i, a[i]]] = 1.0;
+            d[[i, 6 + b[i]]] = 1.0;
+        }
+        let dtd = d.t().dot(&d);
+        let g = sym_inverse(dtd.view(), SingularPolicy::Generalized, "D'D")
+            .unwrap()
+            .inverse;
+        let p = d.dot(&g).dot(&d.t());
+        for i in 0..n {
+            assert!(
+                (h[i] - p[[i, i]]).abs() <= 1e-12,
+                "{i}: {} vs {}",
+                h[i],
+                p[[i, i]]
+            );
+        }
+        // one factor: 1 / T_g
+        let h1 = fe_leverage(&factors[1..]).unwrap();
+        for i in 0..n {
+            assert_eq!(h1[i], 1.0 / factors[1].counts[b[i]] as f64);
+        }
+    }
+
+    /// A singleton fixed-effect level has leverage 1: it contributes nothing to the
+    /// HC2/HC3 meat, the SEs stay finite and a warning says so.
+    #[test]
+    fn test_hdfe_hc3_singleton_group_contributes_nothing() {
+        let firm: Vec<i64> = vec![1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4];
+        let x = vec![0.3, 1.1, 2.4, 0.7, 1.9, 2.2, 3.5, 1.0, 0.2, 2.8, 1.6];
+        let y: Vec<f64> = x
+            .iter()
+            .zip(&firm)
+            .enumerate()
+            .map(|(i, (&x, &f))| 0.8 * x + f as f64 + ((i * 7919) % 101) as f64 / 150.0)
+            .collect();
+        let ds = Dataset::new(df! {"firm" => firm, "x" => x, "y" => y}.unwrap());
+        for cov in [CovarianceType::HC2, CovarianceType::HC3] {
+            let r = run_hdfe(&ds, "y", &["x"], &["firm"], None, cov).unwrap();
+            assert!(
+                r.std_errors[0].is_finite() && r.std_errors[0] > 0.0,
+                "{cov:?}"
+            );
+            assert!(
+                r.warnings.iter().any(|w| w
+                    == "1 observation has leverage 1 (a singleton fixed-effect level) and \
+                        contributes nothing to the HC2/HC3 meat"),
+                "{cov:?}: {:?}",
+                r.warnings
+            );
+        }
     }
 }

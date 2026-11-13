@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "id": "hdfe_hc_leverage",
+  "area": "econometrics/hdfe",
+  "method": "HC0-HC3 with the fixed effects in the leverage: sandwich::vcovHC on lm with factor dummies (Grunfeld one- and two-way, an unbalanced short panel, two connected components)",
+  "reference": "sandwich::vcovHC(lm(y ~ x + factor(fe1) [+ factor(fe2)]), type = 'HC0' | 'HC1' | 'HC2' | 'HC3') (hat values of the dummy-variable regression)",
+  "call": "vcovHC(lm(y ~ x1 + x2 + factor(id) + factor(t), hdfe_hc_short), type)",
+  "dataset": "validation/datasets/generated/hdfe_hc_short.csv",
+  "datasets": ["validation/datasets/generated/hdfe_hc_short.csv", "validation/datasets/generated/hdfe_disconnected.csv", "validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "stats": "4.3.3"
+  },
+  "values": {
+    "short_oneway_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.39362754003836287, -0.10911414543571848]
+    },
+    "short_oneway_se_hc0": {
+      "names": ["x1", "x2"],
+      "values": [0.13714033712600587, 0.13433839222489347]
+    },
+    "short_oneway_se_hc1": {
+      "names": ["x1", "x2"],
+      "values": [0.16057189801991031, 0.15729121765738874]
+    },
+    "short_oneway_se_hc2": {
+      "names": ["x1", "x2"],
+      "values": [0.16165238996820019, 0.15698817851496089]
+    },
+    "short_oneway_se_hc3": {
+      "names": ["x1", "x2"],
+      "values": [0.19112675278123067, 0.18353773474768031]
+    },
+    "short_oneway_df_resid": 275,
+    "short_oneway_max_hat": 0.50209899270682201,
+    "short_twoway_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.55433904655868282, -0.35501380548575173]
+    },
+    "short_twoway_se_hc0": {
+      "names": ["x1", "x2"],
+      "values": [0.12545899690596746, 0.11841079138201445]
+    },
+    "short_twoway_se_hc1": {
+      "names": ["x1", "x2"],
+      "values": [0.14770256384993527, 0.13940472908237858]
+    },
+    "short_twoway_se_hc2": {
+      "names": ["x1", "x2"],
+      "values": [0.14837315810464607, 0.13929535027005632]
+    },
+    "short_twoway_se_hc3": {
+      "names": ["x1", "x2"],
+      "values": [0.17594477241867931, 0.16397545151018414]
+    },
+    "short_twoway_df_resid": 272,
+    "short_twoway_max_hat": 0.5080092082695794,
+    "short_n_obs": 377,
+    "disconnected_coef": {
+      "names": ["x", "z"],
+      "values": [0.61305666904133704, -0.19632157739860001]
+    },
+    "disconnected_se_hc0": {
+      "names": ["x", "z"],
+      "values": [0.089035423099003197, 0.09255358296297371]
+    },
+    "disconnected_se_hc1": {
+      "names": ["x", "z"],
+      "values": [0.1083704658852013, 0.11265263370388129]
+    },
+    "disconnected_se_hc2": {
+      "names": ["x", "z"],
+      "values": [0.10977604905644478, 0.11497817589440992]
+    },
+    "disconnected_se_hc3": {
+      "names": ["x", "z"],
+      "values": [0.13544923214205651, 0.14299414062772708]
+    },
+    "disconnected_df_resid": 54,
+    "disconnected_max_hat": 0.41218116210063327,
+    "grunfeld_firm_coef": {
+      "names": ["value", "capital"],
+      "values": [0.1101238041207187, 0.31006534130013907]
+    },
+    "grunfeld_firm_se_hc0": {
+      "names": ["value", "capital"],
+      "values": [0.018787700332010999, 0.041491297346970192]
+    },
+    "grunfeld_firm_se_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.019378033290778428, 0.042795005618506216]
+    },
+    "grunfeld_firm_se_hc2": {
+      "names": ["value", "capital"],
+      "values": [0.020619432443447935, 0.047754969275525111]
+    },
+    "grunfeld_firm_se_hc3": {
+      "names": ["value", "capital"],
+      "values": [0.022716358678936111, 0.05521871231748763]
+    },
+    "grunfeld_firm_df_resid": 188,
+    "grunfeld_firm_max_hat": 0.28881205063678128,
+    "grunfeld_twoway_coef": {
+      "names": ["value", "capital"],
+      "values": [0.11771585508260668, 0.35791627307342749]
+    },
+    "grunfeld_twoway_se_hc0": {
+      "names": ["value", "capital"],
+      "values": [0.017630927422211187, 0.050009040655381337]
+    },
+    "grunfeld_twoway_se_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.019179920521312847, 0.05440266425854462]
+    },
+    "grunfeld_twoway_se_hc2": {
+      "names": ["value", "capital"],
+      "values": [0.020335613819528215, 0.06306854398278354]
+    },
+    "grunfeld_twoway_se_hc3": {
+      "names": ["value", "capital"],
+      "values": [0.023623789027062667, 0.080115497083570353]
+    },
+    "grunfeld_twoway_df_resid": 169,
+    "grunfeld_twoway_max_hat": 0.41131348022051484
+  }
+}
