@@ -39,6 +39,7 @@ use crate::tools::requests::causal::{
 
 use crate::tools::common::parse_option;
 use p2a_core::econometrics::rd::rd_bandwidth_with;
+use p2a_core::econometrics::staggered_did::BasePeriodType;
 use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::options::Choices;
 use p2a_core::regression::HacKernel;
@@ -537,7 +538,7 @@ impl AnalyticsServer {
 
     /// Run Callaway-Sant'Anna staggered difference-in-differences.
     #[tool(
-        description = "Estimate group-time average treatment effects with staggered adoption as Callaway & Sant'Anna (2021) and R's did::att_gt with did::aggte aggregations (simple, dynamic/event, group). Without covariates every method is the difference in mean outcome changes; with covariates, 'outcome_regression' is DRDID reg_did_panel, 'ipw' std_ipw_did_panel and 'doubly_robust' drdid_panel, with covariates taken from the earlier of the two periods of each cell, as did. Comparison units: never treated (default) or not yet treated; anticipation shifts the base period. bootstrap = 0 gives analytic influence-function standard errors for every method. Returns ATT(g,t), the aggregations, a pre-trend test and identification diagnostics."
+        description = "Estimate group-time average treatment effects with staggered adoption as Callaway & Sant'Anna (2021) and R's did::att_gt (did 2.5.1 defaults: varying base period, units treated in the first period dropped) with did::aggte aggregations (dynamic/event, group, and the overall ATT as aggte's default group-weighted aggregation, with the simple one beside it). Without covariates every method is the difference in mean outcome changes; with covariates, 'outcome_regression' is DRDID reg_did_panel, 'ipw' std_ipw_did_panel and 'doubly_robust' drdid_panel, with covariates taken from the earlier of the two periods of each cell, as did. Comparison units: never treated (default) or not yet treated; anticipation shifts the base period. bootstrap = 0 gives analytic influence-function standard errors for every method. Returns ATT(g,t), the aggregations, a pre-trend test and identification diagnostics."
     )]
     pub async fn staggered_did(
         &self,
@@ -551,6 +552,10 @@ impl AnalyticsServer {
             request.estimation_method.as_deref(),
             AttEstimationMethod::OutcomeRegression
         ));
+        let base_period_type = tool_try!(parse_option(
+            request.base_period_type.as_deref(),
+            BasePeriodType::Varying
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -559,10 +564,12 @@ impl AnalyticsServer {
         let config = StaggeredDidConfig {
             comparison_group,
             estimation_method,
+            base_period_type,
             base_period: request.base_period.unwrap_or(-1),
             bootstrap: request.bootstrap.unwrap_or(999),
             anticipation: request.anticipation.unwrap_or(0),
             seed: Some(self.seed_for(None).await),
+            min_obs_per_cell: request.min_obs_per_cell.unwrap_or(1),
             ..Default::default()
         };
 

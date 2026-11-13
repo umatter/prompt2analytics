@@ -197,7 +197,8 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
                     "Parallel trends",
                 )
                 .with_diagnostics(
-                    WarningDiagnostics::new(stat_name, stat).with_threshold(test.p_value, true),
+                    WarningDiagnostics::new(stat_name, stat)
+                        .with_threshold(pretrend_critical_value(test, 0.95), true),
                 )
                 .with_remediation(vec![
                     "Examine event study plot for divergence patterns".to_string(),
@@ -234,6 +235,19 @@ fn check_parallel_trends(result: &StaggeredDidResult, report: &mut Identificatio
     }
 }
 
+/// The critical value of the pre-trend statistic at `level` on its own scale: the
+/// chi-squared(df) quantile, or the F(df, df2) quantile with a bootstrap covariance
+/// (NaN when it cannot be computed).
+fn pretrend_critical_value(test: &PreTrendTest, level: f64) -> f64 {
+    use statrs::distribution::{ContinuousCDF, FisherSnedecor};
+    match (test.f_stat, test.df2) {
+        (Some(_), Some(df2)) => FisherSnedecor::new(test.df as f64, df2 as f64)
+            .map_or(f64::NAN, |f| f.inverse_cdf(level)),
+        _ => crate::traits::estimator::chi_squared_quantile(level, test.df as f64)
+            .unwrap_or(f64::NAN),
+    }
+}
+
 /// What to do when the pre-trend test was not computed, by the reason: too many
 /// pre-treatment cells (on either path), or, with a bootstrap, too few complete
 /// replicates (the analytic path needs none). The analytic path can also give up
@@ -258,80 +272,69 @@ fn pretrend_unavailable_remediation(
     steps
 }
 
-/// Check for anticipation effects in pre-treatment periods. The configured
-/// anticipation window (`-anticipation <= t - g < 0`) holds effects the estimator
-/// allows for, so those cells are not flagged.
+/// Check for anticipation effects: one test, of the event-study effect at the
+/// nearest estimated lead e* (the largest e < -anticipation with a finite SE:
+/// e = -1 with a varying base, e = -2 with a universal one, whose e = -1 is the
+/// reference), at the user's level 1 - `confidence_level`. Testing every
+/// pre-treatment cell at 5% each raised false alarms on most null panels with
+/// many pre-periods; the leads further back are the pre-trend test's concern.
 fn check_anticipation(result: &StaggeredDidResult, report: &mut IdentificationReport) {
     let window = i64::try_from(result.config.anticipation).unwrap_or(i64::MAX);
-    // Count significant pre-treatment effects (CI excludes 0) before the window
-    let significant_pre: Vec<_> = result
-        .group_time_atts
+    let alpha = 1.0 - result.config.confidence_level;
+    let lead = result
+        .event_study
         .iter()
-        .filter(|att| {
-            !att.post_treatment
-                && att.relative_time < -window
-                && (att.ci_lower > 0.0 || att.ci_upper < 0.0)
-        })
-        .collect();
-
-    if significant_pre.is_empty() {
+        .filter(|e| e.key < -window && e.std_error.is_finite() && e.std_error > 0.0)
+        .max_by_key(|e| e.key);
+    let Some(lead) = lead else {
+        report.add_assumption(Assumption::untestable(
+            "No anticipation",
+            "No pre-treatment event-study effect is estimable",
+        ));
+        return;
+    };
+    if !(lead.p_value < alpha) {
         report.add_assumption(Assumption::testable(
             "No anticipation",
-            "No significant pre-treatment effects detected",
+            "No significant event-study effect at the nearest pre-treatment period",
             AssumptionStatus::NoViolation,
         ));
-    } else {
-        report.add_assumption(Assumption::testable(
-            "No anticipation",
-            "Significant pre-treatment effects detected",
-            AssumptionStatus::PotentialViolation,
-        ));
-
-        // Find the earliest significant pre-treatment effect
-        let earliest = significant_pre
-            .iter()
-            .map(|att| att.time - att.group)
-            .min()
-            .unwrap_or(0);
-
-        let before_window = if window > 0 {
-            format!(", before the configured anticipation window of {window} period(s)")
-        } else {
-            String::new()
-        };
-        let warning = IdentificationWarning::new(
-            "ANTICIPATION_DETECTED",
-            WarningSeverity::Caution,
-            "Possible Anticipation Effects",
-            format!(
-                "{} pre-treatment period(s) show significant effects (p < 0.05){before_window}. \
-                 Effects begin {} period(s) before treatment. This may indicate \
-                 that units anticipated treatment and changed behavior, or that \
-                 the treatment timing is misspecified.",
-                significant_pre.len(),
-                -earliest
-            ),
-            "No anticipation",
-        )
-        .with_remediation(vec![
-            "Verify treatment timing is correctly coded".to_string(),
-            "Consider an earlier effective treatment date".to_string(),
-            format!(
-                "Re-estimate with anticipation = {} (did's `anticipation`): the base period \
-                 becomes {} and those periods are treated as anticipation effects",
-                -earliest,
-                crate::econometrics::staggered_did::base_period_label(
-                    crate::econometrics::staggered_did::base_period_offset(
-                        result.config.base_period,
-                        usize::try_from(-earliest).unwrap_or(usize::MAX),
-                    )
-                )
-            ),
-            "Discuss why anticipation may or may not be present".to_string(),
-        ]);
-
-        report.add_warning(warning);
+        return;
     }
+    report.add_assumption(Assumption::testable(
+        "No anticipation",
+        "Significant event-study effect at the nearest pre-treatment period",
+        AssumptionStatus::PotentialViolation,
+    ));
+    let suggested = window.saturating_add(1);
+    let level = format!("{}%", (alpha * 100.0 * 1e6).round() / 1e6);
+    let warning = IdentificationWarning::new(
+        "ANTICIPATION_DETECTED",
+        WarningSeverity::Caution,
+        "Possible Anticipation Effects",
+        format!(
+            "The event-study effect at e = {} is {:.4} (p = {:.4} at the {level} level): \
+             outcomes of treated cohorts moved before treatment. If treatment was \
+             anticipated, set anticipation = {suggested}.",
+            lead.key, lead.att, lead.p_value
+        ),
+        "No anticipation",
+    )
+    .with_remediation(vec![
+        "Verify treatment timing is correctly coded".to_string(),
+        format!(
+            "Re-estimate with anticipation = {suggested} (did's `anticipation`): the base period \
+             of post-treatment cells becomes {}",
+            crate::econometrics::staggered_did::base_period_label(
+                crate::econometrics::staggered_did::base_period_offset(
+                    result.config.base_period,
+                    usize::try_from(suggested).unwrap_or(usize::MAX),
+                )
+            )
+        ),
+        "Discuss why anticipation may or may not be present".to_string(),
+    ]);
+    report.add_warning(warning);
 }
 
 #[cfg(test)]
@@ -356,6 +359,7 @@ mod tests {
                 n_comparison: 200,
                 post_treatment: true,
                 relative_time: 0,
+                base_time: 2019,
             },
             GroupTimeATT {
                 group: 2020,
@@ -368,6 +372,7 @@ mod tests {
                 n_comparison: 200,
                 post_treatment: true,
                 relative_time: 1,
+                base_time: 2019,
             },
         ];
 
@@ -385,6 +390,7 @@ mod tests {
                 n_comparison: 200,
                 post_treatment: false,
                 relative_time: -1,
+                base_time: 2019,
             });
         } else {
             // Not significant: CI includes zero
@@ -399,6 +405,7 @@ mod tests {
                 n_comparison: 200,
                 post_treatment: false,
                 relative_time: -1,
+                base_time: 2019,
             });
         }
 
@@ -412,9 +419,10 @@ mod tests {
             method: String::new(),
         });
 
+        let event_study = group_time_atts.iter().map(event_effect).collect();
         StaggeredDidResult {
             group_time_atts,
-            event_study: vec![],
+            event_study,
             group_effects: vec![],
             overall_att: AggregatedEffect {
                 key: 0,
@@ -426,6 +434,7 @@ mod tests {
                 n_cells: 2,
                 n_obs: 1000,
             },
+            overall_simple: AggregatedEffect::default(),
             pretrend_test,
             config: StaggeredDidConfig::default(),
             cohorts: vec![2020],
@@ -433,10 +442,180 @@ mod tests {
             n_obs: 1000,
             n_treated: 300,
             n_never_treated: 700,
+            n_dropped_first_period: 0,
             warnings: vec![],
             missing: Default::default(),
             covariates: vec![],
         }
+    }
+
+    /// The event-study effect of a single cell (its own ATT, SE and normal p-value).
+    fn event_effect(c: &GroupTimeATT) -> AggregatedEffect {
+        AggregatedEffect {
+            key: c.relative_time,
+            att: c.att,
+            std_error: c.std_error,
+            ci_lower: c.ci_lower,
+            ci_upper: c.ci_upper,
+            p_value: crate::traits::estimator::normal_p_value_two_sided(c.att / c.std_error),
+            n_cells: 1,
+            n_obs: c.n_treated,
+        }
+    }
+
+    /// A result whose only pre-treatment effects are the event-study leads `leads`
+    /// as (e, att, p).
+    fn with_leads(leads: &[(i64, f64, f64)]) -> StaggeredDidResult {
+        let mut r = create_mock_staggered_result(Some(0.5), false);
+        r.event_study.retain(|e| e.key >= 0);
+        for &(e, att, p) in leads {
+            r.event_study.push(AggregatedEffect {
+                key: e,
+                att,
+                std_error: 0.2,
+                ci_lower: f64::NAN,
+                ci_upper: f64::NAN,
+                p_value: p,
+                n_cells: 1,
+                n_obs: 100,
+            });
+        }
+        r.event_study.sort_by_key(|e| e.key);
+        r
+    }
+
+    fn anticipation_warnings(r: &StaggeredDidResult) -> Vec<IdentificationWarning> {
+        staggered_did_diagnostics(r)
+            .warnings
+            .into_iter()
+            .filter(|w| w.code == "ANTICIPATION_DETECTED")
+            .collect()
+    }
+
+    /// CAUS-51: one test, of the nearest lead; a significant lead further back
+    /// does not warn.
+    #[test]
+    fn test_anticipation_tests_only_the_nearest_lead() {
+        let r = with_leads(&[(-4, 1.3, 0.0001), (-1, 0.05, 0.8)]);
+        assert!(anticipation_warnings(&r).is_empty());
+        let r = with_leads(&[(-4, 0.01, 0.9), (-1, 0.42, 0.012)]);
+        let w = anticipation_warnings(&r);
+        assert_eq!(w.len(), 1);
+        let m = &w[0].message;
+        assert!(m.contains("e = -1 is 0.4200"), "{m}");
+        assert!(m.contains("p = 0.0120 at the 5% level"), "{m}");
+        assert!(m.contains("set anticipation = 1"), "{m}");
+    }
+
+    /// The level is the user's, not a fixed 5%; with anticipation the nearest
+    /// lead lies before the window.
+    #[test]
+    fn test_anticipation_uses_confidence_level() {
+        let mut r = with_leads(&[(-1, 0.42, 0.03)]);
+        assert_eq!(anticipation_warnings(&r).len(), 1);
+        r.config.confidence_level = 0.99;
+        assert!(anticipation_warnings(&r).is_empty());
+        let mut r = with_leads(&[(-2, 0.4, 0.004), (-1, 0.9, 0.0001)]);
+        r.config.anticipation = 1;
+        r.config.confidence_level = 0.99;
+        let w = anticipation_warnings(&r);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("e = -2"), "{}", w[0].message);
+        assert!(w[0].message.contains("at the 1% level"), "{}", w[0].message);
+        assert!(
+            w[0].message.contains("anticipation = 2"),
+            "{}",
+            w[0].message
+        );
+        // no estimable lead: no warning
+        let r = with_leads(&[(-1, 0.0, f64::NAN)]);
+        let mut r2 = r.clone();
+        r2.event_study.iter_mut().for_each(|e| {
+            if e.key < 0 {
+                e.std_error = f64::NAN;
+            }
+        });
+        assert!(anticipation_warnings(&r2).is_empty());
+    }
+
+    /// WP13 hand-off: the threshold of the pre-trend diagnostic is the critical
+    /// value on the statistic's scale, not the p-value.
+    #[test]
+    fn test_pretrend_warning_threshold_is_on_the_statistic_scale() {
+        let result = create_mock_staggered_result(Some(0.02), false);
+        let report = staggered_did_diagnostics(&result);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "PARALLEL_TRENDS_VIOLATED")
+            .expect("warning");
+        let d = w.diagnostics.as_ref().expect("diagnostics");
+        let want = crate::traits::estimator::chi_squared_quantile(0.95, 2.0).unwrap();
+        assert!(
+            (d.threshold.unwrap() - want).abs() < 1e-12,
+            "{:?}",
+            d.threshold
+        );
+        let mut boot = result.clone();
+        if let Some(t) = boot.pretrend_test.as_mut() {
+            t.f_stat = Some(4.1);
+            t.df2 = Some(180);
+        }
+        let report = staggered_did_diagnostics(&boot);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "PARALLEL_TRENDS_VIOLATED")
+            .expect("warning");
+        let th = w.diagnostics.as_ref().unwrap().threshold.unwrap();
+        assert!(th > 2.9 && th < 3.1, "F(2, 180) 95% quantile, got {th}");
+    }
+
+    /// CAUS-51: under no effect and no anticipation the warning fires at about
+    /// its level. 400 seeded null panels (300 units, periods 1-8, cohorts 3/5/7
+    /// and never treated in equal shares, unit effects, AR(0.5) errors), analytic
+    /// SEs, did's defaults; R's rule on 200 such panels warns in 7% (MC se 1.8
+    /// pp), the old any-pre-cell rule in 33%.
+    #[test]
+    fn test_anticipation_false_alarm_rate_under_null() {
+        use crate::data::Dataset;
+        use crate::econometrics::staggered_did::{StaggeredDidConfig, run_staggered_did};
+        use polars::prelude::*;
+        use rand::SeedableRng;
+        use rand::prelude::*;
+        use rand_distr::StandardNormal;
+
+        let (n_units, n_periods, reps) = (300usize, 8i64, 400usize);
+        let mut alarms = 0usize;
+        for rep in 0..reps {
+            let mut rng = StdRng::seed_from_u64(1_000 + rep as u64);
+            let (mut unit, mut time, mut g, mut y) = (vec![], vec![], vec![], vec![]);
+            for i in 0..n_units {
+                let cohort = [3i64, 5, 7, 0][i % 4];
+                let alpha: f64 = rng.sample(StandardNormal);
+                let mut e: f64 = rng.sample::<f64, _>(StandardNormal) / (1.0f64 - 0.25).sqrt();
+                for t in 1..=n_periods {
+                    if t > 1 {
+                        e = 0.5 * e + rng.sample::<f64, _>(StandardNormal);
+                    }
+                    unit.push(i as i64);
+                    time.push(t);
+                    g.push(cohort);
+                    y.push(alpha + 0.1 * t as f64 + e);
+                }
+            }
+            let df = df! {"unit" => unit, "time" => time, "g" => g, "y" => y}.unwrap();
+            let mut config = StaggeredDidConfig::default();
+            config.bootstrap = 0;
+            let r = run_staggered_did(&Dataset::new(df), "y", "g", "time", "unit", None, config)
+                .unwrap();
+            if !anticipation_warnings(&r).is_empty() {
+                alarms += 1;
+            }
+        }
+        let rate = alarms as f64 / reps as f64;
+        assert!(rate < 0.10, "false-alarm rate {rate} ({alarms} of {reps})");
+        eprintln!("anticipation false-alarm rate under the null: {rate} ({alarms} of {reps})");
     }
 
     #[test]
@@ -487,62 +666,6 @@ mod tests {
         assert!(antic_warning.is_some());
     }
 
-    /// CAUS-83: cells inside the configured anticipation window are not flagged;
-    /// an effect before the window is, with a remediation naming the option.
-    #[test]
-    fn test_anticipation_window_cells_not_flagged() {
-        let mut result = create_mock_staggered_result(Some(0.5), true); // significant at -1
-        result.config.anticipation = 1;
-        let report = staggered_did_diagnostics(&result);
-        assert!(
-            !report
-                .warnings
-                .iter()
-                .any(|w| w.code == "ANTICIPATION_DETECTED")
-        );
-        let c = result.group_time_atts.last_mut().unwrap();
-        c.time = 2018;
-        c.relative_time = -2;
-        let report = staggered_did_diagnostics(&result);
-        let w = report
-            .warnings
-            .iter()
-            .find(|w| w.code == "ANTICIPATION_DETECTED")
-            .expect("ANTICIPATION_DETECTED");
-        assert!(
-            w.remediation.iter().any(|r| r.contains("anticipation = 2")),
-            "{:?}",
-            w.remediation
-        );
-        assert!(
-            w.message.contains("configured anticipation window of 1"),
-            "{}",
-            w.message
-        );
-        assert!(
-            w.remediation
-                .iter()
-                .any(|r| r.contains("base period becomes g - 3 ")),
-            "{:?}",
-            w.remediation
-        );
-        // The base period follows the configured base_period, not a literal -1.
-        result.config.base_period = -2;
-        let report = staggered_did_diagnostics(&result);
-        let w = report
-            .warnings
-            .iter()
-            .find(|w| w.code == "ANTICIPATION_DETECTED")
-            .expect("ANTICIPATION_DETECTED");
-        assert!(
-            w.remediation
-                .iter()
-                .any(|r| r.contains("base period becomes g - 4 ")),
-            "{:?}",
-            w.remediation
-        );
-    }
-
     #[test]
     fn test_no_pretrend_periods() {
         // Create result with no pre-treatment periods
@@ -558,6 +681,7 @@ mod tests {
                 n_comparison: 200,
                 post_treatment: true,
                 relative_time: 0,
+                base_time: 2019,
             }],
             event_study: vec![],
             group_effects: vec![],
@@ -571,6 +695,7 @@ mod tests {
                 n_cells: 1,
                 n_obs: 300,
             },
+            overall_simple: AggregatedEffect::default(),
             pretrend_test: None,
             config: StaggeredDidConfig::default(),
             cohorts: vec![2020],
@@ -578,6 +703,7 @@ mod tests {
             n_obs: 300,
             n_treated: 100,
             n_never_treated: 200,
+            n_dropped_first_period: 0,
             warnings: vec![],
             missing: Default::default(),
             covariates: vec![],

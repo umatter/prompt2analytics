@@ -249,10 +249,11 @@ fn test_validate_cli_fuzzy_rd_bwselect() {
 // ---------------------------------------------------------------------------------------------
 
 /// CLI-14: the MCP spelling not_yet_treated ran the never-treated comparison.
-/// R: did_cs_analytic notyet_simple_att / _se (analytic influence-function SEs, bstrap = FALSE).
+/// R: did 2.5.1's default overall (aggte type = "group", varying base), case did_cs_varying
+/// notyet_varying_group_overall_att / _se (analytic influence-function SEs, bstrap = FALSE).
 #[test]
 fn test_validate_cli_staggered_accepts_mcp_spelling() {
-    let case = Case::load("did_cs_analytic");
+    let case = Case::load("did_cs_varying");
     let s = temp_session();
     let d = s.load(&case);
     let j = s.json(&[
@@ -274,8 +275,16 @@ fn test_validate_cli_staggered_accepts_mcp_spelling() {
     ]);
     let o = field(&j, "overall_att");
     Check::new(&case)
-        .scalar("notyet_simple_att", num(&o["att"]), Tol::coef(720))
-        .scalar("notyet_simple_se", num(&o["std_error"]), Tol::se(720))
+        .scalar(
+            "notyet_varying_group_overall_att",
+            num(&o["att"]),
+            Tol::coef(720),
+        )
+        .scalar(
+            "notyet_varying_group_overall_se",
+            num(&o["std_error"]),
+            Tol::se(720),
+        )
         .finish();
     assert_eq!(field(&j, "comparison_group"), "Not-Yet-Treated");
     assert_keys(
@@ -302,10 +311,11 @@ fn test_validate_cli_staggered_accepts_mcp_spelling() {
 }
 
 /// did's anticipation = 1 with DRDID's doubly robust cells and covariates.
-/// R: did_cs_covariates never_ant1_simple_att_dr / _se_dr (glm IRLS propensity).
+/// R: did 2.5.1's default overall (aggte type = "group"), case did_cs_cov_overall
+/// never_ant1_dr_group_overall_att / _se (glm IRLS propensity).
 #[test]
 fn test_validate_cli_staggered_anticipation() {
-    let case = Case::load("did_cs_covariates");
+    let case = Case::load("did_cs_cov_overall");
     let s = temp_session();
     let d = s.load(&case);
     let j = s.json(&[
@@ -333,12 +343,12 @@ fn test_validate_cli_staggered_anticipation() {
     let o = field(&j, "overall_att");
     Check::new(&case)
         .scalar(
-            "never_ant1_simple_att_dr",
+            "never_ant1_dr_group_overall_att",
             num(&o["att"]),
             Tol::iterative(1e-8),
         )
         .scalar(
-            "never_ant1_simple_se_dr",
+            "never_ant1_dr_group_overall_se",
             num(&o["std_error"]),
             Tol::iterative(1e-8),
         )

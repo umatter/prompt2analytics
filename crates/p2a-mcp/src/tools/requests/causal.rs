@@ -384,11 +384,23 @@ pub struct StaggeredDiDRequest {
     )]
     pub estimation_method: Option<String>,
 
+    /// How each cell's base period is chosen
+    #[schemars(
+        description = "Base period of each ATT(g,t), as did::att_gt `base_period`: 'varying' (default, did's default: a pre-treatment cell compares t with the previous period, a post-treatment cell with the last period before g - anticipation) or 'universal' (every cell of cohort g against g + base_period - anticipation; the cell at that period is the reference cell, ATT 0 without SE). Case and separators are ignored; other values are an error."
+    )]
+    pub base_period_type: Option<String>,
+
     /// Base period relative to treatment
     #[schemars(
-        description = "Base period for pre-treatment comparison, relative to g. Default is -1 (one period before treatment)."
+        description = "Offset of the base period from g: -1 (default; did's only offset for 'varying'); with base_period_type 'universal', any negative offset from g. 0 or more is refused."
     )]
     pub base_period: Option<i32>,
+
+    /// Minimum units per cell
+    #[schemars(
+        description = "Fewest treated and fewest comparison units an ATT(g,t) needs to be computed (default 1: did has no per-cell minimum)."
+    )]
+    pub min_obs_per_cell: Option<usize>,
 
     /// Number of bootstrap replications
     #[schemars(

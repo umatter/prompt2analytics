@@ -2,6 +2,46 @@
   "schema": 1,
   "methods": [
     {
+      "id": "staggered_did_cs_defaults",
+      "name": "Callaway-Sant'Anna with did 2.5.1's defaults: varying base period, aggte's group-weighted overall, did's sample rules",
+      "category": "econometrics",
+      "reference": "did 2.5.1 att_gt (base_period 'varying' and 'universal', est_method 'reg' | 'ipw' | 'dr', bstrap = FALSE) and aggte (type 'group' | 'simple' | 'dynamic'), called directly in validation/r/cases/causal_did_t4.R",
+      "doc": "validation/econometrics/staggered_did.md",
+      "cases": [
+        "did_cs_varying",
+        "did_cs_small_cohorts",
+        "did_cs_cov_overall"
+      ],
+      "tests": [
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_varying_never_cs_panel",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_varying_notyet_cs_panel",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_universal_group_overall_cs_panel",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_small_cohorts_drops_first_period_units",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_cov_group_overall"
+      ],
+      "quantities": [
+        "ATT(g,t) and SE with the varying base",
+        "Wald pre-test W, df, p",
+        "aggte group (overall and per group), simple overall, dynamic per event time",
+        "units dropped as treated in the first period; did's small-group warning",
+        "group and simple overall with covariates (OR, IPW, DR; anticipation 0 and 1)"
+      ],
+      "tolerance": "validation/README.md, n = 720 / 264 / 1200 rows: Tol::coef/se/stat/p_value(n); Tol::iterative(1e-8) for IPW and DR",
+      "deviations": [
+        {
+          "finding": "CAUS-84",
+          "quantity": "bootstrap SEs without covariates",
+          "note": "unit-resampling bootstrap where did uses a multiplier bootstrap; random, never pinned"
+        },
+        {
+          "finding": "CAUS-84",
+          "quantity": "aggte dynamic overall",
+          "note": "the result reports the event-study effects per event time, not their overall average; the case's dynamic_overall_* keys are not compared"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
       "id": "bacon_always_treated",
       "name": "Goodman-Bacon decomposition with always-treated units and a cohort at period 0",
       "category": "econometrics",
