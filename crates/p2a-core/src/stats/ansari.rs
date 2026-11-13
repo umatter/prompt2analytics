@@ -306,11 +306,33 @@ fn ab_statistic(x: &[f64], y: &[f64], sig: f64) -> EconResult<(f64, bool)> {
     Ok((s, sizes.iter().any(|&t| t > 1)))
 }
 
+/// Midranks of `c(x / sig, y)` and the tie-group sizes. The samples are finite, so `x / sig` is
+/// NaN only for a zero `x` at a zero (or NaN) scale, which Bauer's exact interval probes when
+/// the smallest ratios are zero. R's `rank` then puts each NaN last, in input order, with its
+/// own rank (`na.last = TRUE`), and so does this.
 fn ab_ranks(x: &[f64], y: &[f64], sig: f64) -> EconResult<(Vec<f64>, Vec<usize>)> {
     let mut pooled: Vec<f64> = try_with_capacity(x.len() + y.len(), "Ansari-Bradley pooled")?;
     pooled.extend(x.iter().map(|&v| v / sig));
     pooled.extend_from_slice(y);
-    midranks(&pooled)
+    if !(sig == 0.0 || sig.is_nan()) || !pooled.iter().any(|v| v.is_nan()) {
+        return midranks(&pooled);
+    }
+    let mut finite: Vec<f64> = try_with_capacity(pooled.len(), "Ansari-Bradley pooled")?;
+    finite.extend(pooled.iter().copied().filter(|v| !v.is_nan()));
+    let (finite_ranks, mut sizes) = midranks(&finite)?;
+    let mut ranks: Vec<f64> = try_with_capacity(pooled.len(), "Ansari-Bradley ranks")?;
+    let (mut next_finite, mut next_nan) = (0usize, finite.len());
+    for v in &pooled {
+        if v.is_nan() {
+            next_nan += 1;
+            ranks.push(next_nan as f64);
+            sizes.push(1);
+        } else {
+            ranks.push(finite_ranks[next_finite]);
+            next_finite += 1;
+        }
+    }
+    Ok((ranks, sizes))
 }
 
 /// R's `normalize`: the standardised AB of `x / sig` against `y`, with the tie-corrected
@@ -1081,6 +1103,58 @@ mod tests {
         assert!((bounds(&big)[0] - r_ci[0]).abs() < 1e-4);
         assert!((bounds(&big)[1] - r_ci[1]).abs() < 1e-4);
         assert!((big.estimate.unwrap() - case.scalar("big_est_r")).abs() < 1e-4);
+    }
+
+    /// A zero in `x` on the default exact path: the smallest ratios are zero, so Bauer's
+    /// interval probes a zero scale, where R ranks the NaN `0 / 0` last. Values quoted from
+    /// R 4.3.3 `ansari.test(x, y, exact = TRUE, conf.int = TRUE)` (seeds 1, 4 and 6 of
+    /// `round(c(0, rnorm(6)), 2)` against `round(rnorm(7, sd = 2), 2)`).
+    #[test]
+    fn test_ansari_exact_interval_with_zero_in_x() {
+        type Case = ([f64; 7], [f64; 7], f64, (f64, f64), f64);
+        let cases: [Case; 3] = [
+            (
+                [0.0, -0.63, 0.18, -0.84, 1.6, 0.33, -0.82],
+                [0.97, 1.48, 1.15, -0.61, 3.02, 0.78, -1.24],
+                0.530_303_030_303_030_3,
+                (0.109_271_523_178_807_95, 1.649_484_536_082_474_4),
+                0.518_932_920_316_171_8,
+            ),
+            (
+                [0.0, 0.22, -0.54, 0.89, 0.6, 1.64, 0.69],
+                [-2.56, -0.43, 3.79, 3.55, 1.13, 0.03, 0.77],
+                0.160_839_160_839_160_83,
+                (0.0, 29.666_666_666_666_668),
+                0.268_209_255_533_199_2,
+            ),
+            (
+                [0.0, 0.27, -0.63, 0.87, 1.73, 0.02, 0.37],
+                [-2.62, 1.48, 0.09, -2.1, 3.46, -2.36, 1.31],
+                0.093_240_093_240_093_19,
+                (0.0, 3.000_000_000_000_000_4),
+                0.250_722_543_352_601_13,
+            ),
+        ];
+        for (x, y, p, (lo, hi), est) in cases {
+            let r = ansari_test_with(&x, &y, Alternative::TwoSided, None, Some(0.95)).unwrap();
+            assert!(r.exact && r.warning.is_none(), "{:?}", r.warning);
+            assert!((r.p_value - p).abs() < 1e-12, "p {} vs {p}", r.p_value);
+            assert!(
+                (r.conf_int_lower.unwrap() - lo).abs() < 1e-12,
+                "{:?}",
+                r.conf_int_lower
+            );
+            assert!(
+                (r.conf_int_upper.unwrap() - hi).abs() < 1e-12,
+                "{:?}",
+                r.conf_int_upper
+            );
+            assert!(
+                (r.estimate.unwrap() - est).abs() < 1e-12,
+                "{:?}",
+                r.estimate
+            );
+        }
     }
 
     /// Samples that differ in location: R's warning and no interval.

@@ -33,6 +33,10 @@ midpoints as R's `absigma`) when the exact path is taken, otherwise the asymptot
 the positive ratios |x_i| / |y_j|, found by bisection over their order statistics rather than by
 materialising all m n of them, with R's warnings when the samples differ in location or the
 interval cannot be computed.
+A zero in `x` makes the smallest exact ratios zero, so the exact inversion evaluates AB at a zero
+scale, where `0 / 0` is NaN; as R's `rank`, that value ranks last with its own rank and the test
+keeps its p-value and interval (`stats::ansari::tests::test_ansari_exact_interval_with_zero_in_x`,
+three samples with values quoted from R 4.3.3; not a registered pin).
 
 ## Pinned values
 
