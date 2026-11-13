@@ -241,24 +241,21 @@ fn pearson_test(
         let z = 0.5 * ((1.0 + r) / (1.0 - r)).ln();
         let se_z = 1.0 / ((n - 3) as f64).sqrt();
 
-        let (z_low, z_high) = match alternative {
+        // The open end of a one-sided interval is -1 or 1 itself, not tanh(-1) or tanh(1)
+        let (r_low, r_high) = match alternative {
             Alternative::TwoSided => {
                 let z_crit = z_critical(conf_level)?;
-                (z - z_crit * se_z, z + z_crit * se_z)
+                ((z - z_crit * se_z).tanh(), (z + z_crit * se_z).tanh())
             }
             Alternative::Less => {
                 let z_crit = normal_quantile(conf_level)?;
-                (-1.0, z + z_crit * se_z)
+                (-1.0, (z + z_crit * se_z).tanh())
             }
             Alternative::Greater => {
                 let z_crit = normal_quantile(conf_level)?;
-                (z - z_crit * se_z, 1.0)
+                ((z - z_crit * se_z).tanh(), 1.0)
             }
         };
-
-        // Transform back: r = (exp(2z) - 1) / (exp(2z) + 1) = tanh(z)
-        let r_low = z_low.tanh().max(-1.0);
-        let r_high = z_high.tanh().min(1.0);
         (Some(r_low), Some(r_high))
     } else {
         (None, None)
@@ -881,6 +878,23 @@ mod tests {
             "p_value for less: {}",
             result_less.p_value
         );
+
+        // r = 0.99907 > tanh(1): the one-sided interval contains it and its open end is -1 or 1
+        let x: Vec<f64> = (1..=10).map(f64::from).collect();
+        let y = [1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
+        let less = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::Less, 0.95).unwrap();
+        let greater = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::Greater,
+            0.95,
+        )
+        .unwrap();
+        assert_eq!(less.conf_low, Some(-1.0));
+        assert!(less.conf_high.unwrap() > less.estimate);
+        assert_eq!(greater.conf_high, Some(1.0));
+        assert!(greater.conf_low.unwrap() < greater.estimate);
     }
 
     #[test]
@@ -917,93 +931,79 @@ mod tests {
     // Validation tests against R
     // =========================================================================
 
-    #[test]
-    fn test_validate_pearson_correlation() {
-        // R: x <- c(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0)
-        // R: y <- c(1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0)
-        // R: cor.test(x, y, method = "pearson")
-        // R: cor = 0.999071, t = 65.555425, p < 0.0001
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let y = vec![1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
-
-        let result = cor_test(
-            &x,
-            &y,
-            CorrelationMethod::Pearson,
-            Alternative::TwoSided,
-            0.95,
-        )
-        .unwrap();
-
-        let expected_cor = 0.999071;
-        assert!(
-            (result.estimate - expected_cor).abs() < 0.001,
-            "Pearson cor mismatch: Rust={:.6}, R={:.6}",
-            result.estimate,
-            expected_cor
-        );
-
-        // t-statistic should be large
-        assert!(
-            result.statistic > 50.0,
-            "t-statistic should be large: {:.2}",
-            result.statistic
-        );
-
-        // p-value should be very small
-        assert!(
-            result.p_value < 0.001,
-            "p-value should be small: {:.6}",
-            result.p_value
-        );
-
-        // df should be n - 2 = 8
-        assert_eq!(result.df, Some(8.0), "df should be 8");
+    /// Column `col` of set `set` of case `stat_cor_test_t4`.
+    fn t4(ds: &Dataset, set: &str, col: &str) -> Vec<f64> {
+        crate::stats::ranks::test_data::column_where(ds, col, &[("set", set)])
     }
 
+    const ALTS: [(Alternative, &str); 3] = [
+        (Alternative::TwoSided, "two"),
+        (Alternative::Less, "less"),
+        (Alternative::Greater, "greater"),
+    ];
+
+    /// r, t, df, two-sided p and the 95% and 90% intervals (R 4.3.3, case `stat_cor_test_t4`).
+    #[test]
+    fn test_validate_pearson_correlation() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cor_test_t4");
+        let mut check = Check::new(&case);
+        for set in ["pear", "pear2"] {
+            let (x, y) = (t4(&ds, set, "x"), t4(&ds, set, "y"));
+            let n = x.len();
+            let run = |level| {
+                cor_test(
+                    &x,
+                    &y,
+                    CorrelationMethod::Pearson,
+                    Alternative::TwoSided,
+                    level,
+                )
+                .unwrap()
+            };
+            let r = run(0.95);
+            let r90 = run(0.90);
+            assert_eq!(r.df, Some((n - 2) as f64));
+            check
+                .scalar(&format!("pearson_{set}_r"), r.estimate, Tol::coef(n))
+                .scalar(&format!("pearson_{set}_t"), r.statistic, Tol::stat(n))
+                .scalar(&format!("pearson_{set}_two_p"), r.p_value, Tol::p_value(n))
+                .vector(
+                    &format!("pearson_{set}_two_ci"),
+                    &[r.conf_low.unwrap(), r.conf_high.unwrap()],
+                    Tol::stat(n),
+                )
+                .vector(
+                    &format!("pearson_{set}_ci90"),
+                    &[r90.conf_low.unwrap(), r90.conf_high.unwrap()],
+                    Tol::stat(n),
+                );
+        }
+        check.finish();
+    }
+
+    /// One-sided p and intervals: the open end is -1 (`less`) or 1 (`greater`), as R.
+    /// Fails before: the open end went through tanh(±1) = ±0.7616, below r for `pear`.
     #[test]
     fn test_validate_pearson_confidence_interval() {
-        // R: cor.test(x, y) conf.int: [0.995917, 0.999789]
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let y = vec![1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
-
-        let result = cor_test(
-            &x,
-            &y,
-            CorrelationMethod::Pearson,
-            Alternative::TwoSided,
-            0.95,
-        )
-        .unwrap();
-
-        let expected_low = 0.995917;
-        let expected_high = 0.999789;
-
-        assert!(result.conf_low.is_some(), "conf_low should be Some");
-        assert!(result.conf_high.is_some(), "conf_high should be Some");
-
-        let conf_low = result.conf_low.unwrap();
-        let conf_high = result.conf_high.unwrap();
-
-        // Confidence interval should contain the estimate
-        assert!(
-            conf_low < result.estimate && result.estimate < conf_high,
-            "CI should contain estimate"
-        );
-
-        // CI bounds should be close to R's values
-        assert!(
-            (conf_low - expected_low).abs() < 0.01,
-            "conf_low mismatch: Rust={:.6}, R={:.6}",
-            conf_low,
-            expected_low
-        );
-        assert!(
-            (conf_high - expected_high).abs() < 0.01,
-            "conf_high mismatch: Rust={:.6}, R={:.6}",
-            conf_high,
-            expected_high
-        );
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cor_test_t4");
+        let mut check = Check::new(&case);
+        for set in ["pear", "pear2"] {
+            let (x, y) = (t4(&ds, set, "x"), t4(&ds, set, "y"));
+            let n = x.len();
+            for (alt, a) in &ALTS[1..] {
+                let r = cor_test(&x, &y, CorrelationMethod::Pearson, *alt, 0.95).unwrap();
+                check
+                    .scalar(&format!("pearson_{set}_{a}_p"), r.p_value, Tol::p_value(n))
+                    .vector(
+                        &format!("pearson_{set}_{a}_ci"),
+                        &[r.conf_low.unwrap(), r.conf_high.unwrap()],
+                        Tol::stat(n),
+                    );
+            }
+        }
+        check.finish();
     }
 
     #[test]
