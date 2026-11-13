@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "bacon_always_treated",
+  "area": "causal/did",
+  "method": "Goodman-Bacon decomposition with always-treated units (first treated in the first period, coded 0) and never-treated units, periods 0-9; the Theorem 1 identity with fixest's TWFE coefficient",
+  "reference": "bacondecomp::bacon (Goodman-Bacon 2021, Theorem 1; 'Later vs Always Treated' for units treated from the first period); fixest::feols two-way fixed effects",
+  "call": "bacon(y ~ D, data = bacon_always_panel, id_var = 'unit', time_var = 'time'); feols(y ~ D | unit + time)",
+  "dataset": "validation/datasets/generated/bacon_always_panel.csv",
+  "datasets": ["validation/datasets/generated/bacon_always_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "bacondecomp": "0.1.1",
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "component_treated": [3, 3, 3, 3, 5, 5, 5, 5, 7, 7, 7, 7],
+    "component_control": [0, 5, 7, -1, 0, 3, 7, -1, 0, 3, 5, -1],
+    "component_control_never": [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+    "component_estimate": [0.48677666782858187, 1.4368821548958359, 1.4559834543010355, 1.8074753386071405, 0.058950018027506754, 0.6507164807199971, 0.92056021044999092, 1.3994387588274997, 0.021148390001792167, 0.44583018645937567, 0.60080275438333519, 1.3486859754613159],
+    "component_weight": [0.11052631578947371, 0.031578947368421054, 0.063157894736842107, 0.11052631578947371, 0.13157894736842105, 0.052631578947368418, 0.052631578947368418, 0.13157894736842105, 0.11052631578947368, 0.063157894736842093, 0.031578947368421054, 0.11052631578947368],
+    "twfe": 0.86403249098815904,
+    "weighted_sum": 0.86403249098816026,
+    "type_weight_treated_vs_untreated": 0.35263157894736841,
+    "type_estimate_treated_vs_untreated": 1.511423232330225,
+    "type_weight_earlier_vs_later_treated": 0.14736842105263159,
+    "type_estimate_earlier_vs_later_treated": 1.260667731624548,
+    "type_weight_later_vs_earlier_treated": 0.14736842105263157,
+    "type_estimate_later_vs_earlier_treated": 0.55221227039330323,
+    "type_weight_later_vs_always_treated": 0.35263157894736841,
+    "type_estimate_later_vs_always_treated": 0.18119666664366457
+  }
+}
