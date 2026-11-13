@@ -294,11 +294,6 @@
       "tolerance": "validation/README.md by n; printed values at their decimals; counts exact",
       "deviations": [
         {
-          "finding": "STAT-16",
-          "quantity": "cancor correlations and coefficients",
-          "note": "centres pinned only"
-        },
-        {
           "finding": "STAT-75",
           "quantity": "model-table SEs",
           "note": "means, grand mean and group sizes pinned"

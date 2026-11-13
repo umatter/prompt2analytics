@@ -7,11 +7,12 @@
 //!
 //! Given centered data matrices X (n × p) and Y (n × q):
 //! 1. Compute covariance matrices: Σxx, Σyy, Σxy
-//! 2. Cholesky decompose: Lx = chol(Σxx), Ly = chol(Σyy)
-//! 3. Form: M = Lx⁻¹' Σxy Ly⁻¹
+//! 2. Cholesky decompose: Σxx = Lx Lx', Σyy = Ly Ly' (Lx, Ly lower triangular)
+//! 3. Form: M = Lx⁻¹ Σxy Ly⁻ᵀ (two triangular solves; R's Qx'Qy)
 //! 4. SVD: M = U Σ V'
 //! 5. Canonical correlations = diagonal of Σ
-//! 6. Coefficients: xcoef = Lx⁻¹ U, ycoef = Ly⁻¹ V
+//! 6. Coefficients on R's scale: xcoef = Lx⁻ᵀ U / √(n-1), ycoef = Ly⁻ᵀ V / √(n-1)
+//!    (R's `backsolve(qr.R(qr(x)), u)`)
 //!
 //! # References
 //!
@@ -29,7 +30,6 @@ use crate::data::columns::{ColumnRequest, Columns, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, faer_to_ndarray, matmul, ndarray_to_faer};
 use crate::resource;
-use faer::linalg::solvers::Solve;
 use faer::prelude::*;
 
 /// Result of canonical correlation analysis.
@@ -271,67 +271,31 @@ pub fn cancor(
         EconError::Internal("Cholesky decomposition of Σyy failed (Y may be collinear)".to_string())
     })?;
 
-    // Compute M = Lx^{-T} * Σxy * Ly^{-1} efficiently using triangular solves
-    // Instead of computing inverses explicitly, solve:
-    // 1. Solve Ly * temp = Σxy^T  ->  temp = Ly^{-1} * Σxy^T
-    // 2. Solve Lx * M^T = temp^T  ->  M^T = Lx^{-1} * temp^T
-    //
-    // Or equivalently: M = (Lx^{-1} * Σxy * Ly^{-T})^T = Ly^{-1} * Σxy^T * Lx^{-T}
-    //
-    // Actually, simpler approach:
-    // temp1 = Ly^{-1} * Σxy^T  (solve Ly * temp1 = Σxy^T)
-    // temp2 = Lx^{-1} * temp1^T (solve Lx * temp2 = temp1^T)
-    // M = temp2^T
-    //
-    // Or use the fact that M = Lx^{-T} * Σxy * Ly^{-1}
-    // Step 1: Solve Ly * A = Σxy^T for A  (A = Ly^{-1} * Σxy^T, so A^T = Σxy * Ly^{-T})
-    // Step 2: Compute B = Σxy * Ly^{-1} = (Ly^{-T} * Σxy^T)^T = (solve Ly^T * C = Σxy^T for C)^T
-    // Step 3: Solve Lx^T * M = B^T for M^T, then transpose
-
-    // Simpler: compute Lx^{-1} and Ly^{-1} using faer's optimized solve
-    // This is still more efficient than our hand-rolled loop
-
-    // Solve Lx * Lx_inv = I for Lx_inv
-    let mut lx_inv_faer = Mat::<f64>::zeros(p, p);
-    for i in 0..p {
-        lx_inv_faer[(i, i)] = 1.0;
-    }
-    let lx_inv_faer = chol_xx.solve(&lx_inv_faer);
-
-    // Solve Ly * Ly_inv = I for Ly_inv
-    let mut ly_inv_faer = Mat::<f64>::zeros(q, q);
-    for i in 0..q {
-        ly_inv_faer[(i, i)] = 1.0;
-    }
-    let ly_inv_faer = chol_yy.solve(&ly_inv_faer);
-
-    // Form M = Lx^{-T} * Σxy * Ly^{-1}
-    // First: temp = Σxy * Ly^{-1}
-    let temp = &cov_xy_faer * &ly_inv_faer;
-
-    // Then: M = Lx^{-T} * temp = (Lx^{-1})^T * temp
-    let lx_inv_t = lx_inv_faer.transpose();
-    let m_faer = lx_inv_t * &temp;
+    // R's cancor works on the QR factors of the (centred) data, X = Qx Rx; with Lx the lower
+    // Cholesky factor of Σxx = X'X / (n - 1), Rx = sqrt(n - 1) Lx'. So R's
+    // Qx'Qy = Lx^{-1} Σxy Ly^{-T}, and its coefficients Rx^{-1} U = Lx^{-T} U / sqrt(n - 1).
+    let lx = faer_ref_to_ndarray(chol_xx.L());
+    let ly = faer_ref_to_ndarray(chol_yy.L());
+    let sxy = faer_to_ndarray(&cov_xy_faer);
+    // A = Lx^{-1} Σxy (p x q), then M' = Ly^{-1} A' (q x p).
+    let a = forward_solve(&lx, &sxy);
+    let m = forward_solve(&ly, &a.t().to_owned()).reversed_axes();
+    resource::checkpoint()?;
 
     // SVD of M
-    let m = faer_to_ndarray(&m_faer);
     let (u, s, vt) = svd(&m)?;
     resource::checkpoint()?;
 
-    // Canonical correlations are the singular values (clamped to [0, 1])
-    let cor = s.mapv(|v| v.clamp(0.0, 1.0));
-
-    // Only keep the first r components
-    let cor = cor.slice(ndarray::s![..r]).to_owned();
+    // Canonical correlations are the singular values, R's d (no clamp: rounding may leave a
+    // perfect correlation a few ulps above 1, as in R).
+    let cor = s.slice(ndarray::s![..r]).to_owned();
     let u_r = u.slice(ndarray::s![.., ..r]).to_owned();
     let v_r = vt.t().slice(ndarray::s![.., ..r]).to_owned();
 
-    // Compute coefficients: xcoef = Lx^{-1} * U, ycoef = Ly^{-1} * V
-    let u_r_faer = ndarray_to_faer(&u_r.view());
-    let v_r_faer = ndarray_to_faer(&v_r.view());
-
-    let xcoef = faer_to_ndarray(&(&lx_inv_faer * &u_r_faer));
-    let ycoef = faer_to_ndarray(&(&ly_inv_faer * &v_r_faer));
+    // Coefficients on R's scale: xcoef = Lx^{-T} U / sqrt(n - 1), ycoef = Ly^{-T} V / sqrt(n - 1)
+    let root = (n as f64 - 1.0).sqrt();
+    let xcoef = back_solve_transposed(&lx, &u_r) / root;
+    let ycoef = back_solve_transposed(&ly, &v_r) / root;
 
     Ok(CancorResult {
         cor,
@@ -482,6 +446,40 @@ fn symmetrize_faer(m: &Mat<f64>) -> Mat<f64> {
         }
     }
     sym
+}
+
+/// `L^{-1} B` for a lower-triangular `L` (k x k) with a nonzero diagonal, by forward
+/// substitution on each column of `B` (k x m).
+fn forward_solve(l: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    let k = l.nrows();
+    let mut x = b.clone();
+    for mut col in x.columns_mut() {
+        for i in 0..k {
+            let mut v = col[i];
+            for j in 0..i {
+                v -= l[(i, j)] * col[j];
+            }
+            col[i] = v / l[(i, i)];
+        }
+    }
+    x
+}
+
+/// `L^{-T} B` for a lower-triangular `L` (k x k) with a nonzero diagonal, by back substitution
+/// with `L'` on each column of `B` (k x m).
+fn back_solve_transposed(l: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    let k = l.nrows();
+    let mut x = b.clone();
+    for mut col in x.columns_mut() {
+        for i in (0..k).rev() {
+            let mut v = col[i];
+            for j in i + 1..k {
+                v -= l[(j, i)] * col[j];
+            }
+            col[i] = v / l[(i, i)];
+        }
+    }
+    x
 }
 
 /// Compute thin SVD of a matrix.
@@ -780,8 +778,8 @@ mod tests {
 
     #[test]
     fn test_cancor_dimensions_and_order() {
-        // R gives cor 0.9016495, 0.4123260 here; p2a's correlations differ (STAT-16), so this test
-        // checks the shape of the result only. The centres are pinned below.
+        // R gives cor 0.9016495, 0.4123260 here (pinned in test_validate_cancor_example); this
+        // test checks the shape of the result.
         // R code:
         // x <- matrix(c(191, 195, 181, 183, 176, 208, 189, 197, 188, 192,
         //              155, 149, 148, 153, 144, 157, 150, 159, 152, 150,
@@ -841,7 +839,7 @@ mod tests {
     }
 
     /// X-8: an Int64 column gives the result of its Float64 copy; a null is refused as R's
-    /// cancor() refuses NA (no R values: STAT-16 is open).
+    /// cancor() refuses NA.
     #[test]
     fn test_na_cancor_columns() {
         // id Int64 (complete), b Float64, a with one null
@@ -872,18 +870,80 @@ mod tests {
         ));
     }
 
-    /// STAT-67 (cancor): the centres and the number of canonical pairs are R's. The correlations and coefficients are
-    /// not (STAT-16, Tier 4), and are recorded in the case.
+    /// The coefficients column-major, each canonical pair's sign flipped so that its first x
+    /// coefficient is positive (the cases' normalisation): (xcoef, ycoef).
+    fn sign_normalised(r: &CancorResult) -> (Vec<f64>, Vec<f64>) {
+        let mut x = r.xcoef.clone();
+        let mut y = r.ycoef.clone();
+        for j in 0..r.n_canonical {
+            if x[(0, j)] < 0.0 {
+                x.column_mut(j).mapv_inplace(|v| -v);
+                y.column_mut(j).mapv_inplace(|v| -v);
+            }
+        }
+        (
+            x.t().iter().copied().collect(),
+            y.t().iter().copied().collect(),
+        )
+    }
+
+    /// STAT-67 (cancor), STAT-16: centres, number of pairs, correlations and coefficients as R's.
     #[test]
     fn test_validate_cancor_t3_centres() {
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("stat_cancor_t3");
         let r = run_cancor(&ds, &["x1", "x2", "x3"], &["y1", "y2"], true, true).unwrap();
+        let (xc, yc) = sign_normalised(&r);
         Check::new(&case)
             .vector("xcenter", &r.xcenter.to_vec(), Tol::coef(100))
             .vector("ycenter", &r.ycenter.to_vec(), Tol::coef(100))
             .scalar("n_canonical", r.n_canonical as f64, Tol::exact())
+            .vector("cor", &r.cor.to_vec(), Tol::coef(100))
+            .vector("xcoef", &xc, Tol::coef(100))
+            .vector("ycoef", &yc, Tol::coef(100))
             .finish();
-        // deviation STAT-16: cor [0.8793290724715916, 0.13269379517114782], xcoef, ycoef (sign-normalised in the case).
+    }
+
+    /// Compare cor, xcoef and ycoef with the `<key>_*` values of `stat_cancor_t4`.
+    fn check_cancor(check: &mut p2a_validation::Check, key: &str, r: &CancorResult, n: usize) {
+        use p2a_validation::Tol;
+        let (xc, yc) = sign_normalised(r);
+        check
+            .vector(&format!("{key}_cor"), &r.cor.to_vec(), Tol::coef(n))
+            .vector(&format!("{key}_xcoef"), &xc, Tol::coef(n))
+            .vector(&format!("{key}_ycoef"), &yc, Tol::coef(n));
+    }
+
+    /// The 10-row example (p = 3, q = 2).
+    #[test]
+    fn test_validate_cancor_example() {
+        let (case, ds) = crate::test_support::load_case("stat_cancor_t4");
+        let r = run_cancor(&ds, &["a1", "a2", "a3"], &["b1", "b2"], true, true).unwrap();
+        let mut check = p2a_validation::Check::new(&case);
+        check_cancor(&mut check, "ex", &r, 10);
+        check.finish();
+    }
+
+    /// cancor(X, Y, xcenter = FALSE, ycenter = FALSE) on the t3 data.
+    #[test]
+    fn test_validate_cancor_no_centring() {
+        let (case, _) = crate::test_support::load_case("stat_cancor_t4");
+        let ds = generated("cancor_t3");
+        let r = run_cancor(&ds, &["x1", "x2", "x3"], &["y1", "y2"], false, false).unwrap();
+        let mut check = p2a_validation::Check::new(&case);
+        check_cancor(&mut check, "nc", &r, 100);
+        check.finish();
+    }
+
+    /// cancor(Y, X): fewer x than y columns.
+    #[test]
+    fn test_validate_cancor_fewer_x() {
+        let (case, _) = crate::test_support::load_case("stat_cancor_t4");
+        let ds = generated("cancor_t3");
+        let r = run_cancor(&ds, &["y1", "y2"], &["x1", "x2", "x3"], true, true).unwrap();
+        assert_eq!(r.ycoef.dim(), (3, 2));
+        let mut check = p2a_validation::Check::new(&case);
+        check_cancor(&mut check, "sw", &r, 100);
+        check.finish();
     }
 }

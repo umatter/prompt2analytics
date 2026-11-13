@@ -120,15 +120,15 @@
     },
     {
       "id": "cancor_t3",
-      "name": "Canonical correlation: centres and dimensions",
+      "name": "Canonical correlation: centres, dimensions, correlations and coefficients",
       "category": "stats",
       "reference": "stats::cancor",
       "doc": "validation/multivariate/cancor.md",
       "cases": ["stat_cancor_t3"],
       "tests": ["p2a-core::stats::cancor::tests::test_validate_cancor_t3_centres"],
-      "quantities": ["xcenter", "ycenter", "number of canonical pairs"],
+      "quantities": ["xcenter", "ycenter", "number of canonical pairs", "cor", "xcoef and ycoef (sign-normalised)"],
       "tolerance": "Tol::coef(100)",
-      "deviations": [{"finding": "STAT-16", "quantity": "canonical correlations, xcoef, ycoef", "note": "Sigma^-1 instead of the Cholesky factor; R values in cor, xcoef, ycoef (sign-normalised)"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

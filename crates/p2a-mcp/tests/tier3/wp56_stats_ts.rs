@@ -2353,7 +2353,7 @@ async fn test_validate_mcp_compute_correlation() {
 }
 
 /// STAT-46/STAT-77: multivariate_cancor through the dispatch path, pinned to cancor()'s
-/// centres (stat_cancor_t3).
+/// centres and canonical correlations (stat_cancor_t3).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_cancor_centres() {
     let case = Case::load("stat_cancor_t3");
@@ -2367,8 +2367,9 @@ async fn test_validate_mcp_cancor_centres() {
         )
         .await,
     );
-    // deviation STAT-16: the correlations and coefficients are not pinned here.
+    // the coefficients are pinned (sign-normalised) in the core tests
     Check::new(&case)
+        .vector("cor", &fs(&j["canonical_correlations"]), Tol::coef(100))
         .named(
             "xcenter",
             &["x1", "x2", "x3"],

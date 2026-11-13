@@ -121,6 +121,29 @@
       "tolerance": "validation/README.md, n < 100: 1e-6 relative; knots exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cancor_t4",
+      "name": "Canonical correlation: correlations and coefficients on a small example, without centring, and with fewer x than y columns",
+      "category": "stats",
+      "reference": "stats::cancor",
+      "doc": "validation/multivariate/cancor.md",
+      "cases": [
+        "stat_cancor_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::cancor::tests::test_validate_cancor_example",
+        "p2a-core::stats::cancor::tests::test_validate_cancor_no_centring",
+        "p2a-core::stats::cancor::tests::test_validate_cancor_fewer_x"
+      ],
+      "quantities": [
+        "cor",
+        "xcoef (sign-normalised)",
+        "ycoef (sign-normalised)"
+      ],
+      "tolerance": "validation/README.md by n (10, 100): coefficients 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
