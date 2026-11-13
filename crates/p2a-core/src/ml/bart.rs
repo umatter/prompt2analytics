@@ -170,6 +170,12 @@ pub struct BartConfig {
     /// `numcut` equally spaced interior points of its range. Default: 100.
     #[serde(default = "default_numcut")]
     pub numcut: usize,
+
+    /// Keep the trees of every kept draw, so that [`bart_predict`] can score new rows.
+    /// Default: false. They take about `n_mcmc x n_trees x (2 s + 1) x 24` bytes for `s` splits
+    /// per tree (about 1.3 at the default prior), about 18 MB at the defaults.
+    #[serde(default)]
+    pub keep_trees: bool,
 }
 
 fn default_numcut() -> usize {
@@ -193,6 +199,7 @@ impl Default for BartConfig {
             confidence_level: 0.95,
             classification: false,
             numcut: default_numcut(),
+            keep_trees: false,
         }
     }
 }
@@ -281,6 +288,127 @@ pub struct BartResult {
     /// Posterior samples of sigma.
     #[serde(skip)]
     pub sigma_samples: Option<Vec<f64>>,
+
+    /// The trees of every kept draw, with `keep_trees`
+    #[serde(skip)]
+    kept_trees: Option<KeptTrees>,
+}
+
+/// A node of a kept tree: a leaf has `left == NO_NODE` and its value in `value`; an internal
+/// node sends rows with `x[var] < value` to `left`.
+#[derive(Debug, Clone, Copy)]
+struct KeptNode {
+    left: u32,
+    right: u32,
+    var: u32,
+    value: f64,
+}
+
+/// The trees of every kept draw in one buffer: tree `t` of draw `d` is
+/// `nodes[starts[d * n_trees + t]..starts[d * n_trees + t + 1]]`, its root first and its child
+/// indices relative to its start.
+#[derive(Debug, Clone)]
+struct KeptTrees {
+    nodes: Vec<KeptNode>,
+    starts: Vec<usize>,
+    n_trees: usize,
+}
+
+impl KeptTrees {
+    fn new(n_draws: usize, n_trees: usize) -> EconResult<Self> {
+        let n = checked_len(&[n_draws, n_trees], "BART kept trees")?;
+        let mut starts = try_with_capacity::<usize>(
+            n.checked_add(1)
+                .ok_or_else(|| crate::resource::overflow("BART kept trees"))?,
+            "BART kept trees",
+        )?;
+        starts.push(0);
+        Ok(Self {
+            nodes: try_with_capacity::<KeptNode>(n, "BART kept tree nodes")?,
+            starts,
+            n_trees,
+        })
+    }
+
+    /// Append the sampler's current trees as one draw
+    fn push_draw(&mut self, trees: &[BartTree]) -> EconResult<()> {
+        let add: usize = trees.iter().map(|t| t.nodes.len()).sum();
+        let need = self.nodes.len().saturating_add(add);
+        if need > self.nodes.capacity() {
+            let cap = need.max(self.nodes.capacity().saturating_mul(2));
+            crate::resource::check_alloc::<KeptNode>(cap, "BART kept tree nodes")?;
+            self.nodes
+                .try_reserve_exact(cap - self.nodes.len())
+                .map_err(|_| {
+                    crate::resource::reserve_failed(
+                        "BART kept tree nodes",
+                        cap,
+                        std::mem::size_of::<KeptNode>(),
+                    )
+                })?;
+        }
+        for tree in trees {
+            self.nodes.extend(tree.nodes.iter().map(|nd| KeptNode {
+                left: nd.left,
+                right: nd.right,
+                var: nd.var,
+                value: if nd.is_leaf() { nd.mu } else { nd.cutv },
+            }));
+            self.starts.push(self.nodes.len());
+        }
+        Ok(())
+    }
+
+    /// The sum of the trees of draw `d` at `row`, in tree order from 0
+    fn fit(&self, d: usize, row: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        for t in 0..self.n_trees {
+            let k = d * self.n_trees + t;
+            let tree = &self.nodes[self.starts[k]..self.starts[k + 1]];
+            let mut i = 0;
+            loop {
+                let node = &tree[i];
+                if node.left == NO_NODE {
+                    sum += node.value;
+                    break;
+                }
+                i = if row[node.var as usize] < node.value {
+                    node.left as usize
+                } else {
+                    node.right as usize
+                };
+            }
+        }
+        sum
+    }
+}
+
+/// Posterior mean, population SD and type-7 interval of each column of `draws` (draws x rows).
+type DrawSummaries = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+fn draw_summaries(draws: &Array2<f64>, level: f64) -> EconResult<DrawSummaries> {
+    let (n_draws, n) = draws.dim();
+    // Sums run over the draws in order, whatever the matrix's layout, so a row's summaries do
+    // not depend on the other rows predicted with it
+    let mean: Vec<f64> = (0..n)
+        .map(|i| draws.column(i).iter().sum::<f64>() / n_draws as f64)
+        .collect();
+    let sd: Vec<f64> = (0..n)
+        .map(|i| {
+            let m = mean[i];
+            let ss: f64 = draws.column(i).iter().map(|&v| (v - m).powi(2)).sum();
+            (ss / n_draws as f64).sqrt()
+        })
+        .collect();
+    let mut lower = try_with_capacity::<f64>(n, "BART interval bounds")?;
+    let mut upper = try_with_capacity::<f64>(n, "BART interval bounds")?;
+    for i in 0..n {
+        let col: Vec<f64> = draws.column(i).to_vec();
+        let (lo, hi) = percentile_interval(&col, level)?;
+        lower.push(lo);
+        upper.push(hi);
+    }
+    Ok((mean, sd, lower, upper))
 }
 
 impl fmt::Display for BartResult {
@@ -1430,6 +1558,11 @@ pub fn bart_arrays(
     // Posterior draws, allocated before any sweep runs
     let mut posterior_preds = try_zeros2(config.n_mcmc, n, "BART posterior draws")?;
     let mut sigma_samples = try_with_capacity::<f64>(config.n_mcmc, "BART sigma draws")?;
+    let mut kept_trees = if config.keep_trees {
+        Some(KeptTrees::new(config.n_mcmc, config.n_trees)?)
+    } else {
+        None
+    };
 
     // Burn-in
     for _ in 0..config.n_burn {
@@ -1467,31 +1600,15 @@ pub fn bart_arrays(
         }
         sigma_samples.push(sampler.sigma);
         sampler.add_split_counts(&mut split_sums);
+        if let Some(kept) = kept_trees.as_mut() {
+            kept.push_draw(&sampler.trees)?;
+        }
     }
 
-    // Compute posterior summaries
-    let predictions: Vec<f64> = (0..n)
-        .map(|i| posterior_preds.column(i).mean().unwrap_or(0.0))
-        .collect();
-
-    let prediction_sd: Vec<f64> = (0..n)
-        .map(|i| {
-            let col = posterior_preds.column(i);
-            let mean = col.mean().unwrap_or(0.0);
-            (col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / config.n_mcmc as f64).sqrt()
-        })
-        .collect();
-
-    // Prediction intervals: R's quantile(type = 7), as BART's posterior summaries are read
-    let mut prediction_lower = Vec::with_capacity(n);
-    let mut prediction_upper = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let col_vals: Vec<f64> = posterior_preds.column(i).to_vec();
-        let (lower, upper) = percentile_interval(&col_vals, config.confidence_level)?;
-        prediction_lower.push(lower);
-        prediction_upper.push(upper);
-    }
+    // Posterior summaries; intervals by R's quantile(type = 7), as BART's posterior summaries
+    // are read
+    let (predictions, prediction_sd, prediction_lower, prediction_upper) =
+        draw_summaries(&posterior_preds, config.confidence_level)?;
 
     // Sigma posterior summaries
     let sigma = sigma_samples.iter().sum::<f64>() / sigma_samples.len() as f64;
@@ -1536,6 +1653,7 @@ pub fn bart_arrays(
         config: config.clone(),
         posterior_samples: Some(posterior_preds),
         sigma_samples: (!config.classification).then_some(sigma_samples),
+        kept_trees,
     })
 }
 
@@ -1570,16 +1688,54 @@ pub fn run_bart(
 
 /// Predict using BART posterior for new data.
 ///
-/// Returns posterior mean predictions and prediction intervals.
+/// Returns the posterior mean and the type-7 interval (`config.confidence_level`) of
+/// `offset + f(x)` at each row of `x_new` over the kept draws (probit BART: of
+/// `Phi(offset + f(x))`). The trees of the draws must have been kept (`keep_trees: true`);
+/// on the training rows this repeats `predictions`, `prediction_lower` and `prediction_upper`.
 pub fn bart_predict(
     result: &BartResult,
     x_new: ArrayView2<f64>,
 ) -> EconResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
-    // For out-of-sample prediction, we would need to store the trees
-    // For now, return an error indicating this limitation
-    Err(EconError::InvalidSpecification {
-        message: "Out-of-sample prediction requires storing the tree ensemble. Use bart_arrays() with the new data included in training for now.".to_string(),
-    })
+    let kept = result
+        .kept_trees
+        .as_ref()
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: "bart_predict needs the posterior trees: fit with keep_trees: true \
+                      (a result read back from JSON holds no trees)"
+                .to_string(),
+        })?;
+    if x_new.ncols() != result.n_features {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x_new has {} columns; the model was fitted on {}",
+                x_new.ncols(),
+                result.n_features
+            ),
+        });
+    }
+    if let Some(((i, j), v)) = x_new.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x_new must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    let (n, n_draws) = (x_new.nrows(), result.n_samples);
+    let mut draws = try_zeros2(n_draws, n, "BART prediction draws")?;
+    let mut row = try_with_capacity::<f64>(result.n_features, "BART prediction row")?;
+    for i in 0..n {
+        checkpoint()?;
+        row.clear();
+        row.extend(x_new.row(i).iter().copied());
+        for d in 0..n_draws {
+            let f = result.offset + kept.fit(d, &row);
+            draws[[d, i]] = if result.config.classification {
+                std_normal_cdf(f)
+            } else {
+                f
+            };
+        }
+    }
+    let (mean, _, lower, upper) = draw_summaries(&draws, result.config.confidence_level)?;
+    Ok((mean, lower, upper))
 }
 
 // ============================================================================
@@ -2364,6 +2520,82 @@ mod tests {
             let v = &r.variable_importance;
             assert!(v[2] < v[0] && v[2] < v[1], "seed {seed}: {v:?}");
         }
+    }
+
+    #[test]
+    fn bart_predict_on_the_training_rows_repeats_the_fit() {
+        let (y, x) = generate_test_data(60, 8);
+        for classification in [false, true] {
+            let y = if classification {
+                y.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 })
+            } else {
+                y.clone()
+            };
+            let c = BartConfig {
+                n_trees: 10,
+                n_burn: 20,
+                n_mcmc: 30,
+                classification,
+                keep_trees: true,
+                seed: Some(4),
+                ..Default::default()
+            };
+            let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+            let (m, lo, hi) = bart_predict(&r, x.view()).unwrap();
+            let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&m), bits(&r.predictions), "{classification}");
+            assert_eq!(bits(&lo), bits(&r.prediction_lower), "{classification}");
+            assert_eq!(bits(&hi), bits(&r.prediction_upper), "{classification}");
+            // new rows: one row per call gives the same as all rows at once
+            let (m1, _, _) = bart_predict(&r, x.slice(s![3..4, ..])).unwrap();
+            assert_eq!(m1[0].to_bits(), m[3].to_bits());
+        }
+    }
+
+    #[test]
+    fn bart_predict_without_kept_trees_says_how() {
+        let (y, x) = generate_test_data(40, 2);
+        let r = bart_arrays(y.view(), x.view(), None, tiny()).unwrap();
+        let e = bart_predict(&r, x.view()).unwrap_err();
+        assert!(e.to_string().contains("keep_trees"), "{e}");
+    }
+
+    #[test]
+    fn bart_predict_checks_columns_and_finiteness() {
+        let (y, x) = generate_test_data(40, 2);
+        let c = BartConfig {
+            keep_trees: true,
+            ..tiny()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        for cols in [2, 4] {
+            let xn = Array2::from_elem((3, cols), 0.5);
+            let e = bart_predict(&r, xn.view()).unwrap_err();
+            assert!(e.to_string().contains("fitted on 3"), "{e}");
+        }
+        let mut xn = Array2::from_elem((3, 3), 0.5);
+        xn[[1, 2]] = f64::INFINITY;
+        let e = bart_predict(&r, xn.view()).unwrap_err();
+        assert!(e.to_string().contains("finite"), "{e}");
+    }
+
+    #[test]
+    fn bart_keep_trees_respects_the_allocation_ceiling() {
+        let (y, x) = generate_test_data(40, 2);
+        let c = BartConfig {
+            n_trees: 100,
+            n_mcmc: 1usize << 20,
+            keep_trees: true,
+            ..tiny()
+        };
+        // the draw matrix (40 rows) passes the ceiling; the kept trees' buffer does not, and
+        // is refused before any sweep
+        let r = with_alloc_ceiling(Some(1 << 30), || bart_arrays(y.view(), x.view(), None, c));
+        assert!(
+            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("kept tree")),
+            "{:?}",
+            r.err()
+        );
     }
 
     #[test]
