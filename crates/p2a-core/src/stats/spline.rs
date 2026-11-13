@@ -24,9 +24,12 @@ pub enum SplineMethod {
     Fmm,
     /// Periodic spline for cyclical data.
     Periodic,
-    /// Monotone Hermite spline (Fritsch-Carlson method). The spelling "hyman" maps here, as in the
-    /// MCP handler, though R's "hyman" filter is another method (STAT-40).
+    /// Monotone Hermite spline with Fritsch-Carlson slopes (R's `splinefun(method = "monoH.FC")`),
+    /// linear outside the knots.
     MonotoneFC,
+    /// Hyman's monotone spline (R's `spline(method = "hyman")`): the FMM spline's slopes filtered
+    /// to keep monotone data monotone. Non-monotone y is an error.
+    Hyman,
 }
 
 crate::option_enum!(
@@ -38,9 +41,10 @@ crate::option_enum!(
             (&["fmm"], SplineMethod::Fmm),
             (&["periodic"], SplineMethod::Periodic),
             (
-                &["monoH.FC", "monotonefc", "monotone", "hyman"],
+                &["monoH.FC", "monotonefc", "monotone"],
                 SplineMethod::MonotoneFC
             ),
+            (&["hyman"], SplineMethod::Hyman),
         ],
     }
 );
@@ -98,6 +102,10 @@ pub struct SplineResult {
     pub method: SplineMethod,
     /// Number of output points.
     pub n: usize,
+    /// R's warnings: "collapsing to unique 'x' values" when tied x were averaged, and for a
+    /// periodic spline whose first and last y differ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Result of approx interpolation.
@@ -111,7 +119,16 @@ pub struct ApproxResult {
     pub method: ApproxMethod,
     /// Number of output points.
     pub n: usize,
+    /// R's warning "collapsing to unique 'x' values" when tied x were averaged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
+
+/// R's warning when tied x values are averaged (`regularize.values(ties = mean)`).
+const TIES_WARNING: &str = "collapsing to unique 'x' values";
+
+/// R's warning when a periodic spline's first and last y differ.
+const PERIODIC_WARNING: &str = "spline: first and last y values differ - using y[1] for both";
 
 /// Perform cubic spline interpolation.
 ///
@@ -120,10 +137,12 @@ pub struct ApproxResult {
 ///
 /// # Arguments
 ///
-/// * `x` - Input x values (must be at least 4 points, will be sorted internally)
+/// * `x` - Input x values (at least 4 distinct values; sorted internally). Tied x values are
+///   collapsed to the mean of their y values with R's warning "collapsing to unique 'x' values".
 /// * `y` - Input y values (same length as x)
 /// * `xout` - Optional x values at which to interpolate. If None, uses n equally spaced points.
-/// * `n` - Number of interpolation points if xout is None (default 50)
+/// * `n` - Number of interpolation points if xout is None (R's default: 3 times the number of
+///   distinct x values)
 /// * `method` - Spline method to use
 ///
 /// # Returns
@@ -137,13 +156,22 @@ pub struct ApproxResult {
 /// 2. Have continuous first and second derivatives
 /// 3. Satisfy boundary conditions specified by the method
 ///
-/// Natural spline: S''(x_0) = S''(x_n) = 0
-/// FMM spline: Uses not-a-knot condition at boundaries
+/// As R's `spline`: the natural spline has `S''(x_0) = S''(x_n) = 0` and continues linearly
+/// outside the knots; the FMM spline matches, on each end interval, the third derivative of the
+/// cubic through the four end points, and continues its end cubics; the periodic spline wraps
+/// `x` into the knots' range (and uses `y[1]` for both ends, with R's warning, when they
+/// differ); "hyman" filters the FMM slopes to keep monotone data monotone (non-monotone y is an
+/// error) and continues its end cubics; monoH.FC (Fritsch-Carlson, `splinefun(method =
+/// "monoH.FC")`) continues linearly.
 ///
 /// # References
 ///
 /// - R function `stats::spline()`
 /// - Forsythe, Malcolm, Moler (1977). "Computer Methods for Mathematical Computations".
+/// - Hyman, J. M. (1983). Accurate monotonicity preserving cubic interpolation. *SIAM J. Sci.
+///   Stat. Comput.* 4, 645-654.
+/// - Fritsch, F. N. and Carlson, R. E. (1980). Monotone piecewise cubic interpolation. *SIAM J.
+///   Numer. Anal.* 17, 238-246.
 pub fn spline(
     x: &[f64],
     y: &[f64],
@@ -151,18 +179,11 @@ pub fn spline(
     n: Option<usize>,
     method: SplineMethod,
 ) -> EconResult<SplineResult> {
-    let (xs, ys) = prepare_spline_knots(x, y)?;
+    let mut warnings = Vec::new();
+    let fitted = fit_spline(x, y, method, &mut warnings)?;
 
-    // Compute spline coefficients
-    let coeffs = match method {
-        SplineMethod::Natural => compute_natural_spline(&xs, &ys)?,
-        SplineMethod::Fmm => compute_fmm_spline(&xs, &ys)?,
-        SplineMethod::Periodic => compute_periodic_spline(&xs, &ys)?,
-        SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
-    };
-
-    // Determine output x values (R's default n = 3 * length(x))
-    let x_out = output_points(&xs, xout, n, 3 * xs.len())?;
+    // Determine output x values (R's default n = 3 * length(unique x))
+    let x_out = output_points(&fitted.x, xout, n, 3 * fitted.x.len())?;
 
     // Evaluate spline at output points
     let mut y_out: Vec<f64> = resource::try_with_capacity(x_out.len(), "interpolation points")?;
@@ -170,7 +191,7 @@ pub fn spline(
         if i % 65_536 == 0 {
             resource::checkpoint()?;
         }
-        y_out.push(evaluate_cubic_spline(&xs, &ys, &coeffs, xi));
+        y_out.push(fitted.eval(xi));
     }
 
     Ok(SplineResult {
@@ -178,6 +199,7 @@ pub fn spline(
         x: x_out,
         y: y_out,
         method,
+        warnings,
     })
 }
 
@@ -188,13 +210,16 @@ pub fn spline(
 ///
 /// # Arguments
 ///
-/// * `x` - Input x values (will be sorted internally)
+/// * `x` - Input x values (sorted internally). Tied x values are collapsed to the mean of
+///   their y values with R's warning "collapsing to unique 'x' values".
 /// * `y` - Input y values (same length as x)
 /// * `xout` - Optional x values at which to interpolate. If None, uses n equally spaced points.
 /// * `n` - Number of interpolation points if xout is None (default 50)
 /// * `method` - Interpolation method (Linear or Constant)
 /// * `rule` - How to handle values outside the x range
-/// * `f` - For constant method: 0 = left-continuous, 1 = right-continuous, 0.5 = midpoint
+/// * `f` - For the constant method, R's `f`: between knots the value is
+///   `(1 - f) y_left + f y_right`, so `f = 0` is right-continuous (the left knot's value on each
+///   interval) and `f = 1` left-continuous. At a knot the value is that knot's own y.
 ///
 /// # Returns
 ///
@@ -212,7 +237,7 @@ pub fn approx(
     rule: ApproxRule,
     f: f64,
 ) -> EconResult<ApproxResult> {
-    let (xs, ys) = prepare_approx_knots(x, y)?;
+    let (xs, ys, tied) = prepare_approx_knots(x, y)?;
 
     // Determine output x values (R's default n = 50)
     let x_out = output_points(&xs, xout, n, 50)?;
@@ -231,6 +256,11 @@ pub fn approx(
         x: x_out,
         y: y_out,
         method,
+        warnings: if tied {
+            vec![TIES_WARNING.to_string()]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -239,24 +269,16 @@ pub fn approx(
 /// This is a convenience wrapper that returns a closure for evaluating
 /// the interpolation at arbitrary points.
 ///
-/// The knots are validated as in [`spline`]: at least 4 finite points with distinct x values.
+/// The knots are validated as in [`spline`]: at least 4 distinct finite x values (ties are
+/// averaged); its warnings are not returned.
 pub fn splinefun(x: &[f64], y: &[f64], method: SplineMethod) -> EconResult<impl Fn(f64) -> f64> {
-    let (xs, ys) = prepare_spline_knots(x, y)?;
-
-    // Compute spline coefficients
-    let coeffs = match method {
-        SplineMethod::Natural => compute_natural_spline(&xs, &ys)?,
-        SplineMethod::Fmm => compute_fmm_spline(&xs, &ys)?,
-        SplineMethod::Periodic => compute_periodic_spline(&xs, &ys)?,
-        SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
-    };
-
-    Ok(move |xi: f64| evaluate_cubic_spline(&xs, &ys, &coeffs, xi))
+    let fitted = fit_spline(x, y, method, &mut Vec::new())?;
+    Ok(move |xi: f64| fitted.eval(xi))
 }
 
 /// Create an approx interpolating function from data points.
 ///
-/// The knots are validated as in [`approx`]: at least 2 points with finite x and y.
+/// The knots are validated as in [`approx`]: at least 2 distinct x values with finite x and y.
 pub fn approxfun(
     x: &[f64],
     y: &[f64],
@@ -264,27 +286,45 @@ pub fn approxfun(
     rule: ApproxRule,
     f: f64,
 ) -> EconResult<impl Fn(f64) -> f64> {
-    let (xs, ys) = prepare_approx_knots(x, y)?;
+    let (xs, ys, _) = prepare_approx_knots(x, y)?;
 
     Ok(move |xi: f64| interpolate_approx(&xs, &ys, xi, method, rule, f))
 }
 
 // ========== Internal helper functions ==========
 
-/// Validate and sort cubic-spline knots: equal lengths, at least 4 points, finite values and
-/// distinct x values (within 1e-14). Returns the knots sorted by x.
-fn prepare_spline_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)> {
+/// Sort `(x, y)` pairs by x (`total_cmp`) and collapse each run of exactly equal x into one knot
+/// with the mean of its y values, as R's `regularize.values(ties = mean)`. Returns the knots and
+/// whether any tie was collapsed.
+fn sort_and_collapse(mut pairs: Vec<(f64, f64)>) -> (Vec<f64>, Vec<f64>, bool) {
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut xs = Vec::with_capacity(pairs.len());
+    let mut ys = Vec::with_capacity(pairs.len());
+    let mut tied = false;
+    let mut i = 0;
+    while i < pairs.len() {
+        let x0 = pairs[i].0;
+        let mut sum = 0.0;
+        let mut j = i;
+        while j < pairs.len() && pairs[j].0 == x0 {
+            sum += pairs[j].1;
+            j += 1;
+        }
+        tied |= j - i > 1;
+        xs.push(x0);
+        ys.push(if j - i > 1 { sum / (j - i) as f64 } else { sum });
+        i = j;
+    }
+    (xs, ys, tied)
+}
+
+/// Validate and sort cubic-spline knots: equal lengths, finite values and at least 4 distinct x
+/// values after tied x are averaged (R's `regularize.values(ties = mean)`). Returns the sorted
+/// knots and whether a tie was collapsed.
+fn prepare_spline_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>, bool)> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
-        });
-    }
-
-    if x.len() < 4 {
-        return Err(EconError::InsufficientData {
-            required: 4,
-            provided: x.len(),
-            context: "cubic spline interpolation".to_string(),
         });
     }
 
@@ -295,27 +335,20 @@ fn prepare_spline_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)
         });
     }
 
-    // Sort by x values
-    let mut pairs: Vec<(f64, f64)> = x.iter().zip(y.iter()).map(|(&xi, &yi)| (xi, yi)).collect();
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
-    let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
-
-    // Check for duplicate x values
-    for i in 1..xs.len() {
-        if (xs[i] - xs[i - 1]).abs() < 1e-14 {
-            return Err(EconError::InvalidSpecification {
-                message: "Duplicate x values not allowed in spline interpolation".to_string(),
-            });
-        }
+    let (xs, ys, tied) = sort_and_collapse(x.iter().copied().zip(y.iter().copied()).collect());
+    if xs.len() < 4 {
+        return Err(EconError::InsufficientData {
+            required: 4,
+            provided: xs.len(),
+            context: "cubic spline interpolation (distinct x values)".to_string(),
+        });
     }
-
-    Ok((xs, ys))
+    Ok((xs, ys, tied))
 }
 
-/// Keep the points with finite x and y, sort them by x and require at least 2 of them.
-fn prepare_approx_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)> {
+/// Keep the points with finite x and y, sort them by x, average tied x and require at least 2
+/// distinct x values. Returns the knots and whether a tie was collapsed.
+fn prepare_approx_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>, bool)> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
@@ -330,26 +363,22 @@ fn prepare_approx_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)
         });
     }
 
-    // Sort by x values
-    let mut pairs: Vec<(f64, f64)> = x
+    let pairs: Vec<(f64, f64)> = x
         .iter()
         .zip(y.iter())
         .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
         .map(|(&xi, &yi)| (xi, yi))
         .collect();
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (xs, ys, tied) = sort_and_collapse(pairs);
 
-    if pairs.len() < 2 {
+    if xs.len() < 2 {
         return Err(EconError::InsufficientData {
             required: 2,
-            provided: pairs.len(),
-            context: "interpolation (after removing NA values)".to_string(),
+            provided: xs.len(),
+            context: "interpolation (distinct x values, after removing NA values)".to_string(),
         });
     }
-
-    let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
-    let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
-    Ok((xs, ys))
+    Ok((xs, ys, tied))
 }
 
 /// The output points: a copy of `xout`, or `n` (or `default_n`) equally spaced points over the
@@ -384,29 +413,169 @@ fn output_points(
     }
 }
 
-/// Spline coefficients: for each interval, stores second derivatives at knots.
-struct SplineCoeffs {
-    /// Second derivatives at each knot point
-    second_derivs: Vec<f64>,
+/// How a spline is represented between the knots.
+enum SplineShape {
+    /// A cubic spline given by its second derivatives at the knots (natural, FMM, periodic).
+    SecondDerivs(Vec<f64>),
+    /// A cubic Hermite spline given by its slopes at the knots (hyman, monoH.FC).
+    Slopes(Vec<f64>),
+}
+
+/// How a spline continues outside the knots (R's `spline_eval` and `splinefunH0`).
+#[derive(Clone, Copy, PartialEq)]
+enum Extrapolation {
+    /// Linear, with the end value and end slope (natural, monoH.FC).
+    Linear,
+    /// The end intervals' cubics continued (FMM, hyman).
+    Cubic,
+    /// `x` wrapped into `[x_0, x_{n-1})` (periodic).
+    Periodic,
+}
+
+/// A fitted interpolating spline: sorted distinct knots, their y values and the shape.
+struct FittedSpline {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    shape: SplineShape,
+    extrapolation: Extrapolation,
+}
+
+/// Prepare the knots (pushing R's warnings) and fit a spline of the given method.
+fn fit_spline(
+    x: &[f64],
+    y: &[f64],
+    method: SplineMethod,
+    warnings: &mut Vec<String>,
+) -> EconResult<FittedSpline> {
+    let (xs, mut ys, tied) = prepare_spline_knots(x, y)?;
+    if tied {
+        warnings.push(TIES_WARNING.to_string());
+    }
+    let (shape, extrapolation) = match method {
+        SplineMethod::Natural => (
+            SplineShape::SecondDerivs(compute_natural_spline(&xs, &ys)?),
+            Extrapolation::Linear,
+        ),
+        SplineMethod::Fmm => (
+            SplineShape::SecondDerivs(compute_fmm_spline(&xs, &ys)?),
+            Extrapolation::Cubic,
+        ),
+        SplineMethod::Periodic => {
+            let last = ys.len() - 1;
+            if ys[0] != ys[last] {
+                ys[last] = ys[0];
+                warnings.push(PERIODIC_WARNING.to_string());
+            }
+            (
+                SplineShape::SecondDerivs(compute_periodic_spline(&xs, &ys)?),
+                Extrapolation::Periodic,
+            )
+        }
+        SplineMethod::Hyman => (
+            SplineShape::Slopes(compute_hyman_slopes(&xs, &ys)?),
+            Extrapolation::Cubic,
+        ),
+        SplineMethod::MonotoneFC => (
+            SplineShape::Slopes(compute_monotone_fc_slopes(&xs, &ys)),
+            Extrapolation::Linear,
+        ),
+    };
+    Ok(FittedSpline {
+        x: xs,
+        y: ys,
+        shape,
+        extrapolation,
+    })
+}
+
+impl FittedSpline {
+    /// The slopes at the first and last knot.
+    fn end_slopes(&self) -> (f64, f64) {
+        let (x, y) = (&self.x, &self.y);
+        let n = x.len();
+        match &self.shape {
+            SplineShape::Slopes(b) => (b[0], b[n - 1]),
+            SplineShape::SecondDerivs(m) => {
+                let h0 = x[1] - x[0];
+                let hl = x[n - 1] - x[n - 2];
+                (
+                    (y[1] - y[0]) / h0 - h0 * (2.0 * m[0] + m[1]) / 6.0,
+                    (y[n - 1] - y[n - 2]) / hl + hl * (m[n - 2] + 2.0 * m[n - 1]) / 6.0,
+                )
+            }
+        }
+    }
+
+    /// The spline's value at `xi` (NaN at a NaN point).
+    fn eval(&self, xi: f64) -> f64 {
+        let (x, y) = (&self.x, &self.y);
+        let n = x.len();
+        let mut xi = xi;
+        match self.extrapolation {
+            Extrapolation::Periodic => {
+                let period = x[n - 1] - x[0];
+                let mut w = (xi - x[0]) % period;
+                if w < 0.0 {
+                    w += period;
+                }
+                xi = w + x[0];
+            }
+            Extrapolation::Linear if xi < x[0] || xi > x[n - 1] => {
+                let (left, right) = self.end_slopes();
+                return if xi < x[0] {
+                    y[0] + left * (xi - x[0])
+                } else {
+                    y[n - 1] + right * (xi - x[n - 1])
+                };
+            }
+            _ => {}
+        }
+        let i = find_interval(x, xi);
+        let h = x[i + 1] - x[i];
+        match &self.shape {
+            SplineShape::SecondDerivs(m) => {
+                // S(x) = a y_i + b y_{i+1} + ((a^3 - a) M_i + (b^3 - b) M_{i+1}) h^2 / 6
+                let a = (x[i + 1] - xi) / h;
+                let b = (xi - x[i]) / h;
+                a * y[i]
+                    + b * y[i + 1]
+                    + ((a.powi(3) - a) * m[i] + (b.powi(3) - b) * m[i + 1]) * h * h / 6.0
+            }
+            SplineShape::Slopes(s) => {
+                let t = (xi - x[i]) / h;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                (2.0 * t3 - 3.0 * t2 + 1.0) * y[i]
+                    + (t3 - 2.0 * t2 + t) * h * s[i]
+                    + (3.0 * t2 - 2.0 * t3) * y[i + 1]
+                    + (t3 - t2) * h * s[i + 1]
+            }
+        }
+    }
+}
+
+/// The interval widths `h_i = x_{i+1} - x_i`.
+fn widths(x: &[f64]) -> Vec<f64> {
+    x.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// The right-hand side `6 [(y_{i+1} - y_i)/h_i - (y_i - y_{i-1})/h_{i-1}]` of the interior rows.
+fn interior_rhs(y: &[f64], h: &[f64], i: usize) -> f64 {
+    6.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1])
 }
 
 /// Compute natural cubic spline coefficients.
-fn compute_natural_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
+fn compute_natural_spline(x: &[f64], y: &[f64]) -> EconResult<Vec<f64>> {
     let n = x.len();
 
     // Natural spline: M_0 = M_{n-1} = 0 (zero second derivatives at endpoints)
     // We solve a tridiagonal system for the second derivatives M_i
-
-    // Set up the tridiagonal system
-    let mut h = Vec::with_capacity(n - 1);
-    for i in 0..n - 1 {
-        h.push(x[i + 1] - x[i]);
-    }
+    let h = widths(x);
 
     // Build the right-hand side
     let mut d = vec![0.0; n];
     for i in 1..n - 1 {
-        d[i] = 6.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1]);
+        d[i] = interior_rhs(y, &h, i);
     }
 
     // Build the tridiagonal matrix (sub-diagonal, diagonal, super-diagonal)
@@ -421,200 +590,147 @@ fn compute_natural_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
     }
 
     // Solve tridiagonal system using Thomas algorithm
-    let second_derivs = solve_tridiagonal(&sub, &diag, &sup, &d)?;
-
-    Ok(SplineCoeffs { second_derivs })
+    solve_tridiagonal(&sub, &diag, &sup, &d)
 }
 
-/// Compute FMM (not-a-knot) cubic spline coefficients.
-fn compute_fmm_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
+/// The third divided difference of four points.
+fn third_divided_difference(x: &[f64], y: &[f64]) -> f64 {
+    let mut f = [y[0], y[1], y[2], y[3]];
+    for k in 1..4 {
+        for i in 0..4 - k {
+            f[i] = (f[i + 1] - f[i]) / (x[i + k] - x[i]);
+        }
+    }
+    f[0]
+}
+
+/// Compute FMM cubic spline coefficients (Forsythe, Malcolm and Moler's `spline`, R's
+/// `fmm_spline`): on each end interval the spline's third derivative, `(M_1 - M_0) / h_0`, equals
+/// that of the cubic through the four end points, `6` times their third divided difference.
+fn compute_fmm_spline(x: &[f64], y: &[f64]) -> EconResult<Vec<f64>> {
     let n = x.len();
+    let h = widths(x);
 
-    // FMM uses not-a-knot condition: third derivative continuous at x_1 and x_{n-2}
-    // This is more complex, but we can approximate with a modified natural spline
-    // that uses the slope estimates from the first/last 4 points
-
-    let mut h = Vec::with_capacity(n - 1);
-    for i in 0..n - 1 {
-        h.push(x[i + 1] - x[i]);
-    }
-
-    // Estimate end slopes using finite differences on 4 points
-    // This approximates the FMM behavior
-    let d_left = estimate_end_derivative(&x[..4], &y[..4], true);
-    let d_right = estimate_end_derivative(&x[n - 4..], &y[n - 4..], false);
-
-    // Build the right-hand side with modified boundary conditions
     let mut d = vec![0.0; n];
-    d[0] = 6.0 * ((y[1] - y[0]) / h[0] - d_left) / h[0];
-    d[n - 1] = 6.0 * (d_right - (y[n - 1] - y[n - 2]) / h[n - 2]) / h[n - 2];
-
-    for i in 1..n - 1 {
-        d[i] = 6.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1]);
-    }
-
-    // Build the tridiagonal matrix
     let mut diag = vec![0.0; n];
     let mut sub = vec![0.0; n];
     let mut sup = vec![0.0; n];
 
-    diag[0] = 2.0;
-    sup[0] = 1.0;
-    diag[n - 1] = 2.0;
-    sub[n - 1] = 1.0;
+    // -h_0 M_0 + h_0 M_1 = 6 h_0^2 D_L;  h M_{n-2} - h M_{n-1} = -6 h^2 D_R  (h = h_{n-2})
+    diag[0] = -h[0];
+    sup[0] = h[0];
+    d[0] = 6.0 * h[0] * h[0] * third_divided_difference(&x[..4], &y[..4]);
+    let hl = h[n - 2];
+    sub[n - 1] = hl;
+    diag[n - 1] = -hl;
+    d[n - 1] = -6.0 * hl * hl * third_divided_difference(&x[n - 4..], &y[n - 4..]);
 
     for i in 1..n - 1 {
         sub[i] = h[i - 1];
         diag[i] = 2.0 * (h[i - 1] + h[i]);
         sup[i] = h[i];
+        d[i] = interior_rhs(y, &h, i);
     }
 
-    let second_derivs = solve_tridiagonal(&sub, &diag, &sup, &d)?;
-
-    Ok(SplineCoeffs { second_derivs })
+    solve_tridiagonal(&sub, &diag, &sup, &d)
 }
 
-/// Compute periodic cubic spline coefficients.
-fn compute_periodic_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
+/// Compute periodic cubic spline coefficients (`y[0] == y[n-1]`, made so by the caller).
+fn compute_periodic_spline(x: &[f64], y: &[f64]) -> EconResult<Vec<f64>> {
     let n = x.len();
+    let h = widths(x);
 
-    // For periodic splines, we need y[0] == y[n-1] (approximately)
-    // We use cyclic boundary conditions
-
-    if (y[0] - y[n - 1]).abs()
-        > 1e-10 * (y.iter().map(|v| v.abs()).sum::<f64>() / n as f64).max(1.0)
-    {
-        return Err(EconError::InvalidSpecification {
-            message: "Periodic spline requires y[0] ≈ y[n-1]".to_string(),
-        });
-    }
-
-    let mut h = Vec::with_capacity(n - 1);
-    for i in 0..n - 1 {
-        h.push(x[i + 1] - x[i]);
-    }
-
-    // Build system with periodic boundary conditions
-    // This is a cyclic tridiagonal system
-    let mut d = vec![0.0; n - 1]; // We have n-1 unknowns (M_0 = M_{n-1})
-    for i in 0..n - 1 {
-        let i_next = (i + 1) % (n - 1);
-        let h_prev = if i == 0 { h[n - 2] } else { h[i - 1] };
-        d[i] = 6.0 * ((y[i_next + 1] - y[i_next]) / h[i_next] - (y[i + 1] - y[i]) / h_prev);
-    }
-
-    // Build the cyclic tridiagonal matrix
-    let mut diag = vec![0.0; n - 1];
-    let mut sub = vec![0.0; n - 1];
-    let mut sup = vec![0.0; n - 1];
-
-    for i in 0..n - 1 {
-        let h_prev = if i == 0 { h[n - 2] } else { h[i - 1] };
+    // n - 1 unknowns M_0..M_{n-2} (M_{n-1} = M_0); the row of knot i wraps with
+    // h_{-1} = h_{n-2} and y_{-1} = y_{n-2}.
+    let m = n - 1;
+    let mut d = vec![0.0; m];
+    let mut diag = vec![0.0; m];
+    let mut sub = vec![0.0; m];
+    let mut sup = vec![0.0; m];
+    for i in 0..m {
+        let (h_prev, y_prev) = if i == 0 {
+            (h[n - 2], y[n - 2])
+        } else {
+            (h[i - 1], y[i - 1])
+        };
+        d[i] = 6.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y_prev) / h_prev);
         sub[i] = h_prev;
         diag[i] = 2.0 * (h_prev + h[i]);
         sup[i] = h[i];
     }
 
-    // Solve cyclic tridiagonal system (simplified: use Gauss elimination)
     let mut second_derivs = solve_cyclic_tridiagonal(&sub, &diag, &sup, &d)?;
     second_derivs.push(second_derivs[0]); // M_{n-1} = M_0 for periodic
-
-    Ok(SplineCoeffs { second_derivs })
+    Ok(second_derivs)
 }
 
-/// Compute monotone Hermite spline (Fritsch-Carlson method).
-fn compute_monotone_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
+/// The secant slopes `(y_{i+1} - y_i) / (x_{i+1} - x_i)`.
+fn secants(x: &[f64], y: &[f64]) -> Vec<f64> {
+    x.windows(2)
+        .zip(y.windows(2))
+        .map(|(xw, yw)| (yw[1] - yw[0]) / (xw[1] - xw[0]))
+        .collect()
+}
+
+/// Hyman's filter of the FMM slopes (R's `spline(method = "hyman")`, `hyman_filter`). The data
+/// must be monotone.
+fn compute_hyman_slopes(x: &[f64], y: &[f64]) -> EconResult<Vec<f64>> {
     let n = x.len();
-
-    // For monotone splines, we use Fritsch-Carlson method
-    // which adjusts slopes to ensure monotonicity
-
-    // Compute secant slopes
-    let mut delta = Vec::with_capacity(n - 1);
-    for i in 0..n - 1 {
-        delta.push((y[i + 1] - y[i]) / (x[i + 1] - x[i]));
+    let s = secants(x, y);
+    if !(y.windows(2).all(|w| w[1] >= w[0]) || y.windows(2).all(|w| w[1] <= w[0])) {
+        return Err(EconError::InvalidSpecification {
+            message: "'y' must be increasing or decreasing for the hyman spline".to_string(),
+        });
     }
-
-    // Initialize tangent slopes
-    let mut m = vec![0.0; n];
-    for i in 1..n - 1 {
-        if delta[i - 1].signum() == delta[i].signum() {
-            // Harmonic mean gives better monotonicity
-            m[i] = 2.0 * delta[i - 1] * delta[i] / (delta[i - 1] + delta[i]);
+    let m = compute_fmm_spline(x, y)?;
+    let h = widths(x);
+    // FMM slopes at the knots.
+    let mut b: Vec<f64> = (0..n - 1)
+        .map(|i| s[i] - h[i] * (2.0 * m[i] + m[i + 1]) / 6.0)
+        .collect();
+    b.push(s[n - 2] + h[n - 2] * (m[n - 2] + 2.0 * m[n - 1]) / 6.0);
+    for i in 0..n {
+        let s0 = if i == 0 { s[0] } else { s[i - 1] };
+        let s1 = if i == n - 1 { s[n - 2] } else { s[i] };
+        let t1 = s0.abs().min(s1.abs());
+        let sigma = if s0 * s1 > 0.0 { s1 } else { b[i] };
+        b[i] = if sigma >= 0.0 {
+            b[i].max(0.0).min(3.0 * t1)
         } else {
-            m[i] = 0.0;
-        }
+            b[i].min(0.0).max(-3.0 * t1)
+        };
     }
-    // Endpoint slopes
-    m[0] = delta[0];
-    m[n - 1] = delta[n - 2];
-
-    // Adjust slopes for monotonicity (Fritsch-Carlson modification)
-    for i in 0..n - 1 {
-        if delta[i].abs() < 1e-14 {
-            m[i] = 0.0;
-            m[i + 1] = 0.0;
-        } else {
-            let alpha = m[i] / delta[i];
-            let beta = m[i + 1] / delta[i];
-            let r = alpha * alpha + beta * beta;
-            if r > 9.0 {
-                let tau = 3.0 / r.sqrt();
-                m[i] = tau * alpha * delta[i];
-                m[i + 1] = tau * beta * delta[i];
-            }
-        }
-    }
-
-    // Convert slopes to second derivative representation
-    // For Hermite splines with given slopes, we can compute equivalent second derivatives
-    let mut second_derivs = vec![0.0; n];
-    for i in 0..n - 1 {
-        let h = x[i + 1] - x[i];
-        // Second derivative at interior points (approximation)
-        if i > 0 {
-            second_derivs[i] = 6.0 * (delta[i - 1] - m[i]) / h;
-        }
-    }
-
-    Ok(SplineCoeffs { second_derivs })
+    Ok(b)
 }
 
-/// Estimate derivative at an endpoint using 4-point Lagrange interpolation.
-fn estimate_end_derivative(x: &[f64], y: &[f64], left: bool) -> f64 {
-    // Use 4-point Lagrange formula to estimate derivative
-    let x0 = if left { x[0] } else { x[3] };
-
-    let mut deriv = 0.0;
-    for i in 0..4 {
-        let mut term = y[i];
-        let mut denom = 1.0;
-        let mut numer_sum = 0.0;
-
-        for j in 0..4 {
-            if i != j {
-                term *= 1.0 / (x[i] - x[j]);
-                denom *= 1.0;
-                numer_sum += 1.0 / (x0 - x[j]);
-            }
-        }
-
-        // For the derivative, we need the sum of products
-        for j in 0..4 {
-            if i != j {
-                let mut prod = y[i];
-                for k in 0..4 {
-                    if k != i && k != j {
-                        prod *= (x0 - x[k]) / (x[i] - x[k]);
-                    }
-                }
-                prod /= x[i] - x[j];
-                deriv += prod;
+/// Fritsch-Carlson slopes (R's `splinefun(method = "monoH.FC")`): the mean of the adjacent
+/// secants (the end secants at the ends), zero on a flat interval, and scaled back on an interval
+/// where they would break monotonicity (R's `monoFC_mod`).
+fn compute_monotone_fc_slopes(x: &[f64], y: &[f64]) -> Vec<f64> {
+    let n = x.len();
+    let s = secants(x, y);
+    let mut m = Vec::with_capacity(n);
+    m.push(s[0]);
+    m.extend(s.windows(2).map(|w| (w[0] + w[1]) / 2.0));
+    m.push(s[n - 2]);
+    for k in 0..n - 1 {
+        let sk = s[k];
+        if sk == 0.0 {
+            m[k] = 0.0;
+            m[k + 1] = 0.0;
+        } else {
+            let alpha = m[k] / sk;
+            let beta = m[k + 1] / sk;
+            let a2b3 = 2.0 * alpha + beta - 3.0;
+            let ab23 = alpha + 2.0 * beta - 3.0;
+            if a2b3 > 0.0 && ab23 > 0.0 && alpha * (a2b3 + ab23) < a2b3 * a2b3 {
+                let tau_s = 3.0 * sk / (alpha * alpha + beta * beta).sqrt();
+                m[k] = tau_s * alpha;
+                m[k + 1] = tau_s * beta;
             }
         }
     }
-
-    deriv
+    m
 }
 
 /// Solve a tridiagonal system using Thomas algorithm.
@@ -706,24 +822,7 @@ fn find_interval(x: &[f64], xi: f64) -> usize {
         .min(x.len() - 2)
 }
 
-/// Evaluate cubic spline at a point.
-fn evaluate_cubic_spline(x: &[f64], y: &[f64], coeffs: &SplineCoeffs, xi: f64) -> f64 {
-    // Find the interval containing xi (clamped to the end intervals outside the range)
-    let i = find_interval(x, xi);
-
-    // Evaluate cubic spline in interval [x[i], x[i+1]]
-    let h = x[i + 1] - x[i];
-    let a = (x[i + 1] - xi) / h;
-    let b = (xi - x[i]) / h;
-    let m0 = coeffs.second_derivs[i];
-    let m1 = coeffs.second_derivs[i + 1];
-
-    // Cubic spline formula:
-    // S(x) = a*y[i] + b*y[i+1] + ((a^3-a)*M[i] + (b^3-b)*M[i+1]) * h^2/6
-    a * y[i] + b * y[i + 1] + ((a.powi(3) - a) * m0 + (b.powi(3) - b) * m1) * h * h / 6.0
-}
-
-/// Linear or constant interpolation at a single point.
+/// Linear or constant interpolation at a single point (R's `approx1`).
 fn interpolate_approx(
     x: &[f64],
     y: &[f64],
@@ -748,8 +847,14 @@ fn interpolate_approx(
         };
     }
 
-    // Find the interval containing xi
+    // Find the interval containing xi; a knot returns its own value.
     let i = find_interval(x, xi);
+    if xi == x[i + 1] {
+        return y[i + 1];
+    }
+    if xi == x[i] {
+        return y[i];
+    }
 
     match method {
         ApproxMethod::Linear => {
@@ -757,12 +862,10 @@ fn interpolate_approx(
             y[i] + t * (y[i + 1] - y[i])
         }
         ApproxMethod::Constant => {
-            // R's f parameter for constant interpolation:
-            // f=0: at each interval, use the left y value (step function with jumps at right endpoints)
-            // f=1: at each interval, use the right y value (step function with jumps at left endpoints)
-            // f=0.5: use midpoint value
-            // General: weighted average (1-f)*y[i] + f*y[i+1]
-            (1.0 - f) * y[i] + f * y[i + 1]
+            // (1 - f) y_left + f y_right; a zero weight drops its term, so f = 0 and f = 1 never
+            // mix in the other neighbour.
+            let f1 = 1.0 - f;
+            (if f1 != 0.0 { y[i] * f1 } else { 0.0 }) + (if f != 0.0 { y[i + 1] * f } else { 0.0 })
         }
     }
 }
@@ -897,6 +1000,7 @@ mod tests {
             )
             .is_err()
         );
+        // Ties are averaged, so four points with one tie leave three distinct knots: too few.
         let e = splinefun(
             &[0.0, 1.0, 1.0, 2.0],
             &[1.0, 2.0, 3.0, 4.0],
@@ -904,7 +1008,304 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(e.to_string().contains("Duplicate"), "{e}");
+        assert!(
+            matches!(e, EconError::InsufficientData { provided: 3, .. }),
+            "{e}"
+        );
+    }
+
+    /// Tied x are collapsed to their mean y with R's warning, in spline and approx (they were refused).
+    #[test]
+    fn test_ties_average_and_warn() {
+        let x = [0.0, 1.0, 1.0, 2.0, 3.0];
+        let y = [1.0, 2.0, 4.0, 0.5, 2.0];
+        let tied = spline(&x, &y, Some(&[1.0]), None, SplineMethod::Natural).unwrap();
+        assert_eq!(tied.y[0], 3.0);
+        assert_eq!(tied.warnings, vec![TIES_WARNING.to_string()]);
+        let plain = spline(&x[1..], &y[1..], Some(&[1.0]), None, SplineMethod::Natural);
+        assert!(plain.is_err()); // three distinct knots
+        let untied = spline(
+            &[0.0, 1.0, 2.0, 3.0],
+            &[1.0, 3.0, 0.5, 2.0],
+            Some(&[0.4, 2.5]),
+            None,
+            SplineMethod::Natural,
+        )
+        .unwrap();
+        assert!(untied.warnings.is_empty());
+        let again = spline(&x, &y, Some(&[0.4, 2.5]), None, SplineMethod::Natural).unwrap();
+        assert_eq!(again.y, untied.y);
+        let a = approx(
+            &x,
+            &y,
+            Some(&[1.0]),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Na,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(a.y, vec![3.0]);
+        assert_eq!(a.warnings, vec![TIES_WARNING.to_string()]);
+        // A single distinct x is refused instead of indexing past the knots.
+        assert!(
+            approx(
+                &[2.0, 2.0],
+                &[1.0, 3.0],
+                Some(&[2.0]),
+                None,
+                ApproxMethod::Linear,
+                ApproxRule::Na,
+                0.0
+            )
+            .is_err()
+        );
+    }
+
+    /// The (x, y) column pair `<s>x`, `<s>y` of `spline_t4.csv` (NA padding dropped).
+    fn t4_pair(ds: &crate::data::Dataset, s: &str) -> (Vec<f64>, Vec<f64>) {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let x = numeric_column(ds.df(), &format!("{s}x"), NaPolicy::Omit)
+            .unwrap()
+            .0;
+        let y = numeric_column(ds.df(), &format!("{s}y"), NaPolicy::Omit)
+            .unwrap()
+            .0;
+        assert_eq!(x.len(), y.len());
+        (x, y)
+    }
+
+    fn spline_at(x: &[f64], y: &[f64], xo: &[f64], m: SplineMethod) -> Vec<f64> {
+        spline(x, y, Some(xo), None, m).unwrap().y
+    }
+
+    /// spline(method = "fmm"): inside and outside the knots, and on n = 11 equally spaced points.
+    #[test]
+    fn test_validate_spline_fmm() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let (sx, sy) = t4_pair(&ds, "s");
+        let (fx, fy) = t4_pair(&ds, "f");
+        let xo = case.vector("xo");
+        let n11 = spline(&fx, &fy, None, Some(11), SplineMethod::Fmm).unwrap();
+        Check::new(&case)
+            .vector(
+                "fmm_s",
+                &spline_at(&sx, &sy, &xo, SplineMethod::Fmm),
+                Tol::coef(10),
+            )
+            .vector("fmm_f_n11", &n11.y, Tol::coef(10))
+            .vector(
+                "fmm_f_out",
+                &spline_at(&fx, &fy, &[-1.0, 6.0], SplineMethod::Fmm),
+                Tol::coef(10),
+            )
+            .finish();
+    }
+
+    /// spline(method = "natural") continues linearly outside the knots.
+    #[test]
+    fn test_validate_spline_natural_outside() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let (sx, sy) = t4_pair(&ds, "s");
+        let (fx, fy) = t4_pair(&ds, "f");
+        let xo = case.vector("xo");
+        Check::new(&case)
+            .vector(
+                "natural_s",
+                &spline_at(&sx, &sy, &xo, SplineMethod::Natural),
+                Tol::coef(10),
+            )
+            .vector(
+                "natural_f_out",
+                &spline_at(&fx, &fy, &[-1.0, 6.0], SplineMethod::Natural),
+                Tol::coef(10),
+            )
+            .finish();
+    }
+
+    /// spline(method = "periodic"), wrapping points outside the knots' range.
+    #[test]
+    fn test_validate_spline_periodic() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let (px, py) = t4_pair(&ds, "p");
+        let (ux, uy) = t4_pair(&ds, "u");
+        let p = spline(
+            &px,
+            &py,
+            Some(&case.vector("pxo")),
+            None,
+            SplineMethod::Periodic,
+        )
+        .unwrap();
+        let u = spline(
+            &ux,
+            &uy,
+            Some(&case.vector("uxo")),
+            None,
+            SplineMethod::Periodic,
+        )
+        .unwrap();
+        assert!(p.warnings.is_empty() && u.warnings.is_empty());
+        Check::new(&case)
+            .vector("periodic_p", &p.y, Tol::coef(12))
+            .vector("periodic_u", &u.y, Tol::coef(12))
+            .finish();
+    }
+
+    /// R: spline(x, y, method = "periodic") with y[1] != y[n] warns and uses y[1] for both ends.
+    #[test]
+    fn test_periodic_first_and_last_y_differ() {
+        let x = [0.0, 1.0, 2.5, 3.0, 4.0];
+        let y = [1.0, 0.2, -0.7, 0.4, 1.0];
+        let mut y2 = y;
+        y2[4] = 1.5;
+        let xo = [0.3, 1.7, 3.6, 4.0, 5.2];
+        let same = spline(&x, &y, Some(&xo), None, SplineMethod::Periodic).unwrap();
+        let diff = spline(&x, &y2, Some(&xo), None, SplineMethod::Periodic).unwrap();
+        assert_eq!(same.y, diff.y);
+        assert_eq!(diff.warnings, vec![PERIODIC_WARNING.to_string()]);
+    }
+
+    /// spline(method = "hyman") on increasing and decreasing data; non-monotone data is refused.
+    #[test]
+    fn test_validate_spline_hyman() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let (hx, hy) = t4_pair(&ds, "h");
+        let (mx, my) = t4_pair(&ds, "m");
+        let (sx, sy) = t4_pair(&ds, "s");
+        let refused = spline(&sx, &sy, None, None, SplineMethod::Hyman);
+        assert!(
+            matches!(&refused, Err(EconError::InvalidSpecification { message }) if message.contains("increasing or decreasing")),
+            "{refused:?}"
+        );
+        Check::new(&case)
+            .vector(
+                "hyman_h",
+                &spline_at(&hx, &hy, &case.vector("hxo"), SplineMethod::Hyman),
+                Tol::coef(12),
+            )
+            .vector(
+                "hyman_m",
+                &spline_at(&mx, &my, &case.vector("mxo"), SplineMethod::Hyman),
+                Tol::coef(12),
+            )
+            .scalar(
+                "hyman_nonmonotone_error",
+                f64::from(u8::from(refused.is_err())),
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    /// splinefun(method = "monoH.FC"), linear outside the knots, on monotone and non-monotone data.
+    #[test]
+    fn test_validate_splinefun_monoh_fc() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let at = |s: &str, xo: &str| {
+            let (x, y) = t4_pair(&ds, s);
+            let f = splinefun(&x, &y, SplineMethod::MonotoneFC).unwrap();
+            case.vector(xo).iter().map(|&v| f(v)).collect::<Vec<_>>()
+        };
+        Check::new(&case)
+            .vector("monofc_h", &at("h", "hxo"), Tol::coef(12))
+            .vector("monofc_m", &at("m", "mxo"), Tol::coef(12))
+            .vector("monofc_s", &at("s", "xo"), Tol::coef(12))
+            .finish();
+    }
+
+    /// Tied x: natural and fmm splines on the averaged knots, and R's default n of 3 per distinct x.
+    #[test]
+    fn test_validate_spline_ties() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let (tx, ty) = t4_pair(&ds, "t");
+        let txo = case.vector("txo");
+        let nat = spline(&tx, &ty, Some(&txo), None, SplineMethod::Natural).unwrap();
+        assert_eq!(nat.warnings, vec![TIES_WARNING.to_string()]);
+        let default_n = spline(&tx, &ty, None, None, SplineMethod::Fmm).unwrap();
+        Check::new(&case)
+            .vector("ties_natural", &nat.y, Tol::coef(10))
+            .vector(
+                "ties_fmm",
+                &spline_at(&tx, &ty, &txo, SplineMethod::Fmm),
+                Tol::coef(10),
+            )
+            .scalar("ties_default_n", default_n.n as f64, Tol::exact())
+            .finish();
+    }
+
+    /// approx(method = "constant") returns a knot's own value at the knot, whatever f.
+    #[test]
+    fn test_validate_approx_constant_at_knots() {
+        use p2a_validation::{Check, Tol};
+        let (case, _) = crate::test_support::load_case("stat_spline_t4");
+        let at = |f: f64| {
+            approx(
+                &[1.0, 2.0, 3.0],
+                &[10.0, 20.0, 30.0],
+                Some(&[1.0, 2.0, 2.5, 3.0]),
+                None,
+                ApproxMethod::Constant,
+                ApproxRule::Na,
+                f,
+            )
+            .unwrap()
+            .y
+        };
+        Check::new(&case)
+            .vector("approx_const_f0", &at(0.0), Tol::coef(10))
+            .vector("approx_const_f05", &at(0.5), Tol::coef(10))
+            .vector("approx_const_f1", &at(1.0), Tol::coef(10))
+            .finish();
+    }
+
+    /// approx with tied x (averaged), linear and constant, and rule = 2 on the tied set.
+    #[test]
+    fn test_validate_approx_ties() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spline_t4");
+        let (tx, ty) = t4_pair(&ds, "t");
+        let ap = |m: ApproxMethod| {
+            approx(
+                &[1.0, 2.0, 2.0, 3.0],
+                &[10.0, 20.0, 40.0, 30.0],
+                Some(&[2.0, 1.5, 2.5]),
+                None,
+                m,
+                ApproxRule::Na,
+                0.0,
+            )
+            .unwrap()
+            .y
+        };
+        let rule2 = approx(
+            &tx,
+            &ty,
+            Some(&case.vector("txo")),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Nearest,
+            0.0,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector(
+                "approx_ties_linear",
+                &ap(ApproxMethod::Linear),
+                Tol::coef(10),
+            )
+            .vector(
+                "approx_ties_const",
+                &ap(ApproxMethod::Constant),
+                Tol::coef(10),
+            )
+            .vector("approx_t_rule2", &rule2.y, Tol::coef(10))
+            .finish();
     }
 
     #[test]
@@ -1216,7 +1617,6 @@ mod tests {
             .vector("spline_x", &s.x, Tol::coef(30))
             .vector("spline_y", &s.y, Tol::coef(30))
             .finish();
-        // deviation STAT-69 / STAT-40: FMM, periodic and monotone splines are not pinned (Tier 4).
     }
 
     /// n = 1 divided 0 by 0; R's seq.int(xmin, xmax, length.out = 1) is xmin.
@@ -1267,6 +1667,14 @@ mod tests {
             ApproxMethod::Constant
         );
         assert_eq!("2".parse::<ApproxRule>().unwrap(), ApproxRule::Nearest);
+        assert_eq!(
+            "hyman".parse::<SplineMethod>().unwrap(),
+            SplineMethod::Hyman
+        );
+        assert_eq!(
+            "monotone".parse::<SplineMethod>().unwrap(),
+            SplineMethod::MonotoneFC
+        );
         assert!("akima".parse::<SplineMethod>().is_err());
     }
 }

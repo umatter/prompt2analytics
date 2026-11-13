@@ -843,8 +843,8 @@ async fn test_mcp_stats_spline_default_cap() {
         .map(|(i, v)| v.sin() + 0.01 * ((i * 7 % 11) as f64))
         .collect();
     let ds = p2a_core::data::Dataset::new(df!("x" => x, "y" => y).unwrap());
-    // Tied x values: R's spline averages them (regularize.values) before counting n; here they
-    // are refused, so the default n counts distinct x values whenever the call runs.
+    // Tied x values: R's spline averages them (regularize.values) before counting n, and so does
+    // the core; the default n is 3 x the 10 distinct x values.
     let tx: Vec<f64> = (0..30).map(|i| (i % 10) as f64).collect();
     let ty: Vec<f64> = (0..30)
         .map(|i| (i % 10) as f64 * 0.5 + 0.03 * ((i * 7 % 11) as f64))
@@ -874,14 +874,19 @@ async fn test_mcp_stats_spline_default_cap() {
         .await,
     );
     assert_eq!(k["n_points"].as_u64(), Some(300));
-    let e = refused(
-        &s,
-        &se,
-        "stats_spline",
-        json!({"dataset": "tied", "x": "x", "y": "y"}),
-    )
-    .await;
-    assert!(e.contains("Duplicate x values"), "{e}");
+    let t = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "tied", "x": "x", "y": "y"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        (t["n_points"].as_u64(), t["n_pairs"].as_u64()),
+        (Some(30), Some(30))
+    );
 }
 
 /// The first `got.len()` entries of a case vector (`Check::vector` compares whole values only).

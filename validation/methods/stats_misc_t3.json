@@ -37,7 +37,7 @@
       "tests": ["p2a-core::stats::spline::tests::test_validate_spline_t3_default_n", "p2a-core::stats::spline::tests::test_validate_spline_t3_n_one"],
       "quantities": ["number of points", "x grid", "y"],
       "tolerance": "Tol::coef(30)",
-      "deviations": [{"finding": "STAT-69", "quantity": "method = 'fmm'", "note": "not pinned"}, {"finding": "STAT-40", "quantity": "monotone and periodic methods", "note": "not pinned"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

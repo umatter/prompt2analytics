@@ -492,7 +492,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-26, STAT-27) |
 | Exact Poisson test (poisson.test) | [poisson_test.md](stats/poisson_test.md) | R-pinned |
 | Test of proportions (prop.test) | [prop_test.md](stats/prop_test.md) | R-pinned |
-| Spline and linear interpolation: default number of points (spline, approx) | [spline.md](stats/spline.md) | R-pinned, known deviations (STAT-40, STAT-69) |
+| Spline and linear interpolation: methods, ties and default number of points (spline, splinefun, approx) | [spline.md](stats/spline.md) | R-pinned |
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned |
 | Ansari-Bradley test of scale | [ansari.md](stats/ansari.md) | R-pinned |
 | Exact binomial test | [binom.md](stats/binom.md) | R-pinned |

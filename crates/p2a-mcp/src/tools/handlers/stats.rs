@@ -3261,7 +3261,7 @@ mod tests {
         let a = json_of(&rt.block_on(server.stats_approx(req(args.clone()))).unwrap());
         let mut sargs = args;
         sargs["method"] = serde_json::json!("natural");
-        // deviation STAT-69: the default method fmm is not R's FMM spline; only natural is pinned
+        // the default method fmm is R-pinned in the core (stat_spline_t4); this case records natural
         let s = json_of(&rt.block_on(server.stats_spline(req(sargs))).unwrap());
         Check::new(&case)
             .vector("approx_y", &nums(&a["y"]), Tol::stat(13))

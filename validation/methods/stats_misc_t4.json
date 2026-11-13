@@ -50,6 +50,56 @@
       "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative, var.pred 1e-5 relative; order exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "spline_t4",
+      "name": "Interpolating cubic splines (spline, splinefun): FMM, natural (outside the knots), periodic, hyman and monoH.FC; tied x averaged",
+      "category": "stats",
+      "reference": "stats::spline; stats::splinefun",
+      "doc": "validation/stats/spline.md",
+      "cases": [
+        "stat_spline_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spline::tests::test_validate_spline_fmm",
+        "p2a-core::stats::spline::tests::test_validate_spline_natural_outside",
+        "p2a-core::stats::spline::tests::test_validate_spline_periodic",
+        "p2a-core::stats::spline::tests::test_validate_spline_hyman",
+        "p2a-core::stats::spline::tests::test_validate_splinefun_monoh_fc",
+        "p2a-core::stats::spline::tests::test_validate_spline_ties"
+      ],
+      "quantities": [
+        "y at xout (fmm, natural, periodic, hyman, monoH.FC)",
+        "fmm at the default n",
+        "refusal of a non-monotone hyman spline",
+        "tied-x averages",
+        "default n after ties"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "approx_t4",
+      "name": "Linear and constant interpolation (approx): constant f at the knots, tied x averaged, rule 2",
+      "category": "stats",
+      "reference": "stats::approx",
+      "doc": "validation/stats/spline.md",
+      "cases": [
+        "stat_spline_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spline::tests::test_validate_approx_constant_at_knots",
+        "p2a-core::stats::spline::tests::test_validate_approx_ties"
+      ],
+      "quantities": [
+        "constant approx at f = 0, 0.5, 1",
+        "linear and constant approx with ties",
+        "rule = 2"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

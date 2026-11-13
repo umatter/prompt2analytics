@@ -176,7 +176,6 @@
       "deviations": [
         {"finding": "STAT-37", "quantity": "density curve", "note": "FFT grid mislabelled when n is not a power of two; density values not pinned"},
         {"finding": "STAT-65", "quantity": "density bandwidth", "note": "default bandwidth is not bw.nrd0 and non-Gaussian kernels scale bw differently; not pinned"},
-        {"finding": "STAT-69", "quantity": "spline method fmm (the default)", "note": "a clamped spline, not R's FMM; only method = natural is pinned"},
         {"finding": "STAT-87", "quantity": "stats_fivenum iqr field", "note": "the hinge spread, not R's IQR; not pinned"}
       ],
       "supersedes_legacy": []

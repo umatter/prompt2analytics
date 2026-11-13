@@ -93,13 +93,7 @@
         "xout description"
       ],
       "tolerance": "validation/README.md, n = 10: 1e-6 relative; counts exact",
-      "deviations": [
-        {
-          "finding": "STAT-69",
-          "quantity": "method fmm",
-          "note": "only method = natural is pinned"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

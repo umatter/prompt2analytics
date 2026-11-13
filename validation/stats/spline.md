@@ -30,6 +30,37 @@ Case `stat_ts_acf_spline_t3` in `validation/r/cases/stats_misc_t3.R`, dataset
 `stats::spline::tests::test_spline_passes_through_knots` checks the knots and the point count (not
 R-pinned).
 
-## Known Differences
+## Methods, ties and warnings (Tier 4)
 
-- **STAT-69, STAT-40:** the FMM, periodic and monotone splines are not pinned.
+The methods are R's: `fmm` (the default) fits the cubic through the first and last four knots at the
+ends (Forsythe, Malcolm and Moler), `natural` has zero second derivatives at the ends and extrapolates
+linearly, `periodic` wraps (when the first and last y differ, the last is set to the first, with R's
+warning "spline: first and last y values differ - using y[1] for both"), `hyman` filters the FMM
+slopes to a monotone spline (Hyman 1983) and refuses a non-monotone y, and `monoH.FC` (in
+`splinefun`) is Fritsch-Carlson as R's `splinefunH0`. FMM and periodic splines extrapolate the end
+cubics, as R. A cubic spline needs at least 4 distinct x (`InsufficientData` with the distinct count),
+`approx` at least 2.
+
+Tied x are averaged before fitting, as R's `regularize.values(ties = mean)`, with R's warning
+"collapsing to unique 'x' values" in `SplineResult::warnings` / `ApproxResult::warnings`; the default
+n counts the distinct x. `approx(method = "constant")` returns the knot's y at an exact knot for every
+`f`, and `f = 0` / `f = 1` take only the left / right value.
+
+Case `stat_spline_t4` in `validation/r/cases/stats_misc_t4.R`, dataset
+`validation/datasets/generated/spline_t4.csv`.
+
+| Test (`stats::spline::tests::`) | R |
+|---|---|
+| `test_validate_spline_fmm` | `spline(x, y, xout = xo)`, `spline(x, y, n = 11)` (`fmm_s`, `fmm_f_n11`, `fmm_f_out`) |
+| `test_validate_spline_natural_outside` | natural spline inside and outside the knots (`natural_s`, `natural_f_out`) |
+| `test_validate_spline_periodic` | periodic spline, equal and unequal end values (`periodic_p`, `periodic_u`) |
+| `test_validate_spline_hyman` | hyman on increasing and decreasing y; refusal of a non-monotone y (`hyman_h`, `hyman_m`) |
+| `test_validate_splinefun_monoh_fc` | `splinefun(method = "monoH.FC")` (`monofc_h`, `monofc_m`, `monofc_s`) |
+| `test_validate_spline_ties` | natural and fmm with tied x; default n after ties (`ties_natural`, `ties_fmm`, `ties_default_n`) |
+| `test_validate_approx_constant_at_knots` | constant approx at f = 0, 0.5, 1 |
+| `test_validate_approx_ties` | linear and constant approx with ties; rule 2 |
+
+Tolerance `Tol::coef(n)`; counts exact. Registry `validation/methods/stats_misc_t4.json`, ids
+`spline_t4` and `approx_t4`.
+
+The MCP tool `stats_spline` reaches the same core; it does not yet report the warnings.

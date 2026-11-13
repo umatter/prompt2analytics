@@ -89,8 +89,8 @@ exact.
 - **STAT-65:** the default density bandwidth is not `bw.nrd0`, and the non-Gaussian kernels
   scale `bw` differently from R; the bandwidth is not pinned. Fixed in core, see `density_t4`
   below; the MCP pin follows.
-- **STAT-69:** `stats_spline`'s default method `fmm` is a clamped spline, not R's
-  Forsythe-Malcolm-Moler end conditions; only `method = "natural"` is pinned.
+- `stats_spline`'s default method `fmm` is R's Forsythe-Malcolm-Moler spline, pinned in the core
+  ([spline.md](spline.md), `spline_t4`); this case records `method = "natural"` only.
 - **STAT-87:** `stats_fivenum`'s `iqr` field is the spread of the hinges, not R's `IQR`; it is
   not pinned.
 
