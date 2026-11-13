@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "stat_cor_matrix_t4",
+  "area": "stats/correlation",
+  "method": "Pearson correlation matrix of the numeric columns with missing values: pairwise-complete (and complete-case) coefficients and pair counts",
+  "reference": "stats::cor(use = 'pairwise.complete.obs') and cor(use = 'complete.obs'); pair counts crossprod(!is.na(m))",
+  "call": "cor(d[, c('a', 'b', 'c', 'i')], use = 'pairwise.complete.obs'); row-major 4 x 4",
+  "dataset": "validation/datasets/generated/cor_matrix_t4.csv",
+  "datasets": ["validation/datasets/generated/cor_matrix_t4.csv", "validation/datasets/generated/cor_matrix_small_t4.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "pairwise": [1, 0.70139454397548162, -0.11101266820444301, 0.48142635977360726, 0.70139454397548162, 1, -0.12319617948137597, 0.57566581354149005, -0.11101266820444301, -0.12319617948137597, 1, 0.19449209648797919, 0.48142635977360726, 0.57566581354149005, 0.19449209648797919, 1],
+    "complete": [1, 0.67802425112999698, -0.22056775367070489, 0.54460705183414015, 0.67802425112999698, 1, -0.094713013090320666, 0.575237634113274, -0.22056775367070489, -0.094713013090320666, 1, 0.18039847805809192, 0.54460705183414015, 0.575237634113274, 0.18039847805809192, 1],
+    "pair_n": [38, 35, 37, 36, 35, 37, 35, 35, 37, 35, 38, 36, 36, 35, 36, 38],
+    "complete_n": 32,
+    "n_rows": 40,
+    "small_ab": 0.59999999999999998
+  }
+}
