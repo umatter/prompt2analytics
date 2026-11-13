@@ -946,6 +946,9 @@ pub fn run_feglm(
     let mut mx = screen.x;
     let mut xs = resource::try_zeros2(n, k, "FEGLM weighted design")?;
     let mut weights = resource::try_vec(n, 0.0, "FEGLM working weights")?;
+    // The weights `mx` was demeaned with (none: the screen's unit-weight demeaning). When the
+    // next weights equal them bit for bit (Gaussian: all 1), `mx` is already the result.
+    let mut mx_weights: Option<Vec<f64>> = None;
     let mut nu = resource::try_vec(n, 0.0, "FEGLM working residual")?;
     let mut ys = Array1::from(resource::try_vec(n, 0.0, "FEGLM weighted residual")?);
 
@@ -969,14 +972,23 @@ pub fn run_feglm(
         // 2. Weighted demeaning of the unscaled X (warm-started from the last iteration's)
         //    and of nu, with the IRLS weights
         let mut proj = WeightedProjector::new(&weights, &factors);
-        let (mx_new, _, x_change, x_conv) = weighted_demean_matrix_map(
-            mx.view(),
-            &mut proj,
-            config.map_tolerance,
-            config.map_max_iter,
-            config.accelerate,
-        )?;
-        mx = mx_new;
+        let (mut x_change, mut x_conv) = (0.0, true);
+        if mx_weights.as_deref() != Some(&weights[..]) {
+            let (mx_new, _, change, conv) = weighted_demean_matrix_map(
+                mx.view(),
+                &mut proj,
+                config.map_tolerance,
+                config.map_max_iter,
+                config.accelerate,
+            )?;
+            (mx, x_change, x_conv) = (mx_new, change, conv);
+            if mx_weights.is_none() {
+                mx_weights = Some(resource::try_vec(n, 0.0, "FEGLM working weights")?);
+            }
+            if let Some(w) = mx_weights.as_mut() {
+                w.copy_from_slice(&weights);
+            }
+        }
         let (mnu, _, nu_change, nu_conv) = weighted_demean_map(
             &nu,
             &mut proj,
@@ -1136,16 +1148,21 @@ pub fn run_feglm(
             .working_weight(eta[i], mu_final[i])
             .max(config.weight_min);
     }
-    let (mx_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
-        mx.view(),
-        &mut WeightedProjector::new(&weights, &factors),
-        config.map_tolerance,
-        config.map_max_iter,
-        config.accelerate,
-    )?;
-    if !final_map_conv {
-        map_stalls.push(("the final information matrix".to_string(), final_map_change));
-    }
+    let mx_final = if mx_weights.as_deref() == Some(&weights[..]) {
+        mx
+    } else {
+        let (mx_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
+            mx.view(),
+            &mut WeightedProjector::new(&weights, &factors),
+            config.map_tolerance,
+            config.map_max_iter,
+            config.accelerate,
+        )?;
+        if !final_map_conv {
+            map_stalls.push(("the final information matrix".to_string(), final_map_change));
+        }
+        mx_final
+    };
     for i in 0..n {
         let s = weights[i].sqrt();
         for j in 0..k {

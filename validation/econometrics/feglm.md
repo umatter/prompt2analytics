@@ -659,6 +659,19 @@ Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, 
 | Logit, two-way (criterion) | 100 / 400 / 1,000 | 0.53 / 0.59 / 0.90 |
 | Poisson, two-way (criterion) | 100 / 400 / 1,000 | 0.59 / 0.72 / 0.78 |
 
+After the rewrite to the FE-GLM MLE (2026-11-13; release build, one core, `RAYON_NUM_THREADS=1`,
+five interleaved rounds against `69f40487`, medians, load average 20-40, wall clock): two-way
+panels of 10 periods with x and x2, default controls. The IRLS counts fall from 13-20 to 5,
+because alpaca's update converges quadratically where the one-pass recovery of the effects
+did not. Gaussian keeps the demeaned design while the weights repeat (all 1), so it demeans X
+once.
+
+| Fit | n | IRLS iterations base / new | new / base (wall clock) |
+|---|---|---|---|
+| Logit, two-way | 100 / 1,000 / 10,000 | 20, 17, 13 / 5, 5, 5 | 0.28 / 0.31 / 0.41 |
+| Poisson, two-way | 100 / 1,000 / 10,000 | 19, 17, 16 / 5, 5, 5 | 0.27 / 0.31 / 0.32 |
+| Gaussian, two-way | 100 / 1,000 / 10,000 | 2 / 2 | 1.05 / 0.87 / 0.95 |
+
 ## Missing values
 
 `run_feglm` reads y, the regressors and every fixed-effect column with one NA-aware request
