@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "ml_bart_pbart_posterior",
+  "area": "ml/bart",
+  "method": "BART::pbart posterior summaries over 100 seeded chains",
+  "reference": "BART::pbart (2.9.10), ntree 50, nskip 200, ndpost 300, numcut 100, k 2, power 2, base 0.95; 100 chains (set.seed(1..100)); each value is the mean over the chains of a per-chain summary of prob.train and varcount, and *_mc_sd its SD across the chains",
+  "call": "pbart(x, y, ntree = 50, nskip = 200, ndpost = 300)",
+  "dataset": "validation/datasets/generated/bart_probit_sim.csv",
+  "datasets": ["validation/datasets/generated/bart_probit_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "BART": "2.9.10"
+  },
+  "values": {
+    "binary_offset": -0.12566134685507399,
+    "binary_offset_mc_sd": 0,
+    "pred_mean_avg": 0.45096252212735666,
+    "pred_mean_avg_mc_sd": 0.0016740144973578397,
+    "post_sd_avg": 0.1182311014222923,
+    "post_sd_avg_mc_sd": 0.0012891362048041812,
+    "width95_avg": 0.44707226721791155,
+    "width95_avg_mc_sd": 0.0046842381349367582,
+    "splits_per_tree": 1.214186,
+    "splits_per_tree_mc_sd": 0.01500352459900064,
+    "varprop": [0.33965749561863051, 0.33741038879892532, 0.32293211558244417],
+    "varprop_mc_sd": [0.015767321622408081, 0.017877147648509145, 0.017644815114325803]
+  }
+}
