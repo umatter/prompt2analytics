@@ -47,6 +47,32 @@ spec_ci <- function(df, coverage = 0.95) {   # stats:::plot.spec's private spec.
 
 **Rust test:** `stats::spectrum::tests::test_validate_spectrum_t3_grid_and_ci`.
 
+### Periodogram ordinates (R-pinned, `stats_misc_t4.json` `spectrum_pgram_t4`)
+
+Case `stat_spectrum_t4` in `validation/r/cases/stats_misc_t4.R`: `spec.pgram` on the n = 96 series
+above and on `validation/datasets/generated/spectrum_t4.csv` (97 points, AR(0.6) plus a trend), over
+taper 0, 0.1 and 0.25, spans none, 7, (3, 3) and (3, 5), detrending, demeaning only and neither,
+`pad = 0.5`, odd n (the first 75 points) and n = 97 with and without `fast` padding. Frequencies,
+ordinates and `n.used` are compared (`Tol::coef(96)`, `n.used` exact) by
+`test_validate_spectrum_pgram_raw_tapered`, `test_validate_spectrum_pgram_smoothed_taper_demean`,
+`test_validate_spectrum_pgram_padding` and `test_validate_spectrum_pgram_odd_and_fast`, and the
+`stat_spectrum_t3` ordinates (`spec`, `raw_spec`) by `test_validate_spectrum_t3_grid_and_ci`.
+
+`spectrum` computes the periodogram as `spec.pgram`: R's detrending (centred times); the split
+cosine bell of `spec.taper` (`m = floor(n p)` points at each end, weights
+`0.5 (1 - cos(pi (2j - 1) / (2m)))`, no renormalisation) with the ordinates divided by
+`u2 = 1 - (5/8) 2p`; `trunc(n * pad)` zeros of padding and, with `fast = true` (R's default), more
+zeros up to the next length with no prime factor above 5 (`nextn`; 97 points are analysed at
+length 100); `|fft|^2 / N0` with `N0` the unpadded length; the zero-frequency ordinate replaced by
+the mean of its neighbours; and modified Daniell smoothing that wraps around circularly as
+`kernapply(circular = TRUE)` does. Ordinates are on R's scale (no one-sided doubling) at
+frequencies `j / N`, `j = 1..floor(N/2)`. The circular smoothing runs over the ordinates
+`0..floor(N/2)` with mirrored indices, which equals R's pass over all `N` because the periodogram of
+a real series is symmetric; `daniell_mirrored_pass_matches_full_circular_convolution` checks it
+against a naive circular convolution, and `test_validate_daniell_interior_against_r` pins all 32
+ordinates of two smoothed periodograms, edges included. `nextn_matches_r` checks `nextn(1:200)`
+and `padding_truncates_as_r` the `trunc` of the padding.
+
 ### Confidence interval
 
 `SpectrumResult::confidence_interval_multipliers(level)` is R's `plot.spec` rule: the two tails are
@@ -77,10 +103,6 @@ missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 **STAT-39 (df and bandwidth):** on the case above R gives df 6.552102376599634 and bandwidth
 0.01084201041388611; p2a gives 18 and 0.03125. The interval multipliers are pinned at given df, so
 they carry p2a's df until STAT-39 is fixed.
-
-**STAT-68 (ordinates):** p2a's spectral ordinates are about twice R's and differ in the taper and in the
-smoothing at the edges. The peak (`spec` 7.658276496605042 at frequency 0.125 in R) is at the same
-frequency. R's `spec`, `raw_spec`, `raw_df` and `raw_bandwidth` are recorded in the case.
 
 ## Performance Comparison
 

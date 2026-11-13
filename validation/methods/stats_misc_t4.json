@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "spectrum_pgram_t4",
+      "name": "Smoothed and raw periodogram (spec.pgram): ordinates, frequencies and padded length over taper, spans, detrending, padding, odd n and fast padding",
+      "category": "stats",
+      "reference": "stats::spec.pgram",
+      "doc": "validation/timeseries/spectrum.md",
+      "cases": ["stat_spectrum_t4"],
+      "tests": [
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_raw_tapered",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_smoothed_taper_demean",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_padding",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_odd_and_fast"
+      ],
+      "quantities": ["freq", "spec", "n.used"],
+      "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative; n.used exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
