@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mackinnon_p_values",
+      "name": "MacKinnon (1994) response-surface p-values of the Dickey-Fuller t (no constant, constant, constant and trend), as plm:::padf(p.approx = 'MacKinnon1994')",
+      "category": "econometrics",
+      "reference": "plm:::padf(q, exo = 'none' | 'intercept' | 'trend', p.approx = 'MacKinnon1994'); urca::punitroot(q, N = Inf, trend) for the deviation",
+      "doc": "validation/econometrics/panel_unit_root.md",
+      "cases": [
+        "mackinnon_punitroot_grid"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_mackinnon_p_grid"
+      ],
+      "quantities": [
+        "p on a 191-point grid (-6.5 to 3) for each model, inside the range where the response surface is monotone"
+      ],
+      "tolerance": "validation/README.md p-values, n = 191: 1e-6 relative (abs 1e-12)",
+      "deviations": [
+        {
+          "finding": "ECON-44",
+          "quantity": "p_nc, p_c, p_ct (plm's default p.approx = MacKinnon1996)",
+          "note": "p2a evaluates MacKinnon's (1994) response surface, plm's p.approx without urca, and not MacKinnon's (1996) tabulated distribution that urca::punitroot interpolates (plm's default with urca installed). On the grid the two differ by at most 0.004 in p inside the monotone range (1% relative for p between 0.01 and 0.99, more in the far tails)"
+        },
+        {
+          "finding": "ECON-44",
+          "quantity": "p94_intercept above t = 2.74, p94_trend above t = 0.70 (the cubic's local maximum) and every model below the quadratic's vertex (t = -19.05, -18.83, -16.18)",
+          "note": "plm evaluates the polynomials outside the range where they rise, so its p falls again (0.25 at t = 3 with a trend); p2a holds p at its value at the turning point, MacKinnon's (1994) tau_min and tau_max, so p is non-decreasing in t. These grid points are asserted constant and non-decreasing in the same test"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_unit_root_statistics",
+      "name": "Panel unit-root statistics: LLC, IPS W-tbar, Maddala-Wu and Hadri (short-run and long-run variance), as plm::purtest and tseries::kpss.test",
+      "category": "econometrics",
+      "reference": "plm::purtest(test = 'levinlin' | 'ips' | 'madwu' | 'hadri', exo, lags = 1 | 2 | 3 | 4, dfcor, Hcons, p.approx = 'MacKinnon1994'); tseries::kpss.test(null, lshort)",
+      "doc": "validation/econometrics/panel_unit_root.md",
+      "cases": [
+        "purtest_stat_ar05",
+        "purtest_stat_short"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_madwu",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_ips",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_llc",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_hadri",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_stat_hadri_long_run"
+      ],
+      "quantities": [
+        "LLC z and p: intercept, trend, none; dfcor FALSE and TRUE; stationary and random-walk panels; T = 15 (table floor); z of 1000 y",
+        "IPS W-tbar, p and the averaged table moments: intercept, trend; lags 1 and 3 (T = 50), 1, 2 and 4 (T = 15)",
+        "Maddala-Wu chi-square, p and per-unit MacKinnon (1994) p: intercept, trend, none (dfcor FALSE); per-unit ADF t: intercept, trend, none, dfcor FALSE and TRUE, stationary and random-walk panels",
+        "Hadri z and p: intercept, trend; Hcons TRUE and FALSE; dfcor FALSE and TRUE; per-unit LM (Hcons TRUE)",
+        "per-unit KPSS statistic (Bartlett long-run variance), level and trend, short and long truncation lags, and the short lag"
+      ],
+      "tolerance": "validation/README.md, n = 500 (120 for the short case): statistics 1e-6 relative, p-values 1e-6 relative (abs 1e-12); table moments 1e-14",
+      "deviations": [
+        {
+          "finding": "ECON-44",
+          "quantity": "madwu_*_stat, madwu_*_p, madwu_*_ptrho without m94 (plm's default p.approx = MacKinnon1996)",
+          "note": "p2a's per-unit p-values are MacKinnon's (1994) response surface (method mackinnon_p_values); the Maddala-Wu statistics are asserted within 2% of plm's default ones, outside the Check"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

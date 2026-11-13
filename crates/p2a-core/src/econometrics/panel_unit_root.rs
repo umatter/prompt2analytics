@@ -68,8 +68,30 @@
 //! shorter unit, or one whose regressors are collinear (an exactly linear series), is
 //! skipped and named in the warnings. With no unit left the test is an error.
 //!
-//! The per-unit ADF regressions and the per-unit lag orders are validated against R
-//! (`urca::ur.df`, `plm::purtest`); the LLC, IPS, Fisher and Hadri statistics are not.
+//! # Statistics (as `plm::purtest`)
+//!
+//! - **LLC**: each unit's ADF residuals normalised by its ADF residual sd, pooled; the t of
+//!   the pooled coefficient corrected by `N T~ S_N sd(rho) / sigma~^2` (`S_N` the mean ratio of
+//!   long-run to short-run sd, Bartlett kernel with `round(3.21 T^(1/3))` lags) and the mean
+//!   and variance adjustments of LLC (2002) Table 2 (interpolated in T, clamped to T = 25 and
+//!   500 with a warning). Needs a balanced panel. Scale invariant.
+//! - **IPS**: W-tbar, the mean ADF t standardised by each unit's moments from IPS (2003)
+//!   Table 3 at `(T - lags - 1, lags)` (interpolated; clamped with a warning; an untabulated
+//!   combination is an error). Model `None` is refused.
+//! - **Fisher (Maddala-Wu)**: `-2 sum ln p_i` against chi-square(2N), with each unit's p from
+//!   MacKinnon's (1994) asymptotic response surface (plm's `p.approx = "MacKinnon1994"`; plm's
+//!   default with urca installed is the 1996 tables, which differ slightly).
+//! - **Hadri**: the mean of each unit's KPSS statistic of its demeaned or detrended series,
+//!   standardised with the moments of the limit; upper tail. `hadri_variance` chooses the
+//!   residual variance: [`HadriVariance::Heteroskedastic`] (per unit, plm `Hcons = TRUE`, the
+//!   default), [`HadriVariance::Homoskedastic`] (pooled, `Hcons = FALSE`), both `rss/(T - k)`
+//!   with `dfcor` and `rss/T` without, or [`HadriVariance::LongRun`] (Bartlett kernel,
+//!   `tseries::kpss.test`; default lags `trunc(4 (T/100)^(1/4))`). Lags, lag selection, model
+//!   `None` and unbalanced panels are refused. The output names the variance.
+//!
+//! The per-unit ADF regressions, the lag orders and the four statistics with their p-values
+//! are validated against R (`urca::ur.df`, `plm::purtest`, `tseries::kpss.test`;
+//! `validation/econometrics/panel_unit_root.md`).
 
 use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
@@ -256,6 +278,63 @@ impl fmt::Display for LagSelection {
     }
 }
 
+/// The residual variance of Hadri's statistic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HadriVariance {
+    /// Per-unit short-run variance, plm `Hcons = TRUE` (default).
+    #[default]
+    Heteroskedastic,
+    /// Pooled short-run variance, plm `Hcons = FALSE`.
+    Homoskedastic,
+    /// Per-unit Bartlett long-run variance with `lags` truncation lags (None:
+    /// `trunc(4 (T/100)^(1/4))`, `tseries::kpss.test`'s short rule).
+    LongRun { lags: Option<usize> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HadriVarianceName {
+    Heteroskedastic,
+    Homoskedastic,
+    LongRun,
+}
+
+static HADRI_VARIANCES: Choices<HadriVarianceName> = Choices {
+    option: "hadri_variance",
+    values: &[
+        (
+            &["heteroskedastic", "hcons", "het"],
+            HadriVarianceName::Heteroskedastic,
+        ),
+        (
+            &["homoskedastic", "homo", "iid"],
+            HadriVarianceName::Homoskedastic,
+        ),
+        (&["long_run", "lrv", "bartlett"], HadriVarianceName::LongRun),
+    ],
+};
+
+impl HadriVariance {
+    /// `name`: heteroskedastic (hcons, het) | homoskedastic (homo, iid) | long_run (lrv,
+    /// bartlett); case and separator insensitive. `lags` only with long_run. An unknown name
+    /// is `InvalidSpecification` listing the names.
+    pub fn from_option(name: &str, lags: Option<usize>) -> EconResult<HadriVariance> {
+        match (HADRI_VARIANCES.parse(name)?, lags) {
+            (HadriVarianceName::LongRun, lags) => Ok(HadriVariance::LongRun { lags }),
+            (v, Some(_)) => Err(invalid(format!(
+                "lags of the Hadri variance apply only to hadri_variance = long_run, not {}",
+                HADRI_VARIANCES.canonical(v)
+            ))),
+            (HadriVarianceName::Heteroskedastic, None) => Ok(HadriVariance::Heteroskedastic),
+            (HadriVarianceName::Homoskedastic, None) => Ok(HadriVariance::Homoskedastic),
+        }
+    }
+
+    /// "heteroskedastic | homoskedastic | long_run", for CLI help and tool descriptions.
+    pub fn names_help() -> String {
+        HADRI_VARIANCES.help()
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -283,6 +362,10 @@ pub struct PanelUnitRootConfig {
     /// default). Default: true.
     #[serde(default = "default_true")]
     pub dfcor: bool,
+    /// Hadri's residual variance; only with `test_type = Hadri` (a non-default value with
+    /// another test is an error). Module docs, "Hadri".
+    #[serde(default)]
+    pub hadri_variance: HadriVariance,
 }
 
 impl Default for PanelUnitRootConfig {
@@ -295,6 +378,7 @@ impl Default for PanelUnitRootConfig {
             lag_selection: None,
             pmax: None,
             dfcor: true,
+            hadri_variance: HadriVariance::Heteroskedastic,
         }
     }
 }
@@ -344,6 +428,10 @@ pub struct PanelUnitRootResult {
     /// ADF residual variance `rss/(n - K)` (true) or `rss/n` (false)
     #[serde(default = "default_true")]
     pub dfcor: bool,
+    /// Hadri: how the residual variance was computed, as printed after "Variance:" (empty
+    /// otherwise).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variance: String,
 }
 
 impl ResultNotes for PanelUnitRootResult {
@@ -390,6 +478,23 @@ impl fmt::Display for PanelUnitRootResult {
                     "ADF residual variance: rss/n (dfcor = false, plm's default)"
                 )?;
             }
+        }
+        if self.test_type == PanelUnitRootTest::Hadri {
+            writeln!(f, "Variance:   {}", self.variance)?;
+            if !self.variance.starts_with("long-run") {
+                if self.dfcor {
+                    writeln!(f, "Residual variance: rss/(T - k) (dfcor = true)")?;
+                } else {
+                    writeln!(f, "Residual variance: rss/T (dfcor = false, plm's default)")?;
+                }
+            }
+        }
+        if self.test_type == PanelUnitRootTest::Fisher {
+            writeln!(
+                f,
+                "Unit p-values: MacKinnon (1994) response surface, asymptotic \
+                 (plm::purtest p.approx = \"MacKinnon1994\")"
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "H0: {}", self.null_hypothesis)?;
@@ -479,7 +584,7 @@ pub fn run_panel_unit_root(
     } = extract_panels(dataset, var_col, unit_col, time_col)?;
 
     let mut result = if config.test_type == PanelUnitRootTest::Hadri {
-        run_hadri_test(&panels, config.model)?
+        run_hadri_test(&panels, config.model, config.hadri_variance, config.dfcor)?
     } else {
         let (plan, label) = lag_plan(&config, &panels);
         let mut r = match config.test_type {
@@ -511,13 +616,21 @@ fn invalid(message: String) -> EconError {
 /// The option combinations that contradict each other (module docs, "Lag order").
 fn check_lag_options(config: &PanelUnitRootConfig) -> EconResult<()> {
     if config.test_type == PanelUnitRootTest::Hadri {
-        if config.lag_selection.is_some() || config.pmax.is_some() {
+        if config.lags.is_some() || config.lag_selection.is_some() || config.pmax.is_some() {
             return Err(invalid(
-                "the Hadri test uses no lagged differences; lag_selection and pmax do not apply"
+                "the Hadri test uses no lagged differences; lags, lag_selection and pmax do \
+                 not apply (the long-run variance's truncation lag is set with \
+                 hadri_variance = long_run)"
                     .to_string(),
             ));
         }
         return Ok(());
+    }
+    if config.hadri_variance != HadriVariance::default() {
+        return Err(invalid(format!(
+            "hadri_variance applies only to the Hadri test, not {}",
+            config.test_type
+        )));
     }
     match (config.lag_selection, config.lags) {
         (Some(LagSelection::Fixed(p)), Some(q)) if p != q => {
@@ -791,8 +904,6 @@ fn select_lag(
 struct AdfFit {
     /// t-statistic of the lagged level.
     t_stat: f64,
-    /// Residual degrees of freedom.
-    df_resid: usize,
 }
 
 /// The ADF regression of one unit with `lags` lagged differences on rows `lags + 1..T`;
@@ -829,7 +940,7 @@ fn adf_regression(
             },
         });
     }
-    Ok(AdfFit { t_stat, df_resid })
+    Ok(AdfFit { t_stat })
 }
 
 /// Runs `f` on every unit; a unit `f` cannot estimate is skipped and named in one warning,
@@ -933,6 +1044,7 @@ fn unit_root_result(
         unit_lags,
         lag_selection: String::new(),
         dfcor: true,
+        variance: String::new(),
     }
 }
 
@@ -1070,88 +1182,103 @@ fn extract_panels(
 // Levin-Lin-Chu Test
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Levin-Lin-Chu (2002) panel unit root test.
+/// Levin-Lin-Chu (2002) panel unit root test, as `plm::purtest(test = "levinlin")`.
 ///
 /// Tests H0: All panels have a unit root (common ρ = 0)
 /// vs H1: All panels are stationary (common ρ < 0)
 ///
-/// The LLC test assumes a common autoregressive parameter across panels
-/// and is based on a pooled ADF regression with panel-specific intercepts/trends.
+/// Each unit's ADF residuals are normalised by the unit's ADF residual sd, pooled into one
+/// regression whose t is corrected by the ratio of long-run to short-run sd and the mean and
+/// variance adjustments of LLC (2002) Table 2. Needs a balanced panel, as plm.
 fn run_llc_test(
     panels: &[(String, Vec<f64>)],
     model: PanelModel,
     plan: &LagPlan,
     dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    // Step 1: each unit's auxiliary regressions; units that cannot be estimated are skipped.
-    // dfcor enters only Hall's lag choice (plm's lagsel), not the auxiliary residuals.
-    let (units, warnings) = skip_or_propagate(PanelUnitRootTest::LLC, panels, |series| {
+    // Step 1: each unit's auxiliary regressions and ADF residual sd; units that cannot be
+    // estimated are skipped.
+    let (units, mut warnings) = skip_or_propagate(PanelUnitRootTest::LLC, panels, |series| {
         let p = unit_lag(series, plan, model, dfcor)?;
         let (e, v) = compute_llc_residuals(series, model, p)?;
-        Ok((p, e, v))
+        let sigma = llc_unit_sigma(series, &e, &v, model, p, dfcor)?;
+        Ok((p, e, v, sigma))
     })?;
-
-    let mut delta_y_tilde_all: Vec<f64> = Vec::new();
-    let mut y_lag_tilde_all: Vec<f64> = Vec::new();
-    let mut s2_all: Vec<f64> = Vec::with_capacity(units.len());
-    for (_, (_, e, v)) in &units {
-        // Panel-specific variance
-        let s2: f64 = e.iter().map(|ei| ei * ei).sum::<f64>() / e.len() as f64;
-        s2_all.push(s2.max(1e-10));
-
-        // Standardize residuals by sqrt(s2)
-        let s = s2.sqrt().max(1e-10);
-        delta_y_tilde_all.extend(e.iter().map(|ei| ei / s));
-        y_lag_tilde_all.extend(v.iter().map(|vi| vi / s));
-    }
     let used: Vec<usize> = units.iter().map(|(i, _)| *i).collect();
-    let unit_lags: Vec<usize> = units.iter().map(|(_, (p, _, _))| *p).collect();
-    let n = used.len();
-    let avg_t: f64 = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n as f64;
-
-    // Step 2: Pooled regression of standardized residuals
-    // Δ̃y = ρ * ṽ_{t-1} + error
-    let n_obs = delta_y_tilde_all.len();
-    let delta_y_tilde = Array1::from(delta_y_tilde_all);
-    let y_lag_tilde = Array1::from(y_lag_tilde_all);
-
-    // Simple regression: ρ̂ = Σ(ṽ·Δ̃y) / Σ(ṽ²)
-    let sum_vy: f64 = y_lag_tilde
-        .iter()
-        .zip(delta_y_tilde.iter())
-        .map(|(v, d)| v * d)
-        .sum();
-    let sum_vv: f64 = y_lag_tilde.iter().map(|v| v * v).sum();
-
-    if sum_vv.abs() < 1e-10 {
-        return Err(EconError::SingularMatrix {
-            context: "LLC: ṽ'ṽ near zero".to_string(),
-            suggestion: "Check for constant or near-constant series".to_string(),
-        });
+    let unit_lags: Vec<usize> = units.iter().map(|(_, (p, ..))| *p).collect();
+    let lens = used.iter().map(|&i| panels[i].1.len());
+    let (t_min, t_max) = (lens.clone().min().unwrap_or(0), lens.max().unwrap_or(0));
+    if t_min != t_max {
+        return Err(invalid(format!(
+            "the Levin-Lin-Chu test needs a balanced panel (every unit with the same number of \
+             observations, as plm::purtest); the units used have {t_min} to {t_max} \
+             observations; the Im-Pesaran-Shin and Maddala-Wu tests allow unbalanced panels"
+        )));
     }
+    let t_len = t_max;
+    let n = used.len();
+    let nf = n as f64;
 
-    let rho_hat = sum_vy / sum_vv;
+    // Step 2: the ratio of each unit's long-run sd of Δy (Bartlett kernel, q lags) to its
+    // ADF residual sd, averaged.
+    let q_rule = (3.21 * (t_len as f64).powf(1.0 / 3.0)).round_ties_even() as usize;
+    let q = q_rule.min(t_len - 2);
+    if q < q_rule {
+        warnings.push(format!(
+            "Levin-Lin-Chu: the long-run variance's truncation lag is capped at T - 2 = {q} \
+             (round(3.21 T^(1/3)) = {q_rule} exceeds the autocovariances of a series of {t_len})"
+        ));
+    }
+    let mut s_bar = 0.0;
+    for (&i, (_, (_, _, _, sigma))) in used.iter().zip(&units) {
+        resource::checkpoint()?;
+        s_bar += llc_long_run_variance(&panels[i].1, model, q)?.sqrt() / sigma;
+    }
+    s_bar /= nf;
 
-    // Compute standard error
-    let resid: Array1<f64> = &delta_y_tilde - &y_lag_tilde.mapv(|v| v * rho_hat);
-    let s2_resid: f64 = resid.iter().map(|r| r * r).sum::<f64>() / n_obs.saturating_sub(1) as f64;
-    let se_rho = (s2_resid / sum_vv).sqrt();
+    // Step 3: the pooled regression of the normalised residuals, d = e / σ on w = v / σ.
+    let (mut sum_wd, mut sum_ww, mut n_obs) = (0.0, 0.0, 0usize);
+    for (_, (_, e, v, sigma)) in &units {
+        for (ei, vi) in e.iter().zip(v) {
+            let (d, w) = (ei / sigma, vi / sigma);
+            sum_wd += w * d;
+            sum_ww += w * w;
+        }
+        n_obs += e.len();
+    }
+    let rho = sum_wd / sum_ww;
+    let mut rss = 0.0;
+    for (_, (_, e, v, sigma)) in &units {
+        for (ei, vi) in e.iter().zip(v) {
+            let r = ei / sigma - rho * (vi / sigma);
+            rss += r * r;
+        }
+    }
+    let s2 = if dfcor {
+        rss / (n_obs - 1) as f64
+    } else {
+        rss / n_obs as f64
+    };
+    let sd_rho = (s2 / sum_ww).sqrt();
+    let t_rho = rho / sd_rho;
 
-    // Compute t-statistic
-    let t_rho = rho_hat / se_rho.max(1e-10);
-
-    // Step 3: Bias adjustment (simplified)
-    // Use approximate adjustment factors from LLC (2002) tables
-    let (mu_star, sigma_star) = get_llc_adjustment_factors(avg_t, model);
-
-    // Adjusted t-statistic
-    let n_bar_t = n as f64 * avg_t;
-    let s_n_t = (s2_all.iter().sum::<f64>() / n as f64).sqrt();
-
-    // t*_ρ = (t_ρ - N̄T * S_N,T * μ*_m,T / σ̂²) / σ*_m,T
-    let t_star = (t_rho * se_rho - n_bar_t.sqrt() * s_n_t * mu_star) / sigma_star;
-
-    // P-value from standard normal
+    // Step 4: the adjusted t, z = (t_rho - N T~ S_N / σ~² sd(ρ) μ*) / σ*.
+    let mean_lag = unit_lags.iter().sum::<usize>() as f64 / nf;
+    let t_tilde = t_len as f64 - mean_lag - 1.0;
+    let sigma_eps2 = rss / (nf * t_tilde);
+    let (mu_star, sigma_star, edge) = llc_adjustment(t_len, model);
+    match edge {
+        Some(TableEdge::Below) => warnings.push(format!(
+            "Levin-Lin-Chu: T = {t_len} is below the shortest row (T = 25) of the LLC (2002) \
+             Table 2 adjustment; the T = 25 values are used, as plm::purtest does"
+        )),
+        Some(TableEdge::Above) => warnings.push(format!(
+            "Levin-Lin-Chu: T = {t_len} is above the longest row (T = 500) of the LLC (2002) \
+             Table 2 adjustment; the T = 500 values are used, as plm::purtest does"
+        )),
+        None => {}
+    }
+    let t_star = (t_rho - nf * t_tilde * s_bar / sigma_eps2 * sd_rho * mu_star) / sigma_star;
     let p_value = normal_cdf(t_star);
 
     Ok(unit_root_result(
@@ -1168,6 +1295,126 @@ fn run_llc_test(
         unit_lags,
         warnings,
     ))
+}
+
+/// One unit's ADF residual sd from its auxiliary residuals (Frisch-Waugh-Lovell: the ADF
+/// regression's rss is `e'e - (v'e)^2 / v'v`), with `rss/(n - K)` (`dfcor`) or `rss/n`, as
+/// plm's `tsadf`. A lagged level that the other regressors explain (`|v| < 1e-7 |y_{t-1}|`,
+/// the pivoted QR's rule) makes the ADF regression rank deficient and skips the unit.
+fn llc_unit_sigma(
+    series: &[f64],
+    e: &[f64],
+    v: &[f64],
+    model: PanelModel,
+    lags: usize,
+    dfcor: bool,
+) -> Result<f64, UnitError> {
+    let k = 1 + n_det(model) + lags;
+    let n = e.len();
+    let level = &series[lags..series.len() - 1];
+    let level_norm = level.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let vv: f64 = v.iter().map(|x| x * x).sum();
+    let full_rank = vv > 0.0 && vv.sqrt() >= 1e-7 * level_norm;
+    if !full_rank {
+        return Err(rank_deficient(
+            format!("the ADF regression with {lags} lag(s)"),
+            k - 1,
+            k,
+        ));
+    }
+    let ve: f64 = v.iter().zip(e).map(|(a, b)| a * b).sum();
+    let ee: f64 = e.iter().map(|x| x * x).sum();
+    let rss = ee - ve * ve / vv;
+    let df = if dfcor { n - k } else { n };
+    let sigma = (rss / df as f64).sqrt();
+    if sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        return Err(UnitError::Skip {
+            reason: "exact fit: no residual variation".to_string(),
+            error: EconError::SingularMatrix {
+                context: "ADF regression fits exactly (no residual variation)".to_string(),
+                suggestion: "the series is exactly linear or constant over the sample".to_string(),
+            },
+        });
+    }
+    Ok(sigma)
+}
+
+/// The long-run variance of one unit's first differences, as plm's `longrunvar`: Δy demeaned
+/// (intercept), detrended on (1, t) (trend) or raw (none), Bartlett kernel with `q` lags,
+/// autocovariances divided by T - 1.
+fn llc_long_run_variance(series: &[f64], model: PanelModel, q: usize) -> EconResult<f64> {
+    let m = series.len() - 1;
+    let mut dx = resource::try_with_capacity(m, "LLC long-run variance")?;
+    dx.extend(series.windows(2).map(|w| w[1] - w[0]));
+    let mf = m as f64;
+    match model {
+        PanelModel::None => {}
+        PanelModel::Intercept => {
+            let mean = dx.iter().sum::<f64>() / mf;
+            dx.iter_mut().for_each(|x| *x -= mean);
+        }
+        PanelModel::Trend => {
+            // Residuals of the regression on (1, 1..m), in closed form.
+            let t_mean = (mf + 1.0) / 2.0;
+            let x_mean = dx.iter().sum::<f64>() / mf;
+            let (mut sxy, mut sxx) = (0.0, 0.0);
+            for (j, x) in dx.iter().enumerate() {
+                let tc = (j + 1) as f64 - t_mean;
+                sxy += tc * (x - x_mean);
+                sxx += tc * tc;
+            }
+            let slope = sxy / sxx;
+            for (j, x) in dx.iter_mut().enumerate() {
+                *x -= x_mean + slope * ((j + 1) as f64 - t_mean);
+            }
+        }
+    }
+    let mut lrv = dx.iter().map(|x| x * x).sum::<f64>() / mf;
+    for lag in 1..=q {
+        let gamma: f64 = dx[lag..]
+            .iter()
+            .zip(&dx[..m - lag])
+            .map(|(a, b)| a * b)
+            .sum();
+        lrv += 2.0 * (1.0 - lag as f64 / (q + 1) as f64) * gamma / mf;
+    }
+    Ok(lrv)
+}
+
+/// The T rows of LLC (2002) Table 2 as `plm:::adj.levinlin` stores them.
+const LLC_TS: [f64; 13] = [
+    25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 250.0, 500.0,
+];
+
+/// LLC (2002) Table 2 (`plm:::adj.levinlin`): the mean adjustment mu* by T.
+#[rustfmt::skip]
+const LLC_MU: [[f64; 13]; 3] = [
+    // none
+    [0.004, 0.003, 0.002, 0.002, 0.001, 0.001, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    // intercept
+    [-0.554, -0.546, -0.541, -0.537, -0.533, -0.531, -0.527, -0.524, -0.521, -0.520, -0.518, -0.509, -0.500],
+    // trend
+    [-0.703, -0.674, -0.653, -0.637, -0.624, -0.614, -0.598, -0.587, -0.578, -0.571, -0.566, -0.533, -0.500],
+];
+
+/// LLC (2002) Table 2 (`plm:::adj.levinlin`): the standard deviation adjustment sigma* by T.
+#[rustfmt::skip]
+const LLC_SIGMA: [[f64; 13]; 3] = [
+    [1.049, 1.035, 1.027, 1.021, 1.017, 1.014, 1.011, 1.008, 1.007, 1.006, 1.005, 1.001, 1.000],
+    [0.919, 0.889, 0.867, 0.850, 0.837, 0.826, 0.810, 0.798, 0.789, 0.782, 0.776, 0.742, 0.707],
+    [1.003, 0.949, 0.906, 0.871, 0.842, 0.818, 0.780, 0.751, 0.728, 0.710, 0.695, 0.603, 0.500],
+];
+
+/// (mu*, sigma*) at T, interpolated between rows and clamped to T = 25 and 500 as
+/// `plm:::adj.levinlin.value` does, with the end clamped to, if any.
+fn llc_adjustment(t_len: usize, model: PanelModel) -> (f64, f64, Option<TableEdge>) {
+    let row = n_det(model);
+    let pos = select_t(t_len as f64, &LLC_TS);
+    (
+        pos.value(&LLC_MU[row], &LLC_TS),
+        pos.value(&LLC_SIGMA[row], &LLC_TS),
+        pos.edge,
+    )
 }
 
 /// LLC auxiliary regression residuals of one unit: Δy and y_{t-1} on the deterministic
@@ -1235,37 +1482,6 @@ fn compute_llc_residuals(
     Ok((dy.residuals.to_vec(), v.residuals.to_vec()))
 }
 
-/// Get LLC adjustment factors (μ*, σ*) based on T and model.
-/// These are approximations from LLC (2002) simulation tables.
-fn get_llc_adjustment_factors(avg_t: f64, model: PanelModel) -> (f64, f64) {
-    // Simplified approximations based on LLC (2002) Table 2
-    // For more accuracy, use interpolation tables
-
-    match model {
-        PanelModel::None => {
-            // No deterministics
-            let mu = -0.5 / avg_t.sqrt();
-            let sigma = 1.0 + 0.5 / avg_t;
-            (mu, sigma)
-        }
-        PanelModel::Intercept => {
-            // Individual means
-            // μ* ≈ -0.71 - 1.61/T - 2.39/T²
-            let mu = -0.71 - 1.61 / avg_t - 2.39 / (avg_t * avg_t);
-            // σ* ≈ 1.0
-            let sigma = 1.0;
-            (mu, sigma)
-        }
-        PanelModel::Trend => {
-            // Individual means and trends
-            // μ* ≈ -1.04 - 4.69/T - 10.6/T²
-            let mu = -1.04 - 4.69 / avg_t - 10.6 / (avg_t * avg_t);
-            let sigma = 1.0;
-            (mu, sigma)
-        }
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Im-Pesaran-Shin Test
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1306,22 +1522,58 @@ fn run_ips_test(
     plan: &LagPlan,
     dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
+    if model == PanelModel::None {
+        return Err(invalid(
+            "the Im-Pesaran-Shin test needs model intercept or trend (its W-tbar moments are \
+             tabulated only for those; plm::purtest refuses exo = 'none')"
+                .to_string(),
+        ));
+    }
     let (used, unit_lags, fits, warnings) =
         unit_adf_fits(PanelUnitRootTest::IPS, panels, model, plan, dfcor)?;
     let t_stats: Vec<f64> = fits.iter().map(|f| f.t_stat).collect();
     let n_valid = t_stats.len();
-    let avg_t: f64 = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n_valid as f64;
 
-    // Compute average t-statistic
+    // Each unit's E and Var of t from IPS (2003) Table 3 at (T_i - p_i - 1, p_i), averaged.
+    let (mut e_sum, mut v_sum) = (0.0, 0.0);
+    let (mut below, mut above, mut many_lags) = (0usize, 0usize, 0usize);
+    for (&i, &p) in used.iter().zip(&unit_lags) {
+        let l = panels[i].1.len() - p - 1;
+        let (e, v, edge) = ips_moments(l, p, model)?;
+        e_sum += e;
+        v_sum += v;
+        match edge {
+            Some(TableEdge::Below) => below += 1,
+            Some(TableEdge::Above) => above += 1,
+            None => {}
+        }
+        many_lags += usize::from(p > IPS_MAX_LAG);
+    }
+    let e_t = e_sum / n_valid as f64;
+    let var_t = v_sum / n_valid as f64;
+    let mut warnings = warnings;
+    if many_lags > 0 {
+        warnings.push(format!(
+            "Im-Pesaran-Shin: {many_lags} unit(s) use more than {IPS_MAX_LAG} lags; the \
+             {IPS_MAX_LAG}-lag moments of IPS (2003) Table 3 are used, as plm::purtest does"
+        ));
+    }
+    if below > 0 {
+        warnings.push(format!(
+            "Im-Pesaran-Shin: {below} unit(s) have T - lags - 1 below 10 (the shortest row of \
+             IPS (2003) Table 3); the T = 10 moments are used, as plm::purtest does"
+        ));
+    }
+    if above > 0 {
+        warnings.push(format!(
+            "Im-Pesaran-Shin: {above} unit(s) have T - lags - 1 above 100 (the longest row of \
+             IPS (2003) Table 3); the T = 100 moments are used, as plm::purtest does"
+        ));
+    }
+
     let t_bar: f64 = t_stats.iter().sum::<f64>() / n_valid as f64;
-
-    // Get moments E[t] and Var[t] from IPS (2003) tables
-    let (e_t, var_t) = get_ips_moments(avg_t, model);
-
-    // W-statistic: standardized t-bar
+    // W-tbar: the standardised t-bar, lower tail.
     let w_stat = (n_valid as f64).sqrt() * (t_bar - e_t) / var_t.sqrt();
-
-    // P-value from standard normal
     let p_value = normal_cdf(w_stat);
 
     let mut r = unit_root_result(
@@ -1342,29 +1594,165 @@ fn run_ips_test(
     Ok(r)
 }
 
-/// Get IPS (2003) expected mean and variance of t-statistic.
-/// These are approximations based on Table 2 of IPS (2003).
-fn get_ips_moments(avg_t: f64, model: PanelModel) -> (f64, f64) {
-    match model {
-        PanelModel::None => {
-            // No constant: E[t] ≈ 0, Var[t] ≈ 1
-            (0.0, 1.0)
-        }
-        PanelModel::Intercept => {
-            // Individual intercept only
-            // Approximation: E[t] ≈ -1.52 - 0.5/T, Var[t] ≈ 0.96 + 0.56/T
-            let e_t = -1.52 - 0.5 / avg_t;
-            let var_t = 0.96 + 0.56 / avg_t;
-            (e_t, var_t)
-        }
-        PanelModel::Trend => {
-            // Individual intercept and trend
-            // E[t] ≈ -2.15 - 2.0/T, Var[t] ≈ 0.89 + 0.91/T
-            let e_t = -2.15 - 2.0 / avg_t;
-            let var_t = 0.89 + 0.91 / avg_t;
-            (e_t, var_t)
-        }
+/// Which end of a table a value was clamped to (plm's `selectT` warns "the time series is
+/// short" or "long").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableEdge {
+    Below,
+    Above,
+}
+
+/// plm's `selectT` over the tabulated `ts` (increasing): the row of `x`, the two rows around
+/// it, or the first or last row when `x` lies outside.
+struct TablePos {
+    lo: usize,
+    hi: usize,
+    x: f64,
+    edge: Option<TableEdge>,
+}
+
+fn select_t(x: f64, ts: &[f64]) -> TablePos {
+    let last = ts.len() - 1;
+    if let Some(i) = ts.iter().position(|&t| t == x) {
+        return TablePos {
+            lo: i,
+            hi: i,
+            x,
+            edge: None,
+        };
     }
+    if x < ts[0] {
+        return TablePos {
+            lo: 0,
+            hi: 0,
+            x: ts[0],
+            edge: Some(TableEdge::Below),
+        };
+    }
+    if x > ts[last] {
+        return TablePos {
+            lo: last,
+            hi: last,
+            x: ts[last],
+            edge: Some(TableEdge::Above),
+        };
+    }
+    let hi = ts.partition_point(|&t| t <= x);
+    TablePos {
+        lo: hi - 1,
+        hi,
+        x,
+        edge: None,
+    }
+}
+
+impl TablePos {
+    /// The tabulated value of `row` at `x`, linearly interpolated between rows as plm does
+    /// (NaN when either end is not tabulated).
+    fn value(&self, row: &[f64], ts: &[f64]) -> f64 {
+        if self.lo == self.hi {
+            return row[self.lo];
+        }
+        let (t0, t1) = (ts[self.lo], ts[self.hi]);
+        row[self.lo] + (self.x - t0) / (t1 - t0) * (row[self.hi] - row[self.lo])
+    }
+}
+
+/// The largest lag order of IPS (2003) Table 3; larger orders use its row.
+const IPS_MAX_LAG: usize = 8;
+
+/// The T columns of IPS (2003) Table 3 (T - lags - 1 of the ADF regression).
+const IPS_TS: [f64; 10] = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 100.0];
+
+const NA: f64 = f64::NAN;
+
+/// IPS (2003) Table 3 as `plm:::adj.ips.wtbar` stores it: mean of the ADF t by lag order
+/// (rows 0..=8) and T (`IPS_TS`), individual intercepts; NaN = not tabulated.
+#[rustfmt::skip]
+const IPS_INTERCEPT_MEAN: [[f64; 10]; 9] = [
+    [-1.504, -1.514, -1.522, -1.520, -1.526, -1.523, -1.527, -1.519, -1.524, -1.532],
+    [-1.488, -1.503, -1.516, -1.514, -1.519, -1.520, -1.524, -1.519, -1.522, -1.530],
+    [-1.319, -1.387, -1.428, -1.443, -1.460, -1.476, -1.493, -1.490, -1.498, -1.514],
+    [-1.306, -1.366, -1.413, -1.433, -1.453, -1.471, -1.489, -1.486, -1.495, -1.512],
+    [-1.171, -1.260, -1.329, -1.363, -1.394, -1.428, -1.454, -1.458, -1.470, -1.495],
+    [NA, NA, -1.313, -1.351, -1.384, -1.421, -1.451, -1.454, -1.467, -1.494],
+    [NA, NA, NA, -1.289, -1.331, -1.380, -1.418, -1.427, -1.444, -1.476],
+    [NA, NA, NA, -1.273, -1.319, -1.371, -1.411, -1.423, -1.441, -1.474],
+    [NA, NA, NA, -1.212, -1.266, -1.329, -1.377, -1.393, -1.415, -1.456],
+];
+
+/// As [`IPS_INTERCEPT_MEAN`], the variance of t.
+#[rustfmt::skip]
+const IPS_INTERCEPT_VAR: [[f64; 10]; 9] = [
+    [1.069, 0.923, 0.851, 0.809, 0.789, 0.770, 0.760, 0.749, 0.736, 0.735],
+    [1.255, 1.011, 0.915, 0.861, 0.831, 0.803, 0.781, 0.770, 0.753, 0.745],
+    [1.421, 1.078, 0.969, 0.905, 0.865, 0.830, 0.798, 0.789, 0.766, 0.754],
+    [1.759, 1.181, 1.037, 0.952, 0.907, 0.858, 0.819, 0.802, 0.782, 0.761],
+    [2.080, 1.279, 1.097, 1.005, 0.946, 0.886, 0.842, 0.819, 0.801, 0.771],
+    [NA, NA, 1.171, 1.055, 0.980, 0.912, 0.863, 0.839, 0.814, 0.781],
+    [NA, NA, NA, 1.114, 1.023, 0.942, 0.886, 0.858, 0.834, 0.795],
+    [NA, NA, NA, 1.164, 1.062, 0.968, 0.910, 0.875, 0.851, 0.806],
+    [NA, NA, NA, 1.217, 1.105, 0.996, 0.929, 0.896, 0.871, 0.818],
+];
+
+/// As [`IPS_INTERCEPT_MEAN`], individual intercepts and trends.
+#[rustfmt::skip]
+const IPS_TREND_MEAN: [[f64; 10]; 9] = [
+    [-2.166, -2.167, -2.168, -2.167, -2.172, -2.173, -2.176, -2.174, -2.174, -2.177],
+    [-2.173, -2.169, -2.172, -2.172, -2.173, -2.177, -2.180, -2.178, -2.176, -2.179],
+    [-1.914, -1.999, -2.047, -2.074, -2.095, -2.120, -2.137, -2.143, -2.146, -2.158],
+    [-1.922, -1.977, -2.032, -2.065, -2.091, -2.117, -2.137, -2.142, -2.146, -2.158],
+    [-1.750, -1.823, -1.911, -1.968, -2.009, -2.057, -2.091, -2.103, -2.114, -2.135],
+    [NA, NA, -1.888, -1.955, -1.998, -2.051, -2.087, -2.101, -2.111, -2.135],
+    [NA, NA, NA, -1.868, -1.923, -1.995, -2.042, -2.065, -2.081, -2.113],
+    [NA, NA, NA, -1.851, -1.912, -1.986, -2.036, -2.063, -2.079, -2.112],
+    [NA, NA, NA, -1.761, -1.835, -1.925, -1.987, -2.024, -2.046, -2.088],
+];
+
+/// As [`IPS_TREND_MEAN`], the variance of t.
+#[rustfmt::skip]
+const IPS_TREND_VAR: [[f64; 10]; 9] = [
+    [1.132, 0.869, 0.763, 0.713, 0.690, 0.655, 0.633, 0.621, 0.610, 0.597],
+    [1.453, 0.975, 0.845, 0.769, 0.734, 0.687, 0.654, 0.641, 0.627, 0.605],
+    [1.627, 1.036, 0.882, 0.796, 0.756, 0.702, 0.661, 0.653, 0.634, 0.613],
+    [2.482, 1.214, 0.983, 0.861, 0.808, 0.735, 0.688, 0.674, 0.650, 0.625],
+    [3.947, 1.332, 1.052, 0.913, 0.845, 0.759, 0.705, 0.685, 0.662, 0.629],
+    [NA, NA, 1.165, 0.991, 0.899, 0.792, 0.730, 0.705, 0.673, 0.638],
+    [NA, NA, NA, 1.055, 0.945, 0.828, 0.753, 0.725, 0.689, 0.650],
+    [NA, NA, NA, 1.145, 1.009, 0.872, 0.786, 0.747, 0.713, 0.661],
+    [NA, NA, NA, 1.208, 1.063, 0.902, 0.808, 0.766, 0.728, 0.670],
+];
+
+/// The mean and variance of one unit's ADF t under the null, from IPS (2003) Table 3 at
+/// `l = T - lags - 1` and the lag order (8 for more), as `plm:::adj.ips.wtbar.value`; with
+/// the table end it was clamped to, if any. Untabulated (lags, T) is an error (plm: NA).
+fn ips_moments(
+    l: usize,
+    lags: usize,
+    model: PanelModel,
+) -> EconResult<(f64, f64, Option<TableEdge>)> {
+    let (mean, var) = match model {
+        PanelModel::Intercept => (&IPS_INTERCEPT_MEAN, &IPS_INTERCEPT_VAR),
+        PanelModel::Trend => (&IPS_TREND_MEAN, &IPS_TREND_VAR),
+        PanelModel::None => {
+            return Err(invalid(
+                "the Im-Pesaran-Shin moments are tabulated only for model intercept or trend"
+                    .to_string(),
+            ));
+        }
+    };
+    let row = lags.min(IPS_MAX_LAG);
+    let pos = select_t(l as f64, &IPS_TS);
+    let e = pos.value(&mean[row], &IPS_TS);
+    let v = pos.value(&var[row], &IPS_TS);
+    if e.is_nan() || v.is_nan() {
+        return Err(invalid(format!(
+            "Im-Pesaran-Shin: the W-tbar moments are not tabulated for {row} lags at T - lags \
+             - 1 = {l} (IPS 2003 Table 3 has 5 lags from 20 and 6 to 8 lags from 25 periods); \
+             use fewer lags or a longer panel"
+        )));
+    }
+    Ok((e, v, pos.edge))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1386,12 +1774,10 @@ fn run_fisher_test(
     let (used, unit_lags, fits, warnings) =
         unit_adf_fits(PanelUnitRootTest::Fisher, panels, model, plan, dfcor)?;
     let t_stats: Vec<f64> = fits.iter().map(|f| f.t_stat).collect();
-    let p_values: Vec<f64> = fits
+    // MacKinnon's p of a t far in the lower tail stays positive; the floor keeps ln p finite.
+    let p_values: Vec<f64> = t_stats
         .iter()
-        .map(|f| {
-            let df = u32::try_from(f.df_resid).unwrap_or(u32::MAX);
-            adf_p_value(f.t_stat, df, model).clamp(1e-10, 1.0 - 1e-10)
-        })
+        .map(|&t| mackinnon_p(t, model).max(f64::MIN_POSITIVE))
         .collect();
     let n_valid = p_values.len();
 
@@ -1420,20 +1806,72 @@ fn run_fisher_test(
     Ok(r)
 }
 
-/// Approximate p-value for ADF t-statistic using MacKinnon (1996) critical values.
-fn adf_p_value(t_stat: f64, _df: u32, model: PanelModel) -> f64 {
-    // MacKinnon (1996) response surface approximation
-    // For simplicity, use standard normal CDF with appropriate shift
-    // A more accurate implementation would use MacKinnon's tables
+/// MacKinnon's (1994) response surface for the asymptotic distribution of the Dickey-Fuller
+/// t of one series, as `plm:::padf(p.approx = "MacKinnon1994")` stores it:
+/// `p = Phi(small(t))` up to `limit`, `Phi(large(t))` above, with polynomial coefficients in
+/// increasing powers.
+struct MacKinnon94 {
+    small: [f64; 3],
+    large: [f64; 4],
+    limit: f64,
+}
 
-    let shift = match model {
-        PanelModel::None => 0.0,
-        PanelModel::Intercept => -2.86, // 5% critical value ≈ -2.86
-        PanelModel::Trend => -3.41,     // 5% critical value ≈ -3.41
+impl MacKinnon94 {
+    /// MacKinnon (1994), Table 3 (N = 1), rescaled as plm does (`small[, 3] / 100`,
+    /// `large[, 2:3] / 10`, `large[, 4] / 100`).
+    fn of(model: PanelModel) -> MacKinnon94 {
+        match model {
+            PanelModel::None => MacKinnon94 {
+                small: [0.6344, 1.2378, 3.2496 / 100.0],
+                large: [0.4797, 9.3557 / 10.0, -0.6999 / 10.0, 3.3066 / 100.0],
+                limit: -1.04,
+            },
+            PanelModel::Intercept => MacKinnon94 {
+                small: [2.1659, 1.4412, 3.8269 / 100.0],
+                large: [1.7339, 9.3202 / 10.0, -1.2745 / 10.0, -1.0368 / 100.0],
+                limit: -1.61,
+            },
+            PanelModel::Trend => MacKinnon94 {
+                small: [3.2512, 1.6047, 4.9588 / 100.0],
+                large: [2.5261, 6.1654 / 10.0, -3.7956 / 10.0, -6.0285 / 100.0],
+                limit: -2.89,
+            },
+        }
+    }
+
+    /// The range over which the surface rises: from the vertex of the quadratic to the local
+    /// maximum of the cubic (none without deterministic terms). These are MacKinnon's tau_min
+    /// and tau_max; outside them the polynomials turn back.
+    fn range(&self) -> (f64, f64) {
+        let [_, b1, b2] = self.small;
+        let lo = -b1 / (2.0 * b2);
+        let [_, c1, c2, c3] = self.large;
+        // c1 + 2 c2 t + 3 c3 t^2 = 0; with c3 < 0 the larger root is the maximum.
+        let disc = c2 * c2 - 3.0 * c3 * c1;
+        let hi = if c3 < 0.0 && disc >= 0.0 {
+            (-c2 - disc.sqrt()) / (3.0 * c3)
+        } else {
+            f64::INFINITY
+        };
+        (lo, hi)
+    }
+}
+
+/// MacKinnon's (1994) asymptotic p-value of an ADF t, as `plm::purtest(p.approx =
+/// "MacKinnon1994")`, with `t` held inside the range where the surface rises (so p is
+/// non-decreasing; plm evaluates the polynomials beyond it). It takes no degrees of freedom:
+/// the surface is the asymptotic one.
+fn mackinnon_p(t: f64, model: PanelModel) -> f64 {
+    let m = MacKinnon94::of(model);
+    let (lo, hi) = m.range();
+    let t = t.clamp(lo, hi);
+    let z = if t <= m.limit {
+        let [b0, b1, b2] = m.small;
+        b0 + b1 * t + b2 * (t * t)
+    } else {
+        let [c0, c1, c2, c3] = m.large;
+        c0 + c1 * t + c2 * (t * t) + c3 * (t * t * t)
     };
-
-    // Approximate p-value: transform to standard normal scale
-    let z = (t_stat - shift) / 0.8;
     normal_cdf(z)
 }
 
@@ -1441,37 +1879,139 @@ fn adf_p_value(t_stat: f64, _df: u32, model: PanelModel) -> f64 {
 // Hadri Test
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Hadri (2000) panel stationarity test.
+/// Hadri (2000) panel stationarity test, as `plm::purtest(test = "hadri")`.
 ///
 /// Tests H0: All panels are stationary
 /// vs H1: Some panels have unit roots
 ///
-/// Based on KPSS-type LM statistics averaged across panels.
+/// Each unit's KPSS statistic `sum (cumsum e)^2 / (T^2 sigma^2)` of its demeaned or detrended
+/// series, averaged and standardised with the moments of its limit. Needs a deterministic
+/// term and a balanced panel, as plm.
 fn run_hadri_test(
     panels: &[(String, Vec<f64>)],
     model: PanelModel,
+    variance: HadriVariance,
+    dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    let mut lm_stats: Vec<f64> = Vec::with_capacity(panels.len());
-    for (_, series) in panels {
-        resource::checkpoint()?;
-        lm_stats.push(compute_kpss_statistic(series, model)?);
+    if model == PanelModel::None {
+        return Err(invalid(
+            "Hadri's test needs model intercept or trend (plm::purtest refuses exo = 'none'; \
+             without deterministic terms the KPSS limit has mean 1/2, not 1/6)"
+                .to_string(),
+        ));
     }
+    let lens = panels.iter().map(|(_, s)| s.len());
+    let (t_min, t_max) = (lens.clone().min().unwrap_or(0), lens.max().unwrap_or(0));
+    if t_min != t_max {
+        return Err(invalid(format!(
+            "Hadri's test needs a balanced panel (every unit with the same number of \
+             observations, as plm::purtest); the units have {t_min} to {t_max} observations"
+        )));
+    }
+    let t_len = t_max;
+    let tf = t_len as f64;
+    let nd = n_det(model);
+    let short_df = if dfcor { (t_len - nd) as f64 } else { tf };
+    let long_lags = match variance {
+        HadriVariance::LongRun { lags } => {
+            let l = lags.unwrap_or((4.0 * (tf / 100.0).powf(0.25)).trunc() as usize);
+            if l >= t_len {
+                return Err(invalid(format!(
+                    "the long-run variance's truncation lag ({l}) must be below the number of \
+                     observations per unit ({t_len})"
+                )));
+            }
+            Some(l)
+        }
+        _ => None,
+    };
 
-    let n_valid = lm_stats.len();
-    let used: Vec<usize> = (0..n_valid).collect();
+    // Per unit: S_i = sum (cumsum e)^2 / T^2, e'e, and the long-run variance if asked.
+    let n = panels.len();
+    let mut partial = Vec::with_capacity(n);
+    let mut rss = Vec::with_capacity(n);
+    let mut lrv = Vec::with_capacity(if long_lags.is_some() { n } else { 0 });
+    for (label, series) in panels {
+        resource::checkpoint()?;
+        let e = kpss_residuals(series, model)?;
+        let scale = series.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let e_norm = e.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if e_norm <= 1e-10 * scale * tf.sqrt() {
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "Hadri: unit '{label}' has no variation around its {}",
+                    if model == PanelModel::Trend {
+                        "trend"
+                    } else {
+                        "mean"
+                    }
+                ),
+                suggestion: "drop units whose series is constant (or exactly linear with a \
+                             trend)"
+                    .to_string(),
+            });
+        }
+        let mut cum = 0.0;
+        let s2: f64 = e
+            .iter()
+            .map(|x| {
+                cum += x;
+                cum * cum
+            })
+            .sum();
+        partial.push(s2 / (tf * tf));
+        rss.push(e.iter().map(|x| x * x).sum::<f64>());
+        if let Some(l) = long_lags {
+            lrv.push(bartlett_long_run_variance(&e, l));
+        }
+    }
+    let nf = n as f64;
+    let (unit_lm, lm_bar, label) = match variance {
+        HadriVariance::Heteroskedastic => {
+            let lm: Vec<f64> = partial
+                .iter()
+                .zip(&rss)
+                .map(|(s, r)| s / (r / short_df))
+                .collect();
+            let bar = lm.iter().sum::<f64>() / nf;
+            (
+                lm,
+                bar,
+                "heteroskedasticity-consistent, per unit (plm Hcons = TRUE)".to_string(),
+            )
+        }
+        HadriVariance::Homoskedastic => {
+            let sigma2 = rss.iter().sum::<f64>() / (nf * short_df);
+            let lm: Vec<f64> = partial
+                .iter()
+                .zip(&rss)
+                .map(|(s, r)| s / (r / short_df))
+                .collect();
+            let bar = partial.iter().sum::<f64>() / nf / sigma2;
+            (
+                lm,
+                bar,
+                "homoskedastic, pooled (plm Hcons = FALSE)".to_string(),
+            )
+        }
+        HadriVariance::LongRun { .. } => {
+            let l = long_lags.unwrap_or(0);
+            let lm: Vec<f64> = partial.iter().zip(&lrv).map(|(s, v)| s / v).collect();
+            let bar = lm.iter().sum::<f64>() / nf;
+            (
+                lm,
+                bar,
+                format!("long-run, Bartlett kernel, {l} lag(s) (tseries::kpss.test)"),
+            )
+        }
+    };
 
-    // Average LM statistic
-    let lm_bar: f64 = lm_stats.iter().sum::<f64>() / n_valid as f64;
-
-    // Get moments for KPSS statistic
     let (mu, sigma2) = get_hadri_moments(model);
-
-    // Z-statistic
-    let z_stat = (n_valid as f64).sqrt() * (lm_bar - mu) / sigma2.sqrt();
-
-    // P-value (one-sided, upper tail)
+    let z_stat = nf.sqrt() * (lm_bar - mu) / sigma2.sqrt();
+    // One-sided, upper tail.
     let p_value = Normal::standard().sf(z_stat);
 
+    let used: Vec<usize> = (0..n).collect();
     let mut r = unit_root_result(
         PanelUnitRootTest::Hadri,
         model,
@@ -1483,83 +2023,55 @@ fn run_hadri_test(
         Vec::new(),
         Vec::new(),
     );
-    r.unit_statistics = Some(lm_stats);
+    r.unit_statistics = Some(unit_lm);
+    r.variance = label;
     Ok(r)
 }
 
-/// Compute KPSS-type LM statistic for a single series.
-fn compute_kpss_statistic(series: &[f64], model: PanelModel) -> EconResult<f64> {
-    let t = series.len();
-    if t < 3 {
-        return Err(EconError::InsufficientData {
-            required: 3,
-            provided: t,
-            context: "KPSS statistic".to_string(),
-        });
+/// A unit's series demeaned (intercept) or detrended on (1, 1..T) (trend), closed form.
+fn kpss_residuals(series: &[f64], model: PanelModel) -> EconResult<Vec<f64>> {
+    let tf = series.len() as f64;
+    let mean = series.iter().sum::<f64>() / tf;
+    let mut e = resource::try_with_capacity(series.len(), "Hadri residuals")?;
+    if model != PanelModel::Trend {
+        e.extend(series.iter().map(|x| x - mean));
+        return Ok(e);
     }
-
-    // Detrend the series
-    let residuals: Vec<f64> = match model {
-        PanelModel::None => series.to_vec(),
-        PanelModel::Intercept => {
-            let mean: f64 = series.iter().sum::<f64>() / t as f64;
-            series.iter().map(|&x| x - mean).collect()
-        }
-        PanelModel::Trend => {
-            // Regress on constant and trend (full rank for t >= 2)
-            let mut x = resource::try_zeros2(t, 2, "KPSS trend regression")?;
-            for i in 0..t {
-                x[[i, 0]] = 1.0;
-                x[[i, 1]] = (i + 1) as f64;
-            }
-            least_squares(x.view(), ArrayView1::from(series))?
-                .residuals
-                .to_vec()
-        }
-    };
-
-    // Compute partial sums S_t = Σ_{s=1}^{t} e_s
-    let mut s: Vec<f64> = Vec::with_capacity(t);
-    let mut cumsum = 0.0;
-    for e in &residuals {
-        cumsum += e;
-        s.push(cumsum);
+    let t_mean = (tf + 1.0) / 2.0;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for (j, x) in series.iter().enumerate() {
+        let tc = (j + 1) as f64 - t_mean;
+        sxy += tc * (x - mean);
+        sxx += tc * tc;
     }
-
-    // Long-run variance estimate (simple Newey-West with automatic bandwidth)
-    let bandwidth = ((t as f64).powf(1.0 / 3.0)).ceil() as usize;
-    let mut sigma2_lr = residuals.iter().map(|e| e * e).sum::<f64>() / t as f64;
-
-    for j in 1..=bandwidth {
-        let weight = 1.0 - j as f64 / (bandwidth + 1) as f64;
-        let mut gamma_j = 0.0;
-        for i in j..t {
-            gamma_j += residuals[i] * residuals[i - j];
-        }
-        gamma_j /= t as f64;
-        sigma2_lr += 2.0 * weight * gamma_j;
-    }
-
-    sigma2_lr = sigma2_lr.max(1e-10);
-
-    // LM statistic: η = (1/T²) Σ S_t² / σ²_LR
-    let sum_s2: f64 = s.iter().map(|si| si * si).sum();
-    let lm = sum_s2 / ((t * t) as f64 * sigma2_lr);
-
-    Ok(lm)
+    let slope = sxy / sxx;
+    e.extend(
+        series
+            .iter()
+            .enumerate()
+            .map(|(j, x)| x - mean - slope * ((j + 1) as f64 - t_mean)),
+    );
+    Ok(e)
 }
 
-/// Get Hadri (2000) moments for LM statistic under H0.
+/// The Bartlett long-run variance of residuals `e` with `l` lags, as `tseries::kpss.test`:
+/// `(1/T) e'e + (2/T) sum_j (1 - j/(l+1)) sum_t e_t e_{t-j}`.
+fn bartlett_long_run_variance(e: &[f64], l: usize) -> f64 {
+    let t = e.len();
+    let tf = t as f64;
+    let mut v = e.iter().map(|x| x * x).sum::<f64>() / tf;
+    for j in 1..=l {
+        let gamma: f64 = e[j..].iter().zip(&e[..t - j]).map(|(a, b)| a * b).sum();
+        v += 2.0 / tf * (1.0 - j as f64 / (l + 1) as f64) * gamma;
+    }
+    v
+}
+
+/// Hadri (2000) moments of the KPSS limit under H0 (model none is refused before).
 fn get_hadri_moments(model: PanelModel) -> (f64, f64) {
     match model {
-        PanelModel::None | PanelModel::Intercept => {
-            // Individual intercept: μ = 1/6, σ² = 1/45
-            (1.0 / 6.0, 1.0 / 45.0)
-        }
-        PanelModel::Trend => {
-            // Individual intercept and trend: μ = 1/15, σ² = 11/6300
-            (1.0 / 15.0, 11.0 / 6300.0)
-        }
+        PanelModel::Trend => (1.0 / 15.0, 11.0 / 6300.0),
+        _ => (1.0 / 6.0, 1.0 / 45.0),
     }
 }
 
@@ -1649,7 +2161,7 @@ mod tests {
 
         let result = run_panel_unit_root(&dataset, "y_ur", "unit", "time", config).unwrap();
 
-        // The value is not checked: the LLC statistic is ECON-41 (Tier 4).
+        // The LLC statistic is pinned to plm in test_validate_purtest_stat_llc.
         assert_eq!(result.n_panels, 10);
         assert_eq!(result.lags_used, 1);
         assert!(result.statistic.is_finite());
@@ -1706,6 +2218,10 @@ mod tests {
         assert!(result.unit_lags.is_empty());
         assert!(result.statistic.is_finite());
         assert!((0.0..=1.0).contains(&result.p_value));
+        assert_eq!(
+            result.variance,
+            "heteroskedasticity-consistent, per unit (plm Hcons = TRUE)"
+        );
     }
 
     #[test]
@@ -1728,6 +2244,7 @@ mod tests {
             unit_lags: vec![1, 2, 1],
             lag_selection: "AIC per unit, pmax = 2".into(),
             dfcor: false,
+            variance: String::new(),
         };
 
         let display = format!("{}", result);
@@ -1939,7 +2456,6 @@ mod tests {
     #[test]
     fn test_validate_purtest_lag_selection_ips() {
         let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
-        // deviation ECON-43: the W-tbar statistic uses ad-hoc moments; ips_*_stat/_p are not compared
         let mut c = Check::new(&case);
         for (sel, rule) in RULES {
             for dfcor in [false, true] {
@@ -1960,6 +2476,16 @@ mod tests {
                     &format!("trho_{rule}{sfx}"),
                     r.unit_statistics.as_deref().unwrap(),
                     Tol::stat(480),
+                )
+                .scalar(
+                    &format!("ips_{rule}{sfx}_stat"),
+                    r.statistic,
+                    Tol::stat(480),
+                )
+                .scalar(
+                    &format!("ips_{rule}{sfx}_p"),
+                    r.p_value,
+                    Tol::p_value(480),
                 );
                 assert_eq!(r.n_panels, 12);
                 assert_eq!(r.lags_used, *r.unit_lags.iter().max().unwrap());
@@ -1987,7 +2513,6 @@ mod tests {
     #[test]
     fn test_validate_purtest_lag_selection_llc() {
         let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
-        // deviation ECON-41: levinlin_*_stat/_p not compared
         let mut c = Check::new(&case);
         for (sel, rule) in RULES {
             for dfcor in [false, true] {
@@ -2003,6 +2528,16 @@ mod tests {
                     &format!("levinlin_{rule}{sfx}_lags"),
                     &as_f64(&r.unit_lags),
                     Tol::exact(),
+                )
+                .scalar(
+                    &format!("levinlin_{rule}{sfx}_stat"),
+                    r.statistic,
+                    Tol::stat(480),
+                )
+                .scalar(
+                    &format!("levinlin_{rule}{sfx}_p"),
+                    r.p_value,
+                    Tol::p_value(480),
                 );
                 assert_eq!(r.lags_used, *r.unit_lags.iter().max().unwrap());
                 assert_eq!(r.lag_selection, rule_label(sel));
@@ -2015,7 +2550,8 @@ mod tests {
     #[test]
     fn test_validate_purtest_lag_selection_madwu() {
         let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
-        // deviation ECON-44: madwu_*_stat/_p and ptrho_* not compared
+        // deviation ECON-44: madwu_*_stat/_p and ptrho_* are plm's default p.approx =
+        // MacKinnon1996 (urca's tables); p2a uses MacKinnon (1994): asserted close, not pinned.
         let mut c = Check::new(&case);
         for (sel, rule) in RULES {
             for dfcor in [false, true] {
@@ -2038,6 +2574,12 @@ mod tests {
                     Tol::stat(480),
                 );
                 assert_eq!(r.n_panels, 12);
+                let m96 = case.scalar(&format!("madwu_{rule}{sfx}_stat"));
+                assert!(
+                    (r.statistic - m96).abs() <= 0.02 * m96,
+                    "{rule}{sfx}: {} vs MacKinnon (1996) {m96}",
+                    r.statistic
+                );
             }
         }
         let r = purtest(
@@ -2218,7 +2760,8 @@ mod tests {
                 c.test_type = PanelUnitRootTest::Hadri;
                 c.lag_selection = Some(LagSelection::Aic);
             })),
-            "the Hadri test uses no lagged differences; lag_selection and pmax do not apply"
+            "the Hadri test uses no lagged differences; lags, lag_selection and pmax do not \
+             apply (the long-run variance's truncation lag is set with hadri_variance = long_run)"
         );
         assert_eq!(
             message(run(&|c| c.pmax = Some(2))),
@@ -2523,5 +3066,581 @@ mod tests {
             compute_llc_residuals(&line, PanelModel::Intercept, 2),
             Err(UnitError::Skip { .. })
         ));
+    }
+
+    // ── Statistics (validation/r/cases/econ_purtest_t4.R) ──
+
+    const EXOS: [(PanelModel, &str); 3] = [
+        (PanelModel::Intercept, "intercept"),
+        (PanelModel::Trend, "trend"),
+        (PanelModel::None, "none"),
+    ];
+
+    /// `test` on column `col` of a (id, t) panel with fixed `lags`.
+    fn stat_run(
+        ds: &Dataset,
+        col: &str,
+        test: PanelUnitRootTest,
+        model: PanelModel,
+        lags: Option<usize>,
+        dfcor: bool,
+    ) -> PanelUnitRootResult {
+        let mut c = cfg(test, model, lags);
+        c.dfcor = dfcor;
+        run_panel_unit_root(ds, col, "id", "t", c).unwrap()
+    }
+
+    /// The case key of a column, model and dfcor: "rw_trend_dfcor".
+    fn stat_tag(col: &str, exo: &str, dfcor: bool) -> String {
+        let rw = if col == "y" { "" } else { "rw_" };
+        let sfx = if dfcor { "_dfcor" } else { "" };
+        format!("{rw}{exo}{sfx}")
+    }
+
+    /// plm:::padf(q, exo, p.approx = "MacKinnon1994") on a grid from -6.5 to 3, inside the
+    /// range where the surface rises; outside it p is held at the turning point's value.
+    #[test]
+    fn test_validate_mackinnon_p_grid() {
+        let (case, _) = crate::test_support::load_case("mackinnon_punitroot_grid");
+        let q = case.vector("q");
+        let mut c = Check::new(&case);
+        c.vector("q", &q, Tol::exact());
+        let tol = Tol::p_value(191);
+        let mut failures = Vec::new();
+        let mut held = 0;
+        for (model, exo) in EXOS {
+            let expected = case.vector(&format!("p94_{exo}"));
+            let (lo, hi) = MacKinnon94::of(model).range();
+            let p: Vec<f64> = q.iter().map(|&t| mackinnon_p(t, model)).collect();
+            for (i, &t) in q.iter().enumerate() {
+                if (lo..=hi).contains(&t) {
+                    if !tol.allows(p[i], expected[i]) {
+                        failures.push(format!("{exo} q = {t}: {} vs {}", p[i], expected[i]));
+                    }
+                } else {
+                    // deviation ECON-44: plm evaluates the polynomial past its turning point
+                    held += 1;
+                    let edge = mackinnon_p(t.clamp(lo, hi), model);
+                    assert_eq!(p[i], edge, "{exo} q = {t}");
+                }
+            }
+            assert!(p.windows(2).all(|w| w[0] <= w[1]), "{exo}: {p:?}");
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Above 2.74 with an intercept (6 points) and above 0.70 with a trend (47).
+        assert_eq!(held, 53);
+        c.finish();
+    }
+
+    /// Non-decreasing in t over a wide grid for every model, and the turning points are
+    /// MacKinnon's (1994) tau_min and tau_max (N = 1): -19.04, -18.83, -16.18; inf, 2.74, 0.70.
+    #[test]
+    fn test_mackinnon_p_monotone_with_mackinnons_range() {
+        for (model, (tau_min, tau_max)) in [
+            (PanelModel::None, (-19.04, f64::INFINITY)),
+            (PanelModel::Intercept, (-18.83, 2.74)),
+            (PanelModel::Trend, (-16.18, 0.70)),
+        ] {
+            let (lo, hi) = MacKinnon94::of(model).range();
+            assert!((lo - tau_min).abs() < 0.01, "{model:?}: {lo}");
+            assert!(
+                hi == tau_max || (hi - tau_max).abs() < 0.01,
+                "{model:?}: {hi}"
+            );
+            let mut last = 0.0;
+            for k in 0..=30_000 {
+                let t = -25.0 + 0.001 * f64::from(k);
+                let p = mackinnon_p(t, model);
+                assert!(
+                    p >= last && p > 0.0 && p < 1.0,
+                    "{model:?} t = {t}: {p} < {last}"
+                );
+                last = p;
+            }
+        }
+    }
+
+    /// Maddala-Wu with MacKinnon's (1994) p-values: plm::purtest(test = "madwu", lags = 1,
+    /// p.approx = "MacKinnon1994"); the per-unit ADF t for every model and dfcor.
+    #[test]
+    fn test_validate_purtest_stat_madwu() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in EXOS {
+            let r = stat_run(&ds, "y", PanelUnitRootTest::Fisher, model, Some(1), false);
+            c.scalar(
+                &format!("madwu_{exo}_m94_stat"),
+                r.statistic,
+                Tol::stat(500),
+            )
+            .scalar(&format!("madwu_{exo}_m94_p"), r.p_value, Tol::p_value(500))
+            .vector(
+                &format!("madwu_{exo}_m94_ptrho"),
+                r.unit_p_values.as_deref().unwrap(),
+                Tol::p_value(500),
+            );
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    let tag = stat_tag(col, exo, dfcor);
+                    let r = stat_run(&ds, col, PanelUnitRootTest::Fisher, model, Some(1), dfcor);
+                    c.vector(
+                        &format!("madwu_{tag}_trho"),
+                        r.unit_statistics.as_deref().unwrap(),
+                        Tol::stat(500),
+                    );
+                    // deviation ECON-44: madwu_*_stat/_p/_ptrho without m94 are plm's default
+                    // p.approx = MacKinnon1996 (urca's tables); asserted close, not pinned.
+                    let m96 = case.scalar(&format!("madwu_{tag}_stat"));
+                    assert!(
+                        (r.statistic - m96).abs() <= 0.02 * m96,
+                        "{tag}: {} vs MacKinnon (1996) {m96}",
+                        r.statistic
+                    );
+                }
+            }
+        }
+        c.finish();
+    }
+
+    /// IPS W-tbar with IPS (2003) Table 3 moments: plm::purtest(test = "ips", lags = 1 | 3)
+    /// on T = 50 and lags = 1 | 2 | 4 on T = 15 (rows 10 and 15, interpolation between).
+    #[test]
+    fn test_validate_purtest_stat_ips() {
+        // The averaged table moments plm reports (rowMeans(adjval)).
+        let moments = |ds: &Dataset, r: &PanelUnitRootResult, model| {
+            let lens: Vec<usize> = (1..=r.n_panels)
+                .map(|i| {
+                    let ids = ds.df().column("id").unwrap().i64().unwrap();
+                    ids.iter().filter(|&v| v == Some(i as i64)).count()
+                })
+                .collect();
+            let (mut e, mut v) = (0.0, 0.0);
+            for (len, &p) in lens.iter().zip(&r.unit_lags) {
+                let (a, b, _) = ips_moments(len - p - 1, p, model).unwrap();
+                e += a;
+                v += b;
+            }
+            let n = r.n_panels as f64;
+            vec![e / n, v / n]
+        };
+        let tight = Tol::new(1e-14, 1e-14);
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    for lags in [1, 3] {
+                        let key = format!("ips_{}_lags{lags}", stat_tag(col, exo, dfcor));
+                        let r =
+                            stat_run(&ds, col, PanelUnitRootTest::IPS, *model, Some(lags), dfcor);
+                        c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(500))
+                            .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(500))
+                            .vector(&format!("{key}_moments"), &moments(&ds, &r, *model), tight);
+                    }
+                }
+            }
+        }
+        c.finish();
+        let (case, ds) = crate::test_support::load_case("purtest_stat_short");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            for lags in [1, 2, 4] {
+                let key = format!("ips_{exo}_lags{lags}");
+                let r = stat_run(&ds, "y", PanelUnitRootTest::IPS, *model, Some(lags), true);
+                c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(120))
+                    .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(120))
+                    .vector(&format!("{key}_moments"), &moments(&ds, &r, *model), tight);
+            }
+        }
+        c.finish();
+    }
+
+    /// plm::purtest refuses exo = "none" for IPS.
+    #[test]
+    fn test_ips_refuses_model_none() {
+        let ds = noisy_panel(&[30; 6], 7);
+        let e = run_panel_unit_root(
+            &ds,
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::None, Some(1)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("Im-Pesaran-Shin test needs model intercept or trend")),
+            "{e:?}"
+        );
+    }
+
+    /// T = 18 with 5 lags: T - lags - 1 = 12 lies between rows 10 and 15, where 5 lags are not
+    /// tabulated (plm returns NA).
+    #[test]
+    fn test_ips_untabulated_moments_is_an_error() {
+        let ds = noisy_panel(&[18; 6], 8);
+        let e = run_panel_unit_root(
+            &ds,
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(5)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("not tabulated for 5 lags at T - lags - 1 = 12")),
+            "{e:?}"
+        );
+    }
+
+    /// Clamped table rows and lag orders above 8 are used as plm does, with a warning.
+    #[test]
+    fn test_ips_table_clamp_warnings() {
+        let short = run_panel_unit_root(
+            &noisy_panel(&[9; 6], 9),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(1)),
+        )
+        .unwrap();
+        assert!(
+            short
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("Im-Pesaran-Shin: 6 unit(s) have T - lags - 1 below 10")),
+            "{:?}",
+            short.warnings
+        );
+        let (e, v, edge) = ips_moments(7, 1, PanelModel::Intercept).unwrap();
+        assert_eq!((e, v, edge), (-1.488, 1.255, Some(TableEdge::Below)));
+        let many = run_panel_unit_root(
+            &noisy_panel(&[60; 6], 10),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(9)),
+        )
+        .unwrap();
+        assert!(
+            many.warnings
+                .iter()
+                .any(|w| w.starts_with("Im-Pesaran-Shin: 6 unit(s) use more than 8 lags")),
+            "{:?}",
+            many.warnings
+        );
+        let (_, _, edge) = ips_moments(150, 1, PanelModel::Trend).unwrap();
+        assert_eq!(edge, Some(TableEdge::Above));
+    }
+
+    /// The LLC z of plm::purtest(test = "levinlin", lags = 1): every model and dfcor, on the
+    /// stationary and the random-walk panels; the z of 1000 y (scale invariance); T = 15,
+    /// below the table's first row.
+    #[test]
+    fn test_validate_purtest_stat_llc() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in EXOS {
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    let key = format!("llc_{}", stat_tag(col, exo, dfcor));
+                    let r = stat_run(&ds, col, PanelUnitRootTest::LLC, model, Some(1), dfcor);
+                    c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(500))
+                        .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(500));
+                    assert!(
+                        !r.warnings.iter().any(|w| w.starts_with("Levin-Lin-Chu")),
+                        "{:?}",
+                        r.warnings
+                    );
+                }
+            }
+        }
+        let y: Vec<f64> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| 1000.0 * v.unwrap())
+            .collect();
+        let scaled = with_column(&ds, Column::new("y1000".into(), y));
+        let r = stat_run(
+            &scaled,
+            "y1000",
+            PanelUnitRootTest::LLC,
+            PanelModel::Intercept,
+            Some(1),
+            false,
+        );
+        c.scalar("llc_intercept_x1000_stat", r.statistic, Tol::stat(500));
+        c.finish();
+
+        let (case, ds) = crate::test_support::load_case("purtest_stat_short");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            let r = stat_run(&ds, "y", PanelUnitRootTest::LLC, *model, Some(1), true);
+            c.scalar(&format!("llc_{exo}_stat"), r.statistic, Tol::stat(120))
+                .scalar(&format!("llc_{exo}_p"), r.p_value, Tol::p_value(120));
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w
+                        .starts_with("Levin-Lin-Chu: T = 15 is below the shortest row (T = 25)")),
+                "{:?}",
+                r.warnings
+            );
+        }
+        c.finish();
+    }
+
+    /// plm::purtest refuses LLC on an unbalanced panel.
+    #[test]
+    fn test_llc_refuses_unbalanced_panels() {
+        let mut lengths = vec![40; 9];
+        lengths.push(38);
+        let e = run_panel_unit_root(
+            &noisy_panel(&lengths, 11),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::LLC, PanelModel::Intercept, Some(1)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("needs a balanced panel")
+                    && message.contains("38 to 40 observations")
+                    && message.contains("Im-Pesaran-Shin and Maddala-Wu")),
+            "{e:?}"
+        );
+    }
+
+    /// T = 7: round(3.21 * 7^(1/3)) = 6 exceeds T - 2 = 5 autocovariance lags.
+    #[test]
+    fn test_llc_long_run_lag_capped_on_very_short_series() {
+        let r = run_panel_unit_root(
+            &noisy_panel(&[7; 8], 12),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::LLC, PanelModel::Intercept, Some(0)),
+        )
+        .unwrap();
+        assert!(r.statistic.is_finite());
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with(
+                "Levin-Lin-Chu: the long-run variance's truncation lag is capped at T - 2 = 5 \
+                 (round(3.21 T^(1/3)) = 6"
+            )),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// A lagged level that the other regressors explain is a rank-deficient ADF regression.
+    #[test]
+    fn test_llc_unit_sigma_skips_explained_level() {
+        let series: Vec<f64> = (0..20).map(|t| 1.0 + 0.1 * f64::from(t % 3)).collect();
+        let e: Vec<f64> = (0..19).map(|t| 0.01 * f64::from(t % 5) - 0.02).collect();
+        let v = vec![0.0; 19];
+        assert!(matches!(
+            llc_unit_sigma(&series, &e, &v, PanelModel::Intercept, 0, true),
+            Err(UnitError::Skip { reason, .. }) if reason.starts_with("rank deficient")
+        ));
+        let v: Vec<f64> = (0..19).map(|t| 0.3 * f64::from(t % 4) - 0.45).collect();
+        assert!(llc_unit_sigma(&series, &e, &v, PanelModel::Intercept, 0, true).is_ok());
+    }
+
+    /// Hadri's z of plm::purtest(test = "hadri", Hcons, dfcor) on the stationary and the
+    /// random-walk panels, with the per-unit LM.
+    #[test]
+    fn test_validate_purtest_stat_hadri() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, exo) in &EXOS[..2] {
+            for col in ["y", "y_rw"] {
+                for dfcor in [false, true] {
+                    for (variance, v) in [
+                        (HadriVariance::Heteroskedastic, "hcons"),
+                        (HadriVariance::Homoskedastic, "homo"),
+                    ] {
+                        let key = format!("hadri_{}_{v}", stat_tag(col, exo, dfcor));
+                        let mut cf = cfg(PanelUnitRootTest::Hadri, *model, None);
+                        cf.dfcor = dfcor;
+                        cf.hadri_variance = variance;
+                        let r = run_panel_unit_root(&ds, col, "id", "t", cf).unwrap();
+                        c.scalar(&format!("{key}_stat"), r.statistic, Tol::stat(500))
+                            .scalar(&format!("{key}_p"), r.p_value, Tol::p_value(500));
+                        if variance == HadriVariance::Heteroskedastic {
+                            c.vector(
+                                &format!("{key}_lm"),
+                                r.unit_statistics.as_deref().unwrap(),
+                                Tol::stat(500),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        c.finish();
+    }
+
+    /// Hadri's long-run option: the per-unit statistics are tseries::kpss.test's, with its
+    /// short truncation lag (3 at T = 50) or a given one (10, its long rule at T = 50).
+    #[test]
+    fn test_validate_purtest_stat_hadri_long_run() {
+        let (case, ds) = crate::test_support::load_case("purtest_stat_ar05");
+        let mut c = Check::new(&case);
+        for (model, null) in [
+            (PanelModel::Intercept, "level"),
+            (PanelModel::Trend, "trend"),
+        ] {
+            for col in ["y", "y_rw"] {
+                let rw = if col == "y" { "" } else { "rw_" };
+                for (lags, len) in [(None, "short"), (Some(10), "long")] {
+                    let key = format!("kpss_{rw}{null}_{len}");
+                    let mut cf = cfg(PanelUnitRootTest::Hadri, model, None);
+                    cf.hadri_variance = HadriVariance::LongRun { lags };
+                    let r = run_panel_unit_root(&ds, col, "id", "t", cf).unwrap();
+                    c.vector(&key, r.unit_statistics.as_deref().unwrap(), Tol::stat(500));
+                    let lag = case.scalar(&format!("{key}_lag"));
+                    assert_eq!(
+                        r.variance,
+                        format!("long-run, Bartlett kernel, {lag} lag(s) (tseries::kpss.test)")
+                    );
+                }
+            }
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_hadri_refuses_model_none_unbalanced_and_lags() {
+        let message = |ds: &Dataset, f: &dyn Fn(&mut PanelUnitRootConfig)| {
+            let mut c = cfg(PanelUnitRootTest::Hadri, PanelModel::Intercept, None);
+            f(&mut c);
+            match run_panel_unit_root(ds, "y", "unit", "time", c) {
+                Err(EconError::InvalidSpecification { message }) => message,
+                other => panic!("{other:?}"),
+            }
+        };
+        let ds = noisy_panel(&[30; 6], 13);
+        assert!(
+            message(&ds, &|c| c.model = PanelModel::None)
+                .starts_with("Hadri's test needs model intercept or trend")
+        );
+        assert!(
+            message(&ds, &|c| c.lags = Some(2))
+                .starts_with("the Hadri test uses no lagged differences; lags,")
+        );
+        assert!(
+            message(&ds, &|c| {
+                c.hadri_variance = HadriVariance::LongRun { lags: Some(30) }
+            })
+            .contains("truncation lag (30) must be below")
+        );
+        let unbalanced = noisy_panel(&[30, 30, 30, 28], 14);
+        assert!(
+            message(&unbalanced, &|_| {}).contains(
+                "needs a balanced panel (every unit with the same number of observations"
+            )
+        );
+    }
+
+    #[test]
+    fn test_hadri_variance_option_parses_and_conflicts() {
+        HADRI_VARIANCES.validate().unwrap();
+        for (name, v) in [
+            ("heteroskedastic", HadriVariance::Heteroskedastic),
+            ("Hcons", HadriVariance::Heteroskedastic),
+            ("het", HadriVariance::Heteroskedastic),
+            ("homo", HadriVariance::Homoskedastic),
+            ("iid", HadriVariance::Homoskedastic),
+            ("long-run", HadriVariance::LongRun { lags: None }),
+            ("bartlett", HadriVariance::LongRun { lags: None }),
+        ] {
+            assert_eq!(HadriVariance::from_option(name, None).unwrap(), v, "{name}");
+        }
+        assert_eq!(
+            HadriVariance::from_option("lrv", Some(4)).unwrap(),
+            HadriVariance::LongRun { lags: Some(4) }
+        );
+        let e = HadriVariance::from_option("newey", None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("heteroskedastic, homoskedastic, long_run")),
+            "{e:?}"
+        );
+        assert!(HadriVariance::from_option("homo", Some(2)).is_err());
+        assert_eq!(
+            HadriVariance::names_help(),
+            "heteroskedastic | homoskedastic | long_run"
+        );
+        let mut c = cfg(PanelUnitRootTest::LLC, PanelModel::Intercept, Some(1));
+        c.hadri_variance = HadriVariance::Homoskedastic;
+        let e =
+            run_panel_unit_root(&noisy_panel(&[30; 6], 15), "y", "unit", "time", c).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message == "hadri_variance applies only to the Hadri test, not Levin-Lin-Chu"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_hadri_display_names_variance() {
+        let ds = noisy_panel(&[30; 6], 16);
+        let mut c = cfg(PanelUnitRootTest::Hadri, PanelModel::Trend, None);
+        let text = run_panel_unit_root(&ds, "y", "unit", "time", c.clone())
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains(
+                "Variance:   heteroskedasticity-consistent, per unit (plm Hcons = TRUE)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Residual variance: rss/(T - k) (dfcor = true)"),
+            "{text}"
+        );
+        assert!(!text.contains("ADF residual variance"), "{text}");
+        c.hadri_variance = HadriVariance::LongRun { lags: None };
+        let text = run_panel_unit_root(&ds, "y", "unit", "time", c)
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains("Variance:   long-run, Bartlett kernel, 2 lag(s) (tseries::kpss.test)"),
+            "{text}"
+        );
+        assert!(!text.contains("Residual variance"), "{text}");
+    }
+
+    /// A constant unit has no residual variance: an error naming it, not an infinite LM.
+    #[test]
+    fn test_hadri_constant_unit_is_an_error() {
+        let mut df = noisy_panel(&[30; 5], 17).df().clone();
+        let flat = DataFrame::new(vec![
+            Column::new("unit".into(), vec![6i64; 30]),
+            Column::new("time".into(), (1..=30i64).collect::<Vec<_>>()),
+            Column::new("y".into(), vec![2.5; 30]),
+        ])
+        .unwrap();
+        df.vstack_mut(&flat).unwrap();
+        let e = run_panel_unit_root(
+            &Dataset::new(df),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::Hadri, PanelModel::Intercept, None),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::SingularMatrix { context, .. }
+                if context == "Hadri: unit '6' has no variation around its mean"),
+            "{e:?}"
+        );
     }
 }
