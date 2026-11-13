@@ -174,6 +174,14 @@ fn solve_residual_ok(a: &ArrayView2<f64>, x: &Array1<f64>, b: &Array1<f64>) -> b
     inf_norm(&r) <= bound
 }
 
+/// `||A x - b||_inf <= sqrt(eps) ||b||_inf` (the early-return condition of [`solve`], next to
+/// the backward-error check of `solve_residual_ok`).
+fn residual_small_relative_to_b(a: &ArrayView2<f64>, x: &Array1<f64>, b: &Array1<f64>) -> bool {
+    let inf_norm = |v: &Array1<f64>| v.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+    let r = a.dot(x) - b;
+    inf_norm(&r) <= f64::EPSILON.sqrt() * inf_norm(b)
+}
+
 /// Convert ndarray Array2 to faer Mat
 pub fn ndarray_to_faer(arr: &ArrayView2<f64>) -> Mat<f64> {
     let (rows, cols) = arr.dim();
@@ -420,9 +428,10 @@ pub fn cholesky(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
 /// - Non-square `a`: [`LinalgError::NotSquare`]; `b` of another length:
 ///   [`LinalgError::DimensionMismatch`]; a non-finite entry in `a` or `b`:
 ///   [`LinalgError::NonFinite`].
-/// - The solution by LU with partial pivoting is returned if it is finite and
+/// - The solution by LU with partial pivoting is returned if it is finite,
 ///   `||A x - b||_inf <= INVERSE_RESIDUAL_FACTOR * n * eps * (||A||_inf ||x||_inf + ||b||_inf)`
-///   (a normwise backward error of at most 100 n eps).
+///   (a normwise backward error of at most 100 n eps) and `||A x - b||_inf <= sqrt(eps)
+///   ||b||_inf` (a matrix singular to working precision can pass the first check alone).
 /// - Otherwise, if `condition_number(a) > CONDITION_THRESHOLD`, the matrix is treated
 ///   as singular ([`LinalgError::SingularMatrix`]); else `pseudoinverse(a) b` is
 ///   returned under the same check, or [`LinalgError::SingularMatrix`].
@@ -449,7 +458,10 @@ pub fn solve(a: &ArrayView2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, Linalg
     let col_b = Col::<f64>::from_fn(b.len(), |i| b[i]);
     let x = faer_col_to_ndarray(&mat_a.partial_piv_lu().solve(&col_b));
     drop(mat_a);
-    if solve_residual_ok(a, &x, b) {
+    // A small backward error alone does not certify the LU solution: a matrix singular to
+    // working precision whose pivots round away from zero passes it with a huge x. The
+    // early return also requires a residual of at most sqrt(eps) ||b||.
+    if solve_residual_ok(a, &x, b) && residual_small_relative_to_b(a, &x, b) {
         return Ok(x);
     }
 
@@ -965,6 +977,11 @@ mod tests {
         }
         let singular = array![[1.0, 2.0], [2.0, 4.0]];
         let r = solve(&singular.view(), &array![1.0, 3.0]);
+        assert!(matches!(r, Err(LinalgError::SingularMatrix)), "{r:?}");
+        // singular to working precision, with LU pivots that round away from zero: the
+        // backward error is small but x is huge and the residual is of the order of b
+        let near = array![[0.1, 0.3], [0.3, 0.9]];
+        let r = solve(&near.view(), &array![1.0, 1.0]);
         assert!(matches!(r, Err(LinalgError::SingularMatrix)), "{r:?}");
     }
 

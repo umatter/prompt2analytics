@@ -78,7 +78,7 @@ impl std::str::FromStr for GlmnetFamily {
             .trim()
             .to_ascii_lowercase()
             .chars()
-            .map(|c| if matches!(c, ' ' | '-' | '.') { '_' } else { c })
+            .filter(|c| !matches!(c, ' ' | '-' | '.' | '_'))
             .collect();
         match key.as_str() {
             "gaussian" | "linear" | "normal" => Ok(GlmnetFamily::Gaussian),
@@ -362,7 +362,17 @@ fn standardize_design(
         for (zi, &v) in zj.iter_mut().zip(col.iter()) {
             *zi = (v - c) / s;
         }
-        xv.push(zj.iter().map(|v| v * v).sum::<f64>() / nf);
+        let v = zj.iter().map(|v| v * v).sum::<f64>() / nf;
+        if !(mean.is_finite() && sd.is_finite() && v.is_finite()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "column {} of x is too large in magnitude: its mean or variance is not \
+                     finite in double precision; rescale it",
+                    j + 1
+                ),
+            });
+        }
+        xv.push(v);
         center.push(c);
         scale.push(s);
         usable.push(ok);
@@ -423,6 +433,34 @@ struct Wls<'a> {
 }
 
 impl<'a> Wls<'a> {
+    /// [`Wls::new`] for the weights `w`, reusing the column list and the curvature buffer of
+    /// an earlier solve (from [`Wls::into_buffers`]) instead of allocating them again.
+    fn reweighted(design: &'a Design, w: &'a [f64], all: Vec<usize>, mut v: Vec<f64>) -> Self {
+        let nf = design.n as f64;
+        v.clear();
+        v.extend((0..design.p).map(|j| {
+            design
+                .col(j)
+                .iter()
+                .zip(w)
+                .map(|(z, w)| w * z * z)
+                .sum::<f64>()
+                / nf
+        }));
+        Wls {
+            design,
+            w: Some(w),
+            v,
+            sum_w: w.iter().sum(),
+            all,
+        }
+    }
+
+    /// The column list and the curvature buffer, for [`Wls::reweighted`].
+    fn into_buffers(self) -> (Vec<usize>, Vec<f64>) {
+        (self.all, self.v)
+    }
+
     fn new(design: &'a Design, w: Option<&'a [f64]>) -> Self {
         let nf = design.n as f64;
         let (v, sum_w) = match w {
@@ -551,6 +589,28 @@ fn truncation_warning(k: usize, len: usize, lambda: f64, max_iter: usize) -> Str
          {max_iter} coordinate passes over the path; the fits for the {} larger lambdas are returned",
         k - 1
     )
+}
+
+/// The truncation note when the IRLS iterations of the `k`-th (1-based) of `len` lambdas hit
+/// their cap ([`MXIT_IRLS`]), which is not the coordinate-pass budget `max_iter`.
+fn irls_truncation_warning(k: usize, len: usize, lambda: f64) -> String {
+    format!(
+        "IRLS did not converge in {MXIT_IRLS} iterations at lambda[{k}] of {len} (lambda = \
+         {lambda:.6e}); the fits for the {} larger lambdas are returned",
+        k - 1
+    )
+}
+
+/// `ConvergenceFailure` when the IRLS iterations of the first lambda hit their cap.
+fn irls_failure(k: usize, last_change: f64) -> EconError {
+    EconError::ConvergenceFailure {
+        iterations: MXIT_IRLS,
+        last_change,
+        suggestion: format!(
+            "IRLS did not converge in {MXIT_IRLS} iterations at lambda[{k}]; the binomial \
+             fit may be (quasi-)separated: try a larger lambda or alpha < 1"
+        ),
+    }
 }
 
 /// `ConvergenceFailure` when not even the first lambda converged.
@@ -869,10 +929,14 @@ fn binomial_path(
     };
     let mut fits = resource::try_with_capacity(lambdas.len(), "glmnet coefficient path")?;
     let mut warnings = Vec::new();
+    // buffers reused across IRLS iterations and lambdas
+    let mut b_old = vec![0.0; p];
+    let (mut all, mut v_buf) = (design.usable_columns(), Vec::with_capacity(p));
     for (k, &lambda) in lambdas.iter().enumerate() {
         let l1 = lambda * config.alpha;
         let l2 = lambda * (1.0 - config.alpha);
-        let mut failed = None;
+        // Some((last change, whether the IRLS iteration cap was hit))
+        let mut failed: Option<(f64, bool)> = None;
         for outer in 0..MXIT_IRLS {
             // eta = b0 + z b
             eta.fill(b0);
@@ -886,10 +950,16 @@ fn binomial_path(
                 w[i] = pr * (1.0 - pr);
                 r[i] = (y01[i] - pr) / w[i];
             }
-            let wls = Wls::new(design, Some(&w));
-            let (b_old, b0_old) = (b.clone(), b0);
+            let wls = Wls::reweighted(
+                design,
+                &w,
+                std::mem::take(&mut all),
+                std::mem::take(&mut v_buf),
+            );
+            b_old.copy_from_slice(&b);
+            let b0_old = b0;
             let intercept = config.intercept.then_some(&mut b0);
-            if let Solve::Budget(dlx) = wls.solve(
+            let solved = wls.solve(
                 &mut b,
                 intercept,
                 &mut r,
@@ -897,30 +967,35 @@ fn binomial_path(
                 l2,
                 config.thresh,
                 &mut budget,
-            )? {
-                failed = Some(dlx);
-                break;
-            }
+            );
             let change = (0..p)
                 .map(|j| wls.v[j] * (b[j] - b_old[j]).powi(2))
                 .fold(wls.sum_w / nf * (b0 - b0_old).powi(2), f64::max);
+            (all, v_buf) = wls.into_buffers();
+            if let Solve::Budget(dlx) = solved? {
+                failed = Some((dlx, false));
+                break;
+            }
             if change < config.thresh {
                 break;
             }
             if outer + 1 == MXIT_IRLS {
-                failed = Some(change);
+                failed = Some((change, true));
             }
         }
-        if let Some(dlx) = failed {
+        if let Some((dlx, irls_cap)) = failed {
             if fits.is_empty() {
-                return Err(first_lambda_failure(config.max_iter, dlx));
+                return Err(if irls_cap {
+                    irls_failure(k + 1, dlx)
+                } else {
+                    first_lambda_failure(config.max_iter, dlx)
+                });
             }
-            warnings.push(truncation_warning(
-                k + 1,
-                lambdas.len(),
-                lambda,
-                config.max_iter,
-            ));
+            warnings.push(if irls_cap {
+                irls_truncation_warning(k + 1, lambdas.len(), lambda)
+            } else {
+                truncation_warning(k + 1, lambdas.len(), lambda, config.max_iter)
+            });
             break;
         }
         // deviance at the converged coefficients
@@ -993,6 +1068,14 @@ pub fn glmnet(
                 .sum::<f64>()
         }
     };
+
+    if !null_deviance.is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: "the response is too large in magnitude: its null deviance is not finite \
+                      in double precision; rescale it"
+                .to_string(),
+        });
+    }
 
     // lambda_max: the smallest lambda at which every coefficient is zero (glmnet), from the
     // gradient at the null fit; divided by max(alpha, 1e-3) so a ridge path starts where
@@ -1149,6 +1232,11 @@ pub fn cv_glmnet_foldid(
     let k = foldid.iter().copied().max().unwrap_or(0);
     if k < 2 {
         return spec("foldid must use at least 2 folds".to_string());
+    }
+    if k > n {
+        return spec(format!(
+            "foldid labels must be 1, 2, ..., K with K at most the {n} rows (got label {k})"
+        ));
     }
     let mut sizes = resource::try_vec(k, 0usize, "glmnet fold sizes")?;
     for &f in foldid {
@@ -1509,12 +1597,14 @@ impl std::fmt::Display for GlmnetCvResult {
         writeln!(
             f,
             "  lambda.min:  {:.4e} (index {})",
-            self.lambda_min, self.lambda_min_index
+            self.lambda_min,
+            self.lambda_min_index + 1
         )?;
         writeln!(
             f,
             "  lambda.1se:  {:.4e} (index {})",
-            self.lambda_1se, self.lambda_1se_index
+            self.lambda_1se,
+            self.lambda_1se_index + 1
         )?;
         writeln!(f)?;
         let (min, se1) = (self.fit_min(), self.fit_1se());
@@ -1555,6 +1645,109 @@ mod tests {
     use crate::resource::{self, Budget, CancelToken};
     use approx::assert_relative_eq;
     use ndarray::array;
+
+    /// Family names ignore case and the separators ' ', '-', '.', '_' (dropped, as documented).
+    #[test]
+    fn test_glmnet_family_ignores_separators() {
+        for g in ["gaus-sian", "gaus sian", "Gaus.Sian", "gaus_sian"] {
+            assert_eq!(
+                g.parse::<GlmnetFamily>().unwrap(),
+                GlmnetFamily::Gaussian,
+                "{g}"
+            );
+        }
+        for b in ["bi nomial", "bi-nomial", "LOG_IT"] {
+            assert_eq!(
+                b.parse::<GlmnetFamily>().unwrap(),
+                GlmnetFamily::Binomial,
+                "{b}"
+            );
+        }
+    }
+
+    /// Inputs whose mean, variance or null deviance overflow are refused, naming the column
+    /// or the response.
+    #[test]
+    fn test_glmnet_refuses_overflowing_inputs() {
+        let n = 12;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            let v = ((i * 7 + j * 3) % 5) as f64 + 0.1 * i as f64;
+            if j == 1 { v * 1e300 } else { v }
+        });
+        let y = Array1::from_shape_fn(n, |i| 1.0 + 0.3 * i as f64 + ((i * 5) % 3) as f64 * 0.2);
+        match glmnet(x.view(), y.view(), &GlmnetConfig::default()) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("column 2"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let x = x.mapv(|v| if v > 1e200 { v / 1e300 } else { v });
+        let y = y.mapv(|v| v * 1e300);
+        match glmnet(x.view(), y.view(), &GlmnetConfig::default()) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("response"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// A fold label above the number of rows is refused before any allocation sized by it.
+    #[test]
+    fn test_cv_glmnet_fold_label_above_n() {
+        let x = Array2::from_shape_fn((6, 1), |(i, _)| i as f64 + 0.3 * ((i * 3) % 2) as f64);
+        let y = Array1::from(vec![1.1, 1.9, 3.2, 3.8, 5.1, 6.3]);
+        let foldid = [1usize, 2, 1, 2, 1, usize::MAX];
+        match cv_glmnet_foldid(x.view(), y.view(), &GlmnetConfig::default(), &foldid) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("at most the 6 rows"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// The IRLS cap has its own message, not the coordinate-pass budget's.
+    #[test]
+    fn test_glmnet_irls_cap_message() {
+        let w = irls_truncation_warning(3, 10, 0.25);
+        assert!(
+            w.starts_with("IRLS did not converge in 100 iterations at lambda[3]"),
+            "{w}"
+        );
+        assert!(!w.contains("max_iter"), "{w}");
+        match irls_failure(1, 0.5) {
+            EconError::ConvergenceFailure {
+                iterations,
+                suggestion,
+                ..
+            } => {
+                assert_eq!(iterations, MXIT_IRLS);
+                assert!(suggestion.contains("lambda[1]"), "{suggestion}");
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// The CV Display numbers lambdas from 1, as the fit list does.
+    #[test]
+    fn test_cv_glmnet_display_index_is_one_based() {
+        let x = Array2::from_shape_fn((30, 2), |(i, j)| {
+            ((i * (j + 3)) % 7) as f64 + 0.1 * i as f64 * (j as f64 + 1.0)
+        });
+        let y = Array1::from_shape_fn(30, |i| {
+            1.0 + 0.5 * x[[i, 0]] - 0.2 * x[[i, 1]] + (((i * 13) % 5) as f64 - 2.0) * 0.3
+        });
+        let foldid: Vec<usize> = (0..30).map(|i| i % 3 + 1).collect();
+        let cv = cv_glmnet_foldid(x.view(), y.view(), &GlmnetConfig::default(), &foldid).unwrap();
+        let t = cv.to_string();
+        assert!(
+            t.contains(&format!("(index {})", cv.lambda_min_index + 1)),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!("(index {})", cv.lambda_1se_index + 1)),
+            "{t}"
+        );
+    }
 
     #[test]
     fn test_soft_threshold() {

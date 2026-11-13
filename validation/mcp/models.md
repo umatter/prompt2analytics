@@ -76,7 +76,7 @@ Tests of `crates/p2a-mcp/tests/tier3/wp58_models.rs` unless the module is named.
 | `test_validate_mcp_quantreg_br_se` | regression_quantreg | `tau{25,50,75}_coef`, `tau25_se_{nid,iid,ker}`, `tau{25,50,75}_se_nid` | printed | TOOL-14, TOOL-32 |
 | `test_validate_mcp_regression_ols_aliased` | regression_ols | `trap_coef`, `trap_se` | printed | TOOL-32 |
 | `test_validate_mcp_regression_diagnostics_tests` | regression_diagnostics, _bgtest, _resettest, _waldtest, _harvtest | `jarque_bera`, `breusch_pagan`, `durbin_watson`, `condition_number`, `bgtest4_f`, `princomp_stat`, `princomp_df`, `wald_drop_x2_x3_f`, `harvey_collier`, `harvey_collier_df` | printed; df exact | TOOL-32 |
-| `test_validate_mcp_regression_hac_dk` | regression_hac, regression_driscoll_kraay | `coef`, `kernhac_parzen_bw4`; `coef`, `n_periods` | printed | TOOL-32 |
+| `test_validate_mcp_regression_hac_dk` | regression_hac, regression_driscoll_kraay | `coef`, `kernhac_parzen_bw4` (lag 3); `coef`, `n_periods`, `vcovpl_lag2` | printed | TOOL-32 |
 | `test_validate_mcp_loess_x10_and_mass_point` | regression_loess | `fit_s075_d2`, `fit_s075_d1`, `fit_s12_d2`, `loess_masspoint_expected` | `Tol::coef(10)`, `Tol::coef(100)` | TOOL-32 |
 | `test_validate_mcp_supsmu_span_and_periodic` | regression_supsmu | `cv_x`, `span03_y`, `weighted_y`, `supsmu_periodic_y`, `supsmu_plain_y` | `Tol::coef(100)` | TOOL-32 |
 | `test_validate_mcp_regression_step` | regression_step | `forward_aic`, `backward_bic` | `Tol::stat(n)` | TOOL-32 |
@@ -137,7 +137,6 @@ R-pinned.
 
 Registry deviations (quantities not pinned through MCP):
 
-- REG-24: Driscoll-Kraay standard errors.
 - REG-29, REG-30: smooth.spline fit, df, lambda and criterion value (the property test
   `test_mcp_smooth_spline_criterion` compares with the library and checks that GCV and CV
   differ).

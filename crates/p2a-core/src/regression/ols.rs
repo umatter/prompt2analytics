@@ -66,6 +66,7 @@ use crate::data::columns::{
     ColumnRequest, Columns, Factor, MissingSummary, NaPolicy, econ_error_from_design,
 };
 use crate::errors::{EconError, EconResult, EstimationWarning};
+use crate::linalg::matrix_ops::{eig_symmetric, matrix_inverse};
 use crate::linalg::solve::{
     LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
 };
@@ -237,6 +238,13 @@ pub struct OlsResult {
     /// nothing is aliased.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliased: Vec<String>,
+    /// The overall Wald F test of the slopes computed with the reported covariance
+    /// (HC0-HC3, clustered), as `lmtest::waldtest(fit, vcov = V, test = "F")`. `None` for
+    /// classical standard errors, where it equals [`f_statistic`](Self::f_statistic), and when
+    /// the slopes' covariance is singular or not positive semi-definite (with a warning).
+    /// [`f_statistic`](Self::f_statistic) stays the classical `summary.lm` F.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wald_f: Option<WaldF>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -263,6 +271,101 @@ pub struct OlsResult {
     /// with an intercept, about zero without (summary.lm).
     #[serde(skip)]
     pub sst: f64,
+    /// The solve the fit took (`None` after deserialisation).
+    #[serde(skip)]
+    pub(crate) path: Option<OlsPath>,
+}
+
+/// An overall F test of the slopes with a robust covariance V:
+/// `F = b_s' V_ss^{-1} b_s / q` over the q identified slopes s (every identified coefficient
+/// without an intercept), on q and `df_resid` degrees of freedom. This is
+/// `lmtest::waldtest(fit, vcov = V, test = "F")` and `car::linearHypothesis(fit, ..,
+/// vcov. = V, test = "F")`; for clustered covariances, too, the denominator df is n - k
+/// (Stata uses G - 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaldF {
+    /// The F statistic.
+    pub statistic: f64,
+    /// Numerator df: the number of identified slopes tested.
+    pub df1: usize,
+    /// Denominator df: the residual df of the fit.
+    pub df2: usize,
+    /// Upper-tail p-value of F(df1, df2).
+    pub p_value: f64,
+    /// The covariance used: "HC0" .. "HC3", "clustered" or "two-way clustered".
+    pub cov_label: String,
+}
+
+impl WaldF {
+    /// The Display line "F-statistic (Wald, <label>): F on q and df DF (p = ..)".
+    fn line(&self) -> String {
+        format!(
+            "F-statistic (Wald, {}): {:.4} on {} and {} DF (p = {:.4})",
+            self.cov_label, self.statistic, self.df1, self.df2, self.p_value
+        )
+    }
+}
+
+/// The Wald F of the identified slopes of `beta` with the covariance `vcov` (k x k, NaN rows
+/// and columns for aliased coefficients). `intercept_col` is the intercept's column, left
+/// out. `Ok(None)` when there is no slope; `Err(warning)` when the slopes' covariance cannot
+/// be inverted (the test is not reported). Cancellation and the allocation ceiling propagate.
+fn robust_wald_f(
+    beta: &Array1<f64>,
+    vcov: &Array2<f64>,
+    intercept_col: Option<usize>,
+    df_resid: usize,
+    label: &str,
+) -> EconResult<Result<Option<WaldF>, String>> {
+    let slopes: Vec<usize> = (0..beta.len())
+        .filter(|&j| Some(j) != intercept_col && !beta[j].is_nan())
+        .collect();
+    let q = slopes.len();
+    if q == 0 || df_resid == 0 {
+        return Ok(Ok(None));
+    }
+    let v = select_block(vcov, &slopes);
+    let b: Array1<f64> = slopes.iter().map(|&j| beta[j]).collect();
+    let inv = match sym_inverse(v.view(), SingularPolicy::Error, "robust Wald F") {
+        Ok(inv) => inv,
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+        Err(_) => {
+            return Ok(Err(format!(
+                "The Wald F test with the {label} covariance is not reported: the covariance \
+                 of the slopes is singular"
+            )));
+        }
+    };
+    let statistic = b.dot(&inv.inverse.dot(&b)) / q as f64;
+    if !statistic.is_finite() || statistic < 0.0 {
+        return Ok(Err(format!(
+            "The Wald F test with the {label} covariance is not reported: the covariance of \
+             the slopes is not positive definite"
+        )));
+    }
+    Ok(Ok(Some(WaldF {
+        statistic,
+        df1: q,
+        df2: df_resid,
+        p_value: f_test_p_value(statistic, q as f64, df_resid as f64),
+        cov_label: label.to_string(),
+    })))
+}
+
+/// The first constant, non-zero column of `x` (the intercept, in any position), when the
+/// model has an intercept.
+fn intercept_column(x: ndarray::ArrayView2<'_, f64>, intercept: bool) -> Option<usize> {
+    if !intercept || x.nrows() == 0 {
+        return None;
+    }
+    x.columns().into_iter().position(|col| {
+        let v0 = col[0];
+        if !v0.is_finite() || v0 == 0.0 {
+            return false;
+        }
+        let tol = 1e-10 * v0.abs().max(1.0);
+        col.iter().all(|&v| (v - v0).abs() <= tol)
+    })
 }
 
 impl LinearEstimator for OlsResult {
@@ -328,11 +431,21 @@ impl std::fmt::Display for OlsResult {
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
-        writeln!(
-            f,
-            "F-statistic: {:.4} (p = {:.4})",
-            self.f_statistic, self.f_p_value
-        )?;
+        match &self.wald_f {
+            Some(w) => {
+                writeln!(f, "{}", w.line())?;
+                writeln!(
+                    f,
+                    "F-statistic (classical): {:.4} (p = {:.4})",
+                    self.f_statistic, self.f_p_value
+                )?;
+            }
+            None => writeln!(
+                f,
+                "F-statistic: {:.4} (p = {:.4})",
+                self.f_statistic, self.f_p_value
+            )?,
+        }
         writeln!(f, "Standard Errors: {}", self.cov_type)?;
         writeln!(f)?;
         writeln!(f, "Coefficients:")?;
@@ -686,9 +799,9 @@ pub(crate) fn certainly_full_rank(x: ndarray::ArrayView2<'_, f64>) -> EconResult
 /// they meet `Tol::coef(n)` (1e-10 relative for n > 1000) across the range the normal
 /// equations accept (checked at 1e-10 relative against the QR at reciprocal conditions
 /// 2.7e-5, `ols_year_trend`, and about 1e-7, `test_ols_solve_path_threshold`, near the
-/// 1e-8 edge). The fixed-design bootstrap solver skips this step
-/// (see `FixedDesignSolver`). At or above it the unrefined error is below about 1e-12 and the solve
-/// is left as it was, bit for bit.
+/// 1e-8 edge). At or above it the unrefined error is below about 1e-12 and the solve is left
+/// as it was, bit for bit. The fixed-design bootstrap solver skips this step (see
+/// `FixedDesignSolver`).
 const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 
 /// `(X'X)^{-1}` of a full-rank, well-conditioned design and whether solves with it take a
@@ -697,7 +810,12 @@ const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 /// Built by [`normal_equations_inverse`]; the OLS fit ([`solve_ols`]) and every other
 /// least-squares fit that takes OLS's solve decision use it (panel FE and RE, HDFE, FEGLM,
 /// LLC, the GLM's IRLS, conditional and multinomial logit, GLS, sensemakr, VAR, Granger), so
-/// the thresholds and the refinement live here only.
+/// the thresholds and the refinement live here only. Two callers apply [`Self::inverse`]
+/// without the refinement step on purpose: the fixed-design bootstrap
+/// (`FixedDesignSolver`) and Cubist's leaf models (`ml::cubist`), which are refit and
+/// smoothed, so the refinement's last bits do not reach their predictions; unrefined, the
+/// coefficients' relative error is of order eps / rcond, at most about 1e-8 where the normal
+/// equations are accepted.
 #[derive(Debug, Clone)]
 pub(crate) struct NormalInverse {
     /// `(X'X)^{-1}` (k x k), the unscaled covariance of the coefficients.
@@ -887,8 +1005,17 @@ struct IdentifiedDesign<'a> {
 
 impl<'a> IdentifiedDesign<'a> {
     /// The identified part of `x`, the design `ols` was fitted on. Refuses an `x` whose shape
-    /// is not the fit's.
+    /// is not the fit's, or whose columns are clearly not orthogonal to the fit's residuals
+    /// ([`IdentifiedDesign::check_normal_equations`]).
     fn of(x: ndarray::ArrayView2<'a, f64>, ols: &OlsResult) -> EconResult<Self> {
+        let id = Self::of_fitted(x, ols)?;
+        id.check_normal_equations(ols)?;
+        Ok(id)
+    }
+
+    /// [`IdentifiedDesign::of`] for an `x` the caller built from the fit's own data (the
+    /// clustered fit), where the normal-equations check cannot fail and is skipped.
+    fn of_fitted(x: ndarray::ArrayView2<'a, f64>, ols: &OlsResult) -> EconResult<Self> {
         let k = ols.n_params;
         if x.nrows() != ols.n_obs || x.ncols() != k {
             return Err(EconError::InvalidSpecification {
@@ -910,22 +1037,62 @@ impl<'a> IdentifiedDesign<'a> {
             });
         }
         let cols: Vec<usize> = (0..k).filter(|&j| !ols.beta[j].is_nan()).collect();
-        if cols.len() == k {
-            return Ok(IdentifiedDesign {
+        let id = if cols.len() == k {
+            IdentifiedDesign {
                 cols,
                 k,
                 x: ndarray::CowArray::from(x),
                 unscaled: ols.xtx_inv.clone(),
+            }
+        } else {
+            let x1 = select_columns(x, &cols)?;
+            let unscaled = select_block(&ols.xtx_inv, &cols);
+            IdentifiedDesign {
+                cols,
+                k,
+                x: ndarray::CowArray::from(x1),
+                unscaled,
+            }
+        };
+        Ok(id)
+    }
+
+    /// `x` must be the fitted design, which the normal equations of the fit make orthogonal
+    /// to the residuals. The rounding in X'e of a correct fit is of order
+    /// eps ‖X‖ (‖X‖ ‖b‖ + ‖y‖) whatever ‖e‖ is, and 1e-6 ‖X₁‖_F (‖X₁‖_F ‖b₁‖₂ + ‖e‖₂) bounds
+    /// it with room for ill-conditioned designs fitted by the normal equations; `x` is
+    /// refused only when ‖X₁'e‖∞ exceeds that bound a thousandfold, which no correct fit comes
+    /// near. One pass over `x`. (An exact fit, or one with non-finite residuals, cannot be
+    /// checked and passes.)
+    fn check_normal_equations(&self, ols: &OlsResult) -> EconResult<()> {
+        let e = &ols.resid;
+        let r = self.cols.len();
+        if e.len() != self.x.nrows() || e.iter().any(|v| !v.is_finite()) {
+            return Ok(());
+        }
+        // X'e and ‖X‖_F² in one pass over the rows
+        let mut xte = resource::try_vec(r, 0.0_f64, "normal-equations check")?;
+        let mut x_ss = 0.0;
+        for (row, &ei) in self.x.rows().into_iter().zip(e.iter()) {
+            for (acc, &v) in xte.iter_mut().zip(row.iter()) {
+                *acc += v * ei;
+                x_ss += v * v;
+            }
+        }
+        let b_ss: f64 = self.cols.iter().map(|&j| ols.beta[j] * ols.beta[j]).sum();
+        let e_ss: f64 = e.iter().map(|v| v * v).sum();
+        let x_f = x_ss.sqrt();
+        let max = xte.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let bound = 1e-6 * x_f * (x_f * b_ss.sqrt() + e_ss.sqrt()) + f64::MIN_POSITIVE;
+        if max.is_finite() && bound.is_finite() && max > 1e3 * bound {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "x is not the design the OLS fit was computed on (its columns are not \
+                     orthogonal to the fit's residuals: max |X'e| = {max:.3e})"
+                ),
             });
         }
-        let x1 = select_columns(x, &cols)?;
-        let unscaled = select_block(&ols.xtx_inv, &cols);
-        Ok(IdentifiedDesign {
-            cols,
-            k,
-            x: ndarray::CowArray::from(x1),
-            unscaled,
-        })
+        Ok(())
     }
 
     /// Number of identified columns (the rank of the fit).
@@ -975,6 +1142,19 @@ impl FixedDesignSolver {
             Some(u) => FixedDesignSolver::Normal(u.inverse),
             None => FixedDesignSolver::Qr(Qr::decompose(x, LM_QR_TOL)?),
         })
+    }
+
+    /// The solver of a fitted model's identified design: the fit's own `(X'X)^{-1}` when the
+    /// fit took the normal equations (the same matrix [`FixedDesignSolver::new`] would form
+    /// again), [`FixedDesignSolver::new`]'s decision on the identified columns otherwise (an
+    /// aliased fit's identified columns can pass the normal-equations test).
+    fn for_fit(id: &IdentifiedDesign<'_>, path: Option<OlsPath>) -> EconResult<Self> {
+        match path {
+            Some(OlsPath::NormalEquations) if id.rank() == id.k => {
+                Ok(FixedDesignSolver::Normal(id.unscaled.clone()))
+            }
+            _ => FixedDesignSolver::new(id.x.view()),
+        }
     }
 
     /// Coefficients of `y` on `x` (the design this solver was built from).
@@ -1075,6 +1255,7 @@ fn fit_ols(
         residuals,
         unscaled: xtx_inv,
         aliased: aliased_idx,
+        path,
         ..
     } = solve;
 
@@ -1102,6 +1283,33 @@ fn fit_ols(
         let u1 = select_block(&xtx_inv, &cols);
         let v1 = compute_vcov(&x1.view(), &residuals, &u1, cov_type, n, df_resid)?;
         embed_block(&v1, &cols, k)
+    };
+
+    // The overall Wald F with a robust covariance (the classical F is kept)
+    let robust_label = match cov_type {
+        CovarianceType::Standard => None,
+        CovarianceType::HC0 => Some("HC0"),
+        CovarianceType::HC1 => Some("HC1"),
+        CovarianceType::HC2 => Some("HC2"),
+        CovarianceType::HC3 => Some("HC3"),
+    };
+    let wald_f = match robust_label {
+        None => None,
+        Some(label) => {
+            match robust_wald_f(
+                &beta,
+                &vcov,
+                intercept_column(x, intercept),
+                df_resid,
+                label,
+            )? {
+                Ok(w) => w,
+                Err(w) => {
+                    warnings.push(w);
+                    None
+                }
+            }
+        }
     };
 
     // Extract standard errors from diagonal
@@ -1156,6 +1364,7 @@ fn fit_ols(
         warnings,
         missing: MissingSummary::none(n),
         aliased,
+        wald_f,
         beta,
         se,
         resid: residuals,
@@ -1163,6 +1372,7 @@ fn fit_ols(
         xtx_inv,
         ssr,
         sst,
+        path: Some(path),
     })
 }
 
@@ -1351,9 +1561,12 @@ impl std::fmt::Display for OlsClusteredResult {
         }
         writeln!(f, "R-squared: {:.4}", self.ols.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.ols.adj_r_squared)?;
+        if let Some(w) = &self.ols.wald_f {
+            writeln!(f, "{}", w.line())?;
+        }
         writeln!(
             f,
-            "F-statistic: {:.4} (p = {:.4})",
+            "F-statistic (classical): {:.4} (p = {:.4})",
             self.ols.f_statistic, self.ols.f_p_value
         )?;
         writeln!(f)?;
@@ -1436,6 +1649,32 @@ impl OlsClusteredResult {
         cluster2: Option<&str>,
         intercept: bool,
     ) -> EconResult<OlsClusteredResult> {
+        Self::fit_with(
+            dataset,
+            y_col,
+            x_cols,
+            cluster1,
+            cluster2,
+            intercept,
+            ClusteredOptions::default(),
+        )
+    }
+
+    /// [`OlsClusteredResult::fit`] with options. Two-way clustering (`V_1 + V_2 - V_12`)
+    /// need not give a positive semi-definite covariance: one that is not is reported with a
+    /// warning (its negative variances give NaN standard errors and no Wald F), and
+    /// `opts.fix = true` sets its negative eigenvalues to 0 and rebuilds it, as
+    /// `sandwich::vcovCL(fix = TRUE)`. One-way clustering is positive semi-definite by
+    /// construction and is not changed.
+    pub fn fit_with(
+        dataset: &Dataset,
+        y_col: &str,
+        x_cols: &[&str],
+        cluster1: &str,
+        cluster2: Option<&str>,
+        intercept: bool,
+        opts: ClusteredOptions,
+    ) -> EconResult<OlsClusteredResult> {
         // Cluster ids, with the rows whose id is missing left out.
         let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
         let context = match cluster2 {
@@ -1462,7 +1701,7 @@ impl OlsClusteredResult {
         // identified columns and the fit's (X'X)^{-1} block, as sandwich::vcovCL does.
         let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
             .map_err(|e| econ_error_from_design(e, df))?;
-        let id = IdentifiedDesign::of(design.data.view(), &base_result)?;
+        let id = IdentifiedDesign::of_fitted(design.data.view(), &base_result)?;
 
         // Row indices (into the sample) of each cluster
         let factor1 = ids.factor(cluster1);
@@ -1496,6 +1735,7 @@ impl OlsClusteredResult {
             );
         }
 
+        let mut indefinite = false;
         let (vcov, n_clusters_2, cluster_type) = if let Some(c2) = cluster2 {
             // Two-way clustering
             let factor2 = ids.factor(c2);
@@ -1511,7 +1751,7 @@ impl OlsClusteredResult {
             }
 
             let intersection = intersection_groups(factor1, factor2);
-            let vcov = compute_twoway_clustered_vcov(
+            let mut vcov = compute_twoway_clustered_vcov(
                 &id.x.view(),
                 &base_result.resid,
                 &id.unscaled,
@@ -1519,6 +1759,10 @@ impl OlsClusteredResult {
                 &clusters2,
                 &intersection,
             )?;
+            if let Some(w) = twoway_psd_check(&mut vcov, opts.fix)? {
+                indefinite = !opts.fix;
+                base_result.warnings.push(w);
+            }
 
             (
                 id.embed(&vcov),
@@ -1560,6 +1804,26 @@ impl OlsClusteredResult {
             })
             .collect();
 
+        // The overall Wald F with the clustered covariance (the classical F is kept)
+        let label = if cluster2.is_some() {
+            "two-way clustered"
+        } else {
+            "clustered"
+        };
+        let intercept_col = intercept_column(design.data.view(), intercept);
+        // (a Wald form on a covariance that is not positive semi-definite has no meaning)
+        base_result.wald_f = if indefinite {
+            None
+        } else {
+            match robust_wald_f(&base_result.beta, &vcov, intercept_col, df, label)? {
+                Ok(w) => w,
+                Err(w) => {
+                    base_result.warnings.push(w);
+                    None
+                }
+            }
+        };
+
         // Update the result
         base_result.coefficients = coefficients;
         base_result.se = se;
@@ -1578,6 +1842,87 @@ impl OlsClusteredResult {
             cluster_var_2: cluster2.map(|s| s.to_string()),
         })
     }
+}
+
+/// Options of [`OlsClusteredResult::fit_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClusteredOptions {
+    /// Two-way clustering: set the negative eigenvalues of a covariance that is not
+    /// positive semi-definite to 0 and rebuild it (`sandwich::vcovCL(fix = TRUE)`).
+    pub fix: bool,
+}
+
+/// The eigenvalue check of a two-way clustered covariance (rank x rank): `None` when it is
+/// positive semi-definite, otherwise a warning naming its smallest eigenvalue. A smallest
+/// eigenvalue above `-16 k eps max|λ|` is rounding on a covariance that is positive
+/// semi-definite in exact arithmetic (a rank-deficient one with few clusters, say) and is not
+/// reported. With `fix` the covariance is rebuilt as `Q max(Λ, 0) Q'` whenever an eigenvalue
+/// is negative, rounding-level ones included. Without `fix` a reported covariance is
+/// indefinite: the caller withholds the Wald F, which the warning says.
+fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<String>> {
+    let sym = (&*vcov + &vcov.t()) * 0.5;
+    // A Cholesky factorisation with positive pivots shows the covariance is positive
+    // definite, so without `fix` the eigenvalues are not needed (they are with `fix`, which
+    // also rebuilds a covariance whose negative eigenvalues are at rounding level)
+    if !fix && positive_definite_by_cholesky(&sym) {
+        return Ok(None);
+    }
+    let (values, vectors) = eig_symmetric(&sym.view()).map_err(|e| {
+        EconError::Computation(format!(
+            "eigen-decomposition of the two-way clustered covariance failed: {e}"
+        ))
+    })?;
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    if min >= 0.0 || !min.is_finite() {
+        return Ok(None);
+    }
+    let scale = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let tol = 16.0 * values.len() as f64 * f64::EPSILON * scale;
+    let reported = min < -tol;
+    if !fix {
+        return Ok(reported.then(|| {
+            format!(
+                "Two-way cluster-robust covariance is not positive semi-definite (smallest \
+                 eigenvalue {min:.6e}), so no Wald F is reported; set fix to clamp negative \
+                 eigenvalues to 0 (sandwich::vcovCL(fix = TRUE))"
+            )
+        }));
+    }
+    let clamped = values.mapv(|v| v.max(0.0));
+    let scaled = &vectors * &clamped.view().insert_axis(ndarray::Axis(0));
+    *vcov = scaled.dot(&vectors.t());
+    Ok(reported.then(|| {
+        format!(
+            "Two-way cluster-robust covariance is not positive semi-definite (smallest \
+             eigenvalue {min:.6e}); negative eigenvalues clamped to 0 (sandwich::vcovCL(fix = TRUE))"
+        )
+    }))
+}
+
+/// `true` when the Cholesky factorisation of the symmetric `m` (its lower triangle) runs to
+/// the end with finite, positive pivots, i.e. `m` is numerically positive definite.
+fn positive_definite_by_cholesky(m: &Array2<f64>) -> bool {
+    let k = m.nrows();
+    let mut l = vec![0.0_f64; k * k];
+    for j in 0..k {
+        let mut d = m[[j, j]];
+        for p in 0..j {
+            d -= l[j * k + p] * l[j * k + p];
+        }
+        if !(d > 0.0 && d.is_finite()) {
+            return false;
+        }
+        let djj = d.sqrt();
+        l[j * k + j] = djj;
+        for i in j + 1..k {
+            let mut v = m[[i, j]];
+            for p in 0..j {
+                v -= l[i * k + p] * l[j * k + p];
+            }
+            l[i * k + j] = v / djj;
+        }
+    }
+    true
 }
 
 /// The rows of `dataset` that `ids` kept, restricted to the columns `names` (each must
@@ -1732,7 +2077,8 @@ pub struct HacResult {
     pub vcov: Vec<Vec<f64>>,
     /// HAC-adjusted standard errors
     pub std_errors: Vec<f64>,
-    /// Bandwidth (number of lags) used
+    /// Lag count L: lag j has weight k(j / (L + 1)) for every kernel (sandwich's
+    /// `NeweyWest(lag = L)`, `kernHAC(bw = L + 1)`)
     pub bandwidth: usize,
     /// Kernel type used
     pub kernel: HacKernel,
@@ -1752,6 +2098,12 @@ pub struct HacResult {
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Number of lag weights in the meat, lag 0 included: the lags 0..n-1 (0..n-2 with
+    /// prewhitening) up to the last whose weight exceeds 1e-7 in absolute value
+    /// (sandwich's `weightsAndrews`). L + 1 for Bartlett, Parzen and Tukey-Hanning, L + 2
+    /// for Truncated, up to n for Quadratic Spectral.
+    #[serde(default)]
+    pub n_lag_weights: usize,
 }
 
 impl std::fmt::Display for HacResult {
@@ -1851,6 +2203,12 @@ impl HacKernel {
     }
 
     /// Compute the kernel weight for a given lag j and bandwidth m.
+    ///
+    /// Bartlett is evaluated at `j / (m + 1)`, every other kernel at `j / m`, and no kernel
+    /// has support beyond lag `m`. The OLS HAC and Driscoll-Kraay estimators use
+    /// [`HacKernel::lag_weight`] instead, which evaluates every kernel at `j / (m + 1)`
+    /// (sandwich's `NeweyWest(lag = m)` / `vcovPL(lag = m)`); this method is kept for the
+    /// general GMM's HAC weighting until that is moved to the same convention.
     pub fn weight(&self, j: usize, m: usize) -> f64 {
         if j == 0 {
             return 1.0;
@@ -1875,10 +2233,7 @@ impl HacKernel {
                 }
             }
             Self::QuadraticSpectral => {
-                let z = 6.0 * std::f64::consts::PI * j as f64 / (5.0 * m as f64);
-                let t1 = 3.0 / z.powi(2);
-                let t2 = z.sin() / z - z.cos();
-                t1 * t2
+                quadratic_spectral(6.0 * std::f64::consts::PI * j as f64 / (5.0 * m as f64))
             }
             Self::Truncated => {
                 if j <= m {
@@ -1898,6 +2253,97 @@ impl HacKernel {
     }
 }
 
+/// The Quadratic Spectral kernel `3/z² (sin z / z - cos z)` at `z > 0`. Below `z = 1e-2` the
+/// two terms cancel to `z²/3` and the closed form keeps only about `eps / z²` relative
+/// accuracy, so the Taylor series `1 - z²/10 + z⁴/280` is used there; its first omitted term
+/// is below `z⁶ / 15000`, under rounding at the switch.
+fn quadratic_spectral(z: f64) -> f64 {
+    if z < QS_SERIES_BELOW {
+        let z2 = z * z;
+        1.0 - z2 / 10.0 + z2 * z2 / 280.0
+    } else {
+        3.0 / (z * z) * (z.sin() / z - z.cos())
+    }
+}
+
+/// Where [`quadratic_spectral`] switches from its Taylor series to the closed form.
+const QS_SERIES_BELOW: f64 = 1e-2;
+
+impl HacKernel {
+    /// The kernel `k(x)` at `x >= 0` (sandwich's `kweights`): Truncated 1 for `x <= 1`;
+    /// Bartlett `1 - x` for `x < 1`; Parzen `1 - 6x² + 6x³` for `x <= 1/2` and `2(1 - x)³` for
+    /// `x <= 1`; Tukey-Hanning `(1 + cos(πx)) / 2` for `x <= 1`; zero beyond those supports.
+    /// Quadratic Spectral `3/z² (sin z / z - cos z)` with `z = 6πx/5` has unbounded support
+    /// and is 1 at `x = 0`; below `z = 1e-2` the closed form loses digits to cancellation and
+    /// its Taylor series `1 - z²/10 + z⁴/280` is used instead (exact to rounding there).
+    /// (sandwich switches QS to an exponential approximation below `|x| < 1e-3`; that is not
+    /// copied.)
+    fn at(self, x: f64) -> f64 {
+        if x == 0.0 {
+            return 1.0;
+        }
+        match self {
+            Self::Truncated => {
+                if x <= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Bartlett => {
+                if x < 1.0 {
+                    1.0 - x
+                } else {
+                    0.0
+                }
+            }
+            Self::Parzen => {
+                if x <= 0.5 {
+                    1.0 - 6.0 * x * x + 6.0 * x * x * x
+                } else if x <= 1.0 {
+                    2.0 * (1.0 - x).powi(3)
+                } else {
+                    0.0
+                }
+            }
+            Self::TukeyHanning => {
+                if x <= 1.0 {
+                    0.5 * (1.0 + (std::f64::consts::PI * x).cos())
+                } else {
+                    0.0
+                }
+            }
+            Self::QuadraticSpectral => quadratic_spectral(6.0 * std::f64::consts::PI * x / 5.0),
+        }
+    }
+
+    /// The weight of lag `j` for the lag count `lags` = L: the kernel at `x = j / (L + 1)`,
+    /// for every kernel. This is the convention of sandwich's `NeweyWest(lag = L)` and
+    /// `vcovPL(lag = L)`, so p2a's lag count L is `kernHAC(bw = L + 1)`. Lag 0 has weight 1.
+    pub fn lag_weight(self, j: usize, lags: usize) -> f64 {
+        self.at(j as f64 / (lags as f64 + 1.0))
+    }
+
+    /// The weights of lags `0..n_rows` for the lag count `lags` ([`HacKernel::lag_weight`]),
+    /// cut after the last weight whose absolute value exceeds `tol` (lag 0 is always kept).
+    /// sandwich's `weightsAndrews` cuts at `tol = 1e-7` (the HAC estimator), `meatPL` after
+    /// the last non-zero weight (`tol = 0`, Driscoll-Kraay). Bartlett, Parzen and
+    /// Tukey-Hanning stop at lag L; Truncated at L + 1 (`x = 1` is inside its support);
+    /// Quadratic Spectral can keep every lag up to `n_rows - 1`.
+    pub(crate) fn lag_set(self, lags: usize, n_rows: usize, tol: f64) -> Vec<f64> {
+        let n = n_rows.max(1);
+        // Compactly supported kernels have no weight beyond lag L + 1.
+        let horizon = match self {
+            Self::QuadraticSpectral => n,
+            _ => lags.saturating_add(2).min(n),
+        };
+        let mut w: Vec<f64> = (0..horizon).map(|j| self.lag_weight(j, lags)).collect();
+        let last = w.iter().rposition(|v| v.abs() > tol).unwrap_or(0);
+        w.truncate(last + 1);
+        w
+    }
+}
+
 /// Most lags whose cross-product sums the HAC meat accumulates in one pass over the rows.
 const HAC_LAG_BLOCK: usize = 256;
 /// Most lag cross-product sums held at once (a block has at most `HAC_LAG_SUMS / k^2` lags).
@@ -1905,26 +2351,41 @@ const HAC_LAG_SUMS: usize = 65_536;
 
 /// Compute HAC (Heteroskedasticity and Autocorrelation Consistent) covariance matrix.
 ///
-/// Implements the Newey-West (1987) estimator with various kernel options.
-/// This is the R equivalent of `sandwich::vcovHAC()`.
+/// The Newey-West (1987) estimator and its kernel variants (Andrews, 1991), as sandwich
+/// computes them with a fixed lag count: `NeweyWest(lag = L, prewhite = prewhiten,
+/// adjust = FALSE)` for the Bartlett kernel and `kernHAC(kernel, bw = L + 1, prewhite =
+/// prewhiten, adjust = FALSE)` for the others.
 ///
 /// # Mathematical Background
 ///
-/// The HAC covariance estimator is:
-/// V_HAC = (X'X)⁻¹ Ω̂ (X'X)⁻¹
+/// The HAC covariance estimator is V_HAC = (X'X)⁻¹ Ω̂ (X'X)⁻¹ with
+/// Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ'), Γ̂ⱼ = Σᵢ sᵢ sᵢ₋ⱼ' and the scores sᵢ = uᵢ xᵢ.
+/// For the lag count L every kernel weighs lag j by k(j / (L + 1)) (sandwich's
+/// `NeweyWest(lag = L)` convention). The lags summed are those of sandwich's
+/// `weightsAndrews`: 0..n-1, cut after the last weight above 1e-7 in absolute value. So
+/// Bartlett, Parzen and Tukey-Hanning sum lags 0..L, Truncated 0..L+1 (k(1) = 1), and the
+/// Quadratic Spectral kernel, whose support is unbounded, sums up to all n lags (by FFT when
+/// the `spectral-analysis` feature is on, in O(k n log n + k² n); directly in O(k² n L)
+/// otherwise). `HacResult::n_lag_weights` reports the count.
 ///
-/// where Ω̂ = Σⱼ₌₋ₘᵐ w(j/m) Γ̂ⱼ
+/// With `prewhiten`, a VAR(1) is fitted to the scores without a constant, the meat is built
+/// from its n - 1 residuals and recoloured by D = (I - A)⁻¹ (sandwich's `meatHAC(prewhite =
+/// 1)`); a VAR(1) that is not identified is an `InvalidSpecification`.
 ///
-/// and Γ̂ⱼ = (1/n) Σᵢ uᵢ uᵢ₊ⱼ xᵢ xᵢ₊ⱼ'
+/// A negative variance (possible with the Truncated and Tukey-Hanning kernels, which do not
+/// guarantee a positive semi-definite estimate) gives a NaN standard error and a warning.
 ///
 /// # Arguments
 ///
 /// * `ols_result` - OLS regression result
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
-///   fit, not recomputed from `x`, and only the shape of `x` is checked.
-/// * `bandwidth` - Optional bandwidth (number of lags). If None, uses Newey-West automatic selection.
-///   A user bandwidth must be smaller than n (otherwise `InvalidSpecification`); one above n/4
+///   fit, not recomputed from `x`. Its shape is checked, and an `x` that is clearly not the
+///   fitted design (`X'e` far from 0) is an `InvalidSpecification`.
+/// * `bandwidth` - Optional lag count L. `None` uses the fixed rule floor(4 (n/100)^(2/9))
+///   (sandwich's `vcovPL(lag = "NW1994")`), clamped to [1, n - 1]; this is not the
+///   data-driven bandwidth of `vcovHAC` or `bwNeweyWest`.
+///   A user lag count must be smaller than n (otherwise `InvalidSpecification`); one above n/4
 ///   adds an entry to `HacResult::warnings`.
 /// * `kernel` - Kernel type (default: Bartlett/Newey-West)
 /// * `prewhiten` - Whether to use VAR(1) prewhitening (default: false)
@@ -1943,7 +2404,8 @@ const HAC_LAG_SUMS: usize = 65_536;
 ///   Matrix Estimation. *Econometrica*, 59(3), 817-858.
 ///   <https://doi.org/10.2307/2938229>
 ///
-/// R equivalent: `sandwich::vcovHAC()`, `sandwich::NeweyWest()`
+/// R equivalent: `sandwich::NeweyWest(lag = L, adjust = FALSE)`,
+/// `sandwich::kernHAC(bw = L + 1, adjust = FALSE)`
 ///
 /// # Example
 ///
@@ -2022,116 +2484,35 @@ pub fn vcov_hac(
     let x = &id.x;
     let xtx_inv = &id.unscaled;
 
-    // Optionally prewhiten residuals with VAR(1)
-    let (u, rho) = if prewhiten {
-        prewhiten_residuals(residuals)
+    // The meat of the sandwich: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ') over weightsAndrews' lag set
+    // (every lag whose weight k(j / (bw + 1)) exceeds 1e-7), from the scores s_i = u_i x_i.
+    // With prewhitening (sandwich's meatHAC(prewhite = 1)) a VAR(1) is fitted to the scores,
+    // the meat is built from its n - 1 residuals and recoloured with D = (I - A)^{-1}:
+    // Ω̂ = D Ω̂* D'. Either way it is divided by the original n.
+    let (omega, n_lag_weights) = if prewhiten {
+        let mut scores = resource::try_zeros2(n, k, "HAC scores")?;
+        for ((mut srow, xrow), &ui) in scores.rows_mut().into_iter().zip(x.rows()).zip(residuals) {
+            srow.zip_mut_with(&xrow, |s, &xij| *s = ui * xij);
+        }
+        let (resid, d) = var1_prewhiten_scores(scores.view())?;
+        drop(scores);
+        let m = n - 1;
+        let rev = reversed_columns(resid.view())?;
+        let weights = kernel.lag_set(bw, m, 1e-7);
+        let star = hac_meat_dispatch(&rev, m, k, &weights)?;
+        let star = Array2::from_shape_vec((k, k), star)
+            .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
+        (d.dot(&star).dot(&d.t()), weights.len())
     } else {
-        (residuals.clone(), 0.0)
+        // Scores stored once, column-reversed and column-major (see `hac_meat`)
+        let rev = reversed_scores(x.view(), residuals.view())?;
+        let weights = kernel.lag_set(bw, n, 1e-7);
+        let omega = hac_meat_dispatch(&rev, n, k, &weights)?;
+        let omega = Array2::from_shape_vec((k, k), omega)
+            .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
+        (omega, weights.len())
     };
-
-    // Compute score vectors: s_i = u_i * x_i, row-major (n × k). The sums below run over
-    // flat rows (no index arithmetic or bounds checks per term) in the same order as
-    // before, so the meat is unchanged bit for bit.
-    let mut scores = resource::try_vec(
-        resource::checked_len(&[n, k], "HAC scores")?,
-        0.0,
-        "HAC scores",
-    )?;
-    for (i, (row, &ui)) in x.rows().into_iter().zip(u.iter()).enumerate() {
-        for (s, &xij) in scores[i * k..(i + 1) * k].iter_mut().zip(row.iter()) {
-            *s = ui * xij;
-        }
-    }
-
-    // Compute the meat of the sandwich: Ω̂ = Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
-    let mut omega = vec![0.0; k * k];
-
-    // Lag 0: Γ̂₀ = Σᵢ sᵢ sᵢ'
-    for si in scores.chunks_exact(k.max(1)).take(n) {
-        for (j, &sij) in si.iter().enumerate() {
-            for (o, &sil) in omega[j * k..(j + 1) * k].iter_mut().zip(si) {
-                *o += sij * sil;
-            }
-        }
-    }
-
-    // Lags 1 to bw: add cross-products with kernel weights. For each pair of columns
-    // (j, l), the sums Γ̂_lag[j, l] = Σᵢ s_ij s_(i-lag)l of a block of consecutive lags are
-    // accumulated together: with the columns stored reversed, the lagged scores of
-    // consecutive lags are consecutive, so each row adds s_ij times a contiguous slice to
-    // the block's sums (independent sums the compiler vectorises, where one sum per lag
-    // was a chain of dependent additions). Every sum still runs over the rows in
-    // ascending order, and the lags add to omega in lag order, so the meat is the same
-    // bit for bit as with one pass per lag.
-    let kk = k * k;
-    let max_lag = bw.min(n.saturating_sub(1));
-    // rev[l * n + t] = s_(n-1-t)l, so s_(i-lag)l = rev[l * n + n - 1 - i + lag]
-    let mut rev = resource::try_vec(
-        resource::checked_len(&[n, k], "HAC scores")?,
-        0.0,
-        "HAC lagged scores",
-    )?;
-    for (i, si) in scores.chunks_exact(k.max(1)).take(n).enumerate() {
-        for (l, &sil) in si.iter().enumerate() {
-            rev[l * n + n - 1 - i] = sil;
-        }
-    }
-    let block = (HAC_LAG_SUMS / kk.max(1))
-        .clamp(1, HAC_LAG_BLOCK)
-        .min(max_lag.max(1));
-    let mut acc = vec![0.0; block];
-    let mut gammas = vec![0.0; block * kk];
-    let mut lag0 = 1;
-    while lag0 <= max_lag {
-        resource::checkpoint()?;
-        let lag1 = (lag0 + block - 1).min(max_lag);
-        let nl = lag1 - lag0 + 1;
-        for j in 0..k {
-            for l in 0..k {
-                let acc = &mut acc[..nl];
-                acc.fill(0.0);
-                let rl = &rev[l * n..(l + 1) * n];
-                for i in lag0..n {
-                    let sij = scores[i * k + j];
-                    // the lags of the block with a row i - lag >= 0
-                    let m = (i + 1 - lag0).min(nl);
-                    let start = n - 1 - i + lag0;
-                    for (g, &sll) in acc[..m].iter_mut().zip(&rl[start..start + m]) {
-                        *g += sij * sll;
-                    }
-                }
-                for (t, &g) in acc.iter().enumerate() {
-                    gammas[t * kk + j * k + l] = g;
-                }
-            }
-        }
-
-        // Add symmetrically (Γ̂ⱼ + Γ̂ⱼ')
-        for (lag, gamma_lag) in (lag0..=lag1).zip(gammas.chunks_exact(kk.max(1))) {
-            let w = kernel.weight(lag, bw);
-            if w.abs() < 1e-15 {
-                continue;
-            }
-            for j in 0..k {
-                for l in 0..k {
-                    omega[j * k + l] += w * (gamma_lag[j * k + l] + gamma_lag[l * k + j]);
-                }
-            }
-        }
-        lag0 = lag1 + 1;
-    }
-
-    // Scale by 1/n
-    let mut omega = Array2::from_shape_vec((k, k), omega)
-        .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
-    omega /= n as f64;
-
-    // If prewhitening was used, recolor the covariance matrix
-    if prewhiten && rho.abs() > 1e-10 {
-        // Recolor: V = (1 - ρ)^(-2) V_prewhitened
-        let recolor_factor: f64 = 1.0 / (1.0 - rho).powi(2);
-        omega *= recolor_factor;
-    }
+    let omega = omega / n as f64;
 
     // Compute the sandwich: V = (X'X)⁻¹ Ω̂ (X'X)⁻¹
     let meat_bread =
@@ -2149,12 +2530,8 @@ pub fn vcov_hac(
     let vcov_identified = &vcov_hac * (n as f64);
 
     // Extract standard errors (square root of diagonal); NaN for aliased columns
-    let identified_se: Vec<f64> = (0..k)
-        .map(|i| {
-            let var = vcov_identified[[i, i]];
-            if var >= 0.0 { var.sqrt() } else { 0.0 }
-        })
-        .collect();
+    let identified_se =
+        negative_variance_check(&vcov_identified, &id, ols_result, kernel, &mut warnings);
     let std_errors = id.embed_vec(&identified_se);
     let vcov_scaled = id.embed(&vcov_identified);
     let k = full_k;
@@ -2185,44 +2562,303 @@ pub fn vcov_hac(
         prewhiten,
         df_resid: ols_result.df_resid,
         warnings,
+        n_lag_weights,
     })
 }
 
-/// Prewhiten residuals using AR(1) model.
-fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
-    let n = residuals.len();
-    if n < 3 {
-        return (residuals.clone(), 0.0);
+/// The scores `s_il = u_i x_il` of a design `x` (n x k) and weights `u`, stored once,
+/// column-major with each column reversed: `rev[l * n + (n - 1 - i)] = s_il`. The HAC meat
+/// reads its lagged cross-products as contiguous slices of this one copy.
+fn reversed_scores(
+    x: ndarray::ArrayView2<'_, f64>,
+    u: ndarray::ArrayView1<'_, f64>,
+) -> EconResult<Vec<f64>> {
+    let (n, k) = x.dim();
+    let mut rev = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC scores")?,
+        0.0,
+        "HAC scores",
+    )?;
+    for (i, (row, &ui)) in x.rows().into_iter().zip(u.iter()).enumerate() {
+        for (l, &xil) in row.iter().enumerate() {
+            rev[l * n + n - 1 - i] = ui * xil;
+        }
     }
+    Ok(rev)
+}
 
-    // Estimate AR(1) coefficient: ρ = Σᵢ u_{i} u_{i-1} / Σᵢ u_{i-1}²
-    let mut sum_lag_prod = 0.0;
-    let mut sum_lag_sq = 0.0;
-    for i in 1..n {
-        sum_lag_prod += residuals[i] * residuals[i - 1];
-        sum_lag_sq += residuals[i - 1] * residuals[i - 1];
+/// The unscaled HAC meat `Σ_ℓ w_ℓ (Γ_ℓ + Γ_ℓ')` (with `Γ_0` counted once) of the scores in
+/// `rev` (n rows, k columns, laid out by [`reversed_scores`]), where
+/// `Γ_ℓ[a, b] = Σ_{i ≥ ℓ} s_ia s_(i-ℓ)b` and `weights[ℓ]` is the weight of lag ℓ
+/// (`weights[0]` is ignored: lag 0 has weight 1). Lags whose weight is below 1e-15 in
+/// absolute value add nothing. Returned row-major (k x k).
+///
+/// Every sum runs over the rows in ascending order and the lags add in lag order. For each
+/// pair of columns `(a, b)`, the sums of a block of consecutive lags are accumulated together:
+/// with the columns stored reversed, the lagged scores of consecutive lags are consecutive, so
+/// each row adds `s_ia` times a contiguous slice to the block's sums (independent sums the
+/// compiler vectorises).
+fn hac_meat(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<f64>> {
+    let kk = k * k;
+    let mut omega = resource::try_vec(kk, 0.0, "HAC meat")?;
+    // Lag 0: Γ̂₀ = Σᵢ sᵢ sᵢ', rows in ascending order (descending in `rev`)
+    for a in 0..k {
+        let ra = &rev[a * n..(a + 1) * n];
+        for b in 0..k {
+            let rb = &rev[b * n..(b + 1) * n];
+            let mut g = 0.0;
+            for (&sa, &sb) in ra.iter().rev().zip(rb.iter().rev()) {
+                g += sa * sb;
+            }
+            omega[a * k + b] = g;
+        }
     }
+    let max_lag = weights.len().saturating_sub(1).min(n.saturating_sub(1));
+    if max_lag == 0 {
+        return Ok(omega);
+    }
+    let block = (HAC_LAG_SUMS / kk.max(1))
+        .clamp(1, HAC_LAG_BLOCK)
+        .min(max_lag);
+    let mut acc = resource::try_vec(block, 0.0, "HAC lag sums")?;
+    let mut gammas = resource::try_vec(
+        resource::checked_len(&[block, kk], "HAC lag sums")?,
+        0.0,
+        "HAC lag sums",
+    )?;
+    let mut lag0 = 1;
+    while lag0 <= max_lag {
+        resource::checkpoint()?;
+        let lag1 = (lag0 + block - 1).min(max_lag);
+        let nl = lag1 - lag0 + 1;
+        for a in 0..k {
+            let ra = &rev[a * n..(a + 1) * n];
+            for b in 0..k {
+                let acc = &mut acc[..nl];
+                acc.fill(0.0);
+                let rb = &rev[b * n..(b + 1) * n];
+                // s_(i-lag)b = rb[n - 1 - i + lag]; s_ia = ra[n - 1 - i]
+                for i in lag0..n {
+                    let sia = ra[n - 1 - i];
+                    // the lags of the block with a row i - lag >= 0
+                    let m = (i + 1 - lag0).min(nl);
+                    let start = n - 1 - i + lag0;
+                    for (g, &sb) in acc[..m].iter_mut().zip(&rb[start..start + m]) {
+                        *g += sia * sb;
+                    }
+                }
+                for (t, &g) in acc.iter().enumerate() {
+                    gammas[t * kk + a * k + b] = g;
+                }
+            }
+        }
+        // Add symmetrically (Γ̂ⱼ + Γ̂ⱼ')
+        for (lag, gamma_lag) in (lag0..=lag1).zip(gammas.chunks_exact(kk.max(1))) {
+            let w = weights[lag];
+            if w.abs() < 1e-15 {
+                continue;
+            }
+            for a in 0..k {
+                for b in 0..k {
+                    omega[a * k + b] += w * (gamma_lag[a * k + b] + gamma_lag[b * k + a]);
+                }
+            }
+        }
+        lag0 = lag1 + 1;
+    }
+    Ok(omega)
+}
 
-    let rho = if sum_lag_sq > 1e-15 {
-        (sum_lag_prod / sum_lag_sq).clamp(-0.99, 0.99)
-    } else {
-        0.0
+/// Lag sets longer than this use the FFT meat ([`hac_meat_fft`]) when the
+/// `spectral-analysis` feature is on.
+#[cfg(feature = "spectral-analysis")]
+const HAC_FFT_MIN_LAGS: usize = 64;
+
+/// [`hac_meat`], or [`hac_meat_fft`] for a long lag set (the Quadratic Spectral kernel keeps
+/// up to n lags) when the `spectral-analysis` feature is on. The two agree to about 1e-12
+/// relative.
+fn hac_meat_dispatch(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<f64>> {
+    #[cfg(feature = "spectral-analysis")]
+    if weights.len() > HAC_FFT_MIN_LAGS {
+        return hac_meat_fft(rev, n, k, weights);
+    }
+    hac_meat(rev, n, k, weights)
+}
+
+/// The meat of [`hac_meat`] as `Ω[a, b] = s_a' W s_b`, with `W` the symmetric Toeplitz matrix
+/// `W[i, j] = w_|i-j|` (`w_0 = 1`, zero beyond the lag set). `W s_b` is a linear convolution,
+/// computed as a circular one of length `N >= n + max_lag` (a power of two) by FFT, two real
+/// columns per complex transform: O(k N log N + k² n), against O(k² n L) summed directly.
+/// The scores are read reversed, which leaves `s_a' W s_b` unchanged (W is persymmetric).
+#[cfg(feature = "spectral-analysis")]
+fn hac_meat_fft(rev: &[f64], n: usize, k: usize, weights: &[f64]) -> EconResult<Vec<f64>> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let max_lag = weights.len().saturating_sub(1).min(n.saturating_sub(1));
+    let len = n
+        .checked_add(max_lag)
+        .and_then(|m| m.checked_next_power_of_two())
+        .ok_or_else(|| EconError::ResourceLimit("HAC FFT length overflows".to_string()))?;
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(len);
+    let ifft = planner.plan_fft_inverse(len);
+    // The kernel's spectrum (real: the kernel is real and even)
+    let mut h = resource::try_vec(len, Complex::new(0.0, 0.0), "HAC FFT kernel")?;
+    h[0].re = 1.0;
+    for (d, &w) in weights.iter().enumerate().take(max_lag + 1).skip(1) {
+        h[d].re = w;
+        h[len - d].re = w;
+    }
+    fft.process(&mut h);
+    let scale = 1.0 / len as f64;
+    let mut spectrum = resource::try_vec(len, 0.0, "HAC FFT spectrum")?;
+    for (g, c) in spectrum.iter_mut().zip(&h) {
+        *g = c.re * scale;
+    }
+    drop(h);
+    // W s_b for every column, packed two columns per transform
+    let mut ws = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC FFT products")?,
+        0.0,
+        "HAC FFT products",
+    )?;
+    let mut buf = resource::try_vec(len, Complex::new(0.0, 0.0), "HAC FFT buffer")?;
+    let mut b = 0;
+    while b < k {
+        resource::checkpoint()?;
+        let pair = b + 1 < k;
+        buf.fill(Complex::new(0.0, 0.0));
+        for (z, &v) in buf.iter_mut().zip(&rev[b * n..(b + 1) * n]) {
+            z.re = v;
+        }
+        if pair {
+            for (z, &v) in buf.iter_mut().zip(&rev[(b + 1) * n..(b + 2) * n]) {
+                z.im = v;
+            }
+        }
+        fft.process(&mut buf);
+        for (z, &g) in buf.iter_mut().zip(&spectrum) {
+            *z *= g;
+        }
+        ifft.process(&mut buf);
+        for (o, z) in ws[b * n..(b + 1) * n].iter_mut().zip(&buf) {
+            *o = z.re;
+        }
+        if pair {
+            for (o, z) in ws[(b + 1) * n..(b + 2) * n].iter_mut().zip(&buf) {
+                *o = z.im;
+            }
+        }
+        b += if pair { 2 } else { 1 };
+    }
+    let mut omega = resource::try_vec(k * k, 0.0, "HAC meat")?;
+    for a in 0..k {
+        let ra = &rev[a * n..(a + 1) * n];
+        for c in 0..k {
+            let wc = &ws[c * n..(c + 1) * n];
+            omega[a * k + c] = ra.iter().zip(wc).map(|(x, y)| x * y).sum();
+        }
+    }
+    // symmetric up to rounding; make it exactly so, as the direct sum is
+    for a in 0..k {
+        for c in (a + 1)..k {
+            let m = 0.5 * (omega[a * k + c] + omega[c * k + a]);
+            omega[a * k + c] = m;
+            omega[c * k + a] = m;
+        }
+    }
+    Ok(omega)
+}
+
+/// The columns of `m` (n x k) column-major with each column reversed:
+/// `rev[l * n + (n - 1 - i)] = m[i, l]` (the layout of [`reversed_scores`]).
+fn reversed_columns(m: ndarray::ArrayView2<'_, f64>) -> EconResult<Vec<f64>> {
+    let (n, k) = m.dim();
+    let mut rev = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC scores")?,
+        0.0,
+        "HAC scores",
+    )?;
+    for (i, row) in m.rows().into_iter().enumerate() {
+        for (l, &v) in row.iter().enumerate() {
+            rev[l * n + n - 1 - i] = v;
+        }
+    }
+    Ok(rev)
+}
+
+/// VAR(1) prewhitening of HAC scores (n x k), as sandwich's `meatHAC(prewhite = 1)`:
+/// `ar(scores, order.max = 1, aic = FALSE, demean = FALSE, method = "ols")`. Fits
+/// `s_i = A s_(i-1) + u_i` by least squares without a constant (`lm.fit`'s pivoted QR,
+/// one decomposition for all k columns) and returns the n - 1 residuals `u_i` and the
+/// recolouring matrix `D = (I - A)^{-1}`. Costs one n·k² decomposition and a k x k inverse.
+///
+/// A rank-deficient lagged score matrix (a score column that is zero, such as that of a
+/// regressor with leverage 1) or a singular `I - A` (a unit root) is an
+/// `InvalidSpecification` naming the prewhitening; sandwich stops there too.
+pub(crate) fn var1_prewhiten_scores(
+    scores: ndarray::ArrayView2<'_, f64>,
+) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (n, k) = scores.dim();
+    let refuse = |why: &str| EconError::InvalidSpecification {
+        message: format!(
+            "HAC prewhitening: {why}; the VAR(1) of the scores is not identified. Fit without \
+             prewhitening, or drop the regressor whose scores are zero"
+        ),
     };
-
-    // Prewhitened residuals: v_i = u_i - ρ u_{i-1}
-    let mut prewhitened = Array1::<f64>::zeros(n - 1);
-    for i in 1..n {
-        prewhitened[i - 1] = residuals[i] - rho * residuals[i - 1];
+    if n < k + 2 {
+        return Err(refuse("fewer observations than the VAR(1) needs"));
     }
-
-    // Pad to original length for consistency
-    let mut result = Array1::<f64>::zeros(n);
-    result[0] = residuals[0];
-    for i in 1..n {
-        result[i] = prewhitened[i - 1];
+    let lagged = scores.slice(ndarray::s![..n - 1, ..]);
+    let current = scores.slice(ndarray::s![1.., ..]);
+    let qr = Qr::decompose(lagged, LM_QR_TOL)?;
+    if qr.rank() < k {
+        return Err(refuse("the lagged scores are linearly dependent"));
     }
+    // B = A' (k x k): current = lagged B + resid
+    let mut b = Array2::<f64>::zeros((k, k));
+    for c in 0..k {
+        b.column_mut(c).assign(&qr.coefficients(current.column(c))?);
+    }
+    let mut resid = resource::try_zeros2(n - 1, k, "HAC prewhitening residuals")?;
+    resid.assign(&current);
+    // resid = current - lagged B, in place (no second n x k temporary)
+    ndarray::linalg::general_mat_mul(-1.0, &lagged, &b, 1.0, &mut resid);
+    let i_minus_a = Array2::<f64>::eye(k) - b.t();
+    let d = matrix_inverse(&i_minus_a.view())
+        .map_err(|_| refuse("I - A is singular (the VAR(1) of the scores has a unit root)"))?;
+    Ok((resid, d))
+}
 
-    (result, rho)
+/// The standard errors `sqrt(v_ii)` of an identified covariance (rank x rank) from a kernel
+/// estimator. A negative variance (the Truncated and Tukey-Hanning kernels do not guarantee a
+/// positive semi-definite estimate) gives a NaN standard error and a warning naming the
+/// coefficient, never 0.
+fn negative_variance_check(
+    vcov: &Array2<f64>,
+    id: &IdentifiedDesign<'_>,
+    ols: &OlsResult,
+    kernel: HacKernel,
+    warnings: &mut Vec<String>,
+) -> Vec<f64> {
+    (0..id.rank())
+        .map(|i| {
+            let var = vcov[[i, i]];
+            if var >= 0.0 {
+                var.sqrt()
+            } else {
+                let name = ols
+                    .coefficients
+                    .get(id.cols[i])
+                    .map_or_else(|| format!("x{}", id.cols[i] + 1), |c| c.name.clone());
+                warnings.push(format!(
+                    "Variance estimate for '{name}' is negative ({var:.6e}); its standard error \
+                     is NaN. The {kernel} kernel does not guarantee a positive semi-definite \
+                     covariance; the Bartlett, Parzen or Quadratic Spectral kernel does."
+                ));
+                f64::NAN
+            }
+        })
+        .collect()
 }
 
 /// Convenience function to compute HAC standard errors for a dataset.
@@ -2232,8 +2868,9 @@ fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
 /// * `dataset` - The dataset
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
-/// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than n; one above n/4
-///   adds a warning (see [`vcov_hac`]).
+/// * `bandwidth` - Optional lag count L (lag j weighs k(j / (L + 1)) for every kernel; `None`
+///   is the fixed rule floor(4 (n/100)^(2/9))). Must be smaller than n; one above n/4 adds a
+///   warning (see [`vcov_hac`]).
 /// * `kernel` - Kernel name: `bartlett` (also `Newey-West`, `nw`), `parzen`,
 ///   `quadratic_spectral` (`Quadratic Spectral`, `qs`), `truncated` (`rectangular`),
 ///   `tukey_hanning` (`Tukey-Hanning`, `tukey`); case, spaces and dashes are ignored. `None`
@@ -2244,7 +2881,9 @@ fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
 ///
 /// `HacResult` with HAC-adjusted standard errors.
 ///
-/// R equivalent: `sandwich::NeweyWest(lm(y ~ x), lag = bandwidth, prewhite = prewhiten)`
+/// R equivalent: `sandwich::NeweyWest(lm(y ~ x), lag = bandwidth, prewhite = prewhiten)` for
+/// Bartlett, `sandwich::kernHAC(lm(y ~ x), kernel, bw = bandwidth + 1, prewhite = prewhiten,
+/// adjust = FALSE)` for the other kernels.
 ///
 /// This is [`HacResult::fit`] with an intercept.
 pub fn run_vcov_hac(
@@ -2444,7 +3083,8 @@ impl std::fmt::Display for BootstrapResult {
 /// * `ols_result` - Result from OLS estimation
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
-///   fit, not recomputed from `x`, and only the shape of `x` is checked.
+///   fit, not recomputed from `x`. Its shape is checked, and an `x` that is clearly not the
+///   fitted design (`X'e` far from 0) is an `InvalidSpecification`.
 /// * `y` - Response vector (n)
 /// * `n_boot` - Number of bootstrap replications (default: 999). At least 10, otherwise
 ///   `InvalidSpecification`; replicate storage above the allocation ceiling is `ResourceLimit`.
@@ -2537,7 +3177,7 @@ pub fn vcov_bootstrap(
     // replicate. The pairs bootstrap refits each resampled design.
     let fixed = match bootstrap_type {
         BootstrapType::Pairs => None,
-        _ => Some(FixedDesignSolver::new(x1)?),
+        _ => Some(FixedDesignSolver::for_fit(&id, ols_result.path)?),
     };
 
     // Storage for bootstrap coefficient estimates
@@ -2640,7 +3280,8 @@ pub fn vcov_bootstrap(
     vcov_r /= divisor;
 
     // Standard errors from diagonal; NaN rows, columns and SEs for aliased columns
-    let se_r: Vec<f64> = (0..r).map(|i| vcov_r[[i, i]].max(0.0).sqrt()).collect();
+    // a sample variance; never negative
+    let se_r: Vec<f64> = (0..r).map(|i| vcov_r[[i, i]].sqrt()).collect();
     let std_errors = id.embed_vec(&se_r);
     let vcov_k = id.embed(&vcov_r);
     let vcov: Vec<Vec<f64>> = vcov_k.rows().into_iter().map(|row| row.to_vec()).collect();
@@ -2755,7 +3396,7 @@ pub struct DriscollKraayResult {
     pub n_periods: usize,
     /// Number of cross-sectional units.
     pub n_units: usize,
-    /// Bandwidth used.
+    /// Lag count L used: lag j has weight k(j / (L + 1)) (`vcovPL(lag = L)`).
     pub bandwidth: usize,
     /// Kernel type used.
     pub kernel: HacKernel,
@@ -2817,25 +3458,28 @@ impl std::fmt::Display for DriscollKraayResult {
 ///
 /// # Algorithm
 ///
-/// 1. Aggregate moment conditions (score vectors) by time period:
-///    h̄_t = (1/N_t) Σᵢ uᵢₜ xᵢₜ
+/// 1. Sum the scores within each time period: h_t = Σᵢ∈t uᵢₜ xᵢₜ.
 ///
-/// 2. Apply Newey-West HAC estimation to the time series of aggregated moments:
-///    Ω̂ = Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
-///    where Γ̂ⱼ = (1/T) Σₜ h̄_t h̄_{t-j}'
+/// 2. Apply the kernel to the time series of period sums (sorted by period):
+///    Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ'), Γ̂ⱼ = Σₜ h_t h_{t-j}', with w(j) = k(j / (L + 1)) for
+///    the lag count L over lags 0..T-1, cut after the last non-zero weight (sandwich's
+///    `meatPL`; Quadratic Spectral keeps every lag).
 ///
-/// 3. Scale and compute sandwich:
-///    V = (X'X)⁻¹ (T × Ω̂) (X'X)⁻¹
+/// 3. The sandwich V = (X'X)⁻¹ Ω̂ (X'X)⁻¹, with no small-sample factor: this is
+///    `sandwich::vcovPL(cluster = ~unit, order.by = ~time, lag = L, adjust = FALSE)`
+///    (`vcovPL`'s default `adjust = TRUE` multiplies by n/(n - k)) and
+///    `plm::vcovSCC(maxlag = L)`. The t tests use T - rank degrees of freedom.
 ///
 /// # Arguments
 ///
 /// * `ols_result` - Result from OLS estimation
 /// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
 ///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
-///   fit, not recomputed from `x`, and only the shape of `x` is checked.
+///   fit, not recomputed from `x`. Its shape is checked, and an `x` that is clearly not the
+///   fitted design (`X'e` far from 0) is an `InvalidSpecification`.
 /// * `time_ids` - Time period identifier for each observation
-/// * `bandwidth` - Optional bandwidth (None for automatic). A user bandwidth must be smaller than
-///   the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
+/// * `bandwidth` - Optional lag count L (None: floor(T^(1/4)), `vcovPL`'s `lag = "NW1987"`). A
+///   user lag count must be smaller than the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
 ///   entry to `DriscollKraayResult::warnings`.
 /// * `kernel` - Kernel type for HAC
 ///
@@ -2945,74 +3589,35 @@ pub fn vcov_driscoll_kraay(
     let x = &id.x;
     let xtx_inv = &id.unscaled;
 
-    // Step 1: Aggregate score vectors by time period
-    // h̄_t = (1/N_t) Σᵢ∈t uᵢ xᵢ
-    let mut h_bar: Vec<Array1<f64>> = Vec::with_capacity(n_periods);
-
-    for t in &time_periods {
-        let indices = &time_map[t];
-        let n_t = indices.len();
-
-        let mut h_t = Array1::<f64>::zeros(k);
-        for &i in indices {
+    // Step 1: sum the scores within each period, h_t = Σᵢ∈t uᵢ xᵢ (sandwich's meatPL),
+    // stored column-reversed and column-major over the sorted periods (see `hac_meat`)
+    let mut h = resource::try_vec(
+        resource::checked_len(&[n_periods, k], "Driscoll-Kraay period scores")?,
+        0.0,
+        "Driscoll-Kraay period scores",
+    )?;
+    for (t, period) in time_periods.iter().enumerate() {
+        for &i in &time_map[period] {
             for j in 0..k {
-                h_t[j] += residuals[i] * x[[i, j]];
+                h[j * n_periods + n_periods - 1 - t] += residuals[i] * x[[i, j]];
             }
         }
-        // Average within time period
-        h_t /= n_t as f64;
-        h_bar.push(h_t);
     }
 
     // Step 2: Automatic bandwidth selection
     let bw = bandwidth.unwrap_or_else(|| {
-        // Newey-West 1987 rule: floor(T^(1/4))
+        // Newey-West 1987 rule: floor(T^(1/4)) (vcovPL's lag = "NW1987")
         let nw_bw = (n_periods as f64).powf(0.25).floor() as usize;
         nw_bw.max(1).min(n_periods - 1)
     });
 
-    // Step 3: Compute HAC-adjusted covariance of aggregated moments
-    // Ω̂ = Γ̂₀ + Σⱼ₌₁ᵐ w(j)(Γ̂ⱼ + Γ̂ⱼ')
-    let mut omega = Array2::<f64>::zeros((k, k));
-
-    // Lag 0: Γ̂₀ = (1/T) Σₜ h̄_t h̄_t'
-    for t in 0..n_periods {
-        for j in 0..k {
-            for l in 0..k {
-                omega[[j, l]] += h_bar[t][j] * h_bar[t][l];
-            }
-        }
-    }
-
-    // Lags 1 to bw
-    for lag in 1..=bw.min(n_periods - 1) {
-        resource::checkpoint()?;
-        let w = kernel.weight(lag, bw);
-        if w.abs() < 1e-15 {
-            continue;
-        }
-
-        let mut gamma_lag = Array2::<f64>::zeros((k, k));
-        for t in lag..n_periods {
-            for j in 0..k {
-                for l in 0..k {
-                    gamma_lag[[j, l]] += h_bar[t][j] * h_bar[t - lag][l];
-                }
-            }
-        }
-
-        // Add symmetrically
-        for j in 0..k {
-            for l in 0..k {
-                omega[[j, l]] += w * (gamma_lag[[j, l]] + gamma_lag[[l, j]]);
-            }
-        }
-    }
-
-    // Scale by T (number of periods) to get consistent estimator
-    // The aggregation by N already accounted for cross-sectional dimension
-    // Final formula: V = (X'X)⁻¹ × (T × Ω̂) × (X'X)⁻¹
-    let scaled_omega = &omega * (n_periods as f64);
+    // Step 3: Ω̂ = Γ̂₀ + Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ') with Γ̂ⱼ = Σₜ h_t h_{t-j}', over meatPL's lag set:
+    // k(j / (bw + 1)) for j = 0..T-1, cut after the last non-zero weight
+    let weights = kernel.lag_set(bw, n_periods, 0.0);
+    let omega = hac_meat_dispatch(&h, n_periods, k, &weights)?;
+    let scaled_omega = Array2::from_shape_vec((k, k), omega).map_err(|e| {
+        EconError::Computation(format!("Driscoll-Kraay meat has the wrong shape: {e}"))
+    })?;
 
     // Sandwich: V = (X'X)⁻¹ Ω (X'X)⁻¹
     let meat_bread =
@@ -3027,7 +3632,7 @@ pub fn vcov_driscoll_kraay(
         })?;
 
     // Extract standard errors and compute statistics; NaN for aliased columns
-    let identified_se: Vec<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
+    let identified_se = negative_variance_check(&vcov, &id, ols_result, kernel, &mut warnings);
     let std_errors = id.embed_vec(&identified_se);
     let vcov = id.embed(&vcov);
     let k = full_k;
@@ -3040,19 +3645,11 @@ pub fn vcov_driscoll_kraay(
         .collect();
 
     let df = df_periods as f64;
-    // Aliased columns: NaN (the se > 0 rule would turn them into t = 0, p = 1)
+    // b / se: NaN for aliased columns and negative variance estimates
     let t_stats: Vec<f64> = coefficients
         .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| {
-            if se.is_nan() {
-                f64::NAN
-            } else if se > 0.0 {
-                b / se
-            } else {
-                0.0
-            }
-        })
+        .map(|(&b, &se)| b / se)
         .collect();
 
     let p_values: Vec<f64> = t_stats
@@ -3099,8 +3696,8 @@ pub fn vcov_driscoll_kraay(
 ///   whose id is missing is dropped, the model is re-estimated on the other rows, and the
 ///   drop is reported in `DriscollKraayResult::missing` and as the first warning (no row
 ///   with an id is `InsufficientData` naming the column).
-/// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
-///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
+/// * `bandwidth` - Optional lag count L (None: floor(T^(1/4))). Must be smaller than the number
+///   of time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
 /// * `kernel` - Kernel name, as for [`run_vcov_hac`] (`None` is Bartlett; an unknown name is
 ///   `InvalidSpecification`)
 ///
@@ -3111,10 +3708,11 @@ pub fn vcov_driscoll_kraay(
 /// # R Equivalent
 ///
 /// ```r
-/// library(plm)
 /// library(sandwich)
-/// model <- plm(y ~ x, data = panel_data, model = "pooling")
-/// vcovPL(model, cluster = ~ firm + year)
+/// model <- lm(y ~ x, data = panel_data)
+/// vcovPL(model, cluster = ~ unit, order.by = ~ time, lag = L, kernel = "Bartlett",
+///        adjust = FALSE)
+/// # equivalently: plm::vcovSCC(plm(y ~ x, panel_data, model = "pooling"), maxlag = L)
 /// ```
 pub fn run_vcov_driscoll_kraay(
     dataset: &Dataset,
@@ -3823,6 +4421,7 @@ mod tests {
 
     /// summary.lm / logLik / AIC / BIC, from the struct fields.
     fn pin_fit(check: &mut Check<'_>, r: &OlsResult) {
+        // Not pinned here: extract_aic, extract_bic, compared by the stepwise tests.
         let n = r.n_obs;
         check
             .scalar("r2", r.r_squared, Tol::stat(n))
@@ -4248,14 +4847,173 @@ mod tests {
             .finish();
     }
 
+    /// The overall Wald F with the reported covariance (case `ols_wald_f_grunfeld`):
+    /// lmtest::waldtest(m, vcov = vcovHC(type = ..) | vcovCL(..), test = "F").
+    #[test]
+    fn test_validate_ols_wald_f_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_wald_f_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let xs = ["value", "capital"];
+        let mut check = Check::new(&case);
+        let classical = run_ols(&ds, "inv", &xs, true, CovarianceType::Standard).unwrap();
+        assert!(classical.wald_f.is_none());
+        check
+            .scalar("f_classical", classical.f_statistic, Tol::stat(n))
+            .scalar("f_classical_p", classical.f_p_value, Tol::p_value(n))
+            .scalar("f_df2", classical.df_resid as f64, Tol::exact());
+        let mut wald = |key: &str, w: &WaldF| {
+            check
+                .scalar(key, w.statistic, Tol::stat(n))
+                .scalar(&format!("{key}_p"), w.p_value, Tol::p_value(n))
+                .scalar("f_df1", w.df1 as f64, Tol::exact())
+                .scalar("wald_df2", w.df2 as f64, Tol::exact());
+        };
+        for (key, cov) in [
+            ("wald_f_hc0", CovarianceType::HC0),
+            ("wald_f_hc1", CovarianceType::HC1),
+            ("wald_f_hc2", CovarianceType::HC2),
+            ("wald_f_hc3", CovarianceType::HC3),
+        ] {
+            let r = run_ols(&ds, "inv", &xs, true, cov).unwrap();
+            // the classical F is unchanged
+            assert_eq!(r.f_statistic, classical.f_statistic);
+            wald(key, r.wald_f.as_ref().unwrap());
+        }
+        let firm = run_ols_clustered(&ds, "inv", &xs, "firm", None).unwrap();
+        wald("wald_f_cl_firm", firm.ols.wald_f.as_ref().unwrap());
+        let two = run_ols_clustered(&ds, "inv", &xs, "firm", Some("year")).unwrap();
+        wald("wald_f_cl_firm_year", two.ols.wald_f.as_ref().unwrap());
+        assert_eq!(
+            two.ols.wald_f.as_ref().unwrap().cov_label,
+            "two-way clustered"
+        );
+        let origin = run_ols(&ds, "inv", &xs, false, CovarianceType::HC1).unwrap();
+        let w = origin.wald_f.as_ref().unwrap();
+        check
+            .scalar("wald_f_hc1_origin", w.statistic, Tol::stat(n))
+            .scalar("wald_f_hc1_origin_p", w.p_value, Tol::p_value(n))
+            .scalar("wald_origin_df2", w.df2 as f64, Tol::exact())
+            .finish();
+        assert_eq!(w.df1, 2);
+    }
+
+    /// The robust Wald F is printed before the classical F, which is labelled; the
+    /// R-squared lines the MCP handler rewrites are still there.
+    #[test]
+    fn test_wald_f_display_lines() {
+        let ds = create_test_dataset();
+        let hc1 = run_ols(&ds, "y", &["x1"], true, CovarianceType::HC1).unwrap();
+        let t = hc1.to_string();
+        let wald = t.find("F-statistic (Wald, HC1): ").expect(&t);
+        let classical = t.find("F-statistic (classical): ").expect(&t);
+        assert!(wald < classical, "{t}");
+        assert!(
+            t.contains("\nR-squared: ") && t.contains("\nAdj. R-squared: "),
+            "{t}"
+        );
+        assert!(t.contains(" on 1 and 8 DF (p = "), "{t}");
+        let std = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let t = std.to_string();
+        assert!(t.contains("\nF-statistic: ") && !t.contains("Wald"), "{t}");
+        let cl = run_ols_clustered(&ds, "y", &["x1"], "cluster", None).unwrap();
+        let t = cl.to_string();
+        assert!(
+            t.contains("F-statistic (Wald, clustered): ")
+                && t.contains("F-statistic (classical): "),
+            "{t}"
+        );
+        // JSON: the classical F stays; the Wald F is added
+        let json = serde_json::to_value(&hc1).unwrap();
+        assert!(json["f_statistic"].is_number() && json["wald_f"]["df1"] == 1);
+        assert!(serde_json::to_value(&std).unwrap().get("wald_f").is_none());
+    }
+
+    /// Aliased slopes are left out of the Wald F; a singular slope covariance (two clusters)
+    /// gives no Wald F and a warning.
+    /// The Cholesky shortcut of the two-way PSD check agrees with the eigenvalues: a
+    /// positive-definite matrix passes, an indefinite one, one with a zero pivot and a
+    /// non-finite one go on to the eigen-decomposition.
+    #[test]
+    fn test_positive_definite_by_cholesky() {
+        let pd = ndarray::array![[4.0, 1.2, 0.3], [1.2, 2.5, -0.4], [0.3, -0.4, 1.1]];
+        assert!(positive_definite_by_cholesky(&pd));
+        let indefinite = ndarray::array![[1.0, 2.0], [2.0, 1.0]];
+        assert!(!positive_definite_by_cholesky(&indefinite));
+        let singular = ndarray::array![[1.0, 1.0], [1.0, 1.0]];
+        assert!(!positive_definite_by_cholesky(&singular));
+        let nan = ndarray::array![[1.0, f64::NAN], [f64::NAN, 1.0]];
+        assert!(!positive_definite_by_cholesky(&nan));
+        let mut v = pd.clone();
+        assert_eq!(twoway_psd_check(&mut v, false).unwrap(), None);
+        assert_eq!(v, pd);
+        let mut w = indefinite.clone();
+        let warning = twoway_psd_check(&mut w, false).unwrap().unwrap();
+        assert!(warning.contains("not positive semi-definite"), "{warning}");
+    }
+
+    #[test]
+    fn test_wald_f_singular_slope_vcov() {
+        let n = 30;
+        let e = perf3_noise(2 * n, 23);
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.41).cos() + e[i]).collect();
+        let dup: Vec<f64> = x.iter().map(|v| 3.0 * v).collect();
+        let z: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.77).sin() + e[n - 1 - i])
+            .collect();
+        let g: Vec<i64> = (0..n).map(|i| (i % 2) as i64).collect();
+        let y: Vec<f64> = (0..n).map(|i| 0.5 - x[i] + 0.3 * z[i] + e[n + i]).collect();
+        let ds = Dataset::new(
+            df! { "y" => y.clone(), "x" => x.clone(), "dup" => dup, "z" => z, "g" => g }.unwrap(),
+        );
+        let aliased = run_ols(&ds, "y", &["x", "dup"], true, CovarianceType::HC1).unwrap();
+        assert_eq!(aliased.aliased, vec!["dup".to_string()]);
+        let plain = run_ols(&ds, "y", &["x"], true, CovarianceType::HC1).unwrap();
+        let (wa, wp) = (aliased.wald_f.unwrap(), plain.wald_f.unwrap());
+        assert_eq!(wa.df1, 1);
+        assert!((wa.statistic - wp.statistic).abs() <= 1e-8 * wp.statistic);
+        // two clusters: the meat is the outer product of two cluster scores that sum to
+        // zero, so the covariance has rank 1 and its 2 x 2 slope block is singular
+        let singular = run_ols_clustered(&ds, "y", &["x", "z"], "g", None).unwrap();
+        assert!(singular.ols.wald_f.is_none());
+        assert!(
+            singular
+                .ols
+                .warnings
+                .iter()
+                .any(|w| w.contains("Wald F") && w.contains("singular")),
+            "{:?}",
+            singular.ols.warnings
+        );
+        // HC0 with the dummy d of one observation j: its hat value is 1 and its residual is
+        // zero up to rounding, so the meat has a zero row and column for d and the HC0
+        // covariance has a zero eigenvalue (vcovHC(type = "HC0") in R), with null vector
+        // X'X e_d = x_j. Without an intercept every column is a slope: V_ss = V is singular.
+        // With one, x_j has a non-zero intercept entry, so the slope block stays regular.
+        let d: Vec<f64> = (0..n).map(|i| if i == 7 { 1.0 } else { 0.0 }).collect();
+        let ds_d = Dataset::new(df! { "y" => y, "x" => x, "d" => d }.unwrap());
+        let hc0 = run_ols(&ds_d, "y", &["x", "d"], false, CovarianceType::HC0).unwrap();
+        assert!(hc0.wald_f.is_none(), "{:?}", hc0.wald_f);
+        assert!(
+            hc0.warnings.iter().any(|w| w.contains("Wald F")
+                && (w.contains("singular") || w.contains("not positive definite"))),
+            "{:?}",
+            hc0.warnings
+        );
+        let with_intercept = run_ols(&ds_d, "y", &["x", "d"], true, CovarianceType::HC0).unwrap();
+        let w = with_intercept.wald_f.expect("regular slope block");
+        assert_eq!(w.df1, 2);
+        assert!(w.statistic.is_finite() && w.statistic > 0.0);
+    }
+
     // ════════════════════════════════════════════════════════════════════════════
     // VALIDATION TESTS - HAC and Driscoll-Kraay (R cases); bootstrap property test
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Pinned to case `hac_ar1` (sandwich::NeweyWest / kernHAC on the legacy Test 8 DGP; validation/r/cases/regression_legacy.R).
+    /// Pinned to case `hac_ar1` (sandwich::NeweyWest / kernHAC on the legacy Test 8 DGP;
+    /// validation/r/cases/regression_legacy.R). p2a's lag count L weights lag j by
+    /// k(j / (L + 1)) for every kernel: NeweyWest(lag = L) = kernHAC(bw = L + 1).
     #[test]
     fn test_validate_hac_ar1() {
-        use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("hac_ar1");
         let n = case.scalar("n_obs") as usize;
         let bw = case.scalar("bw_rule") as usize; // 4 = floor(4 (n/100)^(2/9))
@@ -4264,14 +5022,15 @@ mod tests {
         };
         let auto = hac(None, "bartlett", false);
         let bartlett = hac(Some(bw), "bartlett", false);
-        let parzen = hac(Some(bw), "parzen", false);
-        let truncated = hac(Some(bw), "truncated", false);
-        let tukey = hac(Some(bw), "tukey-hanning", false);
-        Check::new(&case)
+        // kernHAC(bw = 4) is p2a's lag 3
+        let parzen = hac(Some(3), "parzen", false);
+        let truncated = hac(Some(3), "truncated", false);
+        let tukey = hac(Some(3), "tukey-hanning", false);
+        let qs = hac(Some(3), "qs", false);
+        let mut check = Check::new(&case);
+        check
             .named("coef", &auto.names, &auto.coefficients, Tol::coef(n))
             .scalar("bw_rule", auto.bandwidth as f64, Tol::exact())
-            // p2a's Bartlett bandwidth m weights lag j by 1 - j/(m + 1):
-            // NeweyWest(lag = m) = kernHAC(bw = m + 1)
             .named(
                 "neweywest_lag4",
                 &bartlett.names,
@@ -4284,65 +5043,456 @@ mod tests {
                 &bartlett.names,
                 &bartlett.std_errors,
                 Tol::se(n),
-            )
-            .named(
-                "kernhac_parzen_bw4",
-                &parzen.names,
-                &parzen.std_errors,
-                Tol::se(n),
-            )
-            .vector("kernhac_parzen_bw4_vcov", &parzen.vcov.concat(), Tol::se(n))
-            .named(
-                "kernhac_truncated_bw4",
-                &truncated.names,
-                &truncated.std_errors,
-                Tol::se(n),
-            )
-            .vector(
-                "kernhac_truncated_bw4_vcov",
-                &truncated.vcov.concat(),
-                Tol::se(n),
-            )
-            .named(
-                "kernhac_tukey_hanning_bw4",
-                &tukey.names,
-                &tukey.std_errors,
-                Tol::se(n),
-            )
-            .vector(
-                "kernhac_tukey_hanning_bw4_vcov",
-                &tukey.vcov.concat(),
-                Tol::se(n),
-            )
-            .finish();
+            );
+        for (key, r) in [
+            ("kernhac_parzen_bw4", &parzen),
+            ("kernhac_truncated_bw4", &truncated),
+            ("kernhac_tukey_hanning_bw4", &tukey),
+            ("kernhac_qs_bw4", &qs),
+        ] {
+            check
+                .named(key, &r.names, &r.std_errors, Tol::se(n))
+                .vector(&format!("{key}_vcov"), &r.vcov.concat(), Tol::se(n));
+        }
+        check.finish();
         assert_eq!(auto.std_errors, bartlett.std_errors); // default bandwidth = bw_rule
         // Tier 0 (REG-1, 428d7cf): a user bandwidth above n/4 warns; 4 <= 100/4, and the
         // default never warns
         assert!(
-            [&auto, &bartlett, &parzen, &truncated, &tukey]
+            [&auto, &bartlett, &parzen, &truncated, &tukey, &qs]
                 .iter()
                 .all(|r| r.warnings.is_empty())
         );
-        // deviation REG-50: "qs" truncates the QS kernel at the bandwidth (kernhac_qs_bw4),
-        //   and p2a's Bartlett bandwidth m is kernHAC(bw = m + 1), not kernhac_bartlett_bw4.
-        // deviation REG-22: prewhiten = true is a scalar AR(1) on the residuals
-        //   (neweywest_lag4_prewhite).
-        // deviation REG-61: default bandwidth is the fixed rule, not bwNeweyWest
-        //   (bw_neweywest); no adjust = TRUE (kernhac_*_adjust).
-        let qs = hac(Some(bw), "qs", false);
+        // VAR(1) prewhitening of the scores (sandwich's meatHAC(prewhite = 1))
         let prewhitened = hac(Some(bw), "bartlett", true);
-        assert!(
-            qs.std_errors
-                .iter()
-                .chain(&prewhitened.std_errors)
-                .all(|s| s.is_finite() && *s > 0.0)
-        );
+        Check::new(&case)
+            .named(
+                "neweywest_lag4_prewhite",
+                &prewhitened.names,
+                &prewhitened.std_errors,
+                Tol::se(n),
+            )
+            .finish();
         assert!(prewhitened.prewhiten && matches!(qs.kernel, HacKernel::QuadraticSpectral));
         assert!(
             matches!(auto.kernel, HacKernel::Bartlett)
                 && matches!(parzen.kernel, HacKernel::Parzen)
         );
         assert_eq!((auto.n_obs, auto.n_params), (n, 2));
+        // Bartlett, Parzen, Tukey-Hanning keep lags 0..L; Truncated 0..L+1
+        assert_eq!(
+            (
+                bartlett.n_lag_weights,
+                parzen.n_lag_weights,
+                truncated.n_lag_weights
+            ),
+            (5, 4, 5)
+        );
+    }
+
+    /// The Quadratic Spectral kernel over a long series (case `vcov_hac_qs_long`): at lag 0 it
+    /// still sums every lag whose weight exceeds 1e-7, at lag 2 all n.
+    #[test]
+    fn test_validate_hac_qs_long() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_qs_long");
+        let n = case.scalar("n_obs") as usize;
+        let hac = |lag: usize, k: &str| {
+            run_vcov_hac(&ds, "y", &["x"], Some(lag), Some(k), false).unwrap()
+        };
+        let (qs0, qs2, nw2) = (hac(0, "qs"), hac(2, "qs"), hac(2, "bartlett"));
+        let qs2_pw = run_vcov_hac(&ds, "y", &["x"], Some(2), Some("qs"), true).unwrap();
+        let names = &qs0.names;
+        Check::new(&case)
+            .named("coef", names, &qs0.coefficients, Tol::coef(n))
+            .named("kernhac_qs_bw1", names, &qs0.std_errors, Tol::se(n))
+            .vector("kernhac_qs_bw1_vcov", &qs0.vcov.concat(), Tol::se(n))
+            .scalar("qs_bw1_n_weights", qs0.n_lag_weights as f64, Tol::exact())
+            .named("kernhac_qs_bw3", names, &qs2.std_errors, Tol::se(n))
+            .vector("kernhac_qs_bw3_vcov", &qs2.vcov.concat(), Tol::se(n))
+            .scalar("qs_bw3_n_weights", qs2.n_lag_weights as f64, Tol::exact())
+            .named("nw_lag2", names, &nw2.std_errors, Tol::se(n))
+            .named(
+                "kernhac_qs_bw3_prewhite",
+                names,
+                &qs2_pw.std_errors,
+                Tol::se(n),
+            )
+            .vector(
+                "kernhac_qs_bw3_prewhite_vcov",
+                &qs2_pw.vcov.concat(),
+                Tol::se(n),
+            )
+            .finish();
+    }
+
+    /// HAC on Grunfeld in file order (case `vcov_hac_grunfeld`): Newey-West lag 3 and the
+    /// default rule, the Quadratic Spectral kernel at lag 2 and 3.
+    #[test]
+    fn test_validate_hac_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let hac = |lag: Option<usize>, k: &str| {
+            run_vcov_hac(&ds, "inv", &["value", "capital"], lag, Some(k), false).unwrap()
+        };
+        let (nw3, qs2, qs3, auto) = (
+            hac(Some(3), "bartlett"),
+            hac(Some(2), "qs"),
+            hac(Some(3), "qs"),
+            hac(None, "bartlett"),
+        );
+        let nw3_pw = run_vcov_hac(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            Some(3),
+            Some("bartlett"),
+            true,
+        )
+        .unwrap();
+        let names = &nw3.names;
+        Check::new(&case)
+            .named("coef", names, &nw3.coefficients, Tol::coef(n))
+            .named("nw_lag3", names, &nw3.std_errors, Tol::se(n))
+            .named("kernhac_qs_bw3", names, &qs2.std_errors, Tol::se(n))
+            .named("kernhac_qs_bw4", names, &qs3.std_errors, Tol::se(n))
+            .named("nw_lag_rule", names, &auto.std_errors, Tol::se(n))
+            .named("nw_lag3_prewhite", names, &nw3_pw.std_errors, Tol::se(n))
+            .vector("nw_lag3_prewhite_vcov", &nw3_pw.vcov.concat(), Tol::se(n))
+            .scalar("bw_rule", auto.bandwidth as f64, Tol::exact())
+            .finish();
+    }
+
+    /// Newey-West and the Quadratic Spectral kernel without prewhitening on a series with
+    /// three regressors (case `vcov_hac_prewhite_ts`).
+    #[test]
+    fn test_validate_hac_kernels_ts() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_prewhite_ts");
+        let n = case.scalar("n_obs") as usize;
+        let lag = case.scalar("lag") as usize;
+        let hac =
+            |k: &str| run_vcov_hac(&ds, "y", &["x1", "x2"], Some(lag), Some(k), false).unwrap();
+        let (nw, qs) = (hac("bartlett"), hac("qs"));
+        let names = &nw.names;
+        Check::new(&case)
+            .named("coef", names, &nw.coefficients, Tol::coef(n))
+            .named("nw_lag5", names, &nw.std_errors, Tol::se(n))
+            .vector("nw_lag5_vcov", &nw.vcov.concat(), Tol::se(n))
+            .named("kernhac_qs_bw6", names, &qs.std_errors, Tol::se(n))
+            .vector("kernhac_qs_bw6_vcov", &qs.vcov.concat(), Tol::se(n))
+            .scalar("qs_bw6_n_weights", qs.n_lag_weights as f64, Tol::exact())
+            .finish();
+    }
+
+    /// VAR(1) prewhitening of the scores with every kernel (case `vcov_hac_prewhite_ts`):
+    /// NeweyWest(lag = 5, prewhite = TRUE) and kernHAC(bw = 6, prewhite = TRUE).
+    #[test]
+    fn test_validate_hac_prewhite_var1_ts() {
+        let (case, ds) = crate::test_support::load_case("vcov_hac_prewhite_ts");
+        let n = case.scalar("n_obs") as usize;
+        let lag = case.scalar("lag") as usize;
+        let hac =
+            |k: &str| run_vcov_hac(&ds, "y", &["x1", "x2"], Some(lag), Some(k), true).unwrap();
+        let mut check = Check::new(&case);
+        for (key, kernel) in [
+            ("nw_lag5_prewhite", "bartlett"),
+            ("kernhac_parzen_bw6_prewhite", "parzen"),
+            ("kernhac_qs_bw6_prewhite", "qs"),
+            ("kernhac_truncated_bw6_prewhite", "truncated"),
+            ("kernhac_tukey_hanning_bw6_prewhite", "tukey-hanning"),
+        ] {
+            let r = hac(kernel);
+            assert!(r.prewhiten);
+            check
+                .named(key, &r.names, &r.std_errors, Tol::se(n))
+                .vector(&format!("{key}_vcov"), &r.vcov.concat(), Tol::se(n));
+            if kernel == "qs" {
+                check.scalar(
+                    "qs_bw6_prewhite_n_weights",
+                    r.n_lag_weights as f64,
+                    Tol::exact(),
+                );
+            }
+        }
+        check.finish();
+    }
+
+    /// A regressor with leverage 1 has a zero score column, so the VAR(1) of the scores is
+    /// not identified: an error naming the prewhitening, as sandwich stops in solve().
+    #[test]
+    fn test_var1_prewhiten_singular_lag_matrix() {
+        let n = 40;
+        let e = perf3_noise(2 * n, 17);
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.3).sin() + e[i]).collect();
+        let d: Vec<f64> = (0..n).map(|i| if i == 17 { 1.0 } else { 0.0 }).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x[i] + 2.0 * d[i] + e[n + i])
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x, "d" => d }.unwrap());
+        match run_vcov_hac(&ds, "y", &["x", "d"], Some(3), None, true) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("prewhitening"), "{message}")
+            }
+            other => panic!("expected the prewhitening error, got {other:?}"),
+        }
+        // without prewhitening the fit is fine
+        assert!(run_vcov_hac(&ds, "y", &["x", "d"], Some(3), None, false).is_ok());
+    }
+
+    /// A negative variance from the Truncated kernel (case `hac_truncated_indefinite`,
+    /// kernHAC(kernel = "Truncated", bw = 6)): NaN standard errors and a warning, not 0.
+    #[test]
+    fn test_validate_hac_truncated_indefinite() {
+        let (case, ds) = crate::test_support::load_case("hac_truncated_indefinite");
+        let n = case.scalar("n_obs") as usize;
+        let r = run_vcov_hac(&ds, "y", &["x"], Some(5), Some("truncated"), false).unwrap();
+        let diag: Vec<f64> = (0..2).map(|i| r.vcov[i][i]).collect();
+        Check::new(&case)
+            .named("coef", &r.names, &r.coefficients, Tol::coef(n))
+            .vector("kernhac_truncated_bw6_diag", &diag, Tol::se(n))
+            .vector("kernhac_truncated_bw6_vcov", &r.vcov.concat(), Tol::se(n))
+            .finish();
+        assert!(
+            r.std_errors.iter().all(|s| s.is_nan()),
+            "{:?}",
+            r.std_errors
+        );
+        for name in ["(Intercept)", "x"] {
+            assert!(
+                r.warnings.iter().any(
+                    |w| w.contains(&format!("'{name}' is negative")) && w.contains("Truncated")
+                ),
+                "{:?}",
+                r.warnings
+            );
+        }
+    }
+
+    /// A smallest eigenvalue at rounding level (-1e-20 against 1e-2) is not an indefinite
+    /// covariance: no warning, the covariance untouched without fix (so the caller keeps the
+    /// Wald F), clamped silently with fix. A genuine negative eigenvalue is still reported,
+    /// and the warning says the Wald F is withheld.
+    #[test]
+    fn test_twoway_psd_check_ignores_rounding_level_negative() {
+        let base = Array2::from_diag(&ndarray::arr1(&[1e-2, 5e-3, -1e-20]));
+        let mut v = base.clone();
+        assert_eq!(twoway_psd_check(&mut v, false).unwrap(), None);
+        assert_eq!(v, base);
+        let mut v = base.clone();
+        assert_eq!(twoway_psd_check(&mut v, true).unwrap(), None);
+        assert!(v[[2, 2]] >= 0.0);
+
+        let mut v = Array2::from_diag(&ndarray::arr1(&[1e-2, 5e-3, -1e-4]));
+        let w = twoway_psd_check(&mut v, false)
+            .unwrap()
+            .expect("indefinite");
+        assert!(w.contains("no Wald F is reported"), "{w}");
+        let mut v = Array2::from_diag(&ndarray::arr1(&[1e-2, 5e-3, -1e-4]));
+        let w = twoway_psd_check(&mut v, true).unwrap().expect("indefinite");
+        assert!(w.contains("clamped"), "{w}");
+    }
+
+    /// A rank-deficient positive semi-definite covariance (v v' of rank 1, exact in floating
+    /// point) is not reported, whatever sign rounding gives its zero eigenvalues.
+    #[test]
+    fn test_twoway_psd_check_rank_deficient_psd_does_not_warn() {
+        let u = ndarray::arr1(&[0.5, -0.25, 0.125]);
+        let base = Array2::from_shape_fn((3, 3), |(i, j)| u[i] * u[j]);
+        let mut v = base.clone();
+        assert_eq!(twoway_psd_check(&mut v, false).unwrap(), None);
+        assert_eq!(v, base);
+    }
+
+    /// Two-way clustering on two copies of one cluster column with fewer clusters than
+    /// parameters: V_a + V_b - V_ab is the (rank-deficient, positive semi-definite) one-way
+    /// covariance, which draws no "not positive semi-definite" warning.
+    #[test]
+    fn test_twoway_rank_deficient_psd_fit_does_not_warn() {
+        let n = 24;
+        let e = perf3_noise(3 * n, 11);
+        let x1: Vec<f64> = (0..n).map(|i| i as f64 / 5.0 + e[i]).collect();
+        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).cos() + e[n + i]).collect();
+        let x3: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.3).sin() + e[2 * n + i])
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * x1[i] - x2[i] + 0.2 * x3[i] + e[(5 * i) % (3 * n)])
+            .collect();
+        let g: Vec<i64> = (0..n as i64).map(|i| i % 3).collect();
+        let df = df! {
+            "y" => y, "x1" => x1, "x2" => x2, "x3" => x3, "a" => g.clone(), "b" => g,
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let r = OlsClusteredResult::fit_with(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            "a",
+            Some("b"),
+            true,
+            ClusteredOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            !r.ols
+                .warnings
+                .iter()
+                .any(|w| w.contains("not positive semi-definite")),
+            "{:?}",
+            r.ols.warnings
+        );
+    }
+
+    /// The Quadratic Spectral kernel's Taylor branch below z = 1e-2 agrees with the closed
+    /// form at the switch and is continuous across it; at small z it keeps the digits the
+    /// closed form loses.
+    #[test]
+    fn test_quadratic_spectral_small_z_series() {
+        let closed = |z: f64| 3.0 / (z * z) * (z.sin() / z - z.cos());
+        let z = QS_SERIES_BELOW;
+        let series = {
+            let z2 = z * z;
+            1.0 - z2 / 10.0 + z2 * z2 / 280.0
+        };
+        // the closed form at 1e-2 carries about eps / z^2 = 2e-12 relative error
+        assert!((series - closed(z)).abs() < 1e-10, "{series} {}", closed(z));
+        let below = quadratic_spectral(z * (1.0 - 1e-12));
+        let above = quadratic_spectral(z * (1.0 + 1e-12));
+        assert!((below - above).abs() < 1e-10, "{below} {above}");
+        // 1 - z^2/10 to within z^4/280 at small z, where the closed form cancels
+        let z = 1e-5;
+        assert!((quadratic_spectral(z) - (1.0 - z * z / 10.0)).abs() < 1e-18);
+        assert!(quadratic_spectral(z) < 1.0);
+        // through the lag weights: a huge lag count gives weights just below 1
+        let w = HacKernel::QuadraticSpectral.lag_weight(1, 100_000);
+        assert!(w < 1.0 && 1.0 - w < 1e-9, "{w}");
+    }
+
+    /// A two-way clustered covariance with a negative eigenvalue (case
+    /// `ols_twoway_indefinite`): NaN SEs and a warning; fix clamps it as vcovCL(fix = TRUE).
+    #[test]
+    fn test_validate_ols_twoway_indefinite() {
+        let (case, ds) = crate::test_support::load_case("ols_twoway_indefinite");
+        let n = case.scalar("n_obs") as usize;
+        let r = OlsClusteredResult::fit(&ds, "y", &["x"], "a", Some("b"), true).unwrap();
+        let fixed = OlsClusteredResult::fit_with(
+            &ds,
+            "y",
+            &["x"],
+            "a",
+            Some("b"),
+            true,
+            ClusteredOptions { fix: true },
+        )
+        .unwrap();
+        let diag: Vec<f64> = (0..2).map(|i| r.ols.vcov[[i, i]]).collect();
+        let fix_se: Vec<f64> = fixed.ols.coefficients.iter().map(|c| c.std_error).collect();
+        let fix_vcov: Vec<f64> = fixed.ols.vcov.iter().copied().collect();
+        let eig = case.vector("cl_twoway_eigenvalues");
+        let warning = r
+            .ols
+            .warnings
+            .iter()
+            .find(|w| w.contains("not positive semi-definite"))
+            .expect("PSD warning");
+        // the smallest eigenvalue as printed ({:.6e})
+        let printed: f64 = warning
+            .split("smallest eigenvalue ")
+            .nth(1)
+            .and_then(|t| t.split(')').next())
+            .unwrap()
+            .parse()
+            .unwrap();
+        Check::new(&case)
+            .named(
+                "coef",
+                &r.ols.variable_names,
+                &col(&r.ols, |c| c.estimate),
+                Tol::coef(n),
+            )
+            .vector("cl_twoway_diag", &diag, Tol::se(n))
+            .vector("cl_twoway_fix_se", &fix_se, Tol::se(n))
+            .vector("cl_twoway_fix_vcov", &fix_vcov, Tol::se(n))
+            .finish();
+        assert!(
+            (printed - eig[1]).abs() <= 5e-7 * eig[1].abs(),
+            "{printed} vs {eig:?}"
+        );
+        assert!(r.ols.coefficients.iter().all(|c| c.std_error.is_nan()));
+        assert!(r.ols.wald_f.is_none());
+        assert!(fixed.ols.wald_f.is_some());
+        assert!(
+            fixed
+                .ols
+                .warnings
+                .iter()
+                .any(|w| w.contains("clamped to 0"))
+        );
+    }
+
+    /// A negative Driscoll-Kraay variance gives NaN se, t and p (not 0, 0 and 1). A property
+    /// test on the data of case `vcov_dk_grunfeld_t10`, loaded without the case.
+    #[test]
+    fn test_dk_nan_se_gives_nan_t() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../validation/datasets/generated/vcov_dk_grunfeld_t10.csv"
+        );
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(path).unwrap());
+        // Truncated at lag 7 of T = 10 periods weighs lags 1-8 by 1 (at lag 8 every lag has
+        // weight 1 and the meat collapses to (X'u)(X'u)' = 0, whose sign is rounding); here
+        // the slope variances are negative by orders of magnitude more than rounding
+        let r = run_vcov_driscoll_kraay(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            "year",
+            Some(7),
+            Some("truncated"),
+        )
+        .unwrap();
+        let neg: Vec<usize> = (0..3).filter(|&i| r.vcov[i][i] < 0.0).collect();
+        assert_eq!(neg, vec![1, 2], "{:?}", r.vcov);
+        for &i in &neg {
+            assert!(r.std_errors[i].is_nan() && r.t_stats[i].is_nan() && r.p_values[i].is_nan());
+        }
+        assert!(
+            r.warnings.iter().any(|w| w.contains("is negative")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// The FFT meat equals the direct sum to rounding (noisy AR(0.5) scores).
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn test_hac_qs_fft_matches_direct() {
+        for n in [200usize, 1500] {
+            for k in [1usize, 3, 6] {
+                let e = perf3_noise(n * (k + 1), (n + k) as u64);
+                let mut s = vec![0.0; n * k];
+                for a in 0..k {
+                    let mut prev = 0.0;
+                    for i in 0..n {
+                        prev = 0.5 * prev + e[a * n + i] * (1.0 + 0.3 * a as f64);
+                        s[a * n + n - 1 - i] = prev;
+                    }
+                }
+                for lag in [0usize, 2, 10] {
+                    let w = HacKernel::QuadraticSpectral.lag_set(lag, n, 1e-7);
+                    assert!(w.len() > HAC_FFT_MIN_LAGS);
+                    let direct = hac_meat(&s, n, k, &w).unwrap();
+                    let fft = hac_meat_fft(&s, n, k, &w).unwrap();
+                    for a in 0..k {
+                        for b in 0..k {
+                            let scale = (direct[a * k + a] * direct[b * k + b]).sqrt();
+                            let d = (fft[a * k + b] - direct[a * k + b]).abs();
+                            assert!(d <= 1e-10 * scale, "n {n} k {k} lag {lag}: {d} vs {scale}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Property test, not R-pinned: sandwich::vcovBS resamples with R's RNG, which cannot be
@@ -4417,10 +5567,9 @@ mod tests {
     }
 
     /// Case `dk_panel` (sandwich::vcovPL / plm::vcovSCC on the legacy Test 10 DGP;
-    /// validation/r/cases/regression_legacy.R). Only the parts p2a reproduces are pinned.
+    /// validation/r/cases/regression_legacy.R).
     #[test]
     fn test_validate_driscoll_kraay_panel() {
-        use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("dk_panel");
         let n = case.scalar("n_obs") as usize;
         let dk = run_vcov_driscoll_kraay(&ds, "y", &["x"], "time", None, None).unwrap();
@@ -4429,24 +5578,101 @@ mod tests {
         Check::new(&case)
             .named("coef", &dk.names, &dk.coefficients, Tol::coef(n))
             .named("se_ols", &dk.names, &ols_se, Tol::se(n))
-            // default bandwidth floor(T^(1/4)) = vcovPL's lag = "NW1987"; Bartlett
-            // 1 - j/(m + 1) = vcovPL's bw = lag + 1
+            // default lag floor(T^(1/4)) = vcovPL's lag = "NW1987"; Bartlett
+            // 1 - j/(L + 1) = vcovPL's bw = lag + 1
             .scalar("lag", dk.bandwidth as f64, Tol::exact())
             .scalar("n_periods", dk.n_periods as f64, Tol::exact())
             .scalar("n_obs", dk.n_obs as f64, Tol::exact())
+            .named("vcovpl_lag2", &dk.names, &dk.std_errors, Tol::se(n))
+            .named("vcovscc_lag2", &dk.names, &dk.std_errors, Tol::se(n))
             .finish();
-        // deviation REG-24: std_errors, vcov, t_stats and p_values average the scores within
-        //   period and scale by T; here they are sqrt(T)/N = 0.4472 times vcovpl_lag2
-        //   (= vcovscc_lag2).
         assert_eq!(dk.n_units, 10);
         assert!(matches!(dk.kernel, HacKernel::Bartlett));
         // Tier 0 (REG-1, 428d7cf) warns only for a user bandwidth above T/4
         assert!(dk.warnings.is_empty());
-        let ratio = dk.std_errors[0] / ols_se[0];
-        assert!(
-            (ratio - 1.0).abs() > 0.01,
-            "DK and OLS SEs should differ: ratio={ratio:.3}"
-        );
+    }
+
+    /// The Driscoll-Kraay estimates of `case` for every kernel at `lag`, against
+    /// `vcovpl_<kernel>_lag<lag>` (SEs and covariance).
+    fn check_dk_kernels(
+        case_id: &str,
+        lag: Option<usize>,
+        expect_lag: usize,
+    ) -> (p2a_validation::Case, Vec<DriscollKraayResult>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let n = case.scalar("n_obs") as usize;
+        let mut check = Check::new(&case);
+        let mut out = Vec::new();
+        for (key, kernel) in [
+            ("bartlett", "bartlett"),
+            ("parzen", "parzen"),
+            ("qs", "qs"),
+            ("truncated", "truncated"),
+            ("tukey_hanning", "tukey-hanning"),
+        ] {
+            let r = run_vcov_driscoll_kraay(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                "year",
+                lag,
+                Some(kernel),
+            )
+            .unwrap();
+            assert_eq!(r.bandwidth, expect_lag);
+            let k = format!("vcovpl_{key}_lag{expect_lag}");
+            check.named(&k, &r.names, &r.std_errors, Tol::se(n)).vector(
+                &format!("{k}_vcov"),
+                &r.vcov.concat(),
+                Tol::se(n),
+            );
+            if key == "bartlett" {
+                check
+                    .named("coef", &r.names, &r.coefficients, Tol::coef(n))
+                    .named(
+                        &format!("vcovscc_lag{expect_lag}"),
+                        &r.names,
+                        &r.std_errors,
+                        Tol::se(n),
+                    )
+                    .scalar("n_periods", r.n_periods as f64, Tol::exact())
+                    .scalar("n_obs", r.n_obs as f64, Tol::exact());
+            }
+            out.push(r);
+        }
+        check.finish();
+        drop(check);
+        (case, out)
+    }
+
+    /// Driscoll-Kraay on Grunfeld, five kernels at lag 2 (case `vcov_dk_grunfeld`):
+    /// vcovPL(cluster = ~firm, order.by = ~year, lag = 2, adjust = FALSE).
+    #[test]
+    fn test_validate_driscoll_kraay_grunfeld_kernels() {
+        let (case, r) = check_dk_kernels("vcov_dk_grunfeld", Some(2), 2);
+        let (_, ds) = crate::test_support::load_case("vcov_dk_grunfeld");
+        let auto =
+            run_vcov_driscoll_kraay(&ds, "inv", &["value", "capital"], "year", None, None).unwrap();
+        assert_eq!(auto.bandwidth as f64, case.scalar("lag_rule"));
+        assert_eq!(auto.std_errors, r[0].std_errors);
+    }
+
+    /// Unbalanced Grunfeld, five kernels at lag 2 (case `vcov_dk_grunfeld_unbal`).
+    #[test]
+    fn test_validate_driscoll_kraay_grunfeld_unbalanced() {
+        check_dk_kernels("vcov_dk_grunfeld_unbal", Some(2), 2);
+    }
+
+    /// Grunfeld 1935-1944 (T = 10): the default lag floor(T^(1/4)) = 1, five kernels
+    /// (case `vcov_dk_grunfeld_t10`). At lag 1 Tukey-Hanning equals Bartlett (both weigh
+    /// lag 1 by 1/2).
+    #[test]
+    fn test_validate_driscoll_kraay_grunfeld_t10_default_lag() {
+        let (case, r) = check_dk_kernels("vcov_dk_grunfeld_t10", None, 1);
+        assert_eq!(case.scalar("lag_rule"), 1.0);
+        for (b, t) in r[0].std_errors.iter().zip(&r[4].std_errors) {
+            assert!((b - t).abs() <= 1e-12 * b.abs(), "{b} vs {t}");
+        }
     }
 
     // ========================================
@@ -4588,7 +5814,7 @@ mod tests {
         }
     }
 
-    /// The truncated kernel at bandwidth n - 1 gives every lag weight 1, so the
+    /// The truncated kernel at lag n - 1 gives every lag 1..n-1 weight 1, so the
     /// meat is (X'u)(X'u)'/n, which the OLS normal equations make zero up to
     /// rounding. The variances are then noise of about 1e-17 whose sign depends
     /// on the machine's floating-point path, so they are bounded here, not
@@ -4597,20 +5823,27 @@ mod tests {
     fn test_hac_truncated_kernel_at_n_minus_1_collapses() {
         let ts = create_timeseries_dataset();
         let r = run_vcov_hac(&ts, "y", &["x"], Some(29), Some("truncated"), false).unwrap();
-        assert!(r.std_errors.iter().all(|&s| s < 1e-6), "{:?}", r.std_errors);
-        // the bandwidth-above-n/4 warning
-        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        // a variance of rounding noise is tiny, or negative (NaN SE with a warning)
+        assert!(
+            r.std_errors.iter().all(|&s| s.is_nan() || s < 1e-6),
+            "{:?}",
+            r.std_errors
+        );
+        let negative = r.std_errors.iter().filter(|s| s.is_nan()).count();
+        // the bandwidth-above-n/4 warning, plus one per negative variance
+        assert_eq!(r.warnings.len(), 1 + negative, "{:?}", r.warnings);
     }
 
     /// Characterisation test: the code before the T0-WP14 resource bounds gives
     /// the same numbers, and later refactors must not move them.
     ///
-    /// The truncated kernel is pinned at bandwidth 5, where its SEs are 0.148
-    /// and 0.0072. At bandwidth n - 1 = 29 they collapse to rounding noise
+    /// The truncated kernel is pinned at lag 5 (lags 1-6 at weight 1, kernHAC(bw = 6)), where
+    /// its SEs are 0.141 and 0.0069. At lag n - 1 = 29 they collapse to rounding noise
     /// (see `test_hac_truncated_kernel_at_n_minus_1_collapses`). A numpy
     /// re-implementation of the lag loop reproduces the three HAC pins to
     /// 2e-14, and moving beta by up to 10 ulp changes their variances by at
-    /// most 3e-13 relative.
+    /// most 3e-13 relative. The Bartlett and Truncated values equal sandwich's
+    /// NeweyWest(lag = L) and kernHAC(bw = L + 1).
     #[test]
     fn test_pinned_hac_dk_bootstrap_outputs() {
         let ts = create_timeseries_dataset();
@@ -4636,10 +5869,14 @@ mod tests {
                 0.0067448421041296615,
                 0.10055839075154051,
                 0.005817042539300054,
-                0.14772400250120787,
-                0.007223766353723901,
-                0.01250309685000187,
-                0.0011882147319589296,
+                // Truncated lag 5 = kernHAC(bw = 6): lags 1-6 at weight 1 (R 4.3.3, sandwich
+                // 3.1.3: 0.1407363667278248 / 0.0068974507714703115)
+                0.1407363667278248,
+                0.0068974507714703115,
+                // Driscoll-Kraay lag 9: vcovPL(cluster = ~unit, order.by = ~time, lag = 9,
+                // adjust = FALSE) is 0.019769131925837232 / 0.0018787324511785868 (R 4.3.3)
+                0.019769131925837232,
+                0.0018787324511785868,
                 0.09631970723095434,
                 0.01566998133541119,
                 1.0,
@@ -5816,9 +7053,102 @@ mod tests {
         }
     }
 
-    /// The HAC meat over flat score rows, its lag sums accumulated a block of lags at a time,
-    /// equals, bit for bit, the indexed one-pass-per-lag loop it replaced (same terms, same
-    /// summation order), with and without an aliased column.
+    /// Every kernel is evaluated at j / (L + 1) (sandwich's NeweyWest(lag = L) convention).
+    #[test]
+    fn test_lag_weight_matches_newey_west_convention() {
+        let qs = |x: f64| {
+            let z = 6.0 * std::f64::consts::PI * x / 5.0;
+            3.0 / (z * z) * (z.sin() / z - z.cos())
+        };
+        for lags in [0usize, 1, 3, 7] {
+            for j in 0..=(lags + 3) {
+                let x = j as f64 / (lags as f64 + 1.0);
+                let expect = [
+                    (HacKernel::Bartlett, if x < 1.0 { 1.0 - x } else { 0.0 }),
+                    (HacKernel::Truncated, if x <= 1.0 { 1.0 } else { 0.0 }),
+                    (
+                        HacKernel::Parzen,
+                        if x <= 0.5 {
+                            1.0 - 6.0 * x * x + 6.0 * x.powi(3)
+                        } else if x <= 1.0 {
+                            2.0 * (1.0 - x).powi(3)
+                        } else {
+                            0.0
+                        },
+                    ),
+                    (
+                        HacKernel::TukeyHanning,
+                        if x <= 1.0 {
+                            0.5 * (1.0 + (std::f64::consts::PI * x).cos())
+                        } else {
+                            0.0
+                        },
+                    ),
+                    (
+                        HacKernel::QuadraticSpectral,
+                        if j == 0 { 1.0 } else { qs(x) },
+                    ),
+                ];
+                for (kernel, e) in expect {
+                    let w = kernel.lag_weight(j, lags);
+                    assert!(
+                        (w - e).abs() <= 1e-15,
+                        "{kernel:?} L={lags} j={j}: {w} vs {e}"
+                    );
+                }
+            }
+        }
+        // spot checks
+        let b: Vec<f64> = (1..=5)
+            .map(|j| HacKernel::Bartlett.lag_weight(j, 4))
+            .collect();
+        for (w, e) in b.iter().zip([0.8, 0.6, 0.4, 0.2, 0.0]) {
+            assert!((w - e).abs() < 1e-15, "{b:?}");
+        }
+        assert_eq!(HacKernel::Truncated.lag_weight(6, 5), 1.0);
+        assert_eq!(HacKernel::Truncated.lag_weight(7, 5), 0.0);
+        let z = 6.0 * std::f64::consts::PI / 5.0;
+        let qs1 = 3.0 / (z * z) * (z.sin() / z - z.cos());
+        assert!((HacKernel::QuadraticSpectral.lag_weight(1, 0) - qs1).abs() < 1e-15);
+        for kernel in [
+            HacKernel::Bartlett,
+            HacKernel::Parzen,
+            HacKernel::QuadraticSpectral,
+            HacKernel::Truncated,
+            HacKernel::TukeyHanning,
+        ] {
+            assert_eq!(kernel.lag_weight(0, 0), 1.0);
+            assert_eq!(kernel.lag_weight(0, 5), 1.0);
+        }
+    }
+
+    /// The lag sets cut after the last weight above the tolerance (sandwich's weightsAndrews
+    /// at 1e-7; meatPL at 0).
+    #[test]
+    fn test_lag_set_tolerance() {
+        assert_eq!(
+            HacKernel::QuadraticSpectral.lag_set(0, 3000, 1e-7).len(),
+            1451
+        );
+        assert_eq!(
+            HacKernel::QuadraticSpectral.lag_set(2, 3000, 1e-7).len(),
+            2999
+        );
+        assert_eq!(HacKernel::Bartlett.lag_set(4, 3000, 1e-7).len(), 5);
+        assert_eq!(HacKernel::Truncated.lag_set(5, 3000, 1e-7).len(), 7);
+        assert_eq!(HacKernel::Parzen.lag_set(3, 3000, 0.0).len(), 4);
+        assert_eq!(HacKernel::TukeyHanning.lag_set(3, 3000, 0.0).len(), 4);
+        // lag 0: Bartlett, Parzen and Tukey-Hanning keep lag 0 only; Truncated keeps lag 1
+        assert_eq!(HacKernel::Bartlett.lag_set(0, 100, 1e-7), vec![1.0]);
+        assert_eq!(HacKernel::Truncated.lag_set(0, 100, 1e-7), vec![1.0, 1.0]);
+        // never longer than the number of rows
+        assert_eq!(HacKernel::Truncated.lag_set(5, 4, 0.0).len(), 4);
+        assert_eq!(HacKernel::QuadraticSpectral.lag_set(50, 20, 0.0).len(), 20);
+    }
+
+    /// The HAC meat over one reversed score copy, its lag sums accumulated a block of lags at a
+    /// time, equals, bit for bit, the indexed one-pass-per-lag loop it replaced (same terms,
+    /// same summation order), with and without an aliased column.
     #[test]
     fn test_hac_meat_matches_indexed_reference_exactly() {
         let n = 600;
@@ -5869,8 +7199,9 @@ mod tests {
                         }
                     }
                 }
-                for lag in 1..=hac.bandwidth.min(n - 1) {
-                    let w = kernel.weight(lag, hac.bandwidth);
+                let weights = kernel.lag_set(hac.bandwidth, n, 1e-7);
+                assert_eq!(hac.n_lag_weights, weights.len());
+                for (lag, &w) in weights.iter().enumerate().skip(1) {
                     if w.abs() < 1e-15 {
                         continue;
                     }
@@ -5888,6 +7219,15 @@ mod tests {
                         }
                     }
                 }
+                // the direct meat equals the reference bit for bit, whichever path vcov_hac takes
+                let x_view = x.view();
+                let rev = reversed_scores(x_view, u.view()).unwrap();
+                let direct = hac_meat(&rev, n, k, &weights).unwrap();
+                for a in 0..k {
+                    for b in 0..k {
+                        assert_eq!(direct[a * k + b].to_bits(), omega[[a, b]].to_bits());
+                    }
+                }
                 omega /= n as f64;
                 let bread = Array2::from_shape_fn((k, k), |(a, b)| ols.xtx_inv[[keep[a], keep[b]]]);
                 let v = matmul(
@@ -5896,18 +7236,78 @@ mod tests {
                 )
                 .unwrap()
                     * (n as f64);
+                // the FFT meat (long lag sets with spectral-analysis) agrees to rounding
+                let exact = !cfg!(feature = "spectral-analysis") || weights.len() <= 64;
                 for (a, &ca) in keep.iter().enumerate() {
-                    assert_eq!(
-                        hac.std_errors[ca].to_bits(),
-                        v[[a, a]].sqrt().to_bits(),
-                        "{cols:?} {bw:?} {kernel:?} {a}"
-                    );
                     for (b, &cb) in keep.iter().enumerate() {
-                        assert_eq!(hac.vcov[ca][cb].to_bits(), v[[a, b]].to_bits());
+                        let (got, want) = (hac.vcov[ca][cb], v[[a, b]]);
+                        if exact {
+                            assert_eq!(got.to_bits(), want.to_bits(), "{cols:?} {bw:?} {kernel:?}");
+                        } else {
+                            let scale = (v[[a, a]] * v[[b, b]]).sqrt();
+                            assert!((got - want).abs() <= 1e-10 * scale, "{got} vs {want}");
+                        }
+                    }
+                    if exact {
+                        assert_eq!(hac.std_errors[ca].to_bits(), v[[a, a]].sqrt().to_bits());
                     }
                 }
             }
         }
+    }
+
+    /// The residual and wild bootstraps reuse the base fit's normal-equations inverse:
+    /// bit-identical to a solver that forms it again.
+    #[test]
+    fn test_fixed_design_solver_reuses_base_factor() {
+        let ds = create_test_dataset();
+        let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        assert_eq!(ols.path, Some(OlsPath::NormalEquations));
+        let dm = DesignMatrix::from_dataframe(ds.df(), &["x1"], true).unwrap();
+        let id = IdentifiedDesign::of(dm.data.view(), &ols).unwrap();
+        let (reused, fresh) = (
+            FixedDesignSolver::for_fit(&id, ols.path).unwrap(),
+            FixedDesignSolver::new(id.x.view()).unwrap(),
+        );
+        match (&reused, &fresh) {
+            (FixedDesignSolver::Normal(a), FixedDesignSolver::Normal(b)) => {
+                assert!(a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits()))
+            }
+            _ => panic!("both solvers should take the normal equations"),
+        }
+        // a deserialised fit has no path and decides again
+        assert!(matches!(
+            FixedDesignSolver::for_fit(&id, None).unwrap(),
+            FixedDesignSolver::Normal(_)
+        ));
+    }
+
+    /// A design that is not the fitted one is an InvalidSpecification in every build (the
+    /// public vcov_* functions take a caller's x), never a panic.
+    #[test]
+    fn test_identified_design_rejects_other_design() {
+        let ds = create_test_dataset();
+        let ols = run_ols(&ds, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        // x1 plus a multiple of the residuals: X'e is 100 ‖e‖², far from 0
+        let other = Array2::from_shape_fn((10, 2), |(i, j)| {
+            if j == 0 {
+                1.0
+            } else {
+                (i + 1) as f64 + 100.0 * ols.resid[i]
+            }
+        });
+        match IdentifiedDesign::of(other.view(), &ols) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("not the design the OLS fit"), "{message}")
+            }
+            Err(e) => panic!("wrong error: {e}"),
+            Ok(_) => panic!("another design was accepted"),
+        }
+        // the public estimators pass the error on
+        assert!(matches!(
+            vcov_hac(&ols, &other, Some(2), HacKernel::Bartlett, false),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     /// The pairs bootstrap takes solve_ols's coefficients without forming residuals: every

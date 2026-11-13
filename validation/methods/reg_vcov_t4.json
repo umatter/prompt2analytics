@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "hac_kernels_qs",
+      "name": "HAC covariance for OLS: lag-count kernel convention and the untruncated Quadratic Spectral kernel",
+      "category": "regression",
+      "reference": "sandwich::NeweyWest(lag = L, prewhite = FALSE); sandwich::kernHAC(kernel = 'Quadratic Spectral', bw = L + 1, prewhite = FALSE, adjust = FALSE); sandwich::weightsAndrews (number of lag weights); NeweyWest(lag = L, prewhite = TRUE) and kernHAC(prewhite = 1) for the prewhitened keys",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": [
+        "vcov_hac_qs_long",
+        "vcov_hac_grunfeld",
+        "vcov_hac_prewhite_ts"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_hac_qs_long",
+        "p2a-core::regression::ols::tests::test_validate_hac_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_hac_kernels_ts"
+      ],
+      "quantities": [
+        "coefficients",
+        "default lag rule floor(4 (n/100)^(2/9)) and its SEs (Grunfeld)",
+        "Newey-West SEs and covariance (lags 2, 3, 5)",
+        "Quadratic Spectral SEs and covariance at lags 0, 2, 3 and 5",
+        "number of Quadratic Spectral lag weights above 1e-7",
+        "prewhitened Quadratic Spectral (lag 2) and Newey-West (lag 3) SEs and covariance"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n) (n = 200, 300, 3000); weight counts and the lag rule exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "hac_prewhite_var1",
+      "name": "HAC covariance for OLS with VAR(1) prewhitening of the scores",
+      "category": "regression",
+      "reference": "sandwich::NeweyWest(lag = L, prewhite = TRUE); sandwich::kernHAC(kernel = ..., bw = L + 1, prewhite = 1, adjust = FALSE) (ar(order.max = 1, demean = FALSE, method = 'ols') of the estimating functions)",
+      "doc": "validation/regression/regression_legacy_cases.md",
+      "cases": [
+        "vcov_hac_prewhite_ts"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_hac_prewhite_var1_ts"
+      ],
+      "quantities": [
+        "coefficients",
+        "prewhitened SEs and covariance for Bartlett (lag 5), Parzen, Quadratic Spectral, Truncated and Tukey-Hanning (lag 5 = bw 6)",
+        "number of Quadratic Spectral lag weights with and without prewhitening"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n); weight counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "driscoll_kraay_kernels",
+      "name": "Driscoll-Kraay covariance for OLS, five kernels, balanced and unbalanced panels",
+      "category": "regression",
+      "reference": "sandwich::vcovPL(m, cluster = ~firm, order.by = ~year, lag = L, kernel = ..., adjust = FALSE); plm::vcovSCC (Bartlett cross-check)",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": [
+        "vcov_dk_grunfeld",
+        "vcov_dk_grunfeld_unbal",
+        "vcov_dk_grunfeld_t10"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_driscoll_kraay_grunfeld_kernels",
+        "p2a-core::regression::ols::tests::test_validate_driscoll_kraay_grunfeld_unbalanced",
+        "p2a-core::regression::ols::tests::test_validate_driscoll_kraay_grunfeld_t10_default_lag"
+      ],
+      "quantities": [
+        "coefficients",
+        "Driscoll-Kraay SEs and covariance for Bartlett, Parzen, Quadratic Spectral, Truncated and Tukey-Hanning",
+        "default lag floor(T^(1/4))",
+        "number of periods and n"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), SEs and covariance entries Tol::se(n); counts and lags exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ols_wald_f",
+      "name": "Overall Wald F test of the OLS slopes with a robust covariance",
+      "category": "regression",
+      "reference": "lmtest::waldtest(m, vcov = sandwich::vcovHC(m, type = ...) | sandwich::vcovCL(m, cluster = ..., type = 'HC1'), test = 'F')",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": [
+        "ols_wald_f_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_wald_f_grunfeld"
+      ],
+      "quantities": [
+        "Wald F and p for HC0-HC3, clustered by firm and two-way clustered",
+        "numerator and denominator degrees of freedom",
+        "Wald F and p without an intercept (HC1)",
+        "classical F, unchanged"
+      ],
+      "tolerance": "validation/README.md: statistics Tol::stat(n), p-values Tol::p_value(n); degrees of freedom exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "vcov_indefinite",
+      "name": "Covariances that are not positive semi-definite: Truncated-kernel HAC and two-way clustering",
+      "category": "regression",
+      "reference": "sandwich::kernHAC(kernel = 'Truncated', bw = 6, prewhite = FALSE, adjust = FALSE); sandwich::vcovCL(m, cluster = ~g1 + g2, type = 'HC1', fix = FALSE | TRUE)",
+      "doc": "validation/regression/ols_clustered.md",
+      "cases": [
+        "hac_truncated_indefinite",
+        "ols_twoway_indefinite"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_hac_truncated_indefinite",
+        "p2a-core::regression::ols::tests::test_validate_ols_twoway_indefinite"
+      ],
+      "quantities": [
+        "coefficients",
+        "covariance diagonal and entries (a negative variance gives a NaN SE)",
+        "smallest eigenvalue of the two-way covariance as printed in the warning (6 significant digits)",
+        "fix = TRUE SEs and covariance"
+      ],
+      "tolerance": "validation/README.md: coefficients Tol::coef(n), covariance entries and SEs Tol::se(n)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

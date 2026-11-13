@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "vcov_hac_qs_long",
+  "area": "regression/hac",
+  "method": "HAC, Quadratic Spectral kernel at lag 0 and 2 (all weights above 1e-7), y ~ x, errors AR(0.5), n = 3000",
+  "reference": "sandwich::kernHAC(kernel = 'Quadratic Spectral', bw = 1 | 3, prewhite = FALSE | TRUE, adjust = FALSE); sandwich::weightsAndrews; sandwich::NeweyWest(lag = 2, prewhite = FALSE)",
+  "call": "kernHAC(lm(y ~ x, data = vcov_hac_qs_long), kernel = 'Quadratic Spectral', bw = 1, prewhite = FALSE, adjust = FALSE)",
+  "dataset": "validation/datasets/generated/vcov_hac_qs_long.csv",
+  "datasets": ["validation/datasets/generated/vcov_hac_qs_long.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.9377682885023662, 0.99747839620176182]
+    },
+    "n_obs": 3000,
+    "kernhac_qs_bw1": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.022077132551483244, 0.020286294800739801]
+    },
+    "kernhac_qs_bw1_vcov": [0.00048739978169576103, -1.8410781150835709e-05, -1.8410781150835712e-05, 0.00041153375674252271],
+    "qs_bw1_n_weights": 1451,
+    "kernhac_qs_bw3": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.030011835627542643, 0.021913125327893641]
+    },
+    "kernhac_qs_bw3_vcov": [0.00090071027773463801, -2.1199841493637387e-05, -2.1199841493637383e-05, 0.00048018506163597388],
+    "qs_bw3_n_weights": 2999,
+    "kernhac_qs_bw3_prewhite": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.035200311349112508, 0.022443759712935829]
+    },
+    "kernhac_qs_bw3_prewhite_vcov": [0.0012390619190744588, -2.4248059162669371e-05, -2.4248059162669371e-05, 0.00050372235005200134],
+    "nw_lag2": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.027937065795119054, 0.021579519972196298]
+    }
+  }
+}

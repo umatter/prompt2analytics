@@ -79,6 +79,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
+| `generated/hac_truncated_indefinite.csv` | 40 × 2 (y, x) | `hac_truncated_indefinite` | `r/cases/reg_vcov_t4.R` | seed 5, errors AR(-0.7) |
 | `generated/kalman_intercepts.csv` | 50 × 2 (t, y) | `kalman_intercepts` | `r/cases/ts_statespace.R` | seed 20261124 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
@@ -98,10 +99,15 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/munging_join_frames.csv` | 6 × 4 (frame, k, value, value_right) | `data_munging_join_suffix` | `r/cases/data_munging_t3.R` | three frames A, AB, C in one file |
 | `generated/munging_long.csv` | 12 × 4 (id, g, x, y) | `data_munging_lag`, `data_munging_filter` | `r/cases/data_munging_t3.R` | interleaved groups, Int64 and Float64 with NA; seed 5011 |
 | `generated/munging_wide.csv` | 4 × 4 (id, a, b, c) | `data_munging_pivot_longer` | `r/cases/data_munging_t3.R` | integer and double columns with NA |
+| `generated/ols_twoway_indefinite.csv` | 36 × 4 (y, x, a, b; 3 × 3 clusters) | `ols_twoway_indefinite` | `r/cases/reg_vcov_t4.R` | seed 1 |
 | `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
 | `generated/robust_weighted_t3.csv` | 25 × 3 (x1, x2, w) | `stat_robust_weighted_t3` | `r/cases/stats_misc_t3.R` | two samples and weights |
 | `generated/secontrast_poly_t4.csv` | 24 × 2 (dose, y) | `stat_secontrast_poly_t4` | `r/cases/stats_exact_t4.R` | seed 20261111; four numeric dose levels, quadratic mean plus noise |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3` | `r/cases/stats_misc_t3.R` | sine plus noise |
+| `generated/vcov_dk_grunfeld_t10.csv` | 100 × 5 (firm, year, inv, value, capital) | `vcov_dk_grunfeld_t10` | `r/cases/reg_vcov_t4.R` | `grunfeld.csv`, years 1935-1944 |
+| `generated/vcov_dk_grunfeld_unbal.csv` | 190 × 5 (firm, year, inv, value, capital) | `vcov_dk_grunfeld_unbal` | `r/cases/reg_vcov_t4.R` | `grunfeld.csv` with 10 rows dropped |
+| `generated/vcov_hac_prewhite_ts.csv` | 300 × 3 (y, x1, x2) | `vcov_hac_prewhite_ts` | `r/cases/reg_vcov_t4.R` | seed 20261111, AR(0.9) regressor and AR(0.7) errors |
+| `generated/vcov_hac_qs_long.csv` | 3000 × 2 (y, x) | `vcov_hac_qs_long` | `r/cases/reg_vcov_t4.R` | seed 31, AR(0.3) regressor and AR(0.5) errors |
 | `generated/step_legacy.csv` | 100 × 4 (y, x1, x2, x3) | `step_legacy` | `r/cases/regression.R` | seed 42 (DGP of `scripts/validate_regression_diag.R`) |
 | `generated/step_borderline.csv` | 120 × 4 (y, x1, x2, x3) | `step_borderline` | `r/cases/regression.R` | seed 5 |
 | `generated/bgtest_ar1.csv` | 100 × 2 (y, x) | `diag_bgtest_ar1` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |

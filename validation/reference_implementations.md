@@ -136,8 +136,8 @@ names a quantity the registry records as not matching R, with its finding.
 | `run_random_effects` | R `plm(model = "random")` Swamy-Arora, `ercomp`, `pwaldtest`; z inference (pinned) | - |
 | `run_hausman_test` | R `plm::phtest`, classical covariances (pinned) | - |
 | `run_hdfe` | R `fixest::feols`, `fitstat`; adjusted within R² from `plm(effect = "twoways")` (pinned) | R `lfe::felm` |
-| HAC (`vcov_hac`) | R `sandwich::NeweyWest(lag =, prewhite = FALSE)`, `kernHAC(kernel =, bw =, prewhite = FALSE, adjust = FALSE)` (pinned; deviations REG-22, REG-50, REG-61) | - |
-| Driscoll-Kraay (`vcov_driscoll_kraay`) | R `sandwich::vcovPL` (pinned; deviations REG-24, REG-50) | R `plm::vcovSCC` |
+| HAC (`vcov_hac`) | R `sandwich::NeweyWest(lag =, prewhite = FALSE)`, `NeweyWest(lag =, prewhite = TRUE)`, `kernHAC(kernel =, bw = lag + 1, prewhite = FALSE, adjust = FALSE)` (pinned) | - |
+| Driscoll-Kraay (`vcov_driscoll_kraay`) | R `sandwich::vcovPL(lag =, kernel =, adjust = FALSE)` (pinned) | R `plm::vcovSCC` |
 | Quantile regression | R `quantreg::rq(method = "br")`, `summary.rq(se = "iid" / "nid")` (pinned; deviation REG-26, the scale-free sparsity fuzz) | - |
 | GLS AR(1) | R `nlme::gls(correlation = corAR1())`, REML and ML, phi estimated (pinned) | - |
 | `run_multinom` | R `nnet::multinom` (pinned) | - |

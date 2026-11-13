@@ -338,7 +338,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Robust SEs (HC0-HC3) | [ols_robust_se.md](regression/ols_robust_se.md) | R-pinned |
 | Clustered SEs | [ols_clustered.md](regression/ols_clustered.md) | R-pinned |
 | Regression through the origin: uncentered R², adjusted R² with n, F on k df (OLS, raw design, GLS, clustered, HAC) | [no_intercept.md](regression/no_intercept.md) | R-pinned |
-| HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-22, REG-24, REG-37, REG-50, REG-61) |
+| HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-37) |
 | Bootstrap covariance (vcovBS) | [vcovBS.md](regression/vcovBS.md) | not R-pinned |
 | LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-60) |
 | Nonlinear least squares | [nls.md](regression/nls.md) | R-pinned |
@@ -567,7 +567,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | CLI causal iv, mediation and staggered-did (rows dropped, first-stage HC1 Wald F, units kept after trimming, pre-trend Wald test) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
-| MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, ECON-33, ECON-34, ECON-41, REG-24, REG-29, STAT-23, TS-23) |
+| MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, ECON-33, ECON-34, ECON-41, REG-29, STAT-23, TS-23) |
 | MCP causal tools (option tables and aliases, MatchIt defaults and the matched sample, IPW, ltmle, gformula, gsynth and mediation fields) | [causal_surface.md](mcp/causal_surface.md) | R-pinned, known deviations (REG-27) |
 | MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-16, STAT-27, STAT-39, STAT-58, STAT-68, STAT-69, STAT-72, STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
 | MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned, known deviations (DATA-65) |

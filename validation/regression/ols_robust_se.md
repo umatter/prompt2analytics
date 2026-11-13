@@ -120,7 +120,28 @@ mammen, webb. Case and separators are ignored; an unknown name is an error listi
 **Driscoll-Kraay.** Needs more time periods than identified coefficients (T > r);
 otherwise `InsufficientData`. Its t and p use T − r degrees of freedom; R's
 `coeftest(lm, vcov = vcovPL)` uses n − r. p2a keeps T − r because the estimator is
-asymptotic in T. Driscoll-Kraay SEs are not R-pinned (REG-24, Tier 4).
+asymptotic in T. The meat sums the scores within each period and weighs lag j by
+k(j / (L + 1)) over the lags with a non-zero weight, with no further scaling: lag L equals
+`sandwich::vcovPL(m, cluster = ~unit, order.by = ~time, lag = L, kernel = ..., adjust = FALSE)` and
+`plm::vcovSCC` for every kernel. The default lag is floor(T^(1/4))
+(`vcovPL(lag = "NW1987")`). The Driscoll-Kraay SEs are R-pinned
+(`test_validate_driscoll_kraay_panel`, and the five kernels on Grunfeld in the
+`reg_vcov_t4` cases).
+
+**Negative variances.** The Truncated and Tukey-Hanning kernels do not guarantee a positive
+semi-definite covariance. A negative diagonal element of a HAC or Driscoll-Kraay covariance
+gives a NaN standard error (and NaN t and p) and a warning naming the coefficient, as
+`sqrt` of a negative variance does in R; it is no longer clamped to 0. The bootstrap
+covariance is a sample covariance and is not clamped either.
+
+**Wald F.** With a robust covariance (HC0-HC3, one- and two-way clustered) the result also
+carries `wald_f`: the overall Wald test of the identified slopes, F = b's V_ss⁻¹ b_s / q on
+q and n − r degrees of freedom, as `lmtest::waldtest(m, vcov = ...)` with `test = "F"`
+(case `ols_wald_f_grunfeld`, `test_validate_ols_wald_f_grunfeld`). The text output prints
+it first, "F-statistic (Wald, HC1): ...", followed by the classical F, labelled
+"F-statistic (classical): ..."; the JSON keeps `f_statistic` (classical) and adds `wald_f`.
+Aliased slopes are left out; a singular slope covariance gives no Wald F and a warning. The
+classical covariance has no `wald_f`.
 
 ## Known Differences
 

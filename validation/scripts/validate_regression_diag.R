@@ -343,10 +343,11 @@ print(hac_nw)
 # Kernel HAC with an explicit kernel and bandwidth (INF-16). vcovHAC() has no
 # `kernel` argument: it silently ignores one and returns its default
 # (Andrews quadratic-spectral) estimate, which is what both rows held before.
-# bw is p2a's default lag for this n, floor(4 (n/100)^(2/9)) = 4; no
-# prewhitening and no small-sample adjustment, as p2a. kernHAC weights lag j by
-# k(j / bw), so p2a's Bartlett bandwidth m equals kernHAC(bw = m + 1), i.e.
-# NeweyWest(lag = m); see the hac_ar1 case in validation/r/cases/regression_legacy.R.
+# bw = floor(4 (n/100)^(2/9)) = 4 for this n; no prewhitening and no
+# small-sample adjustment, as p2a. kernHAC weights lag j by k(j / bw) and p2a's
+# lag count L weights it by k(j / (L + 1)) for every kernel, so kernHAC(bw = 4)
+# is p2a's lag 3, Bartlett included (and NeweyWest(lag = L) is p2a's lag L); see
+# the hac_ar1 case in validation/r/cases/regression_legacy.R.
 hac_bw <- floor(4 * (n / 100)^(2 / 9))
 hac_bartlett <- kernHAC(model_hac, kernel = "Bartlett", bw = hac_bw, prewhite = FALSE, adjust = FALSE)
 hac_parzen <- kernHAC(model_hac, kernel = "Parzen", bw = hac_bw, prewhite = FALSE, adjust = FALSE)
