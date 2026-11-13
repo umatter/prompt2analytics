@@ -36,7 +36,7 @@ projections, linear between them, constant beyond.
 
 | Test | Tolerance | Largest measured gap |
 |---|---|---|
-| `test_validate_ppr_supsmu_b0`, `test_validate_ppr_supsmu_b5`, `test_validate_ppr_supsmu_span03`, `test_validate_ppr_optlevels`, `test_validate_ppr_weighted`, `test_validate_ppr_one_predictor` | `Tol::new(1e-8, 1e-10)`; `yb`, `ys` `Tol::coef(n)` | 9.6e-11 relative (a fitted value near 0); 1e-12 absolute |
+| `test_validate_ppr_supsmu_b0`, `test_validate_ppr_supsmu_b5`, `test_validate_ppr_supsmu_span03`, `test_validate_ppr_optlevels`, `test_validate_ppr_weighted`, `test_validate_ppr_one_predictor` | `Tol::iterative(1e-8)`; `yb`, `ys` `Tol::coef(n)` | 9.6e-11 relative (a fitted value near 0); 1e-12 absolute |
 | `test_validate_ppr_supsmu_smoother` | `Tol::coef(n)` | 0 |
 | `test_validate_ppr_spline_df5`, `test_validate_ppr_gcvspline`, `test_validate_ppr_gcvspline_pen2` | `Tol::new(0.03, 0.02)` | see below |
 | `test_validate_ppr_spline_smoother` | about 10x measured: `spar` 5e-3, `ratio` 3e-2, last evaluation 0.15 relative + 0.02, refit at R's `spar` 5e-3 relative + 4e-3 | see below |
@@ -92,7 +92,10 @@ Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_va
   values (64 machine epsilons of the largest, as a share of the range), so untied data keep R's knots unless the
   largest value is about 1e13 times the gap between knots; such a value is refused where R fits it. Too few
   distinct values (4 always suffice) at the start of a search are an error, and any refusal by the smoother later
-  in a search is a rejected step.
+  in a search is a rejected step. Near ties that leave the penalised normal equations without a positive pivot are
+  refused with the remedy: round the predictor, or use `sm.method = "supsmu"`. The B-spline evaluation and Brent's
+  minimiser are shared with `smooth_spline`; the penalty here keeps the exact 1/3 (`smooth_spline` uses `sgram.f`'s
+  0.333) and the fit of the minimiser.
 
 ## Missing and non-finite values
 

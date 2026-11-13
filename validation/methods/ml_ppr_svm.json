@@ -38,7 +38,7 @@
         "super smoother: cv span, bass 5, span 0.3, weights",
         "spline smoother: knots, spar, ratio, smooth and edf at R's last evaluation, and smooth and edf refitted at R's spar (df matching, GCV, GCV penalty 2)"
       ],
-      "tolerance": "Super-smoother runs: Tol::new(1e-8, 1e-10) (largest measured gap 1e-10 relative). Spline runs: Tol::new(0.03, 0.02), about 3x the measured gap (at most 1.2% relative on the scale of each quantity), see the deviation; yb and ys Tol::coef(n). Spline smoother: spar 5e-3 relative, ratio 3e-2, R's last evaluation 0.15 relative + 0.02, refit at R's spar 5e-3 relative + 4e-3, each about 10x measured.",
+      "tolerance": "Super-smoother runs: Tol::iterative(1e-8) (1e-8 relative, 1e-12 absolute; largest measured gap 9.6e-11 relative, 1e-12 absolute). Spline runs: Tol::new(0.03, 0.02), about 3x the measured gap (at most 1.2% relative on the scale of each quantity), see the deviation; yb and ys Tol::coef(n). Spline smoother: spar 5e-3 relative, ratio 3e-2, R's last evaluation 0.15 relative + 0.02, refit at R's spar 5e-3 relative + 4e-3, each about 10x measured.",
       "deviations": [
         {
           "finding": "ML-34",

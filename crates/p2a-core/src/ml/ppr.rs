@@ -582,7 +582,9 @@ pub fn ppr(
 /// when `x`, `y` or a weight is non-finite, a weight is negative or the weights sum to zero, when
 /// `y` or every predictor is constant, when the response is too large to scale, when the
 /// projections pool into fewer than three groups, and when a spline smoother starts a search on too
-/// few distinct projection values (4 always suffice). `Cancelled` once the installed computation
+/// few distinct projection values (4 always suffice), or meets abscissae so unevenly spaced (near
+/// ties) that its penalised normal equations are not positive definite (round the predictor, or
+/// use `sm.method = "supsmu"`). `Cancelled` once the installed computation
 /// budget expires (checked per term, per search step and per backfitting pass).
 pub fn ppr_with(
     x: ArrayView2<f64>,
@@ -1770,8 +1772,10 @@ mod tests {
             }
         }
         /// The super-smoother runs: the same search at the same stopping rules, with projections
-        /// that have no ties, so only rounding separates them from R.
-        pub(super) const SUPSMU_TOL: Tol = Tol::new(1e-8, 1e-10);
+        /// that have no ties, so only rounding separates them from R (iterative: 1e-8 relative).
+        pub(super) fn supsmu_tol() -> Tol {
+            Tol::iterative(1e-8)
+        }
         /// The spline runs: R's penalty (0.333 for 1/3) and last-evaluation fit steer its search,
         /// so these are R-compared at about 3x the measured gap, not to digits (validation/ml/ppr.md).
         // deviation ML-34: every quantity of the spline runs is pinned at this tolerance; the largest
@@ -1821,13 +1825,13 @@ mod tests {
     #[test]
     fn test_validate_ppr_supsmu_b0() {
         let (case, x, _, _) = validate::ppr_case("ppr_methods");
-        let (_, r) = validate::run("ppr_methods", "supsmu_b0", |_| {}, validate::SUPSMU_TOL);
+        let (_, r) = validate::run("ppr_methods", "supsmu_b0", |_| {}, validate::supsmu_tol());
         assert_eq!((r.nterms, r.max_terms, r.optlevel), (2, 3, 2));
         let nx = validate::newx(&case);
         let rows: Vec<Vec<f64>> = nx.outer_iter().map(|r| r.to_vec()).collect();
         let pred = r.try_predict(nx.view()).unwrap();
         let mut c = Check::new(&case);
-        c.vector("supsmu_b0_predict", &pred, validate::SUPSMU_TOL);
+        c.vector("supsmu_b0_predict", &pred, validate::supsmu_tol());
         c.finish();
         assert_eq!(r.predict(&rows), pred);
         assert_eq!(x.nrows(), r.n);
@@ -1838,7 +1842,7 @@ mod tests {
             "ppr_methods",
             "supsmu_b5",
             |c| c.bass = 5.0,
-            validate::SUPSMU_TOL,
+            validate::supsmu_tol(),
         );
     }
     #[test]
@@ -1847,7 +1851,7 @@ mod tests {
             "ppr_methods",
             "supsmu_span03",
             |c| c.span = 0.3,
-            validate::SUPSMU_TOL,
+            validate::supsmu_tol(),
         );
     }
     #[test]
@@ -1895,7 +1899,7 @@ mod tests {
             let mut c = validate::cfg();
             c.optlevel = ol;
             let r = ppr_with(x.view(), &y, None, &c).unwrap();
-            validate::check(&case, tag, &r, validate::SUPSMU_TOL);
+            validate::check(&case, tag, &r, validate::supsmu_tol());
             if ol == 0 {
                 assert_eq!(r.nterms, 3);
                 assert!(r.convergence.is_none());
@@ -1913,7 +1917,7 @@ mod tests {
     fn test_validate_ppr_weighted() {
         let (case, x, y, w) = validate::ppr_case("ppr_methods");
         let r = ppr_with(x.view(), &y, Some(&w), &validate::cfg()).unwrap();
-        validate::check(&case, "supsmu_weighted", &r, validate::SUPSMU_TOL);
+        validate::check(&case, "supsmu_weighted", &r, validate::supsmu_tol());
     }
     /// p = 1: the direction is +-1 and the search stops after one smooth.
     #[test]
@@ -1921,7 +1925,7 @@ mod tests {
         let (case, x, y, _) = validate::ppr_case("ppr_methods");
         let x1 = x.slice(ndarray::s![.., 0..1]).to_owned();
         let r = ppr_with(x1.view(), &y, None, &PprConfig::default()).unwrap();
-        validate::check(&case, "supsmu_p1", &r, validate::SUPSMU_TOL);
+        validate::check(&case, "supsmu_p1", &r, validate::supsmu_tol());
     }
     /// ML-32: the returned model is the smoother model: predict on the training rows reproduces
     /// fitted exactly, residuals = y - fitted, alpha has unit norm, and gof, the RSS the search

@@ -12,9 +12,11 @@
 //! - `spar` in [0, 1.5] chosen by Brent's minimiser (R's bracket, tolerance and eps) on
 //!   `3 + (df - edf)^2` (df matching) or `(rss / sum w) / (1 - gcvpen edf / sum w)^2` (GCV).
 //!
-//! The returned fit, df, spar and lambda all belong to the minimiser. R differs twice: `sgram.f`
-//! integrates the quadratic term with 0.333 for 1/3, and `sbart.c` returns the smooth, leverages
-//! and lambda of its last Brent evaluation, not of the spar it reports.
+//! The B-spline evaluation and the Brent minimiser are `smooth_spline`'s. The returned fit, df,
+//! spar and lambda all belong to the minimiser. R differs twice: `sgram.f` integrates the
+//! quadratic term with 0.333 for 1/3, and `sbart.c` returns the smooth, leverages and lambda of
+//! its last Brent evaluation, not of the spar it reports; `smooth_spline` follows R in both,
+//! this smoother in neither (its R pins hold at the exact 1/3).
 //!
 //! Tied abscissae move the knots away from `ppr.f`'s, which then coincide: `ppr_spline_knots`
 //! drops the repeats, where R divides by the empty interval and returns NaN criteria. Repeats are
@@ -23,6 +25,7 @@
 
 use super::SmoothingMethod;
 use crate::errors::{EconError, EconResult};
+use crate::regression::smooth_spline::{brent_spar, bspline4, bspline4_d2};
 use crate::resource;
 
 /// Most B-spline coefficients: `ppr.f` uses `nk = min(n, 15)`.
@@ -137,45 +140,6 @@ fn distinct_values(dx: &[f64], eps: f64) -> usize {
         }
     }
     count
-}
-
-/// The four cubic B-splines non-zero on `[t[left], t[left + 1])`, at `x` (Cox-de Boor).
-#[inline]
-fn bspline4(t: &[f64], left: usize, x: f64) -> [f64; 4] {
-    let mut b = [1.0, 0.0, 0.0, 0.0];
-    let (mut dl, mut dr) = ([0.0; 3], [0.0; 3]);
-    for j in 0..3 {
-        dr[j] = t[left + j + 1] - x;
-        dl[j] = x - t[left - j];
-        let mut saved = 0.0;
-        for i in 0..=j {
-            let term = b[i] / (dr[i] + dl[j - i]);
-            b[i] = saved + dr[i] * term;
-            saved = dl[j - i] * term;
-        }
-        b[j + 1] = saved;
-    }
-    b
-}
-
-/// Second derivatives at `x` of the four cubic B-splines of the interval `left`, with the
-/// derivative recursion on the two linear B-splines there. Knots coincide only under a spline
-/// that vanishes on this interval, whose term is 0.
-fn bspline4_d2(t: &[f64], left: usize, x: f64) -> [f64; 4] {
-    let ratio = |num: f64, den: f64| if den > 0.0 { num / den } else { 0.0 };
-    let width = t[left + 1] - t[left];
-    let b2 = [0.0, (t[left + 1] - x) / width, (x - t[left]) / width, 0.0];
-    let mut d3 = [0.0; 5];
-    for k in 0..3 {
-        let i = left - 2 + k;
-        d3[k + 1] = 2.0 * (ratio(b2[k], t[i + 2] - t[i]) - ratio(b2[k + 1], t[i + 3] - t[i + 1]));
-    }
-    let mut d2 = [0.0; 4];
-    for k in 0..4 {
-        let i = left - 3 + k;
-        d2[k] = 3.0 * (ratio(d3[k], t[i + 3] - t[i]) - ratio(d3[k + 1], t[i + 4] - t[i + 1]));
-    }
-    d2
 }
 
 /// `Omega_ij = integral of B_i'' B_j''` over the knot range: B'' is linear on each interval, so
@@ -312,7 +276,7 @@ impl Problem {
                         message: format!(
                             "smoothing spline: the penalised normal equations are not positive \
                              definite (pivot {}); the abscissae are too unevenly spaced for the \
-                             knots",
+                             knots: round the predictor, or use sm.method = \"supsmu\"",
                             i + 1
                         ),
                     });
@@ -389,86 +353,11 @@ fn fitted_at(coef: &[f64; NK_MAX], left: usize, b: &[f64; 4]) -> f64 {
     b[0] * c[0] + b[1] * c[1] + b[2] * c[2] + b[3] * c[3]
 }
 
-/// Brent's minimiser on `spar` in [`LSPAR`, `USPAR`] with R's tolerances. Returns the minimiser.
-fn brent_spar(mut f: impl FnMut(f64) -> EconResult<f64>) -> EconResult<f64> {
-    const LSPAR: f64 = 0.0;
-    const USPAR: f64 = 1.5;
-    const TOL: f64 = 1e-2;
-    const MAXIT: usize = 500;
-    const BIG: f64 = 1e100;
-    const C_GOLD: f64 = 0.381_966_011_250_105_15;
-    let eps = 0.000244_f32 as f64;
-    let finite = |v: f64| if v.is_finite() { v } else { 2.0 * BIG };
-    let sign = |a: f64, b: f64| if b >= 0.0 { a.abs() } else { -a.abs() };
-
-    let (mut a, mut b) = (LSPAR, USPAR);
-    let mut x = a + C_GOLD * (b - a);
-    let (mut v, mut w) = (x, x);
-    let (mut d, mut e) = (0.0_f64, 0.0_f64);
-    let mut fx = finite(f(x)?);
-    let (mut fv, mut fw) = (fx, fx);
-    let mut iter = 0;
-    loop {
-        resource::checkpoint()?;
-        let xm = (a + b) * 0.5;
-        let tol1 = eps * x.abs() + TOL / 3.0;
-        let tol2 = tol1 * 2.0;
-        iter += 1;
-        if (x - xm).abs() <= tol2 - (b - a) * 0.5 || iter > MAXIT {
-            return Ok(x);
-        }
-        let mut golden = e.abs() <= tol1 || fx >= BIG || fv >= BIG || fw >= BIG;
-        if !golden {
-            let r = (x - w) * (fx - fv);
-            let mut q = (x - v) * (fx - fw);
-            let mut p = (x - v) * q - (x - w) * r;
-            q = (q - r) * 2.0;
-            if q > 0.0 {
-                p = -p;
-            }
-            q = q.abs();
-            let r = e;
-            e = d;
-            if p.abs() >= (0.5 * q * r).abs() || q == 0.0 || p <= q * (a - x) || p >= q * (b - x) {
-                golden = true;
-            } else {
-                d = p / q;
-                let u = x + d;
-                if u - a < tol2 || b - u < tol2 {
-                    d = sign(tol1, xm - x);
-                }
-            }
-        }
-        if golden {
-            e = if x >= xm { a - x } else { b - x };
-            d = C_GOLD * e;
-        }
-        let u = x + if d.abs() >= tol1 { d } else { sign(tol1, d) };
-        let fu = finite(f(u)?);
-        if fu <= fx {
-            if u >= x {
-                a = x;
-            } else {
-                b = x;
-            }
-            (v, fv) = (w, fw);
-            (w, fw) = (x, fx);
-            (x, fx) = (u, fu);
-        } else {
-            if u < x {
-                a = u;
-            } else {
-                b = u;
-            }
-            if fu <= fw || w == x {
-                (v, fv) = (w, fw);
-                (w, fw) = (u, fu);
-            } else if fu <= fv || v == x || v == w {
-                (v, fv) = (u, fu);
-            }
-        }
-    }
-}
+/// ppr.f's spline bracket and tolerances for sbart's Brent minimiser on `spar`.
+const LSPAR: f64 = 0.0;
+const USPAR: f64 = 1.5;
+const SPAR_TOL: f64 = 1e-2;
+const SPAR_MAXIT: usize = 500;
 
 /// Smooths `y` on sorted `dx` in [0, 1] on `knot`, with the spar that minimises `crit`, into `smo`.
 fn fit_spline(
@@ -483,7 +372,8 @@ fn fit_spline(
     smo: &mut [f64],
 ) -> EconResult<SplineFit> {
     let problem = Problem::new(dx, eps, y, w, knot, left, basis)?;
-    let spar = brent_spar(|spar| {
+    let eps = 0.000244_f32 as f64;
+    let spar = brent_spar(LSPAR, USPAR, SPAR_TOL, eps, SPAR_MAXIT, |spar| {
         let solved = problem.solve(problem.lambda(spar))?;
         Ok(problem.criterion(&solved, crit, y, w, left, basis))
     })?;
