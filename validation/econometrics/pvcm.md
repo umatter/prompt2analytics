@@ -129,24 +129,28 @@ relative; n exact.
 
 ## Timing
 
-Release builds of v0.5.0 (`f80b0131`) and this version, on one core (`taskset -c 2`,
-`RAYON_NUM_THREADS=1`), nine rounds interleaving the two builds; each round reports the median
-of at least 41 calls after ten warm-up calls, and the table gives the median of the nine. The
-machine was shared with other builds (load average 12-50 on 12 logical CPUs), so ratios
-within about 0.05 of 1 are noise. Simulated panels of n / 20 entities over 20 periods with two regressors.
+Re-timed on a quiet machine on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version,
+one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in
+alternating order; each round is one process per build reporting the median of its calls after
+warm-up calls. The table gives the ratio of the medians of the five per-round medians, with the
+ratio of their minima in brackets (1-minute load average 1.7-2.6). Simulated panels of n / 20
+entities over 20 periods with two regressors.
 
-| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 |
+| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
 |---|---|---|---|---|
-| within (one OLS per entity) | 100 | 54.1 | 57.1 | 1.06 |
-| within (one OLS per entity) | 1,000 | 481.0 | 519.7 | 1.08 |
-| within (one OLS per entity) | 10,000 | 4,416 | 4,826 | 1.09 |
-| random (Swamy) | 100 | 91.7 | 87.4 | 0.95 |
-| random (Swamy) | 1,000 | 639.7 | 700.0 | 1.09 |
-| random (Swamy) | 10,000 | 5,688 | 6,093 | 1.07 |
+| within (one OLS per entity) | 100 | 17.6 | 19.5 | **1.10** [1.08] |
+| within (one OLS per entity) | 1,000 | 162 | 177 | 1.09 [1.09] |
+| within (one OLS per entity) | 10,000 | 1,496 | 1,579 | 1.06 [1.07] |
+| random (Swamy) | 100 | 24.3 | 27.3 | **1.12** [1.15] |
+| random (Swamy) | 1,000 | 216 | 232 | 1.07 [1.07] |
+| random (Swamy) | 10,000 | 1,925 | 1,975 | 1.03 [1.04] |
 
-Both fits stay below 1.1x of v0.5.0. The added cost is the per-entity bookkeeping
-(`entities`, `n_entities_used`), the eigen check of Delta in the Swamy fit and the weighted
-homogeneity statistic; none of it grows faster than the number of entities.
+Both fits stay within 1.1x of v0.5.0 from n = 1,000 on; at n = 100 the within fit is at 1.10x
+(17.6 µs against 19.5 µs) and the Swamy fit at 1.12x (24.3 µs against 27.3 µs; 1.15x by the
+minima), which is above the rule and not signed off. The added cost is the per-entity
+bookkeeping (`entities`, `n_entities_used`), the eigen check of Delta in the Swamy fit and the
+weighted homogeneity statistic, a constant of about 2-3 µs; none of it grows faster than the
+number of entities.
 
 ## Known differences
 

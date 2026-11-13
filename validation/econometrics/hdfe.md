@@ -355,32 +355,34 @@ Further tests: `econometrics::hdfe::tests::test_hdfe_fe_leverage_matches_dense_p
 
 ### Timing of HC2/HC3
 
-Release builds of v0.5.0 (`f80b0131`) and this version, on one core (`taskset -c 2`,
-`RAYON_NUM_THREADS=1`), nine rounds interleaving the two builds; each round reports the median
-of at least 41 calls after ten warm-up calls, and the table gives the median of the nine. The
-machine was shared with other builds (load average 12-50 on 12 logical CPUs), so ratios
-within about 0.05 of 1 are noise. Simulated panels of n / 10 entities over 10 periods with two regressors; the
-two-way rows absorb entity and period.
+Re-timed on a quiet machine on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version,
+one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in
+alternating order; each round is one process per build reporting the median of its calls after
+warm-up calls. The table gives the ratio of the medians of the five per-round medians, with the
+ratio of their minima in brackets (1-minute load average 1.7-2.6). Simulated panels of n / 10
+entities over 10 periods with two regressors; the two-way rows absorb entity and period.
 
-| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 |
+| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
 |---|---|---|---|---|
-| HC1, one-way | 100 | 32.2 | 33.5 | 1.04 |
-| HC1, one-way | 1,000 | 173.3 | 194.6 | 1.12 |
-| HC1, one-way | 10,000 | 2,758 | 2,848 | 1.03 |
-| HC3, one-way | 100 | 42.0 | 36.9 | 0.88 |
-| HC3, one-way | 1,000 | 257.3 | 206.0 | 0.80 |
-| HC3, one-way | 10,000 | 3,498 | 3,312 | 0.95 |
-| HC1, two-way | 100 | 48.7 | 50.0 | 1.03 |
-| HC1, two-way | 1,000 | 283.6 | 248.3 | 0.88 |
-| HC1, two-way | 10,000 | 3,929 | 3,558 | 0.91 |
-| HC3, two-way | 100 | 56.9 | 69.8 | 1.23 |
-| HC3, two-way | 1,000 | 343.7 | 405.6 | 1.18 |
-| HC3, two-way | 10,000 | 4,739 | 4,237 | 0.89 |
+| HC1, one-way | 100 | 10.9 | 10.8 | 0.99 [1.03] |
+| HC1, one-way | 1,000 | 67.8 | 67.6 | 1.00 [1.00] |
+| HC1, one-way | 10,000 | 856 | 824 | 0.96 [1.00] |
+| HC3, one-way | 100 | 14.4 | 12.2 | 0.85 [0.82] |
+| HC3, one-way | 1,000 | 105 | 76.9 | 0.73 [0.74] |
+| HC3, one-way | 10,000 | 1,155 | 954 | 0.83 [0.83] |
+| HC1, two-way | 100 | 16.6 | 16.0 | 0.96 [0.99] |
+| HC1, two-way | 1,000 | 98.7 | 98.4 | 1.00 [1.00] |
+| HC1, two-way | 10,000 | 1,115 | 1,115 | 1.00 [0.99] |
+| HC3, two-way | 100 | 20.4 | 23.2 | **1.14** [1.08] |
+| HC3, two-way | 1,000 | 131 | 125 | 0.95 [0.97] |
+| HC3, two-way | 10,000 | 1,448 | 1,386 | 0.96 [0.97] |
 
-One-way HC3 is faster than before; its fixed-effect leverage is `1 / T_g`. Two-way HC3 at n = 100 and 1,000 costs 1.23x and 1.18x of v0.5.0: v0.5.0 omitted the
-fixed-effect leverage and so reported wrong standard errors (see above), and the new cost is
-building and inverting the Schur complement of the 10 period levels. This is above the 1.1x
-rule and is not signed off. At n = 10,000 the row is 0.89x.
+One-way HC3 is faster than before; its fixed-effect leverage is `1 / T_g`. Two-way HC3 costs
+1.14x of v0.5.0 at n = 100 (20.4 µs against 23.2 µs; 1.08x by the minima) and less than
+v0.5.0 from n = 1,000: v0.5.0 omitted the fixed-effect leverage and so reported wrong standard
+errors (see above), and the new cost is building and inverting the Schur complement of the 10
+period levels. The n = 100 row is above the 1.1x rule and is not signed off. (A run on a shared
+machine with an earlier harness had measured 1.23x and 1.18x at n = 100 and 1,000.)
 
 Peak resident memory (`/usr/bin/time -v`), whole process:
 
@@ -398,17 +400,19 @@ for v0.5.0's incorrect HC3.
 ### Timing of the one-way demeaning
 
 Columns of a one-way design are demeaned in parallel again when there is more than one
-column and enough rows. Same setup, n = 100,000 rows, 10 periods per level:
+column and enough rows. Same setup and quiet re-time, n = 100,000 rows, 10 periods per level;
+the 4-thread rows run on the two P cores' four hardware threads (`taskset -c 0-3`,
+`RAYON_NUM_THREADS=4`):
 
-| Fit | k | threads | v0.5.0 µs | new µs | new / v0.5.0 |
+| Fit | k | threads | v0.5.0 µs | new µs | new / v0.5.0 [min] |
 |---|---|---|---|---|---|
-| HC1, one-way | 5 | 1 | 97,071 | 82,940 | 0.85 |
-| HC1, one-way | 20 | 1 | 598,057 | 553,806 | 0.93 |
-| HC1, one-way | 5 | all | 100,289 | 97,186 | 0.97 |
-| HC1, one-way | 20 | all | 563,844 | 526,035 | 0.93 |
-| FEGLM Poisson, one-way | 5 | 1 | 513,486 | 521,324 | 1.02 |
+| HC1, one-way | 5 | 1 | 20,281 | 19,607 | 0.97 [0.98] |
+| HC1, one-way | 20 | 1 | 123,387 | 114,818 | 0.93 [0.92] |
+| HC1, one-way | 5 | 4 | 21,248 | 19,411 | 0.91 [0.95] |
+| HC1, one-way | 20 | 4 | 125,585 | 110,410 | 0.88 [0.84] |
+| FEGLM Poisson, one-way | 5 | 1 | 110,294 | 110,325 | 1.00 [1.02] |
 
-The multi-threaded rows ran on the shared machine and show little parallel gain there.
+The four hardware threads are two physical cores, so the parallel demeaning gains little here.
 
 ## Known differences
 

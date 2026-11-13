@@ -126,6 +126,42 @@ other builds (load average 33-36 on 12 logical CPUs), so ratios within about 0.0
 | CUE HAC | 1,000 | 1,732 | 1,557 | 1,479 | 0.85 | 0.95 |
 | CUE HAC | 10,000 | 30,524 | 27,340 | 28,696 | 0.94 | 1.05 |
 
+Quiet re-time against v0.5.0 alone (2026-11-13; `ff8e7559` was not rebuilt). Release builds of
+v0.5.0 (`f80b0131`) and this version, one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five
+rounds interleaving the two builds in alternating order; each round is one process per build
+reporting the median of its calls after warm-up calls. The table gives the ratio of the medians of
+the five per-round medians, with the ratio of their minima in brackets (1-minute load average
+1.7-2.6). Linear IV, q = 5 instruments and k = 4 coefficients:
+
+| Fit | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| one-step, identity W (`vcov = Fixed`) | 100 | 14.5 | 14.5 | 1.00 [0.93] |
+| one-step, identity W (`vcov = Fixed`) | 1,000 | 84.3 | 82.9 | 0.98 [1.01] |
+| one-step, identity W (`vcov = Fixed`) | 10,000 | 971 | 965 | 0.99 [0.99] |
+| two-step MDS | 100 | 21.5 | 21.8 | 1.01 [1.02] |
+| two-step MDS | 1,000 | 104 | 99.5 | 0.96 [1.00] |
+| two-step MDS | 10,000 | 1,137 | 1,124 | 0.99 [1.00] |
+| iterative MDS | 100 | 36.7 | 36.6 | 1.00 [1.03] |
+| iterative MDS | 1,000 | 125 | 124 | 0.99 [0.99] |
+| iterative MDS | 10,000 | 1,210 | 1,227 | 1.01 [0.99] |
+| two-step IID | 100 | 20.5 | 20.7 | 1.01 [1.01] |
+| two-step IID | 1,000 | 91.4 | 92.8 | 1.01 [0.98] |
+| two-step IID | 10,000 | 968 | 950 | 0.98 [1.00] |
+| two-step HAC | 100 | 29.7 | 29.7 | 1.00 [0.97] |
+| two-step HAC | 1,000 | 179 | 178 | 0.99 [0.99] |
+| two-step HAC | 10,000 | 2,213 | 2,234 | 1.01 [0.99] |
+| iterative HAC | 100 | 89.9 | 90.2 | 1.00 [1.00] |
+| iterative HAC | 1,000 | 331 | 330 | 1.00 [1.02] |
+| iterative HAC | 10,000 | 3,526 | 3,484 | 0.99 [1.00] |
+| CUE MDS | 100 | 79.7 | 79.8 | 1.00 [1.01] |
+| CUE MDS | 1,000 | 228 | 228 | 1.00 [1.00] |
+| CUE MDS | 10,000 | 2,176 | 2,098 | 0.96 [1.00] |
+| CUE HAC | 100 | 131 | 131 | 1.00 [1.00] |
+| CUE HAC | 1,000 | 613 | 608 | 0.99 [1.00] |
+| CUE HAC | 10,000 | 8,867 | 8,816 | 0.99 [1.01] |
+
+Every row is within 1.1x of v0.5.0 (0.96-1.01).
+
 For q <= 8 the MDS moment covariance of linear IV is formed column by column (`LinearIv::mds_omega`:
 each moment `z_j * e` as one contiguous vector, centred by its own mean, then q (q + 1) / 2 dot
 products) instead of the n x q moment matrix and a matrix product of its transpose. It equals the

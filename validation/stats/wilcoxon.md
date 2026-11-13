@@ -268,7 +268,49 @@ requested level cannot be reached, with R's warning; an unreachable exact level 
 
 *Note: R timings approximate from `system.time()` resolution; microbenchmark recommended.*
 **Note: these timings predate the exact distributions of Tier 4 (exact now runs for each sample
-below 50, as R); the package report holds the current timing comparison.
+below 50, as R). The current comparison with v0.5.0 follows.
+
+### Against v0.5.0 (2026-11-13)
+
+Re-timed on a quiet machine on 2026-11-13: release builds of v0.5.0 (`f80b0131`) and this version,
+one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five rounds interleaving the two builds in
+alternating order; each round is one process per build reporting the median of its calls after
+warm-up calls. The table gives the ratio of the medians of the five per-round medians, with the
+ratio of their minima in brackets (1-minute load average 1.7-2.6). Two samples of n each (signed
+rank: n pairs); the exact rows are the default call at sizes where R's rule picks the exact
+distribution, which v0.5.0 approximated, so they are slower by construction; the interval rows
+select the order statistics they need (see above) where v0.5.0 built every pairwise difference or
+Walsh average.
+
+| Call | n | v0.5.0 µs | new µs | new / v0.5.0 [min] |
+|---|---|---|---|---|
+| rank sum, asymptotic | 100 | 2.56 | 2.56 | 1.00 [1.07] |
+| rank sum, asymptotic | 1,000 | 29.0 | 28.5 | 0.99 [1.05] |
+| rank sum, asymptotic | 10,000 | 538 | 517 | 0.96 [0.95] |
+| rank sum, ties | 100 | 2.28 | 2.34 | 1.03 [1.00] |
+| rank sum, ties | 1,000 | 17.9 | 16.5 | 0.92 [0.99] |
+| rank sum, ties | 10,000 | 148 | 145 | 0.98 [0.98] |
+| rank sum, exact | 15 | 0.56 | 3.12 | 5.57 [5.59] |
+| rank sum, exact | 30 | 0.94 | 24.9 | 26.53 [29.42] |
+| rank sum, exact | 49 | 1.44 | 90.9 | 63.11 [64.29] |
+| rank sum with interval | 100 | 308 | 36.8 | 0.12 [0.12] |
+| rank sum with interval | 1,000 | 49,524 | 738 | 0.01 [0.02] |
+| rank sum with interval | 10,000 | 6,982,718 | 19,419 | 0.00 [0.00] |
+| signed rank, asymptotic | 100 | 1.49 | 1.61 | 1.08 [1.07] |
+| signed rank, asymptotic | 1,000 | 17.3 | 15.9 | 0.92 [1.06] |
+| signed rank, asymptotic | 10,000 | 267 | 242 | 0.91 [0.92] |
+| signed rank, exact | 25 | 0.56 | 2.20 | 3.93 [4.26] |
+| signed rank, exact | 40 | 0.72 | 5.91 | 8.21 [8.62] |
+| signed rank, exact | 49 | 1.11 | 12.1 | 10.90 [13.08] |
+| signed rank with interval | 100 | 126 | 23.2 | 0.18 [0.17] |
+| signed rank with interval | 1,000 | 23,063 | 449 | 0.02 [0.02] |
+| signed rank with interval | 10,000 | 3,344,119 | 11,452 | 0.00 [0.00] |
+| pairwise, asymptotic | 100 | 16.1 | 16.6 | 1.04 [1.05] |
+| pairwise, asymptotic | 1,000 | 186 | 187 | 1.01 [1.03] |
+| pairwise, asymptotic | 10,000 | 2,693 | 2,768 | 1.03 [1.04] |
+| pairwise, exact | 15 | 3.16 | 11.2 | 3.53 [3.61] |
+| pairwise, exact | 30 | 6.18 | 68.0 | 11.00 [11.73] |
+| pairwise, exact | 49 | 8.21 | 277 | 33.77 [32.81] |
 
 ## References
 

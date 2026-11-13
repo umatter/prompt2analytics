@@ -274,54 +274,58 @@ a shared, loaded machine as user-space CPU cycles per call from the hardware cou
 `vcovHAC` bench at n = 100 / 500 / 1,000 / 5,000 is 0.75 / 0.76 / 0.76 / 0.57 of base, and the
 unified OLS_HAC row at n = 100 / 1,000 / 10,000 0.96 / 0.88 / 0.67.
 
-**Variance estimators: lag convention, Quadratic Spectral, VAR(1) prewhitening, Driscoll-Kraay,
-Wald F.** Release builds of this code and of `f80b0131` (each in its own tree), `RAYON_NUM_THREADS=1`,
-one pinned core, a scratch harness that fits from a dataset (three AR(1) regressors and an intercept,
-AR(1) errors; clusters and Driscoll-Kraay with 10 units, so T = n/10, two-way clustering by unit and
-period; bootstrap B = 199). Base and head alternate round by round; each cell is the median over
-rounds of the per-round head / base ratio of the per-case medians, with the interquartile range of the
-per-round ratios in brackets. The machine was shared (load average 3-25 on 12 cores), so ratios within
-about ±0.1 of 1 are noise. Rows marked † were re-timed after the two-way PSD check's Cholesky shortcut
-(26 rounds for the OLS and clustered rows, 11 for the HAC and Driscoll-Kraay rows); the other rows come
-from 16 rounds before it (the shortcut does not touch them). The design check of `vcov_hac`,
+**Variance estimators: lag convention, Quadratic Spectral, VAR(1) prewhitening, Driscoll-Kraay, Wald
+F.** Re-timed on a quiet machine on 2026-11-13 (1-minute load average 1.7-2.6): release builds of
+this code and of v0.5.0 (`f80b0131`), `RAYON_NUM_THREADS=1`, one P core (`taskset -c 2`), a scratch
+harness that fits from a dataset (three AR(1) regressors and an intercept, AR(1) errors; clusters
+and Driscoll-Kraay with 10 units, so T = n/10, two-way clustering by unit and period; bootstrap B =
+199). Five rounds alternate the two builds; in each round one process per build reports the median
+of each case's calls. Each cell is the ratio (this code / v0.5.0) of the medians of the five
+per-round medians, with the ratio of their minima in brackets. The design check of `vcov_hac`,
 `vcov_driscoll_kraay` and `vcov_bootstrap` (X'e near 0) is included in every row.
 
-| Fit | n = 100 | 200 | 1,000 | 10,000 |
-|---|---|---|---|---|
-| OLS standard † | 1.00 [0.94-1.05] | 1.01 [0.95-1.06] | 1.00 [0.96-1.04] | 1.00 [0.89-1.06] |
-| OLS HC1 (adds the Wald F) † | 1.06 [1.01-1.09] | 1.06 [1.00-1.11] | 1.03 [1.01-1.09] | 1.02 [0.94-1.07] |
-| clustered, one-way (adds the Wald F) † | 1.06 [1.01-1.10] | 1.06 [1.00-1.12] | 1.03 [1.01-1.12] | 0.99 [0.94-1.06] |
-| clustered, two-way (adds the Wald F and the PSD check) † | 1.03 [0.99-1.13] | 1.03 [0.97-1.11] | 1.00 [0.97-1.03] | 0.98 [0.95-1.02] |
-| HAC Bartlett, default lag † | 1.00 [0.99-1.03] | 1.00 [0.95-1.02] | 1.01 [0.98-1.07] | 1.00 [0.98-1.10] |
-| HAC Parzen, lag 4 | 1.00 [0.89-1.05] | 1.00 [0.96-1.05] | 1.02 [0.99-1.10] | 0.92 [0.84-0.98] |
-| HAC Quadratic Spectral, lag 4 | **1.32** [1.24-1.38] | **1.53** [1.51-1.57] | **2.38** [2.19-2.54] | **3.90** [2.97-4.11] |
-| HAC Quadratic Spectral, default lag | **1.33** [1.20-1.43] | **1.51** [1.48-1.56] | **2.15** [2.06-2.30] | **3.27** [2.31-3.49] |
-| HAC Bartlett, default lag, prewhitened | **1.44** [1.34-1.48] | **1.42** [1.37-1.44] | **1.60** [1.53-1.71] | **1.51** [1.38-1.62] |
-| Driscoll-Kraay Bartlett, default lag † | 1.05 [1.04-1.06] | 1.01 [0.97-1.02] | 0.98 [0.85-1.02] | 0.96 [0.88-1.07] |
-| Driscoll-Kraay Quadratic Spectral, lag 2 † | 1.06 [1.05-1.08] | 1.08 [1.02-1.09] | 1.09 [1.05-1.13] | **1.13** [1.07-1.23] |
-| Driscoll-Kraay Quadratic Spectral, default lag † | 1.09 [1.07-1.13] | 1.08 [1.05-1.09] | 1.07 [1.03-1.13] | 1.03 [1.01-1.12] |
-| bootstrap pairs | 1.00 [0.94-1.04] | 0.99 [0.97-1.05] | 1.01 [0.96-1.13] | 0.99 [0.88-1.06] |
-| bootstrap residual | 1.01 [0.98-1.04] | 1.03 [0.98-1.08] | 1.02 [1.01-1.09] | 0.94 [0.88-1.11] |
-| bootstrap wild | 1.02 [0.97-1.06] | 1.03 [0.98-1.08] | 1.02 [0.99-1.06] | 1.01 [0.90-1.09] |
-| GLS AR(1), rho estimated | 1.00 [0.91-1.08] | 1.01 [0.96-1.05] | 1.02 [1.00-1.10] | 0.98 [0.90-1.17] |
-| ARIMA(1,0,1) | 0.97 [0.91-1.01] | 1.01 [0.95-1.06] | 1.00 [0.98-1.08] | 0.98 [0.91-1.08] |
-| ARIMA(2,1,2) | 1.05 [1.01-1.09] | 1.08 [1.04-1.16] | 1.04 [1.02-1.07] | 1.00 [0.97-1.08] |
-| glmnet binomial path | 0.98 [0.95-1.00] | 0.98 [0.94-1.03] | 0.98 [0.96-1.01] | 0.95 [0.87-1.02] |
+| Fit | n = 100 | 200 | 1,000 | 10,000 | base µs at 10,000 |
+|---|---|---|---|---|---|
+| OLS standard | 0.96 [0.95] | 0.94 [0.90] | 0.97 [0.96] | 1.00 [0.98] | 193 |
+| OLS HC1 (adds the Wald F) | 1.05 [1.07] | 1.01 [0.97] | 1.01 [1.03] | 0.99 [1.01] | 377 |
+| clustered, one-way (adds the Wald F) | 1.04 [1.02] | 1.02 [1.01] | 0.99 [1.02] | 0.87 [1.00] | 546 |
+| clustered, two-way (adds the Wald F and the PSD check) | 1.05 [1.05] | 1.02 [1.05] | 1.02 [1.03] | 0.92 [1.00] | 914 |
+| HAC Bartlett, default lag | 0.83 [0.91] | 0.88 [0.86] | 0.76 [0.78] | 0.80 [0.83] | 1,329 |
+| HAC Parzen, lag 4 | 0.87 [0.86] | 0.86 [0.90] | 0.77 [0.80] | 0.81 [0.82] | 1,078 |
+| HAC Quadratic Spectral, lag 4 | **1.21** [1.22] | **1.34** [1.34] | **1.60** [1.68] | **2.25** [2.35] | 1,077 |
+| HAC Quadratic Spectral, default lag | **1.23** [1.21] | **1.29** [1.33] | **1.44** [1.44] | **1.79** [1.86] | 1,323 |
+| HAC Bartlett, default lag, prewhitened | **1.33** [1.36] | **1.29** [1.34] | **1.20** [1.25] | 1.08 [1.15] | 1,331 |
+| Driscoll-Kraay Bartlett, default lag | 0.94 [0.94] | 0.97 [0.99] | 0.94 [1.00] | 0.89 [0.92] | 921 |
+| Driscoll-Kraay Quadratic Spectral, lag 2 | 0.96 [0.96] | 1.01 [1.04] | 1.03 [1.11] | 1.03 [1.07] | 835 |
+| Driscoll-Kraay Quadratic Spectral, default lag | 0.94 [1.00] | 0.95 [0.97] | 1.04 [1.08] | 0.94 [0.97] | 920 |
+| bootstrap pairs | 0.95 [0.98] | 0.99 [1.01] | 1.00 [1.01] | 0.98 [0.98] | 30,378 |
+| bootstrap residual | 1.00 [0.99] | 0.97 [0.99] | 1.00 [0.98] | 1.00 [1.00] | 21,507 |
+| bootstrap wild | 1.01 [0.98] | 0.97 [0.97] | 0.96 [0.98] | 1.00 [1.00] | 9,827 |
+| GLS AR(1), rho estimated | 1.03 [1.03] | 0.99 [1.02] | 1.01 [0.96] | **1.12** [1.11] | 6,257 |
+| ARIMA(1,0,1) | 1.10 [1.07] | 1.00 [1.04] | 0.99 [1.02] | 1.02 [1.04] | 44,400 |
+| ARIMA(2,1,2) | 1.01 [1.06] | 0.98 [1.04] | 1.02 [1.00] | 1.01 [1.02] | 8,882 |
+| glmnet binomial path | 0.94 [0.98] | 0.95 [0.98] | 0.98 [0.97] | 0.97 [1.00] | 12,872 |
 
-`vcov_hac` alone on wider designs (k regressors plus an intercept, AR(1) regressors, Bartlett
-at the default lag, six to fifteen calls per round, three rounds; measured before the design check,
-which adds one O(nk) pass):
+`vcov_hac` alone on wider designs (k regressors plus an intercept, AR(1) regressors, Bartlett at the
+default lag unless marked, three to 101 calls per process, same five rounds; the design check
+included):
 
-| Shape | head / base | max RSS head / base |
-|---|---|---|
-| n = 10,000, k = 30 | 0.28 | 18.2 / 17.8 MB |
-| n = 100,000, k = 30 | 0.29 | 86.3 / 107.8 MB |
-| n = 100,000, k = 50 | 0.31 | 133.2 / 170.3 MB |
-| prewhitened, n = 100 / 1,000 / 10,000, k = 30 | **1.82 / 1.25** / 0.70 | |
-| Quadratic Spectral, default lag, n = 1,000 / 10,000, k = 30 | 0.17 / 0.16 | |
+| Shape | head / base [min] | base µs | head µs |
+|---|---|---|---|
+| n = 10,000, k = 30 | 0.87 [0.85] | 41,735 | 36,305 |
+| n = 100,000, k = 30 | 0.47 [0.46] | 937,792 | 438,008 |
+| n = 100,000, k = 50 | 0.44 [0.46] | 2,752,753 | 1,214,158 |
+| prewhitened, n = 100, k = 30 | **1.38** [1.41] | 292 | 401 |
+| prewhitened, n = 1,000, k = 30 | 1.09 [1.09] | 3,700 | 4,049 |
+| prewhitened, n = 10,000, k = 30 | **1.16** [1.18] | 42,306 | 49,150 |
+| prewhitened, n = 10,000, k = 3 | **1.34** [1.32] | 851 | 1,137 |
+| Quadratic Spectral, default lag, n = 100, k = 30 | 0.20 [0.21] | 293 | 58.5 |
+| Quadratic Spectral, default lag, n = 1,000, k = 30 | 0.19 [0.19] | 3,701 | 703 |
+| Quadratic Spectral, default lag, n = 10,000, k = 30 | 0.25 [0.25] | 42,014 | 10,382 |
 
-The rows in bold are above 1.1x. The Quadratic Spectral rows, Driscoll-Kraay's included, sum more
-lags than before, by design: the kernel's support is unbounded and `weightsAndrews` keeps every
+The rows in bold are above 1.1x. The Quadratic Spectral rows sum more lags than before, by design
+(Driscoll-Kraay's Quadratic Spectral rows do too, but over T - 1 = n/10 - 1 lags, and stay within
+1.1x): the kernel's support is unbounded and `weightsAndrews` keeps every
 weight above 1e-7, which at these lags is all n - 1 lags (T - 1 for Driscoll-Kraay), where the old
 code cut the sum at the bandwidth. The lag sums cost O(k² n L) directly; with the
 `spectral-analysis` feature (on in `ci` and `full`) a lag set of 64 or more is summed by FFT in
@@ -332,6 +336,9 @@ constant cost per fit (a q x q inverse and an F tail probability, about 2 µs to
 only at n = 100-200. The two-way PSD check settles a positive-definite covariance by a Cholesky
 factorisation and only takes the eigen-decomposition (about 10 µs at k = 4) for one that is not, or
 with `fix`.
+GLS AR(1) at n = 10,000 takes 7.01 ms against 6.26 ms (1.12x; 1.11x by the minima; 0.99-1.03x
+at n <= 1,000). The non-finite input refusal and the exact-fit check this version adds are O(n k)
+passes, far below that difference, so its cause is not identified yet; it is not signed off.
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 
