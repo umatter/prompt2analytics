@@ -48,6 +48,27 @@
       "tolerance": "validation/README.md coefficient row (n <= 31: 1e-6)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "nls_weighted",
+      "name": "Weighted and one-sided bounded nonlinear least squares",
+      "category": "regression",
+      "reference": "stats::nls(weights = w) (Gauss-Newton); nls(algorithm = 'port', lower = ) and (upper = )",
+      "doc": "validation/regression/nls.md",
+      "cases": [
+        "nls_weighted_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::nls::tests::test_validate_nls_weighted",
+        "p2a-core::regression::nls::tests::test_validate_nls_one_sided_bounds"
+      ],
+      "quantities": [
+        "weighted coefficients, SEs, t, p, weighted RSS, sigma, df, fitted values, residuals y - f",
+        "lower-bound-only and upper-bound-only coefficients and RSS"
+      ],
+      "tolerance": "Tol::iterative: coefficients and fits 1e-6, SEs and t 1e-5, p 1e-3, RSS and sigma 1e-8 (as nls_expdecay)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

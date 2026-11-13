@@ -2,10 +2,18 @@
 
 ## Method
 
-`nls()` (one regressor), `nls_multi()` and `run_nls()` minimise `RSS(theta) = sum (y_i - f(x_i,
-theta))^2` by Levenberg-Marquardt (default) or Gauss-Newton. Standard errors are
-`sigma^2 (J'J)^-1` with a forward-difference Jacobian (step 1e-7) at the solution, `sigma^2 = RSS /
-(n - p)`, t with `n - p` degrees of freedom.
+`nls()` (one regressor), `nls_multi()` and `run_nls()` minimise `RSS(theta) = sum w_i (y_i -
+f(x_i, theta))^2` (unit weights by default) by Levenberg-Marquardt (default) or Gauss-Newton.
+Standard errors are `sigma^2 (J_w'J_w)^-1` with `J_w = diag(sqrt w) J`, a central-difference
+Jacobian at the solution, `sigma^2 = RSS / (n_w - p)` with `n_w` the observations of positive
+weight, t with `n_w - p` degrees of freedom, as R's `nls(weights =)`. Residuals are `y - f`
+(unweighted), the RSS weighted, as R's `resid`/`deviance`.
+
+Weights must be one per observation, finite and non-negative; bounds one per parameter, either
+side alone (`-inf`/`+inf` for an unbounded parameter), lower <= upper; `nls` and `nls_multi`
+check both alike (REG-48). With bounds, a parameter at a bound whose step points outward is held
+there while the others move (an active set), as `algorithm = "port"` reaches a solution on the
+bound. Without weights and bounds the arithmetic is the unweighted fit's, unchanged.
 
 ## R reference
 
@@ -27,14 +35,23 @@ The values the old tests quoted (a = 9.776, RSS 0.198; Vmax = 200.2, Km = 0.102)
 ## Tolerances
 
 Iterative: R stops at a relative offset of 1e-7, p2a's Levenberg-Marquardt at a 1e-8 relative
-change in RSS. Coefficients `Tol::iterative(1e-6)`, SEs and t `1e-5` (forward-difference
+change in RSS. Coefficients `Tol::iterative(1e-6)`, SEs and t `1e-5` (central-difference
 Jacobian), p-values `1e-3`, RSS and sigma `1e-8`, df exact.
 
 ## Tests
 
 `test_validate_nls_expdecay`, `test_validate_nls_michaelis_menten` (registry entry `nls` in
-`validation/methods/regression_smoothers_t3.json`). Both pass at `NlsConfig::default()`: nls's
-unweighted fit has no defect these pins found.
+`validation/methods/regression_smoothers_t3.json`). Both pass at `NlsConfig::default()`.
+
+Case `nls_weighted_t4` (`validation/r/cases/regression_smoothers_t4.R`; n = 40, variance rising
+with x, `w = 1 / (1 + x / 2)^2`): `test_validate_nls_weighted` pins the weighted coefficients,
+SEs, t, p, RSS, sigma, df, fitted values and residuals; `test_validate_nls_one_sided_bounds`
+pins `nls(algorithm = "port")` with a lower bound alone on c (weighted) and an upper bound alone
+on b (unweighted), both optima on the bound (registry entry `nls_weighted`,
+`regression_smoothers_t4.json`; same tolerances, RSS change tolerance 1e-12).
+`test_nls_multi_rejects_short_weights_and_bounds` covers the input checks. Release note: weighted
+fits changed (before, the weights entered only the RSS that accepts a step, not the step or the
+covariance), and a single bound is now applied.
 
 ## Deviations
 
