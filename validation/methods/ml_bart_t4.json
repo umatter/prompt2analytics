@@ -5,19 +5,55 @@
       "id": "ml_bart_regression",
       "name": "BART regression (wbart prior calibration, cutpoint grid, birth/death sampler)",
       "category": "ml",
-      "reference": "BART::wbart 2.9.10: prior calibration and bartModelMatrix cutpoints exactly",
+      "reference": "BART::wbart 2.9.10: prior calibration and bartModelMatrix cutpoints exactly; posterior summaries against 100 seeded wbart chains",
       "doc": "validation/ml/bart.md",
       "cases": [
-        "ml_bart_wbart_calibration"
+        "ml_bart_wbart_calibration",
+        "ml_bart_wbart_posterior"
       ],
       "tests": [
-        "p2a-core::ml::bart::tests::test_validate_bart_wbart_calibration"
+        "p2a-core::ml::bart::tests::test_validate_bart_wbart_calibration",
+        "p2a-core::ml::bart::tests::test_validate_bart_wbart_posterior"
       ],
       "quantities": [
-        "fmean, sigest, qchisq(0.1, 3), lambda, tau (m = 50, 200), numcut and cutpoint grid"
+        "fmean, sigest, qchisq(0.1, 3), lambda, tau (m = 50, 200), numcut and cutpoint grid",
+        "posterior mean of sigma; averages over rows of the posterior mean, posterior SD and 95% interval width of f; RMSE and 95% coverage of the true f; split shares per covariate (one chain, seed 46)"
       ],
-      "tolerance": "Tol::coef(200): 1e-8 relative; numcut exact",
-      "deviations": [],
+      "tolerance": "calibration Tol::coef(200): 1e-8 relative, numcut exact; posterior summaries 5 Monte Carlo SDs of the 100 wbart chains, absolute, each element of the split shares by its own SD",
+      "deviations": [
+        {
+          "finding": "ML-16",
+          "quantity": "splits_per_tree",
+          "note": "p2a samples the Chipman-George-McCulloch tree prior; wbart's birth ratio takes the root of a one-split tree for a non-nog node (tree::ntype returns 't' before 'n'), halving Pnog for births at the root's children, so its trees are smaller (1.19 splits per tree on this design when the data are silent, against 1.38 for the prior; bart_samples_the_tree_prior_when_the_data_are_silent checks p2a against the prior by rejection sampling)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_bart_probit_pbart",
+      "name": "Probit BART posterior summaries against BART::pbart",
+      "category": "ml",
+      "reference": "BART::pbart 2.9.10 on bart_probit_sim: 100 seeded chains, ntree 50, nskip 200, ndpost 300",
+      "doc": "validation/ml/bart.md",
+      "cases": [
+        "ml_bart_pbart_posterior"
+      ],
+      "tests": [
+        "p2a-core::ml::bart::tests::test_validate_bart_pbart_posterior"
+      ],
+      "quantities": [
+        "binaryOffset",
+        "average over rows of the posterior mean of P(y = 1)",
+        "split shares per covariate (one chain, seed 46)"
+      ],
+      "tolerance": "offset Tol::coef(300); posterior summaries 5 Monte Carlo SDs of the 100 pbart chains, absolute",
+      "deviations": [
+        {
+          "finding": "ML-16",
+          "quantity": "splits_per_tree, post_sd_avg, width95_avg",
+          "note": "pbart shares wbart's birth ratio at the root's children (see ml_bart_regression), which favours smaller trees; p2a samples the CGM prior, with about 1.41 splits per tree against pbart's 1.21 and posterior SDs about 3 Monte Carlo SDs wider"
+        }
+      ],
       "supersedes_legacy": []
     }
   ]

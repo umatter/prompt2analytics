@@ -1659,6 +1659,232 @@ mod tests {
         );
     }
 
+    /// The case's per-chain summaries (`.bart_draw_summary` in ml_bart_t4.R): mean fit, mean
+    /// posterior SD (population), mean type-7 95% width, splits per tree, split shares, and with
+    /// the true f its RMSE and the share of rows whose interval holds it.
+    fn draw_summary(r: &BartResult, truth: Option<&Array1<f64>>) -> Vec<(&'static str, Vec<f64>)> {
+        let n = r.n_obs as f64;
+        let draws = r.posterior_samples.as_ref().unwrap();
+        let avg = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let width: Vec<f64> = (0..r.n_obs)
+            .map(|i| {
+                let (lo, hi) = percentile_interval(&draws.column(i).to_vec(), 0.95).unwrap();
+                hi - lo
+            })
+            .collect();
+        let splits: f64 = r.variable_count_mean.iter().sum();
+        let mut out = vec![
+            ("pred_mean_avg", vec![avg(&r.predictions)]),
+            ("post_sd_avg", vec![avg(&r.prediction_sd)]),
+            ("width95_avg", vec![avg(&width)]),
+            ("splits_per_tree", vec![splits / r.n_trees as f64]),
+            (
+                "varprop",
+                r.variable_count_mean.iter().map(|c| c / splits).collect(),
+            ),
+        ];
+        if let Some(f) = truth {
+            let rmse = (r
+                .predictions
+                .iter()
+                .zip(f)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                / n)
+                .sqrt();
+            let covered = (0..r.n_obs)
+                .filter(|&i| r.prediction_lower[i] <= f[i] && f[i] <= r.prediction_upper[i])
+                .count() as f64;
+            out.push(("rmse_f", vec![rmse]));
+            out.push(("cover95_f", vec![covered / n]));
+        }
+        out
+    }
+
+    /// Monte Carlo tolerance: 5 SDs of 100 wbart chains; a single p2a chain differs from their
+    /// mean by about one chain SD. Scalars go through `check`; a vector's elements each have
+    /// their own SD, so they are compared one by one, and the failures are returned.
+    fn check_mc(
+        check: &mut Check,
+        case: &p2a_validation::Case,
+        key: &str,
+        got: &[f64],
+    ) -> Vec<String> {
+        let sd = case.vector(&format!("{key}_mc_sd"));
+        if let [g] = got {
+            check.scalar(key, *g, Tol::new(0.0, 5.0 * sd[0]));
+            return Vec::new();
+        }
+        let want = case.vector(key);
+        if got.len() != want.len() || sd.len() != want.len() {
+            return vec![format!(
+                "{key}: length {} (Rust) vs {} (R)",
+                got.len(),
+                want.len()
+            )];
+        }
+        (0..got.len())
+            .filter(|&i| !Tol::new(0.0, 5.0 * sd[i]).allows(got[i], want[i]))
+            .map(|i| {
+                format!(
+                    "{key}[{i}] rust={} R={} allowed={}",
+                    got[i],
+                    want[i],
+                    5.0 * sd[i]
+                )
+            })
+            .collect()
+    }
+
+    /// The tree prior's split count by rejection: a tree grown from the CGM prior (split with
+    /// probability alpha (1 + d)^-beta while a variable has cutpoints left, variable uniform among
+    /// those, cutpoint uniform in its range), kept only when every child holds 5 rows.
+    fn prior_tree_splits(
+        x: &Array2<f64>,
+        cuts: &[Vec<f64>],
+        rows: &[usize],
+        depth: usize,
+        bounds: &[(i64, i64)],
+        u: &mut dyn FnMut() -> f64,
+    ) -> Option<usize> {
+        let good: Vec<usize> = (0..bounds.len())
+            .filter(|&v| bounds[v].0 <= bounds[v].1)
+            .collect();
+        if good.is_empty() || u() >= split_prob(0.95, 2.0, depth) {
+            return Some(0);
+        }
+        let v = good[((u() * good.len() as f64) as usize).min(good.len() - 1)];
+        let (lo, hi) = bounds[v];
+        let c = lo + ((u() * (hi - lo + 1) as f64) as i64).min(hi - lo);
+        let cut = cuts[v][c as usize];
+        let (l, r): (Vec<usize>, Vec<usize>) = rows.iter().partition(|&&i| x[[i, v]] < cut);
+        if l.len() < 5 || r.len() < 5 {
+            return None;
+        }
+        let mut bl = bounds.to_vec();
+        bl[v].1 = c - 1;
+        let mut br = bounds.to_vec();
+        br[v].0 = c + 1;
+        let a = prior_tree_splits(x, cuts, &l, depth + 1, &bl, u)?;
+        let b = prior_tree_splits(x, cuts, &r, depth + 1, &br, u)?;
+        Some(1 + a + b)
+    }
+
+    /// With a leaf prior SD near 0 the data carry no information, so the chain must sample the
+    /// tree prior restricted to trees whose every child holds 5 rows. wbart and pbart sample
+    /// about 1.19 splits per tree here instead of about 1.38: their birth ratio counts the nog
+    /// nodes of the grown tree as one more than they are when the leaf is a child of a root that
+    /// has two leaves.
+    #[test]
+    fn bart_samples_the_tree_prior_when_the_data_are_silent() {
+        let (_, ds) = crate::test_support::load_case("ml_bart_wbart_posterior");
+        let x = case_matrix(&ds, &FRIEDMAN_X);
+        let y = case_vector(&ds, "y");
+        let cuts: Vec<Vec<f64>> = (0..6)
+            .map(|v| cutpoints(x.column(v), 100).unwrap())
+            .collect();
+        let bounds: Vec<(i64, i64)> = cuts.iter().map(|c| (0, c.len() as i64 - 1)).collect();
+        let rows: Vec<usize> = (0..x.nrows()).collect();
+        let mut state = 7u64;
+        let mut u = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut total, mut kept) = (0usize, 0usize);
+        while kept < 40_000 {
+            if let Some(s) = prior_tree_splits(&x, &cuts, &rows, 0, &bounds, &mut u) {
+                total += s;
+                kept += 1;
+            }
+        }
+        let exact = total as f64 / kept as f64;
+        let mut chain = 0.0;
+        for seed in [1, 2] {
+            let c = BartConfig {
+                n_trees: 50,
+                n_burn: 300,
+                n_mcmc: 1000,
+                k: 1e6,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+            chain += r.variable_count_mean.iter().sum::<f64>() / 50.0 / 2.0;
+        }
+        assert!(
+            (chain - exact).abs() < 0.04,
+            "chain {chain} vs prior {exact}"
+        );
+    }
+
+    #[test]
+    fn test_validate_bart_wbart_posterior() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_wbart_posterior");
+        let x = case_matrix(&ds, &FRIEDMAN_X);
+        let y = case_vector(&ds, "y");
+        let f = case_vector(&ds, "f");
+        let c = BartConfig {
+            n_trees: 50,
+            n_burn: 300,
+            n_mcmc: 1000,
+            numcut: 100,
+            seed: Some(46),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let sigma = r.sigma_samples.as_ref().unwrap();
+        let sigma_mean = sigma.iter().sum::<f64>() / sigma.len() as f64;
+        let mut check = Check::new(&case);
+        let mut bad = check_mc(&mut check, &case, "sigma_mean", &[sigma_mean]);
+        for (key, got) in draw_summary(&r, Some(&f)) {
+            // deviation ML-16: splits_per_tree follows the CGM tree prior, not wbart's birth
+            // ratio at the root's children (bart_samples_the_tree_prior_when_the_data_are_silent)
+            if key != "splits_per_tree" {
+                bad.extend(check_mc(&mut check, &case, key, &got));
+            }
+        }
+        check.finish();
+        assert!(
+            bad.is_empty(),
+            "case ml_bart_wbart_posterior: {}",
+            bad.join("; ")
+        );
+    }
+
+    #[test]
+    fn test_validate_bart_pbart_posterior() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_pbart_posterior");
+        let x = case_matrix(&ds, &["x1", "x2", "x3"]);
+        let y = case_vector(&ds, "y");
+        let c = BartConfig {
+            classification: true,
+            n_trees: 50,
+            n_burn: 200,
+            n_mcmc: 300,
+            seed: Some(46),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let mut check = Check::new(&case);
+        check.scalar("binary_offset", r.offset, Tol::coef(300));
+        let mut bad = Vec::new();
+        for (key, got) in draw_summary(&r, None) {
+            // deviation ML-16: the tree size and the posterior spread follow the CGM tree prior,
+            // not pbart's birth ratio at the root's children, which favours smaller trees
+            if !matches!(key, "splits_per_tree" | "post_sd_avg" | "width95_avg") {
+                bad.extend(check_mc(&mut check, &case, key, &got));
+            }
+        }
+        check.finish();
+        assert!(
+            bad.is_empty(),
+            "case ml_bart_pbart_posterior: {}",
+            bad.join("; ")
+        );
+    }
+
     /// The finding's design: y = 1000 + 5 x + noise. Uncentred, the leaf prior shrank the fit
     /// toward 0 (mean fit about 38.6 below mean y) and sigma absorbed the bias (about 38.5).
     /// wbart on the same design (30 chains): bias -0.0004, sigma 0.43, coverage of f 0.93.
