@@ -23,7 +23,7 @@ Where F_n and G_m are empirical CDFs, and F_0 is the theoretical CDF.
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
-| stats | R | `ks.test()` | R 4.3.2 |
+| stats | R | `ks.test()` | R 4.3.3 |
 | scipy.stats | Python | `ks_2samp()`, `kstest()` | SciPy 1.11 |
 
 ## Test Cases
@@ -46,7 +46,9 @@ ks.test(xe, "pexp", 0.8, exact = FALSE)
 | `pexp(0.8)` | 40 | 0.2258535956589462 | 0.03378814171051292 | 0.02180511454303294 | 0.9626772811058978 | 0.2258535956589462 | 0.016894152315484544 |
 
 Pinned with `Tol::stat(n)` and `Tol::p_value(n)`, and n exactly, by
-`stats::ks::tests::test_validate_ks_t3_one_sample`.
+`stats::ks::tests::test_validate_ks_t3_one_sample` (asymptotic p through `exact: Some(false)`),
+together with R's default exact two-sided p (`norm_p_exact` 0.12705346811680995, `unif_p_exact`
+0.08193161051708098, `exp_p_exact` 0.028313228455144945).
 
 ### Two-sample tests (R-pinned)
 
@@ -60,8 +62,11 @@ ks.test(xa, ya, exact = FALSE)   # n = 60 and 45
 | `x5`, `y5` | 0.8 | 0.8 | 0.04076220397836616 | 0 | 1 |
 | `xa`, `ya` | 0.23888888888888887 | 0.23888888888888887 | 0.05313493619748799 | 0.07222222222222223 | 0.7647135434753901 |
 
-Pinned by `stats::ks::tests::test_validate_ks_t3_two_sample`. The two-sided p-values are a known
-deviation (below).
+Pinned by `stats::ks::tests::test_validate_ks_t3_two_sample`, with the two-sided p, exact
+(`two5_p_exact` 0.07936507936507936, `twol_p_exact` 0.0922124055286588) and asymptotic
+(`two5_p_asym` 0.08151888641220961, `twol_p_asym` 0.10625393011376794). The one-sided exact p of
+the same samples (case `stat_ks_t3_exact_t4`) are pinned by
+`stats::ks::tests::test_validate_ks_t3_one_sided_exact_t4`.
 
 ### Reference parameters
 
@@ -90,12 +95,10 @@ ks2 <- suppressWarnings(ks.test(d$xi, d$yi))   # each sample drops its own NA
 |---|---|---|
 | D | 0.3333333333333333 | pinned (`Tol::stat`) |
 | n, m | 20, 18 | pinned (exact) |
-| p-value | 0.15653867760174539 (exact, conditional on ties) | **known deviation STAT-27** |
+| p-value | 0.15653867760174539 (exact, conditional on ties) | pinned (`Tol::p_value`) |
 
-**Known deviation (STAT-27):** p2a computes the asymptotic Kolmogorov p-value with Stephens'
-correction (0.19563779265722 on this case); R 4.3.3 reports the exact p-value conditional on
-the ties. For comparison, R's `ks.test(..., exact = FALSE)` gives 0.24318687396544358. The
-p-value is left out of the test's `Check` until STAT-27 is fixed.
+R 4.3.3 and p2a report the exact p-value conditional on the ties (R's default for n m < 10000);
+`exact: Some(false)` gives the asymptotic 0.24318687396544358.
 
 **Missing values:** `ks_test` and `run_ks_test` read each column through the shared extractor:
 the one-sample test and each sample of the two-sample test drop their own missing values (null
@@ -103,26 +106,44 @@ or NaN; `ks.test` does the same), report them in `KsTestResult.missing` and in a
 line `Missing values: ...`, and accept integer columns. A text column is `NonNumericColumn`.
 
 **Rust tests:**
-- `stats::ks::tests::test_validate_ks_test_two_sample_na` (D, n, m)
+- `stats::ks::tests::test_validate_ks_test_two_sample_na` (D, p, n, m)
 - `stats::ks::tests::test_validate_na_ks_test_missing_rows_and_errors` (one- and two-sample `missing`, Display line, text and absent columns)
 
-**Status:** R-pinned with a known deviation (registry `validation/methods/stats_onesample.json`,
+**Status:** R-pinned (registry `validation/methods/stats_onesample.json`,
 id `ks_test_two_sample`).
+
+## P-values (as R 4.3.3)
+
+`ks_test_one_sample_with`, `ks_test_two_sample_with` and `ks_test_with` take `exact: Option<bool>`;
+`None` is R's default: exact for a one-sample test with n < 100 and no ties, and for a two-sample
+test with n m < 10000 (with or without ties). A one-sample test with ties uses the asymptotic
+distribution with R's warning ("ties should not be present for the Kolmogorov-Smirnov test").
+
+- **One-sample, two-sided, exact:** Marsaglia, Tsang and Wang (2003), as R's `pkolmogorov2x`
+  (matrix power with decimal rescaling).
+- **One-sample, one-sided, exact:** Birnbaum and Tingey's upper tail, summed directly.
+- **Two-sample, exact:** the lattice-path count of R's `psmirnov`, conditional on the tie blocks
+  of the pooled sample and accumulated as an upper tail, so small p-values keep their digits.
+- **Asymptotic:** the limiting Kolmogorov distribution with R's series and tolerance (1e-6)
+  for two-sided tests (no Stephens factor and no cut-off at `sqrt(n) D >= 3`), and
+  `exp(-2 n D²)` (one-sample) or `exp(-2 m n/(m + n) D²)` (two-sample) one-sided.
+
+Every buffer goes through `resource::try_*`, and the matrix power and the lattice recursion check
+the call's budget once per step.
+
+Case `stat_rank_ks_t4` (registry `validation/methods/stats_rank_t4.json`, id `ks_t4`) pins exact
+one-sample p at n = 30 and 99 (`o30`, `o99`, `o99b`, `e99`, every alternative), exact two-sample p
+with and without ties (`t57`, `t75`), and asymptotic p at n = 100, 150, 400 and with ties
+(`a100`, `a150`, `a400`, `o20t`): `test_validate_ks_one_sample_exact_t4`,
+`test_validate_ks_two_sample_exact_t4`, `test_validate_ks_asymptotic_t4`. The exact two-sample
+tail is also checked against full enumeration (`test_psmirnov_exact_matches_enumeration`).
 
 ## Known Differences
 
-**STAT-27 (registry `ks_test_t3`):** p2a has no exact distribution. It reports an asymptotic p-value
-where R's default is exact, applies Stephens' (1970) factor to the two-sided two-sample p-value and
-cuts the series off at `sqrt(n) D >= 3` (p = 0, R about 3e-8). R's values are recorded in the case
-for the method that replaces this:
-
-| Case key | R | p2a |
-|---|---|---|
-| `norm_p_exact` | 0.12705346811680995 | 0.14705778828807003 (asymptotic, equal to `norm_p_asym`) |
-| `unif_p_exact` | 0.08193161051708098 | 0.09809220328878654 |
-| `exp_p_exact` | 0.028313228455144945 | 0.03378814171051292 |
-| `two5_p_exact` / `two5_p_asym` | 0.07936507936507936 / 0.08151888641220961 | 0.036146190769284631 |
-| `twol_p_exact` / `twol_p_asym` | 0.0922124055286588 / 0.10625393011376794 | 0.08997965487690876 |
+**STAT-27, alternative `less` with ties (two-sample exact; registry `ks_t4`).** R evaluates the
+distribution of D+ for both one-sided alternatives. With ties D- has a different distribution, so
+p2a computes P(D- >= d) for `less` (`t75_p_less_exact`, which the case checks by full
+enumeration); R's value `t75_p_less_r` is kept out of the `Check`. Without ties both agree.
 
 **Direction of the one-sided tests (R's convention):** "greater" means the CDF of x lies above that
 of y, so x tends to be smaller; "less" means the CDF of x lies below that of y, so x tends to be
@@ -163,8 +184,8 @@ with `into_no_null_iter` (a missing cell entered the sample as 0) and refused In
 ("Column 'xi' is not numeric.").
 
 **MCP test:** `tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_ks_test_two_sample_na`
-(`statistic_D`, `n`, `n_2` against D, n and m above, `Tol::stat(38)` and exact; `missing`). The
-p-value is not pinned (STAT-27, as above). Registry `validation/methods/mcp_stats.json`, id
+(`statistic_D`, `p_value`, `n`, `n_2` against D, p, n and m above, `Tol::stat(38)`,
+`Tol::p_value(38)` and exact; `missing`). Registry `validation/methods/mcp_stats.json`, id
 `mcp_hypothesis_ks_test`.
 
 ## MCP Tool Usage

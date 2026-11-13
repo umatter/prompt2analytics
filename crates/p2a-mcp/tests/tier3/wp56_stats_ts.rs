@@ -204,10 +204,11 @@ async fn test_validate_mcp_hypothesis_alternative_aliases() {
 /// output. Before: distribution "punif" tested N(0, 1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_ks_distribution_aliases() {
-    // ks.test(xu, "punif", -1.5, 3, exact = FALSE): D 0.24555555555555558,
-    // p 0.09809220328878654 (n = 25); alternative "greater": D+ 0.15522222222222223,
-    // p 0.29978284585485815
+    // ks.test(xu, "punif", -1.5, 3) with R's default exact = NULL (n = 25, no ties: exact):
+    // D 0.24555555555555558, p 0.08193161051708098; alternative "greater":
+    // D+ 0.15522222222222223, p 0.27140337488021915 (stat_ks_t3_exact_t4)
     let case = Case::load("stat_ks_t3");
+    let exact_case = Case::load("stat_ks_t3_exact_t4");
     let (se, s) = session_with("stat_ks_t3");
     let base = json!({"dataset": "ks_t3", "x": "xu", "distribution": "punif", "a": -1.5, "b": 3.0});
     let j = json_of(&ok(&s, &se, "hypothesis_ks_test", base.clone()).await);
@@ -218,9 +219,11 @@ async fn test_validate_mcp_ks_distribution_aliases() {
     let g = json_of(&ok(&s, &se, "hypothesis_ks_test", gt).await);
     Check::new(&case)
         .scalar("unif_d", f(&j["statistic_D"]), Tol::stat(25))
-        .scalar("unif_p_asym", f(&j["p_value"]), Tol::p_value(25))
+        .scalar("unif_p_exact", f(&j["p_value"]), Tol::p_value(25))
         .scalar("unif_dplus", f(&g["statistic_D"]), Tol::stat(25))
-        .scalar("unif_p_greater_asym", f(&g["p_value"]), Tol::p_value(25))
+        .finish();
+    Check::new(&exact_case)
+        .scalar("unif_p_greater_exact", f(&g["p_value"]), Tol::p_value(25))
         .finish();
     // "Uniform" and "unif" are the same distribution; pexp names its rate
     for d in ["Uniform", "unif"] {
@@ -2155,9 +2158,8 @@ async fn test_validate_mcp_wilcoxon_two_sample() {
             case_count(&case, "wilcox_n2")
         )
     );
-    // deviation STAT-72: the tool reports the rank sum R1, R's W is R1 - n1 (n1 + 1) / 2
-    let w = f(&j["statistic"]) - (n1 * (n1 + 1) / 2) as f64;
-    assert_eq!(w, case.vector("wilcox_W")[0], "{j}");
+    // the tool reports R's W
+    assert_eq!(f(&j["statistic"]), case.vector("wilcox_W")[0], "{j}");
 }
 
 /// STAT-46/STAT-77: hypothesis_mcnemar through the dispatch path, pinned to

@@ -134,21 +134,16 @@
       "quantities": [
         "z",
         "p (two-sided, less, greater)",
+        "z and p with ties (mood_z_ties, mood_p_ties)",
         "T"
       ],
       "tolerance": "validation/README.md, n < 100: 1e-5 relative, abs 1e-14 (z) and 1e-12 (p); T exact",
-      "deviations": [
-        {
-          "finding": "STAT-29",
-          "quantity": "z and p with ties (mood_z_ties, mood_p_ties)",
-          "note": "R averages (i - (N+1)/2)^2 over the positions of a tie group; p2a squares the midrank deviation: R z 0.3293662746201299 against p2a 0.0823415686550325 ('ties'), 1.0371275614960966 against 1.015427524079116 ('serum')."
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
       "id": "ansari_bradley",
-      "name": "Ansari-Bradley test of scale: statistic and two-sided normal approximation, including values of order 1e-12",
+      "name": "Ansari-Bradley test of scale: statistic, exact distribution, one-sided tails and tie-corrected normal approximation, including values of order 1e-12",
       "category": "stats",
       "reference": "stats::ansari.test(exact = FALSE | TRUE, alternative)",
       "doc": "validation/stats/ansari.md",
@@ -163,36 +158,18 @@
       "quantities": [
         "AB (seven sets)",
         "two-sided normal-approximation p (five tie-free sets)",
+        "exact p (ansari_p_exact, ab_p_exact)",
+        "one-sided p (ab_p_less, ab_p_greater)",
+        "normal approximation with ties (ab_p_ties)",
         "exact flag off under ties"
       ],
       "tolerance": "validation/README.md, n < 100: p 1e-5 relative with abs 1e-12; AB exact",
-      "deviations": [
-        {
-          "finding": "STAT-13",
-          "quantity": "exact p (ansari_p_exact, ab_p_exact)",
-          "note": "Truncated exact distribution: R 0.0016887137630172688 against p2a 0.198862 ('scale'), R 1 against 0.869565 ('basic'), R 0.05128205128205132 against 0.295762 (small scale)."
-        },
-        {
-          "finding": "STAT-12",
-          "quantity": "one-sided p (ab_p_less, ab_p_greater)",
-          "note": "p2a maps 'less' to the lower tail of AB and 'greater' to the upper tail; R does the opposite (on 'scale' R less = 0.0012020898183661144, p2a less = 0.998798)."
-        },
-        {
-          "finding": "STAT-79",
-          "quantity": "normal approximation with ties (ab_p_ties)",
-          "note": "p2a ignores ties in the variance: R 0.8537871075965991 against p2a 0.832004 ('ties'), R 0.1814581997286707 against 0.184608 ('serum'). AB itself is pinned."
-        },
-        {
-          "finding": "STAT-14",
-          "quantity": "estimate and confidence interval",
-          "note": "Not R's Bauer (1972) inversion; not compared."
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
       "id": "wilcoxon_t3",
-      "name": "Wilcoxon rank-sum and signed-rank tests: normal approximation labelled as such for N = 30 / n = 25, the quoted examples, exact small samples, paired with a zero, values of order 1e-12",
+      "name": "Wilcoxon rank-sum and signed-rank tests: R's default exact rule for N = 30 / n = 25, the quoted examples, exact small samples, paired with a zero, values of order 1e-12",
       "category": "stats",
       "reference": "stats::wilcox.test(exact, correct = TRUE, mu, paired)",
       "doc": "validation/stats/wilcoxon.md",
@@ -206,32 +183,17 @@
         "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_examples"
       ],
       "quantities": [
-        "p (normal approximation with continuity correction)",
+        "p (exact, R's default for N = 30 and n = 25; normal approximation with continuity correction under exact = FALSE)",
         "p (exact, N = 6 and N = 14)",
-        "R's W (from p2a's rank sum)",
-        "rank sum",
+        "paired p with tied |d| (paired_p)",
+        "R's W",
+        "rank sum R1 (rank_sum)",
         "signed-rank V",
         "exact flag",
         "continuity flag"
       ],
       "tolerance": "validation/README.md, n < 100: p 1e-5 relative with abs 1e-12; statistics exact",
-      "deviations": [
-        {
-          "finding": "STAT-73",
-          "quantity": "R's default exact p for 21 <= N < 50 (n30_p_exact, sr25_p_exact)",
-          "note": "p2a's exact enumeration stops at N = 20 and falls back to the normal approximation, reported with exact = false: R exact 0.009874822650594207 and 0.06670159101486205; the normal-approximation values are pinned."
-        },
-        {
-          "finding": "STAT-42",
-          "quantity": "paired p with tied |d| (paired_p)",
-          "note": "p2a's tie variance uses the count of tied observations: R 0.6352893188352069 against p2a 0.6308000140667467. V is pinned."
-        },
-        {
-          "finding": "STAT-72",
-          "quantity": "statistic and u_statistic",
-          "note": "p2a reports the rank sum R1 (R's W = R1 - n1 (n1 + 1) / 2) and U = n1 n2 - W; W is pinned through that identity, u_statistic is not compared."
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

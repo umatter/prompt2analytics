@@ -281,7 +281,7 @@ fn compute_median(data: &[f64]) -> f64 {
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]

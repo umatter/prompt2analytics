@@ -338,7 +338,7 @@ fn test_validate_cli_wilcoxon_na() {
     ];
     let out = s.ok(&paired);
     Check::new(&case)
-        .scalar("paired_v", num_after(&out, "W = "), Tol::exact()) // the CLI labels V as W (STAT-72, Tier 4)
+        .scalar("paired_v", num_after(&out, "W = "), Tol::exact()) // the CLI's own text line still prints "W = " for V
         .scalar(
             "paired_p_exact",
             num_after(&out, "p-value = "),
@@ -365,11 +365,10 @@ fn test_validate_cli_wilcoxon_na() {
         "--col2",
         "y",
     ]);
-    // p2a's rank-sum statistic is the rank sum R1 (R's W = R1 - n_x(n_x+1)/2, STAT-72); R1 itself
-    // is the case key. Not pinned: the exact rank-sum p (no R value in a Tier 2 case; the exact
-    // path is STAT-73, Tier 4).
+    // The rank-sum statistic is R's W = R1 - n_x (n_x + 1) / 2 (the CLI JSON has no rank sum R1;
+    // core pins it). Not pinned: the exact rank-sum p (no R value in this case).
     Check::new(&case)
-        .scalar("ranksum_r1", num(&r, "statistic"), Tol::exact())
+        .scalar("ranksum_w", num(&r, "statistic"), Tol::exact())
         .finish();
     assert_eq!(r["missing"], missing(20, 18, json!({"x": 1, "y": 1}))); // each sample on its own
     let rt = s.ok(&[
@@ -1148,10 +1147,10 @@ fn test_validate_cli_shapiro_bartlett_ks_na() {
         .finish();
     assert_eq!(bj["missing"], missing(22, 20, json!({"xi": 2, "g": 1})));
     let ks = s.json(&["stats", "ks-test", d2.as_str(), "--x", "xi", "--y", "yi"]);
-    // Not pinned: the KS p-value (asymptotic in p2a, exact with ties in R: STAT-27, Tier 4,
-    // recorded in stats_onesample.json).
+    // R's default: exact, conditional on the ties
     Check::new(&two)
         .scalar("ks_d", num(&ks, "statistic"), Tol::stat(38))
+        .scalar("ks_p", num(&ks, "p_value"), Tol::p_value(38))
         .scalar("n_xi", num(&ks, "n"), Tol::exact())
         .scalar("n_yi", num(&ks, "n_2"), Tol::exact())
         .finish();

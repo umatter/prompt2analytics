@@ -84,6 +84,22 @@ A 999.5, B 492.5.
 
 **Rust test:** `stats::quade::tests::test_validate_quade_small_scale`
 
+### Test 4: A = B and constant blocks (Tier 4)
+
+Case `stat_rank_quade_t4` (`validation/r/cases/stats_rank_t4.R`; registry
+`validation/methods/stats_rank_t4.json`, id `quade_t4`), 4 blocks x 3 treatments per set:
+
+- **`conc`:** every non-constant block ranks the treatments alike, so A = B and the F statistic is
+  0/0. As R, p2a reports the statistic as NaN (Display prints `NaN`) and the p-value
+  `(k!)^(1 - b)` (`conc_p`), the probability that every block ranks the treatments in the same
+  order.
+- **`dist`:** a regular design for comparison (`dist_f`, `dist_p`).
+- **`const`:** every block constant, A = 0. R returns p = `(k!)^(1 - b)` here too (`const_p_r`);
+  p2a refuses with `InvalidSpecification` ("every block is constant ...") as it does for
+  Kruskal-Wallis and Friedman on constant data. Registry deviation STAT-64.
+
+**Rust test:** `stats::quade::tests::test_validate_quade_a_equals_b_t4`
+
 ### Input checks
 
 A NaN or infinite cell in `quade_test` is an error naming the block ("block 1 contains a missing
@@ -158,6 +174,9 @@ keep <- d$block != "S2"; quade.test(d$y_na[keep], d$treat[keep], d$block[keep])
    those 7 blocks, and that is the value pinned. R's NA-path values stay in the case JSON
    (`na_quade_f`, `na_quade_df2`, `na_quade_p`) unpinned. Friedman is unaffected (`friedman.test`
    recomputes `n <- nrow(y)` after dropping).
+
+4. **All blocks constant (STAT-64, registry deviation):** p2a refuses a design whose blocks are
+   all constant (Test 4); R returns `(k!)^(1 - b)` for a design with no information.
 
 ## Performance Comparison
 

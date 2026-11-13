@@ -248,6 +248,10 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/rank_small_groups.csv` | 21 × 4 (g, y, y_unit, ynt) | `stat_rank_small_groups` | `r/cases/stats_rank_t3.R` | seed 20261022 |
 | `generated/rank_two_sample.csv` | 126 × 3 (set, group, value) | `stat_rank_two_sample` | `r/cases/stats_rank_t3.R` | seed 20261024 |
 | `generated/rank_wilcoxon.csv` | 101 × 3 (set, group, value) | `stat_rank_wilcoxon` | `r/cases/stats_rank_t3.R` | seed 20261025 |
+| `generated/rank_ks_t4.csv` | 1219 × 3 (set, group, value) | `stat_rank_ks_t4` | `r/cases/stats_rank_t4.R` | seed 20261113 |
+| `generated/rank_quade_t4.csv` | 33 × 4 (set, block, treat, y) | `stat_rank_quade_t4` | `r/cases/stats_rank_t4.R` | literal values: three 4 × 3 designs (A = B, regular, constant blocks) |
+| `generated/rank_scale_t4.csv` | 233 × 3 (set, group, value) | `stat_rank_scale_t4` | `r/cases/stats_rank_t4.R` | seed 20261112 |
+| `generated/rank_wilcoxon_t4.csv` | 518 × 3 (set, group, value) | `stat_rank_wilcoxon_t4` | `r/cases/stats_rank_t4.R` | seed 20261111; `depr`, `lik`, `heavy` literal values |
 | `generated/reset_two.csv` | 150 × 3 (y, x1, x2) | `reset_princomp` | `r/cases/reg_rank_qr.R` | seed 20261121 |
 | `generated/rq_boot_indices.csv` | 100 × 50 (b01-b50) | `rq_boot_xy` | `r/cases/reg_quantreg_br.R` | seed 20261021 |
 | `generated/sensemakr_darfur.csv` | 1276 × 8 (peacefactor, directlyharmed, age, farmer_dar, herder_dar, pastvoted, hhsize_darfur, female) | `sensemakr_darfur` | `r/cases/regression_smoothers_t3.R` | `sensemakr::darfur`, the eight model columns |

@@ -17,10 +17,22 @@ distribution.
 ## Method
 
 AB = Σ min(r, N + 1 − r) over the ranks r of the first sample in the pooled sample of size N, the
-ranks from `stats::ranks::midranks` (exact ties, as R's `rank()`). The p-value is the normal
-approximation (mean and variance of AB under H0, without a tie adjustment, see STAT-79) or, for
-m, n < 50 without ties, an exact distribution (see STAT-13). Normal tails are computed directly
-(`normal_p_value_two_sided`, `normal_cdf`), not as 1 − cdf.
+ranks from `stats::ranks::midranks` (exact ties, as R's `rank()`). The p-value is exact by default
+for m, n < 50 without ties (R's rule; `ansari_test_with(x, y, alternative, exact, conf_level)`
+overrides it, and exact with ties falls back to the normal approximation with R's warning), else
+the normal approximation with R's tie-corrected variance. The exact distribution is R's
+`cansari` count, built as a subset-sum recursion over the support `(m+1)²%/%4 ..` with tails
+summed directly. As in R, a large AB means a smaller spread of `x`, so `less` (x has the larger
+scale) is the upper tail of AB and `greater` the lower tail. Normal tails are computed directly,
+not as 1 − cdf. The DP allocates through `resource::try_*` and checks the call's budget once per
+outer step.
+
+With `conf_int`, the estimate of the ratio of scales and its interval are R's Bauer (1972)
+inversion: exact (the order statistics of the ratios at the exact quantiles, evaluated at the
+midpoints as R's `absigma`) when the exact path is taken, otherwise the asymptotic inversion over
+the positive ratios |x_i| / |y_j|, found by bisection over their order statistics rather than by
+materialising all m n of them, with R's warnings when the samples differ in location or the
+interval cannot be computed.
 
 ## Pinned values
 
@@ -36,8 +48,8 @@ exact.
 | scale | 10 values near 5 (5.05 avoids a tie), 10 spread over 0.8-9.2 | 75 | 0.002404179636732229 |
 | manual | 1:3, 4:6 | 6 | 1 |
 | sim | 20 + 20 normal draws, sd 1 and 3 (seed 20261024) | 251 | 0.026405804321853132 |
-| ties | (1, 2, 2, 3, 4), (2, 3, 3, 4, 5) | 14.5 | STAT-79 |
-| serum | Hollander & Wolfe serum data (`?ansari.test`) | 185.5 | STAT-79 |
+| ties | (1, 2, 2, 3, 4), (2, 3, 3, 4, 5) | 14.5 | 0.8537871075965991 (tie-corrected) |
+| serum | Hollander & Wolfe serum data (`?ansari.test`) | 185.5 | 0.1814581997286707 (tie-corrected) |
 | small scale | `ynt` of groups a and b of `stat_rank_small_groups` (order 1e-12) | 36 | 0.039368435465216844 |
 
 On the tied sets the exact flag is off whatever the configuration asks, as R falls back to the
@@ -46,29 +58,23 @@ normal approximation under ties.
 **Rust tests:** `stats::ansari::tests::test_validate_ansari_two_sample`,
 `stats::ansari::tests::test_validate_ansari_small_scale`
 
-## Known differences (registry deviations)
+The exact p-values (`ab_p_exact`, `ansari_p_exact`: basic 1, scale 0.0016887137630172688, manual
+1, sim 0.02714184174260592, small scale 0.05128205128205132) and the one-sided normal p on
+"scale" (`ab_p_less` 0.0012020898183661144, `ab_p_greater` 0.9987979101816339) are pinned too.
 
-**STAT-13 (exact distribution).** p2a's exact distribution is truncated; R's values stay in the
-cases (`ab_p_exact`, `ansari_p_exact`) and are not compared. The counts are `u64` and overflow for
-m, n >= 35.
+## Tier 4 cases (R-pinned)
 
-| Set | R exact p | p2a exact p |
-|---|---|---|
-| basic | 1 | 0.869565 |
-| scale | 0.0016887137630172688 | 0.198862 |
-| manual | 1 | 1 |
-| sim | 0.02714184174260592 | 0.0801778 |
-| small scale | 0.05128205128205132 | 0.295762 |
+Case `stat_rank_scale_t4` (`validation/r/cases/stats_rank_t4.R`), registry
+`validation/methods/stats_rank_t4.json`, id `ansari_t4`:
 
-**STAT-12 (one-sided alternatives).** p2a maps `less` to the lower tail of AB and `greater` to the
-upper tail; R does the opposite. On "scale" R gives less 0.0012020898183661144 (greater
-0.9987979101816339), p2a less 0.998798. R's values: `ab_p_less`, `ab_p_greater`.
+- `stats::ansari::tests::test_validate_ansari_exact_t4`: exact p for every alternative (`scale`,
+  odd sizes `odd`, 45 + 45 values `ab45`, beyond the old 64-bit overflow), one-sided normal p with
+  ties (`ties_p_less`, `ties_p_greater`).
+- `stats::ansari::tests::test_validate_ansari_intervals_t4`: exact Bauer interval and estimate
+  (`scale`, `cen`, one-sided `cen`), asymptotic interval and estimate on 60 + 60 values (`big`;
+  `*_r` is R's `uniroot` root, the unsuffixed value the ratio it approximates).
 
-**STAT-79 (ties).** The normal approximation ignores ties in the variance: "ties" R
-0.8537871075965991, p2a 0.832004; "serum" R 0.1814581997286707, p2a 0.184608 (`ab_p_ties`). AB is
-pinned on both.
-
-**STAT-14 (estimate and confidence interval).** Not R's Bauer (1972) inversion; not compared.
+There are no registry deviations left for the Ansari-Bradley test.
 
 ## Input checks
 

@@ -19,7 +19,8 @@
         "mcp_series_t3",
         "ts_filter_ar_cpt",
         "mcp_misc_t3",
-        "stat_robust_weighted_t3"
+        "stat_robust_weighted_t3",
+        "stat_ks_t3_exact_t4"
       ],
       "tests": [
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_hypothesis_alternative_aliases",
@@ -31,7 +32,7 @@
       ],
       "quantities": [
         "power at R's type/alternative",
-        "KS D, D+ and asymptotic p against punif(-1.5, 3) and pexp(0.8)",
+        "KS D, D+ and exact p against punif(-1.5, 3) and pexp(0.8) (R's default exact p for the uniform sample, two-sided and greater)",
         "one-sided t, Mood and Poisson p",
         "acf, acvf, pacf and the white-noise bound",
         "Box-Pierce X2",
@@ -45,13 +46,7 @@
         "refusal of unknown values"
       ],
       "tolerance": "validation/README.md by n (Tol::coef/se/stat/p_value); power 1e-10 relative (WP38's ports, <= 1.8e-14); printed values at their decimals (t-test 6, decompose and changepoint 4)",
-      "deviations": [
-        {
-          "finding": "STAT-27",
-          "quantity": "KS exact p",
-          "note": "one-sample asymptotic p pinned; exact p not compared"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -322,11 +317,6 @@
           "finding": "STAT-58",
           "quantity": "Poisson two-sided p",
           "note": "one-sided p and the rate-ratio estimate pinned; the one-sided intervals are not (the tool returns the two-sided interval for every alternative, a core observation recorded in the method document)"
-        },
-        {
-          "finding": "STAT-72",
-          "quantity": "Wilcoxon statistic",
-          "note": "p2a reports R1; R's W pinned through W = R1 - n1(n1 + 1)/2"
         },
         {
           "finding": "STAT-75",

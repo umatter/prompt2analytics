@@ -36,15 +36,19 @@ use crate::stats::friedman::unreplicated_blocks;
 use crate::stats::ranks::{midranks, midranks_into};
 use crate::traits::estimator::f_test_p_value;
 use serde::{Deserialize, Serialize};
+use statrs::function::gamma::ln_gamma;
 
 /// Result of the Quade test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuadeResult {
-    /// The F statistic
+    /// The F statistic; NaN when A == B (identical rankings in every block, as R's
+    /// `quade.test`), with p = (k!)^(1-b)
     pub statistic: f64,
-    /// Numerator degrees of freedom (k - 1)
+    /// Numerator degrees of freedom (k - 1); kept when the statistic is NaN, where R reports
+    /// NA
     pub df1: usize,
-    /// Denominator degrees of freedom ((b - 1)(k - 1))
+    /// Denominator degrees of freedom ((b - 1)(k - 1)); kept when the statistic is NaN, where
+    /// R reports NA
     pub df2: usize,
     /// P-value from F distribution
     pub p_value: f64,
@@ -232,23 +236,26 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     let sum_sj_sq: f64 = treatment_sums.iter().map(|&s| s * s).sum();
     let b_stat = sum_sj_sq / b as f64;
 
-    // Step 7: Compute F statistic: T = (b-1)B / (A - B)
-    let numerator = (b as f64 - 1.0) * b_stat;
-    let denominator = a - b_stat;
-
-    let f_stat = if denominator > 1e-10 {
-        numerator / denominator
-    } else {
-        // If A ≈ B, all treatments are essentially equal
-        0.0
-    };
-
-    // Degrees of freedom
+    // Step 7: T = (b-1)B / (A - B). R: when A == B the statistic is undefined (NaN, df NA)
+    // and p = (k!)^(1-b). A == B is decided as b A == Σ S_j² up to rounding (exact for
+    // dyadic scores). A == 0 means every block is constant: no information, refused.
     let df1 = k - 1;
     let df2 = (b - 1) * (k - 1);
-
-    // P-value from F distribution
-    let p_value = f_test_p_value(f_stat, df1 as f64, df2 as f64);
+    let b_a = b as f64 * a;
+    if a == 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Quade test: every block is constant, so the treatments cannot be ranked \
+                      (quade.test returns an uninformative p-value here)"
+                .to_string(),
+        });
+    }
+    let (f_stat, p_value) = if (b_a - sum_sj_sq).abs() <= 8.0 * f64::EPSILON * b_a {
+        let p = ((1.0 - b as f64) * ln_gamma(k as f64 + 1.0)).exp();
+        (f64::NAN, p)
+    } else {
+        let f = (b as f64 - 1.0) * b_stat / (a - b_stat);
+        (f, f_test_p_value(f, df1 as f64, df2 as f64))
+    };
 
     // Compute mean weighted ranks
     let mean_weighted_ranks: Vec<f64> = treatment_sums.iter().map(|&s| s / b as f64).collect();
@@ -572,5 +579,40 @@ mod tests {
                 other => panic!("{bad}: expected InvalidSpecification, got {other:?}"),
             }
         }
+    }
+
+    /// R's A == B branch: identical rankings with tied ranges give a NaN statistic and
+    /// p = (k!)^(1-b); distinct ranges give the F test; all-constant blocks are refused.
+    /// Fails before: F = 0 and p = 1 when A == B.
+    #[test]
+    fn test_validate_quade_a_equals_b_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_quade_t4");
+        let matrix = |set: &str| -> Vec<Vec<f64>> {
+            let y = crate::stats::ranks::test_data::column_where(&ds, "y", &[("set", set)]);
+            y.chunks(3).map(|c| c.to_vec()).collect()
+        };
+        let names = ["t1", "t2", "t3"].map(String::from);
+        let conc = quade_test(&matrix("conc"), &names).unwrap();
+        let dist = quade_test(&matrix("dist"), &names).unwrap();
+        assert!(conc.statistic.is_nan());
+        assert!(conc.to_string().contains("NaN"), "{conc}");
+        // deviation STAT-64: const_p_r (R's p for all-constant blocks) is not compared
+        match quade_test(&matrix("const"), &names) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("every block is constant"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        Check::new(&case)
+            .scalar("conc_p", conc.p_value, Tol::p_value(12))
+            .scalar(
+                "conc_stat_is_nan",
+                f64::from(u8::from(conc.statistic.is_nan())),
+                Tol::exact(),
+            )
+            .scalar("dist_f", dist.statistic, Tol::stat(12))
+            .scalar("dist_p", dist.p_value, Tol::p_value(12))
+            .finish();
     }
 }
