@@ -753,7 +753,7 @@ fn wbart_prior(
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
             (a.min(v), b.max(v))
         });
-    if !(hi > lo) {
+    if hi <= lo {
         return Err(EconError::InvalidSpecification {
             message: "y is constant: BART's leaf prior SD, (max(y) - min(y)) / (2 k sqrt(n_trees)), would be 0".to_string(),
         });
