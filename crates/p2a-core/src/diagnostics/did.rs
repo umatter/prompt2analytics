@@ -293,7 +293,9 @@ fn check_anticipation(result: &StaggeredDidResult, report: &mut IdentificationRe
         ));
         return;
     };
-    if !(lead.p_value < alpha) {
+    // a NaN p-value is no evidence of anticipation
+    let significant = lead.p_value.is_finite() && lead.p_value < alpha;
+    if !significant {
         report.add_assumption(Assumption::testable(
             "No anticipation",
             "No significant event-study effect at the nearest pre-treatment period",
