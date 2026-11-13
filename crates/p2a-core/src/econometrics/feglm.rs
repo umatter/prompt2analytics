@@ -2089,9 +2089,9 @@ mod tests {
 
     /// Fit `family` on `feglm_mle` with id + time (`<pre>2`) and with id (`<pre>1`) and pin
     /// every reported number the task has made right so far.
-    fn check_mle(family: GlmFamily, y: &str, pre: &str) {
+    fn check_mle(case_id: &str, family: GlmFamily, y: &str, pre: &str) {
         use p2a_validation::{Check, Tol};
-        let (case, ds) = crate::test_support::load_case("feglm_mle");
+        let (case, ds) = crate::test_support::load_case(case_id);
         for (fe, suffix) in [(&["id", "time"][..], "2"), (&["id"][..], "1")] {
             let p = format!("{pre}{suffix}");
             let r = run_feglm(&ds, y, &["x", "x2"], fe, family, Some(tight()))
@@ -2148,17 +2148,17 @@ mod tests {
 
     #[test]
     fn test_validate_feglm_mle_logit() {
-        check_mle(GlmFamily::Logit, "y_bin", "logit");
+        check_mle("feglm_mle", GlmFamily::Logit, "y_bin", "logit");
     }
 
     #[test]
     fn test_validate_feglm_mle_probit() {
-        check_mle(GlmFamily::Probit, "y_bin", "probit");
+        check_mle("feglm_mle", GlmFamily::Probit, "y_bin", "probit");
     }
 
     #[test]
     fn test_validate_feglm_mle_poisson() {
-        check_mle(GlmFamily::Poisson, "y_cnt", "poisson");
+        check_mle("feglm_mle", GlmFamily::Poisson, "y_cnt", "poisson");
     }
 
     /// The default controls reach the MLE to the accuracy their deviance rule (1e-8)
