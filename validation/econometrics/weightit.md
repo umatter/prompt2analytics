@@ -25,13 +25,15 @@ per-group ESS and balance do not depend on the scale; the pooled `effective_samp
 ## Reference Implementation
 
 - R code: `validation/r/cases/causal_weighting.R` (cases `weights_ebal`, `weights_sbw`,
-  `weights_energy`) and `validation/r/cases/causal_ipw_aipw.R` (case `ipw_aipw_sim`, the `glm`
-  weights).
+  `weights_energy`), `validation/r/cases/causal_ipw_aipw.R` (case `ipw_aipw_sim`, the `glm`
+  weights) and `validation/r/cases/causal_weighting_t4.R` (case `weights_trim_balance`:
+  balance tables and trimming).
 - Data: `validation/datasets/generated/weighting_sim.csv` (300 units, 151 treated; x1, x2,
   x3 with x3 binary; seed 20261104), written by `weights_ebal`.
-- Packages: WeightIt 2.0.0, quadprog (both listed in `validation/run_validation.sh`).
+- Packages: WeightIt 2.0.0, cobalt 5.0.0, quadprog.
 - Registry: `validation/methods/causal_weighting.json` (`weightit_glm`, `weightit_ebal`,
-  `weightit_energy`, `weightit_stable`).
+  `weightit_energy`, `weightit_stable`) and `validation/methods/causal_weighting_t4.json`
+  (`weightit_trim_balance`).
 
 ## Reference values (weighting_sim, n = 300)
 
@@ -56,6 +58,8 @@ per-group ESS and balance do not depend on the scale; the pooled `effective_samp
 | `test_validate_entropy_balance_ess` | `weights_ebal` | `entropy_balance` ESS is a count (CAUS-94) | `Tol::stat(n)` |
 | `test_validate_energy_att`, `test_validate_energy_atc`, `test_validate_energy_ate` | `weights_energy` | weights (mean-1 scale), weighted means, effect, zero weights, energy distance | weights 1e-8 relative + 1e-10 absolute; means 1e-8 + 1e-12; effect and energy `Tol::coef(n)`; zero count exact |
 | `test_validate_stable_weights` | `weights_sbw` | ATT, ATC, ATE weights and effects | weights 1e-8 relative + 1e-12 absolute; effects `Tol::coef(n)` |
+| `test_validate_weightit_balance_fixed_sd` | `weights_trim_balance` | balance tables of the glm weights, ATE/ATT/ATC: SMD before and after, variance ratios, mean and max \|SMD\|; no intercept row | `Tol::coef(n)` |
+| `test_validate_weightit_trim` | `weights_trim_balance` | trimmed weights (first 12), max, min, group sums, ESS, SMD after trimming, number changed; ATE at 0.95 (upper, and with the lower tail) and 0.9, ATT and ATC at 0.95 and 0.9; focal weights untouched | `Tol::coef(n)`; count exact |
 
 Property tests (no R values, not registered) cover the error paths and invariants:
 `test_ebal_infeasible_is_error`, `test_entropy_on_infeasible_test_data_is_error`,
@@ -86,9 +90,45 @@ reference), `test_energy_refuses_too_many_units`, `test_energy_honours_cancellat
    quadprog packages (R or Rust) is used (decision WP23-E).
 3. **Stable balancing** is the SBW QP with exact balance (`validation/econometrics/sbw.md`); an
    infeasible exact problem is an error that points to `sbw()` with `balance_tol > 0`.
-4. **Trimming** at a quantile is applied after the weights are computed (sort by
-   `f64::total_cmp`). `trim_quantile` must be in (0.5, 1] (1 = no trimming); anything else,
-   NaN included, is an `InvalidSpecification` (`test_weightit_rejects_bad_trim_quantile`).
+4. **Trimming** follows `WeightIt::trim(w, at, lower, treat)` (WeightIt 2.0.0's `.trim_weights`
+   with the focal group left alone). The trimmed units are those outside the focal group: the
+   controls for ATT, the treated for ATC, every unit for ATE. Weights above the type-3
+   `trim_quantile` of those units' weights are set to it; with `trim_lower` the weights below
+   the type-3 `1 - trim_quantile` quantile are raised to it. Focal weights are never changed.
+   The run reports "weights trimmed at the q% quantile of the {control | treated | all}
+   weights (WeightIt::trim): k changed". `trim_quantile` must be in (0.5, 1] (1 = no
+   trimming); anything else, NaN included, is an `InvalidSpecification`
+   (`test_weightit_rejects_bad_trim_quantile`). R-pinned on `weights_trim_balance`
+   (`test_validate_weightit_trim`): on the case, ATE at 0.95 caps at 3.4459011557282548 and
+   changes 15 weights. Until v0.5.0 the cap was pooled over every weight at the
+   `ceil(q n)`-th order statistic, the lower tail was raised at the same time, and ATT treated
+   weights were trimmed too (CAUS-96).
+
+## Balance tables
+
+`balance_before` and `balance_after` (also the table of `entropy_balance_with`) list the
+covariates only; the intercept row of the design is left out (CAUS-112), so mean |SMD| no
+longer averages in a zero. Per covariate:
+
+- the weighted group means;
+- `std_diff` = (mean_t - mean_c) / SD of the **unweighted** sample, fixed for both tables
+  (cobalt's `s.d.denom`): the treated SD for ATT, the control SD for ATC,
+  sqrt((v_t + v_c) / 2) for ATE. Variances use n - 1; a 0/1 covariate uses p (1 - p) (cobalt
+  `binary = "std"`, MatchIt);
+- `var_ratio` = the ratio of cobalt's weighted variances, sum v (x - m)^2 / (1 - sum v^2)
+  with v = w / sum w; NaN for binary covariates;
+- `max_std_diff`, `mean_std_diff` over the finite |SMD| (0 when none is finite).
+
+R: `cobalt::bal.tab(weightit(..), binary = "std", s.d.denom = ..)` agrees with the case values
+to about 1e-11 relative (`*_smd_after_cobalt`). R-pinned on `weights_trim_balance`
+(`test_validate_weightit_balance_fixed_sd`): SMD before and after, variance ratios, mean and max
+|SMD|. Example (ATT, x1, after weighting): -0.02240619951347782.
+
+Until v0.5.0 the SMD divided by sqrt((v_t + v_c) / 2) of the *weighted* groups, so weighting
+could lower an SMD by inflating a variance, and the before and after values used different
+yardsticks (CAUS-108). The weighted variances used the frequency formula
+sum w (x - m)^2 / (sum w - 1), which depends on the scale of the weights (ATT control weights
+sum to about n1, not n0), so the variance ratios were not cobalt's either.
 
 ## Known Differences
 

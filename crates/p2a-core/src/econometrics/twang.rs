@@ -1,8 +1,8 @@
 //! Toolkit for Weighting and Analysis of Nonequivalent Groups (twang).
 //!
-//! Implements GBM-based propensity score estimation with balance optimization,
-//! similar to the twang R package. Since we don't have a full gradient boosting
-//! machine library, we implement a simplified version using boosted decision stumps.
+//! Implements GBM-based propensity score estimation with balance optimization, as the twang
+//! R package does with `gbm`: Bernoulli boosting with Newton leaf values and trees of
+//! `interaction_depth` splits, and the iteration chosen to minimise a balance criterion.
 //!
 //! # Overview
 //!
@@ -13,16 +13,30 @@
 //!
 //! # Algorithm
 //!
-//! 1. Initialize: F_0(x) = log(n_treated / n_control)
+//! `gbm(distribution = "bernoulli", bag.fraction = 1, train.fraction = 1)`:
+//!
+//! 1. Initialize: F_0 = log(n_treated / n_control) (gbm's `initF`).
 //! 2. For m = 1 to M:
-//!    - Compute pseudo-residuals: r_i = y_i - p_i where p_i = sigmoid(F_{m-1}(x_i))
-//!    - Fit decision stump (single split) to residuals on best feature
-//!    - Update: F_m(x) = F_{m-1}(x) + shrinkage * stump(x)
-//!    - Compute balance metrics with current propensity-based weights
-//!    - Track optimal stopping point based on stop_method
-//! 3. Return propensity scores from optimal iteration
+//!    - Residuals r_i = t_i - p_i with p_i = sigmoid(F_{m-1}(x_i)).
+//!    - Grow a regression tree on r best-first, as gbm does: every terminal node keeps its
+//!      best split (the improvement n_L n_R / n (mean_L - mean_R)^2 over the midpoints of
+//!      consecutive distinct values, left `x < midpoint`, both children with at least
+//!      `min_node_size` rows, gbm's `n.minobsinnode`), and the terminal node with the largest
+//!      improvement is split, `interaction_depth` times or until no node can be split.
+//!    - Newton leaf values: sum_leaf r / sum_leaf p (1 - p) (0 when the denominator is 0).
+//!    - Update: F_m = F_{m-1} + shrinkage * tree(x).
+//!    - Evaluate the stop method's balance criterion with the weights of p_m.
+//! 3. The optimal iteration is the first minimum of the criterion over iterations
+//!    max(1, min_iterations)..=M (twang searches a grid and refines; the global minimum is
+//!    never worse). With `balance_threshold > 0` the run stops early at the first iteration
+//!    >= `min_iterations` whose criterion is below the threshold.
 //!
 //! # Stopping Rules
+//!
+//! Effect sizes are weighted mean differences over an SD fixed from the unweighted sample, as
+//! twang's `ps.summary.new2`: the treated SD for ATT, the SD of the full sample for ATE, the
+//! control SD for ATC (n - 1, every covariate treated as continuous). KS is the weighted
+//! two-sample Kolmogorov-Smirnov statistic.
 //!
 //! - **ESMean**: Mean absolute standardized effect size across all covariates
 //! - **ESMax**: Maximum absolute standardized effect size
@@ -51,10 +65,12 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::weightit::{SdDenominator, balance_sd, finite_abs_mean_max, weighted_var};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::options::Choices;
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -181,22 +197,23 @@ pub struct TwangConfig {
     /// Target estimand (default: ATT)
     pub estimand: TwangEstimand,
 
-    /// Balance threshold for early stopping (default: 0.1)
+    /// Optional early stop (default: 0, off)
     ///
-    /// If the balance metric falls below this threshold, stop early. Must be finite
-    /// and >= 0; 0 disables early stopping.
+    /// With a value above 0, boosting stops at the first iteration >= `min_iterations` whose
+    /// balance criterion falls below it, and the optimum is chosen among the iterations run so
+    /// far. By default every iteration up to `n_trees` is evaluated and the balance-optimal one
+    /// is chosen. Must be finite and >= 0.
     pub balance_threshold: f64,
 
-    /// Minimum number of iterations before early stopping (default: 100)
+    /// The first iteration the selection (and the early stop) considers (default: 1); at most
+    /// `n_trees`. 0 is treated as 1 (the constant model, iteration 0, is never chosen).
     pub min_iterations: usize,
 
-    /// Interaction depth for decision stumps (default: 1, meaning single split)
-    ///
-    /// Value of 1 means single-split stumps. Higher values allow more complex
-    /// trees but increase computation and risk of overfitting.
+    /// Splits per tree (gbm's `interaction.depth`; default: 1, stumps; twang's default is 3).
+    /// Must be at least 1. Each tree is grown best-first to at most this many splits.
     pub interaction_depth: usize,
 
-    /// Minimum observations per terminal node (default: 10)
+    /// Minimum observations per terminal node (default: 10, gbm's `n.minobsinnode`)
     pub min_node_size: usize,
 }
 
@@ -207,8 +224,8 @@ impl Default for TwangConfig {
             shrinkage: 0.01,
             stop_method: StopMethod::ESMean,
             estimand: TwangEstimand::ATT,
-            balance_threshold: 0.1,
-            min_iterations: 100,
+            balance_threshold: 0.0,
+            min_iterations: 1,
             interaction_depth: 1,
             min_node_size: 10,
         }
@@ -231,13 +248,14 @@ pub struct TwangCovariateBalance {
     /// Mean in control group (weighted for after)
     pub mean_control: f64,
 
-    /// Standardized effect size: (mean_t - mean_c) / sd_pooled
+    /// Standardized effect size: (mean_t - mean_c) / SD of the unweighted sample (treated SD
+    /// for ATT, full-sample SD for ATE, control SD for ATC; twang's definition)
     pub std_eff_size: f64,
 
-    /// Kolmogorov-Smirnov statistic
+    /// Weighted two-sample Kolmogorov-Smirnov statistic
     pub ks_statistic: f64,
 
-    /// Variance ratio: var_t / var_c
+    /// Variance ratio var_t / var_c of the weighted variances (cobalt's formula)
     pub var_ratio: f64,
 }
 
@@ -382,6 +400,84 @@ impl DecisionStump {
     }
 }
 
+/// One boosting tree (gbm's regression tree with up to `interaction_depth` splits): split
+/// nodes and Newton leaf values. Node 0 is the root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoostTree {
+    /// The nodes; a split's children are indices into this vector.
+    pub nodes: Vec<BoostNode>,
+}
+
+/// A node of a [`BoostTree`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BoostNode {
+    /// Rows with `x[feature] <= threshold` go to `left`, the others to `right`.
+    Split {
+        feature: usize,
+        threshold: f64,
+        left: usize,
+        right: usize,
+    },
+    /// A terminal node and its (unshrunk) value.
+    Leaf { value: f64 },
+}
+
+impl BoostTree {
+    /// The tree's value for one observation.
+    pub fn predict(&self, x: &[f64]) -> f64 {
+        self.leaf_value(self.leaf_of(|f| x[f]))
+    }
+
+    /// Index of the leaf an observation falls in, given its feature values.
+    fn leaf_of(&self, value: impl Fn(usize) -> f64) -> usize {
+        let mut i = 0;
+        while let BoostNode::Split {
+            feature,
+            threshold,
+            left,
+            right,
+        } = self.nodes[i]
+        {
+            i = if value(feature) <= threshold {
+                left
+            } else {
+                right
+            };
+        }
+        i
+    }
+
+    fn leaf_value(&self, i: usize) -> f64 {
+        match self.nodes[i] {
+            BoostNode::Leaf { value } => value,
+            BoostNode::Split { .. } => f64::NAN,
+        }
+    }
+
+    /// The tree as a stump (depth 1); a tree without a split predicts its leaf everywhere.
+    fn as_stump(&self) -> DecisionStump {
+        match self.nodes[0] {
+            BoostNode::Split {
+                feature,
+                threshold,
+                left,
+                right,
+            } => DecisionStump {
+                feature_idx: feature,
+                threshold,
+                left_value: self.leaf_value(left),
+                right_value: self.leaf_value(right),
+            },
+            BoostNode::Leaf { value } => DecisionStump {
+                feature_idx: 0,
+                threshold: 0.0,
+                left_value: value,
+                right_value: value,
+            },
+        }
+    }
+}
+
 /// Result from twang propensity score estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TwangResult {
@@ -436,9 +532,25 @@ pub struct TwangResult {
     /// Minimum weight (among non-zero)
     pub min_weight: f64,
 
-    /// Learned stumps (internal, for prediction)
+    /// Learned stumps (internal, for prediction); filled only when `interaction_depth` is 1
     #[serde(skip)]
     pub stumps: Vec<DecisionStump>,
+
+    /// Every boosting tree, in order (internal, for prediction)
+    #[serde(skip)]
+    pub trees: Vec<BoostTree>,
+
+    /// Splits per tree used
+    #[serde(default)]
+    pub interaction_depth: usize,
+
+    /// The first iteration the selection considered (max(1, min_iterations))
+    #[serde(default)]
+    pub search_from: usize,
+
+    /// Warnings (optimum at the last iteration, early stop)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 
     /// Initial F0 value
     #[serde(skip)]
@@ -464,7 +576,15 @@ impl fmt::Display for TwangResult {
         )?;
         writeln!(f)?;
         writeln!(f, "GBM Tuning:")?;
-        writeln!(f, "  Optimal Iterations: {}", self.optimal_n_trees)?;
+        writeln!(
+            f,
+            "  Optimal Iterations: {} (minimum of {} over iterations {}..{})",
+            self.optimal_n_trees,
+            stop_label(self.stop_method),
+            self.search_from,
+            self.balance_history.len().saturating_sub(1)
+        )?;
+        writeln!(f, "  Interaction Depth:  {}", self.interaction_depth)?;
         writeln!(f, "  Shrinkage:          {}", self.shrinkage)?;
         writeln!(f)?;
 
@@ -531,8 +651,25 @@ impl fmt::Display for TwangResult {
 
         writeln!(f, "Covariate Balance (After Weighting):")?;
         write!(f, "{}", self.balance_after)?;
+        write!(f, "{}", notes_text(self))?;
 
         Ok(())
+    }
+}
+
+impl ResultNotes for TwangResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+/// twang's name of a stop method.
+fn stop_label(m: StopMethod) -> &'static str {
+    match m {
+        StopMethod::ESMean => "es.mean",
+        StopMethod::ESMax => "es.max",
+        StopMethod::KSMean => "ks.mean",
+        StopMethod::KSMax => "ks.max",
     }
 }
 
@@ -542,9 +679,9 @@ impl fmt::Display for TwangResult {
 
 /// Run twang GBM propensity score estimation.
 ///
-/// This function estimates propensity scores using gradient boosted stumps
-/// and automatically selects the optimal number of iterations based on
-/// covariate balance.
+/// This function estimates propensity scores by gbm's Bernoulli boosting (trees of
+/// `interaction_depth` splits, Newton leaf values) and selects the iteration that minimises
+/// the balance criterion of `stop_method` over every evaluated iteration.
 ///
 /// # Arguments
 ///
@@ -627,18 +764,21 @@ pub fn run_twang(
         }
     }
 
+    let sorted = SortedFeatures::new(&x);
+    let crit = Criterion::new(&x, &t, &sorted, config.estimand);
+
     // Run GBM boosting
-    let (stumps, f0, balance_history, optimal_iter, propensity_scores) =
-        run_gbm_boosting(&x, &t, &config)?;
+    let boost = run_gbm_boosting(&x, &t, &sorted, &crit, &config)?;
+    let propensity_scores = boost.propensity_scores;
 
     // Compute final weights at optimal iteration
     let weights = compute_twang_weights(&propensity_scores, &t, config.estimand);
 
     // Compute balance before (unweighted)
-    let balance_before = compute_twang_balance(&x, &t, &covariate_names, None);
+    let balance_before = compute_twang_balance(&x, &crit, &covariate_names, None);
 
     // Compute balance after (weighted)
-    let balance_after = compute_twang_balance(&x, &t, &covariate_names, Some(&weights));
+    let balance_after = compute_twang_balance(&x, &crit, &covariate_names, Some(&weights));
 
     // Compute effective sample sizes
     let (ess_total, ess_treated, ess_control) = compute_twang_ess(&weights, &t);
@@ -655,13 +795,19 @@ pub fn run_twang(
         .cloned()
         .fold(f64::INFINITY, f64::min);
 
+    let stumps = if config.interaction_depth == 1 {
+        boost.trees.iter().map(BoostTree::as_stump).collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(TwangResult {
         propensity_scores,
         weights,
-        optimal_n_trees: optimal_iter,
+        optimal_n_trees: boost.optimal_iter,
         balance_before,
         balance_after,
-        balance_history,
+        balance_history: boost.balance_history,
         stop_method: config.stop_method,
         estimand: config.estimand,
         effective_sample_size: ess_total,
@@ -674,7 +820,11 @@ pub fn run_twang(
         max_weight,
         min_weight,
         stumps,
-        f0,
+        trees: boost.trees,
+        interaction_depth: config.interaction_depth,
+        search_from: config.min_iterations.max(1),
+        warnings: boost.warnings,
+        f0: boost.f0,
         shrinkage: config.shrinkage,
     })
 }
@@ -722,6 +872,19 @@ fn validate_twang_config(config: &TwangConfig) -> EconResult<()> {
             ),
         });
     }
+    if config.interaction_depth == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "interaction_depth must be at least 1 (splits per tree); got 0".to_string(),
+        });
+    }
+    if config.min_iterations > config.n_trees {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "min_iterations must be at most n_trees ({}); got {}",
+                config.n_trees, config.min_iterations
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -729,121 +892,220 @@ fn validate_twang_config(config: &TwangConfig) -> EconResult<()> {
 // GBM Boosting Implementation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Run gradient boosting with decision stumps.
-///
-/// Returns (stumps, f0, balance_history, optimal_iter, propensity_scores).
+/// What a boosting run returns.
+struct BoostOutcome {
+    trees: Vec<BoostTree>,
+    f0: f64,
+    balance_history: Vec<f64>,
+    optimal_iter: usize,
+    propensity_scores: Vec<f64>,
+    warnings: Vec<String>,
+}
+
+/// gbm's Bernoulli boosting state: the link F, the presorted features and the tree settings.
+struct Booster<'a> {
+    x: &'a Array2<f64>,
+    t: &'a [f64],
+    sorted: &'a SortedFeatures,
+    depth: usize,
+    min_node_size: usize,
+    shrinkage: f64,
+    f: Vec<f64>,
+    // scratch, reused across iterations
+    p: Vec<f64>,
+    z: Vec<f64>,
+    leaf: Vec<usize>,
+}
+
+impl<'a> Booster<'a> {
+    fn new(
+        x: &'a Array2<f64>,
+        t: &'a [f64],
+        sorted: &'a SortedFeatures,
+        config: &TwangConfig,
+    ) -> EconResult<(Self, f64)> {
+        let n = t.len();
+        let n_treated = t.iter().filter(|&&v| v >= 0.5).count() as f64;
+        let n_control = n as f64 - n_treated;
+        // gbm's initF: the log-odds of treatment
+        let f0 = (n_treated / n_control).ln();
+        let booster = Booster {
+            x,
+            t,
+            sorted,
+            depth: config.interaction_depth,
+            min_node_size: config.min_node_size,
+            shrinkage: config.shrinkage,
+            f: resource::try_vec(n, f0, "boosting link")?,
+            p: resource::try_vec(n, 0.0, "boosting probabilities")?,
+            z: resource::try_vec(n, 0.0, "boosting residuals")?,
+            leaf: resource::try_vec(n, 0usize, "boosting leaf index")?,
+        };
+        Ok((booster, f0))
+    }
+
+    /// One boosting iteration: residuals, a tree, Newton leaf values, the link update.
+    fn step(&mut self) -> BoostTree {
+        for i in 0..self.t.len() {
+            let p = sigmoid(self.f[i]);
+            self.p[i] = p;
+            self.z[i] = self.t[i] - p;
+        }
+        let mut tree = grow_tree(self.x, self.sorted, &self.z, self.depth, self.min_node_size);
+        set_newton_leaves(&mut tree, self.x, &self.z, &self.p, &mut self.leaf);
+        for i in 0..self.t.len() {
+            self.f[i] += self.shrinkage * tree.leaf_value(self.leaf[i]);
+        }
+        tree
+    }
+}
+
+/// gbm's Newton leaf values (Bernoulli): sum_leaf z / sum_leaf p (1 - p), summed in index
+/// order, 0 when the denominator is 0. `leaf` receives each row's leaf index.
+fn set_newton_leaves(
+    tree: &mut BoostTree,
+    x: &Array2<f64>,
+    z: &[f64],
+    p: &[f64],
+    leaf: &mut [usize],
+) {
+    let n_nodes = tree.nodes.len();
+    let (mut num, mut den) = (vec![0.0; n_nodes], vec![0.0; n_nodes]);
+    for (i, li) in leaf.iter_mut().enumerate() {
+        let l = tree.leaf_of(|j| x[[i, j]]);
+        *li = l;
+        num[l] += z[i];
+        den[l] += p[i] * (1.0 - p[i]);
+    }
+    for (l, node) in tree.nodes.iter_mut().enumerate() {
+        if let BoostNode::Leaf { value } = node {
+            *value = if den[l] != 0.0 { num[l] / den[l] } else { 0.0 };
+        }
+    }
+}
+
+/// Run gbm's Bernoulli boosting, evaluate the balance criterion at every iteration and pick
+/// the first minimum over `max(1, min_iterations)..=evaluated`; with `balance_threshold > 0`
+/// stop early at the first iteration >= `min_iterations` below it.
 fn run_gbm_boosting(
     x: &Array2<f64>,
     t: &Array1<f64>,
+    sorted: &SortedFeatures,
+    crit: &Criterion,
     config: &TwangConfig,
-) -> EconResult<(Vec<DecisionStump>, f64, Vec<f64>, usize, Vec<f64>)> {
-    let n = t.len();
-    let _k = x.ncols();
-
-    let n_treated: f64 = t.iter().filter(|&&v| v >= 0.5).count() as f64;
-    let n_control: f64 = (n as f64) - n_treated;
-
-    // Initialize: F_0(x) = log(p / (1-p)) where p = n_treated / n
-    // This is the log-odds of being treated
-    let f0 = (n_treated / n_control).ln();
-
-    // Current ensemble prediction F(x)
-    let mut f_values = Array1::from_elem(n, f0);
-
-    // Store stumps
-    let mut stumps =
-        resource::try_with_capacity::<DecisionStump>(config.n_trees, "boosting trees (n_trees)")?;
-
-    // Track balance at each iteration
+) -> EconResult<BoostOutcome> {
+    let t_vec = t.to_vec();
+    let mut trees =
+        resource::try_with_capacity::<BoostTree>(config.n_trees, "boosting trees (n_trees)")?;
     let history_len = config
         .n_trees
         .checked_add(1)
         .ok_or_else(|| EconError::ResourceLimit("n_trees is too large".to_string()))?;
     let mut balance_history =
         resource::try_with_capacity::<f64>(history_len, "balance history (n_trees + 1)")?;
+    let (mut booster, f0) = Booster::new(x, &t_vec, sorted, config)?;
+    let mut weights = vec![0.0; t_vec.len()];
 
-    // Initial balance (iteration 0)
-    let initial_ps = f_values.mapv(sigmoid);
-    let initial_weights = compute_twang_weights_internal(&initial_ps, t, config.estimand);
-    let initial_balance = compute_balance_metric(x, t, &initial_weights, config.stop_method);
-    balance_history.push(initial_balance);
+    // Iteration 0: the constant model (recorded, never chosen).
+    let ps0: Vec<f64> = booster.f.iter().map(|&f| sigmoid(f)).collect();
+    twang_weights_into(&ps0, &crit.groups, config.estimand, &mut weights);
+    balance_history.push(crit.value(x, &weights, config.stop_method));
 
-    // Track best balance
-    let mut best_balance = initial_balance;
-    let mut optimal_iter = 0;
-
-    // Sort every feature once; each stump search then sweeps the sorted orders.
-    let sorted = SortedFeatures::new(x);
-
-    // Gradient boosting iterations
-    for m in 0..config.n_trees {
+    let start = config.min_iterations.max(1);
+    let mut best = (f64::INFINITY, 0usize);
+    let mut f_best = booster.f.clone();
+    let mut early_stop = None;
+    let mut ps = ps0;
+    for m in 1..=config.n_trees {
         resource::checkpoint()?;
-
-        // Compute current probabilities
-        let p: Array1<f64> = f_values.mapv(sigmoid);
-
-        // Clip probabilities for numerical stability
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Compute pseudo-residuals (gradient of binomial deviance)
-        // For logistic loss: r_i = y_i - p_i
-        let residuals: Array1<f64> = t - &p_clipped;
-
-        // Fit decision stump to residuals
-        let stump = fit_decision_stump(x, &sorted, &residuals, config.min_node_size);
-
-        // Update ensemble with shrinkage
-        let stump_predictions = stump.predict_all(x);
-        f_values = &f_values + &(&stump_predictions * config.shrinkage);
-
-        // Store stump
-        stumps.push(stump);
-
-        // Compute propensity scores and weights
-        let ps = f_values.mapv(sigmoid);
-        let weights = compute_twang_weights_internal(&ps, t, config.estimand);
-
-        // Compute balance metric
-        let balance = compute_balance_metric(x, t, &weights, config.stop_method);
-        balance_history.push(balance);
-
-        // Update optimal iteration if balance improved
-        if m >= config.min_iterations && balance < best_balance {
-            best_balance = balance;
-            optimal_iter = m + 1;
+        trees.push(booster.step());
+        for (p, &f) in ps.iter_mut().zip(&booster.f) {
+            *p = sigmoid(f);
         }
-
-        // Early stopping if balance threshold reached
-        if m >= config.min_iterations && balance < config.balance_threshold {
+        twang_weights_into(&ps, &crit.groups, config.estimand, &mut weights);
+        let value = crit.value(x, &weights, config.stop_method);
+        balance_history.push(value);
+        if m >= start && value < best.0 {
+            best = (value, m);
+            f_best.copy_from_slice(&booster.f);
+        }
+        if config.balance_threshold > 0.0
+            && m >= config.min_iterations
+            && value < config.balance_threshold
+        {
+            early_stop = Some(m);
             break;
         }
     }
+    let evaluated = trees.len();
 
-    // If no iteration beat initial, use last iteration
-    if optimal_iter == 0 {
-        optimal_iter = stumps.len();
+    let mut warnings = Vec::new();
+    let optimal_iter = if best.1 == 0 {
+        // Every criterion value was NaN: report the last iteration.
+        warnings.push(format!(
+            "the balance criterion ({}) was not finite at any iteration; the last iteration is reported",
+            stop_label(config.stop_method)
+        ));
+        f_best.copy_from_slice(&booster.f);
+        evaluated
+    } else {
+        best.1
+    };
+    match early_stop {
+        Some(m) => warnings.push(format!(
+            "boosting stopped early at iteration {m} (criterion below balance_threshold = {}); the optimum is over iterations {start}..{m} only",
+            config.balance_threshold
+        )),
+        None if best.1 != 0 && optimal_iter == evaluated => warnings.push(format!(
+            "the balance criterion was still decreasing at n_trees = {}; increase n_trees",
+            config.n_trees
+        )),
+        None => {}
     }
 
-    // Recompute propensity scores at optimal iteration
-    let mut f_optimal = Array1::from_elem(n, f0);
-    for stump in stumps.iter().take(optimal_iter) {
-        let predictions = stump.predict_all(x);
-        f_optimal = &f_optimal + &(&predictions * config.shrinkage);
-    }
-    let propensity_scores: Vec<f64> = f_optimal.mapv(sigmoid).to_vec();
-
-    Ok((stumps, f0, balance_history, optimal_iter, propensity_scores))
+    let propensity_scores: Vec<f64> = f_best.iter().map(|&f| sigmoid(f)).collect();
+    Ok(BoostOutcome {
+        trees,
+        f0,
+        balance_history,
+        optimal_iter,
+        propensity_scores,
+        warnings,
+    })
 }
 
-/// Relative margin (of the total sum of squares) by which a later split candidate must beat
-/// the best one so far. Two features that induce the same partition give criteria that differ
-/// only in summation order; the margin keeps the first such candidate, as the exact search did.
+/// gbm's `initF` and the link after each of the iterations `at` (ascending), for the R pins.
+#[cfg(test)]
+fn gbm_link_path(
+    x: &Array2<f64>,
+    t: &Array1<f64>,
+    config: &TwangConfig,
+    at: &[usize],
+) -> (f64, Vec<Vec<f64>>) {
+    let t_vec = t.to_vec();
+    let sorted = SortedFeatures::new(x);
+    let (mut booster, f0) = Booster::new(x, &t_vec, &sorted, config).unwrap();
+    let mut out = Vec::new();
+    for m in 1..=at.iter().copied().max().unwrap_or(0) {
+        booster.step();
+        if at.contains(&m) {
+            out.push(booster.f.clone());
+        }
+    }
+    (f0, out)
+}
+
+/// Relative margin (of the node's total sum of squares) by which a later split candidate must
+/// beat the best one so far. Two features that induce the same partition give criteria that
+/// differ only in summation order; the margin keeps the first such candidate.
 const SSE_TIE_REL: f64 = 1e-10;
 
 /// Row indices of each feature column in ascending order of value, computed once per
-/// boosting run (O(k n log n)) so that every stump search is a linear sweep.
+/// boosting run (O(k n log n)) so that every split search is a linear sweep.
 struct SortedFeatures {
     order: Vec<Vec<usize>>,
+    /// 0..n, the root's rows in index order.
+    rows: Vec<usize>,
 }
 
 impl SortedFeatures {
@@ -857,48 +1119,47 @@ impl SortedFeatures {
                 idx
             })
             .collect();
-        Self { order }
+        Self {
+            order,
+            rows: (0..x.nrows()).collect(),
+        }
     }
 }
 
-/// Fit a decision stump (single-split tree) to residuals.
-///
-/// Finds the best feature and threshold to split on, minimizing
-/// the sum of squared residuals in each partition.
-///
-/// Candidates are the midpoints between consecutive distinct values of each feature, in
-/// ascending feature and value order. Each feature is swept once along its sorted order with
-/// running sums, so the criterion of every candidate costs O(1) and a stump O(k n):
-///
-/// ```text
-/// SSE = sum r_i^2 - S_L^2 / n_L - S_R^2 / n_R
-/// ```
-///
-/// The leaf means of the chosen split are recomputed in index order, so they are
-/// bit-identical to a direct two-pass computation.
-fn fit_decision_stump(
-    x: &Array2<f64>,
-    sorted: &SortedFeatures,
-    residuals: &Array1<f64>,
-    min_node_size: usize,
-) -> DecisionStump {
-    let n = x.nrows();
-    let k = x.ncols();
+/// The best split of one node.
+#[derive(Debug, Clone, Copy)]
+struct NodeSplit {
+    feature: usize,
+    threshold: f64,
+    /// gbm's improvement n_L n_R / n (mean_L - mean_R)^2 = S_L^2 / n_L + S_R^2 / n_R - S^2 / n.
+    improvement: f64,
+}
 
-    let total: f64 = residuals.iter().sum();
-    let total_sq: f64 = residuals.iter().map(|r| r * r).sum();
+/// The best split of the rows `rows` (any order; the node's totals are summed in this order)
+/// whose per-feature sorted lists are `lists`. Candidates are the midpoints between
+/// consecutive distinct values of each feature, in ascending feature and value order, with at
+/// least `min_node_size` rows on each side; the criterion is the SSE after the split
+/// (`sum r^2 - S_L^2 / n_L - S_R^2 / n_R`) and the first best wins (within `SSE_TIE_REL`).
+fn best_split(
+    x: &Array2<f64>,
+    rows: &[usize],
+    lists: &[&[usize]],
+    z: &[f64],
+    min_node_size: usize,
+) -> Option<NodeSplit> {
+    let n = rows.len();
+    let total: f64 = rows.iter().map(|&i| z[i]).sum();
+    let total_sq: f64 = rows.iter().map(|&i| z[i] * z[i]).sum();
     let tie_margin = SSE_TIE_REL * total_sq;
 
-    let mut best: Option<(usize, f64)> = None;
+    let mut best: Option<(usize, f64, f64)> = None;
     let mut best_sse = f64::INFINITY;
-
-    for j in 0..k {
-        let order = &sorted.order[j];
+    for (j, order) in lists.iter().enumerate() {
         let mut left_sum = 0.0;
         let mut left_count = 0usize;
         for pos in 0..n.saturating_sub(1) {
             let i = order[pos];
-            left_sum += residuals[i];
+            left_sum += z[i];
             left_count += 1;
 
             // Candidates sit only at group boundaries (`-0.0` and `0.0` are one group).
@@ -907,17 +1168,14 @@ fn fit_decision_stump(
             if v == v_next {
                 continue;
             }
-
             let right_count = n - left_count;
             if left_count < min_node_size || right_count < min_node_size {
                 continue;
             }
-
             let right_sum = total - left_sum;
-            let sse = total_sq
-                - left_sum * left_sum / left_count as f64
-                - right_sum * right_sum / right_count as f64;
-
+            let gain = left_sum * left_sum / left_count as f64
+                + right_sum * right_sum / right_count as f64;
+            let sse = total_sq - gain;
             if sse < best_sse - tie_margin {
                 // The midpoint must separate the two groups; with adjacent floats or an
                 // overflowing sum it does not, and the lower value is the exact boundary.
@@ -926,43 +1184,107 @@ fn fit_decision_stump(
                     threshold = v;
                 }
                 best_sse = sse;
-                best = Some((j, threshold));
+                best = Some((j, threshold, gain));
             }
         }
     }
-
-    let Some((feature_idx, threshold)) = best else {
-        // No valid split: predict the mean
-        let mean = residuals.sum() / n as f64;
-        return DecisionStump {
-            feature_idx: 0,
-            threshold: 0.0,
-            left_value: mean,
-            right_value: mean,
-        };
-    };
-
-    // Leaf means of the chosen split, summed in index order.
-    let mut left_count = 0usize;
-    let mut right_count = 0usize;
-    let mut left_sum = 0.0;
-    let mut right_sum = 0.0;
-    for i in 0..n {
-        if x[[i, feature_idx]] <= threshold {
-            left_count += 1;
-            left_sum += residuals[i];
-        } else {
-            right_count += 1;
-            right_sum += residuals[i];
-        }
-    }
-
-    DecisionStump {
-        feature_idx,
+    best.map(|(feature, threshold, gain)| NodeSplit {
+        feature,
         threshold,
-        left_value: left_sum / left_count as f64,
-        right_value: right_sum / right_count as f64,
+        improvement: gain - total * total / n as f64,
+    })
+}
+
+/// A terminal node while a tree grows: its rows (in index order, and sorted per feature) and
+/// its best split. The root borrows the run's presorted lists.
+struct Terminal {
+    node: usize,
+    rows: Option<(Vec<usize>, Vec<Vec<usize>>)>,
+    split: Option<NodeSplit>,
+}
+
+/// Grow one regression tree on the residuals `z` best-first, as gbm does: split the terminal
+/// node with the largest improvement (the first on ties), `depth` times or until no node can
+/// be split. A split's rows are partitioned stably into its children, so every list stays
+/// sorted and a tree costs O(depth k n). Leaf values are left at 0 (the caller sets them).
+fn grow_tree(
+    x: &Array2<f64>,
+    sorted: &SortedFeatures,
+    z: &[f64],
+    depth: usize,
+    min_node_size: usize,
+) -> BoostTree {
+    let root_rows = &sorted.rows;
+    let root_lists: Vec<&[usize]> = sorted.order.iter().map(|v| v.as_slice()).collect();
+    let mut nodes = vec![BoostNode::Leaf { value: 0.0 }];
+    let mut terminals = vec![Terminal {
+        node: 0,
+        rows: None,
+        split: best_split(x, root_rows, &root_lists, z, min_node_size),
+    }];
+
+    for level in 0..depth {
+        // The terminal with the largest improvement; strict `>` keeps the first.
+        let mut pick: Option<(usize, NodeSplit)> = None;
+        for (b, term) in terminals.iter().enumerate() {
+            if let Some(sp) = term.split
+                && pick.is_none_or(|(_, best)| sp.improvement > best.improvement)
+            {
+                pick = Some((b, sp));
+            }
+        }
+        let Some((b, sp)) = pick else { break };
+        let (left_id, right_id) = (nodes.len(), nodes.len() + 1);
+        nodes[terminals[b].node] = BoostNode::Split {
+            feature: sp.feature,
+            threshold: sp.threshold,
+            left: left_id,
+            right: right_id,
+        };
+        nodes.push(BoostNode::Leaf { value: 0.0 });
+        nodes.push(BoostNode::Leaf { value: 0.0 });
+
+        let last = level + 1 == depth;
+        let (left, right) = if last {
+            // No further split: the children's rows are not needed.
+            (None, None)
+        } else {
+            let goes_left = |i: usize| x[[i, sp.feature]] <= sp.threshold;
+            let part = |v: &[usize]| -> (Vec<usize>, Vec<usize>) {
+                v.iter().partition(|&&i| goes_left(i))
+            };
+            let (index, lists): (&[usize], Vec<&[usize]>) = match &terminals[b].rows {
+                Some((index, lists)) => (index, lists.iter().map(|v| v.as_slice()).collect()),
+                None => (root_rows, root_lists.clone()),
+            };
+            let (li, ri) = part(index);
+            let (mut ll, mut rl) = (Vec::with_capacity(lists.len()), Vec::new());
+            for list in &lists {
+                let (a, c) = part(list);
+                ll.push(a);
+                rl.push(c);
+            }
+            (Some((li, ll)), Some((ri, rl)))
+        };
+        let search = |rows: &Option<(Vec<usize>, Vec<Vec<usize>>)>| {
+            rows.as_ref().and_then(|(index, lists)| {
+                let lists: Vec<&[usize]> = lists.iter().map(|v| v.as_slice()).collect();
+                best_split(x, index, &lists, z, min_node_size)
+            })
+        };
+        let (left_split, right_split) = (search(&left), search(&right));
+        terminals[b] = Terminal {
+            node: left_id,
+            rows: left,
+            split: left_split,
+        };
+        terminals.push(Terminal {
+            node: right_id,
+            rows: right,
+            split: right_split,
+        });
     }
+    BoostTree { nodes }
 }
 
 /// Sigmoid function.
@@ -974,215 +1296,230 @@ fn sigmoid(x: f64) -> f64 {
 // Weight and Balance Computation
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// The treatment groups, built once per run.
+struct Groups {
+    treated: Vec<bool>,
+    treated_idx: Vec<usize>,
+    control_idx: Vec<usize>,
+}
+
+impl Groups {
+    fn new(t: &Array1<f64>) -> Self {
+        let treated: Vec<bool> = t.iter().map(|&v| v >= 0.5).collect();
+        let treated_idx = (0..t.len()).filter(|&i| treated[i]).collect();
+        let control_idx = (0..t.len()).filter(|&i| !treated[i]).collect();
+        Self {
+            treated,
+            treated_idx,
+            control_idx,
+        }
+    }
+}
+
 /// Compute IPW weights based on propensity scores and estimand.
 fn compute_twang_weights(
     propensity_scores: &[f64],
     t: &Array1<f64>,
     estimand: TwangEstimand,
 ) -> Vec<f64> {
-    let ps_array = Array1::from_vec(propensity_scores.to_vec());
-    compute_twang_weights_internal(&ps_array, t, estimand)
-}
-
-/// Internal weight computation from Array1.
-fn compute_twang_weights_internal(
-    propensity_scores: &Array1<f64>,
-    t: &Array1<f64>,
-    estimand: TwangEstimand,
-) -> Vec<f64> {
-    let n = t.len();
-    let mut weights = vec![0.0; n];
-
-    // Clip propensity scores
-    let ps_clipped: Array1<f64> = propensity_scores.mapv(|p| p.max(1e-10).min(1.0 - 1e-10));
-
-    match estimand {
-        TwangEstimand::ATT => {
-            // ATT: Treated get weight 1, control get w = ps / (1-ps)
-            for i in 0..n {
-                if t[i] >= 0.5 {
-                    weights[i] = 1.0;
-                } else {
-                    weights[i] = ps_clipped[i] / (1.0 - ps_clipped[i]);
-                }
-            }
-        }
-        TwangEstimand::ATE => {
-            // ATE: Treated get 1/ps, control get 1/(1-ps)
-            for i in 0..n {
-                if t[i] >= 0.5 {
-                    weights[i] = 1.0 / ps_clipped[i];
-                } else {
-                    weights[i] = 1.0 / (1.0 - ps_clipped[i]);
-                }
-            }
-        }
-        TwangEstimand::ATC => {
-            // ATC: Treated get (1-ps)/ps, control get 1
-            for i in 0..n {
-                if t[i] >= 0.5 {
-                    weights[i] = (1.0 - ps_clipped[i]) / ps_clipped[i];
-                } else {
-                    weights[i] = 1.0;
-                }
-            }
-        }
-    }
-
-    // Normalize weights within each group to sum to group size
-    let treated_idx: Vec<usize> = (0..n).filter(|&i| t[i] >= 0.5).collect();
-    let control_idx: Vec<usize> = (0..n).filter(|&i| t[i] < 0.5).collect();
-
-    let sum_t: f64 = treated_idx.iter().map(|&i| weights[i]).sum();
-    let sum_c: f64 = control_idx.iter().map(|&i| weights[i]).sum();
-
-    let n_t = treated_idx.len() as f64;
-    let n_c = control_idx.len() as f64;
-
-    if sum_t > 0.0 {
-        for &i in &treated_idx {
-            weights[i] *= n_t / sum_t;
-        }
-    }
-    if sum_c > 0.0 {
-        for &i in &control_idx {
-            weights[i] *= n_c / sum_c;
-        }
-    }
-
+    let mut weights = vec![0.0; t.len()];
+    twang_weights_into(propensity_scores, &Groups::new(t), estimand, &mut weights);
     weights
 }
 
-/// Compute balance metric for stopping rule.
-fn compute_balance_metric(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    weights: &[f64],
-    stop_method: StopMethod,
-) -> f64 {
-    let balance = compute_twang_balance_internal(x, t, weights);
-
-    match stop_method {
-        StopMethod::ESMean => balance.es_mean,
-        StopMethod::ESMax => balance.es_max,
-        StopMethod::KSMean => balance.ks_mean,
-        StopMethod::KSMax => balance.ks_max,
+/// IPW weights of the estimand (scores clipped to [1e-10, 1 - 1e-10]), each group normalised
+/// to sum to its size.
+fn twang_weights_into(
+    propensity_scores: &[f64],
+    groups: &Groups,
+    estimand: TwangEstimand,
+    weights: &mut [f64],
+) {
+    for (i, w) in weights.iter_mut().enumerate() {
+        let p = propensity_scores[i].clamp(1e-10, 1.0 - 1e-10);
+        let treated = groups.treated[i];
+        *w = match estimand {
+            // ATT: treated 1, controls p / (1 - p)
+            TwangEstimand::ATT => {
+                if treated {
+                    1.0
+                } else {
+                    p / (1.0 - p)
+                }
+            }
+            // ATE: treated 1 / p, controls 1 / (1 - p)
+            TwangEstimand::ATE => {
+                if treated {
+                    1.0 / p
+                } else {
+                    1.0 / (1.0 - p)
+                }
+            }
+            // ATC: treated (1 - p) / p, controls 1
+            TwangEstimand::ATC => {
+                if treated {
+                    (1.0 - p) / p
+                } else {
+                    1.0
+                }
+            }
+        };
+    }
+    for idx in [&groups.treated_idx, &groups.control_idx] {
+        let sum: f64 = idx.iter().map(|&i| weights[i]).sum();
+        if sum > 0.0 {
+            let scale = idx.len() as f64 / sum;
+            for &i in idx.iter() {
+                weights[i] *= scale;
+            }
+        }
     }
 }
 
-/// Compute full balance table.
+/// twang's balance criterion: the groups, the presorted features and, per covariate, the SD
+/// fixed from the unweighted sample (treated SD for ATT, full-sample SD for ATE, control SD for
+/// ATC; n - 1, every covariate continuous, as `ps.summary.new2`).
+struct Criterion<'a> {
+    groups: Groups,
+    sorted: &'a SortedFeatures,
+    sd: Vec<f64>,
+}
+
+impl<'a> Criterion<'a> {
+    fn new(
+        x: &Array2<f64>,
+        t: &Array1<f64>,
+        sorted: &'a SortedFeatures,
+        estimand: TwangEstimand,
+    ) -> Self {
+        let groups = Groups::new(t);
+        let denom = match estimand {
+            TwangEstimand::ATT => SdDenominator::Treated,
+            TwangEstimand::ATE => SdDenominator::All,
+            TwangEstimand::ATC => SdDenominator::Control,
+        };
+        let sd = (0..x.ncols())
+            .map(|j| balance_sd(x.column(j), &groups.treated, denom, false))
+            .collect();
+        Criterion { groups, sorted, sd }
+    }
+
+    /// Weighted means of covariate `j` in the treated and control groups.
+    fn means(&self, x: &Array2<f64>, j: usize, w: &[f64]) -> (f64, f64) {
+        let mean = |idx: &[usize]| {
+            let (mut s, mut sw) = (0.0, 0.0);
+            for &i in idx {
+                s += w[i] * x[[i, j]];
+                sw += w[i];
+            }
+            if sw > 0.0 { s / sw } else { f64::NAN }
+        };
+        (
+            mean(&self.groups.treated_idx),
+            mean(&self.groups.control_idx),
+        )
+    }
+
+    /// Standardized effect size of covariate `j`.
+    fn effect_size(&self, x: &Array2<f64>, j: usize, w: &[f64]) -> f64 {
+        let (mt, mc) = self.means(x, j, w);
+        (mt - mc) / self.sd[j]
+    }
+
+    /// Weighted two-sample KS statistic of covariate `j`, swept along its presorted order:
+    /// the group totals and running sums are accumulated in sorted order and the difference is
+    /// taken at the last unit of each run of equal values. 0 when a group has no weight.
+    fn ks(&self, x: &Array2<f64>, j: usize, w: &[f64]) -> f64 {
+        let order = &self.sorted.order[j];
+        let treated = &self.groups.treated;
+        let (mut t_total, mut c_total) = (0.0, 0.0);
+        for &i in order {
+            if treated[i] {
+                t_total += w[i];
+            } else {
+                c_total += w[i];
+            }
+        }
+        if t_total == 0.0 || c_total == 0.0 {
+            return 0.0;
+        }
+        let (mut t_cum, mut c_cum, mut max_diff) = (0.0, 0.0, 0.0_f64);
+        for (pos, &i) in order.iter().enumerate() {
+            if treated[i] {
+                t_cum += w[i];
+            } else {
+                c_cum += w[i];
+            }
+            let last = pos + 1 == order.len() || x[[order[pos + 1], j]] != x[[i, j]];
+            if last {
+                let diff = (t_cum / t_total - c_cum / c_total).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+            }
+        }
+        max_diff
+    }
+
+    /// The stop method's statistic only: effect sizes for ES, KS for KS; mean and max over
+    /// the finite values.
+    fn value(&self, x: &Array2<f64>, w: &[f64], method: StopMethod) -> f64 {
+        let k = x.ncols();
+        let (mean, max) = match method {
+            StopMethod::ESMean | StopMethod::ESMax => {
+                finite_abs_mean_max((0..k).map(|j| self.effect_size(x, j, w)))
+            }
+            StopMethod::KSMean | StopMethod::KSMax => {
+                finite_abs_mean_max((0..k).map(|j| self.ks(x, j, w)))
+            }
+        };
+        match method {
+            StopMethod::ESMean | StopMethod::KSMean => mean,
+            StopMethod::ESMax | StopMethod::KSMax => max,
+        }
+    }
+}
+
+/// Full balance table: weighted means, effect sizes, KS and weighted variance ratios.
 fn compute_twang_balance(
     x: &Array2<f64>,
-    t: &Array1<f64>,
+    crit: &Criterion,
     names: &[String],
     weights: Option<&[f64]>,
 ) -> TwangBalanceTable {
-    let uniform_weights: Vec<f64>;
+    let ones;
     let w = match weights {
         Some(w) => w,
         None => {
-            uniform_weights = vec![1.0; t.len()];
-            &uniform_weights
+            ones = vec![1.0; x.nrows()];
+            &ones
         }
     };
+    let g = &crit.groups;
+    let covariates: Vec<TwangCovariateBalance> = (0..x.ncols())
+        .map(|j| {
+            let (mean_t, mean_c) = crit.means(x, j, w);
+            let pick = |idx: &[usize]| -> (Vec<f64>, Vec<f64>) {
+                idx.iter().map(|&i| (x[[i, j]], w[i])).unzip()
+            };
+            let ((xt, wt), (xc, wc)) = (pick(&g.treated_idx), pick(&g.control_idx));
+            TwangCovariateBalance {
+                name: names.get(j).cloned().unwrap_or_else(|| format!("X{}", j)),
+                mean_treated: mean_t,
+                mean_control: mean_c,
+                std_eff_size: (mean_t - mean_c) / crit.sd[j],
+                ks_statistic: crit.ks(x, j, w),
+                var_ratio: weighted_var(&xt, &wt) / weighted_var(&xc, &wc),
+            }
+        })
+        .collect();
 
-    let mut table = compute_twang_balance_internal(x, t, w);
-
-    // Add names
-    for (i, cov) in table.covariates.iter_mut().enumerate() {
-        cov.name = names.get(i).cloned().unwrap_or_else(|| format!("X{}", i));
-    }
-
-    table
-}
-
-/// Internal balance computation.
-fn compute_twang_balance_internal(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    weights: &[f64],
-) -> TwangBalanceTable {
-    let n = t.len();
-    let k = x.ncols();
-
-    let mut covariates = Vec::with_capacity(k);
-
-    // Identify groups
-    let treated_idx: Vec<usize> = (0..n).filter(|&i| t[i] >= 0.5).collect();
-    let control_idx: Vec<usize> = (0..n).filter(|&i| t[i] < 0.5).collect();
-
-    for j in 0..k {
-        // Compute weighted means
-        let mut sum_t = 0.0;
-        let mut sum_c = 0.0;
-        let mut w_sum_t = 0.0;
-        let mut w_sum_c = 0.0;
-
-        for &i in &treated_idx {
-            sum_t += weights[i] * x[[i, j]];
-            w_sum_t += weights[i];
-        }
-        for &i in &control_idx {
-            sum_c += weights[i] * x[[i, j]];
-            w_sum_c += weights[i];
-        }
-
-        let mean_t = if w_sum_t > 0.0 { sum_t / w_sum_t } else { 0.0 };
-        let mean_c = if w_sum_c > 0.0 { sum_c / w_sum_c } else { 0.0 };
-
-        // Compute weighted variances
-        let mut var_t = 0.0;
-        let mut var_c = 0.0;
-
-        for &i in &treated_idx {
-            var_t += weights[i] * (x[[i, j]] - mean_t).powi(2);
-        }
-        for &i in &control_idx {
-            var_c += weights[i] * (x[[i, j]] - mean_c).powi(2);
-        }
-
-        var_t = if w_sum_t > 1.0 {
-            var_t / (w_sum_t - 1.0)
-        } else {
-            0.0
-        };
-        var_c = if w_sum_c > 1.0 {
-            var_c / (w_sum_c - 1.0)
-        } else {
-            0.0
-        };
-
-        // Standardized effect size (using pooled SD)
-        let pooled_var = (var_t + var_c) / 2.0;
-        let pooled_sd = pooled_var.sqrt().max(1e-10);
-        let std_eff_size = (mean_t - mean_c) / pooled_sd;
-
-        // Variance ratio
-        let var_ratio = if var_c > 1e-10 { var_t / var_c } else { 1.0 };
-
-        // KS statistic (simplified: compare ECDFs)
-        let ks_stat = compute_ks_statistic(x, j, &treated_idx, &control_idx, weights);
-
-        covariates.push(TwangCovariateBalance {
-            name: format!("X{}", j),
-            mean_treated: mean_t,
-            mean_control: mean_c,
-            std_eff_size,
-            ks_statistic: ks_stat,
-            var_ratio,
-        });
-    }
-
-    // Compute summary statistics
-    let es_abs: Vec<f64> = covariates.iter().map(|c| c.std_eff_size.abs()).collect();
-    let ks_vals: Vec<f64> = covariates.iter().map(|c| c.ks_statistic).collect();
-
-    let es_mean = es_abs.iter().sum::<f64>() / k as f64;
-    let es_max = es_abs.iter().cloned().fold(0.0, f64::max);
-    let ks_mean = ks_vals.iter().sum::<f64>() / k as f64;
-    let ks_max = ks_vals.iter().cloned().fold(0.0, f64::max);
-
-    let n_balanced = es_abs.iter().filter(|&&e| e < 0.1).count();
+    let (es_mean, es_max) = finite_abs_mean_max(covariates.iter().map(|c| c.std_eff_size));
+    let (ks_mean, ks_max) = finite_abs_mean_max(covariates.iter().map(|c| c.ks_statistic));
+    let n_balanced = covariates
+        .iter()
+        .filter(|c| c.std_eff_size.abs() < 0.1)
+        .count();
 
     TwangBalanceTable {
         covariates,
@@ -1192,78 +1529,6 @@ fn compute_twang_balance_internal(
         ks_max,
         n_balanced,
     }
-}
-
-/// Compute two-sample Kolmogorov-Smirnov statistic.
-///
-/// This measures the maximum difference between the weighted ECDFs
-/// of treated and control groups for a given covariate.
-fn compute_ks_statistic(
-    x: &Array2<f64>,
-    col: usize,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    weights: &[f64],
-) -> f64 {
-    // Get weighted values for each group
-    let mut t_vals: Vec<(f64, f64)> = treated_idx
-        .iter()
-        .map(|&i| (x[[i, col]], weights[i]))
-        .collect();
-    let mut c_vals: Vec<(f64, f64)> = control_idx
-        .iter()
-        .map(|&i| (x[[i, col]], weights[i]))
-        .collect();
-
-    // Sort by value
-    t_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
-    c_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Compute total weights
-    let t_total: f64 = t_vals.iter().map(|(_, w)| w).sum();
-    let c_total: f64 = c_vals.iter().map(|(_, w)| w).sum();
-
-    if t_total == 0.0 || c_total == 0.0 {
-        return 0.0;
-    }
-
-    // Merge sorted values to compute ECDF differences
-    let mut all_vals: Vec<f64> = t_vals
-        .iter()
-        .map(|(v, _)| *v)
-        .chain(c_vals.iter().map(|(v, _)| *v))
-        .collect();
-    all_vals.sort_by(f64::total_cmp);
-    all_vals.dedup();
-
-    let mut max_diff: f64 = 0.0;
-    let mut t_cum = 0.0;
-    let mut c_cum = 0.0;
-    let mut t_idx = 0;
-    let mut c_idx = 0;
-
-    for &val in &all_vals {
-        // Update cumulative sums for values <= current
-        while t_idx < t_vals.len() && t_vals[t_idx].0 <= val {
-            t_cum += t_vals[t_idx].1;
-            t_idx += 1;
-        }
-        while c_idx < c_vals.len() && c_vals[c_idx].0 <= val {
-            c_cum += c_vals[c_idx].1;
-            c_idx += 1;
-        }
-
-        // ECDF values
-        let t_ecdf = t_cum / t_total;
-        let c_ecdf = c_cum / c_total;
-
-        let diff = (t_ecdf - c_ecdf).abs();
-        if diff > max_diff {
-            max_diff = diff;
-        }
-    }
-
-    max_diff
 }
 
 /// Compute effective sample size.
@@ -1354,21 +1619,31 @@ mod tests {
         Dataset::new(df)
     }
 
-    /// Verbatim copy of the pre-sweep `fit_decision_stump` (O(k n^2) per tree), kept as the
-    /// reference for the prefix-sum sweep.
+    /// The pre-sweep `fit_decision_stump` (O(k n^2) per tree), kept as the reference for the
+    /// prefix-sum sweep, with gbm's Newton leaf values sum r / sum p (1 - p) in place of the
+    /// leaf means (the split comparisons are unchanged).
     fn naive_stump(
         x: &Array2<f64>,
         residuals: &Array1<f64>,
+        p: &[f64],
         min_node_size: usize,
     ) -> DecisionStump {
+        let newton = |left: bool, j: usize, threshold: f64| {
+            let (mut num, mut den) = (0.0, 0.0);
+            for i in 0..x.nrows() {
+                if (x[[i, j]] <= threshold) == left {
+                    num += residuals[i];
+                    den += p[i] * (1.0 - p[i]);
+                }
+            }
+            if den != 0.0 { num / den } else { 0.0 }
+        };
         let n = x.nrows();
         let k = x.ncols();
 
         let mut best_feature = 0;
         let mut best_threshold = 0.0;
         let mut best_sse = f64::INFINITY;
-        let mut best_left_value = 0.0;
-        let mut best_right_value = 0.0;
 
         // Try each feature
         for j in 0..k {
@@ -1421,29 +1696,118 @@ mod tests {
                     best_sse = sse;
                     best_feature = j;
                     best_threshold = threshold;
-                    best_left_value = left_mean;
-                    best_right_value = right_mean;
                 }
             }
         }
 
-        // If no valid split found, return a stump that predicts the mean
+        // If no valid split found, one leaf for every row
         if best_sse == f64::INFINITY {
-            let mean = residuals.sum() / n as f64;
+            let (num, den) = (0..n).fold((0.0, 0.0), |(a, b), i| {
+                (a + residuals[i], b + p[i] * (1.0 - p[i]))
+            });
+            let v = if den != 0.0 { num / den } else { 0.0 };
             return DecisionStump {
                 feature_idx: 0,
                 threshold: 0.0,
-                left_value: mean,
-                right_value: mean,
+                left_value: v,
+                right_value: v,
             };
         }
 
         DecisionStump {
             feature_idx: best_feature,
             threshold: best_threshold,
-            left_value: best_left_value,
-            right_value: best_right_value,
+            left_value: newton(true, best_feature, best_threshold),
+            right_value: newton(false, best_feature, best_threshold),
         }
+    }
+
+    /// The fast depth-1 tree with Newton leaves, as a stump.
+    fn fit_stump(
+        x: &Array2<f64>,
+        sorted: &SortedFeatures,
+        z: &Array1<f64>,
+        p: &[f64],
+        min_node_size: usize,
+    ) -> DecisionStump {
+        fit_tree(x, sorted, z, p, 1, min_node_size).as_stump()
+    }
+
+    fn fit_tree(
+        x: &Array2<f64>,
+        sorted: &SortedFeatures,
+        z: &Array1<f64>,
+        p: &[f64],
+        depth: usize,
+        min_node_size: usize,
+    ) -> BoostTree {
+        let z = z.to_vec();
+        let mut tree = grow_tree(x, sorted, &z, depth, min_node_size);
+        let mut leaf = vec![0; x.nrows()];
+        set_newton_leaves(&mut tree, x, &z, p, &mut leaf);
+        tree
+    }
+
+    /// A port of gbm's best-first growth (WP14 prototype `grow`): an exhaustive search per
+    /// terminal node by improvement n_L n_R / n (mean_L - mean_R)^2 (strict `>`, the first best
+    /// wins), split at the midpoint, left `x < s`, both children >= `min_node_size`; the node
+    /// with the largest improvement splits, `depth` times. Returns the splits in order and the
+    /// leaves' rows.
+    fn naive_grow(
+        x: &Array2<f64>,
+        z: &[f64],
+        depth: usize,
+        min_node: usize,
+    ) -> (Vec<(usize, f64)>, Vec<Vec<usize>>) {
+        let best = |idx: &[usize]| -> Option<(f64, usize, f64)> {
+            let mut best: Option<(f64, usize, f64)> = None;
+            for j in 0..x.ncols() {
+                let mut o = idx.to_vec();
+                o.sort_by(|&a, &b| x[[a, j]].total_cmp(&x[[b, j]]));
+                let n = o.len();
+                let tot: f64 = o.iter().map(|&i| z[i]).sum();
+                let mut cl = 0.0;
+                for pos in 0..n.saturating_sub(1) {
+                    cl += z[o[pos]];
+                    let (a, b) = (x[[o[pos], j]], x[[o[pos + 1], j]]);
+                    if a == b {
+                        continue;
+                    }
+                    let (nl, nr) = (pos + 1, n - pos - 1);
+                    if nl < min_node || nr < min_node {
+                        continue;
+                    }
+                    let (ml, mr) = (cl / nl as f64, (tot - cl) / nr as f64);
+                    let imp = (nl * nr) as f64 / n as f64 * (ml - mr).powi(2);
+                    if best.is_none_or(|(bi, _, _)| imp > bi) {
+                        best = Some((imp, j, (a + b) / 2.0));
+                    }
+                }
+            }
+            best
+        };
+        let mut leaves = vec![(0..x.nrows()).collect::<Vec<usize>>()];
+        let mut cand = vec![best(&leaves[0])];
+        let mut splits = Vec::new();
+        for _ in 0..depth {
+            let mut pick: Option<(usize, f64)> = None;
+            for (b, c) in cand.iter().enumerate() {
+                if let Some((imp, _, _)) = c
+                    && pick.is_none_or(|(_, bi)| *imp > bi)
+                {
+                    pick = Some((b, *imp));
+                }
+            }
+            let Some((b, _)) = pick else { break };
+            let (_, j, sp) = cand[b].unwrap();
+            splits.push((j, sp));
+            let (l, r): (Vec<usize>, Vec<usize>) = leaves[b].iter().partition(|&&i| x[[i, j]] < sp);
+            cand[b] = best(&l);
+            leaves[b] = l;
+            cand.push(best(&r));
+            leaves.push(r);
+        }
+        (splits, leaves)
     }
 
     fn lcg(seed: &mut u64) -> f64 {
@@ -1462,12 +1826,13 @@ mod tests {
             _ => lcg(&mut s),
         });
         let r = Array1::from_shape_fn(n, |_| lcg(&mut s) - 0.5);
+        let p: Vec<f64> = (0..n).map(|_| 0.05 + 0.9 * lcg(&mut s)).collect();
         let sorted = SortedFeatures::new(&x);
         for min_node in [1, 10, 40, 151] {
-            // 151 > n/2: no valid split, mean stump
+            // 151 > n/2: no valid split, one leaf
             let (a, b) = (
-                naive_stump(&x, &r, min_node),
-                fit_decision_stump(&x, &sorted, &r, min_node),
+                naive_stump(&x, &r, &p, min_node),
+                fit_stump(&x, &sorted, &r, &p, min_node),
             );
             assert_eq!(
                 (a.feature_idx, a.threshold),
@@ -1487,8 +1852,8 @@ mod tests {
             let sorted = SortedFeatures::new(&xj);
             for min_node in [1, 10, 40] {
                 let (a, b) = (
-                    naive_stump(&xj, &r, min_node),
-                    fit_decision_stump(&xj, &sorted, &r, min_node),
+                    naive_stump(&xj, &r, &p, min_node),
+                    fit_stump(&xj, &sorted, &r, &p, min_node),
                 );
                 assert_eq!(
                     (a.feature_idx, a.threshold, a.left_value, a.right_value),
@@ -1505,15 +1870,359 @@ mod tests {
             .data;
         let t = DesignMatrix::extract_column(ds.df(), "treatment").unwrap();
         let r0 = t.mapv(|v| v - 0.5); // first-iteration residuals: f0 = ln(20/20) = 0, p = 0.5
+        let p0 = vec![0.5; t.len()];
         let sorted = SortedFeatures::new(&x);
         let (a, b) = (
-            naive_stump(&x, &r0, 10),
-            fit_decision_stump(&x, &sorted, &r0, 10),
+            naive_stump(&x, &r0, &p0, 10),
+            fit_stump(&x, &sorted, &r0, &p0, 10),
         );
         assert_eq!(
             (a.feature_idx, a.threshold, a.left_value, a.right_value),
             (b.feature_idx, b.threshold, b.left_value, b.right_value)
         );
+    }
+
+    #[test]
+    fn test_tree_growth_matches_naive_best_first() {
+        let (n, k) = (300, 4);
+        let mut s = 99u64;
+        let x = Array2::from_shape_fn((n, k), |(i, j)| match j {
+            2 => (i % 7) as f64,
+            3 => ((i * 13) % 5) as f64 * 0.5,
+            _ => lcg(&mut s),
+        });
+        let z: Vec<f64> = (0..n).map(|_| lcg(&mut s) - 0.5).collect();
+        let sorted = SortedFeatures::new(&x);
+        let cases = [(1, 10), (2, 10), (3, 10), (6, 10), (3, 1), (6, 1), (3, 151)];
+        for (depth, min_node) in cases {
+            let tree = grow_tree(&x, &sorted, &z, depth, min_node);
+            let (splits, leaves) = naive_grow(&x, &z, depth, min_node);
+            // The fast tree's splits in the order they were made (split k creates nodes
+            // 2k + 1 and 2k + 2).
+            let mut fast: Vec<(usize, usize, f64)> = tree
+                .nodes
+                .iter()
+                .filter_map(|nd| match *nd {
+                    BoostNode::Split {
+                        feature,
+                        threshold,
+                        left,
+                        ..
+                    } => Some((left, feature, threshold)),
+                    BoostNode::Leaf { .. } => None,
+                })
+                .collect();
+            fast.sort_by_key(|f| f.0);
+            let fast: Vec<(usize, f64)> = fast.iter().map(|f| (f.1, f.2)).collect();
+            assert_eq!(fast, splits, "depth {depth}, min_node {min_node}");
+            let mut fast_leaves: Vec<Vec<usize>> = vec![Vec::new(); tree.nodes.len()];
+            for i in 0..n {
+                fast_leaves[tree.leaf_of(|j| x[[i, j]])].push(i);
+            }
+            let mut fast_leaves: Vec<Vec<usize>> =
+                fast_leaves.into_iter().filter(|v| !v.is_empty()).collect();
+            let mut leaves = leaves;
+            fast_leaves.sort();
+            leaves.sort();
+            assert_eq!(fast_leaves, leaves, "depth {depth}, min_node {min_node}");
+        }
+    }
+
+    /// The KS reference for the presorted sweep: the per-call sort the balance code used
+    /// before the sweep. Compute two-sample Kolmogorov-Smirnov statistic.
+    ///
+    /// This measures the maximum difference between the weighted ECDFs
+    /// of treated and control groups for a given covariate.
+    fn compute_ks_statistic(
+        x: &Array2<f64>,
+        col: usize,
+        treated_idx: &[usize],
+        control_idx: &[usize],
+        weights: &[f64],
+    ) -> f64 {
+        // Get weighted values for each group
+        let mut t_vals: Vec<(f64, f64)> = treated_idx
+            .iter()
+            .map(|&i| (x[[i, col]], weights[i]))
+            .collect();
+        let mut c_vals: Vec<(f64, f64)> = control_idx
+            .iter()
+            .map(|&i| (x[[i, col]], weights[i]))
+            .collect();
+
+        // Sort by value
+        t_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
+        c_vals.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // Compute total weights
+        let t_total: f64 = t_vals.iter().map(|(_, w)| w).sum();
+        let c_total: f64 = c_vals.iter().map(|(_, w)| w).sum();
+
+        if t_total == 0.0 || c_total == 0.0 {
+            return 0.0;
+        }
+
+        // Merge sorted values to compute ECDF differences
+        let mut all_vals: Vec<f64> = t_vals
+            .iter()
+            .map(|(v, _)| *v)
+            .chain(c_vals.iter().map(|(v, _)| *v))
+            .collect();
+        all_vals.sort_by(f64::total_cmp);
+        all_vals.dedup();
+
+        let mut max_diff: f64 = 0.0;
+        let mut t_cum = 0.0;
+        let mut c_cum = 0.0;
+        let mut t_idx = 0;
+        let mut c_idx = 0;
+
+        for &val in &all_vals {
+            // Update cumulative sums for values <= current
+            while t_idx < t_vals.len() && t_vals[t_idx].0 <= val {
+                t_cum += t_vals[t_idx].1;
+                t_idx += 1;
+            }
+            while c_idx < c_vals.len() && c_vals[c_idx].0 <= val {
+                c_cum += c_vals[c_idx].1;
+                c_idx += 1;
+            }
+
+            // ECDF values
+            let t_ecdf = t_cum / t_total;
+            let c_ecdf = c_cum / c_total;
+
+            let diff = (t_ecdf - c_ecdf).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+
+        max_diff
+    }
+
+    #[test]
+    fn test_twang_ks_presorted_matches_naive() {
+        let n = 200;
+        let mut s = 5u64;
+        let t = Array1::from_shape_fn(n, |i| ((i * 7) % 3 == 0) as u8 as f64);
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => lcg(&mut s),
+            1 => (i % 6) as f64,
+            _ => ((i % 2) as f64) * lcg(&mut s).round(),
+        });
+        let w: Vec<f64> = (0..n).map(|_| 0.2 + 3.0 * lcg(&mut s)).collect();
+        let sorted = SortedFeatures::new(&x);
+        let crit = Criterion::new(&x, &t, &sorted, TwangEstimand::ATT);
+        let g = &crit.groups;
+        for j in 0..3 {
+            let fast = crit.ks(&x, j, &w);
+            let slow = compute_ks_statistic(&x, j, &g.treated_idx, &g.control_idx, &w);
+            assert_eq!(
+                fast.to_bits(),
+                slow.to_bits(),
+                "column {j}: {fast} vs {slow}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_twang_es_uses_fixed_sd() {
+        // twang's ps.summary.new2: the effect size divides the weighted mean difference by an SD
+        // of the unweighted sample, n - 1, binary columns as continuous. CAUS-108.
+        let t = Array1::from(vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let x = Array2::from_shape_vec(
+            (9, 2),
+            vec![
+                1.0, 1.0, 2.5, 0.0, 3.0, 1.0, 4.5, 1.0, 0.5, 0.0, 1.5, 1.0, 2.0, 0.0, 0.7, 0.0,
+                3.3, 1.0,
+            ],
+        )
+        .unwrap();
+        let w = [1.0, 1.0, 1.0, 1.0, 0.4, 2.2, 1.3, 0.8, 0.3];
+        let var = |v: &[f64]| {
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            v.iter().map(|a| (a - m).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0)
+        };
+        let wmean = |v: &[f64], w: &[f64]| {
+            v.iter().zip(w).map(|(a, b)| a * b).sum::<f64>() / w.iter().sum::<f64>()
+        };
+        let sorted = SortedFeatures::new(&x);
+        for est in [TwangEstimand::ATT, TwangEstimand::ATE, TwangEstimand::ATC] {
+            let crit = Criterion::new(&x, &t, &sorted, est);
+            let names = vec!["a".to_string(), "b".to_string()];
+            let table = compute_twang_balance(&x, &crit, &names, Some(&w));
+            for j in 0..2 {
+                let col: Vec<f64> = x.column(j).to_vec();
+                let sd = match est {
+                    TwangEstimand::ATT => var(&col[..4]),
+                    TwangEstimand::ATE => var(&col),
+                    TwangEstimand::ATC => var(&col[4..]),
+                }
+                .sqrt();
+                let expect = (wmean(&col[..4], &w[..4]) - wmean(&col[4..], &w[4..])) / sd;
+                let got = table.covariates[j].std_eff_size;
+                assert!((got - expect).abs() <= 1e-14 * expect.abs(), "{est} {j}");
+                let es = crit.effect_size(&x, j, &w);
+                assert_eq!(es, got);
+            }
+        }
+    }
+
+    /// The twang_gbm_sim runs: (key prefix, depth, estimand, stop method).
+    const GBM_RUNS: [(&str, usize, TwangEstimand, StopMethod); 3] = [
+        ("d1_att_esmean", 1, TwangEstimand::ATT, StopMethod::ESMean),
+        ("d3_ate_ksmax", 3, TwangEstimand::ATE, StopMethod::KSMax),
+        ("d1_atc_esmax", 1, TwangEstimand::ATC, StopMethod::ESMax),
+    ];
+
+    fn gbm_config(depth: usize, est: TwangEstimand, stop: StopMethod) -> TwangConfig {
+        let mut c = TwangConfig::default();
+        c.n_trees = 3000;
+        c.shrinkage = 0.01;
+        c.interaction_depth = depth;
+        c.estimand = est;
+        c.stop_method = stop;
+        c
+    }
+
+    #[test]
+    fn test_validate_twang_gbm_path() {
+        // R: gbm(distribution = "bernoulli", n.trees = 3000, interaction.depth = 1 | 3,
+        // shrinkage = 0.01, bag.fraction = 1, n.minobsinnode = 10) (case twang_gbm_sim).
+        // CAUS-93: the leaves were mean residuals and interaction_depth was ignored.
+        let (case, ds) = crate::test_support::load_case("twang_gbm_sim");
+        let covs = ["x1", "x2", "x3"];
+        let x = DesignMatrix::from_dataframe(ds.df(), &covs, false)
+            .unwrap()
+            .data;
+        let t = DesignMatrix::extract_column(ds.df(), "treat").unwrap();
+        let n = t.len();
+        let at = [1, 10, 100, 1000, 3000];
+        let mut check = p2a_validation::Check::new(&case);
+        for (tag, depth, est, stop) in &GBM_RUNS[..2] {
+            let (f0, links) = gbm_link_path(&x, &t, &gbm_config(*depth, *est, *stop), &at);
+            check.scalar(&format!("{tag}_initf"), f0, p2a_validation::Tol::coef(n));
+            for (m, f) in at.iter().zip(&links) {
+                check.vector(
+                    &format!("{tag}_link_m{m}_head"),
+                    &f[..10],
+                    p2a_validation::Tol::coef(n),
+                );
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_twang_selection() {
+        // R: gbm's path + twang's ES/KS criterion (ps.summary.new2), global argmin over
+        // 1..n.trees (case twang_gbm_sim). CAUS-93: the run stopped at the first iteration
+        // under 0.1 after min_iterations.
+        use p2a_validation::Tol;
+        let (case, ds) = crate::test_support::load_case("twang_gbm_sim");
+        let covs = ["x1", "x2", "x3"];
+        let mut check = p2a_validation::Check::new(&case);
+        for (tag, depth, est, stop) in GBM_RUNS {
+            let r = run_twang(&ds, "treat", &covs, Some(gbm_config(depth, est, stop))).unwrap();
+            let n = r.n_obs;
+            let key = |s: &str| format!("{tag}_{s}");
+            assert_eq!(
+                r.optimal_n_trees as f64,
+                case.scalar(&key("optimal_n_trees")),
+                "{tag}"
+            );
+            assert_eq!(
+                r.balance_history.len(),
+                3001,
+                "{tag}: every iteration evaluated"
+            );
+            assert_eq!(
+                r.balance_history[r.optimal_n_trees],
+                r.balance_after.get_metric(stop)
+            );
+            let es_before: Vec<f64> = r
+                .balance_before
+                .covariates
+                .iter()
+                .map(|c| c.std_eff_size)
+                .collect();
+            let es: Vec<f64> = r
+                .balance_after
+                .covariates
+                .iter()
+                .map(|c| c.std_eff_size)
+                .collect();
+            let ks: Vec<f64> = r
+                .balance_after
+                .covariates
+                .iter()
+                .map(|c| c.ks_statistic)
+                .collect();
+            check
+                .scalar(
+                    &key("criterion_at_opt"),
+                    r.balance_after.get_metric(stop),
+                    Tol::coef(n),
+                )
+                .scalar(&key("criterion_m1"), r.balance_history[1], Tol::coef(n))
+                .scalar(
+                    &key("criterion_m3000"),
+                    r.balance_history[3000],
+                    Tol::coef(n),
+                )
+                .vector(&key("ps_head"), &r.propensity_scores[..10], Tol::coef(n))
+                .vector(&key("es_after"), &es, Tol::coef(n))
+                .vector(&key("ks_after"), &ks, Tol::coef(n))
+                .vector(&key("es_before"), &es_before, Tol::coef(n))
+                .scalar(&key("ess_t"), r.ess_treated, Tol::coef(n))
+                .scalar(&key("ess_c"), r.ess_control, Tol::coef(n));
+            let boundary = r.warnings.iter().any(|w| w.contains("still decreasing"));
+            assert_eq!(boundary, tag == "d1_att_esmean", "{tag}: {:?}", r.warnings);
+            if depth == 1 {
+                assert_eq!(r.stumps.len(), 3000);
+            } else {
+                assert!(r.stumps.is_empty());
+            }
+            assert_eq!(r.trees.len(), 3000);
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_twang_early_stop_is_opt_in() {
+        let ds = {
+            let path = p2a_validation::repo_path("validation/datasets/generated/weighting_sim.csv");
+            Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+        };
+        let mut c = gbm_config(1, TwangEstimand::ATT, StopMethod::ESMean);
+        c.balance_threshold = 0.1;
+        c.min_iterations = 100;
+        let r = run_twang(&ds, "treat", &["x1", "x2", "x3"], Some(c)).unwrap();
+        let h = &r.balance_history;
+        let stop = h.len() - 1;
+        assert!(stop >= 100 && stop < 3000, "stopped at {stop}");
+        assert!(h[stop] < 0.1);
+        assert!(h[100..stop].iter().all(|&v| v >= 0.1));
+        // The optimum is the first minimum over the evaluated iterations from min_iterations.
+        let (mut best, mut arg) = (f64::INFINITY, 0);
+        for (m, &v) in h.iter().enumerate().take(stop + 1).skip(100) {
+            if v < best {
+                best = v;
+                arg = m;
+            }
+        }
+        assert_eq!(r.optimal_n_trees, arg);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains(&format!("stopped early at iteration {stop}"))),
+            "{:?}",
+            r.warnings
+        );
+        let text = r.to_string();
+        assert!(text.contains("Warning: boosting stopped early"));
+        assert!(text.contains(&format!("over iterations 100..{stop}")));
     }
 
     #[test]
@@ -1606,6 +2315,21 @@ mod tests {
                     ..d()
                 },
                 "balance_threshold",
+            ),
+            (
+                TwangConfig {
+                    interaction_depth: 0,
+                    ..d()
+                },
+                "interaction_depth",
+            ),
+            (
+                TwangConfig {
+                    n_trees: 50,
+                    min_iterations: 51,
+                    ..d()
+                },
+                "min_iterations",
             ),
         ];
         for (cfg, needle) in cases {
@@ -1727,55 +2451,6 @@ mod tests {
     }
 
     #[test]
-    fn test_twang_results_unchanged_by_sweep() {
-        // Pinned from the naive stump search at bdfca3c.
-        const OPT: usize = 51;
-        const PS0: f64 = 0.7227379628293721;
-        const PS25: f64 = 0.2772620371706279;
-        const ES_AFTER: f64 = 4.502756363651351;
-        const N_STUMPS: usize = 500;
-        // sum over i of (i + 1) * propensity_scores[i]
-        const PS_CHECKSUM: f64 = 320.90481486825115;
-        const LAST_STUMP: (usize, f64, f64, f64) =
-            (0, 1.0, -0.04187293886907061, 0.04187293886907073);
-        let cfg = TwangConfig {
-            n_trees: 500,
-            shrinkage: 0.05,
-            stop_method: StopMethod::ESMean,
-            min_iterations: 50,
-            ..Default::default()
-        };
-        let r = run_twang(
-            &create_test_dataset(),
-            "treatment",
-            &["x1", "x2"],
-            Some(cfg),
-        )
-        .unwrap();
-        assert_eq!(r.optimal_n_trees, OPT);
-        assert!((r.propensity_scores[0] - PS0).abs() < 1e-12);
-        assert!((r.propensity_scores[25] - PS25).abs() < 1e-12);
-        assert!((r.balance_after.es_mean - ES_AFTER).abs() < 1e-12);
-        assert_eq!(r.stumps.len(), N_STUMPS);
-        assert_eq!(r.balance_history.len(), N_STUMPS + 1);
-        let checksum: f64 = r
-            .propensity_scores
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i + 1) as f64 * p)
-            .sum();
-        assert!(
-            (checksum - PS_CHECKSUM).abs() < 1e-10,
-            "checksum {checksum}"
-        );
-        let s = &r.stumps[N_STUMPS - 1];
-        assert_eq!(s.feature_idx, LAST_STUMP.0);
-        assert!((s.threshold - LAST_STUMP.1).abs() < 1e-12);
-        assert!((s.left_value - LAST_STUMP.2).abs() < 1e-12);
-        assert!((s.right_value - LAST_STUMP.3).abs() < 1e-12);
-    }
-
-    #[test]
     fn test_twang_stop_methods() {
         let dataset = create_test_dataset();
 
@@ -1839,7 +2514,7 @@ mod tests {
         let residuals = Array1::from_vec(vec![1.0, 1.0, 1.0, -1.0, -1.0, -1.0]);
 
         let sorted = SortedFeatures::new(&x);
-        let stump = fit_decision_stump(&x, &sorted, &residuals, 2);
+        let stump = fit_stump(&x, &sorted, &residuals, &[0.5; 6], 2);
 
         // Should split on x[0] (feature 0) around 3.5
         assert_eq!(stump.feature_idx, 0);

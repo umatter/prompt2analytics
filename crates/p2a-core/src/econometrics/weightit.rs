@@ -59,7 +59,7 @@
 //! - R package WeightIt: Greifer, N. (2024). WeightIt: Weighting for Covariate Balance
 //!   in Observational Studies. https://ngreifer.github.io/WeightIt/
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -75,6 +75,7 @@ use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::options::Choices;
 use crate::regression::ols::certainly_full_rank;
 use crate::resource;
+use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// Energy balancing refuses more reweighted units than this (decision WP23-A): the QP is
@@ -183,9 +184,13 @@ pub struct WeightItConfig {
     /// for the balancing methods, as in WeightIt). Multiplies weights by P(D=1) for treated
     /// and P(D=0) for control
     pub stabilize: bool,
-    /// Trim extreme weights at this quantile (e.g., 0.99 trims at 1st and 99th percentile);
-    /// must be in (0.5, 1]. Set to 1.0 for no trimming (default: 1.0)
+    /// Cap weights above this quantile (R type 3) of the weights outside the focal group (the
+    /// controls for ATT, the treated for ATC, all units for ATE), as WeightIt::trim(at); must
+    /// be in (0.5, 1], 1 = no trimming (default)
     pub trim_quantile: f64,
+    /// Also trim the lower tail at the (1 - trim_quantile) quantile, raising weights below it
+    /// (WeightIt::trim(lower = TRUE)). Default false
+    pub trim_lower: bool,
     /// Maximum iterations for iterative methods (default: 200)
     pub max_iter: usize,
     /// Convergence tolerance (default: 1e-8)
@@ -200,6 +205,7 @@ impl Default for WeightItConfig {
             intercept: true,
             stabilize: false,
             trim_quantile: 1.0,
+            trim_lower: false,
             max_iter: 200,
             tolerance: 1e-8,
         }
@@ -215,9 +221,11 @@ pub struct WeightItCovariateBalance {
     pub mean_treated: f64,
     /// Mean in control group
     pub mean_control: f64,
-    /// Standardized mean difference: (mean_t - mean_c) / sqrt((var_t + var_c) / 2)
+    /// (mean_t - mean_c) / SD of the unweighted sample (treated SD for ATT, control SD for
+    /// ATC, sqrt((v_t + v_c) / 2) for ATE; binary covariates p (1 - p); cobalt's s.d.denom)
     pub std_diff: f64,
-    /// Variance ratio: var_t / var_c
+    /// Variance ratio var_t / var_c of the weighted variances (cobalt), NaN for binary
+    /// covariates
     pub var_ratio: f64,
 }
 
@@ -226,9 +234,9 @@ pub struct WeightItCovariateBalance {
 pub struct WeightItBalanceTable {
     /// Balance statistics for each covariate
     pub covariates: Vec<WeightItCovariateBalance>,
-    /// Maximum absolute standardized difference
+    /// Maximum absolute standardized difference over the finite values (0 when none is)
     pub max_std_diff: f64,
-    /// Mean absolute standardized difference
+    /// Mean absolute standardized difference over the finite values (0 when none is)
     pub mean_std_diff: f64,
 }
 
@@ -550,7 +558,7 @@ pub fn weightit(
     {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "trim_quantile must be in (0.5, 1] (1 = no trimming; 0.99 trims at the 1st and 99th percentiles); got {}",
+                "trim_quantile must be in (0.5, 1] (1 = no trimming; 0.99 caps weights above their 99th percentile); got {}",
                 config.trim_quantile
             ),
         });
@@ -592,14 +600,25 @@ pub fn weightit(
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
 
-    // Variable names for balance table
-    let mut var_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
-    if config.intercept {
-        var_names.insert(0, "Intercept".to_string());
-    }
+    // Balance tables cover the covariates only (no intercept row).
+    let var_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
+    let x_bal = if config.intercept {
+        x.slice(ndarray::s![.., 1..])
+    } else {
+        x.view()
+    };
 
-    // Compute balance before weighting
-    let balance_before = compute_balance_table(&x, &d, &var_names, None);
+    // Compute balance before weighting; the SMD denominators are fixed from this sample.
+    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+    let (mom_t, mom_c) = columns_group_moments(x_bal, None, &treated);
+    let scale = BalanceScale::from_moments(
+        x_bal,
+        &treated,
+        &mom_t,
+        &mom_c,
+        config.estimand.sd_denominator(),
+    );
+    let balance_before = balance_table_from_moments(&mom_t, &mom_c, &var_names, &scale);
 
     // Compute weights based on method
     let mut convergence = None;
@@ -729,13 +748,35 @@ pub fn weightit(
 
     // Apply weight trimming if requested
     let weights = if config.trim_quantile < 1.0 {
-        trim_weights(&weights, config.trim_quantile)
+        let (trimmed, changed) = trim_weights(
+            &weights,
+            &treated,
+            config.estimand,
+            config.trim_quantile,
+            config.trim_lower,
+        );
+        let pct = |q: f64| (q * 100.0 * 1e6).round() / 1e6;
+        let group = match config.estimand {
+            WeightEstimand::ATT => "control",
+            WeightEstimand::ATC => "treated",
+            WeightEstimand::ATE => "all",
+        };
+        let lower = if config.trim_lower {
+            format!(" and from below at {}%", pct(1.0 - config.trim_quantile))
+        } else {
+            String::new()
+        };
+        warnings.push(format!(
+            "weights trimmed at the {}% quantile of the {group} weights{lower} (WeightIt::trim): {changed} changed",
+            pct(config.trim_quantile)
+        ));
+        trimmed
     } else {
         weights
     };
 
     // Compute balance after weighting
-    let balance_after = compute_balance_table(&x, &d, &var_names, Some(&weights));
+    let balance_after = compute_balance_table(x_bal, &treated, &var_names, Some(&weights), &scale);
 
     // Compute effective sample sizes
     let (ess_total, ess_treated, ess_control) = compute_ess(&weights, &d);
@@ -906,7 +947,9 @@ pub fn entropy_balance_with(
         }
     }
 
-    let balance = compute_balance_table(&x, &d, &names, Some(&weights));
+    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+    let scale = BalanceScale::new(x.view(), &treated, config.estimand.sd_denominator());
+    let balance = compute_balance_table(x.view(), &treated, &names, Some(&weights), &scale);
     let (_, ess_treated, ess_control) = compute_ess(&weights, &d);
     let reweighted = |i: usize| match config.estimand {
         WeightEstimand::ATT => d[i] < 0.5,
@@ -1860,9 +1903,9 @@ pub(crate) mod dense_qp {
         // solver reads or rotates is a contiguous row of `jt`. Row i of L^{-1} is
         // (e_i - sum_{k<i} L[i,k] row_k(L^{-1})) / L[i,i], nonzero in 0..=i.
         let mut jt_arr = resource::try_zeros2(n, n, "QP inverse factor")?;
-        let jt = jt_arr
-            .as_slice_mut()
-            .expect("try_zeros2 returns a standard-layout array");
+        let jt = jt_arr.as_slice_mut().ok_or_else(|| {
+            EconError::Computation("QP inverse factor is not contiguous".to_string())
+        })?;
         for i in 0..n {
             if i % 64 == 0 {
                 resource::checkpoint()?;
@@ -2090,92 +2133,311 @@ pub(crate) mod dense_qp {
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute balance table for covariates.
-fn compute_balance_table(
-    x: &Array2<f64>,
-    d: &Array1<f64>,
-    var_names: &[String],
-    weights: Option<&[f64]>,
-) -> WeightItBalanceTable {
-    let n = d.len();
-    let k = x.ncols();
+/// Which unweighted sample fixes the SD a balance table standardises by (cobalt's `s.d.denom`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SdDenominator {
+    /// SD of the treated units.
+    Treated,
+    /// SD of the control units.
+    Control,
+    /// `sqrt((v_treated + v_control) / 2)`.
+    Pooled,
+    /// SD of the full sample.
+    All,
+}
 
-    let mut covariates = Vec::with_capacity(k);
+impl WeightEstimand {
+    /// cobalt's default `s.d.denom` for the estimand: treated SD for ATT, control SD for ATC,
+    /// pooled for ATE.
+    pub(crate) fn sd_denominator(self) -> SdDenominator {
+        match self {
+            WeightEstimand::ATT => SdDenominator::Treated,
+            WeightEstimand::ATC => SdDenominator::Control,
+            WeightEstimand::ATE => SdDenominator::Pooled,
+        }
+    }
+}
 
-    for j in 0..k {
-        // Compute weighted means and variances for treated and control
-        let mut sum_t = 0.0;
-        let mut sum_c = 0.0;
-        let mut w_sum_t = 0.0;
-        let mut w_sum_c = 0.0;
+/// Whether every value is 0 or 1.
+pub(crate) fn is_binary<'a>(col: impl Into<ArrayView1<'a, f64>>) -> bool {
+    col.into().iter().all(|&v| v == 0.0 || v == 1.0)
+}
 
-        for i in 0..n {
-            let w = weights.map(|ws| ws[i]).unwrap_or(1.0);
-            let x_ij = x[[i, j]];
+/// Weighted mean and cobalt's weighted variance (with `v = w / sum w`,
+/// `sum v (x - m)^2 / (1 - sum v^2)`) of the units `keep` selects, unit weights when `w` is
+/// `None`. The mean is NaN when the weights sum to 0, the variance NaN for fewer than two
+/// positive weights. Two passes, no allocation.
+pub(crate) fn group_mean_var(
+    x: ArrayView1<f64>,
+    w: Option<&[f64]>,
+    keep: impl Fn(usize) -> bool,
+) -> (f64, f64) {
+    let weight = |i: usize| w.map_or(1.0, |w| w[i]);
+    let (mut sw, mut swx, mut sw2, mut positive) = (0.0, 0.0, 0.0, 0usize);
+    for (i, &xi) in x.iter().enumerate() {
+        if keep(i) {
+            let wi = weight(i);
+            sw += wi;
+            swx += wi * xi;
+            sw2 += wi * wi;
+            positive += usize::from(wi > 0.0);
+        }
+    }
+    let mean = if sw > 0.0 { swx / sw } else { f64::NAN };
+    if positive < 2 {
+        return (mean, f64::NAN);
+    }
+    let mut ss = 0.0;
+    for (i, &xi) in x.iter().enumerate() {
+        if keep(i) {
+            ss += weight(i) * (xi - mean) * (xi - mean);
+        }
+    }
+    (mean, (ss / sw) / (1.0 - sw2 / (sw * sw)))
+}
 
-            if d[i] >= 0.5 {
-                sum_t += w * x_ij;
-                w_sum_t += w;
+/// [`group_mean_var`] of the treated (`[0]`) and the control (`[1]`) units, fused into the
+/// same two passes. The sums are scalar locals per group (not an array indexed by the group),
+/// so they stay in registers.
+pub(crate) fn two_group_mean_var(
+    x: ArrayView1<f64>,
+    w: Option<&[f64]>,
+    treated: &[bool],
+) -> [(f64, f64); 2] {
+    #[derive(Clone, Copy, Default)]
+    struct Sums {
+        sw: f64,
+        swx: f64,
+        sw2: f64,
+        positive: usize,
+    }
+    impl Sums {
+        fn add(&mut self, wi: f64, xi: f64) {
+            self.sw += wi;
+            self.swx += wi * xi;
+            self.sw2 += wi * wi;
+            self.positive += usize::from(wi > 0.0);
+        }
+        fn mean(&self) -> f64 {
+            if self.sw > 0.0 {
+                self.swx / self.sw
             } else {
-                sum_c += w * x_ij;
-                w_sum_c += w;
+                f64::NAN
             }
         }
-
-        let mean_t = if w_sum_t > 0.0 { sum_t / w_sum_t } else { 0.0 };
-        let mean_c = if w_sum_c > 0.0 { sum_c / w_sum_c } else { 0.0 };
-
-        // Compute weighted variances
-        let mut var_t = 0.0;
-        let mut var_c = 0.0;
-
-        for i in 0..n {
-            let w = weights.map(|ws| ws[i]).unwrap_or(1.0);
-            let x_ij = x[[i, j]];
-
-            if d[i] >= 0.5 {
-                var_t += w * (x_ij - mean_t).powi(2);
+        fn var(&self, ss: f64) -> f64 {
+            if self.positive < 2 {
+                f64::NAN
             } else {
-                var_c += w * (x_ij - mean_c).powi(2);
+                (ss / self.sw) / (1.0 - self.sw2 / (self.sw * self.sw))
             }
         }
-
-        var_t = if w_sum_t > 1.0 {
-            var_t / (w_sum_t - 1.0)
+    }
+    let weight = |i: usize| w.map_or(1.0, |w| w[i]);
+    let (mut t, mut c) = (Sums::default(), Sums::default());
+    for (i, &xi) in x.iter().enumerate() {
+        if treated[i] {
+            t.add(weight(i), xi);
         } else {
-            0.0
-        };
-        var_c = if w_sum_c > 1.0 {
-            var_c / (w_sum_c - 1.0)
+            c.add(weight(i), xi);
+        }
+    }
+    let (mean_t, mean_c) = (t.mean(), c.mean());
+    let (mut ss_t, mut ss_c) = (0.0, 0.0);
+    for (i, &xi) in x.iter().enumerate() {
+        if treated[i] {
+            ss_t += weight(i) * (xi - mean_t) * (xi - mean_t);
         } else {
-            0.0
-        };
+            ss_c += weight(i) * (xi - mean_c) * (xi - mean_c);
+        }
+    }
+    [(mean_t, t.var(ss_t)), (mean_c, c.var(ss_c))]
+}
 
-        // Standardized difference
-        let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(1e-10);
-        let std_diff = (mean_t - mean_c) / pooled_sd;
+/// cobalt's weighted variance of `x` with weights `w` (see [`group_mean_var`]). NaN for fewer
+/// than two positive weights.
+pub(crate) fn weighted_var(x: &[f64], w: &[f64]) -> f64 {
+    group_mean_var(ArrayView1::from(x), Some(w), |_| true).1
+}
 
-        // Variance ratio
-        let var_ratio = if var_c > 1e-10 { var_t / var_c } else { 1.0 };
+/// The SMD denominator from the unweighted sample: SD of the treated / control / full sample,
+/// or `sqrt((v1 + v0) / 2)`. Variances use n - 1; with `binary_as_proportion` a 0/1 column uses
+/// `p (1 - p)` (cobalt, `binary = "std"`). NaN when the SD is not positive and finite.
+pub(crate) fn balance_sd<'a>(
+    col: impl Into<ArrayView1<'a, f64>>,
+    treated: &[bool],
+    denom: SdDenominator,
+    binary_as_proportion: bool,
+) -> f64 {
+    let col = col.into();
+    unweighted_sd(col, treated, denom, binary_as_proportion && is_binary(col))
+}
 
-        covariates.push(WeightItCovariateBalance {
-            variable: var_names
-                .get(j)
-                .cloned()
-                .unwrap_or_else(|| format!("X{}", j)),
-            mean_treated: mean_t,
-            mean_control: mean_c,
-            std_diff,
-            var_ratio,
-        });
+/// [`balance_sd`] with the binary test already made (`bin`: the column is 0/1 and is
+/// standardised as a proportion).
+fn unweighted_sd(col: ArrayView1<f64>, treated: &[bool], denom: SdDenominator, bin: bool) -> f64 {
+    match denom {
+        SdDenominator::All => {
+            let (mean, var) = group_mean_var(col, None, |_| true);
+            positive_sd(if bin { mean * (1.0 - mean) } else { var })
+        }
+        _ => {
+            let [t, c] = two_group_mean_var(col, None, treated);
+            sd_from_group_moments(t, c, denom, bin)
+        }
+    }
+}
+
+/// The SD a `Treated`, `Control` or `Pooled` denominator fixes from the unweighted (mean,
+/// variance) of the treated (`t`) and the control (`c`) units; a binary column uses
+/// `p (1 - p)` from the unit-weight mean (the exact share of ones). `All` is not derivable
+/// from the group moments and gives NaN.
+fn sd_from_group_moments(t: (f64, f64), c: (f64, f64), denom: SdDenominator, bin: bool) -> f64 {
+    let var = |(mean, var): (f64, f64)| if bin { mean * (1.0 - mean) } else { var };
+    positive_sd(match denom {
+        SdDenominator::Treated => var(t),
+        SdDenominator::Control => var(c),
+        SdDenominator::Pooled => (var(t) + var(c)) / 2.0,
+        SdDenominator::All => f64::NAN,
+    })
+}
+
+/// `sqrt(var)`, NaN when that is not positive and finite.
+fn positive_sd(var: f64) -> f64 {
+    let sd = var.sqrt();
+    if sd.is_finite() && sd > 0.0 {
+        sd
+    } else {
+        f64::NAN
+    }
+}
+
+/// Per-covariate SMD denominators ([`balance_sd`] with binary covariates as proportions) and
+/// which covariates are binary (their variance ratio is NaN), computed once per sample and
+/// shared by the tables before and after weighting.
+pub(crate) struct BalanceScale {
+    pub(crate) sd: Vec<f64>,
+    pub(crate) binary: Vec<bool>,
+}
+
+impl BalanceScale {
+    pub(crate) fn new(x: ArrayView2<f64>, treated: &[bool], denom: SdDenominator) -> Self {
+        let (sd, binary) = x
+            .columns()
+            .into_iter()
+            .map(|col| {
+                let bin = is_binary(col);
+                (unweighted_sd(col, treated, denom, bin), bin)
+            })
+            .unzip();
+        Self { sd, binary }
     }
 
-    // Summary statistics
-    let max_std_diff = covariates
-        .iter()
-        .map(|c| c.std_diff.abs())
-        .fold(0.0, f64::max);
-    let mean_std_diff = covariates.iter().map(|c| c.std_diff.abs()).sum::<f64>() / k as f64;
+    /// As [`BalanceScale::new`], from the unweighted (mean, variance) of each covariate among
+    /// the treated (`t`) and the controls (`c`) that a balance table before weighting computes
+    /// anyway, so the columns are not read a second time (`All` reads them).
+    pub(crate) fn from_moments(
+        x: ArrayView2<f64>,
+        treated: &[bool],
+        t: &[(f64, f64)],
+        c: &[(f64, f64)],
+        denom: SdDenominator,
+    ) -> Self {
+        let (sd, binary) = x
+            .columns()
+            .into_iter()
+            .enumerate()
+            .map(|(j, col)| {
+                let bin = is_binary(col);
+                let sd = if denom == SdDenominator::All {
+                    unweighted_sd(col, treated, denom, bin)
+                } else {
+                    sd_from_group_moments(t[j], c[j], denom, bin)
+                };
+                (sd, bin)
+            })
+            .unzip();
+        Self { sd, binary }
+    }
+}
+
+/// Unweighted (or weighted) (mean, cobalt variance) of every column of `x` among the treated
+/// and among the controls.
+pub(crate) fn columns_group_moments(
+    x: ArrayView2<f64>,
+    weights: Option<&[f64]>,
+    treated: &[bool],
+) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    x.columns()
+        .into_iter()
+        .map(|col| {
+            let [t, c] = two_group_mean_var(col, weights, treated);
+            (t, c)
+        })
+        .unzip()
+}
+
+/// Mean and max of the finite |SMD| values; both 0 when none is finite.
+pub(crate) fn finite_abs_mean_max(values: impl Iterator<Item = f64>) -> (f64, f64) {
+    let (mut sum, mut max, mut count) = (0.0, 0.0_f64, 0usize);
+    for v in values.map(f64::abs).filter(|v| v.is_finite()) {
+        sum += v;
+        max = max.max(v);
+        count += 1;
+    }
+    if count == 0 {
+        (0.0, 0.0)
+    } else {
+        (sum / count as f64, max)
+    }
+}
+
+/// Balance table over the covariate columns of `x` (no intercept column): weighted group
+/// means, the SMD over the SD `scale` fixes from the unweighted sample (cobalt's `s.d.denom`
+/// for the estimand, binary covariates `p (1 - p)`), and cobalt's weighted variance ratio (NaN
+/// for binary covariates).
+fn compute_balance_table(
+    x: ArrayView2<f64>,
+    treated: &[bool],
+    var_names: &[String],
+    weights: Option<&[f64]>,
+    scale: &BalanceScale,
+) -> WeightItBalanceTable {
+    let (t, c) = columns_group_moments(x, weights, treated);
+    balance_table_from_moments(&t, &c, var_names, scale)
+}
+
+/// [`compute_balance_table`] from the per-covariate (mean, variance) of the treated (`t`) and
+/// the controls (`c`).
+fn balance_table_from_moments(
+    t: &[(f64, f64)],
+    c: &[(f64, f64)],
+    var_names: &[String],
+    scale: &BalanceScale,
+) -> WeightItBalanceTable {
+    let covariates: Vec<WeightItCovariateBalance> = (0..t.len())
+        .map(|j| {
+            let ((mean_t, var_t), (mean_c, var_c)) = (t[j], c[j]);
+            let sd = scale.sd[j];
+            let var_ratio = if scale.binary[j] {
+                f64::NAN
+            } else {
+                var_t / var_c
+            };
+            WeightItCovariateBalance {
+                variable: var_names
+                    .get(j)
+                    .cloned()
+                    .unwrap_or_else(|| format!("X{}", j)),
+                mean_treated: mean_t,
+                mean_control: mean_c,
+                std_diff: (mean_t - mean_c) / sd,
+                var_ratio,
+            }
+        })
+        .collect();
+
+    let (mean_std_diff, max_std_diff) = finite_abs_mean_max(covariates.iter().map(|c| c.std_diff));
 
     WeightItBalanceTable {
         covariates,
@@ -2232,24 +2494,50 @@ fn compute_ess(weights: &[f64], d: &Array1<f64>) -> (f64, f64, f64) {
     (ess_all, ess_t, ess_c)
 }
 
-/// Trim extreme weights at specified quantile.
-fn trim_weights(weights: &[f64], quantile: f64) -> Vec<f64> {
-    let mut sorted: Vec<f64> = weights.to_vec();
+/// Trim weights as WeightIt 2.0.0's `trim(at, lower)` with the focal group left alone: the
+/// trimmed units are those outside the focal group (the controls for ATT, the treated for ATC,
+/// every unit for ATE). Weights above the type-3 `quantile` of those units' weights are set to
+/// it; with `lower`, weights below the type-3 `1 - quantile` are raised to that. Returns the
+/// trimmed weights and how many changed.
+fn trim_weights(
+    weights: &[f64],
+    treated: &[bool],
+    estimand: WeightEstimand,
+    quantile: f64,
+    lower: bool,
+) -> (Vec<f64>, usize) {
+    let trimmed = |i: usize| match estimand {
+        WeightEstimand::ATT => !treated[i],
+        WeightEstimand::ATC => treated[i],
+        WeightEstimand::ATE => true,
+    };
+    let mut sorted: Vec<f64> = (0..weights.len())
+        .filter(|&i| trimmed(i))
+        .map(|i| weights[i])
+        .collect();
+    let mut out = weights.to_vec();
+    if sorted.is_empty() || quantile >= 1.0 {
+        return (out, 0);
+    }
     sorted.sort_by(f64::total_cmp);
-
-    let n = sorted.len();
-    // Not R's rule: WeightIt's trim(at) caps above at quantile(w, at, type = 7) and trims
-    // no lower tail; these floor/ceil order statistics and the lower cap stay (X-18, Tier 4).
-    let lower_idx = ((1.0 - quantile) * n as f64).floor() as usize;
-    let upper_idx = (quantile * n as f64).ceil() as usize;
-
-    let lower_bound = sorted[lower_idx.min(n - 1)];
-    let upper_bound = sorted[upper_idx.min(n - 1)];
-
-    weights
-        .iter()
-        .map(|&w| w.max(lower_bound).min(upper_bound))
-        .collect()
+    let upper = quantile_sorted(&sorted, quantile, QuantileType::T3);
+    let floor = if lower {
+        quantile_sorted(&sorted, 1.0 - quantile, QuantileType::T3)
+    } else {
+        f64::NEG_INFINITY
+    };
+    let mut changed = 0;
+    for (i, w) in out.iter_mut().enumerate() {
+        if !trimmed(i) {
+            continue;
+        }
+        let v = w.min(upper).max(floor);
+        if v != *w {
+            *w = v;
+            changed += 1;
+        }
+    }
+    (out, changed)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2938,6 +3226,142 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_weightit_balance_fixed_sd() {
+        // R: cobalt::bal.tab(binary = "std", s.d.denom = pooled | treated | control) on glm
+        // weights (case weights_trim_balance): the SMD divides by an SD of the unweighted sample.
+        let (case, ds) = crate::test_support::load_case("weights_trim_balance");
+        let mut check = Check::new(&case);
+        for (est, tag) in [
+            (WeightEstimand::ATE, "ate"),
+            (WeightEstimand::ATT, "att"),
+            (WeightEstimand::ATC, "atc"),
+        ] {
+            let mut c = WeightItConfig::default();
+            c.estimand = est;
+            let r = weightit(&ds, "treat", &COVS, c).unwrap();
+            let n = r.n_obs;
+            let names: Vec<&str> = r
+                .balance_after
+                .covariates
+                .iter()
+                .map(|c| c.variable.as_str())
+                .collect();
+            assert_eq!(names, COVS, "{tag}: no intercept row");
+            assert_eq!(r.balance_before.covariates.len(), 3);
+            let smd = |t: &WeightItBalanceTable| -> Vec<f64> {
+                t.covariates.iter().map(|c| c.std_diff).collect()
+            };
+            let vr: Vec<f64> = r.balance_after.covariates[..2]
+                .iter()
+                .map(|c| c.var_ratio)
+                .collect();
+            assert!(r.balance_after.covariates[2].var_ratio.is_nan());
+            check
+                .vector(
+                    &format!("{tag}_smd_before"),
+                    &smd(&r.balance_before),
+                    Tol::coef(n),
+                )
+                .vector(
+                    &format!("{tag}_smd_after"),
+                    &smd(&r.balance_after),
+                    Tol::coef(n),
+                )
+                .vector(&format!("{tag}_vr_after"), &vr, Tol::coef(n));
+            match est {
+                WeightEstimand::ATE => {
+                    check
+                        .scalar(
+                            "ate_mean_abs_smd_before",
+                            r.balance_before.mean_std_diff,
+                            Tol::coef(n),
+                        )
+                        .scalar(
+                            "ate_mean_abs_smd_after",
+                            r.balance_after.mean_std_diff,
+                            Tol::coef(n),
+                        )
+                        .scalar(
+                            "ate_max_abs_smd_after",
+                            r.balance_after.max_std_diff,
+                            Tol::coef(n),
+                        );
+                }
+                WeightEstimand::ATT => {
+                    check.scalar(
+                        "att_mean_abs_smd_after",
+                        r.balance_after.mean_std_diff,
+                        Tol::coef(n),
+                    );
+                }
+                WeightEstimand::ATC => {}
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_balance_sd_matches_definitions() {
+        let x = [1.0, 2.5, 4.0, 3.0, 0.5, 2.0];
+        let b = [1.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+        let t = [true, true, true, false, false, false];
+        let var = |v: &[f64]| {
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            v.iter().map(|a| (a - m).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0)
+        };
+        let prop = |v: &[f64]| {
+            let p = v.iter().sum::<f64>() / v.len() as f64;
+            p * (1.0 - p)
+        };
+        let (vt, vc, va) = (var(&x[..3]), var(&x[3..]), var(&x));
+        let close = |a: f64, e: f64| assert!((a - e).abs() <= 1e-14 * e.abs(), "{a} vs {e}");
+        for bin in [false, true] {
+            close(balance_sd(&x, &t, SdDenominator::Treated, bin), vt.sqrt());
+            close(balance_sd(&x, &t, SdDenominator::Control, bin), vc.sqrt());
+            close(
+                balance_sd(&x, &t, SdDenominator::Pooled, bin),
+                ((vt + vc) / 2.0).sqrt(),
+            );
+            close(balance_sd(&x, &t, SdDenominator::All, bin), va.sqrt());
+        }
+        // A 0/1 column: p (1 - p) with binary_as_proportion, else the n - 1 variance.
+        close(
+            balance_sd(&b, &t, SdDenominator::Treated, true),
+            prop(&b[..3]).sqrt(),
+        );
+        close(
+            balance_sd(&b, &t, SdDenominator::Pooled, true),
+            ((prop(&b[..3]) + prop(&b[3..])) / 2.0).sqrt(),
+        );
+        close(
+            balance_sd(&b, &t, SdDenominator::All, true),
+            prop(&b).sqrt(),
+        );
+        close(
+            balance_sd(&b, &t, SdDenominator::Treated, false),
+            var(&b[..3]).sqrt(),
+        );
+        // A constant column has no SD.
+        assert!(balance_sd(&[2.0; 6], &t, SdDenominator::Pooled, true).is_nan());
+        assert!(balance_sd(&[1.0; 6], &t, SdDenominator::All, true).is_nan());
+        // cobalt's weighted variance does not depend on the scale of the weights.
+        let w = [0.3, 1.2, 0.7, 2.0, 0.1, 0.9];
+        let w3: Vec<f64> = w.iter().map(|v| v * 1e3).collect();
+        close(weighted_var(&x, &w3), weighted_var(&x, &w));
+        close(weighted_var(&x, &[1.0; 6]), va);
+        assert!(weighted_var(&x, &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]).is_nan());
+        // The fused two-group moments equal the per-group ones, interleaved groups included.
+        let ti = [true, false, true, false, false, true];
+        let [mt, mc] = two_group_mean_var(ArrayView1::from(&x), Some(&w), &ti);
+        let xv = ArrayView1::from(&x);
+        for (got, keep) in [(mt, true), (mc, false)] {
+            let want = group_mean_var(xv, Some(&w), |i| ti[i] == keep);
+            close(got.0, want.0);
+            close(got.1, want.1);
+        }
+    }
+
+    #[test]
     fn test_balance_table() {
         let x = Array2::from_shape_vec(
             (6, 2),
@@ -2949,7 +3373,9 @@ mod tests {
         let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         let var_names = vec!["x1".to_string(), "x2".to_string()];
 
-        let balance = compute_balance_table(&x, &d, &var_names, None);
+        let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+        let scale = BalanceScale::new(x.view(), &treated, SdDenominator::Pooled);
+        let balance = compute_balance_table(x.view(), &treated, &var_names, None, &scale);
 
         // Treated has higher means
         assert!(balance.covariates[0].mean_treated > balance.covariates[0].mean_control);
@@ -2960,12 +3386,161 @@ mod tests {
     }
 
     #[test]
-    fn test_weight_trimming() {
-        let weights = vec![0.1, 0.5, 1.0, 2.0, 10.0];
-        let trimmed = trim_weights(&weights, 0.8);
+    fn test_balance_scale_from_moments_matches_direct() {
+        // The denominators derived from the table's group moments are the ones read from the
+        // columns, bit for bit, for every denominator (`All` reads the columns itself).
+        let mut seed = 11u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let n = 57;
+        let treated: Vec<bool> = (0..n).map(|_| next() < 0.45).collect();
+        let x = Array2::from_shape_fn((n, 3), |(_, j)| match j {
+            0 => next() * 3.0 - 1.0,
+            1 => (next() < 0.3) as u8 as f64,
+            _ => (next() * 4.0).floor(),
+        });
+        let (t, c) = columns_group_moments(x.view(), None, &treated);
+        for denom in [
+            SdDenominator::Treated,
+            SdDenominator::Control,
+            SdDenominator::Pooled,
+            SdDenominator::All,
+        ] {
+            let direct = BalanceScale::new(x.view(), &treated, denom);
+            let fused = BalanceScale::from_moments(x.view(), &treated, &t, &c, denom);
+            assert_eq!(direct.binary, fused.binary, "{denom:?}");
+            for (a, b) in direct.sd.iter().zip(&fused.sd) {
+                assert_eq!(a.to_bits(), b.to_bits(), "{denom:?}: {a} vs {b}");
+            }
+        }
+        assert_eq!(
+            BalanceScale::new(x.view(), &treated, SdDenominator::Pooled).binary,
+            vec![false, true, false]
+        );
+    }
 
-        // Extreme values should be trimmed
-        assert!(trimmed.iter().all(|&w| (0.1..=10.0).contains(&w)));
+    #[test]
+    fn test_weight_trimming() {
+        // Checked against WeightIt 2.0.0's .trim_weights(.., groups.not.to.trim = 1): ten
+        // control weights, three focal (treated) weights, ATT, at = 0.8. The type-3 0.8 quantile
+        // of the controls is 3 and the 0.2 quantile 0.2.
+        let w = [
+            0.1, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 5.0, 10.0, 1.0, 1.0, 1.0,
+        ];
+        let treated: Vec<bool> = (0..13).map(|i| i >= 10).collect();
+        let (upper, k) = trim_weights(&w, &treated, WeightEstimand::ATT, 0.8, false);
+        assert_eq!(
+            upper,
+            [
+                0.1, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0
+            ]
+        );
+        assert_eq!(k, 2);
+        let (both, k) = trim_weights(&w, &treated, WeightEstimand::ATT, 0.8, true);
+        assert_eq!(
+            both,
+            [
+                0.2, 0.2, 0.5, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0
+            ]
+        );
+        assert_eq!(k, 3);
+        // ATC trims the treated and leaves the controls; ATE pools both groups.
+        let (atc, _) = trim_weights(&w, &treated, WeightEstimand::ATC, 0.8, false);
+        assert_eq!(&atc[..10], &w[..10]);
+        let (ate, k) = trim_weights(&w, &treated, WeightEstimand::ATE, 0.8, false);
+        assert!(k > 0 && ate.iter().all(|&v| v <= 3.0));
+        // Equal weights and q = 1 change nothing.
+        let (same, k) = trim_weights(&[2.0; 13], &treated, WeightEstimand::ATE, 0.8, true);
+        assert_eq!((same, k), (vec![2.0; 13], 0));
+        let (same, k) = trim_weights(&w, &treated, WeightEstimand::ATE, 1.0, true);
+        assert_eq!((same, k), (w.to_vec(), 0));
+    }
+
+    #[test]
+    fn test_validate_weightit_trim() {
+        // R: WeightIt::trim(w, at, lower, treat) on glm weights (case weights_trim_balance):
+        // a type-3 cap over the weights outside the focal group. CAUS-96: the old rule pooled
+        // every weight, used floor/ceil order statistics and raised the lower tail too.
+        let (case, ds) = crate::test_support::load_case("weights_trim_balance");
+        let treated: Vec<bool> = col(&ds, "treat").iter().map(|&v| v >= 0.5).collect();
+        let mut check = Check::new(&case);
+        let runs = [
+            (WeightEstimand::ATE, 0.95, false, "ate_trim95"),
+            (WeightEstimand::ATE, 0.95, true, "ate_trim95_lower"),
+            (WeightEstimand::ATE, 0.9, false, "ate_trim9"),
+            (WeightEstimand::ATT, 0.95, false, "att_trim95"),
+            (WeightEstimand::ATT, 0.9, false, "att_trim9"),
+            (WeightEstimand::ATC, 0.95, false, "atc_trim95"),
+            (WeightEstimand::ATC, 0.9, false, "atc_trim9"),
+        ];
+        for (est, q, lower, tag) in runs {
+            let mut c = WeightItConfig::default();
+            c.estimand = est;
+            let untrimmed = weightit(&ds, "treat", &COVS, c.clone()).unwrap();
+            c.trim_quantile = q;
+            c.trim_lower = lower;
+            let r = weightit(&ds, "treat", &COVS, c).unwrap();
+            let n = r.n_obs;
+            let key = |s: &str| format!("{tag}_{s}");
+            let changed = r
+                .weights
+                .iter()
+                .zip(&untrimmed.weights)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(changed as f64, case.scalar(&key("n_changed")), "{tag}");
+            let sum = |t: bool| -> f64 {
+                r.weights
+                    .iter()
+                    .zip(&treated)
+                    .filter(|(_, g)| **g == t)
+                    .map(|(w, _)| w)
+                    .sum()
+            };
+            let smd: Vec<f64> = r
+                .balance_after
+                .covariates
+                .iter()
+                .map(|c| c.std_diff)
+                .collect();
+            check
+                .vector(&key("weights_head"), &r.weights[..12], Tol::coef(n))
+                .scalar(&key("max"), r.max_weight, Tol::coef(n))
+                .scalar(&key("min"), r.min_weight, Tol::coef(n))
+                .scalar(&key("sum_t"), sum(true), Tol::coef(n))
+                .scalar(&key("sum_c"), sum(false), Tol::coef(n))
+                .scalar(&key("ess_t"), r.ess_treated, Tol::coef(n))
+                .scalar(&key("ess_c"), r.ess_control, Tol::coef(n))
+                .vector(&key("smd_after"), &smd, Tol::coef(n));
+            // The focal group (the treated for ATT, the controls for ATC, nobody for ATE) keeps
+            // its weights of 1.
+            let focal = |g: bool| match est {
+                WeightEstimand::ATT => g,
+                WeightEstimand::ATC => !g,
+                WeightEstimand::ATE => false,
+            };
+            assert!(
+                r.weights
+                    .iter()
+                    .zip(&treated)
+                    .filter(|(_, g)| focal(**g))
+                    .all(|(w, _)| *w == 1.0),
+                "{tag}: focal weights untouched"
+            );
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.contains("WeightIt::trim")
+                        && w.contains(&format!("{changed} changed"))),
+                "{tag}: {:?}",
+                r.warnings
+            );
+        }
+        check.finish();
     }
 
     #[test]

@@ -200,6 +200,19 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics
    a numeric two-valued treatment as continuous). `tolerance` and `balance_threshold` must be
    finite and positive, `max_iter` at least 1, and n must exceed the number of coefficients.
 
+## Balance tables
+
+`balance_before` and `balance_after` (the intercept row skipped) give the weighted group means,
+`std_diff` = (mean_t - mean_c) / an SD of the **unweighted** sample fixed for both tables
+(cobalt's `s.d.denom`: sqrt((v_t + v_c) / 2) for ATE, the treated SD for ATT; n - 1, a 0/1
+covariate p (1 - p)), and `var_ratio`, the ratio of cobalt's weighted variances (NaN for
+binary covariates); `max_std_diff` and `n_balanced` count the finite values. Until v0.5.0 the
+SD was pooled from the weighted groups (CAUS-108). R-pinned on `balance_sd_cbps_sim`
+(`test_validate_cbps_balance_fixed_sd`, registry `validation/methods/causal_weighting_t4.json`,
+id `cbps_balance`): the SMD times the R denominator equals the weighted mean difference, both
+tables, Over/ATE and Exact/ATT (`Tol::coef(400)`); the weighted means themselves follow from the
+weights pinned above.
+
 ## Not covered
 
 CBPS's `twostep = FALSE` (continuous updating), `ATT = 2`, `standardize = FALSE`,

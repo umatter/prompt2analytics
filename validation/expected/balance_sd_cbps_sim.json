@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "balance_sd_cbps_sim",
+  "area": "econometrics/weighting",
+  "method": "Fixed balance-table SD denominators (cobalt s.d.denom) on cbps_sim",
+  "reference": "cobalt s.d.denom (treated / control / pooled; binary p (1 - p))",
+  "call": "sd(x[t1]); sd(x[!t1]); sqrt((var(x[t1]) + var(x[!t1])) / 2); binary sqrt(p (1 - p))",
+  "dataset": "validation/datasets/generated/cbps_sim.csv",
+  "datasets": ["validation/datasets/generated/cbps_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "cobalt": "5.0.0"
+  },
+  "values": {
+    "sd_treated": [0.9656907615628727, 0.98487573106683546, 0.49971586422330527],
+    "sd_control": [0.99198230978348212, 0.97401813874231391, 0.48498266067368545],
+    "sd_pooled": [0.97892480556252459, 0.97946197992660111, 0.49240436945186222]
+  }
+}
