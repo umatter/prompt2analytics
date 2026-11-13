@@ -218,11 +218,14 @@ pub struct BartResult {
     /// Posterior standard deviation of predictions.
     pub prediction_sd: Vec<f64>,
 
-    /// Variable importance scores (based on inclusion frequency).
-    ///
-    /// Higher values indicate features that are more frequently used
-    /// in tree splits across the MCMC samples.
+    /// Variable importance: each covariate's share of the splits, `variable_count_mean`
+    /// divided by its sum (all zeros when no kept draw has a split).
     pub variable_importance: Vec<f64>,
+
+    /// Mean number of splits on each covariate per kept posterior draw, over all trees
+    /// (`BART::wbart`'s `colMeans(varcount)`).
+    #[serde(default)]
+    pub variable_count_mean: Vec<f64>,
 
     /// Feature names (if provided).
     pub feature_names: Option<Vec<String>>,
@@ -706,8 +709,6 @@ struct BartSampler {
     config: BartConfig,
     /// RNG state
     rng: u64,
-    /// Net births per variable, for variable importance
-    var_counts: Vec<usize>,
     /// Number of features
     n_features: usize,
     /// Scale of the sigma prior (0 for probit BART)
@@ -854,7 +855,6 @@ impl BartSampler {
             sigma_mu,
             config: config.clone(),
             rng: config.seed.unwrap_or(42),
-            var_counts: vec![0; p],
             n_features: p,
             lambda,
             probit,
@@ -1159,7 +1159,6 @@ impl BartSampler {
             - leaf_log_lik(nl + nr, sl + sr, s2, t2);
         if (1.0 - self.random()).ln() < log_alpha {
             let (l, r) = self.trees[j].birth(eta, v, c, cutv, 0.0, 0.0);
-            self.var_counts[v] += 1;
             for i in 0..self.leaf_of.len() {
                 if self.leaf_of[i] as usize == eta {
                     self.leaf_of[i] = if xs[i * p + v] < cutv { l } else { r } as u32;
@@ -1197,8 +1196,6 @@ impl BartSampler {
             - leaf_log_lik(nl, sl, s2, t2)
             - leaf_log_lik(nr, sr, s2, t2);
         if (1.0 - self.random()).ln() < log_alpha {
-            let var = self.trees[j].nodes[eta].var as usize;
-            self.var_counts[var] = self.var_counts[var].saturating_sub(1);
             let remap = self.trees[j].death(eta, 0.0);
             for k in self.leaf_of.iter_mut() {
                 *k = remap[*k as usize];
@@ -1230,16 +1227,13 @@ impl BartSampler {
         }
     }
 
-    /// Get variable importance (normalized counts)
-    fn get_variable_importance(&self) -> Vec<f64> {
-        let total: usize = self.var_counts.iter().sum();
-        if total == 0 {
-            return vec![1.0 / self.n_features as f64; self.n_features];
+    /// Add each tree's splits per variable to `acc`
+    fn add_split_counts(&self, acc: &mut [f64]) {
+        for tree in &self.trees {
+            for node in tree.nodes.iter().filter(|nd| !nd.is_leaf()) {
+                acc[node.var as usize] += 1.0;
+            }
         }
-        self.var_counts
-            .iter()
-            .map(|&c| c as f64 / total as f64)
-            .collect()
     }
 }
 
@@ -1448,8 +1442,9 @@ pub fn bart_arrays(
         }
     }
 
-    // Reset variable importance counts after burn-in
-    sampler.var_counts = vec![0; p];
+    // Splits per variable summed over the kept draws
+    let mut split_sums = try_with_capacity::<f64>(p, "BART split counts")?;
+    split_sums.resize(p, 0.0);
 
     // Collect posterior samples
     for iter in 0..config.n_mcmc {
@@ -1471,6 +1466,7 @@ pub fn bart_arrays(
             };
         }
         sigma_samples.push(sampler.sigma);
+        sampler.add_split_counts(&mut split_sums);
     }
 
     // Compute posterior summaries
@@ -1508,8 +1504,16 @@ pub fn bart_arrays(
         var.sqrt()
     };
 
-    // Variable importance
-    let variable_importance = sampler.get_variable_importance();
+    // Variable importance: the mean split counts and their shares
+    let variable_count_mean: Vec<f64> = split_sums
+        .iter()
+        .map(|&c| c / config.n_mcmc as f64)
+        .collect();
+    let total: f64 = variable_count_mean.iter().sum();
+    let variable_importance: Vec<f64> = variable_count_mean
+        .iter()
+        .map(|&c| if total > 0.0 { c / total } else { 0.0 })
+        .collect();
 
     Ok(BartResult {
         predictions,
@@ -1517,6 +1521,7 @@ pub fn bart_arrays(
         prediction_upper,
         prediction_sd,
         variable_importance,
+        variable_count_mean,
         feature_names,
         sigma,
         sigma_sd,
@@ -2082,6 +2087,59 @@ mod tests {
         );
     }
 
+    /// Importance is the mean split count per kept draw (wbart's varcount), counted here by
+    /// walking every tree after each kept sweep of the same chain. It used to be the net
+    /// number of births after burn-in.
+    #[test]
+    fn bart_importance_counts_splits_in_every_kept_draw() {
+        let (y, x) = generate_test_data(150, 123);
+        let c = BartConfig {
+            n_trees: 20,
+            n_burn: 30,
+            n_mcmc: 60,
+            seed: Some(9),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c.clone()).unwrap();
+        // the same chain, driven by hand
+        let prior = wbart_prior(y.view(), x.view(), &c).unwrap();
+        let yc = y.mapv(|v| v - prior.fmean);
+        let mut sampler = BartSampler::new(&yc, x.view(), &c, Some(prior)).unwrap();
+        let xs: Vec<f64> = x.iter().copied().collect();
+        for _ in 0..c.n_burn {
+            sampler.step(&yc, &xs);
+        }
+        let mut sums = [0.0; 3];
+        for _ in 0..c.n_mcmc {
+            sampler.step(&yc, &xs);
+            for tree in &sampler.trees {
+                for i in tree.walk() {
+                    if !tree.nodes[i].is_leaf() {
+                        sums[tree.nodes[i].var as usize] += 1.0;
+                    }
+                }
+            }
+        }
+        let mean: Vec<f64> = sums.iter().map(|s| s / c.n_mcmc as f64).collect();
+        assert_eq!(r.variable_count_mean, mean);
+        let total: f64 = mean.iter().sum();
+        let shares: Vec<f64> = mean.iter().map(|m| m / total).collect();
+        assert_eq!(r.variable_importance, shares);
+        // the noise covariate x3 is used least
+        for seed in [1, 2, 3] {
+            let c = BartConfig {
+                n_trees: 30,
+                n_burn: 100,
+                n_mcmc: 200,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+            let v = &r.variable_importance;
+            assert!(v[2] < v[0] && v[2] < v[1], "seed {seed}: {v:?}");
+        }
+    }
+
     #[test]
     fn test_bart_prediction_quality() {
         // Simple linear relationship
@@ -2418,9 +2476,9 @@ mod tests {
             v.extend([r.sigma, r.sigma_sd]);
             bits(&v)
         };
-        // With no split ever made the importance is uniform; at the default the
+        // With no split ever made the importance is all zeros; at the default the
         // sampler does split these data.
-        let uniform = bits(&[1.0 / 3.0; 3]);
+        let uniform = bits(&[0.0; 3]);
         assert_ne!(bits(&fit(5).variable_importance), uniform);
         let want = fit(40);
         assert_eq!(bits(&want.variable_importance), uniform);
