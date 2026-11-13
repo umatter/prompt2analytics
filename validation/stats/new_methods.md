@@ -68,72 +68,56 @@ This document validates the 15 newly implemented R stats package methods against
 | ecdf | n=1,000 | 42 | 250 | **6x** |
 | ecdf | n=10,000 | 592 | 1,990 | **3x** |
 
-### Kernel Density Estimation (OPTIMIZED)
+### Kernel Density Estimation
 
-| Size | Rust (µs) | R (µs) | Speedup |
-|------|-----------|--------|---------|
-| n=100 | 71 | 750 | **10.5x** |
-| n=1,000 | 118 | 500 | **4.2x** |
-| n=10,000 | 717 | 1,200 | **1.7x** |
-
-**Optimization Applied**: Implemented FFT-based convolution using `rustfft`. The Gaussian kernel is evaluated via circular convolution in the frequency domain, reducing complexity from O(n×m) to O(n + m log m).
-
-### Interpolation Functions
-
-| Function | Size | Rust (µs) | R (µs) | Speedup |
-|----------|------|-----------|--------|---------|
-| spline (natural) | n=10, 100 out | 3.0 | 70 | **23x** |
-| spline (natural) | n=50, 100 out | 8.8 | 40 | **5x** |
-| spline (natural) | n=100, 100 out | 16 | 40 | **2.5x** |
-| approx (linear) | n=10, 100 out | 1.9 | 70 | **37x** |
-| approx (linear) | n=50, 100 out | 5.1 | 40 | **8x** |
-| approx (linear) | n=100, 100 out | 10.5 | 50 | **5x** |
-
-### Smoothing Spline (FULLY OPTIMIZED)
-
-| Size | Rust (µs) | R (µs) | Speedup |
-|------|-----------|--------|---------|
-| n=50 | 70 | 560 | **8x faster** |
-| n=100 | 163 | 580 | **3.6x faster** |
-| n=200 | 356 | 840 | **2.4x faster** |
-
-**Optimizations Applied**:
-1. **O(n) penalty matrix construction**: Directly compute R^T*R as pentadiagonal instead of dense O(n³)
-2. **Banded Cholesky solver**: O(n) solve instead of dense O(n³) Cholesky
-3. **Coarse-to-fine cross-validation**: 25 iterations instead of 50
-4. **Efficient leverage computation**: Approximate diagonal of inverse via banded structure
-
-**Now Faster Than R**: The optimized implementation exploits the pentadiagonal structure of the smoothing spline penalty matrix, achieving O(n) complexity per fit.
-
-### Trend Test for Proportions
-
-| Groups | Rust (µs) | R (µs) | Speedup |
-|--------|-----------|--------|---------|
-| k=3 | ~5 | 2,284 | **~450x** |
-| k=5 | ~5 | 2,453 | **~490x** |
-| k=10 | ~5 | 2,543 | **~500x** |
-| k=20 | ~5 | 2,516 | **~500x** |
-
-**Note**: The dramatic speedup is likely because R's implementation has significant overhead from formula parsing and object creation. The Rust implementation is a direct numerical computation.
+`density` follows R's `density()` (R 4.3.3): the finite values are linearly binned onto 2m
+points over [from - 4 bw, to + 4 bw], m = max(n, 512) (rounded up to a power of two above 512),
+convolved with the kernel by FFT (`rustfft`, feature `spectral-analysis`) and linearly
+interpolated onto the n requested points from `from` to `to`. Every kernel is scaled so that `bw`
+is its standard deviation; `cosine` is R's raised cosine and `optcosine` R's optimal cosine. The
+default bandwidth is `bw.nrd0` (type-7 IQR; when min(sd, IQR/1.34) is 0, sd, then |x[1]|, then 1).
+Builds without `spectral-analysis` compute the exact kernel sum at the same points. R-pinned in
+`validation/methods/stats_descriptive_t4.json`, id `density_t4` (`validation/stats/robust.md`).
+Timings: see the package report of the Tier 4 change; the earlier figures in this section measured
+an FFT path that no longer exists.
 
 ## Numerical Validation
 
 ### cor.test Validation
 
-```r
-# R code
-set.seed(42)
-x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-y <- c(2.1, 4.3, 5.8, 8.2, 10.1, 11.9, 14.2, 15.8, 18.3, 20.0)
-cor.test(x, y, method = "pearson")
+`cor_test` follows `cor.test`'s defaults (R 4.3.3):
 
-# R 4.3.3 gives:
-# r = 0.9995163215771916
-# t = 90.90631431969589 (df = 8)
-# p-value = 2.393055765222379e-13
+- **Pearson:** r, t on n - 2 degrees of freedom, the Fisher-z interval. A one-sided interval
+  ends at -1 (`less`) or 1 (`greater`).
+- **Spearman:** rho; the statistic is S = (n^3 - n)(1 - rho)/6. Without ties and for n < 1290
+  the p-value comes from the exact distribution of S: all n! permutations for n <= 9 (counted
+  once per n and cached), the AS 89 Edgeworth series for 10 <= n < 1290. With ties or for
+  n >= 1290: the t approximation. A perfect monotone relation gets the direction-aware p
+  (`less` is 1 for rho = 1).
+- **Kendall:** tau-b = S / sqrt((n0 - n1)(n0 - n2)). Without ties and for n < 50 the exact
+  distribution of T, the number of concordant pairs (statistic `T`); otherwise z = S / sqrt(var S)
+  with the tie-corrected variance and no continuity correction (statistic `z`).
+
+```r
+# case stat_cor_test_t4, validation/r/cases/stats_descriptive_t4.R
+# (validation/datasets/generated/cor_test_t4.csv, columns set, x, y)
+x <- 1:10; y <- c(1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0)   # set pear
+cor.test(x, y)                          # r 0.999070526757068, t 65.5554248847905, p 3.26167845639871e-12
+cor.test(x, y, alternative = "less")    # CI [-1, 0.999731847375987]
+y <- c(3, 1, 2, 6, 4, 5, 9, 10, 7, 8)                                # set perm
+cor.test(x, y, method = "spearman")     # S 28, p 0.005556804545853975 (Edgeworth)
+cor.test(x, y, method = "kendall")      # tau 0.6444444444444445, T 37, p 0.009148478835978802
 ```
 
-**Rust test**: `stats::cortest::tests::test_validate_pearson_correlation` (`crates/p2a-core/src/stats/cortest.rs`). It uses different data (y = 1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0; R 4.3.3 gives r 0.999070526757068, t 65.5554248847905, p 3.26167845639871e-12) and checks r within 0.001 of a quoted 0.999071, t > 50, p < 0.001 and df = 8. Not R-pinned (cor.test estimator findings STAT-20, STAT-22, STAT-47).
+**Rust tests:** `stats::cortest::tests::test_validate_pearson_correlation` (r, t, df, two-sided p,
+95% and 90% intervals), `stats::cortest::tests::test_validate_pearson_confidence_interval`
+(one-sided p and intervals), `stats::cortest::tests::test_validate_spearman_t4` (rho, S, three p on
+the exact, Edgeworth and t paths, perfect and tied data),
+`stats::cortest::tests::test_validate_kendall_tie_free_against_r` (exact T and z without ties) and
+`stats::cortest::tests::test_validate_kendall_ties_t4` (tau-b and z with ties). Tolerance
+`validation/README.md` by n: r, rho, tau `Tol::coef(n)`; t, z, S and interval bounds `Tol::stat(n)`;
+p `Tol::p_value(n)`; T and df exact. **Status:** R-pinned for all three methods and every
+alternative (registry `validation/methods/stats_descriptive_t4.json`, id `cor_test_t4`).
 
 #### cor.test with missing values (R-pinned)
 
@@ -174,8 +158,8 @@ Float64, text, absent column, unknown method). Tolerance `validation/README.md`,
 t and CI 1e-5 relative, p `Tol::p_value`; df and counts exact.
 
 **Status:** Pearson, two-sided, on dataset columns: R-pinned (registry
-`validation/methods/stats_onesample.json`, id `cor_test_pearson`). The Kendall and Spearman
-variants and `run_cor_test` on slices stay not R-pinned (STAT-20, STAT-22, STAT-47).
+`validation/methods/stats_onesample.json`, id `cor_test_pearson`). The three methods on slices,
+one-sided alternatives included, are R-pinned under `cor_test_t4` (above).
 
 ### power.t.test Validation
 

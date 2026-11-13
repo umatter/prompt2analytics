@@ -122,7 +122,7 @@
       "id": "cor_test_pearson",
       "name": "Pearson correlation test on dataset columns (complete pairs, Int64)",
       "category": "stats",
-      "reference": "stats::cor.test (method = 'pearson', two-sided)",
+      "reference": "stats::cor.test (method = 'pearson', two-sided (one-sided: `cor_test_t4`))",
       "doc": "validation/stats/new_methods.md",
       "cases": ["stat_two_sample_na"],
       "tests": [
