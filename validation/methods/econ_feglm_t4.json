@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "feglm_mle",
+      "name": "FEGLM at the fixed-effects GLM MLE: logit, probit, Poisson (one and two fixed effects), Gaussian; inverse-Hessian SEs, log-likelihood, AIC/BIC",
+      "category": "econometrics",
+      "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-14); alpaca::feglm",
+      "doc": "validation/econometrics/feglm.md",
+      "cases": [
+        "feglm_mle"
+      ],
+      "tests": [],
+      "quantities": [
+        "coefficients",
+        "SEs (dispersion 1; Gaussian deviance/df)",
+        "log-likelihood and null log-likelihood",
+        "AIC, BIC",
+        "deviance, null deviance",
+        "df_resid, df_absorbed, n, n_positive",
+        "coefficients at the default controls (Tol::iterative)"
+      ],
+      "tolerance": "validation/README.md, n = 464/480: coefficients 1e-8, SE and statistics 1e-6 relative at tolerance 1e-12 / map_tolerance 1e-12; counts exact; default controls Tol::iterative(1e-6)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "feglm_separation",
+      "name": "FEGLM drops groups whose outcome is all 0 or all 1 until none is left; singletons with a positive count kept (alpaca)",
+      "category": "econometrics",
+      "reference": "alpaca::feglm nobs; stats::glm with factor dummies on the kept rows",
+      "doc": "validation/econometrics/feglm.md",
+      "cases": [
+        "feglm_separation"
+      ],
+      "tests": [],
+      "quantities": [
+        "rows dropped and used",
+        "levels used",
+        "coefficients, SEs, log-likelihood, AIC, BIC (logit, Poisson, Gaussian)",
+        "warning (property)"
+      ],
+      "tolerance": "validation/README.md, n = 120-181: coefficients 1e-8, SE and statistics 1e-6 relative; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
