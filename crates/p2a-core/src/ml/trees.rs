@@ -825,7 +825,7 @@ pub fn random_forest(
 
 /// Turn the per-tree SSE decreases summed over `n_trees` trees into their mean, in place, and return
 /// each feature's share (zeros if no tree split).
-fn purity_shares(inc_node_purity: &mut [f64], n_trees: usize) -> Vec<f64> {
+pub(crate) fn purity_shares(inc_node_purity: &mut [f64], n_trees: usize) -> Vec<f64> {
     for v in inc_node_purity.iter_mut() {
         *v /= n_trees as f64;
     }
@@ -1179,6 +1179,19 @@ fn validate_forest_inputs(
             ));
         }
     }
+    check_target_scale(target, "Random Forest")
+}
+
+/// Refuse a target whose centred sum of squares is not finite or exceeds `f64::MAX.sqrt()`
+/// (CART's bound): the split gains square sums of deviations and would overflow.
+pub(crate) fn check_target_scale(y: &ArrayView1<f64>, method: &str) -> Result<(), String> {
+    let mean = y.iter().sum::<f64>() / y.len().max(1) as f64;
+    let ss: f64 = y.iter().map(|&v| (v - mean).powi(2)).sum();
+    if !(ss.is_finite() && ss <= f64::MAX.sqrt()) {
+        return Err(format!(
+            "{method}: the sum of squares of the target overflows; rescale the target"
+        ));
+    }
     Ok(())
 }
 
@@ -1512,6 +1525,84 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("non-finite"), "{err}");
+    }
+
+    #[test]
+    fn test_check_target_scale_boundary() {
+        // Centred sum of squares 2 a^2 for y = (a, -a): just above and just below the bound.
+        let bound = f64::MAX.sqrt();
+        let a_over = (bound / 2.0).sqrt() * (1.0 + 1e-12);
+        let a_under = (bound / 2.0).sqrt() * (1.0 - 1e-12);
+        let y = |a: f64| Array1::from(vec![a, -a]);
+        let err = check_target_scale(&y(a_over).view(), "M").unwrap_err();
+        assert_eq!(
+            err,
+            "M: the sum of squares of the target overflows; rescale the target"
+        );
+        assert!(check_target_scale(&y(a_under).view(), "M").is_ok());
+        assert!(check_target_scale(&y(1e200).view(), "M").is_err());
+    }
+
+    /// A target whose centred sum of squares overflows is refused (the split gains overflowed and
+    /// the importance came out as zeros or NaN); a large finite one fits with finite shares.
+    #[test]
+    fn test_forest_refuses_overflowing_target() {
+        let (x, y) = noisy_regression(60, 2, 9);
+        let huge = y.mapv(|v| v * 1e200);
+        let err = random_forest(
+            x.view(),
+            huge.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("rescale the target"), "{err}");
+        let err = random_forest_with_trees(
+            x.view(),
+            huge.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("rescale the target"), "{err}");
+        let big = y.mapv(|v| v * 1e70);
+        let r = random_forest(
+            x.view(),
+            big.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let m = random_forest_with_trees(
+            x.view(),
+            big.view(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap();
+        for shares in [&r.feature_importances, &m.feature_importances] {
+            assert!(shares.iter().all(|v| v.is_finite()), "{shares:?}");
+            assert!(
+                (shares.iter().sum::<f64>() - 1.0).abs() < 1e-12,
+                "{shares:?}"
+            );
+        }
     }
 
     #[test]
