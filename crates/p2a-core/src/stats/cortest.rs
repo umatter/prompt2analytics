@@ -3,6 +3,11 @@
 //! Implements cor.test from R stats: tests for association between paired samples
 //! using Pearson's product moment correlation coefficient, Kendall's tau, or
 //! Spearman's rho.
+//!
+//! The p-values follow `cor.test`'s defaults. Pearson: t on n - 2 degrees of freedom, with the
+//! Fisher-z interval (one-sided intervals end at -1 or 1). Spearman: without ties and for
+//! n < 1290 the exact distribution of S (all permutations for n <= 9, the AS 89 Edgeworth series
+//! above), otherwise the t approximation.
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, refuse_non_finite};
@@ -11,10 +16,12 @@ use crate::resource;
 use crate::stats::Alternative;
 use crate::stats::ttest::one_sided_p;
 use crate::traits::estimator::{
-    normal_p_value_two_sided, normal_quantile, t_test_p_value, validate_level, z_critical,
+    normal_cdf, normal_p_value_two_sided, normal_quantile, t_test_p_value, validate_level,
+    z_critical,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 /// Method for computing correlation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -66,7 +73,8 @@ pub struct CorTestResult {
     pub estimate: f64,
     /// Name of the estimate (cor, tau, or rho)
     pub estimate_name: String,
-    /// Test statistic (t for Pearson, S for Spearman, z for Kendall)
+    /// Test statistic: t for Pearson; S = (n³ - n)(1 - rho)/6 for Spearman; for Kendall T (the
+    /// number of concordant pairs, exact path) or z (normal path), as `statistic_name` says
     pub statistic: f64,
     /// Name of the statistic
     pub statistic_name: String,
@@ -198,42 +206,10 @@ fn pearson_test(
         });
     }
 
-    // Test statistic: t = r * sqrt((n-2) / (1-r²))
+    // Test statistic: t = r * sqrt((n-2) / (1-r²)), infinite for |r| = 1
     let df = (n - 2) as f64;
-    let t_stat = if (1.0 - r * r).abs() < 1e-15 {
-        // Perfect correlation
-        if r > 0.0 {
-            f64::INFINITY
-        } else {
-            f64::NEG_INFINITY
-        }
-    } else {
-        r * (df / (1.0 - r * r)).sqrt()
-    };
-
-    // P-value from t-distribution
-    let p_value = if t_stat.is_infinite() {
-        // For perfect correlation
-        match alternative {
-            Alternative::TwoSided => 0.0,
-            Alternative::Less => {
-                if t_stat > 0.0 {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            Alternative::Greater => {
-                if t_stat > 0.0 {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
-        }
-    } else {
-        one_sided_p(t_test_p_value(t_stat, df), t_stat, alternative)
-    };
+    let t_stat = t_from_r(r, df);
+    let p_value = t_tail_p(t_stat, df, alternative);
 
     // Confidence interval using Fisher's z-transformation
     // z = 0.5 * ln((1+r)/(1-r)) = atanh(r)
@@ -281,6 +257,11 @@ fn pearson_test(
 }
 
 /// Spearman's rank correlation test.
+///
+/// `statistic` is R's S = (n³ - n)(1 - rho)/6. The p-value follows `cor.test`'s default: without
+/// ties and for n < 1290 the exact null distribution of S (all n! permutations for n <= 9, the
+/// AS 89 Edgeworth series for larger n); with ties or for n >= 1290 the t approximation
+/// t = rho sqrt((n - 2)/(1 - rho²)) on n - 2 degrees of freedom.
 fn spearman_test(
     x: &[f64],
     y: &[f64],
@@ -295,38 +276,30 @@ fn spearman_test(
 
     // Spearman's rho is Pearson correlation of ranks
     let rho = pearson_correlation(&x_ranks, &y_ranks);
+    let nf = n as f64;
+    let n3n = (nf * nf - 1.0) * nf;
+    let s_stat = n3n * (1.0 - rho) / 6.0;
 
-    // For larger samples, use t-approximation
-    // S = sum of squared rank differences (for exact test)
-    // But asymptotically, t = rho * sqrt((n-2)/(1-rho²))
-    let df = (n - 2) as f64;
-    let t_stat = if (1.0 - rho * rho).abs() < 1e-15 {
-        if rho > 0.0 {
-            f64::INFINITY
-        } else {
-            f64::NEG_INFINITY
+    let p_value = if n < SPEARMAN_EXACT_MAX_N && !has_ties(&x_ranks) && !has_ties(&y_ranks) {
+        // R: pspearman(q, n, lower.tail) = prho(n, round(q) + 2 lower.tail, lower.tail)
+        let q = s_stat.round();
+        let lower = || spearman_tail(n, q + 2.0, true);
+        let upper = || spearman_tail(n, q, false);
+        match alternative {
+            Alternative::TwoSided => {
+                let p = if s_stat > n3n / 6.0 {
+                    upper()?
+                } else {
+                    lower()?
+                };
+                (2.0 * p).min(1.0)
+            }
+            Alternative::Greater => lower()?,
+            Alternative::Less => upper()?,
         }
     } else {
-        rho * (df / (1.0 - rho * rho)).sqrt()
-    };
-
-    // P-value using t-distribution approximation
-    let p_value = if t_stat.is_infinite() {
-        0.0
-    } else {
-        one_sided_p(t_test_p_value(t_stat, df), t_stat, alternative)
-    };
-
-    // Note: R uses S statistic, but we use t for simplicity
-    // The S statistic = sum((rank_x - rank_y)²) relates to rho by:
-    // rho = 1 - 6*S / (n*(n²-1))
-    let s_stat = {
-        let sum_d2: f64 = x_ranks
-            .iter()
-            .zip(y_ranks.iter())
-            .map(|(rx, ry)| (rx - ry).powi(2))
-            .sum();
-        sum_d2
+        let df = nf - 2.0;
+        t_tail_p(t_from_r(rho, df), df, alternative)
     };
 
     Ok(CorTestResult {
@@ -345,6 +318,131 @@ fn spearman_test(
         method: CorrelationMethod::Spearman,
         method_name: "Spearman's rank correlation rho".to_string(),
         missing: MissingSummary::none(n),
+    })
+}
+
+/// R's `cor.test` uses the exact Spearman distribution below this sample size (without ties).
+const SPEARMAN_EXACT_MAX_N: usize = 1290;
+
+/// Largest n whose Spearman distribution is counted over all n! permutations (R's `n_small`).
+const SPEARMAN_ENUMERATION_MAX_N: usize = 9;
+
+/// Whether midranks contain a tie: Σ(2r)² equals 4 n(n+1)(2n+1)/6 exactly without ties and is
+/// smaller with them (the values are integers, exact in f64 for the n this is asked for).
+fn has_ties(ranks: &[f64]) -> bool {
+    let n = ranks.len() as f64;
+    let sum: f64 = ranks.iter().map(|r| (2.0 * r) * (2.0 * r)).sum();
+    sum < 2.0 * n * (n + 1.0) * (2.0 * n + 1.0) / 3.0
+}
+
+/// t statistic of a correlation r on `df` degrees of freedom; ±∞ for |r| = 1.
+fn t_from_r(r: f64, df: f64) -> f64 {
+    if (1.0 - r * r).abs() < 1e-15 {
+        if r > 0.0 {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
+    } else {
+        r * (df / (1.0 - r * r)).sqrt()
+    }
+}
+
+/// p-value of a t statistic for `alternative`. An infinite t (|r| = 1) gets the direction-aware
+/// 0 or 1, as R's `pt`.
+fn t_tail_p(t: f64, df: f64, alternative: Alternative) -> f64 {
+    if t.is_infinite() {
+        let positive = t > 0.0;
+        match alternative {
+            Alternative::TwoSided => 0.0,
+            Alternative::Less => f64::from(u8::from(positive)),
+            Alternative::Greater => f64::from(u8::from(!positive)),
+        }
+    } else {
+        one_sided_p(t_test_p_value(t, df), t, alternative)
+    }
+}
+
+/// AS 89 (R's `prho`): P(S >= is) (upper) or P(S < is) (lower) for S = Σ(i - π(i))² under a
+/// uniformly random permutation π of n >= 2 elements. Exact for n <= 9, Edgeworth series above.
+fn spearman_tail(n: usize, is: f64, lower: bool) -> EconResult<f64> {
+    let upper_one = if lower { 0.0 } else { 1.0 };
+    if is <= 0.0 {
+        return Ok(upper_one);
+    }
+    let nf = n as f64;
+    let n3 = nf * (nf * nf - 1.0) / 3.0; // the largest S
+    if is > n3 {
+        return Ok(1.0 - upper_one);
+    }
+    if n <= SPEARMAN_ENUMERATION_MAX_N {
+        let counts = spearman_upper_counts(n);
+        // S takes integer values 0..=n3; `is` is an integer here (round(q) or round(q) + 2)
+        let idx = is.ceil() as usize;
+        let at_least = counts.get(idx).copied().unwrap_or(0);
+        let total = counts[0];
+        let k = if lower { total - at_least } else { at_least };
+        return Ok(f64::from(k) / f64::from(total));
+    }
+    const C: [f64; 12] = [
+        0.2274, 0.2531, 0.1745, 0.0758, 0.1033, 0.3932, 0.0879, 0.0151, 0.0072, 0.0831, 0.0131,
+        4.6e-4,
+    ];
+    let b = 1.0 / nf;
+    let x = (6.0 * (is - 1.0) * b / (nf * nf - 1.0) - 1.0) * (1.0 / b - 1.0).sqrt();
+    let y = x * x;
+    let u = x
+        * b
+        * (C[0]
+            + b * (C[1] + C[2] * b)
+            + y * (-C[3] + b * (C[4] + C[5] * b)
+                - y * b * (C[6] + C[7] * b - y * (C[8] - C[9] * b + y * b * (C[10] - C[11] * y)))));
+    let correction = u * (-y / 2.0).exp();
+    let p = if lower {
+        normal_cdf(x) - correction
+    } else {
+        correction + normal_cdf(-x)
+    };
+    Ok(p.clamp(0.0, 1.0))
+}
+
+/// For n <= 9: `counts[s]` = number of the n! permutations with S = Σ(i - π(i))² >= s, for
+/// s in 0..=(n³ - n)/3 (so `counts[0]` = n!). Counted once per n (Heap's algorithm, S updated in
+/// O(1) per swap) and cached.
+fn spearman_upper_counts(n: usize) -> &'static [u32] {
+    static TABLES: [OnceLock<Vec<u32>>; SPEARMAN_ENUMERATION_MAX_N + 1] =
+        [const { OnceLock::new() }; SPEARMAN_ENUMERATION_MAX_N + 1];
+    TABLES[n].get_or_init(|| {
+        let max_s = n * (n * n - 1) / 3;
+        let mut freq = vec![0u32; max_s + 1];
+        let mut perm: Vec<usize> = (0..n).collect();
+        let mut s = 0usize; // identity: S = 0
+        freq[0] += 1;
+        let d2 = |i: usize, v: usize| (i.abs_diff(v)) * (i.abs_diff(v));
+        // Heap's algorithm, iterative
+        let mut c = vec![0usize; n];
+        let mut i = 1;
+        while i < n {
+            if c[i] < i {
+                let j = if i % 2 == 0 { 0 } else { c[i] };
+                s -= d2(j, perm[j]) + d2(i, perm[i]);
+                perm.swap(j, i);
+                s += d2(j, perm[j]) + d2(i, perm[i]);
+                freq[s] += 1;
+                c[i] += 1;
+                i = 1;
+            } else {
+                c[i] = 0;
+                i += 1;
+            }
+        }
+        // cumulative from the top: counts[s] = #{S >= s}
+        let mut acc = 0u32;
+        for f in freq.iter_mut().rev() {
+            acc += *f;
+            *f = acc;
+        }
+        freq
     })
 }
 
@@ -806,6 +904,12 @@ mod tests {
         )
         .unwrap();
         assert!((result.estimate - 1.0).abs() < 1e-10);
+        // exact path (n = 5): P(S = 0) = 1/5!
+        assert!(
+            (result.p_value - 2.0 / 120.0).abs() < 1e-15,
+            "{}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -1006,6 +1110,57 @@ mod tests {
         check.finish();
     }
 
+    /// rho, S and the three p-values on the exact (n <= 9), Edgeworth (n < 1290) and t (ties,
+    /// n >= 1290) paths of R's cor.test. Fails before: t approximation always, S = Σd², p = 0
+    /// for both one-sided tests at rho = 1.
+    #[test]
+    fn test_validate_spearman_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cor_test_t4");
+        let mut check = Check::new(&case);
+        for set in [
+            "perm", "s8", "s40", "s1300", "perf7", "perf12", "perft", "tie12",
+        ] {
+            let (x, y) = (t4(&ds, set, "x"), t4(&ds, set, "y"));
+            let n = x.len();
+            for (alt, a) in ALTS {
+                let r = cor_test(&x, &y, CorrelationMethod::Spearman, alt, 0.95).unwrap();
+                check.scalar(&format!("spearman_{set}_{a}_p"), r.p_value, Tol::p_value(n));
+                if alt == Alternative::TwoSided {
+                    check.scalar(&format!("spearman_{set}_rho"), r.estimate, Tol::coef(n));
+                    if set.starts_with("perf") {
+                        // R's S is a rounding residual of rho = 1 (1.2e-14 for perf7)
+                        assert!(r.statistic.abs() < 1e-12, "{set}: S = {}", r.statistic);
+                    } else {
+                        check.scalar(&format!("spearman_{set}_S"), r.statistic, Tol::stat(n));
+                    }
+                }
+            }
+        }
+        check.finish();
+    }
+
+    /// n = 9 is the largest n counted over all 9! permutations (R's n_small; AS 89 used 6):
+    /// 368 permutations have S <= 12, the observed S of rho = 0.9.
+    #[test]
+    fn test_spearman_exact_enumeration_at_n9() {
+        let x: Vec<f64> = (1..=9).map(f64::from).collect();
+        let y = [2.0, 1.0, 4.0, 3.0, 6.0, 5.0, 9.0, 7.0, 8.0];
+        let run = |alt| cor_test(&x, &y, CorrelationMethod::Spearman, alt, 0.95).unwrap();
+        let total = 362_880.0;
+        let two = run(Alternative::TwoSided);
+        assert!((two.estimate - 0.9).abs() < 1e-15);
+        assert!(
+            (two.p_value - 2.0 * 368.0 / total).abs() < 1e-15,
+            "{}",
+            two.p_value
+        );
+        let greater = run(Alternative::Greater).p_value;
+        assert!((greater - 368.0 / total).abs() < 1e-15, "{greater}");
+        let less = run(Alternative::Less).p_value;
+        assert!((less - 362_642.0 / total).abs() < 1e-15, "{less}");
+    }
+
     #[test]
     fn test_spearman_rho_monotone_is_one() {
         // R: cor.test(x, y, method = "spearman")
@@ -1036,6 +1191,9 @@ mod tests {
             "S statistic should be 0 for perfect monotonic: {:.4}",
             result.statistic
         );
+        // A perfect increasing relation is no evidence for a negative one
+        let less = cor_test(&x, &y, CorrelationMethod::Spearman, Alternative::Less, 0.95).unwrap();
+        assert_eq!(less.p_value, 1.0);
     }
 
     #[test]

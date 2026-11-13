@@ -12,7 +12,8 @@
       ],
       "tests": [
         "p2a-core::stats::cortest::tests::test_validate_pearson_correlation",
-        "p2a-core::stats::cortest::tests::test_validate_pearson_confidence_interval"
+        "p2a-core::stats::cortest::tests::test_validate_pearson_confidence_interval",
+        "p2a-core::stats::cortest::tests::test_validate_spearman_t4"
       ],
       "quantities": [
         "Pearson r, t, df, p (two-sided, less, greater), 95% and 90% two-sided intervals, one-sided intervals with the open bound -1 or 1",
