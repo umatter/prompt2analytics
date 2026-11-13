@@ -126,7 +126,14 @@ pub struct BartCausalConfig {
     /// Number of bootstrap samples for uncertainty quantification (default: 100)
     ///
     /// More bootstrap samples provide more stable confidence intervals
-    /// but increase computation time.
+    /// but increase computation time. Each replicate fits `max(1, n_trees / 4)`
+    /// trees per response surface, so the standard errors and intervals also
+    /// carry those smaller forests' extra Monte Carlo variance: about 1% of the
+    /// standard error at the default 200 trees and more for few trees. They are
+    /// conservative, never narrower. The propensity score (`include_propensity`)
+    /// is estimated once and held fixed across replicates, as bartCause's
+    /// `p.scoreAsCovariate`. Replicates with fewer than 5 treated or 5 control
+    /// rows are skipped, and fewer than 2 usable replicates are an error.
     pub n_bootstrap: usize,
 
     /// Whether to include estimated propensity scores as a covariate (default: false)
@@ -189,8 +196,8 @@ impl BartCausalConfig {
     /// most the code can allocate:
     ///
     /// - **Trees.** The two response-surface ensembles of `n_trees` trees
-    ///   each, kept for the result, and the two ensembles of `n_trees / 4`
-    ///   trees of the bootstrap replicate being fitted; with
+    ///   each, kept for the result, and the two ensembles of
+    ///   `max(1, n_trees / 4)` trees of the bootstrap replicate being fitted; with
     ///   `include_propensity`, the propensity model's 50 trees
     ///   (`PROPENSITY_TREES`) of depth 3 too. A tree has at most `2 L - 1`
     ///   nodes for `L` leaves; `L` is at most `2^max_depth` and at most its
@@ -239,7 +246,7 @@ impl BartCausalConfig {
         let leaf = self.min_node_size.max(1) as u128;
         let node = heap_chunk_bytes(size_of::<TreeNode>());
         let tree = size_of::<RegressionTree>() as u128;
-        let pairs = (self.n_trees as u128).saturating_add((self.n_trees / 4) as u128);
+        let pairs = (self.n_trees as u128).saturating_add(bootstrap_trees(self.n_trees) as u128);
         let pair = mul(2, self.max_leaves_per_pair(n_obs))
             .saturating_mul(node)
             .saturating_add(2 * tree);
@@ -296,6 +303,12 @@ impl BartCausalConfig {
     fn subsample_size(&self, n_obs: usize) -> u128 {
         subsample_rows(n_obs, self.sample_fraction)
     }
+}
+
+/// The trees each bootstrap replicate fits per response surface: a quarter of `n_trees`, and at
+/// least one.
+fn bootstrap_trees(n_trees: usize) -> usize {
+    (n_trees / 4).max(1)
 }
 
 /// The rows of a subsample of `fraction` drawn from `n_obs` rows, as `subsample` draws it.
@@ -1104,11 +1117,16 @@ pub fn bart_causal_arrays(
         &mut cate_draws,
     )?;
 
-    // Compute ATE statistics from bootstrap
+    require_replicates(n_draws)?;
+
+    // Compute ATE statistics from bootstrap; a standard error of 0 gives no t statistic
     let ate_se = bootstrap_se(&ate_bootstrap);
-    let ate_t_stat = if ate_se > 0.0 { ate / ate_se } else { 0.0 };
-    let ate_df = (n - 2) as f64;
-    let ate_p_value = t_test_p_value(ate_t_stat, ate_df);
+    let (ate_t_stat, ate_p_value) = if ate_se.is_finite() && ate_se > 0.0 {
+        let t = ate / ate_se;
+        (t, t_test_p_value(t, (n - 2) as f64))
+    } else {
+        (f64::NAN, f64::NAN)
+    };
 
     // Confidence interval for ATE (percentile method)
     let alpha = 1.0 - config.confidence_level;
@@ -1430,7 +1448,7 @@ fn bootstrap_cate(
         ens_t.fit(
             x_treated.view(),
             y_treated.view(),
-            config.n_trees / 4, // Fewer trees for bootstrap speed
+            bootstrap_trees(config.n_trees), // fewer trees for bootstrap speed
             config.max_depth,
             config.min_node_size,
             config.sample_fraction,
@@ -1442,7 +1460,7 @@ fn bootstrap_cate(
         ens_c.fit(
             x_control.view(),
             y_control.view(),
-            config.n_trees / 4,
+            bootstrap_trees(config.n_trees),
             config.max_depth,
             config.min_node_size,
             config.sample_fraction,
@@ -1462,6 +1480,19 @@ fn bootstrap_cate(
     }
 
     Ok((ate_samples, n_filled))
+}
+
+/// The bootstrap needs at least two usable replicates (with 5 treated and 5 control rows each)
+/// for a standard error.
+fn require_replicates(n_draws: usize) -> EconResult<()> {
+    if n_draws < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n_draws,
+            context: "bootstrap replicates with at least 5 treated and 5 control rows".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Compute bootstrap standard error.
@@ -2353,6 +2384,102 @@ mod tests {
         let importances = ensemble.feature_importances();
         let sum: f64 = importances.sum();
         assert!((sum - 1.0).abs() < 0.01 || sum == 0.0);
+    }
+
+    /// With one to three trees the bootstrap forests were empty (`n_trees / 4` trees), every
+    /// replicate predicted NaN and the result read t = 0, p = 1.
+    #[test]
+    fn bart_causal_with_one_to_three_trees_has_a_finite_se() {
+        let (y, w, x) = generate_test_data(120, 31);
+        for n_trees in 1..=3 {
+            let cfg = BartCausalConfig {
+                n_trees,
+                n_bootstrap: 20,
+                max_depth: 3,
+                seed: Some(4),
+                ..Default::default()
+            };
+            let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+            assert!(
+                r.ate_se.is_finite() && r.ate_se > 0.0,
+                "{n_trees}: {}",
+                r.ate_se
+            );
+            assert_eq!(r.ate_t_stat, r.ate / r.ate_se);
+            assert_eq!(r.ate_p_value, t_test_p_value(r.ate_t_stat, 118.0));
+            assert!(r.cate_se.iter().all(|s| s.is_finite()));
+        }
+    }
+
+    /// Seeds the end-to-end refusal check loops over (see the test for the measured hit rate).
+    const SEEDS_FOR_REFUSAL: u64 = 400;
+
+    #[test]
+    fn bart_causal_refuses_when_fewer_than_two_replicates_fit() {
+        for n in [0, 1] {
+            let e = require_replicates(n).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InsufficientData { required: 2, provided, .. } if *provided == n),
+                "{e}"
+            );
+            assert!(e.to_string().contains("5 treated and 5 control"), "{e}");
+        }
+        require_replicates(2).unwrap();
+        // End to end: 10 treated rows of 200, two replicates; a replicate has fewer than 5
+        // treated rows with probability about 2.6%, so some seeds lose one of the two
+        let n = 200;
+        let (y, _, x) = generate_test_data(n, 77);
+        let w = Array1::from_shape_fn(n, |i| if i % 20 == 0 { 1.0 } else { 0.0 });
+        let (mut refused, mut fitted) = (0, 0);
+        for seed in 0..SEEDS_FOR_REFUSAL {
+            let cfg = BartCausalConfig {
+                n_trees: 4,
+                n_bootstrap: 2,
+                max_depth: 2,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            match bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg) {
+                Err(EconError::InsufficientData { required: 2, .. }) => refused += 1,
+                Ok(r) => {
+                    assert!(r.ate_se.is_finite(), "seed {seed}");
+                    fitted += 1;
+                }
+                Err(e) => panic!("seed {seed}: {e}"),
+            }
+        }
+        assert!(
+            refused >= 1 && fitted >= 1,
+            "{refused} refused, {fitted} fitted"
+        );
+    }
+
+    #[test]
+    fn bart_causal_reports_nan_t_and_p_for_a_zero_se() {
+        let (_, w, x) = generate_test_data(80, 3);
+        let y = Array1::from_elem(80, 2.5);
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small()).unwrap();
+        assert_eq!((r.ate, r.ate_se), (0.0, 0.0));
+        assert!(r.ate_t_stat.is_nan() && r.ate_p_value.is_nan());
+        assert_eq!(r.ate_significance, SignificanceLevel::NotSignificant);
+        let text = r.to_string();
+        assert!(text.contains("t = NaN, p = NaN)\n"), "{text}");
+    }
+
+    #[test]
+    fn memory_bound_counts_the_bootstrap_floor() {
+        let at = |n_trees| BartCausalConfig {
+            n_trees,
+            ..Default::default()
+        };
+        assert_eq!(bootstrap_trees(3), 1);
+        assert_eq!(bootstrap_trees(8), 2);
+        // the bound at 3 trees counts 3 + 1 tree pairs: one pair more than at 3 + 0
+        let (n, p) = (500, 4);
+        let pair = at(4).memory_bound(n, p) - at(3).memory_bound(n, p);
+        let base = at(3).memory_bound(n, p);
+        assert!(base > 3 * pair, "{base} vs pair {pair}");
+        assert_eq!(at(5).memory_bound(n, p) - at(4).memory_bound(n, p), pair);
     }
 
     #[test]
