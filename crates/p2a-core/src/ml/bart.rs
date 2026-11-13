@@ -22,12 +22,18 @@
 //!    - Default: alpha = 0.95, beta = 2
 //!    - This regularizes tree depth, making deeper trees less likely
 //!
-//! 2. **Leaf value prior**: mu_ij | T_j ~ N(0, sigma_mu^2)
-//!    - sigma_mu = sigma_hat / (k * sqrt(m)) where k ~ 2 shrinks leaf values
-//!    - This ensures the prior for f(x) covers the range of y with high probability
+//! 2. **Leaf value prior**: mu_ij | T_j ~ N(0, tau^2), as `BART::wbart` calibrates it
+//!    - y is centred by its mean (`offset`), and tau = (max(y) - min(y)) / (2 k sqrt(m)),
+//!      fixed for the whole chain, so the prior of f(x) puts the range of y at about +-k SDs
+//!    - Probit BART: tau = 3 / (k sqrt(m)) on the latent scale, as `BART::pbart`
 //!
-//! 3. **Residual variance prior**: sigma^2 ~ Inverse-Gamma(nu/2, nu*lambda/2)
-//!    - Default: nu = 3, lambda calibrated so P(sigma < sigma_hat) = q ~ 0.90
+//! 3. **Residual variance prior**: nu lambda / sigma^2 ~ chi^2_nu
+//!    - sigest is the residual SD of the linear fit of y on the covariates (constant columns
+//!      dropped), or sd(y) when there are at least as many covariates as rows; when that fit is
+//!      exact (sigest 0) p2a also falls back to sd(y), where wbart's chain would start at 0
+//!    - lambda = sigest^2 qchisq(1 - q, nu) / nu, so P(sigma < sigest) = q under the prior
+//!      (defaults nu = 3, q = 0.90)
+//!    - A constant y is refused: the leaf prior SD would be 0
 //!
 //! # MCMC Algorithm
 //!
@@ -59,9 +65,10 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::linalg::solve::least_squares;
 use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
 use crate::stats::robust::percentile_interval;
-use crate::traits::estimator::normal_quantile;
+use crate::traits::estimator::{chi_squared_quantile, normal_quantile};
 
 // ============================================================================
 // Configuration
@@ -149,6 +156,16 @@ pub struct BartConfig {
     /// Probit BART as `BART::pbart`: y coded 0/1, Albert-Chib latent draws, leaf prior SD
     /// 3 / (k sqrt(n_trees)); predictions are posterior mean probabilities. Default: false.
     pub classification: bool,
+
+    /// Cutpoints per covariate, as `BART::bartModelMatrix(numcut, usequants = FALSE)`: a column
+    /// with fewer distinct values gets the midpoints of its distinct values, any other column
+    /// `numcut` equally spaced interior points of its range. Default: 100.
+    #[serde(default = "default_numcut")]
+    pub numcut: usize,
+}
+
+fn default_numcut() -> usize {
+    100
 }
 
 impl Default for BartConfig {
@@ -167,6 +184,7 @@ impl Default for BartConfig {
             max_depth: 10,
             confidence_level: 0.95,
             classification: false,
+            numcut: default_numcut(),
         }
     }
 }
@@ -207,10 +225,27 @@ pub struct BartResult {
     /// Posterior standard deviation of sigma.
     pub sigma_sd: f64,
 
-    /// Probit BART's qnorm(mean(y)), the constant of P(y = 1 | x) = Phi(offset + f(x)); 0 for
-    /// regression.
+    /// The constant the trees are fitted around: mean(y) for regression (`BART::wbart`'s
+    /// `fmean`, so the fit is offset + f(x)), qnorm(mean(y)) for probit BART (P(y = 1 | x) =
+    /// Phi(offset + f(x))).
     #[serde(default)]
     pub offset: f64,
+
+    /// The sigma estimate the prior is calibrated on: the residual SD of the linear fit of y on
+    /// the covariates (sd(y) when there are at least as many covariates as rows, or when the
+    /// linear fit is exact); 1 for probit BART.
+    #[serde(default)]
+    pub sigest: f64,
+
+    /// Scale of the inverse chi-square prior on sigma^2 (nu lambda / sigma^2 ~ chi^2_nu),
+    /// sigest^2 qchisq(1 - q, nu) / nu; 0 for probit BART, whose sigma is fixed at 1.
+    #[serde(default)]
+    pub lambda: f64,
+
+    /// Prior SD of each leaf value (tau): (max(y) - min(y)) / (2 k sqrt(n_trees)) for
+    /// regression, 3 / (k sqrt(n_trees)) for probit BART.
+    #[serde(default)]
+    pub leaf_prior_sd: f64,
 
     /// Number of observations.
     pub n_obs: usize,
@@ -492,6 +527,104 @@ impl BartTree {
 }
 
 // ============================================================================
+// Prior calibration and cutpoints (BART::wbart)
+// ============================================================================
+
+/// `BART::wbart`'s data-driven prior for regression.
+#[derive(Debug, Clone, Copy)]
+struct WbartPrior {
+    /// mean(y), the constant the trees are fitted around
+    fmean: f64,
+    /// The residual SD of the linear fit (or sd(y)) the sigma prior is calibrated on
+    sigest: f64,
+    /// sigest^2 qchisq(1 - q, nu) / nu
+    lambda: f64,
+    /// The leaf prior SD, (max(y) - min(y)) / (2 k sqrt(m))
+    tau: f64,
+}
+
+/// Whether a column holds a single value (no cutpoint, dropped as `wbart`'s `rm.const`).
+fn is_constant(col: ArrayView1<f64>) -> bool {
+    col.iter().all(|&v| v == col[0])
+}
+
+/// `BART::wbart`'s prior calibration: fmean = mean(y); sigest the residual SD of
+/// `lm(y ~ x)` with constant columns dropped, sd(y) when there are at least as many covariates
+/// as rows; lambda = sigest^2 qchisq(1 - q, nu) / nu; tau = (max(y) - min(y)) / (2 k sqrt(m)).
+/// A linear fit with no residual degrees of freedom or an exact one (sigest 0, where wbart's
+/// chain would start at sigma 0) falls back to sd(y). A constant y is refused.
+fn wbart_prior(
+    y: ArrayView1<f64>,
+    x: ArrayView2<f64>,
+    config: &BartConfig,
+) -> EconResult<WbartPrior> {
+    let n = y.len();
+    let (lo, hi) = y
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    if !(hi > lo) {
+        return Err(EconError::InvalidSpecification {
+            message: "y is constant: BART's leaf prior SD, (max(y) - min(y)) / (2 k sqrt(n_trees)), would be 0".to_string(),
+        });
+    }
+    let fmean = y.sum() / n as f64;
+    let sd = (y.iter().map(|&v| (v - fmean) * (v - fmean)).sum::<f64>() / (n - 1) as f64).sqrt();
+    let active: Vec<usize> = (0..x.ncols())
+        .filter(|&j| !is_constant(x.column(j)))
+        .collect();
+    let mut sigest = sd;
+    if active.len() < n {
+        let mut design = try_zeros2(n, active.len() + 1, "BART sigest design")?;
+        design.column_mut(0).fill(1.0);
+        for (k, &j) in active.iter().enumerate() {
+            design.column_mut(k + 1).assign(&x.column(j));
+        }
+        let yc = y.mapv(|v| v - fmean);
+        let fit = least_squares(design.view(), yc.view())?;
+        if fit.df_residual > 0 {
+            let rss = fit.residuals.iter().map(|r| r * r).sum::<f64>();
+            let s = (rss / fit.df_residual as f64).sqrt();
+            if s.is_finite() && s > 0.0 {
+                sigest = s;
+            }
+        }
+    }
+    let lambda = sigest * sigest * chi_squared_quantile(1.0 - config.q, config.nu)? / config.nu;
+    let tau = (hi - lo) / (2.0 * config.k * (config.n_trees as f64).sqrt());
+    Ok(WbartPrior {
+        fmean,
+        sigest,
+        lambda,
+        tau,
+    })
+}
+
+/// The cutpoints of one covariate, as `BART::bartModelMatrix(numcut, usequants = FALSE)`: none
+/// for a constant column; the midpoints of the sorted distinct values when there are fewer
+/// than `numcut` of them; otherwise `numcut` equally spaced interior points of
+/// `[min, max]`, `min + j (max - min) / (numcut + 1)`, as R's `seq` computes them.
+fn cutpoints(col: ArrayView1<f64>, numcut: usize) -> EconResult<Vec<f64>> {
+    let mut xs = try_with_capacity::<f64>(col.len(), "BART cutpoints")?;
+    xs.extend(col.iter().copied());
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    let k = xs.len();
+    if k <= 1 {
+        return Ok(Vec::new());
+    }
+    if k < numcut {
+        return Ok(xs.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect());
+    }
+    let (from, to) = (xs[0], xs[k - 1]);
+    let by = (to - from) / (numcut as f64 + 1.0);
+    let mut cuts = try_with_capacity::<f64>(numcut, "BART cutpoints")?;
+    cuts.extend((1..=numcut).map(|j| from + j as f64 * by));
+    Ok(cuts)
+}
+
+// ============================================================================
 // MCMC Sampler
 // ============================================================================
 
@@ -519,11 +652,11 @@ struct BartSampler {
     var_counts: Vec<usize>,
     /// Number of features
     n_features: usize,
-    /// Data standard deviation (for scaling)
-    y_sd: f64,
+    /// Scale of the sigma prior (0 for probit BART)
+    lambda: f64,
     /// Probit BART: sigma stays at 1 and the sweep's target is the latent draw
     probit: bool,
-    /// Probit BART's qnorm(mean(y)); 0 for regression
+    /// mean(y) for regression, qnorm(mean(y)) for probit BART
     offset: f64,
 }
 
@@ -573,8 +706,12 @@ fn truncated_normal(
 
 impl BartSampler {
     /// Initialize the sampler
-    fn new(y: &Array1<f64>, x: ArrayView2<f64>, config: &BartConfig) -> EconResult<Self> {
-        let n = y.len();
+    fn new(
+        y: &Array1<f64>,
+        x: ArrayView2<f64>,
+        config: &BartConfig,
+        prior: Option<WbartPrior>,
+    ) -> EconResult<Self> {
         let p = x.ncols();
         let m = config.n_trees;
 
@@ -590,40 +727,32 @@ impl BartSampler {
                 rng: config.seed.unwrap_or(42),
                 var_counts: vec![0; p],
                 n_features: p,
-                y_sd: 1.0,
+                lambda: 0.0,
                 probit: true,
                 offset: normal_quantile(y.mean().unwrap_or(0.5))?,
             });
         }
 
-        // Compute data statistics for scaling
-        let y_mean = y.mean().unwrap_or(0.0);
-        let y_sd = (y.iter().map(|&v| (v - y_mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-
-        // Initial sigma estimate (from data SD)
-        let sigma_hat = y_sd.max(0.1);
-
-        // Prior SD for leaf values: ensures sum of trees covers y range
-        // sigma_mu = sigma_hat / (k * sqrt(m)) so that
-        // sum of m leaf values has SD = sigma_hat / k
-        let sigma_mu = sigma_hat / (config.k * (m as f64).sqrt());
-
-        // Initialize all trees as stumps with mu = y_mean / m
-        let initial_mu = y_mean / m as f64;
+        // Regression fits y - fmean: the trees start at 0, sigma at sigest, and the leaf prior
+        // SD stays at tau for the whole chain
+        let prior = match prior {
+            Some(prior) => prior,
+            None => wbart_prior(y.view(), x, config)?,
+        };
         let mut trees = try_with_capacity::<BartTree>(m, "BART trees")?;
-        trees.extend((0..m).map(|_| BartTree::new(initial_mu)));
+        trees.extend((0..m).map(|_| BartTree::new(0.0)));
 
         Ok(Self {
             trees,
-            sigma: sigma_hat,
-            sigma_mu,
+            sigma: prior.sigest,
+            sigma_mu: prior.tau,
             config: config.clone(),
             rng: config.seed.unwrap_or(42),
             var_counts: vec![0; p],
             n_features: p,
-            y_sd,
+            lambda: prior.lambda,
             probit: false,
-            offset: 0.0,
+            offset: prior.fmean,
         })
     }
 
@@ -729,29 +858,10 @@ impl BartSampler {
 
         // Posterior: sigma^2 | ... ~ IG((nu + n)/2, (nu*lambda + ss)/2)
         let nu = self.config.nu;
-        // Calibrate lambda from prior (using y_sd as sigma_hat)
-        let lambda = self.calibrate_lambda(self.y_sd, nu, self.config.q);
         let post_alpha = (nu + n as f64) / 2.0;
-        let post_beta = (nu * lambda + ss) / 2.0;
+        let post_beta = (nu * self.lambda + ss) / 2.0;
 
         self.sigma = self.random_inv_gamma(post_alpha, post_beta).sqrt();
-
-        // Update sigma_mu (prior SD for leaves)
-        self.sigma_mu = self.sigma / (self.config.k * (m as f64).sqrt());
-    }
-
-    /// Calibrate lambda so that P(sigma < sigma_hat) = q
-    fn calibrate_lambda(&self, sigma_hat: f64, nu: f64, q: f64) -> f64 {
-        // For sigma^2 ~ IG(nu/2, nu*lambda/2)
-        // Want P(sigma < sigma_hat) = q, i.e., P(sigma^2 < sigma_hat^2) = q
-        // This requires numerical inversion; use simple approximation
-        // lambda ~ sigma_hat^2 / qchisq(1-q, nu) * nu
-        // Approximate chi-squared quantile
-        let chi_sq_quantile = nu
-            * (1.0 + 2.0 / (9.0 * nu)).powi(3)
-            * (1.0 - 2.0 / (9.0 * nu) + (1.0 - q).powf(1.0 / 3.0) * (2.0 / (9.0 * nu)).sqrt())
-                .powi(3);
-        sigma_hat.powi(2) * chi_sq_quantile / nu
     }
 
     /// Update a single tree using Metropolis-Hastings
@@ -1192,6 +1302,9 @@ fn validate_bart_config(config: &BartConfig) -> EconResult<()> {
     if !(cl.is_finite() && cl > 0.0 && cl < 1.0) {
         return invalid(format!("confidence_level must be in (0, 1) (got {cl})"));
     }
+    if config.numcut == 0 {
+        return invalid("numcut must be at least 1 (got 0)".to_string());
+    }
     Ok(())
 }
 
@@ -1248,12 +1361,20 @@ pub fn bart_arrays(
         }
     }
 
-    // Convert to owned arrays
-    let y_owned = y.to_owned();
+    // Regression: wbart's prior, and the sampler fits y - fmean
+    let prior = if config.classification {
+        None
+    } else {
+        Some(wbart_prior(y, x, &config)?)
+    };
+    let y_owned = match prior {
+        Some(prior) => y.mapv(|v| v - prior.fmean),
+        None => y.to_owned(),
+    };
     let x_owned = x.to_owned();
 
     // Initialize sampler
-    let mut sampler = BartSampler::new(&y_owned, x_owned.view(), &config)?;
+    let mut sampler = BartSampler::new(&y_owned, x_owned.view(), &config, prior)?;
 
     // Posterior draws, allocated before any sweep runs
     let mut posterior_preds = try_zeros2(config.n_mcmc, n, "BART posterior draws")?;
@@ -1284,8 +1405,11 @@ pub fn bart_arrays(
         }
 
         let mut pred = sampler.predict(x_owned.view());
+        let offset = sampler.offset;
         if config.classification {
-            pred.mapv_inplace(|f| std_normal_cdf(sampler.offset + f));
+            pred.mapv_inplace(|f| std_normal_cdf(offset + f));
+        } else {
+            pred.mapv_inplace(|f| offset + f);
         }
         posterior_preds.row_mut(iter).assign(&pred);
         sigma_samples.push(sampler.sigma);
@@ -1339,6 +1463,9 @@ pub fn bart_arrays(
         sigma,
         sigma_sd,
         offset: sampler.offset,
+        sigest: prior.map_or(1.0, |p| p.sigest),
+        lambda: prior.map_or(0.0, |p| p.lambda),
+        leaf_prior_sd: sampler.sigma_mu,
         n_obs: n,
         n_features: p,
         n_trees: config.n_trees,
@@ -1421,6 +1548,104 @@ mod tests {
     }
     fn case_vector(ds: &Dataset, col: &str) -> Array1<f64> {
         Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    const FRIEDMAN_X: [&str; 6] = ["x1", "x2", "x3", "x4", "x5", "x6"];
+
+    #[test]
+    fn test_validate_bart_wbart_calibration() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_wbart_calibration");
+        let x = case_matrix(&ds, &FRIEDMAN_X);
+        let y = case_vector(&ds, "y");
+        let prior = |m| {
+            let c = BartConfig {
+                n_trees: m,
+                ..Default::default()
+            };
+            wbart_prior(y.view(), x.view(), &c).unwrap()
+        };
+        let (p50, p200) = (prior(50), prior(200));
+        let cuts: Vec<Vec<f64>> = (0..6)
+            .map(|j| cutpoints(x.column(j), 100).unwrap())
+            .collect();
+        let numcut: Vec<f64> = cuts.iter().map(|c| c.len() as f64).collect();
+        Check::new(&case)
+            .scalar("fmean", p50.fmean, Tol::coef(200))
+            .scalar("sigest", p50.sigest, Tol::coef(200))
+            .scalar(
+                "qchisq_0_1_3",
+                chi_squared_quantile(0.1, 3.0).unwrap(),
+                Tol::coef(200),
+            )
+            .scalar("lambda", p50.lambda, Tol::coef(200))
+            .scalar("tau_m50", p50.tau, Tol::coef(200))
+            .scalar("tau_m200", p200.tau, Tol::coef(200))
+            .vector("numcut", &numcut, Tol::exact())
+            .vector("cut_x1", &cuts[0], Tol::coef(200))
+            .vector("cut_x6", &cuts[5], Tol::coef(200))
+            .finish();
+        assert_eq!(
+            (p200.fmean, p200.sigest, p200.lambda),
+            (p50.fmean, p50.sigest, p50.lambda)
+        );
+        // a constant column gets no cutpoint
+        assert!(
+            cutpoints(Array1::from_elem(10, 2.5).view(), 100)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The finding's design: y = 1000 + 5 x + noise. Uncentred, the leaf prior shrank the fit
+    /// toward 0 (mean fit about 38.6 below mean y) and sigma absorbed the bias (about 38.5).
+    /// wbart on the same design (30 chains): bias -0.0004, sigma 0.43, coverage of f 0.93.
+    #[test]
+    fn bart_centres_the_response_and_recovers_sigma() {
+        let n = 100;
+        let mut s = 20261113u64;
+        let mut u = || (crate::ml::lcg_random(&mut s) % 1_000_000 + 1) as f64 / 1_000_002.0;
+        let mut x = Array2::zeros((n, 1));
+        let mut y = Array1::zeros(n);
+        let mut f = Array1::zeros(n);
+        for i in 0..n {
+            x[[i, 0]] = u();
+            f[i] = 1000.0 + 5.0 * x[[i, 0]];
+            // Box-Muller, noise SD 0.5
+            let (u1, u2) = (u(), u());
+            y[i] = f[i] + 0.5 * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        }
+        let c = BartConfig {
+            n_trees: 50,
+            n_burn: 300,
+            n_mcmc: 1000,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let mean_pred = r.predictions.iter().sum::<f64>() / n as f64;
+        let mean_y = y.sum() / n as f64;
+        assert!(
+            (mean_pred - mean_y).abs() < 0.05,
+            "bias {}",
+            mean_pred - mean_y
+        );
+        assert!(0.3 < r.sigma && r.sigma < 0.8, "sigma {}", r.sigma);
+        let covered = (0..n)
+            .filter(|&i| r.prediction_lower[i] <= f[i] && f[i] <= r.prediction_upper[i])
+            .count();
+        assert!(covered >= 80, "coverage {covered} of {n}");
+        assert_eq!(r.offset, mean_y);
+    }
+
+    #[test]
+    fn bart_refuses_a_constant_response() {
+        let (_, x) = generate_test_data(40, 2);
+        let y = Array1::from_elem(40, 3.0);
+        let e = bart_arrays(y.view(), x.view(), None, tiny()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("y is constant")),
+            "{e}"
+        );
     }
 
     #[test]
