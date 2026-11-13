@@ -188,9 +188,9 @@
       "doc": "validation/stats/isoreg.md",
       "cases": ["stat_isoreg_medpolish_int"],
       "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_descriptive_isoreg_int"],
-      "quantities": ["fitted values (sorted x)", "number of knots", "n", "refusal of a missing y"],
-      "tolerance": "validation/README.md, n = 10 (< 100): fitted values 1e-6 relative; counts exact",
-      "deviations": [{"finding": "STAT-52", "quantity": "knot positions", "note": "p2a reports the first index of each block, R's iKnots the last; tied x are not pooled; only the number of knots is pinned"}],
+      "quantities": ["fitted values (sorted x)", "number of knots", "knot positions (iKnots)", "n", "refusal of a missing y"],
+      "tolerance": "validation/README.md, n = 10 (< 100): fitted values 1e-6 relative; counts and knots exact",
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

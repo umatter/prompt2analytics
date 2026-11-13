@@ -224,7 +224,7 @@
     },
     {
       "id": "isoreg",
-      "name": "Isotonic regression (PAVA): fitted values, block counts, sorted x and order on tie-free x",
+      "name": "Isotonic regression (PAVA): fitted values, knots (iKnots), cumulative sums, sorted x and order, tied x pooled as R",
       "category": "stats",
       "reference": "stats::isoreg",
       "doc": "validation/stats/isoreg.md",
@@ -235,24 +235,15 @@
         "p2a-core::stats::isoreg::tests::test_validate_isoreg_examples"
       ],
       "quantities": [
-        "yf (doc, doc3, ir4, mono, decr, unsorted)",
+        "yf (doc, doc3, ir4, mono, decr, unsorted, tiedx)",
         "number of knots (decr)",
+        "iKnots (doc, ir4, tiedx)",
+        "yc (doc)",
         "sorted x",
         "ord"
       ],
-      "tolerance": "validation/README.md, n < 100: 1e-6 relative, abs 1e-12; x, ord and block counts exact",
-      "deviations": [
-        {
-          "finding": "STAT-52",
-          "quantity": "iKnots and yc (iknots_doc, iknots_ir4, yc_doc)",
-          "note": "p2a's i_knots are 0-based block starts ([0, 2] for doc; R iKnots (2, 9), 1-based block ends) and yc is cumsum(yf) of length n (R: cumsum(c(0, y)), length n + 1). The knot counts agree on doc and decr; on ir4 R keeps two adjacent pooled blocks with the same fitted value 6 apart (iKnots 4, 5, 6, 9, 10) where p2a merges them (4 knots). The fitted values agree and are pinned."
-        },
-        {
-          "finding": "STAT-52",
-          "quantity": "fitted values with tied x (yf_tiedx, iknots_tiedx)",
-          "note": "R orders by (x, -y) so tied x are pooled: R yf (2, 2, 3, 3, 5); p2a (1, 2.5, 2.5, 4, 5)."
-        }
-      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative, abs 1e-12; x, ord, knots and block counts exact",
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

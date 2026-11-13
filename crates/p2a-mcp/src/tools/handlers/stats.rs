@@ -3285,11 +3285,17 @@ mod tests {
                 {"dataset": name, "x_column": "x", "y_column": "y"}))))
                 .unwrap(),
         );
-        // deviation STAT-52: the knot positions (p2a: first index of each block, R: the last)
-        // are not pinned, only their number.
+        // the knots are the 0-based block ends; R's iKnots are 1-based
+        let knots: Vec<f64> = v["knots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| num(&k["index"]) + 1.0)
+            .collect();
         Check::new(&case)
             .vector("isoreg_yf", &nums(&v["fitted_values"]), Tol::coef(10))
             .scalar("isoreg_n_knots", num(&v["n_knots"]), Tol::exact())
+            .vector("isoreg_knots_r", &knots, Tol::exact())
             .finish();
         assert_eq!(v["n_observations"], serde_json::json!(10));
         let e = err_text(

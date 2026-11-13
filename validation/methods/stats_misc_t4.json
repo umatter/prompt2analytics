@@ -100,6 +100,27 @@
       "tolerance": "validation/README.md, n < 100: 1e-6 relative",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "isoreg_t4",
+      "name": "Isotonic regression with tied x and unsorted input: yc, yf and iKnots as R (order(x, -y))",
+      "category": "stats",
+      "reference": "stats::isoreg",
+      "doc": "validation/stats/isoreg.md",
+      "cases": [
+        "stat_isoreg_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::isoreg::tests::test_validate_isoreg_tied_x"
+      ],
+      "quantities": [
+        "yc (tiedx, ir4, doc)",
+        "iKnots (doc, permuted tiedx)",
+        "yf (permuted tiedx)"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative; knots exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

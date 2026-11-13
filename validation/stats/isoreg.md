@@ -6,8 +6,8 @@ Isotonic (monotonic) regression using the Pool Adjacent Violators Algorithm (PAV
 
 Key outputs:
 - Fitted values (monotonically non-decreasing)
-- Knot positions (where the fitted function changes value)
-- Cumulative fitted values
+- Knot positions (`i_knots`, 0-based ends of the fitted blocks; R's `iKnots` minus 1)
+- `yc`, `cumsum(c(0, y))` of the y in x order (n + 1 values), as R
 
 ## Reference Implementations
 
@@ -34,8 +34,8 @@ ir <- isoreg(c(1, 0, 4, 3, 3, 5, 4, 2, 0))
 |---|---|---|---|
 | `yf` | 0.5, 0.5, 3, 3, 3, 3, 3, 3, 3 | the same | pinned |
 | number of knots | 2 | 2 | pinned |
-| `iKnots` | 2, 9 (1-based block ends) | `i_knots` 0, 2 (0-based block starts) | deviation STAT-52 (definitions) |
-| `yc` | 0, 1, 1, 5, 8, 11, 16, 20, 22, 22 (`cumsum(c(0, y))`, n + 1 values) | cumsum(yf), n values | deviation STAT-52 (definitions) |
+| `iKnots` | 2, 9 (1-based block ends) | `i_knots` 1, 8 (0-based block ends) | pinned (+1) |
+| `yc` | 0, 1, 1, 5, 8, 11, 16, 20, 22, 22 (`cumsum(c(0, y))`, n + 1 values) | the same | pinned |
 
 The previous version of this table listed `yf[2:4]` = 3.33 and `yf[5:8]` = 2.75, a decreasing
 fit that neither R nor p2a produces; both give 3 for the last seven values.
@@ -47,8 +47,8 @@ fit that neither R nor p2a produces; both give 3 for the last seven values.
 ### Test 3: with x (ir4, the `?isoreg` example)
 
 `isoreg(1:10, c(5, 9, 1:2, 5:8, 3, 8))`: `yf` 4.25 (x4), 5, 6 (x4), 8, pinned. R's `iKnots` are
-4, 5, 6, 9, 10: R keeps the two adjacent pooled blocks with the fitted value 6 apart, p2a merges
-them into one (4 knots); deviation STAT-52, not compared.
+4, 5, 6, 9, 10: R pools only strict violators, so two adjacent blocks with the fitted value 6 stay
+apart; p2a does the same and the knots are pinned.
 
 ### Test 4: already monotone and strictly decreasing
 
@@ -66,11 +66,17 @@ them into one (4 knots); deviation STAT-52, not compared.
 
 All three are pinned (p2a's `ord` is 0-based; the test adds 1).
 
-### Known difference: tied x (STAT-52)
+### Tied x
 
-`isoreg(c(3, 1, 2, 2, 1), c(5, 1, 2, 4, 3))`: R orders by (x, -y) and pools tied x, `yf` 2, 2, 3,
-3, 5 (`iKnots` 2, 4, 5); p2a gives 1, 2.5, 2.5, 4, 5. Kept in the case as `yf_tiedx` and
-`iknots_tiedx`, not compared.
+`isoreg(c(3, 1, 2, 2, 1), c(5, 1, 2, 4, 3))`: R orders unsorted x by (x, -y) (`order(x, -y)`), so
+tied x are pooled: `yf` 2, 2, 3, 3, 5, `iKnots` 2, 4, 5. p2a orders the same way (a stable sort);
+`yf_tiedx` and `iknots_tiedx` are pinned. An x that is already non-decreasing is not reordered,
+as R's `is.unsorted`.
+
+Case `stat_isoreg_t4` (`validation/r/cases/stats_misc_t4.R`) adds `yc` of the tied, ir4 and doc
+examples and a permutation of the tied example (`yf_tiedx_perm`, `iknots_tiedx_perm`): Rust test
+`stats::isoreg::tests::test_validate_isoreg_tied_x` (registry `stats_misc_t4.json`, id
+`isoreg_t4`).
 
 ### Input checks
 
@@ -98,30 +104,23 @@ isoreg(d$x, d$y_na)        # error: missing values not allowed
 |---|---|
 | fitted values (sorted-x order) | -1, 11, 12.666666666666666, 12.666666666666666, 12.666666666666666, 20.5, 20.5, 20.5, 20.5, 37 |
 | number of knots | 5 |
-| `iKnots` | 1, 2, 5, 9, 10 (not pinned, STAT-52) |
+| `iKnots` | 1, 2, 5, 9, 10 |
 
 **MCP test:** `tools::handlers::stats::tests::test_validate_mcp_descriptive_isoreg_int` (the
-fitted values and the number of knots; `n_observations` with and without `x_column`; the refusal
+fitted values, the number of knots and their positions, `knots[].index` + 1; `n_observations` with and without `x_column`; the refusal
 of `y_na`).
 
 **Tolerance:** `validation/README.md`, n = 10 (< 100): fitted values 1e-6 (`Tol::coef`), counts
 exact.
 
-**Status:** R-pinned with a known deviation (registry `validation/methods/mcp_stats.json`, id
+**Status:** R-pinned (registry `validation/methods/mcp_stats.json`, id
 `mcp_descriptive_isoreg`).
 
 ## Numerical Precision Summary
 
 - Fitted values agree with R to 6.4e-16 relative on every tie-free set (planning port) and are
   pinned at the `validation/README.md` rows (`Tol::coef`).
-- Sorted x, order and the knot counts of doc and decr are exact.
-
-## Known Differences
-
-- **STAT-52 (Tier 4):** p2a reports the first index (0-based) of each constant block as its
-  knots (0, 1, 2, 5, 9 on the case above), R's `iKnots` the last (1-based: 1, 2, 5, 9, 10); tied
-  x values are not pooled as R pools them; adjacent pooled blocks with equal fitted values are
-  one block in p2a (ir4: 4 knots, R 5). Only the number of knots is pinned, where it agrees.
+- Sorted x, order, the knots and the knot counts are exact.
 
 ## Performance Comparison
 
