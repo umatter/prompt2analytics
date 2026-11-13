@@ -211,8 +211,20 @@ pub struct CubistResult {
     pub committees: usize,
     /// Number of neighbors for instance correction (0 if disabled)
     pub neighbors: usize,
-    /// Variable importance (sum of appearances in rules + linear models)
+    /// Variable importance: the mean of the two usage percentages below (caret's
+    /// `varImp` for Cubist weights them equally), normalised to sum to one; zeros when no
+    /// attribute is used. Unit-free: rescaling a feature does not change it.
     pub variable_importance: Vec<f64>,
+    /// Percent of training cases, per feature, whose rule tests the feature in its
+    /// conditions, averaged over the committees (Cubist's `usage`, "Conds").
+    #[serde(default)]
+    pub usage_conditions: Vec<f64>,
+    /// Percent of training cases, per feature, whose rule's model has a non-zero coefficient
+    /// on the feature, averaged over the committees (Cubist's `usage`, "Model"). Every rule
+    /// model contains the root model, which uses every attribute, and models are not
+    /// simplified, so this is 100 for every non-aliased attribute on most fits.
+    #[serde(default)]
+    pub usage_model: Vec<f64>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
     /// Training RMSE
@@ -260,6 +272,29 @@ impl std::fmt::Display for CubistResult {
         }
         if self.n_rules > 5 {
             writeln!(f, "  ... ({} more rules)", self.n_rules - 5)?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Attribute usage (percent of training cases):")?;
+        writeln!(f, "  {:>6} {:>6}  Attribute", "Conds", "Model")?;
+        let mut by_usage: Vec<usize> = (0..self.usage_conditions.len()).collect();
+        by_usage.sort_by(|&a, &b| {
+            (self.usage_conditions[b] + self.usage_model.get(b).copied().unwrap_or(0.0)).total_cmp(
+                &(self.usage_conditions[a] + self.usage_model.get(a).copied().unwrap_or(0.0)),
+            )
+        });
+        for &i in by_usage.iter().take(10) {
+            let name = match &self.feature_names {
+                Some(names) => names.get(i).cloned().unwrap_or_else(|| format!("X{}", i)),
+                None => format!("X{}", i),
+            };
+            writeln!(
+                f,
+                "  {:>5.0}% {:>5.0}%  {}",
+                self.usage_conditions[i],
+                self.usage_model.get(i).copied().unwrap_or(0.0),
+                name
+            )?;
         }
 
         writeln!(f)?;
@@ -747,50 +782,15 @@ impl CubistTree {
         }
     }
 
-    /// Compute variable importance.
-    fn variable_importance(&self) -> Array1<f64> {
-        let mut importance = Array1::zeros(self.n_features);
-        if let Some(ref root) = self.root {
-            self.accumulate_importance(root, &mut importance);
-        }
-
-        // Normalize
-        let sum: f64 = importance.sum();
-        if sum > 0.0 {
-            importance /= sum;
-        }
-
-        importance
-    }
-
-    /// Accumulate importance from tree structure.
-    fn accumulate_importance(&self, node: &CubistNode, importance: &mut Array1<f64>) {
-        match node {
-            CubistNode::Leaf { coefficients, .. } => {
-                // Add importance from linear model coefficients
-                for (i, &c) in coefficients.iter().enumerate() {
-                    importance[i] += c.abs();
-                }
-            }
-            CubistNode::Split {
-                feature,
-                left,
-                right,
-                coefficients,
-                ..
-            } => {
-                // Add importance for split feature
-                importance[*feature] += 1.0;
-
-                // Add importance from linear model
-                for (i, &c) in coefficients.iter().enumerate() {
-                    importance[i] += c.abs() * 0.5; // Weight internal nodes less
-                }
-
-                self.accumulate_importance(left, importance);
-                self.accumulate_importance(right, importance);
-            }
-        }
+    /// Add each leaf's training cases to the usage counts: to `conditions[j]` when feature
+    /// `j` is tested on the path to the leaf, to `model[j]` when the leaf's smoothed model has
+    /// a non-zero coefficient on it.
+    fn add_usage(&self, conditions: &mut [f64], model: &mut [f64]) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        let mut tested = vec![0usize; self.n_features];
+        add_usage_node(root, &mut tested, conditions, model);
     }
 }
 
@@ -836,6 +836,73 @@ fn smooth_node(node: &mut CubistNode, ancestors: &mut Vec<AncestorModel>, k: f64
             *smoothed_coefficients = b;
         }
     }
+}
+
+/// `CubistTree::add_usage` below `node`; `tested[j]` counts the splits on `j` above it.
+fn add_usage_node(
+    node: &CubistNode,
+    tested: &mut [usize],
+    conditions: &mut [f64],
+    model: &mut [f64],
+) {
+    match node {
+        CubistNode::Split {
+            feature,
+            left,
+            right,
+            ..
+        } => {
+            tested[*feature] += 1;
+            add_usage_node(left, tested, conditions, model);
+            add_usage_node(right, tested, conditions, model);
+            tested[*feature] -= 1;
+        }
+        CubistNode::Leaf {
+            n_samples,
+            smoothed_coefficients,
+            ..
+        } => {
+            let n = *n_samples as f64;
+            for (j, &t) in tested.iter().enumerate() {
+                if t > 0 {
+                    conditions[j] += n;
+                }
+            }
+            for (j, &c) in smoothed_coefficients.iter().enumerate() {
+                if c != 0.0 {
+                    model[j] += n;
+                }
+            }
+        }
+    }
+}
+
+/// Usage percentages over the committee trees fitted on `n` training cases, and the
+/// importance: `(conditions + model) / 2`, normalised to sum to one (zeros if both are zero).
+fn usage_and_importance(
+    trees: &[CubistTree],
+    n: usize,
+    p: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut conditions = vec![0.0; p];
+    let mut model = vec![0.0; p];
+    for tree in trees {
+        tree.add_usage(&mut conditions, &mut model);
+    }
+    let scale = 100.0 / (n as f64 * trees.len().max(1) as f64);
+    for v in conditions.iter_mut().chain(model.iter_mut()) {
+        *v *= scale;
+    }
+    let mut importance: Vec<f64> = conditions
+        .iter()
+        .zip(&model)
+        .map(|(c, m)| 0.5 * c + 0.5 * m)
+        .collect();
+    let total: f64 = importance.iter().sum();
+    if total > 0.0 {
+        importance.iter_mut().for_each(|v| *v /= total);
+    }
+    (conditions, model, importance)
 }
 
 use super::lcg_random;
@@ -977,7 +1044,6 @@ pub fn cubist(
         crate::resource::try_with_capacity(config.committees, "Cubist committees")?;
     let mut current_y = y.to_owned();
     let mut all_rules = Vec::new();
-    let mut total_importance = Array1::zeros(n_features);
 
     for c in 0..config.committees {
         crate::resource::checkpoint()?;
@@ -989,9 +1055,6 @@ pub fn cubist(
             let rules = tree.extract_rules();
             all_rules.extend(rules);
         }
-
-        // Accumulate importance
-        total_importance = total_importance + tree.variable_importance();
 
         // The next member's target is y - (pred - y) = 2y - pred, pred this member's
         // prediction (R's Cubist): where this member over-predicted by 2, the next one aims
@@ -1011,11 +1074,8 @@ pub fn cubist(
         rule.id = i + 1;
     }
 
-    // Normalize importance
-    let sum: f64 = total_importance.sum();
-    if sum > 0.0 {
-        total_importance /= sum;
-    }
+    let (usage_conditions, usage_model, variable_importance) =
+        usage_and_importance(&committee_trees, n_samples, n_features);
 
     // Compute final predictions (average of committees)
     let mut predictions = Vec::with_capacity(n_samples);
@@ -1060,7 +1120,9 @@ pub fn cubist(
         rules: all_rules,
         committees: config.committees,
         neighbors: config.neighbors,
-        variable_importance: total_importance.to_vec(),
+        variable_importance,
+        usage_conditions,
+        usage_model,
         feature_names: None,
         train_rmse,
         train_r_squared,
@@ -1782,6 +1844,102 @@ mod tests {
             assert_eq!(
                 r.committee_trees[1].predict_one(&row).to_bits(),
                 second.predict_one(&row).to_bits()
+            );
+        }
+    }
+
+    /// A leaf with its smoothed (composite) model set directly.
+    fn leaf_with_composite(n_samples: usize, composite: Vec<f64>) -> CubistNode {
+        let mut leaf = hand_leaf(0.0, vec![0.0; composite.len()], n_samples);
+        if let CubistNode::Leaf {
+            smoothed_coefficients,
+            ..
+        } = &mut leaf
+        {
+            *smoothed_coefficients = composite;
+        }
+        leaf
+    }
+
+    #[test]
+    fn test_cubist_usage_counts_cases() {
+        // Leaf A: 30 cases, conditions on x0, composite on x0 and x2. The other 70 cases sit
+        // under a split on x1 (conditions on x0 and x1), composites on x1 only.
+        let right = hand_split(
+            1,
+            0.5,
+            leaf_with_composite(40, vec![0.0, 2.0, 0.0]),
+            leaf_with_composite(30, vec![0.0, -1.0, 0.0]),
+            0.0,
+            vec![0.0; 3],
+            70,
+        );
+        let root = hand_split(
+            0,
+            0.5,
+            leaf_with_composite(30, vec![1.5, 0.0, 0.5]),
+            right,
+            0.0,
+            vec![0.0; 3],
+            100,
+        );
+        let mut tree = CubistTree::new(3, None, 15.0);
+        tree.root = Some(root); // no smoothing pass: the composites above are the models
+        let (conds, model, importance) = usage_and_importance(&[tree], 100, 3);
+        assert_eq!(conds, vec![100.0, 70.0, 0.0]);
+        assert_eq!(model, vec![30.0, 70.0, 30.0]);
+        let want = [65.0 / 150.0, 70.0 / 150.0, 15.0 / 150.0];
+        for (g, w) in importance.iter().zip(want) {
+            assert!((g - w).abs() < 1e-15, "{importance:?}");
+        }
+    }
+
+    #[test]
+    fn test_cubist_importance_is_unit_free() {
+        let (x, y) = plane_data(300, 3);
+        let mut x_small = x.clone();
+        x_small.column_mut(1).mapv_inplace(|v| v / 1_000.0);
+        let a = cubist(x.view(), y.view(), &CubistConfig::default()).unwrap();
+        let b = cubist(x_small.view(), y.view(), &CubistConfig::default()).unwrap();
+        let close = |u: &[f64], v: &[f64]| {
+            u.len() == v.len() && u.iter().zip(v).all(|(p, q)| (p - q).abs() < 1e-12)
+        };
+        assert!(
+            close(&a.variable_importance, &b.variable_importance),
+            "{:?} vs {:?}",
+            a.variable_importance,
+            b.variable_importance
+        );
+        assert!(close(&a.usage_conditions, &b.usage_conditions));
+        assert!(close(&a.usage_model, &b.usage_model));
+        assert!(
+            a.usage_conditions
+                .iter()
+                .all(|&u| (0.0..=100.0).contains(&u))
+        );
+        assert!((a.variable_importance.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cubist_usage_averages_committees() {
+        let (x, y) = plane_data(200, 5);
+        let cfg = CubistConfig {
+            committees: 3,
+            ..Default::default()
+        };
+        let r = cubist(x.view(), y.view(), &cfg).unwrap();
+        let mut mean = vec![0.0; 2];
+        for tree in &r.committee_trees {
+            let (c, _, _) = usage_and_importance(std::slice::from_ref(tree), 200, 2);
+            for (m, v) in mean.iter_mut().zip(c) {
+                *m += v / 3.0;
+            }
+        }
+        for (g, w) in r.usage_conditions.iter().zip(&mean) {
+            assert!(
+                (g - w).abs() < 1e-12,
+                "{:?} vs {mean:?}",
+                r.usage_conditions
             );
         }
     }

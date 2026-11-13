@@ -36,7 +36,9 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
 - `crates/p2a-core/src/ml/cubist.rs`: `test_cubist_min_improvement_stops_splits`,
   `test_cubist_split_rule_is_ssd_share`, `test_cubist_min_improvement_is_a_share` (split rule);
   `test_cubist_smoothing_reaches_the_root`, `test_cubist_smoothing_coefficient_direction`,
-  `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target` (smoothing and committees).
+  `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target` (smoothing and committees);
+  `test_cubist_usage_counts_cases`, `test_cubist_importance_is_unit_free`,
+  `test_cubist_usage_averages_committees` (attribute usage).
 
 ## Splits, smoothing and committees
 
@@ -57,10 +59,20 @@ With `committees > 1`, member `m + 1` is fitted to `2y - pred_m`, `pred_m` the p
 `m`, as R's Cubist ("if the first model over-predicted by 2, the next model's target is y - 2"); the
 prediction is the members' mean.
 
+## Attribute usage and importance
+
+`usage_conditions[j]` is the percent of training cases whose rule tests attribute `j` in its
+conditions, `usage_model[j]` the percent whose rule model has a non-zero coefficient on `j`, each
+averaged over the committees, as Cubist's `usage`. `variable_importance` is
+`(usage_conditions + usage_model) / 2` (caret's `varImp` for Cubist), normalised to sum to one. Both
+are unit-free: rescaling a feature leaves them unchanged.
+
 ## Known differences from Cubist
 
 - Node models use the attributes tested on the path to the node (all attributes at the root), with no
-  term elimination; Cubist and M5 choose other attribute sets and simplify the models.
+  term elimination; Cubist and M5 choose other attribute sets and simplify the models. Because every
+  rule model contains the root model, `usage_model` is 100 for every non-aliased attribute on most fits,
+  and the importance ranking then comes from `usage_conditions`.
 - Rules are not simplified or pruned after the tree is grown.
 
 ## Leaf model with collinear attributes (R-pinned)
