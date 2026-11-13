@@ -45,9 +45,11 @@ plus anticipation are dropped (`n_dropped_first_period`, warning "Dropped N unit
 already treated in the first period."). A group (0 = never treated) whose rows per period are
 fewer than the covariates plus 5 gets did's warning "Some groups in your dataset have very few
 observations, which may cause estimation problems. Check groups: 3,5,7."; when that group is
-the never-treated one and the comparison is never treated, the call is did's error "The
-never-treated group is too small to serve as a reliable control. ...". Duplicate (unit, time)
-rows are refused (below).
+the never-treated one and the comparison is never treated, the call is refused, as did refuses
+it, with an error naming the bound and this API's option ("The never-treated group has 4.0 rows
+per period, fewer than the 5 (covariates + 5) ...; set comparison_group = 'not_yet_treated'").
+Duplicate (unit, time) rows are refused (below), whichever unit they belong to, including a unit
+the first-period rule drops.
 
 **Key parameters**: `outcome`, `treatment_time` (first treatment period, 0 or negative for
 never treated), `time_col`, `unit_col`, `comparison_group` (never treated or not yet treated),
@@ -387,15 +389,15 @@ the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a
 (load average 38-39), so ratios within about 10% are noise.
 Rows are panels of N = n / 10 units over 10 periods, cohorts 4/6/8/never; each side runs its own
 defaults (`min_obs_per_cell = 1` on both). At n = 100 (10 units, 2 never treated) the new code
-refuses the never-treated comparison as did does ("The never-treated group is too small"), so that
+refuses the never-treated comparison as did does (the never-treated group is too small), so that
 column has no ratio; the DR row at n = 100 fails overlap on both sides.
 
 | Fit | n = 100 | 1,000 | 10,000 |
 |---|---|---|---|
-| never treated, OR, `bootstrap: 0` | refused | 1.134 (1,022 / 1,159 µs) | 1.070 |
-| not yet treated, OR, `bootstrap: 0` | 1.140 (157 / 179 µs) | 1.151 (1,080 / 1,243 µs) | 1.080 |
+| never treated, OR, `bootstrap: 0` | refused | 1.134 (base 1,022, new 1,159 µs) | 1.070 |
+| not yet treated, OR, `bootstrap: 0` | 1.140 (base 157, new 179 µs) | 1.151 (base 1,080, new 1,243 µs) | 1.080 |
 | never treated, OR, `bootstrap: 999` | refused | 0.942 | 0.915 |
-| never treated, DR, `x1 + x2`, `bootstrap: 0` | overlap fails | 0.972 | 1.153 (26.4 / 30.5 ms) |
+| never treated, DR, `x1 + x2`, `bootstrap: 0` | overlap fails | 0.972 | 1.153 (base 26.4, new 30.5 ms) |
 
 Four rows are above 1.10x and go to the user: the analytic fits now run did's sample rules (the
 first-period and small-group checks, the duplicate check) and, with the varying base, compute

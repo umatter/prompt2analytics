@@ -131,7 +131,7 @@ use ndarray::{Array1, Array2, s};
 use rand::SeedableRng;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
 use crate::data::Dataset;
@@ -967,7 +967,6 @@ pub fn run_staggered_did(
             Some(_) => {}
         }
     }
-
     let periods: Vec<i64> = period
         .iter()
         .copied()
@@ -1017,6 +1016,25 @@ pub fn run_staggered_did(
              period{ant}."
         ));
     }
+    let duplicate = |i: usize| EconError::InvalidSpecification {
+        message: format!(
+            "The value of idname must be unique (by tname). Some units are observed more \
+             than once in a period: unit '{}' at time {}.",
+            unit.label(i),
+            period[i]
+        ),
+    };
+    // did::att_gt's uniqueness rule holds for every extracted row, so before the
+    // small-group check, which counts rows: the dropped units' rows here (a
+    // duplicate pair belongs to one unit), the kept rows by the panel map below.
+    if n_dropped_first_period > 0 {
+        let mut seen: HashSet<(u32, i64)> = HashSet::new();
+        for i in (0..n_rows).filter(|&i| dropped_unit[unit.codes[i] as usize]) {
+            if !seen.insert((unit.codes[i], period[i])) {
+                return Err(duplicate(i));
+            }
+        }
+    }
     let rows: Vec<usize> = (0..n_rows)
         .filter(|&i| !dropped_unit[unit.codes[i] as usize])
         .collect();
@@ -1031,6 +1049,8 @@ pub fn run_staggered_did(
     let g_col: Array1<f64> = rows.iter().map(|&i| g_of(i) as f64).collect();
     let t_col: Array1<f64> = rows.iter().map(|&i| period[i] as f64).collect();
     let unit_ids: Array1<f64> = rows.iter().map(|&i| f64::from(unit.codes[i])).collect();
+    // Panel structure: (unit, time) -> observation index
+    let panel_map = build_panel_map(&t_col, &unit_ids).map_err(|i| duplicate(rows[i]))?;
     // The covariates without an intercept column: the cell estimators add one.
     let x_cov: Option<Array2<f64>> = covariates
         .map(|c| {
@@ -1083,11 +1103,14 @@ pub fn run_staggered_did(
             list.join(",")
         ));
         if small.contains(&0) && config.comparison_group == ComparisonGroup::NeverTreated {
+            let rows_per_period = group_rows[&0] as f64 / periods.len() as f64;
             return Err(EconError::InvalidSpecification {
-                message: "The never-treated group is too small to serve as a reliable control. \
-                          Try setting `control_group = 'notyettreated'` to include \
-                          not-yet-treated units as controls."
-                    .to_string(),
+                message: format!(
+                    "The never-treated group has {rows_per_period:.1} rows per period, fewer \
+                     than the {required} (covariates + 5) did::att_gt requires for a \
+                     never-treated comparison; set comparison_group = 'not_yet_treated' \
+                     (CLI: --comparison not_yet_treated)."
+                ),
             });
         }
     }
@@ -1104,16 +1127,6 @@ pub fn run_staggered_did(
         });
     }
 
-    // Build panel structure: map (unit, time) -> observation index
-    let panel_map =
-        build_panel_map(&t_col, &unit_ids).map_err(|i| EconError::InvalidSpecification {
-            message: format!(
-                "The value of idname must be unique (by tname). Some units are observed more \
-                 than once in a period: unit '{}' at time {}.",
-                unit.label(rows[i]),
-                t_col[i]
-            ),
-        })?;
     let z = std_normal().inverse_cdf(1.0 - (1.0 - config.confidence_level) / 2.0);
 
     // Compute group-time ATTs
@@ -1349,8 +1362,9 @@ pub fn run_staggered_did(
         {
             let mut w = format!(
                 "bootstrap: {incomplete} of {} replicates could not compute every ATT(g,t) \
-                 (a resample without treated or comparison units of a cell); each standard error uses the replicates in which its cells were \
-                 computed (fewest: {used}, for {label})",
+                 (a resample without treated or comparison units of a cell); each standard \
+                 error uses the replicates in which its cells were computed (fewest: {used}, \
+                 for {label})",
                 config.bootstrap
             );
             if *used < MIN_BOOTSTRAP {
@@ -1799,7 +1813,8 @@ struct BootDraws {
 /// re-fitting every cell in every replicate. Rows of `cells` are replicates and
 /// columns are cells, which keeps the joint draws available for the aggregates
 /// and the pre-trend covariance (CAUS-2, CAUS-86). A cell without an estimate in
-/// a replicate (no drawn treated or no drawn comparison unit) is `NaN`. `cohort_counts` holds how many drawn units each cohort has.
+/// a replicate (no drawn treated or no drawn comparison unit) is `NaN`.
+/// `cohort_counts` holds how many drawn units each cohort has.
 fn bootstrap_draws(table: &BootTable, bootstrap: usize, rng: &mut StdRng) -> EconResult<BootDraws> {
     let n_cells = table.n_cells();
     let n_units = table.n_units;
@@ -4454,6 +4469,124 @@ mod tests {
                 assert!(message.contains("unit '20' at time 2008"), "{message}");
             }
             other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// `create_staggered_dataset`'s rows as (year, unit, first_treat, outcome), kept and
+    /// edited by `f`, rebuilt into a dataset.
+    fn staggered_rows_with(f: impl Fn(Vec<[f64; 4]>) -> Vec<[f64; 4]>) -> Dataset {
+        let ds = create_staggered_dataset();
+        let col = |c: &str| -> Vec<f64> {
+            ds.df()
+                .column(c)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect()
+        };
+        let (yr, un, ft, y) = (col("year"), col("unit"), col("first_treat"), col("outcome"));
+        let rows: Vec<[f64; 4]> = (0..yr.len()).map(|i| [yr[i], un[i], ft[i], y[i]]).collect();
+        let rows = f(rows);
+        let pick = |k: usize| rows.iter().map(|r| r[k]).collect::<Vec<f64>>();
+        Dataset::new(
+            df! {
+                "year" => pick(0),
+                "unit" => pick(1),
+                "first_treat" => pick(2),
+                "outcome" => pick(3)
+            }
+            .unwrap(),
+        )
+    }
+
+    /// With four never-treated units (did's bound: covariates + 5 rows per period) the
+    /// never-treated comparison is refused, naming this API's option and the bound; the
+    /// not-yet-treated comparison runs and keeps did's small-group warning.
+    #[test]
+    fn test_staggered_small_never_treated_group_refused_under_never_treated() {
+        let ds = staggered_rows_with(|rows| rows.into_iter().filter(|r| r[1] != 20.0).collect());
+        match run_staggered_did(
+            &ds,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            analytic(ComparisonGroup::NeverTreated),
+        ) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.starts_with("The never-treated group has 4.0 rows per period"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("fewer than the 5 (covariates + 5)"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("comparison_group = 'not_yet_treated'"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("--comparison not_yet_treated"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let r = run_staggered_did(
+            &ds,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            analytic(ComparisonGroup::NotYetTreated),
+        )
+        .unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w.ends_with("Check groups: 0.")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// A duplicated (unit, time) pair of a unit treated in the first period (which the
+    /// sample rules drop) is refused like any other duplicate, before the small-group
+    /// check counts the extra row.
+    #[test]
+    fn test_staggered_duplicate_of_first_period_unit_is_refused() {
+        let ds = staggered_rows_with(|mut rows| {
+            for r in rows.iter_mut().filter(|r| r[1] == 1.0) {
+                r[2] = 2000.0;
+            }
+            let dup = *rows.iter().find(|r| r[1] == 1.0 && r[0] == 2003.0).unwrap();
+            rows.push(dup);
+            rows
+        });
+        for cg in [
+            ComparisonGroup::NeverTreated,
+            ComparisonGroup::NotYetTreated,
+        ] {
+            match run_staggered_did(
+                &ds,
+                "outcome",
+                "first_treat",
+                "year",
+                "unit",
+                None,
+                analytic(cg),
+            ) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(
+                        message.starts_with("The value of idname must be unique (by tname)"),
+                        "{message}"
+                    );
+                    assert!(message.contains("unit '1' at time 2003"), "{message}");
+                }
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
         }
     }
 
