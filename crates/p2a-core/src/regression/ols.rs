@@ -1901,6 +1901,10 @@ fn twoway_psd_check(vcov: &mut Array2<f64>, fix: bool) -> EconResult<Option<Stri
 
 /// `true` when the Cholesky factorisation of the symmetric `m` (its lower triangle) runs to
 /// the end with finite, positive pivots, i.e. `m` is numerically positive definite.
+///
+/// Hand-rolled rather than `linalg::matrix_ops::cholesky`: `m` is the small rank x rank
+/// covariance, and faer's per-call round trip costs more than the factorisation itself on
+/// this per-fit path.
 fn positive_definite_by_cholesky(m: &Array2<f64>) -> bool {
     let k = m.nrows();
     let mut l = vec![0.0_f64; k * k];
@@ -4928,8 +4932,6 @@ mod tests {
         assert!(serde_json::to_value(&std).unwrap().get("wald_f").is_none());
     }
 
-    /// Aliased slopes are left out of the Wald F; a singular slope covariance (two clusters)
-    /// gives no Wald F and a warning.
     /// The Cholesky shortcut of the two-way PSD check agrees with the eigenvalues: a
     /// positive-definite matrix passes, an indefinite one, one with a zero pivot and a
     /// non-finite one go on to the eigen-decomposition.
@@ -4951,6 +4953,8 @@ mod tests {
         assert!(warning.contains("not positive semi-definite"), "{warning}");
     }
 
+    /// Aliased slopes are left out of the Wald F; a singular slope covariance (two clusters)
+    /// gives no Wald F and a warning.
     #[test]
     fn test_wald_f_singular_slope_vcov() {
         let n = 30;
@@ -6090,9 +6094,10 @@ mod tests {
 
     /// REG-21 (Driscoll-Kraay): a missing time id drops its row and the model is
     /// re-estimated; integral float ids equal the Int64 ids; fractional and text ids are
-    /// refused instead of truncated. A property test: the DK SEs are not R-pinned
-    /// (REG-24), so it compares no R value and loads the dataset without a case; it pins
-    /// the estimation sample against the same estimator on the complete rows.
+    /// refused instead of truncated. A property test of the estimation sample: it compares no
+    /// R value and loads the dataset without a case, and pins the sample against the same
+    /// estimator on the complete rows. The DK values themselves are R-pinned in
+    /// test_validate_driscoll_kraay_panel and test_validate_driscoll_kraay_grunfeld_*.
     #[test]
     fn test_na_driscoll_kraay_time_ids() {
         use super::na_fixtures::{complete_rows, repo_dataset, with_derived};
@@ -6730,8 +6735,9 @@ mod tests {
         Dataset::new(df)
     }
 
-    /// Driscoll-Kraay on an aliased panel: NaN for the aliased column, finite elsewhere (DK
-    /// SEs are not R-pinned: REG-24, Tier 4).
+    /// Driscoll-Kraay on an aliased panel: NaN for the aliased column, finite elsewhere (a
+    /// property test; the DK values are R-pinned in test_validate_driscoll_kraay_panel and
+    /// test_validate_driscoll_kraay_grunfeld_*).
     #[test]
     fn test_driscoll_kraay_aliased_column_is_nan() {
         let ds = short_panel(12, true);
