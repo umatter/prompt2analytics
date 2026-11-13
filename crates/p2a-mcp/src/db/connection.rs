@@ -1,13 +1,14 @@
 //! SurrealDB connection management
 //!
-//! Provides connection to embedded SurrealDB with RocksDB or in-memory backend.
+//! Provides connection to embedded SurrealDB with a SurrealKV (on disk) or in-memory backend.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, Mem, RocksDb};
+use surrealdb::engine::local::{Db, Mem, SurrealKv};
+use surrealdb::types::SurrealValue;
 use thiserror::Error;
 
 /// Database connection errors
@@ -82,7 +83,7 @@ impl Default for PersistenceLimits {
 
 /// Database connection wrapper
 ///
-/// Supports both RocksDB (persistent) and in-memory backends.
+/// Supports both SurrealKV (persistent) and in-memory backends.
 pub struct DbConnection {
     db: Arc<Surreal<Db>>,
     limits: PersistenceLimits,
@@ -136,16 +137,18 @@ type StoreTurns = Arc<Mutex<StoreTurnMap>>;
 /// of [`run_to_end`] can own it.
 ///
 /// Two deletes of one conversation that run at the same time conflict in the
-/// store: the in-memory engine hands both the same rows (neither fails), so
-/// each would release their bytes from the `session_db_bytes` counter, and
-/// RocksDB fails one of them with a write conflict. Taking turns makes the
+/// store: SurrealDB 4's engines (in memory and SurrealKV) validate an
+/// optimistic transaction's writes when it commits and fail one of them with
+/// a write conflict (under SurrealDB 2.4 the in-memory engine handed both the
+/// same rows, so each released their bytes from the `session_db_bytes`
+/// counter). Taking turns makes the
 /// later call find nothing instead. Every write of an existing conversation's
 /// row takes its turn, so the counter update after a message add or content
 /// update never loses a write conflict to another write of that row in this
 /// process. Message adds and content updates and tool-call creates, updates
 /// and status changes take it too, so none commits on a row while a delete or
-/// clear deletes it (on RocksDB that would fail the delete or clear whole with
-/// a write conflict). A message add holds the turn from its
+/// clear deletes it (that would fail the delete or clear whole with a write
+/// conflict). A message add holds the turn from its
 /// `messages_per_conversation` check until the message is written, and a
 /// conversation creation holds its session's turn from the
 /// `conversations_per_session` check until the row is written, so concurrent
@@ -174,8 +177,8 @@ type StoreTurns = Arc<Mutex<StoreTurnMap>>;
 /// than the callers still waiting. The store finishes a query it was sent
 /// even when the caller is dropped, so a turn that ended with the caller
 /// would let the next call count the rows before the dropped call's row is
-/// committed, or run its transaction alongside the dropped call's write (on
-/// RocksDB, one of the two then fails on a write conflict).
+/// committed, or run its transaction alongside the dropped call's write (one
+/// of the two then fails on a write conflict).
 pub(crate) struct StoreTurn {
     turns: StoreTurns,
     key: String,
@@ -271,42 +274,96 @@ fn truncation_cut(s: &str, limit: usize) -> Option<usize> {
 }
 
 /// The error a transaction's failed statement reported, from the
-/// [`take_errors`](surrealdb::Response::take_errors) of its response; `None`
-/// when no statement failed. When a statement inside `BEGIN`/`COMMIT`
-/// fails, the store replaces the results of the other statements, before
-/// and after the failing one, with `QueryNotExecuted` and keeps the cause
-/// only at the failing statement, so this is the lowest-indexed error that
-/// is not `QueryNotExecuted` (the lowest-indexed error when all are).
-/// [`Response::check`](surrealdb::Response::check) returns the first error
-/// by index instead, which hides the cause behind a `QueryNotExecuted`
-/// whenever a statement other than the first fails. A failed commit gives
-/// every statement a `QueryNotExecutedDetail` that carries the cause, and a
-/// transaction cancelled or timed out between statements gives the
-/// statements that ran `QueryCancelled` and the rest `QueryCancelled` or
-/// `QueryTimedout`, so a timeout can come back as `QueryCancelled` (this
-/// server sets no query or transaction timeout); this returns the first of
-/// them as is. `take_errors` returns a `HashMap`, so the index, not the
-/// order of iteration, decides.
+/// [`take_errors`](surrealdb::IndexedResults::take_errors) of its response;
+/// `None` when no statement failed. When a statement inside
+/// `BEGIN`/`COMMIT` fails, the store answers the statements before it with
+/// `NotExecuted` ("not executed due to a failed transaction"), those after it
+/// with `Cancelled` and the `COMMIT` with `NotExecuted`, and keeps the cause
+/// only at the failing statement. A transaction cancelled or timed out
+/// between statements answers the statements that ran with `Cancelled` and
+/// the rest with `TimedOut` or `Cancelled`. A failed commit answers every
+/// statement with `NotExecuted` and only the `COMMIT` (the last of them) names
+/// the cause ("Cannot COMMIT: ..."), with `TransactionConflict` for a write
+/// conflict. So this is the lowest-indexed error that is neither `NotExecuted`
+/// nor `Cancelled` (the cause, a timeout or a conflict), or, when every error
+/// is one of those two, the highest-indexed one (the `COMMIT`'s).
+/// [`IndexedResults::check`](surrealdb::IndexedResults::check) returns the
+/// first error by index instead, which hides the cause behind a `NotExecuted`
+/// whenever a statement other than the first fails. `take_errors` returns a
+/// `HashMap`, so the index, not the order of iteration, decides.
 pub(super) fn failed_statement(
     errors: HashMap<usize, surrealdb::Error>,
 ) -> Option<surrealdb::Error> {
+    use std::cmp::Reverse;
+    use surrealdb::types::QueryError;
+
     errors
         .into_iter()
         .min_by_key(|(index, error)| {
-            let not_executed = matches!(
-                error,
-                surrealdb::Error::Db(surrealdb::error::Db::QueryNotExecuted)
+            let rewritten = matches!(
+                error.query_details(),
+                Some(QueryError::NotExecuted | QueryError::Cancelled)
             );
-            (not_executed, *index)
+            if rewritten {
+                (1, Reverse(*index), 0)
+            } else {
+                (0, Reverse(0), *index)
+            }
         })
         .map(|(_, error)| error)
 }
 
+/// Whether directory `path` holds RocksDB's files: a `CURRENT` file and a
+/// `MANIFEST-*` file, the test SurrealDB 4 refuses a directory on.
+fn holds_rocksdb_files(path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    let (mut current, mut manifest) = (false, false);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        current |= name == "CURRENT";
+        manifest |= name.starts_with("MANIFEST-");
+    }
+    current && manifest
+}
+
+/// Rename the RocksDB store at `path` to `<path>.surrealdb2-<UTC
+/// timestamp>` and return the new path, holding RocksDB's lock on it
+/// meanwhile; the reason when it cannot (a live process holds the store,
+/// the new name is taken, or the rename fails).
+fn set_aside_rocksdb_store(path: &Path) -> Result<std::path::PathBuf, String> {
+    let lock = surrealkv_compat_rocksdb::lock_directory(path).map_err(|e| e.to_string())?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".surrealdb2-{stamp}"));
+    let aside = std::path::PathBuf::from(aside);
+    if aside.exists() {
+        return Err(format!("{} already exists", aside.display()));
+    }
+    std::fs::rename(path, &aside).map_err(|e| e.to_string())?;
+    drop(lock);
+    Ok(aside)
+}
+
 impl DbConnection {
-    /// Connect to a RocksDB database at the given path
-    pub async fn connect_rocksdb(path: impl AsRef<Path>) -> Result<Self, DbError> {
+    /// Connect to the SurrealKV store at `path`, creating it (and its parent
+    /// directories) when it does not exist.
+    ///
+    /// A store written by SurrealDB 2 (p2a 0.5 and earlier), which kept its
+    /// rows in RocksDB, is refused by SurrealDB 4. When the open fails on a
+    /// directory that holds RocksDB's files (a `CURRENT` file and a
+    /// `MANIFEST-*` file, which is what SurrealDB 4 refuses), the directory
+    /// is renamed to `<path>.surrealdb2-<UTC timestamp>`, with a warning that
+    /// names both paths, and a fresh store is opened at `path`; the old one
+    /// can be exported with SurrealDB 2's `surreal export`. A RocksDB
+    /// directory that a live process holds (RocksDB's lock on its `LOCK`
+    /// file) is left alone, and so is a store that fails to open for any
+    /// other reason: the error is returned.
+    pub async fn connect_surrealkv(path: impl AsRef<Path>) -> Result<Self, DbError> {
         let path = path.as_ref();
-        tracing::info!("Connecting to SurrealDB RocksDB at {:?}", path);
+        tracing::info!("Connecting to SurrealDB SurrealKV at {:?}", path);
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -315,11 +372,39 @@ impl DbConnection {
             })?;
         }
 
-        let db = Surreal::new::<RocksDb>(path)
-            .await
-            .map_err(|e| DbError::Connection(e.to_string()))?;
+        let db = match Surreal::new::<SurrealKv>(path).await {
+            Ok(db) => db,
+            Err(e) if holds_rocksdb_files(path) => {
+                let aside = set_aside_rocksdb_store(path).map_err(|reason| {
+                    DbError::Connection(format!(
+                        "{e}; the store at {} was written by an older release \
+                         (SurrealDB 2, RocksDB) and was not moved aside: {reason}",
+                        path.display()
+                    ))
+                })?;
+                tracing::warn!(
+                    old_store = %aside.display(),
+                    new_store = %path.display(),
+                    "The conversation store was written by an older release (SurrealDB 2, \
+                     RocksDB), which this one cannot read. It was moved aside, and a new, \
+                     empty store was started in its place; export the old one with \
+                     SurrealDB 2's `surreal export`"
+                );
+                Surreal::new::<SurrealKv>(path)
+                    .await
+                    .map_err(|e| DbError::Connection(e.to_string()))?
+            }
+            Err(e) => return Err(DbError::Connection(e.to_string())),
+        };
 
         Self::setup(db).await
+    }
+
+    /// The name [`connect_surrealkv`](Self::connect_surrealkv) had while the
+    /// store ran on SurrealDB 2's RocksDB engine. SurrealDB 4 has none: this
+    /// opens a SurrealKV store at `path`, as `connect_surrealkv` does.
+    pub async fn connect_rocksdb(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        Self::connect_surrealkv(path).await
     }
 
     /// Connect to an in-memory database (for testing)
@@ -747,6 +832,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS na_strings ON dataset_meta TYPE option<array<string>>;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session ON dataset_meta COLUMNS session_id;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_id ON dataset_meta COLUMNS id UNIQUE;
+            DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session_name ON dataset_meta COLUMNS session_id, name UNIQUE;
         "#;
 
         db.query(schema).await?;
@@ -780,7 +866,7 @@ impl DbConnection {
             )
             .await?;
 
-        #[derive(serde::Deserialize, Default)]
+        #[derive(SurrealValue, Default)]
         struct StatsResult {
             sessions: Option<i64>,
             conversations: Option<i64>,

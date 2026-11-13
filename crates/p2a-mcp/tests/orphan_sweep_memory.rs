@@ -1,6 +1,6 @@
 //! What the orphan sweeps of the conversation store read and hold, measured
-//! with a counting global allocator on a RocksDB store (the configuration of
-//! a self-hosted server that keeps its history across restarts).
+//! with a counting global allocator on a SurrealKV store (the configuration
+//! of a self-hosted server that keeps its history across restarts).
 //!
 //! The first sweep after every start (`DbConnection::delete_orphans`) used to
 //! read every stored message, tool call and settings row in a grouped scan,
@@ -12,9 +12,15 @@
 //! ids), and to holding one session's conversation rows at a time.
 //!
 //! The allocator counts the Rust allocations of this test binary: every
-//! value SurrealDB reads from the store is decoded there, while RocksDB's
-//! own buffers and caches (C++) are not counted. The tests take turns
-//! (`TURN`) for their whole run, setup included.
+//! value SurrealDB reads from the store is decoded there. SurrealKV is Rust
+//! too, so its block cache is counted as well: the first read of a block
+//! keeps it in the cache, which is the engine's memory, not the sweep's (the
+//! RocksDB engine of SurrealDB 2 kept its cache in C++, which was not
+//! counted). Each test therefore reads every table once ([`warm`]) before it
+//! measures, so that what a sweep holds is not hidden behind the cache
+//! filling, and what it reads still counts (every row read is decoded
+//! again). The tests take turns (`TURN`) for their whole run, setup
+//! included.
 //!
 //! Run with `cargo test -p p2a-mcp --features full --test orphan_sweep_memory`.
 //! CI does not: its feature set for p2a-mcp leaves out `db`, which compiles
@@ -109,13 +115,33 @@ async fn measure<T>(f: impl std::future::Future<Output = T>) -> Measured<T> {
     }
 }
 
-/// A RocksDB store in a fresh directory (kept alive by the returned guard).
-async fn rocksdb() -> (DbConnection, tempfile::TempDir) {
+/// A SurrealKV store in a fresh directory (kept alive by the returned guard).
+async fn surrealkv() -> (DbConnection, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbConnection::connect_rocksdb(dir.path().join("db"))
+    let db = DbConnection::connect_surrealkv(dir.path().join("db"))
         .await
         .unwrap();
     (db, dir)
+}
+
+/// Read every row of every table once, so that the store's block cache
+/// holds them before a sweep is measured (see the module docs).
+async fn warm(db: &DbConnection) {
+    for table in [
+        "sessions",
+        "settings",
+        "conversations",
+        "messages",
+        "tool_calls",
+        "dataset_meta",
+    ] {
+        db.db()
+            .query(format!("SELECT * FROM {table}"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
 }
 
 /// Text of `n` bytes that differs from row to row (`seed`), so that no layer
@@ -149,12 +175,16 @@ async fn insert_orphan_tool_call(db: &DbConnection, conversation_id: &str) {
 
 /// The full sweep reads neither the messages and tool calls of conversations
 /// that exist nor the settings of sessions that exist: it allocates less
-/// than a quarter of their bytes (it allocates about 13 percent of them).
-/// The bound guards each of three tables on its own: the 32 MiB of
-/// messages, the 8 MiB of tool-call arguments and the 8 MiB of settings
-/// strings. A grouped scan allocates about 2.1 times the bytes it reads, so
-/// reading only the live tool calls, or only the live settings, takes the
-/// sweep to about twice the bound. Dataset metadata (none is stored here)
+/// than a quarter of their bytes. The bound guards each of three tables on
+/// its own: the 64 MiB of messages, the 16 MiB of tool-call arguments and
+/// the 16 MiB of settings strings. A grouped scan allocates about 2.1 times
+/// the bytes it reads, so reading only the live tool calls, or only the live
+/// settings, takes the sweep well past the bound. What the sweep allocates
+/// without reading them is mostly a constant of the store: SurrealDB 4
+/// allocates about a megabyte for each write statement, however small, and
+/// the sweep deletes the orphans below in about ten statements; the rows
+/// are large enough (twice what they were under SurrealDB 2) that this
+/// constant stays well below a quarter of them. Dataset metadata (none is stored here)
 /// and the conversation rows (read for their ids; see
 /// `full_orphan_sweep_holds_one_sessions_conversation_rows_at_a_time`) are
 /// not guarded by it. The sweep still finds the orphans before, between,
@@ -162,21 +192,21 @@ async fn insert_orphan_tool_call(db: &DbConnection, conversation_id: &str) {
 #[tokio::test]
 async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
     let _turn = TURN.lock().await;
-    let (db, _dir) = rocksdb().await;
+    let (db, _dir) = surrealkv().await;
     let mut stored = 0usize;
 
-    // Two sessions with long settings strings.
-    for s in ["s1", "s2"] {
+    // Four sessions with long settings strings.
+    for (i, s) in ["s1", "s2", "s3", "s4"].into_iter().enumerate() {
         db.set_session_last_accessed(s, chrono::Utc::now())
             .await
             .unwrap();
         let mut settings = db.get_or_create_settings(s).await.unwrap();
-        settings.system_prompt = Some(text(2 * 1024 * 1024, s.len() + 7));
-        settings.base_url = Some(text(2 * 1024 * 1024, s.len() + 11));
+        settings.system_prompt = Some(text(2 * 1024 * 1024, i + 7));
+        settings.base_url = Some(text(2 * 1024 * 1024, i + 11));
         stored += 4 * 1024 * 1024;
         db.update_settings(&settings).await.unwrap();
     }
-    // Two conversations of s1 with 32 MiB of messages and 8 MiB of tool-call
+    // Two conversations of s1 with 64 MiB of messages and 16 MiB of tool-call
     // arguments between them.
     let mut kept = Vec::new();
     for c in 0..2 {
@@ -187,7 +217,7 @@ async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
             .id_string();
         for m in 0..32 {
             let msg = db
-                .add_message(&id, "user", &text(512 * 1024, c * 100 + m))
+                .add_message(&id, "user", &text(1024 * 1024, c * 100 + m))
                 .await
                 .unwrap();
             stored += msg.content.len();
@@ -196,7 +226,7 @@ async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
                     msg.id_string(),
                     id.clone(),
                     "regression_ols".into(),
-                    text(512 * 1024, 1_000 + c * 100 + m),
+                    text(1024 * 1024, 1_000 + c * 100 + m),
                 );
                 stored += call.arguments.len();
                 db.create_tool_call(&call).await.unwrap();
@@ -219,6 +249,7 @@ async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
         insert_orphan_tool_call(&db, owner).await;
     }
 
+    warm(&db).await;
     let sweep = measure(db.delete_orphans()).await;
     assert_eq!(sweep.out.unwrap(), 2 * orphan_owners.len());
     assert!(
@@ -231,7 +262,7 @@ async fn full_orphan_sweep_does_not_read_the_rows_of_live_owners() {
         let calls = db.get_tool_calls_for_conversation(id).await.unwrap();
         assert_eq!(calls.len(), 8);
     }
-    for s in ["s1", "s2"] {
+    for s in ["s1", "s2", "s3", "s4"] {
         let settings = db.get_or_create_settings(s).await.unwrap();
         assert_eq!(
             settings.system_prompt.map(|p| p.len()),
@@ -275,9 +306,10 @@ async fn store_with_long_titles(db: &DbConnection, orphans: usize) -> usize {
 #[tokio::test]
 async fn full_orphan_sweep_holds_one_sessions_conversation_rows_at_a_time() {
     let _turn = TURN.lock().await;
-    let (db, _dir) = rocksdb().await;
+    let (db, _dir) = surrealkv().await;
     let titles = store_with_long_titles(&db, 4).await;
 
+    warm(&db).await;
     let sweep = measure(db.delete_orphans()).await;
     assert_eq!(sweep.out.unwrap(), 4);
     assert!(
@@ -297,7 +329,7 @@ async fn full_orphan_sweep_holds_one_sessions_conversation_rows_at_a_time() {
 #[tokio::test]
 async fn recent_orphan_sweep_does_not_hold_the_conversation_rows() {
     let _turn = TURN.lock().await;
-    let (db, _dir) = rocksdb().await;
+    let (db, _dir) = surrealkv().await;
     let titles = store_with_long_titles(&db, 0).await;
     let gone = db
         .create_conversation("s00", "gone")
@@ -307,6 +339,7 @@ async fn recent_orphan_sweep_does_not_hold_the_conversation_rows() {
     db.delete_conversation(&gone).await.unwrap();
     insert_orphan_message(&db, &gone).await;
 
+    warm(&db).await;
     let sweep = measure(db.delete_recent_orphans()).await;
     assert_eq!(sweep.out.unwrap(), 1);
     assert!(

@@ -1,8 +1,7 @@
 //! Conversation CRUD operations
 
 use chrono::Utc;
-use surrealdb::RecordId;
-use surrealdb::sql::Datetime;
+use surrealdb::types::{Datetime, RecordId, SurrealValue};
 
 use super::connection::{DbConnection, DbError, failed_statement, run_to_end};
 use super::models::{Conversation, ConversationWithMessages, Message, MessageRole};
@@ -122,7 +121,7 @@ impl DbConnection {
             let mut result = db
                 .db()
                 .query("UPDATE conversations SET title = $title, updated_at = time::now() WHERE id = $id RETURN AFTER")
-                .bind(("id", RecordId::from(("conversations", id.as_str()))))
+                .bind(("id", RecordId::new("conversations", id.as_str())))
                 .bind(("title", title))
                 .await?;
 
@@ -153,7 +152,7 @@ impl DbConnection {
             let mut result = db
                 .db()
                 .query("UPDATE conversations SET is_archived = $archived, updated_at = time::now() WHERE id = $id RETURN AFTER")
-                .bind(("id", RecordId::from(("conversations", id.as_str()))))
+                .bind(("id", RecordId::new("conversations", id.as_str())))
                 .bind(("archived", is_archived))
                 .await?;
 
@@ -221,8 +220,8 @@ impl DbConnection {
     /// (a message add or content update, a title or archive change, a
     /// tool-call create, update or status change) takes that turn too and
     /// holds it until the store has finished, so none commits on a row while
-    /// this transaction deletes it: on RocksDB, which validates an optimistic
-    /// transaction's writes when it commits, one that did would fail this
+    /// this transaction deletes it: the store validates an optimistic
+    /// transaction's writes when it commits, so one that did would fail this
     /// whole with a write-conflict error (nothing deleted; a retry succeeds).
     async fn delete_conversation_rows(
         &self,
@@ -256,24 +255,24 @@ impl DbConnection {
             .query(finish_statement)
             .query("COMMIT TRANSACTION")
             .bind(("id", id.to_string()))
-            .bind(("conv", RecordId::from(("conversations", id))))
+            .bind(("conv", RecordId::new("conversations", id)))
             .await?;
         if let Some(error) = failed_statement(response.take_errors()) {
             return Err(error.into());
         }
 
-        // Committed: BEGIN and COMMIT return nothing, so the three
-        // statements' results are 0, 1 and 2.
+        // Committed: BEGIN and COMMIT take result slots of their own (0 and
+        // 4), so the three statements' results are 1, 2 and 3.
         let mut removed = Removed::default();
         if measure {
-            let tool_calls: Vec<ToolCallText> = response.take(0)?;
-            let messages: Vec<MessageText> = response.take(1)?;
+            let tool_calls: Vec<ToolCallText> = response.take(1)?;
+            let messages: Vec<MessageText> = response.take(2)?;
             removed.messages = messages.len();
             removed.bytes =
                 tool_call_text_bytes(&tool_calls).saturating_add(message_text_bytes(&messages));
         }
         if let Finish::DeleteConversation = finish {
-            let deleted: Option<Conversation> = response.take(2)?;
+            let deleted: Option<Conversation> = response.take(3)?;
             if let Some(conv) = deleted {
                 removed.conversation = true;
                 if measure {
@@ -355,7 +354,7 @@ impl DbConnection {
     /// The number of message rows conversation `conversation_id` holds, as
     /// the store counts them now; a failed count is an error.
     pub(crate) async fn count_messages(&self, conversation_id: &str) -> Result<usize, DbError> {
-        #[derive(serde::Deserialize)]
+        #[derive(SurrealValue)]
         struct CountResult {
             count: i64,
         }
@@ -375,7 +374,7 @@ impl DbConnection {
     async fn set_message_count(&self, conversation_id: &str, count: i32) -> Result<(), DbError> {
         self.db()
             .query("UPDATE conversations SET message_count = $count WHERE id = $id RETURN NONE")
-            .bind(("id", RecordId::from(("conversations", conversation_id))))
+            .bind(("id", RecordId::new("conversations", conversation_id)))
             .bind(("count", count))
             .await?
             .check()?;
@@ -404,7 +403,7 @@ impl DbConnection {
         let conv_id = conversation_id.to_string();
         self.db()
             .query("UPDATE conversations SET message_count = $count, last_message_preview = $preview, updated_at = time::now() WHERE id = $id")
-            .bind(("id", RecordId::from(("conversations", conv_id.as_str()))))
+            .bind(("id", RecordId::new("conversations", conv_id.as_str())))
             .bind(("count", message_count))
             .bind(("preview", preview))
             .await?
@@ -452,11 +451,11 @@ impl DbConnection {
         };
         let msg_id = uuid::Uuid::new_v4().to_string();
         let message = Message {
-            id: RecordId::from(("messages", msg_id.as_str())),
+            id: RecordId::new("messages", msg_id.as_str()),
             conversation_id: conversation_id.to_string(),
             role,
             content: content.to_string(),
-            created_at: Datetime::from(Utc::now()),
+            created_at: Datetime::now(),
             token_count: None,
             model: None,
             finish_reason: None,
@@ -569,7 +568,7 @@ impl DbConnection {
             let mut result = db
                 .db()
                 .query("UPDATE messages SET content = $content WHERE id = $id RETURN AFTER")
-                .bind(("id", RecordId::from(("messages", message_id.as_str()))))
+                .bind(("id", RecordId::new("messages", message_id.as_str())))
                 .bind(("content", content))
                 .await?;
 

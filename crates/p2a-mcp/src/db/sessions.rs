@@ -3,8 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use surrealdb::RecordId;
-use surrealdb::sql::Datetime;
+use surrealdb::types::{Datetime, RecordId, SurrealValue};
 
 use super::connection::{DbConnection, DbError, failed_statement};
 use super::models::{DbSession, Settings, key_string};
@@ -40,7 +39,7 @@ async fn remove_stored_session_dir(id: &str) {
 }
 
 /// One row of `SELECT count() ... GROUP ALL`.
-#[derive(serde::Deserialize)]
+#[derive(SurrealValue)]
 struct CountRow {
     count: i64,
 }
@@ -179,7 +178,7 @@ where
 }
 
 /// A conversation the orphan sweep deletes: its id and its session.
-#[derive(serde::Deserialize)]
+#[derive(SurrealValue)]
 struct ConversationOwner {
     id: RecordId,
     session_id: String,
@@ -201,7 +200,7 @@ struct OwnerGap<'a> {
 
 /// The `$lo` and `$hi` of [`OwnerGap::condition`], bound as query
 /// parameters.
-#[derive(serde::Serialize)]
+#[derive(SurrealValue)]
 struct GapBounds {
     lo: String,
     hi: String,
@@ -272,14 +271,14 @@ fn owner_gaps<'a>(owners: &[&'a str]) -> Vec<OwnerGap<'a>> {
 
 /// The text of a message row that the `session_db_bytes` budget counts.
 /// Other fields of the row are ignored.
-#[derive(serde::Deserialize)]
+#[derive(SurrealValue)]
 pub(super) struct MessageText {
     content: String,
 }
 
 /// The text of a tool-call row that the `session_db_bytes` budget counts.
 /// Other fields of the row are ignored.
-#[derive(serde::Deserialize)]
+#[derive(SurrealValue)]
 pub(super) struct ToolCallText {
     arguments: String,
     result: Option<String>,
@@ -340,7 +339,7 @@ impl DbConnection {
         let id_owned = id.to_string();
         self.db()
             .query("UPDATE sessions SET last_accessed = time::now() WHERE id = $id")
-            .bind(("id", RecordId::from(("sessions", id_owned.as_str()))))
+            .bind(("id", RecordId::new("sessions", id_owned.as_str())))
             .await?;
         Ok(())
     }
@@ -355,7 +354,7 @@ impl DbConnection {
         let mut result = self
             .db()
             .query("UPDATE $id SET last_accessed = $at RETURN AFTER")
-            .bind(("id", RecordId::from(("sessions", id))))
+            .bind(("id", RecordId::new("sessions", id)))
             .bind(("at", Datetime::from(at)))
             .await?;
         let updated: Vec<DbSession> = result.take(0)?;
@@ -386,7 +385,7 @@ impl DbConnection {
         let session_id_owned = session_id.to_string();
         self.db()
             .query("UPDATE sessions SET active_conversation_id = $conv_id, last_accessed = time::now() WHERE id = $id")
-            .bind(("id", RecordId::from(("sessions", session_id_owned.as_str()))))
+            .bind(("id", RecordId::new("sessions", session_id_owned.as_str())))
             .bind(("conv_id", conversation_id.map(|s| s.to_string())))
             .await?;
         Ok(())
@@ -401,7 +400,7 @@ impl DbConnection {
         let session_id_owned = session_id.to_string();
         self.db()
             .query("UPDATE sessions SET dataset_names = $names, last_accessed = time::now() WHERE id = $id")
-            .bind(("id", RecordId::from(("sessions", session_id_owned.as_str()))))
+            .bind(("id", RecordId::new("sessions", session_id_owned.as_str())))
             .bind(("names", dataset_names))
             .await?;
         Ok(())
@@ -416,7 +415,7 @@ impl DbConnection {
         let session_id_owned = session_id.to_string();
         self.db()
             .query("UPDATE sessions SET global_seed = $seed, last_accessed = time::now() WHERE id = $id")
-            .bind(("id", RecordId::from(("sessions", session_id_owned.as_str()))))
+            .bind(("id", RecordId::new("sessions", session_id_owned.as_str())))
             .bind(("seed", seed))
             .await?;
         Ok(())
@@ -623,7 +622,7 @@ impl DbConnection {
     /// conversation's delete or a delete that stopped half way, and both
     /// leave the conversation's id behind; remembering it for two calls also
     /// finds a racing write that lands after the next call started. Orphans
-    /// from before the process started (a RocksDB store after a crash) need
+    /// from before the process started (a SurrealKV store after a crash) need
     /// one full sweep. When more conversations were deleted than are
     /// remembered, this sweeps in full.
     pub async fn delete_recent_orphans(&self) -> Result<usize, DbError> {
@@ -631,7 +630,7 @@ impl DbConnection {
     }
 
     async fn delete_orphans_in(&self, scan: OrphanScan) -> Result<usize, DbError> {
-        let started = Datetime::from(Utc::now());
+        let started = Datetime::now();
         let session_ids: HashSet<String> = {
             let mut result = self.db().query("SELECT * FROM sessions").await?;
             let rows: Vec<DbSession> = result.take(0)?;
@@ -744,7 +743,7 @@ impl DbConnection {
                 gap.condition("session_id")
             ))
             .bind(gap.bounds())
-            .bind(("started", started.clone()))
+            .bind(("started", *started))
             .await?;
         let orphans: Vec<ConversationOwner> = result.take(0)?;
         let mut batch = Batch {
@@ -887,8 +886,9 @@ impl DbConnection {
         }
         let count =
             |row: Option<CountRow>| row.map_or(0, |c| usize::try_from(c.count).unwrap_or(0));
-        let in_range = count(result.take(0)?);
-        let owned = count(result.take(1)?);
+        // BEGIN takes result slot 0, so the two counts are 1 and 2.
+        let in_range = count(result.take(1)?);
+        let owned = count(result.take(2)?);
         Ok(in_range.saturating_sub(owned))
     }
 
@@ -938,7 +938,7 @@ impl DbConnection {
         started: &Datetime,
         owners: &std::sync::Mutex<HashSet<String>>,
     ) -> Result<Batch, DbError> {
-        #[derive(serde::Deserialize)]
+        #[derive(SurrealValue)]
         struct OwnedRow {
             id: RecordId,
             owner: String,
@@ -947,7 +947,7 @@ impl DbConnection {
             .db()
             .query(select)
             .bind(gap.bounds())
-            .bind(("started", started.clone()))
+            .bind(("started", *started))
             .await?;
         let rows: Vec<OwnedRow> = result.take(0)?;
         let read = rows.len();
@@ -981,7 +981,7 @@ impl DbConnection {
             .bind(("cutoff", cutoff))
             .await?;
 
-        #[derive(serde::Deserialize)]
+        #[derive(SurrealValue)]
         struct IdOnly {
             id: RecordId,
         }
@@ -991,7 +991,7 @@ impl DbConnection {
 
         // Delete each old session
         for session in old_sessions {
-            let id_str = session.id.key().to_string();
+            let id_str = key_string(&session.id);
             if let Err(e) = self.delete_session(&id_str).await {
                 tracing::warn!("Failed to delete old session {}: {}", id_str, e);
             }
@@ -1037,12 +1037,12 @@ impl DbConnection {
             self.check_message_bytes(what, "setting", value.map_or(0, String::len))?;
         }
         let mut updated_settings = settings.clone();
-        updated_settings.updated_at = Datetime::from(Utc::now());
+        updated_settings.updated_at = Datetime::now();
         let session_id = settings.session_id.clone();
 
         let result: Option<Settings> = self
             .db()
-            .update(("settings", &session_id))
+            .update(("settings", session_id.as_str()))
             .content(updated_settings)
             .await?;
 
@@ -1086,10 +1086,7 @@ impl DbConnection {
         let mut result = self
             .db()
             .query(&query)
-            .bind((
-                "id",
-                RecordId::from(("settings", session_id_owned.as_str())),
-            ))
+            .bind(("id", RecordId::new("settings", session_id_owned.as_str())))
             .bind(("provider", provider.map(|s| s.to_string())))
             .bind(("model", model.map(|s| s.to_string())))
             .bind(("temperature", temperature))

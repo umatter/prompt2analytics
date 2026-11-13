@@ -38,7 +38,7 @@ pub struct PersistentSessionManager {
 
 #[cfg(feature = "db")]
 impl PersistentSessionManager {
-    /// Create a persistent session manager over a RocksDB store at `db_path`
+    /// Create a persistent session manager over a SurrealKV store at `db_path`
     /// (in memory when `None`), sharing the live registry `sessions` and
     /// applying `limits` to every write.
     pub async fn new(
@@ -47,7 +47,7 @@ impl PersistentSessionManager {
         limits: PersistenceLimits,
     ) -> Result<Self, DbError> {
         let db = match db_path {
-            Some(path) => DbConnection::connect_rocksdb(path).await?,
+            Some(path) => DbConnection::connect_surrealkv(path).await?,
             None => DbConnection::connect_memory().await?,
         };
         Ok(Self::from_connection(db, sessions, limits))
@@ -106,7 +106,7 @@ impl PersistentSessionManager {
     /// Get a live session by ID, touching it.
     ///
     /// A session that is not live but whose row was accessed within the TTL
-    /// (a RocksDB store after a restart) is adopted into the live registry,
+    /// (a SurrealKV store after a restart) is adopted into the live registry,
     /// subject to its capacity. A row older than the TTL gives `Expired`, no
     /// row gives `NotFound`. This never deletes rows: the removal listener and
     /// the sweep do that.
@@ -1631,7 +1631,7 @@ mod tests {
             .db()
             .query(format!(
                 "DEFINE EVENT refuse_row ON TABLE sessions \
-                 WHEN $event = 'CREATE' AND $after.id = type::thing('sessions', '{refused}') \
+                 WHEN $event = 'CREATE' AND $after.id = type::record('sessions', '{refused}') \
                  THEN {{ THROW 'refused' }}"
             ))
             .await

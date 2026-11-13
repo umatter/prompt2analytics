@@ -18,8 +18,8 @@
 //! valid UTF-8 and no function here panics. The crate has no dependencies, uses only `core`/`std`
 //! string APIs and builds for `wasm32-unknown-unknown`.
 //!
-//! `str::floor_char_boundary` is not stable at the workspace MSRV (1.89), hence
-//! [`floor_char_boundary`].
+//! [`floor_char_boundary`] predates `str::floor_char_boundary`, which was not stable at the
+//! workspace's earlier MSRV (1.89); it stays part of this crate's API.
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;

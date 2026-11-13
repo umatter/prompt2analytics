@@ -1011,7 +1011,7 @@ async fn get_session_answers_internal_on_a_store_failure() {
         .db()
         .db()
         .query("REMOVE TABLE sessions")
-        .query("CREATE type::thing('sessions', $id) SET last_accessed = 'not-a-date'")
+        .query("CREATE type::record('sessions', $id) SET last_accessed = 'not-a-date'")
         .bind(("id", broken.clone()))
         .await
         .unwrap()

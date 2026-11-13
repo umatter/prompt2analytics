@@ -1,7 +1,8 @@
 //! Database persistence layer using SurrealDB
 //!
 //! This module provides persistent storage for sessions, conversations,
-//! messages, and settings using SurrealDB with an embedded RocksDB backend.
+//! messages, and settings using SurrealDB 4 with an embedded SurrealKV backend
+//! (or in memory).
 //!
 //! # Features
 //!
@@ -18,7 +19,7 @@
 //! use p2a_mcp::db::{DbConnection, Conversation, Message};
 //!
 //! // Connect to database
-//! let db = DbConnection::connect_rocksdb("./data/p2a.db").await?;
+//! let db = DbConnection::connect_surrealkv("./data/p2a.db").await?;
 //!
 //! // Create a conversation
 //! let conv = db.create_conversation("session-123", "My Chat").await?;
@@ -42,7 +43,9 @@ mod tool_calls;
 mod tests;
 
 pub use connection::{DbConnection, DbError, DbStats, PersistenceLimits};
-pub use dataset_meta::{MAX_STORED_COLUMN_NAME_BYTES, MAX_STORED_COLUMN_NAMES};
+pub use dataset_meta::{
+    MAX_DATASET_META_ROWS_PER_SESSION, MAX_STORED_COLUMN_NAME_BYTES, MAX_STORED_COLUMN_NAMES,
+};
 pub use models::{
     Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole, Settings,
     ToolCall, ToolCallStatus,

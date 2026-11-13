@@ -1,5 +1,6 @@
 //! Dataset metadata CRUD operations
 
+use surrealdb::types::SurrealValue;
 use tracing;
 
 use super::connection::{DbConnection, DbError, run_to_end};
@@ -9,14 +10,22 @@ use super::models::DatasetMeta;
 /// first ones; `column_count` keeps its width).
 ///
 /// The names are for display (the dataset sidebar and inspector, the chat
-/// input's suggestions). The store's work on a row is quadratic in the
-/// length of an array field: `column_names TYPE array<string>` implicitly
-/// defines `column_names[*]`, and the schema check of a SCHEMAFULL row
-/// (surrealdb-core 2.4 `cleanup_table_fields`) looks each element's path up
-/// in a list of every element's path. The embedded engine runs each query
-/// in a task on the server's async runtime, whoever awaits it, so an
-/// unbounded list let one wide dataset hold a runtime worker for minutes.
+/// input's suggestions). Measured on SurrealDB 2.4, the store's work on a
+/// row was quadratic in the length of an array field: `column_names TYPE
+/// array<string>` implicitly defines `column_names[*]`, and the schema check
+/// of a SCHEMAFULL row (surrealdb-core 2.4 `cleanup_table_fields`) looked
+/// each element's path up in a list of every element's path. The embedded
+/// engine runs each query in a task on the server's async runtime, whoever
+/// awaits it, so an unbounded list let one wide dataset hold a runtime worker
+/// for minutes. The bound stays on SurrealDB 4: the names are for display.
 pub const MAX_STORED_COLUMN_NAMES: usize = 1_000;
+
+/// The most dataset metadata rows one session keeps when the server sets a
+/// `session_db_bytes` budget: a save under a new name past them is refused
+/// with `QuotaExceeded`, while a save that replaces a row is not. Without a
+/// budget there is no bound. The bytes budget alone would admit tens of
+/// thousands of small rows, each of which the dataset sidebar lists.
+pub const MAX_DATASET_META_ROWS_PER_SESSION: usize = 1_000;
 
 /// The most bytes of column names one dataset's metadata row keeps: a few
 /// long names stop the list earlier.
@@ -44,14 +53,14 @@ const DATASET_META_FIXED_BYTES: u64 = 128;
 
 /// The texts of a stored dataset metadata row that the `session_db_bytes`
 /// budget counts. Other fields of the row are ignored.
-#[derive(serde::Deserialize)]
+#[derive(SurrealValue)]
 struct DatasetMetaText {
     session_id: String,
     name: String,
     source_path: Option<String>,
     source_type: String,
     column_names: Vec<String>,
-    #[serde(default)]
+    #[surreal(default)]
     na_strings: Option<Vec<String>>,
 }
 
@@ -124,7 +133,7 @@ fn stored_meta(meta: &DatasetMeta) -> DatasetMeta {
         row_count: meta.row_count,
         column_count: meta.column_count,
         column_names: stored_column_names(&meta.column_names),
-        loaded_at: meta.loaded_at.clone(),
+        loaded_at: meta.loaded_at,
         file_size_bytes: meta.file_size_bytes,
         na_strings: meta.na_strings.clone(),
     }
@@ -176,6 +185,12 @@ impl DbConnection {
         let existing = self
             .get_dataset_meta(&stored.session_id, &stored.name)
             .await?;
+
+        // Under a budget a session keeps a bounded number of rows; a row
+        // that replaces one under its name adds none.
+        if existing.is_none() && self.tracks_session_bytes() {
+            self.check_dataset_meta_rows(&stored.session_id).await?;
+        }
 
         // Only what the row adds over the row it replaces counts; what it
         // frees is released once it is written.
@@ -406,6 +421,30 @@ impl DbConnection {
         Ok(dataset_meta_text_bytes(&rows))
     }
 
+    /// Refuse with `QuotaExceeded` when the session already keeps
+    /// [`MAX_DATASET_META_ROWS_PER_SESSION`] dataset metadata rows.
+    async fn check_dataset_meta_rows(&self, session_id: &str) -> Result<(), DbError> {
+        #[derive(Debug, SurrealValue)]
+        struct Count {
+            count: u64,
+        }
+        let mut result = self
+            .db()
+            .query("SELECT count() FROM dataset_meta WHERE session_id = $session_id GROUP ALL")
+            .bind(("session_id", session_id.to_string()))
+            .await?;
+        let count: Option<Count> = result.take(0)?;
+        let rows = count.map_or(0, |c| c.count);
+        if rows >= MAX_DATASET_META_ROWS_PER_SESSION as u64 {
+            return Err(DbError::QuotaExceeded(format!(
+                "this session already keeps the metadata of {rows} datasets, and this server \
+                 keeps at most {MAX_DATASET_META_ROWS_PER_SESSION} per session; remove a \
+                 dataset, or start a new session"
+            )));
+        }
+        Ok(())
+    }
+
     /// Update the source path for a dataset (useful when file moves). With a
     /// `session_db_bytes` budget, the bytes a longer path adds count against
     /// it (`QuotaExceeded` when they would pass it), and those a shorter one
@@ -435,14 +474,14 @@ impl DbConnection {
             // The stored path's length is needed only for the session's
             // byte counter; without a budget the update alone finds the row
             // (or nothing, which is `NotFound`).
-            let mut freed = 0;
+            let (mut reserved, mut freed) = (0, 0);
             if db.tracks_session_bytes() {
                 let Some(existing) = db.get_dataset_meta(&session_id, &name).await? else {
                     return Err(not_found());
                 };
                 let old = existing.source_path.as_deref().map_or(0, str::len);
-                db.reserve_session_bytes(&session_id, source_path.len().saturating_sub(old) as u64)
-                    .await?;
+                reserved = source_path.len().saturating_sub(old) as u64;
+                db.reserve_session_bytes(&session_id, reserved).await?;
                 freed = old.saturating_sub(source_path.len()) as u64;
             }
 
@@ -458,8 +497,17 @@ impl DbConnection {
                 .bind(("source_path", source_path))
                 .await?;
 
-            let updated: Option<DatasetMeta> = result.take(0)?;
-            let updated = updated.ok_or_else(not_found)?;
+            let mut updated: Vec<DatasetMeta> = result.take(0)?;
+            if updated.len() > 1 {
+                // The (session_id, name) index is unique, so this does not
+                // happen; the reservation is given back all the same.
+                db.release_session_bytes(&session_id, reserved);
+                return Err(DbError::Query(format!(
+                    "{} dataset metadata rows matched session={session_id}, name={name}",
+                    updated.len()
+                )));
+            }
+            let updated = updated.pop().ok_or_else(not_found)?;
             db.release_session_bytes(&session_id, freed);
             Ok(updated)
         })

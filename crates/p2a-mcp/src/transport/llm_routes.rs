@@ -1961,7 +1961,7 @@ async fn stop_unfinished_chat(db: &crate::db::DbConnection, msg_id: &str) {
         .iter()
         .filter(|tc| matches!(tc.status, ToolCallStatus::Pending | ToolCallStatus::Running))
     {
-        let started: chrono::DateTime<chrono::Utc> = tc.started_at.clone().into();
+        let started: chrono::DateTime<chrono::Utc> = tc.started_at.into();
         let elapsed_ms = (chrono::Utc::now() - started).num_milliseconds().max(0);
         let duration_ms = i32::try_from(elapsed_ms).unwrap_or(i32::MAX);
         if let Err(e) = db
