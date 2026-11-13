@@ -196,3 +196,24 @@ medians; synthetic noisy data. Head/base: degree 1 span 0.75 (unified): 1.13 / 1
 Re-measured on the merged tree against `ff8e7559` (one P core, three interleaved runs each): degree 1
 span 0.75 (unified) 0.99 / 1.05 / 1.06 at n = 100 / 1,000 / 10,000; LOESS_Gaussian 1.06 / 0.99 / 0.97;
 LOESS_Robust 0.93 / 0.86 / 0.87 (n = 100 / 1,000 / 5,000).
+
+## Timing (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+| Fit (span 0.3) | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| gaussian, degree 1 | 22.1 -> 23.0 us (1.04x) | 1.18 -> 1.43 ms (1.21x) | 97.9 -> 122.9 ms (1.26x) |
+| gaussian, degree 2 | 24.1 -> 30.6 us (1.27x) | 1.33 -> 2.02 ms (1.52x) | 125.6 -> 212.0 ms (1.69x) |
+| symmetric, iterations 4 | 130 -> 154 us (1.18x) | 7.98 -> 9.24 ms (1.16x) | 611 -> 875 ms (1.43x) |
+
+Above 1.1x, awaiting sign-off. The exact `one.delta` needs `sum_j L_ij^2` per row, the
+squared-weight moments `sum w^2 u^j` accumulated in the trace pass: two (degree 1) to five
+(degree 2) more multiply-adds per neighbourhood row, on top of the scaling of `u`. A degree 2
+rerun gave 1.32x / 1.56x / 1.70x. The symmetric family now runs every fit R runs (no early
+stop) and one more fit, of the pseudovalues, for `s`. Peak RSS at n = 10,000 is unchanged
+(7.2 -> 7.3 MB).

@@ -81,3 +81,15 @@ intercept 0.441594195008563728, slope 0.053890384144849528; `Tol::coef(56)`).
 R's `line()` keeps `±Inf` (it deletes only `NA` pairs, `complete.cases`); p2a's array API
 deletes them, and the dataset paths refuse them.
 
+## Timing (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+| iter | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| 1 | 7.3 -> 5.9 us (0.81x) | 64.9 -> 50.1 us (0.77x) | 1.51 -> 1.23 ms (0.82x) |
+| 3 | 10.3 -> 7.7 us (0.75x) | 105 -> 81 us (0.77x) | 2.28 -> 1.78 ms (0.78x) |

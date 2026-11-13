@@ -125,3 +125,19 @@ under registry deviation ML-34. Registry: `validation/methods/mcp_ml_spatial.jso
 1. Friedman, J. H., & Stuetzle, W. (1981). Projection Pursuit Regression. JASA, 76(376), 817-823.
 2. Hastie, T., Tibshirani, R., & Friedman, J. (2009). The Elements of Statistical Learning (2nd ed.). Springer.
 3. R Core Team. ppr() documentation.
+
+## Timing of the shared spline kernel (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+p = 3, two terms, `sm.method = "spline"` (df 5) and `"gcvspline"`; the outputs are
+bit-identical to the base.
+
+| Smoother | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| spline | 1.63 -> 1.64 ms (1.01x) | 3.70 -> 3.72 ms (1.01x) | 68.2 -> 68.5 ms (1.00x) |
+| gcvspline | 2.52 -> 2.59 ms (1.03x) | 17.4 -> 15.8 ms (0.91x) | 227 -> 236 ms (1.04x) |

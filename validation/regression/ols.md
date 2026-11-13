@@ -403,3 +403,17 @@ P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core --lib --no-default-features --fe
 - Longley, J.W. (1967). "An Appraisal of Least Squares Programs for the Electronic Computer from the Point of View of the User". *Journal of the American Statistical Association*, 62(319), 819-841.
 - Akaike, H. (1974). "A new look at the statistical model identification". *IEEE Transactions on Automatic Control*, 19(6), 716-723.
 - Venables, W.N. & Ripley, B.D. (2002). *Modern Applied Statistics with S* (4th ed.). Springer. (`step`, `extractAIC`)
+
+## Timing of step (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+Backward from five noise candidates (two weak signals), AIC.
+
+| n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|
+| 273 -> 259 us (0.95x) | 0.99 -> 0.97 ms (0.98x) | 8.12 -> 8.36 ms (1.03x) |

@@ -70,3 +70,24 @@ None. Release note: every smooth.spline number changed (the fit, df, lambda on R
 
 `run_smooth_spline` refuses a missing x or y (`NullValues`), as R's smooth.spline; see
 [loess.md](loess.md), "Column Types and Missing Values".
+
+## Timing (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+| Fit | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| spar 0.5 | 18.2 -> 20.1 us (1.11x; 1.08x on a rerun) | 150 -> 100 us (0.67x) | 2.83 -> 1.23 ms (0.44x) |
+| GCV | 200 -> 98 us (0.49x) | 1.82 -> 0.35 ms (0.19x) | 38.3 -> 2.75 ms (0.07x) |
+| df = 6 | 96 -> 76 us (0.79x) | 0.92 -> 0.33 ms (0.36x) | 16.8 -> 2.96 ms (0.18x) |
+| CV | 205 -> 111 us (0.54x) | 1.85 -> 0.39 ms (0.21x) | 37.4 -> 3.23 ms (0.09x) |
+| predict, 100 points | 4.4 -> 2.9 us (0.66x) | 19.2 -> 3.4 us (0.18x) | 193 -> 3.8 us (0.02x) |
+
+The search does a few dozen O(n) band solves where the old code bisected and gridded, and
+predict evaluates the stored coefficients instead of refitting. The spar-fixed row at n = 100
+is at the 1.1x line (1.105 and 1.082 on two runs; 2 us). Peak RSS of one GCV fit at n = 10,000:
+8.1 MB before, 8.0 MB after.
