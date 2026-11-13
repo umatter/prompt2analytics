@@ -200,6 +200,25 @@ pub struct MarginalEffectsResult {
     /// Notes on the computation (aliased regressors whose effects are not defined)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The logit/probit fit the effects came from, which [`contrasts`] needs to recompute
+    /// predictions; `None` for OLS and after deserialisation.
+    #[serde(skip)]
+    pub fit: Option<MarginalFit>,
+}
+
+/// The parts of a logit/probit fit that average comparisons need.
+#[derive(Debug, Clone)]
+pub struct MarginalFit {
+    /// Outcome column
+    pub dep_var: String,
+    /// Regressor columns, in model order (the design adds an intercept first)
+    pub x_cols: Vec<String>,
+    /// Design columns (into `MarginalEffectsResult::variables`) with a finite coefficient
+    pub identified: Vec<usize>,
+    /// Coefficients of the identified columns
+    pub beta: Array1<f64>,
+    /// Variance-covariance of `beta` (inverse information matrix)
+    pub vcov: Array2<f64>,
 }
 
 impl ResultNotes for MarginalEffectsResult {
@@ -339,6 +358,7 @@ pub fn marginal_effects_ols(ols_result: &OlsResult) -> EconResult<MarginalEffect
         variables,
         has_intercept,
         warnings: aliased_warning(&aliased).into_iter().collect(),
+        fit: None,
     })
 }
 
@@ -511,14 +531,20 @@ pub fn marginal_effects_discrete(
 
     let mem: Array1<f64> = &beta * f_z_mean;
 
-    // MEM standard errors (simpler since evaluated at fixed point)
-    // SE(MEM_j) = |f(z_bar)| * SE(beta_j) approximately
-    // More precisely, use delta method with gradient at mean
+    // MEM standard errors by the delta method at x̄: MEM_j = β_j f(z̄) with z̄ = x̄'β, so
+    // G[j][l] = d MEM_j / d β_l = I(j = l) f(z̄) + β_j f'(z̄) x̄_l and SE_j = sqrt(G_j V G_j')
+    // (marginaleffects::slopes(newdata = "mean")).
+    let f_prime_mean = match discrete_result.model_type {
+        DiscreteModelType::Logit => f_z_mean * (1.0 - 2.0 * logistic_cdf(z_mean)),
+        DiscreteModelType::Probit => -z_mean * f_z_mean,
+    };
     let mut mem_se = Array1::zeros(k);
     for j in 0..k {
-        // Simpler approximation: SE(MEM_j) = sqrt(Var(beta_j)) * f(z_mean)
-        // This ignores covariance but is a reasonable approximation
-        mem_se[j] = vcov[[j, j]].max(0.0).sqrt() * f_z_mean.abs();
+        let g_j: Array1<f64> = Array1::from_shape_fn(k, |l| {
+            let indicator = if j == l { f_z_mean } else { 0.0 };
+            indicator + beta[j] * f_prime_mean * x_mean[l]
+        });
+        mem_se[j] = g_j.dot(&vcov.dot(&g_j)).max(0.0).sqrt();
     }
 
     // =========================================================================
@@ -612,6 +638,13 @@ pub fn marginal_effects_discrete(
         variables,
         has_intercept,
         warnings: aliased_warning(&aliased_names).into_iter().collect(),
+        fit: Some(MarginalFit {
+            dep_var: dep_var.to_string(),
+            x_cols: x_cols.iter().map(|c| c.to_string()).collect(),
+            identified: id,
+            beta,
+            vcov,
+        }),
     })
 }
 
@@ -669,7 +702,7 @@ fn compute_discrete_vcov(
     let vcov = sym_inverse(
         info_matrix.view(),
         SingularPolicy::Error,
-        "information matrix for marginal effects",
+        "information matrix",
     )
     .map_err(|e| {
         singular_in(
@@ -746,19 +779,28 @@ pub fn marginal_effects(
 
 /// Compute contrasts between specified values of a variable.
 ///
-/// Contrasts show how the predicted outcome changes when a variable changes
-/// from one value to another, holding other variables constant.
+/// For each pair `(v1, v2)` of `values` (in the order given, `v1` first), the contrast is
+/// the average comparison of the predicted outcome with `variable` set to `v2` and to `v1`
+/// for every observation, the other regressors at their observed values:
+///
+/// - OLS: `beta_j (v2 - v1)`, with SE `|v2 - v1| SE(beta_j)` (exact, the model is linear);
+/// - Logit/Probit: `mean_i(F(z2_i) - F(z1_i))` with `z_k = x_i'beta + beta_j (v_k - x_ij)`,
+///   and the delta-method SE `sqrt(g V g')`, `g = mean_i(f(z2_i) x2_i - f(z1_i) x1_i)` (the
+///   rows `x_k` with `variable` set to `v_k`), as
+///   `marginaleffects::avg_comparisons(fit, variables = list(x = c(v1, v2)))`.
 ///
 /// # Arguments
-/// * `dataset` - The dataset
-/// * `result` - Existing marginal effects result
-/// * `variable` - Name of the variable to contrast
-/// * `values` - Values to contrast (e.g., &[0.0, 1.0] for binary)
+/// * `dataset` - The dataset the model was fitted on (read for logit and probit)
+/// * `result` - Marginal effects from [`marginal_effects`] or [`marginal_effects_discrete`]
+///   (a logit/probit result carries its fit; one without, e.g. after deserialisation, is
+///   refused)
+/// * `variable` - Name of the regressor to contrast (not the intercept, not aliased)
+/// * `values` - At least two finite values (e.g. `&[0.0, 1.0]` for binary)
 ///
 /// # Returns
 /// `ContrastsResult` with pairwise contrasts between all specified values.
 pub fn contrasts(
-    _dataset: &Dataset,
+    dataset: &Dataset,
     result: &MarginalEffectsResult,
     variable: &str,
     values: &[f64],
@@ -772,35 +814,129 @@ pub fn contrasts(
             column: variable.to_string(),
             available: result.variables.clone(),
         })?;
+    if variable == "(Intercept)" {
+        return Err(EconError::InvalidSpecification {
+            message: "contrasts: the intercept is not a regressor that can be set to a value"
+                .to_string(),
+        });
+    }
+    if values.len() < 2 || values.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "contrasts need at least two finite values of '{variable}', got {values:?}"
+            ),
+        });
+    }
+    let m = values.len();
+    let n_pairs = m * (m - 1) / 2;
+    let mut contrasts_vec = crate::resource::try_with_capacity(n_pairs, "contrasts")?;
+    let mut push = |v1: f64, v2: f64, estimate: f64, std_error: f64| {
+        let z_value = if std_error > 1e-12 {
+            estimate / std_error
+        } else {
+            0.0
+        };
+        contrasts_vec.push(ContrastEffect {
+            value1: v1,
+            value2: v2,
+            estimate,
+            std_error,
+            z_value,
+            p_value: normal_p_value_two_sided(z_value),
+        });
+    };
 
-    // For simple contrasts, we use the marginal effect to compute
-    // the change: contrast = ME * (value2 - value1)
-    let me = &result.average_marginal[var_idx];
-
-    let mut contrasts_vec = Vec::new();
-
-    for i in 0..values.len() {
-        for j in (i + 1)..values.len() {
-            let v1 = values[i];
-            let v2 = values[j];
-            let diff = v2 - v1;
-
-            let estimate = me.dy_dx * diff;
-            let std_error = me.std_error * diff.abs();
-            let z_value = if std_error > 1e-12 {
-                estimate / std_error
-            } else {
-                0.0
+    match result.model_type {
+        ModelType::Ols => {
+            // Linear: the comparison is the coefficient times the difference, exactly
+            let me = &result.average_marginal[var_idx];
+            if !me.dy_dx.is_finite() {
+                return Err(aliased_contrast(variable));
+            }
+            for i in 0..m {
+                for j in (i + 1)..m {
+                    let diff = values[j] - values[i];
+                    push(
+                        values[i],
+                        values[j],
+                        me.dy_dx * diff,
+                        me.std_error * diff.abs(),
+                    );
+                }
+            }
+        }
+        ModelType::Logit | ModelType::Probit => {
+            let fit = result
+                .fit
+                .as_ref()
+                .ok_or_else(|| EconError::InvalidSpecification {
+                    message: "contrasts of a logit or probit result need the fit that \
+                          marginal_effects_discrete stores, and this result has none (it is \
+                          not serialised); recompute the marginal effects"
+                        .to_string(),
+                })?;
+            let j = fit
+                .identified
+                .iter()
+                .position(|&c| c == var_idx)
+                .ok_or_else(|| aliased_contrast(variable))?;
+            let x_refs: Vec<&str> = fit.x_cols.iter().map(String::as_str).collect();
+            let cols = ColumnRequest::new(dataset.df())
+                .numeric(&fit.dep_var)
+                .numerics(&x_refs)
+                .na(NaPolicy::Omit)
+                .extract()?;
+            if cols.n() != result.n_obs {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "contrasts: the model was estimated on {} rows but '{}' and the \
+                         regressors have {} complete rows; pass the dataset the model was \
+                         fitted on",
+                        result.n_obs,
+                        fit.dep_var,
+                        cols.n()
+                    ),
+                });
+            }
+            let dm = cols.matrix(&x_refs, true)?;
+            let x = dm.data.select(Axis(1), &fit.identified);
+            let (n, k) = x.dim();
+            let (cdf_fn, pdf_fn): (fn(f64) -> f64, fn(f64) -> f64) = match result.model_type {
+                ModelType::Logit => (logistic_cdf, logistic_pdf),
+                _ => (normal_cdf, normal_pdf),
             };
-            let p_value = normal_p_value_two_sided(z_value);
-
-            contrasts_vec.push(ContrastEffect {
-                value1: v1,
-                value2: v2,
-                estimate,
-                std_error,
-                z_value,
-                p_value,
+            let z: Array1<f64> = x.dot(&fit.beta);
+            let beta_j = fit.beta[j];
+            let mut g = Array1::<f64>::zeros(k);
+            for a in 0..m {
+                for b in (a + 1)..m {
+                    crate::resource::checkpoint()?;
+                    let (v1, v2) = (values[a], values[b]);
+                    g.fill(0.0);
+                    let mut sum = 0.0;
+                    for i in 0..n {
+                        let row = x.row(i);
+                        let z1 = z[i] + beta_j * (v1 - row[j]);
+                        let z2 = z[i] + beta_j * (v2 - row[j]);
+                        sum += cdf_fn(z2) - cdf_fn(z1);
+                        let (f1, f2) = (pdf_fn(z1), pdf_fn(z2));
+                        let df = f2 - f1;
+                        for (gl, &xl) in g.iter_mut().zip(row.iter()) {
+                            *gl += df * xl;
+                        }
+                        // column j is v_k in the counterfactual rows, not x_ij
+                        g[j] += (f2 * v2 - f1 * v1) - df * row[j];
+                    }
+                    let nf = n as f64;
+                    g.mapv_inplace(|v| v / nf);
+                    let var = g.dot(&fit.vcov.dot(&g));
+                    push(v1, v2, sum / nf, var.max(0.0).sqrt());
+                }
+            }
+        }
+        ModelType::Poisson | ModelType::NegBin => {
+            return Err(EconError::InvalidSpecification {
+                message: format!("{} contrasts are not implemented", result.model_type),
             });
         }
     }
@@ -811,6 +947,15 @@ pub fn contrasts(
         contrasts: contrasts_vec,
         n_obs: result.n_obs,
     })
+}
+
+/// The error for a contrast of an aliased regressor (its coefficient is not defined).
+fn aliased_contrast(variable: &str) -> EconError {
+    EconError::InvalidSpecification {
+        message: format!(
+            "contrasts: '{variable}' is aliased in the fit (its coefficient is not defined)"
+        ),
+    }
 }
 
 // =============================================================================
@@ -841,10 +986,7 @@ mod tests {
                 context,
                 suggestion,
             }) => {
-                assert_eq!(
-                    context,
-                    "information matrix for marginal effects: rank 2 of 3; marginal effects"
-                );
+                assert_eq!(context, "information matrix: rank 2 of 3; marginal effects");
                 assert_eq!(suggestion, "Model may have separation or multicollinearity");
             }
             other => panic!("expected SingularMatrix, got {other:?}"),
@@ -887,6 +1029,56 @@ mod tests {
         let z = crate::traits::estimator::z_critical(0.95).unwrap();
         let m = &me.average_marginal[1];
         assert!((m.ci_upper - (m.estimate + z * m.std_error)).abs() < 1e-15);
+    }
+
+    /// Case `me_mem_contrast`: logit and probit marginal effects at the mean with the full
+    /// delta-method gradient G = f(z̄) I + β f'(z̄) x̄' (glm at epsilon 1e-14, cross-checked
+    /// against marginaleffects::slopes(newdata = "mean") in the case).
+    #[test]
+    fn test_validate_marginal_effects_mem() {
+        use p2a_validation::Check;
+        let (case, ds) = crate::test_support::load_case("me_mem_contrast");
+        let mut c = Check::new(&case);
+        // The GLM stopping rule bounds coefficients, effects, SEs and z (the iterative row):
+        // 1e-8 for logit (Newton on the canonical link converges quadratically), 1e-6 for
+        // probit (Fisher scoring stops about 2e-7 relative from glm at epsilon 1e-14, as in
+        // test_validate_probit_na_rows_dropped). The relative error of p is about z^2 times
+        // that of z, and |z| <= 7.3 here: 1e-6 and 1e-4.
+        for (link, fit, tol, tol_p) in [
+            (
+                "logit",
+                run_logit(&ds, "y", &["x1", "x2"]).unwrap(),
+                Tol::iterative(1e-8),
+                Tol::iterative(1e-6),
+            ),
+            (
+                "probit",
+                run_probit(&ds, "y", &["x1", "x2"]).unwrap(),
+                Tol::iterative(1e-6),
+                Tol::iterative(1e-4),
+            ),
+        ] {
+            let me = marginal_effects_discrete(&fit, &ds, &["x1", "x2"]).unwrap();
+            let mem = me.at_means.as_ref().unwrap();
+            let names: Vec<&str> = mem.iter().map(|m| m.variable.as_str()).collect();
+            let col = |f: fn(&MarginalEffect) -> f64| mem.iter().map(f).collect::<Vec<_>>();
+            c.named(
+                &format!("{link}_coef"),
+                &fit.variables,
+                &fit.coefficients,
+                tol,
+            )
+            .named(&format!("{link}_mem"), &names, &col(|m| m.estimate), tol)
+            .named(
+                &format!("{link}_mem_se"),
+                &names,
+                &col(|m| m.std_error),
+                tol,
+            )
+            .named(&format!("{link}_mem_z"), &names, &col(|m| m.z_value), tol)
+            .named(&format!("{link}_mem_p"), &names, &col(|m| m.p_value), tol_p);
+        }
+        c.finish();
     }
 
     #[test]
@@ -1110,6 +1302,8 @@ mod tests {
         assert_eq!(me_logit.model_type, ModelType::Logit);
     }
 
+    /// Logit contrasts are average comparisons, mean(F(z2) - F(z1)), not the AME times the
+    /// difference.
     #[test]
     fn test_contrasts() {
         let dataset = create_binary_dataset();
@@ -1119,11 +1313,94 @@ mod tests {
 
         assert_eq!(contrast_result.variable, "x1");
         assert_eq!(contrast_result.contrasts.len(), 3); // (0,1), (0,2), (1,2)
+        let c = &contrast_result.contrasts;
+        assert_eq!((c[0].value1, c[0].value2), (0.0, 1.0));
+        assert_eq!((c[2].value1, c[2].value2), (1.0, 2.0));
+        // additive on the probability scale: (0, 2) = (0, 1) + (1, 2)
+        assert!((c[1].estimate - (c[0].estimate + c[2].estimate)).abs() < 1e-14);
+        // and not linear in the difference (the logit is curved)
+        assert!((c[1].estimate - 2.0 * c[0].estimate).abs() > 1e-6);
+        assert!(c.iter().all(|e| e.std_error > 0.0 && e.p_value < 1.0));
+    }
 
-        // Check that contrast from 0 to 1 equals ME (since diff = 1)
-        let c01 = &contrast_result.contrasts[0];
-        assert!((c01.value1 - 0.0).abs() < 1e-10);
-        assert!((c01.value2 - 1.0).abs() < 1e-10);
+    /// Case `me_mem_contrast`: marginaleffects::avg_comparisons(fit, variables = list(x1 =
+    /// c(v1, v2))) for the pairs of (0, 1, 2.5), written out in R with the delta method.
+    #[test]
+    fn test_validate_contrasts_avg_comparisons() {
+        use p2a_validation::Check;
+        let (case, ds) = crate::test_support::load_case("me_mem_contrast");
+        let values = case.vector("contrast_values");
+        let mut c = Check::new(&case);
+        // tolerances as test_validate_marginal_effects_mem; |z| <= 9 here
+        for (link, model, tol, tol_p) in [
+            (
+                "logit",
+                ModelType::Logit,
+                Tol::iterative(1e-8),
+                Tol::iterative(1e-6),
+            ),
+            (
+                "probit",
+                ModelType::Probit,
+                Tol::iterative(1e-6),
+                Tol::iterative(1e-4),
+            ),
+        ] {
+            let me = marginal_effects(&ds, "y", &["x1", "x2"], model).unwrap();
+            let r = contrasts(&ds, &me, "x1", &values).unwrap();
+            let pairs: Vec<(f64, f64)> = r.contrasts.iter().map(|e| (e.value1, e.value2)).collect();
+            assert_eq!(pairs, vec![(0.0, 1.0), (0.0, 2.5), (1.0, 2.5)]);
+            let col = |f: fn(&ContrastEffect) -> f64| r.contrasts.iter().map(f).collect::<Vec<_>>();
+            c.vector(&format!("{link}_contrast_est"), &col(|e| e.estimate), tol)
+                .vector(&format!("{link}_contrast_se"), &col(|e| e.std_error), tol)
+                .vector(&format!("{link}_contrast_p"), &col(|e| e.p_value), tol_p);
+        }
+        c.finish();
+    }
+
+    /// OLS contrasts stay linear and exact; the other paths refuse what they cannot compute.
+    #[test]
+    fn test_contrasts_ols_and_errors() {
+        let ds = create_test_dataset();
+        let me = marginal_effects(&ds, "y", &["x1", "x2"], ModelType::Ols).unwrap();
+        let r = contrasts(&ds, &me, "x1", &[1.0, 3.5]).unwrap();
+        let ame = &me.average_marginal[1];
+        assert_eq!(r.contrasts[0].estimate, ame.dy_dx * 2.5);
+        assert_eq!(r.contrasts[0].std_error, ame.std_error * 2.5);
+
+        let bin = create_binary_dataset();
+        let logit = marginal_effects(&bin, "y", &["x1", "x2"], ModelType::Logit).unwrap();
+        let invalid =
+            |e: EconError| assert!(matches!(e, EconError::InvalidSpecification { .. }), "{e:?}");
+        invalid(contrasts(&bin, &logit, "(Intercept)", &[0.0, 1.0]).unwrap_err());
+        invalid(contrasts(&ds, &me, "(Intercept)", &[0.0, 1.0]).unwrap_err());
+        assert!(matches!(
+            contrasts(&bin, &logit, "nope", &[0.0, 1.0]).unwrap_err(),
+            EconError::ColumnNotFound { .. }
+        ));
+        invalid(contrasts(&bin, &logit, "x1", &[1.0]).unwrap_err());
+        invalid(contrasts(&bin, &logit, "x1", &[0.0, f64::NAN]).unwrap_err());
+        invalid(contrasts(&ds, &me, "x1", &[0.0, f64::INFINITY]).unwrap_err());
+        // the fit is not serialised: a round-tripped logit result cannot recompute predictions
+        let mut no_fit = logit.clone();
+        no_fit.fit = None;
+        invalid(contrasts(&bin, &no_fit, "x1", &[0.0, 1.0]).unwrap_err());
+        // an aliased regressor has no comparison
+        let (_, tail) = case_data("tail_marginal_logit");
+        let al = marginal_effects(&tail, "y", &["x1", "x2", "x3"], ModelType::Logit).unwrap();
+        invalid(contrasts(&tail, &al, "x3", &[0.0, 1.0]).unwrap_err());
+        assert!(contrasts(&tail, &al, "x2", &[0.0, 1.0]).is_ok());
+        // a cancelled budget stops the pair loop
+        let cancelled = || {
+            let t = crate::resource::CancelToken::new();
+            t.cancel();
+            crate::resource::Budget::new(None, t)
+        };
+        let e = crate::resource::with_budget(cancelled(), || {
+            contrasts(&bin, &logit, "x1", &[0.0, 1.0, 2.0])
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
     #[test]

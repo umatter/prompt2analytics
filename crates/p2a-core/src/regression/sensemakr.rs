@@ -34,9 +34,12 @@
 //! For q=1 (nullifying the effect):
 //! - f = |t| / sqrt(df)
 //!
-//! For statistical significance at level α:
-//! - t_α is the critical value at level α
-//! - f = (|t| - t_α) / sqrt(df) for |t| > t_α
+//! For statistical significance at level α (`robustness_value(t, dof, q, alpha)`):
+//! - f_c = |qt(α/2, df - 1)| / sqrt(df - 1) and f_qa = q|t| / sqrt(df) - f_c
+//! - RV_{q,α} = 0.5 * (sqrt(f_qa⁴ + 4f_qa²) - f_qa²) for f_qa > 0 (0 otherwise), or the
+//!   extreme robustness value (f_q² - f_c²) / (1 + f_q²) when f_q > 1/f_c
+//!
+//! Every statistic here uses the classical OLS t-statistic (`CovarianceType::Standard`).
 //!
 //! ## Bias-adjusted estimate
 //!
@@ -44,7 +47,17 @@
 //!
 //! bias = se * sqrt(R²_{Y~Z|X,D} * R²_{D~Z|X}) * sqrt(df / (1 - R²_{D~Z|X}))
 //!
-//! The adjusted estimate is: β_adj = β - sign(β) * bias
+//! The adjusted estimate is: β_adj = β - sign(β) * bias, its standard error
+//! sqrt((1 - R²_{Y~Z|X,D}) / (1 - R²_{D~Z|X})) * se * sqrt(df / (df - 1))
+//! ([`adjusted_se_ovb`]), and its t-statistic (β_adj - h0) / se_adj.
+//!
+//! ## Benchmark bounds
+//!
+//! A confounder kd times as strongly related to the treatment and ky times as strongly to
+//! the outcome as an observed covariate X_j is bounded by [`ovb_partial_r2_bound`]
+//! (Cinelli & Hazlett 2020, Section 6.1); the bounds table reports the adjusted estimate,
+//! SE, t against h0 = (1 - q) β and the (1 - α) interval with qt(α/2, df), as
+//! `sensemakr::sensemakr()` does.
 //!
 //! # References
 //!
@@ -135,21 +148,22 @@ pub struct SensitivityBound {
     pub kd: f64,
     /// Multiplier applied to get bound (ky)
     pub ky: f64,
-    /// Hypothesized R²_{Y~U|X,D} for bound
+    /// Bound on R²_{Y~Z|D,X} implied by the benchmark (sensemakr's `r2yz.dx`; set to 1 when
+    /// the implied value exceeds 1, with a warning)
     pub r2_yd_bound: f64,
-    /// Hypothesized R²_{D~U|X} for bound
+    /// Bound on R²_{D~Z|X} implied by the benchmark (sensemakr's `r2dz.x`)
     pub r2_xz_bound: f64,
     /// Bias from this confounding scenario
     pub bias: f64,
     /// Adjusted estimate under this confounding scenario
     pub adjusted_estimate: f64,
-    /// Adjusted standard error (approximate)
+    /// Bias-adjusted standard error (sensemakr's `adjusted_se`)
     pub adjusted_se: f64,
-    /// Adjusted t-statistic
+    /// Adjusted t-statistic against h0 = (1 - q) · estimate (sensemakr's `adjusted_t`)
     pub adjusted_t: f64,
-    /// Lower bound of 95% CI for adjusted estimate
+    /// Lower bound of the (1 - alpha) CI for the adjusted estimate (qt(alpha/2, df))
     pub adjusted_ci_lower: f64,
-    /// Upper bound of 95% CI for adjusted estimate
+    /// Upper bound of the (1 - alpha) CI for the adjusted estimate
     pub adjusted_ci_upper: f64,
 }
 
@@ -162,7 +176,7 @@ pub struct ContourData {
     pub r2_xz_values: Vec<f64>,
     /// Matrix of adjusted estimates (row = r2_xz, col = r2_yd)
     pub adjusted_estimates: Vec<Vec<f64>>,
-    /// Matrix of t-statistics for adjusted estimates
+    /// Matrix of t-statistics of the adjusted estimates against 0, with sensemakr's adjusted SE
     pub adjusted_t_stats: Vec<Vec<f64>>,
 }
 
@@ -183,20 +197,16 @@ impl std::fmt::Display for SensemakrResult {
         writeln!(f, "  Partial R²(Y~D|X): {:>8.4}", self.partial_r2_yd)?;
         writeln!(
             f,
-            "  H0: q = {:.0}, reduce = {:.0}%",
+            "  H0: q = {}, reduce = {:.0}%",
             self.rv_q,
             self.rv_q * 100.0
         )?;
         writeln!(f)?;
         writeln!(f, "Robustness Values:")?;
+        writeln!(f, "  RV(q={}): {:>12.4}", self.rv_q, self.robustness_value)?;
         writeln!(
             f,
-            "  RV(q={:.0}): {:>12.4}",
-            self.rv_q, self.robustness_value
-        )?;
-        writeln!(
-            f,
-            "  RV(q={:.0}, α={:.2}): {:>6.4}",
+            "  RV(q={}, α={:.2}): {:>6.4}",
             self.rv_q, self.rv_alpha, self.robustness_value_alpha
         )?;
         writeln!(f)?;
@@ -224,6 +234,21 @@ impl std::fmt::Display for SensemakrResult {
                     bound.adjusted_estimate
                 )?;
             }
+        }
+
+        if let Some(c) = &self.contour_data {
+            writeln!(f)?;
+            writeln!(
+                f,
+                "Contour data: {} x {} grid of adjusted estimates and t-statistics (rows \
+                 R²(D~Z|X) {}..{}, columns R²(Y~Z|D,X) {}..{}); serialise the result to read it.",
+                c.r2_xz_values.len(),
+                c.r2_yd_values.len(),
+                c.r2_xz_values.first().copied().unwrap_or(f64::NAN),
+                c.r2_xz_values.last().copied().unwrap_or(f64::NAN),
+                c.r2_yd_values.first().copied().unwrap_or(f64::NAN),
+                c.r2_yd_values.last().copied().unwrap_or(f64::NAN),
+            )?;
         }
 
         writeln!(f)?;
@@ -299,39 +324,50 @@ pub fn robustness_value(t_stat: f64, df: f64, q: f64) -> f64 {
 
 /// Compute robustness value for statistical significance.
 ///
-/// RV_{q,α} is the minimum confounding needed to bring the t-statistic
-/// below the critical value at level α.
+/// RV_{q,α} is the minimum strength of confounding (partial R² with both treatment and
+/// outcome) that would make the bias-adjusted estimate, reduced by q·100%, not significant
+/// at level α. As `sensemakr::robustness_value(t, dof, q, alpha)`:
+///
+/// - f_q = q|t| / sqrt(df), f_c = |qt(α/2, df - 1)| / sqrt(df - 1) (0 at α = 1),
+///   f_qa = f_q - f_c;
+/// - RV = 0 when f_qa <= 0 (already not significant at that reduction);
+/// - RV = (f_q² - f_c²) / (1 + f_q²) when f_c > 0 and f_q > 1/f_c (the extreme
+///   robustness value, where a confounder explaining all the residual variance of the
+///   outcome is needed);
+/// - otherwise RV = 2 / (1 + sqrt(1 + 4/f_qa²)).
 ///
 /// # Arguments
-/// * `t_stat` - The t-statistic
-/// * `df` - Residual degrees of freedom
-/// * `q` - Proportion of effect to explain away
-/// * `alpha` - Significance level (default 0.05)
+/// * `t_stat` - The classical OLS t-statistic
+/// * `df` - Residual degrees of freedom (must exceed 1)
+/// * `q` - Proportion of effect to explain away (non-negative)
+/// * `alpha` - Significance level, 0 < alpha <= 1
+///
+/// Returns NaN for inputs outside those ranges.
 ///
 /// # References
-/// Cinelli & Hazlett (2020), Section 3.2
+/// Cinelli & Hazlett (2020), Section 4.1 and Appendix
 pub fn robustness_value_alpha(t_stat: f64, df: f64, q: f64, alpha: f64) -> f64 {
-    if df <= 0.0 {
+    if !(t_stat.is_finite() && df.is_finite() && q.is_finite() && alpha.is_finite())
+        || df <= 1.0
+        || q < 0.0
+        || !(alpha > 0.0 && alpha <= 1.0)
+    {
         return f64::NAN;
     }
-
-    // Critical t-value for significance
-    let t_crit = t_critical(alpha, df);
-
-    // Adjusted t-stat: we need |t_adj| = |t| - (1-q)*|t| = q*|t|
-    // But for alpha version, we need confounding to make |t_adj| < t_crit
-    // So f = (q*|t| - t_crit) / sqrt(df) if q*|t| > t_crit
-    let t_adj = q * t_stat.abs() - t_crit;
-
-    if t_adj <= 0.0 {
-        // Already insignificant at this reduction level
-        return 0.0;
+    let fq = q * t_stat.abs() / df.sqrt();
+    let fc = if alpha == 1.0 {
+        0.0
+    } else {
+        t_critical(alpha, df - 1.0) / (df - 1.0).sqrt()
+    };
+    let fqa = fq - fc;
+    if fqa.is_nan() || fqa <= 0.0 {
+        return if fqa.is_nan() { f64::NAN } else { 0.0 };
     }
-
-    let f = t_adj / df.sqrt();
-    let f2 = f.powi(2);
-    let f4 = f.powi(4);
-    0.5 * ((f4 + 4.0 * f2).sqrt() - f2)
+    if fc > 0.0 && fq > 1.0 / fc {
+        return (fq * fq - fc * fc) / (1.0 + fq * fq);
+    }
+    2.0 / (1.0 + (1.0 + 4.0 / (fqa * fqa)).sqrt())
 }
 
 /// Compute the bias from a hypothetical unobserved confounder.
@@ -378,25 +414,113 @@ pub fn adjusted_estimate(estimate: f64, se: f64, r2_yd: f64, r2_xz: f64, df: f64
     }
 }
 
-/// Compute the adjusted standard error under a confounding scenario.
+/// Compute the adjusted standard error under a confounding scenario with no association
+/// between the confounder and the treatment (R²_{D~Z|X} = 0).
 ///
-/// The standard error increases because the effective sample variation decreases
-/// when accounting for a confounder that explains part of the treatment variation.
-///
-/// se_adj = se * sqrt(df / ((1 - r2_yd) * (df - 1)))
-///
-/// This is an approximation; the exact formula depends on the specific
-/// confounding scenario.
+/// se_adj = se * sqrt(1 - r2_yd) * sqrt(df / (df - 1)), which is
+/// [`adjusted_se_ovb`]`(se, r2_yd, 0.0, df)`; use that function for a confounder that is
+/// also associated with the treatment.
 ///
 /// # References
-/// sensemakr R package implementation
+/// sensemakr R package, `adjusted_se.numeric`
 pub fn adjusted_se(se: f64, r2_yd: f64, df: f64) -> f64 {
-    if df <= 1.0 || r2_yd >= 1.0 {
+    adjusted_se_ovb(se, r2_yd, 0.0, df)
+}
+
+/// Compute the bias-adjusted standard error of the treatment coefficient, as sensemakr's
+/// `adjusted_se(se, dof, r2dz.x, r2yz.dx)`:
+///
+/// se_adj = sqrt((1 - R²_{Y~Z|D,X}) / (1 - R²_{D~Z|X})) * se * sqrt(df / (df - 1))
+///
+/// # Arguments
+/// * `se` - Standard error of the treatment coefficient (classical OLS)
+/// * `r2yz_dx` - Partial R² of the confounder with the outcome given treatment and covariates
+/// * `r2dz_x` - Partial R² of the confounder with the treatment given the covariates
+/// * `df` - Residual degrees of freedom
+///
+/// Returns NaN for df <= 1, a partial R² outside [0, 1], or R²_{D~Z|X} = 1.
+///
+/// # References
+/// Cinelli & Hazlett (2020), Section 4; sensemakr R package, `adjusted_se.numeric`
+pub fn adjusted_se_ovb(se: f64, r2yz_dx: f64, r2dz_x: f64, df: f64) -> f64 {
+    let in_unit = |r: f64| (0.0..=1.0).contains(&r);
+    if df.is_nan() || df <= 1.0 || !in_unit(r2yz_dx) || !in_unit(r2dz_x) || r2dz_x >= 1.0 {
         return f64::NAN;
     }
+    ((1.0 - r2yz_dx) / (1.0 - r2dz_x)).sqrt() * se * (df / (df - 1.0)).sqrt()
+}
 
-    // Adjusted SE accounts for reduced variation
-    se * (df / ((1.0 - r2_yd) * (df - 1.0))).sqrt()
+/// Bounds on the strength of a confounder Z that is `kd` times as strongly associated with
+/// the treatment and `ky` times as strongly with the outcome as an observed covariate X_j,
+/// as sensemakr's `ovb_partial_r2_bound(r2dxj.x, r2yxj.dx, kd, ky)` (Cinelli & Hazlett 2020,
+/// Section 6):
+///
+/// - R²_{D~Z|X} = kd R²_{D~X_j|X_-j} / (1 - R²_{D~X_j|X_-j}), which must be below 1;
+/// - with r = R²_{D~X_j|X_-j}, R²_{Z~X_j|X_-j,D} = kd r² / ((1 - kd r)(1 - r)), which must be
+///   below 1;
+/// - R²_{Y~Z|D,X} = ((sqrt(ky) + sqrt(R²_{Z~X_j})) / sqrt(1 - R²_{Z~X_j}))² ·
+///   R²_{Y~X_j|D,X_-j} / (1 - R²_{Y~X_j|D,X_-j}), set to 1 when it exceeds 1.
+///
+/// # Arguments
+/// * `r2dxj_x` - Partial R² of the benchmark with the treatment, R²_{D~X_j|X_-j}
+/// * `r2yxj_dx` - Partial R² of the benchmark with the outcome, R²_{Y~X_j|D,X_-j}
+/// * `kd` - Multiplier on the treatment side (finite, > 0)
+/// * `ky` - Multiplier on the outcome side (finite, >= 0)
+///
+/// # Returns
+/// `(r2dz_x, r2yz_dx, clamped)`, `clamped` true when R²_{Y~Z|D,X} was set to 1.
+///
+/// # Errors
+/// `InvalidSpecification` for a multiplier outside its range, a partial R² outside [0, 1),
+/// or an impossible kd (an implied partial R² of 1 or more).
+pub fn ovb_partial_r2_bound(
+    r2dxj_x: f64,
+    r2yxj_dx: f64,
+    kd: f64,
+    ky: f64,
+) -> EconResult<(f64, f64, bool)> {
+    if !(kd.is_finite() && kd > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("kd must be a finite number above 0, got {kd}"),
+        });
+    }
+    if !(ky.is_finite() && ky >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("ky must be a finite number of at least 0, got {ky}"),
+        });
+    }
+    let partial = |r: f64| r.is_finite() && (0.0..1.0).contains(&r);
+    if !(partial(r2dxj_x) && partial(r2yxj_dx)) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "benchmark partial R² must lie in [0, 1), got R²(D~X_j|X) = {r2dxj_x}, \
+                 R²(Y~X_j|D,X) = {r2yxj_dx}"
+            ),
+        });
+    }
+    let r2dz_x = kd * (r2dxj_x / (1.0 - r2dxj_x));
+    if r2dz_x >= 1.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "kd = {kd} implies R²(D~Z|X) = {r2dz_x} >= 1, which is impossible; try a lower kd"
+            ),
+        });
+    }
+    let r2zxj = kd * r2dxj_x * r2dxj_x / ((1.0 - kd * r2dxj_x) * (1.0 - r2dxj_x));
+    if r2zxj.is_nan() || r2zxj >= 1.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "kd = {kd} implies R²(Z~X_j|X,D) = {r2zxj} >= 1, which is impossible; try a lower kd"
+            ),
+        });
+    }
+    let r2yz_dx =
+        ((ky.sqrt() + r2zxj.sqrt()) / (1.0 - r2zxj).sqrt()).powi(2) * (r2yxj_dx / (1.0 - r2yxj_dx));
+    if r2yz_dx > 1.0 {
+        Ok((r2dz_x, 1.0, true))
+    } else {
+        Ok((r2dz_x, r2yz_dx, false))
+    }
 }
 
 /// Compute partial R² of a covariate with outcome, residualized on other covariates.
@@ -513,12 +637,29 @@ fn partial_r2_covariate_treatment(
     partial_r2_covariate_outcome(treatment, x, covariate_idx, name)
 }
 
+/// sensemakr's statistics use the classical OLS t: the partial R² identity t² / (t² + df),
+/// the robustness values and the bias formula do not hold for a heteroskedasticity-robust t.
+fn require_classical_fit(ols_result: &OlsResult) -> EconResult<()> {
+    if ols_result.cov_type != CovarianceType::Standard {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "sensemakr needs the classical OLS fit (CovarianceType::Standard), got {}: \
+                 its partial R², robustness values and bias bounds are defined for the \
+                 classical t-statistic",
+                ols_result.cov_type
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Run sensitivity analysis from an existing OLS result.
 ///
 /// This is the main entry point when you already have OLS results.
 ///
 /// # Arguments
-/// * `ols_result` - Result from a previous OLS regression
+/// * `ols_result` - Result from a previous OLS regression with `CovarianceType::Standard`
+///   (any other covariance type is an `InvalidSpecification`)
 /// * `treatment` - Name of the treatment variable to analyze
 /// * `benchmark_covariates` - Optional list of covariates to use as sensitivity benchmarks
 /// * `kd` - Multiplier for treatment benchmark partial R² (default 1.0)
@@ -528,7 +669,7 @@ fn partial_r2_covariate_treatment(
 ///
 /// # Example
 /// ```ignore
-/// let ols_result = run_ols(&dataset, "y", &["treatment", "x1", "x2"], true, CovarianceType::HC1)?;
+/// let ols_result = run_ols(&dataset, "y", &["treatment", "x1", "x2"], true, CovarianceType::Standard)?;
 /// let sens = sensemakr(&ols_result, "treatment", Some(&["x1", "x2"]), None, None, 1.0, 0.05)?;
 /// println!("{}", sens);
 /// ```
@@ -583,6 +724,7 @@ fn sensemakr_impl(
             available: ols_result.variable_names.clone(),
         })?;
 
+    require_classical_fit(ols_result)?;
     let coef = &ols_result.coefficients[treatment_idx];
     let estimate = coef.estimate;
     let se = coef.std_error;
@@ -602,6 +744,8 @@ fn sensemakr_impl(
     if let Some(benchmarks) = benchmark_covariates {
         let kd = kd.unwrap_or(1.0);
         let ky = ky.unwrap_or(kd);
+        // the multipliers are checked even when no benchmark matches
+        ovb_partial_r2_bound(0.0, 0.0, kd, ky)?;
 
         for &benchmark_name in benchmarks {
             // Find benchmark in variable names (skip intercept typically)
@@ -637,20 +781,37 @@ fn sensemakr_impl(
                             }
                         };
 
-                    // Apply multipliers
-                    let r2_yd_bound = (ky * r2_benchmark_y).min(1.0);
-                    let r2_xz_bound = (kd * r2_benchmark_d).min(1.0 - 1e-10);
+                    // Cinelli and Hazlett's bounds from the benchmark's partial R²
+                    let (r2_xz_bound, r2_yd_bound, clamped) =
+                        ovb_partial_r2_bound(r2_benchmark_d, r2_benchmark_y, kd, ky).map_err(
+                            |e| match e {
+                                EconError::InvalidSpecification { message } => {
+                                    EconError::InvalidSpecification {
+                                        message: format!("benchmark '{benchmark_name}': {message}"),
+                                    }
+                                }
+                                e => e,
+                            },
+                        )?;
+                    if clamped {
+                        warnings.push(format!(
+                            "the implied R²(Y~Z|D,X) of benchmark '{benchmark_name}' (kd = {kd}, \
+                             ky = {ky}) exceeds 1; set to 1, as sensemakr does"
+                        ));
+                    }
 
-                    // Compute bias and adjusted estimate
+                    // Bias-adjusted estimate, SE, t (h0 = (1 - q) estimate) and CI, as the
+                    // bounds table of sensemakr() reports them (reduce = TRUE)
                     let bias = confounding_bias(se, r2_yd_bound, r2_xz_bound, df);
                     let adj_est = if estimate >= 0.0 {
                         estimate - bias
                     } else {
                         estimate + bias
                     };
-                    let adj_se = adjusted_se(se, r2_yd_bound, df);
-                    let adj_t = adj_est / adj_se;
-                    let t_crit_95 = t_critical(0.05, df);
+                    let adj_se = adjusted_se_ovb(se, r2_yd_bound, r2_xz_bound, df);
+                    let h0 = estimate * (1.0 - q);
+                    let adj_t = (adj_est - h0) / adj_se;
+                    let t_crit = t_critical(alpha, df);
 
                     benchmark_bounds.push(SensitivityBound {
                         benchmark: benchmark_name.to_string(),
@@ -664,8 +825,8 @@ fn sensemakr_impl(
                         adjusted_estimate: adj_est,
                         adjusted_se: adj_se,
                         adjusted_t: adj_t,
-                        adjusted_ci_lower: adj_est - t_crit_95 * adj_se,
-                        adjusted_ci_upper: adj_est + t_crit_95 * adj_se,
+                        adjusted_ci_lower: adj_est - t_crit * adj_se,
+                        adjusted_ci_upper: adj_est + t_crit * adj_se,
                     });
                 }
             }
@@ -740,8 +901,8 @@ pub fn run_sensemakr(
     let mut x_cols: Vec<&str> = vec![treatment_col];
     x_cols.extend(covariate_cols);
 
-    // Run OLS with HC1 robust standard errors
-    let ols_result = run_ols(dataset, y_col, &x_cols, true, CovarianceType::HC1)?;
+    // sensemakr works on the classical lm fit
+    let ols_result = run_ols(dataset, y_col, &x_cols, true, CovarianceType::Standard)?;
 
     // Compute the exact benchmark partial R² of the treatment on each benchmark
     // covariate, R²_{D~X_j|X_{-j}}, by regressing the treatment on the control
@@ -802,7 +963,7 @@ pub fn run_sensemakr(
 /// the adjusted estimate and t-statistic at each point.
 ///
 /// # Arguments
-/// * `ols_result` - The OLS result
+/// * `ols_result` - The OLS result, with `CovarianceType::Standard`
 /// * `treatment` - Name of the treatment variable
 /// * `grid_size` - Number of points in each dimension (default 20)
 /// * `max_r2` - Maximum partial R² value for the grid (default 0.5)
@@ -814,6 +975,18 @@ pub fn generate_contour_data(
 ) -> EconResult<ContourData> {
     let grid_size = grid_size.unwrap_or(20);
     let max_r2 = max_r2.unwrap_or(0.5);
+    require_classical_fit(ols_result)?;
+    if grid_size < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("contour grid_size must be at least 2, got {grid_size}"),
+        });
+    }
+    if !(max_r2.is_finite() && max_r2 > 0.0 && max_r2 < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("contour max_r2 must lie in (0, 1), got {max_r2}"),
+        });
+    }
+    crate::resource::checked_len(&[grid_size, grid_size], "sensemakr contour grid")?;
 
     // Find treatment coefficient
     let treatment_idx = ols_result
@@ -839,17 +1012,15 @@ pub fn generate_contour_data(
     let mut adjusted_t_stats = Vec::with_capacity(grid_size);
 
     for &r2_xz in &r2_xz_values {
+        crate::resource::checkpoint()?;
         let mut row_estimates = Vec::with_capacity(grid_size);
         let mut row_t_stats = Vec::with_capacity(grid_size);
 
         for &r2_yd in &r2_yd_values {
+            // sensemakr's adjusted_estimate and adjusted_t (h0 = 0) at this point
             let adj_est = adjusted_estimate(estimate, se, r2_yd, r2_xz, df);
-            let adj_se = adjusted_se(se, r2_yd, df);
-            let adj_t = if adj_se > 0.0 {
-                adj_est / adj_se
-            } else {
-                f64::NAN
-            };
+            let adj_se = adjusted_se_ovb(se, r2_yd, r2_xz, df);
+            let adj_t = adj_est / adj_se;
 
             row_estimates.push(adj_est);
             row_t_stats.push(adj_t);
@@ -1056,8 +1227,68 @@ mod tests {
             .scalar("rv_q05", robustness_value(t, dof, 0.5), Tol::stat(n))
             .finish();
         assert!((partial_r2(t, dof) - case.scalar("r2yd_x")).abs() <= 1e-14);
-        // deviation REG-28: rv_qa 0.019338593626010935 (R: qt(alpha/2, dof - 1) / sqrt(dof - 1)
-        // and the extreme-RV branch); p2a's robustness_value_alpha gives 0.019359950325335992.
+        Check::new(&case)
+            .scalar("rv_qa", s.robustness_value_alpha, Tol::stat(n))
+            .finish();
+    }
+
+    /// Case `sensemakr_rv_alpha`: sensemakr's `robustness_value(t, dof, q, alpha)` on six
+    /// inputs (`sensemakr_rv_inputs.csv`), row 1 in the extreme-RV branch. Closed forms.
+    #[test]
+    fn test_validate_sensemakr_rv_alpha() {
+        use crate::data::columns::ColumnRequest;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("sensemakr_rv_alpha");
+        let cols = ColumnRequest::new(ds.df())
+            .numerics(&["t", "dof", "q", "alpha"])
+            .extract()
+            .unwrap();
+        let (t, dof, q, alpha) = (
+            cols.numeric("t"),
+            cols.numeric("dof"),
+            cols.numeric("q"),
+            cols.numeric("alpha"),
+        );
+        let rv: Vec<f64> = (0..t.len())
+            .map(|i| robustness_value_alpha(t[i], dof[i], q[i], alpha[i]))
+            .collect();
+        // A closed form, but through a t quantile: p2a's and R's qt(0.95, 49) differ by
+        // 5.5e-13 relative, and f_q - f_c amplifies that about 2 f_c / f_qa = 11 times in
+        // row 5 (3.0e-12 relative), so 1e-10 rather than the closed-form 1e-12.
+        Check::new(&case)
+            .vector("rv", &rv, Tol::new(1e-10, 1e-14))
+            .finish();
+        // is_xrv: row 1 is the extreme branch (fq^2 - fc^2) / (1 + fq^2)
+        assert_eq!(case.vector("is_xrv")[0], 1.0);
+        let fq = q[0] * t[0].abs() / dof[0].sqrt();
+        let fc = t_critical(alpha[0], dof[0] - 1.0) / (dof[0] - 1.0).sqrt();
+        assert!(fq > 1.0 / fc);
+        let xrv = (fq * fq - fc * fc) / (1.0 + fq * fq);
+        assert!((rv[0] - xrv).abs() <= 1e-15, "{} vs {xrv}", rv[0]);
+        // invalid inputs
+        assert!(robustness_value_alpha(3.0, 1.0, 1.0, 0.05).is_nan());
+        assert!(robustness_value_alpha(3.0, 10.0, 1.0, 0.0).is_nan());
+        assert!(robustness_value_alpha(3.0, 10.0, 1.0, 1.5).is_nan());
+    }
+
+    /// sensemakr's statistics (t^2 / (t^2 + df), RV, the bias formula) hold for the classical
+    /// t only: a fit with another covariance type is refused.
+    #[test]
+    fn test_sensemakr_refuses_robust_ols() {
+        let df = df! {
+            "y" => [1.0, 2.1, 2.9, 4.2, 5.0, 5.8, 7.1, 8.0, 9.2, 10.1],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        }
+        .unwrap();
+        let ols = run_ols(&Dataset::new(df), "y", &["x"], true, CovarianceType::HC1).unwrap();
+        let check = |e: EconError| match e {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("CovarianceType::Standard"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        };
+        check(sensemakr(&ols, "x", None, None, None, 1.0, 0.05).unwrap_err());
+        check(generate_contour_data(&ols, "x", Some(5), Some(0.5)).unwrap_err());
     }
 
     /// Case `sensemakr_darfur`, X-16: run_sensemakr's benchmark partial R^2 of the treatment on
@@ -1083,16 +1314,230 @@ mod tests {
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         Check::new(&case)
             .scalar("estimate", r.estimate, Tol::coef(n))
+            .scalar("se", r.std_error, Tol::se(n))
+            .scalar("t", r.t_statistic, Tol::stat(n))
+            .scalar("r2yd_x", r.partial_r2_yd, Tol::stat(n))
+            .scalar("rv_q", r.robustness_value, Tol::stat(n))
+            .scalar("rv_qa", r.robustness_value_alpha, Tol::stat(n))
             .scalar(
                 "female_r2dxj",
                 r.benchmark_bounds[0].r2_xz_benchmark,
                 Tol::stat(n),
             )
+            .scalar(
+                "female_r2yxj",
+                r.benchmark_bounds[0].r2_yd_benchmark,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bound_r2dz_x",
+                r.benchmark_bounds[0].r2_xz_bound,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bound_r2yz_dx",
+                r.benchmark_bounds[0].r2_yd_bound,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bound_adjusted_estimate",
+                r.benchmark_bounds[0].adjusted_estimate,
+                Tol::coef(n),
+            )
+            .scalar(
+                "bound_adjusted_se",
+                r.benchmark_bounds[0].adjusted_se,
+                Tol::se(n),
+            )
+            .scalar(
+                "bound_adjusted_lower",
+                r.benchmark_bounds[0].adjusted_ci_lower,
+                Tol::coef(n),
+            )
+            .scalar(
+                "bound_adjusted_upper",
+                r.benchmark_bounds[0].adjusted_ci_upper,
+                Tol::coef(n),
+            )
             .finish();
-        // deviation REG-28: run_sensemakr's se, t, partial R^2, RV and r2_yd_benchmark use HC1 t
-        // (R: classical; female_r2yxj 0.11546024184356445, p2a 0.1204729846). deviation REG-27:
-        // bound_r2dz_x, bound_r2yz_dx and bound_adjusted_* (the bound formulas, adjusted SE and
-        // CI).
+    }
+
+    /// Case `sensemakr_darfur_bounds`: sensemakr's bounds table (`ovb_partial_r2_bound`,
+    /// `adjusted_estimate`, `adjusted_se`, `adjusted_t` with h0 = (1 - q) estimate, the CI
+    /// with qt(alpha/2, df)) for benchmarks female and age at five settings, the clamp of an
+    /// implied R²(Y~Z|D,X) above 1, and the contour grid.
+    #[test]
+    fn test_validate_sensemakr_darfur_bounds() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("sensemakr_darfur_bounds");
+        let n = case.scalar("n") as usize;
+        let names = ["female", "age"];
+        let mut c = Check::new(&case);
+        for (nm, kd, ky, q, alpha) in [
+            ("k1", 1.0, 1.0, 1.0, 0.05),
+            ("k2", 2.0, 2.0, 1.0, 0.05),
+            ("k3", 3.0, 3.0, 1.0, 0.05),
+            ("kd2ky1", 2.0, 1.0, 1.0, 0.05),
+            ("q05a10", 1.0, 1.0, 0.5, 0.10),
+        ] {
+            let r = run_sensemakr(
+                &ds,
+                "peacefactor",
+                "directlyharmed",
+                &COVS,
+                Some(&names),
+                Some(kd),
+                Some(ky),
+                q,
+                alpha,
+            )
+            .unwrap();
+            assert!(r.warnings.is_empty(), "{nm}: {:?}", r.warnings);
+            let b = &r.benchmark_bounds;
+            let bn: Vec<&str> = b.iter().map(|x| x.benchmark.as_str()).collect();
+            let col = |f: fn(&SensitivityBound) -> f64| b.iter().map(f).collect::<Vec<f64>>();
+            c.scalar(&format!("{nm}_rv_q"), r.robustness_value, Tol::stat(n))
+                .scalar(
+                    &format!("{nm}_rv_qa"),
+                    r.robustness_value_alpha,
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("{nm}_r2dz_x"),
+                    &bn,
+                    &col(|x| x.r2_xz_bound),
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("{nm}_r2yz_dx"),
+                    &bn,
+                    &col(|x| x.r2_yd_bound),
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("{nm}_adj_est"),
+                    &bn,
+                    &col(|x| x.adjusted_estimate),
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{nm}_adj_se"),
+                    &bn,
+                    &col(|x| x.adjusted_se),
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("{nm}_adj_t"),
+                    &bn,
+                    &col(|x| x.adjusted_t),
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("{nm}_lower"),
+                    &bn,
+                    &col(|x| x.adjusted_ci_lower),
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{nm}_upper"),
+                    &bn,
+                    &col(|x| x.adjusted_ci_upper),
+                    Tol::coef(n),
+                );
+        }
+        // ky = 8: the implied R²(Y~Z|D,X) exceeds 1; set to 1 with a warning, as sensemakr
+        let r8 = run_sensemakr(
+            &ds,
+            "peacefactor",
+            "directlyharmed",
+            &COVS,
+            Some(&["female"]),
+            Some(1.0),
+            Some(8.0),
+            1.0,
+            0.05,
+        )
+        .unwrap();
+        let b8 = &r8.benchmark_bounds[0];
+        c.scalar("clamp_r2dz_x", b8.r2_xz_bound, Tol::stat(n))
+            .scalar("clamp_r2yz_dx", b8.r2_yd_bound, Tol::exact())
+            .scalar("clamp_adj_est", b8.adjusted_estimate, Tol::coef(n));
+        assert_eq!(b8.adjusted_se, 0.0);
+        // R: (adj_est - h0) / 0 with h0 = 0, and a CI collapsed to the estimate
+        assert_eq!(b8.adjusted_t, f64::INFINITY);
+        assert_eq!(
+            (b8.adjusted_ci_lower, b8.adjusted_ci_upper),
+            (b8.adjusted_estimate, b8.adjusted_estimate)
+        );
+        assert!(
+            r8.warnings.iter().any(|w| w.contains("'female'")),
+            "{:?}",
+            r8.warnings
+        );
+        // contour grid: rows R²(D~Z|X), columns R²(Y~Z|D,X), h0 = 0
+        let mut x = vec!["directlyharmed"];
+        x.extend(COVS);
+        let ols = run_ols(&ds, "peacefactor", &x, true, CovarianceType::Standard).unwrap();
+        let g = generate_contour_data(&ols, "directlyharmed", Some(5), Some(0.5)).unwrap();
+        let flat = |m: &[Vec<f64>]| m.iter().flatten().copied().collect::<Vec<f64>>();
+        c.vector("grid", &g.r2_xz_values, Tol::exact())
+            .vector("grid", &g.r2_yd_values, Tol::exact())
+            .vector(
+                "contour_adj_est",
+                &flat(&g.adjusted_estimates),
+                Tol::coef(n),
+            )
+            .vector("contour_adj_t", &flat(&g.adjusted_t_stats), Tol::stat(n))
+            .finish();
+    }
+
+    /// Case data for tests that compare no R value.
+    fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
+        crate::test_support::load_case(id)
+    }
+
+    /// An impossible benchmark multiplier (implied R²(D~Z|X) >= 1) is an error, as in
+    /// sensemakr; so are kd <= 0, ky < 0 and non-finite multipliers.
+    #[test]
+    fn test_sensemakr_impossible_kd_is_an_error() {
+        let (_case, ds) = case_data("sensemakr_darfur_bounds");
+        for (kd, ky, what) in [
+            (400.0, 400.0, "kd"),
+            (0.0, 1.0, "kd"),
+            (-1.0, 1.0, "kd"),
+            (f64::NAN, 1.0, "kd"),
+            (1.0, -1.0, "ky"),
+            (1.0, f64::INFINITY, "ky"),
+        ] {
+            let e = run_sensemakr(
+                &ds,
+                "peacefactor",
+                "directlyharmed",
+                &COVS,
+                Some(&["female"]),
+                Some(kd),
+                Some(ky),
+                1.0,
+                0.05,
+            )
+            .unwrap_err();
+            match e {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains(what), "{kd} {ky}: {message}")
+                }
+                e => panic!("{kd} {ky}: {e:?}"),
+            }
+        }
+        assert!(ovb_partial_r2_bound(0.3, 0.1, 3.0, 1.0).is_err());
+        let (r2dz, r2yz, clamped) = ovb_partial_r2_bound(0.01, 0.1, 1.0, 1.0).unwrap();
+        assert!(!clamped && r2dz > 0.01 && r2yz > 0.1);
+        // r2dz.x = 0 leaves sensemakr's adjusted SE at se sqrt(1 - r2yz) sqrt(df / (df - 1))
+        assert_eq!(
+            adjusted_se(0.2, 0.36, 101.0),
+            adjusted_se_ovb(0.2, 0.36, 0.0, 101.0)
+        );
+        let want = 0.2 * 0.8 * (101.0f64 / 100.0).sqrt();
+        assert!((adjusted_se(0.2, 0.36, 101.0) - want).abs() <= 1e-15);
     }
 
     /// A benchmark covariate in the span of the others is an error naming it.
@@ -1126,7 +1571,7 @@ mod tests {
         .unwrap();
 
         let dataset = Dataset::new(df);
-        let ols = run_ols(&dataset, "y", &["x"], true, CovarianceType::HC1).unwrap();
+        let ols = run_ols(&dataset, "y", &["x"], true, CovarianceType::Standard).unwrap();
 
         let contour = generate_contour_data(&ols, "x", Some(10), Some(0.3)).unwrap();
 
@@ -1138,6 +1583,49 @@ mod tests {
         // First point should be original estimate (no confounding)
         let original = ols.coefficients.iter().find(|c| c.name == "x").unwrap();
         assert!((contour.adjusted_estimates[0][0] - original.estimate).abs() < 1e-6);
+    }
+
+    /// q is printed as given (q = 0.5 printed as "0" before), and contour data on the result
+    /// is announced in the text.
+    #[test]
+    fn test_display_prints_q_and_contour_data() {
+        let df = df! {
+            "y" => [1.0, 2.1, 2.9, 4.2, 5.0, 5.8, 7.1, 8.0, 9.2, 10.1],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        }
+        .unwrap();
+        let ols = run_ols(
+            &Dataset::new(df),
+            "y",
+            &["x"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let mut r = sensemakr(&ols, "x", None, None, None, 0.5, 0.05).unwrap();
+        let out = r.to_string();
+        assert!(out.contains("H0: q = 0.5, reduce = 50%"), "{out}");
+        assert!(
+            out.contains("RV(q=0.5):") && out.contains("RV(q=0.5, α=0.05):"),
+            "{out}"
+        );
+        assert!(!out.contains("Contour data"), "{out}");
+        let one = sensemakr(&ols, "x", None, None, None, 1.0, 0.05)
+            .unwrap()
+            .to_string();
+        assert!(
+            one.contains("H0: q = 1, reduce = 100%") && one.contains("RV(q=1):"),
+            "{one}"
+        );
+        r.contour_data = Some(generate_contour_data(&ols, "x", Some(4), Some(0.3)).unwrap());
+        for (g, m) in [(1, 0.5), (0, 0.5), (4, 0.0), (4, 1.0), (4, f64::NAN)] {
+            assert!(matches!(
+                generate_contour_data(&ols, "x", Some(g), Some(m)),
+                Err(EconError::InvalidSpecification { .. })
+            ));
+        }
+        let out = r.to_string();
+        assert!(out.contains("Contour data: 4 x 4 grid"), "{out}");
     }
 
     /// REG-17 (sensemakr.rs): benchmark names over 20 bytes were cut at byte 17; '²' spans bytes 16..18.

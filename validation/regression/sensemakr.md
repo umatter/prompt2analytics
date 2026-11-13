@@ -7,7 +7,16 @@ robustness value `RV_q = (sqrt(f_q^4 + 4 f_q^2) - f_q^2) / 2` with `f_q = q |t| 
 benchmark bounds from the partial R^2 of a covariate with the treatment and the outcome.
 `sensemakr()` works from an `OlsResult`; `run_sensemakr()` from a dataset, with the exact benchmark
 partial R^2 of the treatment on each benchmark covariate (auxiliary regressions by pivoted QR; a
-benchmark collinear with the other covariates is an error naming it).
+benchmark collinear with the other covariates is an error naming it). Both use the classical OLS fit
+(`CovarianceType::Standard`; another covariance type is refused). `RV_{q,alpha}` is sensemakr's
+`robustness_value(t, dof, q, alpha)`: `f_c = |qt(alpha/2, dof - 1)| / sqrt(dof - 1)`,
+`f_qa = f_q - f_c`, 0 for `f_qa <= 0`, the extreme robustness value `(f_q^2 - f_c^2) / (1 + f_q^2)`
+when `f_q > 1 / f_c`, and `2 / (1 + sqrt(1 + 4 / f_qa^2))` otherwise. Benchmark bounds follow
+`ovb_partial_r2_bound`: `r2dz.x = kd r2dxj / (1 - r2dxj)` and the implied `r2yz.dx` (an impossible
+kd is an error; an `r2yz.dx` above 1 is set to 1 with a warning), the adjusted SE is
+`sqrt((1 - r2yz.dx) / (1 - r2dz.x)) se sqrt(dof / (dof - 1))`, the adjusted t is taken against
+`h0 = (1 - q) estimate`, and the interval uses `qt(alpha/2, dof)`, as the bounds table of
+`sensemakr()`.
 
 ## R reference
 
@@ -22,6 +31,20 @@ estimate 0.04888549597934379, se 0.01839185800844235, t 2.6579965959341383, dof 
 0.019338593626010935; benchmark female: `female_r2dxj` 0.002574930988431467, `female_r2yxj`
 0.11546024184356445.
 
+## Tier 4: benchmark bounds and RV_alpha (`sensemakr_darfur_bounds`, `sensemakr_rv_alpha`)
+
+Registry entry `sensemakr_bounds` (`validation/methods/regression_sensitivity_t4.json`). R:
+`sensemakr(m, "directlyharmed", benchmark_covariates = c("female", "age"), kd, ky, q, alpha)$bounds`
+on the darfur model above at (kd, ky, q, alpha) = (1, 1, 1, .05), (2, 2, 1, .05), (3, 3, 1, .05),
+(2, 1, 1, .05), (1, 1, .5, .10); `ky = 8` for the clamp (sensemakr warns and sets r2yz.dx to 1, the
+adjusted SE is 0 and the t infinite); `kd = 400` is an error; `adjusted_estimate` and
+`adjusted_t` on the grid 0, 0.125, ..., 0.5 for the contour data. `sensemakr_rv_alpha`:
+`robustness_value(t, dof, q, alpha)` on six inputs (`sensemakr_rv_inputs.csv`). Example (k2, female):
+r2dz.x 0.005163156749174512, r2yz.dx 0.2624177681941485, adjusted estimate 0.02471622362736591, SE
+0.01584259125464841, t 1.5601124355281129. Tests: `test_validate_sensemakr_darfur_bounds`,
+`test_validate_sensemakr_rv_alpha`, and `test_sensemakr_impossible_kd_is_an_error` (kd = 400, kd <= 0,
+ky < 0, non-finite multipliers).
+
 ## Tolerances
 
 `Tol::coef(n)` for the estimate, `Tol::se(n)`, `Tol::stat(n)` for t, partial R^2 and RV, dof exact;
@@ -29,19 +52,21 @@ estimate 0.04888549597934379, se 0.01839185800844235, t 2.6579965959341383, dof 
 
 ## Tests
 
-`test_validate_sensemakr_darfur` (the formulas on the classical OLS t),
-`test_validate_sensemakr_darfur_benchmark` (X-16: the exact benchmark partial R^2 of the treatment on
-female; a revert to `0.5 * R^2_{Y~X_j}` fails it). Registry entry `sensemakr`. The old R test
+`test_validate_sensemakr_darfur` (the formulas on the classical OLS t, `rv_qa` included),
+`test_validate_sensemakr_darfur_benchmark` (`run_sensemakr`'s se, t, partial R^2, RV and RV_alpha,
+and X-16: the exact benchmark partial R^2 of the treatment on female, a revert to
+`0.5 * R^2_{Y~X_j}` fails it; `female_r2yxj`), `test_validate_sensemakr_rv_alpha` (case
+`sensemakr_rv_alpha`: six inputs of `robustness_value(t, dof, q, alpha)`, row 1 in the extreme
+branch; 1e-10 relative, because p2a's and R's t quantiles differ by about 5e-13 and `f_q - f_c`
+amplifies that). `test_sensemakr_refuses_robust_ols` checks the refusal of an HC1 fit. The darfur benchmark test
+also pins the female bound (`bound_*`). Registry entry `sensemakr`. The old R test
 asserted RV in 0.10-0.20 at a dof of 1276, which is not the
 dataset's, and is deleted. `test_sensemakr_benchmark_collinear_is_an_error` checks the collinearity
 error.
 
 ## Deviations
 
-- REG-28: `rv_qa` (R uses `qt(alpha/2, dof - 1) / sqrt(dof - 1)` and the extreme-RV branch; p2a gives
-  0.019359950325335992). `run_sensemakr`'s se, t, partial R^2, RV and `r2_yd_benchmark` use the HC1
-  t (R: classical; `female_r2yxj` p2a 0.1204729846).
-- REG-27: `bound_r2dz_x`, `bound_r2yz_dx`, `bound_adjusted_*` (bound formulas, adjusted SE and CI).
+None.
 
 ## Timing
 

@@ -131,7 +131,7 @@ names a quantity the registry records as not matching R, with its finding.
 | `run_ols_clustered` | R `sandwich::vcovCL(cluster = ~g, type = "HC1")`, two-way `~g1 + g2` (pinned) | Python `linearmodels` |
 | `step` | R `stats::step`, `extractAIC` (pinned) | - |
 | `run_diagnostics` | R `tseries::jarque.bera.test`, `lmtest::bptest` (studentized), `lmtest::dwtest`, `car::vif`, `base::kappa(exact = TRUE)` (pinned) | - |
-| `bg_test`, `reset_test`, `harvey_collier_test`, `wald_test` | R `lmtest::bgtest`, `resettest`, `harvtest` (with `strucchange::recresid`), `waldtest` (pinned, `type = "princomp"` too; deviation REG-37 Wald Chisq) | R `aod::wald.test` |
+| `bg_test`, `reset_test`, `harvey_collier_test`, `wald_test` | R `lmtest::bgtest`, `resettest`, `harvtest` (with `strucchange::recresid`), `waldtest` (pinned, `type = "princomp"` too, and the Wald Chisq form) | R `aod::wald.test` |
 | `run_fixed_effects` | R `plm(model = "within")`, `vcovHC(method = "arellano")`, `pwaldtest` (pinned) | Python `linearmodels.PanelOLS` |
 | `run_random_effects` | R `plm(model = "random")` Swamy-Arora, `ercomp`, `pwaldtest`; z inference (pinned) | - |
 | `run_hausman_test` | R `plm::phtest`, classical covariances (pinned) | - |

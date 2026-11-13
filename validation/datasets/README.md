@@ -206,6 +206,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/etwfe_panel_all_treated.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8, no never-treated unit |
 | `generated/etwfe_panel_unbalanced.csv` | 923 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, `etwfe_panel` without year 3 of every 7th unit and years 1-2 of every 11th |
 | `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
+| `generated/evalue_hr_inputs.csv` | 3 × 4 (id, est, lo, hi) | `evalue_hr_common` | `r/cases/regression_sensitivity_t4.R` | literal values: three hazard ratios with limits, one without a lower limit (empty cell) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
 | `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax` | `r/cases/stats_power_loglin.R` | seed 20261118 |
 | `generated/feglm_panel.csv` | 480 × 7 (id, time, x, x2, y_gauss, y_bin, y_cnt) | `feglm_families` | `r/cases/econ_panel_t3.R` | seed 20261106 |
@@ -231,6 +232,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
 | `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
 | `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
+| `generated/me_mem_contrast.csv` | 400 × 3 (y, x1, x2) | `me_mem_contrast` | `r/cases/regression_sensitivity_t4.R` | seed 20261111; binary y from a logit DGP in x1 ~ N(1, 1) and x2 ~ U(0, 4) |
 | `generated/medflex_sim.csv` | 500 × 12 (a, m, c1, c2, yc, yb, yp, yi, yo, m_lin, y_lin, c1dup; a, c2, yb and yp Int64) | `medflex_scales` | `r/cases/causal_medflex.R` | read by `mediation_ipw_t3` too (its case lists no dataset); seed 20261130; binary a, gaussian m, yc (gaussian), yb (binary), yp (Poisson), yi (A:M interaction), yo (NDE and NIE of opposite sign), m_lin = 0.1 + 0.3 c1 exactly, c1dup a copy of c1 |
 | `generated/mlogit_fishing.csv` | 4728 × 6 (id, alt, chosen, price, catch, income) | `disc_mlogit_fishing` | `r/cases/discrete_mlogit_asc.R` | `mlogit::Fishing` in long form (`dfidx`), 1182 choice situations × 4 modes |
 | `generated/multinom_overlap.csv` | 300 × 3 (y, x1, x2) | `disc_multinom_overlap` | `r/cases/discrete_mlogit_asc.R` | seed 20261022 |
@@ -264,6 +266,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/reset_two.csv` | 150 × 3 (y, x1, x2) | `reset_princomp` | `r/cases/reg_rank_qr.R` | seed 20261121 |
 | `generated/rq_boot_indices.csv` | 100 × 50 (b01-b50) | `rq_boot_xy` | `r/cases/reg_quantreg_br.R` | seed 20261021 |
 | `generated/sensemakr_darfur.csv` | 1276 × 8 (peacefactor, directlyharmed, age, farmer_dar, herder_dar, pastvoted, hhsize_darfur, female) | `sensemakr_darfur` | `r/cases/regression_smoothers_t3.R` | `sensemakr::darfur`, the eight model columns |
+| `generated/sensemakr_rv_inputs.csv` | 6 × 5 (id, t, dof, q, alpha) | `sensemakr_rv_alpha` | `r/cases/regression_sensitivity_t4.R` | literal values: six t statistics, residual df, q and alpha, one in the extreme-RV branch |
 | `generated/shap_kernel_sim.csv` | 20 × 12 (x0-x11) | `shap_kernel_sim` | `r/cases/ml_shap.R` | seed 4802 |
 | `generated/shap_tree_sim.csv` | 80 × 5 (x0, x1, x2, x3, y) | `shap_tree_rpart` | `r/cases/ml_shap.R` | seed 4801 |
 | `generated/smoothers_t3.csv` | 100 × 4 (x, y, xm, ym) | `smoothers_gcv_periodic_loess` | `r/cases/regression_smoothers_t3.R` | seed 20261127 |

@@ -64,13 +64,7 @@
         "p"
       ],
       "tolerance": "iterative 1e-8 (GLM stopping rule); p 5e-5 relative (z^2 x relative z error)",
-      "deviations": [
-        {
-          "finding": "REG-16",
-          "quantity": "MEM standard errors",
-          "note": "not pinned: the MEM SE approximation drops the gradient term (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

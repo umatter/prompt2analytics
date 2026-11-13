@@ -26,7 +26,9 @@
 //!
 //! DW = Σ(eₜ - eₜ₋₁)² / Σeₜ² ≈ 2(1 - ρ̂)
 //!
-//! DW ≈ 2 suggests no autocorrelation; DW < 2 suggests positive; DW > 2 negative.
+//! DW ≈ 2 suggests no autocorrelation. The reading is a rule of thumb, not a test: below
+//! 1.5 suggests positive and above 2.5 negative first-order autocorrelation; the
+//! Breusch-Godfrey test below gives a p-value.
 //!
 //! ## Breusch-Godfrey Test (Higher-Order Serial Correlation)
 //!
@@ -457,7 +459,7 @@ impl fmt::Display for DiagnosticsResult {
 
         // Durbin-Watson
         if let Some(ref dw) = self.durbin_watson {
-            writeln!(f, "Durbin-Watson Test (Autocorrelation)")?;
+            writeln!(f, "Durbin-Watson Statistic (Autocorrelation)")?;
             writeln!(
                 f,
                 "  Statistic: {:.4} (range: 0-4, 2 = no autocorrelation)",
@@ -825,12 +827,12 @@ fn compute_breusch_pagan(
     }))
 }
 
-/// Compute Durbin-Watson statistic for autocorrelation.
+/// Compute the Durbin-Watson statistic.
 ///
-/// DW = Σ(e_t - e_{t-1})² / Σe_t²
-/// DW ≈ 2 indicates no autocorrelation
-/// DW < 2 indicates positive autocorrelation
-/// DW > 2 indicates negative autocorrelation
+/// DW = Σ(e_t - e_{t-1})² / Σe_t² ≈ 2(1 - ρ̂). The reading uses the rule-of-thumb cut-offs
+/// 1.5 and 2.5 (below 1.5 suggests positive, above 2.5 negative first-order
+/// autocorrelation); it is not a test, and no p-value is computed (`lmtest::dwtest` gives
+/// one; [`bg_test`] tests serial correlation with a p-value).
 fn compute_durbin_watson(residuals: &Array1<f64>) -> DurbinWatsonResult {
     let n = residuals.len();
     if n < 2 {
@@ -864,17 +866,23 @@ fn compute_durbin_watson(residuals: &Array1<f64>) -> DurbinWatsonResult {
     let (autocorrelation_type, interpretation) = if dw < 1.5 {
         (
             AutocorrelationType::Positive,
-            "Positive autocorrelation detected".to_string(),
+            "Below 1.5: suggests positive autocorrelation (rule of thumb, not a test; the \
+             Breusch-Godfrey test gives a p-value)"
+                .to_string(),
         )
     } else if dw > 2.5 {
         (
             AutocorrelationType::Negative,
-            "Negative autocorrelation detected".to_string(),
+            "Above 2.5: suggests negative autocorrelation (rule of thumb, not a test; the \
+             Breusch-Godfrey test gives a p-value)"
+                .to_string(),
         )
     } else {
         (
             AutocorrelationType::None,
-            "No significant autocorrelation".to_string(),
+            "Between 1.5 and 2.5: no strong sign of first-order autocorrelation (rule of thumb, \
+             not a test)"
+                .to_string(),
         )
     };
 
@@ -1107,6 +1115,9 @@ fn first_principal_component(
     let means: Vec<f64> = (0..p).map(|j| z.column(j).sum() / n as f64).collect();
     let mut cov = Array2::<f64>::zeros((p, p));
     for i in 0..n {
+        if i % 256 == 0 {
+            resource::checkpoint()?;
+        }
         for a in 0..p {
             let da = z[[i, a]] - means[a];
             for b in a..p {
@@ -1426,7 +1437,8 @@ pub fn reset_test_from_ols(
 ///
 /// The test computes:
 /// - F-test: F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u)) ~ F(q, n - k_u)
-/// - Chi-squared: χ² = n * (RSS_r - RSS_u) / RSS_u ~ χ²(q)
+/// - Chi-squared: χ² = q·F = (RSS_r − RSS_u) / (RSS_u / (n − k_u)) ~ χ²(q), as
+///   `lmtest::waldtest(test = "Chisq")`
 ///
 /// where q = rank_u - rank_r is the number of restrictions (anova.lm: an aliased or
 /// collinear extra regressor adds none) and n - k_u is n - rank_u.
@@ -1584,20 +1596,17 @@ pub fn wald_test_from_ols(
     let df1 = q;
     let df2 = ols_unrestricted.df_resid; // n - rank_u
 
+    let f_stat = if rss_u > 0.0 && df2 > 0 {
+        (rss_diff / df1 as f64) / (rss_u / df2 as f64)
+    } else {
+        0.0
+    };
     let (statistic, p_value, test_type, df2_opt) = if use_f_test {
-        let f_stat = if rss_u > 0.0 && df2 > 0 {
-            (rss_diff / df1 as f64) / (rss_u / df2 as f64)
-        } else {
-            0.0
-        };
         let p = crate::traits::f_test_p_value(f_stat, df1 as f64, df2 as f64);
         (f_stat, p, "F".to_string(), Some(df2))
     } else {
-        let chi_stat = if rss_u > 0.0 {
-            (n as f64) * rss_diff / rss_u
-        } else {
-            0.0
-        };
+        // lmtest::waldtest(test = "Chisq"): q F, the F statistic's numerator not divided by q
+        let chi_stat = df1 as f64 * f_stat;
         let p = chi_squared_p_value(chi_stat, df1 as f64);
         (chi_stat, p, "Chisq".to_string(), None)
     };
@@ -2449,6 +2458,54 @@ mod tests {
         assert!(dw.statistic > 2.0);
     }
 
+    /// The 1.5 / 2.5 cut-offs are a rule of thumb, not a test (lmtest::dwtest gives a
+    /// p-value): the text must not claim a detection.
+    #[test]
+    fn test_durbin_watson_wording_is_a_rule_of_thumb() {
+        let below = Array1::from_vec(vec![1.0, 1.1, 0.9, 1.05, -1.0, -0.9, -1.1, -0.95]);
+        let between = Array1::from_vec(vec![0.3, -0.5, 0.1, 0.4, -0.2, -0.6, 0.5, 0.2, -0.3]);
+        let above = Array1::from_vec(vec![0.1, -0.12, 0.09, -0.11, 0.1, -0.08, 0.12, -0.1]);
+        for (res, kind) in [
+            (&below, AutocorrelationType::Positive),
+            (&between, AutocorrelationType::None),
+            (&above, AutocorrelationType::Negative),
+        ] {
+            let dw = compute_durbin_watson(res);
+            assert_eq!(
+                format!("{:?}", dw.autocorrelation_type),
+                format!("{kind:?}"),
+                "DW {}",
+                dw.statistic
+            );
+            assert!(
+                dw.interpretation.contains("rule of thumb")
+                    && !dw.interpretation.contains("detected"),
+                "{}",
+                dw.interpretation
+            );
+        }
+        let d = run_diagnostics(&create_test_dataset(), "y", &["x1"]).unwrap();
+        let text = d.to_string();
+        assert!(text.contains("Durbin-Watson Statistic"), "{text}");
+        assert!(!text.contains("Durbin-Watson Test"), "{text}");
+    }
+
+    /// The covariance loop over the rows checks the budget (`eig_symmetric` has none).
+    #[test]
+    fn test_first_principal_component_checks_the_budget() {
+        let cancelled = || {
+            let t = resource::CancelToken::new();
+            t.cancel();
+            resource::Budget::new(None, t)
+        };
+        let z = Array2::from_shape_fn((300, 3), |(i, j)| {
+            ((i * 7 + j * 3) % 11) as f64 + 0.1 * (i as f64).sin()
+        });
+        let e =
+            resource::with_budget(cancelled(), || first_principal_component(z.view())).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
     #[test]
     fn test_jarque_bera() {
         // Normal-ish residuals
@@ -3249,8 +3306,16 @@ mod tests {
             .scalar("k_drop_x2", f1.k_restricted as f64, Tol::exact())
             .scalar("k_drop_x2_x3", f2.k_restricted as f64, Tol::exact())
             .scalar("n_obs", f1.n_obs as f64, Tol::exact())
+            .scalar("wald_drop_x2_chisq", c1.statistic, Tol::stat(n))
+            .scalar("wald_drop_x2_chisq_p", c1.p_value, Tol::p_value(n))
+            .scalar("wald_drop_x2_x3_chisq", c2.statistic, Tol::stat(n))
+            .scalar("wald_drop_x2_x3_chisq_p", c2.p_value, Tol::p_value(n))
+            // aod::wald.test reports the same statistics; its p for x2 and x3 is an
+            // underflow to 0 (aod_chi2_x2_x3_p), so the lmtest p above is the pin there
+            .scalar("aod_chi2_x2", c1.statistic, Tol::stat(n))
+            .scalar("aod_chi2_x2_p", c1.p_value, Tol::p_value(n))
+            .scalar("aod_chi2_x2_x3", c2.statistic, Tol::stat(n))
             .finish();
-        // deviation REG-37: n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (wald_drop_*_chisq, aod_chi2_*)
         assert_eq!(c1.test_type, "Chisq");
         assert_eq!((c1.df1, c1.df2), (1, None));
         assert!(c2.statistic > c1.statistic);
@@ -3263,12 +3328,14 @@ mod tests {
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
         let f = wald_test(&ds, "inv", &["value", "capital"], &["value"], true).unwrap();
+        let c = wald_test(&ds, "inv", &["value", "capital"], &["value"], false).unwrap();
         let n = f.n_obs;
         Check::new(&case)
             .scalar("wald_drop_capital_f", f.statistic, Tol::stat(n))
             .scalar("wald_drop_capital_f_p", f.p_value, Tol::p_value(n))
+            .scalar("wald_drop_capital_chisq", c.statistic, Tol::stat(n))
+            .scalar("wald_drop_capital_chisq_p", c.p_value, Tol::p_value(n))
             .finish();
-        // deviation REG-37: n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (wald_drop_capital_chisq)
         assert_eq!((f.df1, f.df2), (1, Some(197)));
     }
 
@@ -3536,6 +3603,15 @@ mod tests {
             .scalar("wald_alias_df2", w.df2.unwrap() as f64, Tol::exact())
             .scalar("wald_alias_p", w.p_value, Tol::p_value(w.n_obs))
             .finish();
+        // lmtest::waldtest(test = "Chisq") reports q F, q the rank difference
+        let c = wald_test(&ds, "y", &["x1", "x2", "x3"], &["x1"], false).unwrap();
+        assert_eq!((c.df1, c.df2), (w.df1, None));
+        let qf = w.df1 as f64 * w.statistic;
+        assert!(
+            (c.statistic - qf).abs() <= 1e-12 * qf,
+            "{} vs {qf}",
+            c.statistic
+        );
     }
 
     /// x2 = 0.5 x1 exactly: the unrestricted model has the restricted model's rank, so

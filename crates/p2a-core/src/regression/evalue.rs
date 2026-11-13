@@ -31,9 +31,12 @@
 //!
 //! For rare outcomes, HR approximates RR, so use the RR formula directly.
 //!
-//! For common outcomes, apply the square root transformation:
+//! For common outcomes, use VanderWeele's (2020) conversion:
 //!
-//! RR_approx = sqrt(HR)
+//! RR_approx = (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))
+//!
+//! (VanderWeele, T. J. (2020). Optimal approximate conversions of odds ratios and hazard
+//! ratios to risk ratios. Biometrics 76(3), 746-752; `EValue::evalues.HR(rare = FALSE)`.)
 //!
 //! ## E-value for Standardized Mean Difference
 //!
@@ -165,10 +168,14 @@ impl std::fmt::Display for EValueResult {
                     self.effect_type
                 )?;
             } else {
+                let conversion = match self.effect_type {
+                    EffectType::HazardRatio => "(1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR))",
+                    _ => "sqrt(OR)",
+                };
                 writeln!(
                     f,
-                    "  Note: Common outcome transformation (sqrt) was applied to {}.",
-                    self.effect_type
+                    "  Note: Common outcome conversion {} was applied to {}.",
+                    conversion, self.effect_type
                 )?;
             }
         }
@@ -443,7 +450,9 @@ pub fn evalue_or(
 /// Compute E-value from a hazard ratio.
 ///
 /// For rare outcomes (< 15% event rate), HR approximates RR.
-/// For common outcomes, apply square root transformation first.
+/// For common outcomes, HR is converted with VanderWeele's (2020) formula
+/// RR = (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) first, as `EValue::evalues.HR(rare = FALSE)`
+/// (Biometrics 76(3)).
 ///
 /// # Arguments
 /// * `point` - Point estimate of the hazard ratio
@@ -451,7 +460,7 @@ pub fn evalue_or(
 /// * `ci_upper` - Upper bound of confidence interval (optional)
 /// * `rare` - Whether the outcome is rare (< 15% event rate).
 ///            If true, HR is used directly as RR approximation.
-///            If false, sqrt(HR) is used as RR approximation.
+///            If false, (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) is used.
 ///
 /// # Returns
 /// An `EValueResult` containing E-values for point and CI.
@@ -474,8 +483,7 @@ pub fn evalue_hr(
         });
     }
 
-    // Same transformation logic as OR
-    let transform = |hr: f64| -> f64 { if rare { hr } else { hr.sqrt() } };
+    let transform = |hr: f64| -> f64 { if rare { hr } else { hr_common_to_rr(hr) } };
 
     let rr_point = transform(point);
     let rr_lower = ci_lower.map(transform);
@@ -700,19 +708,30 @@ pub fn evalue_rd(rd: f64, baseline_risk: f64, se: Option<f64>) -> EconResult<EVa
     })
 }
 
-/// Compute the minimum bias factor required to explain away an observed effect.
+/// VanderWeele's (2020) conversion of a hazard ratio with a common outcome to a risk ratio,
+/// (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)); 1 at HR = 1, where the formula is 0/0.
+fn hr_common_to_rr(hr: f64) -> f64 {
+    if hr == 1.0 {
+        return 1.0;
+    }
+    // 0.5^x = 2^-x; -expm1(-x ln 2) = 1 - 2^-x without cancellation near HR = 1
+    let one_minus_half_pow = |x: f64| -(-x * std::f64::consts::LN_2).exp_m1();
+    one_minus_half_pow(hr.sqrt()) / one_minus_half_pow((1.0 / hr).sqrt())
+}
+
+/// The bounding factor of a confounder whose two associations both equal `evalue`.
 ///
-/// The bias factor B is defined such that B >= E-value would suffice to
-/// explain away the effect. This is the square of the E-value minus 1.
-///
-/// B = sqrt(E-value) for confounding that affects both treatment and outcome
+/// With RR_EU = RR_UD = e, the joint bounding factor of VanderWeele & Ding (2017) is
+/// B(e, e) = e² / (2e - 1). At the E-value of an observed risk ratio RR this is RR itself,
+/// so `bias_factor(evalue_rr(rr)) == rr` (up to rounding): the E-value is the smallest
+/// common strength of both associations that explains the observed effect away.
 ///
 /// # Arguments
-/// * `evalue` - The E-value
+/// * `evalue` - The common strength of the two associations (risk-ratio scale), e.g. an
+///   E-value
 ///
 /// # Returns
-/// The bias factor B, representing the minimum strength of unmeasured
-/// confounding (as a risk ratio) needed with BOTH treatment and outcome.
+/// The bounding factor B(e, e); 1 for e <= 1 or NaN.
 ///
 /// # References
 /// VanderWeele & Ding (2017), Section on the bounding factor
@@ -720,9 +739,7 @@ pub fn bias_factor(evalue: f64) -> f64 {
     if evalue <= 1.0 || evalue.is_nan() {
         return 1.0;
     }
-    // The E-value is the product of two bias factors (one for U->D, one for U->Y)
-    // If they are equal, each is sqrt(E-value)
-    evalue.sqrt()
+    evalue * evalue / (2.0 * evalue - 1.0)
 }
 
 /// Compute E-value from bounding factor.
@@ -760,35 +777,46 @@ pub fn bounding_factor(rr_eu: f64, rr_ud: f64) -> f64 {
 
 /// Check if a hypothesized confounder could explain away an observed effect.
 ///
-/// Given an observed effect (as E-value) and hypothesized confounder
-/// associations with exposure and outcome, determine if the confounder
-/// could fully explain the effect.
+/// The confounder explains the effect away when its joint bounding factor
+/// B(RR_EU, RR_UD) = RR_EU RR_UD / (RR_EU + RR_UD - 1) reaches the observed risk ratio,
+/// taken away from the null (RR or 1/RR, whichever is at least 1).
 ///
 /// # Arguments
-/// * `observed_evalue` - E-value for the observed effect
+/// * `observed_rr` - The observed effect on the risk-ratio scale. For an odds ratio, hazard
+///   ratio, SMD or risk difference pass `EValueResult::risk_ratio`, the converted estimate
 /// * `rr_eu` - Hypothesized RR for confounder -> exposure
 /// * `rr_ud` - Hypothesized RR for confounder -> outcome
 ///
 /// # Returns
-/// `true` if the hypothesized confounder could fully explain the effect.
+/// `true` if the hypothesized confounder could fully explain the effect; `false` for a
+/// non-finite or non-positive input. A relative allowance of 1e-12 lets a confounder at
+/// exactly the E-value (B(E, E) = RR in exact arithmetic) explain the effect away despite
+/// rounding.
 ///
 /// # Example
 /// ```
 /// use p2a_core::regression::{evalue_rr, could_explain_away};
 ///
-/// let ev = evalue_rr(3.9);  // E-value = 7.26
+/// let rr = 3.9; // E-value 7.26
 ///
-/// // Could a confounder with RR=3 for both associations explain this?
-/// // B = 9/5 = 1.8 < 7.26, so no
-/// assert!(!could_explain_away(ev, 3.0, 3.0));
+/// // RR = 3 for both associations: B = 9/5 = 1.8 < 3.9, so no
+/// assert!(!could_explain_away(rr, 3.0, 3.0));
 ///
-/// // Could a confounder with RR=15 for both associations explain this?
-/// // B = 225/29 = 7.76 > 7.26, so yes
-/// assert!(could_explain_away(ev, 15.0, 15.0));
+/// // RR = 8 for both: B = 64/15 = 4.27 >= 3.9, so yes
+/// assert!(could_explain_away(rr, 8.0, 8.0));
+///
+/// // Both associations at the E-value explain the effect away exactly
+/// let e = evalue_rr(rr);
+/// assert!(could_explain_away(rr, e, e));
 /// ```
-pub fn could_explain_away(observed_evalue: f64, rr_eu: f64, rr_ud: f64) -> bool {
+pub fn could_explain_away(observed_rr: f64, rr_eu: f64, rr_ud: f64) -> bool {
+    let finite_positive = |v: f64| v.is_finite() && v > 0.0;
+    if !(finite_positive(observed_rr) && finite_positive(rr_eu) && finite_positive(rr_ud)) {
+        return false;
+    }
+    let rr = observed_rr.max(1.0 / observed_rr);
     let b = bounding_factor(rr_eu, rr_ud);
-    b >= observed_evalue
+    b >= rr * (1.0 - 1e-12)
 }
 
 #[cfg(test)]
@@ -919,9 +947,10 @@ mod tests {
         assert_eq!(result_rare.effect_type, EffectType::HazardRatio);
         assert!((result_rare.risk_ratio - 1.5).abs() < 1e-10);
 
-        // Common outcome
+        // Common outcome: VanderWeele (2020), (1 - 0.5^2) / (1 - 0.5^0.5)
         let result_common = evalue_hr(4.0, None, None, false).unwrap();
-        assert!((result_common.risk_ratio - 2.0).abs() < 1e-10);
+        assert!((result_common.risk_ratio - 2.5606601717798219).abs() < 1e-12);
+        assert!(result_common.to_string().contains("0.5^sqrt(HR)"));
     }
 
     /// Test E-value for standardized mean difference.
@@ -985,18 +1014,40 @@ mod tests {
         assert!((b2 - 2.29).abs() < 0.01);
     }
 
-    /// Test could_explain_away function.
+    /// could_explain_away compares the bounding factor with the observed risk ratio.
     #[test]
     fn test_could_explain_away() {
-        let ev = evalue_rr(3.9); // E-value = 7.26
+        // B(3, 3) = 9/5 = 1.8 < 3.9: cannot explain it away
+        assert!(!could_explain_away(3.9, 3.0, 3.0));
+        // B(8, 8) = 64/15 = 4.27 >= 3.9, although 8 is below the E-value 7.26
+        assert!(could_explain_away(3.9, 8.0, 8.0));
+        // invalid inputs
+        assert!(!could_explain_away(f64::NAN, 8.0, 8.0));
+        assert!(!could_explain_away(0.0, 8.0, 8.0));
+        assert!(!could_explain_away(3.9, f64::INFINITY, 8.0));
+        assert!(!could_explain_away(3.9, -1.0, 8.0));
+    }
 
-        // Weak confounder cannot explain
-        // B(3,3) = 9/5 = 1.8 < 7.26
-        assert!(!could_explain_away(ev, 3.0, 3.0));
-
-        // Strong confounder can explain
-        // B(15,15) = 225/29 = 7.76 > 7.26
-        assert!(could_explain_away(ev, 15.0, 15.0));
+    /// VanderWeele & Ding (2017): a confounder with both associations equal to the E-value
+    /// explains the observed RR away exactly, B(E, E) = RR.
+    #[test]
+    fn test_could_explain_away_at_the_evalue() {
+        let rr = 3.9;
+        let e = evalue_rr(rr);
+        assert!(could_explain_away(rr, e, e));
+        assert!(could_explain_away(rr, 8.0, 8.0));
+        assert!(!could_explain_away(rr, 3.0, 3.0));
+        assert!(could_explain_away(rr, 15.0, 15.0));
+        // protective effect: the RR scale is |log RR|
+        let e6 = evalue_rr(0.6);
+        assert!(could_explain_away(0.6, e6, e6));
+        assert!(!could_explain_away(0.6, 1.5, 1.5));
+        for x in [1.2, 2.5, 3.9] {
+            let b = bias_factor(evalue_rr(x));
+            assert!((b - x).abs() <= 1e-12 * x, "{x}: {b}");
+        }
+        assert_eq!(bias_factor(1.0), 1.0);
+        assert_eq!(bias_factor(0.5), 1.0);
     }
 
     /// Test edge cases.
@@ -1027,6 +1078,8 @@ mod tests {
             // sqrt(OR)
             (5, evalue_or(4.0, Some(2.0), Some(8.0), false).unwrap()),
             (6, evalue_hr(1.5, Some(1.2), Some(1.9), true).unwrap()),
+            // common outcome: VanderWeele (2020)
+            (7, evalue_hr(4.0, Some(2.0), Some(8.0), false).unwrap()),
         ];
         let mut c = Check::new(&case);
         for (k, r) in &rows {
@@ -1039,10 +1092,43 @@ mod tests {
             .scalar("row8_e_point", smd.evalue_point, tol)
             .scalar("row8_e_ci", smd.evalue_ci.unwrap(), tol)
             .scalar("evalue_rr_3_9", evalue_rr(3.9), tol)
+            // EValueResult carries no RR limits: pin them through the conversion
+            .vector(
+                "row7_rr_ci",
+                &[hr_common_to_rr(2.0), hr_common_to_rr(8.0)],
+                tol,
+            )
             .finish();
-        // deviation REG-5: row7 (HR 4, common outcome): EValue RR 2.560660171779822, E
-        //   4.559740046011876; p2a sqrt(HR).
-        // deviation REG-39: could_explain_away is not pinned.
+        // REG-39: could_explain_away is a property (test_could_explain_away_at_the_evalue).
+    }
+
+    /// Case `evalue_hr_common`: EValue 4.1.4 `evalues.HR(est, lo, hi, rare = FALSE)`
+    /// (inputs as `evalue_hr_inputs.csv`; hr3 has no lower limit). Closed forms.
+    #[test]
+    fn test_validate_evalue_hr_common() {
+        use p2a_validation::Check;
+        let (case, _ds) = crate::test_support::load_case("evalue_hr_common");
+        let tol = p2a_validation::Tol::new(1e-12, 1e-14);
+        let rows: [(usize, f64, Option<f64>, Option<f64>); 3] = [
+            (1, 0.6, Some(0.4), Some(0.9)),
+            (2, 1.3, Some(0.9), Some(1.8)),
+            (3, 0.5, None, Some(0.8)),
+        ];
+        let mut c = Check::new(&case);
+        for (k, est, lo, hi) in rows {
+            let r = evalue_hr(est, lo, hi, false).unwrap();
+            let rr_ci: Vec<f64> = [lo, hi]
+                .into_iter()
+                .flatten()
+                .map(hr_common_to_rr)
+                .collect();
+            c.scalar(&format!("hr{k}_rr"), r.risk_ratio, tol)
+                .scalar(&format!("hr{k}_e_point"), r.evalue_point, tol)
+                .scalar(&format!("hr{k}_e_ci"), r.evalue_ci.unwrap(), tol)
+                .vector(&format!("hr{k}_rr_ci"), &rr_ci, tol);
+        }
+        c.finish();
+        assert_eq!(hr_common_to_rr(1.0), 1.0);
     }
 
     /// Test Display implementation.

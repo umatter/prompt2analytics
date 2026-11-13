@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "sensemakr_rv_alpha",
+  "area": "regression/sensemakr",
+  "method": "sensemakr robustness_value with alpha (qt(alpha/2, dof - 1), extreme-RV branch)",
+  "reference": "sensemakr::robustness_value.numeric(t, dof, q, alpha): f_crit = |qt(alpha/2, dof - 1)| / sqrt(dof - 1); extreme_robustness_value when f_q > 1 / f_crit",
+  "call": "robustness_value(30, 10, q = 1, alpha = 0.05); ...",
+  "dataset": "validation/datasets/generated/sensemakr_rv_inputs.csv",
+  "datasets": ["validation/datasets/generated/sensemakr_rv_inputs.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sensemakr": "0.1.6"
+  },
+  "values": {
+    "rv": [0.98276269227204005, 0.98912915026767489, 0.17660974944320282, 0.00057852557916098955, 0.042406633417314939, 0.019338593626010935],
+    "is_xrv": [1, 0, 0, 0, 0, 0]
+  }
+}

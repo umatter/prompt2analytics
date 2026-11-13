@@ -109,8 +109,8 @@ counts, a repeated name gave F = 0, and swapped or longer restricted lists under
 | `test_validate_wald_aliased_rank_q` | `ols_aliased` | `anova(lm(y ~ x1), lm(y ~ x1 + x2 + x3))`, x2 = 2 x1: F 11.38526696929829, df (1, 117), p 0.001004720010233427 |
 
 Registry entry `waldtest_nested_rank` (`validation/methods/reg_rank_qr.json`). Measured:
-F within 3.9e-15 relative, p within 9.6e-14. The χ² form remains n (RSS_r − RSS_u)/RSS_u
-(REG-37, Tier 4), not lmtest's.
+F within 3.9e-15 relative, p within 9.6e-14. The χ² form is q F, as `waldtest(test = "Chisq")`;
+the test asserts that identity.
 
 ## Diagnostics on aliased models (T3-WP09)
 
@@ -160,11 +160,13 @@ rows.
    (pinned above). The scaled number, on which Belsley's thresholds are judged, is
    2.872962 on Grunfeld, as `kappa(sweep(X, 2, sqrt(colSums(X^2)), "/"), exact = TRUE)` gives
    (quoted in `test_scaled_condition_number_ignores_units`, not R-pinned); no warning is
-   printed there. The Durbin-Watson wording (REG-34, Tier 4) is unchanged.
+   printed there.
 2. **VIF of the intercept**: p2a lists an `(Intercept)` row with VIF NaN; `car::vif` has
    no such row, and the test compares the regressors only (T1-WP05 drops the row from the
    text output).
-3. **Durbin-Watson**: no p-value is computed (R's `dwtest` gives 2.1e-32 here).
+3. **Durbin-Watson**: no p-value is computed (R's `dwtest` gives 2.1e-32 here). The text
+   reads the statistic with the 1.5 / 2.5 cut-offs, calls that a rule of thumb, not a test,
+   and points to the Breusch-Godfrey test (`lmtest::bgtest`) for a p-value.
 4. **Breusch-Pagan**: only the studentized version is offered.
 5. **Jarque-Bera p-value**: p2a uses the closed form exp(−JB/2) of the χ²(2) survival
    function, `tseries` uses 1 − pchisq, which is 0 here; they agree within 1e-12 absolute.
@@ -182,3 +184,12 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- regression::
 - Koenker, R. (1981). "A Note on Studentizing a Test for Heteroscedasticity". *Journal of Econometrics*, 17(1), 107-112.
 - Durbin, J. & Watson, G.S. (1950). "Testing for Serial Correlation in Least Squares Regression: I". *Biometrika*, 37(3/4), 409-428.
 - Belsley, D.A., Kuh, E. & Welsch, R.E. (1980). *Regression Diagnostics*. Wiley.
+
+## Tier 4
+
+- Wald test, Chisq form (`test_validate_wald_sim`, `test_validate_wald_grunfeld`,
+  `test_validate_wald_aliased_rank_q`): `lmtest::waldtest(test = "Chisq")` = q F, pinned on
+  `diag_wald_sim` and `ols_diagnostics_grunfeld` (drop capital: 81.98954629331581, p
+  1.3680836872216867e-19).
+- Durbin-Watson: the reading says what the 1.5 / 2.5 cut-offs suggest, calls them a rule of thumb, not a
+  test, and points to `lmtest::bgtest` (`test_durbin_watson_wording_is_a_rule_of_thumb`).
