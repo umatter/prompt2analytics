@@ -1412,9 +1412,9 @@ mod tests {
             .finish();
     }
 
-    fn nls_t4() -> (p2a_validation::Case, Array1<f64>, Array1<f64>, Vec<f64>) {
+    fn nls_t4(case_id: &str) -> (p2a_validation::Case, Array1<f64>, Array1<f64>, Vec<f64>) {
         use crate::data::columns::{NaPolicy, numeric_column};
-        let (case, ds) = crate::test_support::load_case("nls_weighted_t4");
+        let (case, ds) = crate::test_support::load_case(case_id);
         let c = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
         (case, Array1::from(c("x")), Array1::from(c("y")), c("w"))
     }
@@ -1425,7 +1425,7 @@ mod tests {
     #[test]
     fn test_validate_nls_weighted() {
         use p2a_validation::{Check, Tol};
-        let (case, x, y, w) = nls_t4();
+        let (case, x, y, w) = nls_t4("nls_weighted_t4");
         let mut config = NlsConfig::default();
         config.weights = Some(w);
         config.tolerance = 1e-12;
@@ -1463,7 +1463,7 @@ mod tests {
     #[test]
     fn test_validate_nls_one_sided_bounds() {
         use p2a_validation::{Check, Tol};
-        let (case, x, y, w) = nls_t4();
+        let (case, x, y, w) = nls_t4("nls_weighted_t4");
         let names = ["a", "b", "c"];
         let mut lo = NlsConfig::default();
         lo.weights = Some(w);

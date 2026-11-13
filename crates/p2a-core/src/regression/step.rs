@@ -995,8 +995,12 @@ mod tests {
     }
 
     /// Case `step_null_t4` (REG-54): pure noise, y ~ x1 + x2 + x3, n = 60.
-    fn step_null(direction: StepDirection, use_bic: bool) -> (p2a_validation::Case, StepResult) {
-        let (case, ds) = crate::test_support::load_case("step_null_t4");
+    fn step_null(
+        case_id: &str,
+        direction: StepDirection,
+        use_bic: bool,
+    ) -> (p2a_validation::Case, StepResult) {
+        let (case, ds) = crate::test_support::load_case(case_id);
         let r = step(
             &ds,
             "y",
@@ -1023,7 +1027,7 @@ mod tests {
     #[test]
     fn test_validate_step_null_backward() {
         use p2a_validation::{Check, Tol};
-        let (case, r) = step_null(StepDirection::Backward, false);
+        let (case, r) = step_null("step_null_t4", StepDirection::Backward, false);
         let dropped: Vec<f64> = r.steps[1..]
             .iter()
             .map(|s| {
@@ -1050,7 +1054,7 @@ mod tests {
     #[test]
     fn test_validate_step_null_both() {
         use p2a_validation::{Check, Tol};
-        let (case, r) = step_null(StepDirection::Both, false);
+        let (case, r) = step_null("step_null_t4", StepDirection::Both, false);
         Check::new(&case)
             .vector("both_aic", &path(&r), Tol::stat(60))
             .scalar("both_final_p", r.final_model.n_params as f64, Tol::exact())
@@ -1061,7 +1065,7 @@ mod tests {
     #[test]
     fn test_validate_step_null_forward() {
         use p2a_validation::{Check, Tol};
-        let (case, r) = step_null(StepDirection::Forward, false);
+        let (case, r) = step_null("step_null_t4", StepDirection::Forward, false);
         Check::new(&case)
             .vector("forward_aic", &path(&r), Tol::stat(60))
             .scalar(
@@ -1077,7 +1081,7 @@ mod tests {
     #[test]
     fn test_validate_step_null_bic() {
         use p2a_validation::{Check, Tol};
-        let (case, r) = step_null(StepDirection::Backward, true);
+        let (case, r) = step_null("step_null_t4", StepDirection::Backward, true);
         Check::new(&case)
             .vector("bic_aic", &path(&r), Tol::stat(60))
             .scalar("bic_final_p", r.final_model.n_params as f64, Tol::exact())
