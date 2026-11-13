@@ -55,8 +55,8 @@ the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a
 
 | Constraint | J = 10, T0 = 20 | J = 40, T0 = 20 | J = 40, T0 = 50 |
 |---|---|---|---|
-| simplex, new / base | 0.90 (18.3 / 16.5 µs) | 0.90 | 0.95 |
-| lasso_simplex, new / base | 0.002 (10.0 ms / 17.8 µs) | 0.001 | 0.002 |
+| simplex, new / base | 0.90 (base 18.3, new 16.5 µs) | 0.90 | 0.95 |
+| lasso_simplex, new / base | 0.002 (base 10.0 ms, new 17.8 µs) | 0.001 | 0.002 |
 
 ## Deviations
 

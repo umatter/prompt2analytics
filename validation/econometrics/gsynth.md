@@ -146,15 +146,15 @@ covariates cost 7.62x, which is accepted: that row is the iteration gsynth runs 
 The other figures above 1.1x are the marked ones.
 
 The fit with no covariates costs more than the base because the factors come from a full symmetric
-eigendecomposition of the demeaned controls' Gram matrix, as gsynth's `panel_factor` does, where
-the base ran power iteration. On the 500-cell panel of the IFE r = 1 row (20 x 20 Gram; at a8dcc948,
-seven rounds, medians), copies of the two steps timed on their own take 0.089 ms (`gs_pca_with`: Gram,
-eigendecomposition, factors, loadings and common component) and 0.006 ms (the base's
+eigendecomposition of the demeaned controls' Gram matrix, as gsynth's `panel_factor` does, where the
+base ran power iteration. On the 500-cell panel of the IFE r = 1 row (20 x 20 Gram; at a8dcc948,
+seven rounds, medians), copies of the two steps timed on their own take 0.089 ms (`gs_pca_with`:
+Gram, eigendecomposition, factors, loadings and common component) and 0.006 ms (the base's
 `extract_factors_svd`, on its 10 pre-periods). Of the whole fits, 0.239 ms new and 0.213 ms base,
 that leaves 0.150 ms and 0.207 ms for everything else: the factor step adds 0.084 ms, the other
 steps give back 0.058 ms, and the difference is the 0.026 ms above the base. A solver for the
-leading eigenvectors only has not been tried: its vectors would match the full decomposition only to its own tolerance, and whether that
-holds the fits to their tests has not been measured.
+leading eigenvectors only has not been tried: its vectors would match the full decomposition only to
+its own tolerance, and whether that holds the fits to their tests has not been measured.
 
 Without covariates the fit has no iteration, and its fixed parts are computed once: the panel is
 placed cell by cell without sorting its rows, the means, demeaned outcomes and eigendecomposition

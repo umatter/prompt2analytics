@@ -2295,16 +2295,11 @@ fn fit_rmspe_ratio(
     actual: &[(i64, f64)],
     treatment_time: i64,
 ) -> f64 {
-    let pre: Vec<f64> = actual
+    let (ss, k) = actual
         .iter()
         .filter(|(t, _)| *t < treatment_time)
-        .map(|&(_, y)| y)
-        .collect();
-    let scale = if pre.is_empty() {
-        1.0
-    } else {
-        (pre.iter().map(|y| y * y).sum::<f64>() / pre.len() as f64).sqrt()
-    };
+        .fold((0.0, 0usize), |(s, k), &(_, y)| (s + y * y, k + 1));
+    let scale = if k == 0 { 1.0 } else { (ss / k as f64).sqrt() };
     rmspe_ratio(pre_rmspe, effects, scale)
 }
 

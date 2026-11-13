@@ -607,7 +607,7 @@ impl AnalyticsServer {
 
     /// Perform Goodman-Bacon decomposition for staggered DiD.
     #[tool(
-        description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
+        description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated, later vs. always-treated units, treated from the first period) contribute to the overall estimate and with what weights. The treatment column must be 0/1 and absorbing (once 1, a unit stays treated). Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
     )]
     pub async fn bacon_decomp(
         &self,
