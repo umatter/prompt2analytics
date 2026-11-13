@@ -161,8 +161,8 @@ pub struct DoublyRobustConfig {
     pub estimand: Estimand,
     /// Trimming threshold for propensity scores, in [0, 0.5)
     pub trim: f64,
-    /// Number of bootstrap replications for methods `IPW` and `Regression`: 0 gives analytic
-    /// SEs (IPW: the M-estimation SE with the propensity estimated, as
+    /// Number of bootstrap replications for methods `IPW` and `Regression`: 0 (the default)
+    /// gives analytic SEs (IPW: the M-estimation SE with the propensity estimated, as
     /// [`run_ipw_treatment`]; Regression: the sandwich of the stacked estimating equations,
     /// the trimmed set held fixed); 2 or more a bootstrap whose replicates resample all rows,
     /// refit the propensity and outcome models and re-apply the trimming; 1 is refused.
@@ -180,7 +180,7 @@ impl Default for DoublyRobustConfig {
             method: DRMethod::AIPW,
             estimand: Estimand::ATE,
             trim: 0.05,
-            bootstrap: 999,
+            bootstrap: 0,
             seed: None,
         }
     }
@@ -3966,6 +3966,27 @@ mod tests {
             (ratio - 1.0).abs() < 0.15,
             "bootstrap / sandwich SE = {ratio}"
         );
+    }
+
+    /// Doubly robust IPW and regression default to their analytic SEs; the refit bootstrap
+    /// runs only on request.
+    #[test]
+    fn test_dr_ipw_and_regression_default_to_analytic_ses() {
+        assert_eq!(DoublyRobustConfig::default().bootstrap, 0);
+        let ds = create_treatment_dataset();
+        for (method, se) in [
+            (DRMethod::IPW, "M-estimation (propensity estimated)"),
+            (
+                DRMethod::Regression,
+                "analytic (stacked estimating equations, trimming fixed)",
+            ),
+        ] {
+            let mut c = DoublyRobustConfig::default();
+            c.method = method;
+            let r = run_doubly_robust(&ds, "y", "treatment", &["x1", "x2"], c).unwrap();
+            assert_eq!(r.se_method, se, "{method:?}");
+            assert_eq!(r.bootstrap_reps, 0, "{method:?}");
+        }
     }
 
     #[test]

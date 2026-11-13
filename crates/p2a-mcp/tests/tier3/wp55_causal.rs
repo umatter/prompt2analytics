@@ -1070,7 +1070,6 @@ async fn test_validate_mcp_weighting() {
                eb.to_string());
     let mut dc = DoublyRobustConfig::default();
     dc.trim = 0.0;
-    dc.bootstrap = 999;
     dc.seed = None; // the tool's defaults
     let dr = run_doubly_robust(&ds, "y", "treat", &covs, dc).unwrap();
     let t = ok(&server, &session, "treatment_doubly_robust",

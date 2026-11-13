@@ -747,7 +747,7 @@ impl AnalyticsServer {
 
     /// Run Doubly Robust (AIPW) treatment effect estimation.
     #[tool(
-        description = "Estimate the ATE or ATT by augmented IPW (doubly robust: consistent if either the logistic propensity model or the linear outcome model is correct), or by weighting ('ipw') or outcome regression ('regression') alone. Regression adjustment averages the predicted contrast over the treated for ATT. AIPW uses its influence-function SE; 'ipw' and 'regression' use a bootstrap (default 999 replicates) that resamples every row and refits the propensity and outcome models in each replicate, seeded by the session seed (default 42), or analytic SEs with bootstrap = 0 (M-estimation for 'ipw', the stacked-equation sandwich for 'regression'). Returns the effect, its SE and confidence interval, and model fit diagnostics."
+        description = "Estimate the ATE or ATT by augmented IPW (doubly robust: consistent if either the logistic propensity model or the linear outcome model is correct), or by weighting ('ipw') or outcome regression ('regression') alone. Regression adjustment averages the predicted contrast over the treated for ATT. AIPW uses its influence-function SE; 'ipw' and 'regression' use analytic SEs by default (M-estimation for 'ipw', the stacked-equation sandwich for 'regression'), or with bootstrap >= 2 a bootstrap that resamples every row and refits the propensity and outcome models in each replicate, seeded by the session seed (default 42). Returns the effect, its SE and confidence interval, and model fit diagnostics."
     )]
     pub async fn treatment_doubly_robust(
         &self,
@@ -765,7 +765,7 @@ impl AnalyticsServer {
         config.method = method;
         config.trim = request.trim.unwrap_or(0.05);
         config.estimand = estimand;
-        config.bootstrap = request.bootstrap.unwrap_or(999);
+        config.bootstrap = request.bootstrap.unwrap_or(0);
         config.seed = self.seed_or_global(None).await;
 
         let result = match run_doubly_robust(
