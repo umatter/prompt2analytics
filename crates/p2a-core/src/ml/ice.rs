@@ -74,12 +74,11 @@
 //! // shows none of that spread.
 //! assert!((result.pdp_curve[4] - 16.0).abs() < 1e-10);
 //!
-//! // `ice_spread` quantifies what the PDP hides: max(std) / mean(|PDP|),
-//! // here (4 * sqrt(2)) / 8 = 1 / sqrt(2) ~= 0.707, well above the 0.5 at which
-//! // the Display impl flags interaction effects.
-//! assert!(
-//!     (result.ice_spread.heterogeneity_index - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-10
-//! );
+//! // The heterogeneity index H measures what the PDP hides: with each curve centred on
+//! // its own mean, H^2 is the share of the curves' variation that differs between
+//! // observations. Here curve i is (x_s - 3) x1_i around its mean, so H^2 = 10 / 90 and
+//! // H = 1/3; parallel curves (no interaction involving x0) give H = 0.
+//! assert!((result.ice_spread.heterogeneity_index - 1.0 / 3.0).abs() < 1e-12);
 //! ```
 
 use ndarray::{Array2, ArrayView1, ArrayView2};
@@ -206,7 +205,13 @@ pub struct IceSpread {
     /// Interquartile range at each grid point.
     pub iqr: Vec<f64>,
 
-    /// Indicates heterogeneity: max(std_dev) / mean(|pdp|).
+    /// Heterogeneity index `H = sqrt(SS_het / SS_tot)`: each curve is centred on its own mean
+    /// over the grid, `SS_tot` is the sum of squares of the centred curves and `SS_het` that of
+    /// their deviations from the mean centred curve. `H^2` is the share of the curves'
+    /// variation along the feature that differs between observations: 0 for parallel curves
+    /// (no interaction involving the feature), 1 when the mean curve is flat. Unchanged by
+    /// adding a constant to the predictions or by `center`; 0 when every curve is flat; NaN
+    /// when a prediction is NaN.
     pub heterogeneity_index: f64,
 }
 
@@ -249,10 +254,14 @@ impl std::fmt::Display for IceResult {
 
         writeln!(f)?;
         writeln!(f, "Heterogeneity Analysis:")?;
+        let h = self.ice_spread.heterogeneity_index;
         writeln!(
             f,
-            "  Heterogeneity index: {:.4}",
-            self.ice_spread.heterogeneity_index
+            "  Heterogeneity index H: {:.4} (share of the curves' variation along the feature \
+             that differs between observations: {:.1}%; 0 = parallel curves, no interaction \
+             involving this feature)",
+            h,
+            100.0 * h * h
         )?;
         writeln!(
             f,
@@ -268,18 +277,6 @@ impl std::fmt::Display for IceResult {
             "  Mean ICE spread (std): {:.4}",
             self.ice_spread.std_dev.iter().sum::<f64>() / self.ice_spread.std_dev.len() as f64
         )?;
-
-        if self.ice_spread.heterogeneity_index > 0.5 {
-            writeln!(f)?;
-            writeln!(
-                f,
-                "Note: High heterogeneity index suggests interaction effects."
-            )?;
-            writeln!(
-                f,
-                "      The feature's effect varies substantially across observations."
-            )?;
-        }
 
         Ok(())
     }
@@ -378,8 +375,8 @@ where
         });
     }
 
-    // Sample observations if needed
-    let sampled_data = if frac < 1.0 {
+    // Sample observations if needed; with every row the data is used as it is
+    let sampled = if frac < 1.0 {
         let n_sample = ((n_obs as f64) * frac).ceil() as usize;
         let n_sample = n_sample.max(1).min(n_obs);
 
@@ -394,9 +391,13 @@ where
         indices.truncate(n_sample);
         indices.sort_unstable(); // Sort for cache-friendly access
 
-        select_rows(&data, &indices)
+        Some(select_rows(&data, &indices))
     } else {
-        data.to_owned()
+        None
+    };
+    let sampled_data = match &sampled {
+        Some(a) => a.view(),
+        None => data.view(),
     };
 
     let n_sampled = sampled_data.nrows();
@@ -415,7 +416,7 @@ where
     // Compute ICE curves: one prediction call per grid point
     let mut ice_curves = try_zeros2(n_sampled, n_grid, "ICE curves")?;
     pdp::evaluate_grid(
-        sampled_data.view(),
+        sampled_data,
         &[feature_index],
         &[grid_values.as_slice()],
         predict,
@@ -447,7 +448,7 @@ where
     );
 
     // Compute heterogeneity statistics
-    let ice_spread = compute_ice_spread(ice_curves.view(), &pdp_curve)?;
+    let ice_spread = compute_ice_spread(ice_curves.view())?;
 
     // Convert ice_curves to Vec for JSON serialization
     let ice_curves_vec: Vec<Vec<f64>> =
@@ -470,7 +471,7 @@ where
 
 /// Compute ICE spread statistics to quantify heterogeneity: population SD, range and `IQR()` (type 7) per grid
 /// point; a grid point with a NaN prediction gets NaN for all three.
-fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>, pdp_curve: &[f64]) -> EconResult<IceSpread> {
+fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>) -> EconResult<IceSpread> {
     let n_grid = ice_curves.ncols();
     let n_obs = ice_curves.nrows();
 
@@ -495,14 +496,7 @@ fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>, pdp_curve: &[f64]) -> Eco
             - quantile_sorted(&sorted, 0.25, QuantileType::T7);
     }
 
-    // Heterogeneity index: max(std) / mean(|pdp|)
-    let max_std = std_dev.iter().cloned().fold(0.0f64, f64::max);
-    let mean_abs_pdp = pdp_curve.iter().map(|v| v.abs()).sum::<f64>() / pdp_curve.len() as f64;
-    let heterogeneity_index = if mean_abs_pdp > 1e-10 {
-        max_std / mean_abs_pdp
-    } else {
-        max_std // If PDP is near zero, just use max std
-    };
+    let heterogeneity_index = heterogeneity_index(ice_curves);
 
     Ok(IceSpread {
         std_dev,
@@ -510,6 +504,41 @@ fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>, pdp_curve: &[f64]) -> Eco
         iqr,
         heterogeneity_index,
     })
+}
+
+/// `H = sqrt(SS_het / SS_tot)` of [`IceSpread::heterogeneity_index`] on the curves (rows):
+/// each curve centred on its own grid mean; 0 when `SS_tot` is 0; NaN when a value is NaN.
+fn heterogeneity_index(ice_curves: ArrayView2<'_, f64>) -> f64 {
+    if ice_curves.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
+    let (n_obs, n_grid) = ice_curves.dim();
+    if n_obs == 0 || n_grid == 0 {
+        return 0.0;
+    }
+    // Mean centred curve, then the two sums of squares in one more pass.
+    let mut mean_curve = vec![0.0; n_grid];
+    let mut row_means = Vec::with_capacity(n_obs);
+    for row in ice_curves.rows() {
+        let m = row.sum() / n_grid as f64;
+        row_means.push(m);
+        for (acc, &v) in mean_curve.iter_mut().zip(row) {
+            *acc += (v - m) / n_obs as f64;
+        }
+    }
+    let (mut ss_tot, mut ss_het) = (0.0, 0.0);
+    for (row, &m) in ice_curves.rows().into_iter().zip(&row_means) {
+        for (&v, &c) in row.iter().zip(&mean_curve) {
+            let centred = v - m;
+            ss_tot += centred * centred;
+            ss_het += (centred - c) * (centred - c);
+        }
+    }
+    if ss_tot > 0.0 {
+        (ss_het / ss_tot).min(1.0).sqrt()
+    } else {
+        0.0
+    }
 }
 
 use super::lcg_random;
@@ -993,9 +1022,9 @@ mod tests {
         assert!(e.to_string().contains("grid_values must be finite"), "{e}");
     }
 
-    /// A GBM whose prediction fails is an error, not all-zero curves.
+    /// A GBM without trees is refused before any prediction.
     #[test]
-    fn test_ice_gbm_prediction_error_propagates() {
+    fn test_ice_gbm_refuses_model_without_trees() {
         let (x, y) = two_feature_data();
         let gc = crate::ml::GbmConfig {
             n_trees: 5,
@@ -1006,6 +1035,21 @@ mod tests {
         fit.trees.clear(); // a GBM without fitted trees: gbm_predict errs
         let e = ice_curves_gbm(x.view(), &fit, 0, Some(5), None).unwrap_err();
         assert!(e.to_string().contains("no fitted trees"), "{e}");
+    }
+
+    /// A prediction-time error of the CART adapter (a NaN in another column, which the adapter's
+    /// checks do not read) reaches the caller unchanged.
+    #[test]
+    fn test_ice_cart_prediction_error_propagates() {
+        let (x, y) = two_feature_data();
+        let fit = crate::ml::cart(x.view(), y.view(), &crate::ml::CartConfig::default()).unwrap();
+        let mut bad = x.clone();
+        bad[[3, 1]] = f64::NAN;
+        let e = ice_curves_cart(bad.view(), &fit, 0, Some(4), None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("not finite")),
+            "{e}"
+        );
     }
 
     /// Data with fewer columns than the model was fitted on is an error, not an out-of-bounds index in the
@@ -1123,6 +1167,91 @@ mod tests {
             assert!(spread[1].is_nan());
             assert!(spread[0].is_finite() && spread[2].is_finite());
         }
+        assert!(r.ice_spread.heterogeneity_index.is_nan());
+    }
+
+    /// The module example: f = x0 x1 on x0 = 1..5, x1 = 2..6, grid 1..5. Centred on its grid mean,
+    /// curve i is (g - 3) x1_i: SS_tot = 90 * 10, SS_het = 10 * 10, so H = 1/3.
+    #[test]
+    fn test_ice_heterogeneity_closed_form() {
+        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0]];
+        for center in [false, true] {
+            let c = IceConfig {
+                grid_resolution: Some(5),
+                center,
+                ..Default::default()
+            };
+            let h = compute_ice_curves(x.view(), interaction_predict, &c)
+                .unwrap()
+                .ice_spread
+                .heterogeneity_index;
+            assert!((h - 1.0 / 3.0).abs() < 1e-14, "center = {center}: {h}");
+        }
+    }
+
+    /// An additive model has parallel curves: H = 0, centred or not.
+    #[test]
+    fn test_ice_heterogeneity_additive_is_zero() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2], [5.0, 1.1]];
+        let f = |m: ArrayView2<f64>| -> Vec<f64> {
+            (0..m.nrows())
+                .map(|i| m[[i, 0]].powi(2) + 5.0 * m[[i, 1]] + 100.0)
+                .collect()
+        };
+        for center in [false, true] {
+            let c = IceConfig {
+                grid_resolution: Some(7),
+                center,
+                ..Default::default()
+            };
+            let h = compute_ice_curves(x.view(), f, &c)
+                .unwrap()
+                .ice_spread
+                .heterogeneity_index;
+            assert!(h < 1e-12, "center = {center}: {h}");
+        }
+    }
+
+    /// Adding a constant to every prediction leaves H unchanged.
+    #[test]
+    fn test_ice_heterogeneity_location_free() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2], [5.0, 1.1]];
+        let shifted = |m: ArrayView2<f64>| -> Vec<f64> {
+            interaction_predict(m)
+                .into_iter()
+                .map(|v| v + 1e3)
+                .collect()
+        };
+        let c = IceConfig {
+            grid_resolution: Some(5),
+            ..Default::default()
+        };
+        let h0 = compute_ice_curves(x.view(), interaction_predict, &c)
+            .unwrap()
+            .ice_spread
+            .heterogeneity_index;
+        let h1 = compute_ice_curves(x.view(), shifted, &c)
+            .unwrap()
+            .ice_spread
+            .heterogeneity_index;
+        assert!(h0 > 0.0);
+        // The shift costs the centring a few digits; H itself does not move.
+        assert!((h1 - h0).abs() <= 1e-9 * h0, "{h0} vs {h1}");
+    }
+
+    /// One grid point, or a model constant in the feature: H = 0.
+    #[test]
+    fn test_ice_flat_curves() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2]];
+        let one_point = IceConfig {
+            grid_resolution: Some(1),
+            ..Default::default()
+        };
+        let r = compute_ice_curves(x.view(), interaction_predict, &one_point).unwrap();
+        assert_eq!(r.ice_spread.heterogeneity_index, 0.0);
+        let only_x1 = |m: ArrayView2<f64>| -> Vec<f64> { m.column(1).to_vec() };
+        let r = compute_ice_curves(x.view(), only_x1, &IceConfig::default()).unwrap();
+        assert_eq!(r.ice_spread.heterogeneity_index, 0.0);
     }
 
     /// ice_curves_rf on a RandomForestModel (it always returned an error): every ICE value is the forest's tree

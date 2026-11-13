@@ -27,7 +27,8 @@ former `PdpConfig` default did 20.
 | `Quantiles(probs)` | `quantile(x, probs, type = 7, na.rm = TRUE)` | through `stats::robust::quantile_sorted`; probs in [0, 1]. `use_quantiles` with no `grid_resolution` uses pdp's `1:9/10`, with one `seq(0, 1, length.out = n)` |
 | `Values(v)` | `pred.grid` sorted by `order_grid` | non-empty, finite |
 
-NaN feature values are ignored (pdp's `na.rm = TRUE`); infinite values and a feature without finite values are errors.
+NaN feature values are ignored (pdp's `na.rm = TRUE`); for the uniform and quantile grids, infinite values and a
+feature without finite values are errors; a user grid (`Values`) replaces the column, which is then not checked.
 
 **Documented differences from `pdp::partial`.** The first three are registry deviations of `pdp_partial_dependence`:
 
@@ -42,6 +43,14 @@ NaN feature values are ignored (pdp's `na.rm = TRUE`); infinite values and a fea
 
 ICE spread per grid point: population SD (divisor n), range, `IQR()` (type 7); a grid point with a NaN prediction gives
 NaN for all three.
+
+Heterogeneity index (no pdp equivalent): each ICE curve is centred on its own mean over the grid, `c_ig = ICE_i(g) -
+mean_g ICE_i(g)`; with `SS_tot = sum c_ig^2` and `SS_het = sum (c_ig - mean_i c_ig)^2`, `H = sqrt(SS_het / SS_tot)`.
+`H^2` is the share of the curves' variation along the feature that differs between observations: 0 when the curves
+are parallel (no interaction involving the feature), whatever the model adds that does not depend on it; adding a
+constant or centring the curves leaves it unchanged; 0 for flat curves, NaN when a prediction is NaN. No threshold
+is applied to it. Tests: `test_ice_heterogeneity_closed_form` (the module example, `H = 1/3`),
+`test_ice_heterogeneity_additive_is_zero`, `test_ice_heterogeneity_location_free`, `test_ice_flat_curves`.
 
 ## R reference cases (`validation/r/cases/ml_pdp.R`)
 
@@ -88,7 +97,8 @@ The README coefficient row (n < 100: 1e-6) would also pass, but it would hide a 
 Behaviour tests (no R value): `test_pdp_2d_rejects_wrong_prediction_length`, `test_pdp_prediction_error_propagates`,
 `test_pdp_config_rejects_invalid_grids`, `test_feature_grid_rules`, `test_pdp_huge_grid_is_a_resource_error`,
 `test_pdp_stops_when_cancelled`, `test_model_feature_counts_match_training_columns`,
-`test_ice_empty_custom_grid_is_error`, `test_ice_gbm_prediction_error_propagates`,
+`test_ice_empty_custom_grid_is_error`, `test_ice_gbm_refuses_model_without_trees`,
+`test_ice_cart_prediction_error_propagates`,
 `test_ice_model_wrappers_refuse_column_mismatch`, `test_ice_parameter_rules`, `test_ice_prediction_error_propagates`,
 `test_ice_spread_nan_column`, `test_ice_curves_rf_uses_forest_predictions` (random-forest ICE equals the tree average;
 at the observation's own x1, its fitted value, bit for bit), `test_model_pd_rejects_zero_grid_and_column_mismatch`.
