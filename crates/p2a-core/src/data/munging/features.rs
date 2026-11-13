@@ -575,8 +575,7 @@ pub fn bin_with(
             let mut present = crate::resource::try_with_capacity::<f64>(n_present, "bin values")
                 .map_err(feature_err)?;
             present.extend(cells.iter().flatten());
-            let ca = Float64Chunked::from_slice(column.into(), &present);
-            drop(present);
+            let ca = Float64Chunked::from_vec(column.into(), present);
             let edges = quantile_edges(&ca, column, n)?;
             // R's cut refuses duplicated breaks. The outer edges are -inf and
             // +inf, and an interior edge may equal one of them when the data

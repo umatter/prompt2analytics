@@ -399,16 +399,7 @@ pub fn run_vecm_with(
     columns: &[&str],
     config: &VecmConfig,
 ) -> EconResult<VecmResult> {
-    if let Some(dup) = columns
-        .iter()
-        .enumerate()
-        .find(|(i, c)| columns[..*i].contains(c))
-        .map(|(_, c)| *c)
-    {
-        return Err(EconError::InvalidSpecification {
-            message: format!("VECM columns must be distinct; '{dup}' is given twice"),
-        });
-    }
+    // Repeated names are refused by johansen_vecm ("given twice").
     let (data, names) = df_to_array2(dataset.df(), columns)?;
     johansen_vecm(data.view(), &names, config)
 }
@@ -496,9 +487,23 @@ pub fn johansen_vecm(
         .checked_mul(big_k - 1)
         .and_then(|lagged| lagged.checked_add(usize::from(has_const)))
         .and_then(|m| big_k.checked_add(m)?.checked_add(k)?.checked_add(p1));
-    if !n_min.is_some_and(|required| n >= required) {
+    let Some(n_min) = n_min else {
+        // n_min = K (k + 1) + has_const + p1 overflows: name the largest K the sample admits.
+        let c = usize::from(has_const) + p1;
+        let kmax = n.saturating_sub(c) / (k + 1);
+        let bound = if kmax < 2 {
+            "the data support no K >= 2".to_string()
+        } else {
+            format!("so K is at most {kmax}")
+        };
+        return Err(invalid(format!(
+            "lag_order K = {big_k} is too large for N = {n} observations of k = {k} variables: N >= K (k + 1) + \
+             {c} is needed, {bound}"
+        )));
+    };
+    if n < n_min {
         return Err(EconError::InsufficientData {
-            required: n_min.unwrap_or(usize::MAX),
+            required: n_min,
             provided: n,
             context: format!(
                 "Johansen VECM with k = {k} variables, K = {big_k} and ecdet = {ecdet}: N must be at least K + \
@@ -527,34 +532,17 @@ pub fn johansen_vecm(
     }
 
     // Z0 = Δy_t, Z1 = [1,] Δy_{t-1..t-K+1}, ZK = y_{t-1} [, 1 | trend], t = K..N-1 (0-based).
-    let mut z0 = resource::try_zeros2(t, k, "VECM differences")?;
-    let mut z1 = resource::try_zeros2(t, m, "VECM short-run regressors")?;
-    let mut zk = resource::try_zeros2(t, p1, "VECM level terms")?;
-    let off = usize::from(has_const);
-    for j in 0..t {
-        let s = j + big_k;
-        for v in 0..k {
-            z0[[j, v]] = y[[s, v]] - y[[s - 1, v]];
-            zk[[j, v]] = y[[s - 1, v]];
-        }
-        if has_const {
-            z1[[j, 0]] = 1.0;
-        }
-        for i in 1..big_k {
-            for v in 0..k {
-                z1[[j, off + (i - 1) * k + v]] = y[[s - i, v]] - y[[s - i - 1, v]];
-            }
-        }
-        match ecdet {
-            VecmDeterministic::None => {}
-            VecmDeterministic::Const => zk[[j, k]] = 1.0,
-            // urca's trend is 1..N; the level term is at 0-based time s - 1, i.e. trend value s.
-            VecmDeterministic::Trend => zk[[j, k]] = s as f64,
-        }
-    }
+    // Z1 is built once, column by column, and becomes its QR's buffer; Z0 and ZK are never
+    // stored: each of their columns is rebuilt from `y` where it is needed.
+    let mut z1 = resource::try_vec(
+        resource::checked_len(&[t, m], "VECM short-run regressors")?,
+        0.0,
+        "VECM short-run regressors",
+    )?;
+    fill_short_run(y, big_k, has_const, &mut z1);
     resource::checkpoint()?;
 
-    let qr1 = Qr::decompose(z1.view(), LM_QR_TOL)?;
+    let qr1 = Qr::from_columns(z1, t, m, LM_QR_TOL)?;
     if qr1.rank() < m {
         let aliased: Vec<&str> = qr1
             .aliased()
@@ -570,12 +558,12 @@ pub fn johansen_vecm(
             suggestion: "drop constant or duplicated series, or lower lag_order".to_string(),
         });
     }
-    let r0 = residuals(&qr1, &z1, &z0)?;
-    let rk = residuals(&qr1, &z1, &zk)?;
+    let effects = concentrated_effects(&qr1, y, big_k, ecdet)?;
+    drop(qr1);
+    resource::checkpoint()?;
     let tf = t as f64;
-    let s00 = symmetrize(&(r0.t().dot(&r0) / tf));
-    let s0k = r0.t().dot(&rk) / tf;
-    let skk = symmetrize(&(rk.t().dot(&rk) / tf));
+    let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf);
+    drop(effects);
     sym_inverse(
         s00.view(),
         SingularPolicy::Error,
@@ -659,9 +647,9 @@ pub fn johansen_vecm(
             )));
         }
         let design = Design {
-            z0: &z0,
-            z1: &z1,
-            zk: &zk,
+            y,
+            big_k,
+            ecdet,
             t,
             m,
             has_const,
@@ -719,14 +707,109 @@ pub fn johansen_vecm(
     })
 }
 
-/// The design matrices of the restricted stage.
+/// What the restricted stage rebuilds its regressors from: the data, the lag order and the
+/// deterministic terms (`t = N - K` rows, `m` short-run regressors).
 struct Design<'a> {
-    z0: &'a Array2<f64>,
-    z1: &'a Array2<f64>,
-    zk: &'a Array2<f64>,
+    y: ArrayView2<'a, f64>,
+    big_k: usize,
+    ecdet: VecmDeterministic,
     t: usize,
     m: usize,
     has_const: bool,
+}
+
+/// Writes the `m` columns of Z1 = [1,] Δy_{s-1}, ..., Δy_{s-K+1} (s = K..N-1) to `dst`, column
+/// by column (`t` values each).
+fn fill_short_run(y: ArrayView2<'_, f64>, big_k: usize, has_const: bool, dst: &mut [f64]) {
+    let (n, k) = y.dim();
+    let t = n - big_k;
+    let off = usize::from(has_const);
+    if has_const {
+        dst[..t].fill(1.0);
+    }
+    for i in 1..big_k {
+        for v in 0..k {
+            let col = &mut dst[(off + (i - 1) * k + v) * t..][..t];
+            for (j, d) in col.iter_mut().enumerate() {
+                let s = j + big_k;
+                *d = y[[s - i, v]] - y[[s - i - 1, v]];
+            }
+        }
+    }
+}
+
+/// Writes column `c` of [Z0, ZK] to `dst` (`t` values): for c < k the difference Δy_s of
+/// variable c, for c in k..2k the level y_{s-1} of variable c - k, and column 2k the
+/// deterministic level term (1, or urca's trend value s), s = K..N-1.
+fn fill_level_column(
+    y: ArrayView2<'_, f64>,
+    big_k: usize,
+    ecdet: VecmDeterministic,
+    c: usize,
+    dst: &mut [f64],
+) {
+    let k = y.ncols();
+    for (j, d) in dst.iter_mut().enumerate() {
+        let s = j + big_k;
+        *d = if c < k {
+            y[[s, c]] - y[[s - 1, c]]
+        } else if c < 2 * k {
+            y[[s - 1, c - k]]
+        } else {
+            match ecdet {
+                VecmDeterministic::None => 0.0,
+                VecmDeterministic::Const => 1.0,
+                // urca's trend is 1..N; the level term is at 0-based time s - 1, i.e. trend value s.
+                VecmDeterministic::Trend => s as f64,
+            }
+        };
+    }
+}
+
+/// The effects Q'z of every column z of [Z0, ZK] on the QR of Z1, each built from `y` into
+/// one scratch buffer.
+fn concentrated_effects(
+    qr1: &Qr,
+    y: ArrayView2<'_, f64>,
+    big_k: usize,
+    ecdet: VecmDeterministic,
+) -> EconResult<Vec<Array1<f64>>> {
+    let (n, k) = y.dim();
+    let t = n - big_k;
+    let cols = 2 * k + usize::from(ecdet != VecmDeterministic::None);
+    let mut scratch = resource::try_vec(t, 0.0, "VECM level terms")?;
+    let mut effects: Vec<Array1<f64>> = resource::try_with_capacity(cols, "VECM effects")?;
+    for c in 0..cols {
+        fill_level_column(y, big_k, ecdet, c, &mut scratch);
+        effects.push(qr1.qty(ndarray::ArrayView1::from(&scratch[..]))?);
+    }
+    Ok(effects)
+}
+
+/// (S00, S0K, SKK) = moments of the residuals of [Z0, ZK] on Z1, divided by t, from the
+/// effects Q'z: Z1 has full rank `skip`, so the residual cross-product of columns a and b is
+/// the sum of (Q'a)_i (Q'b)_i over i >= skip. Exactly symmetric, and no residual is formed.
+fn concentrated_moments(
+    effects: &[Array1<f64>],
+    k: usize,
+    skip: usize,
+    t: f64,
+) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
+    let p = effects.len();
+    let mut all = Array2::zeros((p, p));
+    for a in 0..p {
+        let ea = effects[a].slice(s![skip..]);
+        for b in 0..=a {
+            let v = ea.dot(&effects[b].slice(s![skip..])) / t;
+            all[[a, b]] = v;
+            all[[b, a]] = v;
+        }
+    }
+    (
+        all.slice(s![..k, ..k]).to_owned(),
+        all.slice(s![..k, k..]).to_owned(),
+        all.slice(s![k.., k..]).to_owned(),
+    )
 }
 
 #[derive(Default)]
@@ -754,10 +837,33 @@ fn restricted_vecm(d: &Design<'_>, v: &Array2<f64>, r: usize) -> EconResult<Rest
         });
     }
     let beta = beta_raw.dot(&matrix_inverse(&top.view())?);
-    let mut x = resource::try_zeros2(d.t, r + d.m, "VECM restricted regressors")?;
-    x.slice_mut(s![.., ..r]).assign(&d.zk.dot(&beta));
-    x.slice_mut(s![.., r..]).assign(d.z1);
-    let qr2 = Qr::decompose(x.view(), LM_QR_TOL)?;
+    // [ZK beta, Z1], column by column, straight into the QR's buffer.
+    let (t, k) = (d.t, d.y.ncols());
+    let mut x = resource::try_vec(
+        resource::checked_len(&[t, r + d.m], "VECM restricted regressors")?,
+        0.0,
+        "VECM restricted regressors",
+    )?;
+    let (ect, short_run) = x.split_at_mut(t * r);
+    for c in 0..r {
+        let col = &mut ect[c * t..][..t];
+        for (j, out) in col.iter_mut().enumerate() {
+            let s = j + d.big_k;
+            let mut acc = 0.0;
+            for v in 0..k {
+                acc += d.y[[s - 1, v]] * beta[[v, c]];
+            }
+            match d.ecdet {
+                VecmDeterministic::None => {}
+                VecmDeterministic::Const => acc += beta[[k, c]],
+                VecmDeterministic::Trend => acc += s as f64 * beta[[k, c]],
+            }
+            *out = acc;
+        }
+    }
+    fill_short_run(d.y, d.big_k, d.has_const, short_run);
+    resource::checkpoint()?;
+    let qr2 = Qr::from_columns(x, t, r + d.m, LM_QR_TOL)?;
     if qr2.rank() < r + d.m {
         return Err(EconError::SingularMatrix {
             context: "Johansen VECM: the error-correction terms are collinear with the short-run regressors"
@@ -765,7 +871,8 @@ fn restricted_vecm(d: &Design<'_>, v: &Array2<f64>, r: usize) -> EconResult<Rest
             suggestion: "lower the rank or lag_order".to_string(),
         });
     }
-    let coef = coefficient_rows(&qr2, d.z0)?; // k x (r + m): ect1..ectr, [constant], lagged differences
+    // k x (r + m): ect1..ectr, [constant], lagged differences
+    let coef = coefficient_rows(&qr2, d.y, d.big_k)?;
     let alpha: Vec<Vec<f64>> = coef.iter().map(|row| row[..r].to_vec()).collect();
     let skip = r + usize::from(d.has_const);
     let constant: Vec<f64> = if d.has_const {
@@ -782,20 +889,18 @@ fn restricted_vecm(d: &Design<'_>, v: &Array2<f64>, r: usize) -> EconResult<Rest
     })
 }
 
-/// Residuals of every column of `ys` on the full-rank design `x` (whose QR is `qr`).
-fn residuals(qr: &Qr, x: &Array2<f64>, ys: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let mut out = ys.clone();
-    for c in 0..ys.ncols() {
-        let fitted: Array1<f64> = x.dot(&qr.coefficients(ys.column(c))?);
-        out.column_mut(c).zip_mut_with(&fitted, |o, f| *o -= f);
-    }
-    Ok(out)
-}
-
-/// OLS coefficients of every column of `ys` on the design of `qr`, one row per column of `ys`.
-fn coefficient_rows(qr: &Qr, ys: &Array2<f64>) -> EconResult<Vec<Vec<f64>>> {
-    (0..ys.ncols())
-        .map(|c| Ok(qr.coefficients(ys.column(c))?.to_vec()))
+/// OLS coefficients of every difference column Δy_s (the columns of Z0) on the design of
+/// `qr`, one row per variable.
+fn coefficient_rows(qr: &Qr, y: ArrayView2<'_, f64>, big_k: usize) -> EconResult<Vec<Vec<f64>>> {
+    let (n, k) = y.dim();
+    let mut scratch = resource::try_vec(n - big_k, 0.0, "VECM differences")?;
+    (0..k)
+        .map(|v| {
+            fill_level_column(y, big_k, VecmDeterministic::None, v, &mut scratch);
+            Ok(qr
+                .coefficients(ndarray::ArrayView1::from(&scratch[..]))?
+                .to_vec())
+        })
         .collect()
 }
 
@@ -885,6 +990,95 @@ mod tests {
     }
     fn rlm_rows(r: &VecmResult) -> usize {
         r.rank + usize::from(!r.constant.is_empty()) + r.gamma.first().map_or(0, Vec::len)
+    }
+
+    /// The moment matrices built from the QR effects equal the explicit ones: Z0, Z1 and ZK
+    /// formed as matrices, the residuals of Z0 and ZK on Z1 by least squares, then R'R / t.
+    /// Compared entrywise relative to sqrt(S_aa S_bb), the scale of each entry.
+    #[test]
+    fn test_vecm_moments_match_explicit_residuals() {
+        let mut seed = 2026_u64;
+        let (n, k, big_k) = (150, 3, 3);
+        let mut y = Array2::zeros((n, k));
+        for t in 1..n {
+            let common = box_muller_ts(&mut seed);
+            for v in 0..k {
+                y[[t, v]] = y[[t - 1, v]] + 0.5 * common + box_muller_ts(&mut seed);
+            }
+        }
+        for ecdet in [D::None, D::Const, D::Trend] {
+            let has_const = ecdet != D::Const;
+            let p1 = k + usize::from(ecdet != D::None);
+            let m = k * (big_k - 1) + usize::from(has_const);
+            let t = n - big_k;
+            let mut z0 = Array2::zeros((t, k));
+            let mut z1 = Array2::zeros((t, m));
+            let mut zk = Array2::zeros((t, p1));
+            let off = usize::from(has_const);
+            for j in 0..t {
+                let s = j + big_k;
+                for v in 0..k {
+                    z0[[j, v]] = y[[s, v]] - y[[s - 1, v]];
+                    zk[[j, v]] = y[[s - 1, v]];
+                }
+                if has_const {
+                    z1[[j, 0]] = 1.0;
+                }
+                for i in 1..big_k {
+                    for v in 0..k {
+                        z1[[j, off + (i - 1) * k + v]] = y[[s - i, v]] - y[[s - i - 1, v]];
+                    }
+                }
+                match ecdet {
+                    D::None => {}
+                    D::Const => zk[[j, k]] = 1.0,
+                    D::Trend => zk[[j, k]] = s as f64,
+                }
+            }
+            let qr = Qr::decompose(z1.view(), LM_QR_TOL).unwrap();
+            let resid = |zs: &Array2<f64>| {
+                let mut out = zs.clone();
+                for c in 0..zs.ncols() {
+                    let fitted = z1.dot(&qr.coefficients(zs.column(c)).unwrap());
+                    out.column_mut(c).zip_mut_with(&fitted, |o, f| *o -= f);
+                }
+                out
+            };
+            let (r0, rk) = (resid(&z0), resid(&zk));
+            let tf = t as f64;
+            let want = [
+                r0.t().dot(&r0) / tf,
+                r0.t().dot(&rk) / tf,
+                rk.t().dot(&rk) / tf,
+            ];
+
+            let mut buf = vec![0.0; t * m];
+            fill_short_run(y.view(), big_k, has_const, &mut buf);
+            let qr1 = Qr::from_columns(buf, t, m, LM_QR_TOL).unwrap();
+            assert_eq!(qr1.rank(), m);
+            let effects = concentrated_effects(&qr1, y.view(), big_k, ecdet).unwrap();
+            let (s00, s0k, skk) = concentrated_moments(&effects, k, m, tf);
+            let got = [s00, s0k, skk];
+            let d0: Vec<f64> = (0..k).map(|i| want[0][[i, i]]).collect();
+            let dk: Vec<f64> = (0..p1).map(|i| want[2][[i, i]]).collect();
+            let scales = [(&d0, &d0), (&d0, &dk), (&dk, &dk)];
+            for (b, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.dim(), w.dim(), "{ecdet}: block {b}");
+                let (da, db) = scales[b];
+                for ((i, j), gv) in g.indexed_iter() {
+                    let scale = (da[i] * db[j]).sqrt();
+                    let rel = (gv - w[[i, j]]).abs() / scale;
+                    assert!(
+                        rel <= 1e-12,
+                        "{ecdet}: block {b} [{i}, {j}]: {gv} vs {} (relative {rel:e})",
+                        w[[i, j]]
+                    );
+                }
+            }
+            // the effect-based moments are exactly symmetric
+            assert_eq!(got[0], got[0].t());
+            assert_eq!(got[2], got[2].t());
+        }
     }
 
     /// R, CLI and MCP spellings of urca's ecdet; unknown values list the accepted ones.
@@ -1155,7 +1349,8 @@ mod tests {
         invalid(run_vecm_with(&ds, &DEN, &cfg(D::None, 2, Some(4))), "rank");
         invalid(run_vecm(&ds, &DEN, 2, 0), "rank");
         invalid(run_vecm_with(&ds, &["LRM"], &base), "at least 2 variables");
-        invalid(run_vecm_with(&ds, &["LRM", "LRM"], &base), "distinct");
+        // the duplicate reaches johansen_vecm (ColumnRequest builds both columns), which names it
+        invalid(run_vecm_with(&ds, &["LRM", "LRM"], &base), "given twice");
         let mut seed = 7_u64;
         let y12 = Array2::from_shape_fn((200, 12), |_| box_muller_ts(&mut seed));
         let names12: Vec<String> = (1..=12).map(|i| format!("v{i}")).collect();
@@ -1181,10 +1376,25 @@ mod tests {
                 "{ecdet}: N = 15 is enough"
             );
         }
-        assert!(matches!(
-            run_vecm_with(&ds, &DEN, &cfg(D::None, usize::MAX, Some(1))),
-            Err(EconError::InsufficientData { .. })
-        ));
+        // An order so large that the sample-size rule overflows names the largest admissible K
+        // (N = 55, k = 4, ecdet none: N >= 5 K + 5, so K <= 10).
+        match run_vecm_with(&ds, &DEN, &cfg(D::None, usize::MAX, Some(1))) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("lag_order") && message.contains("at most 10"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        match johansen_vecm(
+            y.slice(s![..6, ..]),
+            &names,
+            &cfg(D::None, usize::MAX, None),
+        ) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("no K >= 2"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
         // A constant series: its lagged difference is an all-zero short-run regressor (dqrdc2 marks IDE.dl1).
         let mut y_const = y.clone();
         y_const.column_mut(3).fill(0.1);

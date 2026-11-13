@@ -411,8 +411,9 @@ fn lag_design(
 }
 
 /// Largest ratio of the Cholesky diagonal of the equilibrated long-VAR Z'Z accepted by the
-/// normal-equation path (about a condition number of 1e8); above it the residuals come from
-/// the pivoted QR.
+/// normal-equation path; the squared ratio is a lower bound on the condition number of the
+/// equilibrated Z'Z (about 1e8 at this threshold), so this is a heuristic gate, not a bound.
+/// Above it the residuals come from the pivoted QR.
 const LONG_VAR_CHOL_RATIO: f64 = 1e4;
 
 /// Residuals of the step-1 long VAR(m) on rows m..n (`(n - m) x k`). Only residuals are
@@ -781,15 +782,26 @@ pub fn run_varma_with(
         }
     };
     // Step 1: long VAR(m) residuals; rows before m stay 0 and are never read (t - l >= m in
-    // step 2, because t >= m + max(p, q) and l <= q).
-    let mut e = resource::try_zeros2(n, k, "VARMA innovation estimates")?;
-    if q > 0 {
+    // step 2, because t >= m + max(p, q) and l <= q). With q = 0 there are none to estimate:
+    // `lag_design` reads `e` only for lags 1..=q, so the data stand in for it.
+    let e = if q > 0 {
+        let mut e = resource::try_zeros2(n, k, "VARMA innovation estimates")?;
         let u1 = long_var_residuals(data.view(), m, &var_names, &mut warnings)?;
         e.slice_mut(s![m.., ..]).assign(&u1);
-    }
+        Some(e)
+    } else {
+        None
+    };
     // Step 2.
     let names = regressor_names(&var_names, p, q);
-    let x = lag_design(data.view(), e.view(), start, p, q, n_reg)?;
+    let x = lag_design(
+        data.view(),
+        e.as_ref().map_or(data.view(), |e| e.view()),
+        start,
+        p,
+        q,
+        n_reg,
+    )?;
     let fit = OlsSystem::fit(x.view(), data.slice(s![start.., ..]), q == 0)?;
     if let Some(w) = aliasing_message(&fit.aliased, &names) {
         warnings.push(w);

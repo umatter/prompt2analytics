@@ -382,9 +382,7 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
     // Type-specific statistics
     let (numeric_stats, string_stats) = match col.dtype() {
         dt if is_numeric_dtype(dt, false) => {
-            let stats = numeric
-                .as_ref()
-                .and_then(|(present, _)| compute_numeric_stats(present));
+            let stats = numeric.and_then(|(present, _)| compute_numeric_stats(present));
             if let Some(ref s) = stats {
                 if s.outlier_count > 0 {
                     issues.push(DataIssue::OutlierValues {
@@ -461,11 +459,12 @@ fn present_values(col: &Column) -> Option<(Vec<f64>, usize)> {
 /// are none): min, max, mean, the sample standard deviation and the quartiles
 /// by polars' linear quantile, which is R's `quantile(type = 7)`; outlier, zero
 /// and negative counts over the same values.
-fn compute_numeric_stats(present: &[f64]) -> Option<NumericStats> {
+fn compute_numeric_stats(present: Vec<f64>) -> Option<NumericStats> {
     if present.is_empty() {
         return None;
     }
-    let ca = Float64Chunked::from_slice("x".into(), present);
+    // The guarded buffer becomes the column; the counts below read it back.
+    let ca = Float64Chunked::from_vec("x".into(), present);
     let min = ca.min()?;
     let max = ca.max()?;
     let mean = ca.mean()?;
@@ -488,7 +487,8 @@ fn compute_numeric_stats(present: &[f64]) -> Option<NumericStats> {
     let mut zero_count = 0;
     let mut negative_count = 0;
 
-    for &val in present {
+    // one chunk without a validity bitmap (built from a Vec), so the slice is available
+    for &val in ca.cont_slice().ok()? {
         if val < outlier_lower_bound || val > outlier_upper_bound {
             outlier_count += 1;
         }

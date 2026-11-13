@@ -605,7 +605,11 @@ fn fill_with_statistic(
 ) -> MungeResult<(Column, f64)> {
     let which = if median { "median" } else { "mean" };
     let cells = super::numeric_cells(df, name, false)?;
-    let observed: Float64Chunked = cells.into_iter().flatten().map(Some).collect();
+    let n_present = cells.iter().flatten().count();
+    let mut values = crate::resource::try_with_capacity::<f64>(n_present, "fill values")
+        .map_err(|e| MungeError::FeatureError(e.to_string()))?;
+    values.extend(cells.into_iter().flatten());
+    let observed = Float64Chunked::from_vec(name.into(), values);
     let value = if median {
         observed.median()
     } else {

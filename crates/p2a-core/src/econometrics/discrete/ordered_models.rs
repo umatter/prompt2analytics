@@ -28,6 +28,7 @@ use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary,
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky_inverse;
 use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
+use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
 use crate::traits::estimator::logistic_cdf;
 
@@ -211,6 +212,49 @@ impl fmt::Display for OrderedResult {
     }
 }
 
+/// Indices (0-based among `x_cols`) of the regressors that are linear combinations of
+/// the others and of the intercept the cut points stand for. A design whose [1, X]
+/// cross-product passes OLS's normal-equations test has none (`certainly_full_rank`'s
+/// argument: a design certified there has no column the pivoted QR at `LM_QR_TOL` would
+/// alias); only otherwise is [1, X] built and decomposed (pivoted QR, `LM_QR_TOL`).
+fn aliased_regressors(
+    cols: &Columns,
+    dm: ArrayView2<f64>,
+    x_cols: &[&str],
+) -> EconResult<Vec<usize>> {
+    let (n, k) = dm.dim();
+    if n > k + 1 {
+        // [1, X]'[1, X], lower triangle accumulated row by row (no product workspace), then
+        // mirrored
+        let mut g = resource::try_zeros2(k + 1, k + 1, "ordered model cross-product")?;
+        g[[0, 0]] = n as f64;
+        for row in dm.rows() {
+            for a in 0..k {
+                let xa = row[a];
+                g[[a + 1, 0]] += xa;
+                for b in 0..=a {
+                    g[[a + 1, b + 1]] += xa * row[b];
+                }
+            }
+        }
+        for a in 0..=k {
+            for b in 0..a {
+                g[[b, a]] = g[[a, b]];
+            }
+        }
+        if normal_inverse_from_gram(g.view())?.is_some() {
+            return Ok(Vec::new());
+        }
+    }
+    let with_intercept = cols.matrix(x_cols, true)?;
+    let qr = Qr::decompose(with_intercept.view(), LM_QR_TOL)?;
+    Ok(qr
+        .aliased()
+        .into_iter()
+        .filter_map(|a| a.checked_sub(1))
+        .collect())
+}
+
 /// Run ordered logit regression (proportional odds model).
 ///
 /// R equivalent: `MASS::polr()`: `P(y <= j) = F(zeta_j - x'beta)` with the logistic
@@ -232,8 +276,9 @@ impl fmt::Display for OrderedResult {
 /// estimates (Newton's method is affine-invariant). The step test is relative only for
 /// parameters above 1 in absolute value, so a change of units that makes a coefficient
 /// large tightens it and can cost an iteration. `converged == true` implies finite
-/// estimates and log-likelihood. A non-finite step, a failed line search and the
-/// iteration limit end the fit with `converged = false` and a message in `warnings`,
+/// estimates and log-likelihood. A non-finite log-likelihood, score or Hessian,
+/// observed information that is not positive definite even after damping, a non-finite
+/// step, a failed line search and the iteration limit end the fit with `converged = false` and a message in `warnings`,
 /// never with an error. Standard errors are the square roots of the diagonal of the
 /// inverse observed information; they are NaN, with a warning, when the information is
 /// not positive definite.
@@ -361,14 +406,7 @@ pub fn run_ordered_model_with(
     // Aliased regressors (linear combinations of the others and the intercept the cut
     // points stand for) are dropped and reported as NaN, as polr drops them ("design
     // appears to be rank-deficient").
-    let aliased_idx: Vec<usize> = {
-        let with_intercept = cols.matrix(x_cols, true)?;
-        let qr = Qr::decompose(with_intercept.view(), LM_QR_TOL)?;
-        qr.aliased()
-            .into_iter()
-            .filter_map(|a| a.checked_sub(1))
-            .collect()
-    };
+    let aliased_idx = aliased_regressors(&cols, dm.view(), x_cols)?;
     let identified: Vec<usize> = (0..k_full).filter(|c| !aliased_idx.contains(c)).collect();
     let mut warnings: Vec<String> = Vec::new();
     let x_identified;
@@ -861,6 +899,14 @@ mod tests {
         r.category_counts.iter().map(|&c| c as f64).collect()
     }
 
+    /// n, the category counts and the null log-likelihood, which depend neither on the
+    /// link nor on the scale of x.
+    fn check_counts<'c, 'a>(c: &'c mut Check<'a>, r: &OrderedResult) -> &'c mut Check<'a> {
+        c.scalar("n", r.n_obs as f64, Tol::exact())
+            .named("counts", &r.categories, &counts(r), Tol::exact())
+            .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
+    }
+
     /// Every quantity of one polr fit; `p` is "logit_" or "probit_".
     fn check_polr(case: &Case, p: &str, r: &OrderedResult) {
         let n = r.n_obs;
@@ -967,31 +1013,28 @@ mod tests {
             );
             let zn = zeta_names(&r);
             let k = |s: &str| format!("{link}_{s}");
-            Check::new(case)
-                .named(
-                    &k("coef"),
-                    &r.variables,
-                    &r.coefficients,
-                    Tol::iterative(1e-6),
-                )
-                .named(&k("zeta"), &zn, &r.thresholds, Tol::iterative(1e-6))
-                .named(
-                    &k("se_coef"),
-                    &r.variables,
-                    &r.std_errors,
-                    Tol::iterative(1e-5),
-                )
-                .named(
-                    &k("se_zeta"),
-                    &zn,
-                    &r.threshold_std_errors,
-                    Tol::iterative(1e-5),
-                )
-                .scalar(&k("loglik"), r.log_likelihood, Tol::stat(n))
-                .scalar("n", n as f64, Tol::exact())
-                .named("counts", &r.categories, &counts(&r), Tol::exact())
-                .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
-                .finish();
+            let mut c = Check::new(case);
+            c.named(
+                &k("coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(&k("zeta"), &zn, &r.thresholds, Tol::iterative(1e-6))
+            .named(
+                &k("se_coef"),
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .named(
+                &k("se_zeta"),
+                &zn,
+                &r.threshold_std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar(&k("loglik"), r.log_likelihood, Tol::stat(n));
+            check_counts(&mut c, &r).finish();
         }
     }
 
@@ -1066,10 +1109,8 @@ mod tests {
                         base.iterations
                     );
                 }
-                Check::new(&case)
-                    .scalar("n", r.n_obs as f64, Tol::exact())
-                    .named("counts", &r.categories, &counts(&r), Tol::exact())
-                    .scalar("null_loglik", r.log_likelihood_null, Tol::stat(r.n_obs))
+                let mut c = Check::new(&case);
+                check_counts(&mut c, &r)
                     .named(
                         &format!("{link}_zeta"),
                         &zeta_names(&r),
@@ -1598,6 +1639,127 @@ mod tests {
             EconError::ResourceLimit(m) => assert!(m.contains("Hessian"), "{m}"),
             other => panic!("expected ResourceLimit, got {other:?}"),
         }
+    }
+
+    /// A deterministic N(0, 1) stream (xorshift64* and Box-Muller), so the designs below
+    /// are noisy and reproducible.
+    fn normals(seed: u64, n: usize) -> Vec<f64> {
+        let mut s = seed.max(1);
+        let mut unif = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            ((s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                let (u1, u2) = (unif(), unif());
+                (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+            })
+            .collect()
+    }
+
+    /// Three ordered categories from a latent logit index on `x1` and `x2`.
+    fn three_category_dataset(x1: &[f64], x2: &[f64], seed: u64) -> Dataset {
+        let e = normals(seed, x1.len());
+        let y: Vec<i64> = (0..x1.len())
+            .map(|i| {
+                let z = 0.8 * x1[i] - 0.5 * x2[i] + e[i];
+                if z < -0.5 {
+                    1
+                } else if z < 0.7 {
+                    2
+                } else {
+                    3
+                }
+            })
+            .collect();
+        Dataset::new(df! { "y" => y, "x1" => x1.to_vec(), "x2" => x2.to_vec() }.unwrap())
+    }
+
+    /// The aliasing check certifies a full-rank design from its cross-product, so a fit
+    /// never needs a second n x (k + 1) copy of the design (with the intercept) or the
+    /// QR's working copy of it: under a per-allocation ceiling that admits the n x k
+    /// design itself, the fit succeeds.
+    #[test]
+    fn test_ordered_full_rank_design_is_not_copied() {
+        let (n, k) = (2000, 2);
+        let ds = three_category_dataset(&normals(11, n), &normals(12, n), 13);
+        let r = resource::with_alloc_ceiling(Some(n * k * 8), || {
+            run_ordered_logit(&ds, "y", &["x1", "x2"])
+        });
+        let r = r.unwrap();
+        assert!(r.converged, "{r}");
+        assert!(r.coefficients.iter().all(|v| v.is_finite()), "{r}");
+    }
+
+    /// The cross-product shortcut gives the pivoted QR's verdict: on each design the
+    /// aliased regressors equal those of `Qr::decompose` on [1, X] at `LM_QR_TOL`.
+    #[test]
+    fn test_ordered_aliasing_check_matches_the_qr() {
+        let n = 400;
+        let x1 = normals(21, n);
+        let noise = normals(22, n);
+        let other = normals(23, n);
+        let designs: Vec<(&str, Vec<f64>, Vec<f64>)> = vec![
+            ("well conditioned", x1.clone(), other.clone()),
+            (
+                "scaled by 1e6",
+                x1.iter().map(|v| v * 1e6).collect(),
+                other.iter().map(|v| v * 1e6).collect(),
+            ),
+            (
+                "x2 = x1 + 1e-6 noise",
+                x1.clone(),
+                x1.iter().zip(&noise).map(|(a, e)| a + 1e-6 * e).collect(),
+            ),
+            (
+                "x2 = x1 + 1e-9 noise",
+                x1.clone(),
+                x1.iter().zip(&noise).map(|(a, e)| a + 1e-9 * e).collect(),
+            ),
+            (
+                "x2 = 2 x1",
+                x1.clone(),
+                x1.iter().map(|v| 2.0 * v).collect(),
+            ),
+            ("x2 = 3", x1.clone(), vec![3.0; n]),
+            (
+                "x2 = 1 - x1",
+                x1.clone(),
+                x1.iter().map(|v| 1.0 - v).collect(),
+            ),
+        ];
+        let names = ["x1", "x2"];
+        let mut fallback_kept_both = false;
+        for (label, a, b) in designs {
+            let df = df! { "x1" => a, "x2" => b }.unwrap();
+            let cols = ColumnRequest::new(&df)
+                .numerics(&names)
+                .na(NaPolicy::Omit)
+                .extract()
+                .unwrap();
+            let dm = cols.matrix(&names, false).unwrap();
+            let got = aliased_regressors(&cols, dm.view(), &names).unwrap();
+            let with_intercept = cols.matrix(&names, true).unwrap();
+            let want: Vec<usize> = Qr::decompose(with_intercept.view(), LM_QR_TOL)
+                .unwrap()
+                .aliased()
+                .into_iter()
+                .filter_map(|a| a.checked_sub(1))
+                .collect();
+            assert_eq!(got, want, "{label}");
+            if label == "x2 = x1 + 1e-6 noise" {
+                fallback_kept_both = want.is_empty();
+            }
+            if label == "x2 = x1 + 1e-9 noise" || label.starts_with("x2 = 2") {
+                assert_eq!(want, vec![1], "{label}");
+            }
+        }
+        assert!(
+            fallback_kept_both,
+            "the 1e-6 design should keep both columns"
+        );
     }
 
     /// xb = 2 x: polr warns "design appears to be rank-deficient, so dropping some
