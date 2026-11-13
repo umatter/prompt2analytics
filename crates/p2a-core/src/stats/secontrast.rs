@@ -295,7 +295,10 @@ const CONTR_POLY_MAX_LEVELS: usize = 95;
 ///
 /// The centred scores' powers `y^0 .. y^(k-1)` are orthogonalised by Gram-Schmidt with
 /// re-orthogonalisation (two passes), normalised, and the constant column dropped. Each column's
-/// sign is R's: positive on its own power of the scores.
+/// sign is R's: positive on its own power of the scores. From about degree 25 the raw-power basis
+/// is too ill-conditioned for the high-degree columns to be the exact orthogonal polynomials,
+/// here as in R (whose columns drift from them earlier), so neither matches them there and the
+/// two agree with each other only for the lower degrees.
 ///
 /// # Errors
 ///

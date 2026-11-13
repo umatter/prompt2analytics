@@ -431,6 +431,12 @@ pub fn run_pp_test(dataset: &Dataset, column: &str, lshort: bool) -> EconResult<
 mod tests {
     use super::*;
 
+    use polars::prelude::*;
+
+    fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() < tol
+    }
+
     #[test]
     fn test_pp_test_names_the_non_finite_series() {
         let mut x: Vec<f64> = (0..30)
@@ -450,11 +456,6 @@ mod tests {
             }
             other => panic!("expected NonFiniteValues, got {other:?}"),
         }
-    }
-    use polars::prelude::*;
-
-    fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-        (a - b).abs() < tol
     }
 
     #[test]
@@ -641,8 +642,7 @@ mod tests {
     /// STAT-67 (PP): the regression and Newey-West internals of PP.test, pinned where both lag rules agree (n = 200).
     #[test]
     fn test_validate_pp_test_t3_internals() {
-        use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
-        use crate::stats::cortest::MIN_ACCURATE_SQUARES;
+        use crate::data::columns::{NaPolicy, numeric_column};
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("stat_pp_t3");
         let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Omit).unwrap().0;
@@ -691,8 +691,7 @@ mod tests {
     /// from R's table, on the five fits of stat_pp_t3.
     #[test]
     fn test_validate_pp_test_t3_statistic() {
-        use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
-        use crate::stats::cortest::MIN_ACCURATE_SQUARES;
+        use crate::data::columns::{NaPolicy, numeric_column};
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("stat_pp_t3");
         let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Omit).unwrap().0;
@@ -736,8 +735,7 @@ mod tests {
     /// lambda2 1.1002914390310594 < sigma2 1.1623414925199784, so the statistic exceeds sqrt(ssqru/ssqrtl) t.
     #[test]
     fn test_pp_correction_keeps_sign() {
-        use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
-        use crate::stats::cortest::MIN_ACCURATE_SQUARES;
+        use crate::data::columns::{NaPolicy, numeric_column};
         let path = p2a_validation::repo_path("validation/datasets/generated/pp_t3.csv");
         let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
         let x = numeric_column(ds.df(), "ar", NaPolicy::Omit).unwrap().0;

@@ -468,7 +468,9 @@ fn poisson_two_sided_p(pois: &Poisson, x: u64, m: f64) -> EconResult<f64> {
         } else {
             let refuse = || EconError::InvalidSpecification {
                 message: format!(
-                    "x = {x}, r * T = {m:?}: the two-sided p-value's opposite tail would pass                      the largest count the one-sample exact Poisson test supports                      ({POISSON_MAX_ONE_SAMPLE_COUNT} = 2^52); use a one-sided alternative"
+                    "x = {x}, r * T = {m:?}: the two-sided p-value's opposite tail would pass \
+                     the largest count the one-sample exact Poisson test supports \
+                     ({POISSON_MAX_ONE_SAMPLE_COUNT} = 2^52); use a one-sided alternative"
                 ),
             };
             let bound = POISSON_MAX_ONE_SAMPLE_COUNT as f64;
@@ -1586,6 +1588,7 @@ mod tests {
             Err(EconError::InvalidSpecification { message }) => {
                 assert!(message.contains("4503599627370496"), "{message}");
                 assert!(message.contains("two-sided"), "{message}");
+                assert!(!message.contains("  "), "{message}");
             }
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
