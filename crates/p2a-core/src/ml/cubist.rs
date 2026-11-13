@@ -9,11 +9,12 @@
 //!
 //! - **Linear models in leaves**: Each rule terminates with a linear regression model
 //!   fitted to the data subset defined by that rule
-//! - **Committee models**: Boosting-like ensemble where subsequent trees fit adjusted
-//!   residuals and predictions are averaged
+//! - **Committee models**: Boosting-like ensemble where each tree after the first is fitted
+//!   to `2y - pred` of the one before, and predictions are averaged
 //! - **Instance-based corrections**: K-nearest neighbor adjustment of predictions
 //! - **Rule extraction**: Tree paths are collapsed into interpretable IF-THEN rules
-//! - **Prediction smoothing**: Predictions are smoothed using parent node models
+//! - **Prediction smoothing**: Each rule's model is its leaf model smoothed with every
+//!   ancestor's model up to the root
 //!
 //! ## Example
 //!
@@ -40,16 +41,27 @@
 //!
 //! The Cubist algorithm proceeds as follows:
 //!
-//! 1. **Tree construction**: Build a regression tree using MSE reduction criterion
-//! 2. **Linear model fitting**: Fit linear regression in each terminal node using
-//!    predictors from the path to that node
+//! 1. **Tree construction**: Split a node where the best split removes more than
+//!    `min_improvement` of the node's sum of squared deviations
+//! 2. **Linear model fitting**: Fit least squares at every node, on the attributes tested on
+//!    the path to it (all attributes at the root); an aliased attribute gets coefficient 0
 //! 3. **Rule extraction**: Convert tree paths to rules by collapsing conditions
-//! 4. **Prediction smoothing**: Smooth terminal predictions using parent models
-//!    (Quinlan 1992 smoothing algorithm)
-//! 5. **Committee iteration**: For committees > 1, adjust targets and rebuild:
-//!    - If model over-predicted, decrease target for next iteration
-//!    - Average all committee predictions for final output
-//! 6. **Instance correction**: Optionally adjust predictions using k-NN
+//! 4. **Prediction smoothing** (Quinlan 1992): from the leaf up,
+//!    `p <- (n p + k q) / (n + k)` per ancestor, with `n` the training cases of the child on
+//!    the path, `q` the ancestor's model and `k = smoothing_coefficient`; linear in the
+//!    models, so each rule carries one composite model, which prediction evaluates and the
+//!    rule prints
+//! 5. **Committee iteration**: For committees > 1, the next tree is fitted to `2y - pred`
+//!    (pred the previous tree's prediction), as R's Cubist; predictions are averaged
+//! 6. **Instance correction**: Optionally add the mean residual of the `neighbors` nearest
+//!    training cases on range-scaled distances (Quinlan 1993, equal weights)
+//!
+//! ## Differences from R's Cubist
+//!
+//! Node models use the attributes tested on the path (all at the root) and are not
+//! simplified by term elimination; Cubist and M5 choose other attribute sets and drop terms.
+//! Rules are not simplified or pruned, and the neighbour adjustment weights the neighbours
+//! equally. See `validation/ml/cubist.md`.
 //!
 //! ## References
 //!
@@ -99,9 +111,9 @@ pub struct CubistConfig {
     /// Whether to extract rules from trees. Default: true.
     pub extract_rules: bool,
 
-    /// Smoothing coefficient for parent-child model combination. Default: 15.0.
-    /// Higher values give more weight to child (leaf) model.
-    /// See Quinlan (1992) smoothing algorithm.
+    /// Weight `k` of each ancestor model in the smoothing of a rule's model (Quinlan 1992).
+    /// Default: 15.0. Higher values pull the prediction toward the ancestors (the root model
+    /// as `k` grows); 0 keeps the leaf model.
     pub smoothing_coefficient: f64,
 
     /// Random seed for reproducibility.
@@ -156,9 +168,9 @@ pub struct CubistRule {
     pub conditions: Vec<RuleCondition>,
     /// Number of training samples covered by this rule
     pub coverage: usize,
-    /// Linear model intercept (THEN linear model)
+    /// Intercept of the rule's smoothed model (THEN linear model), the one prediction uses
     pub intercept: f64,
-    /// Linear model coefficients (sparse: only non-zero coefficients)
+    /// Coefficients of the rule's smoothed model, the non-zero ones only
     pub coefficients: Vec<(usize, String, f64)>, // (feature_idx, feature_name, coefficient)
     /// Mean of target variable in this rule's subset
     pub mean_response: f64,
@@ -305,7 +317,33 @@ pub(crate) enum CubistNode {
         std_response: f64,
         // Indices of features used in the path to this leaf
         path_features: Vec<usize>,
+        // The rule's model: this leaf's model smoothed with every ancestor's up to the root
+        // (`CubistTree::smooth`); what prediction evaluates and the rule prints.
+        smoothed_intercept: f64,
+        smoothed_coefficients: Vec<f64>,
     },
+}
+
+impl CubistNode {
+    /// A leaf whose smoothed model is, until `CubistTree::smooth` runs, its own.
+    fn leaf(
+        intercept: f64,
+        coefficients: Vec<f64>,
+        n_samples: usize,
+        (mean_response, std_response): (f64, f64),
+        path_features: Vec<usize>,
+    ) -> CubistNode {
+        CubistNode::Leaf {
+            smoothed_intercept: intercept,
+            smoothed_coefficients: coefficients.clone(),
+            intercept,
+            coefficients,
+            n_samples,
+            mean_response,
+            std_response,
+            path_features,
+        }
+    }
 }
 
 /// Internal tree structure for Cubist.
@@ -332,6 +370,19 @@ impl CubistTree {
         let indices: Vec<usize> = (0..x.nrows()).collect();
         let path_features = Vec::new();
         self.root = Some(self.build_tree(x, y, &indices, 0, config, path_features));
+        self.smooth();
+    }
+
+    /// Fold each leaf's model and every ancestor's into one linear model (Quinlan 1992):
+    /// from the leaf up, `p <- (n p + k q) / (n + k)` per level, with `n` the training cases
+    /// of the child on the path, `q` the ancestor's model and `k` the smoothing coefficient.
+    /// Every step is linear in the models, so the composite is one coefficient vector.
+    fn smooth(&mut self) {
+        let k = self.smoothing_coefficient;
+        if let Some(root) = self.root.as_mut() {
+            let mut ancestors = Vec::new();
+            smooth_node(root, &mut ancestors, k);
+        }
     }
 
     /// Build tree recursively.
@@ -354,29 +405,15 @@ impl CubistTree {
             || n_samples < config.min_split
             || n_samples <= config.min_bucket.saturating_mul(2)
         {
-            let (mean_response, std_response) = self.compute_stats(y, indices);
-            return CubistNode::Leaf {
-                intercept,
-                coefficients,
-                n_samples,
-                mean_response,
-                std_response,
-                path_features,
-            };
+            let stats = self.compute_stats(y, indices);
+            return CubistNode::leaf(intercept, coefficients, n_samples, stats, path_features);
         }
 
         // Check if all targets are the same
         let first_y = y[indices[0]];
         if indices.iter().all(|&i| (y[i] - first_y).abs() < 1e-10) {
-            let (mean_response, std_response) = self.compute_stats(y, indices);
-            return CubistNode::Leaf {
-                intercept,
-                coefficients,
-                n_samples,
-                mean_response,
-                std_response,
-                path_features,
-            };
+            let stats = self.compute_stats(y, indices);
+            return CubistNode::leaf(intercept, coefficients, n_samples, stats, path_features);
         }
 
         // Sum of squared deviations of the node's targets
@@ -388,15 +425,8 @@ impl CubistTree {
         {
             // Check minimum bucket size
             if left_indices.len() < config.min_bucket || right_indices.len() < config.min_bucket {
-                let (mean_response, std_response) = self.compute_stats(y, indices);
-                return CubistNode::Leaf {
-                    intercept,
-                    coefficients,
-                    n_samples,
-                    mean_response,
-                    std_response,
-                    path_features,
-                };
+                let stats = self.compute_stats(y, indices);
+                return CubistNode::leaf(intercept, coefficients, n_samples, stats, path_features);
             }
 
             // Update path features for children
@@ -422,15 +452,8 @@ impl CubistTree {
                 n_samples,
             }
         } else {
-            let (mean_response, std_response) = self.compute_stats(y, indices);
-            CubistNode::Leaf {
-                intercept,
-                coefficients,
-                n_samples,
-                mean_response,
-                std_response,
-                path_features,
-            }
+            let stats = self.compute_stats(y, indices);
+            CubistNode::leaf(intercept, coefficients, n_samples, stats, path_features)
         }
     }
 
@@ -597,72 +620,39 @@ impl CubistTree {
         (mean, var.sqrt())
     }
 
-    /// Predict for a single sample with smoothing.
+    /// Predict for a single sample: the smoothed model of the leaf it falls in.
     fn predict_one(&self, x: &ArrayView1<f64>) -> f64 {
-        match &self.root {
-            Some(node) => self.predict_node(node, x, None),
-            None => 0.0,
-        }
-    }
-
-    /// Recursive prediction with Quinlan (1992) smoothing.
-    fn predict_node(
-        &self,
-        node: &CubistNode,
-        x: &ArrayView1<f64>,
-        parent_pred: Option<(f64, usize)>,
-    ) -> f64 {
-        match node {
-            CubistNode::Leaf {
-                intercept,
-                coefficients,
-                n_samples,
-                ..
-            } => {
-                // Compute linear model prediction
-                let leaf_pred = *intercept
-                    + coefficients
-                        .iter()
-                        .zip(x.iter())
-                        .map(|(&c, &xi)| c * xi)
-                        .sum::<f64>();
-
-                // Apply Quinlan smoothing if parent exists
-                // p' = (np + kq) / (n + k) where n=leaf samples, k=smoothing coef, p=parent, q=leaf
-                match parent_pred {
-                    Some((parent, parent_n)) => {
-                        let k = self.smoothing_coefficient;
-                        let n = *n_samples as f64;
-                        (n * leaf_pred + k * parent) / (n + k)
-                    }
-                    None => leaf_pred,
+        let mut node = match &self.root {
+            Some(node) => node,
+            None => return 0.0,
+        };
+        loop {
+            match node {
+                CubistNode::Leaf {
+                    smoothed_intercept,
+                    smoothed_coefficients,
+                    ..
+                } => {
+                    return *smoothed_intercept
+                        + smoothed_coefficients
+                            .iter()
+                            .zip(x.iter())
+                            .map(|(&c, &xi)| c * xi)
+                            .sum::<f64>();
                 }
-            }
-            CubistNode::Split {
-                feature,
-                threshold,
-                left,
-                right,
-                intercept,
-                coefficients,
-                n_samples,
-            } => {
-                // Compute prediction at this node (for smoothing)
-                let node_pred = *intercept
-                    + coefficients
-                        .iter()
-                        .zip(x.iter())
-                        .map(|(&c, &xi)| c * xi)
-                        .sum::<f64>();
-
-                // Choose child
-                let child = if x[*feature] <= *threshold {
-                    left.as_ref()
-                } else {
-                    right.as_ref()
-                };
-
-                self.predict_node(child, x, Some((node_pred, *n_samples)))
+                CubistNode::Split {
+                    feature,
+                    threshold,
+                    left,
+                    right,
+                    ..
+                } => {
+                    node = if x[*feature] <= *threshold {
+                        left
+                    } else {
+                        right
+                    };
+                }
             }
         }
     }
@@ -691,17 +681,18 @@ impl CubistTree {
     ) {
         match node {
             CubistNode::Leaf {
-                intercept,
-                coefficients,
+                smoothed_intercept,
+                smoothed_coefficients,
                 n_samples,
                 mean_response,
                 std_response,
                 ..
             } => {
-                // Create rule with linear model
+                // The rule's model is the smoothed composite prediction uses; an eliminated
+                // (aliased) attribute has coefficient 0 and is not listed.
                 let mut coef_entries = Vec::new();
-                for (i, &c) in coefficients.iter().enumerate() {
-                    if c.abs() > 1e-10 {
+                for (i, &c) in smoothed_coefficients.iter().enumerate() {
+                    if c != 0.0 {
                         let name = self
                             .feature_names
                             .as_ref()
@@ -715,7 +706,7 @@ impl CubistTree {
                     id: 0, // Will be assigned later
                     conditions,
                     coverage: *n_samples,
-                    intercept: *intercept,
+                    intercept: *smoothed_intercept,
                     coefficients: coef_entries,
                     mean_response: *mean_response,
                     std_response: *std_response,
@@ -799,6 +790,50 @@ impl CubistTree {
                 self.accumulate_importance(left, importance);
                 self.accumulate_importance(right, importance);
             }
+        }
+    }
+}
+
+/// One ancestor on the path from the root: its model and its number of training cases.
+type AncestorModel = (f64, Vec<f64>, usize);
+
+/// `CubistTree::smooth` below `node`, with `ancestors` the models above it (root first).
+fn smooth_node(node: &mut CubistNode, ancestors: &mut Vec<AncestorModel>, k: f64) {
+    match node {
+        CubistNode::Split {
+            left,
+            right,
+            intercept,
+            coefficients,
+            n_samples,
+            ..
+        } => {
+            ancestors.push((*intercept, coefficients.clone(), *n_samples));
+            smooth_node(left, ancestors, k);
+            smooth_node(right, ancestors, k);
+            ancestors.pop();
+        }
+        CubistNode::Leaf {
+            intercept,
+            coefficients,
+            n_samples,
+            smoothed_intercept,
+            smoothed_coefficients,
+            ..
+        } => {
+            let mut b0 = *intercept;
+            let mut b = coefficients.clone();
+            let mut n_below = *n_samples as f64;
+            for (q0, q, n_node) in ancestors.iter().rev() {
+                let denom = n_below + k;
+                b0 = (n_below * b0 + k * q0) / denom;
+                for (bj, &qj) in b.iter_mut().zip(q) {
+                    *bj = (n_below * *bj + k * qj) / denom;
+                }
+                n_below = *n_node as f64;
+            }
+            *smoothed_intercept = b0;
+            *smoothed_coefficients = b;
         }
     }
 }
@@ -958,15 +993,13 @@ pub fn cubist(
         // Accumulate importance
         total_importance = total_importance + tree.variable_importance();
 
-        // Compute predictions for this committee
+        // The next member's target is y - (pred - y) = 2y - pred, pred this member's
+        // prediction (R's Cubist): where this member over-predicted by 2, the next one aims
+        // 2 below y.
         if c < config.committees - 1 {
-            // Adjust targets for next committee (boosting-like)
-            // If over-predicted, reduce target; if under-predicted, increase target
             for i in 0..n_samples {
                 let pred = tree.predict_one(&x.row(i));
-                let error = current_y[i] - pred;
-                // Move target toward prediction (shrink residuals)
-                current_y[i] = y[i] + error * 0.5;
+                current_y[i] = 2.0 * y[i] - pred;
             }
         }
 
@@ -1606,6 +1639,149 @@ mod tests {
             assert!(
                 matches!(err, EconError::InvalidSpecification { .. }),
                 "{m}: {err}"
+            );
+        }
+    }
+
+    fn hand_leaf(intercept: f64, coefficients: Vec<f64>, n_samples: usize) -> CubistNode {
+        CubistNode::leaf(intercept, coefficients, n_samples, (0.0, 0.0), Vec::new())
+    }
+
+    fn hand_split(
+        feature: usize,
+        threshold: f64,
+        left: CubistNode,
+        right: CubistNode,
+        intercept: f64,
+        coefficients: Vec<f64>,
+        n_samples: usize,
+    ) -> CubistNode {
+        CubistNode::Split {
+            feature,
+            threshold,
+            left: Box::new(left),
+            right: Box::new(right),
+            intercept,
+            coefficients,
+            n_samples,
+        }
+    }
+
+    /// A finished tree from hand-built nodes (as `fit` leaves it).
+    fn hand_tree(root: CubistNode, n_features: usize, k: f64) -> CubistTree {
+        let mut tree = CubistTree::new(n_features, None, k);
+        tree.root = Some(root);
+        tree.smooth();
+        tree
+    }
+
+    /// Depth 2 on one feature: root (40 cases, q_root = 1 + 2x) splits at 0.5; its left child
+    /// (20 cases, q_mid = 3 - x) splits at 0.25 into the leaf (8 cases, q_leaf = 0.5 + 4x).
+    fn depth_two_tree(k: f64) -> CubistTree {
+        let mid = hand_split(
+            0,
+            0.25,
+            hand_leaf(0.5, vec![4.0], 8),
+            hand_leaf(-2.0, vec![1.0], 12),
+            3.0,
+            vec![-1.0],
+            20,
+        );
+        let root = hand_split(
+            0,
+            0.5,
+            mid,
+            hand_leaf(7.0, vec![-3.0], 20),
+            1.0,
+            vec![2.0],
+            40,
+        );
+        hand_tree(root, 1, k)
+    }
+
+    #[test]
+    fn test_cubist_smoothing_reaches_the_root() {
+        let tree = depth_two_tree(15.0);
+        let x = 0.2;
+        let (q_leaf, q_mid, q_root) = (0.5 + 4.0 * x, 3.0 - x, 1.0 + 2.0 * x);
+        let p2 = (8.0 * q_leaf + 15.0 * q_mid) / (8.0 + 15.0);
+        let p1 = (20.0 * p2 + 15.0 * q_root) / (20.0 + 15.0);
+        let got = tree.predict_one(&array![x].view());
+        assert!(
+            (got - p1).abs() <= 1e-12 * p1.abs(),
+            "{got} vs {p1} (p2 = {p2})"
+        );
+    }
+
+    #[test]
+    fn test_cubist_smoothing_coefficient_direction() {
+        let x = 0.2;
+        let (q_leaf, q_root) = (0.5 + 4.0 * x, 1.0 + 2.0 * x);
+        let at = |k: f64| depth_two_tree(k).predict_one(&array![x].view());
+        assert!(
+            (at(0.0) - q_leaf).abs() <= 1e-9 * q_leaf.abs(),
+            "{}",
+            at(0.0)
+        );
+        assert!(
+            (at(1e12) - q_root).abs() <= 1e-9 * q_root.abs(),
+            "{}",
+            at(1e12)
+        );
+    }
+
+    /// The rule covering `row`: every condition holds.
+    fn covering_rule<'a>(rules: &'a [CubistRule], row: ArrayView1<f64>) -> &'a CubistRule {
+        let holds = |c: &RuleCondition| match c.operator.as_str() {
+            "<=" => row[c.feature] <= c.threshold,
+            _ => row[c.feature] > c.threshold,
+        };
+        let mut covering = rules.iter().filter(|r| r.conditions.iter().all(holds));
+        let rule = covering.next().expect("a covering rule");
+        assert!(covering.next().is_none(), "rules overlap");
+        rule
+    }
+
+    #[test]
+    fn test_cubist_rule_model_is_the_composite() {
+        let (x, y) = plane_data(300, 7);
+        let r = cubist(x.view(), y.view(), &CubistConfig::default()).unwrap();
+        assert!(r.n_rules > 1, "{}", r.n_rules);
+        let tree = &r.committee_trees[0];
+        for row in x.rows() {
+            let rule = covering_rule(&r.rules, row);
+            let model = rule.intercept
+                + rule
+                    .coefficients
+                    .iter()
+                    .map(|(j, _, c)| c * row[*j])
+                    .sum::<f64>();
+            let want = tree.predict_one(&row);
+            assert!(
+                (model - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "rule {}: {model} vs {want}",
+                rule.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_cubist_committee_target() {
+        let (x, y) = plane_data(200, 11);
+        let cfg = CubistConfig {
+            committees: 2,
+            ..Default::default()
+        };
+        let r = cubist(x.view(), y.view(), &cfg).unwrap();
+        let mut first = CubistTree::new(2, None, cfg.smoothing_coefficient);
+        first.fit(&x.view(), &y.view(), &cfg);
+        let target = Array1::from_shape_fn(y.len(), |i| 2.0 * y[i] - first.predict_one(&x.row(i)));
+        let mut second = CubistTree::new(2, None, cfg.smoothing_coefficient);
+        second.fit(&x.view(), &target.view(), &cfg);
+        for row in x.rows() {
+            assert_eq!(
+                r.committee_trees[1].predict_one(&row).to_bits(),
+                second.predict_one(&row).to_bits()
             );
         }
     }

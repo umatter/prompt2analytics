@@ -31,8 +31,37 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
 
 ## Rust Test Reference
 
-- **File**: `crates/p2a-core/tests/validation_ml_advanced.rs`
-- **Tests**: `test_cubist_regression_properties`, `test_cubist_committees_properties`, `test_cubist_predict_properties`
+- `crates/p2a-core/tests/validation_ml_advanced.rs`: `test_cubist_regression_properties`,
+  `test_cubist_committees_properties`, `test_cubist_predict_properties` (property thresholds below)
+- `crates/p2a-core/src/ml/cubist.rs`: `test_cubist_min_improvement_stops_splits`,
+  `test_cubist_split_rule_is_ssd_share`, `test_cubist_min_improvement_is_a_share` (split rule);
+  `test_cubist_smoothing_reaches_the_root`, `test_cubist_smoothing_coefficient_direction`,
+  `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target` (smoothing and committees).
+
+## Splits, smoothing and committees
+
+A node is split when the best split removes more than `min_improvement` (default 0.01, in [0, 1)) of
+the node's sum of squared deviations of the target, subject to `min_split`, `min_bucket` and `max_depth`.
+
+Every node carries a least-squares model. A rule's model is its leaf model smoothed with every ancestor's,
+from the leaf up to the root (Quinlan 1992):
+
+    p <- (n p + k q) / (n + k)
+
+per ancestor, with `p` the model so far, `q` the ancestor's model, `n` the training cases of the child
+on the path and `k = smoothing_coefficient` (default 15). Each step is linear in the models, so the
+composite is one linear model, stored per rule: prediction evaluates it, and the rules print it.
+`k = 0` keeps the leaf model; a large `k` approaches the root model.
+
+With `committees > 1`, member `m + 1` is fitted to `2y - pred_m`, `pred_m` the prediction of member
+`m`, as R's Cubist ("if the first model over-predicted by 2, the next model's target is y - 2"); the
+prediction is the members' mean.
+
+## Known differences from Cubist
+
+- Node models use the attributes tested on the path to the node (all attributes at the root), with no
+  term elimination; Cubist and M5 choose other attribute sets and simplify the models.
+- Rules are not simplified or pruned after the tree is grown.
 
 ## Leaf model with collinear attributes (R-pinned)
 
