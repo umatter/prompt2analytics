@@ -374,61 +374,81 @@ impl fmt::Display for BartResult {
 // Tree Data Structures
 // ============================================================================
 
-/// A node in a BART tree.
-#[derive(Debug, Clone)]
-enum BartNode {
-    /// Internal (split) node
-    Internal {
-        /// Feature index for split
-        var: usize,
-        /// Split threshold
-        cut: f64,
-        /// Left child node index
-        left: usize,
-        /// Right child node index
-        right: usize,
-    },
-    /// Terminal (leaf) node
-    Leaf {
-        /// Leaf value (mu)
-        mu: f64,
-    },
+/// The child index of a leaf and the parent index of the root.
+const NO_NODE: u32 = u32::MAX;
+
+/// A node of a BART tree. A leaf has `left == right == NO_NODE`.
+#[derive(Debug, Clone, Copy)]
+struct BartNode {
+    /// Parent index (`NO_NODE` for the root)
+    parent: u32,
+    /// Left child index (`NO_NODE` for a leaf)
+    left: u32,
+    /// Right child index (`NO_NODE` for a leaf)
+    right: u32,
+    /// Split variable (internal nodes)
+    var: u32,
+    /// Depth (the root is at 0)
+    depth: u32,
+    /// Split threshold (internal nodes)
+    cut: f64,
+    /// Leaf value (leaves)
+    mu: f64,
 }
 
-/// A single BART tree.
+impl BartNode {
+    fn leaf(parent: u32, depth: u32, mu: f64) -> Self {
+        Self {
+            parent,
+            left: NO_NODE,
+            right: NO_NODE,
+            var: 0,
+            depth,
+            cut: 0.0,
+            mu,
+        }
+    }
+
+    fn is_leaf(&self) -> bool {
+        self.left == NO_NODE
+    }
+}
+
+/// A single BART tree. `nodes` holds exactly the nodes reachable from the root (index 0):
+/// a birth appends two leaves, and a death removes them, moving the last nodes into their
+/// slots, so there are always `2 * internal + 1` nodes.
 #[derive(Debug, Clone)]
 struct BartTree {
-    /// Nodes in the tree (index 0 is root)
     nodes: Vec<BartNode>,
-    /// Depth of the tree
-    depth: usize,
 }
 
 impl BartTree {
     /// Create a new tree with single root node
     fn new(mu: f64) -> Self {
         Self {
-            nodes: vec![BartNode::Leaf { mu }],
-            depth: 0,
+            nodes: vec![BartNode::leaf(NO_NODE, 0, mu)],
+        }
+    }
+
+    /// The leaf a row falls in
+    fn leaf_of(&self, x: &ArrayView1<f64>) -> usize {
+        let mut i = 0;
+        loop {
+            let node = &self.nodes[i];
+            if node.is_leaf() {
+                return i;
+            }
+            i = if x[node.var as usize] <= node.cut {
+                node.left as usize
+            } else {
+                node.right as usize
+            };
         }
     }
 
     /// Predict for a single observation
     fn predict_one(&self, x: &ArrayView1<f64>) -> f64 {
-        let mut node_idx = 0;
-        loop {
-            match &self.nodes[node_idx] {
-                BartNode::Leaf { mu } => return *mu,
-                BartNode::Internal {
-                    var,
-                    cut,
-                    left,
-                    right,
-                } => {
-                    node_idx = if x[*var] <= *cut { *left } else { *right };
-                }
-            }
-        }
+        self.nodes[self.leaf_of(x)].mu
     }
 
     /// Predict for all observations
@@ -441,88 +461,130 @@ impl BartTree {
         preds
     }
 
-    /// Get terminal node indices (leaves)
+    /// Node indices reached from the root, depth first, left before right
+    fn walk(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            out.push(i);
+            let node = &self.nodes[i];
+            if !node.is_leaf() {
+                stack.push(node.right as usize);
+                stack.push(node.left as usize);
+            }
+        }
+        out
+    }
+
+    /// Terminal node indices (leaves), walked from the root
     fn get_leaves(&self) -> Vec<usize> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| match n {
-                BartNode::Leaf { .. } => Some(i),
-                BartNode::Internal { .. } => None,
-            })
+        self.walk()
+            .into_iter()
+            .filter(|&i| self.nodes[i].is_leaf())
             .collect()
     }
 
-    /// Get internal node indices
+    /// Internal node indices, walked from the root
     fn get_internals(&self) -> Vec<usize> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| match n {
-                BartNode::Internal { .. } => Some(i),
-                BartNode::Leaf { .. } => None,
-            })
+        self.walk()
+            .into_iter()
+            .filter(|&i| !self.nodes[i].is_leaf())
             .collect()
     }
 
-    /// Get node depth
+    /// Internal nodes whose two children are leaves ("nog" nodes: the ones a death can remove)
+    fn nogs(&self) -> Vec<usize> {
+        self.get_internals()
+            .into_iter()
+            .filter(|&i| self.is_nog(i))
+            .collect()
+    }
+
+    /// Whether node `i` is internal with two leaf children
+    fn is_nog(&self, i: usize) -> bool {
+        let node = &self.nodes[i];
+        !node.is_leaf()
+            && self.nodes[node.left as usize].is_leaf()
+            && self.nodes[node.right as usize].is_leaf()
+    }
+
+    /// Node depth (stored)
     fn get_depth(&self, node_idx: usize) -> usize {
-        if node_idx == 0 {
-            return 0;
+        self.nodes[node_idx].depth as usize
+    }
+
+    /// Rows that fall in node `node` (a leaf)
+    fn rows_in(&self, node: usize, x: ArrayView2<f64>) -> Vec<usize> {
+        (0..x.nrows())
+            .filter(|&i| self.leaf_of(&x.row(i)) == node)
+            .collect()
+    }
+
+    /// Split leaf `i` on `x[var] <= cut`; returns the new children's indices
+    fn birth(
+        &mut self,
+        i: usize,
+        var: usize,
+        cut: f64,
+        mu_left: f64,
+        mu_right: f64,
+    ) -> (usize, usize) {
+        let left = self.nodes.len();
+        let right = left + 1;
+        let depth = self.nodes[i].depth + 1;
+        self.nodes.push(BartNode::leaf(i as u32, depth, mu_left));
+        self.nodes.push(BartNode::leaf(i as u32, depth, mu_right));
+        let node = &mut self.nodes[i];
+        node.left = left as u32;
+        node.right = right as u32;
+        node.var = var as u32;
+        node.cut = cut;
+        (left, right)
+    }
+
+    /// Collapse the nog node `i` to a leaf with value `mu`, removing its two children. Returns
+    /// the node's index afterwards (it moves when it was one of the last two nodes).
+    fn death(&mut self, i: usize, mu: f64) -> usize {
+        let (l, r) = (self.nodes[i].left as usize, self.nodes[i].right as usize);
+        {
+            let node = &mut self.nodes[i];
+            node.left = NO_NODE;
+            node.right = NO_NODE;
+            node.mu = mu;
         }
-        // Find parent by searching
-        for (i, node) in self.nodes.iter().enumerate() {
-            if let BartNode::Internal { left, right, .. } = node {
-                if *left == node_idx || *right == node_idx {
-                    return 1 + self.get_depth(i);
+        let mut i = i;
+        for gone in [l.max(r), l.min(r)] {
+            if let Some(moved_from) = self.remove_slot(gone) {
+                if moved_from == i {
+                    i = gone;
                 }
             }
         }
-        0
+        i
     }
 
-    /// Check if a node has two leaf children (can be pruned)
-    fn is_singly_internal(&self, node_idx: usize) -> bool {
-        if let BartNode::Internal { left, right, .. } = &self.nodes[node_idx] {
-            matches!(
-                (&self.nodes[*left], &self.nodes[*right]),
-                (BartNode::Leaf { .. }, BartNode::Leaf { .. })
-            )
+    /// Remove the (detached) node at `idx` by moving the last node into its slot and pointing
+    /// that node's parent and children at the new slot. Returns the moved node's old index.
+    fn remove_slot(&mut self, idx: usize) -> Option<usize> {
+        let last = self.nodes.len() - 1;
+        if idx == last {
+            self.nodes.pop();
+            return None;
+        }
+        let moved = self.nodes[last];
+        self.nodes[idx] = moved;
+        self.nodes.pop();
+        let p = moved.parent as usize;
+        if self.nodes[p].left as usize == last {
+            self.nodes[p].left = idx as u32;
         } else {
-            false
+            self.nodes[p].right = idx as u32;
         }
-    }
-
-    /// Get observations that fall in each leaf
-    fn get_leaf_assignments(&self, x: ArrayView2<f64>) -> Vec<Vec<usize>> {
-        let leaves = self.get_leaves();
-        let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
-
-        for i in 0..x.nrows() {
-            let mut node_idx = 0;
-            loop {
-                match &self.nodes[node_idx] {
-                    BartNode::Leaf { .. } => {
-                        assignments[node_idx].push(i);
-                        break;
-                    }
-                    BartNode::Internal {
-                        var,
-                        cut,
-                        left,
-                        right,
-                    } => {
-                        node_idx = if x.row(i)[*var] <= *cut {
-                            *left
-                        } else {
-                            *right
-                        };
-                    }
-                }
-            }
+        if !moved.is_leaf() {
+            self.nodes[moved.left as usize].parent = idx as u32;
+            self.nodes[moved.right as usize].parent = idx as u32;
         }
-
-        leaves.iter().map(|&l| assignments[l].clone()).collect()
+        Some(last)
     }
 }
 
@@ -869,13 +931,8 @@ impl BartSampler {
         let tree = &mut self.trees[tree_idx];
 
         // Propose: grow, prune, or change
-        let n_leaves = tree.get_leaves().len();
-        let n_internal = tree.get_internals().len();
-        let n_singly = tree
-            .get_internals()
-            .iter()
-            .filter(|&&i| tree.is_singly_internal(i))
-            .count();
+        let n_leaves = (tree.nodes.len() + 1) / 2;
+        let n_singly = tree.nogs().len();
 
         // Choose proposal type
         let r = self.random();
@@ -928,9 +985,7 @@ impl BartSampler {
         }
 
         // Get observations in this leaf
-        let assignments = tree.get_leaf_assignments(x);
-        let leaf_pos = leaves.iter().position(|&l| l == leaf_idx).unwrap();
-        let obs_in_leaf: Vec<usize> = assignments[leaf_pos].clone();
+        let obs_in_leaf = tree.rows_in(leaf_idx, x);
 
         if obs_in_leaf.len() < min_rows_to_split(self.config.min_node_size) {
             return; // Not enough observations to split
@@ -984,25 +1039,8 @@ impl BartSampler {
         if self.random().ln() < log_acceptance {
             // Accept: create the split
             let tree = &mut self.trees[tree_idx];
-            let left_idx = tree.nodes.len();
-            let right_idx = left_idx + 1;
-
-            // Get current leaf value for initialization
-            let current_mu = if let BartNode::Leaf { mu } = tree.nodes[leaf_idx] {
-                mu
-            } else {
-                0.0
-            };
-
-            tree.nodes.push(BartNode::Leaf { mu: current_mu });
-            tree.nodes.push(BartNode::Leaf { mu: current_mu });
-            tree.nodes[leaf_idx] = BartNode::Internal {
-                var,
-                cut,
-                left: left_idx,
-                right: right_idx,
-            };
-            tree.depth = tree.depth.max(leaf_depth + 1);
+            let current_mu = tree.nodes[leaf_idx].mu;
+            tree.birth(leaf_idx, var, cut, current_mu, current_mu);
 
             // Update variable importance count
             self.var_counts[var] += 1;
@@ -1019,13 +1057,7 @@ impl BartSampler {
         _backward_prob: f64,
     ) {
         // Find singly-internal nodes (internal nodes with two leaf children)
-        let singly_internals: Vec<usize> = {
-            let tree = &self.trees[tree_idx];
-            tree.get_internals()
-                .into_iter()
-                .filter(|&i| tree.is_singly_internal(i))
-                .collect()
-        };
+        let singly_internals = self.trees[tree_idx].nogs();
 
         if singly_internals.is_empty() {
             return;
@@ -1038,28 +1070,13 @@ impl BartSampler {
         let node_depth = tree.get_depth(node_idx);
 
         // Get the children and their observations
-        let (left_idx, right_idx, var) = if let BartNode::Internal {
-            left, right, var, ..
-        } = tree.nodes[node_idx]
-        {
-            (left, right, var)
-        } else {
-            return;
-        };
+        let node = tree.nodes[node_idx];
+        let (left_idx, right_idx, var) =
+            (node.left as usize, node.right as usize, node.var as usize);
 
         // Get all observations that would be in the merged leaf
-        let assignments = tree.get_leaf_assignments(x);
-        let leaves = tree.get_leaves();
-
-        let left_pos = leaves.iter().position(|&l| l == left_idx);
-        let right_pos = leaves.iter().position(|&l| l == right_idx);
-
-        if left_pos.is_none() || right_pos.is_none() {
-            return;
-        }
-
-        let left_obs = assignments[left_pos.unwrap()].clone();
-        let right_obs = assignments[right_pos.unwrap()].clone();
+        let left_obs = tree.rows_in(left_idx, x);
+        let right_obs = tree.rows_in(right_idx, x);
         let merged_obs: Vec<usize> = left_obs.iter().chain(right_obs.iter()).copied().collect();
 
         // Compute acceptance probability (negative of grow ratio)
@@ -1081,8 +1098,7 @@ impl BartSampler {
                 0.0
             };
 
-            tree.nodes[node_idx] = BartNode::Leaf { mu: mean_resid };
-            // Note: we leave the old child nodes in place (they're now unreachable)
+            tree.death(node_idx, mean_resid);
 
             // Decrement variable importance count
             if self.var_counts[var] > 0 {
@@ -1127,7 +1143,10 @@ impl BartSampler {
     fn draw_leaf_values(&mut self, tree_idx: usize, residual: &Array1<f64>, x: ArrayView2<f64>) {
         // First, gather information without holding a mutable borrow
         let leaves = self.trees[tree_idx].get_leaves();
-        let assignments = self.trees[tree_idx].get_leaf_assignments(x);
+        let assignments: Vec<Vec<usize>> = leaves
+            .iter()
+            .map(|&l| self.trees[tree_idx].rows_in(l, x))
+            .collect();
 
         let sigma2 = self.sigma.powi(2);
         let sigma_mu2 = self.sigma_mu.powi(2);
@@ -1146,9 +1165,7 @@ impl BartSampler {
             let rand_val = random_vals[i];
 
             if obs.is_empty() {
-                if let BartNode::Leaf { ref mut mu } = tree.nodes[leaf_idx] {
-                    *mu = sigma_mu * rand_val;
-                }
+                tree.nodes[leaf_idx].mu = sigma_mu * rand_val;
                 continue;
             }
 
@@ -1162,9 +1179,7 @@ impl BartSampler {
             let post_mean = post_var * sum_r / sigma2;
             let post_sd = post_var.sqrt();
 
-            if let BartNode::Leaf { ref mut mu } = tree.nodes[leaf_idx] {
-                *mu = post_mean + post_sd * rand_val;
-            }
+            tree.nodes[leaf_idx].mu = post_mean + post_sd * rand_val;
         }
     }
 
@@ -2083,30 +2098,89 @@ mod tests {
 
     #[test]
     fn test_bart_tree_operations() {
-        // Test tree grow and predict
         let mut tree = BartTree::new(0.5);
         assert_eq!(tree.get_leaves().len(), 1);
         assert_eq!(tree.get_internals().len(), 0);
 
-        // Manual split
-        tree.nodes.push(BartNode::Leaf { mu: 0.3 });
-        tree.nodes.push(BartNode::Leaf { mu: 0.7 });
-        tree.nodes[0] = BartNode::Internal {
-            var: 0,
-            cut: 0.5,
-            left: 1,
-            right: 2,
-        };
-        tree.depth = 1;
+        let (l, r) = tree.birth(0, 0, 0.5, 0.3, 0.7);
+        assert_eq!((l, r), (1, 2));
+        assert_eq!(tree.get_leaves(), vec![1, 2]);
+        assert_eq!(tree.get_internals(), vec![0]);
+        assert_eq!((tree.get_depth(1), tree.nodes[1].parent), (1, 0));
 
-        assert_eq!(tree.get_leaves().len(), 2);
-        assert_eq!(tree.get_internals().len(), 1);
-
-        // Test predictions
         let x = array![[0.3], [0.7]];
         let preds = tree.predict(x.view());
-        assert_eq!(preds[0], 0.3); // x[0] <= 0.5, goes left
-        assert_eq!(preds[1], 0.7); // x[1] > 0.5, goes right
+        assert_eq!(preds[0], 0.3); // x[0] <= 0.5 goes left
+        assert_eq!(preds[1], 0.7); // x[1] > 0.5 goes right
+
+        // grow the left leaf, then remove the root's split: every node is reachable afterwards
+        tree.birth(1, 0, 0.2, 0.1, 0.4);
+        assert_eq!(tree.nogs(), vec![1]);
+        let at = tree.death(1, 0.35);
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.walk().len(), 3);
+        assert!(tree.nodes[at].is_leaf());
+        assert_eq!(tree.nodes[at].mu, 0.35);
+        let at = tree.death(0, 0.5);
+        assert_eq!((at, tree.nodes.len()), (0, 1));
+
+        // a death in the middle of the vector moves the last nodes into the freed slots
+        tree.birth(0, 0, 0.5, 0.0, 0.0);
+        tree.birth(1, 0, 0.2, 0.0, 0.0);
+        tree.birth(2, 0, 0.8, 0.6, 0.9);
+        tree.death(1, 0.25);
+        assert_tree_invariants(&tree);
+        let x = array![[0.1], [0.3], [0.7], [0.95]];
+        assert_eq!(tree.predict(x.view()).to_vec(), vec![0.25, 0.25, 0.6, 0.9]);
+    }
+
+    /// Every node is reachable from the root, there are 2 * internal + 1 of them, parents and
+    /// children point at each other, and each stored depth is the walked depth.
+    fn assert_tree_invariants(tree: &BartTree) {
+        let reached = tree.walk();
+        let internal = reached
+            .iter()
+            .filter(|&&i| !tree.nodes[i].is_leaf())
+            .count();
+        assert_eq!(reached.len(), tree.nodes.len(), "unreachable nodes");
+        assert_eq!(tree.nodes.len(), 2 * internal + 1);
+        let mut seen = vec![false; tree.nodes.len()];
+        for &i in &reached {
+            assert!(!seen[i], "node {i} reached twice");
+            seen[i] = true;
+            let node = tree.nodes[i];
+            if i == 0 {
+                assert_eq!((node.parent, node.depth), (NO_NODE, 0));
+            } else {
+                let parent = tree.nodes[node.parent as usize];
+                assert!(parent.left as usize == i || parent.right as usize == i);
+                assert_eq!(node.depth, parent.depth + 1, "node {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn bart_trees_hold_only_reachable_nodes() {
+        let (y, x) = generate_test_data(150, 3);
+        let c = BartConfig {
+            n_trees: 20,
+            seed: Some(3),
+            ..Default::default()
+        };
+        let prior = wbart_prior(y.view(), x.view(), &c).unwrap();
+        let yc = y.mapv(|v| v - prior.fmean);
+        let mut sampler = BartSampler::new(&yc, x.view(), &c, Some(prior)).unwrap();
+        let mut deaths_seen = false;
+        for _ in 0..200 {
+            let before: usize = sampler.trees.iter().map(|t| t.nodes.len()).sum();
+            sampler.step(&yc, x.view());
+            let after: usize = sampler.trees.iter().map(|t| t.nodes.len()).sum();
+            deaths_seen |= after < before;
+            for tree in &sampler.trees {
+                assert_tree_invariants(tree);
+            }
+        }
+        assert!(deaths_seen, "no death was accepted");
     }
 
     #[test]
