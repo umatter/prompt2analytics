@@ -128,6 +128,18 @@ print(result$par)
    solutions agree at `Tol::iterative(1e-4)`, function and gradient counts are p2a's.
 2. **L-BFGS-B**: not available; BFGS runs, with a note.
 
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| x² + y², x + y ≥ 1, BFGS | 2 | 235,006.2 | 1,026.5 | < 0.01 |
+| (x - 1)² + (y - 2)², x, y ≥ 0, Nelder-Mead | 2 | 616.1 | 48.7 | 0.08 |
+
+n is the number of parameters. The previous barrier ran 100 outer iterations; R's adaptive barrier stops after a few.
+
 ## Performance Notes
 
 - Complexity depends on inner optimizer and number of constraints

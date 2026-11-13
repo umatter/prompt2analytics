@@ -66,6 +66,21 @@ id `cancor_t4`).
 
 4. **Missing values**: `run_cancor` refuses a null or NaN cell with `NullValues` naming the column, as R's `cancor` refuses NA; integer columns are accepted (T2-WP06; `stats::cancor::tests::test_na_cancor_columns`).
 
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| 3 x and 2 y columns | 100 | 25.7 | 23.1 | 0.90 |
+| 3 x and 2 y columns | 1,000 | 83.8 | 81.6 | 0.97 |
+| 3 x and 2 y columns | 10,000 | 944.7 | 1,149.7 | 1.22 |
+
+The change touches only the p x p and q x q steps; centring and the covariances, which carry the
+rows, are unchanged. The n = 10,000 gap lies within the spread of the previous code's own runs
+(597-1,149 µs) and needs the integration re-timing.
+
 ## Performance Comparison
 
 | Dataset Size | Rust (µs) | R (µs) | Speedup |

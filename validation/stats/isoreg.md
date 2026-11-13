@@ -122,6 +122,17 @@ exact.
   pinned at the `validation/README.md` rows (`Tol::coef`).
 - Sorted x, order, the knots and the knot counts are exact.
 
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| unsorted x | 100 | 11.2 | 10.6 | 0.95 |
+| unsorted x | 1,000 | 121.5 | 123.4 | 1.02 |
+| unsorted x | 10,000 | 1,824.9 | 1,935.6 | 1.06 |
+
 ## Performance Comparison
 
 | Dataset Size | Rust (µs) | R (µs) | Speedup |

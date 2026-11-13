@@ -233,6 +233,17 @@ The synthetic tests 1-3 above check properties, not R values.
 6. **Uniqueness optimiser**: p2a's own fixed point, pinned at 1e-4 relative to R's L-BFGS-B optimum; R's
    default `factr` itself moves R's uniquenesses by about 7e-6.
 
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| 6 variables, 2 factors, varimax, regression scores | 100 | 4,176.9 | 4,069.0 | 0.97 |
+| 6 variables, 2 factors, varimax, regression scores | 1,000 | 6,292.1 | 5,857.0 | 0.93 |
+| 6 variables, 2 factors, varimax, regression scores | 10,000 | 8,887.5 | 7,892.5 | 0.89 |
+
 ## Performance Comparison
 
 Benchmarks measured on 2026-01-20 (v2 with optimizations). Rust times from Criterion, R times from system.time().

@@ -115,6 +115,20 @@ These compare no R number: `test_spectrum_sine_peak_property`, `test_raw_periodo
 missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 ([acf.md](../stats/acf.md)).
 
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| periodogram, spans (3, 3) | 100 | 10.3 | 9.9 | 0.96 |
+| periodogram, spans (3, 3) | 1,000 | 77.4 | 68.5 | 0.89 |
+| periodogram, spans (3, 3) | 10,000 | 1,100.0 | 965.2 | 0.88 |
+| AR spectrum, AIC order, 500 frequencies | 100 | 304.1 | 315.8 | 1.04 |
+| AR spectrum, AIC order, 500 frequencies | 1,000 | 3,274.4 | 3,269.5 | 1.00 |
+| AR spectrum, AIC order, 500 frequencies | 10,000 | 46,813.6 | 47,103.2 | 1.01 |
+
 ## Performance Comparison
 
 ### Raw Periodogram (no smoothing)

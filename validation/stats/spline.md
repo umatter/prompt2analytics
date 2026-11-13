@@ -64,3 +64,16 @@ Tolerance `Tol::coef(n)`; counts exact. Registry `validation/methods/stats_misc_
 `spline_t4` and `approx_t4`.
 
 The MCP tool `stats_spline` reaches the same core; it does not yet report the warnings.
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| spline, fmm, default n | 100 | 19.4 | 20.4 | 1.05 |
+| spline, fmm, default n | 1,000 | 212.7 | 228.2 | 1.07 |
+| spline, fmm, default n | 10,000 | 3,676.4 | 3,808.8 | 1.04 |
+| spline, natural, default n | 100 | 20.0 | 21.0 | 1.05 |
+| spline, natural, default n | 1,000 | 218.8 | 237.8 | 1.09 |
+| spline, natural, default n | 10,000 | 3,837.4 | 3,894.4 | 1.01 |
