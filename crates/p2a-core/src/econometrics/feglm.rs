@@ -15,14 +15,27 @@
 //!
 //! # Algorithm
 //!
-//! The algorithm combines IRLS with weighted demeaning:
+//! IRLS with weighted alternating projections, as `alpaca::feglm` (Stammann 2018):
 //!
-//! 1. Initialize linear predictor η
-//! 2. For each IRLS iteration:
-//!    a. Compute working weights w and working response z
-//!    b. Weighted demean z and X using MAP with weights w
-//!    c. Solve weighted least squares on demeaned data
-//!    d. Update coefficients and check convergence
+//! 1. Drop every fixed-effect group whose outcome is all 0 (binomial and Poisson) or
+//!    all 1 (binomial), repeating over all dimensions until nothing changes; singletons
+//!    with a positive outcome stay (alpaca).
+//! 2. Start from the constant linear predictor `link(mean((y + 0.5) / 2))` (binomial),
+//!    `link(mean(y + 0.1))` (Poisson) or `mean(y)` (Gaussian), with every slope 0.
+//! 3. In each IRLS iteration:
+//!    a. compute the working weights w and the working residual nu = z - eta;
+//!    b. demean the unscaled nu and X with weights w by alternating projections (the
+//!       last iteration's demeaned X, and in the first iteration the unit-weight
+//!       regressor screen's, is the warm start: `M_W (M_V X) = M_W X`);
+//!    c. solve the weighted least squares of the demeaned nu on the demeaned X for the
+//!       slope step, and take the step of eta, `nu - (M nu - M X step)`, which lies in the
+//!       span of X and the effects;
+//!    d. halve the step until the deviance is finite, the mean valid and the deviance
+//!       not higher than the last one by more than the tolerance (alpaca's step halving,
+//!       which asks for a decrease, would refuse the last Newton step near the estimate and
+//!       stop short of glm's); at most 50 halvings, and when none is accepted the iterate
+//!       stays and the fit has converged.
+//! 4. Standard errors come from the inverse Hessian at the final weights.
 //!
 //! # References
 //!
@@ -57,7 +70,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::xtx;
-use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text, sci};
@@ -465,6 +478,11 @@ pub struct FeglmResult {
     #[allow(dead_code)]
     pub(crate) vcov: Array2<f64>,
 
+    /// Rows dropped because their fixed-effect group's outcome is all 0 (or, for binomial,
+    /// all 1): such a group's effect has no finite estimate (alpaca and fixest drop them too)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub n_separated: usize,
+
     /// Rows dropped because of a missing value in y, a regressor or a fixed-effect id
     /// (fixest drops them too).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
@@ -557,45 +575,86 @@ impl fmt::Display for FeglmResult {
     }
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Weighted Demeaning Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// A weighted demeaning of the scaled design and the weights it was computed with.
-struct DemeanedX {
-    weights: Array1<f64>,
-    x: Array2<f64>,
-    change: f64,
-    converged: bool,
+/// Step-halving tries per IRLS iteration (alpaca's inner loop).
+const MAX_STEP_TRIES: usize = 50;
+
+/// Whether `mu` is a valid mean of the family (glm's `validmu`).
+fn valid_mu(family: GlmFamily, mu: f64) -> bool {
+    match family {
+        GlmFamily::Logit | GlmFamily::Probit => mu.is_finite() && mu > 0.0 && mu < 1.0,
+        GlmFamily::Poisson => mu.is_finite() && mu > 0.0,
+        GlmFamily::Gaussian => mu.is_finite(),
+    }
 }
 
-/// A weighted demeaning of the scaled working response and the response it was computed
-/// from (with the weights of the cached [`DemeanedX`]).
-struct DemeanedZ {
-    z: Array1<f64>,
-    demeaned: Array1<f64>,
-    change: f64,
-    converged: bool,
-}
-
-/// `x` with row `i` multiplied by `s[i]`.
-fn scale_rows(x: &Array2<f64>, s: &Array1<f64>) -> Array2<f64> {
-    let (n, k) = x.dim();
-    let mut out = Array2::zeros((n, k));
-    for j in 0..k {
-        for i in 0..n {
-            out[[i, j]] = x[[i, j]] * s[i];
+/// The rows kept after dropping every fixed-effect group whose outcome is all 0 (or, for
+/// binomial, all 1), repeated over all factors until a full round drops nothing: such a
+/// group's effect has no finite estimate (alpaca's and fixest's rule).
+fn separated_rows_kept(
+    y: &Array1<f64>,
+    factors: &[FactorInfo],
+    binomial: bool,
+) -> EconResult<Vec<bool>> {
+    let n = y.len();
+    let mut keep = resource::try_vec(n, true, "FEGLM row mask")?;
+    loop {
+        resource::checkpoint()?;
+        let mut changed = false;
+        for factor in factors {
+            let mut sums = resource::try_vec(factor.n_levels, 0.0, "FEGLM group sums")?;
+            let mut counts = resource::try_vec(factor.n_levels, 0usize, "FEGLM group sums")?;
+            for i in (0..n).filter(|&i| keep[i]) {
+                sums[factor.ids[i]] += y[i];
+                counts[factor.ids[i]] += 1;
+            }
+            for i in 0..n {
+                let g = factor.ids[i];
+                if keep[i] && (sums[g] == 0.0 || (binomial && sums[g] == counts[g] as f64)) {
+                    keep[i] = false;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return Ok(keep);
         }
     }
-    out
 }
 
-/// Whether two vectors hold the same values, bit for bit.
-fn same_values(a: &Array1<f64>, b: &Array1<f64>) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b.iter())
-            .all(|(p, q)| p.to_bits() == q.to_bits())
+/// `factor` on the rows `rows` (ascending): the levels still used, renumbered in their
+/// old order, and their counts. A dimension may keep a single level; it then absorbs
+/// only the constant.
+fn reduce_factor(factor: &FactorInfo, rows: &[usize]) -> EconResult<FactorInfo> {
+    let mut counts = resource::try_vec(factor.n_levels, 0usize, "FEGLM group counts")?;
+    for &i in rows {
+        counts[factor.ids[i]] += 1;
+    }
+    let mut new_id = resource::try_vec(factor.n_levels, usize::MAX, "FEGLM group counts")?;
+    let mut kept_counts = Vec::new();
+    for (g, &c) in counts.iter().enumerate() {
+        if c > 0 {
+            new_id[g] = kept_counts.len();
+            kept_counts.push(c);
+        }
+    }
+    let mut ids = resource::try_vec(rows.len(), 0usize, "FEGLM group ids")?;
+    for (dst, &i) in ids.iter_mut().zip(rows) {
+        *dst = new_id[factor.ids[i]];
+    }
+    Ok(FactorInfo {
+        name: factor.name.clone(),
+        n_levels: kept_counts.len(),
+        ids,
+        counts: kept_counts,
+    })
 }
 
 /// Check the IRLS and MAP controls: a tolerance of zero or less can never be
@@ -653,7 +712,10 @@ fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
 /// Run Generalized Linear Model with High-Dimensional Fixed Effects.
 ///
 /// Uses IRLS (Iteratively Reweighted Least Squares) combined with the Method of
-/// Alternating Projections for efficient absorption of multiple fixed effects.
+/// Alternating Projections for efficient absorption of multiple fixed effects: each step
+/// demeans the working residual and X with the IRLS weights and takes alpaca's update with
+/// step halving (see the module docs). Groups whose outcome is all 0 (or all 1 for
+/// binomial) are dropped first, until none is left, and reported in `n_separated`.
 ///
 /// # Arguments
 ///
@@ -728,17 +790,17 @@ pub fn run_feglm(
     let y = cols.numeric_array(y_col);
 
     // Validate y for binomial families
-    let n_positive = y.iter().filter(|&&v| v >= 0.5).count();
+    let n_positive_all = y.iter().filter(|&&v| v >= 0.5).count();
     match family {
         GlmFamily::Logit | GlmFamily::Probit => {
-            if n_positive == 0 || n_positive == y.len() {
+            if n_positive_all == 0 || n_positive_all == y.len() {
                 return Err(EconError::InvalidSpecification {
                     message: format!(
                         "Dependent variable '{}' must be binary with both 0 and 1 values for {}. \
                          Found {} ones out of {} observations.",
                         y_col,
                         family,
-                        n_positive,
+                        n_positive_all,
                         y.len()
                     ),
                 });
@@ -760,9 +822,8 @@ pub fn run_feglm(
 
     // Design matrix WITHOUT intercept (FE absorbs the constant)
     let design = cols.matrix(x_cols, false)?;
-    let x_all = design.data;
     let all_names = design.column_names;
-    let n = y.len();
+    let n_complete = y.len();
 
     // Factor information for each FE dimension (levels in R factor order)
     let factors: Vec<FactorInfo> = fe_cols
@@ -770,13 +831,66 @@ pub fn run_feglm(
         .map(|col| factor_info(col, cols.factor(col)))
         .collect::<EconResult<Vec<_>>>()?;
 
+    // Groups whose outcome is all 0 (or all 1 for binomial) have no finite MLE for their
+    // effect; they are dropped until a full round drops nothing (alpaca, fixest).
+    let mut warnings: Vec<String> = Vec::new();
+    let (y, x_all, factors, n_separated) = match family {
+        GlmFamily::Logit | GlmFamily::Probit | GlmFamily::Poisson => {
+            let binomial = family != GlmFamily::Poisson;
+            let keep = separated_rows_kept(&y, &factors, binomial)?;
+            let n_kept = keep.iter().filter(|&&k| k).count();
+            if n_kept == 0 {
+                let outcome = if binomial { "all 0 or all 1" } else { "all 0" };
+                return Err(EconError::InsufficientData {
+                    required: 1,
+                    provided: 0,
+                    context: format!(
+                        "every row is in a fixed-effect group whose outcome is {outcome}"
+                    ),
+                });
+            }
+            if n_kept == n_complete {
+                (y, design.data, factors, 0)
+            } else {
+                let dropped = n_complete - n_kept;
+                let outcome = if binomial { "all 0 or all 1" } else { "all 0" };
+                warnings.push(format!(
+                    "{dropped} of {n_complete} rows dropped: their fixed-effect group's outcome \
+                     is {outcome} (alpaca and fixest drop them too)"
+                ));
+                let rows: Vec<usize> = (0..n_complete).filter(|&i| keep[i]).collect();
+                let mut y_kept = resource::try_vec(n_kept, 0.0, "FEGLM outcome")?;
+                for (dst, &i) in y_kept.iter_mut().zip(&rows) {
+                    *dst = y[i];
+                }
+                let kx = design.data.ncols();
+                let mut x_kept = resource::try_zeros2(n_kept, kx, "FEGLM design")?;
+                for (r, &i) in rows.iter().enumerate() {
+                    x_kept.row_mut(r).assign(&design.data.row(i));
+                }
+                let reduced = factors
+                    .iter()
+                    .map(|f| reduce_factor(f, &rows))
+                    .collect::<EconResult<Vec<_>>>()?;
+                (Array1::from(y_kept), x_kept, reduced, dropped)
+            }
+        }
+        GlmFamily::Gaussian => (y, design.data, factors, 0),
+    };
+    let n = y.len();
+    let n_positive = match family {
+        GlmFamily::Poisson => y.iter().filter(|&&v| v > 0.0).count(),
+        _ => y.iter().filter(|&&v| v >= 0.5).count(),
+    };
+
     // Demeaning steps that stopped at map_max_iter: (step, relative change)
     let mut map_stalls: Vec<(String, f64)> = Vec::new();
 
     // Regressors absorbed by the effects or collinear after them are not estimated.
     // Rank against the fixed effects does not depend on positive weights
     // (rank(M_D^W X) = rank([X D]) - rank(D)), so one unit-weight screen covers every
-    // IRLS step.
+    // IRLS step; its demeaned columns seed the first weighted demeaning
+    // (M_W (M_1 X) = M_W X).
     let (x_screen_dm, _, screen_change, screen_conv) = demean_matrix_map(
         &x_all,
         &factors,
@@ -788,7 +902,7 @@ pub fn run_feglm(
         map_stalls.push(("the regressor screen".to_string(), screen_change));
     }
     let screen = screen_regressors(x_all.view(), x_screen_dm, &all_names, &fe_label(fe_cols))?;
-    let mut warnings = screen.warnings.clone();
+    warnings.extend(screen.warnings.iter().cloned());
     let x = if screen.kept.len() == x_all.ncols() {
         x_all
     } else {
@@ -811,231 +925,155 @@ pub fn run_feglm(
         })?;
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Initialize
+    // Initialize: alpaca's constant start, which lies in the span of the effects
     // ═══════════════════════════════════════════════════════════════════════════
-    let mut beta = Array1::zeros(k);
-
-    // Initial guess for eta based on family
-    let mut eta: Array1<f64> = match family {
+    let y_mean = y.mean().unwrap_or(0.0);
+    let eta_start = match family {
         GlmFamily::Logit | GlmFamily::Probit => {
-            let p_bar = (n_positive as f64 / n as f64).clamp(0.01, 0.99);
-            Array1::from_elem(n, family.link(p_bar))
+            family.link(y.iter().map(|&v| (v + 0.5) / 2.0).sum::<f64>() / n as f64)
         }
-        GlmFamily::Poisson => y.mapv(|yi| (yi.max(0.1)).ln()),
-        GlmFamily::Gaussian => y.clone(),
+        GlmFamily::Poisson => family.link(y_mean + 0.1),
+        GlmFamily::Gaussian => y_mean,
     };
+    let mut eta: Array1<f64> = Array1::from_elem(n, eta_start);
+    let mut beta: Array1<f64> = Array1::zeros(k);
 
-    // μ is kept in step with η: computed once per update of η and used by the deviance,
-    // the next iteration and the final statistics.
     let deviance_of = |mu: &Array1<f64>| -> f64 {
         y.iter()
             .zip(mu.iter())
             .map(|(&yi, &m)| family.deviance(yi, m))
             .sum()
     };
+    // μ is kept in step with η: computed once per update of η and used by the deviance,
+    // the next iteration and the final statistics.
     let mut mu: Array1<f64> = eta.mapv(|e| family.inv_link(e));
-    // The weighted demeaning of X from the last IRLS iteration and its weights: when the
-    // weights repeat (Gaussian: all 1), the same inputs give the same demeaned X.
-    let mut x_demeaned_cache: Option<DemeanedX> = None;
-    let mut z_cache: Option<DemeanedZ> = None;
+    let mut dev_old = deviance_of(&mu);
+
+    // The demeaned design of the last iteration (warm start of the next) and the row-scaled
+    // buffer of the weighted solve, allocated once
+    let mut mx = screen.x;
+    let mut xs = resource::try_zeros2(n, k, "FEGLM weighted design")?;
+    let mut weights = resource::try_vec(n, 0.0, "FEGLM working weights")?;
+    let mut nu = resource::try_vec(n, 0.0, "FEGLM working residual")?;
+    let mut ys = Array1::from(resource::try_vec(n, 0.0, "FEGLM weighted residual")?);
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // IRLS Loop
+    // IRLS Loop (alpaca's update with step halving)
     // ═══════════════════════════════════════════════════════════════════════════
     let mut iterations = 0;
     let mut converged = false;
     let mut final_change = f64::NAN;
-    let mut devold = deviance_of(&mu);
 
-    for iter in 0..config.max_iter {
+    for iter in 1..=config.max_iter {
         resource::checkpoint()?;
-        iterations = iter + 1;
+        iterations = iter;
 
-        // 1. μ from η (kept in step with η)
-
-        // 2. Compute working weights
-        let weights: Array1<f64> = eta
-            .iter()
-            .zip(mu.iter())
-            .map(|(&e, &m)| family.working_weight(e, m).max(config.weight_min))
-            .collect();
-
-        // 3. Compute working response
-        let z: Array1<f64> = y
-            .iter()
-            .zip(eta.iter())
-            .zip(mu.iter())
-            .map(|((&yi, &ei), &mi)| family.working_response(yi, ei, mi))
-            .collect();
-
-        // 4. Scale by sqrt(weights) for weighted least squares
-        let sqrt_w: Array1<f64> = weights.mapv(|w| w.sqrt());
-
-        // Scale z and X by sqrt(weights)
-        let z_scaled: Array1<f64> = &z * &sqrt_w;
-
-        // 5. Weighted demean z and X by fixed effects
-        // Note: We demean the pre-scaled data, which effectively applies weighted demeaning.
-        // Both are memoized: the same weights demean the same scaled X to the same result,
-        // and the same weights and z the same z, so the solve repeats too (Gaussian: the
-        // weights are all 1 and z is y in every iteration).
-        let same_weights = x_demeaned_cache
-            .as_ref()
-            .is_some_and(|c| same_values(&c.weights, &weights));
-        let z_repeats = same_weights && z_cache.as_ref().is_some_and(|c| same_values(&c.z, &z));
-        let weights_v = weights.to_vec();
-        let mut proj =
-            (!z_repeats || !same_weights).then(|| WeightedProjector::new(&weights_v, &factors));
-        if !z_repeats {
-            let proj = proj.as_mut().ok_or_else(|| {
-                EconError::Internal("FEGLM: weighted projector missing".to_string())
-            })?;
-            let (z_demeaned, _, change, converged) = weighted_demean_map(
-                &z_scaled.to_vec(),
-                proj,
-                config.map_tolerance,
-                config.map_max_iter,
-                config.accelerate,
-            )?;
-            z_cache = Some(DemeanedZ {
-                z: z.clone(),
-                demeaned: Array1::from(z_demeaned),
-                change,
-                converged,
-            });
+        // 1. Working weights and the working residual nu = z - eta
+        for i in 0..n {
+            weights[i] = family.working_weight(eta[i], mu[i]).max(config.weight_min);
+            nu[i] = family.working_response(y[i], eta[i], mu[i]) - eta[i];
         }
 
-        if !same_weights {
-            let proj = proj.as_mut().ok_or_else(|| {
-                EconError::Internal("FEGLM: weighted projector missing".to_string())
-            })?;
-            let x_scaled = scale_rows(&x, &sqrt_w);
-            let (x_dm, _, change, conv) = weighted_demean_matrix_map(
-                x_scaled.view(),
-                proj,
-                config.map_tolerance,
-                config.map_max_iter,
-                config.accelerate,
-            )?;
-            x_demeaned_cache = Some(DemeanedX {
-                weights: weights.clone(),
-                x: x_dm,
-                change,
-                converged: conv,
-            });
-        }
-        let (
-            Some(DemeanedX {
-                x: x_demeaned,
-                change: x_change,
-                converged: x_conv,
-                ..
-            }),
-            Some(DemeanedZ {
-                demeaned: z_demeaned,
-                change: z_change,
-                converged: z_conv,
-                ..
-            }),
-        ) = (x_demeaned_cache.as_ref(), z_cache.as_ref())
-        else {
-            return Err(EconError::Internal(
-                "FEGLM: demeaned design missing".to_string(),
-            ));
-        };
-        let (x_change, x_conv, z_change, z_conv) = (*x_change, *x_conv, *z_change, *z_conv);
-
-        if !z_conv || !x_conv {
-            map_stalls.push((
-                format!("IRLS iteration {iterations}"),
-                z_change.max(x_change),
-            ));
+        // 2. Weighted demeaning of the unscaled X (warm-started from the last iteration's)
+        //    and of nu, with the IRLS weights
+        let mut proj = WeightedProjector::new(&weights, &factors);
+        let (mx_new, _, x_change, x_conv) = weighted_demean_matrix_map(
+            mx.view(),
+            &mut proj,
+            config.map_tolerance,
+            config.map_max_iter,
+            config.accelerate,
+        )?;
+        mx = mx_new;
+        let (mnu, _, nu_change, nu_conv) = weighted_demean_map(
+            &nu,
+            &mut proj,
+            config.map_tolerance,
+            config.map_max_iter,
+            config.accelerate,
+        )?;
+        if !nu_conv || !x_conv {
+            map_stalls.push((format!("IRLS iteration {iter}"), nu_change.max(x_change)));
         }
 
-        // 6. Solve weighted least squares on demeaned data (OLS's solve decision: the
-        // normal equations when well conditioned, the pivoted QR otherwise); the same
-        // demeaned X and z give the last iteration's beta again
-        if !z_repeats {
-            beta = match normal_equations_inverse(x_demeaned.view())? {
-                Some(normal) => normal.coefficients(x_demeaned.view(), z_demeaned),
-                None => {
-                    let ls = least_squares(x_demeaned.view(), z_demeaned.view())?;
-                    if ls.rank < k {
-                        return Err(EconError::SingularMatrix {
-                            context: format!(
-                                "FEGLM IRLS iteration {iterations}: weighted design rank {} of {k}",
-                                ls.rank
-                            ),
-                            suggestion: "Check for perfect multicollinearity or separation"
-                                .to_string(),
-                        });
-                    }
-                    ls.coefficients
+        // 3. The weighted least-squares step of sqrt(w) Mnu on sqrt(w) MX (OLS's solve
+        //    decision: the normal equations when well conditioned, the pivoted QR otherwise)
+        for i in 0..n {
+            let s = weights[i].sqrt();
+            ys[i] = s * mnu[i];
+            for j in 0..k {
+                xs[[i, j]] = s * mx[[i, j]];
+            }
+        }
+        let beta_upd = match normal_equations_inverse(xs.view())? {
+            Some(normal) => normal.coefficients(xs.view(), &ys),
+            None => {
+                let qr = Qr::decompose(xs.view(), LM_QR_TOL)?;
+                if qr.rank() < k {
+                    return Err(EconError::SingularMatrix {
+                        context: format!(
+                            "FEGLM IRLS iteration {iter}: weighted design rank {} of {k}",
+                            qr.rank()
+                        ),
+                        suggestion: "Check for perfect multicollinearity or separation".to_string(),
+                    });
                 }
-            };
-        }
-
-        // 7. Update linear predictor
-        // For FEGLM, we need to recover the FE contribution
-        // η_new = Xβ + FE effects
-        // The FE effects are implicitly in the demeaned residuals
-
-        // Simple approach: use the fitted values from demeaned regression
-        // and add back the structure
-        let x_beta: Array1<f64> = x.dot(&beta);
-
-        // The FE contribution can be approximated by:
-        // z - X_demeaned β / sqrt_w ≈ FE contribution
-        // But for simplicity, we use the iterative update:
-        // η_new = η_old + (β_new - β_old) influence
-        // Actually, we need to properly update eta including FE effects
-
-        // For IRLS to work correctly, we update eta as follows:
-        // 1. The working response z contains information about FE
-        // 2. After demeaning, we get the coefficient update
-        // 3. The new eta = Xβ + (z - Xβ) projected onto FE space
-
-        // Simplified approach: use the relationship that
-        // z_demeaned = (X_demeaned)β + residual
-        // The residual contains the deviation from the model
-
-        // For numerical stability, we compute:
-        // eta_new = X*beta + FE_effects
-        // where FE_effects are recovered from the working model
-
-        // One approach: eta_new = eta + step * (z - eta)
-        // weighted by the relative change
-        eta = x_beta.clone();
-
-        // Add back FE effects by computing group means from residuals
-        // This is a simplified approximation
-        let z_residual = &z - &x_beta;
-        for factor in &factors {
-            let mut group_sums = vec![0.0; factor.n_levels];
-            let mut group_counts = vec![0.0; factor.n_levels];
-
-            for i in 0..n {
-                let g = factor.ids[i];
-                group_sums[g] += z_residual[i] * weights[i];
-                group_counts[g] += weights[i];
+                qr.coefficients(ys.view())?
             }
+        };
 
-            let group_means: Vec<f64> = group_sums
-                .iter()
-                .zip(group_counts.iter())
-                .map(|(&s, &c)| if c > 1e-10 { s / c } else { 0.0 })
-                .collect();
+        // 4. The step of the linear predictor, in the span of X and the effects:
+        //    eta_upd = nu - (Mnu - MX beta_upd)
+        let mx_beta = mx.dot(&beta_upd);
+        let eta_upd: Array1<f64> = Array1::from_shape_fn(n, |i| nu[i] - (mnu[i] - mx_beta[i]));
 
-            for i in 0..n {
-                eta[i] += group_means[factor.ids[i]];
+        // 5. Step halving: accept the first step that gives a finite deviance, a valid mean
+        //    and a deviance no higher than the last by more than the tolerance (relative).
+        //    alpaca asks for a decrease of at least the tolerance, which refuses the last
+        //    Newton step near the estimate and stops short of glm's.
+        let mut accepted = None;
+        let mut any_valid = false;
+        let mut rho = 1.0f64;
+        for _ in 0..MAX_STEP_TRIES {
+            let eta_try: Array1<f64> = Array1::from_shape_fn(n, |i| eta[i] + rho * eta_upd[i]);
+            let mu_try: Array1<f64> = eta_try.mapv(|e| family.inv_link(e));
+            let dev = deviance_of(&mu_try);
+            let valid = dev.is_finite()
+                && eta_try.iter().all(|e| e.is_finite())
+                && mu_try.iter().all(|&m| valid_mu(family, m));
+            if valid {
+                any_valid = true;
+                if (dev - dev_old) / (0.1 + dev.abs()) <= config.tolerance {
+                    accepted = Some((eta_try, mu_try, dev, rho));
+                    break;
+                }
+            }
+            rho /= 2.0;
+        }
+        match accepted {
+            Some((eta_new, mu_new, dev, rho)) => {
+                beta.scaled_add(rho, &beta_upd);
+                eta = eta_new;
+                mu = mu_new;
+                final_change = deviance_change(dev, dev_old);
+                dev_old = dev;
+            }
+            None if any_valid => {
+                // No step improves the deviance: keep the last iterate (alpaca), which
+                // the deviance rule then counts as converged
+                final_change = 0.0;
+            }
+            None => {
+                return Err(EconError::ConvergenceFailure {
+                    iterations: iter,
+                    last_change: final_change,
+                    suggestion: "the FEGLM step could not be corrected by step halving; check \
+                                 for separation or extreme counts"
+                        .to_string(),
+                });
             }
         }
 
-        // 8. Check convergence: fixest's (glm.fit's) relative deviance change
-        mu = eta.mapv(|e| family.inv_link(e));
-        let dev = deviance_of(&mu);
-        final_change = deviance_change(dev, devold);
-        devold = dev;
         if final_change < config.tolerance {
             converged = true;
             break;
@@ -1072,7 +1110,7 @@ pub fn run_feglm(
     };
 
     // Deviance (of the final μ, computed with the convergence check)
-    let deviance: f64 = devold;
+    let deviance: f64 = dev_old;
 
     // Null deviance (approximated)
     let null_deviance = match family {
@@ -1124,38 +1162,31 @@ pub fn run_feglm(
     // Compute Variance-Covariance Matrix
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // Information matrix from final iteration
-    let weights_final: Array1<f64> = eta
-        .iter()
-        .zip(mu_final.iter())
-        .map(|(&e, &m)| family.working_weight(e, m).max(config.weight_min))
-        .collect();
-
-    let sqrt_w_final: Array1<f64> = weights_final.mapv(|w| w.sqrt());
-
-    let (x_demeaned_final, final_map_change, final_map_conv) =
-        match x_demeaned_cache.filter(|c| same_values(&c.weights, &weights_final)) {
-            Some(c) => (c.x, c.change, c.converged),
-            None => {
-                let x_scaled_final = scale_rows(&x, &sqrt_w_final);
-                let weights_final_v = weights_final.to_vec();
-                let (x_dm, _, change, conv) = weighted_demean_matrix_map(
-                    x_scaled_final.view(),
-                    &mut WeightedProjector::new(&weights_final_v, &factors),
-                    config.map_tolerance,
-                    config.map_max_iter,
-                    config.accelerate,
-                )?;
-                (x_dm, change, conv)
-            }
-        };
+    // The inverse Hessian at the final weights; the last demeaned design is the warm start
+    for i in 0..n {
+        weights[i] = family
+            .working_weight(eta[i], mu_final[i])
+            .max(config.weight_min);
+    }
+    let (mx_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
+        mx.view(),
+        &mut WeightedProjector::new(&weights, &factors),
+        config.map_tolerance,
+        config.map_max_iter,
+        config.accelerate,
+    )?;
     if !final_map_conv {
         map_stalls.push(("the final information matrix".to_string(), final_map_change));
     }
-
-    let xtx_final = xtx(&x_demeaned_final.view());
+    for i in 0..n {
+        let s = weights[i].sqrt();
+        for j in 0..k {
+            xs[[i, j]] = s * mx_final[[i, j]];
+        }
+    }
+    let information = xtx(&xs.view());
     let vcov = sym_inverse(
-        xtx_final.view(),
+        information.view(),
         SingularPolicy::Error,
         "FEGLM information matrix",
     )?
@@ -1183,6 +1214,18 @@ pub fn run_feglm(
         .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
+    let tiny = 10.0 * f64::EPSILON;
+    match family {
+        GlmFamily::Logit | GlmFamily::Probit
+            if mu_final.iter().any(|&m| m < tiny || m > 1.0 - tiny) =>
+        {
+            warnings.push("fitted probabilities numerically 0 or 1 occurred".to_string());
+        }
+        GlmFamily::Poisson if mu_final.iter().any(|&m| m < tiny) => {
+            warnings.push("fitted rates numerically 0 occurred".to_string());
+        }
+        _ => {}
+    }
     if !converged {
         let record = Convergence::new(
             false,
@@ -1241,6 +1284,7 @@ pub fn run_feglm(
         n_positive,
         df_resid,
         df_absorbed,
+        n_separated,
         beta,
         vcov,
         missing: cols.missing().clone(),
@@ -1996,13 +2040,11 @@ mod tests {
             .finish();
     }
 
-    /// Logit, probit and Poisson on feglm_families either converge or say that they did
-    /// not; the coefficients are finite.
+    /// Logit, probit and Poisson on feglm_families converge, say so in neither their
+    /// warnings nor their Display, and give finite coefficients.
     #[test]
     fn test_validate_feglm_families_report_convergence() {
         let (_case, ds) = crate::test_support::load_case("feglm_families");
-        // deviation ECON-20 (coefficients; fixest drops 16 rows, the entities whose outcome is
-        // all 0 or all 1, for logit/probit: logit_nobs 464 of 480), ECON-67 (poisson SE)
         for (y, family) in [
             ("y_bin", GlmFamily::Logit),
             ("y_bin", GlmFamily::Probit),
@@ -2010,24 +2052,225 @@ mod tests {
         ] {
             let r = run_feglm(&ds, y, &["x", "x2"], &["id", "time"], family, None)
                 .unwrap_or_else(|e| panic!("{family:?}: {e}"));
+            assert!(r.converged, "{family:?} {:?}", r.warnings);
             assert!(r.iterations <= r.max_iter, "{family:?}");
-            // A fit that did not converge says so in its warnings and its Display; a fit
-            // that converged says neither.
-            let warned = r
-                .warnings
-                .iter()
-                .any(|w| w.starts_with("FEGLM IRLS did not converge after"));
-            assert_eq!(warned, !r.converged, "{family:?} {:?}", r.warnings);
-            assert_eq!(
-                r.to_string().contains("Converged: no"),
-                !r.converged,
-                "{family:?}"
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("FEGLM IRLS did not converge after")),
+                "{family:?} {:?}",
+                r.warnings
             );
+            assert!(!r.to_string().contains("Converged: no"), "{family:?}");
             assert!(
                 r.coefficients.iter().all(|b| b.is_finite()),
                 "{family:?} {:?}",
                 r.coefficients
             );
+        }
+    }
+
+    // =========================================================================
+    // T4: the FE-GLM MLE (glm with factor dummies on the rows alpaca keeps)
+    // =========================================================================
+
+    /// The controls of the R reference: glm's epsilon 1e-16 and 100 iterations, MAP
+    /// tolerance 1e-12. Probit's IRLS is Fisher scoring, which converges linearly: glm at
+    /// epsilon 1e-14 still stops about 1e-8 (relative) short of its own estimate.
+    fn tight() -> FeglmConfig {
+        let mut config = FeglmConfig::default();
+        config.tolerance = 1e-16;
+        config.map_tolerance = 1e-12;
+        config.max_iter = 100;
+        config
+    }
+
+    const SEP_WARNING_BIN: &str = "rows dropped: their fixed-effect group's outcome is all 0 or \
+                                   all 1 (alpaca and fixest drop them too)";
+    const SEP_WARNING_POIS: &str = "rows dropped: their fixed-effect group's outcome is all 0 (alpaca and fixest drop them too)";
+
+    /// Fit `family` on `feglm_mle` with id + time (`<pre>2`) and with id (`<pre>1`) and pin
+    /// every reported number the task has made right so far.
+    fn check_mle(family: GlmFamily, y: &str, pre: &str) {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("feglm_mle");
+        for (fe, suffix) in [(&["id", "time"][..], "2"), (&["id"][..], "1")] {
+            let p = format!("{pre}{suffix}");
+            let r = run_feglm(&ds, y, &["x", "x2"], fe, family, Some(tight()))
+                .unwrap_or_else(|e| panic!("{p}: {e}"));
+            assert!(r.converged, "{p}: {:?}", r.warnings);
+            let n = r.n_obs;
+            Check::new(&case)
+                .named(
+                    &format!("{p}_coef"),
+                    &r.variables,
+                    &r.coefficients,
+                    Tol::coef(n),
+                )
+                .scalar(&format!("{p}_nobs"), n as f64, Tol::exact())
+                .scalar(
+                    &format!("{p}_n_positive"),
+                    r.n_positive as f64,
+                    Tol::exact(),
+                )
+                .finish();
+            if family == GlmFamily::Poisson {
+                assert_eq!(r.n_separated, 0, "{p}");
+                assert!(r.warnings.is_empty(), "{p}: {:?}", r.warnings);
+            } else {
+                assert_eq!(r.n_separated, 16, "{p}");
+                assert_eq!(
+                    r.warnings,
+                    vec![format!("16 of 480 {SEP_WARNING_BIN}")],
+                    "{p}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_feglm_mle_logit() {
+        check_mle(GlmFamily::Logit, "y_bin", "logit");
+    }
+
+    #[test]
+    fn test_validate_feglm_mle_probit() {
+        check_mle(GlmFamily::Probit, "y_bin", "probit");
+    }
+
+    #[test]
+    fn test_validate_feglm_mle_poisson() {
+        check_mle(GlmFamily::Poisson, "y_cnt", "poisson");
+    }
+
+    /// The default controls reach the MLE to the accuracy their deviance rule (1e-8)
+    /// allows: logit and Poisson coefficients to 1e-6 relative, probit's to 1e-5 (Fisher
+    /// scoring converges linearly, and stops about 4e-6 short), every fit converged, and no
+    /// warning other than the drop warning.
+    #[test]
+    fn test_validate_feglm_mle_default_controls() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("feglm_mle");
+        for (family, y, pre) in [
+            (GlmFamily::Logit, "y_bin", "logit"),
+            (GlmFamily::Probit, "y_bin", "probit"),
+            (GlmFamily::Poisson, "y_cnt", "poisson"),
+        ] {
+            for (fe, suffix) in [(&["id", "time"][..], "2"), (&["id"][..], "1")] {
+                let p = format!("{pre}{suffix}");
+                let r = run_feglm(&ds, y, &["x", "x2"], fe, family, None)
+                    .unwrap_or_else(|e| panic!("{p}: {e}"));
+                assert!(r.converged, "{p}: {:?}", r.warnings);
+                let others: Vec<&String> = r
+                    .warnings
+                    .iter()
+                    .filter(|w| !w.contains("rows dropped: their fixed-effect group"))
+                    .collect();
+                assert!(others.is_empty(), "{p}: {others:?}");
+                assert_eq!(r.warnings.len(), usize::from(family != GlmFamily::Poisson));
+                Check::new(&case)
+                    .named(
+                        &format!("{p}_coef"),
+                        &r.variables,
+                        &r.coefficients,
+                        Tol::iterative(if family == GlmFamily::Probit {
+                            1e-5
+                        } else {
+                            1e-6
+                        }),
+                    )
+                    .finish();
+            }
+        }
+    }
+
+    /// alpaca's drop rule on a panel whose drops cascade: the all-1 and all-0 entities,
+    /// then the period left all 0, then the entities that leaves constant, then the
+    /// singleton. Poisson drops only the all-0 entity and keeps the singleton; Gaussian
+    /// drops nothing.
+    #[test]
+    fn test_validate_feglm_separation_drop_rule() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("feglm_separation");
+        let fit = |y: &str, family| {
+            run_feglm(&ds, y, &["x", "x2"], &["id", "time"], family, Some(tight()))
+                .unwrap_or_else(|e| panic!("{family:?}: {e}"))
+        };
+
+        let r = fit("y_bin", GlmFamily::Logit);
+        assert_eq!((r.n_obs, r.n_separated, r.n_positive), (120, 61, 53));
+        assert_eq!(r.fe_counts[1], 5, "period 6 has no row left");
+        assert_eq!(r.warnings, vec![format!("61 of 181 {SEP_WARNING_BIN}")]);
+        Check::new(&case)
+            .named("logit_coef", &r.variables, &r.coefficients, Tol::coef(120))
+            .scalar("logit_nobs", r.n_obs as f64, Tol::exact())
+            .scalar("logit_n_dropped", r.n_separated as f64, Tol::exact())
+            .scalar("logit_n_positive", r.n_positive as f64, Tol::exact())
+            .finish();
+
+        let r = fit("y_cnt", GlmFamily::Poisson);
+        assert_eq!((r.n_obs, r.n_separated), (175, 6));
+        assert_eq!(r.warnings, vec![format!("6 of 181 {SEP_WARNING_POIS}")]);
+        Check::new(&case)
+            .named(
+                "poisson_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(175),
+            )
+            .scalar("poisson_nobs", r.n_obs as f64, Tol::exact())
+            .scalar("poisson_n_dropped", r.n_separated as f64, Tol::exact())
+            .scalar("poisson_n_positive", r.n_positive as f64, Tol::exact())
+            .finish();
+
+        let r = fit("y_gauss", GlmFamily::Gaussian);
+        assert_eq!((r.n_obs, r.n_separated), (181, 0));
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        Check::new(&case)
+            .named("gauss_coef", &r.variables, &r.coefficients, Tol::coef(181))
+            .scalar("gauss_nobs", r.n_obs as f64, Tol::exact())
+            .finish();
+    }
+
+    /// The 12-row binary panel is quasi-separated: glm with dummies warns "fitted
+    /// probabilities numerically 0 or 1 occurred" (R 4.3.3), and so does FEGLM.
+    #[test]
+    fn test_feglm_fitted_probabilities_warning() {
+        let r = run_feglm(
+            &create_binary_panel(),
+            "y",
+            &["x"],
+            &["firm", "year"],
+            GlmFamily::Logit,
+            None,
+        )
+        .unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "fitted probabilities numerically 0 or 1 occurred"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// Every entity's outcome is constant: no row is left to fit.
+    #[test]
+    fn test_feglm_all_rows_separated_is_refused() {
+        let df = df! {
+            "id" => [1i64, 1, 2, 2, 3, 3],
+            "x" => [0.1, 0.7, -0.3, 0.4, 0.9, -0.2],
+            "y" => [0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        match run_feglm(&ds, "y", &["x"], &["id"], GlmFamily::Logit, None) {
+            Err(EconError::InsufficientData { context, .. }) => assert!(
+                context.contains("fixed-effect group whose outcome is all 0 or all 1"),
+                "{context}"
+            ),
+            Err(e) => panic!("expected InsufficientData, got: {e}"),
+            Ok(_) => panic!("expected InsufficientData, got Ok"),
         }
     }
 }

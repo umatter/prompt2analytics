@@ -3,7 +3,7 @@
   "id": "feglm_separation",
   "area": "econometrics/feglm",
   "method": "FE-GLM drop rule: all-0/all-1 entities, a period left all 0 after them, an all-0 count entity, a singleton with a positive count",
-  "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-14); fixest::feglm nobs (drops the singleton too)",
+  "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); fixest::feglm nobs (drops the singleton too)",
   "call": "glm(y ~ x + x2 + factor(id) + factor(time), family, feglm_sep[alpaca rows])",
   "dataset": "validation/datasets/generated/feglm_sep.csv",
   "datasets": ["validation/datasets/generated/feglm_sep.csv"],
@@ -16,18 +16,18 @@
   "values": {
     "logit_coef": {
       "names": ["x", "x2"],
-      "values": [1.7829834942951857, -0.76419994993835316]
+      "values": [1.7829834942951899, -0.76419994993835727]
     },
     "logit_se": {
       "names": ["x", "x2"],
-      "values": [0.4009821327391756, 0.37641504665070619]
+      "values": [0.40098214081509659, 0.37641505354869575]
     },
     "logit_loglik": -48.911683027708875,
     "logit_loglik_null": -82.359132216388332,
     "logit_aic": 157.82336605541775,
     "logit_bic": 241.44811833887911,
     "logit_deviance": 97.823366055417765,
-    "logit_null_deviance": 164.71826443277664,
+    "logit_null_deviance": 164.71826443277669,
     "logit_df_resid": 90,
     "logit_nobs": 120,
     "logit_df_absorbed": 28,
@@ -47,7 +47,7 @@
     "poisson_aic": 540.25662208526455,
     "poisson_bic": 657.3537031204346,
     "poisson_deviance": 171.60884396336135,
-    "poisson_null_deviance": 258.19793980150769,
+    "poisson_null_deviance": 258.19793980150774,
     "poisson_df_resid": 138,
     "poisson_nobs": 175,
     "poisson_df_absorbed": 35,

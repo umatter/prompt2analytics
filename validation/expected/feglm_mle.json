@@ -3,7 +3,7 @@
   "id": "feglm_mle",
   "area": "econometrics/feglm",
   "method": "FE-GLM MLE: logit, probit, Poisson (id + time, id), Gaussian (id + time) on feglm_panel; glm with factor dummies on alpaca's rows",
-  "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-14); alpaca::feglm",
+  "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); alpaca::feglm",
   "call": "glm(y ~ x + x2 + factor(id) [+ factor(time)], family, feglm_panel[alpaca rows]); alpaca::feglm(y ~ x + x2 | id [+ time])",
   "dataset": "validation/datasets/generated/feglm_panel.csv",
   "datasets": ["validation/datasets/generated/feglm_panel.csv"],
@@ -15,11 +15,11 @@
   "values": {
     "logit2_coef": {
       "names": ["x", "x2"],
-      "values": [0.80043817007673745, -0.41026088885247108]
+      "values": [0.80043817007673823, -0.41026088885247225]
     },
     "logit2_se": {
       "names": ["x", "x2"],
-      "values": [0.13397991323587349, 0.12222423005404838]
+      "values": [0.1339799142939801, 0.1222242310883162]
     },
     "logit2_loglik": -252.86653245699807,
     "logit2_loglik_null": -320.06251321479715,
@@ -67,11 +67,11 @@
     },
     "probit2_coef": {
       "names": ["x", "x2"],
-      "values": [0.4865586851978535, -0.2515687160658216]
+      "values": [0.48655868581043543, -0.25156871636428046]
     },
     "probit2_se": {
       "names": ["x", "x2"],
-      "values": [0.077643649172821572, 0.072503658051015094]
+      "values": [0.077643649444223028, 0.072503658312476918]
     },
     "probit2_loglik": -252.20829660276729,
     "probit2_loglik_null": -320.06251321479715,
@@ -93,11 +93,11 @@
     },
     "probit1_coef": {
       "names": ["x", "x2"],
-      "values": [0.4737728310514982, -0.24731138542628542]
+      "values": [0.47377283465326819, -0.24731138852915355]
     },
     "probit1_se": {
       "names": ["x", "x2"],
-      "values": [0.076016238111643125, 0.070393558441146684]
+      "values": [0.07601623984580308, 0.070393559620453752]
     },
     "probit1_loglik": -257.45570527037376,
     "probit1_loglik_null": -320.06251321479715,
@@ -119,11 +119,11 @@
     },
     "poisson2_coef": {
       "names": ["x", "x2"],
-      "values": [0.27527722149353584, -0.14987732371223111]
+      "values": [0.27527722149353595, -0.14987732371223125]
     },
     "poisson2_se": {
       "names": ["x", "x2"],
-      "values": [0.044690917690510652, 0.04388248259132467]
+      "values": [0.044690917753578571, 0.043882482709638161]
     },
     "poisson2_loglik": -631.55185803222162,
     "poisson2_loglik_null": -770.21915676457104,
@@ -145,11 +145,11 @@
     },
     "poisson1_coef": {
       "names": ["x", "x2"],
-      "values": [0.29042409491583748, -0.12788618039217861]
+      "values": [0.29042409491583715, -0.12788618039217853]
     },
     "poisson1_se": {
       "names": ["x", "x2"],
-      "values": [0.045097960195608668, 0.042282590208162281]
+      "values": [0.04509796028005892, 0.042282590360285442]
     },
     "poisson1_loglik": -681.48586414390718,
     "poisson1_loglik_null": -770.21915676457104,

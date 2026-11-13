@@ -1,7 +1,7 @@
 # validation/r/cases/econ_feglm_t4.R -- T4-WP10 FEGLM references (ECON-20, ECON-66, ECON-67, ECON-85).
 #  * feglm_mle: logit, probit and Poisson with id + time and with id alone, Gaussian with id + time, on
 #    feglm_panel (feglm_families' data). The reference is glm with factor dummies on the rows alpaca and
-#    fixest keep (groups whose outcome is all 0 or all 1 dropped), fitted to epsilon 1e-14: coefficients,
+#    fixest keep (groups whose outcome is all 0 or all 1 dropped), fitted to epsilon 1e-16: coefficients,
 #    inverse-Hessian SEs (alpaca's; dispersion 1 for binomial and Poisson), log-likelihood, AIC, BIC,
 #    deviance, the intercept-only null log-likelihood and deviance, residual df, n.
 #  * feglm_separation: a two-way panel where dropping the all-1 and all-0 entities leaves a period whose
@@ -12,9 +12,9 @@
 
 glm_ref <- function(v, pre, d, y, fe, family) {
   f <- as.formula(paste(y, "~ x + x2 +", paste0("factor(", fe, ")", collapse = " + ")))
-  g <- glm(f, data = d, family = family, control = glm.control(epsilon = 1e-14, maxit = 100))
+  g <- glm(f, data = d, family = family, control = glm.control(epsilon = 1e-16, maxit = 100))
   stopifnot(g$converged)
-  g0 <- glm(as.formula(paste(y, "~ 1")), data = d, family = family, control = glm.control(epsilon = 1e-14, maxit = 100))
+  g0 <- glm(as.formula(paste(y, "~ 1")), data = d, family = family, control = glm.control(epsilon = 1e-16, maxit = 100))
   s <- summary(g)$coefficients
   v[[paste0(pre, "_coef")]] <- named(coef(g)[c("x", "x2")])
   v[[paste0(pre, "_se")]] <- named(s[c("x", "x2"), "Std. Error"])
@@ -62,7 +62,7 @@ case("feglm_mle", "econometrics/feglm", "FE-GLM MLE: logit, probit, Poisson (id 
   l <- lm(y_gauss ~ x + x2 + factor(id) + factor(time), d)
   v$gauss2_dispersion <- summary(l)$sigma^2
   v$n_obs <- nrow(d)
-  list(values = v, reference = "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-14); alpaca::feglm",
+  list(values = v, reference = "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); alpaca::feglm",
        call = "glm(y ~ x + x2 + factor(id) [+ factor(time)], family, feglm_panel[alpaca rows]); alpaca::feglm(y ~ x + x2 | id [+ time])",
        packages = c("stats", "alpaca"))
 })
@@ -97,6 +97,6 @@ case("feglm_separation", "econometrics/feglm", "FE-GLM drop rule: all-0/all-1 en
 
   v <- glm_ref(v, "gauss", d, "y_gauss", c("id", "time"), gaussian())
   v$n_obs <- nrow(d)
-  list(values = v, reference = "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-14); fixest::feglm nobs (drops the singleton too)",
+  list(values = v, reference = "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); fixest::feglm nobs (drops the singleton too)",
        call = "glm(y ~ x + x2 + factor(id) + factor(time), family, feglm_sep[alpaca rows])", packages = c("stats", "alpaca", "fixest"))
 })
