@@ -401,25 +401,34 @@ impl DecisionStump {
 }
 
 /// One boosting tree (gbm's regression tree with up to `interaction_depth` splits): split
-/// nodes and Newton leaf values. Node 0 is the root.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// nodes and Newton leaf values. Node 0 is the root. Built by `run_twang` only (it is not
+/// deserialised), so every child index is in range and points forward, which
+/// [`predict`](Self::predict) relies on.
+#[derive(Debug, Clone, Serialize)]
 pub struct BoostTree {
     /// The nodes; a split's children are indices into this vector.
     pub nodes: Vec<BoostNode>,
 }
 
 /// A node of a [`BoostTree`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum BoostNode {
     /// Rows with `x[feature] <= threshold` go to `left`, the others to `right`.
     Split {
+        /// Column of the covariate matrix the node splits on.
         feature: usize,
+        /// Split point: values at most this go left.
         threshold: f64,
+        /// Index of the left child in [`BoostTree::nodes`].
         left: usize,
+        /// Index of the right child in [`BoostTree::nodes`].
         right: usize,
     },
     /// A terminal node and its (unshrunk) value.
-    Leaf { value: f64 },
+    Leaf {
+        /// gbm's Newton leaf value, before the shrinkage is applied.
+        value: f64,
+    },
 }
 
 impl BoostTree {
@@ -850,6 +859,10 @@ pub fn twang(
 }
 
 /// Checks the boosting parameters before any work.
+/// Most splits per tree: a tree is grown without a checkpoint, so its size is capped, at the
+/// depth the crate's other tree builders stop at.
+const MAX_INTERACTION_DEPTH: usize = 512;
+
 fn validate_twang_config(config: &TwangConfig) -> EconResult<()> {
     if config.n_trees == 0 {
         return Err(EconError::InvalidSpecification {
@@ -872,9 +885,13 @@ fn validate_twang_config(config: &TwangConfig) -> EconResult<()> {
             ),
         });
     }
-    if config.interaction_depth == 0 {
+    if config.interaction_depth == 0 || config.interaction_depth > MAX_INTERACTION_DEPTH {
         return Err(EconError::InvalidSpecification {
-            message: "interaction_depth must be at least 1 (splits per tree); got 0".to_string(),
+            message: format!(
+                "interaction_depth must be between 1 and {MAX_INTERACTION_DEPTH} (splits per \
+                 tree); got {}",
+                config.interaction_depth
+            ),
         });
     }
     if config.min_iterations > config.n_trees {
@@ -1462,17 +1479,28 @@ impl<'a> Criterion<'a> {
     }
 
     /// The stop method's statistic only: effect sizes for ES, KS for KS; mean and max over
-    /// the finite values.
+    /// the finite values, NaN when none is finite (every covariate's reference-group SD is
+    /// 0 or undefined), so the run warns instead of picking an iteration on a constant 0.
     fn value(&self, x: &Array2<f64>, w: &[f64], method: StopMethod) -> f64 {
         let k = x.ncols();
+        let mut finite = 0usize;
+        let mut count = |v: f64| {
+            if v.is_finite() {
+                finite += 1;
+            }
+            v
+        };
         let (mean, max) = match method {
             StopMethod::ESMean | StopMethod::ESMax => {
-                finite_abs_mean_max((0..k).map(|j| self.effect_size(x, j, w)))
+                finite_abs_mean_max((0..k).map(|j| count(self.effect_size(x, j, w))))
             }
             StopMethod::KSMean | StopMethod::KSMax => {
-                finite_abs_mean_max((0..k).map(|j| self.ks(x, j, w)))
+                finite_abs_mean_max((0..k).map(|j| count(self.ks(x, j, w))))
             }
         };
+        if finite == 0 {
+            return f64::NAN;
+        }
         match method {
             StopMethod::ESMean | StopMethod::KSMean => mean,
             StopMethod::ESMax | StopMethod::KSMax => max,
@@ -1600,6 +1628,44 @@ mod tests {
         let t = CancelToken::new();
         t.cancel();
         Budget::new(None, t)
+    }
+
+    /// ATT with every covariate constant among the treated: no effect size is defined, so the
+    /// criterion is not finite and the run says so instead of choosing iteration 1 silently.
+    #[test]
+    fn test_twang_warns_when_no_effect_size_is_defined() {
+        let n = 60;
+        let treat: Vec<f64> = (0..n).map(|i| (i % 3 == 0) as u8 as f64).collect();
+        let x1: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 3 == 0 {
+                    1.0
+                } else {
+                    ((i * 37) % 17) as f64 / 4.0
+                }
+            })
+            .collect();
+        let x2: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 3 == 0 {
+                    -2.0
+                } else {
+                    ((i * 53) % 13) as f64 / 3.0 - 1.0
+                }
+            })
+            .collect();
+        let df = df! {"treatment" => treat, "x1" => x1, "x2" => x2}.unwrap();
+        let mut c = TwangConfig::default();
+        c.n_trees = 50;
+        c.min_node_size = 2;
+        let r = run_twang(&Dataset::new(df), "treatment", &["x1", "x2"], Some(c)).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("was not finite at any iteration")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     /// `create_test_dataset()` with `x1[3] = NaN`.
@@ -2319,6 +2385,13 @@ mod tests {
             (
                 TwangConfig {
                     interaction_depth: 0,
+                    ..d()
+                },
+                "interaction_depth",
+            ),
+            (
+                TwangConfig {
+                    interaction_depth: 513,
                     ..d()
                 },
                 "interaction_depth",

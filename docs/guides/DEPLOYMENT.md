@@ -303,7 +303,8 @@ HTTP), and they never depend on the resource profile:
   interval) is refused when it would take more than 2e9 steps (R's default
   exact range, fewer than 50 values per sample, is far below that);
 - the C5.0, quantile random forest and Cubist tree builders stop at depth 512,
-  so no input can recurse deep enough to overflow a worker's stack;
+  so no input can recurse deep enough to overflow a worker's stack; twang's
+  boosting trees take at most 512 splits (`interaction_depth`);
 - staggered DiD `bootstrap` is 0 (analytic influence-function SEs) or at least
   50 replicates, and its joint pre-trend Wald test is computed for at most 2000
   pre-treatment cells (reported as not computed above that).
