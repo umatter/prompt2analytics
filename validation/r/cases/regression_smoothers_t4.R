@@ -144,7 +144,7 @@ case("smooth_spline_t4", "regression/smoothers", "smooth.spline's algorithm (wri
   s <- smooth.spline(C$x, C$y, df = 6); v$r_c_df6_df <- s$df; v$r_c_df6_fit <- vec(s$y)
   list(values = v, dataset = "validation/datasets/generated/smooth_spline_t4a.csv",
        reference = "stats::smooth.spline's algorithm (R 4.3 sbart.c / sslvrg.f / sgram.f: scaled x, .nknots.smspl, the penalty with 0.333, ratio, spar search returning its last evaluation, criteria) written out with splines::splineDesign (a_*, b_*, c_*); stats::smooth.spline itself (r_*)",
-       call = "smooth.spline(x, y, spar = 0.5 | df = 6 | cv = FALSE | cv = TRUE); smooth.spline(x, y, w) on tied x", packages = "splines")
+       call = "smooth.spline(x, y, spar = 0.5 | df = 6 | cv = FALSE | cv = TRUE); smooth.spline(x, y, w) on tied x", packages = character(0))
 })
 
 .tukeyline <- function(x, y, iter) {                   # R >= 3.5 line.c, checked against line() below

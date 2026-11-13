@@ -8,9 +8,7 @@
   "dataset": "validation/datasets/generated/smooth_spline_t4a.csv",
   "datasets": ["validation/datasets/generated/smooth_spline_t4a.csv", "validation/datasets/generated/smooth_spline_t4b.csv", "validation/datasets/generated/smooth_spline_t4c.csv"],
   "r_version": "R version 4.3.3 (2024-02-29)",
-  "packages": {
-    "splines": "4.3.3"
-  },
+  "packages": {},
   "values": {
     "a_nx": 120,
     "a_nknots": 69,
