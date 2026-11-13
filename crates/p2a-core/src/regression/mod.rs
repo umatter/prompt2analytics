@@ -184,7 +184,8 @@ pub use sensemakr::{
     sensemakr,
 };
 pub use smooth_spline::{
-    SmoothSplineConfig, SmoothSplineResult, run_smooth_spline, smooth_spline, smooth_spline_predict,
+    SmoothSplineConfig, SmoothSplineFit, SmoothSplineResult, SplineCriterion, run_smooth_spline,
+    smooth_spline, smooth_spline_predict,
 };
 pub use step::{
     Add1Result, Drop1Result, StepConfig, StepDirection, StepRecord, StepResult, TermEvaluation,

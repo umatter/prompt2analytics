@@ -2,81 +2,69 @@
 
 ## Method
 
-A cubic smoothing spline: lambda is given (`lambda`, `spar`), found by bisection for a
-target `df`, or, with neither, chosen by a criterion. The criterion is GCV by default, as
-R's `smooth.spline(cv = FALSE)`, or ordinary leave-one-out CV, R's `cv = TRUE`. The result
-reports the criterion it used (`criterion`, `None` when df, spar or lambda was given) and its
-value (`cv_crit`). Inputs are validated: df in (1, number of unique x], spar finite, lambda
-finite and non-negative, weights finite and non-negative. A df target that 30 bisection
-steps miss by 0.05 or more is a warning.
+R's `smooth.spline` algorithm, written in Rust: x scaled to [0, 1] by `(x - min) / range`;
+x values within `1e-6 * IQR(x)` of each other merged (weights summed, `ybar` the weighted mean);
+weights rescaled to sum to the number of positive weights; knots at every distinct x up to 49
+distinct values, else `.nknots.smspl`'s count at R's positions (`all_knots` keeps every distinct
+x); cubic B-splines; the penalty `Omega = integral B_i'' B_j''` with `sgram.f`'s 0.333 for 1/3;
+`lambda = ratio * 256^(3 spar - 1)` with `ratio = tr(X'WX) / tr(Omega)` over the inner
+coefficients; a banded Cholesky solve of `(X'WX + lambda Omega) c = X'Wy` with the exact
+leverages `w_i b_i' (X'WX + lambda Omega)^-1 b_i` from the band of the inverse; and `sbart.c`'s
+Brent search on spar in [-1.5, 1.5] (tolerance 1e-4, eps 2e-8, 500 steps) for GCV, ordinary CV
+or a df target (`3 + (df - target)^2`). As R, the search reports the best spar with the lambda,
+df, fit and leverages of its last evaluation. O(n) time and memory.
 
-The penalty, the spar scale and the df/leverages are p2a's own approximation, not R's
-`sbart.c` (REG-29, REG-30, Tier 4), so no smooth.spline number is R-pinned.
+Precedence: `df` > `spar` > `lambda` > the criterion (GCV by default, as R's `cv = FALSE`; CV
+with `criterion = Cv` or R's `cv = true`). A given lambda reports the spar it corresponds to.
+`cv_crit` is R's on the observations: CV when CV selected spar, else GCV. A df target the search
+misses by more than `DF_TARGET_TOL` (1e-2) is a warning. `smooth_spline_predict` evaluates the
+stored B-spline coefficients (`fit`), linearly beyond the data range with the end slopes, as R's
+`predict.smooth.spline.fit`.
+
+Inputs: df in (1, number of distinct x], spar and lambda finite (lambda non-negative), weights
+finite and non-negative, not all zero; at least 4 distinct x.
 
 ### Criterion semantics (REG-53)
 
 | Request | R | p2a |
 |---|---|---|
 | nothing given | `smooth.spline(x, y)` = `cv = FALSE`: GCV | `SmoothSplineConfig::default()`: GCV |
-| GCV | `cv = FALSE` | `criterion = SplineCriterion::Gcv`, or `with_cv(true)` |
-| ordinary leave-one-out CV | `cv = TRUE` | `criterion = SplineCriterion::Cv`, `cv = true` (R's meaning; overrides `criterion`), or `with_cv(false)` |
+| GCV | `cv = FALSE` | `criterion = SplineCriterion::Gcv` |
+| ordinary leave-one-out CV | `cv = TRUE` | `criterion = SplineCriterion::Cv`, or `cv = true` (R's meaning; overrides `criterion`) |
 
-`with_cv` keeps its old argument for source compatibility: its argument has the opposite
-sense of R's `cv`. Before, `SmoothSplineConfig` derived `Default` with `cv = false`, and
-`cv = true` meant GCV, so a default config (MCP `regression_smooth_spline`) ran LOO-CV while
-the CLI (`with_cv(true)`) ran GCV. The MCP default fit and its `cv_crit` change; the CLI is
-unchanged. The unified benchmark's "GCV" row now sets `criterion` (with `cv: true` under
-R's meaning it would have timed LOO-CV).
+`with_cv` is deprecated (`with_criterion`): its argument has the opposite sense of R's `cv`.
 
 ## R reference
 
-Case `smoothers_gcv_periodic_loess` (`validation/r/cases/regression_smoothers_t3.R`),
-x = sorted `runif(100)`, y = sin(2 pi x) + N(0, 0.3^2) (`set.seed(20261127)`):
-
-```r
-smooth.spline(x, y, cv = FALSE); smooth.spline(x, y, cv = TRUE); smooth.spline(x, y, df = 6)
-```
-
-## Values (recorded, not compared: REG-29, REG-30)
-
-| Key | R |
-|---|---|
-| `gcv_df` | 15.321748435572115 |
-| `gcv_lambda` | 3.212013000460938e-05 |
-| `gcv_crit` | 0.07644935114226169 |
-| `cv_df` | 14.708802804818221 |
-| `cv_lambda` | 3.875462586472911e-05 |
-| `cv_crit` | 0.07592175230027477 |
-| `dfmatch6_df` | 5.9989809005108645 |
-| `dfmatch6_lambda` | 0.002428943146826809 |
+- Case `smooth_spline_t4` (`validation/r/cases/regression_smoothers_t4.R`): data A (n = 120, 69
+  knots), B (150 rows, weights, 81 distinct x), C (x = 1:30). Keys `a_*`, `b_*`, `c_*` are R's
+  algorithm written out in R (`sbart`/`sslvrg`/`sgram` with 0.333 and the last evaluation);
+  `r_*` keys are `smooth.spline` itself. The two agree to about 1.4e-9.
+- Case `smoothers_gcv_periodic_loess` (`regression_smoothers_t3.R`): `smooth.spline(cv = FALSE)`,
+  `cv = TRUE`, `df = 6` on x = sorted `runif(100)`.
 
 ## Tolerances
 
-None against R. The property tests compare p2a's reported criterion with R's definition on
-p2a's own fit at 1e-12 relative: GCV `(RSS / n) / (1 - df / n)^2`, CV
-`mean((r_i / (1 - h_ii))^2)`.
+A given spar or lambda: the coefficient row of `validation/README.md` (`Tol::coef(120)`).
+Searched fits: `Tol::iterative(1e-6)` (Brent stops at 1e-4 in spar; both sides run the same
+search, so the pins hold to rounding).
 
 ## Tests
 
-Property tests (no registry entry: nothing is compared with R):
-
-- `test_smooth_spline_default_criterion_is_gcv`: the default equals GCV bit for bit, `cv =
-  true` equals `criterion = Cv`, the two criteria give different lambdas, `cv_crit` is R's
-  formula on the returned fit, `with_cv(true)` is GCV, a df request reports no criterion
-  (data: `validation/datasets/generated/smoothers_t3.csv`).
-- `test_spline_criterion_parses_aliases_and_rejects_unknown`: the option table.
-- `test_smooth_spline_rejects_invalid_controls`: df, spar, lambda and weights.
-- `test_smooth_spline_df_target_is_met`: df = 6 within 0.05, no warning.
-
-T0-WP14's `test_pinned_smooth_spline_outputs` and the band, cancellation and memory tests
-are unchanged.
+- `test_validate_smooth_spline_spar_fixed`: knots, lambda, df, fit, leverages, GCV at spar 0.5;
+  lambda 1e-4; all knots; predictions inside and outside the range.
+- `test_validate_smooth_spline_searched`: df 6, GCV, CV on A; GCV and df 5 with weights and ties
+  on B (merged x, residuals); df 6 on C.
+- `test_validate_smooth_spline_gcv_cv_t3`: GCV, CV and df 6 of the t3 case.
+- Properties: the B-spline basis against de Boor's recursion, the penalty against Gauss-Legendre
+  quadrature (exact 1/3), the band inverse against a dense inverse, Brent on a quadratic,
+  `.nknots.smspl` against R's values, scale invariance, ties merged at the IQR tolerance,
+  cancellation, linear memory at large n, the criterion option table and the input checks.
 
 ## Deviations
 
-- REG-29: `gcv_lambda`, `cv_lambda`, `dfmatch6_lambda`, `gcv_fit_head` (p2a's discrete
-  penalty and spar scale are not R's; Tier 4).
-- REG-30: `gcv_df`, `cv_df`, `dfmatch6_df`, `gcv_crit`, `cv_crit` (approximate leverages;
-  Tier 4).
+None. Release note: every smooth.spline number changed (the fit, df, lambda on R's scale,
+`n_knots`, `cv_crit`, predictions).
 
 ## NA handling
 
