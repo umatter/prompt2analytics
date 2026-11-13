@@ -29,14 +29,20 @@
 //! returns 0 there and warns "zero-width neighborhood. make span bigger". A constant x is
 //! an error.
 //!
-//! `enp` is the trace of the hat matrix (R's `trace.hat`), not R's "Equivalent Number of
-//! Parameters"; the residual SE and the robust iterations are not yet R's (REG-60).
+//! **Statistics** are R's `statistics = "exact"`: `trace_hat = tr(L)`, `one_delta =
+//! tr((I - L)'(I - L)) = n - 2 tr(L) + sum L_ij^2` (exact, where R's default "approximate"
+//! interpolates a table; the two differ by about 5e-4 relative at n = 100), R's equivalent
+//! number of parameters `enp = one_delta + 2 tr(L) - n`, and the residual scale `residual_se =
+//! sqrt(RSS / one_delta)` (R's `s`). As R, they come from the first (gaussian) fit.
 //!
 //! # Robust Fitting
 //!
-//! When `robust=true`, the algorithm applies iterative reweighting using the bisquare
-//! function to downweight outliers:
-//! - w(u) = (1 - u^2)^2 for |u| < 1, else 0
+//! `robust = true` is R's `family = "symmetric"`: `robust_iterations` fits in all (R's
+//! `iterations`, default 4), the gaussian fit and then refits with bisquare robustness weights
+//! from the residuals of the previous fit, with lowesw's cut-offs: `|r| > 0.999 c` gives 0,
+//! `|r| < 0.001 c` gives 1, else `(1 - (r / c)^2)^2`, with `c = 6 median|r|` (all 1 when `c`
+//! is below the smallest positive normal number). The residual scale of a robust fit is
+//! computed, as R does, from a gaussian fit of lowesp's pseudovalues.
 //!
 //! # Performance
 //!
@@ -76,11 +82,12 @@ pub struct LoessConfig {
     /// Use robust fitting with iterative reweighting.
     /// Default: false (gaussian family). Set true for "symmetric" family.
     pub robust: bool,
-    /// Number of robustifying iterations (only used if robust=true).
-    /// Default: 4.
+    /// Total number of fits of the symmetric family (R's `iterations`; only used if
+    /// robust = true): the gaussian fit and `robust_iterations - 1` robust refits. At least 1;
+    /// 1 is the gaussian fit alone. Default: 4.
     pub robust_iterations: usize,
-    /// Convergence tolerance for robust iterations.
-    /// Default: 1e-4.
+    /// Early stop of the robust refits: they stop once no fitted value moves by more than
+    /// `tolerance`. Default: 0 (no early stop, as R).
     pub tolerance: f64,
 }
 
@@ -91,7 +98,7 @@ impl Default for LoessConfig {
             degree: 2,
             robust: false,
             robust_iterations: 4,
-            tolerance: 1e-4,
+            tolerance: 0.0,
         }
     }
 }
@@ -131,16 +138,23 @@ pub struct LoessResult {
     pub robust: bool,
     /// Number of observations
     pub n_obs: usize,
-    /// Effective number of parameters (trace of hat matrix)
+    /// R's equivalent number of parameters, `one_delta + 2 trace_hat - n`.
     pub enp: f64,
-    /// Residual sum of squares
+    /// Residual sum of squares of the final fit
     pub rss: f64,
-    /// Residual standard error
+    /// Residual standard error, R's `s`: `sqrt(RSS / one_delta)`, the RSS of a robust fit
+    /// taken from its pseudovalues.
     pub residual_se: f64,
     /// R-squared (1 - RSS/TSS)
     pub r_squared: f64,
-    /// Number of robust iterations performed
+    /// Number of fits performed (1 for the gaussian family; R's `iterations`)
     pub robust_iterations: usize,
+    /// Trace of the hat matrix (R's `trace.hat`).
+    #[serde(default)]
+    pub trace_hat: f64,
+    /// `tr((I - L)'(I - L))`, exact (R's `one.delta` with `statistics = "exact"`).
+    #[serde(default)]
+    pub one_delta: f64,
     /// Rows dropped because x or y was missing ([`run_loess`]); absent from JSON when
     /// nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
@@ -245,6 +259,8 @@ struct Nbhd {
 struct LocalFit {
     fit: f64,
     c00: f64,
+    /// `sum_j L_ij^2` of this row of the smoother (0 unless asked for)
+    l2: f64,
     degree: usize,
     zero_width: bool,
     robust_fallback: bool,
@@ -333,9 +349,21 @@ impl SortedData {
     }
 }
 
-/// Moment sums `s[j] = sum w u^j` (j <= 2D) and `t[j] = sum w u^j y` (j <= D) over the
-/// rows of the neighbourhood with positive weight, and their count. `D` is the degree, a
-/// constant so that the inner loop is unrolled.
+/// Moment sums over the rows of the neighbourhood with positive weight.
+#[derive(Debug, Clone, Copy, Default)]
+struct Moments {
+    /// `s[j] = sum w u^j` (j <= 2D)
+    s: [f64; 5],
+    /// `t[j] = sum w u^j y` (j <= D)
+    t: [f64; 3],
+    /// `q[j] = sum w^2 u^j` (j <= 2D), for `sum_j L_ij^2`; zero unless asked for
+    q: [f64; 5],
+    /// rows with positive weight
+    m: usize,
+}
+
+/// The [`Moments`] of the neighbourhood. `D` is the degree, a constant so that the inner loop
+/// is unrolled; `hat` adds the squared-weight sums.
 #[inline]
 fn moments<const D: usize>(
     sd: &SortedData,
@@ -344,28 +372,32 @@ fn moments<const D: usize>(
     zero_width: bool,
     inv_r: f64,
     rw: Option<&[f64]>,
-) -> ([f64; 5], [f64; 3], usize) {
-    match (zero_width, rw) {
-        (true, None) => moments_kernel::<D, true, false>(sd, x0, nb, inv_r, &[]),
-        (true, Some(rw)) => moments_kernel::<D, true, true>(sd, x0, nb, inv_r, rw),
-        (false, None) => moments_kernel::<D, false, false>(sd, x0, nb, inv_r, &[]),
-        (false, Some(rw)) => moments_kernel::<D, false, true>(sd, x0, nb, inv_r, rw),
+    hat: bool,
+) -> Moments {
+    match (zero_width, rw, hat) {
+        (true, None, false) => moments_kernel::<D, true, false, false>(sd, x0, nb, inv_r, &[]),
+        (true, None, true) => moments_kernel::<D, true, false, true>(sd, x0, nb, inv_r, &[]),
+        (true, Some(rw), _) => moments_kernel::<D, true, true, false>(sd, x0, nb, inv_r, rw),
+        (false, None, false) => moments_kernel::<D, false, false, false>(sd, x0, nb, inv_r, &[]),
+        (false, None, true) => moments_kernel::<D, false, false, true>(sd, x0, nb, inv_r, &[]),
+        (false, Some(rw), _) => moments_kernel::<D, false, true, false>(sd, x0, nb, inv_r, rw),
     }
 }
 
 /// [`moments`] with the zero-width and robustness branches resolved at compile time.
 #[inline]
-fn moments_kernel<const D: usize, const ZERO_WIDTH: bool, const ROBUST: bool>(
+fn moments_kernel<const D: usize, const ZERO_WIDTH: bool, const ROBUST: bool, const HAT: bool>(
     sd: &SortedData,
     x0: f64,
     nb: &Nbhd,
     inv_r: f64,
     rw: &[f64],
-) -> ([f64; 5], [f64; 3], usize) {
-    // Sums in d = x - x0 (unscaled), rescaled to u = d / radius at the end: one multiply
-    // fewer per row, and the same values up to rounding.
+) -> Moments {
+    // Sums in u = (x - x0) / radius, in [-1, 1]: powers of the unscaled distance under- or
+    // overflow for x on a scale far from 1.
     let (mut s0, mut s1, mut s2, mut s3, mut s4) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let (mut t0, mut t1, mut t2) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut q0, mut q1, mut q2, mut q3, mut q4) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut m = 0usize;
     let xs = &sd.x_sorted[nb.left..nb.right];
     let ys = &sd.y_sorted[nb.left..nb.right];
@@ -393,31 +425,44 @@ fn moments_kernel<const D: usize, const ZERO_WIDTH: bool, const ROBUST: bool>(
         for ((&w, &xi), &yi) in wc.iter().zip(xc).zip(yc) {
             if w > 0.0 {
                 m += 1;
-                let d = xi - x0;
+                let d = (xi - x0) * inv_r;
                 s0 += w;
                 t0 += w * yi;
+                if HAT {
+                    q0 += w * w;
+                }
                 if D >= 1 {
                     let wd = w * d;
                     s1 += wd;
                     t1 += wd * yi;
                     let wd2 = wd * d;
                     s2 += wd2;
+                    if HAT {
+                        q1 += w * wd;
+                        q2 += w * wd2;
+                    }
                     if D >= 2 {
                         t2 += wd2 * yi;
                         let wd3 = wd2 * d;
                         s3 += wd3;
-                        s4 += wd3 * d;
+                        let wd4 = wd3 * d;
+                        s4 += wd4;
+                        if HAT {
+                            q3 += w * wd3;
+                            q4 += w * wd4;
+                        }
                     }
                 }
             }
         }
         start = end;
     }
-    let r1 = inv_r;
-    let r2 = r1 * r1;
-    let s = [s0, s1 * r1, s2 * r2, s3 * r2 * r1, s4 * r2 * r2];
-    let t = [t0, t1 * r1, t2 * r2];
-    (s, t, m)
+    Moments {
+        s: [s0, s1, s2, s3, s4],
+        t: [t0, t1, t2],
+        q: [q0, q1, q2, q3, q4],
+        m,
+    }
 }
 
 /// Squared relative pivot tolerance: dqrdc2's column rule (`LM_QR_TOL`) on the sqrt(w)
@@ -445,21 +490,23 @@ fn local_fit(
     nb: &Nbhd,
     degree: usize,
     robust: Option<&[f64]>,
+    hat: bool,
 ) -> EconResult<LocalFit> {
     let zero_width = nb.radius == 0.0;
     let degree = if zero_width { 0 } else { degree };
     let inv_r = if zero_width { 0.0 } else { 1.0 / nb.radius };
     let accumulate = |rw: Option<&[f64]>| match degree {
-        0 => moments::<0>(sd, x0, nb, zero_width, inv_r, rw),
-        1 => moments::<1>(sd, x0, nb, zero_width, inv_r, rw),
-        _ => moments::<2>(sd, x0, nb, zero_width, inv_r, rw),
+        0 => moments::<0>(sd, x0, nb, zero_width, inv_r, rw, hat),
+        1 => moments::<1>(sd, x0, nb, zero_width, inv_r, rw, hat),
+        _ => moments::<2>(sd, x0, nb, zero_width, inv_r, rw, hat),
     };
-    let (mut s, mut t, mut m) = accumulate(robust);
+    let mut mo = accumulate(robust);
     let mut robust_fallback = false;
-    if m == 0 && robust.is_some() {
-        (s, t, m) = accumulate(None);
+    if mo.m == 0 && robust.is_some() {
+        mo = accumulate(None);
         robust_fallback = true;
     }
+    let (s, t, m) = (mo.s, mo.t, mo.m);
     if m == 0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -494,7 +541,7 @@ fn local_fit(
         kept = j + 1;
     }
     // kept >= 1: M_00 = sum w > 0.
-    let solve0 = |b: &[f64; 3]| {
+    let solve = |b: &[f64; 3]| {
         let mut z = [0.0f64; 3];
         for i in 0..kept {
             let mut v = b[i];
@@ -513,13 +560,24 @@ fn local_fit(
             }
             z[i] = v;
         }
-        z[0]
+        z
     };
-    let fit = solve0(&t);
-    let c00 = solve0(&[1.0, 0.0, 0.0]);
+    let fit = solve(&t)[0];
+    // c = M^-1 e_1: row i of the smoother is L_ij = w_j c'x_j, so sum_j L_ij^2 = c' Q c with
+    // Q = [sum w^2 u^(a+b)]
+    let c = solve(&[1.0, 0.0, 0.0]);
+    let mut l2 = 0.0;
+    if hat {
+        for a in 0..kept {
+            for b in 0..kept {
+                l2 += c[a] * c[b] * mo.q[a + b];
+            }
+        }
+    }
     Ok(LocalFit {
         fit,
-        c00,
+        c00: c[0],
+        l2,
         degree: kept - 1,
         zero_width,
         robust_fallback,
@@ -592,16 +650,18 @@ impl FitStats {
     }
 }
 
-/// Fit all data points: (fitted values in the original order, trace of the hat matrix, stats).
+/// Fit all data points: (fitted values in the original order, trace of the hat matrix,
+/// `sum_ij L_ij^2`, stats); the two sums only with `compute_hat`.
 fn fit_all_points(
     sd: &SortedData,
     degree: usize,
     robust_weights: Option<&[f64]>,
     compute_hat: bool,
-) -> EconResult<(Vec<f64>, f64, FitStats)> {
+) -> EconResult<(Vec<f64>, f64, f64, FitStats)> {
     let n = sd.x_sorted.len();
     let mut fitted = crate::resource::try_vec(n, 0.0, "LOESS fitted values")?;
     let mut hat_trace = 0.0;
+    let mut sum_l2 = 0.0;
     let mut stats = FitStats::default();
     for si in 0..n {
         if si % 256 == 0 {
@@ -609,11 +669,12 @@ fn fit_all_points(
         }
         let x0 = sd.x_sorted[si];
         let nb = sd.neighbourhood(x0);
-        let lf = local_fit(sd, x0, &nb, degree, robust_weights)?;
+        let lf = local_fit(sd, x0, &nb, degree, robust_weights, compute_hat)?;
         fitted[sd.orig_idx[si]] = lf.fit;
         if compute_hat {
             // the point's own tricube weight is 1; its robustness weight is 1 here
             hat_trace += lf.c00;
+            sum_l2 += lf.l2;
         }
         if lf.zero_width {
             stats.zero_width_points += 1;
@@ -627,7 +688,7 @@ fn fit_all_points(
             stats.robust_fallback += 1;
         }
     }
-    Ok((fitted, hat_trace, stats))
+    Ok((fitted, hat_trace, sum_l2, stats))
 }
 
 /// Fit at a single evaluation point (used for prediction at new x values).
@@ -638,41 +699,64 @@ fn fit_single_point(
     robust_weights: Option<&[f64]>,
 ) -> EconResult<f64> {
     let nb = sd.neighbourhood(x0);
-    Ok(local_fit(sd, x0, &nb, degree, robust_weights)?.fit)
+    Ok(local_fit(sd, x0, &nb, degree, robust_weights, false)?.fit)
 }
 
-/// Compute robust weights using bisquare function.
-///
-/// Scale residuals by 6 * MAD (median absolute deviation) and apply bisquare.
-fn compute_robust_weights(residuals: &[f64]) -> Vec<f64> {
-    let n = residuals.len();
-    if n == 0 {
-        return vec![];
-    }
-
-    // Compute median of absolute residuals
-    let mut abs_resid: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
-    abs_resid.sort_by(|a, b| a.total_cmp(b));
-    let median_idx = n / 2;
-    let mad = if n % 2 == 0 {
-        (abs_resid[median_idx - 1] + abs_resid[median_idx]) / 2.0
+/// The median of `v` (sorted in place): R's lowesw/lowesp rule, the middle value or the mean
+/// of the two middle values.
+fn median_in_place(v: &mut [f64]) -> f64 {
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    if n % 2 == 0 {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
     } else {
-        abs_resid[median_idx]
-    };
-
-    // Scale factor: 6 * MAD (following R's loess implementation)
-    let scale = 6.0 * mad;
-
-    if scale < 1e-10 {
-        // All residuals are essentially zero
-        return vec![1.0; n];
+        v[n / 2]
     }
+}
 
-    // Compute bisquare weights
-    residuals
+/// R's lowesw: bisquare robustness weights of the residuals with `c = 6 median|r|`: 0 above
+/// `0.999 c`, 1 below `0.001 c`, all 1 when `c` is below the smallest positive normal number.
+fn compute_robust_weights(residuals: &[f64]) -> EconResult<Vec<f64>> {
+    let n = residuals.len();
+    let mut abs_resid = crate::resource::try_with_capacity(n, "LOESS robustness weights")?;
+    abs_resid.extend(residuals.iter().map(|r| r.abs()));
+    let cmad = 6.0 * median_in_place(&mut abs_resid);
+    if cmad < f64::MIN_POSITIVE {
+        return crate::resource::try_vec(n, 1.0, "LOESS robustness weights");
+    }
+    Ok(residuals
         .iter()
-        .map(|&r| bisquare_weight(r / scale))
-        .collect()
+        .map(|&r| {
+            let a = r.abs();
+            if cmad * 0.999 < a {
+                0.0
+            } else if cmad * 0.001 < a {
+                bisquare_weight(a / cmad)
+            } else {
+                1.0
+            }
+        })
+        .collect())
+}
+
+/// R's lowesp: the pseudovalues `yhat + c rw (y - yhat)` (unit prior weights) whose gaussian
+/// fit gives the residual scale of a robust fit, with `c = n / sum (1 - (y - yhat)^2 / k) sqrt(rw)`
+/// and `k = (6 median|y - yhat|)^2 / 5`.
+fn pseudovalues(y: &[f64], yhat: &[f64], rw: &[f64]) -> EconResult<Vec<f64>> {
+    let n = y.len();
+    let mut a = crate::resource::try_with_capacity(n, "LOESS pseudovalues")?;
+    a.extend(y.iter().zip(yhat).map(|(yi, fi)| (yi - fi).abs()));
+    let mad = median_in_place(&mut a);
+    let k = (6.0 * mad) * (6.0 * mad) / 5.0;
+    let mut total = 0.0;
+    for i in (0..n).rev() {
+        let e = y[i] - yhat[i];
+        total += (1.0 - e * e / k) * rw[i].sqrt();
+    }
+    let c = n as f64 / total;
+    Ok((0..n)
+        .map(|i| yhat[i] + (c * rw[i]) * (y[i] - yhat[i]))
+        .collect())
 }
 
 /// Fit LOESS model to data.
@@ -725,10 +809,10 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             message: "robust_iterations must be at least 1 when robust = true".to_string(),
         });
     }
-    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+    if !(config.tolerance.is_finite() && config.tolerance >= 0.0) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "tolerance must be a finite positive number, got {}",
+                "tolerance must be a finite non-negative number, got {}",
                 config.tolerance
             ),
         });
@@ -748,61 +832,71 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
         });
     }
 
-    // Initial fit (also computes hat matrix trace for ENP)
-    let (mut fitted, enp, mut stats) = fit_all_points(&sd, config.degree, None, true)?;
+    // The gaussian fit, with the exact statistics (R computes them on the first fit)
+    let (mut fitted, trace_hat, sum_l2, mut stats) =
+        fit_all_points(&sd, config.degree, None, true)?;
+    let nf = n as f64;
+    let one_delta = nf - 2.0 * trace_hat + sum_l2;
+    let enp = one_delta + 2.0 * trace_hat - nf;
 
-    // Compute residuals
     let mut residuals: Vec<f64> = y
         .iter()
         .zip(fitted.iter())
         .map(|(yi, fi)| yi - fi)
         .collect();
 
-    // Robust fitting iterations
+    // Symmetric family: robust_iterations fits in all
     let mut robust_weights: Option<Vec<f64>> = None;
-    let mut iterations = 0;
-
+    let mut iterations = 1;
     if config.robust {
-        for iter in 0..config.robust_iterations {
-            // Compute robust weights from residuals
-            let new_robust_weights = compute_robust_weights(&residuals);
-
-            // Refit with robust weights (no need for hat trace in robust iterations)
-            let (new_fitted, _, pass) =
-                fit_all_points(&sd, config.degree, Some(&new_robust_weights), false)?;
+        while iterations < config.robust_iterations {
+            let w = compute_robust_weights(&residuals)?;
+            let (new_fitted, _, _, pass) = fit_all_points(&sd, config.degree, Some(&w), false)?;
             stats.merge(pass);
-
-            // Check convergence
             let max_change: f64 = fitted
                 .iter()
                 .zip(new_fitted.iter())
                 .map(|(f1, f2)| (f1 - f2).abs())
                 .fold(0.0, f64::max);
-
             fitted = new_fitted;
             residuals = y
                 .iter()
                 .zip(fitted.iter())
                 .map(|(yi, fi)| yi - fi)
                 .collect();
-            robust_weights = Some(new_robust_weights);
-            iterations = iter + 1;
-
-            if max_change < config.tolerance {
+            robust_weights = Some(w);
+            iterations += 1;
+            if config.tolerance > 0.0 && max_change < config.tolerance {
                 break;
             }
         }
     }
     let warnings = stats.warnings(n, sd.q, config.span);
 
-    // Compute diagnostics
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
-    let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
+    let y_mean: f64 = y.iter().sum::<f64>() / nf;
     let tss: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum();
-
-    let df = (n as f64 - enp).max(1.0);
-    let residual_se = (rss / df).sqrt();
-    let r_squared = if tss > 1e-10 { 1.0 - rss / tss } else { 0.0 };
+    // R's s: a robust fit's residual sum of squares is that of a gaussian fit of its
+    // pseudovalues
+    let sum_squares = match &robust_weights {
+        Some(rw) => {
+            let pseudo = pseudovalues(y, &fitted, rw)?;
+            let mut y_sorted = crate::resource::try_with_capacity(n, "LOESS pseudovalues")?;
+            y_sorted.extend(sd.orig_idx.iter().map(|&i| pseudo[i]));
+            let psd = SortedData {
+                x_sorted: sd.x_sorted.clone(),
+                y_sorted,
+                orig_idx: sd.orig_idx.clone(),
+                q: sd.q,
+                radius_mult: sd.radius_mult,
+            };
+            let (zz, _, _, _) = fit_all_points(&psd, config.degree, None, false)?;
+            pseudo.iter().zip(&zz).map(|(p, z)| (p - z) * (p - z)).sum()
+        }
+        None => rss,
+    };
+    let residual_se = (sum_squares / one_delta).sqrt();
+    let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
     // Build model for prediction
     let model = LoessModel {
@@ -827,6 +921,8 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
         residual_se,
         r_squared,
         robust_iterations: iterations,
+        trace_hat,
+        one_delta,
         missing: MissingSummary::none(n),
         warnings,
     })
@@ -1234,17 +1330,17 @@ mod tests {
         let pred = loess_predict(r2.model.as_ref().unwrap(), &case.vector("predict_x")).unwrap();
         Check::new(&case)
             .vector("fit_s075_d2", &r2.fitted, Tol::coef(n))
-            .scalar("trace_s075_d2", r2.enp, Tol::stat(n))
+            .scalar("trace_s075_d2", r2.trace_hat, Tol::stat(n))
             .vector("fit_s075_d1", &r1.fitted, Tol::coef(n))
-            .scalar("trace_s075_d1", r1.enp, Tol::stat(n))
+            .scalar("trace_s075_d1", r1.trace_hat, Tol::stat(n))
             .vector("fit_s05_d0", &r0.fitted, Tol::coef(n))
             .vector("fit_s12_d2", &r12.fitted, Tol::coef(n))
             .vector("predict_s075_d2", &pred, Tol::coef(n))
             .scalar("n", r2.n_obs as f64, Tol::exact())
             .finish();
-        // deviation REG-60: enp_r_s075_d2 is R's "Equivalent Number of Parameters"
-        // (one.delta + 2 tr(L) - n); p2a's `enp` is tr(L), R's trace.hat. Residual SE and
-        // robust iterations are not compared either.
+        // deviation REG-60: enp_r_s075_d2 is R's enp with the default statistics =
+        // "approximate" (one.delta interpolated from the trace, ehg141), not compared; p2a's
+        // enp uses the exact one.delta, pinned in test_validate_loess_exact_statistics.
         assert!(
             r2.warnings.is_empty() && r12.warnings.is_empty(),
             "{:?}",
@@ -1261,9 +1357,9 @@ mod tests {
         let (a, b) = (fit(&x, &y, 0.75, 2), fit(&x, &y, 0.3, 1));
         Check::new(&case)
             .vector("fit_s075_d2", &a.fitted, Tol::coef(100))
-            .scalar("trace_s075_d2", a.enp, Tol::stat(100))
+            .scalar("trace_s075_d2", a.trace_hat, Tol::stat(100))
             .vector("fit_s03_d1", &b.fitted, Tol::coef(100))
-            .scalar("trace_s03_d1", b.enp, Tol::stat(100))
+            .scalar("trace_s03_d1", b.trace_hat, Tol::stat(100))
             .finish();
     }
 
@@ -1320,7 +1416,7 @@ mod tests {
         c.robust = true;
         c.robust_iterations = 0;
         bad(c, &x, "robust_iterations");
-        for tol in [0.0, f64::NAN] {
+        for tol in [-1e-4, f64::NAN, f64::INFINITY] {
             let mut c = LoessConfig::default();
             c.tolerance = tol;
             bad(c, &x, "tolerance");
@@ -1360,7 +1456,7 @@ mod tests {
                 evals.extend([0.13, 3.3, 6.9]);
                 for &x0 in &evals {
                     let nb = sd.neighbourhood(x0);
-                    let lf = local_fit(&sd, x0, &nb, degree, None).unwrap();
+                    let lf = local_fit(&sd, x0, &nb, degree, None, true).unwrap();
                     // the reference: QR on the positive-weight rows
                     let rows: Vec<usize> = (nb.left..nb.right)
                         .filter(|&i| {
@@ -1596,5 +1692,107 @@ mod tests {
                 assert_eq!(nb.radius, d_q * sd.radius_mult, "span {span}, x0 {x0}");
             }
         }
+    }
+
+    /// Case `loess_t4` (REG-60): loess(surface = "direct", statistics = "exact") on n = 100
+    /// with three outliers, degrees 1-2, spans 0.3 and 0.75: R's equivalent number of
+    /// parameters `enp = one.delta + 2 trace.hat - n` and residual scale `s = sqrt(RSS /
+    /// one.delta)`.
+    #[test]
+    fn test_validate_loess_exact_statistics() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("loess_t4");
+        let (x, y) = (col(&ds, "x"), col(&ds, "y"));
+        let t = Tol::stat(100);
+        let mut c = Check::new(&case);
+        for degree in 1..=2 {
+            for (sp, tag) in [(0.3, "s30"), (0.75, "s75")] {
+                let r = fit(&x, &y, sp, degree);
+                let p = format!("d{degree}_{tag}_");
+                c.scalar(&format!("{p}trace"), r.trace_hat, t)
+                    .scalar(&format!("{p}one_delta"), r.one_delta, t)
+                    .scalar(&format!("{p}enp"), r.enp, t)
+                    .scalar(&format!("{p}s"), r.residual_se, t);
+            }
+        }
+        c.finish();
+    }
+
+    /// Case `loess_t4` (REG-60): family = "symmetric" with iterations = 4 and 2 (total fits):
+    /// the fit, R's robustness weights of the last fit (lowesw's cut-offs: the outliers get 0)
+    /// and the residual scale from lowesp's pseudovalues.
+    #[test]
+    fn test_validate_loess_symmetric() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("loess_t4");
+        let (x, y) = (col(&ds, "x"), col(&ds, "y"));
+        let t = Tol::coef(100);
+        let mut c = Check::new(&case);
+        for degree in 1..=2 {
+            for (sp, tag) in [(0.3, "s30"), (0.75, "s75")] {
+                for it in [4, 2] {
+                    let mut config = LoessConfig::default();
+                    config.span = sp;
+                    config.degree = degree;
+                    config.robust = true;
+                    config.robust_iterations = it;
+                    let r = loess(&x, &y, config).unwrap();
+                    let p = format!("d{degree}_{tag}_sym{it}_");
+                    let rw = r.model.as_ref().unwrap().robust_weights.clone().unwrap();
+                    c.vector(&format!("{p}fit"), &r.fitted, t)
+                        .scalar(&format!("{p}s"), r.residual_se, Tol::stat(100))
+                        .scalar(&format!("{p}enp"), r.enp, Tol::stat(100))
+                        .vector(&format!("{p}robust_weights"), &rw, t);
+                }
+            }
+        }
+        c.finish();
+    }
+
+    /// T3-WP11-5: the local moments are summed in u = (x - x0) / radius, so a fit on x scaled
+    /// by 1e-90 or 1e90 equals the fit on x.
+    #[test]
+    fn test_loess_moments_extreme_scale() {
+        let x: Vec<f64> = (0..60)
+            .map(|i| i as f64 * 0.37 + (i % 7) as f64 * 0.05)
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v * 0.4).sin() + 0.1 * ((i * 13) % 7) as f64)
+            .collect();
+        let base = fit(&x, &y, 0.5, 2);
+        for scale in [1e-90, 1e90] {
+            let xs: Vec<f64> = x.iter().map(|v| v * scale).collect();
+            let r = fit(&xs, &y, 0.5, 2);
+            for (a, b) in r.fitted.iter().zip(&base.fitted) {
+                assert!(
+                    (a - b).abs() <= 1e-10 * b.abs().max(1.0),
+                    "{scale}: {a} vs {b}"
+                );
+            }
+            assert!((r.trace_hat - base.trace_hat).abs() <= 1e-10 * base.trace_hat);
+            assert!((r.one_delta - base.one_delta).abs() <= 1e-10 * base.one_delta);
+        }
+    }
+
+    /// lowesw's cut-offs (T3-WP11-3): with c = 6 median|r|, |r| > 0.999 c gives weight 0,
+    /// |r| < 0.001 c weight 1, and all weights are 1 when c is below the smallest positive
+    /// normal number.
+    #[test]
+    fn test_loess_lowesw_cutoffs() {
+        // median |r| = 1, c = 6
+        let r = [0.0, 0.005, -1.0, 1.0, 1.0, 5.995, -5.9939, 6.5, 1.0];
+        let w = compute_robust_weights(&r).unwrap();
+        assert_eq!(w[0], 1.0);
+        assert_eq!(w[1], 1.0);
+        assert_eq!(w[5], 0.0);
+        assert!(w[6] > 0.0 && w[6] < 1e-5);
+        assert_eq!(w[7], 0.0);
+        assert!((w[3] - bisquare_weight(1.0 / 6.0)).abs() < 1e-15);
+        assert_eq!(
+            compute_robust_weights(&[0.0, 0.0, 1e-310, 3.0]).unwrap(),
+            vec![1.0; 4]
+        );
     }
 }

@@ -50,6 +50,27 @@
       "supersedes_legacy": []
     },
     {
+      "id": "loess_statistics",
+      "name": "LOESS equivalent number of parameters, one.delta, residual scale; symmetric family",
+      "category": "regression",
+      "reference": "stats::loess(control = loess.control(surface = 'direct', statistics = 'exact')), family = 'gaussian' and 'symmetric' (iterations = 4, 2)",
+      "doc": "validation/regression/loess.md",
+      "cases": [
+        "loess_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::loess::tests::test_validate_loess_exact_statistics",
+        "p2a-core::regression::loess::tests::test_validate_loess_symmetric"
+      ],
+      "quantities": [
+        "trace.hat, one.delta, enp, s (degrees 1-2, spans 0.3, 0.75)",
+        "symmetric family: fit, robustness weights, s, enp"
+      ],
+      "tolerance": "statistics validation/README.md statistic row (n = 100: 1e-6); fits and weights coefficient row (1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "nls_weighted",
       "name": "Weighted and one-sided bounded nonlinear least squares",
       "category": "regression",
