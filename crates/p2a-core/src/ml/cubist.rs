@@ -92,7 +92,8 @@ pub struct CubistConfig {
     /// Minimum samples in a terminal node. Default: 5.
     pub min_bucket: usize,
 
-    /// Minimum improvement ratio to make a split. Default: 0.01.
+    /// Minimum share of the node's sum of squared deviations a split must remove, in [0, 1).
+    /// Default: 0.01.
     pub min_improvement: f64,
 
     /// Whether to extract rules from trees. Default: true.
@@ -378,12 +379,12 @@ impl CubistTree {
             };
         }
 
-        // Compute current node MSE
-        let node_mse = self.compute_mse(y, indices);
+        // Sum of squared deviations of the node's targets
+        let node_ssd = self.compute_ssd(y, indices);
 
         // Find best split
         if let Some((best_feature, best_threshold, left_indices, right_indices)) =
-            self.find_best_split(x, y, indices, config, node_mse)
+            self.find_best_split(x, y, indices, config, node_ssd)
         {
             // Check minimum bucket size
             if left_indices.len() < config.min_bucket || right_indices.len() < config.min_bucket {
@@ -507,16 +508,17 @@ impl CubistTree {
         }
     }
 
-    /// Find the best split for a node.
+    /// Find the best split for a node: the one removing the largest part of the node's sum of
+    /// squared deviations, if it removes more than `min_improvement` of it.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
         y: &ArrayView1<f64>,
         indices: &[usize],
         config: &CubistConfig,
-        node_mse: f64,
+        node_ssd: f64,
     ) -> Option<(usize, f64, Vec<usize>, Vec<usize>)> {
-        let mut best_improvement = config.min_improvement * node_mse;
+        let mut best_improvement = config.min_improvement * node_ssd;
         let mut best_split: Option<(usize, f64)> = None;
 
         for feature in 0..self.n_features {
@@ -530,8 +532,6 @@ impl CubistTree {
             // Incremental MSE calculation
             let total_sum: f64 = sorted.iter().map(|(_, y_val, _)| y_val).sum();
             let total_ss: f64 = sorted.iter().map(|(_, y_val, _)| y_val * y_val).sum();
-            let n = indices.len() as f64;
-
             let mut left_sum = 0.0;
             let mut left_ss = 0.0;
             let mut left_n = 0usize;
@@ -553,13 +553,13 @@ impl CubistTree {
                     continue;
                 }
 
-                // Compute improvement
-                let left_mse = left_ss - left_sum * left_sum / left_n as f64;
+                // Reduction of the sum of squared deviations
+                let left_ssd = left_ss - left_sum * left_sum / left_n as f64;
                 let right_sum = total_sum - left_sum;
                 let right_ss = total_ss - left_ss;
-                let right_mse = right_ss - right_sum * right_sum / right_n as f64;
+                let right_ssd = right_ss - right_sum * right_sum / right_n as f64;
 
-                let improvement = node_mse * n - left_mse - right_mse;
+                let improvement = node_ssd - left_ssd - right_ssd;
 
                 if improvement > best_improvement {
                     best_improvement = improvement;
@@ -576,8 +576,8 @@ impl CubistTree {
         })
     }
 
-    /// Compute MSE for a set of indices.
-    fn compute_mse(&self, y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
+    /// Sum of squared deviations from the mean for a set of indices.
+    fn compute_ssd(&self, y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
         if indices.is_empty() {
             return 0.0;
         }
@@ -858,7 +858,7 @@ fn find_k_neighbors(
 ///
 /// `InsufficientData` for fewer than 2 rows; `Computation` when `x` and `y`
 /// differ in length; `InvalidSpecification` when `committees` is outside
-/// 1..=100 or `x` or `y` holds a non-finite value; `Cancelled` once the
+/// 1..=100, `min_improvement` outside [0, 1), or `x` or `y` holds a non-finite value; `Cancelled` once the
 /// installed computation budget expires (checked per committee and per row of
 /// the final prediction pass, which runs the nearest-neighbour correction).
 ///
@@ -904,6 +904,14 @@ pub fn cubist(
             message: format!(
                 "committees must be between 1 and 100 (the limit of R's Cubist), got {}",
                 config.committees
+            ),
+        });
+    }
+    if !(config.min_improvement >= 0.0 && config.min_improvement < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "min_improvement must be in [0, 1), got {}",
+                config.min_improvement
             ),
         });
     }
@@ -1509,6 +1517,97 @@ mod tests {
         // k=3 nearest to x=3 are x=2,3,4 with y=2,3,4
         // Average should be 3.0
         assert!((knn_pred - 3.0).abs() < 0.5);
+    }
+
+    /// Uniform draws and normal noise from the module's LCG (Box-Muller).
+    fn seeded_uniform(state: &mut u64) -> f64 {
+        (lcg_random(state) % 1_000_000_007) as f64 / 1_000_000_007.0
+    }
+
+    fn seeded_normal(state: &mut u64) -> f64 {
+        let u1 = seeded_uniform(state).max(1e-12);
+        let u2 = seeded_uniform(state);
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+
+    /// `y = 2 x1 + 2 x2 + noise` (sd 0.5), two uniform features on [0, 1].
+    fn plane_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut state = seed;
+        let x = Array2::from_shape_fn((n, 2), |_| seeded_uniform(&mut state));
+        let y = Array1::from_shape_fn(n, |i| {
+            2.0 * x[[i, 0]] + 2.0 * x[[i, 1]] + 0.5 * seeded_normal(&mut state)
+        });
+        (x, y)
+    }
+
+    #[test]
+    fn test_cubist_min_improvement_stops_splits() {
+        let (x, y) = plane_data(300, 2026);
+        let rules = |min_improvement: f64| {
+            let cfg = CubistConfig {
+                max_depth: 10,
+                min_improvement,
+                ..Default::default()
+            };
+            cubist(x.view(), y.view(), &cfg).unwrap().n_rules
+        };
+        let counts: Vec<usize> = [0.0, 0.01, 0.1, 0.5, 0.99]
+            .iter()
+            .map(|&m| rules(m))
+            .collect();
+        assert_eq!(counts[4], 1, "{counts:?}");
+        assert!(counts.windows(2).all(|w| w[0] >= w[1]), "{counts:?}");
+        assert_ne!(counts[0], counts[3], "{counts:?}");
+    }
+
+    #[test]
+    fn test_cubist_split_rule_is_ssd_share() {
+        // Two plateaus plus noise on one feature; the best admissible split (5 to 7 rows on
+        // the left with min_bucket 5) removes a share `best` of the node's sum of squared
+        // deviations, computed here by brute force.
+        let x = Array2::from_shape_fn((12, 1), |(i, _)| i as f64);
+        let noise = [
+            0.9, -1.3, 0.4, 1.1, -0.6, -0.5, 1.2, -0.8, 0.3, -1.4, 0.7, 0.1,
+        ];
+        let y = Array1::from_shape_fn(12, |i| if i < 6 { 0.0 } else { 1.6 } + noise[i]);
+        let ssd = |v: &[f64]| {
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            v.iter().map(|a| (a - m).powi(2)).sum::<f64>()
+        };
+        let ys = y.to_vec();
+        let total = ssd(&ys);
+        let best = (5..=7)
+            .map(|l| (total - ssd(&ys[..l]) - ssd(&ys[l..])) / total)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((0.15..0.6).contains(&best), "{best}");
+        let rules = |min_improvement: f64| {
+            let cfg = CubistConfig {
+                max_depth: 1,
+                min_improvement,
+                ..Default::default()
+            };
+            cubist(x.view(), y.view(), &cfg).unwrap().n_rules
+        };
+        assert_eq!(rules(best - 0.01), 2);
+        assert_eq!(rules(best + 0.01), 1);
+    }
+
+    #[test]
+    fn test_cubist_min_improvement_is_a_share() {
+        let (x, y) = cubist_data();
+        for m in [-0.1, 1.0, f64::NAN, f64::INFINITY] {
+            let cfg = CubistConfig {
+                min_improvement: m,
+                ..Default::default()
+            };
+            let err = cubist(x.view(), y.view(), &cfg)
+                .err()
+                .unwrap_or_else(|| panic!("min_improvement {m} accepted"));
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. }),
+                "{m}: {err}"
+            );
+        }
     }
 
     #[test]
