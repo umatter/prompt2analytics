@@ -27,6 +27,26 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "etwfe_within_r2",
+      "name": "ETWFE within R-squared (fixest r2 type 'wr2')",
+      "category": "econometrics",
+      "reference": "etwfe 0.6.2 etwfe(ivar = id, vcov = ~id); fixest 0.14.2 r2(type = 'wr2')",
+      "doc": "validation/econometrics/etwfe.md",
+      "cases": [
+        "etwfe_within_r2"
+      ],
+      "tests": [
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_within_r2"
+      ],
+      "quantities": [
+        "within R-squared",
+        "nobs"
+      ],
+      "tolerance": "validation/README.md, n = 923 / 960: Tol::se(n); nobs exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

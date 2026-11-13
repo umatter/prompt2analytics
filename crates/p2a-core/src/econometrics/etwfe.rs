@@ -948,11 +948,18 @@ impl Spec {
             .ok()
             .filter(|&d| a == 0 || d < bound)
             .ok_or_else(|| EconError::InvalidSpecification {
-                message: format!(
-                    "anticipation must be below {} (first treated cohort {g_first} minus first \
-                     period {lo}), got {a}",
-                    bound.max(0)
-                ),
+                message: if bound <= 0 {
+                    format!(
+                        "anticipation cannot be used: the first treated cohort {g_first} is the \
+                         first period {lo}, so no cohort has a period before its onset (got \
+                         {a})"
+                    )
+                } else {
+                    format!(
+                        "anticipation must be below {bound} (first treated cohort {g_first} \
+                         minus first period {lo}), got {a}"
+                    )
+                },
             })?;
         let mut warnings = Vec::new();
         if let (ControlGroup::Never, Some(c)) = (config.cgroup, gref_cohort) {
@@ -2798,6 +2805,29 @@ mod tests {
         assert_eq!(r.anticipation, 1);
     }
 
+    /// fixest's within R-squared (`r2(fit, "wr2")`) and nobs of five ETWFE fits:
+    /// not yet and never treated, the time-invariant control `xc`, balanced and
+    /// unbalanced panels (case etwfe_within_r2).
+    #[test]
+    fn test_validate_etwfe_within_r2() {
+        let (case, ds) = crate::test_support::load_case("etwfe_within_r2");
+        let du = panel_csv("etwfe_panel_unbalanced");
+        let xc: Option<&[&str]> = Some(&["xc"]);
+        let fits = [
+            ("notyet", fit(&ds, None, EtwfeConfig::default())),
+            ("never", fit(&ds, None, spec(ControlGroup::Never))),
+            ("notyet_xc", fit(&ds, xc, EtwfeConfig::default())),
+            ("unbal", fit(&du, None, EtwfeConfig::default())),
+            ("unbal_xc", fit(&du, xc, EtwfeConfig::default())),
+        ];
+        let mut ck = Check::new(&case);
+        for (p, r) in &fits {
+            ck.scalar(&format!("{p}_wr2"), r.r_squared, Tol::se(r.n_obs))
+                .scalar(&format!("{p}_nobs"), r.n_obs as f64, Tol::exact());
+        }
+        ck.finish();
+    }
+
     #[test]
     fn test_validate_etwfe_unbalanced() {
         let (case, ds) = crate::test_support::load_case("etwfe_unbalanced");
@@ -3590,6 +3620,7 @@ mod tests {
         assert!(!last_fit_structured());
         assert_eq!(r.collinear_terms, dense.collinear_terms);
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1e-12);
+        assert_eq!(r.terms.len(), dense.terms.len());
         for (a, b) in r.terms.iter().zip(&dense.terms) {
             assert_eq!(a.name, b.name);
             assert!(
@@ -3640,6 +3671,32 @@ mod tests {
                 ),
                 other => panic!("expected InvalidSpecification, got {other:?}"),
             }
+        }
+    }
+
+    /// With the first treated cohort at the first period there is no anticipation
+    /// bound to name: the message says why (before: "must be below 0").
+    #[test]
+    fn test_etwfe_anticipation_without_pre_period_is_explained() {
+        let ds = drop_rows(&panel_csv("etwfe_panel"), |_, t| t < 4);
+        let mut c = EtwfeConfig::default();
+        c.anticipation = 1;
+        match run_etwfe(
+            &ds,
+            "y",
+            "id",
+            "year",
+            "treat",
+            "first_treat",
+            None,
+            Some(c),
+        ) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "anticipation cannot be used: the first treated cohort 4 is the first period 4, \
+                 so no cohort has a period before its onset (got 1)"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
         }
     }
 
