@@ -559,3 +559,47 @@ fn test_cli_max_memory_without_session() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A boolean flag takes an optional value (`num_args = 0..=1`), so placed before a positional it
+/// consumes that positional as its value: `reg ols --intercept <dataset> -y .. -x ..` is a usage
+/// error naming the dataset, not a fit. Pinned as clap reports it. The flags that behave so
+/// (`BoolishValueParser`): `--intercept` of `reg ols`, `clustered`, `quantreg`, `gls`, `step` and
+/// `hac`, `reg step --use-bic`, `ts ar --aic`, `ts stl --robust`, `ts spectrum --detrend`,
+/// `script export --comments` and `discrete clogit --asc`. Put them after the positionals, or give
+/// the value (`--intercept false`).
+#[test]
+fn test_cli_bare_flag_before_positional_is_a_value_error() {
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/grunfeld.csv"),
+        "grunfeld",
+        &[],
+    );
+    let out = s.run(&[
+        "reg",
+        "ols",
+        "--intercept",
+        "grunfeld",
+        "-y",
+        "inv",
+        "-x",
+        "value",
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("invalid value 'grunfeld' for '--intercept [<BOOL>]'"),
+        "{err}"
+    );
+    // after the positional, the bare flag means true
+    s.ok(&[
+        "reg",
+        "ols",
+        "grunfeld",
+        "--intercept",
+        "-y",
+        "inv",
+        "-x",
+        "value",
+    ]);
+}
