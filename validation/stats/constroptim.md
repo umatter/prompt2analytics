@@ -23,10 +23,19 @@ Constraints: `ui %*% theta >= ci`
 
 ## Algorithm
 
-1. Transform problem using logarithmic barrier: f(x) - mu * sum(log(ui %*% x - ci))
-2. Iteratively reduce barrier parameter mu
-3. Use inner optimizer (Nelder-Mead or BFGS) at each barrier level
-4. Return solution when convergence achieved
+R's adaptive barrier (Lange), with R's defaults `mu = 1e-4`, `outer.iterations = 100`,
+`outer.eps = 1e-5`:
+
+1. At the outer iterate θₖ minimise `R(θ, θₖ) = f(θ) - mu Σᵢ [(uᵢθₖ - cᵢ) log(uᵢθ - cᵢ) - uᵢθ]`
+   (NaN outside the region) with BFGS (gradient given) or Nelder-Mead; mu stays fixed.
+2. Stop when `|R - R_old| < (1e-3 + |R|) outer.eps` (the inner result is returned); otherwise move to
+   the inner solution and stop with code 11 if f increased.
+3. Code 7 when the outer iterations run out; code 1 when the last inner optimisation hit its limit.
+   `value` is f at `par`, `barrier_value` the last R minus `value`. No point is projected.
+
+Inner methods: BFGS without a gradient runs Nelder-Mead (R's default for a missing gradient; R's
+explicit `method = "BFGS"` without one stops), and L-BFGS-B runs BFGS; both say so in
+`ConstrOptimResult::notes`.
 
 ## Test Cases
 
@@ -47,9 +56,10 @@ print(result$value)
 # [1] 0
 ```
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
-- `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): x² + y² with x + y ≥ 1 from (1, 1); `quadratic_par` (0.500000000151549 twice) and `quadratic_value` (0.500000000303098), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
-- `stats::constroptim::tests::test_constr_optim_nelder_mead_reaches_the_optimum` (`crates/p2a-core/src/stats/constroptim.rs`; no longer named `test_validate_*`, since it compares no R value): Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5). Not R-pinned: p2a stops at (1.00211, 2.00106), value 5.6e-6, 2.1e-3 from R's (1.0000008855605316, 2.0000000235991697), value 7.8e-13 (`stat_constroptim_legacy`), outside 1e-4; registry deviation STAT-80. The test checks feasibility and a solution within 1e-2 of (1, 2).
+**Rust tests:**
+- `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): x² + y² with x + y ≥ 1 from (1, 1); `quadratic_par` (0.500000000151549 twice) and `quadratic_value` (0.500000000303098), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; the convergence code is pinned exactly, the outer iterations are a path quantity).
+- `stats::constroptim::tests::test_validate_constr_optim_nelder_mead`: Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5); `nelder_mead_par` (1.0000008855605316, 2.0000000235991697) at `Tol::iterative(1e-4)` and the convergence code; the value (R 7.8e-13) is zero up to the inner tolerance, so it is checked below 1e-9, not against R's digits.
+- `test_constr_optim_codes_seven_and_eleven`, `test_constr_optim_method_substitutions_are_noted` (properties): codes 7 and 11, the notes for BFGS without a gradient and for L-BFGS-B, R's defaults.
 
 ### Test Case 2: Active Constraint
 
@@ -68,8 +78,8 @@ print(result$value)
 # Approximately 12.5
 ```
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
-- `stats::constroptim::tests::test_validate_constr_optim_binding_constraint` (`crates/p2a-core/src/stats/constroptim.rs`): minimise x² subject to x ≥ 1 from 2; `binding_par` (1.0000000025631852) and `binding_value` (1.0000000051263704), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
+**Rust tests:**
+- `stats::constroptim::tests::test_validate_constr_optim_binding_constraint` (`crates/p2a-core/src/stats/constroptim.rs`): minimise x² subject to x ≥ 1 from 2; `binding_par` (1.0000000025631852) and `binding_value` (1.0000000051263704), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; the convergence code is pinned exactly, the outer iterations are a path quantity).
 
 ### Test Case 3: Multiple Constraints (Box Constraints)
 
@@ -85,8 +95,8 @@ print(result$par)
 # [1] 2 2  (corner of box closest to (3,4))
 ```
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
-- `stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints` (`crates/p2a-core/src/stats/constroptim.rs`): -x - y with x, y ≥ 0 and x + y ≤ 1 from (0.3, 0.3); `lp3_par` (0.49999999831081493 twice) and `lp3_value` (-0.9999999966216299), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
+**Rust tests:**
+- `stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints` (`crates/p2a-core/src/stats/constroptim.rs`): -x - y with x, y ≥ 0 and x + y ≤ 1 from (0.3, 0.3); `lp3_par` (0.49999999831081493 twice) and `lp3_value` (-0.9999999966216299), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; the convergence code is pinned exactly, the outer iterations are a path quantity).
 
 ### Test Case 4: Higher Dimensional
 
@@ -114,9 +124,9 @@ print(result$par)
 
 ## Known Differences
 
-1. **Barrier parameter schedule (STAT-80, Tier 4)**: R's `constrOptim` (mu = 1e-4, outer.eps = 1e-5) converges in 3 outer iterations on the four legacy problems; p2a's plain log barrier runs 100 (convergence 1), which leaves par about 1.5e-5 relative from R's. Par and value are R-pinned at `Tol::iterative(1e-4)` (`stat_constroptim_legacy`); the convergence code and outer-iteration count are a registry deviation (`stats_power_loglin.json`, `constroptim_legacy`).
-2. **Convergence criteria**: May differ in tolerance handling
-3. **Initial feasibility**: Different handling of infeasible starting points
+1. **Inner optimisers**: p2a's own BFGS (backtracking line search) and Nelder-Mead, not R's `optim`; the
+   solutions agree at `Tol::iterative(1e-4)`, function and gradient counts are p2a's.
+2. **L-BFGS-B**: not available; BFGS runs, with a note.
 
 ## Performance Notes
 

@@ -479,9 +479,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | Median Polish | [medpolish.md](stats/medpolish.md) | R-pinned |
-| Isotonic Regression | [isoreg.md](stats/isoreg.md) | R-pinned, known deviations (STAT-52) |
+| Isotonic Regression | [isoreg.md](stats/isoreg.md) | R-pinned |
 | Log-Linear Models | [loglin.md](stats/loglin.md) | R-pinned |
-| Constrained Optimization | [constroptim.md](stats/constroptim.md) | R-pinned, known deviations (STAT-80) |
+| Constrained Optimization | [constroptim.md](stats/constroptim.md) | R-pinned |
 | SE for Contrasts | [secontrast.md](stats/secontrast.md) | R-pinned |
 | Model Tables | [modeltables.md](stats/modeltables.md) | R-pinned, known deviations (STAT-75) |
 | Fisher's Exact Test (2 × 2) | [fisher.md](stats/fisher.md) | R-pinned |

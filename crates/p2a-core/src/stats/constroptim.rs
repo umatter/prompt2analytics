@@ -9,18 +9,18 @@
 //!
 //! minimize f(θ)  subject to Uθ - c ≥ 0
 //!
-//! using the logarithmic barrier method:
+//! using R's adaptive logarithmic barrier (Lange): at outer iterate θₖ the inner problem is
 //!
-//! minimize f(θ) - μ Σᵢ log(uᵢ'θ - cᵢ)
+//! minimize R(θ, θₖ) = f(θ) - μ Σᵢ [(uᵢ'θₖ - cᵢ) log(uᵢ'θ - cᵢ) - uᵢ'θ]
 //!
-//! The barrier parameter μ is progressively reduced, with inner optimization
-//! performed using BFGS or Nelder-Mead at each stage.
+//! with μ fixed (default 1e-4), solved by BFGS (with a gradient) or Nelder-Mead.
 //!
 //! ## Algorithm
 //!
-//! 1. Start with feasible point θ₀ and initial barrier μ₀
-//! 2. Solve barrier subproblem using unconstrained optimizer
-//! 3. Reduce μ and repeat until convergence
+//! 1. Start with a point θ₀ in the interior of the feasible region
+//! 2. Solve the barrier subproblem re-centred at the current iterate
+//! 3. Stop when the barrier objective changes by less than `(1e-3 + |R|) outer_eps`, when the
+//!    objective increases (code 11) or when the outer iterations run out (code 7)
 //!
 //! # References
 //!
@@ -46,45 +46,54 @@ use serde::{Deserialize, Serialize};
 pub struct ConstrOptimResult {
     /// Optimal parameter values
     pub par: Vec<f64>,
-    /// Objective function value at optimum
+    /// Objective function value at `par` (without the barrier)
     pub value: f64,
     /// Number of function evaluations
     pub counts_fn: usize,
     /// Number of gradient evaluations
     pub counts_grad: usize,
-    /// Convergence code (0 = success)
+    /// Convergence code as R's `constrOptim`: 0 success, 1 the last inner optimisation reached
+    /// its iteration limit, 7 the outer iterations ran out, 11 the objective increased at an
+    /// outer iteration
     pub convergence: i32,
     /// Convergence message
     pub message: Option<String>,
-    /// Value of barrier term at optimum
+    /// The barrier term at the optimum: the last inner value of the barrier objective minus
+    /// `value` (R's `barrier.value`)
     pub barrier_value: f64,
     /// Number of outer iterations
     pub outer_iterations: usize,
+    /// What ran instead of the requested inner method, if anything
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
-/// Configuration for constrained optimization.
+/// Configuration for constrained optimization (R's `constrOptim` defaults).
 #[derive(Debug, Clone)]
 pub struct ConstrOptimConfig {
-    /// Barrier term multiplier
+    /// Barrier term multiplier (R's `mu`, default 1e-4); fixed across outer iterations
     pub mu: f64,
-    /// Maximum outer iterations
+    /// Maximum outer iterations (R's `outer.iterations`, default 100)
     pub outer_iterations: usize,
-    /// Convergence tolerance for outer iterations
+    /// Outer convergence tolerance (R's `outer.eps`, default 1e-5): stop when the barrier
+    /// objective changes by less than `(1e-3 + |r|) outer_eps`
     pub outer_eps: f64,
-    /// Optimization method
+    /// Inner optimization method. BFGS needs a gradient: without one Nelder-Mead runs (R's
+    /// default for a missing gradient) and the result says so in `notes`. L-BFGS-B runs BFGS.
     pub method: OptimMethod,
     /// Maximum function evaluations per inner iteration
     pub max_fn_evals: usize,
-    /// Tolerance for inner optimization
+    /// Gradient-norm tolerance of the inner BFGS (Nelder-Mead stops at R's `reltol`,
+    /// `sqrt(.Machine$double.eps)`)
     pub inner_tol: f64,
 }
 
 impl Default for ConstrOptimConfig {
     fn default() -> Self {
         ConstrOptimConfig {
-            mu: 1.0, // Start with larger mu for stronger barrier effect
+            mu: 1e-4,
             outer_iterations: 100,
-            outer_eps: 1e-6,
+            outer_eps: 1e-5,
             method: OptimMethod::BFGS,
             max_fn_evals: 1000,
             inner_tol: 1e-8,
@@ -99,7 +108,7 @@ pub enum OptimMethod {
     NelderMead,
     /// BFGS quasi-Newton method
     BFGS,
-    /// L-BFGS-B limited memory BFGS
+    /// L-BFGS-B limited memory BFGS. Not available: BFGS runs instead (noted in the result)
     LBFGSB,
 }
 
@@ -180,142 +189,135 @@ where
         return Err("function cannot be evaluated at initial parameters".to_string());
     }
 
+    // R's inner methods: BFGS needs the gradient (R's explicit method = "BFGS" without one fails;
+    // its default for a missing gradient is Nelder-Mead, which runs here, with a note). p2a has
+    // no bounded optimiser, and L-BFGS-B needs finite values outside the region, which the
+    // barrier does not give, so L-BFGS-B runs BFGS (with a note).
+    let mut notes = Vec::new();
+    let use_bfgs = match (config.method, grad.is_some()) {
+        (OptimMethod::NelderMead, _) => false,
+        (OptimMethod::BFGS, true) => true,
+        (OptimMethod::LBFGSB, true) => {
+            notes.push("L-BFGS-B is not available; ran BFGS".to_string());
+            true
+        }
+        (OptimMethod::BFGS | OptimMethod::LBFGSB, false) => {
+            notes.push("BFGS needs a gradient; ran Nelder-Mead".to_string());
+            false
+        }
+    };
+
+    let mu = config.mu;
+    let s_mu = mu.signum();
+    // R's adaptive barrier (Lange): R(theta, theta_old) = f(theta)
+    //   - mu sum[(u_i theta_old - c_i) log(u_i theta - c_i) - u_i theta],
+    // NaN outside the region, so the inner optimiser rejects the point.
+    let barrier_objective = |x: &[f64], old_margin: &[f64]| -> f64 {
+        let mut bar = 0.0;
+        for ((row, &c), &g_old) in ui.iter().zip(ci).zip(old_margin) {
+            let u_theta: f64 = row.iter().zip(x).map(|(&u, &t)| u * t).sum();
+            let g = u_theta - c;
+            if g < 0.0 {
+                return f64::NAN;
+            }
+            bar += g_old * g.ln() - u_theta;
+        }
+        if !bar.is_finite() {
+            bar = f64::NEG_INFINITY;
+        }
+        f(x) - mu * bar
+    };
+
     let mut theta = theta0.to_vec();
-    let mut mu = config.mu;
+    let mut obj = f(&theta);
+    let mut r = barrier_objective(&theta, &margin0);
+    let mut obj_old = obj;
+    let mut par = theta.clone();
+    let mut inner_code = 0;
     let mut fn_count = 0;
     let mut grad_count = 0;
     let mut outer_iter = 0;
-    let mut converged = false;
-    let mut prev_value = f64::INFINITY;
 
-    // Outer loop: gradually reduce barrier influence
-    for iter in 0..config.outer_iterations {
-        outer_iter = iter + 1;
+    for i in 1..=config.outer_iterations {
+        crate::resource::checkpoint().map_err(|e| e.to_string())?;
+        outer_iter = i;
+        obj_old = obj;
+        let r_old = r;
+        let old_margin = compute_constraint_margin(&theta, ui, ci);
+        let fun = |x: &[f64]| barrier_objective(x, &old_margin);
 
-        // Define augmented objective function with barrier
-        let aug_f = |x: &[f64]| {
-            let obj = f(x);
-            let margin = compute_constraint_margin(x, ui, ci);
-
-            // Barrier term: -mu * sum(log(margin))
-            let barrier: f64 = margin
-                .iter()
-                .map(|&m| if m > 0.0 { -m.ln() } else { f64::INFINITY })
-                .sum();
-
-            obj + mu * barrier
-        };
-
-        // Optimize the augmented function
-        let (new_theta, _new_value, fn_evals, grad_evals) = match config.method {
-            OptimMethod::NelderMead => {
-                nelder_mead(&theta, aug_f, config.max_fn_evals, config.inner_tol)
-            }
-            OptimMethod::BFGS | OptimMethod::LBFGSB => {
-                if let Some(ref g) = grad {
-                    // Augmented gradient
-                    let aug_grad = |x: &[f64]| {
-                        let mut grad_vec = g(x);
-                        let margin = compute_constraint_margin(x, ui, ci);
-
-                        // Add barrier gradient: mu * ui^T * (1/margin)
-                        for (j, row) in ui.iter().enumerate() {
-                            if margin[j] > 0.0 {
-                                for (i, &u_ji) in row.iter().enumerate() {
-                                    grad_vec[i] -= mu * u_ji / margin[j];
-                                }
-                            }
+        let (new_par, value, fn_evals, grad_evals, code) = match (use_bfgs, grad.as_ref()) {
+            (true, Some(g)) => {
+                // dR = grad f - mu sum_i u_i ((u_i theta_old - c_i) / (u_i theta - c_i) - 1)
+                let d_r = |x: &[f64]| {
+                    let mut grad_vec = g(x);
+                    let margin = compute_constraint_margin(x, ui, ci);
+                    for ((row, &m), &m_old) in ui.iter().zip(&margin).zip(&old_margin) {
+                        let w = m_old / m - 1.0;
+                        for (gv, &u) in grad_vec.iter_mut().zip(row) {
+                            *gv -= mu * u * w;
                         }
-                        grad_vec
-                    };
-                    bfgs_with_grad(
-                        &theta,
-                        aug_f,
-                        aug_grad,
-                        config.max_fn_evals,
-                        config.inner_tol,
-                    )
-                } else {
-                    nelder_mead(&theta, aug_f, config.max_fn_evals, config.inner_tol)
-                }
+                    }
+                    grad_vec
+                };
+                bfgs_with_grad(&theta, fun, d_r, config.max_fn_evals, config.inner_tol)
             }
+            _ => nelder_mead(&theta, fun, config.max_fn_evals, NM_RELTOL),
         };
-
         fn_count += fn_evals;
         grad_count += grad_evals;
+        par = new_par;
+        inner_code = code;
+        r = value;
 
-        // Check convergence (relative change in objective)
-        let current_obj = f(&new_theta);
-        if (prev_value - current_obj).abs() / (prev_value.abs() + 1.0) < config.outer_eps {
-            converged = true;
-            theta = new_theta;
+        // R: stop when the barrier objective no longer moves (theta is not advanced, the inner
+        // result is returned); otherwise advance and stop if the objective got worse.
+        if r.is_finite()
+            && r_old.is_finite()
+            && (r - r_old).abs() < (1e-3 + r.abs()) * config.outer_eps
+        {
             break;
         }
-
-        theta = new_theta;
-        prev_value = current_obj;
-
-        // Reduce mu slowly to allow solution to approach constraint boundary
-        // Use gentle reduction to maintain barrier effect
-        mu *= 0.9;
-
-        // Don't let mu get too small (maintain barrier effect)
-        if mu < 1e-6 {
-            mu = 1e-6;
+        theta = par.clone();
+        obj = f(&theta);
+        if s_mu * obj > s_mu * obj_old {
+            break;
         }
     }
 
-    // Verify final solution is feasible and project back if needed
-    let margin = compute_constraint_margin(&theta, ui, ci);
-    if margin.iter().any(|&m| m < -1e-10) {
-        // Final solution violates constraints - project back to feasibility
-        // Use simple projection: find the most violated constraint and adjust
-        for _ in 0..10 {
-            let current_margin = compute_constraint_margin(&theta, ui, ci);
-            let min_margin_idx = current_margin
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.total_cmp(b))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+    let (convergence, message) = if mu > 0.0 && obj > obj_old || mu < 0.0 && obj < obj_old {
+        (
+            11,
+            format!(
+                "Objective function {} at outer iteration {outer_iter}",
+                if mu > 0.0 { "increased" } else { "decreased" }
+            ),
+        )
+    } else if outer_iter == config.outer_iterations {
+        (
+            7,
+            "Barrier algorithm ran out of iterations and did not converge".to_string(),
+        )
+    } else if inner_code != 0 {
+        (
+            inner_code,
+            "the inner optimiser reached its iteration limit".to_string(),
+        )
+    } else {
+        (0, "Converged".to_string())
+    };
 
-            if current_margin[min_margin_idx] >= -1e-10 {
-                break; // Now feasible
-            }
-
-            // Project along constraint normal to satisfy the most violated constraint
-            let violation = -current_margin[min_margin_idx];
-            let norm_sq: f64 = ui[min_margin_idx].iter().map(|&u| u * u).sum();
-            if norm_sq > 1e-10 {
-                let step = (violation + 1e-6) / norm_sq;
-                for (i, &u_i) in ui[min_margin_idx].iter().enumerate() {
-                    theta[i] += step * u_i;
-                }
-            }
-        }
-    }
-
-    // Compute final values
-    let final_value = f(&theta);
-    let margin = compute_constraint_margin(&theta, ui, ci);
-    let barrier_value: f64 = margin
-        .iter()
-        .map(|&m| if m > 0.0 { -mu * m.ln() } else { 0.0 })
-        .sum();
-
+    let value = f(&par);
     Ok(ConstrOptimResult {
-        par: theta,
-        value: final_value,
+        par,
+        value,
         counts_fn: fn_count,
         counts_grad: grad_count,
-        convergence: if converged { 0 } else { 1 },
-        message: if converged {
-            Some("Converged".to_string())
-        } else {
-            Some("Maximum iterations reached".to_string())
-        },
-        barrier_value,
+        convergence,
+        message: Some(message),
+        barrier_value: r - value,
         outer_iterations: outer_iter,
+        notes,
     })
 }
 
@@ -333,16 +335,21 @@ fn compute_constraint_margin(theta: &[f64], ui: &[Vec<f64>], ci: &[f64]) -> Vec<
         .collect()
 }
 
+/// R's `optim` default `reltol`, `sqrt(.Machine$double.eps)`, the Nelder-Mead stopping rule.
+const NM_RELTOL: f64 = 1.490_116_119_384_765_6e-8;
+
 /// R's nmmin (src/appl/optim.c): non-finite function values become big.
 const NM_BIG: f64 = 1.0e35;
 
-/// Nelder-Mead simplex optimization (gradient-free).
+/// Nelder-Mead simplex optimization (gradient-free). Returns (par, value, function evaluations,
+/// gradient evaluations, code): code 0 when the simplex's value range fell within `tol` relative to
+/// the best value (R's `reltol` rule), 1 at the iteration limit.
 fn nelder_mead<F>(
     x0: &[f64],
     f_user: F,
     max_evals: usize,
     tol: f64,
-) -> (Vec<f64>, f64, usize, usize)
+) -> (Vec<f64>, f64, usize, usize, i32)
 where
     F: Fn(&[f64]) -> f64,
 {
@@ -387,10 +394,16 @@ where
         let mut indices: Vec<usize> = (0..=n).collect();
         indices.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
 
-        // Check convergence
+        // R's nmmin: stop when the simplex's value range is within reltol of the best value
         let f_range = values[indices[n]] - values[indices[0]];
-        if f_range < tol {
-            return (simplex[indices[0]].clone(), values[indices[0]], fn_evals, 0);
+        if f_range <= tol * (values[indices[0]].abs() + tol) {
+            return (
+                simplex[indices[0]].clone(),
+                values[indices[0]],
+                fn_evals,
+                0,
+                0,
+            );
         }
 
         // Compute centroid (excluding worst point)
@@ -483,17 +496,19 @@ where
             best_idx = i;
         }
     }
-    (simplex[best_idx].clone(), values[best_idx], fn_evals, 0)
+    (simplex[best_idx].clone(), values[best_idx], fn_evals, 0, 1)
 }
 
-/// BFGS optimization with gradient.
+/// BFGS optimization with gradient. Returns (par, value, function evaluations, gradient
+/// evaluations, code): code 0 when the gradient norm fell below `tol` or no step along the search
+/// direction decreases the function, 1 at the iteration limit.
 fn bfgs_with_grad<F, G>(
     x0: &[f64],
     f: F,
     grad: G,
     max_evals: usize,
     tol: f64,
-) -> (Vec<f64>, f64, usize, usize)
+) -> (Vec<f64>, f64, usize, usize, i32)
 where
     F: Fn(&[f64]) -> f64,
     G: Fn(&[f64]) -> Vec<f64>,
@@ -512,12 +527,13 @@ where
     let mut fx = f(&x);
     grad_evals += 1;
     let mut gx = grad(&x);
+    let mut h_is_identity = true;
 
     for _ in 0..max_evals {
         // Check gradient convergence
         let grad_norm: f64 = gx.iter().map(|&g| g * g).sum::<f64>().sqrt();
         if grad_norm < tol {
-            return (x, fx, fn_evals, grad_evals);
+            return (x, fx, fn_evals, grad_evals, 0);
         }
 
         // Compute search direction: p = -H_inv * g
@@ -552,9 +568,19 @@ where
             alpha *= 0.5;
         }
 
-        // Only update if we found a valid step
+        // No step decreases the function. Along the steepest descent direction that makes x a
+        // minimum to working precision; otherwise restart from the steepest descent direction
+        // (repeating the search from the same state would fail the same way).
         if !found_valid_step {
-            // No valid step found, try smaller steps or terminate this iteration
+            if h_is_identity {
+                return (x, fx, fn_evals, grad_evals, 0);
+            }
+            for (i, row) in h_inv.iter_mut().enumerate() {
+                for (j, h) in row.iter_mut().enumerate() {
+                    *h = if i == j { 1.0 } else { 0.0 };
+                }
+            }
+            h_is_identity = true;
             continue;
         }
 
@@ -593,9 +619,10 @@ where
                     ((sy + yhy) * s[i] * s[j] - h_y[i] * s[j] - s[i] * h_y[j]) / (sy * sy);
             }
         }
+        h_is_identity = false;
     }
 
-    (x, fx, fn_evals, grad_evals)
+    (x, fx, fn_evals, grad_evals, 1)
 }
 
 /// Run constrained optimization (convenience wrapper).
@@ -788,11 +815,8 @@ mod tests {
     // =========================================================================
 
     // Case stat_constroptim_legacy (validation/r/cases/stats_power_loglin.R): R's constrOptim
-    // on the same four problems.
-    //
-    // deviation STAT-80 (Tier 4): R converges in 3 outer iterations (convergence 0); p2a's
-    // plain log barrier runs 100 (convergence 1, mu = 0.9^99 leaves par about 1.5e-5 from
-    // R's); convergence code and outer iterations are not compared.
+    // on the same four problems. Outer iterations are a path quantity (R 3 on each): checked as
+    // a property only.
 
     use p2a_validation::{Case, Check, Tol};
 
@@ -819,11 +843,16 @@ mod tests {
             ConstrOptimConfig::default(),
         )
         .unwrap();
-        // deviation STAT-80: convergence and outer iterations not compared
+        assert!(r.outer_iterations <= 100 && r.barrier_value.is_finite());
         let case = Case::load("stat_constroptim_legacy");
         Check::new(&case)
             .vector("quadratic_par", &r.par, iter())
             .scalar("quadratic_value", r.value, iter())
+            .scalar(
+                "quadratic_convergence",
+                f64::from(r.convergence),
+                Tol::exact(),
+            )
             .finish();
     }
 
@@ -849,16 +878,17 @@ mod tests {
             ConstrOptimConfig::default(),
         )
         .unwrap();
-        // deviation STAT-80: convergence and outer iterations not compared
+        assert!(r.outer_iterations <= 100 && r.barrier_value.is_finite());
         let case = Case::load("stat_constroptim_legacy");
         Check::new(&case)
             .vector("lp3_par", &r.par, iter())
             .scalar("lp3_value", r.value, iter())
+            .scalar("lp3_convergence", f64::from(r.convergence), Tol::exact())
             .finish();
     }
 
     #[test]
-    fn test_constr_optim_nelder_mead_reaches_the_optimum() {
+    fn test_validate_constr_optim_nelder_mead() {
         // R: constrOptim(c(0.5, 0.5), function(x) (x[1] - 1)^2 + (x[2] - 2)^2, grad = NULL,
         //                ui = diag(2), ci = c(0, 0))
         let f = |x: &[f64]| (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2);
@@ -870,19 +900,94 @@ mod tests {
         };
         let r = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(&[0.5, 0.5], f, None, &ui, &ci, config)
             .unwrap();
-        // deviation STAT-80: rust par=(1.0021099915327514, 2.0010575190290307), value
-        // 5.570410765044598e-6; R par=(1.0000008855605316, 2.0000000235991697), value
-        // 7.847743758893449e-13 (stat_constroptim_legacy). p2a's barrier with Nelder-Mead
-        // stops 2.1e-3 from R's solution, outside 1e-4, so par and value are not compared with
-        // R (registry deviation in stats_power_loglin.json, constroptim_legacy). Not R-pinned:
-        // the solution is feasible and within 1e-2 of the optimum (1, 2).
-        assert!(r.par[0] >= 0.0 && r.par[1] >= 0.0, "{:?}", r.par);
-        assert!(
-            (r.par[0] - 1.0).abs() < 1e-2 && (r.par[1] - 2.0).abs() < 1e-2,
-            "{:?}",
-            r.par
+        assert!(r.notes.is_empty());
+        assert!(r.outer_iterations <= 100 && r.barrier_value.is_finite());
+        // The value at the optimum is 0 up to the inner tolerance (R 7.8e-13): rounding-level, so it
+        // is checked as small, not against R's digits.
+        assert!(r.value < 1e-9, "{}", r.value);
+        let case = Case::load("stat_constroptim_legacy");
+        Check::new(&case)
+            .vector("nelder_mead_par", &r.par, iter())
+            .scalar(
+                "nelder_mead_convergence",
+                f64::from(r.convergence),
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    /// R's codes: 7 when the outer iterations run out (even if the last one converged), and 11
+    /// when the objective increases between outer iterates (here an objective that grows with
+    /// each call). No point is projected: the result is the last inner solution.
+    #[test]
+    fn test_constr_optim_codes_seven_and_eleven() {
+        let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
+        let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
+        let mut cfg = ConstrOptimConfig::default();
+        cfg.outer_iterations = 1;
+        let r = constr_optim(&[1.0, 1.0], f, Some(grad), &[vec![1.0, 1.0]], &[1.0], cfg).unwrap();
+        assert_eq!(r.convergence, 7, "{r:?}");
+        assert_eq!(r.outer_iterations, 1);
+        assert!(r.par[0] + r.par[1] > 1.0);
+
+        let calls = std::cell::Cell::new(0usize);
+        let growing = |x: &[f64]| {
+            calls.set(calls.get() + 1);
+            x[0].powi(2) + x[1].powi(2) + 0.1 * calls.get() as f64
+        };
+        let mut nm = ConstrOptimConfig::default();
+        nm.method = OptimMethod::NelderMead;
+        let r = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(
+            &[1.0, 1.0],
+            growing,
+            None,
+            &[vec![1.0, 1.0]],
+            &[1.0],
+            nm,
+        )
+        .unwrap();
+        assert_eq!(r.convergence, 11, "{r:?}");
+        assert_eq!(r.outer_iterations, 1);
+        assert!(r.message.unwrap().contains("increased"));
+    }
+
+    /// BFGS without a gradient runs Nelder-Mead (R's default for a missing gradient) and says so;
+    /// L-BFGS-B runs BFGS and says so. Both reach R's solution of the quadratic problem.
+    #[test]
+    fn test_constr_optim_method_substitutions_are_noted() {
+        let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
+        let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
+        let ui = vec![vec![1.0, 1.0]];
+        let ci = vec![1.0];
+        let case = Case::load("stat_constroptim_legacy");
+        let r = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(
+            &[1.0, 1.0],
+            f,
+            None,
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            r.notes,
+            vec!["BFGS needs a gradient; ran Nelder-Mead".to_string()]
         );
-        assert!(r.value < 1e-4, "{}", r.value);
+        let mut cfg = ConstrOptimConfig::default();
+        cfg.method = OptimMethod::LBFGSB;
+        let l = constr_optim(&[1.0, 1.0], f, Some(grad), &ui, &ci, cfg).unwrap();
+        assert_eq!(
+            l.notes,
+            vec!["L-BFGS-B is not available; ran BFGS".to_string()]
+        );
+        for p in [&r.par, &l.par] {
+            for (a, b) in p.iter().zip(case.vector("quadratic_par")) {
+                assert!(iter().allows(*a, b), "{p:?}");
+            }
+        }
+        // the defaults are R's
+        let d = ConstrOptimConfig::default();
+        assert_eq!((d.mu, d.outer_iterations, d.outer_eps), (1e-4, 100, 1e-5));
     }
 
     #[test]
@@ -901,11 +1006,16 @@ mod tests {
             ConstrOptimConfig::default(),
         )
         .unwrap();
-        // deviation STAT-80: convergence and outer iterations not compared
+        assert!(r.outer_iterations <= 100 && r.barrier_value.is_finite());
         let case = Case::load("stat_constroptim_legacy");
         Check::new(&case)
             .vector("binding_par", &r.par, iter())
             .scalar("binding_value", r.value, iter())
+            .scalar(
+                "binding_convergence",
+                f64::from(r.convergence),
+                Tol::exact(),
+            )
             .finish();
     }
 }
