@@ -1586,6 +1586,7 @@ p2a causal did [OPTIONS] --outcome <OUTCOME> --treat <TREAT> --post <POST> <DATA
 | `--treat <TREAT>` | Treatment indicator column |
 | `--post <POST>` | Post-treatment period indicator column |
 | `-x, --controls [<CONTROLS>...]` | Control variable columns (optional) |
+| `--cluster <CLUSTER>` | Cluster standard errors on this column (CR1, as sandwich::vcovCL); HC1 without it |
 
 #### `p2a causal synth`
 
@@ -1623,7 +1624,8 @@ p2a causal ipw [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> <DATASET>
 | `-x, --covariates <COVARIATES>...` | Covariate columns |
 | `--estimand <ESTIMAND>` | Estimand: ate (default) or att [default: ate] |
 | `--trim <TRIM>` | Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05) [default: 0.05] |
-| `--bootstrap <BOOTSTRAP>` | Standard errors: 0 (default) gives the M-estimation SE with the propensity score estimated, as WeightIt; N &gt;= 2 a bootstrap of the weighted means with the fitted propensity scores held fixed (conservative) [default: 0] |
+| `--bootstrap <BOOTSTRAP>` | Standard errors: 0 (default) gives the M-estimation SE with the propensity score estimated, as WeightIt; N &gt;= 2 a bootstrap that resamples every row and refits the propensity model and the trimming in each replicate [default: 0] |
+| `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
 
 #### `p2a causal doubly-robust`
 
@@ -1642,7 +1644,8 @@ p2a causal doubly-robust [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> <
 | `--method <METHOD>` | Method: aipw (default; also dr, doubly_robust), ipw or regression (also reg, ra, outcome_regression) [default: aipw] |
 | `--estimand <ESTIMAND>` | Estimand: ate (default) or att [default: ate] |
 | `--trim <TRIM>` | Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05) [default: 0.05] |
-| `--bootstrap <BOOTSTRAP>` | Bootstrap replications for the SEs of --method ipw and regression (at least 2; default: 999); aipw uses its analytic influence-function SE and ignores it [default: 999] |
+| `--bootstrap <BOOTSTRAP>` | Bootstrap replications for the SEs of --method ipw and regression (default: 999), each refitting the propensity and outcome models; 0 gives analytic SEs (M-estimation for ipw, the stacked-equation sandwich for regression) and 1 is an error. aipw uses its analytic influence-function SE and ignores it [default: 999] |
+| `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
 
 #### `p2a causal mediation`
 
@@ -1660,6 +1663,7 @@ p2a causal mediation [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> --med
 | `-m, --mediator <MEDIATOR>` | Mediator variable column |
 | `-x, --covariates [<COVARIATES>...]` | Covariate columns |
 | `--bootstrap <BOOTSTRAP>` | Number of bootstrap replications (default: 999) [default: 999] |
+| `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
 
 #### `p2a causal rd`
 
@@ -1724,6 +1728,7 @@ p2a causal staggered-did [OPTIONS] --outcome <OUTCOME> --treatment-time <TREATME
 | `--method <METHOD>` | Estimation method, as did's est_method (DRDID) [default: or] |
 | `--anticipation <ANTICIPATION>` | Periods before treatment in which units may anticipate it (did's anticipation) [default: 0] |
 | `--bootstrap <BOOTSTRAP>` | Unit-bootstrap replications for SEs (at least 50), or 0 for analytic SEs [default: 999] |
+| `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
 
 #### `p2a causal tmle`
 
@@ -1805,6 +1810,7 @@ p2a causal stdreg [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> <DATASET
 | `--se-method <SE_METHOD>` | SE method: bootstrap (default; also boot), delta or sandwich (also robust) [default: bootstrap] |
 | `--bootstrap <BOOTSTRAP>` | Number of bootstrap replications (default: 999) [default: 999] |
 | `--interactions` | Include treatment-covariate interactions in outcome model |
+| `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
 
 ### `p2a discrete`
 
