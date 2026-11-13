@@ -89,10 +89,11 @@ pub enum SCPIConstraint {
         lambda: f64,
     },
 
-    /// Lasso penalty combined with simplex constraints.
-    /// Sparse, interpretable weights that sum to 1.
+    /// Lasso penalty combined with simplex constraints. On the simplex the L1
+    /// norm of the weights is 1, so the penalty is a constant and the weights are
+    /// the simplex weights whatever `lambda` (a warning says so).
     LassoSimplex {
-        /// L1 regularization parameter
+        /// L1 regularization parameter (no effect on the simplex)
         lambda: f64,
     },
 }
@@ -754,7 +755,14 @@ fn estimate_weights(
     warnings: &mut Vec<String>,
 ) -> EconResult<Array1<f64>> {
     match constraint {
-        SCPIConstraint::Simplex => {
+        SCPIConstraint::Simplex | SCPIConstraint::LassoSimplex { .. } => {
+            if matches!(constraint, SCPIConstraint::LassoSimplex { .. }) {
+                warnings.push(
+                    "lasso_simplex: on the simplex the L1 penalty is constant, so lambda has no \
+                     effect; the weights are the simplex weights"
+                        .to_string(),
+                );
+            }
             let qp = solve_simplex_weights(y, x)?;
             if !qp.unique {
                 warnings.push(format!(
@@ -769,10 +777,6 @@ fn estimate_weights(
         SCPIConstraint::Lasso { lambda } => solve_lasso_weights(y, x, *lambda, max_iter, tolerance),
 
         SCPIConstraint::Ridge { lambda } => solve_ridge_weights(y, x, *lambda),
-
-        SCPIConstraint::LassoSimplex { lambda } => {
-            solve_lasso_simplex_weights(y, x, *lambda, max_iter, tolerance)
-        }
     }
 }
 
@@ -895,102 +899,6 @@ fn solve_ridge_weights(
     let w = xtx_inv.dot(&xy);
 
     Ok(w)
-}
-
-/// Solve for weights with Lasso penalty under simplex constraints.
-///
-/// Uses ADMM (Alternating Direction Method of Multipliers).
-fn solve_lasso_simplex_weights(
-    y: &ArrayView1<f64>,
-    x: &ArrayView2<f64>,
-    lambda: f64,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<Array1<f64>> {
-    let n = x.ncols();
-    let rho = 1.0; // ADMM penalty parameter
-
-    // Precompute matrices
-    let xtx_mat = xtx(x);
-    let xy = xty(x, &y.to_owned());
-
-    // (X'X + ρI)⁻¹
-    let mut a_inv_mat = xtx_mat.clone();
-    for i in 0..n {
-        a_inv_mat[[i, i]] += rho;
-    }
-    let a_inv = cholesky_inverse(&a_inv_mat.view()).map_err(|e| {
-        EconError::Computation(format!(
-            "Lasso-simplex weight estimation failed: Matrix inversion error: {:?}",
-            e
-        ))
-    })?;
-
-    // Initialize variables
-    let mut w = Array1::from_elem(n, 1.0 / n as f64);
-    let mut z = w.clone();
-    let mut u: Array1<f64> = Array1::zeros(n); // Dual variable
-
-    for _ in 0..max_iter {
-        crate::resource::checkpoint()?;
-
-        let w_old = w.clone();
-
-        // w-update: minimize ||y - Xw||² + (ρ/2)||w - z + u||²
-        // w = (X'X + ρI)⁻¹ (X'y + ρ(z - u))
-        let rhs = &xy + &((&z - &u) * rho);
-        w = a_inv.dot(&rhs);
-
-        // z-update: simplex projection with L1 penalty
-        // z = argmin λ||z||₁ + (ρ/2)||w + u - z||²  s.t. simplex
-        let v = &w + &u;
-
-        // Apply soft-thresholding then project to simplex
-        let v_thresh: Array1<f64> = v.mapv(|x| soft_threshold(x, lambda / rho));
-        z = project_to_simplex(&v_thresh);
-
-        // u-update
-        u = &u + &(&w - &z);
-
-        // Check convergence
-        let primal_res: f64 = (&w - &z).iter().map(|&x| x * x).sum::<f64>().sqrt();
-        let dual_res: f64 = (&w - &w_old).iter().map(|&x| x * x).sum::<f64>().sqrt() * rho;
-
-        if primal_res < tolerance && dual_res < tolerance {
-            break;
-        }
-    }
-
-    Ok(z)
-}
-
-/// Project a vector onto the simplex (Σx = 1, x ≥ 0).
-///
-/// Uses Duchi et al. (2008) algorithm.
-fn project_to_simplex(v: &Array1<f64>) -> Array1<f64> {
-    let _n = v.len();
-
-    // Sort in descending order
-    let mut sorted: Vec<(usize, f64)> = v.iter().cloned().enumerate().collect();
-    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-    // Find threshold
-    let mut cumsum = 0.0;
-    let mut rho = 0;
-
-    for (i, (_, val)) in sorted.iter().enumerate() {
-        cumsum += val;
-        if val - (cumsum - 1.0) / (i + 1) as f64 > 0.0 {
-            rho = i + 1;
-        }
-    }
-
-    let theta = (sorted[..rho].iter().map(|(_, v)| v).sum::<f64>() - 1.0) / rho as f64;
-
-    // Project
-    let result: Array1<f64> = v.mapv(|x| (x - theta).max(0.0));
-
-    result
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1263,6 +1171,32 @@ mod tests {
         println!("Ridge result:\n{}", result);
     }
 
+    /// CAUS-81: on the simplex the L1 norm is 1, so lasso_simplex is the simplex
+    /// least squares fit whatever lambda (before, ADMM stopped at weights that
+    /// depended on lambda and the iteration limit).
+    #[test]
+    fn test_lasso_simplex_equals_simplex() {
+        let (treated, donors) = generate_test_data();
+        let simplex = run_scpi(&treated.view(), &donors.view(), 7, SCPIConfig::default()).unwrap();
+        for lambda in [0.05, 0.2, 1.0] {
+            let config = SCPIConfig {
+                constraint: SCPIConstraint::LassoSimplex { lambda },
+                ..Default::default()
+            };
+            let r = run_scpi(&treated.view(), &donors.view(), 7, config).unwrap();
+            for (a, b) in r.weights.iter().zip(simplex.weights.iter()) {
+                assert!((a - b).abs() <= 1e-10, "lambda {lambda}: {a} vs {b}");
+            }
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("lasso_simplex: on the simplex the L1 penalty")),
+                "{:?}",
+                r.warnings
+            );
+        }
+    }
+
     #[test]
     fn test_scpi_lasso_simplex() {
         let (treated, donors) = generate_test_data();
@@ -1280,19 +1214,6 @@ mod tests {
         assert!(result.weights.iter().all(|&w| w >= -1e-6));
 
         println!("Lasso-Simplex result:\n{}", result);
-    }
-
-    #[test]
-    fn test_project_to_simplex() {
-        // Test simplex projection
-        let v = array![0.5, 0.3, -0.1, 0.8];
-        let projected = project_to_simplex(&v);
-
-        // Should sum to 1
-        assert_relative_eq!(projected.sum(), 1.0, epsilon = 1e-10);
-
-        // Should be non-negative
-        assert!(projected.iter().all(|&x| x >= -1e-10));
     }
 
     #[test]

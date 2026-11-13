@@ -1593,7 +1593,7 @@ pub struct ScpiRequest {
 
     /// Constraint type
     #[schemars(
-        description = "Weight constraint: 'simplex' (default, non-negative weights summing to 1), 'lasso', 'ridge' or 'lasso_simplex'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Weight constraint: 'simplex' (default, non-negative weights summing to 1), 'lasso', 'ridge' or 'lasso_simplex' (same weights as simplex: the L1 norm is 1 on the simplex). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub constraint: Option<String>,
 

@@ -1899,7 +1899,7 @@ impl AnalyticsServer {
         description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
         Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification \
         through prediction intervals that account for both in-sample and out-of-sample variance. \
-        Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). \
+        Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (same weights as simplex: the L1 norm is 1 on the simplex). \
         Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
         Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics. \
         Units may be identified by text or integer ids; the panel must be balanced."

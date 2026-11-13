@@ -12,6 +12,12 @@ simulation-based construction (CAUS-32, open); the interval width is constant ov
 - Weights: simplex (`min ||y - X w||^2`, `w >= 0`, `sum w = 1`, the exact simplex QP shared with the
   synthetic control; non-unique optima give the minimum-norm weights and a warning), lasso, ridge or
   lasso-simplex. Penalties must be finite, ridge lambda > 0, lasso lambda >= 0.
+- Lasso-simplex (CAUS-81): on the simplex `sum |w| = 1`, so the L1 penalty is a constant and the
+  problem is the simplex least squares fit; `lasso_simplex` returns the simplex weights for every
+  lambda, with the warning "lasso_simplex: on the simplex the L1 penalty is constant, so lambda has
+  no effect; the weights are the simplex weights". Before, an ADMM loop stopped at weights that
+  moved with lambda and the iteration limit (`test_lasso_simplex_equals_simplex`: lambda 0.05, 0.2
+  and 1 give the simplex weights to 1e-10).
 - In-sample variance: `SSE / T0`.
 - Out-of-sample variance: gaussian `SSE / (T0 - J)` (needs T0 > J), subgaussian
   `1.5 (median|e| / qnorm(0.75))^2`, or the mean squared leave-one-out or k-fold prediction error of
