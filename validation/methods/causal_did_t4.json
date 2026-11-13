@@ -17,14 +17,17 @@
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_varying_notyet_cs_panel",
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_universal_group_overall_cs_panel",
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_small_cohorts_drops_first_period_units",
-        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_cov_group_overall"
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_cov_group_overall",
+        "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_analytic",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did"
       ],
       "quantities": [
         "ATT(g,t) and SE with the varying base",
         "Wald pre-test W, df, p",
         "aggte group (overall and per group), simple overall, dynamic per event time",
         "units dropped as treated in the first period; did's small-group warning",
-        "group and simple overall with covariates (OR, IPW, DR; anticipation 0 and 1)"
+        "group and simple overall with covariates (OR, IPW, DR; anticipation 0 and 1)",
+        "MCP staggered_did: the group-weighted overall ATT and SE in the tool text (varying base, never-treated) and in the result (DR, not-yet-treated, anticipation 1)"
       ],
       "tolerance": "validation/README.md, n = 720 / 264 / 1200 rows: Tol::coef/se/stat/p_value(n); Tol::iterative(1e-8) for IPW and DR",
       "deviations": [

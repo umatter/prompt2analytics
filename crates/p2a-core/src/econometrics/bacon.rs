@@ -562,7 +562,9 @@ pub fn bacon_decomp(
     // Each unit's timing: the first period with treatment 1 (none: never treated;
     // the first period of the panel: always treated, as bacondecomp's
     // `treat_time == min(time)`).
-    let first_time = times.first().copied().unwrap_or_default();
+    let Some(&first_time) = times.first() else {
+        return Err(EconError::EmptyDataset);
+    };
     let mut first_treat: BTreeMap<i64, Option<i64>> = BTreeMap::new();
     for i in 0..n {
         let entry = first_treat.entry(unit[i] as i64).or_insert(None);
@@ -2180,9 +2182,17 @@ mod tests {
             .collect()
     }
 
+    /// The panel of the `bacon_always_treated` case, read from its CSV for the property
+    /// tests below, which compare no R value.
+    fn always_panel() -> Dataset {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../validation/datasets/generated/bacon_always_panel.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).expect("bacon_always_panel.csv"))
+    }
+
     /// `bacon_always_panel` with column `col` replaced by `f(row, unit, time)`.
     fn always_panel_with(col: &str, f: impl Fn(usize, i64, i64) -> f64) -> Dataset {
-        let (_, ds) = crate::test_support::load_case("bacon_always_treated");
+        let ds = always_panel();
         let (u, t) = (f64s_of(&ds, "unit"), f64s_of(&ds, "time"));
         let ut: Vec<(i64, i64)> = u
             .iter()
@@ -2199,7 +2209,7 @@ mod tests {
 
     #[test]
     fn test_bacon_refuses_treatment_reversal() {
-        let (_, ds) = crate::test_support::load_case("bacon_always_treated");
+        let ds = always_panel();
         let d = f64s_of(&ds, "D");
         let reversed = always_panel_with("D", |i, u, t| if u == 20 && t == 8 { 0.0 } else { d[i] });
         match bacon_decomp(&reversed, "y", "unit", "time", "D") {
@@ -2220,7 +2230,7 @@ mod tests {
 
     #[test]
     fn test_bacon_refuses_non_binary_treatment() {
-        let (_, ds) = crate::test_support::load_case("bacon_always_treated");
+        let ds = always_panel();
         let d = f64s_of(&ds, "D");
         let two = always_panel_with("D", |i, _, _| 2.0 * d[i]);
         match bacon_decomp(&two, "y", "unit", "time", "D") {
@@ -2237,7 +2247,7 @@ mod tests {
     /// same with shifted labels.
     #[test]
     fn test_bacon_negative_period_cohort() {
-        let (_, ds) = crate::test_support::load_case("bacon_always_treated");
+        let ds = always_panel();
         let a = bacon_decomp(&ds, "y", "unit", "time", "D").unwrap();
         let shifted = always_panel_with("time", |_, _, t| (t - 5) as f64);
         let b = bacon_decomp(&shifted, "y", "unit", "time", "D").unwrap();
