@@ -35,7 +35,8 @@
 //!       which asks for a decrease, would refuse the last Newton step near the estimate and
 //!       stop short of glm's); at most 50 halvings, and when none is accepted the iterate
 //!       stays and the fit has converged.
-//! 4. Standard errors come from the inverse Hessian at the final weights.
+//! 4. Standard errors are the inverse Hessian at the final weights (dispersion 1 for
+//!    binomial and Poisson, deviance / df for Gaussian).
 //!
 //! # References
 //!
@@ -80,8 +81,8 @@ use crate::traits::estimator::{
 };
 
 use super::hdfe::{
-    FactorInfo, WeightedProjector, demean_matrix_map, factor_info, fe_label, screen_regressors,
-    weighted_demean_map, weighted_demean_matrix_map,
+    FactorInfo, WeightedProjector, compute_absorbed_df, demean_matrix_map, factor_info, fe_label,
+    screen_regressors, weighted_demean_map, weighted_demean_matrix_map,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -288,7 +289,8 @@ impl GlmFamily {
                 y * mu_safe.ln() - mu_safe - statrs::function::gamma::ln_gamma(y + 1.0)
             }
             GlmFamily::Gaussian => {
-                // -0.5 * (y - μ)² (up to a constant)
+                // The kernel -0.5 (y - μ)²; the fit's log-likelihood uses sigma^2 = SSR / n
+                // (glm's logLik) instead of summing this
                 -0.5 * (y - mu).powi(2)
             }
         }
@@ -419,25 +421,27 @@ pub struct FeglmResult {
     // ═══════════════════════════════════════════════════════════════════════════
     // Fit Statistics
     // ═══════════════════════════════════════════════════════════════════════════
-    /// Log-likelihood at convergence
+    /// Log-likelihood at convergence (glm's `logLik`; Gaussian at sigma^2 = SSR / n)
     pub log_likelihood: f64,
-    /// Null log-likelihood (intercept-only model)
+    /// Log-likelihood of the intercept-only model on the rows used
     pub log_likelihood_null: f64,
     /// Deviance at convergence
     pub deviance: f64,
-    /// Null deviance
+    /// Deviance of the intercept-only model on the rows used
     pub null_deviance: f64,
     /// McFadden's Pseudo R-squared: 1 - LL/LL_null
     pub pseudo_r_squared: f64,
-    /// AIC: 2k - 2*LL
+    /// AIC: 2p - 2 LL, p counting the slopes, the absorbed effects (`df_absorbed`) and, for
+    /// Gaussian, sigma (glm with factor dummies)
     pub aic: f64,
-    /// BIC: k*ln(n) - 2*LL
+    /// BIC: p ln(n) - 2 LL, with the AIC's p
     pub bic: f64,
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Dispersion (for Poisson)
+    // Dispersion
     // ═══════════════════════════════════════════════════════════════════════════
-    /// Dispersion parameter (1.0 for binomial, estimated for Poisson if overdispersed)
+    /// Dispersion parameter: 1 for binomial and Poisson, as glm, alpaca and fixest;
+    /// deviance / df_resid for Gaussian
     pub dispersion: f64,
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -575,6 +579,11 @@ impl fmt::Display for FeglmResult {
     }
 }
 
+/// glm's Gaussian log-likelihood at the ML variance `ssr / n`: `-n/2 (ln(2 pi ssr / n) + 1)`.
+fn gaussian_log_lik(ssr: f64, n: f64) -> f64 {
+    -0.5 * n * ((2.0 * std::f64::consts::PI * ssr / n).ln() + 1.0)
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -685,24 +694,6 @@ fn validate_config(config: &FeglmConfig) -> EconResult<()> {
         ));
     }
     Ok(())
-}
-
-/// Compute degrees of freedom absorbed by fixed effects.
-fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
-    if factors.is_empty() {
-        return 0;
-    }
-
-    let total_levels: usize = factors.iter().map(|f| f.n_levels).sum();
-
-    // For multi-way FE, there's redundancy
-    let redundant = if factors.len() > 1 {
-        factors.len() - 1
-    } else {
-        0
-    };
-
-    total_levels.saturating_sub(redundant)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -911,7 +902,8 @@ pub fn run_feglm(
     let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
     let k = screen.kept.len();
 
-    // Compute absorbed degrees of freedom
+    // Absorbed degrees of freedom: the connected components of the effects, as the linear
+    // HDFE estimator counts them
     let df_absorbed = compute_absorbed_df(&factors);
 
     // Check we have enough observations
@@ -1087,74 +1079,50 @@ pub fn run_feglm(
     // Final μ (in step with η) and log-likelihood
     let mu_final = mu;
 
-    let log_likelihood: f64 = y
-        .iter()
-        .zip(mu_final.iter())
-        .map(|(&yi, &mi)| family.log_lik(yi, mi))
-        .sum();
-
-    // Null log-likelihood (intercept-only, approximated)
-    let log_likelihood_null = match family {
-        GlmFamily::Logit | GlmFamily::Probit => {
-            let p_bar = n_positive as f64 / n as f64;
-            n_positive as f64 * p_bar.ln() + (n - n_positive) as f64 * (1.0 - p_bar).ln()
-        }
-        GlmFamily::Poisson => {
-            let y_mean = y.mean().unwrap_or(1.0);
-            y.iter().map(|&yi| family.log_lik(yi, y_mean)).sum()
-        }
-        GlmFamily::Gaussian => {
-            let y_mean = y.mean().unwrap_or(0.0);
-            y.iter().map(|&yi| -0.5 * (yi - y_mean).powi(2)).sum()
-        }
-    };
-
     // Deviance (of the final μ, computed with the convergence check)
     let deviance: f64 = dev_old;
+    let nf = n as f64;
 
-    // Null deviance (approximated)
-    let null_deviance = match family {
-        GlmFamily::Logit | GlmFamily::Probit => -2.0 * log_likelihood_null,
-        GlmFamily::Poisson => {
-            let y_mean = y.mean().unwrap_or(1.0);
-            y.iter().map(|&yi| family.deviance(yi, y_mean)).sum()
-        }
-        GlmFamily::Gaussian => {
-            let y_mean = y.mean().unwrap_or(0.0);
-            y.iter().map(|&yi| (yi - y_mean).powi(2)).sum()
-        }
+    // Log-likelihood; Gaussian: glm's normal log-likelihood at sigma^2 = SSR / n
+    let log_likelihood: f64 = match family {
+        GlmFamily::Gaussian => gaussian_log_lik(deviance, nf),
+        _ => y
+            .iter()
+            .zip(mu_final.iter())
+            .map(|(&yi, &mi)| family.log_lik(yi, mi))
+            .sum(),
     };
 
-    // Pseudo R-squared
+    // The intercept-only model on the rows used, whose mean is the outcome mean
+    let (log_likelihood_null, null_deviance) = match family {
+        GlmFamily::Gaussian => {
+            let tss: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
+            (gaussian_log_lik(tss, nf), tss)
+        }
+        _ => y.iter().fold((0.0, 0.0), |(ll, dev), &yi| {
+            (
+                ll + family.log_lik(yi, y_mean),
+                dev + family.deviance(yi, y_mean),
+            )
+        }),
+    };
+
+    // Pseudo R-squared (McFadden's)
     let pseudo_r_squared = if log_likelihood_null.abs() > 1e-10 {
         1.0 - log_likelihood / log_likelihood_null
     } else {
         0.0
     };
 
-    // AIC and BIC
-    let aic = 2.0 * k as f64 - 2.0 * log_likelihood;
-    let bic = (k as f64) * (n as f64).ln() - 2.0 * log_likelihood;
+    // AIC and BIC count every estimated parameter, as glm with factor dummies: the slopes,
+    // the absorbed effects and, for Gaussian, sigma
+    let n_params = (k + df_absorbed + usize::from(family == GlmFamily::Gaussian)) as f64;
+    let aic = 2.0 * n_params - 2.0 * log_likelihood;
+    let bic = n_params * nf.ln() - 2.0 * log_likelihood;
 
-    // Dispersion parameter
+    // Dispersion: 1 for binomial and Poisson (glm, alpaca, fixest); deviance / df for Gaussian
     let dispersion = match family {
         GlmFamily::Gaussian => deviance / df_resid as f64,
-        GlmFamily::Poisson => {
-            // Pearson chi-squared based dispersion estimate
-            let pearson_chi2: f64 = y
-                .iter()
-                .zip(mu_final.iter())
-                .map(|(&yi, &mi)| {
-                    let var = family.variance(mi);
-                    if var > 1e-10 {
-                        (yi - mi).powi(2) / var
-                    } else {
-                        0.0
-                    }
-                })
-                .sum();
-            pearson_chi2 / df_resid as f64
-        }
         _ => 1.0,
     };
 
@@ -1192,9 +1160,9 @@ pub fn run_feglm(
     )?
     .inverse;
 
-    // Apply dispersion scaling for Gaussian/Poisson
+    // Scale by the dispersion (Gaussian only; 1 otherwise)
     let vcov = match family {
-        GlmFamily::Gaussian | GlmFamily::Poisson => &vcov * dispersion,
+        GlmFamily::Gaussian => &vcov * dispersion,
         _ => vcov,
     };
 
@@ -1786,7 +1754,7 @@ mod tests {
     /// FEGLM drops rows with a missing outcome, regressor or fixed-effect id, as fixest
     /// does: the fit on Grunfeld with missing cells equals the fit on its 193 complete
     /// rows. ECON-37: missing ids used to become level 0 (or "") and merge into a real
-    /// level. Not pinned to fixest: FEGLM's numbers carry ECON-20/66/67/85 (Tier 4).
+    /// level. The numbers are pinned in feglm_mle.
     #[test]
     fn test_validate_na_feglm_omit_and_missing_fe_ids() {
         let (case, ds) = crate::test_support::load_case("panel_grunfeld_na");
@@ -1949,7 +1917,8 @@ mod tests {
         assert!(r.converged, "{:?}", r.warnings);
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         // Gaussian coefficients are exact after one IRLS step (MAP to relative 1e-8; R
-        // replica 6.7e-16 from fixest); the SE carries ECON-20 (one-pass FE recovery).
+        // replica 6.7e-16 from fixest); the SE, deviance and dispersion carry the MAP's
+        // relative 1e-8 in the squared residuals.
         Check::new(&case)
             .named(
                 "coef_feglm_big",
@@ -1957,6 +1926,15 @@ mod tests {
                 &r.coefficients,
                 Tol::iterative(1e-8),
             )
+            .named(
+                "se_feglm_big_lm",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-6),
+            )
+            .scalar("deviance_big", r.deviance, Tol::iterative(1e-6))
+            .scalar("dispersion_big", r.dispersion, Tol::iterative(1e-6))
+            .scalar("df_resid", r.df_resid as f64, Tol::exact())
             .finish();
     }
 
@@ -2017,7 +1995,8 @@ mod tests {
         assert!(format!("{r}").contains("Converged: no (1 iteration"));
     }
 
-    /// fixest::feglm(gaussian) on feglm_families: the coefficients, the residual df and n.
+    /// fixest::feglm(gaussian) and lm on feglm_families: the coefficients, lm's SEs, the
+    /// deviance and dispersion, glm's log-likelihood, the residual df and n.
     #[test]
     fn test_validate_feglm_gaussian_families() {
         use p2a_validation::{Check, Tol};
@@ -2031,10 +2010,12 @@ mod tests {
             None,
         )
         .unwrap();
-        // deviation ECON-20: gauss_se_lm, gauss_deviance, gauss_dispersion (eta's one-pass FE recovery)
-        // deviation ECON-66: gauss_loglik_glm
         Check::new(&case)
             .named("gauss_coef", &r.variables, &r.coefficients, Tol::coef(480))
+            .named("gauss_se_lm", &r.variables, &r.std_errors, Tol::se(480))
+            .scalar("gauss_deviance", r.deviance, Tol::stat(480))
+            .scalar("gauss_dispersion", r.dispersion, Tol::stat(480))
+            .scalar("gauss_loglik_glm", r.log_likelihood, Tol::stat(480))
             .scalar("gauss_df_resid", r.df_resid as f64, Tol::exact())
             .scalar("n_obs", r.n_obs as f64, Tol::exact())
             .finish();
@@ -2113,7 +2094,27 @@ mod tests {
                     r.n_positive as f64,
                     Tol::exact(),
                 )
+                .named(&format!("{p}_se"), &r.variables, &r.std_errors, Tol::se(n))
+                .scalar(&format!("{p}_loglik"), r.log_likelihood, Tol::stat(n))
+                .scalar(
+                    &format!("{p}_loglik_null"),
+                    r.log_likelihood_null,
+                    Tol::stat(n),
+                )
+                .scalar(&format!("{p}_aic"), r.aic, Tol::stat(n))
+                .scalar(&format!("{p}_bic"), r.bic, Tol::stat(n))
+                .scalar(&format!("{p}_deviance"), r.deviance, Tol::stat(n))
+                .scalar(&format!("{p}_null_deviance"), r.null_deviance, Tol::stat(n))
+                .scalar(&format!("{p}_df_resid"), r.df_resid as f64, Tol::exact())
+                .scalar(
+                    &format!("{p}_df_absorbed"),
+                    r.df_absorbed as f64,
+                    Tol::exact(),
+                )
                 .finish();
+            // dispersion 1 (glm, alpaca, fixest): no "Dispersion" line
+            assert_eq!(r.dispersion, 1.0, "{p}");
+            assert!(!r.to_string().contains("Dispersion"), "{p}");
             if family == GlmFamily::Poisson {
                 assert_eq!(r.n_separated, 0, "{p}");
                 assert!(r.warnings.is_empty(), "{p}: {:?}", r.warnings);
@@ -2206,6 +2207,15 @@ mod tests {
             .scalar("logit_nobs", r.n_obs as f64, Tol::exact())
             .scalar("logit_n_dropped", r.n_separated as f64, Tol::exact())
             .scalar("logit_n_positive", r.n_positive as f64, Tol::exact())
+            .named("logit_se", &r.variables, &r.std_errors, Tol::se(120))
+            .scalar("logit_loglik", r.log_likelihood, Tol::stat(120))
+            .scalar("logit_loglik_null", r.log_likelihood_null, Tol::stat(120))
+            .scalar("logit_aic", r.aic, Tol::stat(120))
+            .scalar("logit_bic", r.bic, Tol::stat(120))
+            .scalar("logit_deviance", r.deviance, Tol::stat(120))
+            .scalar("logit_null_deviance", r.null_deviance, Tol::stat(120))
+            .scalar("logit_df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("logit_df_absorbed", r.df_absorbed as f64, Tol::exact())
             .finish();
 
         let r = fit("y_cnt", GlmFamily::Poisson);
@@ -2221,6 +2231,15 @@ mod tests {
             .scalar("poisson_nobs", r.n_obs as f64, Tol::exact())
             .scalar("poisson_n_dropped", r.n_separated as f64, Tol::exact())
             .scalar("poisson_n_positive", r.n_positive as f64, Tol::exact())
+            .named("poisson_se", &r.variables, &r.std_errors, Tol::se(175))
+            .scalar("poisson_loglik", r.log_likelihood, Tol::stat(175))
+            .scalar("poisson_loglik_null", r.log_likelihood_null, Tol::stat(175))
+            .scalar("poisson_aic", r.aic, Tol::stat(175))
+            .scalar("poisson_bic", r.bic, Tol::stat(175))
+            .scalar("poisson_deviance", r.deviance, Tol::stat(175))
+            .scalar("poisson_null_deviance", r.null_deviance, Tol::stat(175))
+            .scalar("poisson_df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("poisson_df_absorbed", r.df_absorbed as f64, Tol::exact())
             .finish();
 
         let r = fit("y_gauss", GlmFamily::Gaussian);
@@ -2229,6 +2248,15 @@ mod tests {
         Check::new(&case)
             .named("gauss_coef", &r.variables, &r.coefficients, Tol::coef(181))
             .scalar("gauss_nobs", r.n_obs as f64, Tol::exact())
+            .named("gauss_se", &r.variables, &r.std_errors, Tol::se(181))
+            .scalar("gauss_loglik", r.log_likelihood, Tol::stat(181))
+            .scalar("gauss_loglik_null", r.log_likelihood_null, Tol::stat(181))
+            .scalar("gauss_aic", r.aic, Tol::stat(181))
+            .scalar("gauss_bic", r.bic, Tol::stat(181))
+            .scalar("gauss_deviance", r.deviance, Tol::stat(181))
+            .scalar("gauss_null_deviance", r.null_deviance, Tol::stat(181))
+            .scalar("gauss_df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("gauss_df_absorbed", r.df_absorbed as f64, Tol::exact())
             .finish();
     }
 
@@ -2272,5 +2300,109 @@ mod tests {
             Err(e) => panic!("expected InsufficientData, got: {e}"),
             Ok(_) => panic!("expected InsufficientData, got Ok"),
         }
+    }
+
+    /// lm with factor dummies on a two-way design of two disconnected components: the
+    /// absorbed df count the components (24, not the naive 25), so the residual df and the
+    /// SEs are lm's.
+    #[test]
+    fn test_validate_feglm_disconnected_gaussian() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hdfe_disconnected");
+        let r = run_feglm(
+            &ds,
+            "y",
+            &["x", "z"],
+            &["firm", "year"],
+            GlmFamily::Gaussian,
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(80))
+            .named("se", &r.variables, &r.std_errors, Tol::se(80))
+            .scalar("df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("df_absorbed", r.df_absorbed as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+    }
+
+    /// 50 disconnected 2 x 2 blocks (200 rows): 150 absorbed df, 49 residual df, and the
+    /// Gaussian fit equals the linear HDFE estimator's.
+    #[test]
+    fn test_feglm_many_components_matches_hdfe() {
+        let n = 200;
+        let firm: Vec<i64> = (0..n).map(|i| ((i / 4) * 2 + i % 2) as i64).collect();
+        let year: Vec<i64> = (0..n).map(|i| ((i / 4) * 2 + (i / 2) % 2) as i64).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 37) % 17) as f64 / 7.0 + 0.1 * (i % 5) as f64)
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.8 * x[i] + 0.05 * firm[i] as f64 + ((i * 53) % 29) as f64 / 13.0)
+            .collect();
+        let ds = Dataset::new(df! { "firm" => firm, "year" => year, "x" => x, "y" => y }.unwrap());
+        let r = run_feglm(
+            &ds,
+            "y",
+            &["x"],
+            &["firm", "year"],
+            GlmFamily::Gaussian,
+            None,
+        )
+        .unwrap();
+        assert_eq!((r.df_absorbed, r.df_resid), (150, 49));
+        let h = crate::econometrics::hdfe::run_hdfe(
+            &ds,
+            "y",
+            &["x"],
+            &["firm", "year"],
+            None,
+            crate::regression::CovarianceType::Standard,
+        )
+        .unwrap();
+        assert_eq!(h.df_resid, r.df_resid);
+        let tol = p2a_validation::Tol::new(1e-10, 1e-10);
+        assert!(tol.allows(r.coefficients[0], h.coefficients[0]));
+        assert!(
+            tol.allows(r.std_errors[0], h.std_errors[0]),
+            "{} vs {}",
+            r.std_errors[0],
+            h.std_errors[0]
+        );
+    }
+
+    /// Gaussian with id and time effects on feglm_mle: every reported number is glm's (lm's
+    /// for the SEs and the dispersion), and the pseudo R-squared is McFadden's on the normal
+    /// log-likelihood.
+    #[test]
+    fn test_validate_feglm_mle_gaussian() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("feglm_mle");
+        let r = run_feglm(
+            &ds,
+            "y_gauss",
+            &["x", "x2"],
+            &["id", "time"],
+            GlmFamily::Gaussian,
+            Some(tight()),
+        )
+        .unwrap();
+        assert!(r.converged && r.warnings.is_empty(), "{:?}", r.warnings);
+        Check::new(&case)
+            .named("gauss2_coef", &r.variables, &r.coefficients, Tol::coef(480))
+            .named("gauss2_se", &r.variables, &r.std_errors, Tol::se(480))
+            .scalar("gauss2_loglik", r.log_likelihood, Tol::stat(480))
+            .scalar("gauss2_loglik_null", r.log_likelihood_null, Tol::stat(480))
+            .scalar("gauss2_aic", r.aic, Tol::stat(480))
+            .scalar("gauss2_bic", r.bic, Tol::stat(480))
+            .scalar("gauss2_deviance", r.deviance, Tol::stat(480))
+            .scalar("gauss2_null_deviance", r.null_deviance, Tol::stat(480))
+            .scalar("gauss2_dispersion", r.dispersion, Tol::stat(480))
+            .scalar("gauss2_df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("gauss2_df_absorbed", r.df_absorbed as f64, Tol::exact())
+            .scalar("gauss2_nobs", r.n_obs as f64, Tol::exact())
+            .finish();
+        let mcfadden = 1.0 - r.log_likelihood / r.log_likelihood_null;
+        assert!((r.pseudo_r_squared - mcfadden).abs() <= 1e-12);
     }
 }

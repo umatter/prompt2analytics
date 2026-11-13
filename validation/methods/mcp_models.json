@@ -84,18 +84,13 @@
         "logit coefficients and SEs (logit_coef, logit_se), probit coefficients and SEs (probit_coef_tight, probit_se_tight), aliased row, outcome domain, convergence line",
         "multinom coefficients and SEs (two references, tight MLE)",
         "hurdle binary-part coefficients (zero_coef) and SEs (zero_se_tight)",
-        "FEGLM gaussian coefficients"
+        "FEGLM gaussian coefficients and SEs"
       ],
       "tolerance": "text at the printed precision (4 decimals, Tol::printed)",
       "deviations": [
         {
           "finding": "ECON-16",
           "quantity": "hurdle count part",
-          "note": "not pinned (Tier 4)"
-        },
-        {
-          "finding": "ECON-20",
-          "quantity": "FEGLM SEs, deviance",
           "note": "not pinned (Tier 4)"
         }
       ],
