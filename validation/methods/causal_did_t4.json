@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "bacon_always_treated",
+      "name": "Goodman-Bacon decomposition with always-treated units and a cohort at period 0",
+      "category": "econometrics",
+      "reference": "bacondecomp 0.1.1 bacon (Later vs Always Treated); fixest 0.14.2 feols two-way fixed effects",
+      "doc": "validation/econometrics/bacon.md",
+      "cases": [
+        "bacon_always_treated"
+      ],
+      "tests": [
+        "p2a-core::econometrics::bacon::tests::test_validate_bacon_always_treated"
+      ],
+      "quantities": [
+        "components (treated, control, never flag, estimate, weight)",
+        "type weights and estimates",
+        "TWFE coefficient and the identity"
+      ],
+      "tolerance": "validation/README.md, n = 400: Tol::coef(400)",
+      "deviations": [
+        {
+          "finding": "CAUS-53",
+          "quantity": "unbalanced panels",
+          "note": "bacondecomp refuses them; p2a warns that the identity is not guaranteed"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

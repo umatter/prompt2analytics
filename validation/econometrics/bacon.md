@@ -21,6 +21,30 @@ The Goodman-Bacon (2021) decomposition breaks down a two-way fixed effects (TWFE
 | Treated vs Never-Treated | Units that eventually get treated vs. units that never do | Yes |
 | Treated vs Not-Yet-Treated | Early-treated vs. later-treated (before later is treated) | Yes |
 | Later vs Earlier Treated | Late-treated vs. early-treated (both already treated) | Potentially problematic |
+| Later vs Always Treated | A cohort vs. units treated from the first period, over the whole panel (bacondecomp's type) | Potentially problematic |
+
+Each unit's timing is the first period with treatment 1: never treated, always treated (that
+period is the first period of the panel, bacondecomp's `treat_time == min(time)`), or a cohort,
+whatever the sign of its period (a cohort first treated at period 0 or earlier is kept; before,
+0 was the never-treated sentinel and cohorts at or below 0 were lost). Always-treated units are
+their own control group, never pooled with the never-treated units. `BaconComponent::control_group`
+is 0 for never-treated controls and `control_is_never` tells them apart from a cohort first
+treated at 0. The treatment must be 0/1 (another value is `InvalidSpecification` naming it) and
+absorbing: a unit whose treatment falls from 1 to 0 is bacondecomp's error "Treatment not weakly
+increasing with time", followed by the unit and the two periods.
+
+### R reference: case `bacon_always_treated` (R-pinned)
+
+`validation/r/cases/causal_did_t4.R`, registry `validation/methods/causal_did_t4.json`:
+`bacondecomp::bacon` on `bacon_always_panel.csv` (40 units, periods 0-9; 8 never treated, 8
+always treated, cohorts 3/5/7), components sorted as R by (treated, control) with never treated
+last; TWFE 0.864032490988159 (fixest), the identity to 1e-10; type totals (weight / estimate):
+Later vs Always 0.3526315789473684 / 0.18119666664366457, Treated vs Untreated
+0.3526315789473684 / 1.511423232330225. `test_validate_bacon_always_treated` pins the 12
+components, the four type totals and the TWFE coefficient (`Tol::coef(400)`);
+`test_bacon_refuses_treatment_reversal`, `test_bacon_refuses_non_binary_treatment` and
+`test_bacon_negative_period_cohort` (periods shifted by -5 give the same components) are fixture
+tests.
 
 ### Weight Formula
 
@@ -223,7 +247,7 @@ R-pinned through the case `bacon_twfe` above.
 
 ## Known Limitations
 
-1. **Assumes no treatment reversals**: Once treated, units remain treated
+1. **No treatment reversals**: a treatment that falls from 1 to 0 is refused, as bacondecomp
 2. **Balanced panels**: on an unbalanced panel the weighted sum is not the TWFE coefficient (a
    warning says so; bacondecomp refuses such panels)
 3. **Precision with few timing groups**: Standard errors not computed (use bootstrap separately)
