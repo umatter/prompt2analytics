@@ -1088,8 +1088,9 @@ mod tests {
     fn test_fisher_one_sided_p_does_not_walk_below_the_support() {
         // x = lo = 1e12 - 1 with a two-point support: statrs' cdf(x), which the old code
         // called, adds 1e12 zero terms below the support first and never returns. R:
-        // phyper(1e12 - 1, 1e12, 2, 1e12 + 1) = 1e12 / (1e12 + 2). The tolerance is loose because statrs' ln_gamma, which the
-        // log binomials use, has an absolute error of about 1e-2 at 1e12.
+        // phyper(1e12 - 1, 1e12, 2, 1e12 + 1) = 1e12 / (1e12 + 2). The tolerance is loose
+        // because statrs' ln_gamma, which the log binomials use, has an absolute error of
+        // about 1e-2 at 1e12.
         let t = [[1e12 - 1.0, 2.0], [1.0, 0.0]];
         let less = fisher_exact_test(&t, FisherAlternative::Less, None).unwrap();
         assert!((less.p_value - 1.0).abs() < 0.05, "{}", less.p_value);

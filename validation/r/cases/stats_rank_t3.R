@@ -224,8 +224,8 @@ case("stat_rank_binom", "stats/binom", "Exact binomial test (two-sided relative-
     x = c(15, 0, 10, 3, 7, 1, 2, 5, 6, 3, 1, 10, 95, 7, 12, 2, 60, 4, 9, 0, 30, 18, 40),
     n = c(100, 10, 20, 10, 10, 10, 10, 100, 50, 10, 10, 10, 100, 20, 20, 20, 100, 25, 25, 20, 60, 60, 60),
     p = c(0.1, 0.3, 0.5, 0.37, 0.75, 0.05, 0.05, 0.01, 0.05, 0.1, 0.19, 0.05, 0.5, 0.3, 0.3, 0.3, 0.5, 0.3, 0.3, 0.05, 0.4, 0.4, 0.4))
-  # Cells where p2a's two-sided rule differs from binom.test (STAT-15, Tier 4): x = floor(np) < np, or
-  # no lower-tail cell qualifies (the spurious P(X = 0)), or x = n.
+  # Cells of the former STAT-15 difference (fixed in Tier 4): x = floor(np) < np, or no lower-tail
+  # cell qualifies (the former spurious P(X = 0)), or x = n.
   g$stat15 <- as.integer(seq_len(nrow(g)) %in% c(4:12))
   g$label <- sprintf("r%02d", seq_len(nrow(g)))
   d <- ctx$gen_dataset("rank_binom_grid", g[, c("label", "x", "n", "p", "stat15")])
@@ -234,7 +234,7 @@ case("stat_rank_binom", "stats/binom", "Exact binomial test (two-sided relative-
   all_rows <- seq_len(nrow(d)); ok <- which(d$stat15 == 0); dev <- which(d$stat15 == 1)
   list(values = list(
          p_two = named(col(ok, function(i) bt(i, "two.sided")$p.value)),
-         p_two_stat15 = named(col(dev, function(i) bt(i, "two.sided")$p.value)),        # deviation STAT-15
+         p_two_stat15 = named(col(dev, function(i) bt(i, "two.sided")$p.value)),        # cells of the former STAT-15 difference
          p_less = named(col(all_rows, function(i) bt(i, "less")$p.value)),
          p_greater = named(col(all_rows, function(i) bt(i, "greater")$p.value)),
          ci_two_lower = named(col(all_rows, function(i) bt(i, "two.sided")$conf.int[1])),

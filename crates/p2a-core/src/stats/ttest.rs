@@ -231,6 +231,12 @@ impl std::fmt::Display for TTestResult {
 /// * `alternative` - Direction of alternative hypothesis
 /// * `conf_level` - Confidence level for interval (e.g., 0.95)
 ///
+/// # Errors
+/// `InvalidSpecification` for a level outside (0, 1) or for essentially constant data: a
+/// standard error at or below 10 machine epsilons times the absolute mean (R's `t.test` stops with
+/// "data are essentially constant"; all-zero data, where R's t is NaN, are refused too);
+/// `InsufficientData` for fewer than 2 observations.
+///
 /// # Example
 /// ```ignore
 /// let x = vec![2.1, 2.5, 2.3, 2.8, 2.6];
@@ -261,6 +267,7 @@ pub fn one_sample_t_test(
     let variance: f64 = x.iter().map(|&xi| (xi - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
     let std_dev = variance.sqrt();
     let std_error = std_dev / (n as f64).sqrt();
+    refuse_constant(std_error, mean.abs())?;
 
     // Compute t-statistic
     let t_stat = (mean - mu) / std_error;
@@ -271,7 +278,7 @@ pub fn one_sample_t_test(
 
     // Compute confidence interval
     let (ci_lower, ci_upper) =
-        compute_confidence_interval(mean, std_error, df, conf_level, alternative);
+        compute_confidence_interval(mean, std_error, df, conf_level, alternative)?;
 
     Ok(TTestResult {
         test_name: "One Sample t-test".to_string(),
@@ -305,6 +312,12 @@ pub fn one_sample_t_test(
 /// * `var_equal` - If true, use pooled variance (Student's t-test);
 ///                 if false, use Welch's t-test (recommended)
 /// * `conf_level` - Confidence level for interval (e.g., 0.95)
+///
+/// # Errors
+/// `InvalidSpecification` for a level outside (0, 1) or for essentially constant data: a
+/// standard error at or below 10 machine epsilons times the larger absolute mean (R's `t.test` stops with
+/// "data are essentially constant"; all-zero data, where R's t is NaN, are refused too);
+/// `InsufficientData` for fewer than 2 observations in a sample.
 ///
 /// # Example
 /// ```ignore
@@ -374,6 +387,7 @@ pub fn two_sample_t_test(
         let df = (v1 + v2).powi(2) / (v1.powi(2) / (n1 - 1) as f64 + v2.powi(2) / (n2 - 1) as f64);
         (t, df, se)
     };
+    refuse_constant(std_error, mean1.abs().max(mean2.abs()))?;
 
     // Compute p-value
     let p_value = compute_p_value(t_stat, df, alternative);
@@ -381,7 +395,7 @@ pub fn two_sample_t_test(
     // Confidence interval for difference in means
     let diff = mean1 - mean2;
     let (ci_lower, ci_upper) =
-        compute_confidence_interval(diff, std_error, df, conf_level, alternative);
+        compute_confidence_interval(diff, std_error, df, conf_level, alternative)?;
 
     let test_name = if var_equal {
         "Two Sample t-test (equal variances)"
@@ -419,6 +433,13 @@ pub fn two_sample_t_test(
 /// * `mu` - Hypothesized mean difference (default: 0)
 /// * `alternative` - Direction of alternative hypothesis
 /// * `conf_level` - Confidence level for interval (e.g., 0.95)
+///
+/// # Errors
+/// `InvalidSpecification` for a level outside (0, 1) or for essentially constant data: a
+/// standard error at or below 10 machine epsilons times the absolute mean difference (R's `t.test` stops with
+/// "data are essentially constant"; all-zero data, where R's t is NaN, are refused too);
+/// `InsufficientData` for fewer than 2 pairs; `InvalidSpecification` for samples of unequal
+/// length.
 ///
 /// # Example
 /// ```ignore
@@ -557,47 +578,65 @@ pub fn t_test(
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// R's `t.test` rule: the data are essentially constant when the standard error is below 10
+/// machine epsilons times the (largest absolute) mean. `<=` refuses all-zero data as well, where
+/// R's t is NaN.
+fn refuse_constant(std_error: f64, scale: f64) -> EconResult<()> {
+    if std_error <= 10.0 * f64::EPSILON * scale {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "data are essentially constant: the standard error {std_error:e} is at or below \
+                 10 machine epsilons times the mean (R's t.test stops here)"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// One-sided p-value from a two-sided one, for a statistic symmetric under the null.
+pub(crate) fn one_sided_p(p2: f64, statistic: f64, alternative: Alternative) -> f64 {
+    match alternative {
+        Alternative::TwoSided => p2,
+        Alternative::Greater if statistic > 0.0 => p2 / 2.0,
+        Alternative::Greater => 1.0 - p2 / 2.0,
+        Alternative::Less if statistic < 0.0 => p2 / 2.0,
+        Alternative::Less => 1.0 - p2 / 2.0,
+    }
+}
+
 /// Compute p-value based on alternative hypothesis.
 fn compute_p_value(t_stat: f64, df: f64, alternative: Alternative) -> f64 {
     if df.is_nan() || df <= 0.0 || t_stat.is_nan() {
         return f64::NAN;
     }
-    let p2 = t_test_p_value(t_stat, df);
-    match alternative {
-        Alternative::TwoSided => p2,
-        Alternative::Greater if t_stat > 0.0 => p2 / 2.0,
-        Alternative::Greater => 1.0 - p2 / 2.0,
-        Alternative::Less if t_stat < 0.0 => p2 / 2.0,
-        Alternative::Less => 1.0 - p2 / 2.0,
-    }
+    one_sided_p(t_test_p_value(t_stat, df), t_stat, alternative)
 }
 
-/// Compute confidence interval based on alternative hypothesis.
+/// Compute confidence interval based on alternative hypothesis. NaN bounds for a NaN or
+/// non-positive df or standard error; a failing t quantile is an error.
 fn compute_confidence_interval(
     estimate: f64,
     std_error: f64,
     df: f64,
     conf_level: f64,
     alternative: Alternative,
-) -> (f64, f64) {
+) -> EconResult<(f64, f64)> {
     if df.is_nan() || df <= 0.0 || std_error.is_nan() || std_error <= 0.0 {
-        return (f64::NAN, f64::NAN);
+        return Ok((f64::NAN, f64::NAN));
     }
     let p = match alternative {
         Alternative::TwoSided => (1.0 + conf_level) / 2.0,
         Alternative::Greater | Alternative::Less => conf_level,
     };
-    let Ok(t_crit) = t_quantile(p, df) else {
-        return (f64::NAN, f64::NAN);
-    };
-    match alternative {
+    let t_crit = t_quantile(p, df)?;
+    Ok(match alternative {
         Alternative::TwoSided => {
             let margin = t_crit * std_error;
             (estimate - margin, estimate + margin)
         }
         Alternative::Greater => (estimate - t_crit * std_error, f64::INFINITY),
         Alternative::Less => (f64::NEG_INFINITY, estimate + t_crit * std_error),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1144,6 +1183,56 @@ mod tests {
             Tol::stat(12),
         )
         .finish();
+    }
+
+    /// R's t.test stops with "data are essentially constant" when the standard error is below 10
+    /// machine epsilons times the mean; all-zero data (t = NaN in R) are refused the same way.
+    #[test]
+    fn test_t_tests_refuse_essentially_constant_data() {
+        let constant = |r: EconResult<TTestResult>, what: &str| match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("essentially constant"),
+                    "{what}: {message}"
+                )
+            }
+            other => panic!("{what}: expected InvalidSpecification, got {other:?}"),
+        };
+        let two = Alternative::TwoSided;
+        constant(one_sample_t_test(&[5.0; 4], 3.0, two, 0.95), "one sample");
+        for var_equal in [false, true] {
+            constant(
+                two_sample_t_test(&[5.0; 3], &[6.0; 3], 0.0, two, var_equal, 0.95),
+                "two samples",
+            );
+        }
+        constant(
+            paired_t_test(&[5.0, 6.0, 7.0], &[4.0, 5.0, 6.0], 0.0, two, 0.95),
+            "paired",
+        );
+        let big = 1e10 + 1.0;
+        constant(
+            one_sample_t_test(&[big, big, big + 1e-6], 0.0, two, 0.95),
+            "near-constant on a high level",
+        );
+        constant(one_sample_t_test(&[0.0; 3], 0.0, two, 0.95), "all zero");
+        // R: t.test(c(5, 5, 5.1), mu = 3)$p.value = 0.000268636673752541
+        let r = one_sample_t_test(&[5.0, 5.0, 5.1], 3.0, two, 0.95).unwrap();
+        assert!(
+            (r.p_value - 0.000268636673752541).abs() <= 1e-8 * 0.000268636673752541,
+            "{}",
+            r.p_value
+        );
+    }
+
+    #[test]
+    fn test_t_test_interval_propagates_quantile_errors() {
+        let (lo, hi) =
+            compute_confidence_interval(1.0, 0.5, 10.0, 0.95, Alternative::TwoSided).unwrap();
+        assert!(lo.is_finite() && hi.is_finite() && lo < 1.0 && hi > 1.0);
+        let (lo, hi) =
+            compute_confidence_interval(1.0, 0.5, 10.0, 0.95, Alternative::Greater).unwrap();
+        assert!(lo.is_finite() && hi == f64::INFINITY);
     }
 
     #[test]

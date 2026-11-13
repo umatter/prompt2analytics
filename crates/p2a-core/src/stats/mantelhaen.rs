@@ -36,7 +36,12 @@ use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::contingency::stratified_tables_2x2;
 use crate::traits::chi_squared_p_value;
+use crate::traits::estimator::{normal_quantile, validate_level, z_critical};
 use serde::{Deserialize, Serialize};
+
+fn default_conf_level() -> f64 {
+    0.95
+}
 
 /// Result of the Cochran-Mantel-Haenszel test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,8 +60,12 @@ pub struct MantelHaenszelResult {
     pub total_n: usize,
     /// Mantel-Haenszel common odds ratio estimate
     pub common_odds_ratio: f64,
-    /// 95% confidence interval for the common odds ratio
+    /// Confidence interval for the common odds ratio at `conf_level`: two-sided, or `(0, upper)`
+    /// for `Less` and `(lower, ∞)` for `Greater`, as R's `mantelhaen.test`
     pub odds_ratio_ci: (f64, f64),
+    /// Confidence level of `odds_ratio_ci`
+    #[serde(default = "default_conf_level")]
+    pub conf_level: f64,
     /// Whether continuity correction was applied
     pub continuity_correction: bool,
     /// Alternative hypothesis
@@ -116,8 +125,10 @@ impl std::fmt::Display for MantelHaenszelResult {
         writeln!(f, "Common odds ratio: {:.4}", self.common_odds_ratio)?;
         writeln!(
             f,
-            "95% CI: ({:.4}, {:.4})",
-            self.odds_ratio_ci.0, self.odds_ratio_ci.1
+            "{:.0}% CI: ({:.4}, {:.4})",
+            self.conf_level * 100.0,
+            self.odds_ratio_ci.0,
+            self.odds_ratio_ci.1
         )?;
         writeln!(f)?;
         writeln!(f, "Strata: {}, Total N: {}", self.n_strata, self.total_n)?;
@@ -254,6 +265,29 @@ pub fn mantelhaen_test(
     correct: bool,
     alternative: CmhAlternative,
 ) -> EconResult<MantelHaenszelResult> {
+    mantelhaen_test_with(tables, stratum_names, correct, alternative, 0.95)
+}
+
+/// [`mantelhaen_test`] with the confidence level of the odds-ratio interval.
+///
+/// The interval is R's: `OR exp(∓ z sd)` with `z = qnorm((1 + conf_level) / 2)` for the
+/// two-sided alternative, `(0, OR exp(qnorm(conf_level) sd))` for `Less` and
+/// `(OR exp(-qnorm(conf_level) sd), ∞)` for `Greater`, with `sd` from Robins, Breslow and
+/// Greenland (1986); `(0, ∞)` when either sum of the estimator is 0. The label says whether the
+/// continuity correction was applied: R applies it only when `correct` and `|DELTA| >= 0.5`.
+///
+/// # Errors
+///
+/// `InsufficientData` for no tables; `InvalidSpecification` when `conf_level` is not strictly
+/// between 0 and 1.
+pub fn mantelhaen_test_with(
+    tables: &[Table2x2],
+    stratum_names: Option<&[String]>,
+    correct: bool,
+    alternative: CmhAlternative,
+    conf_level: f64,
+) -> EconResult<MantelHaenszelResult> {
+    validate_level(conf_level, "conf_level")?;
     // Validate input
     if tables.is_empty() {
         return Err(EconError::InsufficientData {
@@ -352,12 +386,14 @@ pub fn mantelhaen_test(
     };
 
     // Confidence interval for OR using Robins et al. (1986) variance
-    let (or_lower, or_upper) = compute_or_confidence_interval(tables, common_odds_ratio, 0.95)?;
+    let (or_lower, or_upper) =
+        compute_or_confidence_interval(tables, common_odds_ratio, conf_level, alternative)?;
 
-    let test_name = if correct {
+    // The label follows the correction actually applied (R drops it when |DELTA| < 0.5).
+    let test_name = if yates > 0.0 {
         "Cochran-Mantel-Haenszel chi-squared test (with continuity correction)"
     } else {
-        "Cochran-Mantel-Haenszel chi-squared test"
+        "Cochran-Mantel-Haenszel chi-squared test (without continuity correction)"
     }
     .to_string();
 
@@ -370,6 +406,7 @@ pub fn mantelhaen_test(
         total_n: total_n as usize,
         common_odds_ratio,
         odds_ratio_ci: (or_lower, or_upper),
+        conf_level,
         continuity_correction: correct && yates > 0.0,
         alternative,
         stratum_stats,
@@ -384,6 +421,7 @@ fn compute_or_confidence_interval(
     tables: &[Table2x2],
     or_mh: f64,
     conf_level: f64,
+    alternative: CmhAlternative,
 ) -> EconResult<(f64, f64)> {
     // Robins, Breslow, Greenland (1986) variance formula
     // Var(ln(OR_MH)) ≈ Σ{P_k R_k / (2R²)} + Σ{(P_k S_k + Q_k R_k) / (2RS)} + Σ{Q_k S_k / (2S²)}
@@ -422,16 +460,23 @@ fn compute_or_confidence_interval(
         + ps_plus_qr_sum / (2.0 * r_sum * s_sum)
         + qs_sum / (2.0 * s_sum * s_sum);
 
-    // z critical value for confidence level
-    let z = crate::traits::estimator::z_critical(conf_level)?;
-
     let ln_or = or_mh.ln();
     let se_ln_or = var_ln_or.sqrt();
 
-    let lower = (ln_or - z * se_ln_or).exp();
-    let upper = (ln_or + z * se_ln_or).exp();
-
-    Ok((lower, upper))
+    Ok(match alternative {
+        CmhAlternative::TwoSided => {
+            let z = z_critical(conf_level)?;
+            ((ln_or - z * se_ln_or).exp(), (ln_or + z * se_ln_or).exp())
+        }
+        CmhAlternative::Less => {
+            let z = normal_quantile(conf_level)?;
+            (0.0, (ln_or + z * se_ln_or).exp())
+        }
+        CmhAlternative::Greater => {
+            let z = normal_quantile(conf_level)?;
+            ((ln_or - z * se_ln_or).exp(), f64::INFINITY)
+        }
+    })
 }
 
 /// Run CMH test on a Dataset with factor columns.
@@ -470,6 +515,29 @@ pub fn run_mantelhaen_test(
     correct: bool,
     alternative: CmhAlternative,
 ) -> EconResult<MantelHaenszelResult> {
+    run_mantelhaen_test_with(
+        dataset,
+        row_var,
+        col_var,
+        stratum_var,
+        correct,
+        alternative,
+        0.95,
+    )
+}
+
+/// [`run_mantelhaen_test`] with the confidence level of the odds-ratio interval (see
+/// [`mantelhaen_test_with`]); `InvalidSpecification` when it is not strictly between 0 and 1.
+pub fn run_mantelhaen_test_with(
+    dataset: &Dataset,
+    row_var: &str,
+    col_var: &str,
+    stratum_var: &str,
+    correct: bool,
+    alternative: CmhAlternative,
+    conf_level: f64,
+) -> EconResult<MantelHaenszelResult> {
+    validate_level(conf_level, "conf_level")?;
     let (strata, tables, missing) =
         stratified_tables_2x2(dataset.df(), row_var, col_var, stratum_var)?;
     let Some(first) = tables.first() else {
@@ -490,7 +558,7 @@ pub fn run_mantelhaen_test(
             .ok_or_else(|| EconError::Computation("a stratum's table is not 2 x 2".to_string()))?;
         cells.push(Table2x2::new(a, b, c, d));
     }
-    let mut result = mantelhaen_test(&cells, Some(&strata), correct, alternative)?;
+    let mut result = mantelhaen_test_with(&cells, Some(&strata), correct, alternative, conf_level)?;
     result.row_levels = row_levels;
     result.col_levels = col_levels;
     result.missing = missing;
@@ -695,6 +763,93 @@ mod tests {
             "Two-sided p = {:.4}, Greater p = {:.4}, Less p = {:.4}",
             two_sided.p_value, greater.p_value, less.p_value
         );
+    }
+
+    /// mantelhaen.test on the Rabbits array: the statistic and p with and without the correction
+    /// for every alternative, the one-sided intervals and the 0.90 level, and the label at
+    /// DELTA = 0, where R applies no correction.
+    #[test]
+    fn test_validate_mantelhaen_alternatives_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds) = crate::test_support::load_case("stat_mantelhaen_alt_t4");
+        let v = case.vector("rab");
+        // column-major 2 x 2 x 5: stratum k has a = v[4k], c = v[4k + 1], b = v[4k + 2], d = v[4k + 3]
+        let tables: Vec<Table2x2> = (0..5)
+            .map(|k| Table2x2::new(v[4 * k], v[4 * k + 2], v[4 * k + 1], v[4 * k + 3]))
+            .collect();
+        let fin = |x: f64| if x.is_infinite() { f64::NAN } else { x };
+        let mut check = Check::new(&case);
+        for correct in [true, false] {
+            for (tag, alt) in [
+                ("two", CmhAlternative::TwoSided),
+                ("less", CmhAlternative::Less),
+                ("greater", CmhAlternative::Greater),
+            ] {
+                let cc = if correct { "cc" } else { "nocc" };
+                let r = mantelhaen_test_with(&tables, None, correct, alt, 0.95).unwrap();
+                check
+                    .scalar(&format!("stat_{tag}_{cc}"), r.statistic, Tol::stat(54))
+                    .scalar(&format!("p_{tag}_{cc}"), r.p_value, Tol::p_value(54));
+            }
+        }
+        for (lv, level) in [(95, 0.95), (90, 0.90)] {
+            for (tag, alt) in [
+                ("two", CmhAlternative::TwoSided),
+                ("less", CmhAlternative::Less),
+                ("greater", CmhAlternative::Greater),
+            ] {
+                let r = mantelhaen_test_with(&tables, None, true, alt, level).unwrap();
+                assert_eq!(r.conf_level, level);
+                let (lo, hi) = r.odds_ratio_ci;
+                check.vector(&format!("ci_{tag}{lv}"), &[fin(lo), fin(hi)], Tol::stat(54));
+            }
+        }
+        let r = mantelhaen_test(&tables, None, true, CmhAlternative::TwoSided).unwrap();
+        check.scalar("estimate", r.common_odds_ratio, Tol::coef(54));
+        let bal = vec![Table2x2::new(5.0, 5.0, 5.0, 5.0); 2];
+        let b = mantelhaen_test(&bal, None, true, CmhAlternative::TwoSided).unwrap();
+        assert!(
+            b.test_name.contains("without continuity correction"),
+            "{}",
+            b.test_name
+        );
+        assert!(!b.continuity_correction);
+        check
+            .scalar("bal_stat", b.statistic, Tol::stat(40))
+            .scalar("bal_p", b.p_value, Tol::p_value(40))
+            .vector(
+                "bal_ci",
+                &[b.odds_ratio_ci.0, b.odds_ratio_ci.1],
+                Tol::stat(40),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_mantelhaen_label_follows_the_applied_correction() {
+        let tables = vec![
+            Table2x2::new(20.0, 10.0, 5.0, 30.0),
+            Table2x2::new(25.0, 15.0, 8.0, 35.0),
+        ];
+        let with = mantelhaen_test(&tables, None, true, CmhAlternative::TwoSided).unwrap();
+        assert!(with.continuity_correction);
+        assert!(
+            with.test_name.ends_with("(with continuity correction)"),
+            "{}",
+            with.test_name
+        );
+        let without = mantelhaen_test(&tables, None, false, CmhAlternative::TwoSided).unwrap();
+        assert!(!without.continuity_correction);
+        assert!(
+            without
+                .test_name
+                .ends_with("(without continuity correction)"),
+            "{}",
+            without.test_name
+        );
+        let r = mantelhaen_test_with(&tables, None, true, CmhAlternative::TwoSided, 0.9).unwrap();
+        assert!(r.to_string().contains("90% CI"), "{r}");
+        assert!(mantelhaen_test_with(&tables, None, true, CmhAlternative::TwoSided, 1.0).is_err());
     }
 
     #[test]

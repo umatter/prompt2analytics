@@ -41,7 +41,7 @@ print(se)
 # Expected: sqrt(MSE * (1/5 + 1/5)) = sqrt(MSE * 0.4)
 ```
 
-**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+**Rust tests** (property checks; the R-pinned case is `stat_secontrast_poly_t4`, below):
 - `stats::secontrast::tests::test_se_contrast_basic` (`crates/p2a-core/src/stats/secontrast.rs`): one SE, in (0, 1).
 
 ### Test Case 2: Treatment Contrasts
@@ -62,7 +62,7 @@ se <- se.contrast(fit, contrasts)
 print(se)
 ```
 
-**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+**Rust tests** (property checks; the R-pinned case is `stat_secontrast_poly_t4`, below):
 - `stats::secontrast::tests::test_generate_contrasts_treatment` (`crates/p2a-core/src/stats/secontrast.rs`): the treatment contrast matrix (k - 1 rows, exact entries, rows summing to zero).
 
 ### Test Case 3: Helmert Contrasts
@@ -76,7 +76,7 @@ se <- se.contrast(fit, contrasts)
 print(se)
 ```
 
-**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+**Rust tests** (property checks; the R-pinned case is `stat_secontrast_poly_t4`, below):
 - `stats::secontrast::tests::test_generate_contrasts_helmert` (`crates/p2a-core/src/stats/secontrast.rs`): the Helmert contrast matrix entries within 1e-10.
 
 ### Test Case 4: Contrast Estimate and T-statistic
@@ -94,8 +94,31 @@ t_stat <- estimate / se
 print(c(estimate = estimate, se = se, t = t_stat))
 ```
 
-**Rust tests** (not R-pinned: no `se.contrast` value is compared; the R-pinned case comes with STAT-66):
+**Rust tests** (property checks; the R-pinned case is `stat_secontrast_poly_t4`, below):
 - `stats::secontrast::tests::test_contrast_t_statistic` (`crates/p2a-core/src/stats/secontrast.rs`): the t statistic is negative with abs(t) > 2.
+
+### Test Case 5: Polynomial contrasts (R-pinned)
+
+**R Code** (case `stat_secontrast_poly_t4`, `validation/r/cases/stats_exact_t4.R`; dataset
+`validation/datasets/generated/secontrast_poly_t4.csv`):
+```r
+f <- factor(d$dose)                      # levels 5, 10, 20, 40 (numeric order)
+fit <- aov(y ~ f, data = d)
+cp <- contr.poly(4)
+se.contrast(fit, cp[as.integer(f), ] / as.vector(table(f))[as.integer(f)])
+```
+
+`contr_poly(k)` is R's `contr.poly(k)`: the k - 1 orthonormal polynomial columns on the scores
+1..k, each positive on its own power; k < 2 and k > 95 are refused as in R, and
+`generate_contrasts(k, Poly)` returns it (an empty set where it is refused). Pinned: `contr.poly(k)`
+for k = 2, 3, 4, 6 (`Tol::coef(24)`), the SE of the three `contr.poly(4)` contrasts
+(`Tol::se(24)`): 0.12484006665987833, 0.12554939092906325, 0.12625473013584326; the estimates
+0.6935902734648174, 0.027348333333333197, -0.18670944005325502; MSE 0.09324384248333335 on 20 df.
+Registry `validation/methods/stats_exact_t4.json`, id `se_contrast_poly_t4` (STAT-66, fixed in
+Tier 4: the polynomial set used to be a linear and a quadratic contrast, unnormalised).
+
+**Rust tests:** `stats::secontrast::tests::test_validate_se_contrast_poly_t4`,
+`stats::secontrast::tests::test_contr_poly_bounds` (orthonormal rows for k = 2..20, the bounds).
 
 ## Fewer than two groups
 

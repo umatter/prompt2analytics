@@ -73,16 +73,24 @@ pub struct PairwiseComparison {
     pub p_adj: f64,
     /// Significance level based on p-value
     pub significance: SignificanceLevel,
+    /// Confidence level of the interval
+    #[serde(default = "default_conf_level")]
+    pub conf_level: f64,
+}
+
+fn default_conf_level() -> f64 {
+    0.95
 }
 
 impl std::fmt::Display for PairwiseComparison {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}-{}: diff={:.4}, 95% CI=[{:.4}, {:.4}], p={:.4}{}",
+            "{}-{}: diff={:.4}, {:.0}% CI=[{:.4}, {:.4}], p={:.4}{}",
             self.group1,
             self.group2,
             self.diff,
+            self.conf_level * 100.0,
             self.ci_lower,
             self.ci_upper,
             self.p_adj,
@@ -260,6 +268,7 @@ pub fn tukey_hsd(anova: &AnovaResult, conf_level: f64) -> EconResult<TukeyHsdRes
                 ci_upper: diff + width,
                 p_adj,
                 significance: SignificanceLevel::from_p_value(p_adj),
+                conf_level,
             });
         }
     }
@@ -355,6 +364,17 @@ mod tests {
             assert!(comp.ci_lower < comp.diff);
             assert!(comp.diff < comp.ci_upper);
             assert!(comp.p_adj >= 0.0 && comp.p_adj <= 1.0);
+        }
+    }
+
+    #[test]
+    fn test_tukey_row_label_uses_the_level() {
+        let dataset = create_test_dataset();
+        let (_anova, tukey) = run_tukey_hsd(&dataset, "value", "group", 0.99).unwrap();
+        for comp in &tukey.comparisons {
+            let row = comp.to_string();
+            assert!(row.contains("99% CI"), "{row}");
+            assert!(!row.contains("95%"), "{row}");
         }
     }
 
@@ -636,6 +656,7 @@ mod tests {
             ci_upper: 8.0,
             p_adj: 0.001,
             significance: SignificanceLevel::TenthPercent,
+            conf_level: 0.95,
         };
 
         let display = format!("{}", comp);

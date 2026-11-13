@@ -24,9 +24,12 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/poisson.test.html>
 
 use crate::errors::{EconError, EconResult};
+use crate::stats::binomtest::{
+    MINLIKE_REL_ERR, binom_two_sided_p, first_at_or_below, last_at_or_below,
+};
 use crate::traits::estimator::chi_squared_quantile;
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{Binomial, DiscreteCDF, Poisson};
+use statrs::distribution::{Binomial, Discrete, DiscreteCDF, Poisson};
 
 /// Alternative hypothesis for the Poisson test.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -204,9 +207,13 @@ fn two_sample_estimate(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<f64> {
 ///
 /// Tests H₀: λ₁/λ₂ = r where X₁ ~ Poisson(λ₁T₁), X₂ ~ Poisson(λ₂T₂).
 ///
-/// The two-sided p-value doubles the smaller tail (R's `poisson.test` sums the outcomes no more
-/// likely than the observed one), and the interval is two-sided for every alternative (R's is
-/// one-sided for a one-sided alternative): STAT-58, STAT-59.
+/// As R's `poisson.test`, the two-sided p-value sums the probabilities of every outcome no more
+/// likely than the observed one (relative tolerance 1e-7; for two samples, `binom.test`'s
+/// rule), and the interval is one-sided for a one-sided alternative: `(0, upper)` for `Less`,
+/// `(lower, ∞)` for `Greater`, each bound at level `conf_level`.
+///
+/// One sample: when the observed count's probability underflows to 0, the opposite tail's
+/// cells underflow too, their total is below 1e-300, and the p-value is the observed tail alone.
 ///
 /// # Errors
 ///
@@ -215,7 +222,8 @@ fn two_sample_estimate(x1: u64, x2: u64, t1: f64, t2: f64) -> EconResult<f64> {
 /// - a time base in `t`, or `r`, is not finite and > 0;
 /// - `conf_level` is not strictly between 0 and 1;
 /// - one-sample: the count is above [`POISSON_MAX_ONE_SAMPLE_COUNT`], or the expected count
-///   `r * T` is not finite and > 0 (it overflows, or underflows to 0);
+///   `r * T` is not finite and > 0 (it overflows, or underflows to 0), or, for the two-sided
+///   p-value, the opposite tail would pass [`POISSON_MAX_ONE_SAMPLE_COUNT`];
 /// - two-sample: the total `x[0] + x[1]` does not fit in `u64`, or, when `x[1]` is not 0, the
 ///   estimated rate ratio `(x[0] / T[0]) / (x[1] / T[1])` overflows `f64`. A rate `x[i] / T[i]`
 ///   that overflows on its own is not refused when the ratio is representable, and neither is an
@@ -323,19 +331,14 @@ fn poisson_test_one_sample(
             // P(X >= x) = 1 - P(X < x) = 1 - P(X <= x-1)
             if x == 0 { 1.0 } else { pois.sf(x - 1) }
         }
-        PoissonAlternative::TwoSided => {
-            // Two-sided: 2 * min(P(X <= x), P(X >= x))
-            let p_left = pois.cdf(x);
-            let p_right = if x == 0 { 1.0 } else { pois.sf(x - 1) };
-            2.0 * p_left.min(p_right).min(0.5)
-        }
+        PoissonAlternative::TwoSided => poisson_two_sided_p(&pois, x, expected)?,
     };
 
     // Rate estimate
     let estimate = x as f64 / t;
 
     // Confidence interval for the rate
-    let (ci_lower, ci_upper) = poisson_ci(x, conf_level)?;
+    let (ci_lower, ci_upper) = poisson_ci(x, conf_level, alternative)?;
     let conf_int = (ci_lower / t, ci_upper / t);
 
     Ok(PoissonTestResult {
@@ -390,16 +393,12 @@ fn poisson_test_two_sample(
                 // P(X₁ >= x₁) = P(X₁ > x₁ - 1)
                 if x1 == 0 { 1.0 } else { binom.sf(x1 - 1) }
             }
-            PoissonAlternative::TwoSided => {
-                let p_left = binom.cdf(x1);
-                let p_right = if x1 == 0 { 1.0 } else { binom.sf(x1 - 1) };
-                2.0 * p_left.min(p_right).min(0.5)
-            }
+            PoissonAlternative::TwoSided => binom_two_sided_p(&binom, x1, n, p),
         }
     };
 
     // Exact conditional confidence interval for the rate ratio
-    let conf_int = rate_ratio_ci(x1, x2, n, t1, t2, conf_level);
+    let conf_int = rate_ratio_ci(x1, x2, n, t1, t2, conf_level, alternative);
 
     Ok(PoissonTestResult {
         method: "Comparison of Poisson rates".to_string(),
@@ -420,7 +419,7 @@ fn poisson_test_two_sample(
 /// Uses the relationship between Poisson and chi-squared/gamma distributions.
 /// `poisson_test` keeps `x` at or below [`POISSON_MAX_ONE_SAMPLE_COUNT`]; `x + 1` is still checked
 /// before any distribution is built.
-fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
+fn poisson_ci(x: u64, conf_level: f64, alternative: PoissonAlternative) -> EconResult<(f64, f64)> {
     let x_plus_1 = x
         .checked_add(1)
         .ok_or_else(|| EconError::InvalidSpecification {
@@ -430,18 +429,73 @@ fn poisson_ci(x: u64, conf_level: f64) -> EconResult<(f64, f64)> {
             ),
         })?;
     let alpha = 1.0 - conf_level;
-
-    // Lower bound: chi-squared quantile
-    let lower = if x == 0 {
-        0.0
-    } else {
-        chi_squared_quantile(alpha / 2.0, 2.0 * x as f64)? / 2.0
+    // Each bound's tail: alpha / 2 for the two-sided interval, alpha for a one-sided one.
+    let lower_at = |tail: f64| -> EconResult<f64> {
+        if x == 0 {
+            Ok(0.0)
+        } else {
+            Ok(chi_squared_quantile(tail, 2.0 * x as f64)? / 2.0)
+        }
     };
+    let upper_at = |tail: f64| -> EconResult<f64> {
+        Ok(chi_squared_quantile(1.0 - tail, 2.0 * x_plus_1 as f64)? / 2.0)
+    };
+    Ok(match alternative {
+        PoissonAlternative::TwoSided => (lower_at(alpha / 2.0)?, upper_at(alpha / 2.0)?),
+        PoissonAlternative::Less => (0.0, upper_at(alpha)?),
+        PoissonAlternative::Greater => (lower_at(alpha)?, f64::INFINITY),
+    })
+}
 
-    // Upper bound: chi-squared quantile
-    let upper = chi_squared_quantile(1.0 - alpha / 2.0, 2.0 * x_plus_1 as f64)? / 2.0;
-
-    Ok((lower, upper))
+/// `poisson.test`'s one-sample two-sided p-value for `x` under Poisson(`m`): the probability of
+/// every count no more likely than `x` (relative tolerance [`MINLIKE_REL_ERR`]).
+///
+/// The pmf does not decrease on `[0, floor(m)]` and does not increase from `ceil(m)` on, so each
+/// boundary is a binary search. For `x < m` the opposite tail is unbounded: as R, its search
+/// range ends at `N = ceil(2m - x)`, doubled while `pmf(N)` is above the threshold, and is
+/// refused once `N` would pass [`POISSON_MAX_ONE_SAMPLE_COUNT`]. When `pmf(x)` underflows to 0
+/// the opposite tail's cells all underflow as well, and their total, below 1e-300, is dropped.
+fn poisson_two_sided_p(pois: &Poisson, x: u64, m: f64) -> EconResult<f64> {
+    let x_f = x as f64;
+    let d = pois.pmf(x);
+    let thr = d * MINLIKE_REL_ERR;
+    let pmf = |i: u64| pois.pmf(i);
+    let p = if x_f == m {
+        1.0
+    } else if x_f < m {
+        if d == 0.0 {
+            pois.cdf(x)
+        } else {
+            let refuse = || EconError::InvalidSpecification {
+                message: format!(
+                    "x = {x}, r * T = {m:?}: the two-sided p-value's opposite tail would pass                      the largest count the one-sample exact Poisson test supports                      ({POISSON_MAX_ONE_SAMPLE_COUNT} = 2^52); use a one-sided alternative"
+                ),
+            };
+            let bound = POISSON_MAX_ONE_SAMPLE_COUNT as f64;
+            let n0 = (2.0 * m - x_f).ceil();
+            if n0 > bound {
+                return Err(refuse());
+            }
+            let mut n = n0 as u64;
+            while pmf(n) > thr {
+                crate::resource::checkpoint()?;
+                n = n
+                    .checked_mul(2)
+                    .filter(|&v| v as f64 <= bound)
+                    .ok_or_else(refuse)?;
+            }
+            // ceil(m) >= 1 because m > x >= 0; pmf(n) <= thr, so a cell qualifies
+            let lo = m.ceil() as u64;
+            let upper = first_at_or_below(lo, n, thr, pmf).map_or(0.0, |i| pois.sf(i - 1));
+            pois.cdf(x) + upper
+        }
+    } else {
+        let hi = m.floor() as u64;
+        let lower = last_at_or_below(0, hi, thr, pmf).map_or(0.0, |i| pois.cdf(i));
+        // x > m > 0, so x >= 1
+        lower + pois.sf(x - 1)
+    };
+    Ok(p.min(1.0))
 }
 
 /// Smallest odds [`find_odds_bound`] resolves. statrs' binomial CDF evaluates its incomplete beta
@@ -479,28 +533,41 @@ const MAX_BRACKET_STEPS: usize = 128;
 /// times T₂ / T₁, contains the estimate. It need not contain the true interval: x = [2e7, 2e7]
 /// gives (0, 1.00062) for R's (0.99938, 1.00062), and x = [5e15, 1] gives (1e15, ∞) for R's
 /// (8.97e14, 1.97e17).
-fn rate_ratio_ci(x1: u64, x2: u64, n: u64, t1: f64, t2: f64, conf_level: f64) -> (f64, f64) {
+fn rate_ratio_ci(
+    x1: u64,
+    x2: u64,
+    n: u64,
+    t1: f64,
+    t2: f64,
+    conf_level: f64,
+    alternative: PoissonAlternative,
+) -> (f64, f64) {
     let alpha = 1.0 - conf_level;
 
     if n == 0 {
         return (0.0, f64::INFINITY);
     }
 
-    // Use numerical search to find CI bounds
-    // The p-value equals alpha/2 at the CI bounds
-
-    // Lower bound: find r such that P(X₁ >= x₁ | H₀: ratio=r) = alpha/2
-    let mut lower = if x1 == 0 {
-        0.0
-    } else {
-        find_odds_bound(x1, x2, n, alpha / 2.0, true)
+    // Each searched bound's tail: alpha / 2 for the two-sided interval, alpha for a one-sided
+    // one, whose other bound is 0 (Less) or infinity (Greater), as binom.test's interval.
+    let (tail, want_lower, want_upper) = match alternative {
+        PoissonAlternative::TwoSided => (alpha / 2.0, true, true),
+        PoissonAlternative::Less => (alpha, false, true),
+        PoissonAlternative::Greater => (alpha, true, false),
     };
 
-    // Upper bound: find r such that P(X₁ <= x₁ | H₀: ratio=r) = alpha/2
-    let mut upper = if x2 == 0 {
+    // Lower bound: find r such that P(X₁ >= x₁ | H₀: ratio=r) = tail
+    let mut lower = if x1 == 0 || !want_lower {
+        0.0
+    } else {
+        find_odds_bound(x1, x2, n, tail, true)
+    };
+
+    // Upper bound: find r such that P(X₁ <= x₁ | H₀: ratio=r) = tail
+    let mut upper = if x2 == 0 || !want_upper {
         f64::INFINITY
     } else {
-        find_odds_bound(x1, x2, n, alpha / 2.0, false)
+        find_odds_bound(x1, x2, n, tail, false)
     };
 
     // A bound on the wrong side of the count ratio comes only from a misjudged tail (see above).
@@ -778,7 +845,7 @@ mod tests {
     #[test]
     fn test_poisson_ci() {
         // Test CI computation for known values
-        let (lower, upper) = poisson_ci(10, 0.95).unwrap();
+        let (lower, upper) = poisson_ci(10, 0.95, PoissonAlternative::TwoSided).unwrap();
         println!("Poisson CI for x=10: ({:.4}, {:.4})", lower, upper);
 
         // For x=10, 95% CI should be approximately (4.8, 18.4)
@@ -901,11 +968,13 @@ mod tests {
     /// ChiSquared::new.
     #[test]
     fn test_poisson_ci_refuses_overflowing_count() {
-        let e = poisson_ci(u64::MAX, 0.95).unwrap_err().to_string();
+        let e = poisson_ci(u64::MAX, 0.95, PoissonAlternative::TwoSided)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("x + 1"), "{e}");
         // The limit, not only the parameter (which is u64::MAX itself here).
         assert!(e.contains(&format!("({})", u64::MAX)), "{e}");
-        let (lower, upper) = poisson_ci(0, 0.95).unwrap();
+        let (lower, upper) = poisson_ci(0, 0.95, PoissonAlternative::TwoSided).unwrap();
         assert_eq!(lower, 0.0);
         assert!(upper > 3.68 && upper < 3.69, "{upper}"); // qgamma(0.975, 1) = 3.688879
     }
@@ -1038,13 +1107,13 @@ mod tests {
     fn test_rate_ratio_ci_overflows_only_with_the_bound() {
         for (x1, x2, t1, t2) in [(1, 1, 1e-160, 1e160), (11, 21, 1e-300, 1e300)] {
             assert_eq!(
-                rate_ratio_ci(x1, x2, x1 + x2, t1, t2, 0.95),
+                rate_ratio_ci(x1, x2, x1 + x2, t1, t2, 0.95, PoissonAlternative::TwoSided),
                 (f64::INFINITY, f64::INFINITY),
                 "x = [{x1}, {x2}], T = [{t1:?}, {t2:?}]"
             );
         }
         assert_eq!(
-            rate_ratio_ci(5, 0, 5, 1e-300, 1e10, 0.95),
+            rate_ratio_ci(5, 0, 5, 1e-300, 1e10, 0.95, PoissonAlternative::TwoSided),
             (f64::INFINITY, f64::INFINITY)
         );
     }
@@ -1394,7 +1463,23 @@ mod tests {
         let rrg = poisson_test(&[11, 21], &[800.0, 3011.0], 1.0, Greater, 0.95).unwrap();
         let big6 = poisson_test(&[1_000_000], &[1.0], 1.0, TwoSided, 0.95).unwrap();
         let sym = poisson_test(&[3, 10], &[1.0, 1.0], 1.0, TwoSided, 0.95).unwrap();
+        let x2r5 = poisson_test(&[2], &[1.0], 5.0, TwoSided, 0.95).unwrap();
+        let rr2 = poisson_test(&[11, 21], &[800.0, 3011.0], 2.0, TwoSided, 0.95).unwrap();
+        // R stores an infinite bound as NA, which Check reads as NaN
+        let fin = |v: f64| if v.is_infinite() { f64::NAN } else { v };
+        let cif = |r: &PoissonTestResult| [fin(r.conf_int.0), fin(r.conf_int.1)];
+        assert_eq!(x10g.conf_int.1, f64::INFINITY);
+        assert_eq!(rrg.conf_int.1, f64::INFINITY);
         Check::new(&case)
+            .scalar("big_p", big.p_value, Tol::p_value(137))
+            .scalar("x10_two_p", x10.p_value, Tol::p_value(10))
+            .scalar("x2_r5_p", x2r5.p_value, Tol::p_value(2))
+            .scalar("rr_two_p", rr.p_value, Tol::p_value(32))
+            .scalar("rr_r2_p", rr2.p_value, Tol::p_value(32))
+            .vector("x10_less_ci", &cif(&x10l), Tol::stat(10))
+            .vector("x10_greater_ci", &cif(&x10g), Tol::stat(10))
+            .vector("rr_less_ci", &cif(&rrl), Tol::stat(32))
+            .vector("rr_greater_ci", &cif(&rrg), Tol::stat(32))
             .vector("big_ci", &ci(&big), Tol::stat(137))
             .scalar("big_est", big.estimate, Tol::coef(137))
             .scalar("big_expected", big.parameter, Tol::coef(137))
@@ -1414,9 +1499,96 @@ mod tests {
             .scalar("sym_est", sym.estimate, Tol::coef(13))
             .scalar("sym_expected", sym.parameter, Tol::coef(13))
             .finish();
-        // deviation STAT-58: big_p, x10_two_p, x2_r5_p, rr_two_p (R's minlike rule; p2a doubles the smaller tail).
-        // deviation STAT-59: x10_less_ci, x10_greater_ci, rr_less_ci, rr_greater_ci (one-sided intervals).
         // not pinned (R's own parameter formula at r != 1, reported): rr_r2_r_parameter; p2a reports rr_r2_binomial_mean.
+    }
+
+    /// poisson.test's two-sided minlike p (one sample, and binom.test for two samples) and the
+    /// one-sided intervals at 0.95 and 0.90.
+    #[test]
+    fn test_validate_poisson_minlike_t4() {
+        use super::PoissonAlternative::*;
+        use p2a_validation::{Check, Tol};
+        let (case, _ds) = crate::test_support::load_case("stat_poisson_minlike_t4");
+        let fin = |v: f64| if v.is_infinite() { f64::NAN } else { v };
+        let cif = |r: &PoissonTestResult| [fin(r.conf_int.0), fin(r.conf_int.1)];
+        let mut check = Check::new(&case);
+        let one: [(&str, u64, f64); 8] = [
+            ("z0", 0, 2.0),
+            ("lo2", 2, 10.0),
+            ("hi25", 25, 10.0),
+            ("eq10", 10, 10.0),
+            ("lo3", 3, 0.5),
+            ("k1100", 1100, 1000.0),
+            ("k10300", 10300, 10000.0),
+            ("k940", 940, 1000.0),
+        ];
+        let (names, ps): (Vec<&str>, Vec<f64>) = one
+            .iter()
+            .map(|&(nm, x, t)| {
+                let r = poisson_test(&[x], &[t], 1.0, TwoSided, 0.95).unwrap();
+                (nm, r.p_value)
+            })
+            .unzip();
+        // the largest count in the set is 10300
+        check.named("one_two_p", &names, &ps, Tol::p_value(10300));
+        let two: [(&str, [u64; 2], [f64; 2]); 3] = [
+            ("z1", [0, 5], [1.0, 1.0]),
+            ("z2", [5, 0], [1.0, 1.0]),
+            ("r230", [2, 30], [10.0, 20.0]),
+        ];
+        for (nm, x, t) in two {
+            let r = poisson_test(&x, &t, 1.0, TwoSided, 0.95).unwrap();
+            let n = (x[0] + x[1]) as usize;
+            check
+                .scalar(&format!("two_{nm}_p"), r.p_value, Tol::p_value(n))
+                .vector(&format!("two_{nm}_ci"), &cif(&r), Tol::stat(n));
+        }
+        for (lv, level) in [(95, 0.95), (90, 0.90)] {
+            for (alt, a) in [("less", Less), ("greater", Greater)] {
+                let tag = format!("{alt}{lv}");
+                let r = poisson_test(&[10], &[2.0], 3.0, a, level).unwrap();
+                check
+                    .scalar(&format!("x10r3_{tag}_p"), r.p_value, Tol::p_value(10))
+                    .vector(&format!("x10r3_{tag}_ci"), &cif(&r), Tol::stat(10));
+                let r0 = poisson_test(&[0], &[2.0], 1.0, a, level).unwrap();
+                check.vector(&format!("x0_{tag}_ci"), &cif(&r0), Tol::stat(2));
+                for (nm, x, t) in [
+                    ("rr", [11u64, 21], [800.0, 3011.0]),
+                    ("z1", [0, 5], [1.0, 1.0]),
+                    ("z2", [5, 0], [1.0, 1.0]),
+                ] {
+                    let r = poisson_test(&x, &t, 1.0, a, level).unwrap();
+                    let n = (x[0] + x[1]) as usize;
+                    check
+                        .scalar(&format!("{nm}_{tag}_p"), r.p_value, Tol::p_value(n))
+                        .vector(&format!("{nm}_{tag}_ci"), &cif(&r), Tol::stat(n));
+                }
+            }
+        }
+        check.finish();
+    }
+
+    /// The two-sided one-sample search: (a) when pmf(x) underflows, the far tail's cells all
+    /// underflow too and the p-value is the observed tail alone, returned without a search;
+    /// (b) an opposite tail that would pass the count bound is refused.
+    #[test]
+    fn test_poisson_two_sided_far_tail_beyond_the_count_bound() {
+        let r = poisson_test(&[10], &[1e20], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        assert_eq!(r.p_value, Poisson::new(1e20).unwrap().cdf(10));
+        let t = (POISSON_MAX_ONE_SAMPLE_COUNT as f64) + 2f64.powi(30);
+        match poisson_test(
+            &[POISSON_MAX_ONE_SAMPLE_COUNT],
+            &[t],
+            1.0,
+            PoissonAlternative::TwoSided,
+            0.95,
+        ) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("4503599627370496"), "{message}");
+                assert!(message.contains("two-sided"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 
     #[test]

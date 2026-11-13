@@ -36,17 +36,19 @@ print(mp$col)
 print(mp$residuals)
 ```
 
-**Results Comparison**:
+#### R reference (not pinned)
 
-| Output | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Overall | 6.0 | 6.0 | 1e-6 | PASS |
-| Row[0] | 0.75 | 0.75 | 1e-6 | PASS |
-| Row[1] | -1.0 | -1.0 | 1e-6 | PASS |
-| Row[2] | 0.25 | 0.25 | 1e-6 | PASS |
-| Col[0] | 0.3 | 0.3 | 1e-6 | PASS |
-| Col[1] | -1.0 | -1.0 | 1e-6 | PASS |
-| Col[2] | 0.5 | 0.5 | 1e-6 | PASS |
+No test asserts these values; they are R's output for the matrix above.
+
+| Output | R Value |
+|--------|---------|
+| Overall | 6.0 |
+| Row[0] | 0.75 |
+| Row[1] | -1.0 |
+| Row[2] | 0.25 |
+| Col[0] | 0.3 |
+| Col[1] | -1.0 |
+| Col[2] | 0.5 |
 
 **Rust Test**: `crates/p2a-core/src/stats/medpolish.rs::tests::test_medpolish_reconstructs_the_table` checks, on another 4 x 3 matrix, that overall + row + column + residual reconstructs the input exactly and that the overall effect is within 1.0 of R's 9.5. It compares no other R value, and no test asserts the table above.
 

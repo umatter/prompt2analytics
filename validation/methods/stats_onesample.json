@@ -34,7 +34,7 @@
       ],
       "quantities": ["t", "df", "p", "95% CI", "estimates", "standard error", "n"],
       "tolerance": "validation/README.md, n < 100: estimates 1e-6, SE, t, df (Welch) and CI 1e-5 relative, p 1e-5 (abs 1e-12); counts and integer df exact",
-      "deviations": [],
+      "deviations": [{"finding": "STAT-85", "quantity": "all-zero data", "note": "R returns t = NaN; p2a refuses as it refuses essentially constant data (R stops there)"}],
       "supersedes_legacy": []
     },
     {

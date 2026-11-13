@@ -19,17 +19,32 @@ and `prop.test(c(30, 40, 35), c(100, 100, 100))`.
 | one sample, with correction: X-squared, p (two-sided) | 2.25, 0.13361440253771517 |
 | one sample, without: X-squared, p | 2.7777777777777777, 0.09558070454562881 |
 | one sample, without: Wilson CI | 0.09305985283656631, 0.2328355959083236 |
+| one sample, with: corrected Wilson CI | 0.08914909572793359, 0.2385307679519066 |
 | two samples, with correction: X-squared, p | 1.7802197802197803, 0.1821223410094948 |
+| two samples, with: CI (Wald with Yates) | -0.24147838108648725, 0.04147838108648719 |
+| two samples, with: CI, less | -1, 0.020340135687017077 |
 | two samples, without: X-squared, p | 2.197802197802198, 0.13820766697402617 |
 | k samples: X-squared, df, p | 2.197802197802198, 2, 0.33323707715622375 |
 
-The p-values for `less` and `greater`, and the estimates, are in the case too.
+The p-values and intervals for `less` and `greater`, with and without the correction, and the
+estimates, are in the case too.
+
+Case `stat_prop_ci_t4` (`validation/r/cases/stats_exact_t4.R`; registry
+`validation/methods/stats_exact_t4.json`, id `prop_ci_t4`) adds the intervals where the correction
+is capped (|x - n p| < 0.5, |DELTA| below half of sum(1/n)), at the boundaries 0 and 1, and at the
+0.90 level, for every alternative: `stats::proptest::tests::test_validate_prop_ci_t4`, tolerances
+at n the total trials of each cell. For example `prop.test(c(15, 25), c(50, 50))`: two-sided
+(-0.40799314123229585, 0.00799314123229583), less (-1, -0.02223118249261749).
+
+The intervals are R's: one sample, the Wilson interval at p ± YATES / n with
+YATES = min(0.5, |x - n p|); two samples, the Wald interval widened by YATES sum(1/n) with
+YATES = min(0.5, |DELTA| / sum(1/n)); one-sided with `qnorm(conf_level)`.
 
 **Rust test:** `stats::proptest::tests::test_validate_prop_test_t3`. Tolerance: `Tol::stat(100)`,
 `Tol::p_value(100)` (k samples: n = 300), estimates `Tol::coef(100)`, df exact.
 
-**Status:** R-pinned with deviations (registry `validation/methods/stats_misc_t3.json`, id
-`prop_test_t3`).
+**Status:** R-pinned (registry `validation/methods/stats_misc_t3.json`, id `prop_test_t3`; and
+`validation/methods/stats_exact_t4.json`, id `prop_ci_t4`).
 
 ## Wall-clock (signed off 2026-11-08)
 
@@ -40,9 +55,6 @@ the base and 0.269 µs here at n = 100 (1.14x, about 33 ns per call: the `conf_l
 
 ## Known Differences
 
-- **STAT-63:** with the correction, R's one-sample interval is the continuity-corrected Wilson
-  interval; p2a's is the uncorrected Wilson interval. R's two-sample interval is Wald with Yates;
-  p2a's is Newcombe's method 10. For the two-sample data above p2a gives -0.22717225103721761,
-  0.031890373925969467 where R gives -0.24147838108648725, 0.04147838108648719. Not compared.
-- **STAT-59:** for a one-sided alternative R's two-sample interval is one-sided; p2a's is two-sided.
-  Not compared.
+None. STAT-63 (the corrected one-sample interval and the two-sample Wald interval with Yates,
+where p2a had used the uncorrected Wilson interval and Newcombe's method 10) and STAT-59 (one-sided
+two-sample intervals) were fixed in Tier 4.

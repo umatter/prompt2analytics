@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "stat_anova2_rcbd_t4",
+  "area": "stats/anova",
+  "method": "Additive two-way ANOVA on a subject x condition layout (40 x 3, 5 rows dropped): Type I both orders and Type II",
+  "reference": "stats::anova(lm(y ~ subj + cond)) and (y ~ cond + subj) for Type I; drop1(test = 'F') for Type II",
+  "call": "anova(lm(y ~ subj + cond)); drop1(lm(y ~ subj + cond), test = 'F')",
+  "dataset": "validation/datasets/generated/anova2_rcbd_t4.csv",
+  "datasets": ["validation/datasets/generated/anova2_rcbd_t4.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "ss_subj_cond": [252.24623866433384, 20.036794988290271, 55.165163563376112],
+    "df_subj_cond": [39, 2, 73],
+    "f_subj_cond": [8.55890176812429, 13.257334336231898],
+    "p_subj_cond": [3.4409142905310909e-15, 1.2257592907706381e-05],
+    "ss_cond_subj": [19.184481489319378, 253.0985521633045, 55.165163563376275],
+    "f_cond_subj": [12.693401580432129, 8.587821396626806],
+    "p_cond_subj": [1.858186878943891e-05, 3.1438975569820096e-15],
+    "ss2": [253.09855216330459, 20.036794988290282],
+    "f2": [8.5878213966268344, 13.257334336231905],
+    "p2": [3.1438975569817485e-15, 1.2257592907706333e-05]
+  }
+}

@@ -165,7 +165,9 @@ pub fn mahalanobis(
 /// With [`SingularCovariance::Generalized`] the distances use a generalized inverse. The centred
 /// rows of a sample covariance lie in its range, where every reflexive generalized inverse gives
 /// the same quadratic form, so these are also `MASS::ginv`'s distances. `rank` is the chi-square
-/// df, and `warnings` says the inverse was generalized. A given `cov` must be symmetric.
+/// df, and `warnings` says the inverse was generalized. A given `cov` must be symmetric. With
+/// `inverted = true`, `cov` is the inverse covariance, `rank` is the number of variables, and a
+/// missing `cov` is `InvalidSpecification`.
 pub fn mahalanobis_with(
     x: ArrayView2<f64>,
     center: Option<ArrayView1<f64>>,
@@ -174,6 +176,14 @@ pub fn mahalanobis_with(
     singular: SingularCovariance,
 ) -> EconResult<MahalanobisResult> {
     let (n, p) = x.dim();
+
+    if inverted && cov.is_none() {
+        return Err(EconError::InvalidSpecification {
+            message: "inverted = true needs cov: it declares the given covariance matrix to be \
+                      its inverse, and none was given"
+                .to_string(),
+        });
+    }
 
     if n == 0 {
         return Err(EconError::EmptyDataset);
@@ -499,6 +509,19 @@ mod tests {
     use super::*;
     use ndarray::array;
     use p2a_validation::{Check, Tol};
+
+    /// `inverted = true` declares the given `cov` to be an inverse; without a `cov` there is
+    /// none, so the call is refused.
+    #[test]
+    fn test_mahalanobis_inverted_needs_a_covariance() {
+        let x = array![[1.0, 2.1], [2.9, 4.2], [5.1, 5.8], [6.8, 8.3]];
+        match mahalanobis_with(x.view(), None, None, true, SingularCovariance::Error) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("inverted = true needs cov"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_mahalanobis_basic() {

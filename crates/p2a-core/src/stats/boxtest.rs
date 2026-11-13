@@ -258,6 +258,12 @@ fn compute_autocorrelations_fft(x: &[f64], lag_max: usize) -> Vec<f64> {
 ///
 /// `BoxTestResult` with the test statistic, p-value, and autocorrelations.
 ///
+/// # Errors
+///
+/// `InsufficientData` below 2 observations; `InvalidSpecification` for a lag outside
+/// `fitdf < lag < n`, a missing or infinite value, or a constant series, whose
+/// autocorrelations are undefined (R's `Box.test` returns NaN).
+///
 /// # Example
 ///
 /// ```ignore
@@ -316,6 +322,16 @@ pub fn box_test(
     if x.iter().any(|v| v.is_nan() || v.is_infinite()) {
         return Err(EconError::InvalidSpecification {
             message: "Missing or infinite values are not allowed".to_string(),
+        });
+    }
+
+    if x.iter().all(|&v| v == x[0]) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the series is constant (all {n} values are {}): its autocorrelations are \
+                 undefined (R's Box.test returns NaN)",
+                x[0]
+            ),
         });
     }
 
@@ -437,6 +453,19 @@ mod tests {
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    /// R's Box.test returns X-squared = NaN on a constant series; p2a refuses it.
+    #[test]
+    fn test_box_test_refuses_a_constant_series() {
+        for kind in [BoxTestType::LjungBox, BoxTestType::BoxPierce] {
+            match box_test(&[2.0; 20], Some(3), kind, 0) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("constant"), "{message}")
+                }
+                other => panic!("{kind}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
     }
 
     #[test]

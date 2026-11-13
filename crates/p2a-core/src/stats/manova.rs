@@ -516,8 +516,8 @@ fn compute_wilks_lambda(
         f64::NAN
     };
 
-    // Exact when s = 1 or (p = 1 and v_h = 1) or (p = 2 and v_h = 2)
-    let is_exact = s == 1 || (p == 1.0 && v_h == 1.0) || (p == 2.0 && v_h == 2.0);
+    // Rao's F is exact when min(p, v_h) <= 2
+    let is_exact = s <= 2;
 
     ManovaTestResult {
         test_type: ManovaTestStatistic::Wilks,
@@ -572,8 +572,8 @@ fn compute_pillai_trace(
         f64::NAN
     };
 
-    // Exact when s = 1 or s = 2
-    let is_exact = s <= 2;
+    // The F transform is exact only when s = min(p, v_h) = 1
+    let is_exact = s == 1;
 
     ManovaTestResult {
         test_type: ManovaTestStatistic::Pillai,
@@ -633,8 +633,8 @@ fn compute_hotelling_lawley(
         f64::NAN
     };
 
-    // Exact when s = 1 or s = 2
-    let is_exact = s <= 2;
+    // The F transform is exact only when s = min(p, v_h) = 1
+    let is_exact = s == 1;
 
     ManovaTestResult {
         test_type: ManovaTestStatistic::HotellingLawley,
@@ -655,7 +655,7 @@ fn compute_roy_largest_root(
     p: f64,
     v_h: f64,
     v_e: f64,
-    _s: usize,
+    s: usize,
 ) -> ManovaTestResult {
     // Roy's largest root = largest eigenvalue
     let theta = eigenvalues.first().copied().unwrap_or(0.0);
@@ -689,7 +689,8 @@ fn compute_roy_largest_root(
         df1,
         df2,
         p_value,
-        is_exact: false, // Roy's test is always an upper bound approximation
+        // Exact at s = 1, where the largest root is the only one; otherwise an upper bound
+        is_exact: s == 1,
     }
 }
 
@@ -738,6 +739,47 @@ pub fn run_manova(dataset: &Dataset, y_cols: &[&str], group_col: &str) -> EconRe
 mod tests {
     use super::*;
     use ndarray::array;
+
+    /// Noisy layout with `p` responses and `g` groups of 6 observations, deterministic.
+    fn exactness_layout(p: usize, g: usize) -> (Array2<f64>, Vec<String>) {
+        let n = 6 * g;
+        let mut y = Array2::<f64>::zeros((n, p));
+        let mut labels = Vec::with_capacity(n);
+        for i in 0..n {
+            let grp = i / 6;
+            labels.push(format!("g{grp}"));
+            for j in 0..p {
+                let noise = ((i * 7 + j * 13) as f64 * 1.37).sin() * 0.8
+                    + ((i * 3 + j * 5) as f64 * 0.91).cos() * 0.5;
+                y[[i, j]] = grp as f64 * (j as f64 + 1.0) * 0.4 + noise;
+            }
+        }
+        (y, labels)
+    }
+
+    /// Pillai's, Hotelling-Lawley's and Roy's F transforms are exact only at s = min(p, v_h) = 1;
+    /// Rao's F for Wilks' lambda is exact when s <= 2.
+    #[test]
+    fn test_manova_exactness_flags() {
+        let flags = |p: usize, g: usize| {
+            let (y, labels) = exactness_layout(p, g);
+            let r = manova_one_way(&y, &labels).unwrap();
+            [
+                r.wilks.is_exact,
+                r.pillai.is_exact,
+                r.hotelling_lawley.is_exact,
+                r.roy.is_exact,
+            ]
+        };
+        // s = 1: two groups, three responses
+        assert_eq!(flags(3, 2), [true, true, true, true]);
+        // s = 2: three responses, three groups (v_h = 2)
+        assert_eq!(flags(3, 3), [true, false, false, false]);
+        // s = 2: two responses, four groups (v_h = 3)
+        assert_eq!(flags(2, 4), [true, false, false, false]);
+        // s = 3: three responses, four groups
+        assert_eq!(flags(3, 4), [false, false, false, false]);
+    }
 
     #[test]
     fn test_manova_basic() {

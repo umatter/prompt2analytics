@@ -58,6 +58,12 @@ pub struct OnewayTestResult {
 ///
 /// A `OnewayTestResult` containing the test statistic, degrees of freedom, and p-value.
 ///
+/// # Errors
+///
+/// `InsufficientData` for fewer than 2 groups or a group with fewer than 2 finite values;
+/// `InvalidSpecification` under Welch's test (`var_equal = false`) when a group is constant,
+/// where its weight is undefined (R's `oneway.test` returns F = NaN).
+///
 /// # Example
 ///
 /// ```
@@ -154,19 +160,26 @@ pub fn oneway_test(groups: &[(String, Vec<f64>)], var_equal: bool) -> EconResult
 
         (f_stat, df1, df2, p)
     } else {
-        // Welch's ANOVA (not assuming equal variances)
+        // Welch's ANOVA (not assuming equal variances). Its weights n_i / v_i are undefined
+        // for a constant group, where R's oneway.test returns F = NaN.
+        for ((name, vals), &v) in clean_groups.iter().zip(&group_variances) {
+            if v.is_nan() || v <= 0.0 || vals.iter().all(|&x| x == vals[0]) {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Welch's test needs a positive variance in every group; group '{name}' \
+                         is constant ({} values equal to {}); R's oneway.test returns F = NaN \
+                         here",
+                        vals.len(),
+                        vals[0]
+                    ),
+                });
+            }
+        }
         // Weights: w_i = n_i / v_i
         let weights: Vec<f64> = group_sizes
             .iter()
             .zip(group_variances.iter())
-            .map(|(&n, &v)| {
-                if v > 1e-15 {
-                    n as f64 / v
-                } else {
-                    // Very small variance - use large weight
-                    n as f64 * 1e15
-                }
-            })
+            .map(|(&n, &v)| n as f64 / v)
             .collect();
 
         let sum_weights: f64 = weights.iter().sum();
@@ -301,6 +314,26 @@ mod tests {
             .vector("welch_df", &[w.df_num, w.df_denom], Tol::stat(36))
             .scalar("welch_p", w.p_value, tail(36))
             .finish();
+    }
+
+    /// R's oneway.test returns F = NaN, denominator df NaN and p NA when a group is constant
+    /// under Welch's weights; p2a refuses, naming the group. var_equal = true is defined.
+    #[test]
+    fn test_welch_oneway_refuses_a_constant_group() {
+        let groups = vec![
+            ("A".to_string(), vec![5.0, 5.0, 5.0, 5.0]),
+            ("B".to_string(), vec![4.0, 6.0, 5.5, 4.5]),
+            ("C".to_string(), vec![4.2, 5.9, 5.1, 4.9]),
+        ];
+        match oneway_test(&groups, false) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("'A'"), "{message}");
+                assert!(message.contains("NaN"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let r = oneway_test(&groups, true).unwrap();
+        assert!(r.statistic.is_finite() && r.p_value.is_finite());
     }
 
     #[test]

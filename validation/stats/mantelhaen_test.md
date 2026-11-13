@@ -124,10 +124,15 @@ method `mantelhaen`.
 1. **Continuity correction**: Both R and Rust apply Yates' correction when |DELTA| >= 0.5 (default: true).
 
 2. **Odds ratio CI**: Both use Robins, Breslow, Greenland (1986) variance formula for the log
-   odds ratio, two-sided at 95%. Open: the one-sided intervals of `alternative = "less"` /
-   `"greater"` and a `conf_level` other than 0.95 (STAT-59), and the method label when
-   |DELTA| < 0.5 (STAT-81). When sum(a d / n) or sum(b c / n) is 0, p2a reports the
-   interval (0, Inf) where R reports (NaN, NaN).
+   odds ratio. As R, the interval is one-sided for `alternative = "less"` / `"greater"`
+   (`(0, OR exp(qnorm(conf_level) sd))`, `(OR exp(-qnorm(conf_level) sd), Inf)`), and
+   `mantelhaen_test_with` / `run_mantelhaen_test_with` take `conf_level` (the older functions use
+   0.95). The label says "with" or "without continuity correction" as applied: R drops the
+   correction when |DELTA| < 0.5 (STAT-59 and STAT-81, fixed in Tier 4; case
+   `stat_mantelhaen_alt_t4`, `stats::mantelhaen::tests::test_validate_mantelhaen_alternatives_t4`,
+   registry `validation/methods/stats_exact_t4.json`, id `mantelhaen_alternatives_t4`). When
+   sum(a d / n) or sum(b c / n) is 0, p2a reports the interval (0, Inf) where R reports
+   (NaN, NaN).
 
 3. **Small strata**: a stratum with one observation contributes nothing, where R refuses the
    table ("sample size in each stratum must be > 1").

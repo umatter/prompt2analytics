@@ -118,6 +118,14 @@ oneway.test(v9 ~ g9, data = d, var.equal = TRUE)   # classical F
   order, the text and absent-column errors)
 - MCP: `test_validate_mcp_hypothesis_oneway_na_labels` (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`)
 
+## Constant groups
+
+Welch's weights `n_i / v_i` are undefined for a group with zero variance. R's `oneway.test`
+returns F = NaN, denominator df NaN and p NA; p2a refuses the call with `InvalidSpecification`
+naming the group (STAT-57; registry deviation in `validation/methods/stats_anova.json`, id
+`oneway_test`). The classical test (`var_equal = true`) is defined and unchanged.
+`stats::oneway::tests::test_welch_oneway_refuses_a_constant_group`.
+
 ## Numerical Precision Summary
 
 - F statistics match R within 0.01

@@ -125,7 +125,6 @@ comment in the test):
 - **STAT-68** (`mcp_t3_spectrum_mahalanobis`), spectral ordinates: not pinned.
 - **TS-22** (`mcp_t3_garch_statespace_forecasting`), airpass_mult_upr, airpass_mult_lwr: predict.HoltWinters' multiplicative interval formula is wrong; the tool prints point forecasts and a note for multiplicative fits, intervals only for additive and non-seasonal fits (hw_add_upr, hw_add_lwr pinned).
 - **STAT-16** (`mcp_t3_remaining_handlers`), cancor correlations and coefficients: centres pinned only.
-- **STAT-58** (`mcp_t3_remaining_handlers`), Poisson two-sided p: one-sided p and the rate-ratio estimate pinned; the one-sided intervals are not (the tool returns the two-sided interval for every alternative, a core observation recorded in the method document).
 - **STAT-75** (`mcp_t3_remaining_handlers`), model-table SEs: means, grand mean and group sizes pinned.
 - **TS-14** (`mcp_t3_remaining_handlers`), ARMAacf for mixed ARMA: pure AR and MA pinned.
 - **TS-26** (`mcp_t3_remaining_handlers`), MSTL components: observation count and periods only.
@@ -154,10 +153,11 @@ Measured on 2026-11-09 against ff8e7559 (release builds, one core, eight interle
 - factanal regression scores are pinned for varimax only. For promax, R multiplies by the
   factor correlation Phi (`sc %*% Phi`) and p2a's `compute_factor_scores` does not (new
   observation, no finding id).
-- `hypothesis_poisson` with a one-sided `alternative` returns the two-sided confidence interval
-  (R: `poisson.test(10, 5, alternative = "less")$conf.int` is [0, 3.392443847144379]); the
-  one-sided p-values are right. The interval bounds are not pinned (new observation in core,
-  no finding id).
+- `hypothesis_poisson` with a one-sided `alternative` returns the one-sided interval, and the
+  two-sided p-value is R's (outcomes no more likely than the observed one); the less and greater
+  intervals, the rate-ratio interval and the two-sided p are pinned in
+  `test_validate_mcp_poisson_one_sided` (R: `poisson.test(10, 5, alternative = "less")$conf.int`
+  is [0, 3.392443847144379]).
 - Holt-Winters prediction intervals are printed for additive and non-seasonal fits only;
   predict.HoltWinters' multiplicative formula is wrong (TS-22), so a multiplicative fit gets
   point forecasts and a note.

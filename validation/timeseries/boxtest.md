@@ -126,6 +126,10 @@ autocorrelations with `na.action = na.pass`.
 
 2. **Missing values**: Rust implementation does not accept NaN/Inf values and will return an error. R's Box.test also does not handle missing values.
 
+3. **Constant series**: its autocorrelations are undefined. R's `Box.test` returns X-squared =
+   NaN; p2a refuses the series with `InvalidSpecification` (STAT-85).
+   `stats::boxtest::tests::test_box_test_refuses_a_constant_series`.
+
 ## Performance Comparison
 
 ### Ljung-Box Test (lag=10)

@@ -42,17 +42,22 @@ indicators), A given B when B is nested in A. A term with df 0 has NaN for MS, F
 drops that row too, and the Display prints it as "not estimable (aliased with the other
 factor)".
 
-The fit runs on the cell means weighted by the square roots of the cell sizes, which has the
-same normal equations as the regression on the rows: O(n) to build the cells, then Gram-Schmidt
-with re-orthogonalisation over the treatment-coded columns of A and B (one cancellation point
-per column). The interaction needs no columns of its own: A + B + A:B spans the indicator of
-every non-empty cell, so the model with the interaction is saturated (rank = number of
-non-empty cells c, residual = within-cell SS), and A:B given A and B is the additive model's
-residual between the cells, on `c - rank(A + B)` df. With the interaction, a Type III main
-effect is the Wald test of equal unweighted marginal means, `sum_l (m_l - m_w)^2 / s_l` over
-the marginal means `m_l` (variance `s_l` sigma^2, `m_w` their `1 / s_l`-weighted mean), which is
-what the sum-to-zero coefficients test. The cost is O(n + c (La + Lb) r) for La and Lb levels
-and the additive model's rank r. `stats::anova::tests::test_two_way_anova_shortcuts_match_explicit_interaction_columns`
+The fit runs on the non-empty cells (O(n) to build them) and only the additive model is
+fitted. The factor with more present levels (A on a tie) is absorbed: its fitted values are the
+level means of the cell means weighted by the cell sizes, the same normal equations as the
+regression on the rows. The treatment-coded columns of the other factor are residualised on that
+projection and on each other, Gram-Schmidt with re-orthogonalisation (one cancellation point per
+column), and the four sums of squares (A, B given A, B, A given B) are differences of fitted
+vectors. For a subjects x conditions layout (randomised complete blocks, repeated measures) the
+cost grows with the number of conditions, not with the number of subjects. The interaction needs
+no columns of its own: A + B + A:B spans the indicator of every non-empty cell, so the model with
+the interaction is saturated (rank = number of non-empty cells c, residual = within-cell SS), and
+A:B given A and B is the additive model's residual between the cells, on `c - rank(A + B)` df.
+With the interaction, a Type III main effect is the Wald test of equal unweighted marginal means,
+`sum_l (m_l - m_w)^2 / s_l` over the marginal means `m_l` (variance `s_l` sigma^2, `m_w` their
+`1 / s_l`-weighted mean), which is what the sum-to-zero coefficients test; it is refused before
+any fit when a cell is empty. The cost is O(n + c min(La, Lb)^2) for La and Lb levels.
+`stats::anova::tests::test_two_way_anova_shortcuts_match_explicit_interaction_columns`
 checks both identities at 1e-10 relative against the fit on explicit interaction columns (cell
 indicators, or the products of the sum codes for Type III). The result carries `ss_type` and,
 when rows were dropped, `missing`.
@@ -154,6 +159,11 @@ Full precision is in `validation/expected/stat_anova_two_way_unbalanced.json`
   `stat_friedman_quade`, `y ~ treat + block`: an Int64 response gives exactly the result of its
   Float64 cast; a text response is `NonNumericColumn`, an absent factor `ColumnNotFound`, the
   same factor twice `InvalidSpecification`)
+- `stats::anova::tests::test_validate_anova2_rcbd_t4` (case `stat_anova2_rcbd_t4`, registry
+  `anova2_rcbd_t4`: an unbalanced 40-subject x 3-condition layout with three empty cells, the
+  additive model as `anova(lm(y ~ subj + cond))`, `anova(lm(y ~ cond + subj))` and
+  `drop1(test = "F")`; Type I SS, df, F and p in both orders, Type II SS, F and p, residual SS and
+  df; this layout is the one where the absorbed factor is the one with many levels)
 - `test_two_way_anova_sparse_layout_df_from_rank` (not R-pinned: a 10 x 10 layout with 30
   non-empty cells, df 9 / 9 / 11 / 30 as R `aov` gives them)
 

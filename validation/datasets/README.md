@@ -71,7 +71,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 
 | File | Rows × columns | Case(s) | R file | Source |
 |---|---|---|---|---|
+| `generated/anova2_rcbd_t4.csv` | 115 × 3 (subj, cond, y) | `stat_anova2_rcbd_t4` | `r/cases/stats_exact_t4.R` | seed 4411; 40 subjects × 3 conditions with 5 rows dropped |
 | `generated/ap_blobs.csv` | 115 × 2 (x, y) | `apcluster_blobs`; read by `pam_clara_blobs`, `fuzzy_reference_blobs` | `r/cases/ml_mixtures.R` | seed 20261109; the same blobs and noise as `blobs_noise.csv` |
+| `generated/binom_minlike_t4.csv` | 6 × 4 (label, x, n, p) | `stat_binom_minlike_t4` | `r/cases/stats_exact_t4.R` | literal values: six (x, n, p) cells of binom.test's two-sided rule |
 | `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/cli_mtcars.csv` | 32 × 4 (mpg, wt, hp, qsec) | `cli_viz_residuals` | `r/cases/cli_other.R` | `datasets::mtcars`, the four columns of `lm(mpg ~ wt + hp + qsec)` |
 | `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
@@ -98,6 +100,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/munging_wide.csv` | 4 × 4 (id, a, b, c) | `data_munging_pivot_longer` | `r/cases/data_munging_t3.R` | integer and double columns with NA |
 | `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
 | `generated/robust_weighted_t3.csv` | 25 × 3 (x1, x2, w) | `stat_robust_weighted_t3` | `r/cases/stats_misc_t3.R` | two samples and weights |
+| `generated/secontrast_poly_t4.csv` | 24 × 2 (dose, y) | `stat_secontrast_poly_t4` | `r/cases/stats_exact_t4.R` | seed 20261111; four numeric dose levels, quadratic mean plus noise |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3` | `r/cases/stats_misc_t3.R` | sine plus noise |
 | `generated/step_legacy.csv` | 100 × 4 (y, x1, x2, x3) | `step_legacy` | `r/cases/regression.R` | seed 42 (DGP of `scripts/validate_regression_diag.R`) |
 | `generated/step_borderline.csv` | 120 × 4 (y, x1, x2, x3) | `step_borderline` | `r/cases/regression.R` | seed 5 |

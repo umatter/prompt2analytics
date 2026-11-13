@@ -1120,12 +1120,19 @@ impl fmt::Display for PowerTTestResult {
 /// A power.t.test call: any one of `n`, `delta`, `sd`, `sig_level`, `power` is solved for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PowerTTestSpec {
+    /// Observations per group (per pair for the paired test); `None` when solved for
     pub n: Option<f64>,
+    /// True difference in means; `None` when solved for
     pub delta: Option<f64>,
+    /// Standard deviation; `None` is 1 unless it is solved for
     pub sd: Option<f64>,
+    /// Significance level; `None` is 0.05 unless it is solved for
     pub sig_level: Option<f64>,
+    /// Power of the test; `None` when solved for
     pub power: Option<f64>,
+    /// One-sample, two-sample or paired test
     pub test_type: TTestType,
+    /// One- or two-sided alternative
     pub alternative: PowerAlternative,
     /// R's `strict`: count both tails of a two-sided test (default false: the one tail R counts)
     pub strict: bool,
@@ -1487,11 +1494,17 @@ impl fmt::Display for PowerPropTestResult {
 /// A power.prop.test call: any one of `n`, `p1`, `p2`, `sig_level`, `power` is solved for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PowerPropTestSpec {
+    /// Observations per group; `None` when solved for
     pub n: Option<f64>,
+    /// Probability in group 1; `None` when solved for
     pub p1: Option<f64>,
+    /// Probability in group 2; `None` when solved for
     pub p2: Option<f64>,
+    /// Significance level; `None` is 0.05 unless it is solved for
     pub sig_level: Option<f64>,
+    /// Power of the test; `None` when solved for
     pub power: Option<f64>,
+    /// One- or two-sided alternative
     pub alternative: PowerAlternative,
     /// R's `strict`
     pub strict: bool,
@@ -1810,11 +1823,17 @@ impl fmt::Display for PowerAnovaTestResult {
 /// A power.anova.test call: any one of the six parameters is solved for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PowerAnovaTestSpec {
+    /// Number of groups; no default (`None` only when solved for)
     pub groups: Option<f64>,
+    /// Observations per group; `None` when solved for
     pub n: Option<f64>,
+    /// Variance of the group means; `None` when solved for
     pub between_var: Option<f64>,
+    /// Variance within the groups; no default (`None` only when solved for)
     pub within_var: Option<f64>,
+    /// Significance level; `None` is 0.05 unless it is solved for
     pub sig_level: Option<f64>,
+    /// Power of the test; `None` when solved for
     pub power: Option<f64>,
     /// Root-search tolerance (default [`R_UNIROOT_TOL`], which R's power.anova.test always uses)
     pub tol: f64,
