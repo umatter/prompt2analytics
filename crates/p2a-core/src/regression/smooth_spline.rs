@@ -340,7 +340,7 @@ pub fn smooth_spline(
             None => setup.solve(setup.lambda(spar))?,
         };
         if let Criterion::DfMatch(target) = crit
-            && !((solved.df - target).abs() <= DF_TARGET_TOL)
+            && ((solved.df - target).abs() > DF_TARGET_TOL || solved.df.is_nan())
         {
             warnings.push(format!(
                 "df target {target} reached {}: the spar search ended at its bound",
@@ -392,7 +392,7 @@ pub fn smooth_spline(
 pub fn smooth_spline_predict(result: &SmoothSplineResult, xnew: &[f64]) -> EconResult<Vec<f64>> {
     let fit = &result.fit;
     let nk = fit.coef.len();
-    if nk < 4 || fit.knots.len() != nk + 4 || !(fit.range > 0.0) {
+    if nk < 4 || fit.knots.len() != nk + 4 || fit.range.is_nan() || fit.range <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: "the smoothing spline result carries no spline coefficients; refit it"
                 .to_string(),
