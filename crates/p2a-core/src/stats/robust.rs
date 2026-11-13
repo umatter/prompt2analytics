@@ -730,21 +730,31 @@ fn density_binned(
     }
 
     // Kernel ordinates at kords = seq(0, 2(up - lo), length 2m), mirrored above m
-    let span = 2.0 * (up - lo);
+    let kords_at = RSeq::new(0.0, 2.0 * (up - lo), size);
     let mut k: Vec<Complex<f64>> = resource::try_with_capacity(size, "density kernel grid")?;
     k.extend((0..size).map(|i| {
         let t = if i <= m {
-            r_seq(0.0, span, size, i)
+            kords_at.at(i)
         } else {
-            -r_seq(0.0, span, size, size - i)
+            -kords_at.at(size - i)
         };
         Complex::new(kernel_function(t, bw, kernel), 0.0)
     }));
 
     resource::checkpoint()?;
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(size);
-    let ifft = planner.plan_fft_inverse(size);
+    // FftPlanner caches its plans: grids up to DENSITY_CACHED_FFT_MAX reuse a per-thread planner
+    // (the default 512-point grid among them), larger ones plan afresh so no big plan is kept.
+    let plan = |planner: &mut FftPlanner<f64>| {
+        (
+            planner.plan_fft_forward(size),
+            planner.plan_fft_inverse(size),
+        )
+    };
+    let (fft, ifft) = if size <= DENSITY_CACHED_FFT_MAX {
+        DENSITY_FFT_PLANNER.with(|planner| plan(&mut planner.borrow_mut()))
+    } else {
+        plan(&mut FftPlanner::new())
+    };
     fft.process(&mut y);
     fft.process(&mut k);
     for (a, b) in y.iter_mut().zip(&k) {
@@ -757,11 +767,13 @@ fn density_binned(
     let kords = |i: usize| (y[i].re * scale).max(0.0);
 
     // approx(xords, kords, x) at x = seq(from, to, length n_user), xords = seq(lo, up, length m)
-    let xords = |j: usize| r_seq(lo, up, m, j);
+    let xords_at = RSeq::new(lo, up, m);
+    let xords = |j: usize| xords_at.at(j);
+    let x_at = RSeq::new(from, to, n_user);
     let mut xs: Vec<f64> = resource::try_with_capacity(n_user, "density grid")?;
     let mut ys: Vec<f64> = resource::try_with_capacity(n_user, "density values")?;
     for i in 0..n_user {
-        let v = r_seq(from, to, n_user, i);
+        let v = x_at.at(i);
         // the interval [xords(j), xords(j + 1)) holding v, as approx's bisection finds it
         let mut j = ((v - lo) / xdelta).floor().clamp(0.0, (m - 2) as f64) as usize;
         while j > 0 && v < xords(j) {
@@ -792,24 +804,53 @@ fn density_binned(
     })
 }
 
+/// The largest FFT length whose plans the per-thread density planner keeps.
+#[cfg(feature = "spectral-analysis")]
+const DENSITY_CACHED_FFT_MAX: usize = 1 << 13;
+
+#[cfg(feature = "spectral-analysis")]
+thread_local! {
+    static DENSITY_FFT_PLANNER: std::cell::RefCell<FftPlanner<f64>> =
+        std::cell::RefCell::new(FftPlanner::new());
+}
+
 /// R's smallest density grid (`density(n = 512)`); larger grids are rounded up to a power of two.
 #[cfg(feature = "spectral-analysis")]
 const R_DENSITY_MIN_GRID: usize = 512;
 
-/// Element `i` of R's `seq.int(from, to, length.out = len)`, `len >= 2`: the ends exactly, the
-/// first half counted up from `from` and the second half down from `to`.
-fn r_seq(from: f64, to: f64, len: usize, i: usize) -> f64 {
-    if i == 0 {
-        return from;
+/// R's `seq.int(from, to, length.out = len)`, `len >= 2`: the ends exactly, the first half
+/// counted up from `from` and the second half down from `to`.
+#[derive(Clone, Copy)]
+struct RSeq {
+    from: f64,
+    to: f64,
+    last: usize,
+    by: f64,
+}
+
+impl RSeq {
+    fn new(from: f64, to: f64, len: usize) -> Self {
+        let last = len - 1;
+        RSeq {
+            from,
+            to,
+            last,
+            by: (to - from) / last as f64,
+        }
     }
-    if i == len - 1 {
-        return to;
-    }
-    let by = (to - from) / (len - 1) as f64;
-    if i < len / 2 {
-        from + i as f64 * by
-    } else {
-        to - (len - 1 - i) as f64 * by
+
+    /// Element `i` (0-based).
+    #[inline]
+    fn at(&self, i: usize) -> f64 {
+        if i == 0 {
+            self.from
+        } else if i == self.last {
+            self.to
+        } else if i < (self.last + 1) / 2 {
+            self.from + i as f64 * self.by
+        } else {
+            self.to - (self.last - i) as f64 * self.by
+        }
     }
 }
 
@@ -827,7 +868,8 @@ pub(crate) fn density_direct(
 ) -> EconResult<DensityResult> {
     let n = data.len();
     let mut x: Vec<f64> = resource::try_with_capacity(n_points, "density grid")?;
-    x.extend((0..n_points).map(|i| r_seq(from, to, n_points, i)));
+    let x_at = RSeq::new(from, to, n_points);
+    x.extend((0..n_points).map(|i| x_at.at(i)));
 
     let mut y: Vec<f64> = resource::try_with_capacity(n_points, "density values")?;
     for &xi in &x {
