@@ -56,6 +56,11 @@ use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value
 pub struct HdfeConfig {
     /// Relative tolerance of the alternating projections: a sweep stops when
     /// ||change|| <= tolerance * max(||demeaned column||, 1e-6 ||column||).
+    /// The floor uses the column's uncentred norm: for a column whose level is far above
+    /// its variation within the groups (values near 1e9 that vary by about 1), the sweeps
+    /// stop when the demeaned column is accurate to about `tolerance * 1e-6 * ||column||`.
+    /// At the default tolerance 1e-8 that is within about 50 times the rounding error the
+    /// stored values already carry (`f64::EPSILON * ||column||`).
     /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub tolerance: f64,
@@ -351,6 +356,196 @@ fn validate_config(config: &HdfeConfig) -> EconResult<()> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Weighted alternating projections (FEGLM's IRLS steps)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The weighted alternating projections onto one set of weights: each factor's group weight
+/// sums, which no sweep and no column changes, computed once, and scratch for the group
+/// means, so a sweep demeans in place without allocating.
+pub(crate) struct WeightedProjector<'a> {
+    weights: &'a [f64],
+    factors: &'a [FactorInfo],
+    /// Per factor, the weight sum of every level.
+    weight_sums: Vec<Vec<f64>>,
+    /// Per factor, scratch for the weighted sums and then the means of the levels.
+    means: Vec<Vec<f64>>,
+}
+
+impl<'a> WeightedProjector<'a> {
+    pub(crate) fn new(weights: &'a [f64], factors: &'a [FactorInfo]) -> Self {
+        let weight_sums = factors
+            .iter()
+            .map(|factor| {
+                let mut sums = vec![0.0; factor.n_levels];
+                for (&g, &w) in factor.ids.iter().zip(weights.iter()) {
+                    sums[g] += w;
+                }
+                sums
+            })
+            .collect();
+        let means = factors.iter().map(|f| vec![0.0; f.n_levels]).collect();
+        WeightedProjector {
+            weights,
+            factors,
+            weight_sums,
+            means,
+        }
+    }
+
+    /// Subtract the weighted means of factor `f`'s levels from `data`, in place.
+    pub(crate) fn demean_by(&mut self, f: usize, data: &mut [f64]) {
+        let (ids, means) = (&self.factors[f].ids, &mut self.means[f]);
+        means.fill(0.0);
+        for ((&g, &v), &w) in ids.iter().zip(data.iter()).zip(self.weights.iter()) {
+            means[g] += v * w;
+        }
+        for (m, &w_sum) in means.iter_mut().zip(&self.weight_sums[f]) {
+            *m = if w_sum > 1e-10 { *m / w_sum } else { 0.0 };
+        }
+        for (v, &g) in data.iter_mut().zip(ids) {
+            *v -= means[g];
+        }
+    }
+
+    /// One round of weighted alternating projections (every factor in turn), in place.
+    pub(crate) fn sweep(&mut self, data: &mut [f64]) {
+        for f in 0..self.factors.len() {
+            self.demean_by(f, data);
+        }
+    }
+}
+
+/// Weighted demean using the Method of Alternating Projections, onto the projector's
+/// weights and factors.
+///
+/// Stops when the weighted norm of a sweep's change is at most `tolerance` times
+/// `max(||current||_w, MAP_SCALE_FLOOR * ||data||_w)`; the returned change is that
+/// ratio. Returns `EconError::Cancelled` when the current budget runs out between sweeps.
+///
+/// A warm start is an input that is already demeaned with other positive weights:
+/// `M_W (M_V x) = M_W x`, so the result is the same and the sweeps start closer to it.
+pub(crate) fn weighted_demean_map(
+    data: &[f64],
+    proj: &mut WeightedProjector,
+    tolerance: f64,
+    max_iter: usize,
+    accelerate: bool,
+) -> EconResult<(Vec<f64>, usize, f64, bool)> {
+    let weights = proj.weights;
+    if proj.factors.is_empty() {
+        return Ok((data.to_vec(), 0, 0.0, true));
+    }
+
+    // Single factor: one pass is sufficient
+    if proj.factors.len() == 1 {
+        let mut out = data.to_vec();
+        proj.demean_by(0, &mut out);
+        return Ok((out, 1, 0.0, true));
+    }
+
+    let mut current = data.to_vec();
+    let mut prev = current.clone();
+    let mut prev_prev = current.clone();
+    let mut final_change = f64::MAX;
+    let w_norm = |v: &[f64]| -> f64 {
+        v.iter()
+            .zip(weights.iter())
+            .map(|(&c, &w)| w * c * c)
+            .sum::<f64>()
+            .sqrt()
+    };
+    let floor = MAP_SCALE_FLOOR * w_norm(data);
+
+    for iter in 1..=max_iter {
+        resource::checkpoint()?;
+        if iter > 1 {
+            prev_prev.copy_from_slice(&prev);
+        }
+        prev.copy_from_slice(&current);
+
+        // One round of weighted alternating projections
+        proj.sweep(&mut current);
+
+        // Change and current norm (weighted L2) in one pass; each sum accumulates in
+        // row order, as two separate passes would
+        let mut delta = 0.0f64;
+        let mut norm_w = 0.0f64;
+        for ((&c, &p), &w) in current.iter().zip(prev.iter()).zip(weights.iter()) {
+            delta += w * (c - p).powi(2);
+            norm_w += w * c * c;
+        }
+        let delta = delta.sqrt();
+        let scale = norm_w.sqrt().max(floor).max(f64::MIN_POSITIVE);
+        final_change = delta / scale;
+
+        // Relative stopping rule: invariant to rescaling the column
+        if delta <= tolerance * scale {
+            return Ok((current, iter, final_change, true));
+        }
+
+        // Gearhart-Koshy acceleration
+        if accelerate && iter > 2 {
+            let mut numerator = 0.0f64;
+            let mut denominator = 0.0f64;
+            let mut norm_sq = 0.0f64;
+            for ((&c, &p), &pp) in current.iter().zip(prev.iter()).zip(prev_prev.iter()) {
+                let d = c - p;
+                let dp = p - pp;
+                numerator += d * dp;
+                denominator += dp * dp;
+                norm_sq += c * c;
+            }
+            let current_norm = norm_sq.sqrt();
+
+            // Scale-free guard: skip only a step that is rounding noise
+            if denominator > (f64::EPSILON * current_norm).powi(2) {
+                let alpha = (numerator / denominator).clamp(0.0, 1.0);
+                if alpha > 0.0 && alpha < 1.0 {
+                    for (c, &p) in current.iter_mut().zip(prev.iter()) {
+                        let d = *c - p;
+                        *c = p + d * (1.0 + alpha);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((current, max_iter, final_change, false))
+}
+
+/// Weighted demean a matrix column-wise, onto the projector's weights and factors.
+pub(crate) fn weighted_demean_matrix_map(
+    x: ArrayView2<f64>,
+    proj: &mut WeightedProjector,
+    tolerance: f64,
+    max_iter: usize,
+    accelerate: bool,
+) -> EconResult<(Array2<f64>, usize, f64, bool)> {
+    let (n, k) = x.dim();
+    let mut x_demeaned = resource::try_zeros2(n, k, "FEGLM demeaned design")?;
+    let mut max_iterations: usize = 0;
+    let mut max_change: f64 = 0.0;
+    let mut all_converged = true;
+
+    for j in 0..k {
+        let col = x.column(j).to_vec();
+        let (col_demeaned, iters, change, converged) =
+            weighted_demean_map(&col, proj, tolerance, max_iter, accelerate)?;
+        x_demeaned
+            .column_mut(j)
+            .iter_mut()
+            .zip(&col_demeaned)
+            .for_each(|(d, &v)| *d = v);
+
+        max_iterations = max_iterations.max(iters);
+        max_change = max_change.max(change);
+        all_converged = all_converged && converged;
+    }
+
+    Ok((x_demeaned, max_iterations, max_change, all_converged))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Regressors absorbed by the fixed effects or collinear
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -637,7 +832,7 @@ fn count_connected_components(f0: &FactorInfo, f1: &FactorInfo) -> usize {
 /// connected-components count for the first two dimensions and add
 /// `n_levels - 1` for each additional dimension (the `reghdfe` default, exact
 /// in the fully-connected case).
-fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
+pub(crate) fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
     match factors.len() {
         0 => 0,
         1 => factors[0].n_levels,
@@ -3290,5 +3485,294 @@ mod tests {
                 r.warnings
             );
         }
+    }
+
+    // =========================================================================
+    // Weighted alternating projections (moved from feglm.rs with FEGLM's IRLS)
+    // =========================================================================
+
+    /// Weighted demean a vector by a single factor: subtracts the weighted group mean
+    /// from each observation.
+    fn weighted_demean_by_factor(
+        data: &Array1<f64>,
+        weights: &Array1<f64>,
+        factor: &FactorInfo,
+    ) -> Array1<f64> {
+        let mut out = data.to_vec();
+        WeightedProjector::new(weights.as_slice().unwrap(), std::slice::from_ref(factor))
+            .demean_by(0, &mut out);
+        Array1::from(out)
+    }
+
+    #[test]
+    fn test_weighted_demean_single_factor() {
+        // Simple test with uniform weights
+        let data = Array1::from(vec![1.0, 2.0, 3.0, 10.0, 11.0, 12.0]);
+        let weights = Array1::from(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        let factor = FactorInfo {
+            name: "test".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
+        };
+
+        let demeaned = weighted_demean_by_factor(&data, &weights, &factor);
+
+        // Group 0 mean: 2, Group 1 mean: 11
+        assert!((demeaned[0] - (-1.0)).abs() < 1e-10);
+        assert!((demeaned[1] - 0.0).abs() < 1e-10);
+        assert!((demeaned[2] - 1.0).abs() < 1e-10);
+        assert!((demeaned[3] - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_weighted_demean_with_varying_weights() {
+        // Test that weights affect the group mean
+        let data = Array1::from(vec![1.0, 2.0, 10.0, 20.0]);
+        // High weight on first observation in each group
+        let weights = Array1::from(vec![10.0, 1.0, 10.0, 1.0]);
+        let factor = FactorInfo {
+            name: "test".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 1, 1],
+            counts: vec![2, 2],
+        };
+
+        let demeaned = weighted_demean_by_factor(&data, &weights, &factor);
+
+        // Weighted mean of group 0: (10*1 + 1*2)/(10+1) = 12/11 ≈ 1.09
+        // Weighted mean of group 1: (10*10 + 1*20)/(10+1) = 120/11 ≈ 10.91
+        let expected_mean_0 = (10.0 * 1.0 + 1.0 * 2.0) / 11.0;
+        let expected_mean_1 = (10.0 * 10.0 + 1.0 * 20.0) / 11.0;
+
+        assert!((demeaned[0] - (1.0 - expected_mean_0)).abs() < 1e-10);
+        assert!((demeaned[1] - (2.0 - expected_mean_0)).abs() < 1e-10);
+        assert!((demeaned[2] - (10.0 - expected_mean_1)).abs() < 1e-10);
+        assert!((demeaned[3] - (20.0 - expected_mean_1)).abs() < 1e-10);
+    }
+
+    /// The weighted MAP as it was before T3-PERF5 (a fresh vector per factor pass, the group
+    /// weight sums recomputed in every pass), the reference of the in-place projector.
+    fn weighted_demean_map_reference(
+        data: &Array1<f64>,
+        weights: &Array1<f64>,
+        factors: &[FactorInfo],
+        tolerance: f64,
+        max_iter: usize,
+        accelerate: bool,
+    ) -> (Array1<f64>, usize, f64, bool) {
+        let by_factor = |data: &Array1<f64>, factor: &FactorInfo| -> Array1<f64> {
+            let mut sums = vec![0.0; factor.n_levels];
+            let mut w_sums = vec![0.0; factor.n_levels];
+            for i in 0..data.len() {
+                let g = factor.ids[i];
+                sums[g] += data[i] * weights[i];
+                w_sums[g] += weights[i];
+            }
+            let means: Vec<f64> = sums
+                .iter()
+                .zip(&w_sums)
+                .map(|(&s, &w)| if w > 1e-10 { s / w } else { 0.0 })
+                .collect();
+            Array1::from_shape_fn(data.len(), |i| data[i] - means[factor.ids[i]])
+        };
+        if factors.len() == 1 {
+            return (by_factor(data, &factors[0]), 1, 0.0, true);
+        }
+        let w_norm = |v: &Array1<f64>| -> f64 {
+            v.iter()
+                .zip(weights.iter())
+                .map(|(&c, &w)| w * c * c)
+                .sum::<f64>()
+                .sqrt()
+        };
+        let floor = MAP_SCALE_FLOOR * w_norm(data);
+        let (mut current, mut prev, mut prev_prev) = (data.clone(), data.clone(), data.clone());
+        let mut final_change = f64::MAX;
+        for iter in 1..=max_iter {
+            if iter > 1 {
+                prev_prev.assign(&prev);
+            }
+            prev.assign(&current);
+            for factor in factors {
+                current = by_factor(&current, factor);
+            }
+            let (mut delta, mut norm_w) = (0.0f64, 0.0f64);
+            for ((&c, &p), &w) in current.iter().zip(prev.iter()).zip(weights.iter()) {
+                delta += w * (c - p).powi(2);
+                norm_w += w * c * c;
+            }
+            let delta = delta.sqrt();
+            let scale = norm_w.sqrt().max(floor).max(f64::MIN_POSITIVE);
+            final_change = delta / scale;
+            if delta <= tolerance * scale {
+                return (current, iter, final_change, true);
+            }
+            if accelerate && iter > 2 {
+                let (mut num, mut den, mut norm_sq) = (0.0f64, 0.0f64, 0.0f64);
+                for ((&c, &p), &pp) in current.iter().zip(prev.iter()).zip(prev_prev.iter()) {
+                    num += (c - p) * (p - pp);
+                    den += (p - pp) * (p - pp);
+                    norm_sq += c * c;
+                }
+                if den > (f64::EPSILON * norm_sq.sqrt()).powi(2) {
+                    let alpha = (num / den).clamp(0.0, 1.0);
+                    if alpha > 0.0 && alpha < 1.0 {
+                        for (c, &p) in current.iter_mut().zip(prev.iter()) {
+                            let d = *c - p;
+                            *c = p + d * (1.0 + alpha);
+                        }
+                    }
+                }
+            }
+        }
+        (current, max_iter, final_change, false)
+    }
+
+    /// T3-PERF5: the weighted MAP through `WeightedProjector` (in place, group weight sums
+    /// once per set of weights) is bit-identical to the per-pass reference: sweeps, change,
+    /// convergence and every value, one and two (unbalanced) factors, with and without
+    /// acceleration, including a sweep limit that stops it early.
+    #[test]
+    fn test_weighted_projector_matches_reference_exactly() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(5);
+        let n = 600;
+        let ids1: Vec<usize> = (0..n).map(|_| rng.gen_range(0..37)).collect();
+        let ids2: Vec<usize> = (0..n).map(|i| (i * 7 + rng.gen_range(0..3)) % 23).collect();
+        let info = |name: &str, ids: Vec<usize>, levels: usize| {
+            let mut counts = vec![0; levels];
+            ids.iter().for_each(|&g| counts[g] += 1);
+            FactorInfo {
+                name: name.to_string(),
+                n_levels: levels,
+                ids,
+                counts,
+            }
+        };
+        let factors = [info("a", ids1, 37), info("b", ids2, 23)];
+        let weights = Array1::from_shape_fn(n, |i| {
+            if i % 50 == 0 {
+                0.0
+            } else {
+                0.05 + rng.r#gen::<f64>() * 0.2
+            }
+        });
+        let data = Array1::from_shape_fn(n, |i| {
+            (i as f64 * 0.01).sin() * 3.0 + factors[0].ids[i] as f64 * 0.1 + rng.r#gen::<f64>()
+        });
+        for (f, max_iter) in [(&factors[..1], 100), (&factors[..], 100), (&factors[..], 3)] {
+            for accelerate in [false, true] {
+                let mut proj = WeightedProjector::new(weights.as_slice().unwrap(), f);
+                let got = weighted_demean_map(
+                    data.as_slice().unwrap(),
+                    &mut proj,
+                    1e-10,
+                    max_iter,
+                    accelerate,
+                )
+                .unwrap();
+                let want =
+                    weighted_demean_map_reference(&data, &weights, f, 1e-10, max_iter, accelerate);
+                assert_eq!((got.1, got.3), (want.1, want.3), "{} factors", f.len());
+                assert_eq!(got.2.to_bits(), want.2.to_bits());
+                for (a, b) in got.0.iter().zip(want.0.iter()) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "{} factors {accelerate}", f.len());
+                }
+                // the projector serves another column with the same weights unchanged
+                let again = weighted_demean_map(
+                    data.as_slice().unwrap(),
+                    &mut proj,
+                    1e-10,
+                    max_iter,
+                    accelerate,
+                )
+                .unwrap();
+                assert!(
+                    again
+                        .0
+                        .iter()
+                        .zip(got.0.iter())
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_weighted_demean_map_stops_when_cancelled() {
+        // the two FactorInfo literals of hdfe's test_demean_map_two_factors, data 1..=6, unit weights
+        let data = Array1::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let weights = Array1::from_elem(6, 1.0);
+        let factor1 = FactorInfo {
+            name: "entity".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
+        };
+        let factor2 = FactorInfo {
+            name: "time".to_string(),
+            n_levels: 3,
+            ids: vec![0, 1, 2, 0, 1, 2],
+            counts: vec![2, 2, 2],
+        };
+        expect_cancelled(with_budget(cancelled(), || {
+            let factors = [factor1, factor2];
+            let mut proj = WeightedProjector::new(weights.as_slice().unwrap(), &factors);
+            weighted_demean_map(data.as_slice().unwrap(), &mut proj, 1e-8, 1000, true)
+        }));
+    }
+
+    /// `M_W (M_V x) = M_W x` for positive weights V and W: a column already demeaned with
+    /// other weights is a warm start that converges to the same demeaned column.
+    #[test]
+    fn test_weighted_map_warm_start_matches_cold() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(11);
+        let n = 600;
+        let info = |name: &str, ids: Vec<usize>, levels: usize| {
+            let mut counts = vec![0; levels];
+            ids.iter().for_each(|&g| counts[g] += 1);
+            FactorInfo {
+                name: name.to_string(),
+                n_levels: levels,
+                ids,
+                counts,
+            }
+        };
+        let ids1: Vec<usize> = (0..n).map(|_| rng.gen_range(0..37)).collect();
+        let ids2: Vec<usize> = (0..n).map(|i| (i * 7 + rng.gen_range(0..3)) % 23).collect();
+        let factors = [info("a", ids1, 37), info("b", ids2, 23)];
+        let v: Vec<f64> = (0..n).map(|_| 0.05 + rng.r#gen::<f64>()).collect();
+        let w: Vec<f64> = (0..n).map(|_| 0.01 + 0.3 * rng.r#gen::<f64>()).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| {
+                (i as f64 * 0.01).sin() * 3.0 + factors[0].ids[i] as f64 * 0.1 + rng.r#gen::<f64>()
+            })
+            .collect();
+        let tol = 1e-13;
+        let (mv_x, _, _, conv_v) = weighted_demean_map(
+            &x,
+            &mut WeightedProjector::new(&v, &factors),
+            tol,
+            10_000,
+            true,
+        )
+        .unwrap();
+        assert!(conv_v);
+        let mut proj = WeightedProjector::new(&w, &factors);
+        let (cold, cold_sweeps, _, cold_conv) =
+            weighted_demean_map(&x, &mut proj, tol, 10_000, true).unwrap();
+        let (warm, warm_sweeps, _, warm_conv) =
+            weighted_demean_map(&mv_x, &mut proj, tol, 10_000, true).unwrap();
+        assert!(cold_conv && warm_conv);
+        let w_norm = |d: &[f64]| d.iter().zip(&w).map(|(a, b)| b * a * a).sum::<f64>().sqrt();
+        let diff: Vec<f64> = cold.iter().zip(&warm).map(|(a, b)| a - b).collect();
+        let rel = w_norm(&diff) / w_norm(&cold);
+        assert!(
+            rel <= 1e-10,
+            "warm and cold differ by {rel:e} (W-norm, relative)"
+        );
+        eprintln!("weighted MAP sweeps: cold {cold_sweeps}, warm {warm_sweeps}");
     }
 }
