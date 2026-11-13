@@ -144,6 +144,30 @@
       "tolerance": "validation/README.md by n (10, 100): coefficients 1e-6 relative",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "factanal_t4",
+      "name": "Factor analysis: a saturated model (dof 0, no test) and promax regression and Bartlett scores",
+      "category": "stats",
+      "reference": "stats::factanal",
+      "doc": "validation/multivariate/factanal.md",
+      "cases": [
+        "stat_factanal_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::factanal::tests::test_validate_factanal_zero_df",
+        "p2a-core::stats::factanal::tests::test_validate_factanal_promax_scores"
+      ],
+      "quantities": [
+        "uniquenesses and loadings (dof 0)",
+        "dof",
+        "absence of the chi-square test",
+        "promax regression scores (first 10 rows)",
+        "promax Bartlett scores (first 10 rows)"
+      ],
+      "tolerance": "Tol::iterative(1e-4) (p2a's fixed point against R's L-BFGS-B optimum, as factanal_rotation); dof exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

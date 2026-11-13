@@ -206,7 +206,7 @@
         {
           "finding": "STAT-23",
           "quantity": "factanal",
-          "note": "smoke test only (STAT-23, STAT-49, Tier 4)"
+          "note": "smoke test only (STAT-23; the handler side of STAT-49)"
         }
       ],
       "supersedes_legacy": []

@@ -142,7 +142,8 @@ Registry deviations (quantities not pinned through MCP):
   differ).
 - ECON-16: the hurdle count part.
 - ECON-20: FEGLM standard errors and deviance.
-- Smoke tests only: Holt-Winters forecasts (TS-23, TS-24), VAR IRF, factanal (STAT-23, STAT-49).
+- Smoke tests only: Holt-Winters forecasts (TS-23, TS-24), VAR IRF, factanal (STAT-23; the core fit and
+  scores are pinned in [factanal.md](../multivariate/factanal.md), the handler side of STAT-49 is open).
 
 Compared with R in the core tests rather than through MCP: the pooled-GLS and mean-group
 standard errors ([pggls.md](../econometrics/pggls.md), [pvcm.md](../econometrics/pvcm.md)) and

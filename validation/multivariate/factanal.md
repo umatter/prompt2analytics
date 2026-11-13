@@ -61,6 +61,16 @@ Tests (`p2a-core`, `stats::factanal::tests::`):
   Varimax and promax: loadings, variance proportions and promax factor correlations against R's
   rotations at the optimum (`rot_*_tight`), since `factanal`'s own rotated output is R's eps 1e-5
   iterate, up to 7.1e-4 away (registry deviation STAT-23).
+- `test_validate_factanal_zero_df` (case `stat_factanal_t4`, `validation/r/cases/stats_misc_t4.R`):
+  `factanal(X[, 1:3], 1)`, a saturated model with dof 0: uniquenesses and loadings at
+  `Tol::iterative(1e-4)`, dof exact, and no test (R prints none): `chi_squared` and `p_value` are NaN
+  (`null` in JSON, read back as NaN).
+- `test_validate_factanal_promax_scores`: promax with regression and Bartlett scores, the first ten
+  rows of each at `Tol::iterative(1e-4)`. Regression scores are R's `Z S^-1 Lambda` with the sample
+  correlation S (Thomson); R does not use the promax factor correlations there, nor does p2a.
+- `test_factanal_refuses_constant_column` (not R-pinned; R stops with an error): a column with zero
+  variance is refused with `InvalidSpecification` naming it (it used to get a floored standard
+  deviation and a fit of zeros).
 - `test_rotation_and_scores_methods_parse_aliases_and_reject_unknown` (not R-pinned): option spellings
   (`varimax`, `promax`, `none`; scores `none`, `regression`/`thomson`, `bartlett`).
 

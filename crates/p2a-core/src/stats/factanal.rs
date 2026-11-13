@@ -130,11 +130,14 @@ pub struct FactorAnalysisResult {
     /// Factor correlation matrix (promax), in the order and signs of `loadings`
     #[serde(skip)]
     pub factor_correlation: Option<Array2<f64>>,
-    /// Chi-squared test statistic for goodness of fit
+    /// Chi-squared test statistic for goodness of fit; NaN when `df` is 0 (a saturated model
+    /// has no test, as R's `factanal` reports none). JSON writes NaN as null and reads it back.
+    #[serde(deserialize_with = "crate::econometrics::panel::types::nan_from_null")]
     pub chi_squared: f64,
     /// Degrees of freedom for chi-squared test
     pub df: usize,
-    /// P-value for chi-squared test
+    /// P-value for chi-squared test; NaN when `df` is 0
+    #[serde(deserialize_with = "crate::econometrics::panel::types::nan_from_null")]
     pub p_value: f64,
     /// Number of observations
     pub n_obs: usize,
@@ -200,6 +203,16 @@ pub fn factanal_with_config(
             message: format!(
                 "Number of factors must be between 1 and {} (number of variables)",
                 p
+            ),
+        });
+    }
+
+    // A constant column has no correlation (R's factanal cannot fit it either)
+    if let Some(j) = zero_variance_column(data) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "column {j} (0-based) has zero variance; factor analysis needs every variable \
+                 to vary"
             ),
         });
     }
@@ -271,7 +284,8 @@ pub fn factanal_from_corr(
             (l, Some(phi))
         }
     };
-    let (rotated_loadings, factor_corr) = sort_loadings(rotated, phi);
+    let (rotated_loadings, factor_corr) =
+        sort_loadings(rotated.view(), phi.as_ref().map(|p| p.view()));
 
     // Compute variance proportions
     let (var_props, cum_var) = compute_variance_proportions(&rotated_loadings.view());
@@ -279,14 +293,16 @@ pub fn factanal_from_corr(
     // Compute chi-squared test statistic
     // χ² = (n - 1 - (2p + 5)/6 - 2k/3) * f
     // where f is the minimum value of the objective function
-    let correction = (2.0 * p as f64 + 5.0) / 6.0 + 2.0 * k as f64 / 3.0;
-    let chi_squared = (n_obs as f64 - 1.0 - correction) * objective;
-    let chi_squared = chi_squared.max(0.0); // Ensure non-negative
-
-    let p_value = if df > 0 {
-        crate::traits::estimator::chi_squared_p_value(chi_squared, df as f64)
+    // A saturated model (df = 0) has no test: R's factanal reports no statistic and no p-value.
+    let (chi_squared, p_value) = if df > 0 {
+        let correction = (2.0 * p as f64 + 5.0) / 6.0 + 2.0 * k as f64 / 3.0;
+        let chi_squared = ((n_obs as f64 - 1.0 - correction) * objective).max(0.0);
+        (
+            chi_squared,
+            crate::traits::estimator::chi_squared_p_value(chi_squared, df as f64),
+        )
     } else {
-        1.0
+        (f64::NAN, f64::NAN)
     };
 
     // Compute factor scores if requested
@@ -1115,9 +1131,10 @@ pub fn permute_columns(m: &Array2<f64>, o: &[usize], signs: &[f64]) -> Array2<f6
 /// R's `sortLoadings`: loadings sorted by SS loadings with positive column sums; the factor
 /// correlations get the same permutation P and signs D (`D P' phi P D`).
 pub fn sort_loadings(
-    l: Array2<f64>,
-    phi: Option<Array2<f64>>,
+    l: ArrayView2<f64>,
+    phi: Option<ArrayView2<f64>>,
 ) -> (Array2<f64>, Option<Array2<f64>>) {
+    let l = l.to_owned();
     let (o, signs) = sort_order(&l);
     let sorted = permute_columns(&l, &o, &signs);
     let phi = phi.map(|phi| {
@@ -1158,12 +1175,15 @@ fn compute_variance_proportions(loadings: &ArrayView2<f64>) -> (Array1<f64>, Arr
     (proportions, cumulative)
 }
 
-/// Compute factor scores.
+/// Compute factor scores, as R's `factanal`: regression scores `Z S^-1 Lambda` with `S` the
+/// correlation matrix of the fit (R 4.3.3 does not multiply promax scores by the factor
+/// correlations), Bartlett scores `Z Psi^-1 Lambda (Lambda' Psi^-1 Lambda)^-1`. `Z` is the
+/// standardised data, whose columns all vary (checked by the caller).
 fn compute_factor_scores(
     data: &ArrayView2<f64>,
     loadings: &ArrayView2<f64>,
     uniquenesses: &ArrayView1<f64>,
-    _corr: &ArrayView2<f64>,
+    corr: &ArrayView2<f64>,
     method: ScoresMethod,
 ) -> EconResult<Array2<f64>> {
     let (n, p) = data.dim();
@@ -1178,7 +1198,7 @@ fn compute_factor_scores(
             let col = data.column(j);
             let mean = means[j];
             let var: f64 = col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-            var.sqrt().max(1e-10)
+            var.sqrt()
         })
         .collect();
 
@@ -1192,11 +1212,10 @@ fn compute_factor_scores(
     // Compute score coefficient matrix
     let score_coef = match method {
         ScoresMethod::Regression => {
-            // Thomson's method: Λ' Σ^(-1)
-            // Σ = ΛΛ' + Ψ
-            let sigma = compute_sigma(loadings, uniquenesses)?;
-            let sigma_inv = invert_matrix(&sigma.view())?;
-            matmul(&loadings.t().to_owned().view(), &sigma_inv.view())
+            // Thomson's method as R: (S^-1 Λ)' with S the sample correlation matrix. For an oblique
+            // rotation ΛΛ' + Ψ is not the fitted correlation, so it is not used.
+            let corr_inv = invert_matrix(corr)?;
+            matmul(&loadings.t().to_owned().view(), &corr_inv.view())
                 .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?
         }
         ScoresMethod::Bartlett => {
@@ -1237,24 +1256,6 @@ fn compute_factor_scores(
     Ok(scores)
 }
 
-/// Compute Σ = ΛΛ' + Ψ
-fn compute_sigma(
-    loadings: &ArrayView2<f64>,
-    uniquenesses: &ArrayView1<f64>,
-) -> EconResult<Array2<f64>> {
-    let p = loadings.nrows();
-
-    let lambda_lambda_t = matmul(loadings, &loadings.t().to_owned().view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-
-    let mut sigma = lambda_lambda_t;
-    for i in 0..p {
-        sigma[[i, i]] += uniquenesses[i];
-    }
-
-    Ok(sigma)
-}
-
 /// Invert a symmetric matrix using faer's optimized routines.
 /// Falls back to eigendecomposition for near-singular matrices.
 fn invert_matrix(m: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
@@ -1284,7 +1285,15 @@ fn invert_matrix(m: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     }
 }
 
-/// Compute correlation matrix from data.
+/// The first column whose values are all equal (zero variance), if any.
+fn zero_variance_column(data: &ArrayView2<f64>) -> Option<usize> {
+    data.columns()
+        .into_iter()
+        .position(|c| c.iter().all(|&v| v == c[0]))
+}
+
+/// Compute correlation matrix from data. Every column must vary ([`zero_variance_column`]);
+/// a constant column is refused before this is called, so no standard deviation is floored.
 /// Uses parallel computation for large datasets (n > 1000).
 fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     let (n, p) = data.dim();
@@ -1318,7 +1327,7 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
                 let mean = means[j];
                 let var: f64 =
                     col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-                var.sqrt().max(1e-10)
+                var.sqrt()
             })
             .collect()
     } else {
@@ -1328,7 +1337,7 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
                 let mean = means[j];
                 let var: f64 =
                     col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-                var.sqrt().max(1e-10)
+                var.sqrt()
             })
             .collect()
     };
@@ -1406,6 +1415,15 @@ pub fn run_factanal(
         .extract()?
         .matrix(columns, false)?
         .data;
+
+    if let Some(j) = zero_variance_column(&data.view()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "column '{}' has zero variance; factor analysis needs every variable to vary",
+                columns[j]
+            ),
+        });
+    }
 
     let mut result = factanal(&data.view(), n_factors, rotation, scores)?;
     result.var_names = Some(columns.iter().map(|s| s.to_string()).collect());
@@ -1653,7 +1671,8 @@ mod tests {
         let pt_sorted = permute_columns(&pt, &po, &ps);
         let phi = factor_correlation(&pt_sorted).unwrap();
         // the sorted phi equals sort_loadings' D P' phi P D of the unsorted one
-        let (_, phi_sorted) = sort_loadings(pm.clone(), Some(factor_correlation(&pt).unwrap()));
+        let phi_unsorted = factor_correlation(&pt).unwrap();
+        let (_, phi_sorted) = sort_loadings(pm.view(), Some(phi_unsorted.view()));
         let phi_sorted = phi_sorted.unwrap();
         for (a, b) in phi.iter().zip(phi_sorted.iter()) {
             assert!((a - b).abs() < 1e-12, "{phi:?} vs {phi_sorted:?}");
@@ -1749,6 +1768,113 @@ mod tests {
         c.finish();
     }
 
+    /// factanal(X[, 1:3], 1): a saturated model (dof 0) has no statistic and no p-value.
+    #[test]
+    fn test_validate_factanal_zero_df() {
+        let (case, x) = factanal_case("stat_factanal_t4");
+        let x3 = x.slice(ndarray::s![.., 0..3]).to_owned();
+        let mut cfg = FactorAnalysisConfig::default();
+        cfg.n_factors = 1;
+        cfg.tolerance = 1e-12;
+        cfg.max_iter = 100_000;
+        let r = factanal_with_config(&x3.view(), &cfg).unwrap();
+        assert!(r.chi_squared.is_nan() && r.p_value.is_nan(), "{r:?}");
+        Check::new(&case)
+            .vector(
+                "df0_uniquenesses",
+                &r.uniquenesses.to_vec(),
+                Tol::iterative(1e-4),
+            )
+            .vector("df0_loadings", &flat(&r.loadings), Tol::iterative(1e-4))
+            .scalar("df0_dof", r.df as f64, Tol::exact())
+            .scalar(
+                "df0_has_test",
+                f64::from(u8::from(!r.chi_squared.is_nan())),
+                Tol::exact(),
+            )
+            .finish();
+        // NaN goes to JSON as null and comes back as NaN
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"chi_squared\":null"), "{json}");
+        let back: FactorAnalysisResult = serde_json::from_str(&json).unwrap();
+        assert!(back.chi_squared.is_nan() && back.p_value.is_nan());
+    }
+
+    /// A constant column is refused, naming it (the correlation matrix floored its standard
+    /// deviation and fitted a matrix of zeros).
+    #[test]
+    fn test_factanal_refuses_constant_column() {
+        use crate::data::Dataset;
+        use polars::prelude::*;
+        let (case, x) = factanal_case("stat_factanal_t4");
+        let mut xc = x.slice(ndarray::s![.., 0..7]).to_owned();
+        xc.column_mut(6).fill(1.0);
+        let e = factanal(&xc.view(), 2, RotationMethod::None, ScoresMethod::None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("column 6") && message.contains("zero variance")),
+            "{e}"
+        );
+        assert_eq!(case.scalar("constant_column_error"), 1.0);
+        let ds = Dataset::new(
+            df!(
+                "a" => [1.0, 2.1, 2.9, 4.2, 5.1, 5.8, 7.2],
+                "k" => [0.1; 7],
+                "b" => [2.0, 2.7, 4.1, 5.2, 5.9, 7.1, 8.3],
+                "c" => [0.4, 1.9, 2.2, 3.1, 4.4, 4.9, 6.6]
+            )
+            .unwrap(),
+        );
+        let e = run_factanal(
+            &ds,
+            &["a", "k", "b", "c"],
+            1,
+            RotationMethod::None,
+            ScoresMethod::None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("'k'")),
+            "{e}"
+        );
+    }
+
+    /// Promax regression and Bartlett scores (first 10 rows), as R 4.3.3: regression scores are
+    /// `Z S^-1 Lambda` with the sample correlation S (no factor correlations), on p2a's tight fit.
+    #[test]
+    fn test_validate_factanal_promax_scores() {
+        let (case, x) = factanal_case("stat_factanal_t4");
+        let mut cfg = FactorAnalysisConfig::default();
+        cfg.n_factors = 3;
+        cfg.rotation = RotationMethod::Promax;
+        cfg.tolerance = 1e-12;
+        cfg.max_iter = 100_000;
+        cfg.scores = ScoresMethod::Regression;
+        let reg = factanal_with_config(&x.view(), &cfg).unwrap();
+        cfg.scores = ScoresMethod::Bartlett;
+        let bart = factanal_with_config(&x.view(), &cfg).unwrap();
+        let first10 = |r: &FactorAnalysisResult| {
+            flat(
+                &r.scores
+                    .as_ref()
+                    .unwrap()
+                    .slice(ndarray::s![0..10, ..])
+                    .to_owned(),
+            )
+        };
+        let sc = reg.scores.as_ref().unwrap();
+        for c in sc.columns() {
+            assert!(c.mean().unwrap().abs() < 1e-12);
+        }
+        Check::new(&case)
+            .vector("promax_reg_rows10", &first10(&reg), Tol::iterative(1e-4))
+            .vector(
+                "promax_bartlett_rows10",
+                &first10(&bart),
+                Tol::iterative(1e-4),
+            )
+            .finish();
+    }
+
     fn generated(name: &str) -> crate::data::Dataset {
         let p = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
         crate::data::Dataset::new(crate::data::DataLoader::load_csv(p).unwrap())
@@ -1815,8 +1941,7 @@ mod tests {
                     assert!((x - y).abs() <= 1e-9);
                 }
             }
-            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
-            (a, b) => panic!("Int64 and Float64 columns disagree: {a:?} vs {b:?}"),
+            (a, b) => panic!("both fits must succeed: {a:?} vs {b:?}"),
         }
         let pm = generated("pairwise_mahalanobis_na");
         assert!(matches!(
