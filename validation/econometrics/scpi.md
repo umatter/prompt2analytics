@@ -45,6 +45,19 @@ Property tests (not registered): `test_scpi_interval_width_increases_with_level`
 `test_variance_method_parses_aliases_and_rejects_unknown`, `test_scpi_constraint_from_options`, and
 the lasso, ridge and lasso-simplex smoke tests.
 
+## Timing (against v0.5.0)
+
+Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
+the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
+(load average 38-39), so ratios within about 10% are noise.
+`run_scpi`, 10 post-treatment periods:
+
+| Constraint | J = 10, T0 = 20 | J = 40, T0 = 20 | J = 40, T0 = 50 |
+|---|---|---|---|
+| simplex, new / base | 0.90 (18.3 / 16.5 µs) | 0.90 | 0.95 |
+| lasso_simplex, new / base | 0.002 (10.0 ms / 17.8 µs) | 0.001 | 0.002 |
+
 ## Deviations
 
 1. CAUS-32: the interval is p2a's own formula, pinned to itself; not the CFT construction.

@@ -190,6 +190,18 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics
 Rscript validation/r/run.R --check          # did_2x2_training still reproduces
 ```
 
+## Timing (against v0.5.0)
+
+Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
+the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
+(load average 38-39), so ratios within about 10% are noise.
+
+| `run_did`, 2x2, HC1 | n = 100 | 1,000 | 10,000 |
+|---|---|---|---|
+| base / new (µs) | 23.0 / 23.4 | 135.5 / 132.7 | 2,445 / 2,559 |
+| new / base | 1.02 | 0.98 | 1.05 |
+
 ## References
 
 - Card, D. & Krueger, A.B. (1994). "Minimum Wages and Employment". *American Economic Review*, 84(4), 772-793.

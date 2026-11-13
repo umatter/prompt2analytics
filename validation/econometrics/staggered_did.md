@@ -379,6 +379,29 @@ cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
 Rscript validation/r/run.R --check          # did_cs_analytic and did_cs_covariates still reproduce
 ```
 
+## Timing (against v0.5.0)
+
+Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
+the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
+(load average 38-39), so ratios within about 10% are noise.
+Rows are panels of N = n / 10 units over 10 periods, cohorts 4/6/8/never; each side runs its own
+defaults (`min_obs_per_cell = 1` on both). At n = 100 (10 units, 2 never treated) the new code
+refuses the never-treated comparison as did does ("The never-treated group is too small"), so that
+column has no ratio; the DR row at n = 100 fails overlap on both sides.
+
+| Fit | n = 100 | 1,000 | 10,000 |
+|---|---|---|---|
+| never treated, OR, `bootstrap: 0` | refused | 1.134 (1,022 / 1,159 µs) | 1.070 |
+| not yet treated, OR, `bootstrap: 0` | 1.140 (157 / 179 µs) | 1.151 (1,080 / 1,243 µs) | 1.080 |
+| never treated, OR, `bootstrap: 999` | refused | 0.942 | 0.915 |
+| never treated, DR, `x1 + x2`, `bootstrap: 0` | overlap fails | 0.972 | 1.153 (26.4 / 30.5 ms) |
+
+Four rows are above 1.10x and go to the user: the analytic fits now run did's sample rules (the
+first-period and small-group checks, the duplicate check) and, with the varying base, compute
+each pre-treatment cell against its own base, plus the group-weighted overall; the bootstrap is
+faster because cells no longer carry blocker lists. Not re-measured on an idle machine.
+
 ## References
 
 - Callaway, B. & Sant'Anna, P.H.C. (2021). "Difference-in-Differences with multiple time
