@@ -38,7 +38,9 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
   `test_cubist_smoothing_reaches_the_root`, `test_cubist_smoothing_coefficient_direction`,
   `test_cubist_rule_model_is_the_composite`, `test_cubist_committee_target` (smoothing and committees);
   `test_cubist_usage_counts_cases`, `test_cubist_importance_is_unit_free`,
-  `test_cubist_usage_averages_committees` (attribute usage).
+  `test_cubist_usage_averages_committees` (attribute usage); `test_cubist_instance_correction_closed_form`,
+  `test_cubist_neighbours_are_scale_free`, `test_cubist_training_metrics_leave_the_row_out`,
+  `test_cubist_neighbors_limit` (instance correction).
 
 ## Splits, smoothing and committees
 
@@ -67,6 +69,17 @@ averaged over the committees, as Cubist's `usage`. `variable_importance` is
 `(usage_conditions + usage_model) / 2` (caret's `varImp` for Cubist), normalised to sum to one. Both
 are unit-free: rescaling a feature leaves them unchanged.
 
+## Instance correction (`neighbors`)
+
+`neighbors` is 0 to 9, as in R. With `k > 0` a prediction at `x` is
+
+    model(x) + mean over the k nearest training cases of (y_i - model(x_i))
+
+(Quinlan 1993), `model` the committee-average rule model, distances Euclidean on features divided by
+their training range (a constant feature contributes nothing), neighbours ordered by distance and then
+row index. On the training data a row is left out of its own neighbour set, so `train_rmse` and
+`train_r_squared` do not see the row's own target; `cubist_predict` uses every training case.
+
 ## Known differences from Cubist
 
 - Node models use the attributes tested on the path to the node (all attributes at the root), with no
@@ -74,6 +87,7 @@ are unit-free: rescaling a feature leaves them unchanged.
   rule model contains the root model, `usage_model` is 100 for every non-aliased attribute on most fits,
   and the importance ranking then comes from `usage_conditions`.
 - Rules are not simplified or pruned after the tree is grown.
+- The instance correction weights the k neighbours equally; Cubist weights them by distance.
 
 ## Leaf model with collinear attributes (R-pinned)
 

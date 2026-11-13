@@ -91,8 +91,11 @@ pub struct CubistConfig {
     /// Each committee fits adjusted residuals from the previous iteration.
     pub committees: usize,
 
-    /// Number of nearest neighbors for instance-based correction. Default: 0 (disabled).
-    /// When > 0, predictions are adjusted using k-NN of training data.
+    /// Number of nearest training cases for the instance-based correction, 0 to 9 (R's
+    /// Cubist). Default: 0 (disabled). With `k > 0` each prediction is adjusted by the mean
+    /// residual `y_i - model(x_i)` of the `k` training cases nearest to it, distances taken on
+    /// features scaled by their training range (Quinlan 1993, with equal weights). On the
+    /// training data a row is left out of its own neighbour set.
     pub neighbors: usize,
 
     /// Maximum depth of trees; values above 512 act as 512. Default: 10.
@@ -227,9 +230,9 @@ pub struct CubistResult {
     pub usage_model: Vec<f64>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
-    /// Training RMSE
+    /// Training RMSE (with `neighbors > 0`, each row's correction leaves the row out)
     pub train_rmse: f64,
-    /// Training R-squared
+    /// Training R-squared (with `neighbors > 0`, each row's correction leaves the row out)
     pub train_r_squared: f64,
     /// Predictions on training data
     pub predictions: Vec<f64>,
@@ -247,6 +250,12 @@ pub struct CubistResult {
     pub(crate) training_x: Option<Array2<f64>>,
     #[serde(skip)]
     pub(crate) training_y: Option<Array1<f64>>,
+    /// Committee-average model prediction at each training row (with `neighbors > 0`).
+    #[serde(skip)]
+    pub(crate) training_model: Option<Array1<f64>>,
+    /// Range (max - min) of each feature over the training rows (with `neighbors > 0`).
+    #[serde(skip)]
+    pub(crate) ranges: Option<Vec<f64>>,
 }
 
 impl std::fmt::Display for CubistResult {
@@ -907,41 +916,87 @@ fn usage_and_importance(
 
 use super::lcg_random;
 
-/// Compute k-nearest neighbors for instance-based correction.
-fn find_k_neighbors(
-    x_train: &ArrayView2<f64>,
-    y_train: &ArrayView1<f64>,
-    x_test: &ArrayView1<f64>,
-    k: usize,
-) -> f64 {
-    if k == 0 || x_train.nrows() == 0 {
-        return 0.0;
+/// Largest `neighbors` accepted, as in R's Cubist.
+const MAX_NEIGHBORS: usize = 9;
+
+/// Quinlan's (1993) instance correction with equal weights: the model's prediction at `x`
+/// plus the mean residual `y_k - m_k` of the neighbours `(distance, y_k, m_k)`.
+fn instance_correction(model_x: f64, neighbours: &[(f64, f64, f64)]) -> f64 {
+    if neighbours.is_empty() {
+        return model_x;
+    }
+    model_x + neighbours.iter().map(|&(_, y, m)| y - m).sum::<f64>() / neighbours.len() as f64
+}
+
+/// The training cases the correction reads: features, targets, the model's prediction at
+/// each case and the feature ranges that scale distances.
+struct NeighbourBase<'a> {
+    x: ArrayView2<'a, f64>,
+    y: ArrayView1<'a, f64>,
+    model: ArrayView1<'a, f64>,
+    ranges: &'a [f64],
+}
+
+impl NeighbourBase<'_> {
+    /// Squared distance on range-scaled features; a feature with zero range adds 0.
+    fn distance2(&self, i: usize, row: &ArrayView1<f64>) -> f64 {
+        self.x
+            .row(i)
+            .iter()
+            .zip(row.iter())
+            .zip(self.ranges)
+            .filter(|&(_, &r)| r > 0.0)
+            .map(|((&a, &b), &r)| ((a - b) / r).powi(2))
+            .sum()
     }
 
-    // Compute distances
-    let mut distances: Vec<(f64, f64)> = x_train
-        .rows()
-        .into_iter()
-        .zip(y_train.iter())
-        .map(|(row, &y)| {
-            let dist: f64 = row
+    /// The corrected prediction at `row` from its `k` nearest training cases, ordered by
+    /// `(distance, index)`, leaving out `exclude` (the row itself on the training data).
+    /// `buf` is reused across calls.
+    fn corrected(
+        &self,
+        row: &ArrayView1<f64>,
+        model_x: f64,
+        k: usize,
+        exclude: Option<usize>,
+        buf: &mut Vec<(f64, usize)>,
+    ) -> f64 {
+        buf.clear();
+        buf.extend(
+            (0..self.x.nrows())
+                .filter(|&i| Some(i) != exclude)
+                .map(|i| (self.distance2(i, row), i)),
+        );
+        let k = k.min(buf.len());
+        if k == 0 {
+            return model_x;
+        }
+        let order = |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        if k < buf.len() {
+            buf.select_nth_unstable_by(k - 1, order);
+            buf.truncate(k);
+        }
+        buf.sort_unstable_by(order);
+        let neighbours: Vec<(f64, f64, f64)> = buf
+            .iter()
+            .map(|&(d, i)| (d.sqrt(), self.y[i], self.model[i]))
+            .collect();
+        instance_correction(model_x, &neighbours)
+    }
+}
+
+/// Range (max - min) of each column.
+fn column_ranges(x: &ArrayView2<f64>) -> Vec<f64> {
+    x.axis_iter(Axis(1))
+        .map(|c| {
+            let (lo, hi) = c
                 .iter()
-                .zip(x_test.iter())
-                .map(|(&a, &b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            (dist, y)
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                    (lo.min(v), hi.max(v))
+                });
+            hi - lo
         })
-        .collect();
-
-    // Sort by distance
-    distances.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Average k nearest
-    let k_actual = k.min(distances.len());
-    let sum: f64 = distances[..k_actual].iter().map(|(_, y)| y).sum();
-
-    sum / k_actual as f64
+        .collect()
 }
 
 /// Fit a Cubist regression model.
@@ -960,7 +1015,7 @@ fn find_k_neighbors(
 ///
 /// `InsufficientData` for fewer than 2 rows; `Computation` when `x` and `y`
 /// differ in length; `InvalidSpecification` when `committees` is outside
-/// 1..=100, `min_improvement` outside [0, 1), or `x` or `y` holds a non-finite value; `Cancelled` once the
+/// 1..=100, `neighbors` above 9, `min_improvement` outside [0, 1), or `x` or `y` holds a non-finite value; `Cancelled` once the
 /// installed computation budget expires (checked per committee and per row of
 /// the final prediction pass, which runs the nearest-neighbour correction).
 ///
@@ -1006,6 +1061,14 @@ pub fn cubist(
             message: format!(
                 "committees must be between 1 and 100 (the limit of R's Cubist), got {}",
                 config.committees
+            ),
+        });
+    }
+    if config.neighbors > MAX_NEIGHBORS {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "neighbors must be 0 to {MAX_NEIGHBORS} (the limit of R's Cubist), got {}",
+                config.neighbors
             ),
         });
     }
@@ -1077,27 +1140,36 @@ pub fn cubist(
     let (usage_conditions, usage_model, variable_importance) =
         usage_and_importance(&committee_trees, n_samples, n_features);
 
-    // Compute final predictions (average of committees)
-    let mut predictions = Vec::with_capacity(n_samples);
-    for i in 0..n_samples {
-        // With neighbors > 0 this loop is O(n^2 p log n): check the budget per row.
-        crate::resource::checkpoint()?;
+    // Model predictions (average of the committees), then the instance correction, which
+    // leaves each training row out of its own neighbour set.
+    let mut model = crate::resource::try_zeros1(n_samples, "Cubist predictions")?;
+    for (i, m) in model.iter_mut().enumerate() {
         let row = x.row(i);
         let pred_sum: f64 = committee_trees
             .iter()
             .map(|tree| tree.predict_one(&row))
             .sum();
-        let mut pred = pred_sum / config.committees as f64;
-
-        // Apply instance-based correction if enabled
-        if config.neighbors > 0 {
-            let knn_pred = find_k_neighbors(&x, &y, &row, config.neighbors);
-            // Combine model prediction with k-NN (weighted average)
-            pred = 0.5 * pred + 0.5 * knn_pred;
-        }
-
-        predictions.push(pred);
+        *m = pred_sum / config.committees as f64;
     }
+    let ranges = column_ranges(&x);
+    let predictions: Vec<f64> = if config.neighbors > 0 {
+        let base = NeighbourBase {
+            x: x.view(),
+            y: y.view(),
+            model: model.view(),
+            ranges: &ranges,
+        };
+        let mut buf = crate::resource::try_with_capacity(n_samples, "Cubist neighbours")?;
+        let mut out = crate::resource::try_with_capacity(n_samples, "Cubist predictions")?;
+        for i in 0..n_samples {
+            // O(n p) per row: check the budget per row.
+            crate::resource::checkpoint()?;
+            out.push(base.corrected(&x.row(i), model[i], config.neighbors, Some(i), &mut buf));
+        }
+        out
+    } else {
+        model.to_vec()
+    };
 
     // Compute training metrics
     let mean_y: f64 = y.iter().sum::<f64>() / n_samples as f64;
@@ -1141,6 +1213,8 @@ pub fn cubist(
         } else {
             None
         },
+        training_model: (config.neighbors > 0).then_some(model),
+        ranges: (config.neighbors > 0).then_some(ranges),
     })
 }
 
@@ -1154,6 +1228,12 @@ pub fn cubist(
 /// # Returns
 ///
 /// Predictions for each observation.
+///
+/// # Errors
+///
+/// `Computation` for a model without trees; `InvalidSpecification` when `x` has a different
+/// number of columns from the training data; `Cancelled` once the installed budget expires
+/// (checked per row when the instance correction runs).
 pub fn cubist_predict(result: &CubistResult, x: ArrayView2<f64>) -> EconResult<Vec<f64>> {
     if result.committee_trees.is_empty() {
         return Err(EconError::Computation(
@@ -1161,8 +1241,33 @@ pub fn cubist_predict(result: &CubistResult, x: ArrayView2<f64>) -> EconResult<V
         ));
     }
 
+    if x.ncols() != result.n_features {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cubist: expected {} features, got {}",
+                result.n_features,
+                x.ncols()
+            ),
+        });
+    }
+
+    let base = match (
+        &result.training_x,
+        &result.training_y,
+        &result.training_model,
+        &result.ranges,
+    ) {
+        (Some(tx), Some(ty), Some(tm), Some(r)) if result.neighbors > 0 => Some(NeighbourBase {
+            x: tx.view(),
+            y: ty.view(),
+            model: tm.view(),
+            ranges: r,
+        }),
+        _ => None,
+    };
     let n_samples = x.nrows();
-    let mut predictions = Vec::with_capacity(n_samples);
+    let mut predictions = crate::resource::try_with_capacity(n_samples, "Cubist predictions")?;
+    let mut buf = Vec::new();
 
     for i in 0..n_samples {
         let row = x.row(i);
@@ -1175,13 +1280,10 @@ pub fn cubist_predict(result: &CubistResult, x: ArrayView2<f64>) -> EconResult<V
             .sum();
         let mut pred = pred_sum / result.committees as f64;
 
-        // Apply instance-based correction if enabled and training data available
-        if result.neighbors > 0 {
-            if let (Some(train_x), Some(train_y)) = (&result.training_x, &result.training_y) {
-                let knn_pred =
-                    find_k_neighbors(&train_x.view(), &train_y.view(), &row, result.neighbors);
-                pred = 0.5 * pred + 0.5 * knn_pred;
-            }
+        // Instance-based correction from all training cases
+        if let Some(base) = &base {
+            crate::resource::checkpoint()?;
+            pred = base.corrected(&row, pred, result.neighbors, None, &mut buf);
         }
 
         predictions.push(pred);
@@ -1602,16 +1704,92 @@ mod tests {
     }
 
     #[test]
-    fn test_find_k_neighbors() {
-        let x_train = array![[1.0], [2.0], [3.0], [4.0], [5.0],];
-        let y_train = array![1.0, 2.0, 3.0, 4.0, 5.0];
-        let x_test = array![3.0];
+    fn test_cubist_instance_correction_closed_form() {
+        let neighbours = [(0.1, 3.0, 2.5), (0.2, 1.0, 1.75), (0.4, 4.0, 4.5)];
+        // 2.0 + mean(0.5, -0.75, -0.5) = 2.0 - 0.25
+        assert_eq!(instance_correction(2.0, &neighbours), 1.75);
+        assert_eq!(instance_correction(2.0, &[]), 2.0);
+    }
 
-        let knn_pred = find_k_neighbors(&x_train.view(), &y_train.view(), &x_test.view(), 3);
+    #[test]
+    fn test_cubist_neighbours_are_scale_free() {
+        let (x, y) = plane_data(200, 13);
+        let mut x_small = x.clone();
+        x_small.column_mut(1).mapv_inplace(|v| v / 1_000.0);
+        let cfg = CubistConfig {
+            neighbors: 5,
+            ..Default::default()
+        };
+        let a = cubist(x.view(), y.view(), &cfg).unwrap();
+        let b = cubist(x_small.view(), y.view(), &cfg).unwrap();
+        for (p, q) in a.predictions.iter().zip(&b.predictions) {
+            assert!((p - q).abs() <= 1e-9 * p.abs().max(1.0), "{p} vs {q}");
+        }
+        let x_new = x.slice(s![..20, ..]).to_owned();
+        let mut x_new_small = x_new.clone();
+        x_new_small.column_mut(1).mapv_inplace(|v| v / 1_000.0);
+        let pa = cubist_predict(&a, x_new.view()).unwrap();
+        let pb = cubist_predict(&b, x_new_small.view()).unwrap();
+        for (p, q) in pa.iter().zip(&pb) {
+            assert!((p - q).abs() <= 1e-9 * p.abs().max(1.0), "{p} vs {q}");
+        }
+    }
 
-        // k=3 nearest to x=3 are x=2,3,4 with y=2,3,4
-        // Average should be 3.0
-        assert!((knn_pred - 3.0).abs() < 0.5);
+    #[test]
+    fn test_cubist_training_metrics_leave_the_row_out() {
+        let (x, y) = plane_data(200, 17);
+        let fit = |neighbors: usize| {
+            let cfg = CubistConfig {
+                neighbors,
+                ..Default::default()
+            };
+            cubist(x.view(), y.view(), &cfg).unwrap()
+        };
+        let (plain, one) = (fit(0), fit(1));
+        // Brute force: the nearest other row on range-scaled distance, ties by index.
+        let ranges = column_ranges(&x.view());
+        for i in 0..200 {
+            let mut best = (f64::INFINITY, usize::MAX);
+            for j in (0..200).filter(|&j| j != i) {
+                let d: f64 = (0..2)
+                    .map(|c| ((x[[i, c]] - x[[j, c]]) / ranges[c]).powi(2))
+                    .sum();
+                if d < best.0 {
+                    best = (d, j);
+                }
+            }
+            let j = best.1;
+            let want = plain.predictions[i] + (y[j] - plain.predictions[j]);
+            let got = one.predictions[i];
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{i}: {got} vs {want}"
+            );
+        }
+        assert!(
+            one.train_r_squared < plain.train_r_squared + 0.05,
+            "{} vs {}",
+            one.train_r_squared,
+            plain.train_r_squared
+        );
+    }
+
+    #[test]
+    fn test_cubist_neighbors_limit() {
+        let (x, y) = cubist_data();
+        let run = |neighbors: usize| {
+            let cfg = CubistConfig {
+                neighbors,
+                ..Default::default()
+            };
+            cubist(x.view(), y.view(), &cfg)
+        };
+        let err = run(10).err().expect("neighbors = 10 refused");
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.contains("0 to 9")),
+            "{err}"
+        );
+        assert!(run(9).is_ok());
     }
 
     /// Uniform draws and normal noise from the module's LCG (Box-Muller).
