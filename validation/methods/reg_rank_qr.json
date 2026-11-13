@@ -116,7 +116,7 @@
       ],
       "quantities": [
         "F",
-        "Chisq = q F",
+        "Chisq = q F (identity with the pinned F)",
         "df1 = rank difference",
         "df2 = n - rank",
         "p",

@@ -714,6 +714,14 @@ fn sensemakr_impl(
     q: f64,
     alpha: f64,
 ) -> EconResult<SensemakrResult> {
+    crate::traits::estimator::validate_level(alpha, "alpha")?;
+    if !(q.is_finite() && q >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "q (the fraction of the estimate to explain away) must be finite and at least 0, got {q}"
+            ),
+        });
+    }
     // Find treatment in variable names
     let treatment_idx = ols_result
         .variable_names
@@ -986,7 +994,11 @@ pub fn generate_contour_data(
             message: format!("contour max_r2 must lie in (0, 1), got {max_r2}"),
         });
     }
-    crate::resource::checked_len(&[grid_size, grid_size], "sensemakr contour grid")?;
+    // two grid_size x grid_size grids of f64: the whole grid is held to the allocation ceiling
+    crate::resource::check_alloc::<f64>(
+        crate::resource::checked_len(&[grid_size, grid_size], "sensemakr contour grid")?,
+        "sensemakr contour grid",
+    )?;
 
     // Find treatment coefficient
     let treatment_idx = ols_result
@@ -1008,13 +1020,17 @@ pub fn generate_contour_data(
     let r2_yd_values: Vec<f64> = (0..grid_size).map(|i| i as f64 * step).collect();
     let r2_xz_values: Vec<f64> = (0..grid_size).map(|i| i as f64 * step).collect();
 
-    let mut adjusted_estimates = Vec::with_capacity(grid_size);
-    let mut adjusted_t_stats = Vec::with_capacity(grid_size);
+    let mut adjusted_estimates =
+        crate::resource::try_with_capacity(grid_size, "sensemakr contour grid")?;
+    let mut adjusted_t_stats =
+        crate::resource::try_with_capacity(grid_size, "sensemakr contour grid")?;
 
     for &r2_xz in &r2_xz_values {
         crate::resource::checkpoint()?;
-        let mut row_estimates = Vec::with_capacity(grid_size);
-        let mut row_t_stats = Vec::with_capacity(grid_size);
+        let mut row_estimates: Vec<f64> =
+            crate::resource::try_with_capacity(grid_size, "sensemakr contour grid")?;
+        let mut row_t_stats: Vec<f64> =
+            crate::resource::try_with_capacity(grid_size, "sensemakr contour grid")?;
 
         for &r2_yd in &r2_yd_values {
             // sensemakr's adjusted_estimate and adjusted_t (h0 = 0) at this point
@@ -1526,6 +1542,33 @@ mod tests {
                     assert!(message.contains(what), "{kd} {ky}: {message}")
                 }
                 e => panic!("{kd} {ky}: {e:?}"),
+            }
+        }
+        for (q, alpha, what) in [
+            (1.0, 1.0, "alpha"),
+            (1.0, 0.0, "alpha"),
+            (1.0, f64::NAN, "alpha"),
+            (-0.5, 0.05, "q"),
+            (f64::NAN, 0.05, "q"),
+            (f64::INFINITY, 0.05, "q"),
+        ] {
+            let e = run_sensemakr(
+                &ds,
+                "peacefactor",
+                "directlyharmed",
+                &COVS,
+                Some(&["female"]),
+                Some(1.0),
+                Some(1.0),
+                q,
+                alpha,
+            )
+            .unwrap_err();
+            match e {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains(what), "q {q}, alpha {alpha}: {message}")
+                }
+                e => panic!("q {q}, alpha {alpha}: {e:?}"),
             }
         }
         assert!(ovb_partial_r2_bound(0.3, 0.1, 3.0, 1.0).is_err());
