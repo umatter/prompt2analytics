@@ -66,6 +66,35 @@
       "tolerance": "n = 4-12 (< 100): every statistic, sd included, Tol::coef(n); counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "density_t4",
+      "name": "Kernel density estimate: R's binned FFT grid for any number of points, seven kernels with bw as the kernel's standard deviation, bw.nrd0 with its fallbacks",
+      "category": "stats",
+      "reference": "stats::density.default (R 4.3.3: linear binning on 2^k >= max(n, 512) points over [from - 4 bw, to + 4 bw], FFT convolution, approx onto seq(from, to, length.out = n)); stats::bw.nrd0; the exact kernel sum mean(K((x0 - x)/bw))/bw with R's kernels for the unbinned path",
+      "doc": "validation/stats/robust.md",
+      "cases": [
+        "stat_density_t4",
+        "stat_density_mcp_na_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::robust::tests::test_validate_density_grid_t4",
+        "p2a-core::stats::robust::tests::test_validate_density_kernels_t4",
+        "p2a-core::stats::robust::tests::test_validate_density_direct_path_against_r",
+        "p2a-core::stats::robust::tests::test_validate_bw_nrd0_t4",
+        "p2a-core::stats::robust::tests::test_validate_density_dataset_na_t4"
+      ],
+      "quantities": [
+        "x and y on grids of 50, 100, 512 and 1000 points, with and without from/to, Gaussian kernel",
+        "y for the epanechnikov, rectangular, triangular, biweight, cosine and optcosine kernels",
+        "y with infinite values (mass scaled by the finite share) and n",
+        "default bandwidth (bw.nrd0) and the density at it, including IQR = 0, sd = 0 and x[1] = 0",
+        "exact kernel sums of the unbinned path (kde_* keys)",
+        "density of the descriptive_na columns at the stats_density defaults (n = 512)"
+      ],
+      "tolerance": "y and x Tol::coef(n) with abs 1e-12 (R's FFT leaves values of order 1e-18 where the density is 0); bw Tol::stat(n); n exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
