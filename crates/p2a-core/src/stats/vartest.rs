@@ -45,7 +45,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
-use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
@@ -321,8 +321,8 @@ pub fn run_var_test(
     conf_level: f64,
 ) -> EconResult<VarTestResult> {
     let df = dataset.df();
-    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
-    let (y, missing_y) = numeric_column(df, y_col, NaPolicy::Omit)?;
+    let (x, missing_x) = sample_column(df, x_col, "F test")?;
+    let (y, missing_y) = sample_column(df, y_col, "F test")?;
     let mut result = var_test(&x, &y, ratio, alternative, conf_level)?;
     result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
     Ok(result)
@@ -393,6 +393,7 @@ fn compute_variance_ratio_ci(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
     use p2a_validation::{Check, Tol};
 
     /// Relative-only tolerance for an upper tail: Tol::p_value's absolute floor would accept
@@ -727,5 +728,17 @@ mod tests {
             run_var_test(&ds, "nope", "y", 1.0, Alternative::TwoSided, 0.95),
             Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
         ));
+    }
+
+    #[test]
+    fn test_var_test_all_missing_column_is_named() {
+        let ds = Dataset::new(
+            polars::prelude::df! { "x" => [1.2, 0.4, 2.2, 1.7], "y" => [None::<f64>, None, None, None] }
+                .unwrap(),
+        );
+        let e = run_var_test(&ds, "x", "y", 1.0, Alternative::TwoSided, 0.95)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'y'") && e.contains("F test"), "{e}");
     }
 }
