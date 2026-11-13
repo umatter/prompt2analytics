@@ -315,7 +315,12 @@ pub(super) fn failed_statement(
 
 /// Whether directory `path` holds RocksDB's files: a `CURRENT` file and a
 /// `MANIFEST-*` file, the test SurrealDB 4 refuses a directory on.
-fn holds_rocksdb_files(path: &Path) -> bool {
+///
+/// SurrealDB 4.0.1 reports that refusal with no error variant of its own, so
+/// the set-aside keys on this test, the one `surrealdb-kvs-surrealkv` applies.
+/// SurrealKV never writes `CURRENT` or `MANIFEST-*`, so a SurrealKV store is
+/// never set aside.
+pub(super) fn holds_rocksdb_files(path: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(path) else {
         return false;
     };
@@ -329,22 +334,45 @@ fn holds_rocksdb_files(path: &Path) -> bool {
     current && manifest
 }
 
+/// The name a RocksDB store at `path` is set aside to:
+/// `<path>.surrealdb2-<UTC timestamp to the second>`.
+fn set_aside_name(path: &Path) -> std::path::PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".surrealdb2-{stamp}"));
+    std::path::PathBuf::from(aside)
+}
+
 /// Rename the RocksDB store at `path` to `<path>.surrealdb2-<UTC
 /// timestamp>` and return the new path, holding RocksDB's lock on it
 /// meanwhile; the reason when it cannot (a live process holds the store,
 /// the new name is taken, or the rename fails).
 fn set_aside_rocksdb_store(path: &Path) -> Result<std::path::PathBuf, String> {
+    set_aside_rocksdb_store_to(path, &set_aside_name(path))
+}
+
+/// [`set_aside_rocksdb_store`] with the new name given.
+///
+/// The new name is claimed with `create_dir`, which fails when anything
+/// already has it, so the check and the claim are one step: two set-asides
+/// of one path within the same second, or a directory created meanwhile,
+/// leave the store where it is. `rename` then replaces the empty directory
+/// it claimed, which POSIX allows. Unix only, as the build is: Windows
+/// refuses both a rename onto an existing directory and a rename of a
+/// directory whose `LOCK` file this process holds open.
+pub(super) fn set_aside_rocksdb_store_to(
+    path: &Path,
+    aside: &Path,
+) -> Result<std::path::PathBuf, String> {
     let lock = surrealkv_compat_rocksdb::lock_directory(path).map_err(|e| e.to_string())?;
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let mut aside = path.as_os_str().to_owned();
-    aside.push(format!(".surrealdb2-{stamp}"));
-    let aside = std::path::PathBuf::from(aside);
-    if aside.exists() {
-        return Err(format!("{} already exists", aside.display()));
+    std::fs::create_dir(aside).map_err(|e| format!("{}: {e}", aside.display()))?;
+    if let Err(e) = std::fs::rename(path, aside) {
+        // Give back the name claimed above; it is still empty.
+        let _ = std::fs::remove_dir(aside);
+        return Err(e.to_string());
     }
-    std::fs::rename(path, &aside).map_err(|e| e.to_string())?;
     drop(lock);
-    Ok(aside)
+    Ok(aside.to_path_buf())
 }
 
 impl DbConnection {
@@ -360,7 +388,8 @@ impl DbConnection {
     /// can be exported with SurrealDB 2's `surreal export`. A RocksDB
     /// directory that a live process holds (RocksDB's lock on its `LOCK`
     /// file) is left alone, and so is a store that fails to open for any
-    /// other reason: the error is returned.
+    /// other reason: the error is returned. SurrealKV writes neither file, so
+    /// a SurrealKV store is never set aside.
     pub async fn connect_surrealkv(path: impl AsRef<Path>) -> Result<Self, DbError> {
         let path = path.as_ref();
         tracing::info!("Connecting to SurrealDB SurrealKV at {:?}", path);
@@ -403,6 +432,7 @@ impl DbConnection {
     /// The name [`connect_surrealkv`](Self::connect_surrealkv) had while the
     /// store ran on SurrealDB 2's RocksDB engine. SurrealDB 4 has none: this
     /// opens a SurrealKV store at `path`, as `connect_surrealkv` does.
+    #[deprecated(note = "opens a SurrealKV store; use connect_surrealkv")]
     pub async fn connect_rocksdb(path: impl AsRef<Path>) -> Result<Self, DbError> {
         Self::connect_surrealkv(path).await
     }

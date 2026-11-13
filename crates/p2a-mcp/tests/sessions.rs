@@ -840,8 +840,8 @@ async fn reload_is_refused_under_memory_pressure() {
     assert!(headers.contains_key(header::RETRY_AFTER));
 }
 
-/// A stored session still within its TTL (a RocksDB server after a restart) is adopted by every
-/// route that takes a session id, not only by GET /api/sessions/{id}.
+/// A stored session still within its TTL (a server with a SurrealKV store, P2A_DB_PATH, after a
+/// restart) is adopted by every route that takes a session id, not only by GET /api/sessions/{id}.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_and_chat_routes_adopt_a_stored_session() {
     let (r, state) = app(ServerConfig::default()).await;

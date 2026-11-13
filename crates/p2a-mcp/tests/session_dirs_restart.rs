@@ -1,13 +1,14 @@
-//! Per-session data directories across a restart with a RocksDB session
-//! store: the stale-directory purge (T0-WP09) and the adoption of stored
-//! sessions (T0-WP07) together.
+//! Per-session data directories across a restart with a SurrealKV session store
+//! (`P2A_DB_PATH`): the stale-directory purge (T0-WP09) and the adoption of
+//! stored sessions (T0-WP07) together.
 //!
-//! What the "earlier process" left is set up before this process uses any
-//! path: session directories with files under the data root, and the rows of
-//! the store, which a child process of this binary writes ([`earlier_process`])
-//! because a RocksDB store stays locked until the process that opened it
-//! exits. The server is then built in-process with `build_app` over that
-//! store, session directories on, and driven with
+//! What the "earlier process" left is set up before this process uses any path:
+//! session directories with files under the data root, and the rows of the
+//! store, which a child process of this binary writes ([`earlier_process`])
+//! because a SurrealKV store stays locked while a connection to it is open, and
+//! the exit of the process that opened it is the one point at which the lock is
+//! certainly released. The server is then built in-process with `build_app`
+//! over that store, session directories on, and driven with
 //! `tower::ServiceExt::oneshot`. The purge runs once per process, at the first
 //! scoped file access, so the whole sequence is one test.
 #![cfg(all(feature = "http", feature = "db"))]
@@ -83,7 +84,7 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
 
 /// The rows the earlier process left in the store at `db_path`.
 async fn seed_store(db_path: &Path) {
-    let db = DbConnection::connect_rocksdb(db_path).await.unwrap();
+    let db = DbConnection::connect_surrealkv(db_path).await.unwrap();
     let now = Utc::now();
     for id in CHAT_ONLY {
         db.set_session_last_accessed(id, now).await.unwrap();
@@ -115,8 +116,9 @@ async fn seed_store(db_path: &Path) {
 const SEED_DB_VAR: &str = "P2A_TEST_RESTART_SEED_DB";
 
 /// The earlier process: run by the main test as a child process of this
-/// binary, because a RocksDB store opened in a process stays locked until
-/// that process exits. Does nothing when the binary's tests run normally.
+/// binary, because a SurrealKV store stays locked while a connection to it
+/// is open, and only the exit of the process that opened it certainly
+/// releases it. Does nothing when the binary's tests run normally.
 #[test]
 fn earlier_process() {
     let Some(db_path) = std::env::var_os(SEED_DB_VAR) else {

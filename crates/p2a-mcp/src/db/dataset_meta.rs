@@ -498,15 +498,13 @@ impl DbConnection {
                 .await?;
 
             let mut updated: Vec<DatasetMeta> = result.take(0)?;
-            if updated.len() > 1 {
-                // The (session_id, name) index is unique, so this does not
-                // happen; the reservation is given back all the same.
-                db.release_session_bytes(&session_id, reserved);
-                return Err(DbError::Query(format!(
-                    "{} dataset metadata rows matched session={session_id}, name={name}",
-                    updated.len()
-                )));
-            }
+            // The (session_id, name) index is unique, so at most one row
+            // matched; the UPDATE has committed by now either way.
+            debug_assert!(
+                updated.len() <= 1,
+                "{} dataset metadata rows matched session={session_id}, name={name}",
+                updated.len()
+            );
             let updated = updated.pop().ok_or_else(not_found)?;
             db.release_session_bytes(&session_id, freed);
             Ok(updated)

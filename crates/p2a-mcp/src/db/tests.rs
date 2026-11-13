@@ -3798,6 +3798,112 @@ async fn a_store_in_use_is_not_set_aside() {
     assert_eq!(live.get_conversation(&id).await.unwrap().title, "kept");
 }
 
+/// A fake RocksDB store (`CURRENT` naming a `MANIFEST-*`, a `LOCK` file)
+/// in directory `path`, and its file names and contents, sorted.
+fn fake_rocksdb_store(path: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(path.join("CURRENT"), "MANIFEST-000005\n").unwrap();
+    std::fs::write(path.join("MANIFEST-000005"), b"\x00manifest").unwrap();
+    std::fs::write(path.join("000004.log"), b"rows of an old store").unwrap();
+    std::fs::write(path.join("LOCK"), b"").unwrap();
+    dir_contents(path)
+}
+
+fn dir_contents(path: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(path)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (e.file_name(), std::fs::read(e.path()).unwrap())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Names the RocksDB directory [`hold_rocksdb_lock`] locks, in the child
+/// process only.
+const HOLD_LOCK_VAR: &str = "P2A_TEST_HOLD_ROCKSDB_LOCK";
+
+/// Not a test of its own: run as a child process of this binary by
+/// [`a_rocksdb_store_another_process_holds_is_not_set_aside`], it takes
+/// RocksDB's lock on the directory named by [`HOLD_LOCK_VAR`] and holds it
+/// until the parent creates `<dir>.release` (or a minute passes). POSIX
+/// record locks never conflict within one process, so the holder has to be
+/// another one. Does nothing when the binary's tests run normally.
+#[test]
+fn hold_rocksdb_lock() {
+    let Some(dir) = std::env::var_os(HOLD_LOCK_VAR) else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let lock = surrealkv_compat_rocksdb::lock_directory(&dir).unwrap();
+    assert!(lock.enforced);
+    std::fs::write(dir.with_extension("ready"), b"").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !dir.with_extension("release").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(lock);
+}
+
+/// A RocksDB store that another process holds (RocksDB's lock on `LOCK`)
+/// is not set aside: the connection fails and every file stays as it was.
+#[tokio::test]
+async fn a_rocksdb_store_another_process_holds_is_not_set_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let before = fake_rocksdb_store(&path);
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "db::tests::hold_rocksdb_lock",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env(HOLD_LOCK_VAR, &path)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !path.with_extension("ready").exists() {
+        assert!(
+            std::time::Instant::now() < deadline && child.try_wait().unwrap().is_none(),
+            "the lock holder did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let result = DbConnection::connect_surrealkv(&path).await;
+    std::fs::write(path.with_extension("release"), b"").unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let Err(DbError::Connection(message)) = result else {
+        panic!("expected a connection error, got {:?}", result.map(|_| ()));
+    };
+    assert!(message.contains("in use"), "{message}");
+    assert!(set_aside_beside(&path).is_empty());
+    assert_eq!(dir_contents(&path), before);
+}
+
+/// A set-aside whose new name is already taken leaves the store where it
+/// is and the directory that has the name untouched.
+#[test]
+fn a_store_is_not_set_aside_onto_a_taken_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let before = fake_rocksdb_store(&path);
+    let aside = dir.path().join("store.surrealdb2-20261113T000000Z");
+    std::fs::create_dir(&aside).unwrap();
+
+    let result = super::connection::set_aside_rocksdb_store_to(&path, &aside);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(dir_contents(&path), before);
+    assert!(std::fs::read_dir(&aside).unwrap().next().is_none());
+    assert!(super::connection::holds_rocksdb_files(&path));
+}
+
 /// A real store written by v0.5.0 (SurrealDB 2.4, RocksDB): set aside with
 /// every file as it was, and a fresh, empty store opened in its place.
 #[tokio::test]
