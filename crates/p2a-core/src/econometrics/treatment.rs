@@ -257,7 +257,7 @@ pub struct IpwResult {
     pub warnings: Vec<String>,
     /// How `std_error` was computed: "M-estimation (propensity estimated)", "efficient
     /// influence function", "propensity treated as known (outcome models unavailable)" or
-    /// "bootstrap (B replicates)"
+    /// "bootstrap (B replicates; ...)", "B of R replicates" when some replicates were dropped
     #[serde(default)]
     pub se_method: String,
     /// M-estimation SE of the stacked logit-score and weighted-mean equations (the
@@ -410,7 +410,8 @@ pub struct DoublyRobustResult {
     pub warnings: Vec<String>,
     /// How `std_error` was computed: "analytic influence function" (AIPW), "M-estimation
     /// (propensity estimated)" (IPW), "analytic (stacked estimating equations, trimming
-    /// fixed)" (Regression) or "bootstrap (B replicates; models refitted)"
+    /// fixed)" (Regression) or "bootstrap (B replicates; models refitted)", "B of R
+    /// replicates" when some replicates were dropped
     #[serde(default)]
     pub se_method: String,
 }
@@ -777,21 +778,14 @@ pub fn run_ipw_treatment(
             |indices| rep.effect(indices),
         )?;
 
-        if boot_effects.len() < config.bootstrap / 2 {
-            warnings.push(
-                "Many bootstrap iterations failed; standard errors may be unreliable".to_string(),
-            );
-        }
+        let label = bootstrap_label(
+            boot_effects.len(),
+            config.bootstrap,
+            "propensity model refitted and trimming re-applied in each",
+            &mut warnings,
+        );
         let (se, lo, hi) = bootstrap_summary(&boot_effects, effect)?;
-        (
-            se,
-            lo,
-            hi,
-            format!(
-                "bootstrap ({} replicates; propensity model refitted and trimming re-applied in each)",
-                config.bootstrap
-            ),
-        )
+        (se, lo, hi, label)
     };
 
     let t_stat = if std_error > 0.0 && std_error.is_finite() {
@@ -1241,6 +1235,35 @@ fn ipw_keeps(estimand: Estimand, d: f64, ps: f64, trim: f64) -> bool {
     }
 }
 
+/// The SE method of a refit bootstrap that kept `used` of `requested` replicates ("bootstrap
+/// (B replicates; what)", or "B of R replicates" when some were dropped), with a warning
+/// naming the dropped count whenever there are any, and the old one when more than half are.
+fn bootstrap_label(
+    used: usize,
+    requested: usize,
+    what: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    if used < requested {
+        warnings.push(format!(
+            "{} of {requested} bootstrap replicates were dropped (a model fit failed on the \
+             resampled rows, or an arm was empty or too small); the standard error uses the \
+             other {used}",
+            requested - used
+        ));
+    }
+    if used < requested / 2 {
+        warnings.push(
+            "Many bootstrap iterations failed; standard errors may be unreliable".to_string(),
+        );
+    }
+    if used == requested {
+        format!("bootstrap ({requested} replicates; {what})")
+    } else {
+        format!("bootstrap ({used} of {requested} replicates; {what})")
+    }
+}
+
 /// A replicate that failed: cancellation and resource limits end the bootstrap, any other
 /// error (a propensity or outcome fit that fails on the resampled rows) drops the replicate.
 fn dropped_replicate(e: EconError) -> EconResult<Option<f64>> {
@@ -1663,24 +1686,14 @@ pub fn run_doubly_robust(
                 |indices| rep.effect(indices),
             )?;
 
-            if boot_effects.len() < config.bootstrap / 2 {
-                warnings.push(
-                    "Many bootstrap iterations failed; standard errors may be unreliable"
-                        .to_string(),
-                );
-            }
-
-            let (se, lo, hi) = bootstrap_summary(&boot_effects, effect)?;
-            (
-                se,
-                lo,
-                hi,
-                format!(
-                    "bootstrap ({} replicates; models refitted)",
-                    config.bootstrap
-                ),
+            let label = bootstrap_label(
+                boot_effects.len(),
                 config.bootstrap,
-            )
+                "models refitted",
+                &mut warnings,
+            );
+            let (se, lo, hi) = bootstrap_summary(&boot_effects, effect)?;
+            (se, lo, hi, label, config.bootstrap)
         }
     };
 
@@ -2229,6 +2242,28 @@ mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    #[test]
+    fn test_bootstrap_label_reports_dropped_replicates() {
+        let mut w = Vec::new();
+        assert_eq!(
+            bootstrap_label(200, 200, "models refitted", &mut w),
+            "bootstrap (200 replicates; models refitted)"
+        );
+        assert!(w.is_empty());
+        assert_eq!(
+            bootstrap_label(193, 200, "models refitted", &mut w),
+            "bootstrap (193 of 200 replicates; models refitted)"
+        );
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].starts_with("7 of 200 bootstrap replicates were dropped"),
+            "{w:?}"
+        );
+        w.clear();
+        bootstrap_label(90, 200, "models refitted", &mut w);
+        assert_eq!(w.len(), 2, "{w:?}");
+    }
 
     /// `validation/datasets/generated/<file>` as data only (no R value is compared).
     fn generated_data(file: &str) -> crate::data::Dataset {

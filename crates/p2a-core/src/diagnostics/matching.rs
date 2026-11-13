@@ -330,8 +330,9 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             issue_parts.push(format!("max = {:.4}", ps_max));
         }
 
-        // Largest ATE weight the scores imply: before trimming from the untrimmed summary,
-        // and, when units were trimmed, the largest weight the estimator actually used.
+        // Largest ATE-scale weight, max(1/min, 1/(1 - max)), the scores imply: before trimming
+        // from the untrimmed summary, and, when units were dropped, over the kept scores. The
+        // message says "ATE-scale": for ATT the weights are 1 and p/(1-p), not this figure.
         let implied_max_weight = |min: f64, max: f64| {
             if min > 0.0 && max < 1.0 {
                 f64::max(1.0 / min, 1.0 / (1.0 - max))
@@ -340,15 +341,15 @@ fn check_positivity(result: &IpwResult, report: &mut IdentificationReport) {
             }
         };
         let max_weight = implied_max_weight(ps_min, ps_max);
-        let weights = if result.ps_summary_untrimmed.is_some() && result.trim > 0.0 {
+        let weights = if result.ps_summary_untrimmed.is_some() && result.n_trimmed > 0 {
             format!(
-                "IPW weights up to ≈ {:.1} before trimming; the kept units' largest weight is \
-                 ≈ {:.1}",
+                "ATE-scale IPW weights up to ≈ {:.1} before trimming; the kept units' largest \
+                 ATE-scale weight is ≈ {:.1}",
                 max_weight,
                 implied_max_weight(result.ps_summary.min, result.ps_summary.max)
             )
         } else {
-            format!("IPW weights up to ≈ {max_weight:.1}")
+            format!("ATE-scale IPW weights up to ≈ {max_weight:.1}")
         };
 
         let n_all = result.n_obs + result.n_trimmed;
@@ -664,8 +665,27 @@ mod tests {
         // The weight the estimator used is bounded by the trim, and the message says so.
         let kept = f64::max(1.0 / r.ps_summary.min, 1.0 / (1.0 - r.ps_summary.max));
         assert!(kept <= 1.0 / 0.05 + 1e-9);
-        let want = format!("the kept units' largest weight is ≈ {kept:.1}");
+        let want = format!("the kept units' largest ATE-scale weight is ≈ {kept:.1}");
         assert!(w.message.contains(&want), "{}", w.message);
+
+        // A trim that drops no unit gives the single-number form.
+        let lowest = untrimmed.min.min(1.0 - untrimmed.max);
+        let mut c = IpwConfig::default();
+        c.trim = lowest / 2.0;
+        let r = run_ipw_treatment(&ds, "y", "d", &["x"], c).unwrap();
+        assert_eq!(r.n_trimmed, 0);
+        let report = ipw_diagnostics(&r);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "POSITIVITY_VIOLATION")
+            .expect("positivity warning");
+        assert!(!w.message.contains("kept units"), "{}", w.message);
+        assert!(
+            w.message.contains("ATE-scale IPW weights up to"),
+            "{}",
+            w.message
+        );
         assert_eq!(
             positivity_status(&report),
             AssumptionStatus::LikelyViolation

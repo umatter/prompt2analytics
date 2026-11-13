@@ -72,8 +72,9 @@ fn test_validate_cli_causal_did_cluster() {
 }
 
 /// Every bootstrapped causal command is seeded: two runs without --seed agree (default 42),
-/// and --seed changes the draws. Fails before: ipw, doubly-robust, mediation and stdreg passed
-/// no seed and drew OS entropy.
+/// and --seed changes the draws. Fails before: stdreg and staggered-did drew unseeded random
+/// numbers, and ipw, doubly-robust and mediation (whose core default seed was already 42) had
+/// no --seed flag.
 #[test]
 fn test_cli_causal_seed_flags() {
     let s = temp_session();
@@ -144,6 +145,53 @@ fn test_cli_causal_seed_flags() {
         other.extend_from_slice(&["--seed", "7"]);
         assert_ne!(first, s.ok(&other), "{cmd:?}");
     }
+}
+
+/// `causal mediation` JSON carries the reverse decomposition (direct effect on the treated,
+/// indirect effect on the controls) with SEs and p-values, and both decompositions add up
+/// to the total effect.
+#[test]
+fn test_cli_causal_mediation_json_has_the_reverse_decomposition() {
+    let s = temp_session();
+    let path = repo_path("validation/datasets/generated/mediation_huber_sim.csv");
+    s.load_as(&path, "m", &[]);
+    let j = s.json(&[
+        "causal",
+        "mediation",
+        "m",
+        "-y",
+        "y",
+        "-t",
+        "d",
+        "-m",
+        "m",
+        "-x",
+        "x1",
+        "x2",
+        "--bootstrap",
+        "50",
+    ]);
+    for key in [
+        "direct_effect_treated",
+        "indirect_effect_control",
+        "se_direct_treated",
+        "se_indirect_control",
+        "p_direct_treated",
+        "p_indirect_control",
+    ] {
+        assert!(number(&j, key).is_finite(), "{key}: {j}");
+    }
+    let total = number(&j, "total_effect");
+    let forward = number(&j, "direct_effect") + number(&j, "indirect_effect");
+    let reverse = number(&j, "direct_effect_treated") + number(&j, "indirect_effect_control");
+    assert!(
+        (forward - total).abs() <= 1e-12 * total.abs().max(1.0),
+        "{j}"
+    );
+    assert!(
+        (reverse - total).abs() <= 1e-12 * total.abs().max(1.0),
+        "{j}"
+    );
 }
 
 /// `causal ipw` reports the units its trimming dropped, in JSON and text. Fails before:
