@@ -127,7 +127,7 @@ opt-level = 1
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.89+) exposing its econometrics, statistics, ML and visualization methods as 270 MCP tools (263 without the `database` feature) and through the `p2a` CLI, in these crates:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.95+) exposing its econometrics, statistics, ML and visualization methods as 270 MCP tools (263 without the `database` feature) and through the `p2a` CLI, in these crates:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output
@@ -811,12 +811,18 @@ it. A tool the chat model should see must be added to `TIER1_TOOLS`.
 
 ### Database Layer (SurrealDB)
 
-Persistent storage via embedded SurrealDB (RocksDB backend):
+Persistent storage via embedded SurrealDB 4: a SurrealKV store on disk when `P2A_DB_PATH` names a directory
+(feature `kv-surrealkv`), the in-memory engine otherwise (`kv-mem`, also the hosted demo's).
 
 **Important Notes:**
-- Use `surrealdb::sql::Datetime` for timestamps (not chrono types)
-- Use `surrealdb::RecordId` for IDs (not String)
-- For datetime updates, use raw SurrealQL with `time::now()`
+- Row types derive `surrealdb::types::SurrealValue` next to serde's derives.
+- Timestamps are `surrealdb::types::Datetime` (`Copy`), not chrono types; ids are `surrealdb::types::RecordId`
+  (`key_string()`/`id_string()` give the key), not String.
+- HTTP routes answer DTOs with string ids and RFC 3339 timestamps, never the row types.
+- For datetime updates, use raw SurrealQL with `time::now()`; `type::record` replaces `type::thing`, and
+  `BEGIN`/`COMMIT` take result slots of their own.
+- A store written by SurrealDB 2 (p2a 0.5.0 and earlier, RocksDB) cannot be opened: `connect_surrealkv` moves
+  it aside to `<path>.surrealdb2-<timestamp>` and starts an empty one.
 
 ## Dioxus App (p2a-dioxus)
 

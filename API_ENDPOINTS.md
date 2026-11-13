@@ -51,7 +51,7 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 - The `db` routes exist when the server is built with the `db` feature and its session database opens. The database is in memory unless `P2A_DB_PATH` names a directory.
 - With `P2A_ACCESS_TOKEN` set, every route except `/health` and CORS preflight needs `Authorization: Bearer <token>`.
 - A route that is not registered in the server's mode answers 404 with an empty body (`GET /api/sessions` answers 405 there, because `POST /api/sessions` exists).
-- With the session database, a stored session within its TTL (a RocksDB server after a restart) is taken back by every route that takes a session id and by the websocket `auth` message; when the session table is full the HTTP routes answer 503 `capacity`.
+- With the session database, a stored session within its TTL (a server with a SurrealKV store, `P2A_DB_PATH`, after a restart; a store written by 0.5.0 or earlier is moved aside to `<path>.surrealdb2-<timestamp>` and a new one started) is taken back by every route that takes a session id and by the websocket `auth` message; when the session table is full the HTTP routes answer 503 `capacity`.
 - The tools a server has depend on its build: without the `database` feature (CI's `--no-default-features --features http,llm,auth,websocket`) the seven `db_*` tools are missing; the default build, `full` and `embedded` have them.
 
 ---
@@ -709,10 +709,10 @@ GET /api/sessions/{session_id}/settings
 PUT /api/sessions/{session_id}/settings
 ```
 
-The path id is the caller. `PUT` takes any of `provider`, `model`, `temperature` and `max_tokens`. **Response** (captured, after a `PUT` with `{"provider":"openai","model":"gpt-4o-mini"}`):
+The path id is the caller. `PUT` takes any of `provider`, `model`, `temperature` and `max_tokens`. **Response** (after a `PUT` with `{"provider":"openai","model":"gpt-4o-mini"}`; `id` is the session id):
 
 ```json
-{"success":true,"data":{"id":{"tb":"settings","id":{"String":"51963a14-…"}},"session_id":"51963a14-…","provider":"openai","model":"gpt-4o-mini","base_url":null,"temperature":0.7,"max_tokens":4096,"system_prompt":null,"updated_at":"2026-10-22T18:50:10.735301052Z"}}
+{"success":true,"data":{"id":"51963a14-…","session_id":"51963a14-…","provider":"openai","model":"gpt-4o-mini","base_url":null,"temperature":0.7,"max_tokens":4096,"system_prompt":null,"updated_at":"2026-10-22T18:50:10.735301052Z"}}
 ```
 
 ### Database Health and Statistics
