@@ -1644,7 +1644,7 @@ p2a causal doubly-robust [OPTIONS] --outcome <OUTCOME> --treatment <TREATMENT> <
 | `--method <METHOD>` | Method: aipw (default; also dr, doubly_robust), ipw or regression (also reg, ra, outcome_regression) [default: aipw] |
 | `--estimand <ESTIMAND>` | Estimand: ate (default) or att [default: ate] |
 | `--trim <TRIM>` | Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05) [default: 0.05] |
-| `--bootstrap <BOOTSTRAP>` | Bootstrap replications for the SEs of --method ipw and regression (default: 999), each refitting the propensity and outcome models; 0 gives analytic SEs (M-estimation for ipw, the stacked-equation sandwich for regression) and 1 is an error. aipw uses its analytic influence-function SE and ignores it [default: 999] |
+| `--bootstrap <BOOTSTRAP>` | Bootstrap replications for the SEs of --method ipw and regression. The default 0 gives analytic SEs (M-estimation for ipw, the stacked-equation sandwich for regression); 2 or more runs a bootstrap whose replicates refit the propensity and outcome models, and 1 is an error. aipw uses its analytic influence-function SE and ignores it [default: 0] |
 | `--seed <SEED>` | Seed of the bootstrap draws (default: 42) |
 
 #### `p2a causal mediation`
