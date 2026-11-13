@@ -140,8 +140,8 @@ tail is also checked against full enumeration (`test_psmirnov_exact_matches_enum
 
 ## Known Differences
 
-**STAT-27, alternative `less` with ties (two-sample exact; registry `ks_t4`).** R evaluates the
-distribution of D+ for both one-sided alternatives. With ties D- has a different distribution, so
+**STAT-27, alternative `less` with ties (two-sample exact; registry `ks_t4`).** R 4.3.3 (the
+version checked) evaluates the distribution of D+ for both one-sided alternatives. With ties D- has a different distribution, so
 p2a computes P(D- >= d) for `less` (`t75_p_less_exact`, which the case checks by full
 enumeration); R's value `t75_p_less_r` is kept out of the `Check`. Without ties both agree.
 

@@ -46,6 +46,7 @@ use crate::errors::{EconError, EconResult};
 use crate::resource::{checked_len, checkpoint, try_vec, try_with_capacity};
 use crate::stats::ranks::midranks;
 use crate::stats::ttest::Alternative;
+use crate::stats::wilcoxon::check_exact_work;
 use crate::traits::SignificanceLevel;
 use crate::traits::estimator::{
     normal_cdf, normal_p_value_two_sided, normal_quantile, validate_level,
@@ -227,6 +228,17 @@ pub fn ansari_test_with(
     let mut interval = (None, None, None);
     let p_value;
     if use_exact {
+        let (mf, nf) = (m as f64, n as f64);
+        // AnsariDist fills (m + 1) rows of m n / 2 cells for each of the m + n scores; Bauer's
+        // interval evaluates AB (m + n values) at each of the m n ratios.
+        let mut work = (mf + nf) * mf * mf * nf / 2.0;
+        if conf_level.is_some() {
+            work = work.max(mf * nf * (mf + nf));
+        }
+        check_exact_work(
+            work,
+            &format!("Ansari-Bradley exact distribution for samples of {m} and {n}"),
+        )?;
         let dist = AnsariDist::new(m, n)?;
         let half = ((m + 1) * (m + 1) / 4) as f64 + ((m * n) / 2) as f64 / 2.0;
         p_value = match alternative {
@@ -774,6 +786,25 @@ fn bauer_asymptotic_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_exact_request_above_the_work_limit_is_refused() {
+        let x: Vec<f64> = (1..=250).map(|i| i as f64).collect();
+        let y: Vec<f64> = (1..=250).map(|i| i as f64 + 0.5).collect();
+        let err = ansari_test_with(&x, &y, Alternative::TwoSided, Some(true), None).unwrap_err();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. }),
+            "{err:?}"
+        );
+        let ok = ansari_test_with(
+            &x[..60],
+            &y[..60],
+            Alternative::TwoSided,
+            Some(true),
+            Some(0.95),
+        );
+        assert!(ok.unwrap().exact);
+    }
 
     #[test]
     fn test_ratio_selection_matches_naive_sort() {

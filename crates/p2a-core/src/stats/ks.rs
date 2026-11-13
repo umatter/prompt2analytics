@@ -896,7 +896,10 @@ pub(crate) fn pkolmogorov_one_exact_upper(d: f64, n: usize) -> f64 {
         .map(|j| {
             let jf = j as f64;
             let lchoose = lnf - ln_gamma(jf + 1.0) - ln_gamma(nf - jf + 1.0);
-            (lchoose + (nf - jf) * (1.0 - d - jf / nf).ln() + (jf - 1.0) * (d + jf / nf).ln()).exp()
+            // n (1 - d) can round up to j while 1 - d - j/n is a rounding error below 0: that
+            // term is 0 (n - j > 0), not the NaN its log would give.
+            let gap = (1.0 - d - jf / nf).max(0.0);
+            (lchoose + (nf - jf) * gap.ln() + (jf - 1.0) * (d + jf / nf).ln()).exp()
         })
         .sum();
     (d * s).clamp(0.0, 1.0)
@@ -966,6 +969,18 @@ pub(crate) fn psmirnov_exact_upper(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_sample_exact_upper_is_finite_where_n_times_one_minus_d_rounds_up() {
+        // 11 (1 - 2/11) rounds to 9 while 1 - 2/11 - 9/11 is -1.1e-16 in f64
+        for (d, n) in [(2.0 / 11.0, 11), (7.0 / 12.0, 12), (3.0 / 13.0, 13)] {
+            let p = super::pkolmogorov_one_exact_upper(d, n);
+            assert!(
+                p.is_finite() && (0.0..=1.0).contains(&p),
+                "d = {d}, n = {n}: {p}"
+            );
+        }
+    }
+
     use super::*;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;

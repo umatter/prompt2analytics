@@ -298,7 +298,10 @@ HTTP), and they never depend on the resource profile:
   `instrument_order` is at most 4; density `n` is at most 2^20; panel GLS
   refuses a panel with more time periods than entities (T > N);
   `regression_bootstrap_cov` needs `n_boot` of at least 10; matching `ratio` is
-  at most the number of controls;
+  at most the number of controls; an exact null distribution requested for the
+  Wilcoxon rank-sum or signed-rank test or the Ansari-Bradley test (and its
+  interval) is refused when it would take more than 2e9 steps (R's default
+  exact range, fewer than 50 values per sample, is far below that);
 - the C5.0, quantile random forest and Cubist tree builders stop at depth 512,
   so no input can recurse deep enough to overflow a worker's stack;
 - staggered DiD `bootstrap` is 0 (analytic influence-function SEs) or at least

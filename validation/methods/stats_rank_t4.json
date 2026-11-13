@@ -118,7 +118,7 @@
         {
           "finding": "STAT-27",
           "quantity": "two-sample exact p, alternative less, with ties (t75_p_less_r)",
-          "note": "R evaluates the D+ distribution for both one-sided alternatives; with ties D- has a different distribution. p2a computes P(D- >= d) by swapping the samples (t75_p_less_exact, checked by full enumeration in the case). Without ties both agree."
+          "note": "R 4.3.3 (the version checked) evaluates the D+ distribution for both one-sided alternatives; with ties D- has a different distribution. p2a computes P(D- >= d) by swapping the samples (t75_p_less_exact, checked by full enumeration in the case). Without ties both agree."
         }
       ],
       "supersedes_legacy": []

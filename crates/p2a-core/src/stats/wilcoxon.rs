@@ -349,18 +349,23 @@ pub fn wilcoxon_rank_sum(
     let mut warnings: Vec<&'static str> = Vec::new();
 
     // the sorted samples are needed only for the interval
-    let sorted = |v: &[f64]| {
-        let mut s = v.to_vec();
+    let sorted = |v: &[f64]| -> EconResult<Vec<f64>> {
+        let mut s: Vec<f64> = try_with_capacity(v.len(), "Wilcoxon interval")?;
+        s.extend_from_slice(v);
         s.sort_by(f64::total_cmp);
-        s
+        Ok(s)
     };
     let (xs, ys) = if config.conf_int {
-        (sorted(&x), sorted(&y))
+        (sorted(&x)?, sorted(&y)?)
     } else {
         (Vec::new(), Vec::new())
     };
 
     let (p_value, z_score, interval) = if exact_used {
+        check_exact_work(
+            rank_sum_exact_work(n1, n2),
+            &format!("Wilcoxon rank-sum exact distribution for samples of {n1} and {n2}"),
+        )?;
         let dist = wilcox_dist(n1, n2)?;
         let p = exact_p(
             w,
@@ -596,6 +601,11 @@ pub fn wilcoxon_signed_rank(
     }
 
     let (p_value, z_score, interval) = if exact_used {
+        let nf = n as f64;
+        check_exact_work(
+            nf * nf * nf / 6.0,
+            &format!("Wilcoxon signed-rank exact distribution for {n} differences"),
+        )?;
         let dist = SignrankDist(signrank_probs(n)?);
         let p = exact_p(
             v,
@@ -927,6 +937,38 @@ fn wilcox_probs_dp(m: usize, n: usize) -> EconResult<Vec<f64>> {
     Ok(rows.pop().unwrap_or_default())
 }
 
+/// The most elementary steps an exact distribution may take (about two seconds), for the
+/// rank tests' exact paths: `exact = true` far above R's default range (fewer than 50
+/// values) is refused above it, in every mode, rather than run for hours or fall back to
+/// the normal approximation silently. R's default range stays far below it.
+pub(crate) const MAX_EXACT_WORK: f64 = 2e9;
+
+/// Refuse an exact distribution whose cost `work` (elementary steps) exceeds
+/// [`MAX_EXACT_WORK`]; `what` names the distribution and its sizes.
+pub(crate) fn check_exact_work(work: f64, what: &str) -> EconResult<()> {
+    if work > MAX_EXACT_WORK {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the {what} needs about {work:.1e} steps, above the limit of {MAX_EXACT_WORK:.0e} \
+                 for an exact distribution; use exact = false (normal approximation)"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Steps of the rank-sum exact distribution for sizes `m`, `n`: a^2 b / 2 for the integer
+/// counts, a^2 b^2 / 4 for the f64 recursion past the i128 range (a = min, b = max).
+fn rank_sum_exact_work(m: usize, n: usize) -> f64 {
+    let (a, b) = (m.min(n), m.max(n));
+    let (af, bf) = (a as f64, b as f64);
+    if log2_choose(a + b, a) >= 124.0 {
+        af * af * bf * bf / 4.0
+    } else {
+        af * af * bf / 2.0
+    }
+}
+
 /// The null distribution of U for sizes `m`, `n`.
 fn wilcox_dist(m: usize, n: usize) -> EconResult<WilcoxDist> {
     Ok(match wilcox_cdf_counts(m, n)? {
@@ -1024,7 +1066,9 @@ fn select_by_count(lo: f64, hi: f64, k: usize, count_le: impl Fn(f64) -> usize) 
             a = mid + 1;
         }
     }
-    from_order_key(a)
+    // order_key puts -0.0 below +0.0 while count_le counts them alike, so a zero comes back
+    // as -0.0; adding 0.0 prints it as R does.
+    from_order_key(a) + 0.0
 }
 
 /// The k-th smallest (1-based) of the pairwise differences `x_i - y_j` of two sorted
@@ -1476,6 +1520,49 @@ fn signed_rank_asymptotic_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zero_order_statistic_is_positive_zero() {
+        let t = select_by_count(-1.0, 1.0, 1, |t| usize::from(t >= 0.0));
+        assert_eq!(t, 0.0);
+        assert!(t.is_sign_positive(), "{t:?}");
+    }
+
+    #[test]
+    fn an_explicit_exact_request_above_the_work_limit_is_refused() {
+        let x: Vec<f64> = (0..320).map(|i| i as f64).collect();
+        let y: Vec<f64> = (0..320).map(|i| i as f64 + 0.5).collect();
+        let exact = WilcoxonConfig {
+            exact: Some(true),
+            ..WilcoxonConfig::default()
+        };
+        let err = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &exact).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.contains("exact = false")),
+            "{err:?}"
+        );
+        // the default rule (normal approximation at these sizes) is unaffected
+        let r = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        );
+        assert!(!r.unwrap().exact);
+
+        let d: Vec<f64> = (0..3000)
+            .map(|i| (i as f64 + 0.5) * if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let err = wilcoxon_signed_rank(&d, None, 0.0, Alternative::TwoSided, &exact).unwrap_err();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. }),
+            "{err:?}"
+        );
+        // R's default range stays far below the limit
+        assert!(rank_sum_exact_work(49, 49) < MAX_EXACT_WORK / 1e3);
+        assert!(rank_sum_exact_work(150, 150) < MAX_EXACT_WORK);
+    }
     use polars::prelude::*;
 
     // ========================================================================

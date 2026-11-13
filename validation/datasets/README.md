@@ -260,14 +260,14 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/rank_friedman_rounding.csv` | 66 × 4 (block, method, time, first12) | `stat_rank_friedman_rounding` | `r/cases/stats_rank_t3.R` | literal values: the `?friedman.test` RoundingTimes data (22 players × 3 methods) in long form; `first12` marks the first 12 players |
 | `generated/rank_isoreg.csv` | 58 × 3 (set, x, y) | `stat_rank_isoreg` | `r/cases/stats_rank_t3.R` | seed 20261026 |
 | `generated/rank_kruskal_hw.csv` | 14 × 2 (value, group) | `stat_rank_kruskal_hw` | `r/cases/stats_rank_t3.R` | literal values: Hollander & Wolfe (1973) p. 116, the `?kruskal.test` example |
+| `generated/rank_ks_t4.csv` | 1219 × 3 (set, group, value) | `stat_rank_ks_t4` | `r/cases/stats_rank_t4.R` | seed 20261113 |
 | `generated/rank_quade_store.csv` | 35 × 3 (store, brand, sales) | `stat_rank_quade_store` | `r/cases/stats_rank_t3.R` | literal values: Conover (1999) p. 375, the `?quade.test` hand-lotion example |
+| `generated/rank_quade_t4.csv` | 33 × 4 (set, block, treat, y) | `stat_rank_quade_t4` | `r/cases/stats_rank_t4.R` | literal values: three 4 × 3 designs (A = B, regular, constant blocks) |
+| `generated/rank_scale_t4.csv` | 233 × 3 (set, group, value) | `stat_rank_scale_t4` | `r/cases/stats_rank_t4.R` | seed 20261112 |
 | `generated/rank_small_blocks.csv` | 32 × 4 (block, treat, y, y_unit) | `stat_rank_small_blocks` | `r/cases/stats_rank_t3.R` | seed 20261023 |
 | `generated/rank_small_groups.csv` | 21 × 4 (g, y, y_unit, ynt) | `stat_rank_small_groups` | `r/cases/stats_rank_t3.R` | seed 20261022 |
 | `generated/rank_two_sample.csv` | 126 × 3 (set, group, value) | `stat_rank_two_sample` | `r/cases/stats_rank_t3.R` | seed 20261024 |
 | `generated/rank_wilcoxon.csv` | 101 × 3 (set, group, value) | `stat_rank_wilcoxon` | `r/cases/stats_rank_t3.R` | seed 20261025 |
-| `generated/rank_ks_t4.csv` | 1219 × 3 (set, group, value) | `stat_rank_ks_t4` | `r/cases/stats_rank_t4.R` | seed 20261113 |
-| `generated/rank_quade_t4.csv` | 33 × 4 (set, block, treat, y) | `stat_rank_quade_t4` | `r/cases/stats_rank_t4.R` | literal values: three 4 × 3 designs (A = B, regular, constant blocks) |
-| `generated/rank_scale_t4.csv` | 233 × 3 (set, group, value) | `stat_rank_scale_t4` | `r/cases/stats_rank_t4.R` | seed 20261112 |
 | `generated/rank_wilcoxon_t4.csv` | 518 × 3 (set, group, value) | `stat_rank_wilcoxon_t4` | `r/cases/stats_rank_t4.R` | seed 20261111; `depr`, `lik`, `heavy` literal values |
 | `generated/reset_two.csv` | 150 × 3 (y, x1, x2) | `reset_princomp` | `r/cases/reg_rank_qr.R` | seed 20261121 |
 | `generated/rq_boot_indices.csv` | 100 × 50 (b01-b50) | `rq_boot_xy` | `r/cases/reg_quantreg_br.R` | seed 20261021 |
