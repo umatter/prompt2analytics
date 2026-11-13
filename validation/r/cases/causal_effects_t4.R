@@ -116,14 +116,13 @@ case("stdreg_se_t4", "causal/stdreg",
                logit_int = glm(yb ~ x1 + x2 + a + a:x1 + a:x2, data = d, family = binomial, control = .t4_ctl),
                pois = glm(yp ~ x1 + x2 + a, data = d, family = poisson, control = .t4_ctl))
   stopifnot(all(vapply(fits, function(f) f$converged, TRUE)))
-  suppressPackageStartupMessages(library(marginaleffects))
   v <- list()
   for (nm in names(fits)) for (est in c("ate", "att", "atc")) {
     S <- switch(est, ate = rep(TRUE, nrow(d)), att = d$a == 1, atc = d$a == 0)
     s <- ses(fits[[nm]], S)
     for (q in c("est", "delta", "sandwich")) v[[paste(nm, est, q, sep = "_")]] <- s[[q]]
     if (nm %in% c("lin_int", "logit_int") && est != "atc") {
-      me <- avg_comparisons(fits[[nm]], variables = "a", newdata = if (est == "att") subset(d, a == 1) else d)
+      me <- marginaleffects::avg_comparisons(fits[[nm]], variables = "a", newdata = if (est == "att") subset(d, a == 1) else d)
       stopifnot(abs(me$std.error - s$gvg) < 1e-9 * s$gvg)
     }
   }
