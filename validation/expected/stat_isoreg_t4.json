@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "stat_isoreg_t4",
+  "area": "stats/isoreg",
+  "method": "isoreg: yc and iKnots with tied x, and invariance to the row order within a tie",
+  "reference": "stats::isoreg (order(x, -y); iKnots 1-based block ends; yc = cumsum(c(0, y)) of the ordered y)",
+  "call": "isoreg(x, y)",
+  "dataset": "validation/datasets/generated/rank_isoreg.csv",
+  "datasets": ["validation/datasets/generated/rank_isoreg.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "yc_tiedx": [0, 3, 4, 8, 10, 15],
+    "yc_ir4": [0, 5, 14, 15, 17, 22, 28, 35, 43, 46, 54],
+    "yf_tiedx_perm": [2, 2, 3, 3, 5],
+    "iknots_tiedx_perm": [2, 4, 5],
+    "iknots_doc": [2, 9],
+    "yc_doc": [0, 1, 1, 5, 8, 11, 16, 20, 22, 22],
+    "perm": [5, 4, 1, 3, 2]
+  }
+}

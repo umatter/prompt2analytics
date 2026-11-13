@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "stat_cancor_t4",
+  "area": "multivariate/cancor",
+  "method": "cancor: the ?cancor-sized 10-row example, no centring, and p < q (coefficients sign-normalised)",
+  "reference": "stats::cancor (QR of the [centred] data, SVD of Qx'Qy); first min(p, q) coefficient columns, column signs so that the first x coefficient is positive",
+  "call": "cancor(A, B); cancor(X, Y, xcenter = FALSE, ycenter = FALSE); cancor(Y, X)",
+  "dataset": "validation/datasets/generated/cancor_t4.csv",
+  "datasets": ["validation/datasets/generated/cancor_t4.csv", "validation/datasets/generated/cancor_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "ex_cor": [0.90164951333194043, 0.4123259597547384],
+    "ex_xcoef": [0.008851769073638209, -0.027913549099982633, 0.15418874887037051, 0.093905314851105079, -0.0049274839987809953, -0.35295667708177758],
+    "ex_ycoef": [-0.14732626574049351, 0.074743998145020141, 0.28300007630004631, -0.56747373442783955],
+    "nc_cor": [0.87895968974895344, 0.13562474432763399],
+    "nc_xcoef": [0.04232260341903981, 0.041694112593772314, 0.031620226277260875, 0.13950893508775786, -0.16169680918054569, -0.028375349294780826],
+    "nc_ycoef": [0.085152393805034157, 0.015052628154004946, 0.1086843334437171, -0.15259598432132968],
+    "sw_cor": [0.87932907247159176, 0.13269379517114785],
+    "sw_xcoef": [0.085318148437044758, 0.014828907930355859, 0.1087873923398459, -0.15285071167931152],
+    "sw_ycoef": [0.042047067198829273, 0.041859373305781836, 0.031893286647262993, 0.13900401774072027, -0.16309939887477529, -0.025655251488974885]
+  }
+}
