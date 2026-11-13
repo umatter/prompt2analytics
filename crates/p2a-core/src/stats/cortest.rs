@@ -7,7 +7,8 @@
 //! The p-values follow `cor.test`'s defaults. Pearson: t on n - 2 degrees of freedom, with the
 //! Fisher-z interval (one-sided intervals end at -1 or 1). Spearman: without ties and for
 //! n < 1290 the exact distribution of S (all permutations for n <= 9, the AS 89 Edgeworth series
-//! above), otherwise the t approximation.
+//! above), otherwise the t approximation. Kendall: tau-b; without ties and for n < 50 the exact
+//! distribution of T, otherwise z with the tie-corrected variance (no continuity correction).
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, refuse_non_finite};
@@ -447,6 +448,11 @@ fn spearman_upper_counts(n: usize) -> &'static [u32] {
 }
 
 /// Kendall's tau correlation test.
+///
+/// `estimate` is tau-b = S / sqrt((n0 - n1)(n0 - n2)) (tau-a without ties). As R's `cor.test`
+/// by default: without ties and for n < 50 the exact null distribution of T, the number of
+/// concordant pairs (`statistic` T); otherwise z = S / sqrt(var S) with the tie-corrected variance
+/// and no continuity correction (`statistic` z).
 fn kendall_test(
     x: &[f64],
     y: &[f64],
@@ -456,30 +462,44 @@ fn kendall_test(
     let n = x.len();
 
     // S = concordant - discordant pairs (Knight's O(n log n) algorithm)
-    let s = kendall_s(x, y)?;
-    let n_pairs = tie_pairs(n)?;
-    let tau = s as f64 / n_pairs as f64;
+    let counts = kendall_s(x, y)?;
+    let n0 = tie_pairs(n)?;
+    let s = counts.s;
+    let tau = s as f64 / ((n0 - counts.n1) as f64 * (n0 - counts.n2) as f64).sqrt();
 
-    // For the test, we use the normal approximation
-    // Var(S) = n(n-1)(2n+5)/18 for no ties
-    let var_s = kendall_var_s_no_ties(n);
-
-    // Continuity correction
-    let z_stat = if s > 0 {
-        (s as f64 - 1.0) / var_s.sqrt()
-    } else if s < 0 {
-        (s as f64 + 1.0) / var_s.sqrt()
-    } else {
-        0.0
-    };
-
-    let p_value = one_sided_p(normal_p_value_two_sided(z_stat), z_stat, alternative);
+    let (statistic, statistic_name, p_value) =
+        if n < KENDALL_EXACT_MAX_N && counts.n1 == 0 && counts.n2 == 0 {
+            // T = (S + n0)/2 concordant pairs
+            let t_obs = u64::try_from((i128::from(s) + i128::from(n0)) / 2).unwrap_or(0);
+            let cdf = kendall_exact_cdf(n)?;
+            let at_most = |k: u64| cdf[usize::try_from(k).unwrap_or(usize::MAX).min(cdf.len() - 1)];
+            let less = at_most(t_obs);
+            // P(T >= t) = P(T <= n0 - t) by symmetry
+            let greater = at_most(n0 - t_obs);
+            let p = match alternative {
+                Alternative::TwoSided => {
+                    let tail = if 2 * t_obs > n0 { greater } else { less };
+                    (2.0 * tail).min(1.0)
+                }
+                Alternative::Less => less,
+                Alternative::Greater => greater,
+            };
+            (t_obs as f64, "T", p)
+        } else {
+            let var_s = kendall_var_s(n, &counts.x_ties, &counts.y_ties);
+            let z = s as f64 / var_s.sqrt();
+            (
+                z,
+                "z",
+                one_sided_p(normal_p_value_two_sided(z), z, alternative),
+            )
+        };
 
     Ok(CorTestResult {
         estimate: tau,
         estimate_name: "tau".to_string(),
-        statistic: z_stat,
-        statistic_name: "z".to_string(),
+        statistic,
+        statistic_name: statistic_name.to_string(),
         p_value,
         df: None,
         conf_low: None,
@@ -492,6 +512,91 @@ fn kendall_test(
         method_name: "Kendall's rank correlation tau".to_string(),
         missing: MissingSummary::none(n),
     })
+}
+
+/// R's `cor.test` uses the exact Kendall distribution below this sample size (without ties).
+const KENDALL_EXACT_MAX_N: usize = 50;
+
+/// `cdf[k]` = P(T <= k) for T the number of concordant pairs (equivalently, of inversions) of a
+/// uniformly random permutation of n elements, k in 0..=n(n-1)/2. Mahonian recursion
+/// P_m(k) = (1/m) Σ_{i<m} P_{m-1}(k - i) with sliding sums, O(n · n(n-1)/2); `n` < 50.
+fn kendall_exact_cdf(n: usize) -> EconResult<Vec<f64>> {
+    let n0 = n * n.saturating_sub(1) / 2;
+    let mut p = resource::try_vec(n0 + 1, 0.0f64, "Kendall exact distribution")?;
+    let mut next = resource::try_vec(n0 + 1, 0.0f64, "Kendall exact distribution")?;
+    p[0] = 1.0;
+    let mut top = 0usize; // largest k with P_{m-1}(k) > 0
+    for m in 2..=n {
+        resource::checkpoint()?;
+        let new_top = top + m - 1;
+        let inv_m = 1.0 / m as f64;
+        let mut window = 0.0;
+        for k in 0..=new_top {
+            if k <= top {
+                window += p[k];
+            }
+            if k >= m {
+                window -= p[k - m];
+            }
+            next[k] = window * inv_m;
+        }
+        std::mem::swap(&mut p, &mut next);
+        top = new_top;
+    }
+    let mut acc = 0.0;
+    for v in p.iter_mut() {
+        acc += *v;
+        *v = acc.min(1.0);
+    }
+    Ok(p)
+}
+
+/// Sums over the tie groups (sizes t) of one variable, exact in `u128`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TieSums {
+    /// Σ t(t-1)
+    t1: u128,
+    /// Σ t(t-1)(t-2)
+    t2: u128,
+    /// Σ t(t-1)(2t+5)
+    t5: u128,
+}
+
+impl TieSums {
+    fn add(&mut self, t: usize) {
+        let t = t as u128;
+        if t > 1 {
+            self.t1 += t * (t - 1);
+            self.t2 += t * (t - 1) * (t - 2);
+            self.t5 += t * (t - 1) * (2 * t + 5);
+        }
+    }
+}
+
+/// Kendall's S and the tie counts behind tau-b and the variance of S.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KendallCounts {
+    /// concordant - discordant pairs
+    s: i64,
+    /// pairs tied in x (including those tied in both)
+    n1: u64,
+    /// pairs tied in y (including those tied in both)
+    n2: u64,
+    x_ties: TieSums,
+    y_ties: TieSums,
+}
+
+/// Variance of Kendall's S under independence with ties (R's `cor.test`, continuity = FALSE):
+/// (v0 - vt - vu)/18 + v1/(2n(n-1)) + v2/(9n(n-1)(n-2)).
+fn kendall_var_s(n: usize, x: &TieSums, y: &TieSums) -> f64 {
+    let nn = n as u128;
+    let v0 = nn * nn.saturating_sub(1) * (2 * nn + 5);
+    // exact: each tie sum is at most v0 (every pair tied)
+    let base = (v0 as i128 - x.t5 as i128 - y.t5 as i128) as f64 / 18.0;
+    let nf = n as f64;
+    let v1 = x.t1 as f64 * y.t1 as f64 / (2.0 * nf * (nf - 1.0));
+    let v2 = x.t2 as f64 * y.t2 as f64 / (9.0 * nf * (nf - 1.0) * (nf - 2.0));
+    base + v1 + v2
 }
 
 /// `t(t-1)/2`, the number of pairs among `t` values, with checked `u64` arithmetic.
@@ -512,7 +617,8 @@ fn tie_pairs(t: usize) -> EconResult<u64> {
 /// values in that order counting strict inversions (the discordant pairs), and count the pairs
 /// tied in y (`n2`): `S = n0 - n1 - n2 + n3 - 2 * inversions`. O(n log n). Ties are exact
 /// equality, as in R (equal infinities tie; -0.0 equals 0.0). The callers have removed NaN pairs.
-fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<i64> {
+/// The tie-group sums of both variables are collected in the same scans.
+fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<KendallCounts> {
     let n = x.len();
     let n0 = tie_pairs(n)?;
     // `+ 0.0` turns -0.0 into +0.0 so that total_cmp treats them as equal
@@ -529,6 +635,7 @@ fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<i64> {
     // Pairs tied in x (n1) and tied in both x and y (n3)
     let mut n1 = 0u64;
     let mut n3 = 0u64;
+    let mut x_ties = TieSums::default();
     let mut i = 0;
     while i < n {
         let xi = key(x[order[i]]);
@@ -537,6 +644,7 @@ fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<i64> {
             j += 1;
         }
         n1 += tie_pairs(j - i)?;
+        x_ties.add(j - i);
         let mut k = i;
         while k < j {
             let yk = key(y[order[k]]);
@@ -585,6 +693,7 @@ fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<i64> {
 
     // Pairs tied in y (n2), from the sorted y values
     let mut n2 = 0u64;
+    let mut y_ties = TieSums::default();
     let mut i = 0;
     while i < n {
         let mut j = i + 1;
@@ -592,20 +701,22 @@ fn kendall_s(x: &[f64], y: &[f64]) -> EconResult<i64> {
             j += 1;
         }
         n2 += tie_pairs(j - i)?;
+        y_ties.add(j - i);
         i = j;
     }
 
     let s = i128::from(n0) - i128::from(n1) - i128::from(n2) + i128::from(n3)
         - 2 * i128::from(inversions);
-    i64::try_from(s).map_err(|_| {
+    let s = i64::try_from(s).map_err(|_| {
         EconError::ResourceLimit("Kendall's tau: the statistic does not fit in 64 bits".to_string())
+    })?;
+    Ok(KendallCounts {
+        s,
+        n1,
+        n2,
+        x_ties,
+        y_ties,
     })
-}
-
-/// Tie-free variance of Kendall's S, `n(n-1)(2n+5)/18`, with the product exact in `u128`.
-fn kendall_var_s_no_ties(n: usize) -> f64 {
-    let n = n as u128;
-    (n * n.saturating_sub(1) * (2 * n + 5)) as f64 / 18.0
 }
 
 /// Pearson correlation coefficient. NaN for a constant column and for squares a double cannot hold
@@ -686,83 +797,31 @@ pub fn run_cor_test_dataset(
 mod tests {
     use super::*;
 
-    /// Reference: today's O(n^2) all-pairs Kendall test, copied verbatim.
-    fn kendall_test_pairwise_reference(
-        x: &[f64],
-        y: &[f64],
-        alternative: Alternative,
-        conf_level: f64,
-    ) -> EconResult<CorTestResult> {
+    /// Reference: the O(n^2) all-pairs count of S = concordant - discordant and of the pairs
+    /// tied in x and in y (a pair tied in both counts in both, as R's n1 and n2).
+    fn kendall_pairwise_reference(x: &[f64], y: &[f64]) -> (i64, u64, u64) {
         let n = x.len();
-
-        // Count concordant and discordant pairs
-        let mut concordant = 0i64;
-        let mut discordant = 0i64;
-        let mut ties_x = 0i64;
-        let mut ties_y = 0i64;
-
+        let (mut s, mut ties_x, mut ties_y) = (0i64, 0u64, 0u64);
         for i in 0..n {
             for j in (i + 1)..n {
                 let dx = x[j] - x[i];
                 let dy = y[j] - y[i];
-
-                if dx.abs() < 1e-15 && dy.abs() < 1e-15 {
-                    // Tie in both
+                if dx == 0.0 {
                     ties_x += 1;
+                }
+                if dy == 0.0 {
                     ties_y += 1;
-                } else if dx.abs() < 1e-15 {
-                    ties_x += 1;
-                } else if dy.abs() < 1e-15 {
-                    ties_y += 1;
-                } else if dx * dy > 0.0 {
-                    concordant += 1;
-                } else {
-                    discordant += 1;
+                }
+                if dx != 0.0 && dy != 0.0 {
+                    s += if dx * dy > 0.0 { 1 } else { -1 };
                 }
             }
         }
-
-        let n_pairs = (n * (n - 1) / 2) as i64;
-        let tau = (concordant - discordant) as f64 / n_pairs as f64;
-
-        // For the test, we use the normal approximation
-        // Var(S) = n(n-1)(2n+5)/18 for no ties
-        let s = concordant - discordant;
-        let var_s = (n * (n - 1) * (2 * n + 5)) as f64 / 18.0;
-
-        // Continuity correction
-        let z_stat = if s > 0 {
-            (s as f64 - 1.0) / var_s.sqrt()
-        } else if s < 0 {
-            (s as f64 + 1.0) / var_s.sqrt()
-        } else {
-            0.0
-        };
-
-        // the same tail helper as the code under test: this reference checks S, tau and z
-        let p_value = one_sided_p(normal_p_value_two_sided(z_stat), z_stat, alternative);
-
-        Ok(CorTestResult {
-            estimate: tau,
-            estimate_name: "tau".to_string(),
-            statistic: z_stat,
-            statistic_name: "z".to_string(),
-            p_value,
-            df: None,
-            conf_low: None,
-            conf_high: None,
-            conf_level,
-            n,
-            null_value: 0.0,
-            alternative,
-            method: CorrelationMethod::Kendall,
-            method_name: "Kendall's rank correlation tau".to_string(),
-            missing: MissingSummary::none(n),
-        })
+        (s, ties_x, ties_y)
     }
 
     // R 4.3.3: set.seed(20261021); x <- round(rnorm(40), 4); y <- round(0.6 * x + rnorm(40, sd = 0.8), 4)
-    //   cor.test(x, y, method = "kendall", exact = FALSE, continuity = TRUE, alternative = alt)
+    // (set kd40 of case stat_cor_test_t4)
     const KX: [f64; 40] = [
         0.1603, 0.5681, 0.5066, 1.0145, 0.6190, -0.6551, -0.7773, 0.4089, 1.7813, 0.8909, -0.3686,
         -0.3427, 0.2088, -1.1010, -1.2737, 0.5803, -1.0766, 2.2568, -0.6514, 0.1311, -1.1748,
@@ -776,19 +835,77 @@ mod tests {
         0.9519, 1.6406, -1.0129, -0.1247, -0.0295, 0.1230, -0.3533, -0.9709, 0.0493,
     ];
 
+    /// Without ties: the exact T for n < 50 (R's default), z without continuity correction for
+    /// n >= 50. Fails before: z with a continuity correction always.
     #[test]
     fn test_validate_kendall_tie_free_against_r() {
-        for (alt, p) in [
-            (Alternative::TwoSided, 0.021718583114218416),
-            (Alternative::Less, 0.9891407084428908),
-            (Alternative::Greater, 0.010859291557109208),
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cor_test_t4");
+        let mut check = Check::new(&case);
+        for (set, name) in [
+            ("perm", "T"),
+            ("kd40", "T"),
+            ("perf7", "T"),
+            ("perf12", "T"),
+            ("k60", "z"),
         ] {
-            let r = cor_test(&KX, &KY, CorrelationMethod::Kendall, alt, 0.95).unwrap();
-            assert!((r.estimate - 0.2538461538461539).abs() < 1e-12);
-            assert!((r.statistic - 2.2952538084597247).abs() < 1e-12);
-            assert!((r.p_value - p).abs() < 1e-12, "{alt:?}: {}", r.p_value);
+            let (x, y) = (t4(&ds, set, "x"), t4(&ds, set, "y"));
+            let n = x.len();
+            for (alt, a) in ALTS {
+                let r = cor_test(&x, &y, CorrelationMethod::Kendall, alt, 0.95).unwrap();
+                assert_eq!(r.statistic_name, name, "{set}");
+                check.scalar(&format!("kendall_{set}_{a}_p"), r.p_value, Tol::p_value(n));
+                if alt == Alternative::TwoSided {
+                    let stat_tol = if name == "T" {
+                        Tol::exact()
+                    } else {
+                        Tol::stat(n)
+                    };
+                    check
+                        .scalar(&format!("kendall_{set}_tau"), r.estimate, Tol::coef(n))
+                        .scalar(&format!("kendall_{set}_stat"), r.statistic, stat_tol)
+                        .scalar(
+                            &format!("kendall_{set}_is_T"),
+                            f64::from(u8::from(name == "T")),
+                            Tol::exact(),
+                        );
+                }
+            }
         }
-        assert_eq!(kendall_s(&KX, &KY).unwrap(), 198); // R: S = 2*T - n(n-1)/2 = 2*489 - 780
+        check.finish();
+        let r = cor_test(
+            &KX,
+            &KY,
+            CorrelationMethod::Kendall,
+            Alternative::TwoSided,
+            0.95,
+        );
+        assert_eq!(r.unwrap().statistic, 489.0);
+        assert_eq!(kendall_s(&KX, &KY).unwrap().s, 198); // S = 2 T - n(n-1)/2 = 2*489 - 780
+    }
+
+    /// With ties: tau-b and z with the tie-corrected variance, no continuity correction.
+    /// Fails before: tau-a and the tie-free variance.
+    #[test]
+    fn test_validate_kendall_ties_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_cor_test_t4");
+        let mut check = Check::new(&case);
+        for set in ["perft", "tie12", "t60"] {
+            let (x, y) = (t4(&ds, set, "x"), t4(&ds, set, "y"));
+            let n = x.len();
+            for (alt, a) in ALTS {
+                let r = cor_test(&x, &y, CorrelationMethod::Kendall, alt, 0.95).unwrap();
+                assert_eq!(r.statistic_name, "z", "{set}");
+                check.scalar(&format!("kendall_{set}_{a}_p"), r.p_value, Tol::p_value(n));
+                if alt == Alternative::TwoSided {
+                    check
+                        .scalar(&format!("kendall_{set}_tau"), r.estimate, Tol::coef(n))
+                        .scalar(&format!("kendall_{set}_stat"), r.statistic, Tol::stat(n));
+                }
+            }
+        }
+        check.finish();
     }
 
     fn lcg(seed: u64) -> impl FnMut() -> u64 {
@@ -808,19 +925,10 @@ mod tests {
         let y: Vec<f64> = (0..500)
             .map(|i| (next() % 13) as f64 + 0.5 * x[i])
             .collect();
-        assert_eq!(kendall_s(&x, &y).unwrap(), 55869); // also computed by a port of the old pairwise loop
-        for alt in [
-            Alternative::TwoSided,
-            Alternative::Less,
-            Alternative::Greater,
-        ] {
-            let new = cor_test(&x, &y, CorrelationMethod::Kendall, alt, 0.95).unwrap();
-            let old = kendall_test_pairwise_reference(&x, &y, alt, 0.95).unwrap();
-            assert_eq!(
-                (new.estimate, new.statistic, new.p_value),
-                (old.estimate, old.statistic, old.p_value)
-            );
-        }
+        let counts = kendall_s(&x, &y).unwrap();
+        assert_eq!(counts.s, 55869); // also computed by a port of the old pairwise loop
+        let (s, ties_x, ties_y) = kendall_pairwise_reference(&x, &y);
+        assert_eq!((counts.s, counts.n1, counts.n2), (s, ties_x, ties_y));
     }
 
     #[test]
@@ -829,14 +937,25 @@ mod tests {
         let n = 200_000usize;
         let x: Vec<f64> = (0..n).map(|i| (i / 2) as f64).collect();
         let y: Vec<f64> = (0..n).map(|i| i as f64).collect();
-        assert_eq!(kendall_s(&x, &y).unwrap(), 19_999_900_000 - 100_000);
+        assert_eq!(kendall_s(&x, &y).unwrap().s, 19_999_900_000 - 100_000);
     }
 
     #[test]
     fn test_kendall_variance_does_not_overflow() {
+        let none = TieSums::default();
         // n(n-1)(2n+5) = 18522013229989500000 > u64::MAX; exact integer, then f64, then / 18
-        assert_eq!(kendall_var_s_no_ties(2_100_000), 1.0290007349994166e18);
-        assert_eq!(kendall_var_s_no_ties(40), 7366.666666666667);
+        assert_eq!(
+            kendall_var_s(2_100_000, &none, &none),
+            1.0290007349994166e18
+        );
+        assert_eq!(kendall_var_s(40, &none, &none), 7366.666666666667);
+        // n = 2^31 in two tie groups per variable: every term stays finite and the variance positive
+        let n = 1usize << 31;
+        let mut half = TieSums::default();
+        half.add(n / 2);
+        half.add(n / 2);
+        let v = kendall_var_s(n, &half, &half);
+        assert!(v.is_finite() && v > 0.0, "{v}");
     }
 
     #[test]
@@ -1326,7 +1445,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(kendall.estimate_name, "tau");
-        assert_eq!(kendall.statistic_name, "z");
+        assert_eq!(kendall.statistic_name, "T"); // exact path: n < 50, no ties
     }
 
     #[test]
