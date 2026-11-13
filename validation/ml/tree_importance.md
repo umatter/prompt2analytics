@@ -12,6 +12,10 @@ splits on. Case file: `validation/r/cases/ml_tree_importance.R`. Registry: `vali
 - **GBM** (`GbmResult::relative_influence`): the sum over trees of the SSE decrease of each split on the
   pseudo-residuals, which is gbm's `relative.influence`. `feature_importances` is the share.
 
+All three refuse a target whose centred sum of squares exceeds `f64::MAX.sqrt()`, CART's bound, where the split
+gains would overflow ("rescale the target"; `test_forest_refuses_overflowing_target`,
+`test_gbm_refuses_overflowing_target`, `test_qrf_refuses_overflowing_target`).
+
 Before this was fixed, each split added `0.5^depth`: a depth-weighted split count that ignored how much the split
 explained.
 
