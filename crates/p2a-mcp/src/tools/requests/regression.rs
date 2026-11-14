@@ -476,8 +476,8 @@ pub struct LineRequest {
     #[schemars(description = "Name of the response column (Y variable).")]
     pub y: String,
 
-    /// Number of polishing iterations
-    #[schemars(description = "Number of polishing iterations. Default is 1.")]
+    /// Number of slope steps
+    #[schemars(description = "Number of slope steps (R's line(iter)), at least 1. Default 1.")]
     pub iter: Option<usize>,
 }
 

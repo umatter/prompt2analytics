@@ -63,7 +63,9 @@ search, so the pins hold to rounding).
 
 ## Deviations
 
-None. Release note: every smooth.spline number changed (the fit, df, lambda on R's scale,
+Two inputs where R stops or reports NA, not pinned: when IQR(x) is 0 R stops ("'tol' must be
+strictly positive and finite") and p2a combines only equal x values; a given `lambda = 0` reports
+`spar` as NaN (R: NA). Release note: every smooth.spline number changed (the fit, df, lambda on R's scale,
 `n_knots`, `cv_crit`, predictions).
 
 ## NA handling

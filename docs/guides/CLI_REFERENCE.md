@@ -1324,7 +1324,7 @@ p2a regression line [OPTIONS] --dep-var <DEP_VAR> --indep-var <INDEP_VAR> <DATAS
 | `<DATASET>` | Dataset name |
 | `-y, --dep-var <DEP_VAR>` | Dependent variable column |
 | `-x, --indep-var <INDEP_VAR>` | Independent variable column (single predictor) |
-| `--iter <ITER>` | Number of polishing iterations [default: 1] |
+| `--iter <ITER>` | Number of slope steps (R's line(iter)), at least 1 [default: 1] |
 
 #### `p2a regression hac`
 

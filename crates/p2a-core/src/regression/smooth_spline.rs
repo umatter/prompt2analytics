@@ -165,7 +165,7 @@ pub struct SmoothSplineResult {
     pub y: Vec<f64>,
     /// Equivalent degrees of freedom (the sum of the leverages).
     pub df: f64,
-    /// Smoothing parameter spar.
+    /// Smoothing parameter spar (NaN for a given lambda of 0, which no spar gives).
     pub spar: f64,
     /// Penalty parameter lambda on R's scale (x scaled to [0, 1]).
     pub lambda: f64,
@@ -212,7 +212,9 @@ impl ResultNotes for SmoothSplineResult {
 /// (tolerance 1e-4, eps 2e-8, at most 500 steps) for the df target, or for GCV (R's default)
 /// or ordinary leave-one-out CV (`criterion = Cv`, `cv = true`).
 ///
-/// As R: x values within `1e-6 * IQR(x)` are one value (their y and weights are combined),
+/// As R: x values within `1e-6 * IQR(x)` are one value (their y and weights are combined);
+/// when IQR(x) is 0, where R stops ("'tol' must be strictly positive and finite"), only equal x
+/// values are combined,
 /// weights are rescaled to sum to the number of positive weights, the penalty integrates
 /// the quadratic term of `B_i'' B_j''` with sgram.f's 0.333 for 1/3, and a search reports
 /// the best spar with the lambda, df, fit and leverages of its last evaluation.
@@ -280,7 +282,8 @@ pub fn smooth_spline(
         }
         if let Some(i) = w.iter().position(|v| !(v.is_finite() && *v >= 0.0)) {
             return spec(format!(
-                "weights must be finite and non-negative; weight {i} is {}",
+                "weights must be finite and non-negative; weight {} is {}",
+                i + 1,
                 w[i]
             ));
         }
@@ -305,8 +308,12 @@ pub fn smooth_spline(
     let (spar, solved) = if let (None, Some(spar)) = (config.df, config.spar) {
         (spar, setup.solve(setup.lambda(spar))?)
     } else if let (None, Some(lambda)) = (config.df, config.lambda) {
-        // the spar of the given lambda on R's scale (R reports NA)
-        let spar = ((lambda / setup.ratio).ln() / 256f64.ln() + 1.0) / 3.0;
+        // the spar of the given lambda on R's scale (R reports NA); none for lambda = 0
+        let spar = if lambda > 0.0 {
+            ((lambda / setup.ratio).ln() / 256f64.ln() + 1.0) / 3.0
+        } else {
+            f64::NAN
+        };
         (spar, setup.solve(lambda)?)
     } else {
         let crit = match config.df {

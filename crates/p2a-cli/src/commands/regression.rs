@@ -471,7 +471,7 @@ EXAMPLES:
         #[arg(short = 'x', long)]
         indep_var: String,
 
-        /// Number of polishing iterations
+        /// Number of slope steps (R's line(iter)), at least 1
         #[arg(long, default_value = "1")]
         iter: usize,
     },

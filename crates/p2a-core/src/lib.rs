@@ -1329,8 +1329,10 @@ pub use regression::{
     SensemakrResult,
     SensitivityBound,
     SmoothSplineConfig,
+    SmoothSplineFit,
     // Smoothing spline
     SmoothSplineResult,
+    SplineCriterion,
     StepConfig,
     StepDirection,
     StepRecord,

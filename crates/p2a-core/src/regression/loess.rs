@@ -743,6 +743,8 @@ fn compute_robust_weights(residuals: &[f64]) -> EconResult<Vec<f64>> {
 /// fit gives the residual scale of a robust fit, with `c = n / sum (1 - (y - yhat)^2 / k) sqrt(rw)`
 /// and `k = (6 median|y - yhat|)^2 / 5`.
 fn pseudovalues(y: &[f64], yhat: &[f64], rw: &[f64]) -> EconResult<Vec<f64>> {
+    // a median absolute residual of 0 makes k 0 and the pseudovalues NaN, as R's lowesp; the
+    // caller warns
     let n = y.len();
     let mut a = crate::resource::try_with_capacity(n, "LOESS pseudovalues")?;
     a.extend(y.iter().zip(yhat).map(|(yi, fi)| (yi - fi).abs()));
@@ -871,7 +873,7 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             }
         }
     }
-    let warnings = stats.warnings(n, sd.q, config.span);
+    let mut warnings = stats.warnings(n, sd.q, config.span);
 
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
     let y_mean: f64 = y.iter().sum::<f64>() / nf;
@@ -895,7 +897,26 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
         }
         None => rss,
     };
-    let residual_se = (sum_squares / one_delta).sqrt();
+    // R's s is NaN or rounding noise in two cases a user can reach; say so rather than
+    // report it silently
+    let residual_se = if one_delta <= 64.0 * f64::EPSILON * nf {
+        warnings.push(
+            "residual standard error not defined: the local fits interpolate the data \
+             (one_delta is 0; use a larger span)"
+                .to_string(),
+        );
+        f64::NAN
+    } else {
+        let s = (sum_squares / one_delta).sqrt();
+        if !s.is_finite() {
+            warnings.push(
+                "residual standard error not defined: more than half of the robust fit's \
+                 residuals are 0, so its pseudovalues are not"
+                    .to_string(),
+            );
+        }
+        s
+    };
     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
     // Build model for prediction
@@ -1005,6 +1026,46 @@ pub fn run_loess(
 mod tests {
     use super::*;
     use ndarray::{Array1, Array2};
+
+    /// A residual standard error that is not defined comes with a warning.
+    #[test]
+    fn test_loess_undefined_residual_se_is_warned() {
+        // a robust fit of exact data with two outliers: the residuals are 0 up to rounding, so
+        // s is finite here; the warning goes with a non-finite s
+        let x: Vec<f64> = (0..40).map(f64::from).collect();
+        let mut y: Vec<f64> = x.iter().map(|v| 2.0 * v + 1.0).collect();
+        y[10] += 30.0;
+        y[30] -= 25.0;
+        let mut cfg = LoessConfig::default();
+        cfg.robust = true;
+        cfg.degree = 1;
+        let r = loess(&x, &y, cfg).unwrap();
+        assert_eq!(
+            r.residual_se.is_finite(),
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("residual standard error not defined")),
+            "{:?}",
+            r.warnings
+        );
+        let y2: Vec<f64> = x.iter().map(|v| 2.0 * v + 1.0 + (v * 1.7).sin()).collect();
+        // local fits on degree + 1 points interpolate: one_delta is 0
+        let mut tight = LoessConfig::default();
+        tight.degree = 1;
+        tight.span = 2.0 / 40.0;
+        let ri = loess(&x, &y2, tight).unwrap();
+        assert!(ri.residual_se.is_nan());
+        assert!(
+            ri.warnings
+                .iter()
+                .any(|w| w.contains("residual standard error not defined: the local fits")),
+            "{:?}",
+            ri.warnings
+        );
+        let r2 = loess(&x, &y2, LoessConfig::default()).unwrap();
+        assert!(r2.residual_se.is_finite());
+        assert!(!r2.warnings.iter().any(|w| w.contains("not defined")));
+    }
 
     #[test]
     fn test_tricubic_weight() {

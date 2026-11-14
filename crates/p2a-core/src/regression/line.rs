@@ -65,7 +65,7 @@ pub struct LineResult {
     pub residuals: Vec<f64>,
     /// Number of pairs used (pairs with a missing or infinite value are dropped)
     pub n: usize,
-    /// Number of polishing iterations performed
+    /// Number of slope steps (R's `line(iter)`), at least 1
     pub iter: usize,
     /// The x values used (the kept pairs, in input order)
     pub x: Vec<f64>,

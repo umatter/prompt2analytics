@@ -469,13 +469,16 @@ fn fit_candidate_strs(
     vars: &[&str],
     intercept: bool,
 ) -> EconResult<OlsResult> {
-    run_ols(dataset, y_col, vars, intercept, CovarianceType::Standard).map_err(|e| {
-        EconError::InvalidSpecification {
+    // an exhausted budget or allocation ceiling keeps its variant, so callers can tell it from
+    // a model that cannot be fitted
+    run_ols(dataset, y_col, vars, intercept, CovarianceType::Standard).map_err(|e| match e {
+        e @ (EconError::ResourceLimit(_) | EconError::Cancelled(_)) => e,
+        e => EconError::InvalidSpecification {
             message: format!(
                 "the candidate model {} could not be fitted: {e}",
                 formula(y_col, vars, intercept)
             ),
-        }
+        },
     })
 }
 
