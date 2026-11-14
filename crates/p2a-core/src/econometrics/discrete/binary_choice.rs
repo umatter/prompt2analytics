@@ -226,7 +226,13 @@ pub fn run_discrete_model(
         f64::NAN,
         settings.tolerance,
     );
-    if let Some(note) = convergence.note(model_name) {
+    // one non-convergence note: glm.fit's own warning, when it gave one
+    if !fit
+        .warnings
+        .iter()
+        .any(|w| w == "glm.fit: algorithm did not converge")
+        && let Some(note) = convergence.note(model_name)
+    {
         warnings.push(note);
     }
 
@@ -310,6 +316,30 @@ mod tests {
     /// Case data for tests that compare no R value.
     fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
         crate::test_support::load_case(id)
+    }
+
+    /// A fit stopped by `max_iter` reports one non-convergence note, glm.fit's, not glm's
+    /// and its own.
+    #[test]
+    fn test_logit_nonconvergence_has_one_note() {
+        let n = 60;
+        let x: Vec<f64> = (0..n).map(|i| ((i * 17) % 23) as f64 / 7.0 - 1.5).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| f64::from(u8::from(x[i] + ((i * 5) % 7) as f64 / 3.0 > 0.8)))
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        for model in [DiscreteModelType::Logit, DiscreteModelType::Probit] {
+            let mut s = MleSettings::default();
+            s.max_iter = 2;
+            let r = run_discrete_model(&ds, "y", &["x"], model, Some(s)).unwrap();
+            assert!(!r.converged, "{r}");
+            let notes: Vec<&String> = r
+                .warnings
+                .iter()
+                .filter(|w| w.contains("converge"))
+                .collect();
+            assert_eq!(notes.len(), 1, "{:?}", r.warnings);
+        }
     }
 
     /// A missing outcome is dropped, as glm's na.omit does; it was read as 0.

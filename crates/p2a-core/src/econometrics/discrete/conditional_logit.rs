@@ -475,7 +475,11 @@ fn constants_only_loglik(
     )?;
     let mut params = resource::try_vec(null_data.n_params, 0.0, "constants-only model")?;
     let mut null_warnings = Vec::new();
-    let (converged, _, _, at_params) = newton_maximise(
+    let NewtonFit {
+        converged,
+        at_params,
+        ..
+    } = newton_maximise(
         &null_data,
         &mut params,
         config,
@@ -907,8 +911,13 @@ pub fn run_mlogit_with(
     let mut params = vec![0.0; n_params];
     let mut warnings: Vec<String> = Vec::new();
     let what = "conditional logit information matrix";
-    let (converged, iterations, final_change, at_params) =
-        newton_maximise(&mlogit_data, &mut params, config, what, &mut warnings)?;
+    let NewtonFit {
+        converged,
+        iterations,
+        final_change,
+        line_search_failed,
+        at_params,
+    } = newton_maximise(&mlogit_data, &mut params, config, what, &mut warnings)?;
     let convergence = Convergence::new(
         converged,
         iterations,
@@ -917,7 +926,10 @@ pub fn run_mlogit_with(
         final_change,
         config.tolerance,
     );
-    if let Some(note) = convergence.note("conditional logit") {
+    // one non-convergence note: the line search's, or the iteration cap's
+    if let Some(iteration) = line_search_failed {
+        warnings.push(line_search_note(iteration));
+    } else if let Some(note) = convergence.note("conditional logit") {
         warnings.push(note);
     }
 
@@ -1107,13 +1119,25 @@ fn check_identified(data: &MlogitData, names: &[String]) -> EconResult<()> {
 /// is then taken when it does not lower the log-likelihood. The full step of the line
 /// search is evaluated with its derivatives, which the next iteration reuses (the values
 /// a fresh pass gives, bit for bit).
+/// What [`newton_maximise`] ends with.
+struct NewtonFit {
+    converged: bool,
+    /// Newton steps taken, the last full step of a converged fit included.
+    iterations: usize,
+    final_change: f64,
+    /// The iteration whose line search found no increase, when that stopped the fit.
+    line_search_failed: Option<usize>,
+    /// The derivatives at the final parameters, when they are known.
+    at_params: Option<MlogitDerivatives>,
+}
+
 fn newton_maximise(
     data: &MlogitData,
     params: &mut [f64],
     config: &MlogitConfig,
     what: &str,
     warnings: &mut Vec<String>,
-) -> EconResult<(bool, usize, f64, Option<MlogitDerivatives>)> {
+) -> EconResult<NewtonFit> {
     let mut final_change = f64::NAN;
     let mut iterations = 0;
     let mut at_params: Option<MlogitDerivatives> = None;
@@ -1130,13 +1154,26 @@ fn newton_maximise(
         let trial =
             |t: f64| -> Vec<f64> { params.iter().zip(&d).map(|(p, s)| p + t * s).collect() };
         if final_change < config.tolerance {
+            // the last full step counts as an iteration when it is taken
             let full = trial(1.0);
             let at_full = compute_mlogit_derivatives_fast(data, &full)?;
             if at_full.ll >= ll - 1e-12 * ll.abs() {
                 params.copy_from_slice(&full);
-                return Ok((true, iterations, final_change, Some(at_full)));
+                return Ok(NewtonFit {
+                    converged: true,
+                    iterations: iterations + 1,
+                    final_change,
+                    line_search_failed: None,
+                    at_params: Some(at_full),
+                });
             }
-            return Ok((true, iterations, final_change, None));
+            return Ok(NewtonFit {
+                converged: true,
+                iterations,
+                final_change,
+                line_search_failed: None,
+                at_params: None,
+            });
         }
         let mut t = 1.0;
         let mut accepted = None;
@@ -1155,18 +1192,34 @@ fn newton_maximise(
             t *= 0.5;
         }
         let Some((cand, at_cand)) = accepted else {
-            warnings.push(format!(
-                "line search failed at iteration {}: no step along the Newton direction \
-                 increases the log-likelihood; the estimates are not at the optimum",
-                iterations + 1
-            ));
-            return Ok((false, iterations, final_change, None));
+            return Ok(NewtonFit {
+                converged: false,
+                iterations,
+                final_change,
+                line_search_failed: Some(iterations + 1),
+                at_params: None,
+            });
         };
         params.copy_from_slice(&cand);
         at_params = at_cand;
         iterations += 1;
     }
-    Ok((false, iterations, final_change, at_params))
+    Ok(NewtonFit {
+        converged: false,
+        iterations,
+        final_change,
+        line_search_failed: None,
+        at_params,
+    })
+}
+
+/// The line-search failure note of the conditional and multinomial logits, the one
+/// non-convergence note of a fit that stopped there.
+pub(super) fn line_search_note(iteration: usize) -> String {
+    format!(
+        "line search failed at iteration {iteration}: no step along the Newton direction \
+         increases the log-likelihood; the estimates are not at the optimum"
+    )
 }
 
 /// [`run_conditional_logit`] with a model and control ([`MlogitConfig`]).
@@ -1697,6 +1750,55 @@ mod tests {
                 Tol::iterative(1e-10),
             )
             .finish();
+    }
+
+    /// `iterations` counts every Newton step taken, the last full step included: a fit
+    /// capped at `max_iter = k` converges exactly when `k >= iterations`. A capped fit
+    /// reports one non-convergence note.
+    #[test]
+    fn test_mlogit_iterations_count_the_final_step() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let fit = |max_iter: usize| {
+            let config = MlogitConfig {
+                max_iter,
+                ..MlogitConfig::default()
+            };
+            run_mlogit_with(
+                &ds,
+                "id",
+                "alt",
+                "chosen",
+                &["price", "catch"],
+                &["income"],
+                &config,
+            )
+            .unwrap()
+        };
+        let full = fit(100);
+        assert!(full.converged);
+        let k = full.iterations;
+        assert!(k >= 2, "{k}");
+        let at_k = fit(k);
+        assert!(at_k.converged && at_k.iterations == k, "{at_k}");
+        let below = fit(k - 1);
+        assert!(!below.converged);
+        let notes: Vec<&String> = below
+            .warnings
+            .iter()
+            .filter(|w| w.contains("converge") || w.contains("line search"))
+            .collect();
+        assert_eq!(notes.len(), 1, "{:?}", below.warnings);
+        let one = fit(1);
+        assert!(!one.converged);
+        assert_eq!(
+            one.warnings
+                .iter()
+                .filter(|w| w.contains("converge") || w.contains("line search"))
+                .count(),
+            1,
+            "{:?}",
+            one.warnings
+        );
     }
 
     #[test]

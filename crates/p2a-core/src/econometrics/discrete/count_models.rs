@@ -53,8 +53,24 @@ fn check_count_outcome(
     allow_non_integer: bool,
 ) -> EconResult<Vec<String>> {
     let n = y.len();
-    let negative: Vec<f64> = y.iter().copied().filter(|&v| v < 0.0).collect();
-    if let Some(first) = negative.first() {
+    // one pass: the count and the first value of each kind
+    let (mut n_negative, mut first_negative) = (0usize, f64::NAN);
+    let (mut n_fractional, mut first_fractional) = (0usize, f64::NAN);
+    for &v in y {
+        if v < 0.0 {
+            if n_negative == 0 {
+                first_negative = v;
+            }
+            n_negative += 1;
+        }
+        if v.fract() != 0.0 {
+            if n_fractional == 0 {
+                first_fractional = v;
+            }
+            n_fractional += 1;
+        }
+    }
+    if n_negative > 0 {
         let r = if allow_non_integer {
             "glm.nb: negative values not allowed for the 'Poisson' family"
         } else {
@@ -62,16 +78,14 @@ fn check_count_outcome(
         };
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "{model}: the outcome '{y_col}' has {} of {n} values negative (first: \
-                 {first}); counts must be non-negative (R: {r})",
-                negative.len()
+                "{model}: the outcome '{y_col}' has {n_negative} of {n} values negative (first: \
+                 {first_negative}); counts must be non-negative (R: {r})"
             ),
         });
     }
-    let fractional: Vec<f64> = y.iter().copied().filter(|v| v.fract() != 0.0).collect();
     let mut warnings = Vec::new();
-    if let Some(first) = fractional.first() {
-        let k = fractional.len();
+    if n_fractional > 0 {
+        let (k, first) = (n_fractional, first_fractional);
         if allow_non_integer {
             warnings.push(format!(
                 "non-integer counts in '{y_col}' ({k} values, first {first}): the negative \
@@ -3782,6 +3796,39 @@ mod tests {
                     .finish();
             }
         }
+    }
+
+    /// The outcome check counts negative and non-integer values and names the first of
+    /// each, in one pass.
+    #[test]
+    fn test_count_outcome_check_reports_first_bad_values() {
+        let y = [0.0, 2.0, 1.5, -3.0, 4.0, -1.0, 2.25];
+        match check_count_outcome(&y, "y", "zero-inflated Poisson", false) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "zero-inflated Poisson: the outcome 'y' has 2 of 7 values negative (first: -3); \
+                 counts must be non-negative (R: pscl: invalid dependent variable, negative \
+                 counts)"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let y = [0.0, 2.0, 1.5, 3.0, 2.25];
+        match check_count_outcome(&y, "y", "hurdle model", false) {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "hurdle model: the outcome 'y' has 2 of 5 non-integer values (first: 1.5); \
+                 counts must be integers (pscl: invalid dependent variable, non-integer values)"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        let w = check_count_outcome(&y, "y", "negative binomial", true).unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("non-integer counts in 'y' (2 values, first 1.5)"));
+        assert!(
+            check_count_outcome(&[0.0, 3.0], "y", "m", false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The count part and the totals of one `disc_hurdle_t4` fit (keys `{prefix}_*`), at
