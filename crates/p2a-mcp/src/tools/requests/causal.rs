@@ -1635,7 +1635,7 @@ pub struct ScpiRequest {
 
     /// Seed
     #[schemars(
-        description = "Seed of the simulations. Default 42; the same seed gives the same intervals."
+        description = "Seed of the simulations. Default: the session seed set with set_seed, else 42; the same seed gives the same intervals."
     )]
     pub seed: Option<u64>,
 

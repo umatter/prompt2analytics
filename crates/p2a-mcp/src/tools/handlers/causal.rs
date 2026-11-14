@@ -2075,18 +2075,37 @@ impl AnalyticsServer {
             }
         }
 
+        // the core names a donor by its column; name it by its unit here (too few
+        // pre-treatment periods are the core's error)
+        if treatment_idx >= 2
+            && let Some(name) = donor_codes
+                .iter()
+                .zip(&donor_units)
+                .find(|&(&u, _)| {
+                    let first = value(u, 0);
+                    (1..treatment_idx).all(|t| value(u, t) == first)
+                })
+                .map(|(_, name)| name)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "SCPI estimation failed: donor unit '{name}' has the same outcome in every \
+                 pre-treatment period; scpi needs variation in every donor to choose the \
+                 regularisation threshold rho (drop the unit)"
+            ))]));
+        }
+
         let config = SCPIConfig {
             constraint,
             alpha: request.alpha,
             e_method,
             sims: request.sims.unwrap_or(200),
-            seed: request.seed,
+            seed: request.seed.or(self.seed_or_global(None).await),
             variance_method,
             weight_threshold: request.weight_threshold.unwrap_or(0.001),
             ..Default::default()
         };
 
-        let result = match run_scpi(
+        let mut result = match run_scpi(
             &treated_values.view(),
             &donor_matrix.view(),
             treatment_idx,
@@ -2100,6 +2119,13 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+
+        if request.cv_folds.is_some() {
+            result.warnings.push(
+                "cv_folds is deprecated and ignored (the cross-validation variances were removed)"
+                    .to_string(),
+            );
+        }
 
         // Format output with donor unit names
         let mut output = format!("{}\n", result);
@@ -3524,6 +3550,42 @@ mod tests {
         let r = run_scpi_on(df, json!({"sims": 5}));
         assert_eq!(r.is_error, Some(true));
         assert!(text(&r).contains("sims"), "{}", text(&r));
+    }
+
+    /// A session seed set with set_seed reaches scpi when the request gives none; cv_folds is
+    /// reported as ignored.
+    #[test]
+    fn test_mcp_scpi_uses_the_session_seed_and_flags_cv_folds() {
+        let req: ScpiRequest = serde_json::from_value(json!({
+            "dataset": "g", "outcome": "inv", "unit_col": "firm", "time_col": "year",
+            "treated_unit": "1", "treatment_time": 1950, "sims": 10, "cv_folds": 3
+        }))
+        .unwrap();
+        let (rt, server) = server_with(vec![("g", grunfeld())]);
+        rt.block_on(async { *server.global_seed.write().await = Some(123) });
+        let r = rt.block_on(server.scpi(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        assert!(out.contains("Simulations: 10 (seed 123)"), "{out}");
+        assert!(out.contains("cv_folds is deprecated and ignored"), "{out}");
+    }
+
+    /// A donor with no pre-treatment variation is named by its unit id.
+    #[test]
+    fn test_mcp_scpi_names_a_constant_donor_by_unit() {
+        let mut df = grunfeld();
+        let firm = df.column("firm").unwrap().i64().unwrap().clone();
+        let inv = df.column("inv").unwrap().f64().unwrap().clone();
+        let constant: Vec<f64> = firm
+            .into_iter()
+            .zip(inv.into_iter())
+            .map(|(f, v)| if f == Some(4) { 7.5 } else { v.unwrap() })
+            .collect();
+        df.with_column(Series::new("inv".into(), constant)).unwrap();
+        let r = run_scpi_on(df, json!({"sims": 10}));
+        assert_eq!(r.is_error, Some(true));
+        let out = text(&r);
+        assert!(out.contains("donor unit '4'"), "{out}");
     }
 
     #[test]
