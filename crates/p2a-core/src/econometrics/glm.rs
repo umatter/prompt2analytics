@@ -2149,9 +2149,10 @@ pub fn fit_propensity(
 
 // ═══ The intercept-only fluctuation (ltmle's targeting step) ═══
 
-/// The logit link's inverse as R's `binomial()$linkinv` computes it: `eta` beyond +/-30 gives
-/// `eps / (1 + eps)` or `1 / (1 + eps)`, so a probability is never exactly 0 or 1.
-fn fluctuation_linkinv(eta: f64) -> f64 {
+/// The logit link's inverse as R's `binomial()$linkinv` (and `predict.glm(type =
+/// "response")`) computes it: `eta` beyond +/-30 gives `eps / (1 + eps)` or
+/// `1 / (1 + eps)`, so a probability is never exactly 0 or 1.
+pub(crate) fn binomial_linkinv(eta: f64) -> f64 {
     const THRESH: f64 = 30.0;
     let t = if eta < -THRESH {
         f64::EPSILON
@@ -2200,7 +2201,7 @@ pub(crate) fn fit_intercept_fluctuation(
     let eval = |eps: f64| -> (f64, f64, f64) {
         let (mut d, mut score, mut info) = (0.0, 0.0, 0.0);
         for &[yi, oi, wi] in &rows {
-            let p = fluctuation_linkinv(oi + eps);
+            let p = binomial_linkinv(oi + eps);
             let a = if yi > 0.0 { yi * (yi / p).ln() } else { 0.0 };
             let b = if yi < 1.0 {
                 (1.0 - yi) * ((1.0 - yi) / (1.0 - p)).ln()

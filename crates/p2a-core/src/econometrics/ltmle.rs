@@ -103,7 +103,7 @@ use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::econometrics::glm::halved_step;
 use crate::econometrics::glm::{
     FLUCTUATION_MAX_HALVINGS, GlmControl, GlmFamily, GlmLink, GlmSpec, InterceptFluctuation,
-    LeanStart, fit_glm, fit_intercept_fluctuation, lean_logit_refined,
+    LeanStart, binomial_linkinv, fit_glm, fit_intercept_fluctuation, lean_logit_refined,
 };
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
@@ -2020,7 +2020,7 @@ fn estimate_regime(
         let mut bounded = Vec::with_capacity(n);
         let mut ht = Vec::with_capacity(n);
         for i in 0..n {
-            let p1 = linkinv(eta[i]);
+            let p1 = binomial_linkinv(eta[i]);
             let prob = if d[t][i] == 1 { p1 } else { 1.0 - p1 };
             cum[i] *= prob;
             let out = cum[i] < lo || cum[i] > hi;
@@ -2105,14 +2105,14 @@ fn estimate_regime(
                 eps[t] = f.epsilon;
                 // ltmle's score check (ltmle:::FixedTimeTMLE): the node's EIC term must sum to
                 // about 0 over the subjects; otherwise the score equation is solved directly.
-                let mut qs = eta.mapv(|e| linkinv(e + eps[t]));
+                let mut qs = eta.mapv(|e| binomial_linkinv(e + eps[t]));
                 let score: f64 = (0..n).map(|i| ht[i] * (q_next[i] - qs[i])).sum();
                 let mut resolved_here = false;
                 if score.is_nan() || score.abs() > TARGETING_SCORE_MAX {
                     let r = resolve_fluctuation(q_next.view(), eta.view(), ht)?;
                     eps[t] = r.epsilon;
                     let (olo, ohi) = offset_bounds(r.offset_bound);
-                    qs = eta.mapv(|e| linkinv(e.max(olo).min(ohi) + r.epsilon));
+                    qs = eta.mapv(|e| binomial_linkinv(e.max(olo).min(ohi) + r.epsilon));
                     resolved_targeting.push((t, r.offset_bound));
                     resolved_here = true;
                     let lb = r.offset_bound;
@@ -2208,21 +2208,6 @@ fn estimate_regime(
             share_q_star_at_bound,
         },
     ))
-}
-
-/// The logit link's inverse as R's `binomial()$linkinv` (and `predict.glm(type =
-/// "response")`) computes it: `eta` beyond +/-30 gives `eps / (1 + eps)` or
-/// `1 / (1 + eps)`, so a probability is never exactly 0 or 1.
-fn linkinv(eta: f64) -> f64 {
-    const THRESH: f64 = 30.0;
-    let t = if eta < -THRESH {
-        f64::EPSILON
-    } else if eta > THRESH {
-        1.0 / f64::EPSILON
-    } else {
-        eta.exp()
-    };
-    t / (1.0 + t)
 }
 
 /// The fluctuation of one node: [`fit_intercept_fluctuation`] with the LTMLE controls.
@@ -2340,7 +2325,7 @@ fn resolve_fluctuation(
         let eval = |eps: f64| -> (f64, f64) {
             let (mut score, mut info) = (0.0, 0.0);
             for (r, o) in rows.iter().zip(&off) {
-                let p = linkinv(o + eps);
+                let p = binomial_linkinv(o + eps);
                 score += r[2] * (r[0] - p);
                 info += r[2] * p * (1.0 - p);
             }
@@ -4066,7 +4051,7 @@ mod tests {
             // Q*_t of every subject is the constant's logit moved by the node's fluctuation
             let eps = never.fluctuation_coefs[t];
             for q in &never.targeted_predictions[t] {
-                assert_eq!(*q, linkinv(logit + eps), "node {t}");
+                assert_eq!(*q, binomial_linkinv(logit + eps), "node {t}");
             }
             assert!(
                 r.warnings.iter().any(|w| w.starts_with(&format!(
@@ -4389,7 +4374,7 @@ mod tests {
         let score = |y: &[f64], o: &[f64], h: &[f64], lb: f64, eps: f64| -> f64 {
             let (lo, hi) = offset_bounds(lb);
             (0..y.len())
-                .map(|i| h[i] * (y[i] - linkinv(o[i].max(lo).min(hi) + eps)))
+                .map(|i| h[i] * (y[i] - binomial_linkinv(o[i].max(lo).min(hi) + eps)))
                 .sum()
         };
         // a root inside the bracket, with a zero-weight row that does not enter
@@ -4432,7 +4417,7 @@ mod tests {
         assert!(!r.finite_root && o1[..2].iter().all(|o| o + r.epsilon <= -30.0));
         // every response at linkinv's own lower clamp: S is 0 only at the clamp, and the search
         // stops at the first bound once |S| is within its target, before reaching it
-        let floor = linkinv(-40.0);
+        let floor = binomial_linkinv(-40.0);
         let yc = [floor, floor, floor];
         let oc = [0.5, -2.0, 1.0];
         let hc = [1.0, 2.0, 3.0];
