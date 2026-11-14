@@ -107,6 +107,28 @@
       "tolerance": "factor 1e-13 (abs 1e-15); log-likelihood at a point 1e-11; gradient 1e-7 (abs 1e-8, numDeriv); estimates 1e-6, SEs 1e-5 relative; log-likelihood Tol::stat(300)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "marginal_effects_probit_ctl",
+      "name": "Probit fit and marginal effects at p2a's GLM control (glm epsilon 1e-10)",
+      "category": "regression",
+      "reference": "glm(y ~ x1 + x2, binomial(probit), control = glm.control(epsilon = 1e-10, maxit = 100)) on me_mem_contrast.csv; effects at the means and average comparisons of x1 by hand from the fit",
+      "doc": "validation/regression/marginal_effects.md",
+      "cases": [
+        "me_probit_ctl_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_probit_at_control"
+      ],
+      "quantities": [
+        "probit coefficients and SEs",
+        "marginal effects at the means",
+        "average comparisons of x1 (estimates)",
+        "n"
+      ],
+      "tolerance": "1e-8 relative (the iterate glm reaches at the same control); n exact. The delta-method SEs of the effects and comparisons stay pinned at 1e-6 against glm at epsilon 1e-14 (method marginal_effects_mem_contrasts)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

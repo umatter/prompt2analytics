@@ -1081,6 +1081,38 @@ mod tests {
         c.finish();
     }
 
+    /// Probit at p2a's own control: glm(binomial(probit), epsilon = 1e-10) stops at the
+    /// same iterate as p2a's IRLS, so the coefficients and their SEs, the effects at the
+    /// means and the average comparisons of x1 match it at 1e-8. The delta-method SEs of
+    /// the effects and comparisons (and their z and p) are not compared here: they use the
+    /// expected information at the final coefficients, where glm's vcov holds the weights
+    /// of the IRLS step before, and probit's Fisher scoring leaves the two about 1e-6
+    /// apart at this control. They stay pinned at 1e-6 against glm at epsilon 1e-14
+    /// (test_validate_marginal_effects_mem, test_validate_contrasts_avg_comparisons).
+    #[test]
+    fn test_validate_marginal_effects_probit_at_control() {
+        use p2a_validation::Check;
+        let (case, ds) = crate::test_support::load_case("me_probit_ctl_t4");
+        let tol = Tol::iterative(1e-8);
+        let fit = run_probit(&ds, "y", &["x1", "x2"]).unwrap();
+        let me = marginal_effects_discrete(&fit, &ds, &["x1", "x2"]).unwrap();
+        let mem = me.at_means.as_ref().unwrap();
+        let names: Vec<&str> = mem.iter().map(|m| m.variable.as_str()).collect();
+        let col = |f: fn(&MarginalEffect) -> f64| mem.iter().map(f).collect::<Vec<_>>();
+        let model = marginal_effects(&ds, "y", &["x1", "x2"], ModelType::Probit).unwrap();
+        let values = case.vector("contrast_values");
+        let r = contrasts(&ds, &model, "x1", &values).unwrap();
+        let ccol = |f: fn(&ContrastEffect) -> f64| r.contrasts.iter().map(f).collect::<Vec<_>>();
+        Check::new(&case)
+            .named("probit_coef", &fit.variables, &fit.coefficients, tol)
+            .named("probit_se", &fit.variables, &fit.std_errors, tol)
+            .named("probit_mem", &names, &col(|m| m.estimate), tol)
+            .vector("probit_contrast_est", &ccol(|e| e.estimate), tol)
+            .scalar("n", fit.n_obs as f64, Tol::exact())
+            .finish();
+        assert!(fit.converged);
+    }
+
     #[test]
     fn test_validate_marginal_effects_aliased_regressor_is_nan() {
         // x3 = 2 x1: glm reports NA for x3. Its effect is undefined (NaN in every column, with

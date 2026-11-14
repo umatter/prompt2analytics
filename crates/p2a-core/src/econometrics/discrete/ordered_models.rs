@@ -212,6 +212,29 @@ impl fmt::Display for OrderedResult {
     }
 }
 
+/// `[1, X]'[1, X]`, the lower triangle accumulated row by row (no product workspace), then
+/// mirrored.
+fn intercept_gram(dm: ArrayView2<f64>) -> EconResult<Array2<f64>> {
+    let (n, k) = dm.dim();
+    let mut g = resource::try_zeros2(k + 1, k + 1, "ordered model cross-product")?;
+    g[[0, 0]] = n as f64;
+    for row in dm.rows() {
+        for a in 0..k {
+            let xa = row[a];
+            g[[a + 1, 0]] += xa;
+            for b in 0..=a {
+                g[[a + 1, b + 1]] += xa * row[b];
+            }
+        }
+    }
+    for a in 0..=k {
+        for b in 0..a {
+            g[[b, a]] = g[[a, b]];
+        }
+    }
+    Ok(g)
+}
+
 /// Indices (0-based among `x_cols`) of the regressors that are linear combinations of
 /// the others and of the intercept the cut points stand for. A design whose [1, X]
 /// cross-product passes OLS's normal-equations test has none (`certainly_full_rank`'s
@@ -224,24 +247,7 @@ fn aliased_regressors(
 ) -> EconResult<Vec<usize>> {
     let (n, k) = dm.dim();
     if n > k + 1 {
-        // [1, X]'[1, X], lower triangle accumulated row by row (no product workspace), then
-        // mirrored
-        let mut g = resource::try_zeros2(k + 1, k + 1, "ordered model cross-product")?;
-        g[[0, 0]] = n as f64;
-        for row in dm.rows() {
-            for a in 0..k {
-                let xa = row[a];
-                g[[a + 1, 0]] += xa;
-                for b in 0..=a {
-                    g[[a + 1, b + 1]] += xa * row[b];
-                }
-            }
-        }
-        for a in 0..=k {
-            for b in 0..a {
-                g[[b, a]] = g[[a, b]];
-            }
-        }
+        let g = intercept_gram(dm)?;
         if normal_inverse_from_gram(g.view())?.is_some() {
             return Ok(Vec::new());
         }
@@ -1751,6 +1757,12 @@ mod tests {
             assert_eq!(got, want, "{label}");
             if label == "x2 = x1 + 1e-6 noise" {
                 fallback_kept_both = want.is_empty();
+                // the Cholesky path declines this design, so the QR decided
+                let gram = intercept_gram(dm.view()).unwrap();
+                assert!(
+                    normal_inverse_from_gram(gram.view()).unwrap().is_none(),
+                    "{label}: the normal-equations test should refuse the design"
+                );
             }
             if label == "x2 = x1 + 1e-9 noise" || label.starts_with("x2 = 2") {
                 assert_eq!(want, vec![1], "{label}");
