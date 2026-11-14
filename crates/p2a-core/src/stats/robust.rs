@@ -511,8 +511,10 @@ pub enum DensityKernel {
     Triangular,
     /// Biweight (quartic) kernel
     Biweight,
-    /// Cosine kernel
+    /// R's raised cosine kernel, (1 + cos(pi t / a)) / (2a)
     Cosine,
+    /// R's "optcosine" kernel, pi/4 cos(pi t / (2a)) / a
+    OptCosine,
 }
 
 crate::option_enum!(
@@ -526,6 +528,7 @@ crate::option_enum!(
             (&["triangular"], DensityKernel::Triangular),
             (&["biweight", "quartic"], DensityKernel::Biweight),
             (&["cosine"], DensityKernel::Cosine),
+            (&["optcosine"], DensityKernel::OptCosine),
         ],
     }
 );
@@ -548,19 +551,22 @@ pub struct DensityResult {
 /// Largest evaluation grid [`density`] accepts (`n` in `2..=2^20`, in every mode).
 const MAX_DENSITY_POINTS: usize = 1 << 20;
 
-/// Compute kernel density estimate using FFT-based convolution.
+/// Kernel density estimate, as R's `density()`.
 ///
-/// This implementation uses Fast Fourier Transform for O(n + m log m) complexity
-/// instead of the naive O(n × m) approach, providing significant speedup for
-/// large datasets.
+/// With the `spectral-analysis` feature (all shipped builds) this is R's algorithm for every
+/// kernel and sample size: the finite values are linearly binned onto 2m points over
+/// [from - 4 bw, to + 4 bw], m = max(n, 512) (rounded up to a power of two above 512), convolved
+/// with the kernel by FFT, and linearly interpolated onto `n` points from `from` to `to`. Without
+/// the feature the estimate is the exact kernel sum at those points, which differs from R's by
+/// R's binning error. Every kernel is scaled so that `bw` is its standard deviation, as in R.
 ///
 /// # Arguments
 ///
 /// * `data` - Input data. NaN values are dropped. Infinite values are dropped the way R
 ///   does it: the density is computed from the finite values and scaled by their share of
 ///   the non-NaN values, and `n` reports the non-NaN count.
-/// * `bw` - Bandwidth (None for Silverman's rule of thumb, which needs two finite values);
-///   a supplied bandwidth must be finite and greater than 0
+/// * `bw` - Bandwidth (None for R's `bw.nrd0`, which needs two finite values); a supplied
+///   bandwidth must be finite and greater than 0
 /// * `kernel` - Kernel function to use
 /// * `n_points` - Number of evaluation points, 2 to 1,048,576 (default 512)
 /// * `from` - Lower bound of evaluation range (default: min - 3*bw); must be finite
@@ -605,7 +611,7 @@ pub fn density(
         return Err(EconError::EmptyDataset);
     }
 
-    // Bandwidth: a supplied one must be usable; otherwise Silverman's rule
+    // Bandwidth: a supplied one must be usable; otherwise R's bw.nrd0
     let bw = match bw {
         Some(bw) => {
             if !(bw.is_finite() && bw > 0.0) {
@@ -623,7 +629,7 @@ pub fn density(
                         .to_string(),
                 });
             }
-            silverman_bandwidth(&clean)
+            bw_nrd0(&clean)?
         }
     };
 
@@ -655,14 +661,8 @@ pub fn density(
         });
     }
 
-    // For small datasets or compact kernels, use direct computation
-    // FFT overhead isn't worth it for small n
     #[cfg(feature = "spectral-analysis")]
-    let mut result = if n >= 100 && matches!(kernel, DensityKernel::Gaussian) {
-        density_fft(&clean, bw, kernel, n_points_requested, from, to)?
-    } else {
-        density_direct(&clean, bw, kernel, n_points_requested, from, to)?
-    };
+    let mut result = density_binned(&clean, bw, kernel, n_points_requested, from, to)?;
     #[cfg(not(feature = "spectral-analysis"))]
     let mut result = density_direct(&clean, bw, kernel, n_points_requested, from, to)?;
 
@@ -678,103 +678,188 @@ pub fn density(
     Ok(result)
 }
 
-/// FFT-based density for the Gaussian kernel. `n_points_requested` is in `2..=2^20`.
+/// R's `density()` on its binned grid: the finite values are linearly binned (weight 1/N each)
+/// onto 2m points over [from - 4 bw, to + 4 bw], m = max(n_user, 512) rounded up to a power of
+/// two above 512, convolved with the kernel by FFT, and the first m values linearly interpolated
+/// onto `n_user` points from `from` to `to`. `n_user` is in `2..=2^20`.
 #[cfg(feature = "spectral-analysis")]
-fn density_fft(
+fn density_binned(
     clean: &[f64],
     bw: f64,
     kernel: DensityKernel,
-    n_points_requested: usize,
+    n_user: usize,
     from: f64,
     to: f64,
 ) -> EconResult<DensityResult> {
     resource::checkpoint()?;
-    let n = clean.len();
+    let m = n_user.max(R_DENSITY_MIN_GRID);
+    let m = if m > R_DENSITY_MIN_GRID {
+        m.next_power_of_two()
+    } else {
+        m
+    };
+    let size = 2 * m;
+    let lo = from - 4.0 * bw;
+    let up = to + 4.0 * bw;
+    if !(lo.is_finite() && up.is_finite() && (up - lo).is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the grid from - 4*bw .. to + 4*bw ({from} - 4*{bw} .. {to} + 4*{bw}) overflows"
+            ),
+        });
+    }
 
-    // Round n_points to power of 2 for efficient FFT (at most 2^20, so no overflow)
-    let n_points = n_points_requested.next_power_of_two();
-    let range = to - from;
-    let step = range / n_points as f64;
-
-    // Step 1: Bin the data onto the grid
-    let fft_size = n_points * 2;
-    let mut binned = resource::try_vec(fft_size, 0.0f64, "density FFT grid")?; // Zero-pad for circular convolution
+    // BinDist: linear binning, weight 1/N per finite value
+    let mut y: Vec<Complex<f64>> = resource::try_vec(size, Complex::new(0.0, 0.0), "density grid")?;
+    let w = 1.0 / clean.len() as f64;
+    let xdelta = (up - lo) / (m - 1) as f64;
+    let ixmax = (m - 2) as f64;
     for &xi in clean {
-        if xi >= from && xi <= to {
-            let idx = ((xi - from) / step).floor() as usize;
-            let idx = idx.min(n_points - 1);
-            binned[idx] += 1.0;
+        let pos = (xi - lo) / xdelta;
+        let fl = pos.floor();
+        let fx = pos - fl;
+        if (0.0..=ixmax).contains(&fl) {
+            let ix = fl as usize;
+            y[ix].re += w * (1.0 - fx);
+            y[ix + 1].re += w * fx;
+        } else if fl == -1.0 {
+            y[0].re += w * fx;
+        } else if fl == ixmax + 1.0 {
+            y[m - 1].re += w * (1.0 - fx);
         }
     }
 
-    // Step 2: Create kernel weights on the grid
-    // For Gaussian: K(u) = exp(-u²/2) / sqrt(2π)
-    let mut kernel_weights = resource::try_vec(fft_size, 0.0f64, "density kernel grid")?;
-    for i in 0..n_points {
-        let u = (i as f64 * step) / bw;
-        kernel_weights[i] = (-0.5 * u * u).exp();
+    // Kernel ordinates at kords = seq(0, 2(up - lo), length 2m), mirrored above m
+    let kords_at = RSeq::new(0.0, 2.0 * (up - lo), size);
+    let mut k: Vec<Complex<f64>> = resource::try_with_capacity(size, "density kernel grid")?;
+    k.extend((0..size).map(|i| {
+        let t = if i <= m {
+            kords_at.at(i)
+        } else {
+            -kords_at.at(size - i)
+        };
+        Complex::new(kernel_function(t, bw, kernel), 0.0)
+    }));
+
+    resource::checkpoint()?;
+    // FftPlanner caches its plans: grids up to DENSITY_CACHED_FFT_MAX reuse a per-thread planner
+    // (the default 512-point grid among them), larger ones plan afresh so no big plan is kept.
+    let plan = |planner: &mut FftPlanner<f64>| {
+        (
+            planner.plan_fft_forward(size),
+            planner.plan_fft_inverse(size),
+        )
+    };
+    let (fft, ifft) = if size <= DENSITY_CACHED_FFT_MAX {
+        DENSITY_FFT_PLANNER.with(|planner| plan(&mut planner.borrow_mut()))
+    } else {
+        plan(&mut FftPlanner::new())
+    };
+    fft.process(&mut y);
+    fft.process(&mut k);
+    for (a, b) in y.iter_mut().zip(&k) {
+        *a *= b.conj();
     }
-    // Mirror for negative side (wrap-around for circular convolution)
-    for i in 1..n_points {
-        kernel_weights[n_points * 2 - i] = kernel_weights[i];
+    drop(k);
+    ifft.process(&mut y);
+    let scale = 1.0 / size as f64;
+    // kords: the convolution on xords = seq(lo, up, length m), floored at 0
+    let kords = |i: usize| (y[i].re * scale).max(0.0);
+
+    // approx(xords, kords, x) at x = seq(from, to, length n_user), xords = seq(lo, up, length m)
+    let xords_at = RSeq::new(lo, up, m);
+    let xords = |j: usize| xords_at.at(j);
+    let x_at = RSeq::new(from, to, n_user);
+    let mut xs: Vec<f64> = resource::try_with_capacity(n_user, "density grid")?;
+    let mut ys: Vec<f64> = resource::try_with_capacity(n_user, "density values")?;
+    for i in 0..n_user {
+        let v = x_at.at(i);
+        // the interval [xords(j), xords(j + 1)) holding v, as approx's bisection finds it
+        let mut j = ((v - lo) / xdelta).floor().clamp(0.0, (m - 2) as f64) as usize;
+        while j > 0 && v < xords(j) {
+            j -= 1;
+        }
+        while j < m - 2 && v >= xords(j + 1) {
+            j += 1;
+        }
+        let (x0, x1) = (xords(j), xords(j + 1));
+        let (y0, y1) = (kords(j), kords(j + 1));
+        let val = if v == x1 {
+            y1
+        } else if v == x0 {
+            y0
+        } else {
+            y0 + (y1 - y0) * ((v - x0) / (x1 - x0))
+        };
+        xs.push(v);
+        ys.push(val);
     }
-
-    // Step 3: FFT both signals
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(fft_size);
-    let ifft = planner.plan_fft_inverse(fft_size);
-
-    let mut binned_complex: Vec<Complex<f64>> =
-        resource::try_with_capacity(fft_size, "density FFT grid")?;
-    binned_complex.extend(binned.iter().map(|&x| Complex::new(x, 0.0)));
-    let mut kernel_complex: Vec<Complex<f64>> =
-        resource::try_with_capacity(fft_size, "density kernel grid")?;
-    kernel_complex.extend(kernel_weights.iter().map(|&x| Complex::new(x, 0.0)));
-
-    fft.process(&mut binned_complex);
-    fft.process(&mut kernel_complex);
-
-    // Step 4: Multiply in frequency domain
-    let mut result_complex: Vec<Complex<f64>> =
-        resource::try_with_capacity(fft_size, "density FFT grid")?;
-    result_complex.extend(
-        binned_complex
-            .iter()
-            .zip(kernel_complex.iter())
-            .map(|(a, b)| a * b),
-    );
-
-    // Step 5: Inverse FFT
-    ifft.process(&mut result_complex);
-
-    // Step 6: Extract and normalize the density values
-    let norm_factor = 1.0 / (n as f64 * bw * (2.0 * std::f64::consts::PI).sqrt() * fft_size as f64);
-    let mut y: Vec<f64> = resource::try_with_capacity(n_points_requested, "density values")?;
-    y.extend(
-        result_complex[..n_points_requested]
-            .iter()
-            .map(|c| (c.re * norm_factor).max(0.0)), // Ensure non-negative
-    );
-
-    // Create x values
-    let mut x: Vec<f64> = resource::try_with_capacity(n_points_requested, "density grid")?;
-    x.extend(
-        (0..n_points_requested)
-            .map(|i| from + i as f64 * (range / (n_points_requested - 1) as f64)),
-    );
 
     Ok(DensityResult {
-        x,
-        y,
+        x: xs,
+        y: ys,
         bw,
-        n,
+        n: clean.len(),
         kernel,
     })
 }
 
-/// Direct density computation for small datasets or non-Gaussian kernels.
-/// `n_points` is in `2..=2^20`; each grid point honours cancellation.
-fn density_direct(
+/// The largest FFT length whose plans the per-thread density planner keeps.
+#[cfg(feature = "spectral-analysis")]
+const DENSITY_CACHED_FFT_MAX: usize = 1 << 13;
+
+#[cfg(feature = "spectral-analysis")]
+thread_local! {
+    static DENSITY_FFT_PLANNER: std::cell::RefCell<FftPlanner<f64>> =
+        std::cell::RefCell::new(FftPlanner::new());
+}
+
+/// R's smallest density grid (`density(n = 512)`); larger grids are rounded up to a power of two.
+#[cfg(feature = "spectral-analysis")]
+const R_DENSITY_MIN_GRID: usize = 512;
+
+/// R's `seq.int(from, to, length.out = len)`, `len >= 2`: the ends exactly, the first half
+/// counted up from `from` and the second half down from `to`.
+#[derive(Clone, Copy)]
+struct RSeq {
+    from: f64,
+    to: f64,
+    last: usize,
+    by: f64,
+}
+
+impl RSeq {
+    fn new(from: f64, to: f64, len: usize) -> Self {
+        let last = len - 1;
+        RSeq {
+            from,
+            to,
+            last,
+            by: (to - from) / last as f64,
+        }
+    }
+
+    /// Element `i` (0-based).
+    #[inline]
+    fn at(&self, i: usize) -> f64 {
+        if i == 0 {
+            self.from
+        } else if i == self.last {
+            self.to
+        } else if i < self.last.div_ceil(2) {
+            // i < len / 2
+            self.from + i as f64 * self.by
+        } else {
+            self.to - (self.last - i) as f64 * self.by
+        }
+    }
+}
+
+/// The exact kernel sum mean(K(x0 - x_i)) at `n_points` points from `from` to `to` (builds
+/// without `spectral-analysis`; R's kernels). `n_points` is in `2..=2^20`; each grid point
+/// honours cancellation.
+#[cfg_attr(feature = "spectral-analysis", allow(dead_code))]
+pub(crate) fn density_direct(
     data: &[f64],
     bw: f64,
     kernel: DensityKernel,
@@ -783,18 +868,18 @@ fn density_direct(
     to: f64,
 ) -> EconResult<DensityResult> {
     let n = data.len();
-    let step = (to - from) / (n_points - 1) as f64;
     let mut x: Vec<f64> = resource::try_with_capacity(n_points, "density grid")?;
-    x.extend((0..n_points).map(|i| from + i as f64 * step));
+    let x_at = RSeq::new(from, to, n_points);
+    x.extend((0..n_points).map(|i| x_at.at(i)));
 
     let mut y: Vec<f64> = resource::try_with_capacity(n_points, "density values")?;
     for &xi in &x {
         resource::checkpoint()?;
         let sum: f64 = data
             .iter()
-            .map(|&xj| kernel_function((xi - xj) / bw, kernel))
+            .map(|&xj| kernel_function(xi - xj, bw, kernel))
             .sum();
-        y.push(sum / (n as f64 * bw));
+        y.push(sum / n as f64);
     }
 
     Ok(DensityResult {
@@ -806,65 +891,63 @@ fn density_direct(
     })
 }
 
-/// Silverman's rule of thumb for bandwidth selection.
-fn silverman_bandwidth(data: &[f64]) -> f64 {
-    let n = data.len() as f64;
-    let mean: f64 = data.iter().sum::<f64>() / n;
-    let var: f64 = data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    let sd = var.sqrt();
-
-    // IQR estimate
-    // STAT-65 (Tier 4): bw.nrd0 uses IQR(x) (type 7); this rule stays until STAT-65 is fixed
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    let q1 = sorted[(0.25 * n) as usize];
-    let q3 = sorted[(0.75 * n).min(n - 1.0) as usize];
-    let iqr = q3 - q1;
-
-    // Silverman's rule: 0.9 * min(sd, IQR/1.34) * n^(-1/5)
-    let scale = sd.min(iqr / 1.34);
-    0.9 * scale * n.powf(-0.2)
+/// R's `bw.nrd0`: 0.9 min(sd, IQR/1.34) n^(-1/5), with the type-7 IQR. When that minimum is 0,
+/// sd is used, then |x[0]| (the first value), then 1, so the bandwidth is never 0. Needs at least
+/// two values, all finite.
+pub(crate) fn bw_nrd0(x: &[f64]) -> EconResult<f64> {
+    let n = x.len();
+    if n < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("bw.nrd0 needs at least 2 data points, got {n}"),
+        });
+    }
+    let nf = n as f64;
+    let mean = x.iter().sum::<f64>() / nf;
+    let hi = (x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (nf - 1.0)).sqrt();
+    let sorted = sorted_copy(x, "bandwidth data")?;
+    let iqr = quantile_sorted(&sorted, 0.75, QuantileType::T7)
+        - quantile_sorted(&sorted, 0.25, QuantileType::T7);
+    let mut lo = hi.min(iqr / 1.34);
+    if lo == 0.0 {
+        lo = hi;
+        if lo == 0.0 {
+            lo = x[0].abs();
+            if lo == 0.0 {
+                lo = 1.0;
+            }
+        }
+    }
+    Ok(0.9 * lo * nf.powf(-0.2))
 }
 
-/// Kernel function evaluation.
-fn kernel_function(u: f64, kernel: DensityKernel) -> f64 {
+/// R's density kernels at distance `t` with bandwidth `bw` (the kernel's standard deviation),
+/// including the 1/bw scaling. The compact kernels are zero at |t| >= a, R's half-width.
+fn kernel_function(t: f64, bw: f64, kernel: DensityKernel) -> f64 {
+    use std::f64::consts::PI;
+    let ax = t.abs();
+    let inside = |a: f64, f: &dyn Fn(f64) -> f64| if ax < a { f(a) } else { 0.0 };
     match kernel {
-        DensityKernel::Gaussian => (-0.5 * u * u).exp() / (2.0 * std::f64::consts::PI).sqrt(),
-        DensityKernel::Epanechnikov => {
-            if u.abs() <= 1.0 {
-                0.75 * (1.0 - u * u)
-            } else {
-                0.0
-            }
+        DensityKernel::Gaussian => {
+            let u = t / bw;
+            (-0.5 * u * u).exp() / ((2.0 * PI).sqrt() * bw)
         }
-        DensityKernel::Rectangular => {
-            if u.abs() <= 1.0 {
-                0.5
-            } else {
-                0.0
-            }
-        }
-        DensityKernel::Triangular => {
-            if u.abs() <= 1.0 {
-                1.0 - u.abs()
-            } else {
-                0.0
-            }
-        }
-        DensityKernel::Biweight => {
-            if u.abs() <= 1.0 {
-                (15.0 / 16.0) * (1.0 - u * u).powi(2)
-            } else {
-                0.0
-            }
-        }
-        DensityKernel::Cosine => {
-            if u.abs() <= 1.0 {
-                (std::f64::consts::PI / 4.0) * (std::f64::consts::PI * u / 2.0).cos()
-            } else {
-                0.0
-            }
-        }
+        DensityKernel::Epanechnikov => inside(bw * 5f64.sqrt(), &|a| {
+            let u = ax / a;
+            0.75 * (1.0 - u * u) / a
+        }),
+        DensityKernel::Rectangular => inside(bw * 3f64.sqrt(), &|a| 0.5 / a),
+        DensityKernel::Triangular => inside(bw * 6f64.sqrt(), &|a| (1.0 - ax / a) / a),
+        DensityKernel::Biweight => inside(bw * 7f64.sqrt(), &|a| {
+            let u = ax / a;
+            let w = 1.0 - u * u;
+            15.0 / 16.0 * w * w / a
+        }),
+        DensityKernel::Cosine => inside(bw / (1.0 / 3.0 - 2.0 / (PI * PI)).sqrt(), &|a| {
+            (1.0 + (PI * t / a).cos()) / (2.0 * a)
+        }),
+        DensityKernel::OptCosine => inside(bw / (1.0 - 8.0 / (PI * PI)).sqrt(), &|a| {
+            PI / 4.0 * (PI * t / (2.0 * a)).cos() / a
+        }),
     }
 }
 
@@ -909,91 +992,175 @@ mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
 
-    // R 4.3.3: dx as below; d <- density(dx, bw = 0.4, n = 50)
-    //   y_exact <- sapply(d$x, function(x0) mean(dnorm((x0 - dx) / 0.4)) / 0.4)
-    //   (d$x is seq(min(dx) - 1.2, max(dx) + 1.2, length.out = 50) = seq(-2.33, 4.25, length.out = 50))
+    // The DX set of case stat_density_t4
     const DX: [f64; 30] = [
         1.21, 0.37, -0.45, 2.08, 1.66, 0.92, -1.13, 0.05, 1.48, 2.61, 0.74, -0.28, 1.02, 3.05,
         0.51, -0.66, 1.87, 1.33, 0.19, 2.34, -0.91, 0.88, 1.55, 0.62, 2.79, -0.12, 1.11, 0.43,
         1.94, 0.27,
     ];
-    const R_DENSITY_Y: [f64; 50] = [
-        0.0004363519876198267,
-        0.0011692584065983236,
-        0.0028209682399536933,
-        0.006139718786480934,
-        0.012085661044025012,
-        0.021588697620735155,
-        0.03515232402227199,
-        0.05248249555024953,
-        0.07240230641008048,
-        0.09320139951982209,
-        0.11329299657713199,
-        0.13182480056904658,
-        0.14892074872175362,
-        0.1654908332270454,
-        0.18278756602578952,
-        0.20191561913472617,
-        0.2233862179068877,
-        0.24676799917899828,
-        0.2705825178601217,
-        0.2926302675968569,
-        0.31072011385022885,
-        0.32343305591948524,
-        0.3304479774923035,
-        0.33227483885856157,
-        0.3297024362034387,
-        0.32341490920712346,
-        0.31395069690946276,
-        0.30181766815669364,
-        0.2875149690513099,
-        0.27143665615716134,
-        0.2538360650640523,
-        0.23498985990967755,
-        0.21547546547342242,
-        0.1962924254325087,
-        0.17860438814941712,
-        0.16315809414073765,
-        0.1497433839758532,
-        0.1371201384962765,
-        0.12356060275358817,
-        0.10773718732989186,
-        0.08944675405233493,
-        0.06976709054395504,
-        0.050591141729530165,
-        0.033832898601711146,
-        0.020736025517617118,
-        0.01158982895687627,
-        0.00588378051173514,
-        0.0027042878032145995,
-        0.0011223260401492597,
-        0.0004196861378714332,
-    ];
-
-    fn r_grid(i: usize) -> f64 {
-        -2.33 + i as f64 * (4.25 - -2.33) / 49.0
+    /// The column `x` of set `set` of case `stat_density_t4`.
+    fn density_set(ds: &crate::data::Dataset, set: &str) -> Vec<f64> {
+        crate::stats::ranks::test_data::column_where(ds, "x", &[("set", set)])
     }
 
+    const ALL_KERNELS: [(DensityKernel, &str); 7] = [
+        (DensityKernel::Gaussian, "gaussian"),
+        (DensityKernel::Epanechnikov, "epanechnikov"),
+        (DensityKernel::Rectangular, "rectangular"),
+        (DensityKernel::Triangular, "triangular"),
+        (DensityKernel::Biweight, "biweight"),
+        (DensityKernel::Cosine, "cosine"),
+        (DensityKernel::OptCosine, "optcosine"),
+    ];
+
+    /// The exact kernel sum (the path of builds without spectral-analysis) against R's kernels
+    /// evaluated directly: mean(K((x0 - x)/bw))/bw at R's density grid.
     #[test]
     fn test_validate_density_direct_path_against_r() {
-        // 30 points < 100, so this is the direct path with or without spectral-analysis
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_density_t4");
+        let mut check = Check::new(&case);
+        let dx = density_set(&ds, "dx");
+        assert_eq!(dx, DX);
+        let d = density_direct(&dx, 0.4, DensityKernel::Gaussian, 50, -2.33, 4.25).unwrap();
+        check
+            .vector("dx_n50_x", &d.x, Tol::coef(30))
+            .vector("kde_dx_n50_y", &d.y, Tol::coef(30));
+        let x9 = density_set(&ds, "x9");
+        let x9_x = case.vector("x9_x");
+        for (k, name) in ALL_KERNELS {
+            let d = density_direct(&x9, 0.5, k, 7, x9_x[0], x9_x[6]).unwrap();
+            check.vector(&format!("kde_x9_{name}_y"), &d.y, Tol::coef(9));
+        }
+        let big = density_set(&ds, "big");
+        let d = density_direct(&big, 0.4, DensityKernel::Gaussian, 100, -3.0, 3.0).unwrap();
+        check
+            .vector("big_ft_x", &d.x, Tol::coef(200))
+            .vector("kde_big_ft_y", &d.y, Tol::coef(200));
+        check.finish();
+    }
+
+    /// R's binned grid for grid sizes that are not powers of two, with from/to, the default
+    /// bandwidth, IQR = 0 and infinite values. Fails before: a 100-point grid was the first 100
+    /// of 128 FFT values labelled over [from, to]; IQR = 0 was an error.
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn test_validate_density_grid_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_density_t4");
+        let mut check = Check::new(&case);
+        let gauss = DensityKernel::Gaussian;
+        let big = density_set(&ds, "big");
+        for n in [100usize, 512, 1000] {
+            let d = density(&big, Some(0.4), gauss, Some(n), None, None).unwrap();
+            check
+                .vector(&format!("big_n{n}_x"), &d.x, Tol::coef(200))
+                .vector(&format!("big_n{n}_y"), &d.y, Tol::coef(200));
+        }
+        let d = density(&big, Some(0.4), gauss, Some(100), Some(-3.0), Some(3.0)).unwrap();
+        check
+            .vector("big_ft_x", &d.x, Tol::coef(200))
+            .vector("big_ft_y", &d.y, Tol::coef(200));
+        let d = density(&big, None, gauss, None, None, None).unwrap();
+        check.scalar("big_default_bw", d.bw, Tol::stat(200)).vector(
+            "big_default_y",
+            &d.y,
+            Tol::coef(200),
+        );
+        let iqr0 = density_set(&ds, "iqr0");
+        let d = density(&iqr0, None, gauss, None, None, None).unwrap();
+        check.vector("iqr0_default_x", &d.x, Tol::coef(22)).vector(
+            "iqr0_default_y",
+            &d.y,
+            Tol::coef(22),
+        );
+        let d = density(&DX, Some(0.4), gauss, Some(50), None, None).unwrap();
+        check
+            .vector("dx_n50_x", &d.x, Tol::coef(30))
+            .vector("dx_n50_y", &d.y, Tol::coef(30));
+        let mut inf = DX.to_vec();
+        inf.extend([f64::INFINITY, f64::NEG_INFINITY]);
+        let d = density(&inf, Some(0.4), gauss, Some(50), None, None).unwrap();
+        check.vector("dx_inf_n50_y", &d.y, Tol::coef(30)).scalar(
+            "dx_inf_n",
+            d.n as f64,
+            Tol::exact(),
+        );
         let d = density(
             &DX,
             Some(0.4),
-            DensityKernel::Gaussian,
+            DensityKernel::Epanechnikov,
             Some(50),
             None,
             None,
         )
         .unwrap();
-        assert_eq!((d.x.len(), d.n), (50, 30));
-        for i in 0..50 {
-            assert!((d.x[i] - r_grid(i)).abs() < 1e-12, "x[{i}]");
-            assert!(
-                (d.y[i] - R_DENSITY_Y[i]).abs() < 1e-12 * R_DENSITY_Y[i].max(1.0),
-                "y[{i}]"
-            );
+        check.vector("dx_epan_n50_y", &d.y, Tol::coef(30));
+        check.finish();
+    }
+
+    /// Every kernel with bw as its standard deviation; cosine is R's raised cosine.
+    /// Fails before: compact kernels had half-width bw; cosine was R's optcosine.
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn test_validate_density_kernels_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_density_t4");
+        let mut check = Check::new(&case);
+        let big = density_set(&ds, "big");
+        let x9 = density_set(&ds, "x9");
+        for (k, name) in ALL_KERNELS {
+            if k != DensityKernel::Gaussian {
+                let d = density(&big, Some(0.4), k, Some(100), None, None).unwrap();
+                check.vector(&format!("big_{name}_y"), &d.y, Tol::coef(200));
+            }
+            let d = density(&x9, Some(0.5), k, Some(7), None, None).unwrap();
+            check.vector(&format!("x9_{name}_y"), &d.y, Tol::coef(9));
+            if k == DensityKernel::Gaussian {
+                check.vector("x9_x", &d.x, Tol::coef(9));
+            }
         }
+        check.finish();
+    }
+
+    /// bw.nrd0 and its fallbacks (IQR = 0: sd; sd = 0: |x[1]|; x[1] = 0: 1), directly and as
+    /// density's default. Fails before: quartiles by index, an error on IQR = 0.
+    #[test]
+    fn test_validate_bw_nrd0_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_density_t4");
+        let mut check = Check::new(&case);
+        for set in ["big", "x9", "ties", "iqr0", "const", "zero"] {
+            let x = density_set(&ds, set);
+            let n = x.len();
+            let bw = bw_nrd0(&x).unwrap();
+            check.scalar(&format!("nrd0_{set}"), bw, Tol::stat(n));
+            let d = density(&x, None, DensityKernel::Gaussian, Some(64), None, None).unwrap();
+            assert_eq!(d.bw, bw, "{set}");
+        }
+        check.finish();
+        assert!(bw_nrd0(&[1.0]).is_err());
+    }
+
+    /// stats_density's defaults (gaussian, n = 512, bw.nrd0) on the descriptive_na columns with
+    /// the missing values dropped.
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn test_validate_density_dataset_na_t4() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_density_mcp_na_t4");
+        let mut check = Check::new(&case);
+        for col in ["v", "vi"] {
+            let (x, _) = numeric_column(ds.df(), col, NaPolicy::Omit).unwrap();
+            let n = x.len();
+            let d = run_density(&x, None, "gaussian", Some(512)).unwrap();
+            check
+                .scalar(&format!("dens_{col}_bw"), d.bw, Tol::stat(n))
+                .vector(&format!("dens_{col}_x"), &d.x, Tol::coef(n))
+                .vector(&format!("dens_{col}_y"), &d.y, Tol::coef(n));
+        }
+        check.finish();
     }
 
     #[test]
@@ -1082,22 +1249,13 @@ mod tests {
         // R: density(c(dx, Inf, -Inf), bw = 0.4, n = 50) has d$x unchanged, y scaled by 30/32 and n = 32
         let mut data = DX.to_vec();
         data.extend([f64::INFINITY, f64::NEG_INFINITY, f64::NAN]); // NaN is dropped and not counted, as in R with na.rm
-        let d = density(
-            &data,
-            Some(0.4),
-            DensityKernel::Gaussian,
-            Some(50),
-            None,
-            None,
-        )
-        .unwrap();
+        let gauss = DensityKernel::Gaussian;
+        let d = density(&data, Some(0.4), gauss, Some(50), None, None).unwrap();
+        let finite = density(&DX, Some(0.4), gauss, Some(50), None, None).unwrap();
         assert_eq!(d.n, 32);
+        assert_eq!(d.x, finite.x);
         for i in 0..50 {
-            assert!((d.x[i] - r_grid(i)).abs() < 1e-12);
-            assert!(
-                (d.y[i] - R_DENSITY_Y[i] * 30.0 / 32.0).abs() < 1e-12,
-                "y[{i}]"
-            );
+            assert!((d.y[i] - finite.y[i] * 30.0 / 32.0).abs() < 1e-15, "y[{i}]");
         }
     }
 
@@ -1184,7 +1342,7 @@ mod tests {
     #[cfg(feature = "spectral-analysis")]
     #[test]
     fn test_density_fft_grid_respects_allocation_ceiling() {
-        // 200 points take the FFT path; the zero-padded grid is 1024 f64 = 8192 bytes > 4096
+        // the binned grid is 2 x 512 complex values = 16384 bytes > 4096
         let data: Vec<f64> = (0..200)
             .map(|i| (i as f64 * 0.37).sin() * 3.0 + i as f64 * 0.01)
             .collect();
@@ -1680,13 +1838,14 @@ mod tests {
             ("Epanechnikov", DensityKernel::Epanechnikov),
             ("triangular", DensityKernel::Triangular),
             ("cosine", DensityKernel::Cosine),
+            ("OptCosine", DensityKernel::OptCosine),
         ] {
             assert_eq!(s.parse::<DensityKernel>().unwrap(), k, "{s:?}");
         }
         assert_eq!(
-            spec_message("optcosine".parse::<DensityKernel>()),
-            "unknown kernel 'optcosine'; expected one of: gaussian, epanechnikov, rectangular, \
-             triangular, biweight, cosine"
+            spec_message("parzen".parse::<DensityKernel>()),
+            "unknown kernel 'parzen'; expected one of: gaussian, epanechnikov, rectangular, \
+             triangular, biweight, cosine, optcosine"
         );
         assert_eq!(DensityKernel::choices().validate(), Ok(()));
         assert_eq!(DensityKernel::Biweight.to_string(), "biweight");

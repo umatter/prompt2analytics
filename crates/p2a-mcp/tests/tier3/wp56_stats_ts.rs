@@ -388,7 +388,7 @@ async fn test_validate_mcp_stats_option_aliases() {
         ),
         (
             "stats_density",
-            json!({"dataset": "robust_weighted_t3", "column": "x1", "kernel": "optcosine"}),
+            json!({"dataset": "robust_weighted_t3", "column": "x1", "kernel": "parzen"}),
             "gaussian",
         ),
         (

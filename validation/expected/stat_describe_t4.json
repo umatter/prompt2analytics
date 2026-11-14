@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "stat_describe_t4",
+  "area": "stats/descriptive",
+  "method": "Descriptive statistics of numeric columns: type-7 quartiles and median, mean, sd, min, max over the present values",
+  "reference": "base mean, sd, min, max and stats::quantile(type = 7) over the non-missing values (summary() quartiles)",
+  "call": "c(n, mean, sd, min, q25, median, q75, max) per column, na.rm",
+  "dataset": "validation/datasets/generated/describe_t4.csv",
+  "datasets": ["validation/datasets/generated/describe_t4.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "e": [12, 47.401666666666664, 11.799338836125393, 26.030000000000001, 42.602500000000006, 48.399999999999999, 52.947500000000005, 67.519999999999996],
+    "o": [11, 3.3232727272727272, 3.2702331748946922, 0.037999999999999999, 0.87450000000000006, 1.9079999999999999, 5.79, 8.9309999999999992],
+    "ni": [10, 102.09999999999999, 13.050755618822315, 79, 94.25, 100, 112.75, 123],
+    "four": [1.75, 2.5, 3.25]
+  }
+}

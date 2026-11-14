@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cor_test_t4",
+      "name": "Correlation test: Pearson one-sided intervals, Spearman exact and Edgeworth p-values and S, Kendall tau-b with the exact T or the tie-corrected z",
+      "category": "stats",
+      "reference": "stats::cor.test (R 4.3.3 defaults: Spearman exact = n < 1290 without ties, by enumeration for n <= 9 and by the AS 89 Edgeworth series above, t approximation with ties or n >= 1290; Kendall exact = n < 50 without ties, otherwise tau-b with the tie-corrected variance and continuity = FALSE)",
+      "doc": "validation/stats/new_methods.md",
+      "cases": [
+        "stat_cor_test_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::cortest::tests::test_validate_pearson_correlation",
+        "p2a-core::stats::cortest::tests::test_validate_pearson_confidence_interval",
+        "p2a-core::stats::cortest::tests::test_validate_spearman_t4",
+        "p2a-core::stats::cortest::tests::test_validate_kendall_tie_free_against_r",
+        "p2a-core::stats::cortest::tests::test_validate_kendall_ties_t4"
+      ],
+      "quantities": [
+        "Pearson r, t, df, p (two-sided, less, greater), 95% and 90% two-sided intervals, one-sided intervals with the open bound -1 or 1",
+        "Spearman rho, S = (n^3 - n)(1 - rho)/6, p (two-sided, less, greater) on the exact, Edgeworth and t paths, perfect monotone data in both directions",
+        "Kendall tau-b, T (exact path) or z (normal path), the statistic's name, p (two-sided, less, greater)"
+      ],
+      "tolerance": "validation/README.md by n: r, rho, tau Tol::coef(n); t, z, S, interval bounds Tol::stat(n); p Tol::p_value(n) (abs 1e-12, so R's 0 from the clamped Edgeworth tail and p2a's tail below 1e-12 compare equal); T and df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "correlation_matrix_t4",
+      "name": "Pearson correlation matrix of the numeric columns with missing values (pairwise-complete observations)",
+      "category": "stats",
+      "reference": "stats::cor(use = 'pairwise.complete.obs'); pair counts crossprod(!is.na(m))",
+      "doc": "validation/stats/descriptive.md",
+      "cases": [
+        "stat_cor_matrix_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::correlation::tests::test_validate_correlation_matrix_pairwise_t4"
+      ],
+      "quantities": [
+        "4 x 4 correlation matrix (double and Int64 columns, text column skipped)",
+        "observations per pair, rows",
+        "two-column case where one row is missing in one column"
+      ],
+      "tolerance": "n = 35-40 (< 100): coefficients Tol::coef(n); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "describe_t4",
+      "name": "Descriptive statistics of numeric columns: count, mean, sd, min, type-7 quartiles and median, max over the present values",
+      "category": "stats",
+      "reference": "base mean, sd, min, max; stats::quantile(type = 7) (summary() quartiles), all over the non-missing values",
+      "doc": "validation/stats/descriptive.md",
+      "cases": [
+        "stat_describe_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::descriptive::tests::test_validate_describe_quantiles_t4"
+      ],
+      "quantities": [
+        "present-value count, mean, sd, min, q25, median, q75, max for an even-length double column, a double column with one missing cell and an Int64 column with two",
+        "quartiles of 1:4"
+      ],
+      "tolerance": "n = 4-12 (< 100): every statistic, sd included, Tol::coef(n); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "density_t4",
+      "name": "Kernel density estimate: R's binned FFT grid for any number of points, seven kernels with bw as the kernel's standard deviation, bw.nrd0 with its fallbacks",
+      "category": "stats",
+      "reference": "stats::density.default (R 4.3.3: linear binning on 2^k >= max(n, 512) points over [from - 4 bw, to + 4 bw], FFT convolution, approx onto seq(from, to, length.out = n)); stats::bw.nrd0; the exact kernel sum mean(K((x0 - x)/bw))/bw with R's kernels for the unbinned path",
+      "doc": "validation/stats/robust.md",
+      "cases": [
+        "stat_density_t4",
+        "stat_density_mcp_na_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::robust::tests::test_validate_density_grid_t4",
+        "p2a-core::stats::robust::tests::test_validate_density_kernels_t4",
+        "p2a-core::stats::robust::tests::test_validate_density_direct_path_against_r",
+        "p2a-core::stats::robust::tests::test_validate_bw_nrd0_t4",
+        "p2a-core::stats::robust::tests::test_validate_density_dataset_na_t4"
+      ],
+      "quantities": [
+        "x and y on grids of 50, 100, 512 and 1000 points, with and without from/to, Gaussian kernel",
+        "y for the epanechnikov, rectangular, triangular, biweight, cosine and optcosine kernels",
+        "y with infinite values (mass scaled by the finite share) and n",
+        "default bandwidth (bw.nrd0) and the density at it, including IQR = 0, sd = 0 and x[1] = 0",
+        "exact kernel sums of the unbinned path (kde_* keys)",
+        "density of the descriptive_na columns at the stats_density defaults (n = 512)"
+      ],
+      "tolerance": "y and x Tol::coef(n) with abs 1e-12 (R's FFT leaves values of order 1e-18 where the density is 0); bw Tol::stat(n); n exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

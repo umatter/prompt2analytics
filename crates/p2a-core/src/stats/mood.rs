@@ -45,7 +45,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
+use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource::try_with_capacity;
 use crate::stats::ranks::midranks;
@@ -290,8 +290,8 @@ pub fn run_mood_test(
     alternative: Option<Alternative>,
 ) -> EconResult<MoodTestResult> {
     let df = dataset.df();
-    let (x, missing_x) = numeric_column(df, x_col, NaPolicy::Omit)?;
-    let (y, missing_y) = numeric_column(df, y_col, NaPolicy::Omit)?;
+    let (x, missing_x) = sample_column(df, x_col, "Mood")?;
+    let (y, missing_y) = sample_column(df, y_col, "Mood")?;
     let mut result = mood_test(&x, &y, alternative.unwrap_or(Alternative::TwoSided))?;
     result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
     Ok(result)
@@ -541,5 +541,15 @@ mod tests {
                 Tol::p_value(12),
             )
             .finish();
+    }
+
+    #[test]
+    fn test_mood_test_all_missing_column_is_named() {
+        let ds = crate::Dataset::new(
+            polars::prelude::df! { "x" => [None::<f64>, None, None, None], "y" => [1.2, 0.4, 2.2, 1.7] }
+                .unwrap(),
+        );
+        let e = run_mood_test(&ds, "x", "y", None).unwrap_err().to_string();
+        assert!(e.contains("'x'") && e.contains("Mood"), "{e}");
     }
 }

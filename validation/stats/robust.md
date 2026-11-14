@@ -84,9 +84,11 @@ exact.
 `iqr`; see the core section below); only its default type 7 is pinned through the MCP tool.
 
 - **STAT-37:** the density's FFT grid is mislabelled when the number of grid points is not a
-  power of two; the density values are not pinned.
+  power of two; the density values are not pinned. Fixed in core, see `density_t4` below; the
+  MCP pin follows.
 - **STAT-65:** the default density bandwidth is not `bw.nrd0`, and the non-Gaussian kernels
-  scale `bw` differently from R; the bandwidth is not pinned.
+  scale `bw` differently from R; the bandwidth is not pinned. Fixed in core, see `density_t4`
+  below; the MCP pin follows.
 - **STAT-69:** `stats_spline`'s default method `fmm` is a clamped spline, not R's
   Forsythe-Malcolm-Moler end conditions; only `method = "natural"` is pinned.
 - **STAT-87:** `stats_fivenum`'s `iqr` field is the spread of the hinges, not R's `IQR`; it is
@@ -235,3 +237,42 @@ default bandwidth becomes `bw.nrd0`.
 - The Tier 3 design paired `t_test_p_value(13.5, 197)` with 2.165754515305109e-40; R gives
   7.793084732270165e-30 for t = 13.5, and 2.165754515305109e-40 is the p-value of the HC1 t of
   `value` in `ols_grunfeld` (16.967101614364047).
+
+---
+
+## Core: kernel density (`density_t4`)
+
+`stats::robust::density` is R's `density()` (R 4.3.3) for every kernel and grid size when the
+`spectral-analysis` feature is on (every shipped build):
+
+1. Drop NaN; the finite values carry weight 1/N each, and the result is scaled by N / (non-NaN
+   count) when infinite values were present (R's `totMass`); `n` reports the non-NaN count.
+2. Bandwidth: the supplied `bw`, or `bw.nrd0` = 0.9 min(sd, IQR/1.34) n^(-1/5) with the type-7
+   IQR; when the minimum is 0, sd, then |x[1]| (first finite value), then 1.
+3. Grid: m = max(n, 512), rounded up to a power of two above 512; `lo = from - 4 bw`,
+   `up = to + 4 bw` (defaults `from = min - 3 bw`, `to = max + 3 bw`).
+4. Linear binning (R's `BinDist`) onto 2m points, kernel ordinates at `seq(0, 2(up - lo), 2m)`
+   mirrored, FFT convolution, the first m values floored at 0 on `seq(lo, up, m)`.
+5. Linear interpolation (`approx`) onto `seq(from, to, n)`.
+
+Kernels are scaled so that `bw` is their standard deviation: half-widths a = bw sqrt(5)
+(epanechnikov), sqrt(3) (rectangular), sqrt(6) (triangular), sqrt(7) (biweight),
+bw / sqrt(1/3 - 2/pi^2) (cosine, R's raised cosine) and bw / sqrt(1 - 8/pi^2) (optcosine); each is
+zero for |t| >= a. Without `spectral-analysis` the estimate is the exact kernel sum
+mean(K(x0 - x_i)) at the same points, which differs from R's by R's binning error.
+
+**R case:** `stat_density_t4` (`validation/r/cases/stats_descriptive_t4.R`, dataset
+`validation/datasets/generated/density_t4.csv`): 200 normal draws at bw 0.4 on grids of 100, 512
+and 1000 points and with from/to, the six other kernels, the default bandwidth, a 9-point set for
+every kernel, `bw.nrd0` with each fallback, and the 30-point `DX` with and without infinite values;
+the `kde_*` keys are the exact kernel sums. `stat_density_mcp_na_t4`: the `stats_density` defaults
+on the `descriptive_na` columns.
+
+**Rust tests:** `stats::robust::tests::test_validate_density_grid_t4`,
+`stats::robust::tests::test_validate_density_kernels_t4`,
+`stats::robust::tests::test_validate_bw_nrd0_t4`,
+`stats::robust::tests::test_validate_density_direct_path_against_r` (the exact kernel sum) and
+`stats::robust::tests::test_validate_density_dataset_na_t4`. Tolerance: x and y `Tol::coef(n)`
+(abs 1e-12, where R's FFT leaves values of order 1e-18), bandwidths `Tol::stat(n)`, counts exact.
+
+**Status:** R-pinned (registry `validation/methods/stats_descriptive_t4.json`, id `density_t4`).

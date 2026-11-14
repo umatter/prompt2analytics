@@ -41,6 +41,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::traits::{SignificanceLevel, chi_squared_p_value};
 
@@ -405,41 +406,8 @@ pub fn run_box_test(
     test_type: BoxTestType,
     fitdf: usize,
 ) -> EconResult<BoxTestResult> {
-    use polars::prelude::*;
-
-    let series = dataset
-        .df()
-        .column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: dataset
-                .df()
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let values = series
-        .cast(&DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: column.to_string(),
-        })?;
-
-    // na-legacy(T4): non-strict cast (text turns into nulls; NaN passes through)
-    let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
-        column: column.to_string(),
-    })?;
-
-    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
-    let missing = ca.null_count();
-    if missing > 0 {
-        return Err(EconError::NullValues {
-            column: column.to_string(),
-            count: missing,
-        });
-    }
-    let x: Vec<f64> = ca.into_iter().flatten().collect();
+    // R's Box.test refuses missing values (na.fail); text, dates and infinite values too
+    let (x, _) = numeric_column(dataset.df(), column, NaPolicy::Fail)?;
 
     let mut result = box_test(&x, lag, test_type, fitdf)?;
     result.series_name = Some(column.to_string());
@@ -708,6 +676,31 @@ mod tests {
             result.p_value < 1e-10,
             "Linear trend should have very low p-value, got {}",
             result.p_value
+        );
+    }
+
+    /// The column is read as R's Box.test reads it (na.fail): text is refused, a null and a NaN
+    /// cell both count as missing, an infinite value is refused. Fails before: NaN passed and
+    /// text became nulls.
+    #[test]
+    fn test_box_test_dataset_column_errors() {
+        let base = [0.3, -1.2, 0.8, 1.9, -0.4, 0.6, -0.9, 1.1, 0.2, -0.7];
+        let mut gaps: Vec<Option<f64>> = base.iter().copied().map(Some).collect();
+        gaps[2] = None;
+        gaps[5] = Some(f64::NAN);
+        let mut inf = base.to_vec();
+        inf[4] = f64::INFINITY;
+        let text: Vec<&str> = base.iter().map(|_| "a").collect();
+        let ds = Dataset::new(df!("gaps" => gaps, "inf" => inf, "text" => text).unwrap());
+        let run = |c: &str| run_box_test(&ds, c, Some(2), BoxTestType::LjungBox, 0);
+        assert!(
+            matches!(run("text"), Err(EconError::NonNumericColumn { ref column }) if column == "text")
+        );
+        assert!(
+            matches!(run("gaps"), Err(EconError::NullValues { ref column, count: 2 }) if column == "gaps")
+        );
+        assert!(
+            matches!(run("inf"), Err(EconError::NonFiniteValues { ref column, .. }) if column == "inf")
         );
     }
 }

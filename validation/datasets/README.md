@@ -76,7 +76,12 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/binom_minlike_t4.csv` | 6 × 4 (label, x, n, p) | `stat_binom_minlike_t4` | `r/cases/stats_exact_t4.R` | literal values: six (x, n, p) cells of binom.test's two-sided rule |
 | `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/cli_mtcars.csv` | 32 × 4 (mpg, wt, hp, qsec) | `cli_viz_residuals` | `r/cases/cli_other.R` | `datasets::mtcars`, the four columns of `lm(mpg ~ wt + hp + qsec)` |
+| `generated/cor_matrix_small_t4.csv` | 5 × 3 (id, a, b; b missing in row 5) | `stat_cor_matrix_t4` | `r/cases/stats_descriptive_t4.R` | literal values: a = 1, 2, 3, 4, 100 |
+| `generated/cor_matrix_t4.csv` | 40 × 6 (id, a, b, lab, c, i; i Int64, lab text; 2-3 missing cells per numeric column in different rows) | `stat_cor_matrix_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261114 |
+| `generated/cor_test_t4.csv` | 1576 × 3 (set, x, y) | `stat_cor_test_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261113; `pear`, `perm` and the perfect sets literal values |
 | `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
+| `generated/density_t4.csv` | 284 × 2 (set, x) | `stat_density_t4` | `r/cases/stats_descriptive_t4.R` | seed 1; `x9`, `ties`, `iqr0`, `const`, `zero`, `dx` literal values |
+| `generated/describe_t4.csv` | 12 × 5 (id, e, o, ni, g; ni Int64, o missing in one row, ni in two, g text) | `stat_describe_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261115 |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/hac_truncated_indefinite.csv` | 40 × 2 (y, x) | `hac_truncated_indefinite` | `r/cases/reg_vcov_t4.R` | seed 5, errors AR(-0.7) |
@@ -179,7 +184,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/loglin_na.csv` | 16 × 5 (id, f1, f2, f3, cnt; f2 and cnt Int64; f1 missing in row 14, f2 in row 15, cnt in row 16; rows 11 and 13 are the same cell (b, 10, y)) | `stat_loglin_na` | `r/cases/stats_mcp.R` | seed 211, a 3 × 2 × 2 table in long form |
 | `generated/weighted_na.csv` | 12 × 7 (id, v, w, a, b, wc, b_na; a, b and b_na Int64; v missing in row 3, w in row 8, b_na in row 5) | `stat_weighted_na` | `r/cases/stats_mcp.R` | seed 307 |
 | `generated/mauchly_na.csv` | 16 × 5 (id, t1-t4, all Int64; t2 missing in row 5, t4 in row 11) | `stat_mauchly_na` | `r/cases/stats_mcp.R` | seed 419, variances growing across conditions |
-| `generated/descriptive_na.csv` | 15 × 6 (id, v, vi, s, xs, ys; vi Int64, s text; v missing in rows 2, 9 and 13, vi in rows 4 and 11, xs in row 5, ys in row 10) | `stat_descriptive_na` | `r/cases/stats_mcp.R` | seed 613 |
+| `generated/descriptive_na.csv` | 15 × 6 (id, v, vi, s, xs, ys; vi Int64, s text; v missing in rows 2, 9 and 13, vi in rows 4 and 11, xs in row 5, ys in row 10) | `stat_descriptive_na`; read by `stat_density_mcp_na_t4` | `r/cases/stats_mcp.R` | seed 613 |
 | `generated/describe_columns.csv` | 15 × 7 (id, income, age, region, grade, member, empty; income missing in rows 3, 8 and 11, age in row 7, region in row 5, member in row 9; empty all missing) | `data_describe_columns` | `r/cases/mcp_data_t3.R` | seed 5901 |
 | `generated/dendrogram_points.csv` | 7 × 2 (id, x) | `viz_dendrogram_hclust` | `r/cases/mcp_data_t3.R` | seed 5902; x the cumulative sum of 7 uniform(0.5, 3) draws, rounded to 3 decimals |
 | `generated/isoreg_medpolish_int.csv` | 10 × 8 (id, x, y, y_na, c1-c4; y, y_na and c1-c4 Int64; y_na missing in row 6, c3 in row 4; x has no ties) | `stat_isoreg_medpolish_int` | `r/cases/stats_mcp.R` | seed 523 |

@@ -53,6 +53,7 @@ use crate::data::columns::{MissingSummary, sample_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_vec, try_with_capacity, try_zeros2};
 use crate::stats::ttest::Alternative;
+use crate::stats::wilcoxon::check_exact_work;
 use crate::traits::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -408,7 +409,9 @@ pub fn ks_test_one_sample(
 ///
 /// `exact = None` is R's `exact = NULL`: the exact distribution for n < 100 without ties
 /// (Marsaglia-Tsang-Wang for the two-sided statistic, Birnbaum-Tingey for one-sided ones),
-/// the asymptotic one otherwise. Ties carry R's warning.
+/// the asymptotic one otherwise. Ties carry R's warning. An explicit `exact = Some(true)` whose
+/// two-sided distribution would take more than 2e9 elementary steps (far above R's default
+/// range) is refused with `InvalidSpecification`.
 ///
 /// # References
 /// - R equivalent: `ks.test(x, "pnorm", alternative = , exact = )`
@@ -455,7 +458,13 @@ pub fn ks_test_one_sample_with(
     let p_value = if exact {
         match alternative {
             Alternative::TwoSided => {
-                // R's exact two-sided p is the complement of the MTW cdf
+                // R's exact two-sided p is the complement of the MTW cdf: about 2 log2(n)
+                // products of k x k matrices, k = 2 floor(n D) + 1
+                let k = 2.0 * (nf * statistic).floor() + 1.0;
+                check_exact_work(
+                    2.0 * k * k * k * nf.log2().max(1.0),
+                    &format!("exact Kolmogorov distribution for n = {n} and D = {statistic:.4}"),
+                )?;
                 1.0 - pkolmogorov_two_exact(statistic, n)?
             }
             _ => pkolmogorov_one_exact_upper(statistic, n),
@@ -540,7 +549,9 @@ pub fn ks_test_two_sample(
 /// `exact = None` is R's `exact = NULL`: the exact distribution when n m < 10000, conditional
 /// on the tie pattern of the pooled sample (R's `psmirnov`); the asymptotic one otherwise,
 /// with R's warning under ties. For `alternative = less` with ties the exact p is that of D-
-/// (R evaluates the D+ distribution there; without ties both agree).
+/// (R evaluates the D+ distribution there; without ties both agree). An explicit
+/// `exact = Some(true)` with n m above 2e9 (far above R's default range) is refused with
+/// `InvalidSpecification`.
 ///
 /// # References
 /// - R equivalent: `ks.test(x, y, alternative = , exact = )`
@@ -588,6 +599,10 @@ pub fn ks_test_two_sample_with(
             Alternative::Greater => SmirnovSide::Plus,
             Alternative::Less => SmirnovSide::Minus,
         };
+        check_exact_work(
+            n as f64 * m as f64,
+            &format!("exact Smirnov distribution for samples of {n} and {m}"),
+        )?;
         psmirnov_exact_upper(statistic, n, m, &block_end, side)?
     } else {
         let n_eff = (n as f64) * (m as f64) / (total as f64);
@@ -1563,6 +1578,51 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("'y'") && e.contains("Kolmogorov-Smirnov"), "{e}");
+    }
+
+    /// An explicit exact request far above R's default range is refused before the work starts.
+    #[test]
+    fn test_ks_exact_requested_above_work_limit_is_refused() {
+        let refused = |r: EconResult<KsTestResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("2e9"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        };
+        // 5,000 values in [1, 2) against N(0, 1): D is about 0.84
+        let x: Vec<f64> = (0..5000)
+            .map(|i| 1.0 + (i as f64 * 0.618_034).fract())
+            .collect();
+        refused(ks_test_one_sample_with(
+            &x,
+            TheoreticalDistribution::Normal,
+            Alternative::TwoSided,
+            Some(true),
+        ));
+        let a: Vec<f64> = (0..60_000)
+            .map(|i| (i as f64 * 0.618_034).fract())
+            .collect();
+        let b: Vec<f64> = (0..60_000)
+            .map(|i| 0.1 + (i as f64 * 0.414_214).fract())
+            .collect();
+        refused(ks_test_two_sample_with(
+            &a,
+            &b,
+            Alternative::TwoSided,
+            Some(true),
+        ));
+        // R's default exact range still runs
+        let small: Vec<f64> = x[..99].to_vec();
+        assert!(
+            ks_test_one_sample_with(
+                &small,
+                TheoreticalDistribution::Normal,
+                Alternative::TwoSided,
+                Some(true)
+            )
+            .is_ok()
+        );
+        assert!(ks_test_two_sample_with(&a[..99], &b[..99], Alternative::TwoSided, None).is_ok());
     }
 
     fn t4(ds: &Dataset, set: &str, group: &str) -> Vec<f64> {
