@@ -752,7 +752,12 @@ not pinned to R here: they are pinned in Case F.
 4. **Separation**: groups whose outcome is all 0 or all 1 are dropped until none is left, as
    alpaca and fixest; a fit whose probabilities still reach 0 or 1 warns as glm does.
 
-5. **Degrees of freedom**: absorbed df by connected components for two fixed effects (exact);
+5. **Controls**: the R cases run glm at epsilon 1e-16 and the tight-control tests at
+   tolerance 1e-16; the probit default-control pin uses `Tol::iterative(1e-5)`. Step halving
+   accepts a step whose relative deviance rise is at most the tolerance (alpaca requires a
+   decrease), and a full IRLS step below 1e-6 (1 + max|eta|) does not warn as vanished.
+
+6. **Degrees of freedom**: absorbed df by connected components for two fixed effects (exact);
    for three or more, the HDFE rule (each further dimension its levels minus 1).
 
 ## Running the Tests

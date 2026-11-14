@@ -670,7 +670,8 @@ fn separated_rows_kept(
         for g in 0..m {
             lv.start[g + 1] = lv.start[g] + lv.rows[g];
         }
-        let mut next = lv.start.clone();
+        let mut next = resource::try_vec(m + 1, 0usize, "FEGLM group rows")?;
+        next.copy_from_slice(&lv.start);
         for (i, &g) in factor.ids.iter().enumerate() {
             lv.members[next[g]] = i;
             next[g] += 1;
@@ -905,7 +906,7 @@ pub fn run_feglm(
         .collect::<EconResult<Vec<_>>>()?;
 
     // Groups whose outcome is all 0 (or all 1 for binomial) have no finite MLE for their
-    // effect; they are dropped until a full round drops nothing (alpaca, fixest).
+    // effect; they are dropped until no such group is left (alpaca, fixest).
     let mut warnings: Vec<String> = Vec::new();
     let (y, x_all, factors, n_separated) = match family {
         GlmFamily::Logit | GlmFamily::Probit | GlmFamily::Poisson => {
