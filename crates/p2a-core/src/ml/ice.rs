@@ -212,8 +212,9 @@ pub struct IceSpread {
     /// between observations: 0 for parallel curves (no interaction involving the feature), 1
     /// when the mean curve is flat. Unchanged by adding a constant to the predictions or by
     /// `center`. Exactly 0 when every curve is flat, and when the centred curves' root mean
-    /// square is at most `64 * f64::EPSILON` times the largest absolute prediction (flat up to
-    /// rounding); NaN when a prediction is NaN or the sums of squares overflow.
+    /// square is at most `64 * f64::EPSILON` times the largest absolute prediction at the
+    /// first or last grid point (flat up to rounding); NaN when a prediction is NaN or the
+    /// sums of squares overflow.
     pub heterogeneity_index: f64,
 }
 
@@ -522,14 +523,14 @@ fn heterogeneity_index(ice_curves: ArrayView2<'_, f64>) -> f64 {
     // makes its row mean, and so both sums, NaN.
     let mut mean_curve = vec![0.0; n_grid];
     let mut row_means = Vec::with_capacity(n_obs);
-    let mut max_abs = 0.0_f64;
+    let mut scale = 0.0_f64;
     for row in ice_curves.rows() {
         let v0 = row[0];
-        let m = row.iter().map(|&v| v - v0).sum::<f64>() / n_grid as f64;
+        let m = anchored_sum(row, v0) / n_grid as f64;
         row_means.push(m);
+        scale = scale.max(v0.abs()).max(row[n_grid - 1].abs());
         for (acc, &v) in mean_curve.iter_mut().zip(row) {
             *acc += (v - v0) - m;
-            max_abs = max_abs.max(v.abs());
         }
     }
     let inv_n = 1.0 / n_obs as f64;
@@ -546,14 +547,31 @@ fn heterogeneity_index(ice_curves: ArrayView2<'_, f64>) -> f64 {
     if !(ss_tot.is_finite() && ss_het.is_finite()) {
         return f64::NAN;
     }
-    // Centred curves whose root mean square is within a few dozen ulps of the largest
-    // prediction are flat up to rounding.
+    // Centred curves whose root mean square is within a few dozen ulps of the predictions at
+    // the ends of the grid are flat up to rounding.
     let rms = (ss_tot / (n_obs * n_grid) as f64).sqrt();
-    if rms <= 64.0 * f64::EPSILON * max_abs {
+    if rms <= 64.0 * f64::EPSILON * scale {
         0.0
     } else {
         (ss_het / ss_tot).min(1.0).sqrt()
     }
+}
+
+/// `sum_g (row[g] - v0)` with eight partial sums, as fast as `row.sum()`; exactly 0 when
+/// every value equals `v0`.
+fn anchored_sum(row: ArrayView1<'_, f64>, v0: f64) -> f64 {
+    let Some(values) = row.as_slice() else {
+        return row.iter().map(|&v| v - v0).sum();
+    };
+    let mut partial = [0.0; 8];
+    let (chunks, remainder) = values.as_chunks::<8>();
+    for chunk in chunks {
+        for (p, &v) in partial.iter_mut().zip(chunk) {
+            *p += v - v0;
+        }
+    }
+    let tail: f64 = remainder.iter().map(|&v| v - v0).sum();
+    partial.iter().sum::<f64>() + tail
 }
 
 use super::lcg_random;

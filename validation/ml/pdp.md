@@ -50,9 +50,10 @@ with `SS_tot = sum c_ig^2` and `SS_het = sum (c_ig - mean_i c_ig)^2`, `H = sqrt(
 `H^2` is the share of the curves' variation along the feature that differs between observations: 0 when the curves
 are parallel (no interaction involving the feature), whatever the model adds that does not depend on it; adding a
 constant or centring the curves leaves it unchanged. It is exactly 0 for flat curves, and when the root mean square of
-the centred curves is at most `64 * f64::EPSILON` times the largest absolute prediction (flat up to rounding: without
-the anchor and this floor, curves constant at 0.1, 0.2, 0.7, 1.1, 0.3 on 20 grid points gave H = 0.99 from rounding
-residues alone); NaN when a prediction is NaN or the sums of squares overflow. No other threshold is applied to it.
+the centred curves is at most `64 * f64::EPSILON` times the largest absolute prediction at the first or last grid
+point (flat up to rounding: without the anchor and this floor, curves constant at 0.1, 0.2, 0.7, 1.1, 0.3 on 20 grid
+points gave H = 0.99 from rounding residues alone); NaN when a prediction is NaN or the sums of squares overflow. No
+other threshold is applied to it.
 Tests: `test_ice_heterogeneity_closed_form` (the module example, `H = 1/3`), `test_ice_heterogeneity_additive_is_zero`,
 `test_ice_heterogeneity_location_free`, `test_ice_flat_curves`, `test_ice_flat_curves_inexact_means`,
 `test_ice_cart_unused_feature_is_flat`, `test_ice_heterogeneity_overflow_is_nan`.
@@ -110,22 +111,25 @@ at the observation's own x1, its fitted value, bit for bit), `test_model_pd_reje
 
 ## Wall-clock (ICE)
 
-`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
-row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
-average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
-the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
-"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` with a linear predictor, default grid (51 points), `IceConfig` defaults.
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), eleven rounds with the sides interleaved per
+row, one core (`taskset -c 2`), one rayon thread, 2026-11-14, after the index was anchored. **Preliminary**: the load
+average was 8-10 during the runs (other builds on the machine), and the base itself moved by more than 2x at
+n = 1,000 between this run and an earlier one, so ratios within about 0.05 of 1 are noise. Cells are the median of the
+round medians (each the median of 7-41 calls after a warm-up); "ratio" is this tree over the base, "min ratio" the
+ratio of the minima. Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` with a linear predictor, default grid
+(51 points), `IceConfig` defaults.
 
 | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---:|---:|---:|---:|---:|
-| 100 | 0.13 | 0.15 | 1.10 | 1.10 |
-| 1,000 | 4.64 | 5.14 | 1.11 | 1.11 |
-| 10,000 | 74.7 | 71.5 | 0.96 | 0.96 |
+| 100 | 0.134 | 0.151 | 1.13 | 1.13 |
+| 1,000 | 4.58 | 5.11 | 1.11 | 1.30 |
+| 10,000 | 70.5 | 68.1 | 0.97 | 0.98 |
 
-The heterogeneity index adds two passes over the curves. The data are no longer copied when every row is used,
-which saves a copy of the data (faster at n = 10,000); at n = 1,000 an earlier run of the same comparison gave 1.27x,
-and putting the copy back gave 1.10x there, so that row moves with where the allocator places the arrays rather
-than with the arithmetic. Peak RSS at n = 10,000: 12.4 MB base, 12.3 MB this tree.
+The heterogeneity index adds two passes over the curves. The anchored row sum uses eight partial sums, so it costs
+what `row.sum()` cost before the anchor; with one running sum the index pass alone was measurably slower. The data
+are no longer copied when every row is used, which saves a copy of the data (faster at n = 10,000). The rows at
+n = 100 and 1,000 are at or above 1.1x and wait for the user's sign-off or a re-timing on a quiet machine. Peak RSS at
+n = 10,000 (earlier run): 12.4 MB base, 12.3 MB this tree.
 
 ## Running
 
