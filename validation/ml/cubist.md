@@ -104,3 +104,33 @@ The tests check DGP recovery only, and no number is compared with Cubist output.
 
 - Training R²: > 0.70 (typically > 0.90)
 - Out-of-sample R²: > 0.50
+
+## Wall-clock
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
+row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
+average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
+the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. No R timing (Cubist is not installed).
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| fit, defaults | 100 | 0.47 | 0.48 | 1.03 | 0.99 |
+|  | 1,000 | 7.29 | 7.51 | 1.03 | 1.03 |
+|  | 10,000 | 71.8 | 72.5 | 1.01 | 1.20 |
+| fit, `committees = 5` | 100 | 2.50 | 2.54 | 1.02 | 1.03 |
+|  | 1,000 | 37.0 | 39.8 | 1.08 | 1.02 |
+|  | 10,000 | 380 | 387 | 1.02 | 0.99 |
+| fit, `neighbors = 5` (leave-one-out training pass) | 100 | 1.43 | 1.02 | 0.71 | 0.73 |
+|  | 1,000 | 111 | 52.3 | 0.47 | 0.46 |
+|  | 10,000 | 11,425 | 4,278 | 0.37 | 0.38 |
+| `cubist_predict`, 1,000 new rows, `neighbors = 5` | 100 | 8.93 | 4.83 | 0.54 | 0.54 |
+|  | 1,000 | 101 | 41.3 | 0.41 | 0.40 |
+|  | 10,000 | 1,134 | 397 | 0.35 | 0.36 |
+
+The neighbour rows are faster because the k nearest cases are selected in linear time instead of sorting every
+training case per prediction. Peak RSS of one `neighbors = 5` fit at n = 10,000 (`/usr/bin/time -v`, whole process):
+6.4 MB base, 7.1 MB this tree (1.11x of a small total: the result now keeps the n model predictions of the
+training rows and the p column ranges for the neighbour step, and the leave-one-out pass holds a distance buffer of n
+buffers). Cubist changed by two lines between v0.5.0 and the lane base, so these rows are this
+package's.

@@ -52,3 +52,25 @@ x = 10, 3.2, 3.5, 4.6, 7.9, 8.9.
 
 `quantregForest`'s defaults and options (node size, `mtry`, `nthreads`, `what`) are not checked here, and its
 random draws cannot be reproduced. The method and its OOB rule follow the paper and the package's documentation.
+
+## Wall-clock
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
+row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
+average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
+the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. No R timing (quantregForest is not installed).
+
+| Row | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| fit with in-sample and OOB quantiles, 100 trees | 100 | 16.3 | 15.0 | 0.92 | 0.92 |
+|  | 1,000 | 302 | 304 | 1.01 | 1.02 |
+|  | 10,000 | 4,865 | 5,330 | 1.10 | 1.09 |
+| the same, 500 trees (default) | 1,000 | 1,770 | 1,666 | 0.94 | 0.93 |
+| quantiles of 1,000 new rows (base: `predict_quantiles_with_y`) | 100 | 50.2 | 34.4 | 0.68 | 0.67 |
+|  | 1,000 | 98.9 | 83.8 | 0.85 | 0.88 |
+|  | 10,000 | 192 | 188 | 0.98 | 1.03 |
+
+Peak RSS of one 500-tree fit at n = 10,000 (`/usr/bin/time -v`, whole process): 205 MB base, 103 MB this tree (each
+tree records its leaf members once, as `u32` offsets, and its in-bag rows as a bit set, instead of leaf lists of
+bootstrap draws).

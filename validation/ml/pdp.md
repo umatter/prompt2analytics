@@ -103,6 +103,25 @@ Behaviour tests (no R value): `test_pdp_2d_rejects_wrong_prediction_length`, `te
 `test_ice_spread_nan_column`, `test_ice_curves_rf_uses_forest_predictions` (random-forest ICE equals the tree average;
 at the observation's own x1, its fitted value, bit for bit), `test_model_pd_rejects_zero_grid_and_column_mismatch`.
 
+## Wall-clock (ICE)
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
+row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
+average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
+the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` with a linear predictor, default grid (51 points), `IceConfig` defaults.
+
+| n | base (ms) | this tree (ms) | ratio | min ratio |
+|---:|---:|---:|---:|---:|
+| 100 | 0.13 | 0.15 | 1.10 | 1.10 |
+| 1,000 | 4.64 | 5.14 | 1.11 | 1.11 |
+| 10,000 | 74.7 | 71.5 | 0.96 | 0.96 |
+
+The heterogeneity index adds two passes over the curves. The data are no longer copied when every row is used,
+which saves a copy of the data (faster at n = 10,000); at n = 1,000 an earlier run of the same comparison gave 1.27x,
+and putting the copy back gave 1.10x there, so that row moves with where the allocator places the arrays rather
+than with the arithmetic. Peak RSS at n = 10,000: 12.4 MB base, 12.3 MB this tree.
+
 ## Running
 
 ```bash

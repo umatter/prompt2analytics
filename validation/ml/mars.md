@@ -61,3 +61,25 @@ the round medians; "ratio" is this tree over the base, "min ratio" the ratio of 
 The one row above 1.1x, fast mode switched off by the caller at n = 1,000 (1.30x), is reached only by an explicit
 `fast = Some(false)` above n = 200, and was signed off by the maintainer on 2026-11-08: the forward pass detects
 rank by Gram-Schmidt instead of adding a ridge, and the same path is 0.46x of the base at n = 10,000.
+
+### After the span and penalty change (against v0.5.0)
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
+row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
+average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
+the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1.
+
+| `fast` | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| default (fast for n > 200) | 100 | 2.06 | 2.99 | 1.45 | 1.45 |
+|  | 1,000 | 128 | 145 | 1.14 | 0.98 |
+|  | 10,000 | 1,446 | 1,449 | 1.00 | 1.01 |
+| `Some(false)` | 100 | 2.08 | 2.98 | 1.43 | 1.46 |
+|  | 1,000 | 658 | 1,640 | 2.49 | 2.60 |
+|  | 10,000 | 47,458 | 86,130 | 1.81 | 1.87 |
+
+The slower rows come from Friedman's spans, accepted by the maintainer as the price of earth's defaults: at n = 100
+(no fast mode) each predictor has 17 instead of 11 candidate knots, and without fast mode 164 / 1,426 instead of
+98 / 768 at n = 1,000 / 10,000; the smaller default penalty (2) can also lengthen the forward pass. Fast mode keeps
+`fast_k` knots per predictor in both trees, so its cost at n = 10,000 is unchanged.

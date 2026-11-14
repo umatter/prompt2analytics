@@ -91,3 +91,7 @@ confirmed by the minima (1.03).
 ```bash
 cargo test -p p2a-core --lib --no-default-features --features ci -- tree_importance_rpart importance_band gbm_stump_influence
 ```
+
+The target-scale check (one pass over the target) against v0.5.0, same protocol as the quantile forest's rows in
+[`quantile_rf.md`](quantile_rf.md) (preliminary, loaded machine): `random_forest` defaults at n = 10,000, 6,065 ms base
+and 6,199 ms this tree (1.02); `gbm` defaults at n = 10,000, 1,855 and 1,929 ms (1.04).

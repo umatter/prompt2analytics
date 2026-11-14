@@ -141,6 +141,25 @@ Property tests against exact enumeration in Rust (not registered: they load no c
   ML-100).
 - shap's `l1_reg` feature selection for large M is not implemented (all features are kept).
 
+## Wall-clock (TreeSHAP, record only)
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
+row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
+average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
+the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. Exact path-dependent TreeSHAP of a 50-tree random forest fitted on 1,000 rows (`mtry` default), single
+thread; n is the number of explained rows. The TreeSHAP code is the same in both trees, so the ratio only checks the
+measurement; faster variants (FastTreeSHAP, Linear TreeSHAP) were evaluated and left out, since the exact kernel's
+cost is accepted.
+
+| Forest | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| depth 6 | 100 | 59.0 | 59.6 | 1.01 | 0.99 |
+|  | 1,000 | 597 | 616 | 1.03 | 1.07 |
+|  | 10,000 | 6,066 | 6,038 | 1.00 | 1.01 |
+| depth 20 | 100 | 860 | 859 | 1.00 | 0.98 |
+|  | 1,000 | 8,487 | 8,446 | 1.00 | 1.03 |
+
 ## Run
 
 ```bash
