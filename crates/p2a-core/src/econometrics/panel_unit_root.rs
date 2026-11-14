@@ -1055,7 +1055,6 @@ struct Panels {
     missing: MissingSummary,
 }
 
-/// "'a', 'b', 'c' (and 4 more)": at most five labels.
 /// Extract the panels: units as a factor (text or numeric ids), times as a whole-number
 /// index, rows with a missing value dropped. A repeated (unit, time) is an error; gaps
 /// are joined in time order, as `plm::purtest` does, with a warning; units with fewer

@@ -24,7 +24,7 @@
         {
           "finding": "ECON-68",
           "quantity": "Quadratic Spectral coefficients, SEs, J and lag count (qs_*, qs_pw_*)",
-          "note": "p2a keeps the L-lag rule k(j/L), j = 1..=L, for the Quadratic Spectral kernel; sandwich sums every lag up to n - 1"
+          "note": "p2a keeps the L-lag rule k(j/L), j = 1..=L, for the Quadratic Spectral kernel; sandwich sums every lag up to n - 1. No review finding covers the QS lag rule: ECON-68 is cited only as the closest finding (it names gmm's default QS kernel and bandwidth)"
         }
       ],
       "supersedes_legacy": []

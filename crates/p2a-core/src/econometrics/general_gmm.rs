@@ -53,9 +53,10 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::eig_symmetric;
+use crate::linalg::matrix_ops::{eig_symmetric, matrix_inverse};
 use crate::linalg::solve::{LM_QR_TOL, Qr, SYM_RANK_TOL, SingularPolicy, sym_inverse};
 use crate::regression::HacKernel;
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text, relative_change_vec};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided};
@@ -760,12 +761,11 @@ fn moment_covariance(
 /// by `k(j / (L + 1))` over the lags of sandwich's `weightsAndrews` (cut after the last weight
 /// above 1e-7: lags 1..=L, 1..=L+1 for Truncated), as `gmm(kernel = .., bw = L + 1)`. The
 /// Quadratic Spectral kernel keeps its earlier rule, `k(j / L)` for `j = 1..=L` (sandwich sums
-/// every lag up to n - 1 for it; deviation ECON-68 in the registry). With `prewhite`, the
-/// weights are those of the n - 1 prewhitened rows.
+/// every lag up to n - 1 for it; a registry deviation filed under ECON-68, the closest
+/// finding). With `prewhite`, the weights are those of the n - 1 prewhitened rows.
 fn hac_covariance(u: Array2<f64>, config: &GeneralGmmConfig, n: usize) -> EconResult<MomentCov> {
     let (eps, d) = if config.prewhite {
-        let (eps, d) = crate::regression::ols::var1_prewhiten_scores(u.view())
-            .map_err(moment_prewhitening_error)?;
+        let (eps, d) = prewhiten_moments(&u)?;
         (eps, Some(d))
     } else {
         (u, None)
@@ -795,6 +795,31 @@ fn hac_covariance(u: Array2<f64>, config: &GeneralGmmConfig, n: usize) -> EconRe
         omega: symmetrize(&(s / n as f64)),
         lags: Some(weights.len().saturating_sub(1)),
     })
+}
+
+/// VAR(1) prewhitening of the moment conditions (`u_t = A u_(t-1) + eps_t` by least squares
+/// without a constant, as sandwich's `prewhite = 1`): the residuals and `D = (I - A)^-1`. A
+/// well-conditioned, full-rank lagged matrix is solved by the normal equations (OLS's checked
+/// route); anything else, and a singular `I - A`, goes through the shared pivoted-QR
+/// prewhitening and its refusals.
+fn prewhiten_moments(u: &Array2<f64>) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (n, q) = u.dim();
+    if n >= q + 2 {
+        let lagged = u.slice(s![..n - 1, ..]);
+        let current = u.slice(s![1.., ..]);
+        if let Some(ne) = normal_equations_inverse(lagged)? {
+            // B = A' (q x q): current = lagged B + eps
+            let b = ne.coefficients_multi(lagged, current);
+            let mut eps = resource::try_zeros2(n - 1, q, "HAC prewhitening residuals")?;
+            eps.assign(&current);
+            ndarray::linalg::general_mat_mul(-1.0, &lagged, &b, 1.0, &mut eps);
+            let i_minus_a = Array2::<f64>::eye(q) - b.t();
+            if let Ok(d) = matrix_inverse(&i_minus_a.view()) {
+                return Ok((eps, d));
+            }
+        }
+    }
+    crate::regression::ols::var1_prewhiten_scores(u.view()).map_err(moment_prewhitening_error)
 }
 
 /// The shared prewhitening's refusal, reworded for moment conditions.
@@ -1695,6 +1720,30 @@ mod tests {
     use ndarray::Array1;
     use p2a_validation::{Check, Tol};
 
+    /// The shared prewhitening refusal is reworded for moment conditions; a change of the
+    /// OLS wording must not leave GMM users advice about regressors and scores.
+    #[test]
+    fn test_gmm_prewhitening_refusal_names_moment_conditions() {
+        // the second moment condition is identically zero: its lagged values are dependent
+        let u = Array2::from_shape_fn((60, 2), |(i, j)| {
+            if j == 0 {
+                ((i * 7919) % 13) as f64 / 13.0 - 0.4
+            } else {
+                0.0
+            }
+        });
+        let mut cfg = GeneralGmmConfig::default();
+        cfg.vcov = GmmVcov::HAC;
+        cfg.prewhite = true;
+        let msg = match hac_covariance(u, &cfg, 60) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("prewhitening must refuse a zero moment condition"),
+        };
+        assert!(msg.contains("moment condition"), "{msg}");
+        assert!(!msg.contains("regressor"), "{msg}");
+        assert!(!msg.contains("score"), "{msg}");
+    }
+
     fn cancelled() -> Budget {
         let token = CancelToken::new();
         token.cancel();
@@ -1982,15 +2031,11 @@ mod tests {
                 } else {
                     tag.to_string()
                 };
-                let r = fit(
-                    &ds,
-                    GeneralGmmConfig {
-                        kernel,
-                        bandwidth: Some(lags),
-                        prewhite,
-                        ..Default::default()
-                    },
-                );
+                let mut cfg = GeneralGmmConfig::default();
+                cfg.kernel = kernel;
+                cfg.bandwidth = Some(lags);
+                cfg.prewhite = prewhite;
+                let r = fit(&ds, cfg);
                 pin(&mut check, &tag, &r, Tol::coef(n), Tol::se(n), true);
                 check.scalar(
                     &format!("{tag}_n_weights"),

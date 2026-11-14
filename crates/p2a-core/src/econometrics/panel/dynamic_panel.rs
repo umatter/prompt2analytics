@@ -929,7 +929,6 @@ fn ab_mtest(
     (stat, normal_two_sided(stat))
 }
 
-/// "'a', 'b', 'c' (and 4 more)": at most five labels.
 /// Arellano-Bond difference GMM, as `plm::pgmm(transformation = "d")`, or Blundell-Bond
 /// system GMM with `config.transform = System`, as `plm::pgmm(transformation = "ld")`
 /// (see the module docs for the conventions).
