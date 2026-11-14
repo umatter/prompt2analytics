@@ -131,6 +131,6 @@ the median of the round medians (each the median of 1-21 calls after a warm-up);
 The neighbour rows are faster because the k nearest cases are selected in linear time instead of sorting every
 training case per prediction. Peak RSS of one `neighbors = 5` fit at n = 10,000 (`/usr/bin/time -v`, whole process):
 6.4 MB base, 7.1 MB this tree (1.11x of a small total: the result now keeps the n model predictions of the
-training rows and the p column ranges for the neighbour step, and the leave-one-out pass holds a distance buffer of n
-buffers). Cubist changed by two lines between v0.5.0 and the lane base, so these rows are this
+training rows and the p column ranges for the neighbour step, and the leave-one-out pass holds a distance buffer
+of n entries). Cubist changed by two lines between v0.5.0 and the lane base, so these rows are this
 package's.
