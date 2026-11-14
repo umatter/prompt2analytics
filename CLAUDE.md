@@ -223,7 +223,7 @@ cargo build -p p2a-core --features cuda                 # GPU acceleration
 
 ### GPU Acceleration (Optional)
 
-The `cuda` feature enables transparent GPU dispatch for core linear algebra operations via cuBLAS and cuSOLVER. GPU paths are selected automatically when problem sizes exceed calibrated thresholds.
+The `cuda` feature enables transparent GPU dispatch for core linear algebra operations via cuBLAS. GPU paths are selected automatically when problem sizes exceed calibrated thresholds.
 
 **GPU-accelerated operations** (via `linalg/gpu/` module):
 - **xtx (X'X)**: 2-7x speedup for k>=30 via cuBLAS DGEMM; used by PCA, the sandwich estimators and OLS's normal-equations fast path (a well-conditioned, full-rank X'X is solved by checked Cholesky, any other design by the pivoted QR of `linalg::solve`)
@@ -268,7 +268,7 @@ crates/p2a-core/src/
 │       ├── memory.rs       # ndarray <-> CudaSlice (row-major handling)
 │       ├── dispatch.rs     # Size thresholds (env-configurable)
 │       ├── blas.rs         # cuBLAS: xtx (DSYRK→DGEMM), xty (DGEMV), matmul (DGEMM)
-│       ├── solver.rs       # cuSOLVER: sandwich_meat (cholesky_inverse is a CPU passthrough)
+│       ├── solver.rs       # sandwich_meat (host scaling + cuBLAS DGEMM); cholesky_inverse is a CPU passthrough
 │       └── kernels.rs      # Custom: pairwise_distances (K-means)
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
@@ -533,24 +533,25 @@ let missing = cols.missing().clone();           // what was dropped
   `output::{print_missing_note, missing_json}`.
 - The NA policy is the default of the method's R reference:
   - **Omit:** one-sample tests (`t.test`); two-sample columns, each column separately (`t.test(x, y)`);
-    paired tests and correlation, jointly (`complete.cases`); response ~ group (`aov`, `kruskal.test`);
+    paired tests and `cor.test`, jointly (`complete.cases`); correlation matrices, pairwise
+    (`cor(use = "pairwise.complete.obs")`); response ~ group (`aov`, `kruskal.test`);
     contingency tables (`table`); survival (`survfit`, `coxph`); discrete choice on rows (`glm`, `polr`,
     `nnet::multinom`); panel, IV, DiD and RD, jointly over every model column (`plm`, `fixest`,
     `rdrobust`); difference GMM (`pgmm`; rows with a missing id or time too); panel unit-root tests (rows
     dropped, gaps joined with a warning, as `plm::purtest`); the weighted mean (complete value-weight
     pairs); Mauchly (complete subjects); `loglin` (`xtabs`) and `prop.trend.test` (a missing group is
-    dropped); SVM, PPR; the CLI viz commands (complete rows of the plotted columns; heatmap
-    `cor(use = "complete.obs")`).
+    dropped); SVM, PPR; the CLI viz commands (complete rows of the plotted columns; the heatmap
+    pairwise, as the correlation matrix).
   - **Fail:** long-format choice models (conditional and mixed logit), because one dropped row breaks a
     choice situation; weighting, matching, TMLE, gsynth; spatial; time series (`stl`, `HoltWinters`,
-    `acf`/`pacf`; dropping an interior value would splice the series); `cov.wt` and `isoreg`; k-means,
+    `acf`/`pacf`, `Box.test`; dropping an interior value would splice the series); `cov.wt` and `isoreg`; k-means,
     hierarchical clustering (`viz dendrogram`), PCA, forests and boosting (no surrogate splits).
   - Friedman and Quade: a missing response drops its block; a missing label is an error.
 - **The NA guard.** `cargo test -p p2a-validation --test na_guard` (in CI) fails on `into_no_null_iter(`
   and on `.f64()` with no `cast`, `strict_cast` or `cast_with_options` call in the six lines above, in
   non-test code of the five product crates; comments, string literals and `#[cfg(test)]` items are
   skipped. `// na-ok: <reason>` on the line or the line above marks a site that is null-free by
-  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marks the 14
+  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marks the 11
   known carry-over sites, which later tiers migrate; the reason says what the site gets wrong, after the
   finding id of the October 2026 code review where there is one. Migrating a site means removing its
   marker and lowering `MAX_LEGACY_MARKERS`. A malformed marker, an `na-legacy` marker with no extraction
@@ -1278,7 +1279,7 @@ let df = df! {
 - `validation/[category]/method.md` - Per-method validation documents with R code and expected values
 
 **GPU Acceleration:**
-- `crates/p2a-core/src/linalg/gpu/` - GPU module (cuBLAS + cuSOLVER wrappers)
+- `crates/p2a-core/src/linalg/gpu/` - GPU module (cuBLAS wrappers)
 - `crates/p2a-core/src/linalg/gpu/dispatch.rs` - Calibrated dispatch thresholds
 - `crates/p2a-core/benches/gpu_benchmarks.rs` - GPU vs CPU benchmarks (95 configurations)
 

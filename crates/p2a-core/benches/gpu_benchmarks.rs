@@ -56,7 +56,7 @@ fn main() {
     #[cfg(feature = "cuda")]
     {
         if let Some(ctx) = p2a_core::linalg::gpu::GpuContext::get() {
-            println!("GPU: ENABLED (cuBLAS + cuSOLVER active)");
+            println!("GPU: ENABLED (cuBLAS active)");
             println!("Thresholds:");
             println!(
                 "  xtx    n*k²  >= {}, k >= {}",
