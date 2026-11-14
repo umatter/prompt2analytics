@@ -46,7 +46,17 @@ monotonicity and on both entry points. The check does not depend on whether the 
 the inequality with lower <= upper.
 
 **Bootstrap:** units resampled (seeded; `seed = None` uses 42), type-7 percentile intervals (R `quantile(type =
-7)`); fewer than 100 valid replicates give no interval.
+7)`) at level 1 - alpha (`ci_level`; Display prints "Overall 90% CI" at alpha = 0.1, it used to print 95%
+whatever alpha was). Fewer than 100 valid replicates give no interval and a warning naming the count
+("20 of 20 bootstrap draws were valid; at least 100 are needed ..."); `n_bootstrap_valid` reports it.
+
+**Input:** every value of Z, D and Y must be 0 or 1 within 1e-9; anything else (NaN, 0.4, 2) is an error naming the
+column and the 0-based row. Values used to be rounded, so NaN and 0.4 counted as 0.
+
+**Wald outside the bounds:** the note says that the Wald ratio estimates the complier effect, which can lie outside
+bounds on the population average effect with every assumption holding; it used to say the assumptions "may be
+violated". Tests: `test_bpbounds_non_binary_values_are_refused`, `test_bpbounds_wald_outside_bounds_note`,
+`test_bpbounds_few_valid_bootstrap_draws_warn`, `test_bpbounds_display_prints_ci_level`.
 
 ## Tables
 
