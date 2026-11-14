@@ -283,27 +283,28 @@ impl std::fmt::Display for CubistResult {
             writeln!(f, "  ... ({} more rules)", self.n_rules - 5)?;
         }
 
-        writeln!(f)?;
-        writeln!(f, "Attribute usage (percent of training cases):")?;
-        writeln!(f, "  {:>6} {:>6}  Attribute", "Conds", "Model")?;
-        let mut by_usage: Vec<usize> = (0..self.usage_conditions.len()).collect();
-        by_usage.sort_by(|&a, &b| {
-            (self.usage_conditions[b] + self.usage_model.get(b).copied().unwrap_or(0.0)).total_cmp(
-                &(self.usage_conditions[a] + self.usage_model.get(a).copied().unwrap_or(0.0)),
-            )
-        });
-        for &i in by_usage.iter().take(10) {
-            let name = match &self.feature_names {
-                Some(names) => names.get(i).cloned().unwrap_or_else(|| format!("X{}", i)),
-                None => format!("X{}", i),
+        if !self.usage_conditions.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Attribute usage (percent of training cases):")?;
+            writeln!(f, "  {:>6} {:>6}  Attribute", "Conds", "Model")?;
+            let usage = |i: usize| {
+                self.usage_conditions[i] + self.usage_model.get(i).copied().unwrap_or(0.0)
             };
-            writeln!(
-                f,
-                "  {:>5.0}% {:>5.0}%  {}",
-                self.usage_conditions[i],
-                self.usage_model.get(i).copied().unwrap_or(0.0),
-                name
-            )?;
+            let mut by_usage: Vec<usize> = (0..self.usage_conditions.len()).collect();
+            by_usage.sort_by(|&a, &b| usage(b).total_cmp(&usage(a)));
+            for &i in by_usage.iter().take(10) {
+                let name = match &self.feature_names {
+                    Some(names) => names.get(i).cloned().unwrap_or_else(|| format!("X{}", i)),
+                    None => format!("X{}", i),
+                };
+                writeln!(
+                    f,
+                    "  {:>5.0}% {:>5.0}%  {}",
+                    self.usage_conditions[i],
+                    self.usage_model.get(i).copied().unwrap_or(0.0),
+                    name
+                )?;
+            }
         }
 
         writeln!(f)?;
@@ -920,12 +921,13 @@ use super::lcg_random;
 const MAX_NEIGHBORS: usize = 9;
 
 /// Quinlan's (1993) instance correction with equal weights: the model's prediction at `x`
-/// plus the mean residual `y_k - m_k` of the neighbours `(distance, y_k, m_k)`.
-fn instance_correction(model_x: f64, neighbours: &[(f64, f64, f64)]) -> f64 {
-    if neighbours.is_empty() {
+/// plus the mean of the neighbours' residuals `y_k - m_k`.
+fn instance_correction(model_x: f64, residuals: impl ExactSizeIterator<Item = f64>) -> f64 {
+    let k = residuals.len();
+    if k == 0 {
         return model_x;
     }
-    model_x + neighbours.iter().map(|&(_, y, m)| y - m).sum::<f64>() / neighbours.len() as f64
+    model_x + residuals.sum::<f64>() / k as f64
 }
 
 /// The training cases the correction reads: features, targets, the model's prediction at
@@ -977,11 +979,7 @@ impl NeighbourBase<'_> {
             buf.truncate(k);
         }
         buf.sort_unstable_by(order);
-        let neighbours: Vec<(f64, f64, f64)> = buf
-            .iter()
-            .map(|&(d, i)| (d.sqrt(), self.y[i], self.model[i]))
-            .collect();
-        instance_correction(model_x, &neighbours)
+        instance_correction(model_x, buf.iter().map(|&(_, i)| self.y[i] - self.model[i]))
     }
 }
 
@@ -1015,9 +1013,11 @@ fn column_ranges(x: &ArrayView2<f64>) -> Vec<f64> {
 ///
 /// `InsufficientData` for fewer than 2 rows; `Computation` when `x` and `y`
 /// differ in length; `InvalidSpecification` when `committees` is outside
-/// 1..=100, `neighbors` above 9, `min_improvement` outside [0, 1), or `x` or `y` holds a non-finite value; `Cancelled` once the
-/// installed computation budget expires (checked per committee and per row of
-/// the final prediction pass, which runs the nearest-neighbour correction).
+/// 1..=100, `neighbors` above 9, `min_improvement` outside [0, 1),
+/// `smoothing_coefficient` negative or not finite, or `x` or `y` holds a
+/// non-finite value; `Cancelled` once the installed computation budget expires
+/// (checked per committee and per row of the final prediction pass, which runs
+/// the nearest-neighbour correction).
 ///
 /// # Example
 ///
@@ -1077,6 +1077,14 @@ pub fn cubist(
             message: format!(
                 "min_improvement must be in [0, 1), got {}",
                 config.min_improvement
+            ),
+        });
+    }
+    if !(config.smoothing_coefficient.is_finite() && config.smoothing_coefficient >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "smoothing_coefficient must be finite and non-negative, got {}",
+                config.smoothing_coefficient
             ),
         });
     }
@@ -1705,10 +1713,11 @@ mod tests {
 
     #[test]
     fn test_cubist_instance_correction_closed_form() {
-        let neighbours = [(0.1, 3.0, 2.5), (0.2, 1.0, 1.75), (0.4, 4.0, 4.5)];
+        let neighbours = [(3.0, 2.5), (1.0, 1.75), (4.0, 4.5)];
         // 2.0 + mean(0.5, -0.75, -0.5) = 2.0 - 0.25
-        assert_eq!(instance_correction(2.0, &neighbours), 1.75);
-        assert_eq!(instance_correction(2.0, &[]), 2.0);
+        let residuals = neighbours.iter().map(|&(y, m)| y - m);
+        assert_eq!(instance_correction(2.0, residuals), 1.75);
+        assert_eq!(instance_correction(2.0, std::iter::empty()), 2.0);
     }
 
     #[test]
@@ -1880,6 +1889,44 @@ mod tests {
                 matches!(err, EconError::InvalidSpecification { .. }),
                 "{m}: {err}"
             );
+        }
+    }
+
+    /// A result deserialized from JSON written before attribute usage existed prints no
+    /// empty usage header.
+    #[test]
+    fn test_cubist_display_without_usage() {
+        let (x, y) = cubist_data();
+        let mut r = cubist(x.view(), y.view(), &CubistConfig::default()).unwrap();
+        assert!(r.to_string().contains("Attribute usage"));
+        r.usage_conditions.clear();
+        r.usage_model.clear();
+        assert!(!r.to_string().contains("Attribute usage"));
+    }
+
+    #[test]
+    fn test_cubist_smoothing_coefficient_is_validated() {
+        let (x, y) = cubist_data();
+        let n = x.nrows() as f64;
+        for k in [-1.0, -n, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let cfg = CubistConfig {
+                smoothing_coefficient: k,
+                ..Default::default()
+            };
+            let err = cubist(x.view(), y.view(), &cfg)
+                .err()
+                .unwrap_or_else(|| panic!("smoothing_coefficient {k} accepted"));
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. }),
+                "{k}: {err}"
+            );
+        }
+        for k in [0.0, 15.0] {
+            let cfg = CubistConfig {
+                smoothing_coefficient: k,
+                ..Default::default()
+            };
+            assert!(cubist(x.view(), y.view(), &cfg).is_ok(), "{k}");
         }
     }
 
