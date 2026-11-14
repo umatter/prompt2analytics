@@ -108,9 +108,7 @@
       ],
       "quantities": ["rows used / dropped (na.omit)"],
       "tolerance": "exact",
-      "deviations": [
-        {"finding": "ECON-16", "quantity": "count-part SEs, NB hurdle theta (all hurdle estimates)", "note": "not pinned to pscl::hurdle: the truncated-count information and the NB theta are Tier 4"}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

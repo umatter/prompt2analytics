@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "discrete_hurdle_count_part",
+      "name": "Hurdle count part: zero-truncated Poisson and negative binomial maximum likelihood (pscl::hurdle)",
+      "category": "econometrics",
+      "reference": "pscl::hurdle(y ~ x1 + x2, dist = 'poisson' | 'negbin', zero.dist = 'binomial', reltol = 1e-15), count part polished by Newton steps on the analytic truncated score; SEs from numDeriv::hessian of the truncated log-likelihood; zero part glm(binomial) at epsilon 1e-14",
+      "doc": "validation/econometrics/hurdle.md",
+      "cases": [
+        "disc_hurdle_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_poisson_count_part",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_count_part",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_flat_theta",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_intercept_only_zero_part"
+      ],
+      "quantities": [
+        "count coefficients, SEs, z, p",
+        "theta, log theta and their SEs",
+        "count and zero log-likelihoods, total log-likelihood, AIC, BIC",
+        "n, positive counts"
+      ],
+      "tolerance": "MLE (validation/README.md, iterative): count coefficients 1e-8 (1e-6 on the flat theta profile), SEs and z 1e-6 (1e-5 flat), p 1e-4, theta and log theta 1e-7, SE(log theta) and SE(theta) 1e-5 (log theta 1e-4 and its SE 1e-3 on the flat profile); log-likelihoods, AIC, BIC Tol::stat(500); pscl's own optim 1e-5 (Poisson), 1e-4 (NB); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
