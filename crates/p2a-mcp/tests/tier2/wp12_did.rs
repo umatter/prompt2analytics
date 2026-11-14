@@ -34,11 +34,15 @@ fn args(dataset: &str, comparison: &str, bootstrap: u64) -> serde_json::Value {
            "unit_col": "unit", "comparison_group": comparison, "bootstrap": bootstrap})
 }
 
-/// The text shows "ATT = 2.5335 (SE = 0.2034, 95% CI [2.1349, 2.9321])" and
-/// "Chi-squared(9) = 7.26, p-value = 0.6105" (R: sprintf of the case values).
+/// The text shows the group-weighted overall "ATT = 2.4588 (SE = 0.1865, ...)" (did
+/// 2.5.1's default aggte, varying base: case did_cs_varying), the simple one
+/// "Simple-weighted ATT: 2.5335 (SE = 0.2034, ...)" and "Chi-squared(9) = 7.26,
+/// p-value = 0.6105" (the never-treated Wald statistic is the same under both
+/// bases; R: sprintf of the case values).
 #[tokio::test]
 async fn test_validate_mcp_staggered_did_analytic() {
     let case = Case::load("did_cs_analytic");
+    let varying = Case::load("did_cs_varying");
     let (session, server) = session_with("did_cs_analytic");
     let res = call(
         &server,
@@ -50,16 +54,29 @@ async fn test_validate_mcp_staggered_did_analytic() {
     let t = text(&res);
     assert!(res.success, "{t}");
     let ov = line_with(&t, "ATT = ");
+    let simple = line_with(&t, "Simple-weighted ATT: ");
     let pt = line_with(&t, "Chi-squared(");
-    Check::new(&case)
+    Check::new(&varying)
         .scalar(
-            "never_simple_att",
+            "never_varying_group_overall_att",
             number_after(ov, "ATT = "),
             Tol::printed(4),
         )
         .scalar(
-            "never_simple_se",
+            "never_varying_group_overall_se",
             number_after(ov, "SE = "),
+            Tol::printed(4),
+        )
+        .finish();
+    Check::new(&case)
+        .scalar(
+            "never_simple_att",
+            number_after(simple, "Simple-weighted ATT: "),
+            Tol::printed(4),
+        )
+        .scalar(
+            "never_simple_se",
+            number_after(simple, "SE = "),
             Tol::printed(4),
         )
         .scalar(
@@ -90,26 +107,26 @@ async fn test_validate_mcp_staggered_did_string_unit_ids() {
         .collect();
     df.with_column(Column::new("unit".into(), labels)).unwrap();
     let (session, server) = session_with_datasets(vec![("cs_panel_str", Dataset::new(df))]);
-    let res = call(
-        &server,
-        &session,
-        "staggered_did",
-        args("cs_panel_str", "not_yet_treated", 0),
-    )
+    let res = call(&server, &session, "staggered_did", {
+        // the universal base of the did_cs_analytic transcription
+        let mut a = args("cs_panel_str", "not_yet_treated", 0);
+        a["base_period_type"] = json!("universal");
+        a
+    })
     .await;
     let t = text(&res);
     assert!(res.success, "{t}");
-    let ov = line_with(&t, "ATT = ");
+    let simple = line_with(&t, "Simple-weighted ATT: ");
     let pt = line_with(&t, "Chi-squared(");
     Check::new(&case)
         .scalar(
             "notyet_simple_att",
-            number_after(ov, "ATT = "),
+            number_after(simple, "Simple-weighted ATT: "),
             Tol::printed(4),
         )
         .scalar(
             "notyet_simple_se",
-            number_after(ov, "SE = "),
+            number_after(simple, "SE = "),
             Tol::printed(4),
         )
         .scalar(

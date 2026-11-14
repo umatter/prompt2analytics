@@ -12,6 +12,8 @@
         "rd_bwselect_fuzzy",
         "did_cs_analytic",
         "did_cs_covariates",
+        "did_cs_varying",
+        "did_cs_cov_overall",
         "did_2x2_training",
         "ipw_aipw_sim",
         "tmle_glm",
@@ -36,7 +38,7 @@
       ],
       "quantities": [
         "selected bandwidths h and b (left, right) for certwo and the Epanechnikov mserd, sharp and fuzzy",
-        "staggered overall ATT and SE (not-yet-treated; DR with anticipation 1)",
+        "staggered overall ATT and SE, did 2.5.1's default group-weighted aggregation with the varying base (not-yet-treated; DR with anticipation 1)",
         "2x2 DiD ATT, HC1 SE, residual df and the aliased regressor",
         "IPW Hajek ATE, M-estimation SE and EIF SE; AIPW ATE and SE",
         "TMLE ATE and SE with a linear Q",

@@ -384,11 +384,23 @@ pub struct StaggeredDiDRequest {
     )]
     pub estimation_method: Option<String>,
 
+    /// How each cell's base period is chosen
+    #[schemars(
+        description = "Base period of each ATT(g,t), as did::att_gt `base_period`: 'varying' (default, did's default: a pre-treatment cell compares t with the previous period, a post-treatment cell with the last period before g - anticipation) or 'universal' (every cell of cohort g against g + base_period - anticipation; the cell at that period is the reference cell, ATT 0 without SE). Case and separators are ignored; other values are an error."
+    )]
+    pub base_period_type: Option<String>,
+
     /// Base period relative to treatment
     #[schemars(
-        description = "Base period for pre-treatment comparison, relative to g. Default is -1 (one period before treatment)."
+        description = "Offset of the base period from g: -1 (default; did's only offset for 'varying'); with base_period_type 'universal', any negative offset from g. 0 or more is refused."
     )]
     pub base_period: Option<i32>,
+
+    /// Minimum units per cell
+    #[schemars(
+        description = "Fewest treated and fewest comparison units an ATT(g,t) needs to be computed (default 1: did has no per-cell minimum)."
+    )]
+    pub min_obs_per_cell: Option<usize>,
 
     /// Number of bootstrap replications
     #[schemars(
@@ -1593,7 +1605,7 @@ pub struct ScpiRequest {
 
     /// Constraint type
     #[schemars(
-        description = "Weight constraint: 'simplex' (default, non-negative weights summing to 1), 'lasso', 'ridge' or 'lasso_simplex'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Weight constraint: 'simplex' (default, non-negative weights summing to 1), 'lasso', 'ridge' or 'lasso_simplex' (same weights as simplex: the L1 norm is 1 on the simplex). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub constraint: Option<String>,
 
@@ -1605,19 +1617,37 @@ pub struct ScpiRequest {
 
     /// Significance level
     #[schemars(
-        description = "Significance level for prediction intervals. Default is 0.05 (95% PI)."
+        description = "Overall level of the prediction intervals, in (0, 1). Omitted: scpi's defaults, in-sample and out-of-sample levels 0.05 each (the interval covers with probability at least 0.90). Given: each part at alpha / 2, so the interval covers with probability at least 1 - alpha."
     )]
     pub alpha: Option<f64>,
 
-    /// Variance estimation method
+    /// Out-of-sample method
     #[schemars(
-        description = "Out-of-sample variance: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv' or 'kfold_cv'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Out-of-sample uncertainty (scpi's e.method): 'all' (default: the three below, each reported, 'gaussian' as the headline), 'gaussian' (sub-Gaussian bounds), 'ls' (location-scale) or 'qreg' (quantile regression). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub e_method: Option<String>,
+
+    /// Number of simulations
+    #[schemars(
+        description = "Number of simulations of the in-sample uncertainty (scpi's sims). Default 200; at least 10."
+    )]
+    pub sims: Option<usize>,
+
+    /// Seed
+    #[schemars(
+        description = "Seed of the simulations. Default: the session seed set with set_seed, else 42; the same seed gives the same intervals."
+    )]
+    pub seed: Option<u64>,
+
+    /// Deprecated variance method
+    #[schemars(
+        description = "Deprecated, use e_method: 'gaussian' selects e_method 'gaussian'; 'subgaussian', 'loo_cv' and 'kfold_cv' select 'all' (the last two with a warning). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub variance_method: Option<String>,
 
     /// Number of CV folds
     #[schemars(
-        description = "Number of folds for K-fold cross-validation (if variance_method='kfold_cv'). Default is 5."
+        description = "Deprecated and ignored (the cross-validation variances were removed)."
     )]
     pub cv_folds: Option<usize>,
 

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "etwfe_within_r2",
+  "area": "econometrics/did",
+  "method": "ETWFE within R-squared (fixest r2(type = 'wr2')) for the cgroup notyet / never fits, with a time-invariant control, on the balanced and the unbalanced panel",
+  "reference": "etwfe::etwfe(ivar = id, vcov = ~id) and fixest::r2(type = 'wr2')",
+  "call": "r2(etwfe(y ~ 0 | y ~ xc, tvar = year, gvar = first_treat, data = <panel>, ivar = id, cgroup = 'notyet' | 'never'), 'wr2')",
+  "dataset": "validation/datasets/generated/etwfe_panel.csv",
+  "datasets": ["validation/datasets/generated/etwfe_panel.csv", "validation/datasets/generated/etwfe_panel_unbalanced.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "etwfe": "0.6.2",
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "notyet_wr2": 0.16314532782103042,
+    "notyet_nobs": 960,
+    "never_wr2": 0.16992769325900592,
+    "never_nobs": 960,
+    "notyet_xc_wr2": 0.2170954069965928,
+    "notyet_xc_nobs": 960,
+    "unbal_wr2": 0.15903473630734566,
+    "unbal_nobs": 923,
+    "unbal_xc_wr2": 0.21488323977249357,
+    "unbal_xc_nobs": 923
+  }
+}

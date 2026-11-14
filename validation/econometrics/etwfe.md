@@ -29,7 +29,9 @@ y_it = a_i + l_t + sum_(g,s) D_it 1(G_i = g) 1(t = s) b_gs [+ controls] + e_it
   `t - first_treat`, from `-d`. Pinned as etwfe on `gvar = first_treat - d` (`ant1`). Staggered
   DiD follows did instead (base period `g - 1 - d`, post cells `t >= g`, see `staggered_did.md`),
   so ETWFE's simple and group aggregates include the `d` anticipation periods and did's start
-  at `g`.
+  at `g`. `d` must be below the first treated cohort minus the first period; when the first
+  treated cohort is the first period the error says that no cohort has a period before its onset
+  (`test_etwfe_anticipation_without_pre_period_is_explained`).
 - **Controls** enter as etwfe's formula controls (`etwfe(y ~ x)`): `x` demeaned within cohort and
   interacted with every cell (`cell:x_dm`), plus `x`, `first_treat::v:x` (treated cohorts) and
   `time::s:x` (periods other than `tref`). Terms the unit effects absorb (a time-invariant
@@ -103,7 +105,11 @@ p-values and CI bounds 1e-6, counts, df and keys exact, marginaleffects SEs 1e-6
 `test_validate_etwfe_emfx_simple`, `test_validate_etwfe_emfx_event`,
 `test_validate_etwfe_emfx_group`, `test_validate_etwfe_emfx_calendar`,
 `test_validate_etwfe_control`, `test_validate_etwfe_cgroup_changes_estimate`,
-`test_validate_etwfe_confidence_level`.
+`test_validate_etwfe_confidence_level`, `test_validate_etwfe_within_r2` (fixest's within R-squared,
+`r2(fit, "wr2")`, and nobs of five fits, case `etwfe_within_r2`, `Tol::se(n)`, registry
+`validation/methods/causal_did_t4.json`: not yet 0.16314532782103042, never 0.16992769325900592,
+not yet with `xc` 0.2170954069965928, unbalanced 0.15903473630734566, unbalanced with `xc`
+0.21488323977249357).
 
 Property tests (not registered; they read the case CSVs without loading a case):
 `test_etwfe_unidentified_cells_are_an_error` (the all-treated panel with `cgroup = never`,

@@ -721,6 +721,19 @@ Difference-in-Differences estimation.
 - ATT = (Treated_Post - Treated_Pre) - (Control_Post - Control_Pre)
 - Assumes parallel trends: without treatment, both groups would have same trend
 
+### staggered_did
+Callaway-Sant'Anna group-time ATTs with did 2.5.1's defaults (varying base period, the
+group-weighted overall ATT of `did::aggte`, units treated in the first period dropped).
+
+```
+/staggered_did dataset:panel outcome:y treatment_time:first_treat time_col:year unit_col:state bootstrap:0
+/staggered_did dataset:panel outcome:y treatment_time:first_treat time_col:year unit_col:state base_period_type:universal bootstrap:0
+```
+
+**Parameters:**
+- `base_period_type` (optional): `varying` (default, did's) or `universal` (every cell against g - 1 - anticipation)
+- `min_obs_per_cell` (optional): fewest treated and comparison units a cell needs (default 1)
+
 ### rd_estimate
 Sharp Regression Discontinuity estimation with robust bias-corrected inference.
 

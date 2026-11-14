@@ -108,9 +108,10 @@ looks like a validation failure but is not one.
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
-  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost, cobalt. Some case files also record the base
-  packages base, stats and datasets and the recommended packages boot and Matrix, which ship
-  with R.
+  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost, cobalt, CVXR, ECOSolveR, Qtools, and
+  scpi 3.0.1 (scpi 4.x needs R >= 4.4; on R 4.3 install 3.0.1 from the CRAN archive). Some case
+  files also record the base packages base, stats and datasets and the recommended packages boot
+  and Matrix, which ship with R.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -123,7 +124,11 @@ looks like a validation failure but is not one.
                      "CBPS", "etwfe", "marginaleffects", "mclust", "mixtools", "flexmix",
                      "apcluster", "e1071", "changepoint", "spatialreg",
                      "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr",
-                     "gbm", "dplyr", "tidyr", "mboost", "xgboost", "cobalt"))
+                     "gbm", "dplyr", "tidyr", "mboost", "xgboost", "cobalt", "CVXR",
+                     "ECOSolveR", "Qtools"))
+  # R 4.3: scpi 3.0.1 from the CRAN archive (R >= 4.4: install.packages("scpi"))
+  install.packages("https://cran.r-project.org/src/contrib/Archive/scpi/scpi_3.0.1.tar.gz",
+                   repos = NULL, type = "source")
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -388,7 +393,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Double/debiased ML (PLR, IRM, PLIV, IIVM) | [doubleml.md](econometrics/doubleml.md) | R-pinned |
 | Heterogeneous effects (hettx): effect summary with type-7 quantiles and IQR statistic, regression imputation on an aliased arm, the constant-effect SKS FRT and the HC2 interaction test | [hettx.md](econometrics/hettx.md) | R-pinned |
 | Synthetic control (Synth: simplex QP, V search) | [synth.md](econometrics/synth.md) | R-pinned, known deviations (CAUS-40) |
-| Synthetic control with prediction intervals (SCPI quantities) | [scpi.md](econometrics/scpi.md) | R-pinned, known deviations (CAUS-32) |
+| Synthetic control with prediction intervals (SCPI, scpi's default intervals) | [scpi.md](econometrics/scpi.md) | R-pinned, known deviations (CAUS-32) |
 | Generalized synthetic control (gsynth / fect: IFE, matrix completion, bootstrap) | [gsynth.md](econometrics/gsynth.md) | R-pinned, known deviations (CAUS-41, CAUS-43, CAUS-44) |
 | Logit | [logit.md](econometrics/logit.md) | R-pinned, known deviations (ECON-60) |
 | Probit | [probit.md](econometrics/probit.md) | R-pinned |

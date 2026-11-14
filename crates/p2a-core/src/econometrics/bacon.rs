@@ -30,6 +30,16 @@
 //!    serve as controls for later-treated units. These can produce bias if treatment effects
 //!    are heterogeneous over time.
 //!
+//! 4. **Later vs. Always Treated** (bacondecomp's type): units treated from the first
+//!    observed period serve as controls over the whole panel. They are their own group,
+//!    never pooled with the never-treated units.
+//!
+//! Each unit's timing is the first period with treatment 1: never treated, always
+//! treated (that period is the first period of the panel, bacondecomp's
+//! `treat_time == min(time)`) or a cohort, whatever the sign of its period. The
+//! treatment must be 0/1 and absorbing (bacondecomp's "Treatment not weakly
+//! increasing with time").
+//!
 //! ## Decomposition Formula
 //!
 //! The TWFE DiD estimator equals:
@@ -99,6 +109,11 @@ pub enum ComparisonType {
     /// as controls. Can introduce bias if treatment effects evolve over time.
     /// Also called "bad controls" in the literature.
     LaterVsEarlierTreated,
+
+    /// Later vs. Always Treated: units treated from the first observed period as
+    /// controls over the whole panel (bacondecomp's "Later vs Always Treated").
+    #[serde(rename = "later_vs_always_treated")]
+    LaterVsAlwaysTreated,
 }
 
 impl fmt::Display for ComparisonType {
@@ -107,6 +122,7 @@ impl fmt::Display for ComparisonType {
             ComparisonType::TreatedVsNeverTreated => write!(f, "Treated vs Never-Treated"),
             ComparisonType::TreatedVsNotYetTreated => write!(f, "Treated vs Not-Yet-Treated"),
             ComparisonType::LaterVsEarlierTreated => write!(f, "Later vs Earlier Treated"),
+            ComparisonType::LaterVsAlwaysTreated => write!(f, "Later vs Always Treated"),
         }
     }
 }
@@ -121,10 +137,15 @@ pub struct BaconComponent {
     /// The period when units in the "treated" group first received treatment.
     pub treated_group: i64,
 
-    /// Treatment timing for the control group in this comparison.
-    /// For never-treated units, this is 0 (or the special marker for never-treated).
-    /// For not-yet-treated, this is the period when they eventually get treated.
+    /// Treatment timing for the control group in this comparison: the period the
+    /// control units were first treated (for always-treated units the first period
+    /// of the panel), or 0 for never-treated units; `control_is_never` tells a
+    /// never-treated control from a cohort first treated at period 0.
     pub control_group: i64,
+
+    /// Whether the control group is the never-treated units.
+    #[serde(default)]
+    pub control_is_never: bool,
 
     /// The 2x2 DiD estimate for this comparison.
     /// This is the ATT from comparing these two groups.
@@ -148,13 +169,22 @@ pub struct BaconComponent {
     pub time_range: (i64, i64),
 }
 
-impl fmt::Display for BaconComponent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ctrl = if self.control_group == 0 {
+impl BaconComponent {
+    /// The control group as printed: "Never", "Always" or its first period.
+    fn control_label(&self) -> String {
+        if self.control_is_never {
             "Never".to_string()
+        } else if self.comparison_type == ComparisonType::LaterVsAlwaysTreated {
+            "Always".to_string()
         } else {
             self.control_group.to_string()
-        };
+        }
+    }
+}
+
+impl fmt::Display for BaconComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ctrl = self.control_label();
         write!(
             f,
             "G={} vs G={}: β̂={:.4}, weight={:.4} [{}]",
@@ -189,6 +219,14 @@ pub struct BaconDecompResult {
     /// Total weight from Later vs. Earlier Treated ("forbidden") comparisons.
     /// Higher values indicate potential bias from treatment effect heterogeneity.
     pub later_vs_earlier: f64,
+
+    /// Total weight from Later vs. Always Treated comparisons.
+    #[serde(default)]
+    pub later_vs_always: f64,
+
+    /// Number of always-treated units (treated from the first period).
+    #[serde(default)]
+    pub n_always_treated: usize,
 
     /// Number of distinct timing groups (cohorts).
     pub n_timing_groups: usize,
@@ -233,6 +271,9 @@ pub struct BaconEstimatesByType {
     pub treated_vs_not_yet: Option<f64>,
     /// Average estimate from Later vs. Earlier Treated comparisons.
     pub later_vs_earlier: Option<f64>,
+    /// Average estimate from Later vs. Always Treated comparisons.
+    #[serde(default)]
+    pub later_vs_always: Option<f64>,
 }
 
 impl fmt::Display for BaconDecompResult {
@@ -250,6 +291,9 @@ impl fmt::Display for BaconDecompResult {
         writeln!(f, "  Unique units:          {}", self.n_units)?;
         writeln!(f, "  Timing groups:         {}", self.n_timing_groups)?;
         writeln!(f, "  Never-treated units:   {}", self.n_never_treated)?;
+        if self.n_always_treated > 0 {
+            writeln!(f, "  Always-treated units:  {}", self.n_always_treated)?;
+        }
         writeln!(f, "  Treatment cohorts:     {:?}", self.timing_groups)?;
         writeln!(f)?;
         writeln!(f, "Weight Distribution by Comparison Type:")?;
@@ -271,6 +315,14 @@ impl fmt::Display for BaconDecompResult {
             self.later_vs_earlier,
             self.later_vs_earlier * 100.0
         )?;
+        if self.n_always_treated > 0 {
+            writeln!(
+                f,
+                "  Later vs Always Treated:     {:.4} ({:.1}%)",
+                self.later_vs_always,
+                self.later_vs_always * 100.0
+            )?;
+        }
         writeln!(f, "  Total weight:                {:.6}", self.weights_sum)?;
         writeln!(f)?;
 
@@ -284,6 +336,9 @@ impl fmt::Display for BaconDecompResult {
         }
         if let Some(est) = self.estimate_by_type.later_vs_earlier {
             writeln!(f, "  Later vs Earlier Treated:    {:.6}", est)?;
+        }
+        if let Some(est) = self.estimate_by_type.later_vs_always {
+            writeln!(f, "  Later vs Always Treated:     {:.6}", est)?;
         }
         writeln!(f)?;
 
@@ -301,11 +356,7 @@ impl fmt::Display for BaconDecompResult {
         writeln!(f, "{}", "-".repeat(80))?;
 
         for comp in &self.components {
-            let ctrl_str = if comp.control_group == 0 {
-                "Never".to_string()
-            } else {
-                comp.control_group.to_string()
-            };
+            let ctrl_str = comp.control_label();
             writeln!(
                 f,
                 "{:>10} {:>10} {:>12.6} {:>10.6} {:>8} {:>8}  {}",
@@ -478,39 +529,89 @@ pub fn bacon_decomp(
         incomplete
     };
 
-    // Build unit -> treatment timing map in one pass over the rows.
-    // Treatment timing = first period where treatment = 1 (0 means never treated)
+    // Treatment must be 0/1 and absorbing (bacondecomp refuses anything else).
+    let unit_labels = cols.factor(unit_col);
+    if let Some(i) = treatment.iter().position(|&d| d != 0.0 && d != 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "column '{treatment_col}' must be a 0/1 treatment indicator; found {} (unit \
+                 '{}', period {})",
+                treatment[i],
+                unit_labels.label(i),
+                time[i]
+            ),
+        });
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (unit[i] as i64, time[i] as i64));
+    for w in order.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if unit[a] == unit[b] && treatment[a] == 1.0 && treatment[b] == 0.0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Treatment not weakly increasing with time: unit '{}' is treated at {} and \
+                     untreated at {}",
+                    unit_labels.label(a),
+                    time[a],
+                    time[b]
+                ),
+            });
+        }
+    }
+
+    // Each unit's timing: the first period with treatment 1 (none: never treated;
+    // the first period of the panel: always treated, as bacondecomp's
+    // `treat_time == min(time)`).
+    let Some(&first_time) = times.first() else {
+        return Err(EconError::EmptyDataset);
+    };
     let mut first_treat: BTreeMap<i64, Option<i64>> = BTreeMap::new();
     for i in 0..n {
         let entry = first_treat.entry(unit[i] as i64).or_insert(None);
-        if treatment[i] > 0.5 {
+        if treatment[i] == 1.0 {
             let t = time[i] as i64;
             if entry.is_none_or(|f| t < f) {
                 *entry = Some(t);
             }
         }
     }
-    let unit_treatment_time: BTreeMap<i64, i64> = first_treat
+    let unit_treatment_time: BTreeMap<i64, Timing> = first_treat
         .into_iter()
-        .map(|(u, first)| (u, first.unwrap_or(0)))
+        .map(|(u, first)| {
+            let timing = match first {
+                None => Timing::Never,
+                Some(t) if t == first_time => Timing::Always,
+                Some(t) => Timing::Cohort(t),
+            };
+            (u, timing)
+        })
         .collect();
     let n_units = unit_treatment_time.len();
 
-    // Identify timing groups (distinct treatment times, excluding never-treated)
+    // Timing groups: the cohorts' first treatment periods (any sign)
     let timing_groups: Vec<i64> = unit_treatment_time
         .values()
-        .filter(|&&g| g > 0)
-        .copied()
+        .filter_map(|g| match g {
+            Timing::Cohort(t) => Some(*t),
+            _ => None,
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
 
-    // Count never-treated units
-    let n_never_treated = unit_treatment_time.values().filter(|&&g| g == 0).count();
+    let n_never_treated = unit_treatment_time
+        .values()
+        .filter(|&&g| g == Timing::Never)
+        .count();
+    let n_always_treated = unit_treatment_time
+        .values()
+        .filter(|&&g| g == Timing::Always)
+        .count();
 
     if timing_groups.is_empty() {
         return Err(EconError::InvalidSpecification {
-            message: "No treated units found. Treatment column should have 1s for treated periods."
+            message: "No units whose treatment starts after the first period found. Treatment \
+                      column should have 1s for treated periods."
                 .to_string(),
         });
     }
@@ -527,17 +628,17 @@ pub fn bacon_decomp(
     // 1. Each treated group vs. never-treated
     // 2. Each earlier-treated group vs. later-treated group (both directions)
 
-    // Type 1: Treated vs. Never-Treated
-    if n_never_treated > 0 {
+    // Type 1: Treated vs. Never-Treated; Later vs. Always Treated
+    for (control, ty) in [
+        (Timing::Never, ComparisonType::TreatedVsNeverTreated),
+        (Timing::Always, ComparisonType::LaterVsAlwaysTreated),
+    ] {
+        if !cells.contains_key(&control) {
+            continue;
+        }
         for &g in &timing_groups {
             crate::resource::checkpoint()?;
-            if let Some(comp) = compute_2x2_did(
-                &cells,
-                g,
-                0, // Never-treated
-                &times,
-                ComparisonType::TreatedVsNeverTreated,
-            ) {
+            if let Some(comp) = compute_2x2_did(&cells, g, control, &times, ty) {
                 components.push(comp);
             }
         }
@@ -609,6 +710,12 @@ pub fn bacon_decomp(
         .map(|c| c.weight)
         .sum();
 
+    let later_vs_always: f64 = components
+        .iter()
+        .filter(|c| c.comparison_type == ComparisonType::LaterVsAlwaysTreated)
+        .map(|c| c.weight)
+        .sum();
+
     // Compute weighted average estimates by type
     let estimate_by_type = compute_estimates_by_type(&components);
 
@@ -631,6 +738,8 @@ pub fn bacon_decomp(
         treated_vs_never,
         treated_vs_not_yet,
         later_vs_earlier,
+        later_vs_always,
+        n_always_treated,
         n_timing_groups: timing_groups.len(),
         n_never_treated,
         n_obs: n,
@@ -645,6 +754,15 @@ pub fn bacon_decomp(
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// A unit's treatment timing: never treated, treated from the first period of the
+/// panel, or first treated at a later period (of any sign).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Timing {
+    Never,
+    Always,
+    Cohort(i64),
+}
 
 /// Outcome sums and counts of one treatment cohort, per time period.
 ///
@@ -678,10 +796,10 @@ fn build_cohort_cells(
     y: &Array1<f64>,
     unit: &Array1<f64>,
     time: &Array1<f64>,
-    unit_treatment_time: &BTreeMap<i64, i64>,
+    unit_treatment_time: &BTreeMap<i64, Timing>,
     times: &[i64],
-) -> BTreeMap<i64, CohortCells> {
-    let mut cell_sums: BTreeMap<(i64, usize), (f64, usize)> = BTreeMap::new();
+) -> BTreeMap<Timing, CohortCells> {
+    let mut cell_sums: BTreeMap<(Timing, usize), (f64, usize)> = BTreeMap::new();
     for i in 0..y.len() {
         // Both lookups always succeed (the maps are built from these rows);
         // a miss would skip the row rather than panic.
@@ -696,7 +814,7 @@ fn build_cohort_cells(
         cell.1 += 1;
     }
 
-    let mut cohorts: BTreeMap<i64, CohortCells> = BTreeMap::new();
+    let mut cohorts: BTreeMap<Timing, CohortCells> = BTreeMap::new();
     for ((g, ti), (sum, count)) in cell_sums {
         let cells = cohorts.entry(g).or_default();
         cells.ti.push(ti);
@@ -717,7 +835,7 @@ fn two_by_two(
     pre: std::ops::Range<usize>,
     post: std::ops::Range<usize>,
     g_treated: i64,
-    g_control: i64,
+    (g_control, control_is_never): (i64, bool),
     comparison_type: ComparisonType,
     time_range: (i64, i64),
 ) -> Option<BaconComponent> {
@@ -747,6 +865,7 @@ fn two_by_two(
     Some(BaconComponent {
         treated_group: g_treated,
         control_group: g_control,
+        control_is_never,
         estimate,
         weight, // normalised in bacon_decomp
         n_treated: n_treated_pre + n_treated_post,
@@ -756,20 +875,26 @@ fn two_by_two(
     })
 }
 
-/// Compute a 2x2 DiD comparison between treated and never-treated groups.
+/// Compute a 2x2 DiD comparison between a cohort and the never-treated or the
+/// always-treated units.
 ///
 /// Pre-period: before g_treated; post-period: g_treated and after. The time
 /// range is the whole panel.
 fn compute_2x2_did(
-    cells: &BTreeMap<i64, CohortCells>,
+    cells: &BTreeMap<Timing, CohortCells>,
     g_treated: i64,
-    g_control: i64,
+    control_timing: Timing,
     times: &[i64],
     comparison_type: ComparisonType,
 ) -> Option<BaconComponent> {
-    let treated = cells.get(&g_treated)?;
-    let control = cells.get(&g_control)?;
+    let treated = cells.get(&Timing::Cohort(g_treated))?;
+    let control = cells.get(&control_timing)?;
     let (&first, &last) = (times.first()?, times.last()?);
+    let g_control = match control_timing {
+        Timing::Never => (0, true),
+        Timing::Always => (first, false),
+        Timing::Cohort(g) => (g, false),
+    };
 
     let lb = times.partition_point(|&t| t < g_treated);
     two_by_two(
@@ -789,15 +914,15 @@ fn compute_2x2_did(
 /// This handles the more complex case where both groups eventually get treated,
 /// so we need to carefully select the time window.
 fn compute_2x2_did_timing(
-    cells: &BTreeMap<i64, CohortCells>,
+    cells: &BTreeMap<Timing, CohortCells>,
     g_treated: i64,
     g_control: i64,
     times: &[i64],
     comparison_type: ComparisonType,
     early_as_treated: bool,
 ) -> Option<BaconComponent> {
-    let treated = cells.get(&g_treated)?;
-    let control = cells.get(&g_control)?;
+    let treated = cells.get(&Timing::Cohort(g_treated))?;
+    let control = cells.get(&Timing::Cohort(g_control))?;
 
     let lb = |g: i64| times.partition_point(|&t| t < g);
     // Determine the appropriate time window based on comparison type
@@ -824,7 +949,7 @@ fn compute_2x2_did_timing(
         pre,
         post,
         g_treated,
-        g_control,
+        (g_control, false),
         comparison_type,
         time_range,
     )
@@ -838,6 +963,8 @@ fn compute_estimates_by_type(components: &[BaconComponent]) -> BaconEstimatesByT
     let mut tvnyt_weight = 0.0;
     let mut lve_sum = 0.0;
     let mut lve_weight = 0.0;
+    let mut lva_sum = 0.0;
+    let mut lva_weight = 0.0;
 
     for comp in components {
         match comp.comparison_type {
@@ -852,6 +979,10 @@ fn compute_estimates_by_type(components: &[BaconComponent]) -> BaconEstimatesByT
             ComparisonType::LaterVsEarlierTreated => {
                 lve_sum += comp.weight * comp.estimate;
                 lve_weight += comp.weight;
+            }
+            ComparisonType::LaterVsAlwaysTreated => {
+                lva_sum += comp.weight * comp.estimate;
+                lva_weight += comp.weight;
             }
         }
     }
@@ -869,6 +1000,11 @@ fn compute_estimates_by_type(components: &[BaconComponent]) -> BaconEstimatesByT
         },
         later_vs_earlier: if lve_weight > 0.0 {
             Some(lve_sum / lve_weight)
+        } else {
+            None
+        },
+        later_vs_always: if lva_weight > 0.0 {
+            Some(lva_sum / lva_weight)
         } else {
             None
         },
@@ -1076,6 +1212,7 @@ mod tests {
         let comp = BaconComponent {
             treated_group: 2002,
             control_group: 0,
+            control_is_never: true,
             estimate: 1.5,
             weight: 0.25,
             n_treated: 100,
@@ -1914,5 +2051,218 @@ mod tests {
             Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "no_such"),
             other => panic!("expected ColumnNotFound, got {other:?}"),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // T4: always-treated units, cohorts at period 0 or earlier, 0/1 absorbing
+    // treatment (case bacon_always_treated, validation/r/cases/causal_did_t4.R)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The components in R's order, (treated, control) with never treated last,
+    /// as (treated, control or -1 for never, never flag, estimate, weight).
+    fn sorted_components(r: &BaconDecompResult) -> Vec<(i64, i64, bool, f64, f64)> {
+        let mut v: Vec<(i64, i64, bool, f64, f64)> = r
+            .components
+            .iter()
+            .map(|c| {
+                (
+                    c.treated_group,
+                    if c.control_is_never {
+                        -1
+                    } else {
+                        c.control_group
+                    },
+                    c.control_is_never,
+                    c.estimate,
+                    c.weight,
+                )
+            })
+            .collect();
+        v.sort_by_key(|c| (c.0, c.2, c.1));
+        v
+    }
+
+    #[test]
+    fn test_validate_bacon_always_treated() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("bacon_always_treated");
+        let r = bacon_decomp(&ds, "y", "unit", "time", "D").unwrap();
+        let n = r.n_obs;
+        assert_eq!(n, 400);
+        assert_eq!((r.n_never_treated, r.n_always_treated), (8, 8));
+        assert_eq!(r.timing_groups, vec![3, 5, 7]);
+        let c = sorted_components(&r);
+        Check::new(&case)
+            .vector(
+                "component_treated",
+                &c.iter().map(|x| x.0 as f64).collect::<Vec<_>>(),
+                Tol::exact(),
+            )
+            .vector(
+                "component_control",
+                &c.iter().map(|x| x.1 as f64).collect::<Vec<_>>(),
+                Tol::exact(),
+            )
+            .vector(
+                "component_control_never",
+                &c.iter()
+                    .map(|x| if x.2 { 1.0 } else { 0.0 })
+                    .collect::<Vec<_>>(),
+                Tol::exact(),
+            )
+            .vector(
+                "component_estimate",
+                &c.iter().map(|x| x.3).collect::<Vec<_>>(),
+                Tol::coef(n),
+            )
+            .vector(
+                "component_weight",
+                &c.iter().map(|x| x.4).collect::<Vec<_>>(),
+                Tol::coef(n),
+            )
+            .scalar("twfe", r.overall_estimate, Tol::coef(n))
+            .scalar("weighted_sum", r.overall_estimate, Tol::coef(n))
+            .scalar(
+                "type_weight_treated_vs_untreated",
+                r.treated_vs_never,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_treated_vs_untreated",
+                r.estimate_by_type.treated_vs_never.unwrap(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_weight_earlier_vs_later_treated",
+                r.treated_vs_not_yet,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_earlier_vs_later_treated",
+                r.estimate_by_type.treated_vs_not_yet.unwrap(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_weight_later_vs_earlier_treated",
+                r.later_vs_earlier,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_later_vs_earlier_treated",
+                r.estimate_by_type.later_vs_earlier.unwrap(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_weight_later_vs_always_treated",
+                r.later_vs_always,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_later_vs_always_treated",
+                r.estimate_by_type.later_vs_always.unwrap(),
+                Tol::coef(n),
+            )
+            .finish();
+        let shown = r.to_string();
+        assert!(shown.contains("Later vs Always Treated"), "{shown}");
+        assert!(shown.contains("Always-treated units:  8"), "{shown}");
+    }
+
+    /// A null-free numeric column as f64 (test-only read; integer columns cast).
+    fn f64s_of(ds: &Dataset, col: &str) -> Vec<f64> {
+        ds.df()
+            .column(col)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| v.expect("null-free column"))
+            .collect()
+    }
+
+    /// The panel of the `bacon_always_treated` case, read from its CSV for the property
+    /// tests below, which compare no R value.
+    fn always_panel() -> Dataset {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../validation/datasets/generated/bacon_always_panel.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).expect("bacon_always_panel.csv"))
+    }
+
+    /// `bacon_always_panel` with column `col` replaced by `f(row, unit, time)`.
+    fn always_panel_with(col: &str, f: impl Fn(usize, i64, i64) -> f64) -> Dataset {
+        let ds = always_panel();
+        let (u, t) = (f64s_of(&ds, "unit"), f64s_of(&ds, "time"));
+        let ut: Vec<(i64, i64)> = u
+            .iter()
+            .zip(&t)
+            .map(|(&u, &t)| (u as i64, t as i64))
+            .collect();
+        let v: Vec<f64> = ut
+            .iter()
+            .enumerate()
+            .map(|(i, &(u, t))| f(i, u, t))
+            .collect();
+        replace(&ds, Column::new(col.into(), v))
+    }
+
+    #[test]
+    fn test_bacon_refuses_treatment_reversal() {
+        let ds = always_panel();
+        let d = f64s_of(&ds, "D");
+        let reversed = always_panel_with("D", |i, u, t| if u == 20 && t == 8 { 0.0 } else { d[i] });
+        match bacon_decomp(&reversed, "y", "unit", "time", "D") {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.starts_with("Treatment not weakly increasing with time"),
+                    "{message}"
+                );
+                assert!(message.contains("unit '20'"), "{message}");
+                assert!(
+                    message.contains("treated at 7 and untreated at 8"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bacon_refuses_non_binary_treatment() {
+        let ds = always_panel();
+        let d = f64s_of(&ds, "D");
+        let two = always_panel_with("D", |i, _, _| 2.0 * d[i]);
+        match bacon_decomp(&two, "y", "unit", "time", "D") {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("must be a 0/1"), "{message}");
+                assert!(message.contains("found 2"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// Periods shifted by -5: the cohorts 3, 5, 7 become -2, 0, 2 and the
+    /// always-treated units are treated from period -5; every component is the
+    /// same with shifted labels.
+    #[test]
+    fn test_bacon_negative_period_cohort() {
+        let ds = always_panel();
+        let a = bacon_decomp(&ds, "y", "unit", "time", "D").unwrap();
+        let shifted = always_panel_with("time", |_, _, t| (t - 5) as f64);
+        let b = bacon_decomp(&shifted, "y", "unit", "time", "D").unwrap();
+        assert_eq!(b.timing_groups, vec![-2, 0, 2]);
+        let (ca, cb) = (sorted_components(&a), sorted_components(&b));
+        assert_eq!(ca.len(), cb.len());
+        for (x, y) in ca.iter().zip(&cb) {
+            assert_eq!(x.0 - 5, y.0);
+            assert_eq!(x.2, y.2);
+            if !x.2 {
+                assert_eq!(x.1 - 5, y.1);
+            }
+            assert!((x.3 - y.3).abs() <= 1e-12 * x.3.abs().max(1.0));
+            assert!((x.4 - y.4).abs() <= 1e-12);
+        }
+        assert!((a.overall_estimate - b.overall_estimate).abs() <= 1e-12);
     }
 }

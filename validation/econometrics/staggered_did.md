@@ -7,20 +7,84 @@ varies across units. The Callaway and Sant'Anna (2021) estimator avoids the bias
 effects under heterogeneous treatment effects. p2a's `run_staggered_did` (MCP `staggered_did`,
 CLI `causal staggered-did`) computes:
 
-- every cell ATT(g,t) with the universal base period g - 1 - anticipation (`base_period = -1`):
-  without covariates the difference in mean outcome changes Y_t - Y_base of cohort g and its
-  comparison units, with covariates DRDID's outcome-regression, IPW or doubly robust estimator
-  (below);
-- the aggregates of `did::aggte`: overall (`type = "simple"`: post-treatment cells weighted by
-  P(G = g)), group (`type = "group"`: each cohort's mean over its post-treatment cells) and
-  event study (`type = "dynamic"`: for each e = t - g, the cells at e weighted by P(G = g));
+- every cell ATT(g,t) against its base period (below): without covariates the difference in mean
+  outcome changes Y_t - Y_base of cohort g and its comparison units, with covariates DRDID's
+  outcome-regression, IPW or doubly robust estimator (below);
+- the aggregates of `did::aggte`: the overall ATT of did's default `type = "group"` (each
+  cohort's mean over its post-treatment cells, averaged with weights P(G = g), with the
+  weight-estimation term in its influence function; `overall_att`), the simple overall
+  (`type = "simple"`: post-treatment cells weighted by P(G = g); `overall_simple`), group
+  effects and the event study (`type = "dynamic"`: for each e = t - g, the cells at e weighted
+  by P(G = g));
 - a joint pre-trend test of the pre-treatment cells.
+
+### Defaults (did 2.5.1)
+
+| Setting | Default | did 2.5.1 |
+|---|---|---|
+| `base_period_type` | `varying` | `base_period = "varying"` |
+| `base_period` | -1 (the only offset with `varying`; any negative offset with `universal`; 0 or more refused) | universal base g - 1 - anticipation |
+| headline overall (`overall_att`) | group-weighted | `aggte()`'s default `type = "group"` |
+| `min_obs_per_cell` | 1 (no per-cell minimum) | none |
+| `seed` | `None` = 42 (`STAGGERED_DID_DEFAULT_SEED`) | `set.seed` by the user |
+
+**The two bases.** With `varying` (did's default) a pre-treatment cell (t < g) compares t with
+the previous observed period, and a post-treatment cell (t >= g) with the last observed period
+before g - anticipation (did's `pret`; g - 1 - anticipation on consecutive periods). There is no
+reference cell: the first period has no cell, every other period has one, and the event study
+has no zero at e = -1. With `universal` every cell of cohort g compares t with
+g + base_period - anticipation, and the cell at that period is the reference cell (ATT 0, SE
+NA). Post-treatment cells, the group effects and the simple and group overalls are the same
+under both bases (on consecutive periods); only the pre-treatment cells, the event-study leads
+and (not-yet-treated) the Wald statistic move. On non-contiguous periods both bases take the
+previous *observed* period, as did's `tlist[i - 1]` does.
+
+**Sample rules (did's `pre_process_did`).** Units first treated after the last period plus
+anticipation are recoded as never treated. Units first treated at or before the first period
+plus anticipation are dropped (`n_dropped_first_period`, warning "Dropped N units that were
+already treated in the first period."). A group (0 = never treated) whose rows per period are
+fewer than the covariates plus 5 gets did's warning "Some groups in your dataset have very few
+observations, which may cause estimation problems. Check groups: 3,5,7."; when that group is
+the never-treated one and the comparison is never treated, the call is refused, as did refuses
+it, with an error naming the bound and this API's option ("The never-treated group has 4.0 rows
+per period, fewer than the 5 (covariates + 5) ...; set comparison_group = 'not_yet_treated'").
+Duplicate (unit, time) rows are refused (below), whichever unit they belong to, including a unit
+the first-period rule drops.
 
 **Key parameters**: `outcome`, `treatment_time` (first treatment period, 0 or negative for
 never treated), `time_col`, `unit_col`, `comparison_group` (never treated or not yet treated),
-`estimation_method`, `anticipation`, `bootstrap`, `confidence_level`, covariates.
+`estimation_method`, `base_period_type`, `base_period`, `anticipation`, `bootstrap`,
+`confidence_level`, `min_obs_per_cell`, covariates.
 
-## R reference
+## R reference: did 2.5.1 defaults (cases `did_cs_varying`, `did_cs_small_cohorts`, `did_cs_cov_overall`)
+
+`validation/r/cases/causal_did_t4.R` calls `did::att_gt` and `did::aggte` (did 2.5.1, DRDID
+1.4.0) directly; registry `validation/methods/causal_did_t4.json`, entry
+`staggered_did_cs_defaults` (R-pinned):
+
+- `did_cs_varying` (`cs_panel.csv`): the four blocks never/not yet x varying/universal; cells
+  (att, se), the Wald pre-test, aggte group (overall and per group), simple and dynamic. Never,
+  varying: group overall 2.458753632369758 (SE 0.1865079163961569), simple 2.5335019071275218
+  (SE 0.20336453729686235), W = 7.255912828424548 on 9 df.
+  `test_validate_cs_varying_never_cs_panel`, `test_validate_cs_varying_notyet_cs_panel` pin every
+  cell, the pre-test, the group, simple and per-event-time quantities;
+  `test_validate_cs_universal_group_overall_cs_panel` the group overall and group effects with
+  the universal base (its cells are pinned by `did_cs_analytic` below).
+- `did_cs_small_cohorts` (`cs_small_panel.csv`, 33 units: cohorts of 4 units, 3 units first
+  treated in period 1): did drops the 3 units (n = 30), warns about groups 3, 5, 7, and computes
+  every cell; group overall 2.7299937974383486 (SE 0.44749250004425567).
+  `test_validate_cs_small_cohorts_drops_first_period_units` pins the counts, the warnings and
+  every quantity.
+- `did_cs_cov_overall` (`cs_cov_panel.csv`, covariates x1 + x2): group and simple overall with
+  their SEs for OR, IPW and DR, anticipation 0 and 1, never and not yet treated (12 blocks),
+  `test_validate_cs_cov_group_overall` (`Tol::coef/se(n)` for OR, `Tol::iterative(1e-8)` for
+  IPW and DR).
+
+Not compared: aggte's dynamic overall (the result reports the event study per event time).
+
+## R reference: universal base (case `did_cs_analytic`)
+
+These tests run with `base_period_type = universal` and pin the simple overall (`overall_simple`).
 
 `did` 2.1 is not installed on the reference machine, so `validation/r/cases/causal_did.R`
 implements its formulas directly from the package source, case `did_cs_analytic`:
@@ -227,9 +291,19 @@ period is not observed is not computed, with a warning (did drops it). `anticipa
 smaller than the number of periods (`InvalidSpecification`). Display prints the anticipation
 line. On integer periods the pre-trend W is the same for anticipation 0 and 1
 (69.50033372533454 both times, OR, never treated): with the universal base the pre-test is a
-re-parametrisation of the same pre-period contrasts. The identification diagnostics do not flag
-significant cells inside the configured window (`test_anticipation_window_cells_not_flagged`,
-`crates/p2a-core/src/diagnostics/did.rs`).
+re-parametrisation of the same pre-period contrasts.
+
+**Anticipation warning (CAUS-51).** The identification diagnostics test one lead: the event-study
+effect at the largest event time below `-anticipation` with a finite SE (e = -1 under the varying
+base, e = -2 under the universal base), at 1 - `confidence_level`. The warning reads "The
+event-study effect at e = -1 is 0.4200 (p = 0.0120 at the 5% level): outcomes of treated cohorts
+moved before treatment. If treatment was anticipated, set anticipation = 1." Before, every
+pre-treatment cell outside the window was tested at a fixed 5%, which warned on a third of null
+panels. Tests (`crates/p2a-core/src/diagnostics/did.rs`, not R-pinned):
+`test_anticipation_tests_only_the_nearest_lead`, `test_anticipation_uses_confidence_level`,
+`test_anticipation_false_alarm_rate_under_null` (400 seeded null panels: 16 warnings, 4%; R's rule
+gives 7% on 200),
+`test_pretrend_warning_threshold_is_on_the_statistic_scale`.
 
 Tests: `test_validate_cs_anticipation` (never and not yet treated, OR, and never treated DR,
 anticipation 1, every cell, aggregate and pre-test value), `test_cs_anticipation_zero_and_one_differ`,
@@ -306,6 +380,29 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics
 cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier2 -- wp12_did
 Rscript validation/r/run.R --check          # did_cs_analytic and did_cs_covariates still reproduce
 ```
+
+## Timing (against v0.5.0)
+
+Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
+the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
+(load average 38-39), so ratios within about 10% are noise.
+Rows are panels of N = n / 10 units over 10 periods, cohorts 4/6/8/never; each side runs its own
+defaults (`min_obs_per_cell = 1` on both). At n = 100 (10 units, 2 never treated) the new code
+refuses the never-treated comparison as did does (the never-treated group is too small), so that
+column has no ratio; the DR row at n = 100 fails overlap on both sides.
+
+| Fit | n = 100 | 1,000 | 10,000 |
+|---|---|---|---|
+| never treated, OR, `bootstrap: 0` | refused | 1.134 (base 1,022, new 1,159 µs) | 1.070 |
+| not yet treated, OR, `bootstrap: 0` | 1.140 (base 157, new 179 µs) | 1.151 (base 1,080, new 1,243 µs) | 1.080 |
+| never treated, OR, `bootstrap: 999` | refused | 0.942 | 0.915 |
+| never treated, DR, `x1 + x2`, `bootstrap: 0` | overlap fails | 0.972 | 1.153 (base 26.4, new 30.5 ms) |
+
+Four rows are above 1.10x and go to the user: the analytic fits now run did's sample rules (the
+first-period and small-group checks, the duplicate check) and, with the varying base, compute
+each pre-treatment cell against its own base, plus the group-weighted overall; the bootstrap is
+faster because cells no longer carry blocker lists. Not re-measured on an idle machine.
 
 ## References
 

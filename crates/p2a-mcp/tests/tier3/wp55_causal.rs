@@ -447,7 +447,6 @@ async fn test_validate_mcp_staggered_did() {
     c.estimation_method = AttEstimationMethod::DoublyRobust;
     c.anticipation = 1;
     c.bootstrap = 0;
-    c.base_period = -1;
     let lib = run_staggered_did(
         &ds,
         "y",
@@ -459,17 +458,31 @@ async fn test_validate_mcp_staggered_did() {
     )
     .unwrap();
     // The DR estimate contains a propensity IRLS: the written-out transcription is the tight reference.
+    // The simple overall is the same under both bases (post-treatment cells only).
     Check::new(&case)
         .scalar(
             "notyet_ant1_simple_att_dr",
-            lib.overall_att.att,
+            lib.overall_simple.att,
             Tol::iterative(1e-8),
         ) // 1.9729398081306126
         .scalar(
             "notyet_ant1_simple_se_dr",
-            lib.overall_att.std_error,
+            lib.overall_simple.std_error,
             Tol::iterative(1e-8),
         ) // 0.16520145652426557
+        .finish();
+    // did 2.5.1's default overall: aggte(type = "group")
+    Check::new(&Case::load("did_cs_cov_overall"))
+        .scalar(
+            "notyet_ant1_dr_group_overall_att",
+            lib.overall_att.att,
+            Tol::iterative(1e-8),
+        ) // 1.7751249020003081
+        .scalar(
+            "notyet_ant1_dr_group_overall_se",
+            lib.overall_att.std_error,
+            Tol::iterative(1e-8),
+        ) // 0.17046937971790868
         .finish();
     assert!(
         t.starts_with(&lib.to_string()),

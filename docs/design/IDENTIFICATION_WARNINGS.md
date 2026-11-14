@@ -59,6 +59,20 @@ These cannot be tested but risk factors can be flagged:
 | Unconfoundedness | Matching, IPW | High-dimensional covariate space |
 | No anticipation | DiD, Event study | Pre-trend patterns |
 
+**Anticipation (staggered DiD, as implemented).** `ANTICIPATION_DETECTED` is one test, not one per
+pre-treatment cell: the event-study effect at the nearest estimated lead, e* = the largest event
+time below `-anticipation` with a finite SE (e = -1 under the varying base; e = -2 under the
+universal base, whose e = -1 is the reference), warns when its normal two-sided p-value is below
+1 - `confidence_level`. The message names e*, the effect, p and the level, and the remediation is
+`anticipation + 1`. With no estimable lead there is no warning. Testing every pre cell at 5% warned
+on a third of null panels (300 units, 8 periods, cohorts 3/5/7/never); the single lead warns at
+about its level (`test_anticipation_false_alarm_rate_under_null`). The pre-trend diagnostic
+tests at the same level, alpha = 1 - `confidence_level`: `PARALLEL_TRENDS_VIOLATED` when the
+joint test's p-value is below alpha (a warning below alpha / 5, a caution otherwise), the
+assumption a potential violation below 2 alpha; at the default 0.95 these are the 5%, 1% and 10%
+breaks. Its threshold is the critical value of its statistic (the chi-squared or F quantile at
+1 - alpha with the test's df), not its p-value.
+
 ### 2.3 Interpretation Warnings (LLM-Layer)
 
 These address how results are communicated:

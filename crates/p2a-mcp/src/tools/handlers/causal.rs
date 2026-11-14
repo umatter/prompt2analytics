@@ -39,6 +39,7 @@ use crate::tools::requests::causal::{
 
 use crate::tools::common::parse_option;
 use p2a_core::econometrics::rd::rd_bandwidth_with;
+use p2a_core::econometrics::staggered_did::BasePeriodType;
 use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::options::Choices;
 use p2a_core::regression::HacKernel;
@@ -537,7 +538,7 @@ impl AnalyticsServer {
 
     /// Run Callaway-Sant'Anna staggered difference-in-differences.
     #[tool(
-        description = "Estimate group-time average treatment effects with staggered adoption as Callaway & Sant'Anna (2021) and R's did::att_gt with did::aggte aggregations (simple, dynamic/event, group). Without covariates every method is the difference in mean outcome changes; with covariates, 'outcome_regression' is DRDID reg_did_panel, 'ipw' std_ipw_did_panel and 'doubly_robust' drdid_panel, with covariates taken from the earlier of the two periods of each cell, as did. Comparison units: never treated (default) or not yet treated; anticipation shifts the base period. bootstrap = 0 gives analytic influence-function standard errors for every method. Returns ATT(g,t), the aggregations, a pre-trend test and identification diagnostics."
+        description = "Estimate group-time average treatment effects with staggered adoption as Callaway & Sant'Anna (2021) and R's did::att_gt (did 2.5.1 defaults: varying base period, units treated in the first period dropped) with did::aggte aggregations (dynamic/event, group, and the overall ATT as aggte's default group-weighted aggregation, with the simple one beside it). Without covariates every method is the difference in mean outcome changes; with covariates, 'outcome_regression' is DRDID reg_did_panel, 'ipw' std_ipw_did_panel and 'doubly_robust' drdid_panel, with covariates taken from the earlier of the two periods of each cell, as did. Comparison units: never treated (default) or not yet treated; anticipation shifts the base period. bootstrap = 0 gives analytic influence-function standard errors for every method. Returns ATT(g,t), the aggregations, a pre-trend test and identification diagnostics."
     )]
     pub async fn staggered_did(
         &self,
@@ -551,6 +552,10 @@ impl AnalyticsServer {
             request.estimation_method.as_deref(),
             AttEstimationMethod::OutcomeRegression
         ));
+        let base_period_type = tool_try!(parse_option(
+            request.base_period_type.as_deref(),
+            BasePeriodType::Varying
+        ));
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -559,10 +564,12 @@ impl AnalyticsServer {
         let config = StaggeredDidConfig {
             comparison_group,
             estimation_method,
+            base_period_type,
             base_period: request.base_period.unwrap_or(-1),
             bootstrap: request.bootstrap.unwrap_or(999),
             anticipation: request.anticipation.unwrap_or(0),
             seed: Some(self.seed_for(None).await),
+            min_obs_per_cell: request.min_obs_per_cell.unwrap_or(1),
             ..Default::default()
         };
 
@@ -600,7 +607,7 @@ impl AnalyticsServer {
 
     /// Perform Goodman-Bacon decomposition for staggered DiD.
     #[tool(
-        description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
+        description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated, later vs. always-treated units, treated from the first period) contribute to the overall estimate and with what weights. The treatment column must be 0/1 and absorbing (once 1, a unit stays treated). Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
     )]
     pub async fn bacon_decomp(
         &self,
@@ -1896,12 +1903,11 @@ impl AnalyticsServer {
 
     /// Run Synthetic Control with Prediction Intervals (SCPI).
     #[tool(
-        description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
-        Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification \
-        through prediction intervals that account for both in-sample and out-of-sample variance. \
-        Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). \
-        Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
-        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics. \
+        description = "Run Synthetic Control with Prediction Intervals (SCPI; Cattaneo, Feng & Titiunik 2021, JASA) for causal inference. \
+        The intervals follow R's scpi package at scpi's defaults (simplex, HC1, misspecification-robust, all three out-of-sample methods), 200 simulations: \
+        simulated in-sample bounds from the weight estimation plus out-of-sample bounds by sub-Gaussian, location-scale and quantile-regression methods, reported per method. \
+        Constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (same weights as simplex: the L1 norm is 1 on the simplex). \
+        Returns donor weights, treatment effects with prediction intervals and pre-treatment fit statistics. \
         Units may be identified by text or integer ids; the panel must be balanced."
     )]
     pub async fn scpi(
@@ -1912,10 +1918,17 @@ impl AnalyticsServer {
             SCPIConstraint::from_options(request.constraint.as_deref(), request.lambda)
                 .map_err(option_message)
         );
-        let variance_method = tool_try!(parse_option(
-            request.variance_method.as_deref(),
-            VarianceMethod::Subgaussian
+        let e_method = tool_try!(parse_option(
+            request.e_method.as_deref(),
+            p2a_core::econometrics::scpi::EMethod::All
         ));
+        let variance_method = match request.variance_method.as_deref() {
+            Some(v) => Some(tool_try!(parse_option(
+                Some(v),
+                VarianceMethod::Subgaussian
+            ))),
+            None => None,
+        };
         use ndarray::{Array1, Array2};
         use p2a_core::data::columns::{ColumnRequest, NaPolicy};
 
@@ -2062,16 +2075,37 @@ impl AnalyticsServer {
             }
         }
 
+        // the core names a donor by its column; name it by its unit here (too few
+        // pre-treatment periods are the core's error)
+        if treatment_idx >= 2
+            && let Some(name) = donor_codes
+                .iter()
+                .zip(&donor_units)
+                .find(|&(&u, _)| {
+                    let first = value(u, 0);
+                    (1..treatment_idx).all(|t| value(u, t) == first)
+                })
+                .map(|(_, name)| name)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "SCPI estimation failed: donor unit '{name}' has the same outcome in every \
+                 pre-treatment period; scpi needs variation in every donor to choose the \
+                 regularisation threshold rho (drop the unit)"
+            ))]));
+        }
+
         let config = SCPIConfig {
             constraint,
-            alpha: request.alpha.unwrap_or(0.05),
+            alpha: request.alpha,
+            e_method,
+            sims: request.sims.unwrap_or(200),
+            seed: request.seed.or(self.seed_or_global(None).await),
             variance_method,
-            cv_folds: request.cv_folds.unwrap_or(5),
             weight_threshold: request.weight_threshold.unwrap_or(0.001),
             ..Default::default()
         };
 
-        let result = match run_scpi(
+        let mut result = match run_scpi(
             &treated_values.view(),
             &donor_matrix.view(),
             treatment_idx,
@@ -2085,6 +2119,13 @@ impl AnalyticsServer {
                 ))]));
             }
         };
+
+        if request.cv_folds.is_some() {
+            result.warnings.push(
+                "cv_folds is deprecated and ignored (the cross-validation variances were removed)"
+                    .to_string(),
+            );
+        }
 
         // Format output with donor unit names
         let mut output = format!("{}\n", result);
@@ -3480,6 +3521,71 @@ mod tests {
         ] {
             assert!(out.contains(needle), "{needle}\n{out}");
         }
+    }
+
+    /// sims, seed and e_method reach run_scpi; alpha sets both levels to alpha / 2.
+    #[test]
+    fn test_mcp_scpi_passes_sims_seed_and_e_method() {
+        let df = grunfeld();
+        let r = run_scpi_on(
+            df.clone(),
+            json!({"sims": 20, "seed": 7, "e_method": "QREG", "alpha": 0.1}),
+        );
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        for needle in [
+            "Simulations: 20 (seed 7)",
+            "quantile regression out-of-sample bounds",
+            "u_alpha = 0.05, out-of-sample e_alpha = 0.05",
+        ] {
+            assert!(out.contains(needle), "{needle}\n{out}");
+        }
+        let r = run_scpi_on(df.clone(), json!({"e_method": "bootstrap"}));
+        assert_eq!(r.is_error, Some(true));
+        let out = text(&r);
+        assert!(
+            out.contains("expected one of: all, gaussian, ls, qreg"),
+            "{out}"
+        );
+        let r = run_scpi_on(df, json!({"sims": 5}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("sims"), "{}", text(&r));
+    }
+
+    /// A session seed set with set_seed reaches scpi when the request gives none; cv_folds is
+    /// reported as ignored.
+    #[test]
+    fn test_mcp_scpi_uses_the_session_seed_and_flags_cv_folds() {
+        let req: ScpiRequest = serde_json::from_value(json!({
+            "dataset": "g", "outcome": "inv", "unit_col": "firm", "time_col": "year",
+            "treated_unit": "1", "treatment_time": 1950, "sims": 10, "cv_folds": 3
+        }))
+        .unwrap();
+        let (rt, server) = server_with(vec![("g", grunfeld())]);
+        rt.block_on(async { *server.global_seed.write().await = Some(123) });
+        let r = rt.block_on(server.scpi(Parameters(req))).unwrap();
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        assert!(out.contains("Simulations: 10 (seed 123)"), "{out}");
+        assert!(out.contains("cv_folds is deprecated and ignored"), "{out}");
+    }
+
+    /// A donor with no pre-treatment variation is named by its unit id.
+    #[test]
+    fn test_mcp_scpi_names_a_constant_donor_by_unit() {
+        let mut df = grunfeld();
+        let firm = df.column("firm").unwrap().i64().unwrap().clone();
+        let inv = df.column("inv").unwrap().f64().unwrap().clone();
+        let constant: Vec<f64> = firm
+            .into_iter()
+            .zip(inv.into_iter())
+            .map(|(f, v)| if f == Some(4) { 7.5 } else { v.unwrap() })
+            .collect();
+        df.with_column(Series::new("inv".into(), constant)).unwrap();
+        let r = run_scpi_on(df, json!({"sims": 10}));
+        assert_eq!(r.is_error, Some(true));
+        let out = text(&r);
+        assert!(out.contains("donor unit '4'"), "{out}");
     }
 
     #[test]

@@ -167,8 +167,8 @@ unchanged.
 
 R: twang is not installed here; the missing-value refusals are not verified against it.
 
-Tests: `test_validate_na_twang_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
-`weighting_na_refusal`).
+Tests: `test_validate_na_twang_columns` (case `causal_mediation_na`, registry
+`validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
 ## References
 

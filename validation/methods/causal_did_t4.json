@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "staggered_did_cs_defaults",
+      "name": "Callaway-Sant'Anna with did 2.5.1's defaults: varying base period, aggte's group-weighted overall, did's sample rules",
+      "category": "econometrics",
+      "reference": "did 2.5.1 att_gt (base_period 'varying' and 'universal', est_method 'reg' | 'ipw' | 'dr', bstrap = FALSE) and aggte (type 'group' | 'simple' | 'dynamic'), called directly in validation/r/cases/causal_did_t4.R",
+      "doc": "validation/econometrics/staggered_did.md",
+      "cases": [
+        "did_cs_varying",
+        "did_cs_small_cohorts",
+        "did_cs_cov_overall"
+      ],
+      "tests": [
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_varying_never_cs_panel",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_varying_notyet_cs_panel",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_universal_group_overall_cs_panel",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_small_cohorts_drops_first_period_units",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_cov_group_overall",
+        "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_analytic",
+        "p2a-mcp::tier3::wp55_causal::test_validate_mcp_staggered_did"
+      ],
+      "quantities": [
+        "ATT(g,t) and SE with the varying base",
+        "Wald pre-test W, df, p",
+        "aggte group (overall and per group), simple overall, dynamic per event time",
+        "units dropped as treated in the first period; did's small-group warning",
+        "group and simple overall with covariates (OR, IPW, DR; anticipation 0 and 1)",
+        "MCP staggered_did: the group-weighted overall ATT and SE in the tool text (varying base, never-treated) and in the result (DR, not-yet-treated, anticipation 1)"
+      ],
+      "tolerance": "validation/README.md, n = 720 / 264 / 1200 rows: Tol::coef/se/stat/p_value(n); Tol::iterative(1e-8) for IPW and DR",
+      "deviations": [
+        {
+          "finding": "CAUS-84",
+          "quantity": "bootstrap SEs without covariates",
+          "note": "unit-resampling bootstrap where did uses a multiplier bootstrap; random, never pinned"
+        },
+        {
+          "finding": "CAUS-84",
+          "quantity": "aggte dynamic overall",
+          "note": "the result reports the event-study effects per event time, not their overall average; the case's dynamic_overall_* keys are not compared"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "bacon_always_treated",
+      "name": "Goodman-Bacon decomposition with always-treated units and a cohort at period 0",
+      "category": "econometrics",
+      "reference": "bacondecomp 0.1.1 bacon (Later vs Always Treated); fixest 0.14.2 feols two-way fixed effects",
+      "doc": "validation/econometrics/bacon.md",
+      "cases": [
+        "bacon_always_treated"
+      ],
+      "tests": [
+        "p2a-core::econometrics::bacon::tests::test_validate_bacon_always_treated"
+      ],
+      "quantities": [
+        "components (treated, control, never flag, estimate, weight)",
+        "type weights and estimates",
+        "TWFE coefficient and the identity"
+      ],
+      "tolerance": "validation/README.md, n = 400: Tol::coef(400)",
+      "deviations": [
+        {
+          "finding": "CAUS-53",
+          "quantity": "unbalanced panels",
+          "note": "bacondecomp refuses them; p2a warns that the identity is not guaranteed"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "etwfe_within_r2",
+      "name": "ETWFE within R-squared (fixest r2 type 'wr2')",
+      "category": "econometrics",
+      "reference": "etwfe 0.6.2 etwfe(ivar = id, vcov = ~id); fixest 0.14.2 r2(type = 'wr2')",
+      "doc": "validation/econometrics/etwfe.md",
+      "cases": [
+        "etwfe_within_r2"
+      ],
+      "tests": [
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_within_r2"
+      ],
+      "quantities": [
+        "within R-squared",
+        "nobs"
+      ],
+      "tolerance": "validation/README.md, n = 923 / 960: Tol::se(n); nobs exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
