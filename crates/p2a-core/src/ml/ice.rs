@@ -509,23 +509,23 @@ fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>) -> EconResult<IceSpread> 
 /// `H = sqrt(SS_het / SS_tot)` of [`IceSpread::heterogeneity_index`] on the curves (rows):
 /// each curve centred on its own grid mean; 0 when `SS_tot` is 0; NaN when a value is NaN.
 fn heterogeneity_index(ice_curves: ArrayView2<'_, f64>) -> f64 {
-    if ice_curves.iter().any(|v| v.is_nan()) {
-        return f64::NAN;
-    }
     let (n_obs, n_grid) = ice_curves.dim();
     if n_obs == 0 || n_grid == 0 {
         return 0.0;
     }
-    // Mean centred curve, then the two sums of squares in one more pass.
+    // Mean centred curve, then the two sums of squares in one more pass. A NaN prediction
+    // makes its row mean, and so both sums, NaN.
     let mut mean_curve = vec![0.0; n_grid];
     let mut row_means = Vec::with_capacity(n_obs);
     for row in ice_curves.rows() {
         let m = row.sum() / n_grid as f64;
         row_means.push(m);
         for (acc, &v) in mean_curve.iter_mut().zip(row) {
-            *acc += (v - m) / n_obs as f64;
+            *acc += v - m;
         }
     }
+    let inv_n = 1.0 / n_obs as f64;
+    mean_curve.iter_mut().for_each(|c| *c *= inv_n);
     let (mut ss_tot, mut ss_het) = (0.0, 0.0);
     for (row, &m) in ice_curves.rows().into_iter().zip(&row_means) {
         for (&v, &c) in row.iter().zip(&mean_curve) {
@@ -534,7 +534,9 @@ fn heterogeneity_index(ice_curves: ArrayView2<'_, f64>) -> f64 {
             ss_het += (centred - c) * (centred - c);
         }
     }
-    if ss_tot > 0.0 {
+    if ss_tot.is_nan() || ss_het.is_nan() {
+        f64::NAN
+    } else if ss_tot > 0.0 {
         (ss_het / ss_tot).min(1.0).sqrt()
     } else {
         0.0
