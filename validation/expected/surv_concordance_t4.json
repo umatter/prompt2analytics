@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "id": "surv_concordance_t4",
+  "area": "econometrics/survival",
+  "method": "Cox concordance (Harrell's C as coxph reports it) and its infinitesimal-jackknife SE; lung age + sex, age + sex + ph.ecog, and the 10-row heavy-ties fixture; lung age + sex clustered on inst (grouped IJ SE)",
+  "reference": "survival::coxph(..., coxph.control(eps = 1e-12, toler.chol = 1e-13))$concordance (concordancefit: timewt = 'n', infinitesimal-jackknife std)",
+  "call": "coxph(Surv(time, status) ~ age + sex [+ ph.ecog], data = lung, ties); coxph(Surv(time, event) ~ x, data = cox_ties_small, ties); coxph(Surv(time, status) ~ age + sex, data = lung, cluster = inst)",
+  "dataset": "validation/datasets/generated/lung.csv",
+  "datasets": ["validation/datasets/generated/cox_ties_small.csv", "validation/datasets/generated/lung.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "ties_small_efron_counts": {
+      "names": ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"],
+      "values": [9, 9, 17, 3, 0]
+    },
+    "ties_small_efron_c": 0.5,
+    "ties_small_efron_se": 0.12121830534626529,
+    "ties_small_breslow_counts": {
+      "names": ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"],
+      "values": [9, 9, 17, 3, 0]
+    },
+    "ties_small_breslow_c": 0.5,
+    "ties_small_breslow_se": 0.12121830534626529,
+    "lung_age_sex_efron_counts": {
+      "names": ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"],
+      "values": [11910, 7793, 311, 28, 0]
+    },
+    "lung_age_sex_efron_c": 0.60285300289797139,
+    "lung_age_sex_efron_se": 0.025498677769730339,
+    "lung_age_sex_breslow_counts": {
+      "names": ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"],
+      "values": [11910, 7793, 311, 28, 0]
+    },
+    "lung_age_sex_breslow_c": 0.60285300289797139,
+    "lung_age_sex_breslow_se": 0.025498677769730339,
+    "lung_age_sex_ecog_efron_counts": {
+      "names": ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"],
+      "values": [12544, 7117, 126, 28, 0]
+    },
+    "lung_age_sex_ecog_efron_c": 0.63713549300045491,
+    "lung_age_sex_ecog_efron_se": 0.02506797385307958,
+    "lung_age_sex_cluster_inst_counts": {
+      "names": ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"],
+      "values": [11814, 7704, 308, 28, 0]
+    },
+    "lung_age_sex_cluster_inst_c": 0.60365177040250173,
+    "lung_age_sex_cluster_inst_se": 0.01984781019980545,
+    "n_age_sex": 228,
+    "n_age_sex_ecog": 227,
+    "n_cluster_inst": 227
+  }
+}

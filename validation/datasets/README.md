@@ -76,10 +76,12 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/binom_minlike_t4.csv` | 6 × 4 (label, x, n, p) | `stat_binom_minlike_t4` | `r/cases/stats_exact_t4.R` | literal values: six (x, n, p) cells of binom.test's two-sided rule |
 | `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/cli_mtcars.csv` | 32 × 4 (mpg, wt, hp, qsec) | `cli_viz_residuals` | `r/cases/cli_other.R` | `datasets::mtcars`, the four columns of `lm(mpg ~ wt + hp + qsec)` |
+| `generated/cox_info_singular.csv` | 8 × 4 (time, status, x, z) | `surv_cox_info_singular_t4` | `r/cases/surv_concordance_t4.R` | literal values: `x` varies only among the two rows censored before the first event, so it is constant in every event-time risk set |
 | `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/hac_truncated_indefinite.csv` | 40 × 2 (y, x) | `hac_truncated_indefinite` | `r/cases/reg_vcov_t4.R` | seed 5, errors AR(-0.7) |
+| `generated/hettx_frt_sim.csv` | 40 × 5 (y_het, y_homo, treat, x1, x2) | `hettx_dfm_t4` | `r/cases/causal_hettx_t4.R` | seed 20261113; 20 treated (fixed design), `y_het` with effect 1 + 1.5 x1, `y_homo` with the constant effect 2; DFM randomization test of a constant effect |
 | `generated/kalman_intercepts.csv` | 50 × 2 (t, y) | `kalman_intercepts` | `r/cases/ts_statespace.R` | seed 20261124 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
