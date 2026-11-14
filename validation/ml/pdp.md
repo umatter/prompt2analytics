@@ -128,7 +128,8 @@ ratio of the minima. Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` wi
 The heterogeneity index adds two passes over the curves. The anchored row sum uses eight partial sums, so it costs
 what `row.sum()` cost before the anchor; with one running sum the index pass alone was measurably slower. The data
 are no longer copied when every row is used, which saves a copy of the data (faster at n = 10,000). The rows at
-n = 100 and 1,000 are at or above 1.1x and wait for the user's sign-off or a re-timing on a quiet machine. Peak RSS at
+n = 100 and 1,000 are at or above 1.1x; they were signed off on 2026-11-14 (rule 5), and a re-timing on a quiet
+machine drops any that comes in at or below 1.1x. Peak RSS at
 n = 10,000 (earlier run): 12.4 MB base, 12.3 MB this tree.
 
 ## Running

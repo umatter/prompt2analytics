@@ -144,7 +144,7 @@ pre-periods, cross-validation on in-sample fit (CAUS-43).
 
 The fits with covariates cost 7.27x, which is accepted: that row is the iteration gsynth runs and
 the base did not. Three rows without covariates are above 1.10x on `gsynth_simdata` and the
-500-cell panel (1.14, 1.14, 1.16) and await the user's decision; the same calls on the other panels
+500-cell panel (1.14, 1.14, 1.16), signed off on 2026-11-14 (rule 5); the same calls on the other panels
 are at or below 1.0x.
 
 The fit with no covariates costs more than the base because the factors come from a full symmetric

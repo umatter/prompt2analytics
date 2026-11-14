@@ -1532,7 +1532,8 @@ async fn test_validate_mcp_multinom_overlap() {
 }
 
 /// disc_hurdle_zero: the binary part of pscl::hurdle is glm(I(y > 0) ~ x1 + x2, binomial).
-/// The count part is ECON-16 (Tier 4) and is not pinned.
+/// The count part is pinned through the tool in
+/// `tools::handlers::discrete::tests::test_validate_mcp_hurdle_count_part` (`disc_hurdle_t4`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_hurdle_zero_part() {
     let case = Case::load("disc_hurdle_zero");

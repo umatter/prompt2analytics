@@ -147,7 +147,7 @@ entities over 20 periods with two regressors.
 
 Both fits stay within 1.1x of v0.5.0 from n = 1,000 on; at n = 100 the within fit is at 1.10x
 (17.6 µs against 19.5 µs) and the Swamy fit at 1.12x (24.3 µs against 27.3 µs; 1.15x by the
-minima), which is above the rule and not signed off. The added cost is the per-entity
+minima), which is above the rule and was signed off on 2026-11-13. The added cost is the per-entity
 bookkeeping (`entities`, `n_entities_used`), the eigen check of Delta in the Swamy fit and the
 weighted homogeneity statistic, a constant of about 2-3 µs; none of it grows faster than the
 number of entities.

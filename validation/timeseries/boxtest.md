@@ -158,6 +158,9 @@ autocorrelations with `na.action = na.pass`.
 
 *Benchmarks run on 2026-01-19. Rust benchmarks via Criterion, R benchmarks via system.time().*
 
+The dataset wrapper (`run_box_test`) reads its column through the NA-aware extractor since Tier 4,
+which costs 2.2-2.5x of v0.5.0's raw cast at every n; signed off on 2026-11-14 (rule 5).
+
 ## References
 
 - Box, G. E. P. & Pierce, D. A. (1970). "Distribution of residual correlations in autoregressive-integrated moving average time series models." *Journal of the American Statistical Association*, 65, 1509-1526.

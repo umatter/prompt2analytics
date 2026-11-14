@@ -122,14 +122,14 @@
       "id": "cor_test_pearson",
       "name": "Pearson correlation test on dataset columns (complete pairs, Int64)",
       "category": "stats",
-      "reference": "stats::cor.test (method = 'pearson', two-sided (one-sided: `cor_test_t4`))",
+      "reference": "stats::cor.test (method = 'pearson', two-sided)",
       "doc": "validation/stats/new_methods.md",
       "cases": ["stat_two_sample_na"],
       "tests": [
         "p2a-core::stats::cortest::tests::test_validate_cor_test_two_sample_na",
         "p2a-core::stats::cortest::tests::test_validate_na_cor_test_columns"
       ],
-      "quantities": ["r", "t", "df", "p", "95% CI (Fisher z)", "n pairs"],
+      "quantities": ["r", "t", "df", "p (two-sided; one-sided: cor_test_t4)", "95% CI (Fisher z)", "n pairs"],
       "tolerance": "validation/README.md, n < 100: r 1e-6, t and CI 1e-5 relative, p 1e-5 (abs 1e-12); df and counts exact",
       "deviations": [{"finding": "X-3", "quantity": "correlation of a constant column", "note": "p2a refuses; cor.test returns NA with the warning 'the standard deviation is zero'"}],
       "supersedes_legacy": []

@@ -158,4 +158,4 @@ permutation, while the test of a constant effect evaluates it at every one of th
 for every draw (the variance in closed form; the range from the lines' envelopes and the MAD from a kink
 sweep, O(n log n) per draw; the IQR by selection, O(n) per grid value), and regression imputation fits two
 outcomes per arm. The decomposition rows add the idiosyncratic randomization test, which v0.5.0 did not
-run. These rows, and the new default at n = 100, await the user's sign-off.
+run. These rows, and the new default at n = 100, were signed off on 2026-11-14 (rule 5).

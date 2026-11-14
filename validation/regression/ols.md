@@ -338,7 +338,8 @@ factorisation and only takes the eigen-decomposition (about 10 µs at k = 4) for
 with `fix`.
 GLS AR(1) at n = 10,000 takes 7.01 ms against 6.26 ms (1.12x; 1.11x by the minima; 0.99-1.03x
 at n <= 1,000). The non-finite input refusal and the exact-fit check this version adds are O(n k)
-passes, far below that difference, so its cause is not identified yet; it is not signed off.
+passes, far below that difference, so its cause is not identified yet; the row was signed off on 2026-11-13
+(rule 5).
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 

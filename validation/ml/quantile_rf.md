@@ -84,4 +84,4 @@ the median of the round medians (each the median of 1-21 calls after a warm-up);
 
 Peak RSS of one 500-tree fit at n = 10,000 (`/usr/bin/time -v`, whole process): 205 MB base, 103 MB this tree (each
 tree records its leaf members once, as `u32` offsets, and its in-bag rows as a bit set, instead of leaf lists of
-bootstrap draws).
+bootstrap draws). The 100-tree fit at n = 10,000 (1.10x) was signed off on 2026-11-14 (rule 5).

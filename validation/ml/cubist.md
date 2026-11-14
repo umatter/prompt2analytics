@@ -132,5 +132,6 @@ The neighbour rows are faster because the k nearest cases are selected in linear
 training case per prediction. Peak RSS of one `neighbors = 5` fit at n = 10,000 (`/usr/bin/time -v`, whole process):
 6.4 MB base, 7.1 MB this tree (1.11x of a small total: the result now keeps the n model predictions of the
 training rows and the p column ranges for the neighbour step, and the leave-one-out pass holds a distance buffer
-of n entries). Cubist changed by two lines between v0.5.0 and the lane base, so these rows are this
-package's.
+of n entries). Cubist itself changed by two lines between v0.5.0 and the base of this change, but the OLS solve
+its node models call (`normal_equations_inverse`) changed in between too, so these rows include that change as well
+as Cubist's own. The fit rows above 1.1x by the minimum and the peak RSS row were signed off on 2026-11-14 (rule 5).

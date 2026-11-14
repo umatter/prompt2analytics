@@ -140,12 +140,12 @@ Registry deviations (quantities not pinned through MCP):
 - REG-29, REG-30: smooth.spline fit, df, lambda and criterion value (the property test
   `test_mcp_smooth_spline_criterion` compares with the library and checks that GCV and CV
   differ).
-- ECON-16: the hurdle count part.
-- ECON-20: FEGLM standard errors and deviance.
 - Smoke tests only: Holt-Winters forecasts (TS-23, TS-24), VAR IRF, factanal (STAT-23; the core fit and
   scores are pinned in [factanal.md](../multivariate/factanal.md), the handler side of STAT-49 is open).
 
-Compared with R in the core tests rather than through MCP: the pooled-GLS and mean-group
+Compared with R in the core tests rather than through MCP: the FEGLM standard errors and
+deviance of the non-Gaussian families ([feglm.md](../econometrics/feglm.md); the Gaussian fit is
+pinned through the tool), the pooled-GLS and mean-group
 standard errors ([pggls.md](../econometrics/pggls.md), [pvcm.md](../econometrics/pvcm.md)) and
 the LLC, IPS and Maddala-Wu statistics ([panel_unit_root.md](../econometrics/panel_unit_root.md)).
 

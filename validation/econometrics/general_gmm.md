@@ -120,7 +120,7 @@ other builds (load average 33-36 on 12 logical CPUs), so ratios within about 0.0
 | one-step, identity W (`vcov = Fixed`) | 100 | 15.5 | 14.7 | 14.3 | 0.92 | 0.97 |
 | one-step, identity W (`vcov = Fixed`) | 1,000 | 52.8 | 46.0 | 46.7 | 0.88 | 1.02 |
 | one-step, identity W (`vcov = Fixed`) | 10,000 | 1,662 | 920.8 | 916.8 | 0.55 | 1.00 |
-| two-step MDS (not signed off) | 100 | 24.1 | 31.4 | 30.2 | 1.25 | 0.96 |
+| two-step MDS (signed off 2026-11-13) | 100 | 24.1 | 31.4 | 30.2 | 1.25 | 0.96 |
 | two-step MDS | 1,000 | 111.6 | 90.2 | 88.9 | 0.80 | 0.99 |
 | two-step MDS | 10,000 | 2,254 | 1,420 | 1,404 | 0.62 | 0.99 |
 | iterative MDS | 100 | 126.5 | 95.4 | 91.2 | 0.72 | 0.96 |
@@ -184,7 +184,7 @@ products) instead of the n x q moment matrix and a matrix product of its transpo
 matrix form to rounding. CUE's variance reuses the Omega and the weighting matrix it computed at the
 estimate.
 
-Two-step MDS at n = 100 costs 1.25x of `ff8e7559` (30.2 µs against 24.1 µs) and is not signed off.
+Two-step MDS at n = 100 costs 1.25x of `ff8e7559` (30.2 µs against 24.1 µs); signed off on 2026-11-13 (rule 5).
 The variance re-evaluates Omega at the two-step estimate, as `gmm::gmm` does (`ff8e7559` reused the
 first-step weighting matrix and did not match R's standard errors), so a two-step fit forms two
 moment covariances and inverts six small matrices (Z'Z, X'Z W Z'X twice, Omega twice,
@@ -194,7 +194,7 @@ singularity refusals was found (a fused row loop and a const-generic accumulator
 small-dimension Cholesky path in shared linear algebra could reduce the cost and would need its own
 package and sign-off.
 
-### Kernels and prewhitening (lane base, wave-1 head `3db88b8e`)
+### Kernels and prewhitening (against `3db88b8e`)
 
 Linear IV, k = 2, q = 4, AR(1) errors, HAC weighting, release builds, one core, interleaved, median of 11
 runs, each the mean of 200 / 40 / 5 fits at n = 100 / 1,000 / 10,000. Bartlett is unchanged; the other

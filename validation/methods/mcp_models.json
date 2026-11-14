@@ -87,13 +87,7 @@
         "FEGLM gaussian coefficients and SEs"
       ],
       "tolerance": "text at the printed precision (4 decimals, Tol::printed)",
-      "deviations": [
-        {
-          "finding": "ECON-16",
-          "quantity": "hurdle count part",
-          "note": "not pinned (Tier 4)"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

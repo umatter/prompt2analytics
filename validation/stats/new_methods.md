@@ -78,8 +78,22 @@ is its standard deviation; `cosine` is R's raised cosine and `optcosine` R's opt
 default bandwidth is `bw.nrd0` (type-7 IQR; when min(sd, IQR/1.34) is 0, sd, then |x[1]|, then 1).
 Builds without `spectral-analysis` compute the exact kernel sum at the same points. R-pinned in
 `validation/methods/stats_descriptive_t4.json`, id `density_t4` (`validation/stats/robust.md`).
-Timings: see the package report of the Tier 4 change; the earlier figures in this section measured
-an FFT path that no longer exists.
+The earlier timing figures of this section measured an FFT path that no longer exists; the rows
+above 1.1x are under "Rule 5" below.
+
+### Rule 5 (Tier 4, signed off 2026-11-14)
+
+Rows above 1.1x of v0.5.0 (`f80b0131`) after the Tier 4 change, measured on a loaded machine (a
+quiet re-timing drops any that comes in at or below 1.1x), signed off on 2026-11-14:
+
+- `density`, default Gaussian kernel: 1.66x at n = 100 and 1.42x at n = 1,000; a 100-point grid
+  2.54x. R's binned FFT now runs at every size, where v0.5.0 summed directly on small inputs. The
+  kernel ordinates above m are copied from those below it (every kernel is even) and the FFT plans
+  are reused.
+- `cor.test(method = "kendall")`: the exact distribution below n = 50 without ties (up to 10x,
+  34 µs at n = 49; R's exact p-value where v0.5.0 used the normal approximation; the table of each n
+  is computed once per process), and with ties 1.27x at n = 100 (the tie-corrected variance).
+- `Box.test` wrappers 2.2-2.5x and `var.test` 1.11x at n = 100: the NA-aware column extractor.
 
 ## Numerical Validation
 

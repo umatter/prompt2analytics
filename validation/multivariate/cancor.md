@@ -69,7 +69,7 @@ id `cancor_t4`).
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
 
 | Method | n | f80b0131 (µs) | this change (µs) | ratio |
 |---|---|---|---|---|
@@ -79,7 +79,7 @@ Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five inter
 
 The change touches only the p x p and q x q steps; centring and the covariances, which carry the
 rows, are unchanged. The n = 10,000 gap lies within the spread of the previous code's own runs
-(597-1,149 µs) and needs the integration re-timing.
+(597-1,149 µs); the row was signed off on 2026-11-14 (rule 5), and a quiet re-timing at or below 1.1x drops it.
 
 ## Performance Comparison
 

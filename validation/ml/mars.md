@@ -79,7 +79,7 @@ the median of the round medians (each the median of 1-21 calls after a warm-up);
 |  | 1,000 | 658 | 1,640 | 2.49 | 2.60 |
 |  | 10,000 | 47,458 | 86,130 | 1.81 | 1.87 |
 
-The slower rows come from Friedman's spans, accepted by the maintainer as the price of earth's defaults: at n = 100
+The slower rows come from Friedman's spans, signed off on 2026-11-14 (rule 5) as the price of earth's defaults: at n = 100
 (no fast mode) each predictor has 17 instead of 11 candidate knots, and without fast mode 164 / 1,426 instead of
 98 / 768 at n = 1,000 / 10,000; the smaller default penalty (2) can also lengthen the forward pass. Fast mode keeps
 `fast_k` knots per predictor in both trees, so its cost at n = 10,000 is unchanged.

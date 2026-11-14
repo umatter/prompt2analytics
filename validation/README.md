@@ -108,8 +108,8 @@ looks like a validation failure but is not one.
   MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
   gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects, mclust, mixtools,
   flexmix, apcluster, e1071, changepoint, spatialreg, spdep, sphet, splm, haven, pdp,
-  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost, cobalt, CVXR, ECOSolveR, Qtools, and
-  scpi 3.0.1 (scpi 4.x needs R >= 4.4; on R 4.3 install 3.0.1 from the CRAN archive). Some case
+  randomForest, purrr, gbm, dplyr, tidyr, mboost, xgboost, cobalt, CVXR, ECOSolveR, Qtools, alpaca,
+  and scpi 3.0.1 (scpi 4.x needs R >= 4.4; on R 4.3 install 3.0.1 from the CRAN archive). Some case
   files also record the base packages base, stats and datasets and the recommended packages boot
   and Matrix, which ship with R.
 
@@ -125,7 +125,7 @@ looks like a validation failure but is not one.
                      "apcluster", "e1071", "changepoint", "spatialreg",
                      "spdep", "sphet", "splm", "haven", "pdp", "randomForest", "purrr",
                      "gbm", "dplyr", "tidyr", "mboost", "xgboost", "cobalt", "CVXR",
-                     "ECOSolveR", "Qtools"))
+                     "ECOSolveR", "Qtools", "alpaca"))
   # R 4.3: scpi 3.0.1 from the CRAN archive (R >= 4.4: install.packages("scpi"))
   install.packages("https://cran.r-project.org/src/contrib/Archive/scpi/scpi_3.0.1.tar.gz",
                    repos = NULL, type = "source")
@@ -366,13 +366,13 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Arellano-Bond difference GMM and Blundell-Bond system GMM (plm::pgmm, transformation "d" and "ld") | [gmm.md](econometrics/gmm.md) | R-pinned, known deviations (ECON-30) |
 | Multinomial and ordered logit/probit (Newton fit) | [discrete_newton.md](econometrics/discrete_newton.md) | R-pinned |
 | Ordered logit and probit (MASS::polr) | [ordered.md](econometrics/ordered.md) | R-pinned |
-| Negative binomial, zero-inflated Poisson and NB (MASS::glm.nb, pscl::zeroinfl) | [count_models.md](econometrics/count_models.md) | R-pinned, known deviations (ECON-64) |
-| Hurdle models (rows used) | [hurdle.md](econometrics/hurdle.md) | R-pinned, known deviations (ECON-16) |
+| Negative binomial, zero-inflated Poisson and NB (MASS::glm.nb, pscl::zeroinfl) | [count_models.md](econometrics/count_models.md) | R-pinned |
+| Hurdle models (rows used) | [hurdle.md](econometrics/hurdle.md) | R-pinned |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | R-pinned |
 | General GMM (gmm::gmm: linear IV and normal-distribution moments; two-step, iterated, CUE, fixed W; HAC kernels on sandwich's lag convention) | [general_gmm.md](econometrics/general_gmm.md) | R-pinned, known deviations (ECON-68) |
 | Marginal treatment effects by local IV | [ivmte.md](econometrics/ivmte.md) | R-pinned |
 | Diff-in-Diff (2x2, lm with HC1 and cluster-robust SEs) | [did.md](econometrics/did.md) | R-pinned |
-| Goodman-Bacon decomposition (bacondecomp) | [bacon.md](econometrics/bacon.md) | R-pinned |
+| Goodman-Bacon decomposition (bacondecomp) | [bacon.md](econometrics/bacon.md) | R-pinned, known deviations (CAUS-53) |
 | Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |
 | Extended TWFE (etwfe::etwfe + emfx) | [etwfe.md](econometrics/etwfe.md) | R-pinned, known deviations (CAUS-14) |
 | Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
@@ -397,13 +397,13 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Generalized synthetic control (gsynth / fect: IFE, matrix completion, bootstrap) | [gsynth.md](econometrics/gsynth.md) | R-pinned, known deviations (CAUS-41, CAUS-43, CAUS-44) |
 | Logit | [logit.md](econometrics/logit.md) | R-pinned, known deviations (ECON-60) |
 | Probit | [probit.md](econometrics/probit.md) | R-pinned |
-| Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
+| Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned, known deviations (ECON-63) |
 | Mixed logit | [mixed_logit.md](econometrics/mixed_logit.md) | R-pinned |
 | Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-78) |
 | Matching (MatchIt: nearest neighbour, CEM, subclassification; optimal full matching as optmatch) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
 | Minimum-cost flow (network simplex) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
 | Panel GLS (pggls): pooled pin on a simulated N > T panel, within and FD warnings | [pggls.md](econometrics/pggls.md) | R-pinned |
-| FEGLM: Gaussian pin, IRLS convergence reporting | [feglm.md](econometrics/feglm.md) | R-pinned, known deviations (ECON-20, ECON-66, ECON-67, ECON-85) |
+| FEGLM: Gaussian pin, IRLS convergence reporting | [feglm.md](econometrics/feglm.md) | R-pinned |
 | Variable coefficients (pvcm within, random) and mean group (pmg) | [pvcm.md](econometrics/pvcm.md) | R-pinned |
 | HDFE: relative MAP rule, absorbed regressors (FE, RE, Hausman, HDFE, FEGLM), disconnected effects | [hdfe.md](econometrics/hdfe.md) | R-pinned |
 | Panel unit-root tests: data extraction (unit ids, time, gaps, missing values), per-unit lag selection (AIC, SIC, Hall) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned, known deviations (ECON-44, ECON-88) |
@@ -470,6 +470,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Affinity propagation (apcluster::apcluster) | [affinity_propagation.md](ml/affinity_propagation.md) | R-pinned |
 | Conditional inference tree root statistics and p-values below 1e-16 (partykit::ctree formulas) | [ctree.md](ml/ctree.md) | R-pinned |
 | Cubist leaf linear model with collinear attributes | [cubist.md](ml/cubist.md) | R-pinned |
+| Quantile regression forest (quantile predictions; tree growth and importance pinned via rpart and randomForest) | [quantile_rf.md](ml/quantile_rf.md) | not R-pinned |
 | PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
@@ -510,6 +511,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
 | Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-87) |
+| Correlation matrix (pairwise complete), cor.test with missing values, describe (count, missing, mean, sd, quantiles) | [descriptive.md](stats/descriptive.md) | R-pinned |
 | One-way ANOVA | [anova.md](stats/anova.md) | R-pinned |
 | Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
 | Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned, known deviations (STAT-53) |
@@ -573,7 +575,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | CLI causal iv, mediation and staggered-did (rows dropped, first-stage HC1 Wald F, units kept after trimming, pre-trend Wald test) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned, known deviations (STAT-85) |
-| MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, REG-29, STAT-23, TS-23) |
+| MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (REG-29, STAT-23, TS-23) |
 | MCP causal tools (option tables and aliases, MatchIt defaults and the matched sample, IPW, ltmle, gformula, gsynth and mediation fields) | [causal_surface.md](mcp/causal_surface.md) | R-pinned, known deviations (REG-27) |
 | MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
 | MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned, known deviations (DATA-65) |

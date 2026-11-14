@@ -211,7 +211,7 @@ jitter, y = 3 sin(0.7 x) + noise.
 | gaussian, degree 2 | 24.1 -> 30.6 us (1.27x) | 1.33 -> 2.02 ms (1.52x) | 125.6 -> 212.0 ms (1.69x) |
 | symmetric, iterations 4 | 130 -> 154 us (1.18x) | 7.98 -> 9.24 ms (1.16x) | 611 -> 875 ms (1.43x) |
 
-Above 1.1x, awaiting sign-off. The exact `one.delta` needs `sum_j L_ij^2` per row, the
+Above 1.1x; signed off 2026-11-14 (rule 5) as the cost of the exact `one.delta`. The exact `one.delta` needs `sum_j L_ij^2` per row, the
 squared-weight moments `sum w^2 u^j` accumulated in the trace pass: two (degree 1) to five
 (degree 2) more multiply-adds per neighbourhood row, on top of the scaling of `u`. A degree 2
 rerun gave 1.32x / 1.56x / 1.70x. The symmetric family now runs every fit R runs (no early

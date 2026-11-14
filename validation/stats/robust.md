@@ -276,3 +276,7 @@ on the `descriptive_na` columns.
 (abs 1e-12, where R's FFT leaves values of order 1e-18), bandwidths `Tol::stat(n)`, counts exact.
 
 **Status:** R-pinned (registry `validation/methods/stats_descriptive_t4.json`, id `density_t4`).
+
+**Timing:** the default Gaussian density is 1.66x / 1.42x of v0.5.0 at n = 100 / 1,000 and a 100-point
+grid 2.54x (R's binned FFT at every size); signed off on 2026-11-14 (rule 5;
+`validation/stats/new_methods.md`, "Rule 5").

@@ -381,7 +381,7 @@ One-way HC3 is faster than before; its fixed-effect leverage is `1 / T_g`. Two-w
 1.14x of v0.5.0 at n = 100 (20.4 µs against 23.2 µs; 1.08x by the minima) and less than
 v0.5.0 from n = 1,000: v0.5.0 omitted the fixed-effect leverage and so reported wrong standard
 errors (see above), and the new cost is building and inverting the Schur complement of the 10
-period levels. The n = 100 row is above the 1.1x rule and is not signed off. (A run on a shared
+period levels. The n = 100 row is above the 1.1x rule and was signed off on 2026-11-13. (A run on a shared
 machine with an earlier harness had measured 1.23x and 1.18x at n = 100 and 1,000.)
 
 Peak resident memory (`/usr/bin/time -v`), whole process:
