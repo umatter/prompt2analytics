@@ -1742,14 +1742,10 @@ pub fn run_cox_ph(
             *cell = v;
         }
     }
-    let obs_data: Vec<(f64, bool, usize)> = data
-        .time
-        .iter()
-        .zip(&data.event)
-        .enumerate()
-        .map(|(i, (&t, &e))| (t, e, i))
-        .collect();
-    let (concordance, concordance_se) = compute_concordance(&obs_data, &x_id, &beta_id);
+    // Row by row, so rows with equal covariates get bit-identical eta (tied.x).
+    let eta: Vec<f64> = (0..n).map(|i| x_id.row(i).dot(&beta_id)).collect();
+    let (concordance, concordance_se, _) =
+        compute_concordance(&data.time, &data.event, &eta, clusters)?;
 
     Ok(CoxResult {
         variables: names,
@@ -2199,94 +2195,179 @@ impl FenwickTree {
     }
 }
 
-/// Compute concordance statistic (C-index) for Cox model.
+/// Pair counts of the Cox concordance, as `survival::concordance` reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ConcordanceCounts {
+    concordant: u64,
+    discordant: u64,
+    tied_x: u64,
+    tied_y: u64,
+    tied_xy: u64,
+}
+
+/// The Cox concordance as `survival::coxph` reports it (`concordancefit`, `timewt = "n"`):
+/// a pair (i, j) is comparable when i has the event and t_i < t_j, or t_i = t_j with j
+/// censored; concordant when eta_i > eta_j, discordant when eta_i < eta_j, tied.x when equal.
+/// Two events at one time are tied.y (tied.xy with equal eta) and not comparable.
+/// C = (concordant + tied.x / 2) / (concordant + discordant + tied.x).
 ///
-/// Uses an O(n log n) algorithm with a Fenwick tree. Sorts observations by time
-/// descending and processes events, using the Fenwick tree to count how many
-/// already-inserted (i.e., larger-time) risk scores are less than, equal to,
-/// or greater than the current event's risk score.
+/// The standard error is the infinitesimal jackknife: with c_i, d_i, t_i the concordant,
+/// discordant and tied.x pairs observation i belongs to, somers = (C - D) / npair and
+/// se = sqrt(sum_g (sum_{i in g} ((c_i - d_i) - somers (c_i + d_i + t_i)))^2) / (2 npair),
+/// with g each observation, or each cluster when `clusters` is given (grouped, as coxph with
+/// `cluster =`).
+///
+/// O(n log n): two sweeps over the time groups with a Fenwick tree over the ranks of eta.
 fn compute_concordance(
-    obs: &[(f64, bool, usize)],
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-) -> (f64, f64) {
-    let n = obs.len();
+    time: &[f64],
+    event: &[bool],
+    eta: &[f64],
+    clusters: Option<(&[u32], usize)>,
+) -> EconResult<(f64, f64, ConcordanceCounts)> {
+    let n = time.len();
+    let mut counts = ConcordanceCounts::default();
     if n < 2 {
-        return (0.5, 0.0);
+        return Ok((0.5, 0.0, counts));
     }
-    let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
-
-    // Create (time, event, risk_score) sorted by time ascending
-    let mut sorted: Vec<(f64, bool, f64)> = obs.iter().map(|&(t, e, ri)| (t, e, eta[ri])).collect();
-    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Coordinate-compress risk scores for Fenwick tree indexing
-    let mut scores: Vec<f64> = sorted.iter().map(|s| s.2).collect();
-    scores.sort_by(|a, b| a.total_cmp(b));
-    scores.dedup();
-    let m = scores.len(); // number of distinct risk scores
-
-    // Map risk score -> 1-indexed rank
-    let score_rank = |s: f64| -> usize { scores.partition_point(|&v| v < s) + 1 };
-
-    let mut concordant = 0.0_f64;
-    let mut discordant = 0.0_f64;
-    let mut tied_risk = 0.0_f64;
-
-    // Fenwick tree tracks risk scores of observations with strictly larger times
-    let mut bit = FenwickTree::new(m);
-    let mut total_inserted: f64 = 0.0;
-
-    // Process groups of observations with the same time, from largest to smallest time.
-    // For each event, observations already in the BIT have strictly larger times.
-    let mut i = n;
-    while i > 0 {
-        // Find the start of this time group
-        let group_end = i;
-        let t_current = sorted[i - 1].0;
-        let mut group_start = i - 1;
-        while group_start > 0 && (sorted[group_start - 1].0 - t_current).abs() < 1e-10 {
-            group_start -= 1;
+    // Ranks of eta (equal values share a rank), 1-based for the tree.
+    let mut scores: Vec<f64> = eta.to_vec();
+    scores.sort_by(f64::total_cmp);
+    scores.dedup_by(|a, b| a == b);
+    let m = scores.len();
+    let rank: Vec<usize> = eta
+        .iter()
+        .map(|&e| scores.partition_point(|&v| v < e) + 1)
+        .collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| time[a].total_cmp(&time[b]).then(a.cmp(&b)));
+    // Time groups as [start, end) ranges of `order`.
+    let mut groups = Vec::new();
+    let mut s = 0;
+    while s < n {
+        let mut e = s + 1;
+        while e < n && time[order[e]] == time[order[s]] {
+            e += 1;
         }
+        groups.push((s, e));
+        s = e;
+    }
 
-        // Process events in this time group (count pairs with BIT entries = larger times)
-        for idx in group_start..group_end {
-            if sorted[idx].1 {
-                let rank = score_rank(sorted[idx].2);
-                let n_less = bit.prefix_sum(rank - 1); // scores < this -> concordant (event has higher risk)
-                let n_equal = bit.range_sum(rank, rank); // scores == this -> tied risk
-                let n_greater = total_inserted - bit.prefix_sum(rank); // scores > this -> discordant
-                concordant += n_less;
-                discordant += n_greater;
-                tied_risk += n_equal;
+    // Per-observation counts (c, d, t) over the comparable pairs.
+    let mut per = vec![[0u64; 3]; n];
+    let query = |bit: &FenwickTree, total: f64, r: usize| {
+        let less = bit.prefix_sum(r - 1);
+        let equal = bit.range_sum(r, r);
+        (less as u64, equal as u64, (total - less - equal) as u64)
+    };
+
+    // Backward sweep: i the earlier member (an event); the tree holds every row with a
+    // later time, and the censored rows of i's own time.
+    let mut bit = FenwickTree::new(m);
+    let mut total = 0.0;
+    for &(gs, ge) in groups.iter().rev() {
+        checkpoint()?;
+        for &i in &order[gs..ge] {
+            if !event[i] {
+                bit.update(rank[i], 1.0);
+                total += 1.0;
             }
         }
-
-        // Insert all observations in this time group into BIT
-        for idx in group_start..group_end {
-            let rank = score_rank(sorted[idx].2);
-            bit.update(rank, 1.0);
-            total_inserted += 1.0;
+        for &i in &order[gs..ge] {
+            if event[i] {
+                let (less, equal, greater) = query(&bit, total, rank[i]);
+                per[i][0] += less;
+                per[i][1] += greater;
+                per[i][2] += equal;
+                counts.concordant += less;
+                counts.discordant += greater;
+                counts.tied_x += equal;
+            }
         }
-
-        i = group_start;
+        for &i in &order[gs..ge] {
+            if event[i] {
+                bit.update(rank[i], 1.0);
+                total += 1.0;
+            }
+        }
+        // Events at one time: tied.y, or tied.xy with equal eta.
+        let mut ev: Vec<usize> = order[gs..ge]
+            .iter()
+            .filter(|&&i| event[i])
+            .map(|&i| rank[i])
+            .collect();
+        ev.sort_unstable();
+        let k = ev.len() as u64;
+        let mut same = 0u64;
+        let mut a = 0;
+        while a < ev.len() {
+            let mut b = a + 1;
+            while b < ev.len() && ev[b] == ev[a] {
+                b += 1;
+            }
+            let r = (b - a) as u64;
+            same += r * (r - 1) / 2;
+            a = b;
+        }
+        counts.tied_xy += same;
+        counts.tied_y += k * k.saturating_sub(1) / 2 - same;
     }
 
-    let total: f64 = concordant + discordant + tied_risk;
-    let c = if total > 0.0 {
-        (concordant + 0.5 * tied_risk) / total
-    } else {
-        0.5
-    };
+    // Forward sweep: j the later member; the tree holds the events of earlier times (and,
+    // for a censored j, the events of j's own time).
+    let mut bit = FenwickTree::new(m);
+    let mut total = 0.0;
+    for &(gs, ge) in &groups {
+        checkpoint()?;
+        for &j in &order[gs..ge] {
+            if event[j] {
+                let (less, equal, greater) = query(&bit, total, rank[j]);
+                per[j][0] += greater;
+                per[j][1] += less;
+                per[j][2] += equal;
+            }
+        }
+        for &j in &order[gs..ge] {
+            if event[j] {
+                bit.update(rank[j], 1.0);
+                total += 1.0;
+            }
+        }
+        for &j in &order[gs..ge] {
+            if !event[j] {
+                let (less, equal, greater) = query(&bit, total, rank[j]);
+                per[j][0] += greater;
+                per[j][1] += less;
+                per[j][2] += equal;
+            }
+        }
+    }
 
-    // Approximate standard error (simplified)
-    let se = if total > 0.0 {
-        (c * (1.0 - c) / total.sqrt()).sqrt()
-    } else {
-        0.0
+    let (conc, disc, tx) = (
+        counts.concordant as f64,
+        counts.discordant as f64,
+        counts.tied_x as f64,
+    );
+    let npair = conc + disc + tx;
+    if npair == 0.0 {
+        return Ok((0.5, 0.0, counts));
+    }
+    let c = (conc + tx / 2.0) / npair;
+    let somers = (conc - disc) / npair;
+    let term = |i: usize| {
+        let [ci, di, ti] = per[i].map(|v| v as f64);
+        (ci - di) - somers * (ci + di + ti)
     };
-
-    (c, se)
+    let ss = match clusters {
+        Some((codes, g)) => {
+            let mut sums = vec![0.0; g];
+            for (i, &code) in codes.iter().enumerate() {
+                sums[code as usize] += term(i);
+            }
+            sums.iter().map(|v| v * v).sum::<f64>()
+        }
+        None => (0..n).map(|i| term(i).powi(2)).sum::<f64>(),
+    };
+    Ok((c, ss.sqrt() / (2.0 * npair), counts))
 }
 
 // =============================================================================
@@ -3421,6 +3502,8 @@ mod tests {
     use crate::test_support::load_case;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     fn create_test_dataset() -> Dataset {
         // Simple survival data
@@ -4529,8 +4612,8 @@ mod tests {
         check.finish();
     }
 
-    /// Every number summary.coxph reports for the model-based fit (deviation ECON-89: the
-    /// concordance and its SE are not pinned). Before: up to 100 iterations under the absolute
+    /// Every number summary.coxph reports for the model-based fit (the concordance and its SE
+    /// are pinned in `test_validate_cox_concordance_lung`). Before: up to 100 iterations under the absolute
     /// score rule, HR limits with 1.96 (sex and ph.ecog upper limits off by 6.0e-6 and 4.1e-6
     /// relative), no convergence fields.
     fn check_cox_model(case_id: &str, ties: TiesMethod) {
@@ -5424,5 +5507,198 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The concordance counts of a fit, recomputed from the rows the fit used.
+    fn concordance_of(
+        ds: &Dataset,
+        time: &str,
+        status: &str,
+        x: &[&str],
+        cluster: Option<&str>,
+        r: &CoxResult,
+    ) -> (f64, f64, ConcordanceCounts) {
+        let data = extract_survival(
+            ds.df(),
+            time,
+            status,
+            cluster,
+            x,
+            TimeRule::NonNegative,
+            "test",
+        )
+        .unwrap();
+        let eta: Vec<f64> = (0..data.time.len())
+            .map(|i| (0..x.len()).map(|j| data.x[j][i] * r.coefficients[j]).sum())
+            .collect();
+        let codes = data
+            .group
+            .as_ref()
+            .map(|g| (g.codes.as_slice(), g.levels.len()));
+        compute_concordance(&data.time, &data.event, &eta, codes).unwrap()
+    }
+
+    fn counts_vec(k: &ConcordanceCounts) -> Vec<f64> {
+        [k.concordant, k.discordant, k.tied_x, k.tied_y, k.tied_xy]
+            .iter()
+            .map(|&v| v as f64)
+            .collect()
+    }
+
+    const COUNT_NAMES: [&str; 5] = ["concordant", "discordant", "tied.x", "tied.y", "tied.xy"];
+
+    #[test]
+    fn test_validate_cox_concordance_lung() {
+        let (case, ds) = load_case("surv_concordance_t4");
+        let mut check = Check::new(&case);
+        let fits: [(&str, &[&str], TiesMethod, &str); 3] = [
+            (
+                "lung_age_sex_efron",
+                &["age", "sex"],
+                TiesMethod::Efron,
+                "n_age_sex",
+            ),
+            (
+                "lung_age_sex_breslow",
+                &["age", "sex"],
+                TiesMethod::Breslow,
+                "n_age_sex",
+            ),
+            (
+                "lung_age_sex_ecog_efron",
+                &["age", "sex", "ph.ecog"],
+                TiesMethod::Efron,
+                "n_age_sex_ecog",
+            ),
+        ];
+        for (tag, x, ties, n_key) in fits {
+            let n = case.scalar(n_key) as usize;
+            let r = run_cox_ph(&ds, "time", "status", x, Some(cox_tight(ties))).unwrap();
+            assert_eq!(r.n_obs, n);
+            let (_, _, k) = concordance_of(&ds, "time", "status", x, None, &r);
+            check
+                .named(
+                    &format!("{tag}_counts"),
+                    &COUNT_NAMES,
+                    &counts_vec(&k),
+                    Tol::exact(),
+                )
+                .scalar(&format!("{tag}_c"), r.concordance, Tol::coef(n))
+                .scalar(&format!("{tag}_se"), r.concordance_se, Tol::se(n));
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_cox_concordance_clustered_lung() {
+        let (case, ds) = load_case("surv_concordance_t4");
+        let n = case.scalar("n_cluster_inst") as usize;
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.cluster = Some("inst".to_string());
+        let x = ["age", "sex"];
+        let r = run_cox_ph(&ds, "time", "status", &x, Some(cfg)).unwrap();
+        assert_eq!(r.n_obs, n);
+        let (_, _, k) = concordance_of(&ds, "time", "status", &x, Some("inst"), &r);
+        Check::new(&case)
+            .named(
+                "lung_age_sex_cluster_inst_counts",
+                &COUNT_NAMES,
+                &counts_vec(&k),
+                Tol::exact(),
+            )
+            .scalar("lung_age_sex_cluster_inst_c", r.concordance, Tol::coef(n))
+            .scalar("lung_age_sex_cluster_inst_se", r.concordance_se, Tol::se(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cox_concordance_ties_small() {
+        let (case, _) = load_case("surv_concordance_t4");
+        let (_, toy) = load_case("surv_cox_ties_small");
+        let n = toy.nrows();
+        let mut check = Check::new(&case);
+        for ties in [TiesMethod::Efron, TiesMethod::Breslow] {
+            let tag = format!("ties_small_{}", ties_tag(ties));
+            let r = run_cox_ph(&toy, "time", "event", &["x"], Some(cox_tight(ties))).unwrap();
+            let (_, _, k) = concordance_of(&toy, "time", "event", &["x"], None, &r);
+            check
+                .named(
+                    &format!("{tag}_counts"),
+                    &COUNT_NAMES,
+                    &counts_vec(&k),
+                    Tol::exact(),
+                )
+                .scalar(&format!("{tag}_c"), r.concordance, Tol::coef(n))
+                .scalar(&format!("{tag}_se"), r.concordance_se, Tol::se(n));
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_concordance_matches_pair_loop() {
+        // The two Fenwick sweeps against the O(n^2) pair definition, on tied times, tied
+        // predictors and censoring, with and without clusters.
+        let mut rng = StdRng::seed_from_u64(17);
+        let n = 300;
+        let time: Vec<f64> = (0..n).map(|_| f64::from(rng.gen_range(1u32..40))).collect();
+        let event: Vec<bool> = (0..n).map(|_| rng.gen_bool(0.6)).collect();
+        let eta: Vec<f64> = (0..n)
+            .map(|_| f64::from(rng.gen_range(-6i32..6)) * 0.25)
+            .collect();
+        let codes: Vec<u32> = (0..n).map(|i| (i % 13) as u32).collect();
+        let mut per = vec![[0f64; 3]; n];
+        let mut k = ConcordanceCounts::default();
+        for i in 0..n {
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                if event[i] && event[j] && time[i] == time[j] && i < j {
+                    if eta[i] == eta[j] {
+                        k.tied_xy += 1;
+                    } else {
+                        k.tied_y += 1;
+                    }
+                }
+                let comparable =
+                    event[i] && (time[i] < time[j] || (time[i] == time[j] && !event[j]));
+                if !comparable {
+                    continue;
+                }
+                let slot = if eta[i] > eta[j] {
+                    k.concordant += 1;
+                    0
+                } else if eta[i] < eta[j] {
+                    k.discordant += 1;
+                    1
+                } else {
+                    k.tied_x += 1;
+                    2
+                };
+                per[i][slot] += 1.0;
+                per[j][slot] += 1.0;
+            }
+        }
+        let np = (k.concordant + k.discordant + k.tied_x) as f64;
+        let somers = (k.concordant as f64 - k.discordant as f64) / np;
+        let term =
+            |i: usize| (per[i][0] - per[i][1]) - somers * (per[i][0] + per[i][1] + per[i][2]);
+        let se_plain = (0..n).map(|i| term(i).powi(2)).sum::<f64>().sqrt() / (2.0 * np);
+        let mut sums = vec![0.0; 13];
+        for i in 0..n {
+            sums[codes[i] as usize] += term(i);
+        }
+        let se_cl = sums.iter().map(|v| v * v).sum::<f64>().sqrt() / (2.0 * np);
+        let c_ref = (k.concordant as f64 + k.tied_x as f64 / 2.0) / np;
+
+        let (c, se, got) = compute_concordance(&time, &event, &eta, None).unwrap();
+        assert_eq!(got, k);
+        assert!((c - c_ref).abs() <= 1e-12 * c_ref);
+        assert!(
+            (se - se_plain).abs() <= 1e-12 * se_plain,
+            "{se} vs {se_plain}"
+        );
+        let (_, se2, _) = compute_concordance(&time, &event, &eta, Some((&codes, 13))).unwrap();
+        assert!((se2 - se_cl).abs() <= 1e-12 * se_cl, "{se2} vs {se_cl}");
     }
 }

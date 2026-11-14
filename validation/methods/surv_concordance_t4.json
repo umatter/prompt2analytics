@@ -10,7 +10,11 @@
       "cases": [
         "surv_concordance_t4"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_cox_concordance_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_cox_concordance_clustered_lung",
+        "p2a-core::econometrics::survival::tests::test_validate_cox_concordance_ties_small"
+      ],
       "quantities": [
         "concordant, discordant, tied.x, tied.y, tied.xy",
         "concordance",

@@ -19,7 +19,17 @@ This document covers what is pinned to R's `survival` package:
   competing risks): integer, float and logical columns, rows with missing values dropped and
   reported, status coded as `Surv()` codes it.
 
-The Cox model's concordance is not R-pinned (ECON-89).
+The Cox model's concordance is reported as `survival::coxph` reports it (`concordancefit`, `timewt = "n"`): a
+pair (i, j) is comparable when i has the event and t_i < t_j, or t_i = t_j with j censored (an event tied with a
+censored time is comparable); C = (concordant + tied.x / 2) / (concordant + discordant + tied.x); the standard
+error is the infinitesimal jackknife sqrt(sum_i ((c_i - d_i) - somers (c_i + d_i + t_i))^2) / (2 npair), summed
+within clusters before squaring when the fit has `cluster`. Two Fenwick-tree sweeps over the time groups,
+O(n log n). R-pinned by `surv_concordance_t4` (lung `age + sex`, efron and breslow: counts 11910, 7793, 311, 28, 0,
+C 0.6028530028979714, SE 0.02549867776973034; `age + sex + ph.ecog`; clustered on `inst`: SE 0.01984781019980545;
+the 10-row heavy-ties fixture). The old code paired tied times differently and used sqrt(C (1 - C) / sqrt(pairs))
+as the SE (lung `age + sex`: C 0.6027). Tests: `test_validate_cox_concordance_lung`,
+`test_validate_cox_concordance_clustered_lung`, `test_validate_cox_concordance_ties_small`; the sweeps against an
+O(n^2) pair loop: `test_concordance_matches_pair_loop`.
 
 ## Reference Implementation
 
@@ -518,8 +528,6 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
    explicitly, which the core cannot see; the CLI and MCP surfaces decide.
 8. **AFT start values** (least squares on ln t) differ from survreg's, so iteration counts can differ; the
    estimates agree to the tolerances below.
-9. **Cox concordance** and its SE are not R-pinned (ECON-89: the SE formula and the pairing of tied times differ
-   from `survival::concordance`).
 
 The confidence interval type is `conf_type` "log" (default, as R), "log-log" or "plain"; before
 ECON-7 was fixed p2a used an undisclosed, broken log-log band.
