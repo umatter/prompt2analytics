@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "disc_negbin_null_t4",
+  "area": "econometrics/discrete",
+  "method": "glm.nb(y ~ 1) on the model's rows, its own theta; McFadden R2 (pscl::pR2)",
+  "reference": "MASS::glm.nb(y ~ 1) on the model's complete rows with its own theta (pscl::pR2: update(object, ~ 1, data = model.frame(object))), polished by Newton steps on the joint score; McFadden R2 = 1 - ll / ll0",
+  "call": "pscl::pR2(glm.nb(y ~ x1 + x2, data = negbin))",
+  "dataset": "validation/datasets/generated/negbin.csv",
+  "datasets": ["validation/datasets/generated/negbin.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "MASS": "7.3.60.0.1",
+    "pscl": "1.5.9",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "loglik": -564.30124785891894,
+    "theta": 1.6025851429909947,
+    "null_loglik": -590.7891356865365,
+    "null_theta": 1.0690413506823526,
+    "pseudo_r2": 0.044834757830874539,
+    "null_loglik_fixed_theta": -593.34841816440883,
+    "pseudo_r2_fixed_theta": 0.048954660392203642,
+    "pseudo_r2_pkg": 0.044834757830874539,
+    "null_loglik_pkg": -590.7891356865365,
+    "na_loglik": -557.98076276707116,
+    "na_null_loglik": -583.22916492633283,
+    "na_null_theta": 1.0583546821331395,
+    "na_pseudo_r2": 0.043290705742485946,
+    "na_n_used": 395
+  }
+}

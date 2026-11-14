@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "id": "disc_hurdle_t4",
+  "area": "econometrics/discrete",
+  "method": "pscl::hurdle count part (zero-truncated Poisson and negative binomial), Newton-polished",
+  "reference": "pscl::hurdle(y ~ x1 + x2, dist = 'poisson' | 'negbin', zero.dist = 'binomial'), count part polished by Newton steps on the analytic zero-truncated score (numDeriv::jacobian); SEs from numDeriv::hessian of the truncated log-likelihood; zero part glm(binomial) at epsilon 1e-14",
+  "call": "hurdle(y ~ x1 + x2, data = zeroinfl, dist = ...)",
+  "dataset": "validation/datasets/generated/zeroinfl.csv",
+  "datasets": ["validation/datasets/generated/zeroinfl.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "pscl": "1.5.9",
+    "MASS": "7.3.60.0.1",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "hp_count": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.61831429149781381, 0.20353671409707119, -0.27476886758143376]
+    },
+    "hp_count_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.055957874172556474, 0.055227266424421127, 0.059126545122407018]
+    },
+    "hp_count_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [11.049638690546519, 3.6854388651593415, -4.6471321301217952]
+    },
+    "hp_count_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [2.2009890960538629e-28, 0.00022830888293370451, 3.3658159043070703e-06]
+    },
+    "hp_ll_count": -350.94330409427636,
+    "hp_ll_zero": -337.13411120086465,
+    "hp_loglik": -688.07741529514101,
+    "hp_aic": 1388.154830590282,
+    "hp_bic": 1413.4424791808151,
+    "hp_count_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.61831428916010467, 0.20353671394237571, -0.27476886673558232]
+    },
+    "hp_count_se_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.055957866204537819, 0.055227248625196949, 0.059126529066260244]
+    },
+    "hp_loglik_pkg": -688.07741529514101,
+    "hp_n": 500,
+    "hp_n_positive": 241,
+    "hnb_count": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.3649446202808409, 0.31441509333101381, -0.31759477578049727]
+    },
+    "hnb_count_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.16163495712085688, 0.096262492273139669, 0.089906359185362286]
+    },
+    "hnb_count_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [2.2578322584511614, 3.2662263972854331, -3.5325062504833928]
+    },
+    "hnb_count_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.023956119246088505, 0.0010899107399537341, 0.00041164049492642364]
+    },
+    "hnb_ll_count": -382.06857291623487,
+    "hnb_ll_zero": -330.50990203157966,
+    "hnb_loglik": -712.57847494781458,
+    "hnb_aic": 1439.1569498956292,
+    "hnb_bic": 1468.6592065845846,
+    "hnb_count_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.36494461931682826, 0.31441508438399901, -0.31759476007837145]
+    },
+    "hnb_count_se_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.16163493812098917, 0.096262496670646666, 0.089906364880718265]
+    },
+    "hnb_loglik_pkg": -712.57847494781447,
+    "hnb_n": 500,
+    "hnb_n_positive": 227,
+    "hnb_log_theta": -0.023689222927289522,
+    "hnb_theta": 0.97658916412380437,
+    "hnb_se_log_theta": 0.37854615006935205,
+    "hnb_se_theta": 0.36968406827851275,
+    "hnb_theta_pkg": 0.97658916407494745,
+    "hnb_se_log_theta_pkg": 0.37854610705971264,
+    "hz1_count": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.61831429149781381, 0.20353671409707119, -0.27476886758143376]
+    },
+    "hz1_count_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.055957874172556474, 0.055227266424421127, 0.059126545122407018]
+    },
+    "hz1_ll_zero": -346.24952025966769,
+    "hz1_loglik": -697.19282435394405,
+    "hpnb_count": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.61549825626985155, 0.2035452640787471, -0.27568737115680425]
+    },
+    "hpnb_count_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.062974414675097665, 0.0555926272020568, 0.060287821355036797]
+    },
+    "hpnb_count_z": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [9.773782883816807, 3.6613715581194262, -4.5728534380645973]
+    },
+    "hpnb_count_p": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [1.4590035403770717e-22, 0.00025086862239274418, 4.8112669129949878e-06]
+    },
+    "hpnb_ll_count": -350.93817969949271,
+    "hpnb_ll_zero": -337.13411120086465,
+    "hpnb_loglik": -688.0722909003573,
+    "hpnb_aic": 1390.1445818007146,
+    "hpnb_bic": 1419.64683848967,
+    "hpnb_count_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.61549814022218807, 0.20354528586418222, -0.27568742905103411]
+    },
+    "hpnb_count_se_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.062974504003184745, 0.055592612453460158, 0.060287824887700708]
+    },
+    "hpnb_loglik_pkg": -688.07229090035992,
+    "hpnb_n": 500,
+    "hpnb_n_positive": 241,
+    "hpnb_log_theta": 5.1589657515638399,
+    "hpnb_theta": 173.98441940639327,
+    "hpnb_se_log_theta": 10.015126250639057,
+    "hpnb_se_theta": 1742.4759259991645,
+    "hpnb_theta_pkg": 173.98519390309403,
+    "hpnb_se_log_theta_pkg": 10.015248731896182
+  }
+}
