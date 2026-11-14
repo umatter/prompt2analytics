@@ -149,8 +149,8 @@ average was 33-70 during the runs (other builds on the machine), so ratios withi
 the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
 "min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. Exact path-dependent TreeSHAP of a 50-tree random forest fitted on 1,000 rows (`mtry` default), single
 thread; n is the number of explained rows. The TreeSHAP code is the same in both trees, so the ratio only checks the
-measurement; faster variants (FastTreeSHAP, Linear TreeSHAP) were evaluated and left out, since the exact kernel's
-cost is accepted.
+measurement. Faster variants (FastTreeSHAP, Linear TreeSHAP) were not implemented; the exact kernel's cost is
+accepted, and these rows record it.
 
 | Forest | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|

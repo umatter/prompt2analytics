@@ -563,9 +563,7 @@ pub fn mars(
 
     let use_fast = config.fast.unwrap_or(n > 200);
     let minspan = config.minspan.unwrap_or_else(|| compute_minspan(n, p));
-    let endspan = config
-        .endspan
-        .unwrap_or_else(|| compute_endspan(p).min((n - 1) / 2));
+    let endspan = config.endspan.unwrap_or_else(|| default_endspan(n, p));
 
     // Find candidate knots for each variable
     let candidate_knots = find_candidate_knots(&x, minspan, endspan, use_fast, config.fast_k);
@@ -742,6 +740,11 @@ fn endspan_raw(p: usize) -> f64 {
 /// End span (observations before the first and after the last knot): eq. 45 floored.
 fn compute_endspan(p: usize) -> usize {
     (endspan_raw(p).floor() as usize).max(1)
+}
+
+/// The end span a fit on `n` rows uses by default: eq. 45, at most `(n - 1) / 2`.
+fn default_endspan(n: usize, p: usize) -> usize {
+    compute_endspan(p).min(n.saturating_sub(1) / 2)
 }
 
 /// Candidate knots closer than this share of their value are one knot: rounding, not data.
@@ -1563,6 +1566,9 @@ mod tests {
             assert_relative_eq!(endspan_raw(p), raw, max_relative = 1e-14);
             assert_eq!(compute_endspan(p), floored, "p = {p}");
         }
+        // Capped at (n - 1) / 2 on a small sample.
+        assert_eq!(default_endspan(12, 5), 5);
+        assert_eq!(default_endspan(100, 5), 9);
     }
 
     #[test]
