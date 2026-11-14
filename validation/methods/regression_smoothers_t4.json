@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "smooth_spline",
+      "name": "Cubic smoothing spline (R's smooth.spline algorithm)",
+      "category": "regression",
+      "reference": "stats::smooth.spline (R 4.3: sbart.c, sslvrg.f, sgram.f with 0.333 for 1/3, the fit of the last Brent evaluation); a_* keys the algorithm written out in R, r_* keys smooth.spline itself",
+      "doc": "validation/regression/smooth_spline.md",
+      "cases": [
+        "smooth_spline_t4",
+        "smoothers_gcv_periodic_loess"
+      ],
+      "tests": [
+        "p2a-core::regression::smooth_spline::tests::test_validate_smooth_spline_spar_fixed",
+        "p2a-core::regression::smooth_spline::tests::test_validate_smooth_spline_searched",
+        "p2a-core::regression::smooth_spline::tests::test_validate_smooth_spline_gcv_cv_t3"
+      ],
+      "quantities": [
+        "knots (nknots, distinct x)",
+        "lambda, df, fit, leverages, GCV criterion at a given spar or lambda",
+        "all-knots fit",
+        "predictions inside and outside the data range",
+        "spar, lambda, df, cv.crit, fit and leverages after the Brent search (df target, GCV, CV)",
+        "weights and tied x: merged x, residuals",
+        "GCV, CV and df = 6 on smoothers_t3 (df, lambda, cv.crit, predictions)"
+      ],
+      "tolerance": "given spar or lambda: validation/README.md coefficient row (n = 120: 1e-8); searched: Tol::iterative(1e-6) (Brent stops at 1e-4 in spar; both sides run the same search, largest measured gap about 1.4e-9)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "line_tukey",
+      "name": "Tukey's resistant line",
+      "category": "regression",
+      "reference": "stats::line(iter) (R >= 3.5 tukeyline)",
+      "doc": "validation/regression/line.md",
+      "cases": [
+        "line_tukey_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::line::tests::test_validate_line_tukey_t4"
+      ],
+      "quantities": [
+        "intercept and slope for iter = 1, 2, 3 (eleven points, tied x, n = 31)",
+        "fitted values and residuals"
+      ],
+      "tolerance": "validation/README.md coefficient row (n <= 31: 1e-6)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "loess_statistics",
+      "name": "LOESS equivalent number of parameters, one.delta, residual scale; symmetric family",
+      "category": "regression",
+      "reference": "stats::loess(control = loess.control(surface = 'direct', statistics = 'exact')), family = 'gaussian' and 'symmetric' (iterations = 4, 2)",
+      "doc": "validation/regression/loess.md",
+      "cases": [
+        "loess_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::loess::tests::test_validate_loess_exact_statistics",
+        "p2a-core::regression::loess::tests::test_validate_loess_symmetric"
+      ],
+      "quantities": [
+        "trace.hat, one.delta, enp, s (degrees 1-2, spans 0.3, 0.75)",
+        "symmetric family: fit, robustness weights, s, enp"
+      ],
+      "tolerance": "statistics validation/README.md statistic row (n = 100: 1e-6); fits and weights coefficient row (1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "nls_weighted",
+      "name": "Weighted and one-sided bounded nonlinear least squares",
+      "category": "regression",
+      "reference": "stats::nls(weights = w) (Gauss-Newton); nls(algorithm = 'port', lower = ) and (upper = )",
+      "doc": "validation/regression/nls.md",
+      "cases": [
+        "nls_weighted_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::nls::tests::test_validate_nls_weighted",
+        "p2a-core::regression::nls::tests::test_validate_nls_one_sided_bounds"
+      ],
+      "quantities": [
+        "weighted coefficients, SEs, t, p, weighted RSS, sigma, df, fitted values, residuals y - f",
+        "lower-bound-only and upper-bound-only coefficients and RSS"
+      ],
+      "tolerance": "Tol::iterative: coefficients and fits 1e-6, SEs and t 1e-5, p 1e-3, RSS and sigma 1e-8 (as nls_expdecay)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "step_null",
+      "name": "Stepwise selection reaching the intercept-only model",
+      "category": "regression",
+      "reference": "stats::step (k = 2 and log(n)); stats::drop1; stats::extractAIC",
+      "doc": "validation/regression/ols.md",
+      "cases": [
+        "step_null_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::step::tests::test_validate_step_null_backward",
+        "p2a-core::regression::step::tests::test_validate_step_null_both",
+        "p2a-core::regression::step::tests::test_validate_step_null_forward",
+        "p2a-core::regression::step::tests::test_validate_step_null_bic",
+        "p2a-core::regression::step::tests::test_validate_drop1_last_term"
+      ],
+      "quantities": [
+        "criterion path (anova AIC column)",
+        "order of the dropped terms",
+        "final model size",
+        "drop1 rows of the last term"
+      ],
+      "tolerance": "validation/README.md statistic row (n = 60: 1e-5); terms and sizes exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

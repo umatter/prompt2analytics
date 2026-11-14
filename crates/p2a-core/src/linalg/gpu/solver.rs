@@ -1,19 +1,10 @@
-//! cuSOLVER wrappers for matrix factorizations.
+//! GPU paths of the solver-type operations.
 //!
-//! Provides GPU-accelerated Cholesky inverse for symmetric positive definite
-//! matrices (like X'X).
-//!
-//! # Implementation Strategy
-//!
-//! For the Cholesky inverse of a k x k matrix:
-//! - If k >= threshold: use cuSOLVER DPOTRF + DPOTRI on device
-//! - The k x k matrix is typically small (k < 100 for most econometric models),
-//!   so GPU benefit comes mainly from the O(nk^2) operations (xtx, xty)
-//!   rather than the O(k^3) inverse.
-//!
-//! For SVD (used in PCA):
-//! - Use cuSOLVER DGESVD for large matrices
-//! - Transfer back eigenvalues and eigenvectors
+//! - `sandwich_meat_gpu`: `X' diag(w) X` with the rows scaled on the host and the cross
+//!   product computed by cuBLAS DGEMM.
+//! - The Cholesky inverse of a k x k matrix is a CPU passthrough (faer): no cuSOLVER routine
+//!   (DPOTRF, DPOTRI, DGESVD) is called. The k x k matrix is small for most econometric
+//!   models, so the GPU benefit comes from the O(nk^2) cross products, not the O(k^3) inverse.
 
 use cudarc::cublas::result::CublasError;
 use cudarc::cublas::sys::cublasOperation_t;

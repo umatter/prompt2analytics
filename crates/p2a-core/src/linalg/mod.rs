@@ -11,6 +11,7 @@
 pub mod design;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+pub(crate) mod layout;
 pub mod matrix_ops;
 pub mod solve;
 pub mod toeplitz;

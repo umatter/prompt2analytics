@@ -88,6 +88,10 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/hac_truncated_indefinite.csv` | 40 × 2 (y, x) | `hac_truncated_indefinite` | `r/cases/reg_vcov_t4.R` | seed 5, errors AR(-0.7) |
 | `generated/kalman_intercepts.csv` | 50 × 2 (t, y) | `kalman_intercepts` | `r/cases/ts_statespace.R` | seed 20261124 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
+| `generated/line_t4_eleven.csv` | 11 × 2 (x, y) | `line_tukey_t4` | `r/cases/regression_smoothers_t4.R` | literal values: x = 1:11, an outlier at x = 11 |
+| `generated/line_t4_n31.csv` | 31 × 2 (x, y) | `line_tukey_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261114 (after `line_t4_ties`); x ~ U(-2, 2), y = 2 - x + N(0, 0.5²) |
+| `generated/line_t4_ties.csv` | 20 × 2 (x, y) | `line_tukey_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261114; x rounded U(0, 4) (ties), y = 1 + 0.5 x + N(0, 1) |
+| `generated/loess_t4.csv` | 100 × 2 (x, y) | `loess_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261115; x ~ U(0, 10) sorted, y = sin(x) + N(0, 0.3²) with outliers at rows 10, 40, 75 |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
 | `generated/mahalanobis_t3.csv` | 30 × 9 (id, f1, f2, f3, a, b, p1, p2, total) | `stat_mahalanobis_t3` | `r/cases/stats_misc_t3.R` | full-rank and collinear columns, padded with NA |
 | `generated/mcp_factanal_t3.csv` | 1200 × 6 (f1, f2, f3, f4, f5, f6) | `mcp_factanal_t3` | `r/cases/mcp_stats_ts.R` | seed 20261204; two correlated factors |
@@ -105,13 +109,18 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/munging_join_frames.csv` | 6 × 4 (frame, k, value, value_right) | `data_munging_join_suffix` | `r/cases/data_munging_t3.R` | three frames A, AB, C in one file |
 | `generated/munging_long.csv` | 12 × 4 (id, g, x, y) | `data_munging_lag`, `data_munging_filter` | `r/cases/data_munging_t3.R` | interleaved groups, Int64 and Float64 with NA; seed 5011 |
 | `generated/munging_wide.csv` | 4 × 4 (id, a, b, c) | `data_munging_pivot_longer` | `r/cases/data_munging_t3.R` | integer and double columns with NA |
+| `generated/nls_weighted_t4.csv` | 40 × 3 (x, y, w) | `nls_weighted_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261116; y = 10 exp(-0.5 x) + 2 + N(0, (0.2 (1 + x / 2))²), w = 1 / (1 + x / 2)² |
 | `generated/ols_twoway_indefinite.csv` | 36 × 4 (y, x, a, b; 3 × 3 clusters) | `ols_twoway_indefinite` | `r/cases/reg_vcov_t4.R` | seed 1 |
 | `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
 | `generated/robust_weighted_t3.csv` | 25 × 3 (x1, x2, w) | `stat_robust_weighted_t3` | `r/cases/stats_misc_t3.R` | two samples and weights |
 | `generated/secontrast_poly_t4.csv` | 24 × 2 (dose, y) | `stat_secontrast_poly_t4` | `r/cases/stats_exact_t4.R` | seed 20261111; four numeric dose levels, quadratic mean plus noise |
+| `generated/smooth_spline_t4a.csv` | 120 × 2 (x, y) | `smooth_spline_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261113; x ~ U(0, 50) sorted, y = sin(x / 8) + N(0, 0.3²) |
+| `generated/smooth_spline_t4b.csv` | 150 × 3 (x, y, w) | `smooth_spline_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261113 (after `smooth_spline_t4a`); x on a 0.1 grid in [0, 10] with ties (81 distinct), y = cos(x / 2) + N(0, 0.25²), weights U(0.5, 2) |
+| `generated/smooth_spline_t4c.csv` | 30 × 2 (x, y) | `smooth_spline_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261113 (after `smooth_spline_t4b`); x = 1:30, y = sin(x / 5) + N(0, 0.2²) |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3`, `stat_spectrum_t4` | `r/cases/stats_misc_t3.R` | sine plus noise |
 | `generated/spectrum_t4.csv` | 97 × 2 (t, z) | `stat_spectrum_t4` | `r/cases/stats_misc_t4.R` | AR(0.6) plus trend, seed 20261113 |
 | `generated/spline_t4.csv` | 12 × 15 (id, sx, sy, fx, fy, px, py, ux, uy, hx, hy, mx, my, tx, ty) | `stat_spline_t4` | `r/cases/stats_misc_t4.R` | seven (x, y) sets, NA-padded; tied x in tx |
+| `generated/step_null_t4.csv` | 60 × 4 (x1, x2, x3, y) | `step_null_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261117; four independent N(0, 1) columns (no predictor helps) |
 | `generated/vcov_dk_grunfeld_t10.csv` | 100 × 5 (firm, year, inv, value, capital) | `vcov_dk_grunfeld_t10` | `r/cases/reg_vcov_t4.R` | `grunfeld.csv`, years 1935-1944 |
 | `generated/vcov_dk_grunfeld_unbal.csv` | 190 × 5 (firm, year, inv, value, capital) | `vcov_dk_grunfeld_unbal` | `r/cases/reg_vcov_t4.R` | `grunfeld.csv` with 10 rows dropped |
 | `generated/vcov_hac_prewhite_ts.csv` | 300 × 3 (y, x1, x2) | `vcov_hac_prewhite_ts` | `r/cases/reg_vcov_t4.R` | seed 20261111, AR(0.9) regressor and AR(0.7) errors |

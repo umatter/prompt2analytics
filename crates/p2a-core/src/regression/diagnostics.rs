@@ -3120,7 +3120,8 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Pinned to case `diag_bgtest_ar1` (lmtest::bgtest on the legacy Test 4 DGP; validation/r/cases/regression_legacy.R).
+    /// Pinned to case `diag_bgtest_ar1` (lmtest::bgtest on the legacy Test 4 DGP;
+    /// validation/r/cases/regression_legacy.R).
     #[test]
     fn test_validate_bgtest_ar1() {
         use p2a_validation::{Check, Tol};
@@ -3170,7 +3171,8 @@ mod tests {
         assert!(lm1.df.1.is_none() && lm1.significant_at_05 && f1.significant_at_05);
     }
 
-    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::bgtest on Grunfeld; validation/r/cases/regression.R).
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::bgtest on Grunfeld;
+    /// validation/r/cases/regression.R).
     #[test]
     fn test_validate_bgtest_grunfeld() {
         use p2a_validation::{Check, Tol};
@@ -3193,7 +3195,8 @@ mod tests {
         assert_eq!(f1.df, (1.0, Some(196.0)));
     }
 
-    /// Pinned to case `diag_reset_quad` (lmtest::resettest on the legacy Test 5 DGP; validation/r/cases/regression_legacy.R).
+    /// Pinned to case `diag_reset_quad` (lmtest::resettest on the legacy Test 5 DGP;
+    /// validation/r/cases/regression_legacy.R).
     #[test]
     fn test_validate_reset_quad() {
         use p2a_validation::{Check, Tol};
@@ -3219,7 +3222,8 @@ mod tests {
         assert!(rf.significant_at_05);
     }
 
-    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::resettest on Grunfeld; validation/r/cases/regression.R).
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::resettest on Grunfeld;
+    /// validation/r/cases/regression.R).
     #[test]
     fn test_validate_reset_grunfeld() {
         use p2a_validation::{Check, Tol};
@@ -3240,7 +3244,8 @@ mod tests {
         assert_eq!(rr.df, (4, 193));
     }
 
-    /// Pinned to case `diag_harvtest_nonlin` (lmtest::harvtest on the legacy Test 6 DGP; validation/r/cases/regression_legacy.R).
+    /// Pinned to case `diag_harvtest_nonlin` (lmtest::harvtest on the legacy Test 6 DGP;
+    /// validation/r/cases/regression_legacy.R).
     #[test]
     fn test_validate_harvey_collier_nonlin() {
         use p2a_validation::{Check, Tol};
@@ -3259,7 +3264,8 @@ mod tests {
         assert_eq!(r.statistic.signum(), case.scalar("recresid_mean").signum());
     }
 
-    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::harvtest on Grunfeld; validation/r/cases/regression.R).
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::harvtest on Grunfeld;
+    /// validation/r/cases/regression.R).
     #[test]
     fn test_validate_harvey_collier_grunfeld() {
         use p2a_validation::{Check, Tol};
@@ -3275,7 +3281,8 @@ mod tests {
         assert_eq!((r.df, r.n_recursive), (196, 197));
     }
 
-    /// Pinned to case `diag_wald_sim` (lmtest::waldtest on the legacy Test 7 DGP; validation/r/cases/regression_legacy.R).
+    /// Pinned to case `diag_wald_sim` (lmtest::waldtest on the legacy Test 7 DGP;
+    /// validation/r/cases/regression_legacy.R).
     #[test]
     fn test_validate_wald_sim() {
         use p2a_validation::{Check, Tol};
@@ -3322,7 +3329,8 @@ mod tests {
         assert!(!f1.significant_at_05 && f2.significant_at_05);
     }
 
-    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::waldtest on Grunfeld; validation/r/cases/regression.R).
+    /// Pinned to case `ols_diagnostics_grunfeld` (lmtest::waldtest on Grunfeld;
+    /// validation/r/cases/regression.R).
     #[test]
     fn test_validate_wald_grunfeld() {
         use p2a_validation::{Check, Tol};

@@ -19,23 +19,19 @@ use std::sync::Arc;
 use cudarc::driver::{CudaSlice, CudaStream};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-/// Copy a 2D ndarray to device memory as a contiguous f64 slice.
+/// Copy a 2D ndarray to device memory as a contiguous f64 slice in logical row-major order.
 ///
-/// If the array is already contiguous in memory (standard row-major),
-/// the raw bytes are copied directly. Otherwise, a contiguous copy is
-/// made first.
+/// A standard-layout view is copied as it is stored. Any other view (transposed, Fortran
+/// order, strided) is copied element by element in row order: `to_owned` would keep a Fortran
+/// layout, whose raw vector is column-major. An allocation the host cannot make is reported
+/// as `CUDA_ERROR_OUT_OF_MEMORY`.
 pub fn array2_to_device(
     stream: &Arc<CudaStream>,
     arr: &ArrayView2<f64>,
 ) -> Result<CudaSlice<f64>, cudarc::driver::DriverError> {
-    let contiguous = if let Some(slice) = arr.as_slice() {
-        // Already contiguous in memory
-        slice.to_vec()
-    } else {
-        // Need to make contiguous (e.g., transposed view)
-        let owned = arr.to_owned();
-        owned.into_raw_vec()
-    };
+    let contiguous = crate::linalg::layout::row_major_copy(arr).map_err(|_| {
+        cudarc::driver::DriverError(cudarc::driver::sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY)
+    })?;
     stream.clone_htod(&contiguous)
 }
 

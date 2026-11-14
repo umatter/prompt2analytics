@@ -36,7 +36,7 @@ projections, linear between them, constant beyond.
 
 | Test | Tolerance | Largest measured gap |
 |---|---|---|
-| `test_validate_ppr_supsmu_b0`, `test_validate_ppr_supsmu_b5`, `test_validate_ppr_supsmu_span03`, `test_validate_ppr_optlevels`, `test_validate_ppr_weighted`, `test_validate_ppr_one_predictor` | `Tol::new(1e-8, 1e-10)`; `yb`, `ys` `Tol::coef(n)` | 9.6e-11 relative (a fitted value near 0); 1e-12 absolute |
+| `test_validate_ppr_supsmu_b0`, `test_validate_ppr_supsmu_b5`, `test_validate_ppr_supsmu_span03`, `test_validate_ppr_optlevels`, `test_validate_ppr_weighted`, `test_validate_ppr_one_predictor` | `Tol::iterative(1e-8)`; `yb`, `ys` `Tol::coef(n)` | 9.6e-11 relative (a fitted value near 0); 1e-12 absolute |
 | `test_validate_ppr_supsmu_smoother` | `Tol::coef(n)` | 0 |
 | `test_validate_ppr_spline_df5`, `test_validate_ppr_gcvspline`, `test_validate_ppr_gcvspline_pen2` | `Tol::new(0.03, 0.02)` | see below |
 | `test_validate_ppr_spline_smoother` | about 10x measured: `spar` 5e-3, `ratio` 3e-2, last evaluation 0.15 relative + 0.02, refit at R's `spar` 5e-3 relative + 4e-3 | see below |
@@ -92,7 +92,10 @@ Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_va
   values (64 machine epsilons of the largest, as a share of the range), so untied data keep R's knots unless the
   largest value is about 1e13 times the gap between knots; such a value is refused where R fits it. Too few
   distinct values (4 always suffice) at the start of a search are an error, and any refusal by the smoother later
-  in a search is a rejected step.
+  in a search is a rejected step. Near ties that leave the penalised normal equations without a positive pivot are
+  refused with the remedy: round the predictor, or use `sm.method = "supsmu"`. The B-spline evaluation and Brent's
+  minimiser are shared with `smooth_spline`; the penalty here keeps the exact 1/3 (`smooth_spline` uses `sgram.f`'s
+  0.333) and the fit of the minimiser.
 
 ## Missing and non-finite values
 
@@ -122,3 +125,19 @@ under registry deviation ML-34. Registry: `validation/methods/mcp_ml_spatial.jso
 1. Friedman, J. H., & Stuetzle, W. (1981). Projection Pursuit Regression. JASA, 76(376), 817-823.
 2. Hastie, T., Tibshirani, R., & Friedman, J. (2009). The Elements of Statistical Learning (2nd ed.). Springer.
 3. R Core Team. ppr() documentation.
+
+## Timing of the shared spline kernel (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+p = 3, two terms, `sm.method = "spline"` (df 5) and `"gcvspline"`; the outputs are
+bit-identical to the base.
+
+| Smoother | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| spline | 1.63 -> 1.64 ms (1.01x) | 3.70 -> 3.72 ms (1.01x) | 68.2 -> 68.5 ms (1.00x) |
+| gcvspline | 2.52 -> 2.59 ms (1.03x) | 17.4 -> 15.8 ms (0.91x) | 227 -> 236 ms (1.04x) |

@@ -959,7 +959,7 @@ impl AnalyticsServer {
             .numerics(&names)
             .na(NaPolicy::Omit)
             .min_rows(
-                4,
+                p2a_core::regression::supsmu::MIN_OBSERVATIONS,
                 &match request.weights.as_deref() {
                     Some(w) => format!(
                         "SuperSmoother of '{}' on '{}' with weights '{}'",
@@ -1032,7 +1032,7 @@ impl AnalyticsServer {
             .numeric(&request.y)
             .na(NaPolicy::Omit)
             .min_rows(
-                3,
+                p2a_core::regression::line::MIN_PAIRS,
                 &format!(
                     "Tukey's resistant line of '{}' on '{}'",
                     request.y, request.x
@@ -1269,7 +1269,7 @@ impl AnalyticsServer {
 
     /// Fit a smoothing spline.
     #[tool(
-        description = "Cubic smoothing spline. spar or df fix the smoothing; otherwise lambda is chosen by criterion: 'gcv' (default, R smooth.spline(cv = FALSE)) or 'cv' (leave-one-out, cv = TRUE). Returns JSON with the fitted values (or predictions at xout), df, lambda, the criterion used (null when spar or df was given), its value and warnings."
+        description = "Cubic smoothing spline. spar or df fix the smoothing; otherwise lambda is chosen by criterion: 'gcv' (default, R smooth.spline(cv = FALSE)) or 'cv' (leave-one-out, cv = TRUE). Returns JSON with the fitted values (or predictions at xout), df, lambda (on R's scale, x scaled to [0, 1]), the criterion used (null when spar or df was given), its value and warnings."
     )]
     pub async fn regression_smooth_spline(
         &self,

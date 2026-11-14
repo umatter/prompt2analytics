@@ -26,8 +26,20 @@ q nearest neighbours:
 - **Exact fits.** p2a evaluates every local fit, as R's `loess(surface = "direct")`; R's
   default kd-tree interpolation differs from the exact fits by up to about 1e-3 relative on
   these data, so the pins use `surface = "direct"`.
-- `enp` is tr(L), R's `trace.hat`; R's "Equivalent Number of Parameters" is
-  `one.delta + 2 tr(L) - n` (REG-60, open, with the residual SE and the robust iterations).
+- **Statistics** are R's `statistics = "exact"`, from the first (gaussian) fit:
+  `trace_hat = tr(L)`, `one_delta = n - 2 tr(L) + sum L_ij^2` (exact; R's default
+  "approximate" interpolates a table and differs by about 5e-4 relative at n = 100), R's
+  "Equivalent Number of Parameters" `enp = one_delta + 2 tr(L) - n`, and the residual scale
+  `residual_se = sqrt(RSS / one_delta)`. `sum_j L_ij^2` comes from the same pass as the trace:
+  row i of L is `w_j c' x_j` with `c` the first column of the local inverse, so it is `c' Q c`
+  with `Q` the squared-weight moments.
+- **Symmetric family** (`robust = true`): `robust_iterations` fits in all (R's `iterations`,
+  default 4; 1 is the gaussian fit alone), each refit with lowesw's bisquare weights of the
+  previous residuals (`c = 6 median|r|`; weight 0 above `0.999 c`, 1 below `0.001 c`; all 1
+  when `c` is below the smallest positive normal number). No early stop by default
+  (`tolerance` 0, as R). The residual scale of a robust fit is R's: the RSS of a gaussian fit
+  of lowesp's pseudovalues over `one_delta`.
+- Local moments are summed in `u = (x - x0) / radius`, so x on any scale gives the same fit.
 
 ## R reference
 
@@ -51,7 +63,7 @@ Cases in `validation/r/cases/regression_smoothers_t3.R`:
 | Key | R |
 |---|---|
 | `fit_s075_d2` | 2.390395787309991, 4.077224371939557, 5.946666803764424, 8.054688091794901, 10.0453119082051, 12.154688091794899, 14.176249526564078, 16.124002238733567, 18.119470241934515, 20.142475836606128 |
-| `trace_s075_d2` | 5.47107540343813 (R `enp` 4.950126136174497, not compared: REG-60) |
+| `trace_s075_d2` | 5.47107540343813 (R `enp` 4.950126136174497 with `statistics = "approximate"`, `enp_r_s075_d2`, not compared) |
 | `fit_s075_d1` | 2.234268487117532, 4.147675425582901, 6.068700753943249, ... |
 | `trace_s075_d1` | 3.4699695365013867 |
 | `fit_s05_d0` | 4.166718441080087, 4.5407187084643565, 5.956844741235391, ... |
@@ -71,6 +83,14 @@ n = 100: 1e-8), the statistics row for the trace. The fits agree with R to about
 
 ## Tests
 
+Registered (`loess_statistics` in `validation/methods/regression_smoothers_t4.json`; case
+`loess_t4` of `regression_smoothers_t4.R`, n = 100 with three outliers):
+
+- `test_validate_loess_exact_statistics`: `trace.hat`, `one.delta`, `enp` and `s` for degrees 1-2
+  and spans 0.3 and 0.75 (statistics row).
+- `test_validate_loess_symmetric`: `family = "symmetric"` with `iterations` 4 and 2: the fit and
+  robustness weights (coefficient row), `s` and `enp` (statistics row).
+
 Registered (`loess_direct` in `validation/methods/regression_smoothers_t3.json`):
 
 - `test_validate_loess_x10_direct`: degrees 0-2, span 0.75, 0.5 and 1.2, the trace and
@@ -87,11 +107,15 @@ q at degrees 0-2 and in prediction, a Likert-style mass point, a constant x refu
 `test_loess_rejects_invalid_controls` (span, degree, robust_iterations, tolerance,
 non-finite x), `test_loess_local_solver_matches_qr` (the moment solver equals pivoted-QR
 least squares on sqrt(w) [1, u, u^2] at 1e-10 relative, with the same effective degree,
-for degrees 0-2 and spans 0.1, 0.5 and 1.2).
+for degrees 0-2 and spans 0.1, 0.5 and 1.2), `test_loess_moments_extreme_scale` (x times
+1e-90 and 1e90 give the fit, trace and one.delta of x to 1e-10), `test_loess_lowesw_cutoffs`.
 
 ## Deviations
 
-- REG-60: R's `enp`, residual SE (`one.delta`) and robust iterations (Tier 4).
+- REG-60 (`loess_direct`): `enp_r_s075_d2` is R's `enp` under the default `statistics =
+  "approximate"`, whose `one.delta` is interpolated from the trace (`ehg141`); p2a computes the
+  exact `one.delta`, so its `enp` is `statistics = "exact"`'s (5.1092 against 4.9501 at n = 10;
+  about 5e-4 relative apart at n = 100). The exact values are pinned by `loess_statistics`.
 - Zero-width neighbourhoods: lowess's tie mean instead of R loess's 0 (decision P2).
 
 ## Performance
@@ -172,3 +196,24 @@ medians; synthetic noisy data. Head/base: degree 1 span 0.75 (unified): 1.13 / 1
 Re-measured on the merged tree against `ff8e7559` (one P core, three interleaved runs each): degree 1
 span 0.75 (unified) 0.99 / 1.05 / 1.06 at n = 100 / 1,000 / 10,000; LOESS_Gaussian 1.06 / 0.99 / 0.97;
 LOESS_Robust 0.93 / 0.86 / 0.87 (n = 100 / 1,000 / 5,000).
+
+## Timing (T4)
+
+Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
+process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
+interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
+cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+jitter, y = 3 sin(0.7 x) + noise.
+
+| Fit (span 0.3) | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| gaussian, degree 1 | 22.1 -> 23.0 us (1.04x) | 1.18 -> 1.43 ms (1.21x) | 97.9 -> 122.9 ms (1.26x) |
+| gaussian, degree 2 | 24.1 -> 30.6 us (1.27x) | 1.33 -> 2.02 ms (1.52x) | 125.6 -> 212.0 ms (1.69x) |
+| symmetric, iterations 4 | 130 -> 154 us (1.18x) | 7.98 -> 9.24 ms (1.16x) | 611 -> 875 ms (1.43x) |
+
+Above 1.1x, awaiting sign-off. The exact `one.delta` needs `sum_j L_ij^2` per row, the
+squared-weight moments `sum w^2 u^j` accumulated in the trace pass: two (degree 1) to five
+(degree 2) more multiply-adds per neighbourhood row, on top of the scaling of `u`. A degree 2
+rerun gave 1.32x / 1.56x / 1.70x. The symmetric family now runs every fit R runs (no early
+stop) and one more fit, of the pseudovalues, for `s`. Peak RSS at n = 10,000 is unchanged
+(7.2 -> 7.3 MB).

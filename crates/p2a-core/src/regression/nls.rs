@@ -57,11 +57,15 @@ pub struct NlsConfig {
     pub lambda_down: f64,
     /// Step size for numerical differentiation (default: 1e-7)
     pub diff_step: f64,
-    /// Whether to use weighted least squares
+    /// Observation weights (R's `weights`): the fit minimises `sum w (y - f)^2`. One per
+    /// observation, finite and non-negative; a zero weight drops the observation from the
+    /// residual degrees of freedom, as in R.
     pub weights: Option<Vec<f64>>,
-    /// Lower bounds for parameters (optional)
+    /// Lower bounds for the parameters, one per parameter (`-inf` for none); usable without
+    /// `upper` (R's `algorithm = "port"`).
     pub lower: Option<Vec<f64>>,
-    /// Upper bounds for parameters (optional)
+    /// Upper bounds for the parameters, one per parameter (`+inf` for none); usable without
+    /// `lower`.
     pub upper: Option<Vec<f64>>,
 }
 
@@ -221,66 +225,12 @@ pub fn nls(
     let n = y.len();
     let k = start.len();
 
-    if n < k {
-        return Err(EconError::InvalidSpecification {
-            message: format!("More parameters ({}) than observations ({})", k, n),
-        });
-    }
+    let setup = check_nls_inputs(n, k, param_names, &config)?;
+    let weights = setup.weights.clone();
+    let bounds = &setup.bounds;
 
-    if param_names.len() != k {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Parameter names length ({}) doesn't match start values length ({})",
-                param_names.len(),
-                k
-            ),
-        });
-    }
-
-    // Validate weights if provided
-    let weights = if let Some(ref w) = config.weights {
-        if w.len() != n {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Weights length ({}) doesn't match data length ({})",
-                    w.len(),
-                    n
-                ),
-            });
-        }
-        Some(Array1::from_vec(w.clone()))
-    } else {
-        None
-    };
-
-    // Validate bounds if provided
-    if let (Some(lower), Some(upper)) = (&config.lower, &config.upper) {
-        if lower.len() != k || upper.len() != k {
-            return Err(EconError::InvalidSpecification {
-                message: "Bounds must have same length as parameters".to_string(),
-            });
-        }
-        for i in 0..k {
-            if lower[i] > upper[i] {
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "Lower bound {} exceeds upper bound {} for parameter {}",
-                        lower[i], upper[i], param_names[i]
-                    ),
-                });
-            }
-        }
-    }
-
-    // Initialize parameters
-    let mut theta = start.clone();
-
-    // Apply bounds if specified
-    if let (Some(lower), Some(upper)) = (&config.lower, &config.upper) {
-        for i in 0..k {
-            theta[i] = theta[i].max(lower[i]).min(upper[i]);
-        }
-    }
+    // Initialize parameters inside the bounds
+    let mut theta = apply_bounds(start, bounds);
 
     // Compute initial residuals and RSS
     let mut residuals = compute_residuals(x, y, &theta, model, n);
@@ -297,9 +247,8 @@ pub fn nls(
         // Compute Jacobian matrix J[i,j] = ∂r_i/∂θ_j
         let jacobian = compute_jacobian(x, y, &theta, model, n, k, config.diff_step);
 
-        // Compute J'J and J'r
-        let jtj = jacobian.t().dot(&jacobian);
-        let jtr = jacobian.t().dot(&residuals);
+        // Compute J'J and J'r, on sqrt(w) r with weights
+        let (jtj, jtr) = normal_terms(jacobian, &residuals, &setup, &theta)?;
 
         // Solve for parameter update based on algorithm
         let delta = match config.algorithm {
@@ -322,8 +271,7 @@ pub fn nls(
                         Ok(d) => {
                             // Try the step
                             let theta_new = &theta - &d;
-                            let theta_bounded =
-                                apply_bounds(&theta_new, &config.lower, &config.upper);
+                            let theta_bounded = apply_bounds(&theta_new, bounds);
                             let residuals_new = compute_residuals(x, y, &theta_bounded, model, n);
                             let rss_new = compute_rss(&residuals_new, &weights);
 
@@ -372,7 +320,7 @@ pub fn nls(
         // For Gauss-Newton: apply update
         if config.algorithm == NlsAlgorithm::GaussNewton {
             let theta_new = &theta - &delta;
-            theta = apply_bounds(&theta_new, &config.lower, &config.upper);
+            theta = apply_bounds(&theta_new, bounds);
 
             let residuals_new = compute_residuals(x, y, &theta, model, n);
             let rss_new = compute_rss(&residuals_new, &weights);
@@ -390,7 +338,7 @@ pub fn nls(
     }
 
     // Compute final statistics
-    let df = n - k;
+    let df = setup.n_used - k;
     let sigma = if df > 0 {
         (rss / df as f64).sqrt()
     } else {
@@ -399,7 +347,7 @@ pub fn nls(
 
     // Compute variance-covariance matrix
     let jacobian_final = compute_jacobian(x, y, &theta, model, n, k, config.diff_step);
-    let jtj_final = jacobian_final.t().dot(&jacobian_final);
+    let jtj_final = final_cross_product(jacobian_final, &setup);
 
     // A rank-deficient J'J at the solution (R's nls stops with "singular gradient") has no
     // covariance: NaN standard errors rather than a generalized inverse.
@@ -503,30 +451,11 @@ pub fn nls_multi(
         });
     }
 
-    if n < k {
-        return Err(EconError::InvalidSpecification {
-            message: format!("More parameters ({}) than observations ({})", k, n),
-        });
-    }
+    let setup = check_nls_inputs(n, k, param_names, &config)?;
+    let weights = setup.weights.clone();
+    let bounds = &setup.bounds;
 
-    if param_names.len() != k {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Parameter names length ({}) doesn't match start values length ({})",
-                param_names.len(),
-                k
-            ),
-        });
-    }
-
-    let weights = config.weights.as_ref().map(|w| Array1::from_vec(w.clone()));
-
-    let mut theta = start.clone();
-    if let (Some(lower), Some(upper)) = (&config.lower, &config.upper) {
-        for i in 0..k {
-            theta[i] = theta[i].max(lower[i]).min(upper[i]);
-        }
-    }
+    let mut theta = apply_bounds(start, bounds);
 
     let mut residuals = compute_residuals_multi(x, y, &theta, model);
     let mut rss = compute_rss(&residuals, &weights);
@@ -540,14 +469,13 @@ pub fn nls_multi(
         iterations += 1;
 
         let jacobian = compute_jacobian_multi(x, y, &theta, model, config.diff_step);
-        let jtj = jacobian.t().dot(&jacobian);
-        let jtr = jacobian.t().dot(&residuals);
+        let (jtj, jtr) = normal_terms(jacobian, &residuals, &setup, &theta)?;
 
         match config.algorithm {
             NlsAlgorithm::GaussNewton => match solve_normal_equations(&jtj, &jtr, 0.0) {
                 Ok(delta) => {
                     let theta_new = &theta - &delta;
-                    theta = apply_bounds(&theta_new, &config.lower, &config.upper);
+                    theta = apply_bounds(&theta_new, bounds);
 
                     let residuals_new = compute_residuals_multi(x, y, &theta, model);
                     let rss_new = compute_rss(&residuals_new, &weights);
@@ -576,8 +504,7 @@ pub fn nls_multi(
                     match solve_lm_equations(&jtj, &jtr, lambda, &diag_jtj) {
                         Ok(d) => {
                             let theta_new = &theta - &d;
-                            let theta_bounded =
-                                apply_bounds(&theta_new, &config.lower, &config.upper);
+                            let theta_bounded = apply_bounds(&theta_new, bounds);
                             let residuals_new =
                                 compute_residuals_multi(x, y, &theta_bounded, model);
                             let rss_new = compute_rss(&residuals_new, &weights);
@@ -622,7 +549,7 @@ pub fn nls_multi(
         }
     }
 
-    let df = n - k;
+    let df = setup.n_used - k;
     let sigma = if df > 0 {
         (rss / df as f64).sqrt()
     } else {
@@ -630,7 +557,7 @@ pub fn nls_multi(
     };
 
     let jacobian_final = compute_jacobian_multi(x, y, &theta, model, config.diff_step);
-    let jtj_final = jacobian_final.t().dot(&jacobian_final);
+    let jtj_final = final_cross_product(jacobian_final, &setup);
 
     // A rank-deficient J'J at the solution (R's nls stops with "singular gradient") has no
     // covariance: NaN standard errors rather than a generalized inverse.
@@ -933,20 +860,162 @@ fn solve_lm_equations(
     Ok(inv.dot(jtr))
 }
 
-/// Apply parameter bounds
-fn apply_bounds(
+/// The checked weights and bounds of an NLS fit.
+struct NlsSetup {
+    /// The weights, if any
+    weights: Option<Array1<f64>>,
+    /// Their square roots, which scale the residuals and Jacobian rows
+    sqrt_w: Option<Array1<f64>>,
+    /// Observations with a non-zero weight (all of them without weights)
+    n_used: usize,
+    /// (lower, upper) per parameter, infinite where a side is unbounded; `None` without bounds
+    bounds: Option<(Vec<f64>, Vec<f64>)>,
+}
+
+/// Checks the inputs of `nls` and `nls_multi`: sizes, parameter names, weights (one per
+/// observation, finite, non-negative, enough of them non-zero) and bounds (one per parameter,
+/// not NaN, lower <= upper; either side may be given alone).
+fn check_nls_inputs(
+    n: usize,
+    k: usize,
+    param_names: &[&str],
+    config: &NlsConfig,
+) -> EconResult<NlsSetup> {
+    let invalid = |message: String| EconError::InvalidSpecification { message };
+    if n < k {
+        return Err(invalid(format!(
+            "More parameters ({}) than observations ({})",
+            k, n
+        )));
+    }
+    if param_names.len() != k {
+        return Err(invalid(format!(
+            "Parameter names length ({}) doesn't match start values length ({})",
+            param_names.len(),
+            k
+        )));
+    }
+    let (weights, sqrt_w, n_used) = match &config.weights {
+        None => (None, None, n),
+        Some(w) => {
+            if w.len() != n {
+                return Err(invalid(format!(
+                    "Weights length ({}) doesn't match data length ({})",
+                    w.len(),
+                    n
+                )));
+            }
+            if let Some(i) = w.iter().position(|v| !(v.is_finite() && *v >= 0.0)) {
+                return Err(invalid(format!(
+                    "weights must be finite and non-negative; weight {} is {}",
+                    i + 1,
+                    w[i]
+                )));
+            }
+            let n_used = w.iter().filter(|v| **v > 0.0).count();
+            if n_used < k {
+                return Err(invalid(format!(
+                    "{n_used} observations have a positive weight, fewer than the {k} parameters"
+                )));
+            }
+            let w = Array1::from_vec(w.clone());
+            let sw = w.mapv(f64::sqrt);
+            (Some(w), Some(sw), n_used)
+        }
+    };
+    let side = |b: &Option<Vec<f64>>, name: &str, none: f64| -> EconResult<Vec<f64>> {
+        match b {
+            None => Ok(vec![none; k]),
+            Some(v) if v.len() != k => Err(invalid(format!(
+                "{name} bounds have {} values; the model has {k} parameters",
+                v.len()
+            ))),
+            Some(v) if v.iter().any(|b| b.is_nan()) => {
+                Err(invalid(format!("{name} bounds must not be NaN")))
+            }
+            Some(v) => Ok(v.clone()),
+        }
+    };
+    let bounds = if config.lower.is_none() && config.upper.is_none() {
+        None
+    } else {
+        let lo = side(&config.lower, "Lower", f64::NEG_INFINITY)?;
+        let hi = side(&config.upper, "Upper", f64::INFINITY)?;
+        for i in 0..k {
+            if lo[i] > hi[i] {
+                return Err(invalid(format!(
+                    "Lower bound {} exceeds upper bound {} for parameter {}",
+                    lo[i], hi[i], param_names[i]
+                )));
+            }
+        }
+        Some((lo, hi))
+    };
+    Ok(NlsSetup {
+        weights,
+        sqrt_w,
+        n_used,
+        bounds,
+    })
+}
+
+/// `J'J` and `J'r` of one iteration, with `J` and `r` scaled by `sqrt(w)` under weights. A
+/// parameter at a bound whose descent direction points outside is held there (its row and
+/// column of `J'J` become the unit vector, its `J'r` zero), so the step moves the others.
+fn normal_terms(
+    mut jacobian: Array2<f64>,
+    residuals: &Array1<f64>,
+    setup: &NlsSetup,
     theta: &Array1<f64>,
-    lower: &Option<Vec<f64>>,
-    upper: &Option<Vec<f64>>,
-) -> Array1<f64> {
-    match (lower, upper) {
-        (Some(lo), Some(hi)) => theta
+) -> EconResult<(Array2<f64>, Array1<f64>)> {
+    let (mut jtj, mut jtr) = match &setup.sqrt_w {
+        None => (jacobian.t().dot(&jacobian), jacobian.t().dot(residuals)),
+        Some(sw) => {
+            for (mut row, s) in jacobian.rows_mut().into_iter().zip(sw.iter()) {
+                row *= *s;
+            }
+            let r = residuals * sw;
+            (jacobian.t().dot(&jacobian), jacobian.t().dot(&r))
+        }
+    };
+    if let Some((lo, hi)) = &setup.bounds {
+        let k = theta.len();
+        for j in 0..k {
+            // the step is theta - delta with delta ~ (J'J)^-1 J'r: J'r > 0 lowers theta_j
+            let held = (theta[j] <= lo[j] && jtr[j] > 0.0) || (theta[j] >= hi[j] && jtr[j] < 0.0);
+            if held {
+                for i in 0..k {
+                    jtj[[i, j]] = 0.0;
+                    jtj[[j, i]] = 0.0;
+                }
+                jtj[[j, j]] = 1.0;
+                jtr[j] = 0.0;
+            }
+        }
+    }
+    Ok((jtj, jtr))
+}
+
+/// `J'J` at the solution, on `sqrt(w) J` under weights (R's gradient of the weighted model).
+fn final_cross_product(mut jacobian: Array2<f64>, setup: &NlsSetup) -> Array2<f64> {
+    if let Some(sw) = &setup.sqrt_w {
+        for (mut row, s) in jacobian.rows_mut().into_iter().zip(sw.iter()) {
+            row *= *s;
+        }
+    }
+    jacobian.t().dot(&jacobian)
+}
+
+/// Clamp the parameters into their bounds (unchanged without bounds).
+fn apply_bounds(theta: &Array1<f64>, bounds: &Option<(Vec<f64>, Vec<f64>)>) -> Array1<f64> {
+    match bounds {
+        Some((lo, hi)) => theta
             .iter()
             .zip(lo.iter())
             .zip(hi.iter())
             .map(|((&t, &l), &u)| t.max(l).min(u))
             .collect(),
-        _ => theta.clone(),
+        None => theta.clone(),
     }
 }
 
@@ -1341,5 +1410,141 @@ mod tests {
             .scalar("sigma", r.sigma, Tol::iterative(1e-8))
             .scalar("df", r.df as f64, Tol::exact())
             .finish();
+    }
+
+    fn nls_t4(case_id: &str) -> (p2a_validation::Case, Array1<f64>, Array1<f64>, Vec<f64>) {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let c = |n: &str| numeric_column(ds.df(), n, NaPolicy::Fail).unwrap().0;
+        (case, Array1::from(c("x")), Array1::from(c("y")), c("w"))
+    }
+
+    /// Case `nls_weighted_t4` (REG-48): stats::nls(y ~ a exp(-b x) + c, weights = w), variance
+    /// rising with x. Iterative as `test_validate_nls_expdecay`, with the RSS change tolerance
+    /// at 1e-12.
+    #[test]
+    fn test_validate_nls_weighted() {
+        use p2a_validation::{Check, Tol};
+        let (case, x, y, w) = nls_t4("nls_weighted_t4");
+        let mut config = NlsConfig::default();
+        config.weights = Some(w);
+        config.tolerance = 1e-12;
+        let r = nls(
+            &x,
+            &y,
+            model_exponential_decay,
+            &ndarray::array![8.0, 0.3, 1.0],
+            &["a", "b", "c"],
+            config,
+        )
+        .unwrap();
+        assert!(r.converged);
+        Check::new(&case)
+            .named(
+                "w_coef",
+                &r.param_names,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named("w_se", &r.param_names, &r.std_errors, Tol::iterative(1e-5))
+            .named("w_t", &r.param_names, &r.t_stats, Tol::iterative(1e-5))
+            .named("w_p", &r.param_names, &r.p_values, Tol::iterative(1e-3))
+            .scalar("w_rss", r.rss, Tol::iterative(1e-8))
+            .scalar("w_sigma", r.sigma, Tol::iterative(1e-8))
+            .scalar("w_df", r.df as f64, Tol::exact())
+            .vector("w_fitted", &r.fitted, Tol::iterative(1e-6))
+            .vector("w_residuals", &r.residuals, Tol::iterative(1e-5))
+            .finish();
+    }
+
+    /// Case `nls_weighted_t4` (REG-48): a lower bound alone on c (weighted, as the R case) and
+    /// an upper bound alone on b (unweighted), as nls(algorithm = "port"); both optima lie on
+    /// the bound.
+    #[test]
+    fn test_validate_nls_one_sided_bounds() {
+        use p2a_validation::{Check, Tol};
+        let (case, x, y, w) = nls_t4("nls_weighted_t4");
+        let names = ["a", "b", "c"];
+        let mut lo = NlsConfig::default();
+        lo.weights = Some(w);
+        lo.tolerance = 1e-12;
+        lo.lower = Some(vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 2.5]);
+        let rl = nls(
+            &x,
+            &y,
+            model_exponential_decay,
+            &ndarray::array![8.0, 0.3, 2.5],
+            &names,
+            lo,
+        )
+        .unwrap();
+        let mut up = NlsConfig::default();
+        up.tolerance = 1e-12;
+        up.upper = Some(vec![f64::INFINITY, 0.45, f64::INFINITY]);
+        let ru = nls(
+            &x,
+            &y,
+            model_exponential_decay,
+            &ndarray::array![8.0, 0.3, 1.0],
+            &names,
+            up,
+        )
+        .unwrap();
+        Check::new(&case)
+            .named(
+                "lower_coef",
+                &rl.param_names,
+                &rl.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .scalar("lower_rss", rl.rss, Tol::iterative(1e-8))
+            .named(
+                "upper_coef",
+                &ru.param_names,
+                &ru.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .scalar("upper_rss", ru.rss, Tol::iterative(1e-8))
+            .finish();
+    }
+
+    /// nls_multi checks its inputs as nls does: a short weights or bounds vector is an error,
+    /// not a panic; negative or non-finite weights are refused.
+    #[test]
+    fn test_nls_multi_rejects_short_weights_and_bounds() {
+        fn lin(x: &Array1<f64>, t: &Array1<f64>) -> f64 {
+            t[0] + t[1] * x[0]
+        }
+        let x = Array2::from_shape_fn((6, 1), |(i, _)| i as f64);
+        let y = ndarray::array![0.1, 1.2, 1.9, 3.1, 4.0, 5.2];
+        let start = ndarray::array![0.0, 1.0];
+        let run = |c: NlsConfig| nls_multi(&x, &y, lin, &start, &["a", "b"], c);
+        for c in [
+            NlsConfig {
+                weights: Some(vec![1.0; 3]),
+                ..Default::default()
+            },
+            NlsConfig {
+                lower: Some(vec![0.0]),
+                ..Default::default()
+            },
+            NlsConfig {
+                upper: Some(vec![9.0]),
+                ..Default::default()
+            },
+            NlsConfig {
+                weights: Some(vec![1.0, -1.0, 1.0, 1.0, 1.0, 1.0]),
+                ..Default::default()
+            },
+            NlsConfig {
+                weights: Some(vec![1.0, f64::NAN, 1.0, 1.0, 1.0, 1.0]),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                run(c),
+                Err(EconError::InvalidSpecification { .. })
+            ));
+        }
     }
 }

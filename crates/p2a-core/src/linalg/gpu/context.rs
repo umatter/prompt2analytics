@@ -38,8 +38,8 @@ pub struct GpuContext {
     /// cuBLAS handle for BLAS operations. cuBLAS handles are not thread-safe
     /// for concurrent calls, so external synchronization is required.
     blas: Mutex<CudaBlas>,
-    /// cuSOLVER dense handle for factorizations. Same thread-safety
-    /// constraint as `blas`.
+    /// cuSOLVER dense handle. Created at start-up but used by no operation (the Cholesky
+    /// inverse is a CPU passthrough). Same thread-safety constraint as `blas`.
     solver: Mutex<DnHandle>,
     /// Dispatch thresholds (from env vars).
     pub thresholds: GpuThresholds,

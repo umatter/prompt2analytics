@@ -1860,8 +1860,8 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Case `quantreg_hetero` (quantreg::rq on the legacy Test 1 DGP; validation/r/cases/regression_legacy.R):
-    /// the simplex's coefficients and objective.
+    /// Case `quantreg_hetero` (quantreg::rq on the legacy Test 1 DGP;
+    /// validation/r/cases/regression_legacy.R): the simplex's coefficients and objective.
     #[test]
     fn test_validate_quantreg_hetero() {
         use p2a_validation::{Check, Tol};
@@ -2005,7 +2005,8 @@ mod tests {
     }
 
     /// Case `rq_br_se`: quantreg::rq(method = "br") coefficients and check-loss objective at tau
-    /// 0.02/0.25/0.5/0.75. Fails before WP10: the IRLS coefficients are 1.8e-5 / 2.8e-5 / 1.0e-6 off.
+    /// 0.02/0.25/0.5/0.75. Fails before WP10: the IRLS coefficients are 1.8e-5 / 2.8e-5 / 1.0e-6
+    /// off.
     #[test]
     fn test_validate_rq_br_coefficients() {
         let (case, ds) = crate::test_support::load_case("rq_br_se");
@@ -2626,9 +2627,9 @@ mod tests {
         }
     }
 
-    /// n = 5 (rows 1-5): R's summary.rq(se = "iid") stops ("variable lengths differ"; h + pz + 1 = 6
-    /// > 5), while rq() itself works. p2a keeps the fit, reports NaN SEs and says why. nid works and
-    /// matches R, with "1 non-positive fis".
+    /// n = 5 (rows 1-5): R's summary.rq(se = "iid") stops ("variable lengths differ"; h + pz + 1 =
+    /// 6 > 5), while rq() itself works. p2a keeps the fit, reports NaN SEs and says why. nid works
+    /// and matches R, with "1 non-positive fis".
     #[test]
     fn test_validate_rq_small_sample_se() {
         let (case, ds) = crate::test_support::load_case("rq_br_se");
@@ -3020,7 +3021,8 @@ mod tests {
     }
 
     /// nid after a Frisch-Newton fit: an auxiliary tau -/+ h outside (tol, 1 - tol) runs the
-    /// simplex instead of failing (Frisch-Newton cannot run there), as `Auto` does for the main fit.
+    /// simplex instead of failing (Frisch-Newton cannot run there), as `Auto` does for the main
+    /// fit.
     #[test]
     fn test_rq_nid_aux_fit_falls_back_to_simplex_outside_fn_range() {
         let ds = hetero();

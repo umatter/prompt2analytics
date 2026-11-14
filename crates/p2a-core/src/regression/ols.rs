@@ -4506,7 +4506,8 @@ mod tests {
         check.finish();
     }
 
-    /// Case ols_no_intercept_grunfeld: lm(inv ~ 0 + value + capital) (validation/r/cases/cli_flags.R). REG-19.
+    /// Case ols_no_intercept_grunfeld: lm(inv ~ 0 + value + capital)
+    /// (validation/r/cases/cli_flags.R). REG-19.
     #[test]
     fn test_validate_ols_no_intercept_grunfeld() {
         let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");
@@ -4569,7 +4570,8 @@ mod tests {
             .finish();
     }
 
-    /// CR1 one- and two-way without intercept: sandwich::vcovCL(lm(inv ~ 0 + value + capital), ~firm [+ year], HC1).
+    /// CR1 one- and two-way without intercept: sandwich::vcovCL(lm(inv ~ 0 + value + capital),
+    /// ~firm [+ year], HC1).
     #[test]
     fn test_validate_ols_clustered_no_intercept_grunfeld() {
         let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");
@@ -4595,7 +4597,8 @@ mod tests {
         }
     }
 
-    /// NeweyWest(lm(inv ~ 0 + value + capital), lag = 4, prewhite = FALSE) = p2a Bartlett bandwidth 4 (T1 hac_ar1).
+    /// NeweyWest(lm(inv ~ 0 + value + capital), lag = 4, prewhite = FALSE) = p2a Bartlett bandwidth
+    /// 4 (T1 hac_ar1).
     #[test]
     fn test_validate_hac_no_intercept_grunfeld() {
         let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");

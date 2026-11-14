@@ -94,6 +94,8 @@ impl Default for SupsmuConfig {
 /// midrange and woofer spans, and `big`, `sml`, `eps`.
 const SPANS: [f64; 3] = [0.05_f32 as f64, 0.2_f32 as f64, 0.5];
 const BIG: f64 = 1.0e20_f32 as f64;
+/// Fewest complete observations (and distinct x values) [`supsmu`] smooths.
+pub const MIN_OBSERVATIONS: usize = 4;
 const SML: f64 = 1.0e-7_f32 as f64;
 const EPS: f64 = 1.0e-3_f32 as f64;
 
@@ -122,8 +124,8 @@ fn half_window(span: f64, n: usize) -> usize {
 /// * `periodic` - Treat x as periodic on [0, 1] (x must lie in [0, 1], as in R)
 /// * `bass` - Smoothness control in [0, 10] (higher = smoother; 0 = none)
 ///
-/// Observations with a NaN or infinite x, y or weight are deleted first; at least 4
-/// must remain, with at least 4 distinct x values.
+/// Observations with a NaN or infinite x, y or weight are deleted first; at least
+/// [`MIN_OBSERVATIONS`] must remain, with at least as many distinct x values.
 ///
 /// # Returns
 /// A `SupsmuResult` with the unique sorted x values and the smooth at each.
@@ -183,10 +185,10 @@ pub fn supsmu(
         n_dropped: n_total - n,
         by_column,
     };
-    if n < 4 {
+    if n < MIN_OBSERVATIONS {
         return Err(format!(
-            "Need at least 4 complete (x, y, wt) observations for supsmu; {n} of {n_total} \
-             are complete"
+            "Need at least {MIN_OBSERVATIONS} complete (x, y, wt) observations for supsmu; {n} of \
+             {n_total} are complete"
         ));
     }
     if let Some(w) = wt
@@ -211,8 +213,8 @@ pub fn supsmu(
         None => vec![1.0; n],
     };
     let distinct = 1 + xs.windows(2).filter(|p| p[1] != p[0]).count();
-    if distinct < 4 {
-        return Err("Need at least 4 unique x values".to_string());
+    if distinct < MIN_OBSERVATIONS {
+        return Err(format!("Need at least {MIN_OBSERVATIONS} unique x values"));
     }
     if periodic {
         let widest = if span > 0.0 { span } else { SPANS[2] };
