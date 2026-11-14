@@ -238,6 +238,10 @@ pub struct GlmFit {
     /// `epsilon` of the spec (0 when read from JSON written before this field existed).
     #[serde(default)]
     pub epsilon: f64,
+    /// [`GlmSpec::coef_tol`] of the spec: the fit kept iterating after the deviance rule
+    /// until the relative coefficient change was below it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coef_tol: Option<f64>,
     /// The last iteration had to halve its step.
     pub boundary: bool,
     /// Binomial families: some fitted probability is within `10 eps` of 0 or 1.
@@ -1283,6 +1287,7 @@ fn fit_glm_solved(
         iterations: fit.iterations,
         max_iter: spec.max_iter,
         epsilon: spec.epsilon,
+        coef_tol: spec.coef_tol,
         boundary: fit.boundary,
         separation,
         warnings,
@@ -1296,11 +1301,17 @@ impl ResultNotes for GlmFit {
     }
 
     fn notes_convergence(&self) -> Option<Convergence> {
+        let criterion = match self.coef_tol {
+            Some(tol) => {
+                format!("relative change in deviance, then relative coefficient change < {tol:e}")
+            }
+            None => "relative change in deviance".to_string(),
+        };
         Some(Convergence::new(
             self.converged,
             self.iterations,
             self.max_iter,
-            "relative change in deviance",
+            &criterion,
             f64::NAN,
             self.epsilon,
         ))
@@ -1442,9 +1453,19 @@ fn lean_logit_within(
         return Ok(None);
     }
     let from_zero = matches!(start, LeanStart::Zero);
-    let xs = x.as_standard_layout();
-    let Some(xrows) = xs.as_slice() else {
-        return Ok(None);
+    // A standard-layout design is read in place; any other is copied once into a guarded buffer
+    let x_copy;
+    let xrows: &[f64] = match x.as_slice() {
+        Some(rows) => rows,
+        None => {
+            let mut copy = resource::try_zeros2(n, k, "logit IRLS workspace")?;
+            copy.assign(&x);
+            x_copy = copy;
+            let Some(rows) = x_copy.as_slice() else {
+                return Ok(None);
+            };
+            rows
+        }
     };
     let y = y.as_standard_layout();
     let Some(y) = y.as_slice() else {
@@ -1556,9 +1577,10 @@ fn lean_logit_within(
     let Some(mut devold) = first_dev else {
         return Ok(None);
     };
-    let mut g = vec![0.0; k * k];
-    let mut inverse = Array2::<f64>::zeros((k, k));
-    let mut chol = vec![0.0; k * k];
+    let kk = resource::checked_len(&[k, k], "logit IRLS workspace")?;
+    let mut g = resource::try_vec(kk, 0.0, "logit IRLS workspace")?;
+    let mut inverse = resource::try_zeros2(k, k, "logit IRLS workspace")?;
+    let mut chol = resource::try_vec(kk, 0.0, "logit IRLS workspace")?;
     let mut rhs = vec![0.0; k];
     let (mut solve_scratch, mut scale_scratch) = (vec![0.0; k], vec![0.0; k]);
     let mut b = Array1::<f64>::zeros(k);
@@ -1988,7 +2010,9 @@ fn inverse_and_condition(
 /// and warnings included.
 ///
 /// The fields of a lean fit: `vcov` is the inverse of the last step's `X'WX` (dispersion 1),
-/// `deviance` and `null_deviance` are computed with fewer logarithms (a few ulps), and the
+/// `deviance` and `null_deviance` are computed with fewer logarithms (the error is a few ulps
+/// of `sum |y eta|` in absolute terms, so the relative error grows as the deviance approaches
+/// 0), and the
 /// log-likelihood and AIC follow from the deviance, which for a 0/1 response is `-2` times the
 /// binomial log-likelihood.
 pub(crate) fn fit_logit_lean(
@@ -2046,6 +2070,7 @@ fn logit_lean_path(
                 iterations: fit.iterations,
                 max_iter: spec.max_iter,
                 epsilon: spec.epsilon,
+                coef_tol: None,
                 boundary: false,
                 separation: false,
                 warnings: Vec::new(),
@@ -2122,6 +2147,151 @@ pub fn fit_propensity(
     })
 }
 
+// ═══ The intercept-only fluctuation (ltmle's targeting step) ═══
+
+/// The logit link's inverse as R's `binomial()$linkinv` (and `predict.glm(type =
+/// "response")`) computes it: `eta` beyond +/-30 gives `eps / (1 + eps)` or
+/// `1 / (1 + eps)`, so a probability is never exactly 0 or 1.
+pub(crate) fn binomial_linkinv(eta: f64) -> f64 {
+    const THRESH: f64 = 30.0;
+    let t = if eta < -THRESH {
+        f64::EPSILON
+    } else if eta > THRESH {
+        1.0 / f64::EPSILON
+    } else {
+        eta.exp()
+    };
+    t / (1.0 + t)
+}
+
+/// An intercept-only fluctuation: epsilon of the intercept-only quasibinomial logit fit of
+/// `y` with offset `offset` and prior weights `h` (`glm(y ~ 1, offset, weights = h,
+/// quasibinomial)` among the followers, zero weights dropping the rest).
+pub(crate) struct InterceptFluctuation {
+    pub epsilon: f64,
+    pub converged: bool,
+    pub iterations: usize,
+    /// The step halvings ran out with the deviance still not finite.
+    pub non_finite: bool,
+}
+
+/// For one coefficient on the canonical link, glm.fit's IRLS step is Newton's step
+/// `score / information`; this solves the same score equation
+/// `sum_i h_i (y_i - plogis(offset_i + eps)) = 0` in O(n) per iteration instead of a
+/// general GLM fit, with glm.fit's stopping rule `|dev - dev_old| / (|dev| + 0.1) <
+/// tolerance`, glm.fit's step halving when the deviance is not finite, and one polishing
+/// Newton step after the rule is met. One pass over the followers per trial value gives its
+/// deviance, score and information.
+pub(crate) fn fit_intercept_fluctuation(
+    y: ArrayView1<f64>,
+    offset: ArrayView1<f64>,
+    h: ArrayView1<f64>,
+    tolerance: f64,
+    max_iter: usize,
+) -> EconResult<InterceptFluctuation> {
+    // (y, offset, h) of the followers
+    let mut rows: Vec<[f64; 3]> = resource::try_with_capacity(h.len(), "LTMLE fluctuation")?;
+    for (&hi, (&yi, &oi)) in h.iter().zip(y.iter().zip(offset.iter())) {
+        if hi > 0.0 {
+            rows.push([yi, oi, hi]);
+        }
+    }
+    // (deviance, score, information) at eps; the deviance is the binomial deviance in its
+    // quasi-binomial working form, 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
+    let eval = |eps: f64| -> (f64, f64, f64) {
+        let (mut d, mut score, mut info) = (0.0, 0.0, 0.0);
+        for &[yi, oi, wi] in &rows {
+            let p = binomial_linkinv(oi + eps);
+            let a = if yi > 0.0 { yi * (yi / p).ln() } else { 0.0 };
+            let b = if yi < 1.0 {
+                (1.0 - yi) * ((1.0 - yi) / (1.0 - p)).ln()
+            } else {
+                0.0
+            };
+            d += 2.0 * wi * (a + b);
+            score += wi * (yi - p);
+            info += wi * p * (1.0 - p);
+        }
+        (d, score, info)
+    };
+    let mut eps = 0.0;
+    let (mut dev, mut score, mut info) = eval(eps);
+    if !dev.is_finite() {
+        return Err(EconError::Computation(
+            "LTMLE: the fluctuation's starting deviance is not finite".into(),
+        ));
+    }
+    for iter in 1..=max_iter {
+        resource::checkpoint()?;
+        if info.is_nan() || info <= 0.0 || score == 0.0 {
+            return Ok(InterceptFluctuation {
+                epsilon: eps,
+                converged: score == 0.0,
+                iterations: iter,
+                non_finite: false,
+            });
+        }
+        // glm.fit halves the step only when the deviance is not finite; when 30 halvings do not
+        // reach a finite deviance, the last finite eps is kept and the fit stops unconverged.
+        let Some((new_eps, new)) = halved_step(eps, score / info, &eval) else {
+            return Ok(InterceptFluctuation {
+                epsilon: eps,
+                converged: false,
+                iterations: iter,
+                non_finite: true,
+            });
+        };
+        let change = (new.0 - dev).abs() / (new.0.abs() + 0.1);
+        eps = new_eps;
+        (dev, score, info) = new;
+        if change < tolerance {
+            // One more Newton step: the deviance rule leaves an O(sqrt(tolerance)) error in
+            // eps when the weights are large, and Newton's step squares it at O(n) cost.
+            if info > 0.0 {
+                let polished = eps + score / info;
+                if eval(polished).0.is_finite() {
+                    eps = polished;
+                }
+            }
+            return Ok(InterceptFluctuation {
+                epsilon: eps,
+                converged: true,
+                iterations: iter,
+                non_finite: false,
+            });
+        }
+    }
+    Ok(InterceptFluctuation {
+        epsilon: eps,
+        converged: false,
+        iterations: max_iter,
+        non_finite: false,
+    })
+}
+
+/// Step halvings glm.fit allows when the deviance is not finite.
+pub(crate) const FLUCTUATION_MAX_HALVINGS: usize = 30;
+
+/// `eps + step`, halved up to [`FLUCTUATION_MAX_HALVINGS`] times while the deviance (the first element of
+/// `eval`) is not finite: the new eps and its evaluation, or `None` when no trial is finite (at
+/// most `FLUCTUATION_MAX_HALVINGS + 1` evaluations).
+pub(crate) fn halved_step(
+    eps: f64,
+    mut step: f64,
+    eval: &impl Fn(f64) -> (f64, f64, f64),
+) -> Option<(f64, (f64, f64, f64))> {
+    for halvings in 0..=FLUCTUATION_MAX_HALVINGS {
+        if halvings > 0 {
+            step /= 2.0;
+        }
+        let new = eval(eps + step);
+        if new.0.is_finite() {
+            return Some((eps + step, new));
+        }
+    }
+    None
+}
+
 /// The logistic fluctuation of TMLE: a quasi-binomial logit fit of `y` (in [0, 1]) on
 /// `covariates` with `offset` (the initial fit on the logit scale), optionally weighted.
 ///
@@ -2129,10 +2299,8 @@ pub fn fit_propensity(
 /// intercept (`glm(y ~ -1 + H, offset, quasibinomial)`), or a column of ones with the
 /// clever covariate as weights (`glm(y ~ 1, offset, weights = H, quasibinomial)`).
 ///
-/// This builds and fits a full GLM. `ltmle` does not call it for its intercept-only form: it
-/// solves the same score equation with a scalar Newton iteration in O(n) per step, with
-/// glm.fit's stopping rule (`validation/econometrics/ltmle.md`, section 10, item 4); an
-/// intercept-only fast path here would let it share this helper.
+/// This builds and fits a full GLM. The intercept-only form with weights has its own O(n) solver,
+/// [`fit_intercept_fluctuation`], which `ltmle` uses.
 pub fn fit_logistic_fluctuation<'a>(
     y: ArrayView1<f64>,
     offset: ArrayView1<'a, f64>,
@@ -3682,6 +3850,8 @@ mod tests {
         for (n, seed) in [(40, 5), (300, 17), (2500, 41)] {
             let d = sim_data(n, seed);
             let glm = fit_glm(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
+            let on_path = logit_lean_path(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
+            assert!(on_path.is_some(), "logit n {n} left the lean path");
             let lean = fit_logit_lean(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
             assert!(glm.warnings.is_empty() && lean.warnings.is_empty());
             assert_fits_agree(&format!("logit n {n}"), &lean, &glm, 1e-12);
@@ -3695,6 +3865,8 @@ mod tests {
             let mut spec = GlmSpec::logit();
             spec.start = Some(start.view());
             let glm_s = fit_glm(d.x.view(), d.yb.view(), &spec).unwrap();
+            let on_path = logit_lean_path(d.x.view(), d.yb.view(), &spec).unwrap();
+            assert!(on_path.is_some(), "logit start n {n} left the lean path");
             let lean_s = fit_logit_lean(d.x.view(), d.yb.view(), &spec).unwrap();
             assert_fits_agree(&format!("logit start n {n}"), &lean_s, &glm_s, 1e-12);
         }
@@ -3712,6 +3884,8 @@ mod tests {
                 .iter()
                 .any(|&m| !(1e-3..=1.0 - 1e-3).contains(&m))
         );
+        let on_path = logit_lean_path(x.view(), y.view(), &GlmSpec::logit()).unwrap();
+        assert!(on_path.is_some(), "near separation left the lean path");
         let lean = fit_logit_lean(x.view(), y.view(), &GlmSpec::logit()).unwrap();
         assert_fits_agree("near separation", &lean, &glm, 1e-12);
         // complete separation: fit_glm's fit, warnings and flags, bit for bit
@@ -3765,5 +3939,129 @@ mod tests {
         let ea = fit_glm(bad.view(), d.yb.view(), &GlmSpec::logit()).unwrap_err();
         let eb = fit_logit_lean(bad.view(), d.yb.view(), &GlmSpec::logit()).unwrap_err();
         assert_eq!(ea.to_string(), eb.to_string());
+    }
+
+    /// A 100 x 11 logit design with an intercept (below the blocked cross-product, which
+    /// allocates its own guarded n x k buffer), in standard layout, its 0/1 response, and
+    /// the same design as a strided view of a 12-column matrix (`HistoryDesigns::g`'s shape).
+    fn wide_logit_design() -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+        let (n, k) = (100, 11);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut u = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let x = Array2::from_shape_fn((n, k), |(_, j)| if j == 0 { 1.0 } else { u() - 0.5 });
+        let y = Array1::from_iter((0..n).map(|i| {
+            let e = 0.4 * x[[i, 1]] - 0.3 * x[[i, 2]] + 0.1;
+            f64::from(u() < 1.0 / (1.0 + (-e).exp()))
+        }));
+        let mut q = Array2::zeros((n, k + 1));
+        q.slice_mut(ndarray::s![.., ..k]).assign(&x);
+        q.column_mut(k).fill(0.25);
+        (x, y, q)
+    }
+
+    fn lean_ctl() -> GlmControl {
+        GlmControl {
+            epsilon: 1e-8,
+            max_iter: 25,
+        }
+    }
+
+    /// The lean logit's k x k workspaces and the copy of a strided design go through the
+    /// fallible allocators, so a per-allocation ceiling refuses them.
+    #[test]
+    fn test_lean_logit_workspace_respects_alloc_ceiling() {
+        let (x, y, q) = wide_logit_design();
+        // above the n-vectors (800 bytes), below a k x k buffer (968 bytes)
+        let r = crate::resource::with_alloc_ceiling(Some(900), || {
+            lean_logit(x.view(), y.view(), None, LeanStart::Mustart, lean_ctl())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.as_ref().err()
+        );
+        // above k x k, below the n x k copy of the strided view (8,800 bytes)
+        let view = q.slice(ndarray::s![.., ..11]);
+        assert!(!view.is_standard_layout());
+        let r = crate::resource::with_alloc_ceiling(Some(5_000), || {
+            lean_logit(view, y.view(), None, LeanStart::Mustart, lean_ctl())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.as_ref().err()
+        );
+    }
+
+    /// A strided design gives the fit of its owned copy, bit for bit.
+    #[test]
+    fn test_lean_logit_non_standard_layout_matches() {
+        let (x, y, q) = wide_logit_design();
+        let view = q.slice(ndarray::s![.., ..11]);
+        let a = lean_logit(view, y.view(), None, LeanStart::Mustart, lean_ctl()).unwrap();
+        let b = lean_logit(x.view(), y.view(), None, LeanStart::Mustart, lean_ctl()).unwrap();
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                assert_eq!(a.iterations, b.iterations);
+                for (p, q) in a.coefficients.iter().zip(&b.coefficients) {
+                    assert_eq!(p.to_bits(), q.to_bits());
+                }
+                for (p, q) in a.fitted.iter().zip(&b.fitted) {
+                    assert_eq!(p.to_bits(), q.to_bits());
+                }
+            }
+            (None, None) => {}
+            (a, b) => panic!(
+                "one path left the lean fit: {:?} vs {:?}",
+                a.is_some(),
+                b.is_some()
+            ),
+        }
+    }
+
+    /// A fit that ran with a coefficient rule says so in its convergence note; one without
+    /// does not.
+    #[test]
+    fn test_glm_notes_name_coef_tol_rule() {
+        let d = sim_data(300, 17);
+        let probit = fit_propensity(d.x.view(), d.yb.view(), GlmLink::Probit).unwrap();
+        let c = probit.fit.notes_convergence().unwrap();
+        assert_eq!(
+            c.criterion,
+            format!(
+                "relative change in deviance, then relative coefficient change < {:e}",
+                PROPENSITY_COEF_TOL
+            )
+        );
+        let logit = fit_propensity(d.x.view(), d.yb.view(), GlmLink::Logit).unwrap();
+        let c = logit.fit.notes_convergence().unwrap();
+        assert_eq!(c.criterion, "relative change in deviance");
+    }
+
+    /// The intercept-only weighted fluctuation solver equals the full quasi-binomial GLM
+    /// `glm(y ~ 1, offset, weights = h)` on a noisy 200-row case with some zero weights.
+    #[test]
+    fn test_intercept_fluctuation_matches_glm() {
+        let d = sim_data(200, 29);
+        let n = 200;
+        let y = Array1::from_iter((0..n).map(|i| (0.1 + 0.8 * d.offset[i]).clamp(0.01, 0.99)));
+        let offset = Array1::from_iter((0..n).map(|i| 0.7 * d.x[[i, 1]] - 0.2));
+        let h = Array1::from_iter((0..n).map(|i| if i % 9 == 0 { 0.0 } else { d.weights[i] }));
+        let f = fit_intercept_fluctuation(y.view(), offset.view(), h.view(), 1e-12, 50).unwrap();
+        assert!(f.converged && !f.non_finite);
+        let ones = Array2::ones((n, 1));
+        let g =
+            fit_logistic_fluctuation(y.view(), offset.view(), ones.view(), Some(h.view())).unwrap();
+        assert!(
+            (f.epsilon - g.coefficients[0]).abs() <= 1e-10,
+            "{} vs {}",
+            f.epsilon,
+            g.coefficients[0]
+        );
     }
 }

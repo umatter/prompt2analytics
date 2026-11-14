@@ -20,15 +20,16 @@ Three methods:
 | Method | Effect | Standard error |
 |--------|--------|----------------|
 | `AIPW` (default) | ATE: mean of psi_i = m1 - m0 + D (Y - m1)/e - (1-D)(Y - m0)/(1-e); ATT: sum phi / n1 with phi = D (Y - m0) - (1-D) e/(1-e) (Y - m0) | analytic: sd(IF)/sqrt(n), n - 1 denominator, with IF = psi (ATE) or (phi - D tau) n/n1 (ATT); `bootstrap_reps = 0`, `se_method` "analytic influence function" |
-| `IPW` | Hajek IPW | `bootstrap = 0`: the M-estimation SE with the propensity estimated, `se_method` "M-estimation (propensity estimated)"; `bootstrap >= 2` (default 999): bootstrap SD, "bootstrap (B replicates; models refitted)" |
-| `Regression` | ATE: mean(m1 - m0) over all kept units; ATT: over the kept treated units | `bootstrap = 0`: the sandwich of the stacked estimating equations of the two arm regressions and the averaged contrast (HC0, the trimmed set fixed), "analytic (stacked estimating equations, trimming fixed)"; `bootstrap >= 2`: bootstrap SD |
+| `IPW` | Hajek IPW | `bootstrap = 0` (default): the M-estimation SE with the propensity estimated, `se_method` "M-estimation (propensity estimated)"; `bootstrap >= 2`: bootstrap SD, "bootstrap (B replicates; models refitted)" |
+| `Regression` | ATE: mean(m1 - m0) over all kept units; ATT: over the kept treated units | `bootstrap = 0` (default): the sandwich of the stacked estimating equations of the two arm regressions and the averaged contrast (HC0, the trimmed set fixed), "analytic (stacked estimating equations, trimming fixed)"; `bootstrap >= 2`: bootstrap SD |
 
 The AIPW SE ignores the estimation of the nuisance models (the usual influence-function SE of
 the R AIPW and tmle packages). For `IPW` and `Regression`, `bootstrap` is 0 (analytic) or at
 least 2; 1 is an error. Each bootstrap replicate resamples every row, refits the propensity
 model (when trimming or weighting needs it) and both arm regressions, and re-applies the
 trimming; a replicate whose refit fails or leaves an arm empty is dropped and counted. The
-default stays 999 replicates; `bootstrap` is ignored by `AIPW`. Regression adjustment for the
+default is 0, the analytic SE, in core, the CLI and MCP (999 replicates until November 2026);
+`bootstrap` is ignored by `AIPW`. Regression adjustment for the
 ATT averages the predicted contrast over the treated (before it averaged over every unit, which
 is the ATE: on `weighting_sim` 1.43074 against R's ATT 1.56333). Bootstrap intervals are type-7
 percentile intervals (normal interval below 20 successful replicates); an unseeded bootstrap

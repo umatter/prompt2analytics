@@ -302,11 +302,12 @@ EXAMPLES:
         #[arg(long, default_value = "0.05")]
         trim: f64,
 
-        /// Bootstrap replications for the SEs of --method ipw and regression (default: 999),
-        /// each refitting the propensity and outcome models; 0 gives analytic SEs
-        /// (M-estimation for ipw, the stacked-equation sandwich for regression) and 1 is an
-        /// error. aipw uses its analytic influence-function SE and ignores it
-        #[arg(long, default_value = "999")]
+        /// Bootstrap replications for the SEs of --method ipw and regression. The default 0
+        /// gives analytic SEs (M-estimation for ipw, the stacked-equation sandwich for
+        /// regression); 2 or more runs a bootstrap whose replicates refit the propensity and
+        /// outcome models, and 1 is an error. aipw uses its analytic influence-function SE
+        /// and ignores it
+        #[arg(long, default_value = "0")]
         bootstrap: usize,
 
         /// Seed of the bootstrap draws (default: 42)

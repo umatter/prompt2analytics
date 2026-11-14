@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "feglm_mle",
+      "name": "FEGLM at the fixed-effects GLM MLE: logit, probit, Poisson (one and two fixed effects), Gaussian; inverse-Hessian SEs, log-likelihood, AIC/BIC",
+      "category": "econometrics",
+      "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); alpaca::feglm",
+      "doc": "validation/econometrics/feglm.md",
+      "cases": [
+        "feglm_mle"
+      ],
+      "tests": [
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_mle_logit",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_mle_probit",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_mle_poisson",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_mle_gaussian",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_mle_default_controls"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs (dispersion 1; Gaussian deviance/df)",
+        "log-likelihood and null log-likelihood",
+        "AIC, BIC",
+        "deviance, null deviance",
+        "df_resid, df_absorbed, n, n_positive",
+        "coefficients at the default controls (Tol::iterative)"
+      ],
+      "tolerance": "validation/README.md, n = 464/480: coefficients 1e-8, SE and statistics 1e-6 relative at tolerance 1e-16 / map_tolerance 1e-12 (glm's epsilon 1e-16); counts exact; default controls Tol::iterative(1e-6), probit 1e-5 (Fisher scoring converges linearly)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "feglm_separation",
+      "name": "FEGLM drops groups whose outcome is all 0 or all 1 until none is left; singletons with a positive count kept (alpaca)",
+      "category": "econometrics",
+      "reference": "alpaca::feglm nobs; stats::glm with factor dummies on the kept rows",
+      "doc": "validation/econometrics/feglm.md",
+      "cases": [
+        "feglm_separation"
+      ],
+      "tests": [
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_separation_drop_rule"
+      ],
+      "quantities": [
+        "rows dropped and used",
+        "levels used",
+        "coefficients, SEs, log-likelihood, AIC, BIC (logit, Poisson, Gaussian)",
+        "warning (property)"
+      ],
+      "tolerance": "validation/README.md, n = 120-181: coefficients 1e-8, SE and statistics 1e-6 relative; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "feglm_absorbed_df",
+      "name": "FEGLM absorbed df by connected components on a disconnected two-way design",
+      "category": "econometrics",
+      "reference": "stats::lm(y ~ x + z + factor(firm) + factor(year)) (rank-based df)",
+      "doc": "validation/econometrics/feglm.md",
+      "cases": [
+        "hdfe_disconnected"
+      ],
+      "tests": [
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_disconnected_gaussian"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs",
+        "df_resid",
+        "df_absorbed",
+        "n"
+      ],
+      "tolerance": "validation/README.md, n = 80: coefficients 1e-6, SE 1e-5 relative; df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

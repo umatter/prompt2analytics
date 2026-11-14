@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "id": "feglm_mle",
+  "area": "econometrics/feglm",
+  "method": "FE-GLM MLE: logit, probit, Poisson (id + time, id), Gaussian (id + time) on feglm_panel; glm with factor dummies on alpaca's rows",
+  "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); alpaca::feglm",
+  "call": "glm(y ~ x + x2 + factor(id) [+ factor(time)], family, feglm_panel[alpaca rows]); alpaca::feglm(y ~ x + x2 | id [+ time])",
+  "dataset": "validation/datasets/generated/feglm_panel.csv",
+  "datasets": ["validation/datasets/generated/feglm_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3",
+    "alpaca": "0.3.5"
+  },
+  "values": {
+    "logit2_coef": {
+      "names": ["x", "x2"],
+      "values": [0.80043817007673823, -0.41026088885247225]
+    },
+    "logit2_se": {
+      "names": ["x", "x2"],
+      "values": [0.1339799142939801, 0.1222242310883162]
+    },
+    "logit2_loglik": -252.86653245699807,
+    "logit2_loglik_null": -320.06251321479715,
+    "logit2_aic": 639.73306491399615,
+    "logit2_bic": 917.10532991315517,
+    "logit2_deviance": 505.73306491399615,
+    "logit2_null_deviance": 640.1250264295943,
+    "logit2_df_resid": 397,
+    "logit2_nobs": 464,
+    "logit2_df_absorbed": 65,
+    "logit2_n_positive": 251,
+    "logit2_alpaca_coef": {
+      "names": ["x", "x2"],
+      "values": [0.80043817007274964, -0.41026088884890888]
+    },
+    "logit2_alpaca_se": {
+      "names": ["x", "x2"],
+      "values": [0.13397991429351561, 0.12222423108787765]
+    },
+    "logit1_coef": {
+      "names": ["x", "x2"],
+      "values": [0.77666421920844109, -0.40827694737903536]
+    },
+    "logit1_se": {
+      "names": ["x", "x2"],
+      "values": [0.13087818084246569, 0.11878021203801983]
+    },
+    "logit1_loglik": -258.08961019711654,
+    "logit1_loglik_null": -320.06251321479715,
+    "logit1_aic": 636.17922039423308,
+    "logit1_bic": 884.57229352780837,
+    "logit1_deviance": 516.17922039423308,
+    "logit1_null_deviance": 640.1250264295943,
+    "logit1_df_resid": 404,
+    "logit1_nobs": 464,
+    "logit1_df_absorbed": 58,
+    "logit1_n_positive": 251,
+    "logit1_alpaca_coef": {
+      "names": ["x", "x2"],
+      "values": [0.77666387682659732, -0.40827668741267914]
+    },
+    "logit1_alpaca_se": {
+      "names": ["x", "x2"],
+      "values": [0.13087814599742184, 0.11878018124082321]
+    },
+    "probit2_coef": {
+      "names": ["x", "x2"],
+      "values": [0.48655868581043543, -0.25156871636428046]
+    },
+    "probit2_se": {
+      "names": ["x", "x2"],
+      "values": [0.077643649444223028, 0.072503658312476918]
+    },
+    "probit2_loglik": -252.20829660276729,
+    "probit2_loglik_null": -320.06251321479715,
+    "probit2_aic": 638.41659320553458,
+    "probit2_bic": 915.78885820469372,
+    "probit2_deviance": 504.41659320553453,
+    "probit2_null_deviance": 640.1250264295943,
+    "probit2_df_resid": 397,
+    "probit2_nobs": 464,
+    "probit2_df_absorbed": 65,
+    "probit2_n_positive": 251,
+    "probit2_alpaca_coef": {
+      "names": ["x", "x2"],
+      "values": [0.48655853995394871, -0.25156860347440124]
+    },
+    "probit2_alpaca_se": {
+      "names": ["x", "x2"],
+      "values": [0.077643641632203081, 0.072503652239470293]
+    },
+    "probit1_coef": {
+      "names": ["x", "x2"],
+      "values": [0.47377283465326819, -0.24731138852915355]
+    },
+    "probit1_se": {
+      "names": ["x", "x2"],
+      "values": [0.07601623984580308, 0.070393559620453752]
+    },
+    "probit1_loglik": -257.45570527037376,
+    "probit1_loglik_null": -320.06251321479715,
+    "probit1_aic": 634.91141054074751,
+    "probit1_bic": 883.30448367432291,
+    "probit1_deviance": 514.91141054074751,
+    "probit1_null_deviance": 640.1250264295943,
+    "probit1_df_resid": 404,
+    "probit1_nobs": 464,
+    "probit1_df_absorbed": 58,
+    "probit1_n_positive": 251,
+    "probit1_alpaca_coef": {
+      "names": ["x", "x2"],
+      "values": [0.47377272101984885, -0.24731130369637616]
+    },
+    "probit1_alpaca_se": {
+      "names": ["x", "x2"],
+      "values": [0.076016234427658508, 0.070393555608620081]
+    },
+    "poisson2_coef": {
+      "names": ["x", "x2"],
+      "values": [0.27527722149353595, -0.14987732371223125]
+    },
+    "poisson2_se": {
+      "names": ["x", "x2"],
+      "values": [0.044690917753578571, 0.043882482709638161]
+    },
+    "poisson2_loglik": -631.55185803222162,
+    "poisson2_loglik_null": -770.21915676457104,
+    "poisson2_aic": 1401.1037160644432,
+    "poisson2_bic": 1689.0949572336767,
+    "poisson2_deviance": 450.96096334113508,
+    "poisson2_null_deviance": 728.29556080583404,
+    "poisson2_df_resid": 411,
+    "poisson2_nobs": 480,
+    "poisson2_df_absorbed": 67,
+    "poisson2_n_positive": 330,
+    "poisson2_alpaca_coef": {
+      "names": ["x", "x2"],
+      "values": [0.27527722148745259, -0.14987732371424825]
+    },
+    "poisson2_alpaca_se": {
+      "names": ["x", "x2"],
+      "values": [0.044690917747624716, 0.043882482698989964]
+    },
+    "poisson1_coef": {
+      "names": ["x", "x2"],
+      "values": [0.29042409491583715, -0.12788618039217853]
+    },
+    "poisson1_se": {
+      "names": ["x", "x2"],
+      "values": [0.04509796028005892, 0.042282590360285442]
+    },
+    "poisson1_loglik": -681.48586414390718,
+    "poisson1_loglik_null": -770.21915676457104,
+    "poisson1_aic": 1486.9717282878144,
+    "poisson1_bic": 1745.7464667297345,
+    "poisson1_deviance": 550.82897556450632,
+    "poisson1_null_deviance": 728.29556080583404,
+    "poisson1_df_resid": 418,
+    "poisson1_nobs": 480,
+    "poisson1_df_absorbed": 60,
+    "poisson1_n_positive": 330,
+    "poisson1_alpaca_coef": {
+      "names": ["x", "x2"],
+      "values": [0.29042409491582272, -0.12788618039218749]
+    },
+    "poisson1_alpaca_se": {
+      "names": ["x", "x2"],
+      "values": [0.045097960279625635, 0.04228259035938059]
+    },
+    "gauss2_coef": {
+      "names": ["x", "x2"],
+      "values": [0.53706260237370906, -0.33085615145492853]
+    },
+    "gauss2_se": {
+      "names": ["x", "x2"],
+      "values": [0.052205773255508715, 0.051275325546290662]
+    },
+    "gauss2_loglik": -654.54074388269851,
+    "gauss2_loglik_null": -860.5163956012226,
+    "gauss2_aic": 1449.081487765397,
+    "gauss2_bic": 1741.2465150385326,
+    "gauss2_deviance": 429.73216262558435,
+    "gauss2_null_deviance": 1013.7321720803457,
+    "gauss2_df_resid": 411,
+    "gauss2_nobs": 480,
+    "gauss2_df_absorbed": 67,
+    "gauss2_dispersion": 1.0455770380184528,
+    "n_obs": 480
+  }
+}

@@ -1557,9 +1557,9 @@ async fn test_validate_mcp_hurdle_zero_part() {
     }
 }
 
-/// feglm_families (econ_panel_t3.R): fixest::feglm gaussian with id and time effects
-/// (coefficients only; its SEs and deviance are ECON-20, Tier 4). The family is parsed
-/// case-insensitively (before: "Gaussian" was "Unknown GLM family").
+/// feglm_families (econ_panel_t3.R): fixest::feglm gaussian with id and time effects,
+/// coefficients and SEs (lm's). The family is parsed case-insensitively (before: "Gaussian"
+/// was "Unknown GLM family").
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_feglm_gaussian() {
     let case = Case::load("feglm_families");
@@ -1578,7 +1578,7 @@ async fn test_validate_mcp_feglm_gaussian() {
         assert_row(
             v,
             row(&t, v),
-            &[case.named("gauss_coef", v)],
+            &[case.named("gauss_coef", v), case.named("gauss_se_lm", v)],
             Tol::printed(4),
         );
     }

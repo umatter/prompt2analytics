@@ -603,7 +603,7 @@ pub struct DoublyRobustRequest {
 
     /// Number of bootstrap replications for standard errors
     #[schemars(
-        description = "Bootstrap replicates for 'ipw' and 'regression' (default 999; seeded by the session seed, else 42). Each replicate resamples every row, refits the propensity model and the outcome models and re-applies the trimming. 0 gives analytic SEs: the M-estimation SE with the propensity estimated ('ipw') or the stacked-estimating-equation sandwich with the trimmed set fixed ('regression'); 1 is an error. AIPW reports the analytic influence-function SE and runs no replicates."
+        description = "Bootstrap replicates for 'ipw' and 'regression'. The default 0 gives analytic SEs: the M-estimation SE with the propensity estimated ('ipw') or the stacked-estimating-equation sandwich with the trimmed set fixed ('regression'). 2 or more runs a bootstrap (seeded by the session seed, else 42) whose replicates resample every row, refit the propensity model and the outcome models and re-apply the trimming; 1 is an error. AIPW reports the analytic influence-function SE and runs no replicates."
     )]
     pub bootstrap: Option<usize>,
 }

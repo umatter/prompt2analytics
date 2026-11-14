@@ -32,15 +32,15 @@ Fixed Effects Generalized Linear Model (FEGLM) combines GLM estimation with high
 | fixest | R | `fepois()$ll_null`, with `stats::dpois()` for the pointwise values (Case D) | 0.14.2 (R 4.3.3) |
 | ppmlhdfe | Stata | `ppmlhdfe` | 2.x |
 
-**Status**: R-pinned with known deviations (method `feglm` in
-`validation/methods/econ_panel_t3.json`, Case E). The Gaussian coefficients, residual df and n
-are pinned to fixest; logit, probit and Poisson are checked for convergence reporting only.
-Not pinned, as Tier 4 findings: IRLS does not converge to the FE-GLM MLE for the non-Gaussian
-families, and the Gaussian SE and deviance carry the one-pass FE recovery in eta (ECON-20);
-the Gaussian log-likelihood (ECON-66); quasi-Poisson SEs (ECON-67); absorbed degrees of
-freedom on disconnected designs (ECON-85). The Poisson log-likelihood convention (Case D) is
-compared with quoted R values, and regressors absorbed by the fixed effects are pinned in
-`validation/econometrics/hdfe.md` (case `panel_absorbed_regressors`).
+**Status**: R-pinned (methods `feglm_mle`, `feglm_separation`, `feglm_absorbed_df` in
+`validation/methods/econ_feglm_t4.json`; `feglm` in `validation/methods/econ_panel_t3.json`).
+Logit, probit and Poisson with one and two fixed effects and Gaussian with two are pinned to
+glm with factor dummies on the rows alpaca keeps (Case F): coefficients, inverse-Hessian SEs,
+log-likelihood and null log-likelihood, AIC, BIC, deviance and null deviance, residual and
+absorbed df, n. The drop rule for groups whose outcome is all 0 or all 1 is pinned in Case G,
+the absorbed df on a disconnected design in Case H. The Poisson log-likelihood convention
+(Case D) is compared with quoted R values, and regressors absorbed by the fixed effects are
+pinned in `validation/econometrics/hdfe.md` (case `panel_absorbed_regressors`).
 
 **Primary Reference**:
 > Stammann, A. (2018). "Fast and Feasible Estimation of Generalized Linear Models with High-Dimensional k-way Fixed Effects". arXiv:1707.01815.
@@ -52,35 +52,63 @@ compared with quoted R values, and regressors absorbed by the fixed effects are 
 
 ## Algorithm
 
-The FEGLM algorithm iterates between:
+IRLS with weighted alternating projections of the *unscaled* working residual and regressors,
+as alpaca (Stammann 2018):
 
-1. **IRLS Update**: Compute working weights and working response
+1. **Separated groups**: for binomial and Poisson, every fixed-effect group whose outcome is
+   all 0 (binomial and Poisson) or all 1 (binomial) is dropped, over all dimensions in turn,
+   until a full round drops nothing (alpaca's and fixest's rule; their effects have no finite
+   estimate). Singletons with a positive outcome stay, as alpaca keeps them (fixest drops
+   them). The rows dropped are in `n_separated` and a warning; the levels left are in
+   `fe_counts`. The rule runs as a worklist (each level's row, zero and one counts are
+   computed once and decremented as rows go, a level that turns constant is queued), linear
+   in the rows times the dimensions; a group stays constant once it is, so it keeps the rows
+   the round-based rule keeps (`test_separated_rows_worklist_matches_rounds`). Logit and
+   probit refuse an outcome outside [0, 1] (`InvalidSpecification`), which the rule and the
+   valid-mean check assume.
+2. **Start**: the constant linear predictor `link(mean((y + 1/2) / 2))` (binomial),
+   `link(mean(y + 0.1))` (Poisson) or `mean(y)` (Gaussian), which lies in the span of the
+   effects, with every slope 0.
+3. **IRLS step**: with working weights `w` and the working residual `nu = z - eta`,
    ```
-   w_i = (dmu/deta)^2 / V(mu_i)
-   z_i = eta_i + (y_i - mu_i) * (deta/dmu)
+   MX  = weighted_demean(X, FE, w)        # warm start: the last iteration's MX
+   Mnu = weighted_demean(nu, FE, w)
+   step = argmin || sqrt(w) (Mnu - MX b) ||
+   eta_step = nu - (Mnu - MX step)        # in the span of X and the effects
    ```
-
-2. **Weighted MAP**: Demean z and X using weighted alternating projections
-   ```
-   z_tilde = weighted_demean(z, FE, w)
-   X_tilde = weighted_demean(X, FE, w)
-   ```
-
-3. **WLS Step**: Solve weighted least squares
-   ```
-   beta_new = (X_tilde' W X_tilde)^-1 X_tilde' W z_tilde
-   ```
-
-4. **Convergence**: stop when the relative change in deviance
-   `|dev - dev_old| / (|dev| + 0.1)` falls below `tolerance` (default 1e-8), R's `glm.fit`
-   and fixest's `glm.tol` rule. `dev_old` at the first iteration is the deviance at the
-   starting values. Each weighted MAP stops on the relative rule of HDFE
-   (`validation/econometrics/hdfe.md`, "Convergence of the alternating projections").
-   Reaching `max_iter` (default 25) returns the fit with `converged = false`, the warning
-   "FEGLM IRLS did not converge after ..." and `Converged: no` in the output; a MAP that
-   stops at its iteration limit adds one warning. Before Tier 3 the rule was the maximum
-   absolute coefficient change and an absolute MAP tolerance, which never stopped on an
-   outcome of order 1e9.
+   The first iteration's warm start is the unit-weight regressor screen's demeaned X
+   (`M_W (M_1 X) = M_W X`), so the screen is not an extra pass.
+4. **Step halving**: `eta + rho eta_step`, `beta + rho step` with `rho` = 1, 1/2, ... (at most
+   50 halvings) until the deviance is finite, the mean valid for the family, and the deviance
+   no higher than the last one by more than `tolerance` (relative). alpaca asks for a decrease
+   of at least the tolerance, which refuses the last Newton step near the estimate and leaves
+   its coefficients about 4e-7 (relative) from glm's on Case F; p2a reaches glm's estimate.
+   When no step is accepted the last iterate stays and the fit counts as converged (alpaca).
+   A fit that stops on such an iteration, or on one whose accepted `rho` is below 2^-20,
+   warns (`FEGLM IRLS stopped: step halving could not improve the deviance in iteration
+   <k>`) unless the full step was negligible (at most 1e-6 times `1 + max |eta|`, where a
+   tight tolerance can refuse a step on rounding at the estimate); when no step gives a finite deviance and a valid mean the fit fails with
+   `ConvergenceFailure`.
+5. **Convergence**: stop when `|dev - dev_old| / (|dev| + 0.1)` falls below `tolerance`
+   (default 1e-8), R's `glm.fit` and fixest's `glm.tol` rule. Each weighted MAP stops on the
+   relative rule of HDFE (`validation/econometrics/hdfe.md`, "Convergence of the alternating
+   projections"). Reaching `max_iter` (default 25) returns the fit with `converged = false`,
+   the warning "FEGLM IRLS did not converge after ..." and `Converged: no` in the output; a MAP
+   that stops at its iteration limit adds one warning.
+6. **Variance**: the inverse Hessian `(MX' W MX)^-1` at the final weights (X demeaned once
+   more, warm-started), with dispersion 1 for binomial and Poisson (glm, alpaca, fixest) and
+   deviance / df_resid for Gaussian. There is no quasi-Poisson option.
+7. **Fit statistics**: the log-likelihood is glm's (`logLik`; Gaussian at sigma^2 = SSR / n);
+   the null log-likelihood and deviance are the intercept-only model's on the rows used; AIC
+   and BIC count the slopes, the absorbed effects and, for Gaussian, sigma, as glm with factor
+   dummies does. The pseudo R-squared is McFadden's `1 - LL / LL0` (for Gaussian, on the
+   normal log-likelihood).
+8. **Absorbed df**: the connected-components count of `panel_hdfe` (`hdfe.md`): one way, the
+   levels; two ways, the levels minus the components of the bipartite graph; each further
+   dimension its levels minus 1.
+9. **Warnings**: binomial fits with a fitted probability within 10 eps of 0 or 1 warn
+   "fitted probabilities numerically 0 or 1 occurred" (glm's text); Poisson fits with a
+   fitted rate within 10 eps of 0 warn "fitted rates numerically 0 occurred".
 
 Regressors absorbed by the fixed effects, or collinear with others after them, are dropped
 before the IRLS loop with a warning and named in `dropped` (the screen of
@@ -140,8 +168,7 @@ fixest::fepois(count ~ x | firm + year, data = cp, vcov = "iid")
 **R results** (n = 12): alpaca β(x) 1.160068290949554 (SE 2.803479169540262); fixest
 1.160073314420888 (SE iid 4.158232662532352, logLik -19.56317883072528).
 
-**Rust tests** (not R-pinned: structure only on these 12 rows; the Poisson coefficients of Case E are a
-registry deviation, ECON-20, Tier 4):
+**Rust tests** (not R-pinned: structure only on these 12 rows; the Poisson fit is pinned in Case F):
 - `econometrics::feglm::tests::test_feglm_poisson_basic` (`crates/p2a-core/src/econometrics/feglm.rs`): structure only (family, a coefficient, positive dispersion).
 
 ### Case C: Binary panel (`create_binary_panel()`)
@@ -149,6 +176,10 @@ registry deviation, ECON-20, Tier 4):
 The 12-row logit panel (firm + year) is quasi-separated in R, so it cannot serve as a
 reference: alpaca returns β(x) = 119.1637489044198 with SE 321373.5004204401, and fixest
 stops with "The only variable, 'x', is collinear with the fixed effects".
+
+glm with factor dummies warns "fitted probabilities numerically 0 or 1 occurred" on these rows
+(R 4.3.3: β(x) = 120.65 after 24 iterations, fitted values reaching 2.2e-16), and so does
+FEGLM (`econometrics::feglm::tests::test_feglm_fitted_probabilities_warning`).
 
 **Rust tests** (not R-pinned: no R value exists for these data):
 - `econometrics::feglm::tests::test_feglm_logit_basic` (`crates/p2a-core/src/econometrics/feglm.rs`): n = 12, fixed-effect dimensions and counts, a coefficient and a finite log-likelihood.
@@ -230,16 +261,96 @@ fixest::fepois(y_cnt ~ x + x2 | id + time, d, vcov = "iid")
 Tests (method `feglm`):
 - `econometrics::feglm::tests::test_validate_feglm_gaussian_families`: the Gaussian
   coefficients (README tolerance for n = 480, 1e-8; the design is balanced, so the MAP is
-  exact after two sweeps), df_resid and n exact.
+  exact after two sweeps), lm's SEs, the deviance and dispersion, glm's log-likelihood,
+  df_resid and n.
 - `econometrics::feglm::tests::test_validate_feglm_families_report_convergence`: logit,
-  probit and Poisson return finite coefficients within `max_iter`, and a fit that does not
-  converge says so in its warnings and its output.
+  probit and Poisson converge, with finite coefficients and no non-convergence warning.
 
-Deviations (registry): the Gaussian SE, deviance and dispersion and the logit, probit and
-Poisson coefficients (ECON-20: the Gaussian SE and deviance come from the one-pass FE
-recovery in eta, an R replica of p2a's algorithm gives SE 0.05227764747 and deviance
-430.9162433 at the coefficients above; fixest also drops the 16 rows of ids whose binary
-outcome is constant), the Gaussian log-likelihood (ECON-66), the Poisson SEs (ECON-67).
+fixest's `vcov = "iid"` SEs (`*_se` in this case) carry fixest's small-sample factor
+sqrt((n - 1) / (n - K)), which p2a, alpaca and glm do not apply, so they are not pinned; the
+logit, probit and Poisson fits are pinned to glm in Case F.
+
+### Case F: the FE-GLM MLE on `feglm_panel` (`feglm_mle`)
+
+`validation/r/cases/econ_feglm_t4.R`, R 4.3.3, alpaca 0.3.5:
+`glm(y ~ x + x2 + factor(id) [+ factor(time)], family, control = glm.control(epsilon = 1e-16))`
+on the rows alpaca keeps (its drop rule, asserted against `alpaca::feglm()$nobs`); logit and
+probit drop the 16 rows of entities 31 and 39, whose outcome is constant. The fits use
+`tolerance = 1e-16`, `map_tolerance = 1e-12` and `max_iter = 100` (glm's epsilon: probit's
+Fisher scoring converges linearly, and glm at epsilon 1e-14 still stops about 1e-8 short of
+its own estimate). glm's and alpaca's inverse-Hessian SEs agree to 1e-8 relative.
+
+| Fit | x | x2 | SE x | SE x2 |
+|---|---|---|---|---|
+| logit, id + time | 0.8004381700767382 | -0.41026088885247225 | 0.1339799142939801 | 0.1222242310883162 |
+| logit, id | 0.7766642192084411 | -0.40827694737903536 | 0.1308781808424657 | 0.11878021203801983 |
+| probit, id + time | 0.48655868581043543 | -0.25156871636428046 | 0.07764364944422303 | 0.07250365831247692 |
+| probit, id | 0.4737728346532682 | -0.24731138852915355 | 0.07601623984580308 | 0.07039355962045375 |
+| Poisson, id + time | 0.27527722149353595 | -0.14987732371223125 | 0.04469091775357857 | 0.04388248270963816 |
+| Poisson, id | 0.29042409491583715 | -0.12788618039217853 | 0.04509796028005892 | 0.04228259036028544 |
+| Gaussian, id + time | 0.5370626023737091 | -0.3308561514549285 | 0.052205773255508715 | 0.05127532554629066 |
+
+| Fit | logLik | null logLik | AIC | BIC | deviance | null deviance | df_resid | n | df_absorbed |
+|---|---|---|---|---|---|---|---|---|---|
+| logit2 | -252.86653245699807 | -320.06251321479715 | 639.7330649139961 | 917.1053299131552 | 505.73306491399615 | 640.1250264295943 | 397 | 464 | 65 |
+| logit1 | -258.08961019711654 | -320.06251321479715 | 636.1792203942331 | 884.5722935278084 | 516.1792203942331 | 640.1250264295943 | 404 | 464 | 58 |
+| probit2 | -252.2082966027673 | -320.06251321479715 | 638.4165932055346 | 915.7888582046937 | 504.4165932055345 | 640.1250264295943 | 397 | 464 | 65 |
+| probit1 | -257.45570527037376 | -320.06251321479715 | 634.9114105407475 | 883.3044836743229 | 514.9114105407475 | 640.1250264295943 | 404 | 464 | 58 |
+| poisson2 | -631.5518580322216 | -770.219156764571 | 1401.1037160644432 | 1689.0949572336767 | 450.9609633411351 | 728.295560805834 | 411 | 480 | 67 |
+| poisson1 | -681.4858641439072 | -770.219156764571 | 1486.9717282878144 | 1745.7464667297345 | 550.8289755645063 | 728.295560805834 | 418 | 480 | 60 |
+| gauss2 | -654.5407438826985 | -860.5163956012226 | 1449.081487765397 | 1741.2465150385326 | 429.73216262558435 | 1013.7321720803457 | 411 | 480 | 67 |
+
+n_positive: 251 for logit and probit, 330 for Poisson. Gaussian dispersion
+(lm sigma^2): 1.0455770380184528. AIC = -2 logLik + 2 (k + df_absorbed), plus 2 for
+Gaussian's sigma; BIC with log(n) of the rows used.
+
+Tests (method `feglm_mle`):
+- `econometrics::feglm::tests::test_validate_feglm_mle_logit`, `_probit`, `_poisson`: id + time
+  and id; coefficients (README tolerance for n = 464/480), SEs, log-likelihood, null
+  log-likelihood, AIC, BIC, deviance, null deviance (SE and statistics tolerances), df_resid,
+  df_absorbed, n, n_positive exact; logit and probit report the 16 dropped rows. Before the
+  rewrite the two-way logit gave x = 0.7002 and the two-way Poisson x = 0.4742.
+- `econometrics::feglm::tests::test_validate_feglm_mle_gaussian`: the same quantities and the
+  dispersion; the pseudo R-squared is McFadden's on the normal log-likelihood.
+- `econometrics::feglm::tests::test_validate_feglm_mle_default_controls`: the six non-Gaussian
+  fits at the default controls converge, warn only about dropped rows, and reach the
+  coefficients to `Tol::iterative(1e-6)` (probit `1e-5`: Fisher scoring stops short at the
+  deviance rule's 1e-8, by 2.8e-6 to 6.2e-6 relative, 0.9e-6 to 1.8e-6 absolute, over the
+  coefficients of probit1 and probit2).
+
+### Case G: the drop rule (`feglm_separation`)
+
+`validation/r/cases/econ_feglm_t4.R` generates `validation/datasets/generated/feglm_sep.csv`
+(181 rows, two-way): entity 1's binary outcome is all 1, entity 2's all 0, period 6 is positive
+only for entity 1, entity 3's counts are all 0, and entity 31 is a singleton with a positive
+outcome.
+
+- Logit: entities 1 and 2, then period 6 (all 0 once entity 1 is gone), then 4 entities that
+  leaves constant, then the singleton: 6 + 6 + 28 + 20 + 1 = 61 rows, as fixest; n = 120, 5
+  periods left.
+- Poisson: entity 3 (6 rows); alpaca keeps the singleton (n = 175), fixest drops it (174).
+- Gaussian: nothing is dropped (n = 181).
+
+| Fit | x | x2 | SE x | SE x2 | logLik | AIC | BIC | df_resid | df_absorbed |
+|---|---|---|---|---|---|---|---|---|---|
+| logit | 1.7829834942951899 | -0.7641999499383573 | 0.4009821408150966 | 0.37641505354869575 | -48.911683027708875 | 157.82336605541775 | 241.4481183388791 | 90 | 28 |
+| poisson | 0.27403964028285105 | -0.29105418647955816 | 0.07698246608142499 | 0.08523053626638594 | -233.12831104263228 | 540.2566220852646 | 657.3537031204346 | 138 | 35 |
+| gauss | 0.6015162527022587 | -0.10219291477899675 | 0.08068189265740196 | 0.08924948012931098 | -226.72516549843021 | 531.4503309968604 | 656.1917152162276 | 143 | 36 |
+
+Test (method `feglm_separation`): `econometrics::feglm::tests::test_validate_feglm_separation_drop_rule`
+pins the rows used and dropped, n_positive, the levels left, the warnings, and every number
+above with the null log-likelihood and deviance. `test_feglm_all_rows_separated_is_refused`:
+a design whose every group is constant is refused (`InsufficientData`).
+
+### Case H: absorbed df on a disconnected design (`hdfe_disconnected`)
+
+The two-way design of `hdfe.md`'s disconnected case (two components, n = 80): lm with dummies
+gives df_absorbed 24 and df_resid 54, x 0.613056669041337, z -0.1963215773986, SE
+0.11929680146935208, 0.10479347160495987. The naive rule (levels minus dimensions plus 1) gave
+25 and SEs 0.12041698380526714, 0.1057774694520543. Test (method `feglm_absorbed_df`):
+`econometrics::feglm::tests::test_validate_feglm_disconnected_gaussian`; and
+`test_feglm_many_components_matches_hdfe` (50 disconnected 2 x 2 blocks, refused before as
+`InsufficientData`) equals `panel_hdfe`'s fit.
 
 ### The previous examples, recomputed
 
@@ -476,12 +587,17 @@ For IRLS, we compute:
 
 | Quantity | n | Precision |
 |----------|---|-----------|
-| Gaussian coefficients (Case E) | 480 | 1e-8 relative |
+| Gaussian coefficients, SEs, deviance, dispersion, logLik (Case E) | 480 | 1e-8 / 1e-6 relative |
+| Logit, probit, Poisson, Gaussian coefficients (Case F) | 464 / 480 | 1e-8 relative |
+| SEs, logLik, null logLik, AIC, BIC, deviance, null deviance (Cases F, G) | 120-480 | 1e-6 relative |
+| Default controls (Case F) | 464 / 480 | `Tol::iterative(1e-6)`, probit `1e-5` |
+| Gaussian SE, deviance, dispersion at y x 1e9 (`hdfe_map_scale`) | 1000 | `Tol::iterative(1e-6)` |
 | Gaussian coefficient at y x 1e9 (`hdfe_map_scale`) | 1000 | `Tol::iterative(1e-8)` |
 | Gaussian coefficients with absorbed regressors (`panel_absorbed_regressors`) | 180 | 1e-8 relative |
 | Poisson LL / null LL (Case D, fixest convention) | 40 | 1e-12 × scale pointwise; 1e-10 relative (null) |
 
-No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67).
+Every family's coefficients, SEs and fit statistics are pinned in Cases F-H (README
+tolerances at glm's epsilon 1e-16; default controls `Tol::iterative`).
 
 ## Solve and timing
 
@@ -491,9 +607,13 @@ No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67
   design (`hdfe.md`, "Solve and timing").
 - μ is computed once per update of η and serves the deviance rule, the next iteration and the
   final statistics; the final deviance is the one the convergence check computed.
-- The weighted demeaning of X is memoized on the weights: when an iteration's weights equal the
-  previous ones bit for bit (Gaussian: all 1), the same scaled X demeans to the same result
-  and is reused, as is the final information matrix's when the final weights repeat.
+- Each IRLS step's weighted demeaning of X starts from the last step's demeaned X (the first
+  from the unit-weight screen's), so the alternating projections start near their fixed point;
+  the final information matrix's demeaning starts from the last step's too.
+- While the weights repeat, the demeaned X, the weighted design and its factorization are
+  kept: a Gaussian fit (unit weights in every iteration) demeans X once, in the screen,
+  factors the weighted design once, and its information matrix is that factorization's
+  inverse.
 - The weighted alternating projections compute the change and the norm of a sweep in one
   pass, and the acceleration terms in another, each sum accumulating in row order as before.
 - (T3-PERF5) The group weight sums of a weighted demeaning do not change between sweeps,
@@ -502,15 +622,13 @@ No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67
   (`test_weighted_projector_matches_reference_exactly`: sweeps, change, convergence and every
   value bit for bit equal to the per-pass reference, one and two unbalanced factors, zero
   weights, with and without acceleration, and a sweep limit).
-- (T3-PERF5) The working response's demeaning is memoized like X's: when an iteration's
-  weights and z repeat bit for bit (Gaussian: all 1 and y), the demeaned z and the solve
-  repeat, and the step reuses them.
 - (T3-PERF5) The regressor screen's unit-weight demeaning (`hdfe::demean_matrix_map`) handed
   the columns to the rayon pool on every call, a wake-up that cost more than the work on a
   small design; one factor, one column or fewer than 2,000 rows now run on the calling thread
   (columns are independent, so the result is the same; this applies to `panel_hdfe` too).
 
-These change no result: the R pins and the convergence tests pass at their tolerances.
+These changed no result when made (Tier 3); the rewrite to the FE-GLM MLE (Algorithm) changed
+the numbers, and the timings below predate it.
 
 Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
 against `ff8e7559` (before these changes); new / base as the ratio of medians.
@@ -554,6 +672,60 @@ Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, 
 | Logit, two-way (criterion) | 100 / 400 / 1,000 | 0.53 / 0.59 / 0.90 |
 | Poisson, two-way (criterion) | 100 / 400 / 1,000 | 0.59 / 0.72 / 0.78 |
 
+After the rewrite to the FE-GLM MLE (2026-11-13; release build, one core, `RAYON_NUM_THREADS=1`,
+five interleaved rounds against `69f40487`, medians, load average 20-40, wall clock): two-way
+panels of 10 periods with x and x2, default controls. The IRLS counts fall from 13-20 to 5,
+because alpaca's update converges quadratically where the one-pass recovery of the effects
+did not. Gaussian keeps the demeaned design while the weights repeat (all 1), so it demeans X
+once.
+
+| Fit | n | IRLS iterations base / new | new / base (wall clock) |
+|---|---|---|---|
+| Logit, two-way | 100 / 1,000 / 10,000 | 20, 17, 13 / 5, 5, 5 | 0.28 / 0.31 / 0.41 |
+| Poisson, two-way | 100 / 1,000 / 10,000 | 19, 17, 16 / 5, 5, 5 | 0.27 / 0.31 / 0.32 |
+| Gaussian, two-way | 100 / 1,000 / 10,000 | 2 / 2 | 1.05 / 0.87 / 0.95 |
+
+The remaining rows (2026-11-14; release build, `taskset -c 2`, `RAYON_NUM_THREADS=1`, base
+and lane interleaved with alternating order, the median over 11 batches per run and the
+median over 5 runs, 7 for Gaussian; against `69f40487`). Gaussian runs on the unified
+runner's `panel_n<n>.csv` (entity effects, `x1`, `x2`); the binomial and Poisson panels have
+n / 10 entities and 10 periods with `x` and `x2`. A first round showed Gaussian with entity
+effects at 1.12 / 1.18 / 1.03: the fit demeaned X twice (the screen, then IRLS iteration 1
+with unit weights) and refactored the same weighted design in iteration 2 and for the
+information matrix. A Gaussian fit now starts from the screen's demeaned X (unit weights are
+its IRLS weights), and the factorization of the weighted design is kept while the design and
+the weights repeat, so its inverse is the information matrix's. The rows below are after
+that change.
+
+| Fit | n | IRLS iterations base / new | new / base (wall clock) |
+|---|---|---|---|
+| Gaussian, entity (unified) | 100 / 1,000 / 10,000 | 2 / 2 | 0.93 / 0.99 / 0.93 |
+| Logit, entity | 100 / 1,000 / 10,000 | 7, 15, 15 / 4, 5, 5 | 0.77 / 0.42 / 0.54 |
+| Probit, two-way | 100 / 1,000 / 10,000 | 25, 25, 25 / 6, 6, 6 | 0.25 / 0.26 / 0.25 |
+| Logit, two-way | 100 / 1,000 / 10,000 | 22, 25, 21 / 5, 5, 5 | 0.25 / 0.24 / 0.26 |
+| Poisson, two-way | 100 / 1,000 / 10,000 | 11, 14, 9 / 6, 5, 6 | 0.46 / 0.35 / 0.58 |
+
+Base's two-way probit stops at `max_iter` = 25 without converging on all three panels.
+Peak resident memory of the whole process (`VmHWM`, data and binary included) at
+n = 10,000, base / new: logit two-way 13.0 / 13.2 MB, Poisson two-way 13.0 / 13.0 MB, probit
+two-way 13.1 / 13.4 MB.
+
+The estimators that share the GLM module (same protocol, 3 runs, 7 for IPW at 1,000 and
+10,000): the doubly robust `IPW` and `Regression` methods with `bootstrap = 0` in both
+builds (the new default):
+
+| Fit | n | new / base (wall clock) |
+|---|---|---|
+| IPW (ATE) | 100 / 1,000 / 10,000 | 1.01 / 1.00 / 1.01 |
+| Doubly robust, AIPW | 100 / 1,000 / 10,000 | 1.02 / 1.01 / 1.02 |
+| Doubly robust, IPW | 100 / 1,000 / 10,000 | 1.03 / 1.00 / 0.99 |
+| Doubly robust, Regression | 100 / 1,000 / 10,000 | 1.02 / 1.00 / 1.01 |
+| LTMLE, two periods | 100 / 1,000 / 10,000 | 0.97 / 0.92 / 1.00 |
+
+These paths read a standard-layout design in place as before (only the k x k workspaces of
+the lean logit IRLS go through the guarded allocator), and the intercept-only fluctuation
+moved to the GLM module unchanged.
+
 ## Missing values
 
 `run_feglm` reads y, the regressors and every fixed-effect column with one NA-aware request
@@ -565,19 +737,23 @@ missing id drops its row instead of becoming level 0 or "". An infinite value is
 `econometrics::feglm::tests::test_validate_na_feglm_omit_and_missing_fe_ids` (on
 `panel_grunfeld_na`: the fit equals the fit on its 193 complete rows, with the text or the
 numeric firm id) and `econometrics::feglm::tests::test_feglm_non_finite_outcome`. Numbers are
-not pinned to R here: ECON-20, ECON-66, ECON-67, ECON-85 (FEGLM), Tier 4.
+not pinned to R here: they are pinned in Case F.
 
 ## Known Differences
 
 1. **Acceleration**: p2a uses optional Gearhart-Koshy acceleration in MAP; alpaca may use different acceleration.
 
-2. **Standard Errors**: p2a currently computes standard SEs from information matrix; alpaca supports additional SE estimators.
+2. **Standard errors**: alpaca's and glm's inverse Hessian (dispersion 1 for binomial and
+   Poisson), not fixest's `vcov = "iid"`, which applies a small-sample factor.
 
-3. **Separated Data**: Different handling of quasi/complete separation in binary models.
+3. **Singletons**: kept, as alpaca keeps them; fixest drops them, so its n (and logLik, AIC,
+   BIC) differ when a singleton has a positive outcome.
 
-4. **Convergence Criteria**: IRLS stops on the relative change in deviance, as fixest and `glm.fit`; the non-Gaussian fits still differ from fixest (ECON-20).
+4. **Separation**: groups whose outcome is all 0 or all 1 are dropped until none is left, as
+   alpaca and fixest; a fit whose probabilities still reach 0 or 1 warns as glm does.
 
-5. **Degrees of Freedom**: Both use: `df = n - k - sum(FE levels) + absorbed`
+5. **Degrees of freedom**: absorbed df by connected components for two fixed effects (exact);
+   for three or more, the HDFE rule (each further dimension its levels minus 1).
 
 ## Running the Tests
 

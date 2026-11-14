@@ -54,7 +54,8 @@
         "n",
         "FEGLM Gaussian coefficient at y x 1e9",
         "iteration counts within 1 across y x 1e-6, y, y x 1e6 (property)",
-        "non-convergence reported as a warning (property)"
+        "non-convergence reported as a warning (property)",
+        "FEGLM Gaussian SE, deviance, dispersion and df at y x 1e9"
       ],
       "tolerance": "Tol::iterative at the README values for n = 1000 (coefficients 1e-8, SE/R2 1e-6); MAP relative tolerance 1e-8; R replica 6.7e-16",
       "deviations": [],
@@ -181,7 +182,7 @@
     },
     {
       "id": "feglm",
-      "name": "FEGLM: Gaussian coefficients pinned to fixest; convergence reporting for logit, probit, Poisson",
+      "name": "FEGLM: Gaussian coefficients, SEs and fit statistics pinned to fixest, lm and glm; convergence reporting for logit, probit, Poisson",
       "category": "econometrics",
       "reference": "fixest::feglm(| id + time, vcov = 'iid'); stats::glm with factor dummies",
       "doc": "validation/econometrics/feglm.md",
@@ -196,31 +197,11 @@
         "Gaussian coefficients",
         "Gaussian df",
         "n",
-        "logit/probit/Poisson convergence reported (property)"
+        "logit/probit/Poisson convergence reported (property)",
+        "Gaussian SE, deviance, dispersion, log-likelihood (glm)"
       ],
-      "tolerance": "validation/README.md, n = 480: coefficients 1e-8 relative; df and n exact. MAP exact after 2 sweeps on this design",
-      "deviations": [
-        {
-          "finding": "ECON-20",
-          "quantity": "logit_coef, probit_coef, poisson_coef, gauss_se_lm, gauss_deviance, gauss_dispersion",
-          "note": "the fixed effects are recovered in eta in one pass, not iterated to the fixed point of the weighted problem; fixest also drops the 16 rows of entities whose binary outcome is constant (logit_nobs 464 of 480)"
-        },
-        {
-          "finding": "ECON-66",
-          "quantity": "gauss_loglik_glm",
-          "note": "the Gaussian log-likelihood (and AIC/BIC) is -0.5 SSR, not glm's normal log-likelihood"
-        },
-        {
-          "finding": "ECON-67",
-          "quantity": "poisson_se, poisson_glm_se",
-          "note": "the Poisson SEs are scaled by a quasi-Poisson dispersion"
-        },
-        {
-          "finding": "ECON-85",
-          "quantity": "df_resid, df_absorbed on disconnected two-way designs",
-          "note": "feglm keeps its own absorbed-df rule (levels summed minus n_factors - 1), which over-counts on disconnected fixed effects; feglm_families is connected, so its df are unaffected"
-        }
-      ],
+      "tolerance": "validation/README.md, n = 480: coefficients 1e-8 relative; df and n exact. MAP exact after 2 sweeps on this design; logit/probit/Poisson pinned in econ_feglm_t4 feglm_mle; fixest's iid SEs (*_se) carry fixest's small-sample factor, which p2a does not apply",
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

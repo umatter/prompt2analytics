@@ -226,7 +226,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/evalue_hr_inputs.csv` | 3 × 4 (id, est, lo, hi) | `evalue_hr_common` | `r/cases/regression_sensitivity_t4.R` | literal values: three hazard ratios with limits, one without a lower limit (empty cell) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
 | `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax`, `stat_factanal_t4` | `r/cases/stats_power_loglin.R` | seed 20261118 |
-| `generated/feglm_panel.csv` | 480 × 7 (id, time, x, x2, y_gauss, y_bin, y_cnt) | `feglm_families` | `r/cases/econ_panel_t3.R` | seed 20261106 |
+| `generated/feglm_panel.csv` | 480 × 7 (id, time, x, x2, y_gauss, y_bin, y_cnt) | `feglm_families`; read by `feglm_mle` | `r/cases/econ_panel_t3.R`; read by `r/cases/econ_feglm_t4.R` | seed 20261106 |
+| `generated/feglm_sep.csv` | 181 × 7 (id, time, x, x2, y_bin, y_cnt, y_gauss) | `feglm_separation` | `r/cases/econ_feglm_t4.R` | seed 20261113; entities 1 and 2 constant, period 6 positive only for entity 1, entity 3 counts all 0, singleton entity 31 |
 | `generated/fisher_legacy.csv` | 4 × 5 (table, a, b, c, d) | `stat_fisher_legacy` | `r/cases/stats_power_loglin.R` | literal values: the four 2 × 2 tables of `fisher.rs`'s legacy tests |
 | `generated/garch_returns.csv` | 1500 × 5 (t, r_norm, r_t, r_g21, r_norm_dm) | `garch_normal_t` | `r/cases/ts_garch.R` | seed 20261105 |
 | `generated/gformula_nc.csv` | 2000 × 5 (B, L_t0, A_t0, Y, Yc) | `gformula_natural_course` | `r/cases/causal_gformula.R` | seed 20261209; one period; binary Y and continuous Yc |

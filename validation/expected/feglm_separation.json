@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "id": "feglm_separation",
+  "area": "econometrics/feglm",
+  "method": "FE-GLM drop rule: all-0/all-1 entities, a period left all 0 after them, an all-0 count entity, a singleton with a positive count",
+  "reference": "stats::glm with factor dummies on the rows alpaca::feglm keeps (epsilon 1e-16); fixest::feglm nobs (drops the singleton too)",
+  "call": "glm(y ~ x + x2 + factor(id) + factor(time), family, feglm_sep[alpaca rows])",
+  "dataset": "validation/datasets/generated/feglm_sep.csv",
+  "datasets": ["validation/datasets/generated/feglm_sep.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3",
+    "alpaca": "0.3.5",
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "logit_coef": {
+      "names": ["x", "x2"],
+      "values": [1.7829834942951899, -0.76419994993835727]
+    },
+    "logit_se": {
+      "names": ["x", "x2"],
+      "values": [0.40098214081509659, 0.37641505354869575]
+    },
+    "logit_loglik": -48.911683027708875,
+    "logit_loglik_null": -82.359132216388332,
+    "logit_aic": 157.82336605541775,
+    "logit_bic": 241.44811833887911,
+    "logit_deviance": 97.823366055417765,
+    "logit_null_deviance": 164.71826443277669,
+    "logit_df_resid": 90,
+    "logit_nobs": 120,
+    "logit_df_absorbed": 28,
+    "logit_n_dropped": 61,
+    "logit_n_positive": 53,
+    "logit_nobs_fixest": 120,
+    "poisson_coef": {
+      "names": ["x", "x2"],
+      "values": [0.27403964028285105, -0.29105418647955816]
+    },
+    "poisson_se": {
+      "names": ["x", "x2"],
+      "values": [0.076982466081424991, 0.085230536266385937]
+    },
+    "poisson_loglik": -233.12831104263228,
+    "poisson_loglik_null": -276.42285896170546,
+    "poisson_aic": 540.25662208526455,
+    "poisson_bic": 657.3537031204346,
+    "poisson_deviance": 171.60884396336135,
+    "poisson_null_deviance": 258.19793980150774,
+    "poisson_df_resid": 138,
+    "poisson_nobs": 175,
+    "poisson_df_absorbed": 35,
+    "poisson_n_dropped": 6,
+    "poisson_n_positive": 119,
+    "poisson_nobs_fixest": 174,
+    "gauss_coef": {
+      "names": ["x", "x2"],
+      "values": [0.60151625270225872, -0.10219291477899675]
+    },
+    "gauss_se": {
+      "names": ["x", "x2"],
+      "values": [0.080681892657401957, 0.089249480129310985]
+    },
+    "gauss_loglik": -226.72516549843021,
+    "gauss_loglik_null": -311.86966883552094,
+    "gauss_aic": 531.45033099686043,
+    "gauss_bic": 656.19171521622764,
+    "gauss_deviance": 129.78385493334659,
+    "gauss_null_deviance": 332.5178868367542,
+    "gauss_df_resid": 143,
+    "gauss_nobs": 181,
+    "gauss_df_absorbed": 36,
+    "n_obs": 181
+  }
+}
