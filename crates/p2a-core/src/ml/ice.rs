@@ -205,13 +205,15 @@ pub struct IceSpread {
     /// Interquartile range at each grid point.
     pub iqr: Vec<f64>,
 
-    /// Heterogeneity index `H = sqrt(SS_het / SS_tot)`: each curve is centred on its own mean
-    /// over the grid, `SS_tot` is the sum of squares of the centred curves and `SS_het` that of
-    /// their deviations from the mean centred curve. `H^2` is the share of the curves'
-    /// variation along the feature that differs between observations: 0 for parallel curves
-    /// (no interaction involving the feature), 1 when the mean curve is flat. Unchanged by
-    /// adding a constant to the predictions or by `center`; 0 when every curve is flat; NaN
-    /// when a prediction is NaN.
+    /// Heterogeneity index `H = sqrt(SS_het / SS_tot)`: each curve is anchored on its value at
+    /// the first grid point and centred on its own mean over the grid, `SS_tot` is the sum of
+    /// squares of the centred curves and `SS_het` that of their deviations from the mean centred
+    /// curve. `H^2` is the share of the curves' variation along the feature that differs
+    /// between observations: 0 for parallel curves (no interaction involving the feature), 1
+    /// when the mean curve is flat. Unchanged by adding a constant to the predictions or by
+    /// `center`. Exactly 0 when every curve is flat, and when the centred curves' root mean
+    /// square is at most `64 * f64::EPSILON` times the largest absolute prediction (flat up to
+    /// rounding); NaN when a prediction is NaN or the sums of squares overflow.
     pub heterogeneity_index: f64,
 }
 
@@ -507,39 +509,50 @@ fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>) -> EconResult<IceSpread> 
 }
 
 /// `H = sqrt(SS_het / SS_tot)` of [`IceSpread::heterogeneity_index`] on the curves (rows):
-/// each curve centred on its own grid mean; 0 when `SS_tot` is 0; NaN when a value is NaN.
+/// each curve anchored on its first grid value, then centred on its own grid mean; 0 when the
+/// centred curves are within rounding of flat; NaN when a value is NaN or a sum overflows.
 fn heterogeneity_index(ice_curves: ArrayView2<'_, f64>) -> f64 {
     let (n_obs, n_grid) = ice_curves.dim();
     if n_obs == 0 || n_grid == 0 {
         return 0.0;
     }
+    // Anchoring on the first value makes a flat curve exactly 0 before its mean is taken, so
+    // its centred values are 0 too and not the rounding residue of a mean such as 0.1.
     // Mean centred curve, then the two sums of squares in one more pass. A NaN prediction
     // makes its row mean, and so both sums, NaN.
     let mut mean_curve = vec![0.0; n_grid];
     let mut row_means = Vec::with_capacity(n_obs);
+    let mut max_abs = 0.0_f64;
     for row in ice_curves.rows() {
-        let m = row.sum() / n_grid as f64;
+        let v0 = row[0];
+        let m = row.iter().map(|&v| v - v0).sum::<f64>() / n_grid as f64;
         row_means.push(m);
         for (acc, &v) in mean_curve.iter_mut().zip(row) {
-            *acc += v - m;
+            *acc += (v - v0) - m;
+            max_abs = max_abs.max(v.abs());
         }
     }
     let inv_n = 1.0 / n_obs as f64;
     mean_curve.iter_mut().for_each(|c| *c *= inv_n);
     let (mut ss_tot, mut ss_het) = (0.0, 0.0);
     for (row, &m) in ice_curves.rows().into_iter().zip(&row_means) {
+        let v0 = row[0];
         for (&v, &c) in row.iter().zip(&mean_curve) {
-            let centred = v - m;
+            let centred = (v - v0) - m;
             ss_tot += centred * centred;
             ss_het += (centred - c) * (centred - c);
         }
     }
-    if ss_tot.is_nan() || ss_het.is_nan() {
-        f64::NAN
-    } else if ss_tot > 0.0 {
-        (ss_het / ss_tot).min(1.0).sqrt()
-    } else {
+    if !(ss_tot.is_finite() && ss_het.is_finite()) {
+        return f64::NAN;
+    }
+    // Centred curves whose root mean square is within a few dozen ulps of the largest
+    // prediction are flat up to rounding.
+    let rms = (ss_tot / (n_obs * n_grid) as f64).sqrt();
+    if rms <= 64.0 * f64::EPSILON * max_abs {
         0.0
+    } else {
+        (ss_het / ss_tot).min(1.0).sqrt()
     }
 }
 
@@ -1254,6 +1267,77 @@ mod tests {
         let only_x1 = |m: ArrayView2<f64>| -> Vec<f64> { m.column(1).to_vec() };
         let r = compute_ice_curves(x.view(), only_x1, &IceConfig::default()).unwrap();
         assert_eq!(r.ice_spread.heterogeneity_index, 0.0);
+    }
+
+    /// Curves constant per row at values whose grid mean is not exact in floating point (0.1 on
+    /// 20 or 51 points): H is still exactly 0, not a ratio of rounding residues.
+    #[test]
+    fn test_ice_flat_curves_inexact_means() {
+        let x = array![[1.0, 0.1], [2.0, 0.2], [3.0, 0.7], [4.0, 1.1], [5.0, 0.3]];
+        let only_x1 = |m: ArrayView2<f64>| -> Vec<f64> { m.column(1).to_vec() };
+        for n_grid in [20, 51] {
+            let grid: Vec<f64> = (0..n_grid)
+                .map(|g| 1.0 + 4.0 * g as f64 / (n_grid - 1) as f64)
+                .collect();
+            let c = IceConfig {
+                grid_values: Some(grid),
+                ..Default::default()
+            };
+            let r = compute_ice_curves(x.view(), only_x1, &c).unwrap();
+            assert_eq!(r.n_grid, n_grid);
+            assert_eq!(r.ice_spread.heterogeneity_index, 0.0, "{n_grid} points");
+        }
+    }
+
+    /// A fitted CART that never splits on the feature gives flat curves: H = 0 exactly.
+    #[test]
+    fn test_ice_cart_unused_feature_is_flat() {
+        let n = 60;
+        let mut x = Array2::<f64>::zeros((n, 2));
+        let mut y = ndarray::Array1::<f64>::zeros(n);
+        for i in 0..n {
+            x[[i, 0]] = (i as f64 * 0.37).sin() * 3.0 + i as f64 * 0.01;
+            x[[i, 1]] = (i % 3) as f64 + 0.05 * (i as f64 * 1.3).cos();
+            y[i] = 0.1 * (i % 3) as f64 + 0.01 * (i as f64 * 0.7).sin();
+        }
+        let config = crate::ml::CartConfig {
+            max_depth: 1,
+            xval: 0,
+            min_split: 2,
+            min_bucket: 1,
+            ..Default::default()
+        };
+        let model = crate::ml::cart(x.view(), y.view(), &config).unwrap();
+        let r = ice_curves_cart(x.view(), &model, 0, Some(51), None).unwrap();
+        assert_eq!(r.n_grid, 51);
+        for row in r.ice_curves.rows() {
+            assert!(row.iter().all(|&v| v == row[0]));
+        }
+        assert!(
+            r.ice_curves
+                .column(0)
+                .iter()
+                .any(|&v| v != r.ice_curves[[0, 0]])
+        );
+        assert_eq!(r.ice_spread.heterogeneity_index, 0.0);
+    }
+
+    /// Centred sums of squares that overflow make H NaN, not a silent 1.
+    #[test]
+    fn test_ice_heterogeneity_overflow_is_nan() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2], [5.0, 1.1]];
+        let huge = |m: ArrayView2<f64>| -> Vec<f64> {
+            interaction_predict(m)
+                .into_iter()
+                .map(|v| v * 1e200)
+                .collect()
+        };
+        let c = IceConfig {
+            grid_resolution: Some(5),
+            ..Default::default()
+        };
+        let r = compute_ice_curves(x.view(), huge, &c).unwrap();
+        assert!(r.ice_spread.heterogeneity_index.is_nan());
     }
 
     /// ice_curves_rf on a RandomForestModel (it always returned an error): every ICE value is the forest's tree
