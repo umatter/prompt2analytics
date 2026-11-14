@@ -396,6 +396,7 @@ impl QuantileTree {
     }
 
     /// The training rows in the leaf `x` falls in.
+    #[cfg(test)]
     fn leaf_members(&self, x: &ArrayView1<f64>) -> &[u32] {
         self.leaf_slice(self.leaf_of(x) as usize)
     }

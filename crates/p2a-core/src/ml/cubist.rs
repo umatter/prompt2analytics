@@ -1920,6 +1920,7 @@ mod tests {
                 matches!(err, EconError::InvalidSpecification { .. }),
                 "{k}: {err}"
             );
+            assert!(err.to_string().contains("smoothing_coefficient"), "{err}");
         }
         for k in [0.0, 15.0] {
             let cfg = CubistConfig {
