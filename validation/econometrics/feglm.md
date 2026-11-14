@@ -610,6 +610,10 @@ tolerances at glm's epsilon 1e-16; default controls `Tol::iterative`).
 - Each IRLS step's weighted demeaning of X starts from the last step's demeaned X (the first
   from the unit-weight screen's), so the alternating projections start near their fixed point;
   the final information matrix's demeaning starts from the last step's too.
+- While the weights repeat, the demeaned X, the weighted design and its factorization are
+  kept: a Gaussian fit (unit weights in every iteration) demeans X once, in the screen,
+  factors the weighted design once, and its information matrix is that factorization's
+  inverse.
 - The weighted alternating projections compute the change and the norm of a sweep in one
   pass, and the acceleration terms in another, each sum accumulating in row order as before.
 - (T3-PERF5) The group weight sums of a weighted demeaning do not change between sweeps,
@@ -680,6 +684,47 @@ once.
 | Logit, two-way | 100 / 1,000 / 10,000 | 20, 17, 13 / 5, 5, 5 | 0.28 / 0.31 / 0.41 |
 | Poisson, two-way | 100 / 1,000 / 10,000 | 19, 17, 16 / 5, 5, 5 | 0.27 / 0.31 / 0.32 |
 | Gaussian, two-way | 100 / 1,000 / 10,000 | 2 / 2 | 1.05 / 0.87 / 0.95 |
+
+The remaining rows (2026-11-14; release build, `taskset -c 2`, `RAYON_NUM_THREADS=1`, base
+and lane interleaved with alternating order, the median over 11 batches per run and the
+median over 5 runs, 7 for Gaussian; against `69f40487`). Gaussian runs on the unified
+runner's `panel_n<n>.csv` (entity effects, `x1`, `x2`); the binomial and Poisson panels have
+n / 10 entities and 10 periods with `x` and `x2`. A first round showed Gaussian with entity
+effects at 1.12 / 1.18 / 1.03: the fit demeaned X twice (the screen, then IRLS iteration 1
+with unit weights) and refactored the same weighted design in iteration 2 and for the
+information matrix. A Gaussian fit now starts from the screen's demeaned X (unit weights are
+its IRLS weights), and the factorization of the weighted design is kept while the design and
+the weights repeat, so its inverse is the information matrix's. The rows below are after
+that change.
+
+| Fit | n | IRLS iterations base / new | new / base (wall clock) |
+|---|---|---|---|
+| Gaussian, entity (unified) | 100 / 1,000 / 10,000 | 2 / 2 | 0.93 / 0.99 / 0.93 |
+| Logit, entity | 100 / 1,000 / 10,000 | 7, 15, 15 / 4, 5, 5 | 0.77 / 0.42 / 0.54 |
+| Probit, two-way | 100 / 1,000 / 10,000 | 25, 25, 25 / 6, 6, 6 | 0.25 / 0.26 / 0.25 |
+| Logit, two-way | 100 / 1,000 / 10,000 | 22, 25, 21 / 5, 5, 5 | 0.25 / 0.24 / 0.26 |
+| Poisson, two-way | 100 / 1,000 / 10,000 | 11, 14, 9 / 6, 5, 6 | 0.46 / 0.35 / 0.58 |
+
+Base's two-way probit stops at `max_iter` = 25 without converging on all three panels.
+Peak resident memory of the whole process (`VmHWM`, data and binary included) at
+n = 10,000, base / new: logit two-way 13.0 / 13.2 MB, Poisson two-way 13.0 / 13.0 MB, probit
+two-way 13.1 / 13.4 MB.
+
+The estimators that share the GLM module (same protocol, 3 runs, 7 for IPW at 1,000 and
+10,000): the doubly robust `IPW` and `Regression` methods with `bootstrap = 0` in both
+builds (the new default):
+
+| Fit | n | new / base (wall clock) |
+|---|---|---|
+| IPW (ATE) | 100 / 1,000 / 10,000 | 1.01 / 1.00 / 1.01 |
+| Doubly robust, AIPW | 100 / 1,000 / 10,000 | 1.02 / 1.01 / 1.02 |
+| Doubly robust, IPW | 100 / 1,000 / 10,000 | 1.03 / 1.00 / 0.99 |
+| Doubly robust, Regression | 100 / 1,000 / 10,000 | 1.02 / 1.00 / 1.01 |
+| LTMLE, two periods | 100 / 1,000 / 10,000 | 0.97 / 0.92 / 1.00 |
+
+These paths read a standard-layout design in place as before (only the k x k workspaces of
+the lean logit IRLS go through the guarded allocator), and the intercept-only fluctuation
+moved to the GLM module unchanged.
 
 ## Missing values
 

@@ -73,7 +73,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::xtx;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
-use crate::regression::ols::normal_equations_inverse;
+use crate::regression::ols::{NormalInverse, normal_equations_inverse};
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text, sci};
 use crate::traits::estimator::{
@@ -593,6 +593,12 @@ fn is_zero(n: &usize) -> bool {
 // Weighted Demeaning Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// The factorization of an IRLS step's weighted demeaned design.
+enum IrlsSolve {
+    Normal(NormalInverse),
+    Qr(Qr),
+}
+
 /// Step-halving tries per IRLS iteration (alpaca's inner loop).
 const MAX_STEP_TRIES: usize = 50;
 
@@ -1022,10 +1028,18 @@ pub fn run_feglm(
     let mut mx = screen.x;
     let mut xs = resource::try_zeros2(n, k, "FEGLM weighted design")?;
     let mut weights = resource::try_vec(n, 0.0, "FEGLM working weights")?;
-    // The weights `mx` was demeaned with (none: the screen's unit-weight demeaning). When the
-    // next weights are equal to them (value equality; Gaussian: all 1), `mx` is already the
-    // result.
-    let mut mx_weights: Option<Vec<f64>> = None;
+    // The weights `mx` was demeaned with. When the next weights are equal to them (value
+    // equality), `mx` is already the result. The screen demeaned with unit weights, which are
+    // Gaussian's IRLS weights in every iteration, so a Gaussian fit starts from them and
+    // demeans X once; the other families start with none.
+    let mut mx_weights: Option<Vec<f64>> = if family == GlmFamily::Gaussian {
+        Some(resource::try_vec(n, 1.0, "FEGLM working weights")?)
+    } else {
+        None
+    };
+    // The factorization of the weighted demeaned design `xs`, kept while `mx` and the weights
+    // repeat (Gaussian: every iteration and the final information matrix)
+    let mut solve: Option<IrlsSolve> = None;
     let mut nu = resource::try_vec(n, 0.0, "FEGLM working residual")?;
     let mut nu_work = resource::try_vec(n, 0.0, "FEGLM working residual")?;
     let mut ys = Array1::from(resource::try_vec(n, 0.0, "FEGLM weighted residual")?);
@@ -1052,6 +1066,7 @@ pub fn run_feglm(
         let mut proj = WeightedProjector::new(&weights, &factors);
         let (mut x_change, mut x_conv) = (0.0, true);
         if mx_weights.as_deref() != Some(&weights[..]) {
+            solve = None;
             let (mx_new, _, change, conv) = weighted_demean_matrix_map(
                 mx.view(),
                 &mut proj,
@@ -1081,28 +1096,43 @@ pub fn run_feglm(
         }
 
         // 3. The weighted least-squares step of sqrt(w) Mnu on sqrt(w) MX (OLS's solve
-        //    decision: the normal equations when well conditioned, the pivoted QR otherwise)
+        //    decision: the normal equations when well conditioned, the pivoted QR otherwise);
+        //    the design and its factorization repeat while MX and the weights do
         for i in 0..n {
-            let s = weights[i].sqrt();
-            ys[i] = s * mnu[i];
-            for j in 0..k {
-                xs[[i, j]] = s * mx[[i, j]];
-            }
+            ys[i] = weights[i].sqrt() * mnu[i];
         }
-        let beta_upd = match normal_equations_inverse(xs.view())? {
-            Some(normal) => normal.coefficients(xs.view(), &ys),
-            None => {
-                let qr = Qr::decompose(xs.view(), LM_QR_TOL)?;
-                if qr.rank() < k {
-                    return Err(EconError::SingularMatrix {
-                        context: format!(
-                            "FEGLM IRLS iteration {iter}: weighted design rank {} of {k}",
-                            qr.rank()
-                        ),
-                        suggestion: "Check for perfect multicollinearity or separation".to_string(),
-                    });
+        if solve.is_none() {
+            for i in 0..n {
+                let s = weights[i].sqrt();
+                for j in 0..k {
+                    xs[[i, j]] = s * mx[[i, j]];
                 }
-                qr.coefficients(ys.view())?
+            }
+            solve = Some(match normal_equations_inverse(xs.view())? {
+                Some(normal) => IrlsSolve::Normal(normal),
+                None => {
+                    let qr = Qr::decompose(xs.view(), LM_QR_TOL)?;
+                    if qr.rank() < k {
+                        return Err(EconError::SingularMatrix {
+                            context: format!(
+                                "FEGLM IRLS iteration {iter}: weighted design rank {} of {k}",
+                                qr.rank()
+                            ),
+                            suggestion: "Check for perfect multicollinearity or separation"
+                                .to_string(),
+                        });
+                    }
+                    IrlsSolve::Qr(qr)
+                }
+            });
+        }
+        let beta_upd = match &solve {
+            Some(IrlsSolve::Normal(normal)) => normal.coefficients(xs.view(), &ys),
+            Some(IrlsSolve::Qr(qr)) => qr.coefficients(ys.view())?,
+            None => {
+                return Err(EconError::Internal(
+                    "FEGLM: the weighted design was not factored".to_string(),
+                ));
             }
         };
 
@@ -1239,34 +1269,43 @@ pub fn run_feglm(
             .working_weight(eta[i], mu_final[i])
             .max(config.weight_min);
     }
-    let mx_final = if mx_weights.as_deref() == Some(&weights[..]) {
-        mx
-    } else {
-        let (mx_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
-            mx.view(),
-            &mut WeightedProjector::new(&weights, &factors),
-            config.map_tolerance,
-            config.map_max_iter,
-            config.accelerate,
-        )?;
-        if !final_map_conv {
-            map_stalls.push(("the final information matrix".to_string(), final_map_change));
+    let vcov = match solve {
+        // The same weights and design as the last solve: X'WX and its inverse are the ones
+        // the normal equations computed
+        Some(IrlsSolve::Normal(normal)) if mx_weights.as_deref() == Some(&weights[..]) => {
+            normal.inverse
         }
-        mx_final
+        _ => {
+            let mx_final = if mx_weights.as_deref() == Some(&weights[..]) {
+                mx
+            } else {
+                let (mx_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
+                    mx.view(),
+                    &mut WeightedProjector::new(&weights, &factors),
+                    config.map_tolerance,
+                    config.map_max_iter,
+                    config.accelerate,
+                )?;
+                if !final_map_conv {
+                    map_stalls.push(("the final information matrix".to_string(), final_map_change));
+                }
+                mx_final
+            };
+            for i in 0..n {
+                let s = weights[i].sqrt();
+                for j in 0..k {
+                    xs[[i, j]] = s * mx_final[[i, j]];
+                }
+            }
+            let information = xtx(&xs.view());
+            sym_inverse(
+                information.view(),
+                SingularPolicy::Error,
+                "FEGLM information matrix",
+            )?
+            .inverse
+        }
     };
-    for i in 0..n {
-        let s = weights[i].sqrt();
-        for j in 0..k {
-            xs[[i, j]] = s * mx_final[[i, j]];
-        }
-    }
-    let information = xtx(&xs.view());
-    let vcov = sym_inverse(
-        information.view(),
-        SingularPolicy::Error,
-        "FEGLM information matrix",
-    )?
-    .inverse;
 
     // Scale by the dispersion (Gaussian only; 1 otherwise)
     let vcov = match family {
