@@ -2080,11 +2080,18 @@ fn execute_spectrum(
                             println!("Kernel spans: {:?}", spans);
                         }
                         if let Some((peak_freq, peak_spec)) = result.peak_frequency() {
-                            println!(
-                                "\nPeak frequency: {:.4} (period = {:.2})",
-                                peak_freq,
-                                1.0 / peak_freq
-                            );
+                            if peak_freq > 0.0 {
+                                println!(
+                                    "\nPeak frequency: {:.4} (period = {:.2})",
+                                    peak_freq,
+                                    1.0 / peak_freq
+                                );
+                            } else {
+                                println!(
+                                    "\nPeak frequency: {:.4} (period = not defined at frequency 0)",
+                                    peak_freq
+                                );
+                            }
                             println!("Peak spectral density: {:.4e}", peak_spec);
                         }
                         println!("\nFrequency    Spectrum");

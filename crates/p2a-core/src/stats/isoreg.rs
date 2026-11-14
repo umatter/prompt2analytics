@@ -47,7 +47,7 @@ impl std::fmt::Display for IsoregResult {
         writeln!(f)?;
 
         // Show knot information
-        writeln!(f, "Knots (where fitted value changes):")?;
+        writeln!(f, "Knots (last index of each pooled block):")?;
         writeln!(f, "  Index    X        Y       Fitted")?;
         for &k in &self.i_knots {
             writeln!(

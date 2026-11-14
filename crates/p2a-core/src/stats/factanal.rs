@@ -284,8 +284,7 @@ pub fn factanal_from_corr(
             (l, Some(phi))
         }
     };
-    let (rotated_loadings, factor_corr) =
-        sort_loadings(rotated.view(), phi.as_ref().map(|p| p.view()));
+    let (rotated_loadings, factor_corr) = sort_loadings(rotated, phi);
 
     // Compute variance proportions
     let (var_props, cum_var) = compute_variance_proportions(&rotated_loadings.view());
@@ -1131,10 +1130,9 @@ pub fn permute_columns(m: &Array2<f64>, o: &[usize], signs: &[f64]) -> Array2<f6
 /// R's `sortLoadings`: loadings sorted by SS loadings with positive column sums; the factor
 /// correlations get the same permutation P and signs D (`D P' phi P D`).
 pub fn sort_loadings(
-    l: ArrayView2<f64>,
-    phi: Option<ArrayView2<f64>>,
+    l: Array2<f64>,
+    phi: Option<Array2<f64>>,
 ) -> (Array2<f64>, Option<Array2<f64>>) {
-    let l = l.to_owned();
     let (o, signs) = sort_order(&l);
     let sorted = permute_columns(&l, &o, &signs);
     let phi = phi.map(|phi| {
@@ -1178,7 +1176,8 @@ fn compute_variance_proportions(loadings: &ArrayView2<f64>) -> (Array1<f64>, Arr
 /// Compute factor scores, as R's `factanal`: regression scores `Z S^-1 Lambda` with `S` the
 /// correlation matrix of the fit (R 4.3.3 does not multiply promax scores by the factor
 /// correlations), Bartlett scores `Z Psi^-1 Lambda (Lambda' Psi^-1 Lambda)^-1`. `Z` is the
-/// standardised data, whose columns all vary (checked by the caller).
+/// standardised data; a constant column is refused here too, because [`factanal_from_corr`]
+/// takes the data for the scores without fitting on it.
 fn compute_factor_scores(
     data: &ArrayView2<f64>,
     loadings: &ArrayView2<f64>,
@@ -1186,6 +1185,14 @@ fn compute_factor_scores(
     corr: &ArrayView2<f64>,
     method: ScoresMethod,
 ) -> EconResult<Array2<f64>> {
+    if let Some(j) = zero_variance_column(data) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "column {j} (0-based) of the data for the scores has zero variance; factor \
+                 scores need every variable to vary"
+            ),
+        });
+    }
     let (n, p) = data.dim();
     let k = loadings.ncols();
 
@@ -1671,8 +1678,7 @@ mod tests {
         let pt_sorted = permute_columns(&pt, &po, &ps);
         let phi = factor_correlation(&pt_sorted).unwrap();
         // the sorted phi equals sort_loadings' D P' phi P D of the unsorted one
-        let phi_unsorted = factor_correlation(&pt).unwrap();
-        let (_, phi_sorted) = sort_loadings(pm.view(), Some(phi_unsorted.view()));
+        let (_, phi_sorted) = sort_loadings(pm.clone(), Some(factor_correlation(&pt).unwrap()));
         let phi_sorted = phi_sorted.unwrap();
         for (a, b) in phi.iter().zip(phi_sorted.iter()) {
             assert!((a - b).abs() < 1e-12, "{phi:?} vs {phi_sorted:?}");
@@ -1798,6 +1804,28 @@ mod tests {
         assert!(json.contains("\"chi_squared\":null"), "{json}");
         let back: FactorAnalysisResult = serde_json::from_str(&json).unwrap();
         assert!(back.chi_squared.is_nan() && back.p_value.is_nan());
+    }
+
+    /// factanal_from_corr takes the data for the scores without fitting on it: a constant
+    /// column there is refused when scores are asked for, not turned into Inf/NaN scores.
+    #[test]
+    fn test_factanal_from_corr_refuses_constant_score_column() {
+        let (_, x) = factanal_case("stat_factanal_t4");
+        let x7 = x.slice(ndarray::s![.., 0..7]).to_owned();
+        let corr = correlation_matrix(&x7.view()).unwrap();
+        let mut data = x7.clone();
+        data.column_mut(3).fill(2.5);
+        let mut cfg = FactorAnalysisConfig::default();
+        cfg.n_factors = 2;
+        cfg.scores = ScoresMethod::Regression;
+        let e = factanal_from_corr(&corr.view(), x7.nrows(), &cfg, Some(&data.view())).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("column 3") && message.contains("zero variance")),
+            "{e}"
+        );
+        // without scores the data is not read
+        cfg.scores = ScoresMethod::None;
+        assert!(factanal_from_corr(&corr.view(), x7.nrows(), &cfg, Some(&data.view())).is_ok());
     }
 
     /// A constant column is refused, naming it (the correlation matrix floored its standard

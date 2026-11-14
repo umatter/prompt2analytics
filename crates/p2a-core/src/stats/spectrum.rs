@@ -230,12 +230,21 @@ impl fmt::Display for SpectrumResult {
         writeln!(f)?;
 
         if let Some((peak_freq, peak_spec)) = self.peak_frequency() {
-            writeln!(
-                f,
-                "Peak Frequency: {:.4} (period = {:.2})",
-                peak_freq,
-                1.0 / peak_freq
-            )?;
+            // an AR spectrum's grid starts at frequency 0, which has no period
+            if peak_freq > 0.0 {
+                writeln!(
+                    f,
+                    "Peak Frequency: {:.4} (period = {:.2})",
+                    peak_freq,
+                    1.0 / peak_freq
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "Peak Frequency: {:.4} (period = not defined at frequency 0)",
+                    peak_freq
+                )?;
+            }
             writeln!(f, "Peak Spectral Density: {:.4}", peak_spec)?;
         }
 
@@ -1193,6 +1202,22 @@ mod tests {
         for &s in &result.spec {
             assert!(s >= 0.0, "AR spectral density should be non-negative");
         }
+    }
+
+    /// A positively autocorrelated series peaks at frequency 0, where the AR grid starts: the
+    /// Display names no period there instead of printing "period = inf".
+    #[test]
+    fn test_spectrum_ar_peak_at_zero_has_no_period() {
+        let mut x = vec![0.0f64; 200];
+        for i in 1..200 {
+            let e = ((i * 7919) % 101) as f64 / 101.0 - 0.5;
+            x[i] = 0.8 * x[i - 1] + e;
+        }
+        let r = spectrum_ar(&x, Some(1), Some(50)).unwrap();
+        assert_eq!(r.peak_frequency().unwrap().0, 0.0);
+        let s = r.to_string();
+        assert!(s.contains("period = not defined at frequency 0"), "{s}");
+        assert!(!s.contains("inf"), "{s}");
     }
 
     #[test]
