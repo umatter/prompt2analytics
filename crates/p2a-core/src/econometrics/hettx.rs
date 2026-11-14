@@ -54,10 +54,12 @@ use rand::SeedableRng;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
+use crate::econometrics::survival::conf_percent;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::xtx;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
@@ -439,9 +441,9 @@ impl fmt::Display for HetTxResult {
             Some((lo, hi)) => {
                 writeln!(
                     f,
-                    "  p = max over {} grid points of tau in the {} interval [{:.4}, {:.4}] + gamma ({})",
+                    "  p = max over {} grid points of tau in the {}% interval [{:.4}, {:.4}] + gamma ({})",
                     self.tau_grid.len(),
-                    format_level(1.0 - self.gamma),
+                    conf_percent(1.0 - self.gamma),
                     lo,
                     hi,
                     self.gamma
@@ -490,13 +492,6 @@ impl fmt::Display for HetTxResult {
 
         Ok(())
     }
-}
-
-/// A level as a percentage with trailing zeros trimmed (0.9999 -> "99.99%").
-fn format_level(level: f64) -> String {
-    let s = format!("{:.6}", 100.0 * level);
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    format!("{s}%")
 }
 
 // ===============================================================================
@@ -637,7 +632,21 @@ fn run_hettx_with_names(
         (Some((lo, hi)), even_grid(lo, hi, config.grid_size))
     };
 
-    // Imputed unit effects at the observed assignment
+    // Imputed unit effects at the observed assignment. The SKS test uses no imputed effects,
+    // so without covariates it runs and the effects shown are the difference in means.
+    let effect_method = if covariates.is_none()
+        && config.test_statistic == HetTestStat::SKS
+        && config.effect_method != EffectEstimationMethod::Stratified
+    {
+        warnings.push(format!(
+            "No covariates for {}: the unit effects shown are the difference in means (the SKS \
+             test does not use imputed effects)",
+            config.effect_method
+        ));
+        EffectEstimationMethod::Stratified
+    } else {
+        config.effect_method
+    };
     let x_int = covariates.map(add_intercept);
     let names = covariates
         .map(|x| design_names(&covariate_names, x.ncols()))
@@ -645,7 +654,7 @@ fn run_hettx_with_names(
     let imputer = Imputer {
         x: covariates.map(|x| x.view()),
         x_int: x_int.as_ref(),
-        method: config.effect_method,
+        method: effect_method,
         n_neighbors: config.n_neighbors,
         names: &names,
     };
@@ -719,7 +728,7 @@ fn run_hettx_with_names(
         estimated_effects: tau_hat.to_vec(),
         ate,
         ate_se,
-        effect_method: config.effect_method,
+        effect_method,
         decomposition,
         n_obs: n,
         n_treated,
@@ -846,9 +855,14 @@ pub(crate) fn frt_constant_effect(
         let observed = observed_effects.ok_or_else(|| EconError::InvalidSpecification {
             message: "a spread statistic needs the imputed effects".to_string(),
         })?;
-        let t_obs = spread_statistic(stat, &observed.to_vec(), None, 0.0, &mut Vec::new());
-        let mut d = vec![0.0; n];
-        let mut buf = Vec::with_capacity(n);
+        let mut buf = resource::try_with_capacity(n, "imputed effects")?;
+        let t_obs = spread_statistic(stat, &contiguous(observed), None, 0.0, &mut buf);
+        let mut d = resource::try_vec(n, 0.0, "assignment change")?;
+        let mut vals = resource::try_vec(g, 0.0, "statistics of one draw")?;
+        let sorted_grid = grid.windows(2).all(|w| w[0] <= w[1]);
+        let mut lines = Vec::new();
+        let mut hull = Vec::new();
+        let mut kinks = Vec::new();
         let mut ignored = Vec::new();
         for b in 0..n_draws {
             resource::checkpoint()?;
@@ -862,21 +876,31 @@ pub(crate) fn frt_constant_effect(
                 Err(e) if is_resource_stop(&e) => return Err(e),
                 Err(_) => continue,
             };
-            let a = a.to_vec();
-            let bv = bv.to_vec();
-            let moments = SpreadMoments::new(&a, &bv);
-            let mut row = null.row_mut(n_valid);
-            let mut ok = true;
-            for (cell, &tau) in row.iter_mut().zip(grid) {
-                let t = if stat == HetTestStat::Variance {
-                    moments.variance(tau)
-                } else {
-                    spread_statistic(stat, &a, Some(&bv), tau, &mut buf)
-                };
-                ok &= t.is_finite();
-                *cell = t;
+            let (a, bv) = (contiguous(&a), contiguous(&bv));
+            match stat {
+                HetTestStat::Variance => {
+                    let moments = SpreadMoments::new(&a, &bv);
+                    for (v, &tau) in vals.iter_mut().zip(grid) {
+                        *v = moments.variance(tau);
+                    }
+                }
+                HetTestStat::Range if sorted_grid => {
+                    range_on_grid(&a, &bv, grid, &mut lines, &mut hull, &mut vals)
+                }
+                HetTestStat::MeanAbsDeviation if sorted_grid => {
+                    mad_on_grid(&a, &bv, grid, &mut kinks, &mut vals)
+                }
+                _ => {
+                    for (v, &tau) in vals.iter_mut().zip(grid) {
+                        *v = spread_statistic(stat, &a, Some(&bv), tau, &mut buf);
+                    }
+                }
             }
-            if ok {
+            if vals.iter().all(|t| t.is_finite()) {
+                null.row_mut(n_valid)
+                    .iter_mut()
+                    .zip(&vals)
+                    .for_each(|(cell, &v)| *cell = v);
                 n_valid += 1;
             }
         }
@@ -916,6 +940,11 @@ struct SksPieces {
     c1: Vec<f64>,
     c0: Vec<f64>,
     t0: Vec<f64>,
+    /// The sums of `t1`, `c1`, `c0`, `t0`, set by [`Self::fill`].
+    sums: [f64; 4],
+    /// Workspace: the centred treated and control values of one tau, in increasing order.
+    treated: Vec<f64>,
+    control: Vec<f64>,
 }
 
 impl SksPieces {
@@ -932,58 +961,63 @@ impl SksPieces {
             };
             piece.push(y[i]);
         }
+        let sum = |v: &[f64]| v.iter().sum::<f64>();
+        self.sums = [sum(&self.t1), sum(&self.c1), sum(&self.c0), sum(&self.t0)];
     }
 
     /// max over pooled points u of |a(u) n0 - b(u) n1|, a and b the counts of the centred
     /// treated and control values at or below u (the SKS statistic times n1 n0).
-    fn numerator(&self, tau: f64, n1: usize, n0: usize) -> u64 {
-        let sum = |v: &[f64]| v.iter().sum::<f64>();
-        let m1 = (sum(&self.t1) + sum(&self.c1) + tau * self.c1.len() as f64) / n1 as f64;
-        let m0 = (sum(&self.c0) + sum(&self.t0) - tau * self.t0.len() as f64) / n0 as f64;
-        // (values, shift, arm): arm 1 counts toward a, arm 0 toward b
-        let pieces: [(&[f64], f64, bool); 4] = [
-            (&self.t1, 0.0, true),
-            (&self.c1, tau, true),
-            (&self.c0, 0.0, false),
-            (&self.t0, -tau, false),
-        ];
-        let value = |p: usize, k: usize| {
-            let (v, shift, arm) = pieces[p];
-            (v[k] + shift) - if arm { m1 } else { m0 }
-        };
-        let mut pos = [0usize; 4];
-        let (mut a, mut b) = (0i64, 0i64);
-        let (n1, n0) = (n1 as i64, n0 as i64);
-        let mut best = 0i64;
-        loop {
-            let mut u = f64::INFINITY;
-            let mut any = false;
-            for p in 0..4 {
-                if pos[p] < pieces[p].0.len() {
-                    let v = value(p, pos[p]);
-                    if !any || v < u {
-                        u = v;
-                        any = true;
-                    }
-                }
-            }
-            if !any {
-                break;
-            }
-            for p in 0..4 {
-                while pos[p] < pieces[p].0.len() && value(p, pos[p]) <= u {
-                    pos[p] += 1;
-                    if pieces[p].2 {
-                        a += 1;
-                    } else {
-                        b += 1;
-                    }
-                }
-            }
-            best = best.max((a * n0 - b * n1).abs());
-        }
-        best as u64
+    fn numerator(&mut self, tau: f64, n1: usize, n0: usize) -> u64 {
+        let [s_t1, s_c1, s_c0, s_t0] = self.sums;
+        let m1 = (s_t1 + s_c1 + tau * self.c1.len() as f64) / n1 as f64;
+        let m0 = (s_c0 + s_t0 - tau * self.t0.len() as f64) / n0 as f64;
+        merge_shifted(&self.t1, &self.c1, tau, m1, &mut self.treated);
+        merge_shifted(&self.c0, &self.t0, -tau, m0, &mut self.control);
+        ks_numerator_sorted(&self.treated, &self.control, n1, n0)
     }
+}
+
+/// The values `v - m` of `p` and `(v + shift) - m` of `q`, both in increasing order, merged
+/// into `out` in increasing order.
+fn merge_shifted(p: &[f64], q: &[f64], shift: f64, m: f64, out: &mut Vec<f64>) {
+    out.clear();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < p.len() && j < q.len() {
+        let (u, v) = ((p[i] + 0.0) - m, (q[j] + shift) - m);
+        if u <= v {
+            out.push(u);
+            i += 1;
+        } else {
+            out.push(v);
+            j += 1;
+        }
+    }
+    out.extend(p[i..].iter().map(|&u| (u + 0.0) - m));
+    out.extend(q[j..].iter().map(|&v| (v + shift) - m));
+}
+
+/// max over pooled points u of |a(u) n0 - b(u) n1| for the increasing `treated` (a counts)
+/// and `control` (b counts) values.
+fn ks_numerator_sorted(treated: &[f64], control: &[f64], n1: usize, n0: usize) -> u64 {
+    let (mut i, mut j) = (0usize, 0usize);
+    let (n1i, n0i) = (n1 as i64, n0 as i64);
+    let mut best = 0i64;
+    while i < treated.len() || j < control.len() {
+        let u = match (treated.get(i), control.get(j)) {
+            (Some(&a), Some(&b)) => a.min(b),
+            (Some(&a), None) => a,
+            (None, Some(&b)) => b,
+            (None, None) => break,
+        };
+        while i < treated.len() && treated[i] <= u {
+            i += 1;
+        }
+        while j < control.len() && control[j] <= u {
+            j += 1;
+        }
+        best = best.max((i as i64 * n0i - j as i64 * n1i).abs());
+    }
+    best as u64
 }
 
 /// Centred second moments of imputed effects `a + tau b`, for the variance in closed form.
@@ -1034,6 +1068,165 @@ fn spread_statistic(
         None => buf.extend_from_slice(a),
     }
     compute_test_statistic(buf, stat)
+}
+
+/// The elements of an imputed-effect vector as a slice (copied only if not contiguous).
+fn contiguous(v: &Array1<f64>) -> Cow<'_, [f64]> {
+    match v.as_slice() {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned(v.to_vec()),
+    }
+}
+
+/// The range of `a + tau b` at every tau of the nondecreasing `grid`, written to `out`:
+/// the upper and lower envelopes of the lines `a_i + tau b_i` are built once (sorted by slope)
+/// and walked along the grid. `lines` and `hull` are workspace.
+fn range_on_grid(
+    a: &[f64],
+    b: &[f64],
+    grid: &[f64],
+    lines: &mut Vec<(f64, f64)>,
+    hull: &mut Vec<(f64, f64)>,
+    out: &mut [f64],
+) {
+    // (slope, intercept), by slope then intercept
+    lines.clear();
+    lines.extend(b.iter().zip(a).map(|(&s, &c)| (s, c)));
+    lines.sort_unstable_by(|p, q| p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)));
+    upper_envelope(lines.iter().copied(), hull);
+    walk_envelope(hull, grid, out, |m, _| m);
+    // min_i (a_i + tau b_i) = -max_i (-a_i + tau (-b_i)); negating is exact
+    upper_envelope(lines.iter().rev().map(|&(s, c)| (-s, -c)), hull);
+    walk_envelope(hull, grid, out, |m, max| max + m);
+}
+
+/// The upper envelope of lines `c + t s` given as `(s, c)` in increasing order of slope (and
+/// of intercept within a slope), into `hull`.
+fn upper_envelope(lines: impl Iterator<Item = (f64, f64)>, hull: &mut Vec<(f64, f64)>) {
+    hull.clear();
+    for (s, c) in lines {
+        if hull.last().is_some_and(|&(s2, _)| s2 == s) {
+            hull.pop();
+        }
+        while hull.len() >= 2 {
+            let (s1, c1) = hull[hull.len() - 2];
+            let (s2, c2) = hull[hull.len() - 1];
+            // the middle line is never above both: the new line overtakes the first one no
+            // later than the middle line does
+            if (c1 - c) * (s2 - s1) <= (c1 - c2) * (s - s1) {
+                hull.pop();
+            } else {
+                break;
+            }
+        }
+        hull.push((s, c));
+    }
+}
+
+/// The envelope's maximum at each t of the nondecreasing `grid`, combined into `out` by
+/// `set(value, previous)`.
+fn walk_envelope(
+    hull: &[(f64, f64)],
+    grid: &[f64],
+    out: &mut [f64],
+    set: impl Fn(f64, f64) -> f64,
+) {
+    let mut j = 0usize;
+    for (o, &t) in out.iter_mut().zip(grid) {
+        let at = |k: usize| hull[k].1 + t * hull[k].0;
+        while j + 1 < hull.len() && at(j + 1) >= at(j) {
+            j += 1;
+        }
+        *o = set(at(j), *o);
+    }
+}
+
+/// The mean absolute deviation of `a + tau b` at every tau of the nondecreasing `grid`,
+/// written to `out`. With c and e the centred `a` and `b`, it is mean |c_i + tau e_i|, linear
+/// between the kinks -c_i / e_i: the kinks are sorted once and the signs flipped as the grid
+/// passes them. `kinks` is workspace.
+fn mad_on_grid(
+    a: &[f64],
+    b: &[f64],
+    grid: &[f64],
+    kinks: &mut Vec<(f64, f64, f64)>,
+    out: &mut [f64],
+) {
+    let n = a.len() as f64;
+    let ma = a.iter().sum::<f64>() / n;
+    let mb = b.iter().sum::<f64>() / n;
+    // sum of sign_i (c_i + t e_i) = sc + t se at t below every kink
+    let (mut sc, mut se) = (0.0, 0.0);
+    kinks.clear();
+    for (&x, &y) in a.iter().zip(b) {
+        let (c, e) = (x - ma, y - mb);
+        if e == 0.0 {
+            sc += c.abs();
+        } else {
+            let s = -e.signum();
+            sc += s * c;
+            se += s * e;
+            kinks.push((-c / e, c, e));
+        }
+    }
+    kinks.sort_unstable_by(|p, q| p.0.total_cmp(&q.0));
+    let mut k = 0usize;
+    for (o, &t) in out.iter_mut().zip(grid) {
+        while k < kinks.len() && kinks[k].0 <= t {
+            let (_, c, e) = kinks[k];
+            let s = 2.0 * e.signum();
+            sc += s * c;
+            se += s * e;
+            k += 1;
+        }
+        *o = (sc + t * se).max(0.0) / n;
+    }
+}
+
+/// R's `IQR()` (type-7 quantiles) of `v`, from the four order statistics it needs, selected in
+/// place (`v` is reordered).
+fn iqr_type7(v: &mut [f64]) -> f64 {
+    let n = v.len();
+    let index = |p: f64| 1.0 + (n as f64 - 1.0) * p;
+    let quantile = |index: f64, lo: f64, qs: f64, xhi: f64| {
+        if index > lo && xhi != qs {
+            let h = index - lo;
+            (1.0 - h) * qs + h * xhi
+        } else {
+            qs
+        }
+    };
+    let min_of = |s: &[f64]| s.iter().copied().fold(f64::INFINITY, f64::min);
+    let (i75, i25) = (index(0.75), index(0.25));
+    let (k75, k25) = (i75.floor() as usize - 1, i25.floor() as usize - 1);
+    let (left, mid, right) = v.select_nth_unstable_by(k75, f64::total_cmp);
+    let x75 = *mid;
+    // the next order statistic is the smallest value above position k75
+    let x75_hi = if i75.ceil() > i75.floor() {
+        min_of(right)
+    } else {
+        x75
+    };
+    let (x25, x25_hi) = if k25 == k75 {
+        let hi = if i25.ceil() > i25.floor() {
+            min_of(right)
+        } else {
+            x75
+        };
+        (x75, hi)
+    } else {
+        let (_, mid, right) = left.select_nth_unstable_by(k25, f64::total_cmp);
+        let x25 = *mid;
+        let hi = if i25.ceil() == i25.floor() {
+            x25
+        } else if right.is_empty() {
+            x75
+        } else {
+            min_of(right)
+        };
+        (x25, hi)
+    };
+    quantile(i75, i75.floor(), x75, x75_hi) - quantile(i25, i25.floor(), x25, x25_hi)
 }
 
 // ===============================================================================
@@ -1359,8 +1552,8 @@ fn fit_outcome_model_on_subset(
     })
 }
 
-/// A spread statistic of the unit effects `tau`.
-fn compute_test_statistic(tau: &[f64], stat_type: HetTestStat) -> f64 {
+/// A spread statistic of the unit effects `tau` (reordered by the IQR).
+fn compute_test_statistic(tau: &mut [f64], stat_type: HetTestStat) -> f64 {
     let n = tau.len();
     if n == 0 {
         return 0.0;
@@ -1377,13 +1570,8 @@ fn compute_test_statistic(tau: &[f64], stat_type: HetTestStat) -> f64 {
             let max = tau.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             max - min
         }
-        HetTestStat::IQR => {
-            // R's IQR(): type-7 quantiles (tau is computed from finite, checked inputs)
-            let mut sorted: Vec<f64> = tau.to_vec();
-            sorted.sort_unstable_by(f64::total_cmp);
-            let q = |p| quantile_sorted(&sorted, p, QuantileType::T7);
-            q(0.75) - q(0.25)
-        }
+        // R's IQR(): type-7 quantiles (tau is computed from finite, checked inputs)
+        HetTestStat::IQR => iqr_type7(tau),
         HetTestStat::MeanAbsDeviation => {
             let m = mean();
             tau.iter().map(|&t| (t - m).abs()).sum::<f64>() / n as f64
@@ -1486,8 +1674,10 @@ fn interaction_hc2(
     // Rows of the kept design scaled by sqrt(e_i^2 / (1 - h_i)).
     let mut scaled = resource::try_zeros2(n, r, "HC2 scores")?;
     let mut leverage_one = false;
+    let mut row = Vec::with_capacity(r);
     for i in 0..n {
-        let row: Vec<f64> = kept.iter().map(|&j| xd[[i, j]]).collect();
+        row.clear();
+        row.extend(kept.iter().map(|&j| xd[[i, j]]));
         let mut h = 0.0;
         for a in 0..r {
             let mut s = 0.0;
@@ -1556,16 +1746,16 @@ fn interaction_hc2(
 }
 
 /// The sample covariance of the columns of `x` (divisor n - 1).
-fn sample_cov(x: &ArrayView2<f64>) -> Array2<f64> {
+fn sample_cov(x: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     let (n, k) = x.dim();
     let means: Vec<f64> = (0..k).map(|j| x.column(j).sum() / n as f64).collect();
-    let mut c = Array2::zeros((n, k));
+    let mut c = resource::try_zeros2(n, k, "centred covariates")?;
     for i in 0..n {
         for j in 0..k {
             c[[i, j]] = x[[i, j]] - means[j];
         }
     }
-    xtx(&c.view()) / (n - 1).max(1) as f64
+    Ok(xtx(&c.view()) / (n - 1).max(1) as f64)
 }
 
 /// The KS distance between the two arms' residuals from their own regressions on
@@ -1594,25 +1784,7 @@ fn residual_ks_numerator(
         r.sort_unstable_by(f64::total_cmp);
     }
     let [r0, r1] = &res;
-    let (mut i, mut j) = (0usize, 0usize);
-    let (n1i, n0i) = (n1 as i64, n0 as i64);
-    let mut best = 0i64;
-    while i < r1.len() || j < r0.len() {
-        let u = match (r1.get(i), r0.get(j)) {
-            (Some(&a), Some(&b)) => a.min(b),
-            (Some(&a), None) => a,
-            (None, Some(&b)) => b,
-            (None, None) => break,
-        };
-        while i < r1.len() && r1[i] <= u {
-            i += 1;
-        }
-        while j < r0.len() && r0[j] <= u {
-            j += 1;
-        }
-        best = best.max((i as i64 * n0i - j as i64 * n1i).abs());
-    }
-    Ok(Some(best as u64))
+    Ok(Some(ks_numerator_sorted(r1, r0, n1, n0)))
 }
 
 /// The conditional randomization test of no idiosyncratic variation (plug-in): H0:
@@ -1682,7 +1854,7 @@ fn compute_heterogeneity_decomposition(
         f64::NAN
     };
 
-    let s_xx = sample_cov(x);
+    let s_xx = sample_cov(x)?;
     let b0: Vec<f64> = fit
         .beta
         .iter()
@@ -1875,7 +2047,7 @@ mod tests {
             .scalar("sd", s.std_dev, Tol::stat(38))
             .scalar(
                 "iqr",
-                compute_test_statistic(tau.as_slice().unwrap(), HetTestStat::IQR),
+                compute_test_statistic(&mut tau.to_vec(), HetTestStat::IQR),
                 Tol::coef(38),
             )
             .finish();
@@ -2225,25 +2397,105 @@ mod tests {
         assert!(result.is_err()); // Need at least 5 in each group
     }
 
+    /// The default SKS test needs no imputed effects, so it runs without covariates (with
+    /// matching, the default) and gives the p-value of the difference-in-means route.
+    #[test]
+    fn test_hettx_sks_without_covariates_runs() {
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let n = 40;
+        let z: Array1<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+        let y: Array1<f64> = (0..n)
+            .map(|i| z[i] * (1.0 + 1.5 * rng.r#gen::<f64>()) + rng.r#gen::<f64>())
+            .collect();
+        let mut config = HetTxConfig::default();
+        config.decompose = false;
+        config.n_permutations = 199;
+        let res = run_hettx(&y.view(), &z.view(), None, config.clone()).unwrap();
+        assert!(res.p_value > 0.0 && res.p_value <= 1.0);
+        assert_eq!(res.effect_method, EffectEstimationMethod::Stratified);
+        assert!(res.warnings.iter().any(|w| w.contains("No covariates")));
+        config.effect_method = EffectEstimationMethod::Stratified;
+        let strat = run_hettx(&y.view(), &z.view(), None, config).unwrap();
+        assert_eq!(res.p_by_tau, strat.p_by_tau);
+        assert_eq!(res.estimated_effects, strat.estimated_effects);
+        // a spread statistic still needs the imputed effects
+        let mut config = HetTxConfig::default();
+        config.decompose = false;
+        config.test_statistic = HetTestStat::Variance;
+        assert!(run_hettx(&y.view(), &z.view(), None, config).is_err());
+    }
+
+    /// Effects with ties and zero slopes, as matching gives (b is a sum of +-1 / k terms).
+    fn spread_inputs(n: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let a = (0..n)
+            .map(|i| (i % 7) as f64 * 0.25 + rng.r#gen::<f64>())
+            .collect();
+        let b = (0..n)
+            .map(|_| (rng.gen_range(0..7) as f64 - 3.0) / 3.0)
+            .collect();
+        (a, b)
+    }
+
+    /// The envelope (range) and kink-sweep (mean absolute deviation) paths agree with the
+    /// statistic computed point by point at every grid value.
+    #[test]
+    fn test_spread_on_grid_matches_pointwise() {
+        for (n, seed) in [(10, 1), (57, 2), (400, 3)] {
+            let (a, b) = spread_inputs(n, seed);
+            let grid = even_grid(-2.5, 3.0, 151);
+            let (mut lines, mut hull, mut kinks) = (Vec::new(), Vec::new(), Vec::new());
+            let mut range = vec![0.0; grid.len()];
+            let mut mad = vec![0.0; grid.len()];
+            range_on_grid(&a, &b, &grid, &mut lines, &mut hull, &mut range);
+            mad_on_grid(&a, &b, &grid, &mut kinks, &mut mad);
+            let mut buf = Vec::new();
+            for (j, &tau) in grid.iter().enumerate() {
+                let r = spread_statistic(HetTestStat::Range, &a, Some(&b), tau, &mut buf);
+                let m =
+                    spread_statistic(HetTestStat::MeanAbsDeviation, &a, Some(&b), tau, &mut buf);
+                assert!(
+                    (range[j] - r).abs() <= 1e-12 * (1.0 + r),
+                    "range n={n} tau={tau}"
+                );
+                assert!(
+                    (mad[j] - m).abs() <= 1e-12 * (1.0 + m),
+                    "mad n={n} tau={tau}"
+                );
+            }
+        }
+    }
+
+    /// The selection IQR is R's type-7 IQR of the sorted values.
+    #[test]
+    fn test_iqr_type7_matches_sorted_quantiles() {
+        for n in 1..60 {
+            let (a, _) = spread_inputs(n, n as u64);
+            let mut sorted = a.clone();
+            sorted.sort_unstable_by(f64::total_cmp);
+            let q = |p| quantile_sorted(&sorted, p, QuantileType::T7);
+            assert_eq!(iqr_type7(&mut a.clone()), q(0.75) - q(0.25), "n = {n}");
+        }
+    }
+
     #[test]
     fn test_compute_test_statistic() {
         let tau = Array1::from(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 
         // Variance: Var([1,2,3,4,5]) = 2.5
-        let var_stat = compute_test_statistic(tau.as_slice().unwrap(), HetTestStat::Variance);
+        let var_stat = compute_test_statistic(&mut tau.to_vec(), HetTestStat::Variance);
         assert!((var_stat - 2.5).abs() < 0.01);
 
         // Range: 5 - 1 = 4
-        let range_stat = compute_test_statistic(tau.as_slice().unwrap(), HetTestStat::Range);
+        let range_stat = compute_test_statistic(&mut tau.to_vec(), HetTestStat::Range);
         assert!((range_stat - 4.0).abs() < 0.01);
 
         // IQR: Q3 - Q1 = 4 - 2 = 2
-        let iqr_stat = compute_test_statistic(tau.as_slice().unwrap(), HetTestStat::IQR);
+        let iqr_stat = compute_test_statistic(&mut tau.to_vec(), HetTestStat::IQR);
         assert!((iqr_stat - 2.0).abs() < 0.01);
 
         // MAD: mean(|x - 3|) for x in [1,2,3,4,5] = (2+1+0+1+2)/5 = 1.2
-        let mad_stat =
-            compute_test_statistic(tau.as_slice().unwrap(), HetTestStat::MeanAbsDeviation);
+        let mad_stat = compute_test_statistic(&mut tau.to_vec(), HetTestStat::MeanAbsDeviation);
         assert!((mad_stat - 1.2).abs() < 0.01);
     }
 
@@ -2800,7 +3052,7 @@ mod tests {
                     );
                 }
                 let mom = SpreadMoments::new(a.as_slice().unwrap(), b.as_slice().unwrap());
-                let v = compute_test_statistic(direct.as_slice().unwrap(), HetTestStat::Variance);
+                let v = compute_test_statistic(&mut direct.to_vec(), HetTestStat::Variance);
                 assert!((mom.variance(tau) - v).abs() <= 1e-10 * (1.0 + v));
             }
         }
