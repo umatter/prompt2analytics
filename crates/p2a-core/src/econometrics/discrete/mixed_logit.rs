@@ -48,6 +48,7 @@ use std::fmt;
 
 use ndarray::Array2;
 
+use super::conditional_logit::validate_choice_sets;
 use super::newton::{ensure_dense_inverse_fits, newton_step};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
@@ -298,8 +299,8 @@ struct ChoiceData {
     /// Per choice situation (in choice-id level order): the attribute rows of its
     /// alternatives in data order, row-major (`rows x n_vars`).
     sit_x: Vec<Vec<f64>>,
-    /// Per choice situation: the row of the chosen alternative (the last row with
-    /// choice > 0.5, else the first).
+    /// Per choice situation: the row of the chosen alternative (exactly one row has
+    /// choice > 0.5; `validate_choice_sets`).
     sit_chosen: Vec<usize>,
     /// Per decision maker (draw unit): its choice situations, in level order.
     unit_situations: Vec<Vec<usize>>,
@@ -334,6 +335,7 @@ fn choice_data(
     let sit = cols.factor(choice_id_col);
     let n_sit = sit.n_levels();
     let choice = cols.numeric(choice_col);
+    validate_choice_sets(sit, cols.factor(alt_id_col), choice)?;
     let xs: Vec<&[f64]> = x_cols.iter().map(|c| cols.numeric(c)).collect();
 
     let mut sit_x: Vec<Vec<f64>> = resource::try_with_capacity(n_sit, what)?;
@@ -988,6 +990,13 @@ fn validate(
 /// Every column comes from one request with `NaPolicy::Fail`: a missing id, alternative,
 /// choice, attribute or individual id is refused with `NullValues` naming the column, as
 /// mlogit refuses it. Int64 and Boolean columns are accepted.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for a choice situation without exactly one chosen row
+/// (`choice > 0.5`) or with an alternative listed twice (naming the first such situation
+/// and their number; mlogit refuses them), as well as for invalid controls and random
+/// parameters.
 pub fn run_mixed_logit(
     dataset: &Dataset,
     choice_id_col: &str,
@@ -1226,6 +1235,7 @@ pub fn run_mixl(
 
 #[cfg(test)]
 mod tests {
+    use super::super::conditional_logit::{Malformed, malformed_choice_data};
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
     use p2a_validation::{Check, Tol};
@@ -1585,6 +1595,54 @@ mod tests {
 
     /// A random parameter that is not a variable, and halton_drop = 0 (point 0 of the
     /// sequence is 0, whose normal quantile is -infinity), are refused.
+    /// The refusals of the conditional logit, on the same malformed Fishing data
+    /// (`sit_chosen` used the last chosen row, or the first row when none was chosen).
+    fn mixed_refusal(kind: Malformed) -> String {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, kind);
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            &[normal("catch")],
+            Some(draws_cfg(5)),
+        );
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mixed_logit_refuses_situation_without_choice() {
+        let m = mixed_refusal(Malformed::NoChoice);
+        assert!(
+            m.starts_with("1 choice situation has no chosen alternative")
+                && m.contains("choice situation '1'"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_logit_refuses_situation_with_two_choices() {
+        let m = mixed_refusal(Malformed::TwoChoices);
+        assert!(
+            m.contains("choice situation '1', 3 alternatives are chosen"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_logit_refuses_situation_with_duplicate_alternative() {
+        let m = mixed_refusal(Malformed::Duplicate);
+        assert!(
+            m.contains("alternative 'boat' appears twice in choice situation '2'"),
+            "{m}"
+        );
+    }
+
     #[test]
     fn test_mixed_logit_rejects_unknown_random_variable() {
         let (_, ds) = case_data("disc_mixed_logit");

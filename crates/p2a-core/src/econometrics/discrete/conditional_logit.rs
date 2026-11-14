@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, NaPolicy};
+use crate::data::columns::{ColumnRequest, Factor, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::ndarray_to_faer;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
@@ -306,6 +306,114 @@ impl fmt::Display for MlogitResult {
     }
 }
 
+/// Refuse choice data that mlogit refuses: a choice situation must have exactly one
+/// chosen row (`choice > 0.5`) and no alternative twice. `situation` and `alternative`
+/// are the factors of the rows; the error names the number of offending situations
+/// and the first of them in data order, checking repeated alternatives first, then
+/// situations without a choice, then those with more than one. One pass over the rows
+/// after a stable counting sort by situation; no per-situation allocation.
+pub(super) fn validate_choice_sets(
+    situation: &Factor,
+    alternative: &Factor,
+    choice: &[f64],
+) -> EconResult<()> {
+    let what = "choice-set check";
+    let n_sit = situation.n_levels();
+    let n_rows = situation.codes.len();
+    // rows grouped by situation, each group in data order
+    let mut start = resource::try_vec(n_sit + 1, 0usize, what)?;
+    for &s in &situation.codes {
+        start[s as usize + 1] += 1;
+    }
+    for s in 0..n_sit {
+        start[s + 1] += start[s];
+    }
+    let mut next = start.clone();
+    let mut order = resource::try_vec(n_rows, 0usize, what)?;
+    for (row, &s) in situation.codes.iter().enumerate() {
+        order[next[s as usize]] = row;
+        next[s as usize] += 1;
+    }
+    drop(next);
+    // stamp[a] == s + 1: alternative a already seen in situation s
+    let mut stamp = resource::try_vec(alternative.n_levels(), 0usize, what)?;
+    // (count, first row, situation, repeated alternative) per kind
+    let mut repeated = (0usize, usize::MAX, 0usize, 0usize);
+    let mut none = (0usize, usize::MAX, 0usize);
+    let mut several = (0usize, usize::MAX, 0usize, 0usize);
+    for s in 0..n_sit {
+        let rows = &order[start[s]..start[s + 1]];
+        let Some(&first) = rows.first() else {
+            continue;
+        };
+        let mut chosen = 0usize;
+        let mut duplicate = None;
+        for &row in rows {
+            let a = alternative.codes[row] as usize;
+            if stamp[a] == s + 1 {
+                duplicate.get_or_insert(a);
+            }
+            stamp[a] = s + 1;
+            if choice[row] > 0.5 {
+                chosen += 1;
+            }
+        }
+        if let Some(a) = duplicate {
+            repeated.0 += 1;
+            if first < repeated.1 {
+                repeated = (repeated.0, first, s, a);
+            }
+        }
+        if chosen == 0 {
+            none.0 += 1;
+            if first < none.1 {
+                none = (none.0, first, s);
+            }
+        } else if chosen > 1 {
+            several.0 += 1;
+            if first < several.1 {
+                several = (several.0, first, s, chosen);
+            }
+        }
+    }
+    // "1 choice situation has", "2 choice situations have"
+    let count = |k: usize, one: &str, many: &str| {
+        if k == 1 {
+            format!("1 choice situation {one}")
+        } else {
+            format!("{k} choice situations {many}")
+        }
+    };
+    let message = if repeated.0 > 0 {
+        format!(
+            "{} an alternative more than once (the first: alternative '{}' appears twice in \
+             choice situation '{}'); each alternative may appear once per choice situation",
+            count(repeated.0, "lists", "list"),
+            alternative.levels[repeated.3],
+            situation.levels[repeated.2]
+        )
+    } else if none.0 > 0 {
+        format!(
+            "{} no chosen alternative (the first: choice situation '{}'); each choice \
+             situation needs exactly one row with choice > 0.5",
+            count(none.0, "has", "have"),
+            situation.levels[none.2]
+        )
+    } else if several.0 > 0 {
+        format!(
+            "{} more than one chosen alternative (the first: choice situation '{}', {} \
+             alternatives are chosen); each choice situation needs exactly one row with \
+             choice > 0.5",
+            count(several.0, "has", "have"),
+            situation.levels[several.2],
+            several.3
+        )
+    } else {
+        return Ok(());
+    };
+    Err(EconError::InvalidSpecification { message })
+}
+
 /// Pre-computed data structure for fast mlogit computation.
 struct MlogitData {
     /// For each choice situation: (start_row, n_alts, chosen_local_idx)
@@ -340,6 +448,7 @@ impl MlogitData {
         for alts in choice_situations {
             let start = flat_idx;
             let n_alts = alts.len();
+            // exactly one chosen row (validate_choice_sets)
             let mut chosen_local = 0;
 
             for (local_idx, &(row_idx, alt_idx)) in alts.iter().enumerate() {
@@ -587,7 +696,10 @@ pub fn run_conditional_logit(
 /// `glm.fit`'s relative-deviance scale is below `tolerance`, then takes that last full
 /// step. A line search that finds no increase stops the fit as not converged.
 ///
-/// Refused: invalid controls and an unknown `reflevel` (`InvalidSpecification`), and an
+/// Refused: invalid controls and an unknown `reflevel` (`InvalidSpecification`); a choice
+/// situation without exactly one chosen row (`choice > 0.5`) or with an alternative listed
+/// twice (`InvalidSpecification` naming the first such situation and their number, as
+/// mlogit refuses them); and an
 /// attribute that is constant within every choice situation or a linear combination of
 /// the others (`SingularMatrix` naming it; mlogit stops with "system is exactly
 /// singular"). A singular information at the estimates (separation) gives `NaN`
@@ -616,6 +728,7 @@ pub fn run_mlogit_with(
     let alt = cols.factor(alt_id_col);
     let choices = cols.numeric(choice_col);
     let n_choice_situations = situation.n_levels();
+    validate_choice_sets(situation, alt, choices)?;
 
     let alternatives: Vec<String> = alt.levels.clone();
     let n_alternatives = alternatives.len();
@@ -981,6 +1094,75 @@ pub fn run_conditional_logit_with(
     )
 }
 
+/// Long-form choice data malformed as in the `disc_clogit_unbalanced_t4` reference
+/// (mlogit refuses all three), for the refusal tests of the conditional and mixed logits.
+/// `ds` has the columns `id`, `alt` and `chosen`; situation `1` gets no chosen row
+/// ([`Malformed::NoChoice`]) or beach and boat chosen as well as its own choice
+/// ([`Malformed::TwoChoices`]: three chosen rows), or
+/// situation `2` gets its boat row twice ([`Malformed::Duplicate`]).
+#[cfg(test)]
+pub(super) fn malformed_choice_data(ds: &Dataset, kind: Malformed) -> Dataset {
+    use polars::prelude::*;
+    let df = ds.df();
+    let ids: Vec<i64> = df
+        .column("id")
+        .unwrap()
+        .cast(&DataType::Int64)
+        .unwrap()
+        .i64()
+        .unwrap()
+        .into_no_null_iter()
+        .collect();
+    let alts: Vec<String> = df
+        .column("alt")
+        .unwrap()
+        .str()
+        .unwrap()
+        .into_no_null_iter()
+        .map(str::to_owned)
+        .collect();
+    let mut chosen: Vec<f64> = df
+        .column("chosen")
+        .unwrap()
+        .cast(&DataType::Float64)
+        .unwrap()
+        .f64()
+        .unwrap()
+        .into_no_null_iter()
+        .collect();
+    for (i, (id, alt)) in ids.iter().zip(&alts).enumerate() {
+        match kind {
+            Malformed::NoChoice if *id == 1 => chosen[i] = 0.0,
+            Malformed::TwoChoices if *id == 1 && (alt == "beach" || alt == "boat") => {
+                chosen[i] = 1.0
+            }
+            _ => {}
+        }
+    }
+    let mut out = df.clone();
+    out.with_column(Column::new("chosen".into(), chosen))
+        .unwrap();
+    if kind == Malformed::Duplicate {
+        let row = ids
+            .iter()
+            .zip(&alts)
+            .position(|(id, alt)| *id == 2 && alt == "boat")
+            .unwrap();
+        let copy = out.slice(row as i64, 1);
+        out.vstack_mut(&copy).unwrap();
+    }
+    Dataset::new(out)
+}
+
+/// The malformations of [`malformed_choice_data`].
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Malformed {
+    NoChoice,
+    TwoChoices,
+    Duplicate,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,6 +1220,75 @@ mod tests {
     /// Case data for tests that compare no R value.
     fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
         crate::test_support::load_case(id)
+    }
+
+    /// The message of an `InvalidSpecification`.
+    fn invalid(r: EconResult<MlogitResult>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// A situation without a chosen row was fitted as if its first alternative had been
+    /// chosen; mlogit refuses it.
+    #[test]
+    fn test_mlogit_refuses_situation_without_choice() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, Malformed::NoChoice);
+        let m = invalid(run_conditional_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            None,
+        ));
+        assert!(
+            m.starts_with("1 choice situation has no chosen alternative"),
+            "{m}"
+        );
+        assert!(m.contains("choice situation '1'"), "{m}");
+    }
+
+    /// A situation with two chosen rows was fitted as if the last had been chosen.
+    #[test]
+    fn test_mlogit_refuses_situation_with_two_choices() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, Malformed::TwoChoices);
+        let m = invalid(run_conditional_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            None,
+        ));
+        assert!(m.starts_with("1 choice situation "), "{m}");
+        assert!(
+            m.contains("choice situation '1', 3 alternatives are chosen"),
+            "{m}"
+        );
+    }
+
+    /// An alternative listed twice in one situation.
+    #[test]
+    fn test_mlogit_refuses_situation_with_duplicate_alternative() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, Malformed::Duplicate);
+        let m = invalid(run_conditional_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            None,
+        ));
+        assert!(m.starts_with("1 choice situation "), "{m}");
+        assert!(
+            m.contains("alternative 'boat' appears twice in choice situation '2'"),
+            "{m}"
+        );
     }
 
     fn null_values(r: EconResult<MlogitResult>) -> (String, usize) {
