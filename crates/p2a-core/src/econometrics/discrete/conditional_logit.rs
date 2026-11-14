@@ -43,7 +43,10 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
 
-use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
+use super::newton::{
+    MAX_HALVINGS, check_newton_control, covariance_from_information, ensure_dense_inverse_fits,
+    equilibrated_newton_step,
+};
 
 /// Result from McFadden's conditional logit model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,100 +514,6 @@ struct MlogitDerivatives {
     n_extreme: usize,
     /// Choice situations with at least one such probability.
     n_situations_extreme: usize,
-}
-
-/// `s_k = 1 / sqrt(info_kk)` (1 for a zero diagonal entry) and `E = S info S`.
-pub(super) fn equilibrate(info: &Array2<f64>) -> (Array1<f64>, Array2<f64>) {
-    let scale: Array1<f64> = info
-        .diag()
-        .mapv(|d| if d > 0.0 { 1.0 / d.sqrt() } else { 1.0 });
-    let mut e = info.clone();
-    for ((r, c), v) in e.indexed_iter_mut() {
-        *v *= scale[r] * scale[c];
-    }
-    (scale, e)
-}
-
-/// The Newton step `d = info^-1 g` and the decrement `g' d`, solved on the equilibrated
-/// information `E = S info S` by Cholesky; only when Cholesky refuses `E` (not positive
-/// definite) or gives a non-finite step, by a symmetric generalized inverse, whose
-/// warning is pushed into `warnings` once.
-pub(super) fn equilibrated_newton_step(
-    info: &Array2<f64>,
-    grad: &Array1<f64>,
-    what: &str,
-    warnings: &mut Vec<String>,
-) -> EconResult<(Array1<f64>, f64)> {
-    let (scale, e) = equilibrate(info);
-    let rhs: Array1<f64> = &scale * grad;
-    let mut ds = None;
-    if let Ok(chol) = ndarray_to_faer(&e.view()).llt(faer::Side::Lower) {
-        let m = rhs.len();
-        let b = faer::Mat::<f64>::from_fn(m, 1, |i, _| rhs[i]);
-        let x = chol.solve(&b);
-        let step: Array1<f64> = (0..m).map(|i| x[(i, 0)]).collect();
-        if step.iter().all(|v| v.is_finite()) {
-            ds = Some(step);
-        }
-    }
-    let ds = match ds {
-        Some(d) => d,
-        None => {
-            let inv = sym_inverse(e.view(), SingularPolicy::Generalized, what)?;
-            if let Some(w) = inv.warning(what)
-                && !warnings.contains(&w)
-            {
-                warnings.push(w);
-            }
-            inv.inverse.dot(&rhs)
-        }
-    };
-    let d = &scale * &ds;
-    let lambda2 = grad.dot(&d);
-    Ok((d, lambda2))
-}
-
-/// Covariance from the information: `S E^-1 S` by [`sym_inverse`] with
-/// [`SingularPolicy::Error`], or `None` with the warning when the information is
-/// singular at the estimates.
-pub(super) fn covariance_from_information(
-    info: &Array2<f64>,
-    what: &str,
-    warnings: &mut Vec<String>,
-) -> EconResult<Option<Array2<f64>>> {
-    let (scale, e) = equilibrate(info);
-    match sym_inverse(e.view(), SingularPolicy::Error, what) {
-        Ok(inv) => {
-            let mut v = inv.inverse;
-            for ((r, c), x) in v.indexed_iter_mut() {
-                *x *= scale[r] * scale[c];
-            }
-            Ok(Some(v))
-        }
-        Err(err @ EconError::SingularMatrix { .. }) => {
-            warnings.push(format!(
-                "the information matrix is singular at the estimates ({err}); standard errors \
-                 are not available"
-            ));
-            Ok(None)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Validate a Newton control: `max_iter >= 1` and a positive, finite `tolerance`.
-pub(super) fn check_newton_control(max_iter: usize, tolerance: f64) -> EconResult<()> {
-    if max_iter == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "max_iter must be at least 1 (got 0)".to_string(),
-        });
-    }
-    if !(tolerance.is_finite() && tolerance > 0.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("tolerance must be a positive, finite number (got {tolerance})"),
-        });
-    }
-    Ok(())
 }
 
 /// Run McFadden's conditional logit model with J - 1 alternative-specific constants.

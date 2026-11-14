@@ -29,8 +29,10 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes};
 use crate::traits::estimator::{logistic_cdf, normal_p_value_two_sided};
 
-use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
-use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits, newton_step};
+use super::newton::{
+    MAX_HALVINGS, covariance_from_information, ensure_dense_inverse_fits, equilibrated_newton_step,
+    newton_step,
+};
 
 /// QR tolerance of glm.nb's `glm.fitter`: `min(1e-7, control$epsilon / 1000)` at its
 /// default epsilon 1e-8.

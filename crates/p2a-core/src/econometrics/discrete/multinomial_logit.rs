@@ -27,8 +27,9 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
 
-use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
-use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
+use super::newton::{
+    MAX_HALVINGS, covariance_from_information, ensure_dense_inverse_fits, equilibrated_newton_step,
+};
 
 /// Newton iterations of [`run_multinom`].
 const MAX_ITER: usize = 100;
