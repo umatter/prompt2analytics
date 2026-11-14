@@ -265,7 +265,7 @@ pub struct ZeroInflRequest {
 
     /// Independent variables (Z) column names for zero-inflation model
     #[schemars(
-        description = "Names of the variables for the zero-inflation model. If not specified, uses intercept only."
+        description = "Names of the variables for the zero-inflation model. If not specified, uses the count-model regressors x (pscl's default); pass [] for an intercept-only zero-inflation model."
     )]
     pub z: Option<Vec<String>>,
 
@@ -294,7 +294,7 @@ pub struct HurdleModelRequest {
 
     /// Independent variables (Z) column names for binary (hurdle) model
     #[schemars(
-        description = "Names of the variables for the binary hurdle model. If not specified, uses same as x."
+        description = "Names of the variables for the binary hurdle model. If not specified, uses the same variables as x; pass [] for an intercept-only hurdle."
     )]
     pub z: Option<Vec<String>>,
 

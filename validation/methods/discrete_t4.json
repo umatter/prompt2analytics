@@ -14,7 +14,8 @@
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_poisson_count_part",
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_count_part",
         "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_flat_theta",
-        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_intercept_only_zero_part"
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_intercept_only_zero_part",
+        "p2a-mcp::tools::handlers::discrete::tests::test_validate_mcp_hurdle_count_part"
       ],
       "quantities": [
         "count coefficients, SEs, z, p",
@@ -22,7 +23,7 @@
         "count and zero log-likelihoods, total log-likelihood, AIC, BIC",
         "n, positive counts"
       ],
-      "tolerance": "MLE (validation/README.md, iterative): count coefficients 1e-8 (1e-6 on the flat theta profile), SEs and z 1e-6 (1e-5 flat), p 1e-4, theta and log theta 1e-7, SE(log theta) and SE(theta) 1e-5 (log theta 1e-4 and its SE 1e-3 on the flat profile); log-likelihoods, AIC, BIC Tol::stat(500); pscl's own optim 1e-5 (Poisson), 1e-4 (NB); counts exact",
+      "tolerance": "MLE (validation/README.md, iterative): count coefficients 1e-8 (1e-6 on the flat theta profile), SEs and z 1e-6 (1e-5 flat), p 1e-4, theta and log theta 1e-7, SE(log theta) and SE(theta) 1e-5 (log theta 1e-4 and its SE 1e-3 on the flat profile); log-likelihoods, AIC, BIC Tol::stat(500); pscl's own optim 1e-5 (Poisson), 1e-4 (NB); counts exact; MCP text at print precision (4 decimals)",
       "deviations": [],
       "supersedes_legacy": []
     },
