@@ -121,7 +121,7 @@ pub struct BartConfig {
 
     /// Prior parameter k for leaf value shrinkage. Default: 2.0.
     ///
-    /// Controls the width of the prior on leaf values: mu ~ N(0, sigma_hat^2 / (k^2 * m)).
+    /// Leaf prior SD tau = (max y - min y) / (2 k sqrt(n_trees)) (probit: 3 / (k sqrt(n_trees))).
     /// Larger k = more shrinkage, smaller individual tree contributions.
     /// k=2 is recommended for most applications.
     pub k: f64,
@@ -146,7 +146,7 @@ pub struct BartConfig {
 
     /// Prior quantile for sigma calibration. Default: 0.90.
     ///
-    /// Lambda is set so P(sigma < sigma_hat) = q under the prior.
+    /// lambda is set so P(sigma < sigest) = q under the prior.
     pub q: f64,
 
     /// Random seed for reproducibility.
@@ -402,8 +402,10 @@ fn draw_summaries(draws: &Array2<f64>, level: f64) -> EconResult<DrawSummaries> 
         .collect();
     let mut lower = try_with_capacity::<f64>(n, "BART interval bounds")?;
     let mut upper = try_with_capacity::<f64>(n, "BART interval bounds")?;
+    let mut col = try_with_capacity::<f64>(n_draws, "BART draws of one row")?;
     for i in 0..n {
-        let col: Vec<f64> = draws.column(i).to_vec();
+        col.clear();
+        col.extend(draws.column(i).iter().copied());
         let (lo, hi) = percentile_interval(&col, level)?;
         lower.push(lo);
         upper.push(hi);
@@ -969,10 +971,13 @@ impl BartSampler {
             )
         } else {
             // Regression fits y - fmean: the trees start at 0, sigma at sigest, and the leaf
-            // prior SD stays at tau for the whole chain
-            let prior = match prior {
-                Some(prior) => prior,
-                None => wbart_prior(y.view(), x, config)?,
+            // prior SD stays at tau for the whole chain. `y` here is already centred, so the
+            // prior cannot be calibrated on it: the caller passes the prior of the raw response
+            let Some(prior) = prior else {
+                return Err(EconError::Computation(
+                    "BART regression sampler needs the prior calibrated on the raw response"
+                        .to_string(),
+                ));
             };
             (prior.sigest, prior.tau, prior.lambda, prior.fmean, false)
         };
@@ -2767,7 +2772,12 @@ mod tests {
     }
 
     /// CGM (1998) grow ratio of the tree prior, ln p_d + 2 ln(1 - p_{d+1}) - ln(1 - p_d) at
-    /// alpha 0.95, beta 2 (R: T4-WP17-ref/lil.R).
+    /// alpha 0.95, beta 2. The values, in R:
+    ///
+    /// ```text
+    /// pg <- function(d) 0.95 * (1 + d)^(-2)
+    /// for (d in 0:3) print(log(pg(d)) + 2 * log(1 - pg(d + 1)) - log(1 - pg(d)), digits = 17)
+    /// ```
     #[test]
     fn bart_grow_prior_ratio_matches_cgm() {
         let want = [
@@ -2805,7 +2815,15 @@ mod tests {
     }
 
     /// The log integrated likelihood of a leaf, the cancelling terms added back, against
-    /// numeric integration over mu in R (T4-WP17-ref/lil.R).
+    /// numeric integration over mu in R:
+    ///
+    /// ```text
+    /// lil <- function(r, s, t2, lim) log(integrate(function(mu) sapply(mu, function(m)
+    ///     exp(sum(dnorm(r, m, s, log = TRUE)) + dnorm(m, 0, sqrt(t2), log = TRUE))),
+    ///     -lim, lim, rel.tol = 1e-14)$value)
+    /// lil(c(0.3, -1.2, 0.8, 0.1, 0.5), 1, 1 / 800, 1)
+    /// lil(c(1.9, -0.4, 2.2, 0.7, 1.1, -1.5, 3.0), 2.5, 0.09, 4)
+    /// ```
     #[test]
     fn bart_integrated_leaf_likelihood_matches_quadrature() {
         let full = |r: &[f64], sigma: f64, t2: f64| {
@@ -2832,6 +2850,25 @@ mod tests {
             let got = full(&r, sigma, t2);
             assert!(((got - want) / want).abs() < 1e-12, "{got} vs {want}");
         }
+    }
+
+    /// The regression sampler is handed an already-centred target, so it refuses to run without
+    /// the prior calibrated on the raw response instead of calibrating on the centred one.
+    #[test]
+    fn bart_regression_sampler_requires_the_raw_response_prior() {
+        let config = BartConfig::default();
+        let (y, x) = generate_test_data(60, 5);
+        let yc = y.mapv(|v| v - y.mean().unwrap());
+        assert!(matches!(
+            BartSampler::new(&yc, x.view(), &config, None),
+            Err(EconError::Computation(_))
+        ));
+        let probit = BartConfig {
+            classification: true,
+            ..BartConfig::default()
+        };
+        let y01 = y.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
+        BartSampler::new(&y01, x.view(), &probit, None).unwrap();
     }
 
     /// A birth from the stump and the death that undoes it have reciprocal ratios.
