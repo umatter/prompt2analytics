@@ -202,7 +202,9 @@ pub struct SCPIConfig {
     pub seed: Option<u64>,
 
     /// Out-of-sample bounds: sub-Gaussian, location-scale, quantile regression or all three
-    /// (scpi's `e.method`, default all)
+    /// (scpi's `e.method`, default all). A value other than `All` wins over
+    /// [`SCPIConfig::variance_method`] (with a warning); `All`, the default, cannot be told
+    /// apart from no choice, so `variance_method` is then honoured
     #[serde(default)]
     pub e_method: EMethod,
 
@@ -212,6 +214,7 @@ pub struct SCPIConfig {
 
     /// Deprecated alias of `e_method` (one release): `gaussian` -> gaussian, `subgaussian` ->
     /// all; `loo_cv` and `kfold_cv` -> all with a warning. `None` (default) uses `e_method`.
+    /// Honoured only while `e_method` is `All` (its default); another `e_method` wins.
     #[serde(default)]
     pub variance_method: Option<VarianceMethod>,
 
@@ -1715,7 +1718,8 @@ const QCQP_NEWTON_MAX: usize = 60;
 /// about 2 of the centred bound `m / t`.
 const QCQP_CENTRED: f64 = 0.25;
 /// Growth factor of t between centrings, and the smallest one the retries of
-/// [`Qcqp::barrier`] may shrink it to.
+/// [`Qcqp::barrier`] may shrink it to (each retry takes the square root of the factor, so the
+/// factor never falls below the floor).
 const QCQP_MU: f64 = 50.0;
 const QCQP_MU_MIN: f64 = 2.0;
 
@@ -1844,12 +1848,34 @@ impl Qcqp {
         (f, df)
     }
 
+    /// The Newton step of the barrier problem `min t c'x - sum log(-f_i(x))` subject to
+    /// `A x = b` at the strictly feasible `x`, and its Newton decrement `lambda^2`; `None` when
+    /// the KKT system fails.
+    fn newton_step(&self, c: &Array1<f64>, x: &Array1<f64>, t: f64) -> Option<(Array1<f64>, f64)> {
+        let (n, m) = (self.n, self.a_eq.nrows());
+        let l = self.g.nrows();
+        let (f, df) = self.constraints(x);
+        // gradient t c + sum df_i / -f_i; Hessian sum (df_i df_i' / f_i^2 + 2 P_i / -f_i)
+        let inv = f.mapv(|v| -1.0 / v);
+        let grad = c * t + &df.t().dot(&inv);
+        let mut hess = Array2::<f64>::zeros((n, n));
+        for (k, (pk, _, _)) in self.quads.iter().enumerate() {
+            hess.scaled_add(2.0 * inv[l + k], pk);
+        }
+        add_weighted_gram(&mut hess, &df, &inv.mapv(|v| v * v));
+        let (dx, _) = solve_kkt(&hess, &self.a_eq, &(-&grad), &Array1::zeros(m))?;
+        // the Newton decrement: half of it bounds the centring error
+        let decrement = -grad.dot(&dx);
+        Some((dx, decrement))
+    }
+
     /// Newton's method on the barrier problem `min t c'x - sum log(-f_i(x))` subject to `A x = b`
-    /// (Boyd and Vandenberghe, sections 10.2 and 11.3) from the strictly feasible `x`: the last
-    /// point and the last Newton decrement `lambda^2` computed (0 when the steps stopped at
+    /// (Boyd and Vandenberghe, sections 10.2 and 11.3) from the strictly feasible `x`: the point
+    /// it ends at and the Newton decrement `lambda^2` at that point (0 when the steps stopped at
     /// `stop_below`). Newton stops once half the decrement is at most 1e-9, when the line search
-    /// cannot move, or after [`QCQP_NEWTON_MAX`] steps. With `stop_below`, it returns as soon as
-    /// `c'x` is below that value.
+    /// cannot move, or after [`QCQP_NEWTON_MAX`] steps; in the last case the decrement is
+    /// computed once more at the point returned. With `stop_below`, it returns as soon as `c'x`
+    /// is below that value.
     fn center(
         &self,
         c: &Array1<f64>,
@@ -1857,30 +1883,15 @@ impl Qcqp {
         t: f64,
         stop_below: Option<f64>,
     ) -> Option<(Array1<f64>, f64)> {
-        let (n, m) = (self.n, self.a_eq.nrows());
-        let l = self.g.nrows();
         let phi = |x: &Array1<f64>| -> Option<f64> {
             let (r, f) = self.slacks(x)?;
             Some(t * c.dot(x) - r.mapv(f64::ln).sum() - f.mapv(f64::ln).sum())
         };
-        let mut last_dec = f64::NAN;
         for _ in 0..newton_max() {
             if stop_below.is_some_and(|v| c.dot(&x) < v) {
                 return Some((x, 0.0));
             }
-            let (f, df) = self.constraints(&x);
-            // gradient t c + sum df_i / -f_i; Hessian sum (df_i df_i' / f_i^2 + 2 P_i / -f_i)
-            let inv = f.mapv(|v| -1.0 / v);
-            let grad = c * t + &df.t().dot(&inv);
-            let mut hess = Array2::<f64>::zeros((n, n));
-            for (k, (pk, _, _)) in self.quads.iter().enumerate() {
-                hess.scaled_add(2.0 * inv[l + k], pk);
-            }
-            add_weighted_gram(&mut hess, &df, &inv.mapv(|v| v * v));
-            let (dx, _) = solve_kkt(&hess, &self.a_eq, &(-&grad), &Array1::zeros(m))?;
-            // the Newton decrement: half of it bounds the centring error
-            let decrement = -grad.dot(&dx);
-            last_dec = decrement;
+            let (dx, decrement) = self.newton_step(c, &x, t)?;
             if decrement / 2.0 <= 1e-9 {
                 return Some((x, decrement));
             }
@@ -1905,15 +1916,21 @@ impl Qcqp {
                 return Some((x, decrement));
             }
         }
-        Some((x, last_dec))
+        // out of steps: the decrement of the point returned, not of the one before the last step
+        if stop_below.is_some_and(|v| c.dot(&x) < v) {
+            return Some((x, 0.0));
+        }
+        let (_, decrement) = self.newton_step(c, &x, t)?;
+        Some((x, decrement))
     }
 
     /// The barrier method (Boyd and Vandenberghe, section 11.3) from the strictly feasible `x`:
     /// centring steps at t = 1, 50, 2500, ... until the duality gap `m / t` of the scaled problem
     /// is below [`QCQP_GAP`]. The gap bound holds only near the central path, so a centring that
     /// ends with a decrement above [`QCQP_CENTRED`] is retried from the last centred point with t
-    /// grown by the square root of the previous factor, down to [`QCQP_MU_MIN`]; below that the
-    /// path goes on from the uncentred point, but the last centring must end centred. `Ok(None)`
+    /// grown by the square root of the previous factor, as long as that root is at least
+    /// [`QCQP_MU_MIN`] (50, 7.07, 2.66); after that the path goes on from the uncentred point,
+    /// but the last centring must end centred. `Ok(None)`
     /// when a Newton system fails or the last centring ends uncentred (as an ECOS failure in
     /// scpi). The budget is checked once per centring.
     fn barrier(&self, c: &Array1<f64>, x0: &Array1<f64>) -> EconResult<Option<Array1<f64>>> {
@@ -1935,7 +1952,7 @@ impl Qcqp {
                 }
                 prev = Some((xn.clone(), t));
             } else {
-                if mu > QCQP_MU_MIN
+                if mu.sqrt() >= QCQP_MU_MIN
                     && let Some((xp, tp)) = &prev
                 {
                     mu = mu.sqrt();
@@ -2803,16 +2820,31 @@ mod tests {
         let want = p.dot(&g) - p.dot(&p).sqrt() * g.dot(&g).sqrt();
         let got = sc.minimize_from(p.view(), &start).unwrap().unwrap();
         assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        // NEWTON_MAX is restored even when a call below panics
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                NEWTON_MAX.with(|c| c.set(QCQP_NEWTON_MAX));
+            }
+        }
         let with_steps = |k: usize| {
+            let _restore = Restore;
             NEWTON_MAX.with(|c| c.set(k));
-            let r = sc.minimize_from(p.view(), &start);
-            NEWTON_MAX.with(|c| c.set(QCQP_NEWTON_MAX));
-            r.unwrap()
+            sc.minimize_from(p.view(), &start).unwrap()
         };
         assert_eq!(with_steps(0), None);
-        if let Some(v) = with_steps(1) {
-            assert!((v - want).abs() < 1e-8, "{v} vs {want}");
-        }
+        // One step per centring on this ball does not centre the last centring: a failure,
+        // not an uncertified value.
+        assert_eq!(with_steps(1), None);
+        // A centring that runs out of steps reports the decrement of the point it returns.
+        let c = p.clone();
+        let _restore = Restore;
+        NEWTON_MAX.with(|cell| cell.set(1));
+        let (x1, d1) = sc.center(&c, start.x.clone(), 1.0, None).unwrap();
+        let (_, at_x1) = sc.newton_step(&c, &x1, 1.0).unwrap();
+        assert_eq!(d1, at_x1);
+        let (_, at_x0) = sc.newton_step(&c, &start.x, 1.0).unwrap();
+        assert_ne!(d1, at_x0);
     }
 
     /// The phase I and every barrier centring check the budget.

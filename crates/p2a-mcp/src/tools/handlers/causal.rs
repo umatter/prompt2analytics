@@ -906,7 +906,7 @@ impl AnalyticsServer {
             n_folds: request.n_folds.unwrap_or(5),
             model_type,
             ml_method,
-            seed: request.seed.or(self.seed_or_global(None).await),
+            seed: self.seed_or_global(request.seed).await,
             trim: request.trim.unwrap_or(0.01),
             lambda: request.lambda.unwrap_or(DML_DEFAULT_LAMBDA),
             folds,
@@ -2094,12 +2094,24 @@ impl AnalyticsServer {
             ))]));
         }
 
+        // the work of the simulations, bounded before they start (`scpi_work`)
+        let sims = request.sims.unwrap_or(200);
+        if let Err(v) = crate::tools::limits::current().check_scpi(
+            "scpi",
+            sims,
+            n_times - treatment_idx,
+            n_donors,
+            matches!(constraint, SCPIConstraint::Lasso { .. }),
+        ) {
+            return Ok(crate::tools::common::limit_refusal(v));
+        }
+
         let config = SCPIConfig {
             constraint,
             alpha: request.alpha,
             e_method,
-            sims: request.sims.unwrap_or(200),
-            seed: request.seed.or(self.seed_or_global(None).await),
+            sims,
+            seed: self.seed_or_global(request.seed).await,
             variance_method,
             weight_threshold: request.weight_threshold.unwrap_or(0.001),
             ..Default::default()

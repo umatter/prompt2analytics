@@ -114,7 +114,10 @@ use serde_json::Value;
 
 mod distinct;
 mod rules;
-pub use rules::{ARIMA_MIN_MAGNITUDE, PARAM_RULES, PIVOT_RULES, ROW_RULES, arima_fit_work};
+pub use rules::{
+    ARIMA_MIN_MAGNITUDE, PARAM_RULES, PIVOT_RULES, ROW_RULES, SCPI_LASSO_WEIGHT, arima_fit_work,
+    scpi_work,
+};
 
 /// Generates [`Family`], [`Family::ALL`], [`Family::key`] and `Family::hosted_cap` from one list
 /// (`Variant => "key", hosted cap;`), so that the enum, its list of variants and its keys and
@@ -238,6 +241,17 @@ families! {
 /// checks the call's budget every iteration and every 4,096 rows of a pass, so a fit that a
 /// higher value allows and that runs past the deadline is cancelled at its next check.
 const ARIMA_FIT_WORK_HOSTED: u64 = 7_500_000;
+
+/// Hosted [`Limits::scpi_work`]: the slowest call it allows is meant to take about a quarter of
+/// the hosted 60 s deadline. Measured on release builds, one call at a time on one core of a
+/// shared machine, over 10 to 160 donors, 20 to 200 pre-treatment and 5 to 20 post-treatment
+/// periods and the simplex, lasso and ridge constraints: a unit ([`scpi_work`], lasso units
+/// weighted by [`SCPI_LASSO_WEIGHT`]) cost at most about 19 us, so the slowest call the value
+/// allows takes about 15 s. It admits the default 200 simulations over five post-treatment
+/// periods with up to 28 donors (10 with the lasso). The core checks the call's budget at every
+/// centring of its programs, so a call that a higher value allows and that runs past the
+/// deadline is cancelled at its next check.
+const SCPI_WORK_HOSTED: u64 = 800_000;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
 /// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one
@@ -536,6 +550,10 @@ pub struct Limits {
     /// before the fit starts. While it is set, [`Limits::check_arima_series`] also refuses a
     /// series below [`ARIMA_MIN_MAGNITUDE`].
     pub arima_fit_work: Option<u64>,
+    /// Work of an `scpi` call, as [`scpi_work`] counts it (simulations x post-treatment periods
+    /// x donors^2, lasso weighted); checked by the handler with [`Limits::check_scpi`] before
+    /// the simulations start.
+    pub scpi_work: Option<u64>,
     /// Bytes a tree-ensemble fit may hold at once (`ml_causal_forest`, `ml_bart_causal`): its
     /// trees, bootstrap draws and working copies of the data, as the core's `memory_bound`
     /// predicts them from the dataset's row count and the request's settings; checked by
@@ -626,7 +644,7 @@ named_limits! {
         max_groups, join_output_rows, onehot_levels, pivot_columns, pivot_cells,
         str_split_parts, str_pad_width,
         generated_cells, generated_bytes, export_bytes, load_file_bytes, response_bytes,
-        session_disk_bytes, spatial_links, arima_fit_work, ensemble_bytes, db_result_rows,
+        session_disk_bytes, spatial_links, arima_fit_work, scpi_work, ensemble_bytes, db_result_rows,
         db_result_bytes, db_timeout_secs, db_memory_mb, db_threads, conversations_per_session,
         messages_per_conversation, session_db_bytes, llm_streams_per_session,
     }
@@ -663,6 +681,7 @@ impl Limits {
             session_disk_bytes: None,
             spatial_links: None,
             arima_fit_work: None,
+            scpi_work: None,
             ensemble_bytes: None,
             db_result_rows: None,
             db_result_bytes: None,
@@ -714,6 +733,7 @@ impl Limits {
             session_disk_bytes: Some(64 * MIB),
             spatial_links: Some(2_000_000),
             arima_fit_work: Some(ARIMA_FIT_WORK_HOSTED),
+            scpi_work: Some(SCPI_WORK_HOSTED),
             ensemble_bytes: Some(ENSEMBLE_BYTES_HOSTED),
             db_result_rows: Some(100_000),
             db_result_bytes: Some(64 * MIB),
@@ -1404,6 +1424,65 @@ impl Limits {
             ),
             tool: tool.to_string(),
             parameter: KNOB.to_string(),
+            requested: work.to_string(),
+            limit: limit.to_string(),
+            override_key: KNOB,
+        })
+    }
+
+    /// Checks an `scpi` call of `sims` simulations over `post` post-treatment periods with
+    /// `donors` donors ([`scpi_work`]; `lasso` for the lasso constraint) against the
+    /// [`Limits::scpi_work`] budget (`None` passes). The handler calls it before the core runs,
+    /// so that a call whose simulations could not fit the deadline is refused up front. The
+    /// refusal says how many simulations the panel allows (when at least the 10 the method
+    /// needs) and how many donors the default 200 simulations allow.
+    pub fn check_scpi(
+        &self,
+        tool: &str,
+        sims: usize,
+        post: usize,
+        donors: usize,
+        lasso: bool,
+    ) -> Result<(), LimitViolation> {
+        const KNOB: &str = "scpi_work";
+        let Some(limit) = self.scpi_work else {
+            return Ok(());
+        };
+        let work = scpi_work(sims, post, donors, lasso);
+        if work <= limit {
+            return Ok(());
+        }
+        // `work > limit`, so `post` and `donors` are at least 1
+        let per_sim = scpi_work(1, post, donors, lasso);
+        let max_sims = limit / per_sim;
+        let per_donor2 = scpi_work(200, post, 1, lasso);
+        let max_donors = (limit / per_donor2).isqrt();
+        let mut advice = Vec::new();
+        if max_sims >= 10 {
+            advice.push(format!("set sims to at most {max_sims}"));
+        }
+        if max_donors >= 1 {
+            advice.push(format!(
+                "keep at most {max_donors} donors at the default 200 simulations"
+            ));
+        }
+        if lasso {
+            advice.push("use the simplex or ridge constraint".to_string());
+        }
+        advice.push("use fewer post-treatment periods".to_string());
+        let advice = advice.join(", or ");
+        let tool = echo(tool);
+        let weight = if lasso {
+            format!(" x {SCPI_LASSO_WEIGHT} for the lasso")
+        } else {
+            String::new()
+        };
+        Err(LimitViolation {
+            message: format!(
+                "`{tool}` with sims = {sims}, {post} post-treatment periods and {donors} donors                  needs {work} ({KNOB}: sims x post-treatment periods x donors^2{weight}), which                  exceeds this server's limit of {limit} for one call, checked before the                  simulations start. To run it, {advice}."
+            ),
+            tool: tool.to_string(),
+            parameter: "sims".to_string(),
             requested: work.to_string(),
             limit: limit.to_string(),
             override_key: KNOB,
@@ -3104,6 +3183,7 @@ mod tests {
             "session_disk_bytes",
             "spatial_links",
             "arima_fit_work",
+            "scpi_work",
             "ensemble_bytes",
             "db_result_rows",
             "db_result_bytes",
@@ -3125,7 +3205,7 @@ mod tests {
         ] {
             assert!(keys.contains(&k), "{k}");
         }
-        assert_eq!(keys.len(), Family::ALL.len() + 39);
+        assert_eq!(keys.len(), Family::ALL.len() + 40);
         for k in keys {
             let v = if BOOLS.contains(&k) { "true" } else { "1" };
             Limits::off()

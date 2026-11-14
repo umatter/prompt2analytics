@@ -35,8 +35,9 @@ outcomes and computes the prediction intervals of Cattaneo, Feng and Titiunik (2
   must end with a Newton decrement of at most 1/4 (gap at most `(2m + 1) / t`); a centring that ends
   above it is retried from the last centred point with a shorter step in t. A simulation whose
   program fails, or ends uncentred, is left out of the quantiles and counted (`n_failed_sims`, with a
-  warning), as an ECOS failure in scpi. An explicit `e_method` wins over the deprecated
-  `variance_method` (with a warning).
+  warning), as an ECOS failure in scpi. An `e_method` other than `all` wins over the deprecated
+  `variance_method` (with a warning); `e_method = all` is also the default, so it cannot be told
+  apart from no `e_method`, and `variance_method` is then honoured.
 - Out-of-sample uncertainty (scpi's `e.method = "all"`, `e.order = 1`, `e.lags = 0`), each side at
   `e_alpha / 2`: sub-Gaussian (`gaussian`: the fitted mean plus `sqrt(-2 log(alpha))` times the
   smaller of the fitted conditional standard deviation and IQR / 1.34 of the quantile-regression
@@ -122,6 +123,7 @@ simulation failed on either side:
 | final tree, seconds per call | 2.04 | 2.84 | 24.7 |
 | first simulated version, seconds per call | 2.10 | 2.96 | 35.6 |
 | ratio final / first | 0.97 | 0.96 | 0.69 |
+| v0.5.0 closed form (not comparable), seconds per call | 1.83e-5 | not timed | not timed |
 
 The first version returned the last barrier point even when its centring had stalled; on the
 J = 40, T0 = 50 panel almost every solve stalled with the long step, so its bounds there were not
@@ -131,7 +133,9 @@ tree at T0 = 20 and T0 = 50 (first version 4.7 MB); the simulation bounds are `2
 numbers, and each program holds matrices of the donor count squared.
 
 For scale, R's `scpi()` 3.0.1 on the case's panel (J = 8, T0 = 14, T1 = 6) takes about 5 seconds.
-The time grows linearly with `sims`; the hosted limits cap `sims`.
+The time grows linearly with `sims`; the hosted limits cap `sims` and the call's work
+(`scpi_work`). The simulated intervals' cost against v0.5.0's
+closed form was signed off on 2026-11-14 (rule 5).
 
 ## Deviations
 

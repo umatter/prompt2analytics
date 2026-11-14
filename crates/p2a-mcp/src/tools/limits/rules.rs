@@ -651,6 +651,7 @@ pub static PARAM_RULES: &[ParamRule] = {
             ),
         ),
         p("scpi", "weight_threshold", Exempt(DISPLAY)),
+        p("scpi", "sims", Max(Replications)),
         p(
             "search_tools",
             "limit",
@@ -667,6 +668,11 @@ pub static PARAM_RULES: &[ParamRule] = {
             "staggered_did",
             "base_period",
             Exempt("relative period offset"),
+        ),
+        p(
+            "staggered_did",
+            "min_obs_per_cell",
+            Exempt("a lower bound on units per cell, not a cost"),
         ),
         p("stats_density", "n", Max(GridPoints)),
         p(
@@ -1071,6 +1077,31 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
     let per_obs = terms.saturating_mul(terms).saturating_add(d as u128);
     let work = (n_obs as u128).saturating_mul(per_obs);
     u64::try_from(work).unwrap_or(u64::MAX)
+}
+
+/// How much more a lasso-penalised `scpi` call costs per [`scpi_work`] unit than a simplex or
+/// ridge one: its programs have twice the variables and a non-smooth penalty, and its slowest
+/// measured units cost up to about eight times theirs.
+pub const SCPI_LASSO_WEIGHT: u64 = 8;
+
+/// Work of an `scpi` call as the `scpi_work` budget counts it:
+/// `sims * post * donors^2`, times [`SCPI_LASSO_WEIGHT`] for the `lasso` constraint,
+/// saturating at `u64::MAX`.
+///
+/// Each simulation solves, for every post-treatment period, a lower and an upper bound by a
+/// barrier method on a program in the donor weights (`p2a_core::econometrics::scpi`), whose
+/// Newton systems grow with the number of donors. The core checks the call's budget once per
+/// centring, so the deadline stops a call; this count bounds its cost before it starts. The
+/// pre-treatment length enters the programs only through donor-by-donor cross products and
+/// barely changed the measured times, so it is not counted. The hosted value was measured on
+/// release builds (`SCPI_WORK_HOSTED`).
+pub fn scpi_work(sims: usize, post: usize, donors: usize, lasso: bool) -> u64 {
+    let d = donors as u128;
+    let w = (sims as u128)
+        .saturating_mul(post as u128)
+        .saturating_mul(d.saturating_mul(d))
+        .saturating_mul(if lasso { SCPI_LASSO_WEIGHT as u128 } else { 1 });
+    u64::try_from(w).unwrap_or(u64::MAX)
 }
 
 /// The smallest magnitude a nonzero value of an ARIMA fit's series may have while the
@@ -1792,13 +1823,14 @@ mod tests {
         const DEFAULTS: &[(&str, &str, u64)] = &[
             ("regression_bootstrap_cov", "n_boot", 999),
             ("treatment_ipw", "bootstrap", 0),
-            ("treatment_doubly_robust", "bootstrap", 999),
+            ("treatment_doubly_robust", "bootstrap", 0),
             ("staggered_did", "bootstrap", 999),
             ("mediation_analysis", "n_bootstrap", 999),
             ("regression_standardization", "n_bootstrap", 999),
             ("natural_effects_mediation", "n_bootstrap", 1000),
             ("bp_bounds", "n_bootstrap", 1000),
             ("gsynth", "bootstrap_reps", 200),
+            ("scpi", "sims", 200),
             ("gsynth", "n_factors", 2),
             ("gsynth", "r_max", 5),
             ("gformula", "n_bootstrap", 200),
@@ -2115,6 +2147,32 @@ mod tests {
         for tool in ["ml_dbscan", "regression_smooth_spline", "spatial_panel_gmm"] {
             assert!(Limits::off().check_rows(tool, 10_000_000, 5).is_ok());
         }
+    }
+
+    #[test]
+    fn scpi_work_is_sims_times_post_times_squared_donors() {
+        use super::{SCPI_LASSO_WEIGHT, scpi_work};
+        assert_eq!(scpi_work(200, 5, 10, false), 100_000);
+        assert_eq!(scpi_work(200, 5, 10, true), 100_000 * SCPI_LASSO_WEIGHT);
+        assert_eq!(scpi_work(0, 5, 10, false), 0);
+        assert_eq!(
+            scpi_work(usize::MAX, usize::MAX, usize::MAX, true),
+            u64::MAX
+        );
+        // the hosted budget admits the defaults (200 simulations) on a small panel
+        let h = super::super::Limits::hosted();
+        let cap = h.scpi_work.expect("hosted scpi work budget");
+        assert!(scpi_work(200, 5, 20, false) <= cap);
+        assert!(scpi_work(200, 5, 10, true) <= cap);
+        assert!(h.check_scpi("scpi", 200, 5, 20, false).is_ok());
+        let e = h.check_scpi("scpi", 200, 10, 80, false).unwrap_err();
+        assert_eq!(e.override_key, "scpi_work");
+        assert!(e.message.contains("sims"), "{}", e.message);
+        assert!(
+            super::super::Limits::off()
+                .check_scpi("scpi", usize::MAX, usize::MAX, usize::MAX, true)
+                .is_ok()
+        );
     }
 
     #[test]

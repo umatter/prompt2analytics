@@ -622,6 +622,7 @@ Named budgets:
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
 | `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
+| `scpi_work` | work of an `scpi` call, simulations × post-treatment periods × donors² (× 8 with the lasso constraint), checked before the simulations start | 800,000 | none |
 | `ensemble_bytes` | memory a `ml_causal_forest` or `ml_bart_causal` fit may hold at once (its trees, bootstrap draws and working copies of the data), as the core's bound predicts it from the rows and the settings, checked before the fit starts | 256 MiB | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
