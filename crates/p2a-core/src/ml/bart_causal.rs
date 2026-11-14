@@ -201,7 +201,9 @@ impl BartCausalConfig {
     ///   each, kept for the result, and the two ensembles of
     ///   `max(1, n_trees / 4)` trees of the bootstrap replicate being fitted; with
     ///   `include_propensity`, the propensity model's 50 trees
-    ///   (`PROPENSITY_TREES`) of depth 3 too. A tree has at most `2 L - 1`
+    ///   (`PROPENSITY_TREES`) of depth 3 too, and the importance pass's lists of the
+    ///   treated and control trees that split on a covariate (one index per tree each).
+    ///   A tree has at most `2 L - 1`
     ///   nodes for `L` leaves; `L` is at most `2^max_depth` and at most its
     ///   subsample divided by `max(min_node_size, 1)`, since every child
     ///   keeps `min_node_size` rows and at least one. A treated tree and
@@ -252,7 +254,8 @@ impl BartCausalConfig {
         let pair = mul(2, self.max_leaves_per_pair(n_obs))
             .saturating_mul(node)
             .saturating_add(2 * tree);
-        let mut trees = mul(pairs, pair);
+        let mut trees = mul(pairs, pair)
+            .saturating_add(mul(2 * size_of::<usize>() as u128, self.n_trees as u128));
         if self.include_propensity {
             let one = ((1u128 << (PROPENSITY_DEPTH + 1)) - 1) * node + tree;
             trees = trees.saturating_add(PROPENSITY_TREES as u128 * one);
