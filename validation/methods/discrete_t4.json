@@ -25,6 +25,29 @@
       "tolerance": "MLE (validation/README.md, iterative): count coefficients 1e-8 (1e-6 on the flat theta profile), SEs and z 1e-6 (1e-5 flat), p 1e-4, theta and log theta 1e-7, SE(log theta) and SE(theta) 1e-5 (log theta 1e-4 and its SE 1e-3 on the flat profile); log-likelihoods, AIC, BIC Tol::stat(500); pscl's own optim 1e-5 (Poisson), 1e-4 (NB); counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_negbin_null",
+      "name": "Negative binomial null model and McFadden pseudo-R2 (pscl::pR2 on MASS::glm.nb)",
+      "category": "econometrics",
+      "reference": "MASS::glm.nb(y ~ 1) on the model frame, with its own theta, polished as disc_negbin; pscl::pR2 McFadden",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": [
+        "disc_negbin_null_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_null_disc_negbin",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_null_missing_rows"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "null log-likelihood",
+        "McFadden pseudo-R2",
+        "rows used (na.omit)"
+      ],
+      "tolerance": "log-likelihoods Tol::stat(n) (n = 400, 395); pseudo-R2 1e-8 relative; rows exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

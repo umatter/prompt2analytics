@@ -163,9 +163,11 @@ pub struct NegBinResult {
     pub theta_std_error: f64,
     /// Log-likelihood
     pub log_likelihood: f64,
-    /// Null log-likelihood
+    /// Log-likelihood of the null model `glm.nb(y ~ 1)` on the same rows, with its own
+    /// theta (pscl::pR2)
     pub log_likelihood_null: f64,
-    /// McFadden's pseudo R-squared
+    /// McFadden's R2 against `glm.nb(y ~ 1)` on the same rows, with its own theta
+    /// (pscl::pR2): `1 - log_likelihood / log_likelihood_null`
     pub pseudo_r_squared: f64,
     /// AIC
     pub aic: f64,
@@ -549,12 +551,28 @@ fn theta_information(theta: f64, mu: &[f64], y: &[f64]) -> f64 {
 /// or the log-likelihood is not finite at a theta the steps reach, so that theta could
 /// not be updated from there (the returned theta is that one).
 fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
+    theta_newton_with(
+        theta,
+        |t| nb_loglik(t, mu, y),
+        |t| theta_score(t, mu, y),
+        |t| theta_information(t, mu, y),
+    )
+}
+
+/// [`theta_newton`] on a log-likelihood, score and information given as functions of
+/// theta.
+fn theta_newton_with(
+    theta: f64,
+    loglik: impl Fn(f64) -> f64,
+    score: impl Fn(f64) -> f64,
+    information: impl Fn(f64) -> f64,
+) -> EconResult<(f64, bool)> {
     let mut theta = theta.min(THETA_MAX);
-    let mut ll = nb_loglik(theta, mu, y);
+    let mut ll = loglik(theta);
     for _ in 0..100 {
         resource::checkpoint()?;
-        let s = theta_score(theta, mu, y);
-        let info = theta_information(theta, mu, y);
+        let s = score(theta);
+        let info = information(theta);
         if !(s.is_finite() && info.is_finite() && ll.is_finite()) {
             return Ok((theta, false));
         }
@@ -571,7 +589,7 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
         let mut accepted = false;
         for _ in 0..30 {
             let candidate = (theta.ln() + delta).exp().min(THETA_MAX);
-            let ll_candidate = nb_loglik(candidate, mu, y);
+            let ll_candidate = loglik(candidate);
             // not lower beyond rounding: near the optimum a step changes the
             // log-likelihood by less than its rounding error
             if ll_candidate.is_finite() && ll_candidate >= ll - 1e-12 * ll.abs() {
@@ -587,6 +605,64 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
         }
     }
     Ok((theta, true))
+}
+
+/// Log-likelihood of `glm.nb(y ~ 1)` on the rows `y` (mean `y_mean`), the null model of
+/// pscl's `pR2`: the intercept-only NB2 fit with its own theta. Its fitted mean is
+/// `y_mean` at every theta (the intercept score `sum (y - mu) theta / (theta + mu)`
+/// vanishes there), so only theta is fitted, by [`theta_newton_with`] from `theta_start`
+/// on the distinct values of `y` with their multiplicities. An all-zero outcome has
+/// log-likelihood 0 (every row has probability 1 at mean 0).
+fn negbin_null_loglik(y: &[f64], y_mean: f64, theta_start: f64) -> EconResult<f64> {
+    use statrs::function::gamma::ln_gamma;
+    if y_mean == 0.0 {
+        return Ok(0.0);
+    }
+    let mut sorted = resource::try_with_capacity(y.len(), "negative binomial null model")?;
+    sorted.extend_from_slice(y);
+    sorted.sort_unstable_by(f64::total_cmp);
+    // (value, count) of each distinct value
+    let mut groups: Vec<(f64, f64)> = Vec::new();
+    for &v in &sorted {
+        match groups.last_mut() {
+            Some((last, count)) if *last == v => *count += 1.0,
+            _ => groups.push((v, 1.0)),
+        }
+    }
+    drop(sorted);
+    let ln_mean = y_mean.ln();
+    let loglik = |theta: f64| -> f64 {
+        let ln_tm = (theta + y_mean).ln();
+        groups
+            .iter()
+            .map(|&(yi, c)| {
+                let log_mu = if yi == 0.0 { 0.0 } else { yi * ln_mean };
+                c * (ln_gamma_ratio(theta, yi) - ln_gamma(yi + 1.0) + theta * theta.ln() + log_mu
+                    - (theta + yi) * ln_tm)
+            })
+            .sum()
+    };
+    let score = |theta: f64| -> f64 {
+        groups
+            .iter()
+            .map(|&(yi, c)| {
+                c * (digamma(theta + yi) - digamma(theta) + theta.ln() + 1.0
+                    - (theta + y_mean).ln()
+                    - (yi + theta) / (y_mean + theta))
+            })
+            .sum()
+    };
+    let information = |theta: f64| -> f64 {
+        groups
+            .iter()
+            .map(|&(yi, c)| {
+                c * (-trigamma(theta + yi) + trigamma(theta) - 1.0 / theta + 2.0 / (y_mean + theta)
+                    - (yi + theta) / ((y_mean + theta) * (y_mean + theta)))
+            })
+            .sum()
+    };
+    let (theta0, _) = theta_newton_with(theta_start, &loglik, score, information)?;
+    Ok(loglik(theta0))
 }
 
 /// Run negative binomial regression (NB2, log link).
@@ -770,9 +846,8 @@ pub fn run_negbin(
     warnings.extend(nb_fit_warnings(n_falling, irls.converged, n_tiny));
     let log_likelihood = nb_loglik(theta, &work.mu, y);
 
-    // Null log-likelihood (unchanged; ECON-64, Tier 4)
-    let log_likelihood_null = n as f64
-        * (theta * (theta / (theta + y_mean)).ln() + y_mean * (y_mean / (theta + y_mean)).ln());
+    // Null log-likelihood: glm.nb(y ~ 1) on the same rows, with its own theta
+    let log_likelihood_null = negbin_null_loglik(y, y_mean, theta)?;
 
     // Standard errors from the expected information (X'WX)^-1 (summary.negbin)
     for (wi, &mi) in work.w.iter_mut().zip(&work.mu) {
@@ -2998,6 +3073,77 @@ mod tests {
 
     // ---- negative binomial against MASS::glm.nb (disc_negbin) -----------------------
 
+    /// pscl::pR2 refits glm.nb(y ~ 1) on the model frame, with its own theta: the null
+    /// log-likelihood (lnGamma terms included) and McFadden's R2.
+    #[test]
+    fn test_validate_negbin_null_disc_negbin() {
+        let (case, ds) = load_case("disc_negbin_null_t4");
+        let r = run_negbin(&ds, "y", &["x1", "x2"], None).unwrap();
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("null_loglik", r.log_likelihood_null, Tol::stat(n))
+            .scalar("pseudo_r2", r.pseudo_r_squared, Tol::iterative(1e-8))
+            .scalar("null_loglik_pkg", r.log_likelihood_null, Tol::stat(n))
+            .scalar("pseudo_r2_pkg", r.pseudo_r_squared, Tol::iterative(1e-8))
+            .finish();
+    }
+
+    /// With missing values the null model is fitted on the model's rows (pscl::pR2 on the
+    /// model frame), not on every row with an outcome.
+    #[test]
+    fn test_validate_negbin_null_missing_rows() {
+        let (case, ds) = load_case("disc_negbin_null_t4");
+        let r = run_negbin(&ds, "y_na", &["x1_na", "x2"], None).unwrap();
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("na_n_used", n as f64, Tol::exact())
+            .scalar("na_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("na_null_loglik", r.log_likelihood_null, Tol::stat(n))
+            .scalar("na_pseudo_r2", r.pseudo_r_squared, Tol::iterative(1e-8))
+            .finish();
+    }
+
+    /// Underdispersed counts: the null model's theta runs to its bound, where the NB is
+    /// the Poisson, so the null log-likelihood is the intercept-only Poisson's (the NB-
+    /// Poisson gap at theta = 1e8 is about n ybar / (2 theta), near 1e-8 relative here).
+    #[test]
+    fn test_negbin_null_poisson_limit() {
+        use statrs::function::gamma::ln_gamma;
+        let n = 200;
+        let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 97) as f64 / 97.0).collect();
+        // values 2, 3, 4 around a mean of 3: variance 2/3, below the mean
+        let y: Vec<f64> = (0..n).map(|i| 2.0 + ((i * 7 + i / 3) % 3) as f64).collect();
+        let ybar = y.iter().sum::<f64>() / n as f64;
+        let poisson_ll: f64 = y
+            .iter()
+            .map(|&yi| yi * ybar.ln() - ybar - ln_gamma(yi + 1.0))
+            .sum();
+        let ds = Dataset::new(df! { "y" => y.clone(), "x" => x }.unwrap());
+        let r = run_negbin(&ds, "y", &["x"], None).unwrap();
+        assert!(
+            (r.log_likelihood_null - poisson_ll).abs() <= 1e-6 * poisson_ll.abs(),
+            "{} vs {poisson_ll}",
+            r.log_likelihood_null
+        );
+        // the null model's theta itself is at the bound
+        let null = negbin_null_loglik(&y, ybar, 1.0).unwrap();
+        assert!((null - poisson_ll).abs() <= 1e-6 * poisson_ll.abs());
+    }
+
+    /// An all-zero outcome: whatever the full fit reports, the null log-likelihood is 0
+    /// (every row has probability 1 at mean 0), never NaN, and nothing panics.
+    #[test]
+    fn test_negbin_null_all_zero() {
+        assert_eq!(negbin_null_loglik(&[0.0; 20], 0.0, 1.0).unwrap(), 0.0);
+        let x: Vec<f64> = (0..20).map(|i| i as f64 / 7.0).collect();
+        let ds = Dataset::new(df! { "y" => vec![0.0; 20], "x" => x }.unwrap());
+        if let Ok(r) = run_negbin(&ds, "y", &["x"], None) {
+            assert_eq!(r.log_likelihood_null, 0.0);
+            assert!(!r.warnings.is_empty());
+        }
+    }
+
     #[test]
     fn test_validate_negbin_theta_disc_negbin() {
         let (case, ds) = load_case("disc_negbin");
@@ -3005,7 +3151,7 @@ mod tests {
         assert!(r.converged, "{:?}", r.warnings);
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         let n = r.n_obs;
-        // deviation ECON-64 (T4): log_likelihood_null and pseudo_r_squared not pinned
+        // the null model and pseudo-R2: test_validate_negbin_null_disc_negbin
         Check::new(&case)
             .named("coef", &r.variables, &r.coefficients, Tol::iterative(1e-6))
             .named("se", &r.variables, &r.std_errors, Tol::iterative(1e-5))
