@@ -230,41 +230,18 @@ pub(crate) fn gmm_equations(
     let k_x = x.len();
     let system = spec.system;
 
-    // Rows grouped by entity in level order (a stable counting sort), then by time.
-    let mut start = resource::try_vec(n_levels.saturating_add(1), 0usize, "GMM entity offsets")?;
-    for &c in &codes {
-        start[c + 1] += 1;
-    }
+    // Rows grouped by entity in level order, then by time.
+    let (start, order) =
+        group_rows_by_code(codes.iter().copied(), n_levels, times, "GMM row order")?;
     for e in 0..n_levels {
-        start[e + 1] += start[e];
-    }
-    let mut next = resource::try_vec(n_levels, 0usize, "GMM entity offsets")?;
-    next.copy_from_slice(&start[..n_levels]);
-    let mut order = resource::try_vec(n, 0usize, "GMM row order")?;
-    for (row, &c) in codes.iter().enumerate() {
-        order[next[c]] = row;
-        next[c] += 1;
-    }
-    drop(next);
-    for e in 0..n_levels {
-        resource::checkpoint()?;
-        let group = &mut order[start[e]..start[e + 1]];
-        group.sort_by_key(|&r| times[r]);
-        let mut a = 0;
-        while a < group.len() {
-            let t = times[group[a]];
-            let b = a + group[a..].partition_point(|&r| times[r] == t);
-            if b - a > 1 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "Entity '{}' has {} rows for time {t}; dynamic-panel GMM needs one \
-                         row per (entity, time).",
-                        factor.levels[e],
-                        b - a
-                    ),
-                });
-            }
-            a = b;
+        if let Some((t, k)) = first_repeated_time(&order[start[e]..start[e + 1]], times) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Entity '{}' has {k} rows for time {t}; dynamic-panel GMM needs one row \
+                     per (entity, time).",
+                    factor.levels[e]
+                ),
+            });
         }
     }
 
@@ -552,6 +529,62 @@ pub(crate) fn gmm_equations(
         entities_without_equations,
         span,
     })
+}
+
+/// Up to five labels, quoted and comma-separated, then "(and N more)".
+pub(crate) fn label_list<S: AsRef<str>>(labels: &[S]) -> String {
+    let shown: Vec<String> = labels
+        .iter()
+        .take(5)
+        .map(|l| format!("'{}'", l.as_ref()))
+        .collect();
+    let mut text = shown.join(", ");
+    if labels.len() > 5 {
+        text.push_str(&format!(" (and {} more)", labels.len() - 5));
+    }
+    text
+}
+
+/// Rows grouped by code in level order (a stable counting sort), each group sorted by time:
+/// group `g` is `order[start[g]..start[g + 1]]`. `codes` are below `n_levels`, one per row.
+pub(crate) fn group_rows_by_code<I>(
+    codes: I,
+    n_levels: usize,
+    times: &[i64],
+    what: &str,
+) -> EconResult<(Vec<usize>, Vec<usize>)>
+where
+    I: Iterator<Item = usize> + Clone,
+{
+    let mut start = resource::try_vec(n_levels.saturating_add(1), 0usize, what)?;
+    let mut n = 0usize;
+    for c in codes.clone() {
+        start[c + 1] += 1;
+        n += 1;
+    }
+    for g in 0..n_levels {
+        start[g + 1] += start[g];
+    }
+    let mut next = resource::try_vec(n_levels, 0usize, what)?;
+    next.copy_from_slice(&start[..n_levels]);
+    let mut order = resource::try_vec(n, 0usize, what)?;
+    for (row, c) in codes.enumerate() {
+        order[next[c]] = row;
+        next[c] += 1;
+    }
+    drop(next);
+    for g in 0..n_levels {
+        resource::checkpoint()?;
+        order[start[g]..start[g + 1]].sort_by_key(|&r| times[r]);
+    }
+    Ok((start, order))
+}
+
+/// The first time that repeats in a time-sorted group of rows, with its number of rows.
+pub(crate) fn first_repeated_time(rows: &[usize], times: &[i64]) -> Option<(i64, usize)> {
+    let p = rows.windows(2).position(|w| times[w[0]] == times[w[1]])?;
+    let t = times[rows[p]];
+    Some((t, rows[p..].partition_point(|&r| times[r] == t)))
 }
 
 #[cfg(test)]
@@ -1008,5 +1041,27 @@ mod tests {
         for (code, id) in codes.iter().zip(&ids) {
             assert_eq!(*code, *id as usize, "firm_id {id} has code {code}");
         }
+    }
+
+    #[test]
+    fn test_label_list_shared() {
+        let owned: Vec<String> = (1..=7).map(|i| format!("u{i}")).collect();
+        let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let expected = "'u1', 'u2', 'u3', 'u4', 'u5' (and 2 more)";
+        assert_eq!(label_list(&owned), expected);
+        assert_eq!(label_list(&borrowed), expected);
+        assert_eq!(label_list(&["a", "b"]), "'a', 'b'");
+    }
+
+    #[test]
+    fn test_group_rows_by_code_sorts_within_groups() {
+        let codes = [1usize, 0, 1, 0, 1];
+        let times = [3i64, 2, 1, 1, 1];
+        let (start, order) = group_rows_by_code(codes.iter().copied(), 2, &times, "t").unwrap();
+        assert_eq!(start, vec![0, 2, 5]);
+        assert_eq!(&order[..2], &[3, 1]);
+        assert_eq!(times[order[4]], 3);
+        assert_eq!(first_repeated_time(&order[2..], &times), Some((1, 2)));
+        assert_eq!(first_repeated_time(&order[..2], &times), None);
     }
 }

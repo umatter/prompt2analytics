@@ -243,7 +243,7 @@ pub struct PanelResult {
 /// estimators are closed form.
 impl ResultNotes for PanelResult {
     fn notes_warnings(&self) -> Vec<String> {
-        self.warnings.clone()
+        notes_without_missing(&self.warnings, &self.missing)
     }
 }
 
@@ -451,6 +451,17 @@ impl fmt::Display for PanelResult {
 
         Ok(())
     }
+}
+
+/// The warnings without the missing-value note, which the CLI and MCP print apart from the
+/// warnings and Display prints as its last line.
+pub(crate) fn notes_without_missing(warnings: &[String], missing: &MissingSummary) -> Vec<String> {
+    let note = missing.note();
+    warnings
+        .iter()
+        .filter(|w| note.as_deref() != Some(w.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// The warnings except the missing-value note under `header` ("  - " per line), then

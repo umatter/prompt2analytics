@@ -98,6 +98,7 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
+use super::panel::utils::{first_repeated_time, group_rows_by_code, label_list};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
@@ -438,7 +439,7 @@ pub struct PanelUnitRootResult {
 
 impl ResultNotes for PanelUnitRootResult {
     fn notes_warnings(&self) -> Vec<String> {
-        self.warnings.clone()
+        super::panel::types::notes_without_missing(&self.warnings, &self.missing)
     }
 }
 
@@ -518,24 +519,12 @@ impl fmt::Display for PanelUnitRootResult {
         writeln!(f, "Significance: {}", sig)?;
 
         // The missing-value note is the last line, not a warning line.
-        let note = self.missing.note();
-        let warnings: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| Some(w.as_str()) != note.as_deref())
-            .collect();
-        if !warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in warnings {
-                writeln!(f, "  - {w}")?;
-            }
-        }
-        if let Some(note) = note {
-            writeln!(f, "Missing values: {note}")?;
-        }
-
-        Ok(())
+        super::panel::types::write_warnings_then_missing(
+            f,
+            "\nWarnings:",
+            &self.warnings,
+            &self.missing,
+        )
     }
 }
 
@@ -1067,15 +1056,6 @@ struct Panels {
 }
 
 /// "'a', 'b', 'c' (and 4 more)": at most five labels.
-fn label_list(labels: &[&str]) -> String {
-    let shown: Vec<String> = labels.iter().take(5).map(|l| format!("'{l}'")).collect();
-    let mut text = shown.join(", ");
-    if labels.len() > 5 {
-        text.push_str(&format!(" (and {} more)", labels.len() - 5));
-    }
-    text
-}
-
 /// Extract the panels: units as a factor (text or numeric ids), times as a whole-number
 /// index, rows with a missing value dropped. A repeated (unit, time) is an error; gaps
 /// are joined in time order, as `plm::purtest` does, with a warning; units with fewer
@@ -1097,23 +1077,14 @@ fn extract_panels(
     let values = cols.numeric(var_col);
     let n_units = factor.n_levels();
 
-    // Rows grouped by unit in level order (a stable counting sort), then by time.
+    // Rows grouped by unit in level order, then by time.
     let what = "panel unit-root rows";
-    let mut start = resource::try_vec(n_units.saturating_add(1), 0usize, what)?;
-    for &code in &factor.codes {
-        start[code as usize + 1] += 1;
-    }
-    for u in 0..n_units {
-        start[u + 1] += start[u];
-    }
-    let mut next = resource::try_vec(n_units, 0usize, what)?;
-    next.copy_from_slice(&start[..n_units]);
-    let mut order = resource::try_vec(factor.codes.len(), 0usize, what)?;
-    for (row, &code) in factor.codes.iter().enumerate() {
-        let slot = &mut next[code as usize];
-        order[*slot] = row;
-        *slot += 1;
-    }
+    let (start, order) = group_rows_by_code(
+        factor.codes.iter().map(|&c| c as usize),
+        n_units,
+        times,
+        what,
+    )?;
 
     let mut series = Vec::new();
     let mut gapped = 0usize;
@@ -1121,21 +1092,19 @@ fn extract_panels(
     let mut short: Vec<&str> = Vec::new();
     for u in 0..n_units {
         resource::checkpoint()?;
-        let rows = &mut order[start[u]..start[u + 1]];
-        rows.sort_by_key(|&r| times[r]);
+        let rows = &order[start[u]..start[u + 1]];
+        if let Some((t, k)) = first_repeated_time(rows, times) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Unit '{}' has {k} rows for time {t}; panel unit-root tests need one row \
+                     per (unit, time).",
+                    factor.levels[u]
+                ),
+            });
+        }
         let mut gap_here = false;
-        for (p, pair) in rows.windows(2).enumerate() {
+        for pair in rows.windows(2) {
             let (t1, t2) = (times[pair[0]], times[pair[1]]);
-            if t1 == t2 {
-                let k = rows[p..].partition_point(|&r| times[r] == t1);
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "Unit '{}' has {k} rows for time {t1}; panel unit-root tests need \
-                         one row per (unit, time).",
-                        factor.levels[u]
-                    ),
-                });
-            }
             if !gap_here && t2.saturating_sub(t1) > 1 {
                 gap_here = true;
                 first_gap.get_or_insert((u, t1, t2));
@@ -3660,5 +3629,59 @@ mod tests {
                 if context == "Hadri: unit '6' has no variation around its mean"),
             "{e:?}"
         );
+    }
+
+    /// The missing-value note is not a warning: the notes of the fixed-effects, panel GLS and
+    /// unit-root results leave it out, and Display prints it once, as the last line.
+    #[test]
+    fn test_panel_notes_exclude_missing_note() {
+        use crate::econometrics::panel::{PanelGlsModel, run_fixed_effects, run_panel_gls};
+        let (_, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let fe = run_fixed_effects(&ds, "inv", &["value", "capital"], "firm_name").unwrap();
+        // panel GLS needs N >= T: the first ten years (rows with a missing year kept)
+        let early = {
+            use polars::prelude::{BooleanChunked, NewChunkedArray};
+            let years = crate::data::columns::numeric_options(ds.df(), "year").unwrap();
+            let mask: Vec<bool> = years
+                .iter()
+                .map(|y| y.is_none_or(|y| y <= 1944.0))
+                .collect();
+            Dataset::new(
+                ds.df()
+                    .filter(&BooleanChunked::from_slice("keep".into(), &mask))
+                    .unwrap(),
+            )
+        };
+        let gls = run_panel_gls(
+            &early,
+            "inv",
+            &["value", "capital"],
+            "firm_name",
+            "year",
+            Some(PanelGlsModel::Pooling),
+        )
+        .unwrap();
+        let pur = run_panel_unit_root(&ds, "inv", "firm_name", "year", ips_one_lag()).unwrap();
+        let cases: [(&dyn ResultNotes, &MissingSummary, String); 3] = [
+            (&fe, &fe.missing, fe.to_string()),
+            (&gls, &gls.missing, gls.to_string()),
+            (&pur, &pur.missing, pur.to_string()),
+        ];
+        for (r, missing, text) in cases {
+            let note = missing.note().expect("rows were dropped");
+            assert!(
+                r.notes_warnings()
+                    .iter()
+                    .all(|w| !w.contains("Missing values") && *w != note),
+                "{:?}",
+                r.notes_warnings()
+            );
+            assert_eq!(text.matches(&note).count(), 1, "{text}");
+            assert!(
+                text.trim_end()
+                    .ends_with(&format!("Missing values: {note}")),
+                "{text}"
+            );
+        }
     }
 }

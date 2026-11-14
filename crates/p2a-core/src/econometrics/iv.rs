@@ -131,34 +131,9 @@ pub struct IVResult {
     pub missing: MissingSummary,
 }
 
-/// Writes the `Warnings:` block (without the warning that repeats the missing-value
-/// note, printed as the last line instead) when something is left.
-fn write_warnings(
-    f: &mut fmt::Formatter<'_>,
-    warnings: &[String],
-    missing: &MissingSummary,
-) -> fmt::Result {
-    let note = missing.note();
-    let shown: Vec<&String> = warnings
-        .iter()
-        .filter(|w| note.as_deref() != Some(w.as_str()))
-        .collect();
-    if !shown.is_empty() {
-        writeln!(f)?;
-        writeln!(f, "Warnings:")?;
-        for w in shown {
-            writeln!(f, "  - {}", w)?;
-        }
-    }
-    Ok(())
-}
-
-/// Writes `Missing values: <note>` as the last line when rows were dropped.
+/// The last line of a result's Display when rows were dropped.
 fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::Result {
-    match missing.note() {
-        Some(note) => writeln!(f, "Missing values: {note}"),
-        None => Ok(()),
-    }
+    super::panel::types::write_warnings_then_missing(f, "", &[], missing)
 }
 
 impl fmt::Display for IVResult {
@@ -228,8 +203,12 @@ impl fmt::Display for IVResult {
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
-        write_warnings(f, &self.warnings, &self.missing)?;
-        write_missing(f, &self.missing)
+        super::panel::types::write_warnings_then_missing(
+            f,
+            "\nWarnings:",
+            &self.warnings,
+            &self.missing,
+        )
     }
 }
 
