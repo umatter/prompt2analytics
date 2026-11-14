@@ -24,8 +24,23 @@ Moments `gbar(theta) = mean_i g_i(theta)`; linear IV `g_i = z_i (y_i - x_i' thet
 - **Variance**: optimal W: `(G' Omega(theta)^-1 G)^-1 / n`, Omega re-evaluated at the estimate. Fixed W: the sandwich
   `T Omega T' / n`, `T = (G'WG)^-1 G'W` (gmm's `FinRes`). z statistics, normal p-values.
 - **Moment covariance**: IID `sigma^2 Z'Z / n` (two-step = 2SLS); MDS `u'u / n`; HAC `S = eps'eps + sum_j w_j
-  (Gamma_j + Gamma_j')`, `w_j = kernel.weight(j, b)`, `b = bandwidth` or `floor(4 (n/100)^(2/9))`, with optional
-  VAR(1) prewhitening (`D S D'`, `D = (I - A)^-1`). Moments are centred by default (`centeredVcov = TRUE`).
+  (Gamma_j + Gamma_j')` for the lag count `L = bandwidth` or `floor(4 (n/100)^(2/9))`, with optional VAR(1)
+  prewhitening (`D S D'`, `D = (I - A)^-1`, the OLS HAC's prewhitening shared). Moments are centred by default
+  (`centeredVcov = TRUE`). The kernel weights:
+
+  | kernel | weight of lag j | lags summed | gmm call |
+  |---|---|---|---|
+  | Bartlett | `1 - j/(L+1)` | 1..=L | `kernel = "Bartlett", bw = L + 1` |
+  | Parzen | `k(j/(L+1))` | 1..=L | `kernel = "Parzen", bw = L + 1` |
+  | Tukey-Hanning | `k(j/(L+1))` | 1..=L | `kernel = "Tukey-Hanning", bw = L + 1` |
+  | Truncated | 1 | 1..=L+1 (`k(1) = 1`) | `kernel = "Truncated", bw = L + 1` |
+  | Quadratic Spectral | `k(j/L)` | 1..=L | not reproduced (deviation ECON-68) |
+
+  The lags summed are sandwich's `weightsAndrews` (every lag up to n - 1, cut after the last weight above 1e-7),
+  computed from the n rows (n - 1 with prewhitening). For the Quadratic Spectral kernel sandwich keeps every lag up to
+  n - 1 (500 of 500 at n = 500), which the direct lag loop would make an O(n^2 q^2) computation; p2a keeps its earlier
+  L-lag rule there and does not match sandwich (`qs_*` and `qs_pw_*` of `gmm_hac_kernels_t4` are recorded, not
+  pinned). `hac_lags` is the last lag summed.
 
 ## p2a configuration and the gmm call it reproduces
 
@@ -57,6 +72,7 @@ chi-squared(q - k) only for the optimal W, so p2a reports `j_stat = NaN` (deviat
 | Test | Keys |
 |---|---|
 | `test_validate_gmm_twostep` | `twostep_mds_*`, `twostep_mds_uncentered_*` |
+| `test_validate_gmm_hac_kernels_gmm_iv` (case `gmm_hac_kernels_t4`) | `{bartlett,parzen,truncated,tukey_hanning}[_pw]_{coef,se,J,J_p,n_weights}` |
 | `test_validate_gmm_iid` | `twostep_iid_*`, `iid_equals_2sls_coef` |
 | `test_validate_gmm_iterative` | `iter_mds_*` (Tol::iterative) |
 | `test_validate_gmm_hac` | `twostep_hac_bartlett_*`, `twostep_hac_bartlett_pw_*`, `hac_nw_lags` |
