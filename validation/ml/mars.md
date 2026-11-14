@@ -16,6 +16,11 @@ GCV is Friedman (1991), eq. 30, as earth's `GetGcv`: `RSS / (n (1 - C/n)^2)` wit
 | `test_mars_without_intercept` | `intercept = false`: no constant, least squares on the returned basis to 1e-10 relative, uncentred R-squared as `lm(y ~ 0 + ...)`, `predict` equal to the fitted values exactly |
 | `test_mars_design_has_full_rank` | The returned basis is identified: a collinear pair adds only its identified hinge, as earth does |
 | `test_mars_incremental_scoring_matches_refits` | Every forward candidate's RSS and every backward deletion's RSS equal a full `least_squares` refit to 1e-9 relative, with the same aliased set |
+| `test_mars_fast_mode_finds_upper_kink` | Fast mode at n = 300 finds a kink at the 80th percentile of `x` (the first `fast_k` candidates used to stop near the 62nd) |
+| `test_mars_fast_subsample_is_even` | The fast-mode subsample of 58 candidates keeps indices 0, 3, ..., 57 |
+| `test_mars_spans_follow_friedman` | `minspan` and `endspan` against eqs. 43 and 45 computed in base R, unfloored to 1e-14 relative |
+| `test_mars_default_penalty_is_earth` | Default penalty 2; `earth_penalty` 2 for degree 1, 3 above |
+| `test_mars_refuses_overflowing_response` | A response whose sum of squares overflows is refused ("rescale the response"); one below it fits |
 | `test_mars_stopping_rule_is_scale_free` | `y` rescaled by 1e-6 and 1e6 gives the same terms, with and without the intercept |
 | `test_mars_validates_parameters` | Spans, `nprune`, `nk`, `degree`, `penalty`, `thresh`, `fast_k`, non-finite data, feature names |
 
@@ -23,9 +28,17 @@ GCV is Friedman (1991), eq. 30, as earth's `GetGcv`: `RSS / (n (1 - C/n)^2)` wit
 
 Not compared, and open:
 
-- Fast mode (`n > 200`) subsamples candidate knots differently from earth's fast MARS (finding WT-3).
-- The `minspan`, `endspan` and `penalty` defaults differ: the penalty is 3 for every degree (earth: 2
-  for degree 1), and the span formulas differ (finding WT-11).
+- Fast mode (on by default above 200 rows) keeps `fast_k` (20) candidate knots per predictor, evenly spaced over
+  all of its candidates, first and last included (`test_mars_fast_subsample_is_even`,
+  `test_mars_fast_mode_finds_upper_kink`). earth's fast MARS (`fast.k`) instead limits the parent terms
+  considered and keeps every knot.
+- Spans: `minspan` is Friedman's (1991) eq. 43 and `endspan` eq. 45, alpha = 0.05, with `p` the number of
+  predictors, as earth; `minspan` is computed once on all `n` rows, where earth counts the non-zero cases of
+  each parent, and `endspan` is not adjusted for interaction terms.
+- The default `penalty` is 2, earth's value for the default `degree = 1`; `MarsConfig::earth_penalty(degree)`
+  gives earth's 3 for higher degrees, and `run_mars` uses it.
+- The forward pass adds the pair with the largest GCV reduction and stops when the relative reduction is below
+  `thresh`; earth selects on RSS and stops on the gain in R-squared.
 - Every knot of a variable is scored separately, where earth sweeps a variable's knots in one pass.
   The results of the two do not differ; the sweep would be faster.
 
@@ -48,3 +61,25 @@ the round medians; "ratio" is this tree over the base, "min ratio" the ratio of 
 The one row above 1.1x, fast mode switched off by the caller at n = 1,000 (1.30x), is reached only by an explicit
 `fast = Some(false)` above n = 200, and was signed off by the maintainer on 2026-11-08: the forward pass detects
 rank by Gram-Schmidt instead of adding a ridge, and the same path is 0.46x of the base at n = 10,000.
+
+### After the span and penalty change (against v0.5.0)
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
+row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
+average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
+the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
+"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1.
+
+| `fast` | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---|---:|---:|---:|---:|---:|
+| default (fast for n > 200) | 100 | 2.06 | 2.99 | 1.45 | 1.45 |
+|  | 1,000 | 128 | 145 | 1.14 | 0.98 |
+|  | 10,000 | 1,446 | 1,449 | 1.00 | 1.01 |
+| `Some(false)` | 100 | 2.08 | 2.98 | 1.43 | 1.46 |
+|  | 1,000 | 658 | 1,640 | 2.49 | 2.60 |
+|  | 10,000 | 47,458 | 86,130 | 1.81 | 1.87 |
+
+The slower rows come from Friedman's spans, accepted by the maintainer as the price of earth's defaults: at n = 100
+(no fast mode) each predictor has 17 instead of 11 candidate knots, and without fast mode 164 / 1,426 instead of
+98 / 768 at n = 1,000 / 10,000; the smaller default penalty (2) can also lengthen the forward pass. Fast mode keeps
+`fast_k` knots per predictor in both trees, so its cost at n = 10,000 is unchanged.

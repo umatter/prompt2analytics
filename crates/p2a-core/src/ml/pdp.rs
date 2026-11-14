@@ -71,7 +71,8 @@
 //! - [`GridSpec::Values`] is a user grid (`pred.grid`), sorted.
 //!
 //! Exact duplicate grid values are listed once (pdp repeats the row with the same `yhat`). NaN feature values
-//! are ignored when a grid is built; infinite values are an error.
+//! are ignored when a grid is built; infinite feature values are an error for the uniform and quantile grids; a
+//! user grid replaces the column, so the column is not checked.
 //!
 //! The evaluation loop checks the length of every prediction vector, returns a fallible model's errors and stops
 //! when the call's budget is cancelled. A NaN prediction propagates into the mean, unlike pdp's
@@ -1404,11 +1405,15 @@ mod tests {
             feature_grid(&[], &GridSpec::Values(vec![3.0, 1.0, 1.0, 2.0]), "x").unwrap(),
             vec![1.0, 2.0, 3.0]
         );
-        // R's overflow branch of seq: no Inf or NaN
-        assert_eq!(
-            feature_grid(&[-1e308, 1e308], &GridSpec::Uniform(5), "x").unwrap(),
-            vec![-1e308, -5e307, 0.0, 5e307, 1e308]
-        );
+        // R's overflow branch of seq, (from/4 + i * by) * 4: no Inf or NaN. The endpoints and the
+        // middle are exact; the other two points are the formula's, whatever its rounding.
+        let g = feature_grid(&[-1e308, 1e308], &GridSpec::Uniform(5), "x").unwrap();
+        let (f4, t4) = (-1e308 / 4.0, 1e308 / 4.0);
+        let by = (t4 - f4) / 4.0;
+        let seq = |i: usize| (f4 + i as f64 * by) * 4.0;
+        assert_eq!(g, vec![-1e308, seq(1), 0.0, seq(3), 1e308]);
+        assert!(g.iter().all(|v| v.is_finite()));
+        assert!(g.windows(2).all(|w| w[0] < w[1]));
         let spec_err = |v: &[f64], s: GridSpec| match feature_grid(v, &s, "feature 3") {
             Err(EconError::InvalidSpecification { message }) => message,
             other => panic!("expected InvalidSpecification, got {other:?}"),

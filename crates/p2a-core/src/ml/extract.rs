@@ -428,6 +428,16 @@ mod tests {
                 "{name}: {e}"
             );
         }
+        let e = c50_fit(&d, "nope", &X).expect_err("c50");
+        assert!(
+            matches!(&e, EconError::ColumnNotFound { column, .. } if column == "nope"),
+            "c50: {e}"
+        );
+        let e = c50_fit(&d, "cls", &["x1", "lab"]).expect_err("c50");
+        assert!(
+            matches!(&e, EconError::NonNumericColumn { column } if column == "lab"),
+            "c50: {e}"
+        );
     }
 
     #[test]

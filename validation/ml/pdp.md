@@ -27,7 +27,8 @@ former `PdpConfig` default did 20.
 | `Quantiles(probs)` | `quantile(x, probs, type = 7, na.rm = TRUE)` | through `stats::robust::quantile_sorted`; probs in [0, 1]. `use_quantiles` with no `grid_resolution` uses pdp's `1:9/10`, with one `seq(0, 1, length.out = n)` |
 | `Values(v)` | `pred.grid` sorted by `order_grid` | non-empty, finite |
 
-NaN feature values are ignored (pdp's `na.rm = TRUE`); infinite values and a feature without finite values are errors.
+NaN feature values are ignored (pdp's `na.rm = TRUE`); for the uniform and quantile grids, infinite values and a
+feature without finite values are errors; a user grid (`Values`) replaces the column, which is then not checked.
 
 **Documented differences from `pdp::partial`.** The first three are registry deviations of `pdp_partial_dependence`:
 
@@ -42,6 +43,20 @@ NaN feature values are ignored (pdp's `na.rm = TRUE`); infinite values and a fea
 
 ICE spread per grid point: population SD (divisor n), range, `IQR()` (type 7); a grid point with a NaN prediction gives
 NaN for all three.
+
+Heterogeneity index (no pdp equivalent): each ICE curve is anchored on its first grid value, `d_ig = ICE_i(g) -
+ICE_i(g_0)`, which is exactly 0 on a flat curve, and centred on its own mean over the grid, `c_ig = d_ig - mean_g d_ig`;
+with `SS_tot = sum c_ig^2` and `SS_het = sum (c_ig - mean_i c_ig)^2`, `H = sqrt(SS_het / SS_tot)`.
+`H^2` is the share of the curves' variation along the feature that differs between observations: 0 when the curves
+are parallel (no interaction involving the feature), whatever the model adds that does not depend on it; adding a
+constant or centring the curves leaves it unchanged. It is exactly 0 for flat curves, and when the root mean square of
+the centred curves is at most `64 * f64::EPSILON` times the largest absolute prediction at the first or last grid
+point (flat up to rounding: without the anchor and this floor, curves constant at 0.1, 0.2, 0.7, 1.1, 0.3 on 20 grid
+points gave H = 0.99 from rounding residues alone); NaN when a prediction is NaN or the sums of squares overflow. No
+other threshold is applied to it.
+Tests: `test_ice_heterogeneity_closed_form` (the module example, `H = 1/3`), `test_ice_heterogeneity_additive_is_zero`,
+`test_ice_heterogeneity_location_free`, `test_ice_flat_curves`, `test_ice_flat_curves_inexact_means`,
+`test_ice_cart_unused_feature_is_flat`, `test_ice_heterogeneity_overflow_is_nan`.
 
 ## R reference cases (`validation/r/cases/ml_pdp.R`)
 
@@ -88,10 +103,33 @@ The README coefficient row (n < 100: 1e-6) would also pass, but it would hide a 
 Behaviour tests (no R value): `test_pdp_2d_rejects_wrong_prediction_length`, `test_pdp_prediction_error_propagates`,
 `test_pdp_config_rejects_invalid_grids`, `test_feature_grid_rules`, `test_pdp_huge_grid_is_a_resource_error`,
 `test_pdp_stops_when_cancelled`, `test_model_feature_counts_match_training_columns`,
-`test_ice_empty_custom_grid_is_error`, `test_ice_gbm_prediction_error_propagates`,
+`test_ice_empty_custom_grid_is_error`, `test_ice_gbm_refuses_model_without_trees`,
+`test_ice_cart_prediction_error_propagates`,
 `test_ice_model_wrappers_refuse_column_mismatch`, `test_ice_parameter_rules`, `test_ice_prediction_error_propagates`,
 `test_ice_spread_nan_column`, `test_ice_curves_rf_uses_forest_predictions` (random-forest ICE equals the tree average;
 at the observation's own x1, its fitted value, bit for bit), `test_model_pd_rejects_zero_grid_and_column_mismatch`.
+
+## Wall-clock (ICE)
+
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), eleven rounds with the sides interleaved per
+row, one core (`taskset -c 2`), one rayon thread, 2026-11-14, after the index was anchored. **Preliminary**: the load
+average was 8-10 during the runs (other builds on the machine), and the base itself moved by more than 2x at
+n = 1,000 between this run and an earlier one, so ratios within about 0.05 of 1 are noise. Cells are the median of the
+round medians (each the median of 7-41 calls after a warm-up); "ratio" is this tree over the base, "min ratio" the
+ratio of the minima. Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` with a linear predictor, default grid
+(51 points), `IceConfig` defaults.
+
+| n | base (ms) | this tree (ms) | ratio | min ratio |
+|---:|---:|---:|---:|---:|
+| 100 | 0.134 | 0.151 | 1.13 | 1.13 |
+| 1,000 | 4.58 | 5.11 | 1.11 | 1.30 |
+| 10,000 | 70.5 | 68.1 | 0.97 | 0.98 |
+
+The heterogeneity index adds two passes over the curves. The anchored row sum uses eight partial sums, so it costs
+what `row.sum()` cost before the anchor; with one running sum the index pass alone was measurably slower. The data
+are no longer copied when every row is used, which saves a copy of the data (faster at n = 10,000). The rows at
+n = 100 and 1,000 are at or above 1.1x and wait for the user's sign-off or a re-timing on a quiet machine. Peak RSS at
+n = 10,000 (earlier run): 12.4 MB base, 12.3 MB this tree.
 
 ## Running
 

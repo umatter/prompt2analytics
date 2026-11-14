@@ -662,6 +662,9 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
         });
     }
 
+    super::trees::check_target_scale(&y, "GBM")
+        .map_err(|message| EconError::InvalidSpecification { message })?;
+
     // Validate binary targets for classification
     if config.family == GbmFamily::Binomial {
         for &yi in y.iter() {
@@ -1196,6 +1199,29 @@ mod tests {
             .vector("fitted", &r.predictions, tol)
             .vector("split_var", &split_var, Tol::exact())
             .finish();
+    }
+
+    /// A target whose centred sum of squares overflows is refused; a large finite one fits with
+    /// finite importance shares.
+    #[test]
+    fn test_gbm_refuses_overflowing_target() {
+        let x = Array2::from_shape_fn((40, 2), |(i, j)| (i * (j + 3) % 17) as f64 + 0.1 * j as f64);
+        let y = Array1::from_shape_fn(40, |i| (i % 7) as f64 + 0.3 * (i % 3) as f64);
+        let cfg = GbmConfig {
+            n_trees: 10,
+            seed: Some(3),
+            ..Default::default()
+        };
+        let huge = y.mapv(|v| v * 1e200);
+        let err = gbm(x.view(), huge.view(), &cfg).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.contains("rescale the target")),
+            "{err}"
+        );
+        let big = y.mapv(|v| v * 1e70);
+        let r = gbm(x.view(), big.view(), &cfg).unwrap();
+        assert!(r.feature_importances.iter().all(|v| v.is_finite()));
+        assert!((r.feature_importances.iter().sum::<f64>() - 1.0).abs() < 1e-12);
     }
 
     #[test]

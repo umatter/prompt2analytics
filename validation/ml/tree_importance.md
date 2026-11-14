@@ -12,6 +12,10 @@ splits on. Case file: `validation/r/cases/ml_tree_importance.R`. Registry: `vali
 - **GBM** (`GbmResult::relative_influence`): the sum over trees of the SSE decrease of each split on the
   pseudo-residuals, which is gbm's `relative.influence`. `feature_importances` is the share.
 
+All three refuse a target whose centred sum of squares exceeds `f64::MAX.sqrt()`, CART's bound, where the split
+gains would overflow ("rescale the target"; `test_forest_refuses_overflowing_target`,
+`test_gbm_refuses_overflowing_target`, `test_qrf_refuses_overflowing_target`).
+
 Before this was fixed, each split added `0.5^depth`: a depth-weighted split count that ignored how much the split
 explained.
 
@@ -87,3 +91,7 @@ confirmed by the minima (1.03).
 ```bash
 cargo test -p p2a-core --lib --no-default-features --features ci -- tree_importance_rpart importance_band gbm_stump_influence
 ```
+
+The target-scale check (one pass over the target) against v0.5.0, same protocol as the quantile forest's rows in
+[`quantile_rf.md`](quantile_rf.md) (preliminary, loaded machine): `random_forest` defaults at n = 10,000, 6,065 ms base
+and 6,199 ms this tree (1.02); `gbm` defaults at n = 10,000, 1,855 and 1,929 ms (1.04).

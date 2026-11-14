@@ -6,12 +6,20 @@
 //!
 //! # Algorithm Overview
 //!
-//! Unlike standard Random Forests which store only the mean response in each leaf node,
-//! QRF stores all training observations that fall into each leaf. For prediction:
+//! The trees are grown as in a random forest, on bootstrap samples. Each tree then records
+//! which of all `n` training rows fall in each of its leaves (Meinshausen 2006, section 3).
+//! For a point x and `k` trees, training row i gets the weight
 //!
-//! 1. For a new observation x, find which leaf it falls into in each tree
-//! 2. Collect all training observations from those leaves across all trees
-//! 3. Compute empirical quantiles from this pooled distribution
+//! `w_i(x) = (1/k) sum_t 1{i in L_t(x)} / |L_t(x)|`,
+//!
+//! with `L_t(x)` the training rows in the leaf of tree t that x falls in, so the weights sum
+//! to one. The conditional distribution is `F(y | x) = sum_i w_i(x) 1{y_i <= y}` and the
+//! alpha-quantile is `inf{y : F(y | x) >= alpha}` (eq. 6): a training response, not an
+//! interpolation between two.
+//!
+//! Out-of-bag predictions for training row i use the trees where i is out of bag, and leave
+//! row i out of their leaves; in-sample predictions use every tree and every row, as
+//! `quantregForest`'s `predict` on the training data.
 //!
 //! # References
 //!
@@ -26,9 +34,7 @@
 //! # Example
 //!
 //! ```
-//! use p2a_core::ml::{
-//!     QuantileRfConfig, predict_quantiles_with_y, prediction_intervals, quantile_rf,
-//! };
+//! use p2a_core::ml::{QuantileRfConfig, predict_quantiles, prediction_intervals, quantile_rf};
 //! use ndarray::array;
 //!
 //! // Ten observations of a noisy monotone relationship.
@@ -55,32 +61,30 @@
 //! // `keep_inbag` defaults to true, so out-of-bag predictions are computed too.
 //! assert!(result.oob_predictions.is_some());
 //!
-//! // Predict quantiles for new data. QRF reads the conditional distribution off
-//! // the training responses sitting in each leaf, so `y` is passed back in.
+//! // Predict quantiles for new data from the training responses the model keeps.
 //! let x_new = array![[2.5, 3.5], [4.0, 5.0]];
-//! let predictions = predict_quantiles_with_y(&result, x_new.view(), y.view()).unwrap();
+//! let predictions = predict_quantiles(&result, x_new.view()).unwrap();
 //! assert_eq!(predictions.dim(), (2, 3));
 //!
-//! // The three columns are quantiles of one pooled empirical distribution, so
-//! // they are ordered and always lie inside the observed range of `y`
-//! // (1.1 to 5.5). The 1e-9 slack is float noise from the interpolation.
+//! // The three columns are quantiles of one weighted distribution of training
+//! // responses, so they are ordered, and each is one of the observed `y`.
 //! for row in predictions.rows() {
-//!     assert!(row[0] <= row[1] + 1e-9 && row[1] <= row[2] + 1e-9);
-//!     assert!(row[0] >= 1.1 - 1e-9 && row[2] <= 5.5 + 1e-9);
+//!     assert!(row[0] <= row[1] && row[1] <= row[2]);
+//!     assert!(row.iter().all(|q| y.iter().any(|yi| yi == q)));
 //! }
 //!
 //! // Columns 0 and 2 bracket an 80% prediction interval.
 //! let intervals = prediction_intervals(&predictions, 0, 2).unwrap();
 //! assert_eq!(intervals.len(), 2);
-//! assert!(intervals.iter().all(|&(lo, hi)| lo <= hi + 1e-9));
+//! assert!(intervals.iter().all(|&(lo, hi)| lo <= hi));
 //! ```
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+#[cfg(test)]
 use crate::stats::robust::{QuantileType, quantile_sorted};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
-use std::collections::HashMap;
 
 /// Configuration for Quantile Regression Forest.
 #[derive(Debug, Clone)]
@@ -167,6 +171,9 @@ pub struct QuantileRfResult {
 
     /// Configuration used
     pub config: QuantileRfConfig,
+
+    /// The training responses, ranked once, for prediction.
+    pub(crate) y_train: RankedY,
 }
 
 impl std::fmt::Display for QuantileRfResult {
@@ -250,7 +257,6 @@ impl std::fmt::Display for QuantileRfResult {
 const MAX_TREE_DEPTH: usize = 512;
 
 /// A tree node in the quantile regression forest.
-/// Unlike standard RF, leaf nodes store indices to all observations in that leaf.
 #[derive(Debug, Clone)]
 pub(crate) enum QrfNode {
     /// Internal split node
@@ -260,11 +266,8 @@ pub(crate) enum QrfNode {
         left: Box<QrfNode>,
         right: Box<QrfNode>,
     },
-    /// Leaf node storing indices of training observations
-    Leaf {
-        /// Indices of training observations that fall into this leaf
-        observation_indices: Vec<usize>,
-    },
+    /// Leaf node; its training rows are in the tree's `members`
+    Leaf { id: u32 },
 }
 
 /// A single quantile regression tree.
@@ -274,10 +277,12 @@ pub(crate) struct QuantileTree {
     root: Option<QrfNode>,
     /// Number of features
     n_features: usize,
-    /// Bootstrap indices (which samples were used to build this tree)
-    bootstrap_indices: Vec<usize>,
-    /// Out-of-bag indices (samples not used in building this tree)
-    oob_indices: Vec<usize>,
+    /// Training rows of every leaf, leaf by leaf (CSR): leaf `l` holds
+    /// `members[offsets[l]..offsets[l + 1]]`, every training row in exactly one leaf.
+    members: Vec<u32>,
+    offsets: Vec<u32>,
+    /// Bit `i` is set when training row `i` is in this tree's bootstrap sample.
+    in_bag: Vec<u64>,
     /// Summed SSE decrease of this tree's splits per feature.
     gain: Vec<f64>,
 }
@@ -288,25 +293,29 @@ impl QuantileTree {
         Self {
             root: None,
             n_features,
-            bootstrap_indices: Vec::new(),
-            oob_indices: Vec::new(),
+            members: Vec::new(),
+            offsets: Vec::new(),
+            in_bag: Vec::new(),
             gain: Vec::new(),
         }
     }
 
-    /// Fit the tree to bootstrap sample.
+    /// Grow the tree on the bootstrap sample, then record the leaf of every training row.
     fn fit(
         &mut self,
         x: &ArrayView2<f64>,
         y: &ArrayView1<f64>,
         bootstrap_indices: Vec<usize>,
-        oob_indices: Vec<usize>,
         config: &QuantileRfConfig,
         rng_state: &mut u64,
-    ) {
-        self.bootstrap_indices = bootstrap_indices.clone();
-        self.oob_indices = oob_indices;
+    ) -> EconResult<()> {
         self.n_features = x.ncols();
+        let n = x.nrows();
+        let mut in_bag = resource::try_vec(n.div_ceil(64), 0u64, "quantile forest in-bag rows")?;
+        for &i in &bootstrap_indices {
+            in_bag[i / 64] |= 1 << (i % 64);
+        }
+        self.in_bag = in_bag;
 
         // Determine mtry (number of features to consider at each split)
         let mtry = config
@@ -320,6 +329,7 @@ impl QuantileTree {
 
         // Build tree recursively
         let mut gain = vec![0.0; x.ncols()];
+        let mut n_leaves = 0u32;
         self.root = Some(self.build_tree(
             x,
             y,
@@ -330,8 +340,74 @@ impl QuantileTree {
             max_depth,
             rng_state,
             &mut gain,
+            &mut n_leaves,
         ));
         self.gain = gain;
+        self.record_members(x, n_leaves as usize)
+    }
+
+    /// Drop every training row down the tree and store the rows of each leaf (CSR).
+    fn record_members(&mut self, x: &ArrayView2<f64>, n_leaves: usize) -> EconResult<()> {
+        let n = x.nrows();
+        let mut leaf_of = resource::try_vec(n, 0u32, "quantile forest leaf membership")?;
+        let mut counts = resource::try_vec(n_leaves + 1, 0u32, "quantile forest leaves")?;
+        for (i, leaf) in leaf_of.iter_mut().enumerate() {
+            *leaf = self.leaf_of(&x.row(i));
+            counts[*leaf as usize + 1] += 1;
+        }
+        for l in 0..n_leaves {
+            counts[l + 1] += counts[l];
+        }
+        let mut next = counts.clone();
+        let mut members = resource::try_vec(n, 0u32, "quantile forest leaf membership")?;
+        for (i, &leaf) in leaf_of.iter().enumerate() {
+            let slot = &mut next[leaf as usize];
+            members[*slot as usize] = i as u32;
+            *slot += 1;
+        }
+        self.members = members;
+        self.offsets = counts;
+        Ok(())
+    }
+
+    /// The leaf `x` falls in.
+    fn leaf_of(&self, x: &ArrayView1<f64>) -> u32 {
+        let mut node = match &self.root {
+            Some(node) => node,
+            None => return 0,
+        };
+        loop {
+            match node {
+                QrfNode::Leaf { id } => return *id,
+                QrfNode::Split {
+                    feature_index,
+                    threshold,
+                    left,
+                    right,
+                } => {
+                    node = if x[*feature_index] <= *threshold {
+                        left
+                    } else {
+                        right
+                    };
+                }
+            }
+        }
+    }
+
+    /// The training rows in the leaf `x` falls in.
+    fn leaf_members(&self, x: &ArrayView1<f64>) -> &[u32] {
+        self.leaf_slice(self.leaf_of(x) as usize)
+    }
+
+    /// The training rows of leaf `l`.
+    fn leaf_slice(&self, l: usize) -> &[u32] {
+        &self.members[self.offsets[l] as usize..self.offsets[l + 1] as usize]
+    }
+
+    /// Whether training row `i` is in this tree's bootstrap sample.
+    fn is_in_bag(&self, i: usize) -> bool {
+        (self.in_bag[i / 64] >> (i % 64)) & 1 == 1
     }
 
     /// Build tree recursively.
@@ -346,23 +422,20 @@ impl QuantileTree {
         max_depth: usize,
         rng_state: &mut u64,
         gain: &mut [f64],
+        n_leaves: &mut u32,
     ) -> QrfNode {
         let n_samples = indices.len();
 
         // Check stopping conditions
         if depth >= max_depth || n_samples <= min_node_size.saturating_mul(2) {
-            return QrfNode::Leaf {
-                observation_indices: indices.to_vec(),
-            };
+            return new_leaf(n_leaves);
         }
 
         // Check if all targets are the same (within tolerance)
         let target_values: Vec<f64> = indices.iter().map(|&i| y[i]).collect();
         let first_val = target_values[0];
         if target_values.iter().all(|&v| (v - first_val).abs() < 1e-10) {
-            return QrfNode::Leaf {
-                observation_indices: indices.to_vec(),
-            };
+            return new_leaf(n_leaves);
         }
 
         // Select random features to consider
@@ -374,9 +447,7 @@ impl QuantileTree {
         {
             // Check minimum node size
             if left_indices.len() < min_node_size || right_indices.len() < min_node_size {
-                return QrfNode::Leaf {
-                    observation_indices: indices.to_vec(),
-                };
+                return new_leaf(n_leaves);
             }
             add_split_gain(gain, best_feature, y, &left_indices, &right_indices);
 
@@ -390,6 +461,7 @@ impl QuantileTree {
                 max_depth,
                 rng_state,
                 gain,
+                n_leaves,
             );
             let right = self.build_tree(
                 x,
@@ -401,6 +473,7 @@ impl QuantileTree {
                 max_depth,
                 rng_state,
                 gain,
+                n_leaves,
             );
 
             QrfNode::Split {
@@ -410,9 +483,7 @@ impl QuantileTree {
                 right: Box::new(right),
             }
         } else {
-            QrfNode::Leaf {
-                observation_indices: indices.to_vec(),
-            }
+            new_leaf(n_leaves)
         }
     }
 
@@ -543,35 +614,6 @@ impl QuantileTree {
         })
     }
 
-    /// Get leaf observation indices for a single observation.
-    fn get_leaf_indices(&self, x: &ArrayView1<f64>) -> Vec<usize> {
-        match &self.root {
-            Some(node) => self.traverse_to_leaf(node, x),
-            None => Vec::new(),
-        }
-    }
-
-    /// Traverse tree to find leaf node and return its observation indices.
-    fn traverse_to_leaf(&self, node: &QrfNode, x: &ArrayView1<f64>) -> Vec<usize> {
-        match node {
-            QrfNode::Leaf {
-                observation_indices,
-            } => observation_indices.clone(),
-            QrfNode::Split {
-                feature_index,
-                threshold,
-                left,
-                right,
-            } => {
-                if x[*feature_index] <= *threshold {
-                    self.traverse_to_leaf(left, x)
-                } else {
-                    self.traverse_to_leaf(right, x)
-                }
-            }
-        }
-    }
-
     /// The summed SSE decrease of this tree's splits per feature.
     fn impurity_decrease(&self) -> &[f64] {
         &self.gain
@@ -579,26 +621,150 @@ impl QuantileTree {
 }
 
 use super::lcg_random;
-use super::trees::add_split_gain;
+use super::trees::{add_split_gain, check_target_scale, purity_shares};
+
+/// A new leaf with the next leaf id.
+fn new_leaf(n_leaves: &mut u32) -> QrfNode {
+    let id = *n_leaves;
+    *n_leaves += 1;
+    QrfNode::Leaf { id }
+}
 
 /// Generate bootstrap sample indices (the sample vector is allocated fallibly).
 fn bootstrap_sample(
     n_samples: usize,
     sample_size: usize,
     rng_state: &mut u64,
-) -> EconResult<(Vec<usize>, Vec<usize>)> {
-    let mut in_bag = vec![false; n_samples];
+) -> EconResult<Vec<usize>> {
     let mut bootstrap = resource::try_with_capacity(sample_size, "bootstrap sample")?;
-
     for _ in 0..sample_size {
-        let idx = lcg_random(rng_state) % n_samples;
-        bootstrap.push(idx);
-        in_bag[idx] = true;
+        bootstrap.push(lcg_random(rng_state) % n_samples);
     }
+    Ok(bootstrap)
+}
 
-    let oob: Vec<usize> = (0..n_samples).filter(|&i| !in_bag[i]).collect();
+/// Training responses with their order: `sorted` ascending, `rank[i]` the position of row
+/// `i` in it (ties by row index).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RankedY {
+    rank: Vec<u32>,
+    sorted: Vec<f64>,
+}
 
-    Ok((bootstrap, oob))
+impl RankedY {
+    fn new(y: &ArrayView1<f64>) -> EconResult<Self> {
+        let n = y.len();
+        let mut order = resource::try_with_capacity::<u32>(n, "quantile forest ranks")?;
+        order.extend(0..n as u32);
+        order.sort_unstable_by(|&a, &b| y[a as usize].total_cmp(&y[b as usize]).then(a.cmp(&b)));
+        let mut rank = resource::try_vec(n, 0u32, "quantile forest ranks")?;
+        let mut sorted = resource::try_with_capacity::<f64>(n, "quantile forest ranks")?;
+        for (r, &i) in order.iter().enumerate() {
+            rank[i as usize] = r as u32;
+            sorted.push(y[i as usize]);
+        }
+        Ok(Self { rank, sorted })
+    }
+}
+
+/// Scratch space of one prediction pass: a weight per training rank, the ranks with a
+/// non-zero weight, the trees that contribute (tree, leaf, effective leaf size) and the
+/// cumulative weights.
+struct WeightBuf {
+    weight: Vec<f64>,
+    touched: Vec<u32>,
+    trees: Vec<(usize, usize, usize)>,
+    cumulative: Vec<f64>,
+}
+
+impl WeightBuf {
+    fn new(n: usize) -> EconResult<Self> {
+        Ok(Self {
+            weight: resource::try_vec(n, 0.0, "quantile forest weights")?,
+            touched: Vec::new(),
+            trees: Vec::new(),
+            cumulative: Vec::new(),
+        })
+    }
+}
+
+/// The Meinshausen (2006) weights of `row` in `buf.weight`, by training rank, with the
+/// touched ranks sorted in `buf.touched`: each contributing tree adds `1 / (k |L|)` to the
+/// rows of its leaf `L`, `k` the number of contributing trees. With `exclude = Some(i)` only
+/// the trees where row `i` is out of bag contribute, and row `i` is left out of their leaves
+/// (a leaf holding only row `i` contributes nothing). Returns `k`.
+fn meinshausen_weights(
+    trees: &[QuantileTree],
+    row: &ArrayView1<f64>,
+    exclude: Option<usize>,
+    ranks: &RankedY,
+    buf: &mut WeightBuf,
+) -> usize {
+    for &r in &buf.touched {
+        buf.weight[r as usize] = 0.0;
+    }
+    buf.touched.clear();
+    buf.trees.clear();
+    for (t, tree) in trees.iter().enumerate() {
+        if exclude.is_some_and(|i| tree.is_in_bag(i)) {
+            continue;
+        }
+        let leaf = tree.leaf_of(row) as usize;
+        let members = tree.leaf_slice(leaf);
+        let size = match exclude {
+            Some(i) => members.len() - members.iter().filter(|&&m| m as usize == i).count(),
+            None => members.len(),
+        };
+        if size > 0 {
+            buf.trees.push((t, leaf, size));
+        }
+    }
+    let k = buf.trees.len();
+    for &(t, leaf, size) in &buf.trees {
+        let w = 1.0 / (k as f64 * size as f64);
+        for &m in trees[t].leaf_slice(leaf) {
+            if Some(m as usize) == exclude {
+                continue;
+            }
+            let r = ranks.rank[m as usize];
+            let slot = &mut buf.weight[r as usize];
+            if *slot == 0.0 {
+                buf.touched.push(r);
+            }
+            *slot += w;
+        }
+    }
+    buf.touched.sort_unstable();
+    k
+}
+
+/// Eq. (6) of Meinshausen (2006) at each of `quantiles`: the smallest training response whose
+/// cumulative weight reaches alpha, written to `out`; NaN when no tree contributes.
+fn meinshausen_quantiles(
+    trees: &[QuantileTree],
+    row: &ArrayView1<f64>,
+    exclude: Option<usize>,
+    ranks: &RankedY,
+    quantiles: &[f64],
+    buf: &mut WeightBuf,
+    out: &mut [f64],
+) {
+    if meinshausen_weights(trees, row, exclude, ranks, buf) == 0 {
+        out.iter_mut().for_each(|v| *v = f64::NAN);
+        return;
+    }
+    buf.cumulative.clear();
+    let mut total = 0.0;
+    for &r in &buf.touched {
+        total += buf.weight[r as usize];
+        buf.cumulative.push(total);
+    }
+    let last = buf.touched.len() - 1;
+    for (o, &alpha) in out.iter_mut().zip(quantiles) {
+        // The cumulative sum can end a rounding error below 1; alpha < 1 then takes the last.
+        let pos = buf.cumulative.partition_point(|&c| c < alpha).min(last);
+        *o = ranks.sorted[buf.touched[pos] as usize];
+    }
 }
 
 /// Refuse any quantile outside the open interval (0, 1), NaN included.
@@ -610,8 +776,7 @@ fn check_quantiles(quantiles: &[f64]) -> Result<(), String> {
 }
 
 /// Compute empirical quantile from a set of values: R's `quantile(type = 7)`, the default.
-/// The prediction paths sort the pooled leaf observations once per point and call
-/// `quantile_sorted` per quantile; this one-shot form is kept for its unit test.
+/// Not used by the forest (eq. 6 has no interpolation); kept for its unit test.
 #[cfg(test)]
 fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
     values.sort_by(f64::total_cmp);
@@ -635,7 +800,9 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 /// Returns a message, before any tree is grown, when `x` has fewer than 2 rows
 /// or a different row count from `y`, when `quantiles` is empty or holds a
 /// value outside the open interval (0, 1) (NaN included), when `n_trees` is 0
-/// or `sample_size` is `Some(0)`, and when `x` or `y` holds a non-finite value.
+/// or `sample_size` is `Some(0)`, when `x` or `y` holds a non-finite value, when
+/// the centred sum of squares of `y` exceeds `f64::MAX.sqrt()` ("rescale the
+/// target"), and above `u32::MAX` rows.
 /// The tree vector and each bootstrap sample are allocated fallibly, so an
 /// `n_trees` or `sample_size` too large to allocate returns a "Resource limit"
 /// message. Once the installed computation budget expires (checked per tree)
@@ -763,38 +930,45 @@ pub fn quantile_rf_with_names(
              remove or impute them first"
         ));
     }
+    check_target_scale(&y, "Quantile Regression Forest")?;
+    if n_samples > u32::MAX as usize {
+        return Err(format!(
+            "Quantile Regression Forest: at most {} rows",
+            u32::MAX
+        ));
+    }
 
     let sample_size = config.sample_size.unwrap_or(n_samples);
     let mut rng_state = config.seed.unwrap_or(42);
 
-    // Build forest; each tree keeps its own out-of-bag rows.
+    // Build forest; each tree keeps its in-bag rows and the leaf of every training row.
     let mut trees = resource::try_with_capacity(config.n_trees, "quantile forest trees")
         .map_err(|e| e.to_string())?;
 
     for _ in 0..config.n_trees {
         resource::checkpoint().map_err(|e| e.to_string())?;
-        let (bootstrap_indices, oob_indices) =
+        let bootstrap_indices =
             bootstrap_sample(n_samples, sample_size, &mut rng_state).map_err(|e| e.to_string())?;
 
         let mut tree = QuantileTree::new(n_features);
-        tree.fit(
-            &x,
-            &y,
-            bootstrap_indices,
-            oob_indices,
-            config,
-            &mut rng_state,
-        );
+        tree.fit(&x, &y, bootstrap_indices, config, &mut rng_state)
+            .map_err(|e| e.to_string())?;
 
         trees.push(tree);
     }
 
-    // Compute predictions for training data
-    let predictions = compute_quantile_predictions(&trees, &x, &y, &config.quantiles);
+    let ranks = RankedY::new(&y).map_err(|e| e.to_string())?;
 
-    // Compute OOB predictions and error
+    // In-sample predictions: every tree, every training row
+    let predictions = compute_quantile_predictions(&trees, &x, &ranks, &config.quantiles, false)
+        .map_err(|e| e.to_string())?;
+
+    // Out-of-bag predictions and error
     let (oob_predictions, oob_error) = if config.keep_inbag {
-        compute_oob_predictions(&trees, &x, &y, &config.quantiles)
+        let oob = compute_quantile_predictions(&trees, &x, &ranks, &config.quantiles, true)
+            .map_err(|e| e.to_string())?;
+        let error = oob_error(&oob, &y, &config.quantiles);
+        (Some(oob), error)
     } else {
         (None, None)
     };
@@ -806,20 +980,7 @@ pub fn quantile_rf_with_names(
             *sum += g;
         }
     }
-    for v in &mut inc_node_purity {
-        *v /= config.n_trees as f64;
-    }
-    let purity_total: f64 = inc_node_purity.iter().sum();
-    let variable_importance: Vec<f64> = inc_node_purity
-        .iter()
-        .map(|&v| {
-            if purity_total > 0.0 {
-                v / purity_total
-            } else {
-                0.0
-            }
-        })
-        .collect();
+    let variable_importance = purity_shares(&mut inc_node_purity, config.n_trees);
 
     Ok(QuantileRfResult {
         trees,
@@ -834,130 +995,61 @@ pub fn quantile_rf_with_names(
         n_features,
         feature_names,
         config: config.clone(),
+        y_train: ranks,
     })
 }
 
-/// Compute quantile predictions for given data.
+/// Quantile predictions at the rows of `x` (eq. 6 on Meinshausen weights). With `oob`, row
+/// `i` of `x` is training row `i`, predicted from the trees where it is out of bag without
+/// itself (NaN when no tree contributes).
 fn compute_quantile_predictions(
     trees: &[QuantileTree],
     x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
+    ranks: &RankedY,
     quantiles: &[f64],
-) -> Array2<f64> {
-    let n_samples = x.nrows();
-    let n_quantiles = quantiles.len();
-    let mut predictions = Array2::zeros((n_samples, n_quantiles));
-
-    for i in 0..n_samples {
-        let row = x.row(i);
-
-        // Collect all observations from leaves across all trees
-        let mut all_leaf_obs: Vec<f64> = Vec::new();
-        for tree in trees {
-            let leaf_indices = tree.get_leaf_indices(&row);
-            for &idx in &leaf_indices {
-                all_leaf_obs.push(y[idx]);
-            }
-        }
-
-        // Compute quantiles from pooled observations (sorted once per point)
-        all_leaf_obs.sort_unstable_by(f64::total_cmp);
-        for (j, &q) in quantiles.iter().enumerate() {
-            predictions[[i, j]] = quantile_sorted(&all_leaf_obs, q, QuantileType::T7);
-        }
+    oob: bool,
+) -> EconResult<Array2<f64>> {
+    let mut predictions = resource::try_zeros2(x.nrows(), quantiles.len(), "QRF predictions")?;
+    let mut buf = WeightBuf::new(ranks.sorted.len())?;
+    let mut row_out = vec![0.0; quantiles.len()];
+    for (i, mut out) in predictions.rows_mut().into_iter().enumerate() {
+        resource::checkpoint()?;
+        let exclude = oob.then_some(i);
+        meinshausen_quantiles(
+            trees,
+            &x.row(i),
+            exclude,
+            ranks,
+            quantiles,
+            &mut buf,
+            &mut row_out,
+        );
+        out.assign(&ArrayView1::from(&row_out));
     }
-
-    predictions
+    Ok(predictions)
 }
 
-/// Compute OOB predictions and error.
-fn compute_oob_predictions(
-    trees: &[QuantileTree],
-    x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
-    quantiles: &[f64],
-) -> (Option<Array2<f64>>, Option<f64>) {
-    let n_samples = x.nrows();
-    let n_quantiles = quantiles.len();
-
-    // For each sample, collect observations from trees where it was OOB
-    let mut oob_predictions = Array2::from_elem((n_samples, n_quantiles), f64::NAN);
-    let mut oob_counts = vec![0usize; n_samples];
-
-    // Build a map from sample index to trees where it was OOB
-    let mut sample_oob_trees: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (tree_idx, tree) in trees.iter().enumerate() {
-        for &sample_idx in &tree.oob_indices {
-            sample_oob_trees
-                .entry(sample_idx)
-                .or_default()
-                .push(tree_idx);
-        }
-    }
-
-    // Compute OOB predictions for each sample
-    for (sample_idx, tree_indices) in sample_oob_trees.iter() {
-        if tree_indices.is_empty() {
-            continue;
-        }
-
-        let row = x.row(*sample_idx);
-
-        // Collect observations from OOB trees only
-        let mut all_leaf_obs: Vec<f64> = Vec::new();
-        for &tree_idx in tree_indices {
-            let tree = &trees[tree_idx];
-            let leaf_indices = tree.get_leaf_indices(&row);
-            for &idx in &leaf_indices {
-                all_leaf_obs.push(y[idx]);
-            }
-        }
-
-        if !all_leaf_obs.is_empty() {
-            all_leaf_obs.sort_unstable_by(f64::total_cmp);
-            for (j, &q) in quantiles.iter().enumerate() {
-                oob_predictions[[*sample_idx, j]] =
-                    quantile_sorted(&all_leaf_obs, q, QuantileType::T7);
-            }
-            oob_counts[*sample_idx] = tree_indices.len();
-        }
-    }
-
-    // Compute OOB error (MSE at median quantile, or first quantile if median not present)
+/// OOB error: mean squared error at the median quantile (the first quantile if 0.5 is not
+/// fitted), over the rows with an OOB prediction.
+fn oob_error(oob: &Array2<f64>, y: &ArrayView1<f64>, quantiles: &[f64]) -> Option<f64> {
     let median_idx = quantiles
         .iter()
         .position(|&q| (q - 0.5).abs() < 1e-10)
         .unwrap_or(0);
-    let mut ss_res = 0.0;
-    let mut valid_count = 0;
-
-    for i in 0..n_samples {
-        let pred = oob_predictions[[i, median_idx]];
+    let (mut ss_res, mut valid_count) = (0.0, 0usize);
+    for (i, &pred) in oob.column(median_idx).iter().enumerate() {
         if !pred.is_nan() {
             ss_res += (y[i] - pred).powi(2);
             valid_count += 1;
         }
     }
-
-    let oob_error = if valid_count > 0 {
-        Some(ss_res / valid_count as f64)
-    } else {
-        None
-    };
-
-    (Some(oob_predictions), oob_error)
+    (valid_count > 0).then(|| ss_res / valid_count as f64)
 }
 
-/// Predict quantiles for new observations.
+/// Predict quantiles for new observations at the model's fitted quantiles.
 ///
-/// # Not usable out of sample
-///
-/// A QRF prediction is an empirical quantile of the *training* responses that
-/// land in the same leaves as `x_new`, and [`QuantileRfResult`] keeps only the
-/// leaf membership, not the responses themselves. This entry point therefore
-/// rejects every call, with an error naming [`predict_quantiles_with_y`], the
-/// variant that takes the training `y` as an extra argument. It exists so that a
-/// caller holding the model alone gets a diagnostic instead of silent nonsense.
+/// Each prediction is eq. (6) of Meinshausen (2006) on the weights the model's trees give the
+/// training responses, which the model keeps.
 ///
 /// # Arguments
 ///
@@ -966,15 +1058,16 @@ fn compute_oob_predictions(
 ///
 /// # Returns
 ///
-/// * Always `Err`: either a shape/quantile validation message, or the message
-///   redirecting to [`predict_quantiles_with_y`].
+/// * Matrix of quantile predictions (n_samples x n_quantiles)
+///
+/// # Errors
+///
+/// As [`predict_quantiles_at`].
 ///
 /// # Example
 ///
 /// ```
-/// use p2a_core::ml::{
-///     QuantileRfConfig, predict_quantiles, predict_quantiles_with_y, quantile_rf,
-/// };
+/// use p2a_core::ml::{QuantileRfConfig, predict_quantiles, quantile_rf};
 /// use ndarray::array;
 ///
 /// let x = array![
@@ -993,17 +1086,12 @@ fn compute_oob_predictions(
 /// let model = quantile_rf(x.view(), y.view(), &config).unwrap();
 /// let x_new = array![[2.5, 3.5], [7.5, 8.5]];
 ///
-/// // Without the training responses the leaf distributions cannot be rebuilt.
-/// let err = predict_quantiles(&model, x_new.view()).unwrap_err();
-/// assert!(err.contains("predict_quantiles_with_y"), "{}", err);
-///
-/// // Hand `y` back and the prediction succeeds: one column per fitted quantile,
-/// // ordered, and inside the observed range of `y` (1.1 to 10.0).
-/// let predictions = predict_quantiles_with_y(&model, x_new.view(), y.view()).unwrap();
+/// // One column per fitted quantile, ordered, each one of the training responses.
+/// let predictions = predict_quantiles(&model, x_new.view()).unwrap();
 /// assert_eq!(predictions.dim(), (2, 3));
 /// for row in predictions.rows() {
-///     assert!(row[0] <= row[1] + 1e-9 && row[1] <= row[2] + 1e-9);
-///     assert!(row[0] >= 1.1 - 1e-9 && row[2] <= 10.0 + 1e-9);
+///     assert!(row[0] <= row[1] && row[1] <= row[2]);
+///     assert!(row.iter().all(|q| y.iter().any(|yi| yi == q)));
 /// }
 /// ```
 pub fn predict_quantiles(
@@ -1013,25 +1101,19 @@ pub fn predict_quantiles(
     predict_quantiles_at(model, x_new, &model.quantiles)
 }
 
-/// Always errs: QRF needs the training responses to predict; use
-/// [`predict_quantiles_with_y_at`] to predict at chosen quantiles.
+/// Predict at chosen quantiles from the training responses the model keeps.
 ///
 /// # Arguments
 ///
 /// * `model` - Fitted QuantileRfResult
 /// * `x_new` - New feature matrix (n_samples x n_features)
-/// * `quantiles` - Quantiles to validate (each must be in (0, 1))
-///
-/// # Returns
-///
-/// * Always `Err`
+/// * `quantiles` - Quantiles to predict (each in (0, 1))
 ///
 /// # Errors
 ///
-/// Reports a column count different from the training data, or a quantile
-/// outside the open interval (0, 1) (NaN included), first. Otherwise it returns
-/// the message redirecting to [`predict_quantiles_with_y`]; the variant that
-/// also takes these quantiles is [`predict_quantiles_with_y_at`].
+/// When `x_new` has a different number of columns from the training data or a quantile lies
+/// outside the open interval (0, 1), NaN included; "Resource limit" or "Computation stopped"
+/// messages from the allocation and budget checks.
 pub fn predict_quantiles_at(
     model: &QuantileRfResult,
     x_new: ArrayView2<f64>,
@@ -1044,18 +1126,15 @@ pub fn predict_quantiles_at(
             x_new.ncols()
         ));
     }
-
     check_quantiles(quantiles)?;
-
-    // The model keeps leaf membership but not the training responses, so no
-    // quantile can be computed here.
-    Err("Out-of-sample prediction requires storing training y values. Use predict_quantiles_with_y instead.".to_string())
+    compute_quantile_predictions(&model.trees, &x_new, &model.y_train, quantiles, false)
+        .map_err(|e| e.to_string())
 }
 
-/// Predict quantiles for new observations with access to training y values.
+/// Predict quantiles for new observations from the training responses passed in.
 ///
-/// This is the primary prediction function for new data, as QRF requires
-/// access to the training response values to compute quantiles.
+/// As [`predict_quantiles`], with the training responses given by the caller instead of
+/// the ones the model keeps (they are ranked once per call).
 ///
 /// # Arguments
 ///
@@ -1108,8 +1187,7 @@ pub fn predict_quantiles_with_y_at(
         ));
     }
 
-    // The pooled leaf responses are sorted with a NaN-blind comparison, so a
-    // non-finite training response would yield NaN or misordered quantiles.
+    // A non-finite training response would yield NaN or misordered quantiles.
     let k = y_train.iter().filter(|v| !v.is_finite()).count();
     if k > 0 {
         return Err(format!(
@@ -1120,38 +1198,9 @@ pub fn predict_quantiles_with_y_at(
 
     check_quantiles(quantiles)?;
 
-    let n_samples = x_new.nrows();
-    let n_quantiles = quantiles.len();
-    let mut predictions = Array2::zeros((n_samples, n_quantiles));
-
-    for i in 0..n_samples {
-        let row = x_new.row(i);
-
-        // Collect all observations from leaves across all trees
-        let mut all_leaf_obs: Vec<f64> = Vec::new();
-        for tree in &model.trees {
-            let leaf_indices = tree.get_leaf_indices(&row);
-            for &idx in &leaf_indices {
-                if idx < y_train.len() {
-                    all_leaf_obs.push(y_train[idx]);
-                }
-            }
-        }
-
-        // Compute quantiles from pooled observations
-        if all_leaf_obs.is_empty() {
-            for j in 0..n_quantiles {
-                predictions[[i, j]] = f64::NAN;
-            }
-        } else {
-            all_leaf_obs.sort_unstable_by(f64::total_cmp);
-            for (j, &q) in quantiles.iter().enumerate() {
-                predictions[[i, j]] = quantile_sorted(&all_leaf_obs, q, QuantileType::T7);
-            }
-        }
-    }
-
-    Ok(predictions)
+    let ranks = RankedY::new(&y_train).map_err(|e| e.to_string())?;
+    compute_quantile_predictions(&model.trees, &x_new, &ranks, quantiles, false)
+        .map_err(|e| e.to_string())
 }
 
 /// Compute prediction intervals from quantile predictions.
@@ -1381,6 +1430,12 @@ mod tests {
 
     #[test]
     fn test_quantile_rf_seeded_output_is_unchanged() {
+        fn leaves(node: &QrfNode) -> usize {
+            match node {
+                QrfNode::Leaf { .. } => 1,
+                QrfNode::Split { left, right, .. } => leaves(left) + leaves(right),
+            }
+        }
         let (x, y) = noisy_regression(150, 3, 5);
         let cfg = QuantileRfConfig {
             n_trees: 25,
@@ -1389,22 +1444,249 @@ mod tests {
             ..Default::default()
         };
         let r = quantile_rf(x.view(), y.view(), &cfg).unwrap();
-        let got = [
-            r.predictions[[0, 1]],
-            r.predictions[[149, 0]],
-            r.predictions[[75, 2]],
-            r.oob_error.unwrap(),
-        ];
-        // Captured from the partition-per-threshold code on continuous data,
-        // where no SSE tie (exact or to within rounding) breaks differently and
-        // no tree reaches the depth cap; must stay bit-identical.
-        const EXPECTED: [u64; 4] = [
-            0x401d26720478d36c,
-            0xbff92b57a34a5541,
-            0x4028bfee6c5e0c40,
-            0x4016a63d0ba8b5a4,
-        ];
-        assert_eq!(got.map(f64::to_bits), EXPECTED);
+        // The grown forest is the earlier builder's, bit for bit: impurity and leaf counts
+        // captured before the predictions changed to Meinshausen's weights. The predictions
+        // themselves are checked against eq. (6) by the tests below.
+        const PURITY: [u64; 3] = [0x40ac009b9ebe57b3, 0x4084ec715c562529, 0x4092428adfb6b1f8];
+        let purity: Vec<u64> = r.inc_node_purity.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(purity, PURITY.to_vec());
+        let counts: Vec<usize> = r
+            .trees
+            .iter()
+            .map(|t| leaves(t.root.as_ref().unwrap()))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                33, 34, 34, 34, 34, 35, 35, 33, 35, 35, 36, 36, 35, 34, 35, 36, 34, 35, 34, 35, 38,
+                34, 36, 36, 37
+            ]
+        );
+        assert!(r.oob_error.unwrap().is_finite());
+    }
+
+    /// Stumps on feature 0 at the given thresholds, every training row in bag; the leaves hold
+    /// all rows (no bootstrap).
+    fn forest_from_thresholds(x: &Array2<f64>, thresholds: &[f64]) -> Vec<QuantileTree> {
+        thresholds
+            .iter()
+            .map(|&threshold| {
+                let mut tree = QuantileTree::new(x.ncols());
+                tree.root = Some(QrfNode::Split {
+                    feature_index: 0,
+                    threshold,
+                    left: Box::new(QrfNode::Leaf { id: 0 }),
+                    right: Box::new(QrfNode::Leaf { id: 1 }),
+                });
+                tree.in_bag = vec![u64::MAX; x.nrows().div_ceil(64)];
+                tree.record_members(&x.view(), 2).unwrap();
+                tree
+            })
+            .collect()
+    }
+
+    fn quantiles_at(
+        trees: &[QuantileTree],
+        x0: f64,
+        exclude: Option<usize>,
+        ranks: &RankedY,
+        alphas: &[f64],
+    ) -> Vec<f64> {
+        let mut buf = WeightBuf::new(ranks.sorted.len()).unwrap();
+        let mut out = vec![0.0; alphas.len()];
+        meinshausen_quantiles(
+            trees,
+            &array![x0].view(),
+            exclude,
+            ranks,
+            alphas,
+            &mut buf,
+            &mut out,
+        );
+        out
+    }
+
+    /// Meinshausen's weights and eq. (6) on a hand-built forest, against values computed in
+    /// base R (validation/ml/quantile_rf.md): the weights are dyadic, so the comparison is exact.
+    #[test]
+    fn test_qrf_meinshausen_two_stumps() {
+        let x = Array2::from_shape_fn((12, 1), |(i, _)| (i + 1) as f64);
+        let y = array![3.1, 1.4, 4.1, 1.5, 9.2, 6.5, 3.5, 8.9, 7.9, 3.2, 3.8, 4.6];
+        let trees = forest_from_thresholds(&x, &[4.5, 8.5]);
+        let ranks = RankedY::new(&y.view()).unwrap();
+        let alphas = [0.1, 0.25, 0.5, 0.75, 0.9];
+        assert_eq!(
+            quantiles_at(&trees, 3.0, None, &ranks, &alphas),
+            vec![1.4, 1.5, 3.1, 4.1, 8.9]
+        );
+        assert_eq!(
+            quantiles_at(&trees, 6.0, None, &ranks, &alphas),
+            vec![1.5, 3.2, 4.1, 7.9, 9.2]
+        );
+        assert_eq!(
+            quantiles_at(&trees, 10.0, None, &ranks, &alphas),
+            vec![3.2, 3.5, 4.6, 7.9, 8.9]
+        );
+        // Tree B alone: its leaf {1..8}, weight 1/8 each.
+        assert_eq!(
+            quantiles_at(&trees[1..], 2.0, None, &ranks, &alphas),
+            vec![1.4, 1.5, 3.5, 6.5, 9.2]
+        );
+        // The weights at x = 3: 3/16 on rows 1-4, 1/16 on rows 5-8.
+        let mut buf = WeightBuf::new(12).unwrap();
+        assert_eq!(
+            meinshausen_weights(&trees, &array![3.0].view(), None, &ranks, &mut buf),
+            2
+        );
+        for i in 0..12 {
+            let want = [0.1875, 0.0625, 0.0][i / 4];
+            assert_eq!(buf.weight[ranks.rank[i] as usize], want, "row {i}");
+        }
+    }
+
+    #[test]
+    fn test_qrf_weights_sum_to_one() {
+        let (x, y) = noisy_regression(120, 3, 21);
+        let cfg = QuantileRfConfig {
+            n_trees: 50,
+            min_node_size: 4,
+            seed: Some(21),
+            ..Default::default()
+        };
+        let m = quantile_rf(x.view(), y.view(), &cfg).unwrap();
+        let mut buf = WeightBuf::new(120).unwrap();
+        for i in [0usize, 17, 42, 77, 119] {
+            let row = x.row(i);
+            assert_eq!(
+                meinshausen_weights(&m.trees, &row, None, &m.y_train, &mut buf),
+                50
+            );
+            let total: f64 = buf.touched.iter().map(|&r| buf.weight[r as usize]).sum();
+            assert!((total - 1.0).abs() < 1e-12, "{total}");
+            let full: Vec<(u32, f64)> = buf
+                .touched
+                .iter()
+                .map(|&r| (r, buf.weight[r as usize]))
+                .collect();
+            // Each tree alone (k = 1) gives 1/|L| over its leaf; their sum over the trees,
+            // divided by k = 50, is the forest's weight at every rank.
+            let mut acc = vec![0.0; 120];
+            let mut one = WeightBuf::new(120).unwrap();
+            for t in 0..m.trees.len() {
+                assert_eq!(
+                    meinshausen_weights(&m.trees[t..=t], &row, None, &m.y_train, &mut one),
+                    1
+                );
+                let leaf = m.trees[t].leaf_members(&row);
+                let per_tree: f64 = one.touched.iter().map(|&r| one.weight[r as usize]).sum();
+                assert!((per_tree - 1.0).abs() < 1e-12, "{per_tree}");
+                for &member in leaf {
+                    let r = m.y_train.rank[member as usize] as usize;
+                    assert!(one.weight[r] > 0.0);
+                }
+                for &r in &one.touched {
+                    acc[r as usize] += one.weight[r as usize];
+                }
+            }
+            let touched_by_trees = acc.iter().filter(|&&w| w > 0.0).count();
+            assert_eq!(touched_by_trees, full.len());
+            for (r, w) in full {
+                // The two sides round 1/(50 |L|) and (1/|L|) / 50 differently over up to 50
+                // additions: a bound of 64 ulps covers that and nothing else.
+                let want = acc[r as usize] / 50.0;
+                assert!(
+                    (w - want).abs() <= 64.0 * f64::EPSILON * want,
+                    "rank {r}: {w} vs {want}"
+                );
+            }
+        }
+    }
+
+    /// Eq. (6) by brute force: responses in ascending order (ties by row), cumulative weight.
+    fn eq6_reference(mut weighted: Vec<(f64, usize, f64)>, alpha: f64) -> f64 {
+        weighted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut c = 0.0;
+        for &(v, _, w) in &weighted {
+            c += w;
+            if c >= alpha {
+                return v;
+            }
+        }
+        weighted.last().unwrap().0
+    }
+
+    #[test]
+    fn test_qrf_one_tree_is_its_leaf_ecdf() {
+        let (x, y) = noisy_regression(80, 2, 8);
+        let cfg = QuantileRfConfig {
+            n_trees: 1,
+            min_node_size: 4,
+            quantiles: vec![0.1, 0.5, 0.75, 0.9],
+            seed: Some(8),
+            ..Default::default()
+        };
+        let m = quantile_rf(x.view(), y.view(), &cfg).unwrap();
+        let tree = &m.trees[0];
+        for i in 0..80 {
+            let leaf = tree.leaf_members(&x.row(i));
+            let w = 1.0 / leaf.len() as f64;
+            for (j, &alpha) in cfg.quantiles.iter().enumerate() {
+                let pairs = leaf
+                    .iter()
+                    .map(|&r| (y[r as usize], r as usize, w))
+                    .collect();
+                assert_eq!(
+                    m.predictions[[i, j]],
+                    eq6_reference(pairs, alpha),
+                    "row {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_qrf_oob_excludes_the_row() {
+        let (x, y) = noisy_regression(60, 2, 12);
+        let cfg = QuantileRfConfig {
+            n_trees: 30,
+            min_node_size: 2,
+            quantiles: vec![0.25, 0.5, 0.9],
+            seed: Some(12),
+            ..Default::default()
+        };
+        let m = quantile_rf(x.view(), y.view(), &cfg).unwrap();
+        let oob = m.oob_predictions.as_ref().unwrap();
+        for i in 0..60 {
+            let row = x.row(i);
+            let leaves: Vec<Vec<usize>> = m
+                .trees
+                .iter()
+                .filter(|t| !t.is_in_bag(i))
+                .map(|t| {
+                    let leaf = t.leaf_members(&row).iter().map(|&r| r as usize);
+                    leaf.filter(|&r| r != i).collect::<Vec<_>>()
+                })
+                .filter(|leaf| !leaf.is_empty())
+                .collect();
+            if leaves.is_empty() {
+                assert!(oob.row(i).iter().all(|v| v.is_nan()));
+                continue;
+            }
+            let k = leaves.len() as f64;
+            let mut weight = vec![0.0; 60];
+            for leaf in &leaves {
+                for &r in leaf {
+                    weight[r] += 1.0 / (k * leaf.len() as f64);
+                }
+            }
+            for (j, &alpha) in cfg.quantiles.iter().enumerate() {
+                let pairs = (0..60)
+                    .filter(|&r| weight[r] > 0.0)
+                    .map(|r| (y[r], r, weight[r]))
+                    .collect();
+                assert_eq!(oob[[i, j]], eq6_reference(pairs, alpha), "row {i}");
+            }
+        }
     }
 
     #[test]
@@ -1546,14 +1828,8 @@ mod tests {
             };
             let mut tree = QuantileTree::new(1);
             let mut rng = 1u64;
-            tree.fit(
-                &x.view(),
-                &y.view(),
-                (0..2_000).collect(),
-                Vec::new(),
-                &cfg,
-                &mut rng,
-            );
+            tree.fit(&x.view(), &y.view(), (0..2_000).collect(), &cfg, &mut rng)
+                .unwrap();
             qrf_depth(tree.root.as_ref().unwrap())
         });
         assert_eq!(depth, MAX_TREE_DEPTH);
@@ -1615,6 +1891,45 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("cancelled"), "{err}");
+    }
+
+    /// A target whose centred sum of squares overflows is refused; a large finite one fits.
+    #[test]
+    fn test_qrf_refuses_overflowing_target() {
+        let (x, y) = noisy_regression(60, 2, 9);
+        let cfg = QuantileRfConfig {
+            n_trees: 5,
+            seed: Some(1),
+            ..Default::default()
+        };
+        let huge = y.mapv(|v| v * 1e200);
+        let err = quantile_rf(x.view(), huge.view(), &cfg).unwrap_err();
+        assert!(err.contains("rescale the target"), "{err}");
+        let big = y.mapv(|v| v * 1e70);
+        let r = quantile_rf(x.view(), big.view(), &cfg).unwrap();
+        assert!(r.variable_importance.iter().all(|v| v.is_finite()));
+        assert!((r.variable_importance.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+    }
+
+    /// The model keeps the training responses: predict_quantiles predicts (it always erred).
+    #[test]
+    fn test_predict_quantiles_uses_stored_y() {
+        let (x, y) = noisy_regression(80, 2, 4);
+        let cfg = QuantileRfConfig {
+            n_trees: 20,
+            min_node_size: 3,
+            quantiles: vec![0.1, 0.5, 0.9],
+            seed: Some(4),
+            ..Default::default()
+        };
+        let m = quantile_rf(x.view(), y.view(), &cfg).unwrap();
+        let x_new = x.slice(ndarray::s![..10, ..]);
+        let a = predict_quantiles(&m, x_new).unwrap();
+        let b = predict_quantiles_with_y(&m, x_new, y.view()).unwrap();
+        assert_eq!(a.mapv(f64::to_bits), b.mapv(f64::to_bits));
+        let a = predict_quantiles_at(&m, x_new, &[0.3]).unwrap();
+        let b = predict_quantiles_with_y_at(&m, x_new, y.view(), &[0.3]).unwrap();
+        assert_eq!(a.mapv(f64::to_bits), b.mapv(f64::to_bits));
     }
 
     #[test]
@@ -2023,10 +2338,10 @@ mod tests {
             &x.view(),
             &y.view(),
             (0..x.nrows()).collect(),
-            Vec::new(),
             &config,
             &mut 1u64,
-        );
+        )
+        .unwrap();
         let total: f64 = tree.impurity_decrease().iter().sum();
         let share: Vec<f64> = tree.impurity_decrease().iter().map(|v| v / total).collect();
         Check::new(&case)
