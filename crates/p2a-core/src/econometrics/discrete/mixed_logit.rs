@@ -1748,9 +1748,7 @@ mod tests {
         }
     }
 
-    /// A random parameter that is not a variable, and halton_drop = 0 (point 0 of the
-    /// sequence is 0, whose normal quantile is -infinity), are refused.
-    /// The refusals of the conditional logit, on the same malformed Fishing data
+    /// The mixed logit's refusals, on the conditional logit's malformed Fishing data
     /// (`sit_chosen` used the last chosen row, or the first row when none was chosen).
     fn mixed_refusal(kind: Malformed) -> String {
         let (_, ds) = case_data("disc_mlogit_fishing");
@@ -1858,6 +1856,8 @@ mod tests {
         );
     }
 
+    /// A random parameter that is not a variable, and halton_drop = 0 (point 0 of the
+    /// sequence is 0, whose normal quantile is -infinity), are refused.
     #[test]
     fn test_mixed_logit_rejects_unknown_random_variable() {
         let (_, ds) = case_data("disc_mixed_logit");

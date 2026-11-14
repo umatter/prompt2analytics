@@ -477,6 +477,8 @@ fn constants_only_loglik(
     let mut null_warnings = Vec::new();
     let NewtonFit {
         converged,
+        iterations,
+        line_search_failed,
         at_params,
         ..
     } = newton_maximise(
@@ -491,11 +493,22 @@ fn constants_only_loglik(
         None => compute_mlogit_loglik_fast(&null_data, &params),
     };
     if !converged {
+        let why = match line_search_failed {
+            Some(it) => {
+                format!("stopped at iteration {it}, where the line search found no increase")
+            }
+            None => format!("did not converge in {iterations} iterations"),
+        };
         warnings.push(format!(
-            "the constants-only null model did not converge in {} iterations; the \
-             pseudo R-squared uses its last log-likelihood",
-            config.max_iter
+            "the constants-only null model {why}; the pseudo R-squared uses its last \
+             log-likelihood"
         ));
+    }
+    for w in null_warnings {
+        let w = format!("constants-only null model: {w}");
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
     }
     Ok(ll)
 }

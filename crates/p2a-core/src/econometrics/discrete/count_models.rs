@@ -627,10 +627,10 @@ fn theta_newton_with(
 /// vanishes there), so only theta is fitted, by [`theta_newton_with`] from `theta_start`
 /// on the distinct values of `y` with their multiplicities. An all-zero outcome has
 /// log-likelihood 0 (every row has probability 1 at mean 0).
-fn negbin_null_loglik(y: &[f64], y_mean: f64, theta_start: f64) -> EconResult<f64> {
+fn negbin_null_loglik(y: &[f64], y_mean: f64, theta_start: f64) -> EconResult<(f64, bool)> {
     use statrs::function::gamma::ln_gamma;
     if y_mean == 0.0 {
-        return Ok(0.0);
+        return Ok((0.0, true));
     }
     let mut sorted = resource::try_with_capacity(y.len(), "negative binomial null model")?;
     sorted.extend_from_slice(y);
@@ -675,8 +675,8 @@ fn negbin_null_loglik(y: &[f64], y_mean: f64, theta_start: f64) -> EconResult<f6
             })
             .sum()
     };
-    let (theta0, _) = theta_newton_with(theta_start, &loglik, score, information)?;
-    Ok(loglik(theta0))
+    let (theta0, converged) = theta_newton_with(theta_start, loglik, score, information)?;
+    Ok((loglik(theta0), converged))
 }
 
 /// Run negative binomial regression (NB2, log link).
@@ -861,7 +861,15 @@ pub fn run_negbin(
     let log_likelihood = nb_loglik(theta, &work.mu, y);
 
     // Null log-likelihood: glm.nb(y ~ 1) on the same rows, with its own theta
-    let log_likelihood_null = negbin_null_loglik(y, y_mean, theta)?;
+    let (log_likelihood_null, null_converged) = negbin_null_loglik(y, y_mean, theta)?;
+    if !null_converged {
+        warnings.push(
+            "the intercept-only null model (glm.nb(y ~ 1)) did not converge: its theta reached \
+             a value where the log-likelihood is not finite; the pseudo R-squared uses its last \
+             log-likelihood"
+                .to_string(),
+        );
+    }
 
     // Standard errors from the expected information (X'WX)^-1 (summary.negbin)
     for (wi, &mi) in work.w.iter_mut().zip(&work.mu) {
@@ -2048,8 +2056,9 @@ pub struct HurdleResult {
     pub aic: f64,
     /// BIC
     pub bic: f64,
-    /// Newton iterations of the count part (for NB, those of its truncated-Poisson start
-    /// included); the zero part's IRLS is glm's and reports through its warnings.
+    /// Newton iterations of the count part (for NB, those of the NB fit, without its
+    /// truncated-Poisson start), at most `HURDLE_COUNT_MAX_ITER`; the zero part's IRLS is glm's
+    /// and reports through its warnings.
     pub iterations: usize,
     /// Whether both parts converged (the count part's Newton fit and the zero part's
     /// glm.fit)
@@ -2617,7 +2626,8 @@ fn fit_truncated_count_part<'a>(
         (Array2::zeros((0, 0)), Array2::zeros((0, 0)), Vec::new())
     };
     let (fit, iterations) = if negbin {
-        let start = maximise_by_newton(
+        // the truncated-Poisson start; its iterations are not the count part's
+        maximise_by_newton(
             |p: &[f64], g: Option<&mut [f64]>, h: Option<&mut Array2<f64>>| {
                 truncated_loglik(&poisson, p, g, h)
             },
@@ -2646,7 +2656,7 @@ fn fit_truncated_count_part<'a>(
             WHAT,
             warnings,
         )?;
-        let iterations = start.iterations + fit.iterations;
+        let iterations = fit.iterations;
         (fit, iterations)
     } else {
         let fit = maximise_by_newton(
@@ -3141,7 +3151,8 @@ mod tests {
             r.log_likelihood_null
         );
         // the null model's theta itself is at the bound
-        let null = negbin_null_loglik(&y, ybar, 1.0).unwrap();
+        let (null, converged) = negbin_null_loglik(&y, ybar, 1.0).unwrap();
+        assert!(converged);
         assert!((null - poisson_ll).abs() <= 1e-6 * poisson_ll.abs());
     }
 
@@ -3149,13 +3160,17 @@ mod tests {
     /// (every row has probability 1 at mean 0), never NaN, and nothing panics.
     #[test]
     fn test_negbin_null_all_zero() {
-        assert_eq!(negbin_null_loglik(&[0.0; 20], 0.0, 1.0).unwrap(), 0.0);
+        assert_eq!(
+            negbin_null_loglik(&[0.0; 20], 0.0, 1.0).unwrap(),
+            (0.0, true)
+        );
         let x: Vec<f64> = (0..20).map(|i| i as f64 / 7.0).collect();
         let ds = Dataset::new(df! { "y" => vec![0.0; 20], "x" => x }.unwrap());
-        if let Ok(r) = run_negbin(&ds, "y", &["x"], None) {
-            assert_eq!(r.log_likelihood_null, 0.0);
-            assert!(!r.warnings.is_empty());
-        }
+        // an all-zero outcome is fitted and reported as not converged
+        let r = run_negbin(&ds, "y", &["x"], None).unwrap();
+        assert_eq!(r.log_likelihood_null, 0.0);
+        assert!(!r.converged);
+        assert!(!r.warnings.is_empty());
     }
 
     #[test]

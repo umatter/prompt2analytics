@@ -146,7 +146,7 @@ of minus the Hessian at the estimate; for NB, `SE(ln theta)` is pscl's `SE.logth
 `SE(theta) = theta SE(ln theta)`. A theta above 1e6 (no overdispersion among the positive
 counts) is reported as for ZINB: the coefficient SEs from the coefficient block, the theta
 SEs NaN, `converged = false` and a warning. `iterations` and the convergence record describe
-the count part (for NB including its truncated-Poisson start); `converged` is both parts.
+the count part (for NB the NB fit's, without its truncated-Poisson start); `converged` is both parts.
 
 Case `disc_hurdle_t4` (`validation/r/cases/discrete_t4.R`, `zeroinfl.csv`, n 500): pscl's
 count part (`optim`, reltol 1e-15) polished by Newton steps on the analytic truncated score,
