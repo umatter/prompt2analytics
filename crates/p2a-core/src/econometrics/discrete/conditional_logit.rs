@@ -77,9 +77,12 @@ pub struct MlogitResult {
     pub gamma_p_values: Vec<Vec<f64>>,
     /// Log-likelihood at convergence
     pub log_likelihood: f64,
-    /// Log-likelihood of null model
+    /// Log-likelihood of the null model: with alternative-specific constants the
+    /// constants-only conditional logit (on choice sets that all hold every alternative,
+    /// mlogit's market shares `sum_j n_j ln(n_j / N)`); without them, equal choice
+    /// probabilities in each situation, `-sum_i ln J_i`
     pub log_likelihood_null: f64,
-    /// McFadden's pseudo R-squared
+    /// McFadden's pseudo R-squared, `1 - log_likelihood / log_likelihood_null`
     pub pseudo_r_squared: f64,
     /// AIC
     pub aic: f64,
@@ -412,6 +415,85 @@ pub(super) fn validate_choice_sets(
         return Ok(());
     };
     Err(EconError::InvalidSpecification { message })
+}
+
+/// `-sum_i ln J_i`: the log-likelihood of equal choice probabilities within each
+/// situation (`choice_info` holds `(start, J_i, chosen)` per situation).
+pub(super) fn equal_shares_loglik(choice_info: &[(usize, usize, usize)]) -> f64 {
+    -choice_info
+        .iter()
+        .map(|&(_, n_alts, _)| (n_alts as f64).ln())
+        .sum::<f64>()
+}
+
+/// Log-likelihood of the constants-only conditional logit, the null model of a fit with
+/// alternative-specific constants. When every situation offers every alternative its
+/// MLE has the market shares as choice probabilities, so the value is mlogit's
+/// `sum_j n_j ln(n_j / N)` (`n_j` the situations choosing `j`; an alternative nobody
+/// chooses adds 0). Otherwise the constants are fitted by [`newton_maximise`] from 0 under
+/// the model's control; a fit that does not converge leaves a warning.
+#[allow(clippy::too_many_arguments)]
+fn constants_only_loglik(
+    data: &MlogitData,
+    choice_situations: &[Vec<(usize, usize)>],
+    choices: &[f64],
+    ones: &[f64],
+    n_alternatives: usize,
+    ref_idx: usize,
+    config: &MlogitConfig,
+    warnings: &mut Vec<String>,
+) -> EconResult<f64> {
+    if data
+        .choice_info
+        .iter()
+        .all(|&(_, n_alts, _)| n_alts == n_alternatives)
+    {
+        let mut chosen = resource::try_vec(n_alternatives, 0usize, "market shares")?;
+        for alts in choice_situations {
+            for &(row, alt) in alts {
+                if choices[row] > 0.5 {
+                    chosen[alt] += 1;
+                }
+            }
+        }
+        let n = choice_situations.len() as f64;
+        return Ok(chosen
+            .iter()
+            .filter(|&&c| c > 0)
+            .map(|&c| c as f64 * (c as f64 / n).ln())
+            .sum());
+    }
+    let null_data = MlogitData::new(
+        choice_situations,
+        choices,
+        &[],
+        &[ones],
+        0,
+        1,
+        n_alternatives,
+        ref_idx,
+    )?;
+    let mut params = resource::try_vec(null_data.n_params, 0.0, "constants-only model")?;
+    let mut null_warnings = Vec::new();
+    let (converged, _, _, at_params) = newton_maximise(
+        &null_data,
+        &mut params,
+        config,
+        "constants-only information matrix",
+        &mut null_warnings,
+    )?;
+    let ll = match at_params {
+        Some(known) => known.ll,
+        None => compute_mlogit_loglik_fast(&null_data, &params),
+    };
+    if !converged {
+        warnings.push(format!(
+            "the constants-only null model did not converge in {} iterations; the \
+             pseudo R-squared uses its last log-likelihood",
+            config.max_iter
+        ));
+    }
+    Ok(ll)
 }
 
 /// Pre-computed data structure for fast mlogit computation.
@@ -849,7 +931,20 @@ pub fn run_mlogit_with(
         Some(known) => known,
         None => compute_mlogit_derivatives_fast(&mlogit_data, &params)?,
     };
-    let log_likelihood_null = n_choice_situations as f64 * (-(n_alternatives as f64).ln());
+    let log_likelihood_null = if config.asc {
+        constants_only_loglik(
+            &mlogit_data,
+            &choice_situations,
+            choices,
+            &ones,
+            n_alternatives,
+            ref_idx,
+            config,
+            &mut warnings,
+        )?
+    } else {
+        equal_shares_loglik(&mlogit_data.choice_info)
+    };
 
     let std_errors: Vec<f64> = match covariance_from_information(&info, what, &mut warnings)? {
         Some(vcov) => (0..n_params)
@@ -1469,6 +1564,141 @@ mod tests {
     }
 
     /// mlogit(chosen ~ price + catch | income) on Fishing: J - 1 constants by default.
+    /// Fishing with charter removed from 300 situations (3 or 4 alternatives): the
+    /// null log-likelihood holds for choice sets of different sizes. Without constants it
+    /// is equal shares per situation, `-sum ln J_i`; with constants the constants-only
+    /// fit (mlogit's market-share formula is not a nested model's likelihood here:
+    /// registry deviation). Coefficients and SEs as on the balanced data.
+    #[test]
+    fn test_validate_mlogit_null_unbalanced_choice_sets() {
+        let (case, ds) = crate::test_support::load_case("disc_clogit_unbalanced_t4");
+        let fit = |asc: bool| {
+            let config = MlogitConfig {
+                asc,
+                ..MlogitConfig::default()
+            };
+            run_mlogit_with(
+                &ds,
+                "id",
+                "alt",
+                "chosen",
+                &["price", "catch"],
+                &[],
+                &config,
+            )
+            .unwrap()
+        };
+        let (asc, noasc) = (fit(true), fit(false));
+        let n = asc.n_choice_situations;
+        Check::new(&case)
+            .scalar("unbal_n_situations", n as f64, Tol::exact())
+            .named(
+                "unbal_asc_coef_tight",
+                &asc.coefficient_names(),
+                &asc.coefficients(),
+                Tol::iterative(1e-9),
+            )
+            .named(
+                "unbal_asc_se_tight",
+                &asc.coefficient_names(),
+                &asc.std_errors(),
+                Tol::iterative(1e-8),
+            )
+            .scalar("unbal_asc_loglik", asc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "unbal_null_constants_only",
+                asc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "unbal_asc_pr2_constants",
+                asc.pseudo_r_squared,
+                Tol::iterative(1e-9),
+            )
+            .named(
+                "unbal_noasc_coef_tight",
+                &noasc.coefficient_names(),
+                &noasc.coefficients(),
+                Tol::iterative(1e-9),
+            )
+            .named(
+                "unbal_noasc_se_tight",
+                &noasc.coefficient_names(),
+                &noasc.std_errors(),
+                Tol::iterative(1e-8),
+            )
+            .scalar("unbal_noasc_loglik", noasc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "unbal_null_equal_shares",
+                noasc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "unbal_noasc_pr2_equal",
+                noasc.pseudo_r_squared,
+                Tol::iterative(1e-10),
+            )
+            .finish();
+        assert!(
+            asc.converged && asc.warnings.is_empty(),
+            "{:?}",
+            asc.warnings
+        );
+    }
+
+    /// On choice sets that all hold every alternative the constants-only null is
+    /// mlogit's market-share null, so the McFadden R2 of the model with constants is
+    /// mlogit's; without constants the null is equal shares.
+    #[test]
+    fn test_validate_mlogit_null_balanced_matches_mlogit() {
+        let (case, _) = crate::test_support::load_case("disc_clogit_unbalanced_t4");
+        let path = p2a_validation::repo_path(&case.datasets[0]);
+        assert!(path.ends_with("mlogit_fishing.csv"), "{}", path.display());
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        let fit = |asc: bool| {
+            let config = MlogitConfig {
+                asc,
+                ..MlogitConfig::default()
+            };
+            run_mlogit_with(
+                &ds,
+                "id",
+                "alt",
+                "chosen",
+                &["price", "catch"],
+                &[],
+                &config,
+            )
+            .unwrap()
+        };
+        let (asc, noasc) = (fit(true), fit(false));
+        let n = asc.n_choice_situations;
+        Check::new(&case)
+            .scalar("bal_asc_loglik", asc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "bal_null_market_shares",
+                asc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bal_asc_pr2_pkg",
+                asc.pseudo_r_squared,
+                Tol::iterative(1e-9),
+            )
+            .scalar("bal_noasc_loglik", noasc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "bal_null_equal_shares",
+                noasc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bal_noasc_pr2_equal",
+                noasc.pseudo_r_squared,
+                Tol::iterative(1e-10),
+            )
+            .finish();
+    }
+
     #[test]
     fn test_validate_mlogit_fishing_asc() {
         let (case, ds) = crate::test_support::load_case("disc_mlogit_fishing");

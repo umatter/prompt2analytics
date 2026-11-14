@@ -48,6 +48,41 @@
       "tolerance": "log-likelihoods Tol::stat(n) (n = 400, 395); pseudo-R2 1e-8 relative; rows exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_mlogit_null",
+      "name": "Conditional logit on unbalanced choice sets and its null log-likelihood (mlogit)",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(chosen ~ price + catch[ | 0]) on Fishing and on Fishing with charter removed from 300 situations, Newton-polished; null log-likelihoods: equal shares -sum ln J_i, mlogit's logLik 'null' attribute (market shares) and the constants-only MLE",
+      "doc": "validation/econometrics/mlogit.md",
+      "cases": [
+        "disc_clogit_unbalanced_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_null_unbalanced_choice_sets",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_null_balanced_matches_mlogit"
+      ],
+      "quantities": [
+        "coefficients and SEs on unbalanced choice sets",
+        "log-likelihood",
+        "null log-likelihood",
+        "McFadden pseudo-R2",
+        "choice situations"
+      ],
+      "tolerance": "coefficients 1e-9, SEs 1e-8 relative; log-likelihoods Tol::stat(1182); pseudo-R2 1e-9 (constants) and 1e-10 (equal shares) relative",
+      "deviations": [
+        {
+          "finding": "ECON-63",
+          "quantity": "null log-likelihood and pseudo-R2 of a model with constants on unbalanced choice sets",
+          "note": "the constants-only conditional logit fit (-1322.50 on the reference; McFadden 0.2037), the likelihood of the nested model; mlogit's market-share formula (-1497.72; 0.2969) gives probability to alternatives a situation did not offer. On balanced choice sets the two are equal and pinned against mlogit"
+        },
+        {
+          "finding": "ECON-63",
+          "quantity": "null log-likelihood of models without constants",
+          "note": "equal shares per situation, -sum ln J_i; mlogit's logLik 'null' attribute is the market-share value for every model, but summary.mlogit prints no McFadden R2 without an intercept, so no printed R number differs"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

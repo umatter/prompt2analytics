@@ -155,7 +155,8 @@ pub struct MixedLogitResult {
     pub std_dev_p_values: Vec<f64>,
     /// Log-likelihood at convergence
     pub log_likelihood: f64,
-    /// Log-likelihood of null model
+    /// Log-likelihood of the null model: equal choice probabilities within each
+    /// situation, `-sum_i ln J_i` (the model has no alternative-specific constants)
     pub log_likelihood_null: f64,
     /// Number of choice situations
     pub n_choice_situations: usize,
@@ -306,6 +307,9 @@ struct ChoiceData {
     unit_situations: Vec<Vec<usize>>,
     /// Number of individuals when an individual column was given.
     n_individuals: Option<usize>,
+    /// `-sum_i ln J_i`: equal choice probabilities within each situation (the null
+    /// model).
+    ll_equal_shares: f64,
 }
 
 /// The choice data of `run_mixed_logit`. Every column comes from one request with
@@ -396,7 +400,9 @@ fn choice_data(
         }
     };
 
+    let ll_equal_shares = -sit_rows.iter().map(|&j| (j as f64).ln()).sum::<f64>();
     Ok(ChoiceData {
+        ll_equal_shares,
         n_vars,
         n_alternatives: cols.factor(alt_id_col).n_levels(),
         sit_x,
@@ -1125,7 +1131,7 @@ pub fn run_mixed_logit(
         .collect();
     let std_dev_p_values: Vec<f64> = std_dev_z_stats.iter().map(|&z| p_value(z)).collect();
 
-    let ll_null = -(n_choice_situations as f64) * (n_alternatives as f64).ln();
+    let ll_null = data.ll_equal_shares;
     let aic = -2.0 * ll + 2.0 * n_params as f64;
     let bic = -2.0 * ll + (n_params as f64) * (n_choice_situations as f64).ln();
 
@@ -1361,6 +1367,7 @@ mod tests {
             sit_chosen: vec![0],
             unit_situations: vec![vec![0]],
             n_individuals: None,
+            ll_equal_shares: -(2f64).ln(),
         };
         let draws = DrawSet {
             n_draws,
@@ -1640,6 +1647,66 @@ mod tests {
         assert!(
             m.contains("alternative 'boat' appears twice in choice situation '2'"),
             "{m}"
+        );
+    }
+
+    /// Without alternative-specific constants the null is equal shares in each situation:
+    /// with situations of 2 and 3 alternatives it is `-sum ln J_i`, not `-N ln J`.
+    #[test]
+    fn test_mixed_logit_null_is_equal_shares_per_situation() {
+        let (_, ds) = case_data("disc_mixed_logit");
+        // drop one unchosen row from every third situation
+        let df = ds.df();
+        let ids: Vec<f64> = df
+            .column("id")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let choice: Vec<f64> = df
+            .column("choice")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let mut keep = vec![true; ids.len()];
+        let mut dropped_in: Option<f64> = None;
+        for (i, (&id, &c)) in ids.iter().zip(&choice).enumerate() {
+            if (id as i64) % 3 == 0 && c < 0.5 && dropped_in != Some(id) {
+                keep[i] = false;
+                dropped_in = Some(id);
+            }
+        }
+        let mask = BooleanChunked::from_slice("keep".into(), &keep);
+        let ds = Dataset::new(df.filter(&mask).unwrap());
+        let mut sizes: std::collections::BTreeMap<i64, usize> = Default::default();
+        for (&id, &k) in ids.iter().zip(&keep) {
+            if k {
+                *sizes.entry(id as i64).or_default() += 1;
+            }
+        }
+        assert!(sizes.values().any(|&j| j == 2) && sizes.values().any(|&j| j == 3));
+        let expected: f64 = -sizes.values().map(|&j| (j as f64).ln()).sum::<f64>();
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &["x", "w"],
+            &[normal("x")],
+            Some(draws_cfg(5)),
+        )
+        .unwrap();
+        assert!(
+            (r.log_likelihood_null - expected).abs() <= 1e-12 * expected.abs(),
+            "{} vs {expected}",
+            r.log_likelihood_null
         );
     }
 
