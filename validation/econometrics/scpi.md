@@ -21,7 +21,8 @@ outcomes and computes the prediction intervals of Cattaneo, Feng and Titiunik (2
   the pseudo-residuals' conditional mean is the linear fit on the active donors and a constant (a
   constant alone when T0 - 10 does not exceed the columns); Sigma = B' Omega B / T0^2 with the HC1
   weights `T0 / (T0 - df)`, df the number of non-zero weights minus 1. rho is scpi's type-2 rule
-  capped at `rho.max = 0.2` (with scpi's fallbacks below 0.001 and 0.05); a donor whose weight is
+  capped at `rho.max = 0.2` (with scpi's fallbacks below 0.001 and 0.05, and scpi's warning when
+  the first raises rho); a donor whose weight is
   below rho keeps it as its lower bound. Per simulation G = Sigma^(1/2) z with z standard normal,
   and per post period the minimum and maximum of `p_t' delta` subject to
   `delta' Q delta - 2 G' delta <= 0` (Q = B'B / T0) over the localised simplex. The in-sample bounds
@@ -30,8 +31,12 @@ outcomes and computes the prediction intervals of Cattaneo, Feng and Titiunik (2
   `||w + delta||_2 <= ||w||_2 + rho` (not R-pinned).
 - The programs are solved by a logarithmic barrier method: one phase I per simulation finds a
   strictly feasible point, every objective of that simulation starts from it, and the duality gap is
-  1e-10 of the scaled problem. A simulation whose program fails is left out of the quantiles and
-  counted (`n_failed_sims`, with a warning).
+  1e-10 of the scaled problem. The gap bound holds only near the central path, so the last centring
+  must end with a Newton decrement of at most 1/4 (gap at most `(2m + 1) / t`); a centring that ends
+  above it is retried from the last centred point with a shorter step in t. A simulation whose
+  program fails, or ends uncentred, is left out of the quantiles and counted (`n_failed_sims`, with a
+  warning), as an ECOS failure in scpi. An explicit `e_method` wins over the deprecated
+  `variance_method` (with a warning).
 - Out-of-sample uncertainty (scpi's `e.method = "all"`, `e.order = 1`, `e.lags = 0`), each side at
   `e_alpha / 2`: sub-Gaussian (`gaussian`: the fitted mean plus `sqrt(-2 log(alpha))` times the
   smaller of the fitted conditional standard deviation and IQR / 1.34 of the quantile-regression
@@ -100,15 +105,30 @@ the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a
 
 **After CAUS-32 (scpi's intervals).** The rows above time the closed-form heuristic interval that
 CAUS-32 replaced. The simulated intervals solve `2 x sims x T1` programs (4,000 at the defaults with
-T1 = 10), so they cost orders of magnitude more; there is no like-for-like base. Release build of
-this tree, same flags and pinning, three processes, each the median of 3 calls (J = 10) or 1 call
-(J = 40) after 2 warm-ups; 2026-11-14, load average 1-5. `run_scpi`, simplex, defaults (200
-simulations, all three out-of-sample methods), 10 post-treatment periods:
+T1 = 10), so they cost orders of magnitude more; there is no like-for-like base. A first measurement
+(2026-11-14, three processes of 1-3 calls) gave 1.98 s (J = 10, T0 = 20), 15.6 s (J = 40, T0 = 20)
+and 19.7 s (J = 40, T0 = 50) per call. The table below is the final tree against the first version
+of the simulated intervals (before the in-sample solves were certified centred and the retry with a
+shorter step was added): release builds, `--no-default-features --features ci`, one core
+(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
+the median of 5 calls (J = 10) or one call (J = 40); median of the five; 2026-11-14, load average
+2-6. `run_scpi`, simplex, defaults (200 simulations, all three out-of-sample methods), T1 = 10, on
+a deterministic noisy panel (donor k at period t: `10 + t (0.5 + 0.05 k) + sin(t (k + 1.3)) +
+0.3 cos(7.1 t + 3.7 k)`; treated: 0.5, 0.3, 0.2 of donors 0-2 plus `0.2 sin(1.9 t)`); no
+simulation failed on either side:
 
 | | J = 10, T0 = 20 | J = 40, T0 = 20 | J = 40, T0 = 50 |
 |---|---|---|---|
-| seconds per call (median of the three processes) | 1.98 | 15.6 | 19.7 |
-| base (closed form, 2026-11-13) | 18.3 µs | microseconds (absolute not recorded) | microseconds (absolute not recorded) |
+| final tree, seconds per call | 2.04 | 2.84 | 24.7 |
+| first simulated version, seconds per call | 2.10 | 2.96 | 35.6 |
+| ratio final / first | 0.97 | 0.96 | 0.69 |
+
+The first version returned the last barrier point even when its centring had stalled; on the
+J = 40, T0 = 50 panel almost every solve stalled with the long step, so its bounds there were not
+certified and the final tree's lower time comes with the certified ones. Peak resident memory
+(`/usr/bin/time -v`, one call per process, J = 40, T1 = 10, 200 simulations): 4.6 MB for the final
+tree at T0 = 20 and T0 = 50 (first version 4.7 MB); the simulation bounds are `2 x sims x T1`
+numbers, and each program holds matrices of the donor count squared.
 
 For scale, R's `scpi()` 3.0.1 on the case's panel (J = 8, T0 = 14, T1 = 6) takes about 5 seconds.
 The time grows linearly with `sims`; the hosted limits cap `sims`.
