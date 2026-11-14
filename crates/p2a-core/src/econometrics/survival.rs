@@ -5717,7 +5717,9 @@ mod tests {
     #[test]
     fn test_validate_cox_concordance_ties_small() {
         let (case, _) = load_case("surv_concordance_t4");
-        let (_, toy) = load_case("surv_cox_ties_small");
+        let toy = crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/cox_ties_small.csv",
+        );
         let n = toy.nrows();
         let mut check = Check::new(&case);
         for ties in [TiesMethod::Efron, TiesMethod::Breslow] {
@@ -5874,7 +5876,9 @@ mod tests {
 
     #[test]
     fn test_log_rank_single_group_names_the_column() {
-        let (_, ds) = load_case("surv_logrank_lung");
+        let ds = crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/lung.csv",
+        );
         let ds = derive_f64(&ds, "sex", "one", |_, _| 1.0);
         let m = invalid_spec(log_rank_test(&ds, "time", "status", "one"), "log-rank");
         assert!(
@@ -5885,7 +5889,9 @@ mod tests {
 
     #[test]
     fn test_cox_df_saturates_on_inconsistent_result() {
-        let (_, ds) = load_case("surv_cox_info_singular_t4");
+        let ds = crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/cox_info_singular.csv",
+        );
         let mut r = run_cox_ph(&ds, "time", "status", &["z"], None).unwrap();
         r.aliased = vec!["a".into(), "b".into()];
         assert_eq!(r.df(), 0);

@@ -2354,7 +2354,9 @@ mod tests {
     // ---- T4: constant-effect test, Neyman SE, decomposition ----
 
     /// The hettx_dfm_t4 data: (y_het, y_homo, z, x) and the stored assignments.
-    fn dfm_case() -> (
+    fn dfm_case(
+        id: &str,
+    ) -> (
         p2a_validation::Case,
         Array1<f64>,
         Array1<f64>,
@@ -2363,7 +2365,7 @@ mod tests {
         Vec<u8>,
     ) {
         use crate::data::columns::{NaPolicy, numeric_column};
-        let (case, ds) = crate::test_support::load_case("hettx_dfm_t4");
+        let (case, ds) = crate::test_support::load_case(id);
         let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
         let z: Vec<u8> = col("treat").iter().map(|&t| t as u8).collect();
         let x = ndarray::stack![
@@ -2399,7 +2401,7 @@ mod tests {
     #[test]
     fn test_validate_hettx_frt_sks_stored_assignments() {
         use p2a_validation::{Check, Tol};
-        let (case, y_het, y_homo, z, _, assignments) = dfm_case();
+        let (case, y_het, y_homo, z, _, assignments) = dfm_case("hettx_dfm_t4");
         let n = z.len();
         let b_draws = case.scalar("B") as usize;
         let gamma = case.scalar("gamma");
@@ -2465,7 +2467,7 @@ mod tests {
     #[test]
     fn test_validate_hettx_systematic_interaction_hc2() {
         use p2a_validation::{Check, Tol};
-        let (case, y_het, y_homo, z, x, assignments) = dfm_case();
+        let (case, y_het, y_homo, z, x, assignments) = dfm_case("hettx_dfm_t4");
         let n = z.len();
         let b_draws = case.scalar("B") as usize;
         let names = vec!["x1".to_string(), "x2".to_string()];

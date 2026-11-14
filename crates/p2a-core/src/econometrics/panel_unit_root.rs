@@ -3636,7 +3636,9 @@ mod tests {
     #[test]
     fn test_panel_notes_exclude_missing_note() {
         use crate::econometrics::panel::{PanelGlsModel, run_fixed_effects, run_panel_gls};
-        let (_, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let ds = crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/grunfeld_na.csv",
+        );
         let fe = run_fixed_effects(&ds, "inv", &["value", "capital"], "firm_name").unwrap();
         // panel GLS needs N >= T: the first ten years (rows with a missing year kept)
         let early = {
