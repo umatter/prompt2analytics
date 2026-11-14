@@ -1714,7 +1714,7 @@ const QCQP_NEWTON_MAX: usize = 60;
 /// (Nesterov, Introductory Lectures on Convex Optimization, section 4.2), within a factor of
 /// about 2 of the centred bound `m / t`.
 const QCQP_CENTRED: f64 = 0.25;
-/// Growth factor of t between centrings, and the smallest one the careful pass of
+/// Growth factor of t between centrings, and the smallest one the retries of
 /// [`Qcqp::barrier`] may shrink it to.
 const QCQP_MU: f64 = 50.0;
 const QCQP_MU_MIN: f64 = 2.0;
@@ -1910,32 +1910,18 @@ impl Qcqp {
 
     /// The barrier method (Boyd and Vandenberghe, section 11.3) from the strictly feasible `x`:
     /// centring steps at t = 1, 50, 2500, ... until the duality gap `m / t` of the scaled problem
-    /// is below [`QCQP_GAP`]. The gap bound holds only near the central path, so the last
-    /// centring must end with a decrement of at most [`QCQP_CENTRED`]; when it does not, the path
-    /// is followed again with shorter steps. `Ok(None)` when a Newton system fails or no path
-    /// ends centred (as an ECOS failure in scpi).
+    /// is below [`QCQP_GAP`]. The gap bound holds only near the central path, so a centring that
+    /// ends with a decrement above [`QCQP_CENTRED`] is retried from the last centred point with t
+    /// grown by the square root of the previous factor, down to [`QCQP_MU_MIN`]; below that the
+    /// path goes on from the uncentred point, but the last centring must end centred. `Ok(None)`
+    /// when a Newton system fails or the last centring ends uncentred (as an ECOS failure in
+    /// scpi). The budget is checked once per centring.
     fn barrier(&self, c: &Array1<f64>, x0: &Array1<f64>) -> EconResult<Option<Array1<f64>>> {
-        match self.barrier_path(c, x0, false)? {
-            Some(x) => Ok(Some(x)),
-            None => self.barrier_path(c, x0, true),
-        }
-    }
-
-    /// One pass of [`Qcqp::barrier`]. An uncentred intermediate centring is only a start for the
-    /// next one; with `careful`, it is retried instead from the last centred point with t grown
-    /// by the square root of the previous factor, down to [`QCQP_MU_MIN`]. The budget is checked
-    /// once per centring.
-    fn barrier_path(
-        &self,
-        c: &Array1<f64>,
-        x0: &Array1<f64>,
-        careful: bool,
-    ) -> EconResult<Option<Array1<f64>>> {
         let n_ineq = (self.g.nrows() + self.quads.len()) as f64;
         let mut x = x0.clone();
         let mut t = 1.0;
         let mut mu = QCQP_MU;
-        // with `careful`, the last centred point and its t
+        // the last centred point and its t
         let mut prev: Option<(Array1<f64>, f64)> = None;
         loop {
             crate::resource::checkpoint()?;
@@ -1947,12 +1933,9 @@ impl Qcqp {
                 if last {
                     return Ok(Some(xn));
                 }
-                if careful {
-                    prev = Some((xn.clone(), t));
-                }
+                prev = Some((xn.clone(), t));
             } else {
-                if careful
-                    && mu > QCQP_MU_MIN
+                if mu > QCQP_MU_MIN
                     && let Some((xp, tp)) = &prev
                 {
                     mu = mu.sqrt();
