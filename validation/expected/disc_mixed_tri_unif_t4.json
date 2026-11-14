@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "id": "disc_mixed_tri_unif_t4",
+  "area": "econometrics/discrete",
+  "method": "Mixed logit with a triangular and a uniform coefficient on x, R = 50 Halton draws (mlogit rpar 't', 'u')",
+  "reference": "mlogit::mlogit(choice ~ x + w | 0, rpar = c(x = 't' | 'u'), R = 50, halton = NA) simulated log-likelihood (make.beta: triangular sqrt(2 u) - 1 below 1/2, 1 - sqrt(2 (1 - u)) above; uniform 2 u - 1; u = pnorm of the normal Halton draw), re-solved with optim(BFGS, reltol 1e-15) and numDeriv Newton steps; SEs from numDeriv::hessian",
+  "call": "mlogit(choice ~ x + w | 0, data = dfidx(mixed_logit), rpar = c(x = 't'), R = 50, halton = NA)",
+  "dataset": "validation/datasets/generated/mixed_logit.csv",
+  "datasets": ["validation/datasets/generated/mixed_logit.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "mlogit": "2.0.0",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "tri_coef": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.95036019839486574, -0.71888457550507523, 3.0881651905351357]
+    },
+    "tri_se": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.20161630642123951, 0.1200213283090325, 0.89348685939004302]
+    },
+    "tri_loglik": -276.51678927017025,
+    "tri_coef_pkg": {
+      "names": ["x", "w", "sd.x"],
+      "values": [0.95037317594086335, -0.71888446896137004, 3.0882157134172474]
+    },
+    "tri_loglik_pkg": -276.51678927304641,
+    "tri_point_loglik": -282.18241809282961,
+    "tri_point_grad": {
+      "names": ["x", "w", "sd.x"],
+      "values": [-21.500299301531896, 7.8660603307422949, 6.8162612239964284]
+    },
+    "unif_coef": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.97058805377134083, -0.72495141007317287, 2.1057087902765343]
+    },
+    "unif_se": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.21146818477156953, 0.12110048508586607, 0.57335541468240514]
+    },
+    "unif_loglik": -276.46733246192434,
+    "unif_coef_pkg": {
+      "names": ["x", "w", "sd.x"],
+      "values": [0.97060052961917787, -0.72495044775358486, 2.1057392300068751]
+    },
+    "unif_loglik_pkg": -276.46733246467886,
+    "unif_point_loglik": -279.07739692130161,
+    "unif_point_grad": {
+      "names": ["x", "w", "sd.x"],
+      "values": [-12.511193040047084, 5.6074507502302362, 7.1331603468260933]
+    },
+    "tri_factor_u": [0.25, 0.49990000000000001, 0.5, 0.50009999999999999, 0.75],
+    "tri_factor": [-0.29289321881345243, -0.00010000500050000305, 0, 0.00010000500050000305, 0.29289321881345243],
+    "point": {
+      "names": ["x", "w", "sd.x"],
+      "values": [0.90000000000000002, -0.69999999999999996, 1.2]
+    },
+    "n_draws": 50,
+    "n_situations": 300
+  }
+}

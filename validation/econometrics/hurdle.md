@@ -53,10 +53,11 @@ summary(model)
 
 No R output of this example is committed, and no test compares with one: the zero part is
 R-pinned as a binomial glm on its own case (`validation/methods/discrete_t3.json`, see
-[count_models.md](count_models.md)); the truncated count part is not R-pinned (ECON-16, Tier 4).
+[count_models.md](count_models.md)); the truncated count part is R-pinned on `disc_hurdle_t4`
+(see "Count part" below).
 
 **Rust tests** (the zero part is R-pinned as a binomial glm, `validation/methods/discrete_t3.json`; the
-truncated count part is not R-pinned: ECON-16, Tier 4):
+truncated count part on `disc_hurdle_t4`, `validation/methods/discrete_t4.json`):
 - `econometrics::discrete::tests::test_hurdle_poisson_basic` (`crates/p2a-core/src/econometrics/discrete/mod.rs`): n = 12, model type and the zero count; no `pscl::hurdle` value is compared.
 
 ### Test 2: Hurdle Negative Binomial - Overdispersed Data
@@ -84,10 +85,11 @@ model_nb$theta  # Dispersion parameter
 
 No R output of this example is committed, and no test compares with one: the zero part is
 R-pinned as a binomial glm on its own case (`validation/methods/discrete_t3.json`, see
-[count_models.md](count_models.md)); the truncated count part is not R-pinned (ECON-16, Tier 4).
+[count_models.md](count_models.md)); the truncated count part is R-pinned on `disc_hurdle_t4`
+(see "Count part" below).
 
 **Rust tests** (the zero part is R-pinned as a binomial glm, `validation/methods/discrete_t3.json`; the
-truncated count part is not R-pinned: ECON-16, Tier 4):
+truncated count part on `disc_hurdle_t4`, `validation/methods/discrete_t4.json`):
 - `econometrics::discrete::count_models::tests::test_hurdle_negbin` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): the model type and that a theta is returned.
 - `econometrics::discrete::count_models::tests::test_hurdle_negbin_structure_properties` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, theta > 0 and a finite log-likelihood; no `pscl::hurdle` value is compared.
 
@@ -98,7 +100,7 @@ truncated count part is not R-pinned: ECON-16, Tier 4):
 **Data:** Uses test dataset with y increasing with x.
 
 **Rust tests** (the zero part is R-pinned as a binomial glm, `validation/methods/discrete_t3.json`; the
-truncated count part is not R-pinned: ECON-16, Tier 4):
+truncated count part on `disc_hurdle_t4`, `validation/methods/discrete_t4.json`):
 - `econometrics::discrete::count_models::tests::test_hurdle_poisson_structure_properties` (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): n, model type, no theta, the zero and positive counts, and finite log-likelihoods; no `pscl::hurdle` value is compared.
 
 ## Missing values
@@ -118,23 +120,60 @@ of the 500 rows (`hurdle_na_n_used`; `y_na` has 3 and `x2_na` 2 missing cells).
 - `econometrics::discrete::count_models::tests::test_validate_hurdle_missing_rows_dropped`
   (`crates/p2a-core/src/econometrics/discrete/count_models.rs`): `n_obs` equals R's
   `hurdle_na_n_used` (exact), 5 rows are dropped, and both parts' coefficients equal those
-  of the same fit on the complete rows. The estimates themselves are not compared with
-  `pscl::hurdle` (ECON-16, Tier 4).
+  of the same fit on the complete rows, and so do the count-part SEs and log-likelihood
+  (Poisson) and the coefficients, SEs and theta of the NB hurdle. The estimates are pinned
+  against `pscl::hurdle` on complete data in the "Count part" tests.
 
-## Numerical Precision Summary
+## Count part (T4)
 
-- **Coefficients**: Match R within ±0.3 (stochastic data generation)
-- **Standard errors**: Match R within ±30%
-- **Log-likelihood**: Match R within ±5%
-- **AIC/BIC**: Match R within ±5%
-- **Theta (NegBin)**: Match R within ±50% (difficult to estimate)
+The count part is the zero-truncated Poisson or NB maximum-likelihood fit on the positive
+counts, pscl's count hurdle. Per positive count, with `eta = x'beta`, `mu = e^eta`:
 
-## Known Differences
+- Poisson: `y eta - mu - lnGamma(y + 1) - ln(1 - e^-mu)`; score `y - mu / (1 - p0)`;
+  Hessian weight `-mu P(N >= 2) / (1 - p0)^2`, the exact truncated information
+  (`P(N >= 2)` from its series below `mu = 0.1`, where `1 - e^-mu (1 + mu)` cancels).
+- NB (`t = ln theta`): `ln f(y) - ln(1 - f0)`, `L = ln f0 = -theta ln(1 + mu / theta)`,
+  first derivatives `lnf_a + r L_a`, second `lnf_ab + r L_ab + r (1 + r) L_a L_b` with
+  `r = f0 / (1 - f0)`, in `(eta, t)`.
 
-1. **Convergence tolerance**: Rust uses 1e-6, R uses 1e-8. Small samples may not converge to strict tolerance in Rust.
-2. **Starting values**: Rust initializes beta from log(mean(y)), R may use different initialization.
-3. **Theta estimation**: Rust uses profile likelihood gradient step, R uses full MLE.
-4. **Truncation adjustment**: Both use log(1 - P(Y=0)) correction but numerical precision may differ.
+The log-likelihood is maximised by damped Newton steps (the zero-inflated models' loop:
+Levenberg damping, step halving, at most 100 iterations), from `ln(mean y)` in the
+intercept for the Poisson (the truncated-Poisson log-likelihood is concave) and from the
+truncated-Poisson MLE with theta = 1 for the NB, ln theta capped at ln 1e8. It stops on
+the Newton decrement, the relative log-likelihood change (1e-12) and the relative step
+(the rule of `run_zip`). Standard errors are the square roots of the diagonal of the inverse
+of minus the Hessian at the estimate; for NB, `SE(ln theta)` is pscl's `SE.logtheta` and
+`SE(theta) = theta SE(ln theta)`. A theta above 1e6 (no overdispersion among the positive
+counts) is reported as for ZINB: the coefficient SEs from the coefficient block, the theta
+SEs NaN, `converged = false` and a warning. `iterations` and the convergence record describe
+the count part (for NB including its truncated-Poisson start); `converged` is both parts.
+
+Case `disc_hurdle_t4` (`validation/r/cases/discrete_t4.R`, `zeroinfl.csv`, n 500): pscl's
+count part (`optim`, reltol 1e-15) polished by Newton steps on the analytic truncated score,
+SEs from `numDeriv::hessian`; the `*_pkg` keys are pscl's own estimate.
+
+| Key | (Intercept) | x1 | x2 | other |
+|---|---|---|---|---|
+| `hp_count` / `hp_count_se` | 0.6183142914978138 / 0.055957874172556474 | 0.2035367140970712 / 0.05522726642442113 | -0.27476886758143376 / 0.05912654512240702 | loglik -688.077415295141, 241 positive |
+| `hnb_count` / `hnb_count_se` (`y_nb`) | 0.3649446202808409 / 0.16163495712085688 | 0.3144150933310138 / 0.09626249227313967 | -0.3175947757804973 / 0.08990635918536229 | theta 0.9765891641238044, SE(ln theta) 0.37854615006935205, SE(theta) 0.36968406827851275 |
+| `hpnb_count` (NB on `y`) | 0.6154982562698516 | 0.2035452640787471 | -0.27568737115680425 | theta 173.98441940639327 (flat profile), SE(ln theta) 10.015126250639057 |
+
+**Rust tests** (`crates/p2a-core/src/econometrics/discrete/count_models.rs`; registry
+`validation/methods/discrete_t4.json`, id `discrete_hurdle_count_part`):
+- `econometrics::discrete::count_models::tests::test_validate_hurdle_poisson_count_part`:
+  count coefficients 1e-8, SEs and z 1e-6, p 1e-4; count, zero and total log-likelihood, AIC
+  and BIC `Tol::stat(500)`; pscl's estimate 1e-5.
+- `econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_count_part`: the
+  same, plus theta and ln theta 1e-7, SE(ln theta) and SE(theta) 1e-5; pscl's estimate 1e-4.
+- `econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_flat_theta`:
+  coefficients 1e-6, SEs 1e-5, ln theta 1e-4 and its SE 1e-3 (a flat profile), no warning.
+- `econometrics::discrete::count_models::tests::test_validate_hurdle_intercept_only_zero_part`:
+  `y ~ x1 + x2 | 1`.
+- `p2a-mcp` `tools::handlers::discrete::tests::test_validate_mcp_hurdle_count_part`: the tool's
+  Count Part rows at print precision.
+- Not R-pinned: `test_hurdle_truncated_information_matches_central_differences` (score and
+  Hessian vs central differences at mu = 1e-6, 30 and a regression point, Poisson and NB),
+  `test_hurdle_small_mean_series` and `test_hurdle_negbin_theta_runs_to_poisson_warns`.
 
 ## Performance Comparison
 
@@ -167,18 +206,18 @@ The Rust implementation:
 1. Separates observations into binary indicators (y > 0 vs y = 0)
 2. Fits the zero hurdle as the shared binomial GLM (`fit_glm`, glm.fit's IRLS)
 3. Extracts positive observations (y > 0)
-4. Fits truncated Poisson/NegBin on positive subset by Newton steps solved on the
-   equilibrated information (Cholesky first)
-5. For NegBin: estimates theta using profile likelihood
+4. Fits truncated Poisson/NegBin on positive subset by damped Newton steps on the analytic
+   truncated log-likelihood
+5. For NegBin: estimates ln theta jointly with the coefficients
 6. Computes combined log-likelihood: LL = LL_binary + LL_count
 7. Returns coefficients, standard errors, z-statistics, p-values for both parts
 
 ## Status
 
-R-pinned for the rows used, known deviations (ECON-16): registry
-`validation/methods/discrete_ordered_count.json`, id `discrete_hurdle_rows`. The hurdle
-estimates, standard errors and theta are not R-pinned (ECON-16, Tier 4: the
-truncated-count information and the NB hurdle theta).
+R-pinned: the rows used (registry `validation/methods/discrete_ordered_count.json`, id
+`discrete_hurdle_rows`), the zero part (`validation/methods/discrete_t3.json`) and the count
+part, its SEs, theta and the SEs of ln theta and theta (`validation/methods/discrete_t4.json`,
+id `discrete_hurdle_count_part`).
 
 ## Zero part = binomial glm (T3-WP18)
 
@@ -190,9 +229,9 @@ Case `disc_hurdle_zero` (registry `validation/methods/discrete_t3.json`, id
 `zero_coef_pkg`. `econometrics::discrete::count_models::tests::test_validate_hurdle_zero_part_is_binomial_glm`
 pins it at the tight glm fit: coefficients 1e-8, SEs and logLik 1e-6, pscl's estimate 1e-6;
 n, zeros and positives exact. glm's warnings (separation in the zero part) are in
-`HurdleResult.warnings`, printed in the Warnings block. The truncated count part stays
-unpinned (ECON-16, Tier 4); a singular count-part information gives `NaN` standard errors and a
-warning (the `eye * 1e-6` covariance fallback is gone).
+`HurdleResult.warnings`, printed in the Warnings block. The truncated count part is pinned
+on `disc_hurdle_t4` ("Count part" above); a singular count-part information gives `NaN`
+standard errors and a warning (the `eye * 1e-6` covariance fallback is gone).
 
 ## Outcome domain and aliased regressors (T3-WP18)
 

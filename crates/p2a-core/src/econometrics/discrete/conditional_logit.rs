@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, NaPolicy};
+use crate::data::columns::{ColumnRequest, Factor, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::ndarray_to_faer;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
@@ -43,7 +43,10 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
 
-use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
+use super::newton::{
+    MAX_HALVINGS, check_newton_control, covariance_from_information, ensure_dense_inverse_fits,
+    equilibrated_newton_step,
+};
 
 /// Result from McFadden's conditional logit model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,9 +77,12 @@ pub struct MlogitResult {
     pub gamma_p_values: Vec<Vec<f64>>,
     /// Log-likelihood at convergence
     pub log_likelihood: f64,
-    /// Log-likelihood of null model
+    /// Log-likelihood of the null model: with alternative-specific constants the
+    /// constants-only conditional logit (on choice sets that all hold every alternative,
+    /// mlogit's market shares `sum_j n_j ln(n_j / N)`); without them, equal choice
+    /// probabilities in each situation, `-sum_i ln J_i`
     pub log_likelihood_null: f64,
-    /// McFadden's pseudo R-squared
+    /// McFadden's pseudo R-squared, `1 - log_likelihood / log_likelihood_null`
     pub pseudo_r_squared: f64,
     /// AIC
     pub aic: f64,
@@ -303,6 +309,197 @@ impl fmt::Display for MlogitResult {
     }
 }
 
+/// Refuse choice data that mlogit refuses: a choice situation must have exactly one
+/// chosen row (`choice > 0.5`) and no alternative twice. `situation` and `alternative`
+/// are the factors of the rows; the error names the number of offending situations
+/// and the first of them in data order, checking repeated alternatives first, then
+/// situations without a choice, then those with more than one. One pass over the rows
+/// after a stable counting sort by situation; no per-situation allocation.
+pub(super) fn validate_choice_sets(
+    situation: &Factor,
+    alternative: &Factor,
+    choice: &[f64],
+) -> EconResult<()> {
+    let what = "choice-set check";
+    let n_sit = situation.n_levels();
+    let n_rows = situation.codes.len();
+    // rows grouped by situation, each group in data order
+    let mut start = resource::try_vec(n_sit + 1, 0usize, what)?;
+    for &s in &situation.codes {
+        start[s as usize + 1] += 1;
+    }
+    for s in 0..n_sit {
+        start[s + 1] += start[s];
+    }
+    let mut next = start.clone();
+    let mut order = resource::try_vec(n_rows, 0usize, what)?;
+    for (row, &s) in situation.codes.iter().enumerate() {
+        order[next[s as usize]] = row;
+        next[s as usize] += 1;
+    }
+    drop(next);
+    // stamp[a] == s + 1: alternative a already seen in situation s
+    let mut stamp = resource::try_vec(alternative.n_levels(), 0usize, what)?;
+    // (count, first row, situation, repeated alternative) per kind
+    let mut repeated = (0usize, usize::MAX, 0usize, 0usize);
+    let mut none = (0usize, usize::MAX, 0usize);
+    let mut several = (0usize, usize::MAX, 0usize, 0usize);
+    for s in 0..n_sit {
+        let rows = &order[start[s]..start[s + 1]];
+        let Some(&first) = rows.first() else {
+            continue;
+        };
+        let mut chosen = 0usize;
+        let mut duplicate = None;
+        for &row in rows {
+            let a = alternative.codes[row] as usize;
+            if stamp[a] == s + 1 {
+                duplicate.get_or_insert(a);
+            }
+            stamp[a] = s + 1;
+            if choice[row] > 0.5 {
+                chosen += 1;
+            }
+        }
+        if let Some(a) = duplicate {
+            repeated.0 += 1;
+            if first < repeated.1 {
+                repeated = (repeated.0, first, s, a);
+            }
+        }
+        if chosen == 0 {
+            none.0 += 1;
+            if first < none.1 {
+                none = (none.0, first, s);
+            }
+        } else if chosen > 1 {
+            several.0 += 1;
+            if first < several.1 {
+                several = (several.0, first, s, chosen);
+            }
+        }
+    }
+    // "1 choice situation has", "2 choice situations have"
+    let count = |k: usize, one: &str, many: &str| {
+        if k == 1 {
+            format!("1 choice situation {one}")
+        } else {
+            format!("{k} choice situations {many}")
+        }
+    };
+    let message = if repeated.0 > 0 {
+        format!(
+            "{} an alternative more than once (the first: alternative '{}' appears twice in \
+             choice situation '{}'); each alternative may appear once per choice situation",
+            count(repeated.0, "lists", "list"),
+            alternative.levels[repeated.3],
+            situation.levels[repeated.2]
+        )
+    } else if none.0 > 0 {
+        format!(
+            "{} no chosen alternative (the first: choice situation '{}'); each choice \
+             situation needs exactly one row with choice > 0.5",
+            count(none.0, "has", "have"),
+            situation.levels[none.2]
+        )
+    } else if several.0 > 0 {
+        format!(
+            "{} more than one chosen alternative (the first: choice situation '{}', {} \
+             alternatives are chosen); each choice situation needs exactly one row with \
+             choice > 0.5",
+            count(several.0, "has", "have"),
+            situation.levels[several.2],
+            several.3
+        )
+    } else {
+        return Ok(());
+    };
+    Err(EconError::InvalidSpecification { message })
+}
+
+/// `-sum_i ln J_i`: the log-likelihood of equal choice probabilities within each
+/// situation (`choice_info` holds `(start, J_i, chosen)` per situation).
+pub(super) fn equal_shares_loglik(choice_info: &[(usize, usize, usize)]) -> f64 {
+    -choice_info
+        .iter()
+        .map(|&(_, n_alts, _)| (n_alts as f64).ln())
+        .sum::<f64>()
+}
+
+/// Log-likelihood of the constants-only conditional logit, the null model of a fit with
+/// alternative-specific constants. When every situation offers every alternative its
+/// MLE has the market shares as choice probabilities, so the value is mlogit's
+/// `sum_j n_j ln(n_j / N)` (`n_j` the situations choosing `j`; an alternative nobody
+/// chooses adds 0). Otherwise the constants are fitted by [`newton_maximise`] from 0 under
+/// the model's control; a fit that does not converge leaves a warning.
+#[allow(clippy::too_many_arguments)]
+fn constants_only_loglik(
+    data: &MlogitData,
+    choice_situations: &[Vec<(usize, usize)>],
+    choices: &[f64],
+    ones: &[f64],
+    n_alternatives: usize,
+    ref_idx: usize,
+    config: &MlogitConfig,
+    warnings: &mut Vec<String>,
+) -> EconResult<f64> {
+    if data
+        .choice_info
+        .iter()
+        .all(|&(_, n_alts, _)| n_alts == n_alternatives)
+    {
+        let mut chosen = resource::try_vec(n_alternatives, 0usize, "market shares")?;
+        for alts in choice_situations {
+            for &(row, alt) in alts {
+                if choices[row] > 0.5 {
+                    chosen[alt] += 1;
+                }
+            }
+        }
+        let n = choice_situations.len() as f64;
+        return Ok(chosen
+            .iter()
+            .filter(|&&c| c > 0)
+            .map(|&c| c as f64 * (c as f64 / n).ln())
+            .sum());
+    }
+    let null_data = MlogitData::new(
+        choice_situations,
+        choices,
+        &[],
+        &[ones],
+        0,
+        1,
+        n_alternatives,
+        ref_idx,
+    )?;
+    let mut params = resource::try_vec(null_data.n_params, 0.0, "constants-only model")?;
+    let mut null_warnings = Vec::new();
+    let NewtonFit {
+        converged,
+        at_params,
+        ..
+    } = newton_maximise(
+        &null_data,
+        &mut params,
+        config,
+        "constants-only information matrix",
+        &mut null_warnings,
+    )?;
+    let ll = match at_params {
+        Some(known) => known.ll,
+        None => compute_mlogit_loglik_fast(&null_data, &params),
+    };
+    if !converged {
+        warnings.push(format!(
+            "the constants-only null model did not converge in {} iterations; the \
+             pseudo R-squared uses its last log-likelihood",
+            config.max_iter
+        ));
+    }
+    Ok(ll)
+}
+
 /// Pre-computed data structure for fast mlogit computation.
 struct MlogitData {
     /// For each choice situation: (start_row, n_alts, chosen_local_idx)
@@ -337,6 +534,7 @@ impl MlogitData {
         for alts in choice_situations {
             let start = flat_idx;
             let n_alts = alts.len();
+            // exactly one chosen row (validate_choice_sets)
             let mut chosen_local = 0;
 
             for (local_idx, &(row_idx, alt_idx)) in alts.iter().enumerate() {
@@ -513,100 +711,6 @@ struct MlogitDerivatives {
     n_situations_extreme: usize,
 }
 
-/// `s_k = 1 / sqrt(info_kk)` (1 for a zero diagonal entry) and `E = S info S`.
-pub(super) fn equilibrate(info: &Array2<f64>) -> (Array1<f64>, Array2<f64>) {
-    let scale: Array1<f64> = info
-        .diag()
-        .mapv(|d| if d > 0.0 { 1.0 / d.sqrt() } else { 1.0 });
-    let mut e = info.clone();
-    for ((r, c), v) in e.indexed_iter_mut() {
-        *v *= scale[r] * scale[c];
-    }
-    (scale, e)
-}
-
-/// The Newton step `d = info^-1 g` and the decrement `g' d`, solved on the equilibrated
-/// information `E = S info S` by Cholesky; only when Cholesky refuses `E` (not positive
-/// definite) or gives a non-finite step, by a symmetric generalized inverse, whose
-/// warning is pushed into `warnings` once.
-pub(super) fn equilibrated_newton_step(
-    info: &Array2<f64>,
-    grad: &Array1<f64>,
-    what: &str,
-    warnings: &mut Vec<String>,
-) -> EconResult<(Array1<f64>, f64)> {
-    let (scale, e) = equilibrate(info);
-    let rhs: Array1<f64> = &scale * grad;
-    let mut ds = None;
-    if let Ok(chol) = ndarray_to_faer(&e.view()).llt(faer::Side::Lower) {
-        let m = rhs.len();
-        let b = faer::Mat::<f64>::from_fn(m, 1, |i, _| rhs[i]);
-        let x = chol.solve(&b);
-        let step: Array1<f64> = (0..m).map(|i| x[(i, 0)]).collect();
-        if step.iter().all(|v| v.is_finite()) {
-            ds = Some(step);
-        }
-    }
-    let ds = match ds {
-        Some(d) => d,
-        None => {
-            let inv = sym_inverse(e.view(), SingularPolicy::Generalized, what)?;
-            if let Some(w) = inv.warning(what)
-                && !warnings.contains(&w)
-            {
-                warnings.push(w);
-            }
-            inv.inverse.dot(&rhs)
-        }
-    };
-    let d = &scale * &ds;
-    let lambda2 = grad.dot(&d);
-    Ok((d, lambda2))
-}
-
-/// Covariance from the information: `S E^-1 S` by [`sym_inverse`] with
-/// [`SingularPolicy::Error`], or `None` with the warning when the information is
-/// singular at the estimates.
-pub(super) fn covariance_from_information(
-    info: &Array2<f64>,
-    what: &str,
-    warnings: &mut Vec<String>,
-) -> EconResult<Option<Array2<f64>>> {
-    let (scale, e) = equilibrate(info);
-    match sym_inverse(e.view(), SingularPolicy::Error, what) {
-        Ok(inv) => {
-            let mut v = inv.inverse;
-            for ((r, c), x) in v.indexed_iter_mut() {
-                *x *= scale[r] * scale[c];
-            }
-            Ok(Some(v))
-        }
-        Err(err @ EconError::SingularMatrix { .. }) => {
-            warnings.push(format!(
-                "the information matrix is singular at the estimates ({err}); standard errors \
-                 are not available"
-            ));
-            Ok(None)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Validate a Newton control: `max_iter >= 1` and a positive, finite `tolerance`.
-pub(super) fn check_newton_control(max_iter: usize, tolerance: f64) -> EconResult<()> {
-    if max_iter == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "max_iter must be at least 1 (got 0)".to_string(),
-        });
-    }
-    if !(tolerance.is_finite() && tolerance > 0.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("tolerance must be a positive, finite number (got {tolerance})"),
-        });
-    }
-    Ok(())
-}
-
 /// Run McFadden's conditional logit model with J - 1 alternative-specific constants.
 ///
 /// R equivalent: `mlogit::mlogit(choice ~ x | z, reflevel = reference)`: generic
@@ -678,7 +782,10 @@ pub fn run_conditional_logit(
 /// `glm.fit`'s relative-deviance scale is below `tolerance`, then takes that last full
 /// step. A line search that finds no increase stops the fit as not converged.
 ///
-/// Refused: invalid controls and an unknown `reflevel` (`InvalidSpecification`), and an
+/// Refused: invalid controls and an unknown `reflevel` (`InvalidSpecification`); a choice
+/// situation without exactly one chosen row (`choice > 0.5`) or with an alternative listed
+/// twice (`InvalidSpecification` naming the first such situation and their number, as
+/// mlogit refuses them); and an
 /// attribute that is constant within every choice situation or a linear combination of
 /// the others (`SingularMatrix` naming it; mlogit stops with "system is exactly
 /// singular"). A singular information at the estimates (separation) gives `NaN`
@@ -707,6 +814,7 @@ pub fn run_mlogit_with(
     let alt = cols.factor(alt_id_col);
     let choices = cols.numeric(choice_col);
     let n_choice_situations = situation.n_levels();
+    validate_choice_sets(situation, alt, choices)?;
 
     let alternatives: Vec<String> = alt.levels.clone();
     let n_alternatives = alternatives.len();
@@ -803,8 +911,13 @@ pub fn run_mlogit_with(
     let mut params = vec![0.0; n_params];
     let mut warnings: Vec<String> = Vec::new();
     let what = "conditional logit information matrix";
-    let (converged, iterations, final_change, at_params) =
-        newton_maximise(&mlogit_data, &mut params, config, what, &mut warnings)?;
+    let NewtonFit {
+        converged,
+        iterations,
+        final_change,
+        line_search_failed,
+        at_params,
+    } = newton_maximise(&mlogit_data, &mut params, config, what, &mut warnings)?;
     let convergence = Convergence::new(
         converged,
         iterations,
@@ -813,7 +926,10 @@ pub fn run_mlogit_with(
         final_change,
         config.tolerance,
     );
-    if let Some(note) = convergence.note("conditional logit") {
+    // one non-convergence note: the line search's, or the iteration cap's
+    if let Some(iteration) = line_search_failed {
+        warnings.push(line_search_note(iteration));
+    } else if let Some(note) = convergence.note("conditional logit") {
         warnings.push(note);
     }
 
@@ -827,7 +943,20 @@ pub fn run_mlogit_with(
         Some(known) => known,
         None => compute_mlogit_derivatives_fast(&mlogit_data, &params)?,
     };
-    let log_likelihood_null = n_choice_situations as f64 * (-(n_alternatives as f64).ln());
+    let log_likelihood_null = if config.asc {
+        constants_only_loglik(
+            &mlogit_data,
+            &choice_situations,
+            choices,
+            &ones,
+            n_alternatives,
+            ref_idx,
+            config,
+            &mut warnings,
+        )?
+    } else {
+        equal_shares_loglik(&mlogit_data.choice_info)
+    };
 
     let std_errors: Vec<f64> = match covariance_from_information(&info, what, &mut warnings)? {
         Some(vcov) => (0..n_params)
@@ -990,13 +1119,25 @@ fn check_identified(data: &MlogitData, names: &[String]) -> EconResult<()> {
 /// is then taken when it does not lower the log-likelihood. The full step of the line
 /// search is evaluated with its derivatives, which the next iteration reuses (the values
 /// a fresh pass gives, bit for bit).
+/// What [`newton_maximise`] ends with.
+struct NewtonFit {
+    converged: bool,
+    /// Newton steps taken, the last full step of a converged fit included.
+    iterations: usize,
+    final_change: f64,
+    /// The iteration whose line search found no increase, when that stopped the fit.
+    line_search_failed: Option<usize>,
+    /// The derivatives at the final parameters, when they are known.
+    at_params: Option<MlogitDerivatives>,
+}
+
 fn newton_maximise(
     data: &MlogitData,
     params: &mut [f64],
     config: &MlogitConfig,
     what: &str,
     warnings: &mut Vec<String>,
-) -> EconResult<(bool, usize, f64, Option<MlogitDerivatives>)> {
+) -> EconResult<NewtonFit> {
     let mut final_change = f64::NAN;
     let mut iterations = 0;
     let mut at_params: Option<MlogitDerivatives> = None;
@@ -1013,13 +1154,26 @@ fn newton_maximise(
         let trial =
             |t: f64| -> Vec<f64> { params.iter().zip(&d).map(|(p, s)| p + t * s).collect() };
         if final_change < config.tolerance {
+            // the last full step counts as an iteration when it is taken
             let full = trial(1.0);
             let at_full = compute_mlogit_derivatives_fast(data, &full)?;
             if at_full.ll >= ll - 1e-12 * ll.abs() {
                 params.copy_from_slice(&full);
-                return Ok((true, iterations, final_change, Some(at_full)));
+                return Ok(NewtonFit {
+                    converged: true,
+                    iterations: iterations + 1,
+                    final_change,
+                    line_search_failed: None,
+                    at_params: Some(at_full),
+                });
             }
-            return Ok((true, iterations, final_change, None));
+            return Ok(NewtonFit {
+                converged: true,
+                iterations,
+                final_change,
+                line_search_failed: None,
+                at_params: None,
+            });
         }
         let mut t = 1.0;
         let mut accepted = None;
@@ -1038,18 +1192,34 @@ fn newton_maximise(
             t *= 0.5;
         }
         let Some((cand, at_cand)) = accepted else {
-            warnings.push(format!(
-                "line search failed at iteration {}: no step along the Newton direction \
-                 increases the log-likelihood; the estimates are not at the optimum",
-                iterations + 1
-            ));
-            return Ok((false, iterations, final_change, None));
+            return Ok(NewtonFit {
+                converged: false,
+                iterations,
+                final_change,
+                line_search_failed: Some(iterations + 1),
+                at_params: None,
+            });
         };
         params.copy_from_slice(&cand);
         at_params = at_cand;
         iterations += 1;
     }
-    Ok((false, iterations, final_change, at_params))
+    Ok(NewtonFit {
+        converged: false,
+        iterations,
+        final_change,
+        line_search_failed: None,
+        at_params,
+    })
+}
+
+/// The line-search failure note of the conditional and multinomial logits, the one
+/// non-convergence note of a fit that stopped there.
+pub(super) fn line_search_note(iteration: usize) -> String {
+    format!(
+        "line search failed at iteration {iteration}: no step along the Newton direction \
+         increases the log-likelihood; the estimates are not at the optimum"
+    )
 }
 
 /// [`run_conditional_logit`] with a model and control ([`MlogitConfig`]).
@@ -1070,6 +1240,75 @@ pub fn run_conditional_logit_with(
         &[],
         config,
     )
+}
+
+/// Long-form choice data malformed as in the `disc_clogit_unbalanced_t4` reference
+/// (mlogit refuses all three), for the refusal tests of the conditional and mixed logits.
+/// `ds` has the columns `id`, `alt` and `chosen`; situation `1` gets no chosen row
+/// ([`Malformed::NoChoice`]) or beach and boat chosen as well as its own choice
+/// ([`Malformed::TwoChoices`]: three chosen rows), or
+/// situation `2` gets its boat row twice ([`Malformed::Duplicate`]).
+#[cfg(test)]
+pub(super) fn malformed_choice_data(ds: &Dataset, kind: Malformed) -> Dataset {
+    use polars::prelude::*;
+    let df = ds.df();
+    let ids: Vec<i64> = df
+        .column("id")
+        .unwrap()
+        .cast(&DataType::Int64)
+        .unwrap()
+        .i64()
+        .unwrap()
+        .into_no_null_iter()
+        .collect();
+    let alts: Vec<String> = df
+        .column("alt")
+        .unwrap()
+        .str()
+        .unwrap()
+        .into_no_null_iter()
+        .map(str::to_owned)
+        .collect();
+    let mut chosen: Vec<f64> = df
+        .column("chosen")
+        .unwrap()
+        .cast(&DataType::Float64)
+        .unwrap()
+        .f64()
+        .unwrap()
+        .into_no_null_iter()
+        .collect();
+    for (i, (id, alt)) in ids.iter().zip(&alts).enumerate() {
+        match kind {
+            Malformed::NoChoice if *id == 1 => chosen[i] = 0.0,
+            Malformed::TwoChoices if *id == 1 && (alt == "beach" || alt == "boat") => {
+                chosen[i] = 1.0
+            }
+            _ => {}
+        }
+    }
+    let mut out = df.clone();
+    out.with_column(Column::new("chosen".into(), chosen))
+        .unwrap();
+    if kind == Malformed::Duplicate {
+        let row = ids
+            .iter()
+            .zip(&alts)
+            .position(|(id, alt)| *id == 2 && alt == "boat")
+            .unwrap();
+        let copy = out.slice(row as i64, 1);
+        out.vstack_mut(&copy).unwrap();
+    }
+    Dataset::new(out)
+}
+
+/// The malformations of [`malformed_choice_data`].
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Malformed {
+    NoChoice,
+    TwoChoices,
+    Duplicate,
 }
 
 #[cfg(test)]
@@ -1129,6 +1368,75 @@ mod tests {
     /// Case data for tests that compare no R value.
     fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
         crate::test_support::load_case(id)
+    }
+
+    /// The message of an `InvalidSpecification`.
+    fn invalid(r: EconResult<MlogitResult>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// A situation without a chosen row was fitted as if its first alternative had been
+    /// chosen; mlogit refuses it.
+    #[test]
+    fn test_mlogit_refuses_situation_without_choice() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, Malformed::NoChoice);
+        let m = invalid(run_conditional_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            None,
+        ));
+        assert!(
+            m.starts_with("1 choice situation has no chosen alternative"),
+            "{m}"
+        );
+        assert!(m.contains("choice situation '1'"), "{m}");
+    }
+
+    /// A situation with two chosen rows was fitted as if the last had been chosen.
+    #[test]
+    fn test_mlogit_refuses_situation_with_two_choices() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, Malformed::TwoChoices);
+        let m = invalid(run_conditional_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            None,
+        ));
+        assert!(m.starts_with("1 choice situation "), "{m}");
+        assert!(
+            m.contains("choice situation '1', 3 alternatives are chosen"),
+            "{m}"
+        );
+    }
+
+    /// An alternative listed twice in one situation.
+    #[test]
+    fn test_mlogit_refuses_situation_with_duplicate_alternative() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, Malformed::Duplicate);
+        let m = invalid(run_conditional_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            None,
+        ));
+        assert!(m.starts_with("1 choice situation "), "{m}");
+        assert!(
+            m.contains("alternative 'boat' appears twice in choice situation '2'"),
+            "{m}"
+        );
     }
 
     fn null_values(r: EconResult<MlogitResult>) -> (String, usize) {
@@ -1309,6 +1617,190 @@ mod tests {
     }
 
     /// mlogit(chosen ~ price + catch | income) on Fishing: J - 1 constants by default.
+    /// Fishing with charter removed from 300 situations (3 or 4 alternatives): the
+    /// null log-likelihood holds for choice sets of different sizes. Without constants it
+    /// is equal shares per situation, `-sum ln J_i`; with constants the constants-only
+    /// fit (mlogit's market-share formula is not a nested model's likelihood here:
+    /// registry deviation). Coefficients and SEs as on the balanced data.
+    #[test]
+    fn test_validate_mlogit_null_unbalanced_choice_sets() {
+        let (case, ds) = crate::test_support::load_case("disc_clogit_unbalanced_t4");
+        let fit = |asc: bool| {
+            let config = MlogitConfig {
+                asc,
+                ..MlogitConfig::default()
+            };
+            run_mlogit_with(
+                &ds,
+                "id",
+                "alt",
+                "chosen",
+                &["price", "catch"],
+                &[],
+                &config,
+            )
+            .unwrap()
+        };
+        let (asc, noasc) = (fit(true), fit(false));
+        let n = asc.n_choice_situations;
+        Check::new(&case)
+            .scalar("unbal_n_situations", n as f64, Tol::exact())
+            .named(
+                "unbal_asc_coef_tight",
+                &asc.coefficient_names(),
+                &asc.coefficients(),
+                Tol::iterative(1e-9),
+            )
+            .named(
+                "unbal_asc_se_tight",
+                &asc.coefficient_names(),
+                &asc.std_errors(),
+                Tol::iterative(1e-8),
+            )
+            .scalar("unbal_asc_loglik", asc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "unbal_null_constants_only",
+                asc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "unbal_asc_pr2_constants",
+                asc.pseudo_r_squared,
+                Tol::iterative(1e-9),
+            )
+            .named(
+                "unbal_noasc_coef_tight",
+                &noasc.coefficient_names(),
+                &noasc.coefficients(),
+                Tol::iterative(1e-9),
+            )
+            .named(
+                "unbal_noasc_se_tight",
+                &noasc.coefficient_names(),
+                &noasc.std_errors(),
+                Tol::iterative(1e-8),
+            )
+            .scalar("unbal_noasc_loglik", noasc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "unbal_null_equal_shares",
+                noasc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "unbal_noasc_pr2_equal",
+                noasc.pseudo_r_squared,
+                Tol::iterative(1e-10),
+            )
+            .finish();
+        assert!(
+            asc.converged && asc.warnings.is_empty(),
+            "{:?}",
+            asc.warnings
+        );
+    }
+
+    /// On choice sets that all hold every alternative the constants-only null is
+    /// mlogit's market-share null, so the McFadden R2 of the model with constants is
+    /// mlogit's; without constants the null is equal shares.
+    #[test]
+    fn test_validate_mlogit_null_balanced_matches_mlogit() {
+        let (case, _) = crate::test_support::load_case("disc_clogit_unbalanced_t4");
+        let path = p2a_validation::repo_path(&case.datasets[0]);
+        assert!(path.ends_with("mlogit_fishing.csv"), "{}", path.display());
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        let fit = |asc: bool| {
+            let config = MlogitConfig {
+                asc,
+                ..MlogitConfig::default()
+            };
+            run_mlogit_with(
+                &ds,
+                "id",
+                "alt",
+                "chosen",
+                &["price", "catch"],
+                &[],
+                &config,
+            )
+            .unwrap()
+        };
+        let (asc, noasc) = (fit(true), fit(false));
+        let n = asc.n_choice_situations;
+        Check::new(&case)
+            .scalar("bal_asc_loglik", asc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "bal_null_market_shares",
+                asc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bal_asc_pr2_pkg",
+                asc.pseudo_r_squared,
+                Tol::iterative(1e-9),
+            )
+            .scalar("bal_noasc_loglik", noasc.log_likelihood, Tol::stat(n))
+            .scalar(
+                "bal_null_equal_shares",
+                noasc.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(
+                "bal_noasc_pr2_equal",
+                noasc.pseudo_r_squared,
+                Tol::iterative(1e-10),
+            )
+            .finish();
+    }
+
+    /// `iterations` counts every Newton step taken, the last full step included: a fit
+    /// capped at `max_iter = k` converges exactly when `k >= iterations`. A capped fit
+    /// reports one non-convergence note.
+    #[test]
+    fn test_mlogit_iterations_count_the_final_step() {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let fit = |max_iter: usize| {
+            let config = MlogitConfig {
+                max_iter,
+                ..MlogitConfig::default()
+            };
+            run_mlogit_with(
+                &ds,
+                "id",
+                "alt",
+                "chosen",
+                &["price", "catch"],
+                &["income"],
+                &config,
+            )
+            .unwrap()
+        };
+        let full = fit(100);
+        assert!(full.converged);
+        let k = full.iterations;
+        assert!(k >= 2, "{k}");
+        let at_k = fit(k);
+        assert!(at_k.converged && at_k.iterations == k, "{at_k}");
+        let below = fit(k - 1);
+        assert!(!below.converged);
+        let notes: Vec<&String> = below
+            .warnings
+            .iter()
+            .filter(|w| w.contains("converge") || w.contains("line search"))
+            .collect();
+        assert_eq!(notes.len(), 1, "{:?}", below.warnings);
+        let one = fit(1);
+        assert!(!one.converged);
+        assert_eq!(
+            one.warnings
+                .iter()
+                .filter(|w| w.contains("converge") || w.contains("line search"))
+                .count(),
+            1,
+            "{:?}",
+            one.warnings
+        );
+    }
+
     #[test]
     fn test_validate_mlogit_fishing_asc() {
         let (case, ds) = crate::test_support::load_case("disc_mlogit_fishing");

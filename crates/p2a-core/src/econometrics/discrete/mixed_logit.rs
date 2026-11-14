@@ -48,6 +48,7 @@ use std::fmt;
 
 use ndarray::Array2;
 
+use super::conditional_logit::validate_choice_sets;
 use super::newton::{ensure_dense_inverse_fits, newton_step};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
@@ -101,9 +102,12 @@ pub struct MixedLogitConfig {
     pub n_draws: usize,
     /// Use Halton sequences (quasi-random) instead of pseudo-random
     pub halton: bool,
-    /// Maximum iterations. At least 1 (otherwise `InvalidSpecification`).
+    /// BFGS iterations plus Newton steps, per stage (the conditional-logit start, then the
+    /// mixed logit). At least 1 (otherwise `InvalidSpecification`).
     pub max_iter: usize,
-    /// Convergence tolerance. Must be finite and > 0 (otherwise `InvalidSpecification`).
+    /// Converged when `max_k |dLL/dtheta_k| <= tolerance (1 + |LL|)` at the reported
+    /// estimate and the Hessian there is negative definite. Finite and > 0 (otherwise
+    /// `InvalidSpecification`).
     pub tolerance: f64,
     /// Random seed of the pseudo-random draws (`halton: false`); unseeded when `None`.
     pub seed: Option<u64>,
@@ -138,7 +142,9 @@ pub struct MixedLogitResult {
     pub distributions: Vec<RandomDistribution>,
     /// Estimated mean of each random parameter
     pub means: Vec<f64>,
-    /// Estimated standard deviation of random parameters (0 for a fixed coefficient)
+    /// Spread of each random parameter: the standard deviation for normal, the standard
+    /// deviation of ln beta for log-normal, the half-width for uniform and triangular
+    /// (mlogit's `sd.`); 0 for a fixed coefficient
     pub std_devs: Vec<f64>,
     /// Standard errors of means
     pub mean_std_errors: Vec<f64>,
@@ -154,7 +160,8 @@ pub struct MixedLogitResult {
     pub std_dev_p_values: Vec<f64>,
     /// Log-likelihood at convergence
     pub log_likelihood: f64,
-    /// Log-likelihood of null model
+    /// Log-likelihood of the null model: equal choice probabilities within each
+    /// situation, `-sum_i ln J_i` (the model has no alternative-specific constants)
     pub log_likelihood_null: f64,
     /// Number of choice situations
     pub n_choice_situations: usize,
@@ -162,9 +169,10 @@ pub struct MixedLogitResult {
     pub n_alternatives: usize,
     /// Number of simulation draws per decision maker (0 without random parameters)
     pub n_draws: usize,
-    /// Number of iterations
+    /// Iterations (BFGS iterations plus Newton steps), summed over both stages
     pub iterations: usize,
-    /// Converged flag
+    /// `max_k |dLL/dtheta_k| <= tolerance (1 + |LL|)` at the reported estimate and the
+    /// Hessian there is negative definite
     pub converged: bool,
     /// AIC
     pub aic: f64,
@@ -266,6 +274,17 @@ impl fmt::Display for MixedLogitResult {
 
         writeln!(f, "{:-<101}", "")?;
         writeln!(f, "Signif. codes: '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
+        if self.distributions.iter().any(|d| {
+            matches!(
+                d,
+                RandomDistribution::Uniform | RandomDistribution::Triangular
+            )
+        }) {
+            writeln!(
+                f,
+                "Std.Dev: half-width for Uniform and Triangular (mlogit's sd.)"
+            )?;
+        }
         if !self.warnings.is_empty() {
             writeln!(f, "Warnings:")?;
             for w in &self.warnings {
@@ -298,13 +317,16 @@ struct ChoiceData {
     /// Per choice situation (in choice-id level order): the attribute rows of its
     /// alternatives in data order, row-major (`rows x n_vars`).
     sit_x: Vec<Vec<f64>>,
-    /// Per choice situation: the row of the chosen alternative (the last row with
-    /// choice > 0.5, else the first).
+    /// Per choice situation: the row of the chosen alternative (exactly one row has
+    /// choice > 0.5; `validate_choice_sets`).
     sit_chosen: Vec<usize>,
     /// Per decision maker (draw unit): its choice situations, in level order.
     unit_situations: Vec<Vec<usize>>,
     /// Number of individuals when an individual column was given.
     n_individuals: Option<usize>,
+    /// `-sum_i ln J_i`: equal choice probabilities within each situation (the null
+    /// model).
+    ll_equal_shares: f64,
 }
 
 /// The choice data of `run_mixed_logit`. Every column comes from one request with
@@ -334,6 +356,7 @@ fn choice_data(
     let sit = cols.factor(choice_id_col);
     let n_sit = sit.n_levels();
     let choice = cols.numeric(choice_col);
+    validate_choice_sets(sit, cols.factor(alt_id_col), choice)?;
     let xs: Vec<&[f64]> = x_cols.iter().map(|c| cols.numeric(c)).collect();
 
     let mut sit_x: Vec<Vec<f64>> = resource::try_with_capacity(n_sit, what)?;
@@ -394,7 +417,9 @@ fn choice_data(
         }
     };
 
+    let ll_equal_shares = -sit_rows.iter().map(|&j| (j as f64).ln()).sum::<f64>();
     Ok(ChoiceData {
+        ll_equal_shares,
         n_vars,
         n_alternatives: cols.factor(alt_id_col).n_levels(),
         sit_x,
@@ -440,7 +465,9 @@ struct DrawSet {
     /// Draws per unit (R).
     n_draws: usize,
     /// Per random parameter (in `x_cols` order): `n_units * n_draws` draws, unit-major
-    /// (unit u's draws at `u * n_draws .. (u + 1) * n_draws`).
+    /// (unit u's draws at `u * n_draws .. (u + 1) * n_draws`): standard normal from
+    /// [`draw_set`], the factors `e` of [`draw_factor`] after [`into_factors`], which is
+    /// what the likelihood reads (the same for normal and log-normal parameters).
     z: Vec<Vec<f64>>,
     /// The scheme in words, e.g. "Halton, prime 2, first 100 points dropped, 50 draws
     /// per choice situation".
@@ -527,27 +554,51 @@ fn too_many_random(m: usize) -> EconError {
 
 /// The factor `e` of a draw `z`: beta = mu + sigma e (Normal, Uniform, Triangular),
 /// beta = exp(mu + sigma e) (LogNormal). Uniform: `e = 2 Phi(z) - 1`, uniform on
-/// [-1, 1]; Triangular: `e = t(Phi(z))` with `t(u) = 2 sqrt(u) - 1` below 1/2 and
-/// `1 - 2 sqrt(1 - u)` above, the symmetric triangular law on [-1, 1]. Sigma is the
+/// [-1, 1]; Triangular: `e = t(Phi(z))` with `t(u) = sqrt(2u) - 1` up to 1/2 and
+/// `1 - sqrt(2 (1 - u))` above, the symmetric triangular law on [-1, 1] (mlogit's
+/// `make.beta`). `1 - u` is taken as `Phi(-z)`, without cancellation. Sigma is the
 /// half-width of the uniform and triangular laws.
 fn draw_factor(z: f64, dist: RandomDistribution) -> f64 {
     match dist {
         RandomDistribution::Normal | RandomDistribution::LogNormal => z,
         RandomDistribution::Uniform => 2.0 * normal_cdf(z) - 1.0,
         RandomDistribution::Triangular => {
-            let u = normal_cdf(z);
-            if u < 0.5 {
-                2.0 * u.sqrt() - 1.0
+            if z <= 0.0 {
+                (2.0 * normal_cdf(z)).sqrt() - 1.0
             } else {
-                1.0 - 2.0 * (1.0 - u).sqrt()
+                // numeric-ok: the triangular quantile at the lower tail Phi(-z), not a p-value
+                1.0 - (2.0 * normal_cdf(-z)).sqrt()
             }
         }
         RandomDistribution::Fixed => 0.0,
     }
 }
 
+/// Replace the standard normal draws of each random parameter by their factors
+/// ([`draw_factor`]) in place, once per fit, so the likelihood reads the factor of a
+/// draw instead of computing it at every evaluation. `random_dists` lists the laws of the
+/// random parameters in the order of `draws.z`; normal and log-normal draws are their
+/// own factors and are left as they are.
+fn into_factors(draws: &mut DrawSet, random_dists: &[RandomDistribution]) -> EconResult<()> {
+    for (z, &dist) in draws.z.iter_mut().zip(random_dists) {
+        if matches!(
+            dist,
+            RandomDistribution::Uniform | RandomDistribution::Triangular
+        ) {
+            for (j, v) in z.iter_mut().enumerate() {
+                if j % 65_536 == 0 {
+                    resource::checkpoint()?;
+                }
+                *v = draw_factor(*v, dist);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The simulated log-likelihood and its gradient at `theta` = (means in `x_cols` order,
 /// then `s_m` for the random variables in `x_cols` order), with `sigma_m = |s_m|`.
+/// `draws` holds the factors `e` of the draws ([`into_factors`]).
 ///
 /// Unit u (a choice situation, or an individual and all its situations) and draw r give
 /// `l_ur = sum_s ln P_s(chosen | beta_ur)`; the unit contributes
@@ -622,7 +673,7 @@ fn simulated_ll_grad(
             beta[row..row + k].copy_from_slice(&theta[..k]);
             dmu[row..row + k].fill(1.0);
             for (m, &j) in random.iter().enumerate() {
-                let e = draw_factor(draws.z[m][u * r_n + r], dists[j]);
+                let e = draws.z[m][u * r_n + r];
                 let sigma = theta[k + m].abs();
                 if dists[j] == RandomDistribution::LogNormal {
                     let b = (theta[j] + sigma * e).exp();
@@ -988,6 +1039,13 @@ fn validate(
 /// Every column comes from one request with `NaPolicy::Fail`: a missing id, alternative,
 /// choice, attribute or individual id is refused with `NullValues` naming the column, as
 /// mlogit refuses it. Int64 and Boolean columns are accepted.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for a choice situation without exactly one chosen row
+/// (`choice > 0.5`) or with an alternative listed twice (naming the first such situation
+/// and their number; mlogit refuses them), as well as for invalid controls and random
+/// parameters.
 pub fn run_mixed_logit(
     dataset: &Dataset,
     choice_id_col: &str,
@@ -1022,7 +1080,11 @@ pub fn run_mixed_logit(
         "choice situation"
     };
     let draws = if n_random > 0 {
-        Some(draw_set(&config, n_units, n_random, unit_label)?)
+        let mut d = draw_set(&config, n_units, n_random, unit_label)?;
+        let random_dists: Vec<RandomDistribution> =
+            random.iter().map(|&j| distributions[j]).collect();
+        into_factors(&mut d, &random_dists)?;
+        Some(d)
     } else {
         None
     };
@@ -1116,7 +1178,7 @@ pub fn run_mixed_logit(
         .collect();
     let std_dev_p_values: Vec<f64> = std_dev_z_stats.iter().map(|&z| p_value(z)).collect();
 
-    let ll_null = -(n_choice_situations as f64) * (n_alternatives as f64).ln();
+    let ll_null = data.ll_equal_shares;
     let aic = -2.0 * ll + 2.0 * n_params as f64;
     let bic = -2.0 * ll + (n_params as f64) * (n_choice_situations as f64).ln();
 
@@ -1226,6 +1288,7 @@ pub fn run_mixl(
 
 #[cfg(test)]
 mod tests {
+    use super::super::conditional_logit::{Malformed, malformed_choice_data};
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
     use p2a_validation::{Check, Tol};
@@ -1351,6 +1414,7 @@ mod tests {
             sit_chosen: vec![0],
             unit_situations: vec![vec![0]],
             n_individuals: None,
+            ll_equal_shares: -(2f64).ln(),
         };
         let draws = DrawSet {
             n_draws,
@@ -1435,6 +1499,107 @@ mod tests {
             // numDeriv's gradient is accurate to about 1e-9
             .named("ln_n_grad", &names, &grad, Tol::new(1e-7, 1e-8))
             .finish();
+    }
+
+    /// mlogit's triangular factor (`make.beta`): `sqrt(2u) - 1` up to 1/2, `1 -
+    /// sqrt(2 (1 - u))` above, at u mapped through the normal quantile as the draws are.
+    #[test]
+    fn test_validate_mixed_logit_triangular_factor() {
+        let (case, _) = case_data("disc_mixed_tri_unif_t4");
+        let factors: Vec<f64> = case
+            .vector("tri_factor_u")
+            .iter()
+            .map(|&u| {
+                let z = crate::traits::estimator::normal_quantile(u).unwrap();
+                draw_factor(z, RandomDistribution::Triangular)
+            })
+            .collect();
+        Check::new(&case)
+            .vector("tri_factor", &factors, Tol::new(1e-13, 1e-15))
+            .finish();
+    }
+
+    /// The simulated log-likelihood and gradient of a triangular and of a uniform random
+    /// coefficient at a fixed point, 50 Halton draws per situation, against mlogit's.
+    #[test]
+    fn test_validate_mixed_logit_triangular_uniform_loglik_gradient() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_tri_unif_t4");
+        let data = choice_data(ds.df(), "id", "alt", "choice", &["x", "w"], None).unwrap();
+        let names = ["x", "w", "sd.x"];
+        let theta = case.by_names("point", &names);
+        for (prefix, dist) in [
+            ("tri", RandomDistribution::Triangular),
+            ("unif", RandomDistribution::Uniform),
+        ] {
+            let mut draws = draw_set(
+                &draws_cfg(50),
+                data.unit_situations.len(),
+                1,
+                "choice situation",
+            )
+            .unwrap();
+            into_factors(&mut draws, &[dist]).unwrap();
+            let dists = [dist, RandomDistribution::Fixed];
+            let (ll, grad) = simulated_ll_grad(&data, &draws, &dists, &theta).unwrap();
+            Check::new(&case)
+                .scalar(&format!("{prefix}_point_loglik"), ll, Tol::new(1e-11, 0.0))
+                // numDeriv's gradient is accurate to about 1e-9
+                .named(
+                    &format!("{prefix}_point_grad"),
+                    &names,
+                    &grad,
+                    Tol::new(1e-7, 1e-8),
+                )
+                .finish();
+        }
+    }
+
+    /// mlogit(rpar = c(x = 't')) and c(x = 'u'), 50 Halton draws per situation: the
+    /// estimates, standard errors and simulated log-likelihood.
+    #[test]
+    fn test_validate_mixed_logit_triangular_uniform_fit() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_tri_unif_t4");
+        for (prefix, dist) in [
+            ("tri", RandomDistribution::Triangular),
+            ("unif", RandomDistribution::Uniform),
+        ] {
+            let spec = RandomParameterSpec {
+                name: "x".to_string(),
+                distribution: dist,
+            };
+            let r = run_mixed_logit(
+                &ds,
+                "id",
+                "alt",
+                "choice",
+                &["x", "w"],
+                &[spec],
+                Some(draws_cfg(50)),
+            )
+            .unwrap();
+            let est = [r.means[0], r.means[1], r.std_devs[0]];
+            let se = [
+                r.mean_std_errors[0],
+                r.mean_std_errors[1],
+                r.std_dev_std_errors[0],
+            ];
+            Check::new(&case)
+                .named(
+                    &format!("{prefix}_coef"),
+                    &NAMES,
+                    &est,
+                    Tol::iterative(1e-6),
+                )
+                .named(&format!("{prefix}_se"), &NAMES, &se, Tol::iterative(1e-5))
+                .scalar(
+                    &format!("{prefix}_loglik"),
+                    r.log_likelihood,
+                    Tol::stat(300),
+                )
+                .finish();
+            assert!(r.converged, "{r}");
+            assert!(r.to_string().contains("half-width"), "{r}");
+        }
     }
 
     /// The simulated log-likelihood at R's optimum, cross-section (one unit per situation)
@@ -1585,6 +1750,114 @@ mod tests {
 
     /// A random parameter that is not a variable, and halton_drop = 0 (point 0 of the
     /// sequence is 0, whose normal quantile is -infinity), are refused.
+    /// The refusals of the conditional logit, on the same malformed Fishing data
+    /// (`sit_chosen` used the last chosen row, or the first row when none was chosen).
+    fn mixed_refusal(kind: Malformed) -> String {
+        let (_, ds) = case_data("disc_mlogit_fishing");
+        let ds = malformed_choice_data(&ds, kind);
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "chosen",
+            &["price", "catch"],
+            &[normal("catch")],
+            Some(draws_cfg(5)),
+        );
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mixed_logit_refuses_situation_without_choice() {
+        let m = mixed_refusal(Malformed::NoChoice);
+        assert!(
+            m.starts_with("1 choice situation has no chosen alternative")
+                && m.contains("choice situation '1'"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_logit_refuses_situation_with_two_choices() {
+        let m = mixed_refusal(Malformed::TwoChoices);
+        assert!(
+            m.contains("choice situation '1', 3 alternatives are chosen"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_logit_refuses_situation_with_duplicate_alternative() {
+        let m = mixed_refusal(Malformed::Duplicate);
+        assert!(
+            m.contains("alternative 'boat' appears twice in choice situation '2'"),
+            "{m}"
+        );
+    }
+
+    /// Without alternative-specific constants the null is equal shares in each situation:
+    /// with situations of 2 and 3 alternatives it is `-sum ln J_i`, not `-N ln J`.
+    #[test]
+    fn test_mixed_logit_null_is_equal_shares_per_situation() {
+        let (_, ds) = case_data("disc_mixed_logit");
+        // drop one unchosen row from every third situation
+        let df = ds.df();
+        let ids: Vec<f64> = df
+            .column("id")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let choice: Vec<f64> = df
+            .column("choice")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let mut keep = vec![true; ids.len()];
+        let mut dropped_in: Option<f64> = None;
+        for (i, (&id, &c)) in ids.iter().zip(&choice).enumerate() {
+            if (id as i64) % 3 == 0 && c < 0.5 && dropped_in != Some(id) {
+                keep[i] = false;
+                dropped_in = Some(id);
+            }
+        }
+        let mask = BooleanChunked::from_slice("keep".into(), &keep);
+        let ds = Dataset::new(df.filter(&mask).unwrap());
+        let mut sizes: std::collections::BTreeMap<i64, usize> = Default::default();
+        for (&id, &k) in ids.iter().zip(&keep) {
+            if k {
+                *sizes.entry(id as i64).or_default() += 1;
+            }
+        }
+        assert!(sizes.values().any(|&j| j == 2) && sizes.values().any(|&j| j == 3));
+        let expected: f64 = -sizes.values().map(|&j| (j as f64).ln()).sum::<f64>();
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &["x", "w"],
+            &[normal("x")],
+            Some(draws_cfg(5)),
+        )
+        .unwrap();
+        assert!(
+            (r.log_likelihood_null - expected).abs() <= 1e-12 * expected.abs(),
+            "{} vs {expected}",
+            r.log_likelihood_null
+        );
+    }
+
     #[test]
     fn test_mixed_logit_rejects_unknown_random_variable() {
         let (_, ds) = case_data("disc_mixed_logit");
@@ -2062,6 +2335,12 @@ mod tests {
             .named("se", &NAMES, &se, Tol::iterative(1e-5))
             .scalar("loglik", r.log_likelihood, Tol::stat(300))
             .named("clogit_coef_tight", &["x", "w"], &cl, Tol::iterative(1e-6))
+            .named(
+                "clogit_se_tight",
+                &["x", "w"],
+                &[c.mean_std_errors[0] * 100.0, c.mean_std_errors[1] / 100.0],
+                Tol::iterative(1e-5),
+            )
             .scalar("clogit_loglik_tight", c.log_likelihood, Tol::stat(300))
             .finish();
         assert!(r.converged && c.converged, "{r}\n{c}");

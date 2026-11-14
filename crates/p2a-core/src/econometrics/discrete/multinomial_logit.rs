@@ -27,8 +27,10 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
 
-use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
-use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
+use super::conditional_logit::line_search_note;
+use super::newton::{
+    MAX_HALVINGS, covariance_from_information, ensure_dense_inverse_fits, equilibrated_newton_step,
+};
 
 /// Newton iterations of [`run_multinom`].
 const MAX_ITER: usize = 100;
@@ -378,6 +380,8 @@ pub fn run_multinom(
     let mut at_beta: Option<MultinomDerivatives> = None;
     // Largest relative component of the polish step at the stop, when it was taken.
     let mut polish_step: Option<f64> = None;
+    // The iteration whose line search found no increase, when that stopped the fit.
+    let mut line_search_failed: Option<usize> = None;
     while iterations < MAX_ITER {
         resource::checkpoint()?;
         let MultinomDerivatives { ll, grad, info, .. } = match at_beta.take() {
@@ -392,10 +396,12 @@ pub fn run_multinom(
         if final_change < TOLERANCE {
             // The last full step, then one more from the new point: with 35 parameters
             // (disc_multinom_mn8) one step leaves the iterate 5e-10 off the optimum.
+            // the last full step and the polish step count as iterations when taken
             let full = trial(1.0);
             let at_full = model.derivatives(&full)?;
             if at_full.ll >= ll - 1e-12 * ll.abs() {
                 beta = full;
+                iterations += 1;
                 let (d2, _) =
                     equilibrated_newton_step(&at_full.info, &at_full.grad, what, &mut warnings)?;
                 // At a regular optimum Newton converges quadratically, so the polish step is
@@ -411,6 +417,7 @@ pub fn run_multinom(
                 let at_polish = model.derivatives(&polish)?;
                 if at_polish.ll >= at_full.ll - 1e-12 * at_full.ll.abs() {
                     beta = polish;
+                    iterations += 1;
                     at_beta = Some(at_polish);
                 } else {
                     at_beta = Some(at_full);
@@ -437,11 +444,7 @@ pub fn run_multinom(
             t *= 0.5;
         }
         let Some((cand, at_cand)) = accepted else {
-            warnings.push(format!(
-                "line search failed at iteration {}: no step along the Newton direction \
-                 increases the log-likelihood; the estimates are not at the optimum",
-                iterations + 1
-            ));
+            line_search_failed = Some(iterations + 1);
             break;
         };
         beta = cand;
@@ -513,6 +516,9 @@ pub fn run_multinom(
         ));
     } else if diverging_stop {
         // the divergence warning above says it; one warning, not two
+    } else if let Some(iteration) = line_search_failed {
+        // one non-convergence note: the line search's
+        warnings.push(line_search_note(iteration));
     } else if let Some(note) = convergence.note("multinomial logit") {
         warnings.push(note);
     }

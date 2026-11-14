@@ -487,14 +487,6 @@ impl AnalyticsServer {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_discrete_option_tables_validate() {
-        assert_eq!(super::MIXED_DISTRIBUTION.validate(), Ok(()));
-        assert_eq!(super::ORDERED_MODEL.validate(), Ok(()));
-        assert_eq!(super::COUNT_DIST.validate(), Ok(()));
-        assert_eq!(super::FEGLM_FAMILY.validate(), Ok(()));
-    }
-
     use p2a_core::data::{DataLoader, Dataset};
     use p2a_core::econometrics::{OrderedConfig, OrderedModelType, run_ordered_model_with};
     use p2a_validation::{Case, Check, Tol};
@@ -503,7 +495,17 @@ mod tests {
 
     use crate::server::AnalyticsServer;
     use crate::tools::common::test_support::{server_with, text};
-    use crate::tools::requests::discrete::{LogitRequest, MixedLogitRequest, OrderedRequest};
+    use crate::tools::requests::discrete::{
+        HurdleModelRequest, LogitRequest, MixedLogitRequest, OrderedRequest,
+    };
+
+    #[test]
+    fn test_discrete_option_tables_validate() {
+        assert_eq!(super::MIXED_DISTRIBUTION.validate(), Ok(()));
+        assert_eq!(super::ORDERED_MODEL.validate(), Ok(()));
+        assert_eq!(super::COUNT_DIST.validate(), Ok(()));
+        assert_eq!(super::FEGLM_FAMILY.validate(), Ok(()));
+    }
 
     /// Case `id`, a runtime and a server holding the case's dataset under its file stem.
     fn server_with_case(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {
@@ -780,5 +782,49 @@ mod tests {
             init_theta.contains("1e-8") && init_theta.contains("1e6"),
             "{init_theta}"
         );
+        let z_text = |name: &str| {
+            tool(name).input_schema["properties"]["z"]["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let zeroinfl_z = z_text("zeroinfl");
+        assert!(
+            zeroinfl_z.contains("count-model regressors") && zeroinfl_z.contains("[]"),
+            "{zeroinfl_z}"
+        );
+        let hurdle_z = z_text("hurdle_model");
+        assert!(hurdle_z.contains("[]"), "{hurdle_z}");
+    }
+
+    /// The hurdle count part through the tool: the Count Part rows equal pscl's
+    /// zero-truncated Poisson fit at print precision.
+    #[test]
+    fn test_validate_mcp_hurdle_count_part() {
+        let (case, rt, server) = server_with_case("disc_hurdle_t4");
+        let request: HurdleModelRequest = serde_json::from_value(json!({
+            "dataset": "zeroinfl", "y": "y", "x": ["x1", "x2"]
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.hurdle_model(Parameters(request)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        let count_part = t
+            .split("Count Part")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no count part in:\n{t}"));
+        let names = ["(Intercept)", "x1", "x2"];
+        let (mut coef, mut se) = (Vec::new(), Vec::new());
+        for name in names {
+            let tokens = row(count_part, name);
+            coef.push(number(tokens[1]));
+            se.push(number(tokens[2]));
+        }
+        Check::new(&case)
+            .named("hp_count", &names, &coef, Tol::printed(4))
+            .named("hp_count_se", &names, &se, Tol::printed(4))
+            .finish();
     }
 }

@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "id": "disc_clogit_unbalanced_t4",
+  "area": "econometrics/discrete",
+  "method": "mlogit on Fishing with and without 'charter' in 300 situations: null log-likelihoods for unbalanced choice sets",
+  "reference": "mlogit::mlogit(chosen ~ price + catch[ | 0]) and mlogit(chosen ~ 1), Newton-polished (*_tight); null log-likelihoods: equal shares -sum ln J_i, mlogit's logLik['null'] = sum n_j ln(n_j / N) (summary.mlogit mfR2), and the constants-only MLE",
+  "call": "mlogit(chosen ~ price + catch, data = dfidx(fishing_unbalanced), reflevel = 'beach')",
+  "dataset": "validation/datasets/generated/mlogit_fishing_unbalanced.csv",
+  "datasets": ["validation/datasets/generated/mlogit_fishing.csv", "validation/datasets/generated/mlogit_fishing_unbalanced.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "mlogit": "2.0.0",
+    "dfidx": "0.2.0"
+  },
+  "values": {
+    "bal_asc_coef_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.87137491551805746, 1.4988884108281058, 0.30705524527827033, -0.024789550881999297, 0.37716885214202095]
+    },
+    "bal_asc_se_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.11404283053890034, 0.13293279570191199, 0.1145737962664141, 0.0017044027510731178, 0.10997065922402284]
+    },
+    "bal_asc_loglik": -1230.78383041549,
+    "bal_noasc_coef_tight": {
+      "names": ["price", "catch"],
+      "values": [-0.020476534637820128, 0.95309850611037983]
+    },
+    "bal_noasc_se_tight": {
+      "names": ["price", "catch"],
+      "values": [0.0012230609699032773, 0.089413423954072022]
+    },
+    "bal_noasc_loglik": -1311.9796171077896,
+    "bal_null_equal_shares": -1638.5999348437106,
+    "bal_null_market_shares": -1497.7229107709336,
+    "bal_null_constants_only": -1497.7229107709336,
+    "bal_asc_pr2_equal": 0.24888082548783819,
+    "bal_asc_pr2_market": 0.17822995057079027,
+    "bal_asc_pr2_constants": 0.17822995057079027,
+    "bal_asc_pr2_pkg": 0.17822995057079027,
+    "bal_noasc_pr2_equal": 0.19932889706057133,
+    "bal_n_situations": 1182,
+    "bal_n_rows": 4728,
+    "bal_choice_counts": [134, 418, 452, 178],
+    "unbal_asc_coef_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.9273414062490718, 2.2950805210558336, 0.29119698433802338, -0.026210738050104709, 0.12539265848390463]
+    },
+    "unbal_asc_se_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.11435454449130736, 0.14844094401931532, 0.1145756505008886, 0.0018033984869619125, 0.11818126820188422]
+    },
+    "unbal_asc_loglik": -1053.0569392866296,
+    "unbal_noasc_coef_tight": {
+      "names": ["price", "catch"],
+      "values": [-0.018824005083396083, 1.1667684628806367]
+    },
+    "unbal_noasc_se_tight": {
+      "names": ["price", "catch"],
+      "values": [0.0011311833541633913, 0.097180959688683177]
+    },
+    "unbal_noasc_loglik": -1217.3907629190433,
+    "unbal_null_equal_shares": -1552.2953131081765,
+    "unbal_null_market_shares": -1497.7229107709336,
+    "unbal_null_constants_only": -1322.5046743613673,
+    "unbal_asc_pr2_equal": 0.32161301371316831,
+    "unbal_asc_pr2_market": 0.29689468478212566,
+    "unbal_asc_pr2_constants": 0.2037404784257969,
+    "unbal_asc_pr2_pkg": 0.29689468478212566,
+    "unbal_noasc_pr2_equal": 0.21574796197673918,
+    "unbal_n_situations": 1182,
+    "unbal_n_rows": 4428,
+    "unbal_choice_counts": [134, 418, 452, 178],
+    "dropped_ids_first": [3, 4, 5, 7, 9],
+    "dropped_ids_last": [554],
+    "refused_no_chosen": 1,
+    "refused_two_chosen": 1,
+    "refused_duplicate_alt": 1
+  }
+}

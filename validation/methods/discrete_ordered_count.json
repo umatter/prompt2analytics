@@ -54,9 +54,7 @@
       ],
       "quantities": ["coefficients", "SE", "z", "p", "theta", "SE(theta)", "log-likelihood", "AIC", "BIC", "mean and variance of y", "rows used / dropped (na.omit)", "trigamma", "intercept-only model (glm.nb(y ~ 1))", "init_theta range [1e-8, 1e6]"],
       "tolerance": "MLE: coefficients and theta 1e-6, SEs and z 1e-5 relative; p 2e-3 relative; log-likelihood, AIC, BIC 1e-6 (n = 400); mean/variance of y 1e-8; glm.nb's own SE.theta 1e-4 (evaluated one theta.ml step before its theta); trigamma 1e-12 relative",
-      "deviations": [
-        {"finding": "ECON-64", "quantity": "null log-likelihood and McFadden pseudo-R2", "note": "not pinned: the null log-likelihood omits the lnGamma terms and reuses the full model's theta (Tier 4)"}
-      ],
+      "deviations": [],
       "supersedes_legacy": ["validation/expected/negbin_test.csv"]
     },
     {
@@ -108,9 +106,7 @@
       ],
       "quantities": ["rows used / dropped (na.omit)"],
       "tolerance": "exact",
-      "deviations": [
-        {"finding": "ECON-16", "quantity": "count-part SEs, NB hurdle theta (all hurdle estimates)", "note": "not pinned to pscl::hurdle: the truncated-count information and the NB theta are Tier 4"}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

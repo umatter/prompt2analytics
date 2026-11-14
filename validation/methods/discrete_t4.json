@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "discrete_hurdle_count_part",
+      "name": "Hurdle count part: zero-truncated Poisson and negative binomial maximum likelihood (pscl::hurdle)",
+      "category": "econometrics",
+      "reference": "pscl::hurdle(y ~ x1 + x2, dist = 'poisson' | 'negbin', zero.dist = 'binomial', reltol = 1e-15), count part polished by Newton steps on the analytic truncated score; SEs from numDeriv::hessian of the truncated log-likelihood; zero part glm(binomial) at epsilon 1e-14",
+      "doc": "validation/econometrics/hurdle.md",
+      "cases": [
+        "disc_hurdle_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_poisson_count_part",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_count_part",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_negbin_flat_theta",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_intercept_only_zero_part",
+        "p2a-mcp::tools::handlers::discrete::tests::test_validate_mcp_hurdle_count_part"
+      ],
+      "quantities": [
+        "count coefficients, SEs, z, p",
+        "theta, log theta and their SEs",
+        "count and zero log-likelihoods, total log-likelihood, AIC, BIC",
+        "n, positive counts"
+      ],
+      "tolerance": "MLE (validation/README.md, iterative): count coefficients 1e-8 (1e-6 on the flat theta profile), SEs and z 1e-6 (1e-5 flat), p 1e-4, theta and log theta 1e-7, SE(log theta) and SE(theta) 1e-5 (log theta 1e-4 and its SE 1e-3 on the flat profile); log-likelihoods, AIC, BIC Tol::stat(500); pscl's own optim 1e-5 (Poisson), 1e-4 (NB); counts exact; MCP text at print precision (4 decimals)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_negbin_null",
+      "name": "Negative binomial null model and McFadden pseudo-R2 (pscl::pR2 on MASS::glm.nb)",
+      "category": "econometrics",
+      "reference": "MASS::glm.nb(y ~ 1) on the model frame, with its own theta, polished as disc_negbin; pscl::pR2 McFadden",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": [
+        "disc_negbin_null_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_null_disc_negbin",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_null_missing_rows"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "null log-likelihood",
+        "McFadden pseudo-R2",
+        "rows used (na.omit)"
+      ],
+      "tolerance": "log-likelihoods Tol::stat(n) (n = 400, 395); pseudo-R2 1e-8 relative; rows exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_mlogit_null",
+      "name": "Conditional logit on unbalanced choice sets and its null log-likelihood (mlogit)",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(chosen ~ price + catch[ | 0]) on Fishing and on Fishing with charter removed from 300 situations, Newton-polished; null log-likelihoods: equal shares -sum ln J_i, mlogit's logLik 'null' attribute (market shares) and the constants-only MLE",
+      "doc": "validation/econometrics/mlogit.md",
+      "cases": [
+        "disc_clogit_unbalanced_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_null_unbalanced_choice_sets",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_null_balanced_matches_mlogit"
+      ],
+      "quantities": [
+        "coefficients and SEs on unbalanced choice sets",
+        "log-likelihood",
+        "null log-likelihood",
+        "McFadden pseudo-R2",
+        "choice situations"
+      ],
+      "tolerance": "coefficients 1e-9, SEs 1e-8 relative; log-likelihoods Tol::stat(1182); pseudo-R2 1e-9 (constants) and 1e-10 (equal shares) relative",
+      "deviations": [
+        {
+          "finding": "ECON-63",
+          "quantity": "null log-likelihood and pseudo-R2 of a model with constants on unbalanced choice sets",
+          "note": "the constants-only conditional logit fit (-1322.50 on the reference; McFadden 0.2037), the likelihood of the nested model; mlogit's market-share formula (-1497.72; 0.2969) gives probability to alternatives a situation did not offer. On balanced choice sets the two are equal and pinned against mlogit"
+        },
+        {
+          "finding": "ECON-63",
+          "quantity": "null log-likelihood of models without constants",
+          "note": "equal shares per situation, -sum ln J_i; mlogit's logLik 'null' attribute is the market-share value for every model, but summary.mlogit prints no McFadden R2 without an intercept, so no printed R number differs"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_mixed_tri_unif",
+      "name": "Mixed logit with a triangular or uniform random coefficient (mlogit)",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(choice ~ x + w | 0, rpar = c(x = 't') | c(x = 'u'), R = 50, halton = NA) on mixed_logit.csv, re-solved as discrete_mixed.R (optim BFGS + numDeriv Newton); the simulated log-likelihood and numDeriv gradient at a fixed point; mlogit's make.beta triangular factor",
+      "doc": "validation/econometrics/mixed_logit.md",
+      "cases": [
+        "disc_mixed_tri_unif_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_factor",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_uniform_loglik_gradient",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_uniform_fit"
+      ],
+      "quantities": [
+        "triangular draw factor",
+        "simulated log-likelihood and gradient at a fixed point",
+        "means, half-width, SEs, log-likelihood"
+      ],
+      "tolerance": "factor 1e-13 (abs 1e-15); log-likelihood at a point 1e-11; gradient 1e-7 (abs 1e-8, numDeriv); estimates 1e-6, SEs 1e-5 relative; log-likelihood Tol::stat(300)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "marginal_effects_probit_ctl",
+      "name": "Probit fit and marginal effects at p2a's GLM control (glm epsilon 1e-10)",
+      "category": "regression",
+      "reference": "glm(y ~ x1 + x2, binomial(probit), control = glm.control(epsilon = 1e-10, maxit = 100)) on me_mem_contrast.csv; effects at the means and average comparisons of x1 by hand from the fit",
+      "doc": "validation/regression/marginal_effects.md",
+      "cases": [
+        "me_probit_ctl_t4"
+      ],
+      "tests": [
+        "p2a-core::regression::marginal_effects::tests::test_validate_marginal_effects_probit_at_control"
+      ],
+      "quantities": [
+        "probit coefficients and SEs",
+        "marginal effects at the means",
+        "average comparisons of x1 (estimates)",
+        "n"
+      ],
+      "tolerance": "1e-8 relative (the iterate glm reaches at the same control); n exact. The delta-method SEs of the effects and comparisons stay pinned at 1e-6 against glm at epsilon 1e-14 (method marginal_effects_mem_contrasts)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
