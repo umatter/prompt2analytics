@@ -1,13 +1,81 @@
-# hettx: effect summary and regression imputation
+# hettx: randomization tests of treatment effect variation
 
-**Status:** R-pinned (registry entry `hettx_effect_summary_and_imputation` in
-`validation/methods/numeric_hygiene.json`).
+**Status:** R-pinned (registry entries `causal_hettx_dfm` in `validation/methods/causal_hettx_t4.json`
+and `hettx_effect_summary_and_imputation` in `validation/methods/numeric_hygiene.json`).
 
-R's `hettx` package is not installed in the validation environment, so the method as a whole is not
-pinned to it. Two of its building blocks are pinned to base R instead: the summary of the estimated
-individual effects (and the IQR statistic of the permutation test) to `stats::quantile(type = 7)` and
-`stats::IQR`, and the regression imputation of the outcome model on one arm to `stats::lm` and
-`predict.lm`. Cases: `validation/r/cases/numeric_hettx.R`.
+R's `hettx` package is not installed in the validation environment. The procedures of Ding, Feller &
+Miratrix (2016, 2019) are written out in p2a and, for the reference values, in base R and `sandwich`
+(`validation/r/cases/causal_hettx_t4.R`); the R pin is against that transcription, not against hettx.
+
+## Test of a constant effect (`hettx_dfm_t4`)
+
+H0: tau_i = tau for every unit, tau unknown. The average effect is the difference in means with the
+Neyman SE sqrt(s1^2 / n1 + s0^2 / n0) (`ate_se`; it used to be sd(imputed effects) / sqrt(n), the spread
+of the imputed unit effects). For each tau on `grid_size` (default 151) evenly spaced points over the
+1 - gamma Neyman interval (gamma = 1e-4 by default), Y(0) = Y - tau Z is imputed, every drawn assignment Zb
+(a permutation of Z, draw b from stream b of the seed) gives Yb = Y(0) + tau Zb, and
+p(tau) = (1 + #{t(Yb, Zb) >= t(Y, Z)}) / (B + 1), with the same B assignments for every tau. The p-value is
+min(1, max p(tau) + gamma); `plugin` tests tau = ATE only, without gamma. The old code permuted the
+treatment labels with the outcomes fixed, which tests "no effect for anyone": any constant non-zero effect
+moved its p-value.
+
+Statistics: the shifted Kolmogorov-Smirnov statistic (default, as hettx; the largest distance between the
+ecdfs of the arm-centred outcomes, computed on integer counts max |a n0 - b n1| / (n1 n0) by a merge of four
+pieces of the outcome order, O(n) per grid point), or the variance, range, IQR or mean absolute deviation
+of the imputed unit effects (matching or regression). Both imputations are linear in the outcome for a
+fixed assignment, so each draw imputes once (tau_hat(tau) = imp(Y) + tau imp(Zb - Z)), and the variance is
+closed form in tau. `stratified` imputes the difference in means for every unit (no strata are formed),
+so it is refused with a spread statistic and runs with SKS.
+
+R values (n = 40, 20 treated, B = 199 stored assignments, 21 grid points, gamma = 1e-4):
+
+| quantity | y_het (tau_i = 1 + 1.5 x1) | y_homo (tau = 2) |
+|---|---|---|
+| ATE | 1.2523141634600001 | 1.822803991685 |
+| Neyman SE | 0.46096121659848616 | 0.32102126510916196 |
+| SKS numerator | 80 | 80 |
+| p-value (max + gamma) | 0.7851 | 0.6001 |
+| plug-in p | 0.68 | 0.5 |
+
+The SKS test has little power at n = 40 (DFM's own finding for small samples). Every p(tau) is pinned
+exactly (multiples of 1/200). Test: `test_validate_hettx_frt_sks_stored_assignments`.
+
+## Decomposition (`hettx_dfm_t4`)
+
+**Systematic variation** (DFM 2019): `y ~ 1 + z + X + z:X` by least squares (an aliased interaction is
+dropped from the test and its df, with R's aliasing warning); the interaction coefficients are tested with
+the Wald chi-squared statistic on their HC2 covariance (`sandwich::vcovHC(type = "HC2")`); the systematic
+variance is beta' S_xx beta (S_xx the sample covariance of X). Covariate importance is |beta_j| sd(x_j),
+normalised to sum 1.
+
+**Idiosyncratic variation** (DFM 2016, section 6; hettx's `detect_idiosyncratic` with an interaction
+formula, plug-in coefficients): H0 tau_i = b_z + X_i' beta. Y(0) = Y - Z tau_i, Yb = Y(0) + Zb tau_i, and
+the statistic is the KS distance between the two arms' residuals from their own regressions on X, with
+the same drawn assignments as the test of a constant effect.
+
+The old decomposition permuted the imputed effects across units: its idiosyncratic p-value was
+1 + 1/(B + 1) - p_sys by construction, and with regression imputation the idiosyncratic part was
+identically 0. The total and idiosyncratic variances of the imputed effects are now descriptive only.
+
+| quantity | y_het | y_homo |
+|---|---|---|
+| beta (x1, x2) | 1.1137538690529611, 0.27741484918074066 | -0.38624613094174404, 0.27741484918194353 |
+| HC2 SE (x1, x2) | 0.35044847974916404, 0.4037724485726621 | 0.3504484797464814, 0.40377244856776373 |
+| Wald chi-squared (2 df) | 10.13136472658899 | 2.259513868801343 |
+| p | 0.006309603991365877 | 0.32311178423764686 |
+| systematic variance | 1.2561945372195817 | 0.21721394444931225 |
+| covariate-adjusted KS numerator | 80 | 80 |
+| idiosyncratic p | 0.525 | 0.525 |
+
+The two outcomes differ by treat (1.5 x1 - 1), which is linear in X, so their covariate-adjusted
+residuals and the idiosyncratic test coincide. Test: `test_validate_hettx_systematic_interaction_hc2`.
+
+Property tests: `test_hettx_p_value_is_shift_invariant` (adding c to the treated outcomes moves the ATE and
+the interval by c and leaves the p-value), `test_hettx_sks_counts_match_naive` (the merge against the ecdf
+definition), `test_hettx_linear_in_tau_imputation_matches_rerun`, `test_hettx_matching_k_nearest_matches_full_sort`
+(the neighbour selection against a stable sort, with tied distances), `test_hettx_ate_se_is_neyman`.
+
+Tolerances: `validation/README.md` for n < 100; integer numerators and p-values exact.
 
 ## Effect summary and IQR statistic (`qtl_hettx_summary`)
 

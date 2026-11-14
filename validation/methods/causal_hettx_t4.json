@@ -10,7 +10,10 @@
       "cases": [
         "hettx_dfm_t4"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_frt_sks_stored_assignments",
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_systematic_interaction_hc2"
+      ],
       "quantities": [
         "ATE and Neyman SE",
         "1 - gamma interval and the tau grid",
