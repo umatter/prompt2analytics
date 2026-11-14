@@ -1903,12 +1903,11 @@ impl AnalyticsServer {
 
     /// Run Synthetic Control with Prediction Intervals (SCPI).
     #[tool(
-        description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
-        Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification \
-        through prediction intervals that account for both in-sample and out-of-sample variance. \
-        Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (same weights as simplex: the L1 norm is 1 on the simplex). \
-        Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
-        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics. \
+        description = "Run Synthetic Control with Prediction Intervals (SCPI; Cattaneo, Feng & Titiunik 2021, JASA) for causal inference. \
+        The intervals follow R's scpi package at scpi's defaults (simplex, HC1, misspecification-robust, all three out-of-sample methods), 200 simulations: \
+        simulated in-sample bounds from the weight estimation plus out-of-sample bounds by sub-Gaussian, location-scale and quantile-regression methods, reported per method. \
+        Constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (same weights as simplex: the L1 norm is 1 on the simplex). \
+        Returns donor weights, treatment effects with prediction intervals and pre-treatment fit statistics. \
         Units may be identified by text or integer ids; the panel must be balanced."
     )]
     pub async fn scpi(
@@ -1919,10 +1918,17 @@ impl AnalyticsServer {
             SCPIConstraint::from_options(request.constraint.as_deref(), request.lambda)
                 .map_err(option_message)
         );
-        let variance_method = tool_try!(parse_option(
-            request.variance_method.as_deref(),
-            VarianceMethod::Subgaussian
+        let e_method = tool_try!(parse_option(
+            request.e_method.as_deref(),
+            p2a_core::econometrics::scpi::EMethod::All
         ));
+        let variance_method = match request.variance_method.as_deref() {
+            Some(v) => Some(tool_try!(parse_option(
+                Some(v),
+                VarianceMethod::Subgaussian
+            ))),
+            None => None,
+        };
         use ndarray::{Array1, Array2};
         use p2a_core::data::columns::{ColumnRequest, NaPolicy};
 
@@ -2071,9 +2077,11 @@ impl AnalyticsServer {
 
         let config = SCPIConfig {
             constraint,
-            alpha: request.alpha.unwrap_or(0.05),
+            alpha: request.alpha,
+            e_method,
+            sims: request.sims.unwrap_or(200),
+            seed: request.seed,
             variance_method,
-            cv_folds: request.cv_folds.unwrap_or(5),
             weight_threshold: request.weight_threshold.unwrap_or(0.001),
             ..Default::default()
         };
@@ -3487,6 +3495,35 @@ mod tests {
         ] {
             assert!(out.contains(needle), "{needle}\n{out}");
         }
+    }
+
+    /// sims, seed and e_method reach run_scpi; alpha sets both levels to alpha / 2.
+    #[test]
+    fn test_mcp_scpi_passes_sims_seed_and_e_method() {
+        let df = grunfeld();
+        let r = run_scpi_on(
+            df.clone(),
+            json!({"sims": 20, "seed": 7, "e_method": "QREG", "alpha": 0.1}),
+        );
+        let out = text(&r);
+        assert_ne!(r.is_error, Some(true), "{out}");
+        for needle in [
+            "Simulations: 20 (seed 7)",
+            "quantile regression out-of-sample bounds",
+            "u_alpha = 0.05, out-of-sample e_alpha = 0.05",
+        ] {
+            assert!(out.contains(needle), "{needle}\n{out}");
+        }
+        let r = run_scpi_on(df.clone(), json!({"e_method": "bootstrap"}));
+        assert_eq!(r.is_error, Some(true));
+        let out = text(&r);
+        assert!(
+            out.contains("expected one of: all, gaussian, ls, qreg"),
+            "{out}"
+        );
+        let r = run_scpi_on(df, json!({"sims": 5}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("sims"), "{}", text(&r));
     }
 
     #[test]

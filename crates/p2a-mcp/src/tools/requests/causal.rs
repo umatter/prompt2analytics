@@ -1617,19 +1617,37 @@ pub struct ScpiRequest {
 
     /// Significance level
     #[schemars(
-        description = "Significance level for prediction intervals. Default is 0.05 (95% PI)."
+        description = "Overall level of the prediction intervals, in (0, 1). Omitted: scpi's defaults, in-sample and out-of-sample levels 0.05 each (the interval covers with probability at least 0.90). Given: each part at alpha / 2, so the interval covers with probability at least 1 - alpha."
     )]
     pub alpha: Option<f64>,
 
-    /// Variance estimation method
+    /// Out-of-sample method
     #[schemars(
-        description = "Out-of-sample variance: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv' or 'kfold_cv'. Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Out-of-sample uncertainty (scpi's e.method): 'all' (default: the three below, each reported, 'gaussian' as the headline), 'gaussian' (sub-Gaussian bounds), 'ls' (location-scale) or 'qreg' (quantile regression). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+    )]
+    pub e_method: Option<String>,
+
+    /// Number of simulations
+    #[schemars(
+        description = "Number of simulations of the in-sample uncertainty (scpi's sims). Default 200; at least 10."
+    )]
+    pub sims: Option<usize>,
+
+    /// Seed
+    #[schemars(
+        description = "Seed of the simulations. Default 42; the same seed gives the same intervals."
+    )]
+    pub seed: Option<u64>,
+
+    /// Deprecated variance method
+    #[schemars(
+        description = "Deprecated, use e_method: 'gaussian' selects e_method 'gaussian'; 'subgaussian', 'loo_cv' and 'kfold_cv' select 'all' (the last two with a warning). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub variance_method: Option<String>,
 
     /// Number of CV folds
     #[schemars(
-        description = "Number of folds for K-fold cross-validation (if variance_method='kfold_cv'). Default is 5."
+        description = "Deprecated and ignored (the cross-validation variances were removed)."
     )]
     pub cv_folds: Option<usize>,
 
