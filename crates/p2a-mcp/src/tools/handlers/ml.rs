@@ -160,9 +160,8 @@ const FEWEST_TREES: usize = 1;
 const FEWEST_FOREST_TREES: usize = 2;
 /// The shallowest trees both fits accept: at depth 0 each tree is a single leaf.
 const SHALLOWEST_TREES: usize = 0;
-/// The fewest bootstrap replications `bart_causal` accepts. Two give a standard error only
-/// when `n_trees` is at least 4: each replication fits `n_trees / 4` trees, none below 4,
-/// and the standard error is then NaN until ML-67 is fixed.
+/// The fewest bootstrap replications `bart_causal` accepts. Each replication fits
+/// `max(1, n_trees / 4)` trees per arm, so two give a standard error at any `n_trees`.
 const FEWEST_BART_REPLICATIONS: usize = 2;
 
 /// One numeric setting a refused tree-ensemble request could change: the verb and the
@@ -1388,7 +1387,7 @@ impl AnalyticsServer {
 
     /// Run Treatment Effect Heterogeneity Test (hettx).
     #[tool(
-        description = "Test for treatment effect heterogeneity using Fisherian randomization inference. Tests H0: all individual treatment effects are equal (tau_i = tau). Returns permutation p-value, estimated individual effects, ATE, and optionally decomposes heterogeneity into systematic (explained by covariates) and idiosyncratic components. Based on R package 'hettx' by Ding, Feller & Miratrix."
+        description = "Test for treatment effect heterogeneity by Fisherian randomization inference, as R's hettx (Ding, Feller & Miratrix 2016). H0: a constant treatment effect, tau_i = tau for every unit. The randomization p-value is maximized over a grid of 151 values of tau spanning a 1 - gamma confidence interval for the effect (gamma = 1e-4) and gamma is added, so the test holds whatever the constant effect is. Statistics: the variance (default), range, IQR or mean absolute deviation of the imputed unit effects (matching or regression imputation), or 'sks', the shifted Kolmogorov-Smirnov statistic, which imputes nothing (the default with effect_method 'stratified'). Returns the p-value, the imputed effects' summary and the ATE, and optionally decomposes the heterogeneity into a systematic part (explained by covariates) and an idiosyncratic part."
     )]
     pub async fn heterogeneity_test(
         &self,
@@ -1401,11 +1400,6 @@ impl AnalyticsServer {
         // hettx's core draws from entropy without a seed: 42 keeps unseeded runs reproducible.
         let seed = self.seed_for(request.seed).await;
 
-        let test_statistic =
-            match parse_option(request.test_statistic.as_deref(), HetTestStat::Variance) {
-                Ok(t) => t,
-                Err(e) => return error_text(e),
-            };
         let effect_method = match parse_option(
             request.effect_method.as_deref(),
             EffectEstimationMethod::Matching,
@@ -1413,6 +1407,18 @@ impl AnalyticsServer {
             Ok(m) => m,
             Err(e) => return error_text(e),
         };
+        // A spread statistic is constant over the assignments under the stratified method
+        // (every imputed effect is the difference in means), so its default is SKS.
+        let default_statistic = if effect_method == EffectEstimationMethod::Stratified {
+            HetTestStat::SKS
+        } else {
+            HetTestStat::Variance
+        };
+        let test_statistic =
+            match parse_option(request.test_statistic.as_deref(), default_statistic) {
+                Ok(t) => t,
+                Err(e) => return error_text(e),
+            };
 
         let mut config = HetTxConfig::default();
         config.n_permutations = request.n_permutations.unwrap_or(1000);

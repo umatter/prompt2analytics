@@ -778,6 +778,20 @@ async fn test_mcp_ml_unknown_option_is_error() {
         let e = err(&call(&server, &s, "heterogeneity_test", a).await);
         assert!(e.contains("'bogus'") && e.contains(expect), "{field}: {e}");
     }
+    // effect_method 'stratified' without a statistic runs the SKS test (a spread statistic of
+    // identical imputed effects is refused by the core); an explicit spread statistic is not
+    // replaced
+    let a = json!({"dataset": "h2", "outcome": "c", "treatment": "tr", "covariates": ["a"], "n_permutations": 10, "effect_method": "stratified"});
+    let t = ok(&call(&server, &s, "heterogeneity_test", a.clone()).await);
+    assert!(t.contains("Shifted Kolmogorov-Smirnov"), "{t}");
+    let e = err(&call(
+        &server,
+        &s,
+        "heterogeneity_test",
+        with(&a, json!({"test_statistic": "variance"})),
+    )
+    .await);
+    assert!(e.to_lowercase().contains("stratified"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -816,7 +830,7 @@ async fn test_ml_option_descriptions_list_every_value() {
     lists_every_value(
         "heterogeneity_test",
         "test_statistic",
-        vec!["variance", "range", "iqr", "mad"],
+        vec!["variance", "range", "iqr", "mad", "sks"],
     );
     lists_every_value(
         "heterogeneity_test",

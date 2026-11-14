@@ -1641,7 +1641,7 @@ pub struct ScpiRequest {
 
     /// Deprecated variance method
     #[schemars(
-        description = "Deprecated, use e_method: 'gaussian' selects e_method 'gaussian'; 'subgaussian', 'loo_cv' and 'kfold_cv' select 'all' (the last two with a warning). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
+        description = "Deprecated, use e_method: 'gaussian' selects e_method 'gaussian'; 'subgaussian', 'loo_cv' and 'kfold_cv' select 'all' (the last two with a warning). Used only when e_method is absent or 'all'; another e_method wins (with a warning). Case and separators ('-', '_', '.', ' ') are ignored; other values are an error."
     )]
     pub variance_method: Option<String>,
 
@@ -2068,7 +2068,9 @@ pub struct HetTxRequest {
     pub n_permutations: Option<usize>,
 
     /// Test statistic type (default: 'variance')
-    #[schemars(description = "Test statistic: 'variance' (default), 'range', 'iqr', or 'mad'.")]
+    #[schemars(
+        description = "Test statistic: 'variance', 'range', 'iqr' or 'mad' of the imputed unit effects, or 'sks', the shifted Kolmogorov-Smirnov statistic of the arm-centred outcomes (no imputation). Default 'variance', and 'sks' when effect_method is 'stratified'."
+    )]
     pub test_statistic: Option<String>,
 
     /// Whether to decompose heterogeneity (default: true)
@@ -2079,7 +2081,7 @@ pub struct HetTxRequest {
 
     /// Effect estimation method (default: 'matching')
     #[schemars(
-        description = "Method for estimating individual effects: 'matching' (default), 'regression', or 'stratified'."
+        description = "Method for estimating individual effects: 'matching' (default), 'regression', or 'stratified' (the difference in means for every unit; runs only with test_statistic 'sks')."
     )]
     pub effect_method: Option<String>,
 
