@@ -36,15 +36,26 @@ always returned an error because the model did not keep `y`.
 
 | Test | What it checks |
 |---|---|
-| `test_qrf_meinshausen_two_stumps` | Two stumps on 12 rows (splits at 4.5 and 8.5): weights and eq. (6) quantiles at x = 3, 6, 10, alpha 0.1-0.9, equal to the base-R computation exactly (dyadic weights); OOB through one tree |
-| `test_qrf_weights_sum_to_one` | 50-tree forest, five points: the weights sum to one, and each tree adds `1/k` |
+| `test_qrf_meinshausen_two_stumps` | Two stumps on 12 rows (splits at 4.5 and 8.5): weights and eq. (6) quantiles at x = 3, 6, 10, alpha 0.1-0.9, equal to the base-R computation exactly (dyadic weights); one tree alone (tree B) |
+| `test_qrf_weights_sum_to_one` | 50-tree forest, five points: the weights sum to one, and each tree alone gives `1/|L|` over its leaf, whose sum over the trees divided by `k` is the forest's weight at every rank |
 | `test_qrf_one_tree_is_its_leaf_ecdf` | One tree: each prediction is eq. (6) on the training rows of its leaf |
 | `test_qrf_oob_excludes_the_row` | OOB prediction equals a brute-force reference over the out-of-bag trees without the row |
 | `test_predict_quantiles_uses_stored_y` | `predict_quantiles` equals `predict_quantiles_with_y` with the training `y`, bit for bit |
 | `test_quantile_rf_seeded_output_is_unchanged` | The seeded forest's impurity and leaf counts are those of the earlier builder, bit for bit |
 | `test_qrf_refuses_overflowing_target` | A target whose sum of squares overflows is refused |
 
-Reference values (base R, `qrf.R`): at x = 3 the weights are 3/16 on rows 1-4 and 1/16 on rows 5-8, and the
+Reference values, computed in base R: each stump puts weight `1/|L|` on the training rows of the leaf `x` falls in,
+the forest averages the two, and eq. (6) is the smallest `y` whose cumulative weight in ascending `y` reaches alpha:
+
+```r
+x <- 1:12; y <- c(3.1, 1.4, 4.1, 1.5, 9.2, 6.5, 3.5, 8.9, 7.9, 3.2, 3.8, 4.6)
+leaf_w <- function(s, x0) { m <- if (x0 <= s) x <= s else x > s; m / sum(m) }
+w <- function(x0) (leaf_w(4.5, x0) + leaf_w(8.5, x0)) / 2
+q <- function(x0, a) { o <- order(y); y[o][which(cumsum(w(x0)[o]) >= a)[1]] }
+sapply(c(0.1, 0.25, 0.5, 0.75, 0.9), function(a) q(3, a))
+```
+
+At x = 3 the weights are 3/16 on rows 1-4 and 1/16 on rows 5-8, and the
 quantiles at alpha = 0.1, 0.25, 0.5, 0.75, 0.9 are 1.4, 1.5, 3.1, 4.1, 8.9; at x = 6, 1.5, 3.2, 4.1, 7.9, 9.2; at
 x = 10, 3.2, 3.5, 4.6, 7.9, 8.9.
 

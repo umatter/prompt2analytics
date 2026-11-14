@@ -397,7 +397,11 @@ impl QuantileTree {
 
     /// The training rows in the leaf `x` falls in.
     fn leaf_members(&self, x: &ArrayView1<f64>) -> &[u32] {
-        let l = self.leaf_of(x) as usize;
+        self.leaf_slice(self.leaf_of(x) as usize)
+    }
+
+    /// The training rows of leaf `l`.
+    fn leaf_slice(&self, l: usize) -> &[u32] {
         &self.members[self.offsets[l] as usize..self.offsets[l + 1] as usize]
     }
 
@@ -664,11 +668,12 @@ impl RankedY {
 }
 
 /// Scratch space of one prediction pass: a weight per training rank, the ranks with a
-/// non-zero weight, the trees that contribute and the cumulative weights.
+/// non-zero weight, the trees that contribute (tree, leaf, effective leaf size) and the
+/// cumulative weights.
 struct WeightBuf {
     weight: Vec<f64>,
     touched: Vec<u32>,
-    trees: Vec<usize>,
+    trees: Vec<(usize, usize, usize)>,
     cumulative: Vec<f64>,
 }
 
@@ -700,26 +705,24 @@ fn meinshausen_weights(
     }
     buf.touched.clear();
     buf.trees.clear();
-    let leaf_size = |t: &QuantileTree| {
-        let members = t.leaf_members(row);
-        match exclude {
-            Some(i) => members.len() - members.iter().filter(|&&m| m as usize == i).count(),
-            None => members.len(),
-        }
-    };
     for (t, tree) in trees.iter().enumerate() {
         if exclude.is_some_and(|i| tree.is_in_bag(i)) {
             continue;
         }
-        if leaf_size(tree) > 0 {
-            buf.trees.push(t);
+        let leaf = tree.leaf_of(row) as usize;
+        let members = tree.leaf_slice(leaf);
+        let size = match exclude {
+            Some(i) => members.len() - members.iter().filter(|&&m| m as usize == i).count(),
+            None => members.len(),
+        };
+        if size > 0 {
+            buf.trees.push((t, leaf, size));
         }
     }
     let k = buf.trees.len();
-    for &t in &buf.trees {
-        let members = trees[t].leaf_members(row);
-        let w = 1.0 / (k as f64 * leaf_size(&trees[t]) as f64);
-        for &m in members {
+    for &(t, leaf, size) in &buf.trees {
+        let w = 1.0 / (k as f64 * size as f64);
+        for &m in trees[t].leaf_slice(leaf) {
             if Some(m as usize) == exclude {
                 continue;
             }
@@ -1503,8 +1506,8 @@ mod tests {
         out
     }
 
-    /// Meinshausen's weights and eq. (6) on a hand-built forest, against base R
-    /// (`T4-WP19-ref/qrf.R`): the weights are dyadic, so the comparison is exact.
+    /// Meinshausen's weights and eq. (6) on a hand-built forest, against values computed in
+    /// base R (validation/ml/quantile_rf.md): the weights are dyadic, so the comparison is exact.
     #[test]
     fn test_qrf_meinshausen_two_stumps() {
         let x = Array2::from_shape_fn((12, 1), |(i, _)| (i + 1) as f64);
@@ -1560,14 +1563,41 @@ mod tests {
             );
             let total: f64 = buf.touched.iter().map(|&r| buf.weight[r as usize]).sum();
             assert!((total - 1.0).abs() < 1e-12, "{total}");
-            // Each tree adds 1/k over its leaf.
-            for tree in &m.trees {
-                let leaf = tree.leaf_members(&row);
-                let share = leaf.len() as f64 * (1.0 / (50.0 * leaf.len() as f64));
-                assert!((share - 1.0 / 50.0).abs() < 1e-15);
+            let full: Vec<(u32, f64)> = buf
+                .touched
+                .iter()
+                .map(|&r| (r, buf.weight[r as usize]))
+                .collect();
+            // Each tree alone (k = 1) gives 1/|L| over its leaf; their sum over the trees,
+            // divided by k = 50, is the forest's weight at every rank.
+            let mut acc = vec![0.0; 120];
+            let mut one = WeightBuf::new(120).unwrap();
+            for t in 0..m.trees.len() {
+                assert_eq!(
+                    meinshausen_weights(&m.trees[t..=t], &row, None, &m.y_train, &mut one),
+                    1
+                );
+                let leaf = m.trees[t].leaf_members(&row);
+                let per_tree: f64 = one.touched.iter().map(|&r| one.weight[r as usize]).sum();
+                assert!((per_tree - 1.0).abs() < 1e-12, "{per_tree}");
                 for &member in leaf {
-                    assert!(buf.weight[m.y_train.rank[member as usize] as usize] > 0.0);
+                    let r = m.y_train.rank[member as usize] as usize;
+                    assert!(one.weight[r] > 0.0);
                 }
+                for &r in &one.touched {
+                    acc[r as usize] += one.weight[r as usize];
+                }
+            }
+            let touched_by_trees = acc.iter().filter(|&&w| w > 0.0).count();
+            assert_eq!(touched_by_trees, full.len());
+            for (r, w) in full {
+                // The two sides round 1/(50 |L|) and (1/|L|) / 50 differently over up to 50
+                // additions: a bound of 64 ulps covers that and nothing else.
+                let want = acc[r as usize] / 50.0;
+                assert!(
+                    (w - want).abs() <= 64.0 * f64::EPSILON * want,
+                    "rank {r}: {w} vs {want}"
+                );
             }
         }
     }
