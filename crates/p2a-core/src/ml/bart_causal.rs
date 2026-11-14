@@ -10,7 +10,9 @@
 //! - **Separate response surfaces**: Fit separate models for treated and control groups
 //! - **CATE estimation**: Conditional Average Treatment Effects via counterfactual prediction
 //! - **Bootstrap uncertainty**: Confidence intervals through bootstrap resampling
-//! - **Variable importance**: Identify covariates driving treatment effect heterogeneity
+//! - **Variable importance**: Identify covariates driving treatment effect heterogeneity:
+//!   the permutation importance of the estimated CATE, the mean squared change of tau-hat when
+//!   the covariate is permuted, as shares
 //! - **Propensity score option**: Optionally include propensity scores in covariate set
 //!
 //! # Mathematical Background
@@ -126,7 +128,14 @@ pub struct BartCausalConfig {
     /// Number of bootstrap samples for uncertainty quantification (default: 100)
     ///
     /// More bootstrap samples provide more stable confidence intervals
-    /// but increase computation time.
+    /// but increase computation time. Each replicate fits `max(1, n_trees / 4)`
+    /// trees per response surface, so the standard errors and intervals also
+    /// carry those smaller forests' extra Monte Carlo variance: about 1% of the
+    /// standard error at the default 200 trees and more for few trees. They are
+    /// conservative, never narrower. The propensity score (`include_propensity`)
+    /// is estimated once and held fixed across replicates, as bartCause's
+    /// `p.scoreAsCovariate`. Replicates with fewer than 5 treated or 5 control
+    /// rows are skipped, and fewer than 2 usable replicates are an error.
     pub n_bootstrap: usize,
 
     /// Whether to include estimated propensity scores as a covariate (default: false)
@@ -189,8 +198,8 @@ impl BartCausalConfig {
     /// most the code can allocate:
     ///
     /// - **Trees.** The two response-surface ensembles of `n_trees` trees
-    ///   each, kept for the result, and the two ensembles of `n_trees / 4`
-    ///   trees of the bootstrap replicate being fitted; with
+    ///   each, kept for the result, and the two ensembles of
+    ///   `max(1, n_trees / 4)` trees of the bootstrap replicate being fitted; with
     ///   `include_propensity`, the propensity model's 50 trees
     ///   (`PROPENSITY_TREES`) of depth 3 too. A tree has at most `2 L - 1`
     ///   nodes for `L` leaves; `L` is at most `2^max_depth` and at most its
@@ -209,7 +218,7 @@ impl BartCausalConfig {
     ///   and their treated and control rows, the predictions; one replicate's
     ///   resample, its rows and groups and its predictions; the intervals and
     ///   standard errors, the result's copies and the sorted copy its summary
-    ///   makes.
+    ///   makes, and the permuted column of the importance pass.
     /// - **One tree's working copies.** The subsample's flags, indices and
     ///   rows, and what the recursion holds: every level on the path to the
     ///   node being split holds its children's index vectors, together at most
@@ -239,7 +248,7 @@ impl BartCausalConfig {
         let leaf = self.min_node_size.max(1) as u128;
         let node = heap_chunk_bytes(size_of::<TreeNode>());
         let tree = size_of::<RegressionTree>() as u128;
-        let pairs = (self.n_trees as u128).saturating_add((self.n_trees / 4) as u128);
+        let pairs = (self.n_trees as u128).saturating_add(bootstrap_trees(self.n_trees) as u128);
         let pair = mul(2, self.max_leaves_per_pair(n_obs))
             .saturating_mul(node)
             .saturating_add(2 * tree);
@@ -254,8 +263,9 @@ impl BartCausalConfig {
         // group indices and the outcome by group (2); the predictions y1, y0 and the CATE
         // (3); the replicate's resample indices, y and w (3), its group indices and outcome
         // by group (2) and its predictions (3); the intervals and standard errors (3), the
-        // result's copies (3) and the summary's sorted copy (1); the propensity score (1).
-        let per_row = 4 + 2 + 3 + 3 + 2 + 3 + 3 + 3 + 1 + 1;
+        // result's copies (3) and the summary's sorted copy (1); the propensity score (1); the
+        // importance pass's permuted column (1).
+        let per_row = 4 + 2 + 3 + 3 + 2 + 3 + 3 + 3 + 1 + 1 + 1;
         // Per row and covariate: the extracted covariates, the ensembles' covariates and their
         // treated and control rows, the replicate's rows and their treated and control rows.
         let data = mul(mul(8, n), per_row)
@@ -298,6 +308,12 @@ impl BartCausalConfig {
     }
 }
 
+/// The trees each bootstrap replicate fits per response surface: a quarter of `n_trees`, and at
+/// least one.
+fn bootstrap_trees(n_trees: usize) -> usize {
+    (n_trees / 4).max(1)
+}
+
 /// The rows of a subsample of `fraction` drawn from `n_obs` rows, as `subsample` draws it.
 fn subsample_rows(n_obs: usize, fraction: f64) -> u128 {
     ((n_obs as f64) * fraction) as usize as u128
@@ -307,8 +323,8 @@ fn subsample_rows(n_obs: usize, fraction: f64) -> u128 {
 /// of `s` rows of `cols` covariates drawn from at most `n` rows, with `drawn` covariates
 /// drawn per split and a recursion path of `levels` levels: the subsample's flags, indices
 /// and rows; the path (each level's child index vectors and drawn covariates); the split
-/// search's order; the list the covariates are drawn from, or the importance sums and one
-/// tree's importances.
+/// search's order; the list the covariates are drawn from (counted at 16 bytes per covariate,
+/// an upper bound).
 fn tree_working_copies(n: u128, s: u128, cols: u128, drawn: u128, levels: u128) -> u128 {
     n.saturating_add(mul(mul(8, s), cols.saturating_add(2)))
         .saturating_add(mul(mul(8, s.saturating_add(drawn)), levels))
@@ -361,10 +377,14 @@ pub struct BartCausalResult {
     /// Predicted outcome under control: E[Y|T=0,X]
     pub y0_pred: Vec<f64>,
 
-    /// Variable importance scores (covariate name, importance)
+    /// Variable importance scores (covariate name, importance), largest first
     ///
-    /// Importance is based on how much each variable contributes to
-    /// treatment effect heterogeneity.
+    /// Permutation importance of the estimated CATE: for each covariate (the propensity score
+    /// included), the mean squared change of tau-hat(x) = mu1-hat(x) - mu0-hat(x) over the rows
+    /// when that covariate's column is permuted, as shares that sum to 1. A covariate the
+    /// effect does not vary with scores near 0 however well it predicts the outcome; all
+    /// shares are 0 when no permutation changes the CATE. The permutations draw from their
+    /// own random stream, so the estimates do not depend on them.
     pub variable_importance: Vec<(String, f64)>,
 
     /// Number of observations
@@ -393,6 +413,9 @@ pub struct BartCausalResult {
     ensemble_treated: Option<TreeEnsemble>,
     #[serde(skip)]
     ensemble_control: Option<TreeEnsemble>,
+    /// The propensity model, with `include_propensity`: new rows are scored with it
+    #[serde(skip)]
+    ensemble_propensity: Option<TreeEnsemble>,
 }
 
 impl fmt::Display for BartCausalResult {
@@ -684,6 +707,75 @@ impl RegressionTree {
         }
     }
 
+    /// Whether any split of the tree is on covariate `j`.
+    fn splits_on(&self, j: usize) -> bool {
+        fn walk(node: &TreeNode, j: usize) -> bool {
+            match node {
+                TreeNode::Leaf { .. } => false,
+                TreeNode::Split {
+                    feature_index,
+                    left,
+                    right,
+                    ..
+                } => *feature_index == j || walk(left, j) || walk(right, j),
+            }
+        }
+        self.root.as_ref().is_some_and(|node| walk(node, j))
+    }
+
+    /// The prediction at row `x` with covariate `j` set to `v`, minus the prediction at `x`.
+    /// Both rows follow one path down to the first split on `j` that sends them apart, and the
+    /// change is 0 when they never part.
+    fn change_with(&self, x: &ArrayView1<f64>, j: usize, v: f64) -> f64 {
+        let Some(mut node) = self.root.as_ref() else {
+            return 0.0;
+        };
+        loop {
+            match node {
+                TreeNode::Leaf { .. } => return 0.0,
+                TreeNode::Split {
+                    feature_index,
+                    threshold,
+                    left,
+                    right,
+                } => {
+                    let goes_left = x[*feature_index] <= *threshold;
+                    if *feature_index == j && (v <= *threshold) != goes_left {
+                        let (moved, stays) = if goes_left {
+                            (right, left)
+                        } else {
+                            (left, right)
+                        };
+                        return self.traverse_with(moved, x, j, v) - self.traverse(stays, x);
+                    }
+                    node = if goes_left { left } else { right };
+                }
+            }
+        }
+    }
+
+    /// The prediction below `node` at row `x` with covariate `j` set to `v`.
+    fn traverse_with(&self, mut node: &TreeNode, x: &ArrayView1<f64>, j: usize, v: f64) -> f64 {
+        loop {
+            match node {
+                TreeNode::Leaf { value, .. } => return *value,
+                TreeNode::Split {
+                    feature_index,
+                    threshold,
+                    left,
+                    right,
+                } => {
+                    let value = if *feature_index == j {
+                        v
+                    } else {
+                        x[*feature_index]
+                    };
+                    node = if value <= *threshold { left } else { right };
+                }
+            }
+        }
+    }
+
     fn traverse(&self, node: &TreeNode, x: &ArrayView1<f64>) -> f64 {
         match node {
             TreeNode::Leaf { value, .. } => *value,
@@ -699,34 +791,6 @@ impl RegressionTree {
                     self.traverse(right, x)
                 }
             }
-        }
-    }
-
-    fn feature_importances(&self) -> Array1<f64> {
-        let mut importances = Array1::zeros(self.n_features);
-        if let Some(ref root) = self.root {
-            self.accumulate_importances(root, &mut importances, 1.0);
-        }
-
-        let sum: f64 = importances.sum();
-        if sum > 0.0 {
-            importances /= sum;
-        }
-
-        importances
-    }
-
-    fn accumulate_importances(&self, node: &TreeNode, importances: &mut Array1<f64>, weight: f64) {
-        if let TreeNode::Split {
-            feature_index,
-            left,
-            right,
-            ..
-        } = node
-        {
-            importances[*feature_index] += weight;
-            self.accumulate_importances(left, importances, weight * 0.5);
-            self.accumulate_importances(right, importances, weight * 0.5);
         }
     }
 }
@@ -787,6 +851,16 @@ impl TreeEnsemble {
         Ok(())
     }
 
+    /// Add `scale` times the ensemble's prediction at each row of `x` to `out`.
+    fn add_predictions(&self, x: ArrayView2<f64>, scale: f64, out: &mut Array1<f64>) {
+        let m = self.trees.len() as f64;
+        for (i, o) in out.iter_mut().enumerate() {
+            let row = x.row(i);
+            let sum: f64 = self.trees.iter().map(|t| t.predict_one(&row)).sum();
+            *o += scale * (sum / m);
+        }
+    }
+
     /// Predict for all observations.
     fn predict(&self, x: ArrayView2<f64>) -> Array1<f64> {
         let n = x.nrows();
@@ -799,18 +873,6 @@ impl TreeEnsemble {
         }
 
         predictions
-    }
-
-    /// Get aggregated feature importances.
-    fn feature_importances(&self) -> Array1<f64> {
-        let mut importances = Array1::zeros(self.n_features);
-
-        for tree in &self.trees {
-            importances = importances + tree.feature_importances();
-        }
-
-        importances /= self.trees.len() as f64;
-        importances
     }
 }
 
@@ -1036,8 +1098,8 @@ pub fn bart_causal_arrays(
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Optionally compute and add propensity scores
-    let (x_aug, covariate_names_aug) = if config.include_propensity {
-        let propensity = estimate_propensity(x.view(), treatment.view(), &mut rng_state)?;
+    let (x_aug, covariate_names_aug, ensemble_propensity) = if config.include_propensity {
+        let (propensity, model) = estimate_propensity(x.view(), treatment.view(), &mut rng_state)?;
         let mut x_new = Array2::zeros((n, p + 1));
         for i in 0..n {
             for j in 0..p {
@@ -1047,9 +1109,9 @@ pub fn bart_causal_arrays(
         }
         let mut names = covariate_names.clone();
         names.push("propensity".to_string());
-        (x_new, names)
+        (x_new, names, Some(model))
     } else {
-        (x.to_owned(), covariate_names.clone())
+        (x.to_owned(), covariate_names.clone(), None)
     };
 
     // Extract treated and control data
@@ -1104,11 +1166,16 @@ pub fn bart_causal_arrays(
         &mut cate_draws,
     )?;
 
-    // Compute ATE statistics from bootstrap
+    require_replicates(n_draws)?;
+
+    // Compute ATE statistics from bootstrap; a standard error of 0 gives no t statistic
     let ate_se = bootstrap_se(&ate_bootstrap);
-    let ate_t_stat = if ate_se > 0.0 { ate / ate_se } else { 0.0 };
-    let ate_df = (n - 2) as f64;
-    let ate_p_value = t_test_p_value(ate_t_stat, ate_df);
+    let (ate_t_stat, ate_p_value) = if ate_se.is_finite() && ate_se > 0.0 {
+        let t = ate / ate_se;
+        (t, t_test_p_value(t, (n - 2) as f64))
+    } else {
+        (f64::NAN, f64::NAN)
+    };
 
     // Confidence interval for ATE (percentile method)
     let alpha = 1.0 - config.confidence_level;
@@ -1128,11 +1195,13 @@ pub fn bart_causal_arrays(
         cate_se_vec.push(se);
     }
 
-    // Compute variable importance for treatment effect heterogeneity
-    // Use average importance across both response surfaces
-    let imp_treated = ensemble_treated.feature_importances();
-    let imp_control = ensemble_control.feature_importances();
-    let avg_importance = (&imp_treated + &imp_control) / 2.0;
+    // Variable importance for treatment effect heterogeneity
+    let avg_importance = cate_permutation_importance(
+        &ensemble_treated,
+        &ensemble_control,
+        x_aug.view(),
+        config.seed.unwrap_or(42),
+    )?;
 
     let mut variable_importance: Vec<(String, f64)> = covariate_names_aug
         .iter()
@@ -1165,6 +1234,7 @@ pub fn bart_causal_arrays(
         config: config.clone(),
         ensemble_treated: Some(ensemble_treated),
         ensemble_control: Some(ensemble_control),
+        ensemble_propensity,
     })
 }
 
@@ -1262,46 +1332,60 @@ pub fn bart_causal_predict(
 }
 
 /// Predict CATE using array inputs.
+///
+/// `x` holds the training covariates, in the training order and without the propensity score.
+/// A model fitted with `include_propensity` scores each new row's propensity with the fitted
+/// propensity model, clipped to [0.01, 0.99] as at fit time, and uses it as the last covariate,
+/// so the training rows get back the in-sample CATEs. A result read back from JSON holds no
+/// ensembles and cannot predict.
 pub fn bart_causal_predict_arrays(
     result: &BartCausalResult,
     x: ArrayView2<f64>,
 ) -> EconResult<Vec<f64>> {
-    let ensemble_treated =
-        result
-            .ensemble_treated
-            .as_ref()
-            .ok_or_else(|| EconError::InvalidSpecification {
-                message: "Model has no fitted ensemble (may have been deserialized)".to_string(),
-            })?;
+    let no_ensemble = || EconError::InvalidSpecification {
+        message: "Model has no fitted ensemble (may have been deserialized)".to_string(),
+    };
+    let ensemble_treated = result.ensemble_treated.as_ref().ok_or_else(no_ensemble)?;
+    let ensemble_control = result.ensemble_control.as_ref().ok_or_else(no_ensemble)?;
 
-    let ensemble_control =
-        result
-            .ensemble_control
-            .as_ref()
-            .ok_or_else(|| EconError::InvalidSpecification {
-                message: "Model has no fitted ensemble (may have been deserialized)".to_string(),
-            })?;
+    let with_propensity = result.config.include_propensity;
+    let expected = result.covariate_names.len() - usize::from(with_propensity);
+    if x.ncols() != expected {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x has {} columns; the model was fitted on {expected} covariates{}",
+                x.ncols(),
+                if with_propensity {
+                    " (the propensity score is computed, not supplied)"
+                } else {
+                    ""
+                }
+            ),
+        });
+    }
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
 
-    // If propensity was included, we need to estimate it for new data
-    // For simplicity, we just use covariates as-is (propensity column not included)
-    let x_to_use = if result.config.include_propensity && x.ncols() < result.covariate_names.len() {
-        // Need to add propensity column (use 0.5 as placeholder for prediction)
-        let n = x.nrows();
-        let p = x.ncols();
-        let mut x_aug = Array2::zeros((n, p + 1));
-        for i in 0..n {
-            for j in 0..p {
-                x_aug[[i, j]] = x[[i, j]];
-            }
-            x_aug[[i, p]] = 0.5; // Placeholder propensity
-        }
+    let x_aug = if with_propensity {
+        let model = result
+            .ensemble_propensity
+            .as_ref()
+            .ok_or_else(no_ensemble)?;
+        let scores = propensity_scores(model, x);
+        let (n, p) = (x.nrows(), x.ncols());
+        let mut x_aug = try_zeros2(n, p + 1, "BART causal prediction covariates")?;
+        x_aug.slice_mut(s![.., ..p]).assign(&x);
+        x_aug.column_mut(p).assign(&scores);
         x_aug
     } else {
         x.to_owned()
     };
 
-    let y1_pred = ensemble_treated.predict(x_to_use.view());
-    let y0_pred = ensemble_control.predict(x_to_use.view());
+    let y1_pred = ensemble_treated.predict(x_aug.view());
+    let y0_pred = ensemble_control.predict(x_aug.view());
 
     let cate = &y1_pred - &y0_pred;
     Ok(cate.to_vec())
@@ -1349,16 +1433,13 @@ fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
     result
 }
 
-/// Estimate propensity scores using logistic regression approximation.
-///
-/// This uses a simplified approach: fit a regression tree to predict treatment.
+/// Estimate propensity scores with a regression-tree ensemble on the treatment indicator,
+/// clipped to [0.01, 0.99]; returns the scores and the ensemble, which scores new rows.
 fn estimate_propensity(
     x: ArrayView2<f64>,
     treatment: ArrayView1<f64>,
     rng_state: &mut u64,
-) -> EconResult<Array1<f64>> {
-    let n = x.nrows();
-
+) -> EconResult<(Array1<f64>, TreeEnsemble)> {
     // Use a simple ensemble to predict propensity; `None` draws the default number of
     // covariates per split (`default_mtry`), as the response surfaces do by default.
     let mut ensemble = TreeEnsemble::new();
@@ -1373,14 +1454,13 @@ fn estimate_propensity(
         rng_state,
     )?;
 
-    let mut propensity = ensemble.predict(x);
+    let propensity = propensity_scores(&ensemble, x);
+    Ok((propensity, ensemble))
+}
 
-    // Clip propensity to [0.01, 0.99] for numerical stability
-    for i in 0..n {
-        propensity[i] = propensity[i].max(0.01).min(0.99);
-    }
-
-    Ok(propensity)
+/// The propensity model's scores, clipped to [0.01, 0.99] for numerical stability.
+fn propensity_scores(model: &TreeEnsemble, x: ArrayView2<f64>) -> Array1<f64> {
+    model.predict(x).mapv(|p| p.clamp(0.01, 0.99))
 }
 
 /// Bootstrap CATE estimation.
@@ -1430,7 +1510,7 @@ fn bootstrap_cate(
         ens_t.fit(
             x_treated.view(),
             y_treated.view(),
-            config.n_trees / 4, // Fewer trees for bootstrap speed
+            bootstrap_trees(config.n_trees), // fewer trees for bootstrap speed
             config.max_depth,
             config.min_node_size,
             config.sample_fraction,
@@ -1442,7 +1522,7 @@ fn bootstrap_cate(
         ens_c.fit(
             x_control.view(),
             y_control.view(),
-            config.n_trees / 4,
+            bootstrap_trees(config.n_trees),
             config.max_depth,
             config.min_node_size,
             config.sample_fraction,
@@ -1462,6 +1542,79 @@ fn bootstrap_cate(
     }
 
     Ok((ate_samples, n_filled))
+}
+
+/// Permutation importance of the CATE: for each column j of `x`, the mean over the rows of
+/// (tau(x_i) - tau(x_i with column j permuted))^2, tau = mu1 - mu0 from the two ensembles, as
+/// shares (all zeros when every change is 0). The permutation is a Fisher-Yates shuffle of a
+/// copy of column j, from a stream seeded by `seed` and j, apart from the fit's. Only the trees
+/// that split on j can change, and a row's change in such a tree is 0 unless a split on j
+/// sends the permuted value the other way, so each row walks those trees once and takes the
+/// other branch only where the two values part.
+fn cate_permutation_importance(
+    treated: &TreeEnsemble,
+    control: &TreeEnsemble,
+    x: ArrayView2<f64>,
+    seed: u64,
+) -> EconResult<Array1<f64>> {
+    let (n, p) = x.dim();
+    let mut permuted = try_with_capacity::<f64>(n, "BART causal importance column")?;
+    let mut uses_t = try_with_capacity::<usize>(treated.trees.len(), "BART causal importance")?;
+    let mut uses_c = try_with_capacity::<usize>(control.trees.len(), "BART causal importance")?;
+    let (m_t, m_c) = (treated.trees.len() as f64, control.trees.len() as f64);
+    let mut importance = Array1::zeros(p);
+    for j in 0..p {
+        checkpoint()?;
+        uses_t.clear();
+        uses_t.extend((0..treated.trees.len()).filter(|&t| treated.trees[t].splits_on(j)));
+        uses_c.clear();
+        uses_c.extend((0..control.trees.len()).filter(|&t| control.trees[t].splits_on(j)));
+        if uses_t.is_empty() && uses_c.is_empty() {
+            continue;
+        }
+        permuted.clear();
+        permuted.extend(x.column(j).iter().copied());
+        let mut rng = seed ^ (j as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for i in (1..n).rev() {
+            let k = lcg_random(&mut rng) % (i + 1);
+            permuted.swap(i, k);
+        }
+        let mut sum_sq = 0.0;
+        for (i, &v) in permuted.iter().enumerate() {
+            let row = x.row(i);
+            let dt: f64 = uses_t
+                .iter()
+                .map(|&t| treated.trees[t].change_with(&row, j, v))
+                .sum();
+            let dc: f64 = uses_c
+                .iter()
+                .map(|&t| control.trees[t].change_with(&row, j, v))
+                .sum();
+            let change = dt / m_t - dc / m_c;
+            sum_sq += change * change;
+        }
+        importance[j] = sum_sq / n as f64;
+    }
+    let total = importance.sum();
+    if total > 0.0 && total.is_finite() {
+        importance /= total;
+    } else {
+        importance.fill(0.0);
+    }
+    Ok(importance)
+}
+
+/// The bootstrap needs at least two usable replicates (with 5 treated and 5 control rows each)
+/// for a standard error.
+fn require_replicates(n_draws: usize) -> EconResult<()> {
+    if n_draws < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n_draws,
+            context: "bootstrap replicates with at least 5 treated and 5 control rows".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Compute bootstrap standard error.
@@ -2212,6 +2365,121 @@ mod tests {
         assert!(result.ate > 0.0);
     }
 
+    /// The importance ranks the covariate the effect varies with, not the one that predicts the
+    /// outcome best: here x0 moves y by 4 in both arms and x1 moves only the effect, by 2. The
+    /// split counts of the response surfaces it used to report ranked x0 first.
+    #[test]
+    fn bart_causal_importance_ranks_the_effect_modifier_first() {
+        let n = 600;
+        let mut rng = 2026u64;
+        let mut u = || (lcg_random(&mut rng) % 10_000) as f64 / 10_000.0;
+        let mut x = Array2::zeros((n, 3));
+        let mut w = Array1::zeros(n);
+        let mut y = Array1::zeros(n);
+        for i in 0..n {
+            for j in 0..3 {
+                x[[i, j]] = u();
+            }
+            w[i] = if u() < 0.5 { 1.0 } else { 0.0 };
+            let tau = 1.0 + 2.0 * x[[i, 1]];
+            y[i] = 4.0 * x[[i, 0]] + tau * w[i] + (u() - 0.5);
+        }
+        for seed in [1, 2, 3] {
+            let cfg = BartCausalConfig {
+                n_trees: 60,
+                max_depth: 4,
+                n_bootstrap: 2,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+            assert_eq!(
+                r.variable_importance[0].0, "x1",
+                "seed {seed}: {:?}",
+                r.variable_importance
+            );
+            let imp = |name: &str| {
+                r.variable_importance
+                    .iter()
+                    .find(|(v, _)| v == name)
+                    .map(|(_, i)| *i)
+                    .unwrap()
+            };
+            assert!(
+                imp("x0") < 0.5 * imp("x1"),
+                "seed {seed}: {:?}",
+                r.variable_importance
+            );
+            let total: f64 = r.variable_importance.iter().map(|(_, v)| v).sum();
+            assert!((total - 1.0).abs() < 1e-12, "{total}");
+        }
+    }
+
+    /// The importance pass walks only the trees that split on the permuted covariate; a naive
+    /// pass that permutes the whole column and predicts both ensembles at every row gives the
+    /// same shares, on noisy data with five covariates and the default tree settings.
+    #[test]
+    fn bart_causal_importance_matches_the_full_permutation_pass() {
+        let (n, p) = (300, 5);
+        let mut rng = 77u64;
+        let mut u = || (lcg_random(&mut rng) % 100_000) as f64 / 100_000.0;
+        let x = Array2::from_shape_fn((n, p), |_| u());
+        let y1 = Array1::from_shape_fn(n, |i| 2.0 * x[[i, 0]] + 3.0 * x[[i, 1]] + u());
+        let y0 = Array1::from_shape_fn(n, |i| 2.0 * x[[i, 0]] - x[[i, 2]] + u());
+        let mut state = 5u64;
+        let (mut treated, mut control) = (TreeEnsemble::new(), TreeEnsemble::new());
+        treated
+            .fit(x.view(), y1.view(), 40, 4, 5, 0.632, None, &mut state)
+            .unwrap();
+        control
+            .fit(x.view(), y0.view(), 40, 4, 5, 0.632, None, &mut state)
+            .unwrap();
+        let seed = 11;
+        let got = cate_permutation_importance(&treated, &control, x.view(), seed).unwrap();
+        let cate = &treated.predict(x.view()) - &control.predict(x.view());
+        let mut want = Array1::<f64>::zeros(p);
+        for j in 0..p {
+            let mut xp = x.clone();
+            let mut r = seed ^ (j as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            for i in (1..n).rev() {
+                let k = lcg_random(&mut r) % (i + 1);
+                let (a, b) = (xp[[i, j]], xp[[k, j]]);
+                xp[[i, j]] = b;
+                xp[[k, j]] = a;
+            }
+            let tau = &treated.predict(xp.view()) - &control.predict(xp.view());
+            want[j] = cate
+                .iter()
+                .zip(&tau)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                / n as f64;
+        }
+        want /= want.sum();
+        assert!(want.iter().filter(|&&v| v > 0.0).count() >= 3, "{want}");
+        for j in 0..p {
+            assert!(
+                (got[j] - want[j]).abs() < 1e-10,
+                "x{j}: {} vs {}",
+                got[j],
+                want[j]
+            );
+        }
+    }
+
+    #[test]
+    fn bart_causal_importance_is_zero_for_a_constant_cate() {
+        let (_, w, x) = generate_test_data(80, 3);
+        let y = Array1::from_elem(80, 2.5);
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small()).unwrap();
+        assert!(r.cate.iter().all(|&c| c == r.cate[0]));
+        assert!(
+            r.variable_importance.iter().all(|(_, v)| *v == 0.0),
+            "{:?}",
+            r.variable_importance
+        );
+    }
+
     #[test]
     fn test_bart_causal_heterogeneity() {
         // Test that CATE varies with x0 (which is the true effect modifier)
@@ -2348,11 +2616,148 @@ mod tests {
                 pred
             );
         }
+    }
 
-        // Feature importances should sum to approximately 1
-        let importances = ensemble.feature_importances();
-        let sum: f64 = importances.sum();
-        assert!((sum - 1.0).abs() < 0.01 || sum == 0.0);
+    /// With one to three trees the bootstrap forests were empty (`n_trees / 4` trees), every
+    /// replicate predicted NaN and the result read t = 0, p = 1.
+    #[test]
+    fn bart_causal_with_one_to_three_trees_has_a_finite_se() {
+        let (y, w, x) = generate_test_data(120, 31);
+        for n_trees in 1..=3 {
+            let cfg = BartCausalConfig {
+                n_trees,
+                n_bootstrap: 20,
+                max_depth: 3,
+                seed: Some(4),
+                ..Default::default()
+            };
+            let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+            assert!(
+                r.ate_se.is_finite() && r.ate_se > 0.0,
+                "{n_trees}: {}",
+                r.ate_se
+            );
+            assert_eq!(r.ate_t_stat, r.ate / r.ate_se);
+            assert_eq!(r.ate_p_value, t_test_p_value(r.ate_t_stat, 118.0));
+            assert!(r.cate_se.iter().all(|s| s.is_finite()));
+        }
+    }
+
+    /// Seeds the end-to-end refusal check loops over. Measured: 25 of these 400 seeds are
+    /// refused (about 6% per seed: either replicate can draw fewer than 5 treated rows), so the
+    /// loop expects about 25 refusals and both outcomes occur.
+    const SEEDS_FOR_REFUSAL: u64 = 400;
+
+    #[test]
+    fn bart_causal_refuses_when_fewer_than_two_replicates_fit() {
+        for n in [0, 1] {
+            let e = require_replicates(n).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InsufficientData { required: 2, provided, .. } if *provided == n),
+                "{e}"
+            );
+            assert!(e.to_string().contains("5 treated and 5 control"), "{e}");
+        }
+        require_replicates(2).unwrap();
+        // End to end: 10 treated rows of 200, two replicates; a replicate has fewer than 5
+        // treated rows with probability about 2.6%, so some seeds lose one of the two
+        let n = 200;
+        let (y, _, x) = generate_test_data(n, 77);
+        let w = Array1::from_shape_fn(n, |i| if i % 20 == 0 { 1.0 } else { 0.0 });
+        let (mut refused, mut fitted) = (0, 0);
+        for seed in 0..SEEDS_FOR_REFUSAL {
+            let cfg = BartCausalConfig {
+                n_trees: 4,
+                n_bootstrap: 2,
+                max_depth: 2,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            match bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg) {
+                Err(EconError::InsufficientData { required: 2, .. }) => refused += 1,
+                Ok(r) => {
+                    assert!(r.ate_se.is_finite(), "seed {seed}");
+                    fitted += 1;
+                }
+                Err(e) => panic!("seed {seed}: {e}"),
+            }
+        }
+        assert!(
+            refused >= 1 && fitted >= 1,
+            "{refused} refused, {fitted} fitted"
+        );
+    }
+
+    #[test]
+    fn bart_causal_reports_nan_t_and_p_for_a_zero_se() {
+        let (_, w, x) = generate_test_data(80, 3);
+        let y = Array1::from_elem(80, 2.5);
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small()).unwrap();
+        assert_eq!((r.ate, r.ate_se), (0.0, 0.0));
+        assert!(r.ate_t_stat.is_nan() && r.ate_p_value.is_nan());
+        assert_eq!(r.ate_significance, SignificanceLevel::NotSignificant);
+        let text = r.to_string();
+        assert!(text.contains("t = NaN, p = NaN)\n"), "{text}");
+    }
+
+    #[test]
+    fn memory_bound_counts_the_bootstrap_floor() {
+        let at = |n_trees| BartCausalConfig {
+            n_trees,
+            ..Default::default()
+        };
+        assert_eq!(bootstrap_trees(3), 1);
+        assert_eq!(bootstrap_trees(8), 2);
+        // the bound at 3 trees counts 3 + 1 tree pairs: one pair more than at 3 + 0
+        let (n, p) = (500, 4);
+        let pair = at(4).memory_bound(n, p) - at(3).memory_bound(n, p);
+        let base = at(3).memory_bound(n, p);
+        assert!(base > 3 * pair, "{base} vs pair {pair}");
+        assert_eq!(at(5).memory_bound(n, p) - at(4).memory_bound(n, p), pair);
+    }
+
+    /// A model fitted with the propensity score as a covariate scores new rows' propensity
+    /// with the fitted model; the training rows get back the in-sample CATEs exactly. The
+    /// propensity column used to be filled with 0.5.
+    #[test]
+    fn bart_causal_predict_repeats_the_in_sample_cate_with_propensity() {
+        let (y, w, x) = generate_test_data(150, 123);
+        let cfg = BartCausalConfig {
+            n_trees: 30,
+            max_depth: 3,
+            n_bootstrap: 4,
+            include_propensity: true,
+            seed: Some(123),
+            ..Default::default()
+        };
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+        let again = bart_causal_predict_arrays(&r, x.view()).unwrap();
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&again), bits(&r.cate));
+        // without the propensity score too
+        let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), small()).unwrap();
+        let again = bart_causal_predict_arrays(&r, x.view()).unwrap();
+        assert_eq!(bits(&again), bits(&r.cate));
+    }
+
+    #[test]
+    fn bart_causal_predict_arrays_checks_the_column_count() {
+        let (y, w, x) = generate_test_data(80, 5);
+        for include_propensity in [false, true] {
+            let cfg = BartCausalConfig {
+                include_propensity,
+                ..small()
+            };
+            let r = bart_causal_arrays(y.view(), w.view(), x.view(), names3(), cfg).unwrap();
+            for cols in [2, 4] {
+                let xn = Array2::from_elem((5, cols), 0.5);
+                let e = bart_causal_predict_arrays(&r, xn.view()).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.contains("fitted on 3 covariates")),
+                    "{include_propensity} {cols}: {e}"
+                );
+            }
+        }
     }
 
     #[test]

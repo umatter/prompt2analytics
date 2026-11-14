@@ -22,19 +22,33 @@
 //!    - Default: alpha = 0.95, beta = 2
 //!    - This regularizes tree depth, making deeper trees less likely
 //!
-//! 2. **Leaf value prior**: mu_ij | T_j ~ N(0, sigma_mu^2)
-//!    - sigma_mu = sigma_hat / (k * sqrt(m)) where k ~ 2 shrinks leaf values
-//!    - This ensures the prior for f(x) covers the range of y with high probability
+//! 2. **Leaf value prior**: mu_ij | T_j ~ N(0, tau^2), as `BART::wbart` calibrates it
+//!    - y is centred by its mean (`offset`), and tau = (max(y) - min(y)) / (2 k sqrt(m)),
+//!      fixed for the whole chain, so the prior of f(x) puts the range of y at about +-k SDs
+//!    - Probit BART: tau = 3 / (k sqrt(m)) on the latent scale, as `BART::pbart`
 //!
-//! 3. **Residual variance prior**: sigma^2 ~ Inverse-Gamma(nu/2, nu*lambda/2)
-//!    - Default: nu = 3, lambda calibrated so P(sigma < sigma_hat) = q ~ 0.90
+//! 3. **Residual variance prior**: nu lambda / sigma^2 ~ chi^2_nu
+//!    - sigest is the residual SD of the linear fit of y on the covariates (constant columns
+//!      dropped), or sd(y) when there are at least as many covariates as rows; when that fit is
+//!      exact (sigest 0) p2a also falls back to sd(y), where wbart's chain would start at 0
+//!    - lambda = sigest^2 qchisq(1 - q, nu) / nu, so P(sigma < sigest) = q under the prior
+//!      (defaults nu = 3, q = 0.90)
+//!    - A constant y is refused: the leaf prior SD would be 0
 //!
 //! # MCMC Algorithm
 //!
 //! The algorithm uses Bayesian backfitting with Gibbs sampling:
 //!
-//! 1. For j = 1,...,m: Draw (T_j, M_j) given all other trees and sigma
-//!    - Use Metropolis-Hastings with grow/prune proposals for tree structure
+//! 1. For j = 1,...,m: Draw (T_j, M_j) given all other trees and sigma, as `BART::wbart`
+//!    - One Metropolis-Hastings birth (grow) or death (prune) move on the tree structure, with
+//!      the Chipman-George-McCulloch (1998) acceptance ratio: the tree prior's
+//!      p_d (1 - p_l)(1 - p_r) / (1 - p_d) term, the move and node-choice probabilities, and the
+//!      leaf likelihood with mu integrated out
+//!    - Split rules come from a fixed grid of cutpoints per covariate (`numcut`, as
+//!      `BART::bartModelMatrix`); the split variable is drawn uniformly among the covariates
+//!      with cutpoints, rows with `x < cut` go left, and a child with fewer than
+//!      `min_node_size` rows rejects the birth (wbart's fixed 5); a node at `max_depth` cannot
+//!      split, so the tree prior is truncated there (below 1e-6 of its mass at the default 10)
 //!    - Draw leaf values from conjugate normal posterior
 //!
 //! 2. Draw sigma^2 from its conditional inverse-gamma posterior
@@ -59,9 +73,10 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::resource::{checkpoint, try_with_capacity, try_zeros2};
+use crate::linalg::solve::least_squares;
+use crate::resource::{checked_len, checkpoint, try_with_capacity, try_zeros2};
 use crate::stats::robust::percentile_interval;
-use crate::traits::estimator::normal_quantile;
+use crate::traits::estimator::{chi_squared_quantile, normal_quantile};
 
 // ============================================================================
 // Configuration
@@ -106,7 +121,7 @@ pub struct BartConfig {
 
     /// Prior parameter k for leaf value shrinkage. Default: 2.0.
     ///
-    /// Controls the width of the prior on leaf values: mu ~ N(0, sigma_hat^2 / (k^2 * m)).
+    /// Leaf prior SD tau = (max y - min y) / (2 k sqrt(n_trees)) (probit: 3 / (k sqrt(n_trees))).
     /// Larger k = more shrinkage, smaller individual tree contributions.
     /// k=2 is recommended for most applications.
     pub k: f64,
@@ -131,7 +146,7 @@ pub struct BartConfig {
 
     /// Prior quantile for sigma calibration. Default: 0.90.
     ///
-    /// Lambda is set so P(sigma < sigma_hat) = q under the prior.
+    /// lambda is set so P(sigma < sigest) = q under the prior.
     pub q: f64,
 
     /// Random seed for reproducibility.
@@ -149,6 +164,22 @@ pub struct BartConfig {
     /// Probit BART as `BART::pbart`: y coded 0/1, Albert-Chib latent draws, leaf prior SD
     /// 3 / (k sqrt(n_trees)); predictions are posterior mean probabilities. Default: false.
     pub classification: bool,
+
+    /// Cutpoints per covariate, as `BART::bartModelMatrix(numcut, usequants = FALSE)`: a column
+    /// with fewer distinct values gets the midpoints of its distinct values, any other column
+    /// `numcut` equally spaced interior points of its range. Default: 100.
+    #[serde(default = "default_numcut")]
+    pub numcut: usize,
+
+    /// Keep the trees of every kept draw, so that [`bart_predict`] can score new rows.
+    /// Default: false. They take about `n_mcmc x n_trees x (2 s + 1) x 24` bytes for `s` splits
+    /// per tree (about 1.3 at the default prior), about 18 MB at the defaults.
+    #[serde(default)]
+    pub keep_trees: bool,
+}
+
+fn default_numcut() -> usize {
+    100
 }
 
 impl Default for BartConfig {
@@ -167,6 +198,8 @@ impl Default for BartConfig {
             max_depth: 10,
             confidence_level: 0.95,
             classification: false,
+            numcut: default_numcut(),
+            keep_trees: false,
         }
     }
 }
@@ -192,11 +225,14 @@ pub struct BartResult {
     /// Posterior standard deviation of predictions.
     pub prediction_sd: Vec<f64>,
 
-    /// Variable importance scores (based on inclusion frequency).
-    ///
-    /// Higher values indicate features that are more frequently used
-    /// in tree splits across the MCMC samples.
+    /// Variable importance: each covariate's share of the splits, `variable_count_mean`
+    /// divided by its sum (all zeros when no kept draw has a split).
     pub variable_importance: Vec<f64>,
+
+    /// Mean number of splits on each covariate per kept posterior draw, over all trees
+    /// (`BART::wbart`'s `colMeans(varcount)`).
+    #[serde(default)]
+    pub variable_count_mean: Vec<f64>,
 
     /// Feature names (if provided).
     pub feature_names: Option<Vec<String>>,
@@ -207,10 +243,27 @@ pub struct BartResult {
     /// Posterior standard deviation of sigma.
     pub sigma_sd: f64,
 
-    /// Probit BART's qnorm(mean(y)), the constant of P(y = 1 | x) = Phi(offset + f(x)); 0 for
-    /// regression.
+    /// The constant the trees are fitted around: mean(y) for regression (`BART::wbart`'s
+    /// `fmean`, so the fit is offset + f(x)), qnorm(mean(y)) for probit BART (P(y = 1 | x) =
+    /// Phi(offset + f(x))).
     #[serde(default)]
     pub offset: f64,
+
+    /// The sigma estimate the prior is calibrated on: the residual SD of the linear fit of y on
+    /// the covariates (sd(y) when there are at least as many covariates as rows, or when the
+    /// linear fit is exact); 1 for probit BART.
+    #[serde(default)]
+    pub sigest: f64,
+
+    /// Scale of the inverse chi-square prior on sigma^2 (nu lambda / sigma^2 ~ chi^2_nu),
+    /// sigest^2 qchisq(1 - q, nu) / nu; 0 for probit BART, whose sigma is fixed at 1.
+    #[serde(default)]
+    pub lambda: f64,
+
+    /// Prior SD of each leaf value (tau): (max(y) - min(y)) / (2 k sqrt(n_trees)) for
+    /// regression, 3 / (k sqrt(n_trees)) for probit BART.
+    #[serde(default)]
+    pub leaf_prior_sd: f64,
 
     /// Number of observations.
     pub n_obs: usize,
@@ -235,6 +288,129 @@ pub struct BartResult {
     /// Posterior samples of sigma.
     #[serde(skip)]
     pub sigma_samples: Option<Vec<f64>>,
+
+    /// The trees of every kept draw, with `keep_trees`
+    #[serde(skip)]
+    kept_trees: Option<KeptTrees>,
+}
+
+/// A node of a kept tree: a leaf has `left == NO_NODE` and its value in `value`; an internal
+/// node sends rows with `x[var] < value` to `left`.
+#[derive(Debug, Clone, Copy)]
+struct KeptNode {
+    left: u32,
+    right: u32,
+    var: u32,
+    value: f64,
+}
+
+/// The trees of every kept draw in one buffer: tree `t` of draw `d` is
+/// `nodes[starts[d * n_trees + t]..starts[d * n_trees + t + 1]]`, its root first and its child
+/// indices relative to its start.
+#[derive(Debug, Clone)]
+struct KeptTrees {
+    nodes: Vec<KeptNode>,
+    starts: Vec<usize>,
+    n_trees: usize,
+}
+
+impl KeptTrees {
+    fn new(n_draws: usize, n_trees: usize) -> EconResult<Self> {
+        let n = checked_len(&[n_draws, n_trees], "BART kept trees")?;
+        let mut starts = try_with_capacity::<usize>(
+            n.checked_add(1)
+                .ok_or_else(|| crate::resource::overflow("BART kept trees"))?,
+            "BART kept trees",
+        )?;
+        starts.push(0);
+        Ok(Self {
+            nodes: try_with_capacity::<KeptNode>(n, "BART kept tree nodes")?,
+            starts,
+            n_trees,
+        })
+    }
+
+    /// Append the sampler's current trees as one draw
+    fn push_draw(&mut self, trees: &[BartTree]) -> EconResult<()> {
+        let add: usize = trees.iter().map(|t| t.nodes.len()).sum();
+        let need = self.nodes.len().saturating_add(add);
+        if need > self.nodes.capacity() {
+            let cap = need.max(self.nodes.capacity().saturating_mul(2));
+            crate::resource::check_alloc::<KeptNode>(cap, "BART kept tree nodes")?;
+            self.nodes
+                .try_reserve_exact(cap - self.nodes.len())
+                .map_err(|_| {
+                    crate::resource::reserve_failed(
+                        "BART kept tree nodes",
+                        cap,
+                        std::mem::size_of::<KeptNode>(),
+                    )
+                })?;
+        }
+        for tree in trees {
+            self.nodes.extend(tree.nodes.iter().map(|nd| KeptNode {
+                left: nd.left,
+                right: nd.right,
+                var: nd.var,
+                value: if nd.is_leaf() { nd.mu } else { nd.cutv },
+            }));
+            self.starts.push(self.nodes.len());
+        }
+        Ok(())
+    }
+
+    /// The sum of the trees of draw `d` at `row`, in tree order from 0
+    fn fit(&self, d: usize, row: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        for t in 0..self.n_trees {
+            let k = d * self.n_trees + t;
+            let tree = &self.nodes[self.starts[k]..self.starts[k + 1]];
+            let mut i = 0;
+            loop {
+                let node = &tree[i];
+                if node.left == NO_NODE {
+                    sum += node.value;
+                    break;
+                }
+                i = if row[node.var as usize] < node.value {
+                    node.left as usize
+                } else {
+                    node.right as usize
+                };
+            }
+        }
+        sum
+    }
+}
+
+/// Posterior mean, population SD and type-7 interval of each column of `draws` (draws x rows).
+type DrawSummaries = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+fn draw_summaries(draws: &Array2<f64>, level: f64) -> EconResult<DrawSummaries> {
+    let (n_draws, n) = draws.dim();
+    // Sums run over the draws in order, whatever the matrix's layout, so a row's summaries do
+    // not depend on the other rows predicted with it
+    let mean: Vec<f64> = (0..n)
+        .map(|i| draws.column(i).iter().sum::<f64>() / n_draws as f64)
+        .collect();
+    let sd: Vec<f64> = (0..n)
+        .map(|i| {
+            let m = mean[i];
+            let ss: f64 = draws.column(i).iter().map(|&v| (v - m).powi(2)).sum();
+            (ss / n_draws as f64).sqrt()
+        })
+        .collect();
+    let mut lower = try_with_capacity::<f64>(n, "BART interval bounds")?;
+    let mut upper = try_with_capacity::<f64>(n, "BART interval bounds")?;
+    let mut col = try_with_capacity::<f64>(n_draws, "BART draws of one row")?;
+    for i in 0..n {
+        col.clear();
+        col.extend(draws.column(i).iter().copied());
+        let (lo, hi) = percentile_interval(&col, level)?;
+        lower.push(lo);
+        upper.push(hi);
+    }
+    Ok((mean, sd, lower, upper))
 }
 
 impl fmt::Display for BartResult {
@@ -339,156 +515,304 @@ impl fmt::Display for BartResult {
 // Tree Data Structures
 // ============================================================================
 
-/// A node in a BART tree.
-#[derive(Debug, Clone)]
-enum BartNode {
-    /// Internal (split) node
-    Internal {
-        /// Feature index for split
-        var: usize,
-        /// Split threshold
-        cut: f64,
-        /// Left child node index
-        left: usize,
-        /// Right child node index
-        right: usize,
-    },
-    /// Terminal (leaf) node
-    Leaf {
-        /// Leaf value (mu)
-        mu: f64,
-    },
+/// The child index of a leaf and the parent index of the root.
+const NO_NODE: u32 = u32::MAX;
+
+/// A node of a BART tree. A leaf has `left == right == NO_NODE`.
+#[derive(Debug, Clone, Copy)]
+struct BartNode {
+    /// Parent index (`NO_NODE` for the root)
+    parent: u32,
+    /// Left child index (`NO_NODE` for a leaf)
+    left: u32,
+    /// Right child index (`NO_NODE` for a leaf)
+    right: u32,
+    /// Split variable (internal nodes)
+    var: u32,
+    /// Index of the split's cutpoint among the variable's cutpoints (internal nodes)
+    cut: u32,
+    /// Depth (the root is at 0)
+    depth: u32,
+    /// The split's cutpoint: rows with `x[var] < cutv` go left, as BART's `tree::bn`
+    cutv: f64,
+    /// Leaf value (leaves)
+    mu: f64,
 }
 
-/// A single BART tree.
+impl BartNode {
+    fn leaf(parent: u32, depth: u32, mu: f64) -> Self {
+        Self {
+            parent,
+            left: NO_NODE,
+            right: NO_NODE,
+            var: 0,
+            cut: 0,
+            depth,
+            cutv: 0.0,
+            mu,
+        }
+    }
+
+    fn is_leaf(&self) -> bool {
+        self.left == NO_NODE
+    }
+}
+
+/// A single BART tree. `nodes` holds exactly the nodes reachable from the root (index 0):
+/// a birth appends two leaves, and a death removes them, moving the last nodes into their
+/// slots, so there are always `2 * internal + 1` nodes.
 #[derive(Debug, Clone)]
 struct BartTree {
-    /// Nodes in the tree (index 0 is root)
     nodes: Vec<BartNode>,
-    /// Depth of the tree
-    depth: usize,
 }
 
 impl BartTree {
     /// Create a new tree with single root node
     fn new(mu: f64) -> Self {
         Self {
-            nodes: vec![BartNode::Leaf { mu }],
-            depth: 0,
+            nodes: vec![BartNode::leaf(NO_NODE, 0, mu)],
         }
     }
 
-    /// Predict for a single observation
-    fn predict_one(&self, x: &ArrayView1<f64>) -> f64 {
-        let mut node_idx = 0;
+    /// The leaf a row (its covariates in column order) falls in
+    fn leaf_of(&self, row: &[f64]) -> usize {
+        let mut i = 0;
         loop {
-            match &self.nodes[node_idx] {
-                BartNode::Leaf { mu } => return *mu,
-                BartNode::Internal {
-                    var,
-                    cut,
-                    left,
-                    right,
-                } => {
-                    node_idx = if x[*var] <= *cut { *left } else { *right };
-                }
+            let node = &self.nodes[i];
+            if node.is_leaf() {
+                return i;
+            }
+            i = if row[node.var as usize] < node.cutv {
+                node.left as usize
+            } else {
+                node.right as usize
+            };
+        }
+    }
+
+    /// Node indices reached from the root, depth first, left before right
+    fn walk(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            out.push(i);
+            let node = &self.nodes[i];
+            if !node.is_leaf() {
+                stack.push(node.right as usize);
+                stack.push(node.left as usize);
             }
         }
+        out
     }
 
-    /// Predict for all observations
-    fn predict(&self, x: ArrayView2<f64>) -> Array1<f64> {
-        let n = x.nrows();
-        let mut preds = Array1::zeros(n);
-        for i in 0..n {
-            preds[i] = self.predict_one(&x.row(i));
-        }
-        preds
-    }
-
-    /// Get terminal node indices (leaves)
+    /// Terminal node indices (leaves), walked from the root
     fn get_leaves(&self) -> Vec<usize> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| match n {
-                BartNode::Leaf { .. } => Some(i),
-                BartNode::Internal { .. } => None,
-            })
+        self.walk()
+            .into_iter()
+            .filter(|&i| self.nodes[i].is_leaf())
             .collect()
     }
 
-    /// Get internal node indices
+    /// Internal node indices, walked from the root
     fn get_internals(&self) -> Vec<usize> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| match n {
-                BartNode::Internal { .. } => Some(i),
-                BartNode::Leaf { .. } => None,
-            })
+        self.walk()
+            .into_iter()
+            .filter(|&i| !self.nodes[i].is_leaf())
             .collect()
     }
 
-    /// Get node depth
+    /// Internal nodes whose two children are leaves ("nog" nodes: the ones a death can remove)
+    fn nogs(&self) -> Vec<usize> {
+        self.get_internals()
+            .into_iter()
+            .filter(|&i| self.is_nog(i))
+            .collect()
+    }
+
+    /// Whether node `i` is internal with two leaf children
+    fn is_nog(&self, i: usize) -> bool {
+        let node = &self.nodes[i];
+        !node.is_leaf()
+            && self.nodes[node.left as usize].is_leaf()
+            && self.nodes[node.right as usize].is_leaf()
+    }
+
+    /// Node depth (stored)
     fn get_depth(&self, node_idx: usize) -> usize {
-        if node_idx == 0 {
-            return 0;
+        self.nodes[node_idx].depth as usize
+    }
+
+    /// Split leaf `i` on `x[var] < cutv` (cutpoint `cut` of `var`); returns the new children
+    fn birth(
+        &mut self,
+        i: usize,
+        var: usize,
+        cut: usize,
+        cutv: f64,
+        mu_left: f64,
+        mu_right: f64,
+    ) -> (usize, usize) {
+        let left = self.nodes.len();
+        let right = left + 1;
+        let depth = self.nodes[i].depth + 1;
+        self.nodes.push(BartNode::leaf(i as u32, depth, mu_left));
+        self.nodes.push(BartNode::leaf(i as u32, depth, mu_right));
+        let node = &mut self.nodes[i];
+        node.left = left as u32;
+        node.right = right as u32;
+        node.var = var as u32;
+        node.cut = cut as u32;
+        node.cutv = cutv;
+        (left, right)
+    }
+
+    /// Collapse the nog node `i` to a leaf with value `mu`, removing its two children. Returns
+    /// where every old node index is now: the two children map to the collapsed node, and the
+    /// nodes moved into the freed slots to those slots.
+    fn death(&mut self, i: usize, mu: f64) -> Vec<u32> {
+        let (l, r) = (self.nodes[i].left as usize, self.nodes[i].right as usize);
+        {
+            let node = &mut self.nodes[i];
+            node.left = NO_NODE;
+            node.right = NO_NODE;
+            node.mu = mu;
         }
-        // Find parent by searching
-        for (i, node) in self.nodes.iter().enumerate() {
-            if let BartNode::Internal { left, right, .. } = node {
-                if *left == node_idx || *right == node_idx {
-                    return 1 + self.get_depth(i);
+        let mut remap: Vec<u32> = (0..self.nodes.len() as u32).collect();
+        remap[l] = i as u32;
+        remap[r] = i as u32;
+        for gone in [l.max(r), l.min(r)] {
+            if let Some(from) = self.remove_slot(gone) {
+                for t in remap.iter_mut() {
+                    if *t as usize == from {
+                        *t = gone as u32;
+                    }
                 }
             }
         }
-        0
+        remap
     }
 
-    /// Check if a node has two leaf children (can be pruned)
-    fn is_singly_internal(&self, node_idx: usize) -> bool {
-        if let BartNode::Internal { left, right, .. } = &self.nodes[node_idx] {
-            matches!(
-                (&self.nodes[*left], &self.nodes[*right]),
-                (BartNode::Leaf { .. }, BartNode::Leaf { .. })
-            )
+    /// Remove the (detached) node at `idx` by moving the last node into its slot and pointing
+    /// that node's parent and children at the new slot. Returns the moved node's old index.
+    fn remove_slot(&mut self, idx: usize) -> Option<usize> {
+        let last = self.nodes.len() - 1;
+        if idx == last {
+            self.nodes.pop();
+            return None;
+        }
+        let moved = self.nodes[last];
+        self.nodes[idx] = moved;
+        self.nodes.pop();
+        let p = moved.parent as usize;
+        if self.nodes[p].left as usize == last {
+            self.nodes[p].left = idx as u32;
         } else {
-            false
+            self.nodes[p].right = idx as u32;
         }
+        if !moved.is_leaf() {
+            self.nodes[moved.left as usize].parent = idx as u32;
+            self.nodes[moved.right as usize].parent = idx as u32;
+        }
+        Some(last)
     }
+}
 
-    /// Get observations that fall in each leaf
-    fn get_leaf_assignments(&self, x: ArrayView2<f64>) -> Vec<Vec<usize>> {
-        let leaves = self.get_leaves();
-        let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+// ============================================================================
+// Prior calibration and cutpoints (BART::wbart)
+// ============================================================================
 
-        for i in 0..x.nrows() {
-            let mut node_idx = 0;
-            loop {
-                match &self.nodes[node_idx] {
-                    BartNode::Leaf { .. } => {
-                        assignments[node_idx].push(i);
-                        break;
-                    }
-                    BartNode::Internal {
-                        var,
-                        cut,
-                        left,
-                        right,
-                    } => {
-                        node_idx = if x.row(i)[*var] <= *cut {
-                            *left
-                        } else {
-                            *right
-                        };
-                    }
-                }
+/// `BART::wbart`'s data-driven prior for regression.
+#[derive(Debug, Clone, Copy)]
+struct WbartPrior {
+    /// mean(y), the constant the trees are fitted around
+    fmean: f64,
+    /// The residual SD of the linear fit (or sd(y)) the sigma prior is calibrated on
+    sigest: f64,
+    /// sigest^2 qchisq(1 - q, nu) / nu
+    lambda: f64,
+    /// The leaf prior SD, (max(y) - min(y)) / (2 k sqrt(m))
+    tau: f64,
+}
+
+/// Whether a column holds a single value (no cutpoint, dropped as `wbart`'s `rm.const`).
+fn is_constant(col: ArrayView1<f64>) -> bool {
+    col.iter().all(|&v| v == col[0])
+}
+
+/// `BART::wbart`'s prior calibration: fmean = mean(y); sigest the residual SD of
+/// `lm(y ~ x)` with constant columns dropped, sd(y) when there are at least as many covariates
+/// as rows; lambda = sigest^2 qchisq(1 - q, nu) / nu; tau = (max(y) - min(y)) / (2 k sqrt(m)).
+/// A linear fit with no residual degrees of freedom or an exact one (sigest 0, where wbart's
+/// chain would start at sigma 0) falls back to sd(y). A constant y is refused.
+fn wbart_prior(
+    y: ArrayView1<f64>,
+    x: ArrayView2<f64>,
+    config: &BartConfig,
+) -> EconResult<WbartPrior> {
+    let n = y.len();
+    let (lo, hi) = y
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    if hi <= lo {
+        return Err(EconError::InvalidSpecification {
+            message: "y is constant: BART's leaf prior SD, (max(y) - min(y)) / (2 k sqrt(n_trees)), would be 0".to_string(),
+        });
+    }
+    let fmean = y.sum() / n as f64;
+    let sd = (y.iter().map(|&v| (v - fmean) * (v - fmean)).sum::<f64>() / (n - 1) as f64).sqrt();
+    let active: Vec<usize> = (0..x.ncols())
+        .filter(|&j| !is_constant(x.column(j)))
+        .collect();
+    let mut sigest = sd;
+    if active.len() < n {
+        let mut design = try_zeros2(n, active.len() + 1, "BART sigest design")?;
+        design.column_mut(0).fill(1.0);
+        for (k, &j) in active.iter().enumerate() {
+            design.column_mut(k + 1).assign(&x.column(j));
+        }
+        let yc = y.mapv(|v| v - fmean);
+        let fit = least_squares(design.view(), yc.view())?;
+        if fit.df_residual > 0 {
+            let rss = fit.residuals.iter().map(|r| r * r).sum::<f64>();
+            let s = (rss / fit.df_residual as f64).sqrt();
+            if s.is_finite() && s > 0.0 {
+                sigest = s;
             }
         }
-
-        leaves.iter().map(|&l| assignments[l].clone()).collect()
     }
+    let lambda = sigest * sigest * chi_squared_quantile(1.0 - config.q, config.nu)? / config.nu;
+    let tau = (hi - lo) / (2.0 * config.k * (config.n_trees as f64).sqrt());
+    Ok(WbartPrior {
+        fmean,
+        sigest,
+        lambda,
+        tau,
+    })
+}
+
+/// The cutpoints of one covariate, as `BART::bartModelMatrix(numcut, usequants = FALSE)`: none
+/// for a constant column; the midpoints of the sorted distinct values when there are fewer
+/// than `numcut` of them; otherwise `numcut` equally spaced interior points of
+/// `[min, max]`, `min + j (max - min) / (numcut + 1)`, as R's `seq` computes them.
+fn cutpoints(col: ArrayView1<f64>, numcut: usize) -> EconResult<Vec<f64>> {
+    let mut xs = try_with_capacity::<f64>(col.len(), "BART cutpoints")?;
+    xs.extend(col.iter().copied());
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    let k = xs.len();
+    if k <= 1 {
+        return Ok(Vec::new());
+    }
+    if k < numcut {
+        return Ok(xs.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect());
+    }
+    let (from, to) = (xs[0], xs[k - 1]);
+    let by = (to - from) / (numcut as f64 + 1.0);
+    let mut cuts = try_with_capacity::<f64>(numcut, "BART cutpoints")?;
+    cuts.extend((1..=numcut).map(|j| from + j as f64 * by));
+    Ok(cuts)
 }
 
 // ============================================================================
@@ -509,22 +833,37 @@ struct BartSampler {
     trees: Vec<BartTree>,
     /// Current residual SD
     sigma: f64,
-    /// Scaled prior SD for leaf values
+    /// Leaf prior SD (tau), fixed for the chain
     sigma_mu: f64,
     /// Config
     config: BartConfig,
     /// RNG state
     rng: u64,
-    /// Feature counts for variable importance
-    var_counts: Vec<usize>,
     /// Number of features
     n_features: usize,
-    /// Data standard deviation (for scaling)
-    y_sd: f64,
+    /// Scale of the sigma prior (0 for probit BART)
+    lambda: f64,
     /// Probit BART: sigma stays at 1 and the sweep's target is the latent draw
     probit: bool,
-    /// Probit BART's qnorm(mean(y)); 0 for regression
+    /// mean(y) for regression, qnorm(mean(y)) for probit BART
     offset: f64,
+    /// Cutpoints per covariate (empty for a constant column)
+    cuts: Vec<Vec<f64>>,
+    /// The covariates with at least one cutpoint, the ones a birth draws its variable from
+    active: Vec<usize>,
+    /// The current sum of the trees at every row
+    allfit: Vec<f64>,
+    /// Scratch: the fit of the tree being updated, before its update
+    ftemp: Vec<f64>,
+    /// Scratch: the partial residual of the tree being updated
+    resid: Vec<f64>,
+    /// Scratch: each row's leaf in the tree being updated
+    leaf_of: Vec<u32>,
+    /// Scratch: the sum of the updated trees, in tree order
+    fresh: Vec<f64>,
+    /// Scratch: row count and residual sum per node of the tree being updated
+    node_n: Vec<usize>,
+    node_sum: Vec<f64>,
 }
 
 /// Deepest tail draws: each accepts with probability above 0.7, so this bound is never reached by
@@ -571,76 +910,121 @@ fn truncated_normal(
     )))
 }
 
+/// Log integrated likelihood of a leaf holding `n` partial residuals with sum `s`, up to the
+/// terms that cancel between a parent and its two children: the residuals are N(mu, s2) and
+/// mu ~ N(0, t2) is integrated out.
+fn leaf_log_lik(n: usize, s: f64, s2: f64, t2: f64) -> f64 {
+    let k = s2 + n as f64 * t2;
+    0.5 * (s2 / k).ln() + t2 * s * s / (2.0 * s2 * k)
+}
+
+/// The tree prior's probability that a node at depth `d` splits, alpha (1 + d)^-beta.
+fn split_prob(alpha: f64, beta: f64, d: usize) -> f64 {
+    alpha * (1.0 + d as f64).powf(-beta)
+}
+
 impl BartSampler {
-    /// Initialize the sampler
-    fn new(y: &Array1<f64>, x: ArrayView2<f64>, config: &BartConfig) -> EconResult<Self> {
-        let n = y.len();
+    /// Initialize the sampler on the backfitting target's length `n` and the covariates.
+    fn new(
+        y: &Array1<f64>,
+        x: ArrayView2<f64>,
+        config: &BartConfig,
+        prior: Option<WbartPrior>,
+    ) -> EconResult<Self> {
+        let n = x.nrows();
         let p = x.ncols();
         let m = config.n_trees;
-
-        if config.classification {
-            // The latent SD is 1 and the leaf prior fixed; trees start at 0 around the offset
-            let mut trees = try_with_capacity::<BartTree>(m, "BART trees")?;
-            trees.extend((0..m).map(|_| BartTree::new(0.0)));
-            return Ok(Self {
-                trees,
-                sigma: 1.0,
-                sigma_mu: 3.0 / (config.k * (m as f64).sqrt()),
-                config: config.clone(),
-                rng: config.seed.unwrap_or(42),
-                var_counts: vec![0; p],
-                n_features: p,
-                y_sd: 1.0,
-                probit: true,
-                offset: normal_quantile(y.mean().unwrap_or(0.5))?,
+        if p > u32::MAX as usize {
+            return Err(EconError::InvalidSpecification {
+                message: format!("BART takes at most {} covariates (got {p})", u32::MAX),
             });
         }
-
-        // Compute data statistics for scaling
-        let y_mean = y.mean().unwrap_or(0.0);
-        let y_sd = (y.iter().map(|&v| (v - y_mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-
-        // Initial sigma estimate (from data SD)
-        let sigma_hat = y_sd.max(0.1);
-
-        // Prior SD for leaf values: ensures sum of trees covers y range
-        // sigma_mu = sigma_hat / (k * sqrt(m)) so that
-        // sum of m leaf values has SD = sigma_hat / k
-        let sigma_mu = sigma_hat / (config.k * (m as f64).sqrt());
-
-        // Initialize all trees as stumps with mu = y_mean / m
-        let initial_mu = y_mean / m as f64;
+        let mut cuts = try_with_capacity::<Vec<f64>>(p, "BART cutpoints")?;
+        for j in 0..p {
+            let c = cutpoints(x.column(j), config.numcut)?;
+            if c.len() >= u32::MAX as usize {
+                return Err(EconError::InvalidSpecification {
+                    message: format!("covariate {j} has more than {} cutpoints", u32::MAX - 1),
+                });
+            }
+            cuts.push(c);
+        }
+        let active: Vec<usize> = (0..p).filter(|&j| !cuts[j].is_empty()).collect();
         let mut trees = try_with_capacity::<BartTree>(m, "BART trees")?;
-        trees.extend((0..m).map(|_| BartTree::new(initial_mu)));
+        trees.extend((0..m).map(|_| BartTree::new(0.0)));
+        let buf = |what| -> EconResult<Vec<f64>> {
+            let mut v = try_with_capacity::<f64>(n, what)?;
+            v.resize(n, 0.0);
+            Ok(v)
+        };
+        let mut leaf_of = try_with_capacity::<u32>(n, "BART leaf index")?;
+        leaf_of.resize(n, 0);
+
+        let (sigma, sigma_mu, lambda, offset, probit) = if config.classification {
+            // The latent SD is 1 and the leaf prior fixed; trees start at 0 around the offset
+            (
+                1.0,
+                3.0 / (config.k * (m as f64).sqrt()),
+                0.0,
+                normal_quantile(y.mean().unwrap_or(0.5))?,
+                true,
+            )
+        } else {
+            // Regression fits y - fmean: the trees start at 0, sigma at sigest, and the leaf
+            // prior SD stays at tau for the whole chain. `y` here is already centred, so the
+            // prior cannot be calibrated on it: the caller passes the prior of the raw response
+            let Some(prior) = prior else {
+                return Err(EconError::Computation(
+                    "BART regression sampler needs the prior calibrated on the raw response"
+                        .to_string(),
+                ));
+            };
+            (prior.sigest, prior.tau, prior.lambda, prior.fmean, false)
+        };
 
         Ok(Self {
             trees,
-            sigma: sigma_hat,
+            sigma,
             sigma_mu,
             config: config.clone(),
             rng: config.seed.unwrap_or(42),
-            var_counts: vec![0; p],
             n_features: p,
-            y_sd,
-            probit: false,
-            offset: 0.0,
+            lambda,
+            probit,
+            offset,
+            cuts,
+            active,
+            allfit: buf("BART fit")?,
+            ftemp: buf("BART tree fit")?,
+            resid: buf("BART residuals")?,
+            leaf_of,
+            fresh: buf("BART fit")?,
+            node_n: Vec::new(),
+            node_sum: Vec::new(),
         })
     }
 
-    /// Simple LCG random number generator
+    /// A uniform draw on [0, 1): an LCG state passed through the SplitMix64 finaliser, 53 bits
     fn random(&mut self) -> f64 {
-        self.rng = self.rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-        ((self.rng >> 33) ^ self.rng) as f64 / u64::MAX as f64
+        self.rng = self
+            .rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^= z >> 31;
+        (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
-    /// Generate random integer in [0, max)
+    /// Generate random integer in [0, max), max >= 1
     fn random_int(&mut self, max: usize) -> usize {
-        (self.random() * max as f64) as usize
+        ((self.random() * max as f64) as usize).min(max - 1)
     }
 
     /// Sample from standard normal (Box-Muller)
     fn random_normal(&mut self) -> f64 {
-        let u1 = self.random().max(1e-10);
+        let u1 = 1.0 - self.random(); // (0, 1]
         let u2 = self.random();
         (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
     }
@@ -665,7 +1049,7 @@ impl BartSampler {
         };
 
         let gamma = if alpha < 1.0 {
-            g * self.random().powf(1.0 / alpha)
+            g * (1.0 - self.random()).powf(1.0 / alpha)
         } else {
             g
         };
@@ -673,411 +1057,316 @@ impl BartSampler {
         beta / gamma
     }
 
-    /// Compute log likelihood ratio for splitting probability
-    fn log_split_prob(&self, depth: usize) -> f64 {
-        let p = self.config.alpha * (1.0 + depth as f64).powf(-self.config.beta);
-        p.ln() - (1.0 - p).ln()
-    }
-
     /// Probit BART's latent draw: z_i ~ N(offset + f(x_i), 1) truncated by y_i, returned as
     /// z - offset, the sweep's backfitting target.
-    fn draw_latent(&mut self, y01: &Array1<f64>, x: ArrayView2<f64>) -> EconResult<Array1<f64>> {
-        let fit = self.predict(x);
+    fn draw_latent(&mut self, y01: &Array1<f64>) -> EconResult<Array1<f64>> {
         let offset = self.offset;
+        let fit = std::mem::take(&mut self.allfit);
         let mut latent = Array1::zeros(y01.len());
         let mut uniform = || self.random();
+        let mut out = Ok(());
         for i in 0..y01.len() {
-            let z = truncated_normal(offset + fit[i], y01[i] == 1.0, &mut uniform)?;
-            latent[i] = z - offset;
+            match truncated_normal(offset + fit[i], y01[i] == 1.0, &mut uniform) {
+                Ok(z) => latent[i] = z - offset,
+                Err(e) => {
+                    out = Err(e);
+                    break;
+                }
+            }
         }
-        Ok(latent)
+        self.allfit = fit;
+        out.map(|()| latent)
     }
 
-    /// Run one MCMC iteration (one full sweep through all trees) on the backfitting target `y`: the
-    /// response for regression, the latent draw for probit BART
-    fn step(&mut self, y: &Array1<f64>, x: ArrayView2<f64>) {
-        let m = self.trees.len();
+    /// The range of cutpoint indices of variable `v` still available at `node`: those strictly
+    /// inside the bounds its ancestors' rules on `v` leave (BART's `tree::rg`).
+    fn cut_range(&self, tree: &BartTree, node: usize, v: usize) -> Option<(usize, usize)> {
+        let ncut = self.cuts[v].len();
+        if ncut == 0 {
+            return None;
+        }
+        let (mut lo, mut hi) = (0i64, ncut as i64 - 1);
+        let mut child = node;
+        let mut parent = tree.nodes[node].parent;
+        while parent != NO_NODE {
+            let pn = &tree.nodes[parent as usize];
+            if pn.var as usize == v {
+                let c = pn.cut as i64;
+                if pn.left as usize == child {
+                    hi = hi.min(c - 1);
+                } else {
+                    lo = lo.max(c + 1);
+                }
+            }
+            child = parent as usize;
+            parent = pn.parent;
+        }
+        (lo <= hi).then_some((lo as usize, hi as usize))
+    }
+
+    /// Whether `node` can split: below `max_depth`, with some variable left that has an
+    /// available cutpoint (BART's `cansplit`, with the depth cap).
+    fn can_split(&self, tree: &BartTree, node: usize) -> bool {
+        (tree.nodes[node].depth as usize) < self.config.max_depth
+            && self
+                .active
+                .iter()
+                .any(|&v| self.cut_range(tree, node, v).is_some())
+    }
+
+    /// The tree prior's probability that `node` splits: alpha (1 + d)^-beta if it can, else 0
+    fn grow_prob(&self, tree: &BartTree, node: usize) -> f64 {
+        if self.can_split(tree, node) {
+            split_prob(
+                self.config.alpha,
+                self.config.beta,
+                tree.nodes[node].depth as usize,
+            )
+        } else {
+            0.0
+        }
+    }
+
+    /// One MCMC sweep through all trees on the backfitting target `y` (the centred response, or
+    /// the latent draw for probit BART), then the sigma draw. Rows are in `xs`, row-major.
+    fn step(&mut self, y: &Array1<f64>, xs: &[f64]) {
         let n = y.len();
-
-        // Compute current fit (sum of all trees)
-        let mut current_fit: Array1<f64> = Array1::zeros(n);
-        for tree in &self.trees {
-            current_fit = current_fit + tree.predict(x);
+        let p = self.n_features;
+        self.fresh.iter_mut().for_each(|v| *v = 0.0);
+        for j in 0..self.trees.len() {
+            {
+                let tree = &self.trees[j];
+                for i in 0..n {
+                    let leaf = tree.leaf_of(&xs[i * p..(i + 1) * p]);
+                    self.leaf_of[i] = leaf as u32;
+                    self.ftemp[i] = tree.nodes[leaf].mu;
+                    self.resid[i] = y[i] - self.allfit[i] + self.ftemp[i];
+                }
+            }
+            self.birth_death(j, xs);
+            self.draw_leaf_values(j);
+            let tree = &self.trees[j];
+            for i in 0..n {
+                let f = tree.nodes[self.leaf_of[i] as usize].mu;
+                self.allfit[i] += f - self.ftemp[i];
+                self.fresh[i] += f;
+            }
         }
-
-        // Backfitting: update each tree in turn
-        for j in 0..m {
-            // Partial residual: y - sum of all other trees
-            let tree_fit = self.trees[j].predict(x);
-            let residual = y - &current_fit + &tree_fit;
-
-            // Update tree j given partial residual
-            self.update_tree(j, &residual, x);
-
-            // Update current fit
-            let new_tree_fit = self.trees[j].predict(x);
-            current_fit = current_fit - &tree_fit + &new_tree_fit;
-        }
+        // The sum of the trees in tree order, free of the drift of the running update
+        std::mem::swap(&mut self.allfit, &mut self.fresh);
 
         if self.probit {
             return;
         }
-
-        // Update sigma
-        let final_residual = y - &current_fit;
-        let ss = final_residual.iter().map(|&r| r.powi(2)).sum::<f64>();
-
+        let ss: f64 = (0..n).map(|i| (y[i] - self.allfit[i]).powi(2)).sum();
         // Posterior: sigma^2 | ... ~ IG((nu + n)/2, (nu*lambda + ss)/2)
         let nu = self.config.nu;
-        // Calibrate lambda from prior (using y_sd as sigma_hat)
-        let lambda = self.calibrate_lambda(self.y_sd, nu, self.config.q);
         let post_alpha = (nu + n as f64) / 2.0;
-        let post_beta = (nu * lambda + ss) / 2.0;
-
+        let post_beta = (nu * self.lambda + ss) / 2.0;
         self.sigma = self.random_inv_gamma(post_alpha, post_beta).sqrt();
-
-        // Update sigma_mu (prior SD for leaves)
-        self.sigma_mu = self.sigma / (self.config.k * (m as f64).sqrt());
     }
 
-    /// Calibrate lambda so that P(sigma < sigma_hat) = q
-    fn calibrate_lambda(&self, sigma_hat: f64, nu: f64, q: f64) -> f64 {
-        // For sigma^2 ~ IG(nu/2, nu*lambda/2)
-        // Want P(sigma < sigma_hat) = q, i.e., P(sigma^2 < sigma_hat^2) = q
-        // This requires numerical inversion; use simple approximation
-        // lambda ~ sigma_hat^2 / qchisq(1-q, nu) * nu
-        // Approximate chi-squared quantile
-        let chi_sq_quantile = nu
-            * (1.0 + 2.0 / (9.0 * nu)).powi(3)
-            * (1.0 - 2.0 / (9.0 * nu) + (1.0 - q).powf(1.0 / 3.0) * (2.0 / (9.0 * nu)).sqrt())
-                .powi(3);
-        sigma_hat.powi(2) * chi_sq_quantile / nu
-    }
-
-    /// Update a single tree using Metropolis-Hastings
-    fn update_tree(&mut self, tree_idx: usize, residual: &Array1<f64>, x: ArrayView2<f64>) {
-        let tree = &mut self.trees[tree_idx];
-
-        // Propose: grow, prune, or change
-        let n_leaves = tree.get_leaves().len();
-        let n_internal = tree.get_internals().len();
-        let n_singly = tree
-            .get_internals()
-            .iter()
-            .filter(|&&i| tree.is_singly_internal(i))
-            .count();
-
-        // Choose proposal type
-        let r = self.random();
-        let (proposal_type, forward_prob, backward_prob) = if n_leaves == 1 {
-            // Can only grow from single leaf
-            ("grow", 1.0, 1.0)
-        } else if n_singly == 0 {
-            // No prunable nodes, can only grow
-            ("grow", 0.5, 0.5)
-        } else if r < 0.5 {
-            ("grow", 0.5, 0.5)
-        } else {
-            ("prune", 0.5, 0.5)
-        };
-
-        match proposal_type {
-            "grow" => self.propose_grow(tree_idx, residual, x, forward_prob, backward_prob),
-            "prune" => self.propose_prune(tree_idx, residual, x, forward_prob, backward_prob),
-            _ => {}
-        }
-
-        // Draw new leaf values from conditional posterior
-        self.draw_leaf_values(tree_idx, residual, x);
-    }
-
-    /// Propose a grow move (split a leaf)
-    fn propose_grow(
-        &mut self,
-        tree_idx: usize,
-        residual: &Array1<f64>,
-        x: ArrayView2<f64>,
-        _forward_prob: f64,
-        _backward_prob: f64,
-    ) {
-        let leaves = self.trees[tree_idx].get_leaves();
-
-        if leaves.is_empty() {
-            return;
-        }
-
-        // Choose a random leaf to split (get random index before borrowing tree)
-        let random_idx = self.random_int(leaves.len());
-        let leaf_idx = leaves[random_idx];
-        let tree = &self.trees[tree_idx];
-        let leaf_depth = tree.get_depth(leaf_idx);
-
-        // Check depth constraint
-        if leaf_depth >= self.config.max_depth {
-            return;
-        }
-
-        // Get observations in this leaf
-        let assignments = tree.get_leaf_assignments(x);
-        let leaf_pos = leaves.iter().position(|&l| l == leaf_idx).unwrap();
-        let obs_in_leaf: Vec<usize> = assignments[leaf_pos].clone();
-
-        if obs_in_leaf.len() < min_rows_to_split(self.config.min_node_size) {
-            return; // Not enough observations to split
-        }
-
-        // Choose a random variable to split on
-        let var = self.random_int(self.n_features);
-
-        // Get values of this variable in the leaf
-        let mut values: Vec<f64> = obs_in_leaf.iter().map(|&i| x[[i, var]]).collect();
-        values.sort_by(f64::total_cmp);
-        values.dedup();
-
-        if values.len() < 2 {
-            return; // No valid split point
-        }
-
-        // Choose a random split point
-        let split_idx = self.random_int(values.len() - 1);
-        let cut = (values[split_idx] + values[split_idx + 1]) / 2.0;
-
-        // Count observations in proposed children
-        let n_left = obs_in_leaf.iter().filter(|&&i| x[[i, var]] <= cut).count();
-        let n_right = obs_in_leaf.len() - n_left;
-
-        if n_left < self.config.min_node_size || n_right < self.config.min_node_size {
-            return; // Children would be too small
-        }
-
-        // Compute acceptance probability using log likelihood ratio
-        let log_prior_ratio =
-            self.log_split_prob(leaf_depth) - self.log_split_prob(leaf_depth + 1).powi(2);
-
-        // Likelihood ratio from integrating out leaf values
-        let left_obs: Vec<usize> = obs_in_leaf
-            .iter()
-            .filter(|&&i| x[[i, var]] <= cut)
-            .copied()
+    /// One birth-or-death Metropolis-Hastings move on tree `j` (BART's `bd`), on the partial
+    /// residuals in `resid` and the leaf indices in `leaf_of`, which it keeps current.
+    fn birth_death(&mut self, j: usize, xs: &[f64]) {
+        let tree = &self.trees[j];
+        let goodbots: Vec<usize> = tree
+            .get_leaves()
+            .into_iter()
+            .filter(|&l| self.can_split(tree, l))
             .collect();
-        let right_obs: Vec<usize> = obs_in_leaf
-            .iter()
-            .filter(|&&i| x[[i, var]] > cut)
-            .copied()
-            .collect();
-
-        let log_lik_ratio =
-            self.compute_split_log_lik_ratio(residual, &obs_in_leaf, &left_obs, &right_obs);
-
-        let log_acceptance = log_prior_ratio + log_lik_ratio;
-
-        if self.random().ln() < log_acceptance {
-            // Accept: create the split
-            let tree = &mut self.trees[tree_idx];
-            let left_idx = tree.nodes.len();
-            let right_idx = left_idx + 1;
-
-            // Get current leaf value for initialization
-            let current_mu = if let BartNode::Leaf { mu } = tree.nodes[leaf_idx] {
-                mu
-            } else {
-                0.0
-            };
-
-            tree.nodes.push(BartNode::Leaf { mu: current_mu });
-            tree.nodes.push(BartNode::Leaf { mu: current_mu });
-            tree.nodes[leaf_idx] = BartNode::Internal {
-                var,
-                cut,
-                left: left_idx,
-                right: right_idx,
-            };
-            tree.depth = tree.depth.max(leaf_depth + 1);
-
-            // Update variable importance count
-            self.var_counts[var] += 1;
-        }
-    }
-
-    /// Propose a prune move (collapse an internal node to leaf)
-    fn propose_prune(
-        &mut self,
-        tree_idx: usize,
-        residual: &Array1<f64>,
-        x: ArrayView2<f64>,
-        _forward_prob: f64,
-        _backward_prob: f64,
-    ) {
-        // Find singly-internal nodes (internal nodes with two leaf children)
-        let singly_internals: Vec<usize> = {
-            let tree = &self.trees[tree_idx];
-            tree.get_internals()
-                .into_iter()
-                .filter(|&i| tree.is_singly_internal(i))
-                .collect()
-        };
-
-        if singly_internals.is_empty() {
-            return;
-        }
-
-        // Choose a random singly-internal node to prune (get random index before borrowing tree)
-        let random_idx = self.random_int(singly_internals.len());
-        let node_idx = singly_internals[random_idx];
-        let tree = &self.trees[tree_idx];
-        let node_depth = tree.get_depth(node_idx);
-
-        // Get the children and their observations
-        let (left_idx, right_idx, var) = if let BartNode::Internal {
-            left, right, var, ..
-        } = tree.nodes[node_idx]
-        {
-            (left, right, var)
+        let pb = if goodbots.is_empty() {
+            0.0
+        } else if tree.nodes.len() == 1 {
+            1.0
         } else {
-            return;
+            0.5
         };
-
-        // Get all observations that would be in the merged leaf
-        let assignments = tree.get_leaf_assignments(x);
-        let leaves = tree.get_leaves();
-
-        let left_pos = leaves.iter().position(|&l| l == left_idx);
-        let right_pos = leaves.iter().position(|&l| l == right_idx);
-
-        if left_pos.is_none() || right_pos.is_none() {
-            return;
-        }
-
-        let left_obs = assignments[left_pos.unwrap()].clone();
-        let right_obs = assignments[right_pos.unwrap()].clone();
-        let merged_obs: Vec<usize> = left_obs.iter().chain(right_obs.iter()).copied().collect();
-
-        // Compute acceptance probability (negative of grow ratio)
-        let log_prior_ratio =
-            -self.log_split_prob(node_depth) + self.log_split_prob(node_depth + 1).powi(2);
-        let log_lik_ratio =
-            -self.compute_split_log_lik_ratio(residual, &merged_obs, &left_obs, &right_obs);
-
-        let log_acceptance = log_prior_ratio + log_lik_ratio;
-
-        if self.random().ln() < log_acceptance {
-            // Accept: collapse to leaf
-            let tree = &mut self.trees[tree_idx];
-
-            // Get mean residual for merged observations
-            let mean_resid = if !merged_obs.is_empty() {
-                merged_obs.iter().map(|&i| residual[i]).sum::<f64>() / merged_obs.len() as f64
-            } else {
-                0.0
-            };
-
-            tree.nodes[node_idx] = BartNode::Leaf { mu: mean_resid };
-            // Note: we leave the old child nodes in place (they're now unreachable)
-
-            // Decrement variable importance count
-            if self.var_counts[var] > 0 {
-                self.var_counts[var] -= 1;
-            }
+        if self.random() < pb {
+            self.birth(j, xs, &goodbots, pb);
+        } else {
+            self.death(j, goodbots.len(), pb);
         }
     }
 
-    /// Compute log likelihood ratio for splitting
-    fn compute_split_log_lik_ratio(
+    /// The prior-and-proposal part of a birth's MH ratio at leaf `eta` on (`v`, cut index `c`)
+    /// with available range `[lo, hi]` (BART's `bprop`): p_eta (1 - p_l)(1 - p_r) PD Pnog /
+    /// ((1 - p_eta) Pbot PB). The children's grow probabilities use the depth cap and whether a
+    /// variable stays available in each child.
+    fn birth_ratio(
         &self,
-        residual: &Array1<f64>,
-        parent_obs: &[usize],
-        left_obs: &[usize],
-        right_obs: &[usize],
+        tree: &BartTree,
+        eta: usize,
+        v: usize,
+        (c, lo, hi): (usize, usize, usize),
+        n_goodbots: usize,
+        pb: f64,
     ) -> f64 {
-        let sigma2 = self.sigma.powi(2);
-        let sigma_mu2 = self.sigma_mu.powi(2);
-
-        // Helper to compute marginal log likelihood for a set of observations
-        let marg_log_lik = |obs: &[usize]| -> f64 {
-            if obs.is_empty() {
-                return 0.0;
-            }
-            let n = obs.len() as f64;
-            let sum_r: f64 = obs.iter().map(|&i| residual[i]).sum();
-            let sum_r2: f64 = obs.iter().map(|&i| residual[i].powi(2)).sum();
-
-            // Marginal likelihood integrating out mu ~ N(0, sigma_mu^2)
-            // -n/2 * log(2*pi*sigma^2) - 1/2 * sum(r^2)/sigma^2
-            // + 1/2 * log(sigma_mu^2/(sigma_mu^2 + sigma^2/n)) + 1/2 * (sum_r)^2 / (sigma^2/n + sigma_mu^2 * n) / n
-            let var_total = sigma2 + n * sigma_mu2;
-            -0.5 * n * (2.0 * std::f64::consts::PI * sigma2).ln() - 0.5 * sum_r2 / sigma2
-                + 0.5 * (sigma_mu2 / (sigma_mu2 + sigma2 / n)).ln()
-                + 0.5 * sum_r.powi(2) / var_total
-        };
-
-        marg_log_lik(left_obs) + marg_log_lik(right_obs) - marg_log_lik(parent_obs)
-    }
-
-    /// Draw new leaf values from their conditional posterior
-    fn draw_leaf_values(&mut self, tree_idx: usize, residual: &Array1<f64>, x: ArrayView2<f64>) {
-        // First, gather information without holding a mutable borrow
-        let leaves = self.trees[tree_idx].get_leaves();
-        let assignments = self.trees[tree_idx].get_leaf_assignments(x);
-
-        let sigma2 = self.sigma.powi(2);
-        let sigma_mu2 = self.sigma_mu.powi(2);
-        let sigma_mu = self.sigma_mu;
-
-        // Pre-generate random numbers
-        let mut random_vals: Vec<f64> = Vec::with_capacity(leaves.len());
-        for _ in 0..leaves.len() {
-            random_vals.push(self.random_normal());
-        }
-
-        // Now update the tree
-        let tree = &mut self.trees[tree_idx];
-        for (i, &leaf_idx) in leaves.iter().enumerate() {
-            let obs = &assignments[i];
-            let rand_val = random_vals[i];
-
-            if obs.is_empty() {
-                if let BartNode::Leaf { ref mut mu } = tree.nodes[leaf_idx] {
-                    *mu = sigma_mu * rand_val;
-                }
-                continue;
-            }
-
-            let n = obs.len() as f64;
-            let sum_r: f64 = obs.iter().map(|&j| residual[j]).sum();
-
-            // Posterior: mu | r ~ N(post_mean, post_var)
-            // post_var = 1 / (n/sigma^2 + 1/sigma_mu^2)
-            // post_mean = post_var * sum_r / sigma^2
-            let post_var = 1.0 / (n / sigma2 + 1.0 / sigma_mu2);
-            let post_mean = post_var * sum_r / sigma2;
-            let post_sd = post_var.sqrt();
-
-            if let BartNode::Leaf { ref mut mu } = tree.nodes[leaf_idx] {
-                *mu = post_mean + post_sd * rand_val;
-            }
-        }
-    }
-
-    /// Get sum of tree predictions
-    fn predict(&self, x: ArrayView2<f64>) -> Array1<f64> {
-        let n = x.nrows();
-        let mut pred: Array1<f64> = Array1::zeros(n);
-        for tree in &self.trees {
-            pred = pred + tree.predict(x);
-        }
-        pred
-    }
-
-    /// Get variable importance (normalized counts)
-    fn get_variable_importance(&self) -> Vec<f64> {
-        let total: usize = self.var_counts.iter().sum();
-        if total == 0 {
-            return vec![1.0 / self.n_features as f64; self.n_features];
-        }
-        self.var_counts
+        let (alpha, beta) = (self.config.alpha, self.config.beta);
+        let d = tree.nodes[eta].depth as usize;
+        let pg_eta = split_prob(alpha, beta, d);
+        let child_depth_ok = d + 1 < self.config.max_depth;
+        let other_good = self
+            .active
             .iter()
-            .map(|&c| c as f64 / total as f64)
-            .collect()
+            .any(|&w| w != v && self.cut_range(tree, eta, w).is_some());
+        let pg_child = split_prob(alpha, beta, d + 1);
+        let pgl = if child_depth_ok && (other_good || c > lo) {
+            pg_child
+        } else {
+            0.0
+        };
+        let pgr = if child_depth_ok && (other_good || c < hi) {
+            pg_child
+        } else {
+            0.0
+        };
+        let pd_new = if n_goodbots > 1 || pgl > 0.0 || pgr > 0.0 {
+            0.5
+        } else {
+            1.0
+        };
+        let n_nogs = tree.nogs().len();
+        let parent = tree.nodes[eta].parent;
+        let pnog_new = if parent == NO_NODE {
+            1.0
+        } else if tree.is_nog(parent as usize) {
+            1.0 / n_nogs as f64
+        } else {
+            1.0 / (n_nogs as f64 + 1.0)
+        };
+        pg_eta * (1.0 - pgl) * (1.0 - pgr) * pd_new * pnog_new
+            / ((1.0 - pg_eta) * (1.0 / n_goodbots as f64) * pb)
+    }
+
+    /// The prior-and-proposal part of a death's MH ratio at the nog node `eta` (BART's
+    /// `dprop`): (1 - p_eta) PB Pbot / (p_eta (1 - p_l)(1 - p_r) PD Pnog).
+    fn death_ratio(&self, tree: &BartTree, eta: usize, n_goodbots: usize, pb: f64) -> f64 {
+        let node = tree.nodes[eta];
+        let (l, r) = (node.left as usize, node.right as usize);
+        let pg_eta = split_prob(self.config.alpha, self.config.beta, node.depth as usize);
+        let pgl = self.grow_prob(tree, l);
+        let pgr = self.grow_prob(tree, r);
+        let pb_new = if node.parent == NO_NODE { 1.0 } else { 0.5 };
+        let ngood_new = n_goodbots + 1 - usize::from(pgl > 0.0) - usize::from(pgr > 0.0);
+        let n_nogs = tree.nogs().len();
+        (1.0 - pg_eta) * pb_new * (1.0 / ngood_new as f64)
+            / (pg_eta * (1.0 - pgl) * (1.0 - pgr) * (1.0 - pb) * (1.0 / n_nogs as f64))
+    }
+
+    /// Propose and maybe accept a birth at a leaf that can split.
+    fn birth(&mut self, j: usize, xs: &[f64], goodbots: &[usize], pb: f64) {
+        let p = self.n_features;
+        let eta = goodbots[self.random_int(goodbots.len())];
+        // The variable is drawn among all covariates with cutpoints, as wbart; one exhausted
+        // at eta puts every row in one child, a birth wbart always rejects
+        let k = self.random_int(self.active.len());
+        let v = self.active[k];
+        let tree = &self.trees[j];
+        let Some((lo, hi)) = self.cut_range(tree, eta, v) else {
+            return;
+        };
+        let c = lo + self.random_int(hi - lo + 1);
+        let cutv = self.cuts[v][c];
+
+        let (mut nl, mut sl, mut nr, mut sr) = (0usize, 0.0, 0usize, 0.0);
+        for i in 0..self.leaf_of.len() {
+            if self.leaf_of[i] as usize == eta {
+                if xs[i * p + v] < cutv {
+                    nl += 1;
+                    sl += self.resid[i];
+                } else {
+                    nr += 1;
+                    sr += self.resid[i];
+                }
+            }
+        }
+        let min = self.config.min_node_size;
+        if nl.saturating_add(nr) < min_rows_to_split(min) || nl < min || nr < min {
+            return;
+        }
+        let tree = &self.trees[j];
+        let ratio = self.birth_ratio(tree, eta, v, (c, lo, hi), goodbots.len(), pb);
+        let (s2, t2) = (self.sigma * self.sigma, self.sigma_mu * self.sigma_mu);
+        let log_alpha = ratio.ln() + leaf_log_lik(nl, sl, s2, t2) + leaf_log_lik(nr, sr, s2, t2)
+            - leaf_log_lik(nl + nr, sl + sr, s2, t2);
+        if (1.0 - self.random()).ln() < log_alpha {
+            let (l, r) = self.trees[j].birth(eta, v, c, cutv, 0.0, 0.0);
+            for i in 0..self.leaf_of.len() {
+                if self.leaf_of[i] as usize == eta {
+                    self.leaf_of[i] = if xs[i * p + v] < cutv { l } else { r } as u32;
+                }
+            }
+        }
+    }
+
+    /// Propose and maybe accept a death at a nog node.
+    fn death(&mut self, j: usize, n_goodbots: usize, pb: f64) {
+        let nogs = self.trees[j].nogs();
+        if nogs.is_empty() {
+            return; // a single leaf that cannot split
+        }
+        let eta = nogs[self.random_int(nogs.len())];
+        let tree = &self.trees[j];
+        let (l, r) = (
+            tree.nodes[eta].left as usize,
+            tree.nodes[eta].right as usize,
+        );
+        let (mut nl, mut sl, mut nr, mut sr) = (0usize, 0.0, 0usize, 0.0);
+        for i in 0..self.leaf_of.len() {
+            let k = self.leaf_of[i] as usize;
+            if k == l {
+                nl += 1;
+                sl += self.resid[i];
+            } else if k == r {
+                nr += 1;
+                sr += self.resid[i];
+            }
+        }
+        let ratio = self.death_ratio(tree, eta, n_goodbots, pb);
+        let (s2, t2) = (self.sigma * self.sigma, self.sigma_mu * self.sigma_mu);
+        let log_alpha = ratio.ln() + leaf_log_lik(nl + nr, sl + sr, s2, t2)
+            - leaf_log_lik(nl, sl, s2, t2)
+            - leaf_log_lik(nr, sr, s2, t2);
+        if (1.0 - self.random()).ln() < log_alpha {
+            let remap = self.trees[j].death(eta, 0.0);
+            for k in self.leaf_of.iter_mut() {
+                *k = remap[*k as usize];
+            }
+        }
+    }
+
+    /// Draw every leaf value of tree `j` from its conditional posterior N(post_var S / s2,
+    /// post_var), post_var = 1 / (n / s2 + 1 / t2), in node order.
+    fn draw_leaf_values(&mut self, j: usize) {
+        let len = self.trees[j].nodes.len();
+        self.node_n.clear();
+        self.node_n.resize(len, 0);
+        self.node_sum.clear();
+        self.node_sum.resize(len, 0.0);
+        for i in 0..self.leaf_of.len() {
+            let k = self.leaf_of[i] as usize;
+            self.node_n[k] += 1;
+            self.node_sum[k] += self.resid[i];
+        }
+        let (s2, t2) = (self.sigma * self.sigma, self.sigma_mu * self.sigma_mu);
+        for k in 0..len {
+            if self.trees[j].nodes[k].is_leaf() {
+                let post_var = 1.0 / (self.node_n[k] as f64 / s2 + 1.0 / t2);
+                let post_mean = post_var * self.node_sum[k] / s2;
+                let z = self.random_normal();
+                self.trees[j].nodes[k].mu = post_mean + post_var.sqrt() * z;
+            }
+        }
+    }
+
+    /// Add each tree's splits per variable to `acc`
+    fn add_split_counts(&self, acc: &mut [f64]) {
+        for tree in &self.trees {
+            for node in tree.nodes.iter().filter(|nd| !nd.is_leaf()) {
+                acc[node.var as usize] += 1.0;
+            }
+        }
     }
 }
 
@@ -1192,6 +1481,9 @@ fn validate_bart_config(config: &BartConfig) -> EconResult<()> {
     if !(cl.is_finite() && cl > 0.0 && cl < 1.0) {
         return invalid(format!("confidence_level must be in (0, 1) (got {cl})"));
     }
+    if config.numcut == 0 {
+        return invalid("numcut must be at least 1 (got 0)".to_string());
+    }
     Ok(())
 }
 
@@ -1248,72 +1540,80 @@ pub fn bart_arrays(
         }
     }
 
-    // Convert to owned arrays
-    let y_owned = y.to_owned();
-    let x_owned = x.to_owned();
+    // Regression: wbart's prior, and the sampler fits y - fmean
+    let prior = if config.classification {
+        None
+    } else {
+        Some(wbart_prior(y, x, &config)?)
+    };
+    let y_owned = match prior {
+        Some(prior) => y.mapv(|v| v - prior.fmean),
+        None => y.to_owned(),
+    };
+    // Rows in one row-major buffer for the tree traversals
+    let mut xs =
+        try_with_capacity::<f64>(checked_len(&[n, p], "BART covariates")?, "BART covariates")?;
+    for row in x.rows() {
+        xs.extend(row.iter().copied());
+    }
 
     // Initialize sampler
-    let mut sampler = BartSampler::new(&y_owned, x_owned.view(), &config)?;
+    let mut sampler = BartSampler::new(&y_owned, x, &config, prior)?;
 
     // Posterior draws, allocated before any sweep runs
     let mut posterior_preds = try_zeros2(config.n_mcmc, n, "BART posterior draws")?;
     let mut sigma_samples = try_with_capacity::<f64>(config.n_mcmc, "BART sigma draws")?;
+    let mut kept_trees = if config.keep_trees {
+        Some(KeptTrees::new(config.n_mcmc, config.n_trees)?)
+    } else {
+        None
+    };
 
     // Burn-in
     for _ in 0..config.n_burn {
         checkpoint()?;
         if config.classification {
-            let latent = sampler.draw_latent(&y_owned, x_owned.view())?;
-            sampler.step(&latent, x_owned.view());
+            let latent = sampler.draw_latent(&y_owned)?;
+            sampler.step(&latent, &xs);
         } else {
-            sampler.step(&y_owned, x_owned.view());
+            sampler.step(&y_owned, &xs);
         }
     }
 
-    // Reset variable importance counts after burn-in
-    sampler.var_counts = vec![0; p];
+    // Splits per variable summed over the kept draws
+    let mut split_sums = try_with_capacity::<f64>(p, "BART split counts")?;
+    split_sums.resize(p, 0.0);
 
     // Collect posterior samples
     for iter in 0..config.n_mcmc {
         checkpoint()?;
         if config.classification {
-            let latent = sampler.draw_latent(&y_owned, x_owned.view())?;
-            sampler.step(&latent, x_owned.view());
+            let latent = sampler.draw_latent(&y_owned)?;
+            sampler.step(&latent, &xs);
         } else {
-            sampler.step(&y_owned, x_owned.view());
+            sampler.step(&y_owned, &xs);
         }
 
-        let mut pred = sampler.predict(x_owned.view());
-        if config.classification {
-            pred.mapv_inplace(|f| std_normal_cdf(sampler.offset + f));
+        let offset = sampler.offset;
+        let mut row = posterior_preds.row_mut(iter);
+        for (d, &f) in row.iter_mut().zip(&sampler.allfit) {
+            *d = if config.classification {
+                std_normal_cdf(offset + f)
+            } else {
+                offset + f
+            };
         }
-        posterior_preds.row_mut(iter).assign(&pred);
         sigma_samples.push(sampler.sigma);
+        sampler.add_split_counts(&mut split_sums);
+        if let Some(kept) = kept_trees.as_mut() {
+            kept.push_draw(&sampler.trees)?;
+        }
     }
 
-    // Compute posterior summaries
-    let predictions: Vec<f64> = (0..n)
-        .map(|i| posterior_preds.column(i).mean().unwrap_or(0.0))
-        .collect();
-
-    let prediction_sd: Vec<f64> = (0..n)
-        .map(|i| {
-            let col = posterior_preds.column(i);
-            let mean = col.mean().unwrap_or(0.0);
-            (col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / config.n_mcmc as f64).sqrt()
-        })
-        .collect();
-
-    // Prediction intervals: R's quantile(type = 7), as BART's posterior summaries are read
-    let mut prediction_lower = Vec::with_capacity(n);
-    let mut prediction_upper = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let col_vals: Vec<f64> = posterior_preds.column(i).to_vec();
-        let (lower, upper) = percentile_interval(&col_vals, config.confidence_level)?;
-        prediction_lower.push(lower);
-        prediction_upper.push(upper);
-    }
+    // Posterior summaries; intervals by R's quantile(type = 7), as BART's posterior summaries
+    // are read
+    let (predictions, prediction_sd, prediction_lower, prediction_upper) =
+        draw_summaries(&posterior_preds, config.confidence_level)?;
 
     // Sigma posterior summaries
     let sigma = sigma_samples.iter().sum::<f64>() / sigma_samples.len() as f64;
@@ -1326,8 +1626,16 @@ pub fn bart_arrays(
         var.sqrt()
     };
 
-    // Variable importance
-    let variable_importance = sampler.get_variable_importance();
+    // Variable importance: the mean split counts and their shares
+    let variable_count_mean: Vec<f64> = split_sums
+        .iter()
+        .map(|&c| c / config.n_mcmc as f64)
+        .collect();
+    let total: f64 = variable_count_mean.iter().sum();
+    let variable_importance: Vec<f64> = variable_count_mean
+        .iter()
+        .map(|&c| if total > 0.0 { c / total } else { 0.0 })
+        .collect();
 
     Ok(BartResult {
         predictions,
@@ -1335,10 +1643,14 @@ pub fn bart_arrays(
         prediction_upper,
         prediction_sd,
         variable_importance,
+        variable_count_mean,
         feature_names,
         sigma,
         sigma_sd,
         offset: sampler.offset,
+        sigest: prior.map_or(1.0, |p| p.sigest),
+        lambda: prior.map_or(0.0, |p| p.lambda),
+        leaf_prior_sd: sampler.sigma_mu,
         n_obs: n,
         n_features: p,
         n_trees: config.n_trees,
@@ -1346,6 +1658,7 @@ pub fn bart_arrays(
         config: config.clone(),
         posterior_samples: Some(posterior_preds),
         sigma_samples: (!config.classification).then_some(sigma_samples),
+        kept_trees,
     })
 }
 
@@ -1380,16 +1693,54 @@ pub fn run_bart(
 
 /// Predict using BART posterior for new data.
 ///
-/// Returns posterior mean predictions and prediction intervals.
+/// Returns the posterior mean and the type-7 interval (`config.confidence_level`) of
+/// `offset + f(x)` at each row of `x_new` over the kept draws (probit BART: of
+/// `Phi(offset + f(x))`). The trees of the draws must have been kept (`keep_trees: true`);
+/// on the training rows this repeats `predictions`, `prediction_lower` and `prediction_upper`.
 pub fn bart_predict(
     result: &BartResult,
     x_new: ArrayView2<f64>,
 ) -> EconResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
-    // For out-of-sample prediction, we would need to store the trees
-    // For now, return an error indicating this limitation
-    Err(EconError::InvalidSpecification {
-        message: "Out-of-sample prediction requires storing the tree ensemble. Use bart_arrays() with the new data included in training for now.".to_string(),
-    })
+    let kept = result
+        .kept_trees
+        .as_ref()
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: "bart_predict needs the posterior trees: fit with keep_trees: true \
+                      (a result read back from JSON holds no trees)"
+                .to_string(),
+        })?;
+    if x_new.ncols() != result.n_features {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x_new has {} columns; the model was fitted on {}",
+                x_new.ncols(),
+                result.n_features
+            ),
+        });
+    }
+    if let Some(((i, j), v)) = x_new.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x_new must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
+    let (n, n_draws) = (x_new.nrows(), result.n_samples);
+    let mut draws = try_zeros2(n_draws, n, "BART prediction draws")?;
+    let mut row = try_with_capacity::<f64>(result.n_features, "BART prediction row")?;
+    for i in 0..n {
+        checkpoint()?;
+        row.clear();
+        row.extend(x_new.row(i).iter().copied());
+        for d in 0..n_draws {
+            let f = result.offset + kept.fit(d, &row);
+            draws[[d, i]] = if result.config.classification {
+                std_normal_cdf(f)
+            } else {
+                f
+            };
+        }
+    }
+    let (mean, _, lower, upper) = draw_summaries(&draws, result.config.confidence_level)?;
+    Ok((mean, lower, upper))
 }
 
 // ============================================================================
@@ -1421,6 +1772,330 @@ mod tests {
     }
     fn case_vector(ds: &Dataset, col: &str) -> Array1<f64> {
         Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    const FRIEDMAN_X: [&str; 6] = ["x1", "x2", "x3", "x4", "x5", "x6"];
+
+    #[test]
+    fn test_validate_bart_wbart_calibration() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_wbart_calibration");
+        let x = case_matrix(&ds, &FRIEDMAN_X);
+        let y = case_vector(&ds, "y");
+        let prior = |m| {
+            let c = BartConfig {
+                n_trees: m,
+                ..Default::default()
+            };
+            wbart_prior(y.view(), x.view(), &c).unwrap()
+        };
+        let (p50, p200) = (prior(50), prior(200));
+        let cuts: Vec<Vec<f64>> = (0..6)
+            .map(|j| cutpoints(x.column(j), 100).unwrap())
+            .collect();
+        let numcut: Vec<f64> = cuts.iter().map(|c| c.len() as f64).collect();
+        Check::new(&case)
+            .scalar("fmean", p50.fmean, Tol::coef(200))
+            .scalar("sigest", p50.sigest, Tol::coef(200))
+            .scalar(
+                "qchisq_0_1_3",
+                chi_squared_quantile(0.1, 3.0).unwrap(),
+                Tol::coef(200),
+            )
+            .scalar("lambda", p50.lambda, Tol::coef(200))
+            .scalar("tau_m50", p50.tau, Tol::coef(200))
+            .scalar("tau_m200", p200.tau, Tol::coef(200))
+            .vector("numcut", &numcut, Tol::exact())
+            .vector("cut_x1", &cuts[0], Tol::coef(200))
+            .vector("cut_x6", &cuts[5], Tol::coef(200))
+            .finish();
+        assert_eq!(
+            (p200.fmean, p200.sigest, p200.lambda),
+            (p50.fmean, p50.sigest, p50.lambda)
+        );
+        // a constant column gets no cutpoint
+        assert!(
+            cutpoints(Array1::from_elem(10, 2.5).view(), 100)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The case's per-chain summaries (`.bart_draw_summary` in ml_bart_t4.R): mean fit, mean
+    /// posterior SD (population), mean type-7 95% width, splits per tree, split shares, and with
+    /// the true f its RMSE and the share of rows whose interval holds it.
+    fn draw_summary(r: &BartResult, truth: Option<&Array1<f64>>) -> Vec<(&'static str, Vec<f64>)> {
+        let n = r.n_obs as f64;
+        let draws = r.posterior_samples.as_ref().unwrap();
+        let avg = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let width: Vec<f64> = (0..r.n_obs)
+            .map(|i| {
+                let (lo, hi) = percentile_interval(&draws.column(i).to_vec(), 0.95).unwrap();
+                hi - lo
+            })
+            .collect();
+        let splits: f64 = r.variable_count_mean.iter().sum();
+        let mut out = vec![
+            ("pred_mean_avg", vec![avg(&r.predictions)]),
+            ("post_sd_avg", vec![avg(&r.prediction_sd)]),
+            ("width95_avg", vec![avg(&width)]),
+            ("splits_per_tree", vec![splits / r.n_trees as f64]),
+            (
+                "varprop",
+                r.variable_count_mean.iter().map(|c| c / splits).collect(),
+            ),
+        ];
+        if let Some(f) = truth {
+            let rmse = (r
+                .predictions
+                .iter()
+                .zip(f)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                / n)
+                .sqrt();
+            let covered = (0..r.n_obs)
+                .filter(|&i| r.prediction_lower[i] <= f[i] && f[i] <= r.prediction_upper[i])
+                .count() as f64;
+            out.push(("rmse_f", vec![rmse]));
+            out.push(("cover95_f", vec![covered / n]));
+        }
+        out
+    }
+
+    /// Monte Carlo tolerance: 5 SDs of 100 wbart chains; a single p2a chain differs from their
+    /// mean by about one chain SD. Scalars go through `check`; a vector's elements each have
+    /// their own SD, so they are compared one by one, and the failures are returned.
+    fn check_mc(
+        check: &mut Check,
+        case: &p2a_validation::Case,
+        key: &str,
+        got: &[f64],
+    ) -> Vec<String> {
+        let sd = case.vector(&format!("{key}_mc_sd"));
+        if let [g] = got {
+            check.scalar(key, *g, Tol::new(0.0, 5.0 * sd[0]));
+            return Vec::new();
+        }
+        let want = case.vector(key);
+        if got.len() != want.len() || sd.len() != want.len() {
+            return vec![format!(
+                "{key}: length {} (Rust) vs {} (R)",
+                got.len(),
+                want.len()
+            )];
+        }
+        (0..got.len())
+            .filter(|&i| !Tol::new(0.0, 5.0 * sd[i]).allows(got[i], want[i]))
+            .map(|i| {
+                format!(
+                    "{key}[{i}] rust={} R={} allowed={}",
+                    got[i],
+                    want[i],
+                    5.0 * sd[i]
+                )
+            })
+            .collect()
+    }
+
+    /// The tree prior's split count by rejection: a tree grown from the CGM prior (split with
+    /// probability alpha (1 + d)^-beta while a variable has cutpoints left, variable uniform among
+    /// those, cutpoint uniform in its range), kept only when every child holds 5 rows.
+    fn prior_tree_splits(
+        x: &Array2<f64>,
+        cuts: &[Vec<f64>],
+        rows: &[usize],
+        depth: usize,
+        bounds: &[(i64, i64)],
+        u: &mut dyn FnMut() -> f64,
+    ) -> Option<usize> {
+        let good: Vec<usize> = (0..bounds.len())
+            .filter(|&v| bounds[v].0 <= bounds[v].1)
+            .collect();
+        if good.is_empty() || u() >= split_prob(0.95, 2.0, depth) {
+            return Some(0);
+        }
+        let v = good[((u() * good.len() as f64) as usize).min(good.len() - 1)];
+        let (lo, hi) = bounds[v];
+        let c = lo + ((u() * (hi - lo + 1) as f64) as i64).min(hi - lo);
+        let cut = cuts[v][c as usize];
+        let (l, r): (Vec<usize>, Vec<usize>) = rows.iter().partition(|&&i| x[[i, v]] < cut);
+        if l.len() < 5 || r.len() < 5 {
+            return None;
+        }
+        let mut bl = bounds.to_vec();
+        bl[v].1 = c - 1;
+        let mut br = bounds.to_vec();
+        br[v].0 = c + 1;
+        let a = prior_tree_splits(x, cuts, &l, depth + 1, &bl, u)?;
+        let b = prior_tree_splits(x, cuts, &r, depth + 1, &br, u)?;
+        Some(1 + a + b)
+    }
+
+    /// With a leaf prior SD near 0 the data carry no information, so the chain must sample the
+    /// tree prior restricted to trees whose every child holds 5 rows. wbart and pbart sample
+    /// about 1.19 splits per tree here instead of about 1.38: their birth ratio counts the nog
+    /// nodes of the grown tree as one more than they are when the leaf is a child of a root that
+    /// has two leaves.
+    #[test]
+    fn bart_samples_the_tree_prior_when_the_data_are_silent() {
+        let (_, ds) = crate::test_support::load_case("ml_bart_wbart_posterior");
+        let x = case_matrix(&ds, &FRIEDMAN_X);
+        let y = case_vector(&ds, "y");
+        let cuts: Vec<Vec<f64>> = (0..6)
+            .map(|v| cutpoints(x.column(v), 100).unwrap())
+            .collect();
+        let bounds: Vec<(i64, i64)> = cuts.iter().map(|c| (0, c.len() as i64 - 1)).collect();
+        let rows: Vec<usize> = (0..x.nrows()).collect();
+        let mut state = 7u64;
+        let mut u = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut total, mut kept) = (0usize, 0usize);
+        while kept < 40_000 {
+            if let Some(s) = prior_tree_splits(&x, &cuts, &rows, 0, &bounds, &mut u) {
+                total += s;
+                kept += 1;
+            }
+        }
+        let exact = total as f64 / kept as f64;
+        let mut chain = 0.0;
+        for seed in [1, 2] {
+            let c = BartConfig {
+                n_trees: 50,
+                n_burn: 300,
+                n_mcmc: 1000,
+                k: 1e6,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+            chain += r.variable_count_mean.iter().sum::<f64>() / 50.0 / 2.0;
+        }
+        assert!(
+            (chain - exact).abs() < 0.04,
+            "chain {chain} vs prior {exact}"
+        );
+    }
+
+    #[test]
+    fn test_validate_bart_wbart_posterior() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_wbart_posterior");
+        let x = case_matrix(&ds, &FRIEDMAN_X);
+        let y = case_vector(&ds, "y");
+        let f = case_vector(&ds, "f");
+        let c = BartConfig {
+            n_trees: 50,
+            n_burn: 300,
+            n_mcmc: 1000,
+            numcut: 100,
+            seed: Some(46),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let sigma = r.sigma_samples.as_ref().unwrap();
+        let sigma_mean = sigma.iter().sum::<f64>() / sigma.len() as f64;
+        let mut check = Check::new(&case);
+        let mut bad = check_mc(&mut check, &case, "sigma_mean", &[sigma_mean]);
+        for (key, got) in draw_summary(&r, Some(&f)) {
+            // deviation ML-16: splits_per_tree follows the CGM tree prior, not wbart's birth
+            // ratio at the root's children (bart_samples_the_tree_prior_when_the_data_are_silent)
+            if key != "splits_per_tree" {
+                bad.extend(check_mc(&mut check, &case, key, &got));
+            }
+        }
+        check.finish();
+        assert!(
+            bad.is_empty(),
+            "case ml_bart_wbart_posterior: {}",
+            bad.join("; ")
+        );
+    }
+
+    #[test]
+    fn test_validate_bart_pbart_posterior() {
+        let (case, ds) = crate::test_support::load_case("ml_bart_pbart_posterior");
+        let x = case_matrix(&ds, &["x1", "x2", "x3"]);
+        let y = case_vector(&ds, "y");
+        let c = BartConfig {
+            classification: true,
+            n_trees: 50,
+            n_burn: 200,
+            n_mcmc: 300,
+            seed: Some(46),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let mut check = Check::new(&case);
+        check.scalar("binary_offset", r.offset, Tol::coef(300));
+        let mut bad = Vec::new();
+        for (key, got) in draw_summary(&r, None) {
+            // deviation ML-16: the tree size and the posterior spread follow the CGM tree prior,
+            // not pbart's birth ratio at the root's children, which favours smaller trees
+            if !matches!(key, "splits_per_tree" | "post_sd_avg" | "width95_avg") {
+                bad.extend(check_mc(&mut check, &case, key, &got));
+            }
+        }
+        check.finish();
+        assert!(
+            bad.is_empty(),
+            "case ml_bart_pbart_posterior: {}",
+            bad.join("; ")
+        );
+    }
+
+    /// The finding's design: y = 1000 + 5 x + noise. Uncentred, the leaf prior shrank the fit
+    /// toward 0 (mean fit about 38.6 below mean y) and sigma absorbed the bias (about 38.5).
+    /// wbart on the same design (30 chains): bias -0.0004, sigma 0.43, coverage of f 0.93.
+    #[test]
+    fn bart_centres_the_response_and_recovers_sigma() {
+        let n = 100;
+        let mut s = 20261113u64;
+        let mut u = || (crate::ml::lcg_random(&mut s) % 1_000_000 + 1) as f64 / 1_000_002.0;
+        let mut x = Array2::zeros((n, 1));
+        let mut y = Array1::zeros(n);
+        let mut f = Array1::zeros(n);
+        for i in 0..n {
+            x[[i, 0]] = u();
+            f[i] = 1000.0 + 5.0 * x[[i, 0]];
+            // Box-Muller, noise SD 0.5
+            let (u1, u2) = (u(), u());
+            y[i] = f[i] + 0.5 * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        }
+        let c = BartConfig {
+            n_trees: 50,
+            n_burn: 300,
+            n_mcmc: 1000,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        let mean_pred = r.predictions.iter().sum::<f64>() / n as f64;
+        let mean_y = y.sum() / n as f64;
+        assert!(
+            (mean_pred - mean_y).abs() < 0.05,
+            "bias {}",
+            mean_pred - mean_y
+        );
+        assert!(0.3 < r.sigma && r.sigma < 0.8, "sigma {}", r.sigma);
+        let covered = (0..n)
+            .filter(|&i| r.prediction_lower[i] <= f[i] && f[i] <= r.prediction_upper[i])
+            .count();
+        assert!(covered >= 80, "coverage {covered} of {n}");
+        assert_eq!(r.offset, mean_y);
+    }
+
+    #[test]
+    fn bart_refuses_a_constant_response() {
+        let (_, x) = generate_test_data(40, 2);
+        let y = Array1::from_elem(40, 3.0);
+        let e = bart_arrays(y.view(), x.view(), None, tiny()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("y is constant")),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1799,6 +2474,135 @@ mod tests {
         );
     }
 
+    /// Importance is the mean split count per kept draw (wbart's varcount), counted here by
+    /// walking every tree after each kept sweep of the same chain. It used to be the net
+    /// number of births after burn-in.
+    #[test]
+    fn bart_importance_counts_splits_in_every_kept_draw() {
+        let (y, x) = generate_test_data(150, 123);
+        let c = BartConfig {
+            n_trees: 20,
+            n_burn: 30,
+            n_mcmc: 60,
+            seed: Some(9),
+            ..Default::default()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c.clone()).unwrap();
+        // the same chain, driven by hand
+        let prior = wbart_prior(y.view(), x.view(), &c).unwrap();
+        let yc = y.mapv(|v| v - prior.fmean);
+        let mut sampler = BartSampler::new(&yc, x.view(), &c, Some(prior)).unwrap();
+        let xs: Vec<f64> = x.iter().copied().collect();
+        for _ in 0..c.n_burn {
+            sampler.step(&yc, &xs);
+        }
+        let mut sums = [0.0; 3];
+        for _ in 0..c.n_mcmc {
+            sampler.step(&yc, &xs);
+            for tree in &sampler.trees {
+                for i in tree.walk() {
+                    if !tree.nodes[i].is_leaf() {
+                        sums[tree.nodes[i].var as usize] += 1.0;
+                    }
+                }
+            }
+        }
+        let mean: Vec<f64> = sums.iter().map(|s| s / c.n_mcmc as f64).collect();
+        assert_eq!(r.variable_count_mean, mean);
+        let total: f64 = mean.iter().sum();
+        let shares: Vec<f64> = mean.iter().map(|m| m / total).collect();
+        assert_eq!(r.variable_importance, shares);
+        // the noise covariate x3 is used least
+        for seed in [1, 2, 3] {
+            let c = BartConfig {
+                n_trees: 30,
+                n_burn: 100,
+                n_mcmc: 200,
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+            let v = &r.variable_importance;
+            assert!(v[2] < v[0] && v[2] < v[1], "seed {seed}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn bart_predict_on_the_training_rows_repeats_the_fit() {
+        let (y, x) = generate_test_data(60, 8);
+        for classification in [false, true] {
+            let y = if classification {
+                y.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 })
+            } else {
+                y.clone()
+            };
+            let c = BartConfig {
+                n_trees: 10,
+                n_burn: 20,
+                n_mcmc: 30,
+                classification,
+                keep_trees: true,
+                seed: Some(4),
+                ..Default::default()
+            };
+            let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+            let (m, lo, hi) = bart_predict(&r, x.view()).unwrap();
+            let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&m), bits(&r.predictions), "{classification}");
+            assert_eq!(bits(&lo), bits(&r.prediction_lower), "{classification}");
+            assert_eq!(bits(&hi), bits(&r.prediction_upper), "{classification}");
+            // new rows: one row per call gives the same as all rows at once
+            let (m1, _, _) = bart_predict(&r, x.slice(s![3..4, ..])).unwrap();
+            assert_eq!(m1[0].to_bits(), m[3].to_bits());
+        }
+    }
+
+    #[test]
+    fn bart_predict_without_kept_trees_says_how() {
+        let (y, x) = generate_test_data(40, 2);
+        let r = bart_arrays(y.view(), x.view(), None, tiny()).unwrap();
+        let e = bart_predict(&r, x.view()).unwrap_err();
+        assert!(e.to_string().contains("keep_trees"), "{e}");
+    }
+
+    #[test]
+    fn bart_predict_checks_columns_and_finiteness() {
+        let (y, x) = generate_test_data(40, 2);
+        let c = BartConfig {
+            keep_trees: true,
+            ..tiny()
+        };
+        let r = bart_arrays(y.view(), x.view(), None, c).unwrap();
+        for cols in [2, 4] {
+            let xn = Array2::from_elem((3, cols), 0.5);
+            let e = bart_predict(&r, xn.view()).unwrap_err();
+            assert!(e.to_string().contains("fitted on 3"), "{e}");
+        }
+        let mut xn = Array2::from_elem((3, 3), 0.5);
+        xn[[1, 2]] = f64::INFINITY;
+        let e = bart_predict(&r, xn.view()).unwrap_err();
+        assert!(e.to_string().contains("finite"), "{e}");
+    }
+
+    #[test]
+    fn bart_keep_trees_respects_the_allocation_ceiling() {
+        let (y, x) = generate_test_data(40, 2);
+        let c = BartConfig {
+            n_trees: 100,
+            n_mcmc: 1usize << 20,
+            keep_trees: true,
+            ..tiny()
+        };
+        // the draw matrix (40 rows) passes the ceiling; the kept trees' buffer does not, and
+        // is refused before any sweep
+        let r = with_alloc_ceiling(Some(1 << 30), || bart_arrays(y.view(), x.view(), None, c));
+        assert!(
+            matches!(&r, Err(EconError::ResourceLimit(m)) if m.contains("kept tree")),
+            "{:?}",
+            r.err()
+        );
+    }
+
     #[test]
     fn test_bart_prediction_quality() {
         // Simple linear relationship
@@ -1856,32 +2660,275 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// The fit of one tree at each row of `x`
+    fn tree_fit(tree: &BartTree, x: &Array2<f64>) -> Vec<f64> {
+        x.rows()
+            .into_iter()
+            .map(|r| tree.nodes[tree.leaf_of(r.as_slice().unwrap())].mu)
+            .collect()
+    }
+
     #[test]
     fn test_bart_tree_operations() {
-        // Test tree grow and predict
         let mut tree = BartTree::new(0.5);
         assert_eq!(tree.get_leaves().len(), 1);
         assert_eq!(tree.get_internals().len(), 0);
 
-        // Manual split
-        tree.nodes.push(BartNode::Leaf { mu: 0.3 });
-        tree.nodes.push(BartNode::Leaf { mu: 0.7 });
-        tree.nodes[0] = BartNode::Internal {
-            var: 0,
-            cut: 0.5,
-            left: 1,
-            right: 2,
+        // cutpoint 3 of variable 0, value 0.5
+        let (l, r) = tree.birth(0, 0, 3, 0.5, 0.3, 0.7);
+        assert_eq!((l, r), (1, 2));
+        assert_eq!(tree.get_leaves(), vec![1, 2]);
+        assert_eq!(tree.get_internals(), vec![0]);
+        assert_eq!((tree.get_depth(1), tree.nodes[1].parent), (1, 0));
+        assert_eq!((tree.nodes[0].cut, tree.nodes[0].cutv), (3, 0.5));
+
+        // x < 0.5 goes left, as BART's tree::bn; 0.5 itself goes right
+        let x = array![[0.3], [0.5], [0.7]];
+        assert_eq!(tree_fit(&tree, &x), vec![0.3, 0.7, 0.7]);
+
+        // grow the left leaf, then remove that split: every node is reachable afterwards
+        tree.birth(1, 0, 1, 0.2, 0.1, 0.4);
+        assert_eq!(tree.nogs(), vec![1]);
+        let remap = tree.death(1, 0.35);
+        assert_eq!(remap, vec![0, 1, 2, 1, 1]);
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.walk().len(), 3);
+        assert!(tree.nodes[1].is_leaf());
+        assert_eq!(tree.nodes[1].mu, 0.35);
+        let remap = tree.death(0, 0.5);
+        assert_eq!((remap, tree.nodes.len()), (vec![0, 0, 0], 1));
+
+        // a death in the middle of the vector moves the last nodes into the freed slots
+        tree.birth(0, 0, 3, 0.5, 0.0, 0.0);
+        tree.birth(1, 0, 1, 0.2, 0.0, 0.0);
+        tree.birth(2, 0, 5, 0.8, 0.6, 0.9);
+        let remap = tree.death(1, 0.25);
+        assert_eq!(remap, vec![0, 1, 2, 1, 1, 3, 4]);
+        assert_tree_invariants(&tree);
+        let x = array![[0.1], [0.3], [0.7], [0.95]];
+        assert_eq!(tree_fit(&tree, &x), vec![0.25, 0.25, 0.6, 0.9]);
+    }
+
+    /// Every node is reachable from the root, there are 2 * internal + 1 of them, parents and
+    /// children point at each other, and each stored depth is the walked depth.
+    fn assert_tree_invariants(tree: &BartTree) {
+        let reached = tree.walk();
+        let internal = reached
+            .iter()
+            .filter(|&&i| !tree.nodes[i].is_leaf())
+            .count();
+        assert_eq!(reached.len(), tree.nodes.len(), "unreachable nodes");
+        assert_eq!(tree.nodes.len(), 2 * internal + 1);
+        let mut seen = vec![false; tree.nodes.len()];
+        for &i in &reached {
+            assert!(!seen[i], "node {i} reached twice");
+            seen[i] = true;
+            let node = tree.nodes[i];
+            if i == 0 {
+                assert_eq!((node.parent, node.depth), (NO_NODE, 0));
+            } else {
+                let parent = tree.nodes[node.parent as usize];
+                assert!(parent.left as usize == i || parent.right as usize == i);
+                assert_eq!(node.depth, parent.depth + 1, "node {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn bart_trees_hold_only_reachable_nodes() {
+        let (y, x) = generate_test_data(150, 3);
+        let c = BartConfig {
+            n_trees: 20,
+            seed: Some(3),
+            ..Default::default()
         };
-        tree.depth = 1;
+        let prior = wbart_prior(y.view(), x.view(), &c).unwrap();
+        let yc = y.mapv(|v| v - prior.fmean);
+        let mut sampler = BartSampler::new(&yc, x.view(), &c, Some(prior)).unwrap();
+        let xs: Vec<f64> = x.iter().copied().collect();
+        let mut deaths_seen = false;
+        for _ in 0..200 {
+            let before: usize = sampler.trees.iter().map(|t| t.nodes.len()).sum();
+            sampler.step(&yc, &xs);
+            let after: usize = sampler.trees.iter().map(|t| t.nodes.len()).sum();
+            deaths_seen |= after < before;
+            for tree in &sampler.trees {
+                assert_tree_invariants(tree);
+            }
+        }
+        assert!(deaths_seen, "no death was accepted");
+    }
 
-        assert_eq!(tree.get_leaves().len(), 2);
-        assert_eq!(tree.get_internals().len(), 1);
+    /// A sampler on `n` rows of two covariates with 100 distinct values each, so every node of
+    /// a shallow tree has cutpoints left on both.
+    fn kernel_sampler(config: &BartConfig) -> (BartSampler, Vec<f64>, Array1<f64>) {
+        let (y, x) = generate_test_data(120, 11);
+        let x = x.slice(s![.., 0..2]).to_owned();
+        let prior = wbart_prior(y.view(), x.view(), config).unwrap();
+        let yc = y.mapv(|v| v - prior.fmean);
+        let sampler = BartSampler::new(&yc, x.view(), config, Some(prior)).unwrap();
+        let xs: Vec<f64> = x.iter().copied().collect();
+        (sampler, xs, yc)
+    }
 
-        // Test predictions
-        let x = array![[0.3], [0.7]];
-        let preds = tree.predict(x.view());
-        assert_eq!(preds[0], 0.3); // x[0] <= 0.5, goes left
-        assert_eq!(preds[1], 0.7); // x[1] > 0.5, goes right
+    /// CGM (1998) grow ratio of the tree prior, ln p_d + 2 ln(1 - p_{d+1}) - ln(1 - p_d) at
+    /// alpha 0.95, beta 2. The values, in R:
+    ///
+    /// ```text
+    /// pg <- function(d) 0.95 * (1 + d)^(-2)
+    /// for (d in 0:3) print(log(pg(d)) + 2 * log(1 - pg(d + 1)) - log(1 - pg(d)), digits = 17)
+    /// ```
+    #[test]
+    fn bart_grow_prior_ratio_matches_cgm() {
+        let want = [
+            2.4021334381652988,
+            -1.3895398568183652,
+            -2.2593868479078156,
+            -2.8401529422152962,
+        ];
+        let (sampler, _, _) = kernel_sampler(&BartConfig::default());
+        // a path of left children: the node at depth d is grown at its left leaf
+        let mut tree = BartTree::new(0.0);
+        let mut eta = 0;
+        for (d, &w) in want.iter().enumerate() {
+            let goodbots = tree.get_leaves();
+            let n_goodbots = goodbots.len();
+            let pb = if tree.nodes.len() == 1 { 1.0 } else { 0.5 };
+            let ratio = sampler.birth_ratio(&tree, eta, 1, (50, 0, 99), n_goodbots, pb);
+            // the move and node-choice factors, PD(new) Pnog(new) / (Pbot(old) PB(old)): the
+            // grown node's parent stops being a nog when it is one
+            let n_nogs = tree.nogs().len() as f64;
+            let parent = tree.nodes[eta].parent;
+            let pnog = if parent == NO_NODE {
+                1.0
+            } else if tree.is_nog(parent as usize) {
+                1.0 / n_nogs
+            } else {
+                1.0 / (n_nogs + 1.0)
+            };
+            let moves = 0.5 * pnog / ((1.0 / n_goodbots as f64) * pb);
+            let got = (ratio / moves).ln();
+            assert!((got - w).abs() < 1e-12, "depth {d}: {got} vs {w}");
+            let (l, _) = tree.birth(eta, 0, 50, sampler.cuts[0][50], 0.0, 0.0);
+            eta = l;
+        }
+    }
+
+    /// The log integrated likelihood of a leaf, the cancelling terms added back, against
+    /// numeric integration over mu in R:
+    ///
+    /// ```text
+    /// lil <- function(r, s, t2, lim) log(integrate(function(mu) sapply(mu, function(m)
+    ///     exp(sum(dnorm(r, m, s, log = TRUE)) + dnorm(m, 0, sqrt(t2), log = TRUE))),
+    ///     -lim, lim, rel.tol = 1e-14)$value)
+    /// lil(c(0.3, -1.2, 0.8, 0.1, 0.5), 1, 1 / 800, 1)
+    /// lil(c(1.9, -0.4, 2.2, 0.7, 1.1, -1.5, 3.0), 2.5, 0.09, 4)
+    /// ```
+    #[test]
+    fn bart_integrated_leaf_likelihood_matches_quadrature() {
+        let full = |r: &[f64], sigma: f64, t2: f64| {
+            let s2 = sigma * sigma;
+            let n = r.len() as f64;
+            -0.5 * n * (2.0 * std::f64::consts::PI * s2).ln()
+                - r.iter().map(|v| v * v).sum::<f64>() / (2.0 * s2)
+                + leaf_log_lik(r.len(), r.iter().sum(), s2, t2)
+        };
+        for (r, sigma, t2, want) in [
+            (
+                vec![0.3, -1.2, 0.8, 0.1, 0.5],
+                1.0,
+                1.0 / 800.0,
+                -5.8126526613955756,
+            ),
+            (
+                vec![1.9, -0.4, 2.2, 0.7, 1.1, -1.5, 3.0],
+                2.5,
+                0.09,
+                -14.568144379882822,
+            ),
+        ] {
+            let got = full(&r, sigma, t2);
+            assert!(((got - want) / want).abs() < 1e-12, "{got} vs {want}");
+        }
+    }
+
+    /// The regression sampler is handed an already-centred target, so it refuses to run without
+    /// the prior calibrated on the raw response instead of calibrating on the centred one.
+    #[test]
+    fn bart_regression_sampler_requires_the_raw_response_prior() {
+        let config = BartConfig::default();
+        let (y, x) = generate_test_data(60, 5);
+        let yc = y.mapv(|v| v - y.mean().unwrap());
+        assert!(matches!(
+            BartSampler::new(&yc, x.view(), &config, None),
+            Err(EconError::Computation(_))
+        ));
+        let probit = BartConfig {
+            classification: true,
+            ..BartConfig::default()
+        };
+        let y01 = y.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
+        BartSampler::new(&y01, x.view(), &probit, None).unwrap();
+    }
+
+    /// A birth from the stump and the death that undoes it have reciprocal ratios.
+    #[test]
+    fn bart_birth_death_ratio_is_reversible() {
+        let (sampler, _, _) = kernel_sampler(&BartConfig::default());
+        for (v, c) in [(0, 50), (1, 0), (1, 99)] {
+            let stump = BartTree::new(0.0);
+            let birth = sampler.birth_ratio(&stump, 0, v, (c, 0, 99), 1, 1.0);
+            let mut grown = stump.clone();
+            grown.birth(0, v, c, sampler.cuts[v][c], 0.0, 0.0);
+            let goodbots = grown
+                .get_leaves()
+                .into_iter()
+                .filter(|&l| sampler.can_split(&grown, l))
+                .count();
+            let death = sampler.death_ratio(&grown, 0, goodbots, 0.5);
+            assert!(
+                (birth * death - 1.0).abs() < 1e-12,
+                "{v} {c}: {}",
+                birth * death
+            );
+        }
+        // and deeper: grow the right child of a split root
+        let mut tree = BartTree::new(0.0);
+        tree.birth(0, 0, 40, sampler.cuts[0][40], 0.0, 0.0);
+        let birth = sampler.birth_ratio(&tree, 2, 1, (10, 0, 99), 2, 0.5);
+        tree.birth(2, 1, 10, sampler.cuts[1][10], 0.0, 0.0);
+        let death = sampler.death_ratio(&tree, 2, 3, 0.5);
+        assert!((birth * death - 1.0).abs() < 1e-12, "{}", birth * death);
+    }
+
+    #[test]
+    fn bart_birth_respects_min_node_size_and_max_depth() {
+        let c = BartConfig {
+            n_trees: 10,
+            min_node_size: 9,
+            max_depth: 2,
+            seed: Some(5),
+            ..Default::default()
+        };
+        let (mut sampler, xs, yc) = kernel_sampler(&c);
+        let mut deepest = 0;
+        for _ in 0..150 {
+            sampler.step(&yc, &xs);
+            for tree in &sampler.trees {
+                let mut rows = vec![0usize; tree.nodes.len()];
+                for row in xs.chunks(2) {
+                    rows[tree.leaf_of(row)] += 1;
+                }
+                for leaf in tree.get_leaves() {
+                    deepest = deepest.max(tree.nodes[leaf].depth);
+                    assert!(tree.nodes[leaf].depth <= 2);
+                    if tree.nodes.len() > 1 {
+                        assert!(rows[leaf] >= 9, "a leaf of {} rows", rows[leaf]);
+                    }
+                }
+            }
+        }
+        assert_eq!(deepest, 2, "the cap was never reached");
     }
 
     #[test]
@@ -1924,9 +2971,9 @@ mod tests {
             v.extend([r.sigma, r.sigma_sd]);
             bits(&v)
         };
-        // With no split ever made the importance is uniform; at the default the
+        // With no split ever made the importance is all zeros; at the default the
         // sampler does split these data.
-        let uniform = bits(&[1.0 / 3.0; 3]);
+        let uniform = bits(&[0.0; 3]);
         assert_ne!(bits(&fit(5).variable_importance), uniform);
         let want = fit(40);
         assert_eq!(bits(&want.variable_importance), uniform);

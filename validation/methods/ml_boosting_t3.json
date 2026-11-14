@@ -110,13 +110,7 @@
         "proximity to glm probit probabilities (property)"
       ],
       "tolerance": "offset 1e-6 relative; posterior mean 0.009 and SD 0.006 absolute (5 Monte Carlo SDs from 200 R replications); glm property: mean absolute difference < 0.085, correlation > 0.90",
-      "deviations": [
-        {
-          "finding": "ML-16",
-          "quantity": "tree grow/prune kernel",
-          "note": "Probit and regression BART share a kernel whose Metropolis-Hastings ratio is an open finding (ML-16, ML-121); the single-leaf pin excludes it and the glm property is insensitive to it."
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     }
   ]

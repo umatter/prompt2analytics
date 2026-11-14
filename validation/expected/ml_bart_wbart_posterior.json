@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "ml_bart_wbart_posterior",
+  "area": "ml/bart",
+  "method": "BART::wbart posterior summaries over 100 seeded chains",
+  "reference": "BART::wbart (2.9.10), ntree 50, nskip 300, ndpost 1000, numcut 100, k 2, power 2, base 0.95, sigdf 3, sigquant 0.9; 100 chains (set.seed(1..100)); each value is the mean over the chains of a per-chain summary, and *_mc_sd its SD across the chains",
+  "call": "wbart(x, y, ntree = 50, nskip = 300, ndpost = 1000); summaries of yhat.train (population SD, quantile type 7), sigma[-(1:300)], varcount",
+  "dataset": "validation/datasets/generated/bart_friedman.csv",
+  "datasets": ["validation/datasets/generated/bart_friedman.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "BART": "2.9.10"
+  },
+  "values": {
+    "sigma_mean": 0.9092770551112257,
+    "sigma_mean_mc_sd": 0.045346554322982013,
+    "pred_mean_avg": 114.23946967491784,
+    "pred_mean_avg_mc_sd": 0.0012101454672412738,
+    "post_sd_avg": 0.6618592455632748,
+    "post_sd_avg_mc_sd": 0.031819519150028508,
+    "width95_avg": 2.5789449873045451,
+    "width95_avg_mc_sd": 0.12329059783347671,
+    "splits_per_tree": 1.334492,
+    "splits_per_tree_mc_sd": 0.031483911042712837,
+    "varprop": [0.20508854625126682, 0.23554378076170987, 0.16135805815572213, 0.17711922299675417, 0.13657333147422851, 0.084317060360318496],
+    "varprop_mc_sd": [0.012780940344832291, 0.01318917311266413, 0.010059502702961036, 0.0098754612748683558, 0.0084665615057061827, 0.013570326251835643],
+    "rmse_f": 0.7780002687276818,
+    "rmse_f_mc_sd": 0.022012983047843979,
+    "cover95_f": 0.89500000000000002,
+    "cover95_f_mc_sd": 0.028841258325846025
+  }
+}

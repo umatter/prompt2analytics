@@ -319,8 +319,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/adaboost_sim.csv` | 120 × 6 (x1, x2, x3, y3, yb, yr) | `ml_adaboost_samme` | `r/cases/ml_boosting_t3.R` | seed 46 |
 | `generated/xgb_small.csv` | 16 × 3 (x1, x2, y) | `ml_xgboost_l1`; read by `ml_xgboost_pkg` | `r/cases/ml_boosting_t3.R` | seed 4637 |
 | `generated/mboost_sim.csv` | 200 × 6 (x1, x2, x3, yg, yb, yc) | `ml_mboost_bols`; read by `ml_mboost_pkg` | `r/cases/ml_boosting_t3.R` | seed 4636 |
+| `generated/bart_friedman.csv` | 200 × 8 (x1, x2, x3, x4, x5, x6, f, y) | `ml_bart_wbart_calibration`; read by `ml_bart_wbart_posterior` | `r/cases/ml_bart_t4.R` | seed 20261113; Friedman-type f with x6 drawn from 1..5, y = f + N(0, 1) |
 | `generated/bart_probit_small.csv` | 40 × 2 (x1, y) | `ml_bart_probit_single_leaf` | `r/cases/ml_boosting_t3.R` | seed 4639 |
-| `generated/bart_probit_sim.csv` | 300 × 4 (x1, x2, x3, y) | `ml_bart_probit_glm` | `r/cases/ml_boosting_t3.R` | seed 4640 |
+| `generated/bart_probit_sim.csv` | 300 × 4 (x1, x2, x3, y) | `ml_bart_probit_glm`; read by `ml_bart_pbart_posterior` | `r/cases/ml_boosting_t3.R` | seed 4640 |
 | `generated/cr_small.csv` | 40 × 3 (id, time, event) | `mcp_competing_risks` | `r/cases/mcp_dispatch.R` | seed 20261023; integer times with ties; event 0 censored, 1 and 2 competing events |
 | `generated/mcp_dispatch.csv` | 48 × 19 (id, k, xn, a, b, gx, gy, v, s, u, w, seas, y1, y2, f1-f4, txt) | `mcp_dispatch_smoke` | `r/cases/mcp_dispatch.R` | seed 20261024; k integer counts, xn with 3 empty cells, (a, b) three separated blobs, (gx, gy) an 8 × 6 grid with v, s one mean shift, u and w correlated, seas trend plus season, y1/y2 a VAR(1), f1-f4 one factor, txt strings |
 | `generated/pdp_lm.csv` | 60 × 4 (x1, x2, x3, y) | `pdp_lm` | `r/cases/ml_pdp.R` | seed 20261022; x1 ~ U(-2, 2), x2 ~ N(0, 1), x3 on four levels; y quadratic in x1 with an x1:x2 interaction plus N(0, 0.4^2) noise |
