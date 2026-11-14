@@ -34,7 +34,7 @@ Moments `gbar(theta) = mean_i g_i(theta)`; linear IV `g_i = z_i (y_i - x_i' thet
   | Parzen | `k(j/(L+1))` | 1..=L | `kernel = "Parzen", bw = L + 1` |
   | Tukey-Hanning | `k(j/(L+1))` | 1..=L | `kernel = "Tukey-Hanning", bw = L + 1` |
   | Truncated | 1 | 1..=L+1 (`k(1) = 1`) | `kernel = "Truncated", bw = L + 1` |
-  | Quadratic Spectral | `k(j/L)` | 1..=L | not reproduced (deviation ECON-68) |
+  | Quadratic Spectral | `k(j/L)` | 1..=L | not reproduced (deviation filed under ECON-68, the closest finding; no finding covers the QS lag rule) |
 
   The lags summed are sandwich's `weightsAndrews` (every lag up to n - 1, cut after the last weight above 1e-7),
   computed from the n rows (n - 1 with prewhitening). For the Quadratic Spectral kernel sandwich keeps every lag up to
@@ -193,3 +193,24 @@ the same estimate in this path. Within this method no cheaper form with the same
 singularity refusals was found (a fused row loop and a const-generic accumulator were tried earlier); a
 small-dimension Cholesky path in shared linear algebra could reduce the cost and would need its own
 package and sign-off.
+
+### Kernels and prewhitening (lane base, wave-1 head `3db88b8e`)
+
+Linear IV, k = 2, q = 4, AR(1) errors, HAC weighting, release builds, one core, interleaved, median of 11
+runs, each the mean of 200 / 40 / 5 fits at n = 100 / 1,000 / 10,000. Bartlett is unchanged; the other
+kernels weigh one more lag (`k(j / (L + 1))` over sandwich's lag set). Prewhitening solves the VAR(1) by the
+normal equations when the lagged moments are of full rank and well conditioned, and only otherwise by the
+shared pivoted QR (which took 1.31-1.41x at n >= 1,000 when used for every fit).
+
+| Fit | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| two-step Bartlett, prewhite 0 / 1 | 1.03 / 1.01 | 1.02 / 1.02 | 1.02 / 1.03 |
+| iterative Bartlett, prewhite 0 / 1 | 1.02 / 1.02 | 1.02 / 1.02 | 1.02 / 1.05 |
+| CUE Bartlett, prewhite 0 / 1 | 1.01 / 1.00 | 1.01 / 1.01 | 1.01 / 1.07 |
+| two-step Parzen, prewhite 0 / 1 | 1.05 / 1.03 | 1.09 / 1.05 | 1.06 / 1.07 |
+| two-step Quadratic Spectral, prewhite 0 / 1 | 1.00 / 1.01 | 1.02 / 1.00 | 1.01 / 1.04 |
+| two-step Truncated, prewhite 0 / 1 | 1.08 / 1.03 | 1.08 / 1.06 | 1.06 / 1.06 |
+| two-step Tukey-Hanning, prewhite 0 / 1 | 1.05 / 1.03 | 1.08 / 1.06 | 1.07 / 1.07 |
+
+Panel FE / RE / LLC after the shared label and grouping helpers (same protocol, 10 periods per unit):
+FE 1.00 / 1.01 / 1.01, RE 1.02 / 1.01 / 1.01, LLC 1.02 / 1.01 / 1.02 at n = 100 / 1,000 / 10,000.

@@ -509,6 +509,20 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
   when V is singular but not zero; a zero V is an error, as above), df is their number minus one
   and p the upper tail.
 
+## Timing of the Cox fit with the concordance
+
+`run_cox_ph` (Efron ties, three covariates, a lung-like simulated DGP with integer times and censoring)
+against v0.5.0 (`f80b0131`), release builds, one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), interleaved,
+median of 21 runs, each the mean of 2,000 / 200 / 10 fits. The concordance now computes the per-observation
+counts of the jackknife SE in a second Fenwick-tree sweep; it reuses the fit's risk sets for the time order
+and ranks eta with one sort.
+
+| n | v0.5.0 µs | new µs | new / v0.5.0 |
+|---|---|---|---|
+| 100 | 111 | 110 | 0.99 |
+| 1,000 | 875 | 842 | 0.96 |
+| 10,000 | 9,908 | 9,212 | 0.93 |
+
 ## Known Differences from R
 
 1. **Invalid status codes are an error.** R's `Surv()` turns codes other than 0/1, 1/2 or logical
