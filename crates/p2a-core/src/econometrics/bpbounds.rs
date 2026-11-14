@@ -91,6 +91,7 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::econometrics::survival::conf_percent;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::robust::percentile_interval;
@@ -390,12 +391,6 @@ fn default_ci_level() -> f64 {
     0.95
 }
 
-/// A level as a percentage with trailing zeros trimmed (0.9 -> "90", 0.975 -> "97.5").
-fn percent(level: f64) -> String {
-    let s = format!("{:.6}", 100.0 * level);
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
-}
-
 impl fmt::Display for BPBoundsResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Balke-Pearl Bounds for Average Causal Effect (ACE)")?;
@@ -446,7 +441,7 @@ impl fmt::Display for BPBoundsResult {
             writeln!(
                 f,
                 "  Overall {}% CI: [{:.4}, {:.4}]",
-                percent(self.ci_level),
+                conf_percent(self.ci_level),
                 ci_lower,
                 ci_upper
             )?;

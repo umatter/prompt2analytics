@@ -486,14 +486,11 @@ const KM_TABLE_MAX_ROWS: usize = 200;
 const KM_TABLE_HEAD: usize = 100;
 const KM_TABLE_TAIL: usize = 50;
 
-/// A confidence level as a percentage: "95" for 0.95, "97.5" for 0.975.
+/// A confidence level as a percentage: "95" for 0.95, "97.5" for 0.975, "99.99" for 0.9999
+/// (six decimals, trailing zeros trimmed, so the product's rounding never shows).
 pub fn conf_percent(conf_level: f64) -> String {
-    let pct = conf_level * 100.0;
-    if (pct - pct.round()).abs() < 1e-9 {
-        format!("{pct:.0}")
-    } else {
-        format!("{pct}")
-    }
+    let s = format!("{:.6}", conf_level * 100.0);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// `{:.<decimals>}` of a value, or "NA" for NaN / `None` (R's NA).
@@ -1796,7 +1793,7 @@ pub fn run_cox_ph(
     // Row by row, so rows with equal covariates get bit-identical eta (tied.x).
     let eta: Vec<f64> = (0..n).map(|i| x_id.row(i).dot(&beta_id)).collect();
     let (concordance, concordance_se, _) =
-        compute_concordance(&data.time, &data.event, &eta, clusters)?;
+        compute_concordance(&data.time, &data.event, &eta, clusters, Some(&rs))?;
 
     Ok(CoxResult {
         variables: names,
@@ -2234,45 +2231,35 @@ fn quadratic_form_full_rank(
     Ok(Ok(b.dot(&inv.inverse.dot(b))))
 }
 
-/// Fenwick tree (Binary Indexed Tree) for cumulative frequency queries.
-/// Supports point updates and prefix sum queries in O(log n).
+/// Fenwick tree (Binary Indexed Tree) of counts: point increments and prefix sums in
+/// O(log n).
 struct FenwickTree {
-    tree: Vec<f64>,
-    n: usize,
+    tree: Vec<u64>,
 }
 
 impl FenwickTree {
     fn new(n: usize) -> Self {
         Self {
-            tree: vec![0.0; n + 1],
-            n,
+            tree: vec![0; n + 1],
         }
     }
 
-    /// Add `val` to position `i` (1-indexed).
-    fn update(&mut self, mut i: usize, val: f64) {
-        while i <= self.n {
-            self.tree[i] += val;
+    /// Add one at position `i` (1-indexed).
+    fn increment(&mut self, mut i: usize) {
+        while i < self.tree.len() {
+            self.tree[i] += 1;
             i += i & i.wrapping_neg();
         }
     }
 
-    /// Sum of elements from position 1 to `i` (inclusive, 1-indexed).
-    fn prefix_sum(&self, mut i: usize) -> f64 {
-        let mut s = 0.0;
+    /// Count at positions 1 to `i` (inclusive, 1-indexed).
+    fn prefix_sum(&self, mut i: usize) -> u64 {
+        let mut s = 0;
         while i > 0 {
             s += self.tree[i];
             i -= i & i.wrapping_neg();
         }
         s
-    }
-
-    /// Sum of elements in range [lo, hi] (1-indexed, inclusive).
-    fn range_sum(&self, lo: usize, hi: usize) -> f64 {
-        if lo > hi {
-            return 0.0;
-        }
-        self.prefix_sum(hi) - if lo > 1 { self.prefix_sum(lo - 1) } else { 0.0 }
     }
 }
 
@@ -2304,6 +2291,7 @@ fn compute_concordance(
     event: &[bool],
     eta: &[f64],
     clusters: Option<(&[u32], usize)>,
+    risk_sets: Option<&CoxRiskSets>,
 ) -> EconResult<(f64, f64, ConcordanceCounts)> {
     let n = time.len();
     let mut counts = ConcordanceCounts::default();
@@ -2311,46 +2299,50 @@ fn compute_concordance(
         return Ok((0.5, 0.0, counts));
     }
     // Ranks of eta (equal values share a rank), 1-based for the tree.
-    let mut scores: Vec<f64> = eta.to_vec();
-    scores.sort_by(f64::total_cmp);
-    scores.dedup_by(|a, b| a == b);
-    let m = scores.len();
-    let rank: Vec<usize> = eta
-        .iter()
-        .map(|&e| scores.partition_point(|&v| v < e) + 1)
-        .collect();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| time[a].total_cmp(&time[b]).then(a.cmp(&b)));
-    // Time groups as [start, end) ranges of `order`.
-    let mut groups = Vec::new();
-    let mut s = 0;
-    while s < n {
-        let mut e = s + 1;
-        while e < n && time[order[e]] == time[order[s]] {
-            e += 1;
+    let mut by_eta: Vec<(f64, usize)> = eta.iter().copied().zip(0..).collect();
+    by_eta.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let mut rank = vec![0usize; n];
+    let mut m = 0;
+    let mut prev = f64::NAN;
+    for &(e, i) in &by_eta {
+        if m == 0 || e != prev {
+            m += 1;
+            prev = e;
         }
-        groups.push((s, e));
-        s = e;
+        rank[i] = m;
     }
+    // The time groups, latest first (the fit's risk sets when given); only the membership
+    // of a group matters below, not its order.
+    let built;
+    let rs = match risk_sets {
+        Some(rs) => rs,
+        None => {
+            built = CoxRiskSets::new(time);
+            &built
+        }
+    };
+    let order = &rs.order;
+    let groups: Vec<(usize, usize)> = rs.blocks.iter().map(|b| (b.start, b.end)).collect();
 
     // Per-observation counts (c, d, t) over the comparable pairs.
     let mut per = vec![[0u64; 3]; n];
-    let query = |bit: &FenwickTree, total: f64, r: usize| {
+    let query = |bit: &FenwickTree, total: u64, r: usize| {
         let less = bit.prefix_sum(r - 1);
-        let equal = bit.range_sum(r, r);
-        (less as u64, equal as u64, (total - less - equal) as u64)
+        let at_most = bit.prefix_sum(r);
+        (less, at_most - less, total - at_most)
     };
 
     // Backward sweep: i the earlier member (an event); the tree holds every row with a
     // later time, and the censored rows of i's own time.
     let mut bit = FenwickTree::new(m);
-    let mut total = 0.0;
-    for &(gs, ge) in groups.iter().rev() {
+    let mut total = 0u64;
+    let mut ev: Vec<usize> = Vec::new();
+    for &(gs, ge) in &groups {
         checkpoint()?;
         for &i in &order[gs..ge] {
             if !event[i] {
-                bit.update(rank[i], 1.0);
-                total += 1.0;
+                bit.increment(rank[i]);
+                total += 1;
             }
         }
         for &i in &order[gs..ge] {
@@ -2366,16 +2358,18 @@ fn compute_concordance(
         }
         for &i in &order[gs..ge] {
             if event[i] {
-                bit.update(rank[i], 1.0);
-                total += 1.0;
+                bit.increment(rank[i]);
+                total += 1;
             }
         }
         // Events at one time: tied.y, or tied.xy with equal eta.
-        let mut ev: Vec<usize> = order[gs..ge]
-            .iter()
-            .filter(|&&i| event[i])
-            .map(|&i| rank[i])
-            .collect();
+        ev.clear();
+        ev.extend(
+            order[gs..ge]
+                .iter()
+                .filter(|&&i| event[i])
+                .map(|&i| rank[i]),
+        );
         ev.sort_unstable();
         let k = ev.len() as u64;
         let mut same = 0u64;
@@ -2396,8 +2390,8 @@ fn compute_concordance(
     // Forward sweep: j the later member; the tree holds the events of earlier times (and,
     // for a censored j, the events of j's own time).
     let mut bit = FenwickTree::new(m);
-    let mut total = 0.0;
-    for &(gs, ge) in &groups {
+    let mut total = 0u64;
+    for &(gs, ge) in groups.iter().rev() {
         checkpoint()?;
         for &j in &order[gs..ge] {
             if event[j] {
@@ -2409,8 +2403,8 @@ fn compute_concordance(
         }
         for &j in &order[gs..ge] {
             if event[j] {
-                bit.update(rank[j], 1.0);
-                total += 1.0;
+                bit.increment(rank[j]);
+                total += 1;
             }
         }
         for &j in &order[gs..ge] {
@@ -5638,7 +5632,7 @@ mod tests {
             .group
             .as_ref()
             .map(|g| (g.codes.as_slice(), g.levels.len()));
-        compute_concordance(&data.time, &data.event, &eta, codes).unwrap()
+        compute_concordance(&data.time, &data.event, &eta, codes, None).unwrap()
     }
 
     fn counts_vec(k: &ConcordanceCounts) -> Vec<f64> {
@@ -5796,14 +5790,15 @@ mod tests {
         let se_cl = sums.iter().map(|v| v * v).sum::<f64>().sqrt() / (2.0 * np);
         let c_ref = (k.concordant as f64 + k.tied_x as f64 / 2.0) / np;
 
-        let (c, se, got) = compute_concordance(&time, &event, &eta, None).unwrap();
+        let (c, se, got) = compute_concordance(&time, &event, &eta, None, None).unwrap();
         assert_eq!(got, k);
         assert!((c - c_ref).abs() <= 1e-12 * c_ref);
         assert!(
             (se - se_plain).abs() <= 1e-12 * se_plain,
             "{se} vs {se_plain}"
         );
-        let (_, se2, _) = compute_concordance(&time, &event, &eta, Some((&codes, 13))).unwrap();
+        let (_, se2, _) =
+            compute_concordance(&time, &event, &eta, Some((&codes, 13)), None).unwrap();
         assert!((se2 - se_cl).abs() <= 1e-12 * se_cl, "{se2} vs {se_cl}");
     }
 
