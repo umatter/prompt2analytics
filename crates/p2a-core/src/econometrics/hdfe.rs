@@ -424,26 +424,28 @@ impl<'a> WeightedProjector<'a> {
 ///
 /// A warm start is an input that is already demeaned with other positive weights:
 /// `M_W (M_V x) = M_W x`, so the result is the same and the sweeps start closer to it.
+///
+/// `data` is taken by value and demeaned in place, so a caller that already holds a copy
+/// (a column of a matrix, a working residual) does not pay for a second one.
 pub(crate) fn weighted_demean_map(
-    data: &[f64],
+    data: Vec<f64>,
     proj: &mut WeightedProjector,
     tolerance: f64,
     max_iter: usize,
     accelerate: bool,
 ) -> EconResult<(Vec<f64>, usize, f64, bool)> {
     let weights = proj.weights;
+    let mut current = data;
     if proj.factors.is_empty() {
-        return Ok((data.to_vec(), 0, 0.0, true));
+        return Ok((current, 0, 0.0, true));
     }
 
     // Single factor: one pass is sufficient
     if proj.factors.len() == 1 {
-        let mut out = data.to_vec();
-        proj.demean_by(0, &mut out);
-        return Ok((out, 1, 0.0, true));
+        proj.demean_by(0, &mut current);
+        return Ok((current, 1, 0.0, true));
     }
 
-    let mut current = data.to_vec();
     let mut prev = current.clone();
     let mut prev_prev = current.clone();
     let mut final_change = f64::MAX;
@@ -454,7 +456,7 @@ pub(crate) fn weighted_demean_map(
             .sum::<f64>()
             .sqrt()
     };
-    let floor = MAP_SCALE_FLOOR * w_norm(data);
+    let floor = MAP_SCALE_FLOOR * w_norm(&current);
 
     for iter in 1..=max_iter {
         resource::checkpoint()?;
@@ -528,9 +530,10 @@ pub(crate) fn weighted_demean_matrix_map(
     let mut all_converged = true;
 
     for j in 0..k {
+        // The column's one copy, demeaned in place
         let col = x.column(j).to_vec();
         let (col_demeaned, iters, change, converged) =
-            weighted_demean_map(&col, proj, tolerance, max_iter, accelerate)?;
+            weighted_demean_map(col, proj, tolerance, max_iter, accelerate)?;
         x_demeaned
             .column_mut(j)
             .iter_mut()
@@ -3664,14 +3667,9 @@ mod tests {
         for (f, max_iter) in [(&factors[..1], 100), (&factors[..], 100), (&factors[..], 3)] {
             for accelerate in [false, true] {
                 let mut proj = WeightedProjector::new(weights.as_slice().unwrap(), f);
-                let got = weighted_demean_map(
-                    data.as_slice().unwrap(),
-                    &mut proj,
-                    1e-10,
-                    max_iter,
-                    accelerate,
-                )
-                .unwrap();
+                let got =
+                    weighted_demean_map(data.to_vec(), &mut proj, 1e-10, max_iter, accelerate)
+                        .unwrap();
                 let want =
                     weighted_demean_map_reference(&data, &weights, f, 1e-10, max_iter, accelerate);
                 assert_eq!((got.1, got.3), (want.1, want.3), "{} factors", f.len());
@@ -3680,14 +3678,9 @@ mod tests {
                     assert_eq!(a.to_bits(), b.to_bits(), "{} factors {accelerate}", f.len());
                 }
                 // the projector serves another column with the same weights unchanged
-                let again = weighted_demean_map(
-                    data.as_slice().unwrap(),
-                    &mut proj,
-                    1e-10,
-                    max_iter,
-                    accelerate,
-                )
-                .unwrap();
+                let again =
+                    weighted_demean_map(data.to_vec(), &mut proj, 1e-10, max_iter, accelerate)
+                        .unwrap();
                 assert!(
                     again
                         .0
@@ -3719,7 +3712,7 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             let factors = [factor1, factor2];
             let mut proj = WeightedProjector::new(weights.as_slice().unwrap(), &factors);
-            weighted_demean_map(data.as_slice().unwrap(), &mut proj, 1e-8, 1000, true)
+            weighted_demean_map(data.to_vec(), &mut proj, 1e-8, 1000, true)
         }));
     }
 
@@ -3752,7 +3745,7 @@ mod tests {
             .collect();
         let tol = 1e-13;
         let (mv_x, _, _, conv_v) = weighted_demean_map(
-            &x,
+            x.clone(),
             &mut WeightedProjector::new(&v, &factors),
             tol,
             10_000,
@@ -3762,9 +3755,9 @@ mod tests {
         assert!(conv_v);
         let mut proj = WeightedProjector::new(&w, &factors);
         let (cold, cold_sweeps, _, cold_conv) =
-            weighted_demean_map(&x, &mut proj, tol, 10_000, true).unwrap();
+            weighted_demean_map(x.clone(), &mut proj, tol, 10_000, true).unwrap();
         let (warm, warm_sweeps, _, warm_conv) =
-            weighted_demean_map(&mv_x, &mut proj, tol, 10_000, true).unwrap();
+            weighted_demean_map(mv_x.clone(), &mut proj, tol, 10_000, true).unwrap();
         assert!(cold_conv && warm_conv);
         let w_norm = |d: &[f64]| d.iter().zip(&w).map(|(a, b)| b * a * a).sum::<f64>().sqrt();
         let diff: Vec<f64> = cold.iter().zip(&warm).map(|(a, b)| a - b).collect();

@@ -60,7 +60,12 @@ as alpaca (Stammann 2018):
    until a full round drops nothing (alpaca's and fixest's rule; their effects have no finite
    estimate). Singletons with a positive outcome stay, as alpaca keeps them (fixest drops
    them). The rows dropped are in `n_separated` and a warning; the levels left are in
-   `fe_counts`.
+   `fe_counts`. The rule runs as a worklist (each level's row, zero and one counts are
+   computed once and decremented as rows go, a level that turns constant is queued), linear
+   in the rows times the dimensions; a group stays constant once it is, so it keeps the rows
+   the round-based rule keeps (`test_separated_rows_worklist_matches_rounds`). Logit and
+   probit refuse an outcome outside [0, 1] (`InvalidSpecification`), which the rule and the
+   valid-mean check assume.
 2. **Start**: the constant linear predictor `link(mean((y + 1/2) / 2))` (binomial),
    `link(mean(y + 0.1))` (Poisson) or `mean(y)` (Gaussian), which lies in the span of the
    effects, with every slope 0.
@@ -78,8 +83,11 @@ as alpaca (Stammann 2018):
    no higher than the last one by more than `tolerance` (relative). alpaca asks for a decrease
    of at least the tolerance, which refuses the last Newton step near the estimate and leaves
    its coefficients about 4e-7 (relative) from glm's on Case F; p2a reaches glm's estimate.
-   When no step is accepted the last iterate stays and the fit counts as converged (alpaca);
-   when no step gives a finite deviance and a valid mean the fit fails with
+   When no step is accepted the last iterate stays and the fit counts as converged (alpaca).
+   A fit that stops on such an iteration, or on one whose accepted `rho` is below 2^-20,
+   warns (`FEGLM IRLS stopped: step halving could not improve the deviance in iteration
+   <k>`) unless the full step was negligible (at most 1e-6 times `1 + max |eta|`, where a
+   tight tolerance can refuse a step on rounding at the estimate); when no step gives a finite deviance and a valid mean the fit fails with
    `ConvergenceFailure`.
 5. **Convergence**: stop when `|dev - dev_old| / (|dev| + 0.1)` falls below `tolerance`
    (default 1e-8), R's `glm.fit` and fixest's `glm.tol` rule. Each weighted MAP stops on the
@@ -306,8 +314,9 @@ Tests (method `feglm_mle`):
   dispersion; the pseudo R-squared is McFadden's on the normal log-likelihood.
 - `econometrics::feglm::tests::test_validate_feglm_mle_default_controls`: the six non-Gaussian
   fits at the default controls converge, warn only about dropped rows, and reach the
-  coefficients to `Tol::iterative(1e-6)` (probit `1e-5`: Fisher scoring stops about 4e-6
-  short at the deviance rule's 1e-8).
+  coefficients to `Tol::iterative(1e-6)` (probit `1e-5`: Fisher scoring stops short at the
+  deviance rule's 1e-8, by 2.8e-6 to 6.2e-6 relative, 0.9e-6 to 1.8e-6 absolute, over the
+  coefficients of probit1 and probit2).
 
 ### Case G: the drop rule (`feglm_separation`)
 

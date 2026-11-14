@@ -19,7 +19,7 @@
 //!
 //! 1. Drop every fixed-effect group whose outcome is all 0 (binomial and Poisson) or
 //!    all 1 (binomial), repeating over all dimensions until nothing changes; singletons
-//!    with a positive outcome stay (alpaca).
+//!    with a positive outcome stay (alpaca). Logit and probit outcomes must lie in [0, 1].
 //! 2. Start from the constant linear predictor `link(mean((y + 0.5) / 2))` (binomial),
 //!    `link(mean(y + 0.1))` (Poisson) or `mean(y)` (Gaussian), with every slope 0.
 //! 3. In each IRLS iteration:
@@ -34,7 +34,8 @@
 //!       not higher than the last one by more than the tolerance (alpaca's step halving,
 //!       which asks for a decrease, would refuse the last Newton step near the estimate and
 //!       stop short of glm's); at most 50 halvings, and when none is accepted the iterate
-//!       stays and the fit has converged.
+//!       stays and the fit has converged, with a warning when the step it could not
+//!       take (or took at below 2^-20) was not negligible.
 //! 4. Standard errors are the inverse Hessian at the final weights (dispersion 1 for
 //!    binomial and Poisson, deviance / df for Gaussian).
 //!
@@ -595,6 +596,18 @@ fn is_zero(n: &usize) -> bool {
 /// Step-halving tries per IRLS iteration (alpaca's inner loop).
 const MAX_STEP_TRIES: usize = 50;
 
+/// A fit that stops on an iteration whose step was halved below this fraction of the
+/// IRLS step (2^-20), or on one where no halving improved the deviance, counts as
+/// converged (alpaca) but warns when that step was not negligible: the deviance stopped
+/// changing because the step vanished, for example after a demeaning that did not
+/// converge, not because the score is zero.
+const SMALL_STEP: f64 = 1.0 / 1_048_576.0;
+
+/// An IRLS step of the linear predictor at most this fraction of `1 + max |eta|` is
+/// negligible: at the estimate, rounding in the deviance can refuse such a step under a
+/// tight tolerance, and stopping there is convergence.
+const NEGLIGIBLE_STEP: f64 = 1e-6;
+
 /// Whether `mu` is a valid mean of the family (glm's `validmu`).
 fn valid_mu(family: GlmFamily, mu: f64) -> bool {
     match family {
@@ -605,37 +618,91 @@ fn valid_mu(family: GlmFamily, mu: f64) -> bool {
 }
 
 /// The rows kept after dropping every fixed-effect group whose outcome is all 0 (or, for
-/// binomial, all 1), repeated over all factors until a full round drops nothing: such a
-/// group's effect has no finite estimate (alpaca's and fixest's rule).
+/// binomial, all 1), repeated over all factors until none is left: such a group's effect
+/// has no finite estimate (alpaca's and fixest's rule).
+///
+/// A worklist: each level's row, zero and one counts are computed once; a dropped row
+/// decrements them in every factor, and a level whose kept rows become all 0 (all 1) is
+/// queued. A group stays constant once it is, so the result is the closure the round-based
+/// rule reaches, in time linear in the rows times the factors.
 fn separated_rows_kept(
     y: &Array1<f64>,
     factors: &[FactorInfo],
     binomial: bool,
 ) -> EconResult<Vec<bool>> {
+    struct Levels {
+        rows: Vec<usize>,
+        zeros: Vec<usize>,
+        ones: Vec<usize>,
+        queued: Vec<bool>,
+        // the level's rows, ascending: members[start[g]..start[g + 1]]
+        start: Vec<usize>,
+        members: Vec<usize>,
+    }
     let n = y.len();
+    let constant = |lv: &Levels, g: usize| {
+        lv.rows[g] > 0 && (lv.zeros[g] == lv.rows[g] || (binomial && lv.ones[g] == lv.rows[g]))
+    };
     let mut keep = resource::try_vec(n, true, "FEGLM row mask")?;
-    loop {
-        resource::checkpoint()?;
-        let mut changed = false;
-        for factor in factors {
-            let mut sums = resource::try_vec(factor.n_levels, 0.0, "FEGLM group sums")?;
-            let mut counts = resource::try_vec(factor.n_levels, 0usize, "FEGLM group sums")?;
-            for i in (0..n).filter(|&i| keep[i]) {
-                sums[factor.ids[i]] += y[i];
-                counts[factor.ids[i]] += 1;
+    let mut levels = Vec::with_capacity(factors.len());
+    let mut queue: Vec<(usize, usize)> = Vec::new();
+    for (f, factor) in factors.iter().enumerate() {
+        let m = factor.n_levels;
+        let mut lv = Levels {
+            rows: resource::try_vec(m, 0usize, "FEGLM group counts")?,
+            zeros: resource::try_vec(m, 0usize, "FEGLM group counts")?,
+            ones: resource::try_vec(m, 0usize, "FEGLM group counts")?,
+            queued: resource::try_vec(m, false, "FEGLM group counts")?,
+            start: resource::try_vec(m + 1, 0usize, "FEGLM group rows")?,
+            members: resource::try_vec(n, 0usize, "FEGLM group rows")?,
+        };
+        for (i, &g) in factor.ids.iter().enumerate() {
+            lv.rows[g] += 1;
+            lv.zeros[g] += usize::from(y[i] == 0.0);
+            lv.ones[g] += usize::from(y[i] == 1.0);
+        }
+        for g in 0..m {
+            lv.start[g + 1] = lv.start[g] + lv.rows[g];
+        }
+        let mut next = lv.start.clone();
+        for (i, &g) in factor.ids.iter().enumerate() {
+            lv.members[next[g]] = i;
+            next[g] += 1;
+        }
+        for g in 0..m {
+            if constant(&lv, g) {
+                lv.queued[g] = true;
+                queue.push((f, g));
             }
-            for i in 0..n {
-                let g = factor.ids[i];
-                if keep[i] && (sums[g] == 0.0 || (binomial && sums[g] == counts[g] as f64)) {
-                    keep[i] = false;
-                    changed = true;
+        }
+        levels.push(lv);
+    }
+    let mut popped = 0usize;
+    while let Some((f, g)) = queue.pop() {
+        if popped.is_multiple_of(1024) {
+            resource::checkpoint()?;
+        }
+        popped += 1;
+        for idx in levels[f].start[g]..levels[f].start[g + 1] {
+            let i = levels[f].members[idx];
+            if !keep[i] {
+                continue;
+            }
+            keep[i] = false;
+            for (h, factor) in factors.iter().enumerate() {
+                let lv = &mut levels[h];
+                let l = factor.ids[i];
+                lv.rows[l] -= 1;
+                lv.zeros[l] -= usize::from(y[i] == 0.0);
+                lv.ones[l] -= usize::from(y[i] == 1.0);
+                if !lv.queued[l] && constant(lv, l) {
+                    lv.queued[l] = true;
+                    queue.push((h, l));
                 }
             }
         }
-        if !changed {
-            return Ok(keep);
-        }
     }
+    Ok(keep)
 }
 
 /// `factor` on the rows `rows` (ascending): the levels still used, renumbered in their
@@ -784,6 +851,15 @@ pub fn run_feglm(
     let n_positive_all = y.iter().filter(|&&v| v >= 0.5).count();
     match family {
         GlmFamily::Logit | GlmFamily::Probit => {
+            // The separated-group rule and the valid-mean check assume a binomial mean
+            if let Some(&bad) = y.iter().find(|&&v| !(0.0..=1.0).contains(&v)) {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Dependent variable '{y_col}' must lie in [0, 1] for {family} \
+                         (found {bad})"
+                    ),
+                });
+            }
             if n_positive_all == 0 || n_positive_all == y.len() {
                 return Err(EconError::InvalidSpecification {
                     message: format!(
@@ -947,9 +1023,11 @@ pub fn run_feglm(
     let mut xs = resource::try_zeros2(n, k, "FEGLM weighted design")?;
     let mut weights = resource::try_vec(n, 0.0, "FEGLM working weights")?;
     // The weights `mx` was demeaned with (none: the screen's unit-weight demeaning). When the
-    // next weights equal them bit for bit (Gaussian: all 1), `mx` is already the result.
+    // next weights are equal to them (value equality; Gaussian: all 1), `mx` is already the
+    // result.
     let mut mx_weights: Option<Vec<f64>> = None;
     let mut nu = resource::try_vec(n, 0.0, "FEGLM working residual")?;
+    let mut nu_work = resource::try_vec(n, 0.0, "FEGLM working residual")?;
     let mut ys = Array1::from(resource::try_vec(n, 0.0, "FEGLM weighted residual")?);
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -989,8 +1067,10 @@ pub fn run_feglm(
                 w.copy_from_slice(&weights);
             }
         }
+        // nu's demeaning works in the buffer the last iteration's Mnu came back in
+        nu_work.copy_from_slice(&nu);
         let (mnu, _, nu_change, nu_conv) = weighted_demean_map(
-            &nu,
+            std::mem::take(&mut nu_work),
             &mut proj,
             config.map_tolerance,
             config.map_max_iter,
@@ -1030,6 +1110,7 @@ pub fn run_feglm(
         //    eta_upd = nu - (Mnu - MX beta_upd)
         let mx_beta = mx.dot(&beta_upd);
         let eta_upd: Array1<f64> = Array1::from_shape_fn(n, |i| nu[i] - (mnu[i] - mx_beta[i]));
+        nu_work = mnu;
 
         // 5. Step halving: accept the first step that gives a finite deviance, a valid mean
         //    and a deviance no higher than the last by more than the tolerance (relative).
@@ -1054,18 +1135,22 @@ pub fn run_feglm(
             }
             rho /= 2.0;
         }
-        match accepted {
+        let max_abs = |v: &Array1<f64>| v.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+        let step_matters = max_abs(&eta_upd) > NEGLIGIBLE_STEP * (1.0 + max_abs(&eta));
+        let step_vanished = match accepted {
             Some((eta_new, mu_new, dev, rho)) => {
                 beta.scaled_add(rho, &beta_upd);
                 eta = eta_new;
                 mu = mu_new;
                 final_change = deviance_change(dev, dev_old);
                 dev_old = dev;
+                rho < SMALL_STEP
             }
             None if any_valid => {
                 // No step improves the deviance: keep the last iterate (alpaca), which
                 // the deviance rule then counts as converged
                 final_change = 0.0;
+                true
             }
             None => {
                 return Err(EconError::ConvergenceFailure {
@@ -1076,10 +1161,16 @@ pub fn run_feglm(
                         .to_string(),
                 });
             }
-        }
+        };
 
         if final_change < config.tolerance {
             converged = true;
+            if step_vanished && step_matters {
+                warnings.push(format!(
+                    "FEGLM IRLS stopped: step halving could not improve the deviance in \
+                     iteration {iter}; the estimate may not be the maximum likelihood"
+                ));
+            }
             break;
         }
     }
@@ -2163,8 +2254,9 @@ mod tests {
 
     /// The default controls reach the MLE to the accuracy their deviance rule (1e-8)
     /// allows: logit and Poisson coefficients to 1e-6 relative, probit's to 1e-5 (Fisher
-    /// scoring converges linearly, and stops about 4e-6 short), every fit converged, and no
-    /// warning other than the drop warning.
+    /// scoring converges linearly: probit1 and probit2 stop 2.8e-6 to 6.2e-6 relative, or
+    /// 0.9e-6 to 1.8e-6 absolute, short of R's), every fit converged, and no warning other
+    /// than the drop warning.
     #[test]
     fn test_validate_feglm_mle_default_controls() {
         use p2a_validation::{Check, Tol};
@@ -2421,5 +2513,259 @@ mod tests {
             .finish();
         let mcfadden = 1.0 - r.log_likelihood / r.log_likelihood_null;
         assert!((r.pseudo_r_squared - mcfadden).abs() <= 1e-12);
+    }
+
+    /// The round-based drop rule the worklist replaced: every round rescans every factor.
+    fn separated_rows_kept_rounds(
+        y: &Array1<f64>,
+        factors: &[FactorInfo],
+        binomial: bool,
+    ) -> Vec<bool> {
+        let n = y.len();
+        let mut keep = vec![true; n];
+        loop {
+            let mut changed = false;
+            for factor in factors {
+                let mut sums = vec![0.0; factor.n_levels];
+                let mut counts = vec![0usize; factor.n_levels];
+                for i in (0..n).filter(|&i| keep[i]) {
+                    sums[factor.ids[i]] += y[i];
+                    counts[factor.ids[i]] += 1;
+                }
+                for i in 0..n {
+                    let g = factor.ids[i];
+                    if keep[i] && (sums[g] == 0.0 || (binomial && sums[g] == counts[g] as f64)) {
+                        keep[i] = false;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                return keep;
+            }
+        }
+    }
+
+    /// A dataset R generated for the FEGLM cases, read as `p2a data load` reads it; these
+    /// tests use only its data, not the case's reference values.
+    fn generated_csv(file: &str) -> Dataset {
+        let path = format!(
+            "{}/../../validation/datasets/generated/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    fn info_from_ids(name: &str, ids: Vec<usize>) -> FactorInfo {
+        let n_levels = ids.iter().max().map_or(0, |m| m + 1);
+        let mut counts = vec![0; n_levels];
+        for &g in &ids {
+            counts[g] += 1;
+        }
+        FactorInfo {
+            name: name.to_string(),
+            n_levels,
+            ids,
+            counts,
+        }
+    }
+
+    /// The worklist drop rule keeps the rows the round-based rule keeps: on the separation
+    /// case's data, on a chain whose drops cascade one level per round, and on noisy
+    /// random panels with many all-0 and all-1 groups.
+    #[test]
+    fn test_separated_rows_worklist_matches_rounds() {
+        use rand::{Rng, SeedableRng};
+        let check = |y: &Array1<f64>, factors: &[FactorInfo], what: &str| {
+            for binomial in [true, false] {
+                if binomial && y.iter().any(|&v| v > 1.0) {
+                    continue;
+                }
+                let got = separated_rows_kept(y, factors, binomial).unwrap();
+                let want = separated_rows_kept_rounds(y, factors, binomial);
+                assert_eq!(got, want, "{what}, binomial {binomial}");
+            }
+        };
+
+        // the separation case's data, both outcomes, one and two factors
+        let ds = generated_csv("feglm_sep.csv");
+        for y_col in ["y_bin", "y_cnt"] {
+            let cols = ColumnRequest::new(ds.df())
+                .numeric(y_col)
+                .factors(&["id", "time"])
+                .na(NaPolicy::Omit)
+                .extract()
+                .unwrap();
+            let y = cols.numeric_array(y_col);
+            let factors: Vec<FactorInfo> = ["id", "time"]
+                .iter()
+                .map(|c| factor_info(c, cols.factor(c)).unwrap())
+                .collect();
+            let n_kept = |k: &[bool]| k.iter().filter(|&&b| b).count();
+            let kept = separated_rows_kept(&y, &factors, y_col == "y_bin").unwrap();
+            assert!(n_kept(&kept) < y.len(), "{y_col}: the case drops rows");
+            check(&y, &factors, y_col);
+            check(&y, &factors[..1], y_col);
+        }
+
+        // a chain: period 0 holds one 0, entity j has (j, j) = 0 and (j, j + 1) = 1, so each
+        // drop makes the next level constant; the last period also holds a noisy tail
+        let len = 60;
+        let mut ent = Vec::new();
+        let mut per = Vec::new();
+        let mut y = Vec::new();
+        for j in 0..len {
+            ent.extend([j, j]);
+            per.extend([j, j + 1]);
+            y.extend([0.0, 1.0]);
+        }
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(17);
+        for r in 0..20 {
+            ent.push(len + r % 4);
+            per.push(len - 10 + r % 7);
+            y.push(f64::from(rng.gen_range(0..2u8)));
+        }
+        let factors = [info_from_ids("e", ent), info_from_ids("p", per)];
+        let y = Array1::from(y);
+        check(&y, &factors, "chain");
+        let kept = separated_rows_kept(&y, &factors, true).unwrap();
+        assert!(!kept[2 * len - 1] || !kept[0], "the chain cascades");
+
+        // noisy random panels, two and three factors, outcomes 0/1 and counts with many zeros
+        for seed in 0..30u64 {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let n = rng.gen_range(20..300);
+            let m = [
+                rng.gen_range(2..40),
+                rng.gen_range(2..15),
+                rng.gen_range(2..6),
+            ];
+            let ids: Vec<Vec<usize>> = m
+                .iter()
+                .map(|&m| (0..n).map(|_| rng.gen_range(0..m)).collect())
+                .collect();
+            let p_one = rng.gen_range(0.02..0.5);
+            let y_bin: Array1<f64> = (0..n)
+                .map(|_| f64::from(u8::from(rng.r#gen::<f64>() < p_one)))
+                .collect();
+            let y_cnt: Array1<f64> = (0..n)
+                .map(|_| {
+                    if rng.r#gen::<f64>() < 0.7 {
+                        0.0
+                    } else {
+                        rng.gen_range(0.3..4.0)
+                    }
+                })
+                .collect();
+            for k in [2, 3] {
+                let factors: Vec<FactorInfo> = ids[..k]
+                    .iter()
+                    .enumerate()
+                    .map(|(f, v)| info_from_ids(&format!("f{f}"), v.clone()))
+                    .collect();
+                check(&y_bin, &factors, &format!("seed {seed}, {k} factors, 0/1"));
+                check(
+                    &y_cnt,
+                    &factors,
+                    &format!("seed {seed}, {k} factors, counts"),
+                );
+            }
+        }
+    }
+
+    /// Logit and probit refuse an outcome outside [0, 1], naming the column and the value,
+    /// before the drop rule or step halving can misread it.
+    #[test]
+    fn test_feglm_binomial_outcome_outside_unit_interval() {
+        let x: Vec<f64> = (0..40)
+            .map(|i| ((i * 7) % 11) as f64 / 10.0 + 0.01 * i as f64)
+            .collect();
+        let base: Vec<f64> = (0..40)
+            .map(|i| f64::from(u8::from((i * 5) % 3 == 0)))
+            .collect();
+        for (family, bad) in [(GlmFamily::Logit, 2.0), (GlmFamily::Probit, -1.0)] {
+            let mut y = base.clone();
+            y[3] = bad;
+            let res = run_feglm(&frame(&x, &y, None), "y", &["x"], &["id"], family, None);
+            expect_invalid(
+                res,
+                &format!("'y' must lie in [0, 1] for {family} (found {bad})"),
+            );
+        }
+        // a fractional outcome inside [0, 1] is still a binomial mean
+        let mut y = base.clone();
+        y[3] = 0.25;
+        assert!(
+            run_feglm(
+                &frame(&x, &y, None),
+                "y",
+                &["x"],
+                &["id"],
+                GlmFamily::Logit,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    /// A fit that stops because step halving left no step counts as converged, as in
+    /// alpaca, but says so in its warnings. A weight floor far above the IRLS weights
+    /// (with one demeaning sweep per step, or converged demeaning) turns the step into a
+    /// poor direction on staggered two-way panels; the same panels at the default controls
+    /// never warn.
+    #[test]
+    fn test_feglm_vanished_step_warns() {
+        use rand::{Rng, SeedableRng};
+        let warned = |r: &FeglmResult| {
+            r.warnings
+                .iter()
+                .any(|w| w.contains("step halving could not improve the deviance"))
+        };
+        let mut n_warned = 0;
+        for seed in 0..6u64 {
+            // 40 entities, each observed in 4 consecutive periods starting at its own index
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let (mut e, mut t, mut x, mut y_bin, mut y_cnt) =
+                (vec![], vec![], vec![], vec![], vec![]);
+            for i in 0..40i64 {
+                for k in 0..4 {
+                    let period = i + k;
+                    let xv = period as f64 * 0.3 + rng.r#gen::<f64>();
+                    let eta = 0.5 * xv - 0.1 * period as f64 + 0.5 * (i % 3) as f64;
+                    let p = 1.0 / (1.0 + (-eta).exp());
+                    e.push(i);
+                    t.push(period);
+                    x.push(xv);
+                    y_bin.push(f64::from(u8::from(rng.r#gen::<f64>() < p)));
+                    y_cnt.push((eta.exp() * rng.r#gen::<f64>() * 2.0).floor());
+                }
+            }
+            let ds = Dataset::new(
+                df! { "e" => e, "t" => t, "x" => x, "y_bin" => y_bin, "y_cnt" => y_cnt }.unwrap(),
+            );
+            for (family, y) in [(GlmFamily::Logit, "y_bin"), (GlmFamily::Poisson, "y_cnt")] {
+                let fit = |config| run_feglm(&ds, y, &["x"], &["e", "t"], family, config);
+                let clean = fit(None).unwrap();
+                assert!(
+                    !warned(&clean),
+                    "seed {seed} {family:?}: {:?}",
+                    clean.warnings
+                );
+                for map_max_iter in [1, 1000] {
+                    let mut config = FeglmConfig::default();
+                    config.weight_min = 20.0;
+                    config.map_max_iter = map_max_iter;
+                    let r = fit(Some(config)).unwrap();
+                    if warned(&r) {
+                        assert!(r.converged, "a vanished step stops the fit as converged");
+                        n_warned += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            n_warned > 0,
+            "a weight floor of 20 should leave a vanished step"
+        );
     }
 }
