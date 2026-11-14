@@ -88,8 +88,10 @@ features centred within each situation, at `LM_QR_TOL`.
 
 Newton's method on the centred information, solved on the equilibrated matrix by Cholesky (a
 generalized inverse, with a warning, only when Cholesky refuses it). It stops when the Newton
-decrement is below 1e-10 on `glm.fit`'s relative-deviance scale, then takes that last full step;
-a line search that finds no increase is reported and the fit is not converged. Newton's method
+decrement is below 1e-10 on `glm.fit`'s relative-deviance scale, then takes that last full step,
+which `iterations` counts (a fit capped at its reported count converges; the multinomial
+logit counts its final and polish steps too); a line search that finds no increase is
+reported, as the fit's one non-convergence note, and the fit is not converged. Newton's method
 is affine invariant: with income scaled by 1e-6 or 1e6 the iteration counts agree within one
 across scales (p2a's own invariance; the coefficients change only by the scale). Not
 R-pinned: iteration counts.
@@ -174,6 +176,48 @@ beta 1e-6 and SEs 1e-5 relative, log-likelihood 1e-6, mlogit's own estimate at 1
 ([mixed_logit.md](mixed_logit.md)).
 
 ---
+
+## Null log-likelihood and unbalanced choice sets (`disc_clogit_unbalanced_t4`)
+
+`log_likelihood_null` is, with alternative-specific constants, the constants-only
+conditional logit; without them, equal choice probabilities in each situation,
+`-sum_i ln J_i`. When every situation offers every alternative the constants-only MLE has
+the market shares as probabilities, so the null is mlogit's `sum_j n_j ln(n_j / N)`, taken in
+closed form, and the McFadden R2 is mlogit's (Fishing with constants: 0.17822995057079027;
+it was 0.2489 against the equal-shares null). On choice sets of different sizes the
+constants are fitted by Newton's method under the model's control; mlogit keeps the
+market-share formula there, which gives probability to alternatives a situation did not
+offer (registry deviation). Before, the null was `-N ln J` for every model.
+
+Case `disc_clogit_unbalanced_t4` (`validation/r/cases/discrete_t4.R`) removes charter from
+the first 300 situations that did not choose it (`mlogit_fishing_unbalanced.csv`, 4,428 rows,
+1,182 situations of 3 or 4 modes):
+
+| Key | Value |
+|---|---|
+| `unbal_asc_loglik` | -1053.0569392866296 |
+| `unbal_null_constants_only` / `unbal_asc_pr2_constants` | -1322.5046743613673 / 0.2037404784257969 |
+| `unbal_null_market_shares` / `unbal_asc_pr2_market` (mlogit) | -1497.7229107709336 / 0.29689468478212566 |
+| `unbal_null_equal_shares` / `unbal_noasc_pr2_equal` | -1552.2953131081765 / 0.21574796197673918 |
+| `bal_null_market_shares` / `bal_asc_pr2_pkg` | -1497.7229107709336 / 0.17822995057079027 |
+
+Tests (registry `validation/methods/discrete_t4.json`, id `discrete_mlogit_null`):
+`econometrics::discrete::conditional_logit::tests::test_validate_mlogit_null_unbalanced_choice_sets`
+(coefficients 1e-9 and SEs 1e-8 on the unbalanced sets, with and without constants; nulls
+`Tol::stat(1182)`; pseudo-R2 1e-9 and 1e-10) and
+`econometrics::discrete::conditional_logit::tests::test_validate_mlogit_null_balanced_matches_mlogit`.
+
+## Malformed choice sets
+
+A choice situation must have exactly one chosen row (`choice > 0.5`) and list each
+alternative once. A situation without a chosen row was fitted as if its first alternative had
+been chosen, one with several as if the last had been, and a repeated alternative entered the
+likelihood twice; mlogit refuses all three (`refused_*` = 1 in `disc_clogit_unbalanced_t4`).
+`run_mlogit_with` and `run_mixed_logit` refuse them with `InvalidSpecification` naming the
+first offending situation in data order and their number. Not R-pinned tests:
+`econometrics::discrete::conditional_logit::tests::test_mlogit_refuses_situation_without_choice`,
+`..._with_two_choices` and `..._with_duplicate_alternative` (the same three in
+`mixed_logit.rs`).
 
 ## Missing values
 

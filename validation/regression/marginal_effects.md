@@ -253,6 +253,16 @@ SE are written out with `G = f(zbar) I + beta f'(zbar) xbar'` and checked in the
 `test_validate_contrasts_avg_comparisons`; tolerances iterative 1e-8 (logit) and 1e-6 (probit), p-values
 1e-6 and 1e-4.
 
+Probit at p2a's own control (case `me_probit_ctl_t4`, `validation/r/cases/discrete_t4.R`; registry
+`validation/methods/discrete_t4.json`, id `marginal_effects_probit_ctl`): glm at `epsilon = 1e-10`
+stops at the iterate p2a's IRLS reaches (5 iterations), so
+`test_validate_marginal_effects_probit_at_control` pins the probit coefficients and SEs, the MEM
+(x1 0.15457442056346077) and the average comparisons of x1 at 1e-8. Not at that tolerance: the
+delta-method SEs of the MEM and of the comparisons (and their z and p), which use the expected
+information at the final coefficients, where glm's `vcov` holds the weights of the IRLS step before;
+for a probit (Fisher scoring, linear convergence) the two differ by about 1e-6 relative at this
+control. Those stay pinned at 1e-6 against glm at `epsilon = 1e-14`.
+
 ## Status
 
 - [x] Core implementation complete

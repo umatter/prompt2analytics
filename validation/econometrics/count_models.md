@@ -356,14 +356,28 @@ scaled fits to the unscaled one at 1e-7 relative.
 
 ## Status
 
-R-pinned, known deviations (ECON-64): registry
-`validation/methods/discrete_ordered_count.json`, ids `discrete_negbin` (deviation
-ECON-64), `discrete_zip` and `discrete_zinb`.
+R-pinned: registry `validation/methods/discrete_ordered_count.json`, ids `discrete_negbin`,
+`discrete_zip` and `discrete_zinb`; the null model and pseudo-R2
+`validation/methods/discrete_t4.json`, id `discrete_negbin_null`.
+
+## Null model
+
+`log_likelihood_null` is the log-likelihood of `glm.nb(y ~ 1)` on the model's rows, with its
+own theta, the null model `pscl::pR2` refits; `pseudo_r_squared` is McFadden's `1 - ll /
+ll0` against it. Its fitted mean is the sample mean at every theta, so only theta is fitted,
+by the Newton steps of the full model's theta on the distinct outcome values and their
+multiplicities, from the full model's theta. An all-zero outcome has null log-likelihood 0.
+Case `disc_negbin_null_t4` (`validation/r/cases/discrete_t4.R`, `negbin.csv`): null
+log-likelihood -590.7891356865365 at theta 1.0690413506823526, McFadden 0.04483475783087454
+(pscl::pR2); with missing values (395 rows) -583.2291649263328 and 0.043290705742485946.
+Tests: `econometrics::discrete::count_models::tests::test_validate_negbin_null_disc_negbin`
+and `econometrics::discrete::count_models::tests::test_validate_negbin_null_missing_rows`
+(log-likelihoods `Tol::stat(n)`, pseudo-R2 1e-8); not R-pinned:
+`test_negbin_null_poisson_limit` (underdispersed counts: the intercept-only Poisson
+log-likelihood) and `test_negbin_null_all_zero`.
 
 ## Known Differences
 
-- ECON-64 (Tier 4): `log_likelihood_null` omits the lnGamma terms and reuses the full
-  model's theta, so it and `pseudo_r_squared` are not glm.nb's null model; not pinned.
 - glm.nb's own `SE.theta` is evaluated one `theta.ml` step before its reported theta; it
   is checked at 1e-4.
 - No overdispersion: theta stops at a value above 1e6 (bounded by 1e8) with
@@ -371,8 +385,9 @@ ECON-64), `discrete_zip` and `discrete_zinb`.
 - ZIP/ZINB: pscl's BFGS stops about 1e-7 relative from the MLE (`*_pkg`, checked at
   1e-4); p2a warns about fitted zero-inflation probabilities numerically 0 or 1, which
   pscl's EM suppresses, and refuses an outcome without zeros as pscl does.
-- Open items: TOOL-30 (Tier 4) the MCP description of the `z` argument. (ECON-58, the
-  outcome domain, is closed by T3-WP18; see below.)
+- The MCP `z` argument of `zeroinfl` defaults to the count regressors (pscl's default), and
+  `[]` gives an intercept-only zero part; the description says so. (ECON-58, the outcome
+  domain, is closed by T3-WP18; see below.)
 - `validation/expected/negbin_test.csv`, `zip_test.csv` and `zinb_test.csv` are legacy
   files that no test reads.
 
