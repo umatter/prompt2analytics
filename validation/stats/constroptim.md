@@ -33,9 +33,13 @@ R's adaptive barrier (Lange), with R's defaults `mu = 1e-4`, `outer.iterations =
 3. Code 7 when the outer iterations run out; code 1 when the last inner optimisation hit its limit.
    `value` is f at `par`, `barrier_value` the last R minus `value`. No point is projected.
 
-Inner methods: BFGS without a gradient runs Nelder-Mead (R's default for a missing gradient; R's
-explicit `method = "BFGS"` without one stops), and L-BFGS-B runs BFGS; both say so in
-`ConstrOptimResult::notes`.
+Inner methods: BFGS needs a gradient, and a call without one is refused with an
+`InvalidSpecification` naming the method and the missing gradient, as R's explicit
+`method = "BFGS"` without `grad` stops (R's default for a missing gradient is Nelder-Mead, which
+p2a runs only when asked for). L-BFGS-B is refused: it needs finite values outside the feasible
+region, which the barrier does not give. Nothing is substituted. `mu` and `outer_eps` must be
+finite and positive and are refused by name otherwise (p2a has no `fnscale`, so a maximisation is
+written as minimising -f).
 
 ## Test Cases
 
@@ -59,7 +63,7 @@ print(result$value)
 **Rust tests:**
 - `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): x² + y² with x + y ≥ 1 from (1, 1); `quadratic_par` (0.500000000151549 twice) and `quadratic_value` (0.500000000303098), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; the convergence code is pinned exactly, the outer iterations are a path quantity).
 - `stats::constroptim::tests::test_validate_constr_optim_nelder_mead`: Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5); `nelder_mead_par` (1.0000008855605316, 2.0000000235991697) at `Tol::iterative(1e-4)` and the convergence code; the value (R 7.8e-13) is zero up to the inner tolerance, so it is checked below 1e-9, not against R's digits.
-- `test_constr_optim_codes_seven_and_eleven` (property), `test_validate_constr_optim_method_substitutions` (the substituted methods reach R's quadratic solution): codes 7 and 11, the notes for BFGS without a gradient and for L-BFGS-B, R's defaults.
+- `test_constr_optim_codes_seven_and_eleven` (property), `test_validate_constr_optim_inner_methods` (BFGS with the gradient and Nelder-Mead reach R's quadratic solution): codes 7 and 11, the refusals of BFGS without a gradient, of L-BFGS-B and of a zero, negative or non-finite `mu` or `outer_eps`, R's defaults.
 
 ### Test Case 2: Active Constraint
 
@@ -131,7 +135,7 @@ print(result$par)
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
 
 | Method | n | f80b0131 (µs) | this change (µs) | ratio |
 |---|---|---|---|---|

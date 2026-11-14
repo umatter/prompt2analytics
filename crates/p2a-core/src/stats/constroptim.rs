@@ -39,6 +39,7 @@
 //!
 //! R equivalent: `stats::constrOptim()`
 
+use crate::errors::{EconError, EconResult};
 use serde::{Deserialize, Serialize};
 
 /// Result of constrained optimization.
@@ -63,23 +64,23 @@ pub struct ConstrOptimResult {
     pub barrier_value: f64,
     /// Number of outer iterations
     pub outer_iterations: usize,
-    /// What ran instead of the requested inner method, if anything
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
 }
 
 /// Configuration for constrained optimization (R's `constrOptim` defaults).
 #[derive(Debug, Clone)]
 pub struct ConstrOptimConfig {
-    /// Barrier term multiplier (R's `mu`, default 1e-4); fixed across outer iterations
+    /// Barrier term multiplier (R's `mu`, default 1e-4); fixed across outer iterations. Must be
+    /// finite and positive (p2a has no `fnscale`, so a maximisation is written as minimising -f)
     pub mu: f64,
     /// Maximum outer iterations (R's `outer.iterations`, default 100)
     pub outer_iterations: usize,
     /// Outer convergence tolerance (R's `outer.eps`, default 1e-5): stop when the barrier
-    /// objective changes by less than `(1e-3 + |r|) outer_eps`
+    /// objective changes by less than `(1e-3 + |r|) outer_eps`. Must be finite and positive
     pub outer_eps: f64,
-    /// Inner optimization method. BFGS needs a gradient: without one Nelder-Mead runs (R's
-    /// default for a missing gradient) and the result says so in `notes`. L-BFGS-B runs BFGS.
+    /// Inner optimization method. BFGS needs a gradient (as R's `method = "BFGS"` without
+    /// `grad`, a call without one is refused; Nelder-Mead is the gradient-free method).
+    /// L-BFGS-B is refused: it needs finite values outside the region, which the barrier
+    /// does not give
     pub method: OptimMethod,
     /// Maximum function evaluations per inner iteration
     pub max_fn_evals: usize,
@@ -108,7 +109,7 @@ pub enum OptimMethod {
     NelderMead,
     /// BFGS quasi-Newton method
     BFGS,
-    /// L-BFGS-B limited memory BFGS. Not available: BFGS runs instead (noted in the result)
+    /// L-BFGS-B limited memory BFGS. Not available: `constr_optim` refuses it
     LBFGSB,
 }
 
@@ -152,63 +153,83 @@ pub fn constr_optim<F, G>(
     ui: &[Vec<f64>],
     ci: &[f64],
     config: ConstrOptimConfig,
-) -> Result<ConstrOptimResult, String>
+) -> EconResult<ConstrOptimResult>
 where
     F: Fn(&[f64]) -> f64,
     G: Fn(&[f64]) -> Vec<f64>,
 {
+    let invalid = |message: String| EconError::InvalidSpecification { message };
     let p = theta0.len();
     let k = ci.len();
 
     // Validate inputs
     if ui.len() != k {
-        return Err(format!(
+        return Err(invalid(format!(
             "ui has {} rows but ci has {} elements",
             ui.len(),
             k
-        ));
+        )));
     }
     for (i, row) in ui.iter().enumerate() {
         if row.len() != p {
-            return Err(format!(
+            return Err(invalid(format!(
                 "ui row {} has {} elements but theta has {} elements",
                 i,
                 row.len(),
                 p
-            ));
+            )));
         }
     }
+    if !(config.mu.is_finite() && config.mu > 0.0) {
+        return Err(invalid(format!(
+            "constrOptim mu must be finite and positive, got {}",
+            config.mu
+        )));
+    }
+    if !(config.outer_eps.is_finite() && config.outer_eps > 0.0) {
+        return Err(invalid(format!(
+            "constrOptim outer_eps must be finite and positive, got {}",
+            config.outer_eps
+        )));
+    }
+    // R's inner methods: BFGS needs the gradient (R's explicit method = "BFGS" without one
+    // fails). p2a has no bounded optimiser, and L-BFGS-B needs finite values outside the
+    // region, which the barrier does not give. Both are refused rather than replaced.
+    let use_bfgs = match (config.method, grad.is_some()) {
+        (OptimMethod::NelderMead, _) => false,
+        (OptimMethod::BFGS, true) => true,
+        (OptimMethod::BFGS, false) => {
+            return Err(invalid(
+                "constrOptim method BFGS needs a gradient: pass grad, or use method Nelder-Mead"
+                    .to_string(),
+            ));
+        }
+        (OptimMethod::LBFGSB, _) => {
+            return Err(invalid(
+                "constrOptim method L-BFGS-B is not available (it needs finite values outside \
+                 the feasible region, which the barrier does not give): use BFGS with a \
+                 gradient, or Nelder-Mead"
+                    .to_string(),
+            ));
+        }
+    };
 
     // Check that initial point satisfies constraints
     let margin0 = compute_constraint_margin(theta0, ui, ci);
     if margin0.iter().any(|&m| m <= 0.0) {
-        return Err("Initial value is not feasible (does not satisfy constraints)".to_string());
+        return Err(invalid(
+            "Initial value is not feasible (does not satisfy constraints)".to_string(),
+        ));
     }
     // R's nmmin stops on a non-finite objective at the start value.
     if !f(theta0).is_finite() {
-        return Err("function cannot be evaluated at initial parameters".to_string());
+        return Err(invalid(
+            "function cannot be evaluated at initial parameters".to_string(),
+        ));
     }
 
-    // R's inner methods: BFGS needs the gradient (R's explicit method = "BFGS" without one fails;
-    // its default for a missing gradient is Nelder-Mead, which runs here, with a note). p2a has
-    // no bounded optimiser, and L-BFGS-B needs finite values outside the region, which the
-    // barrier does not give, so L-BFGS-B runs BFGS (with a note).
-    let mut notes = Vec::new();
-    let use_bfgs = match (config.method, grad.is_some()) {
-        (OptimMethod::NelderMead, _) => false,
-        (OptimMethod::BFGS, true) => true,
-        (OptimMethod::LBFGSB, true) => {
-            notes.push("L-BFGS-B is not available; ran BFGS".to_string());
-            true
-        }
-        (OptimMethod::BFGS | OptimMethod::LBFGSB, false) => {
-            notes.push("BFGS needs a gradient; ran Nelder-Mead".to_string());
-            false
-        }
-    };
-
+    // mu > 0 (checked above), so R's sign(mu) is 1
     let mu = config.mu;
-    let s_mu = mu.signum();
     // R's adaptive barrier (Lange): R(theta, theta_old) = f(theta)
     //   - mu sum[(u_i theta_old - c_i) log(u_i theta - c_i) - u_i theta],
     // NaN outside the region, so the inner optimiser rejects the point.
@@ -239,7 +260,7 @@ where
     let mut outer_iter = 0;
 
     for i in 1..=config.outer_iterations {
-        crate::resource::checkpoint().map_err(|e| e.to_string())?;
+        crate::resource::checkpoint()?;
         outer_iter = i;
         obj_old = obj;
         let r_old = r;
@@ -280,18 +301,15 @@ where
         }
         theta = par.clone();
         obj = f(&theta);
-        if s_mu * obj > s_mu * obj_old {
+        if obj > obj_old {
             break;
         }
     }
 
-    let (convergence, message) = if mu > 0.0 && obj > obj_old || mu < 0.0 && obj < obj_old {
+    let (convergence, message) = if obj > obj_old {
         (
             11,
-            format!(
-                "Objective function {} at outer iteration {outer_iter}",
-                if mu > 0.0 { "increased" } else { "decreased" }
-            ),
+            format!("Objective function increased at outer iteration {outer_iter}"),
         )
     } else if outer_iter == config.outer_iterations {
         (
@@ -317,7 +335,6 @@ where
         message: Some(message),
         barrier_value: r - value,
         outer_iterations: outer_iter,
-        notes,
     })
 }
 
@@ -633,7 +650,7 @@ pub fn run_constr_optim<F, G>(
     ui: &[Vec<f64>],
     ci: &[f64],
     config: Option<ConstrOptimConfig>,
-) -> Result<ConstrOptimResult, String>
+) -> EconResult<ConstrOptimResult>
 where
     F: Fn(&[f64]) -> f64,
     G: Fn(&[f64]) -> Vec<f64>,
@@ -663,9 +680,12 @@ mod tests {
             None::<fn(&[f64]) -> Vec<f64>>,
             &[vec![1.0, 0.0]],
             &[0.0],
-            ConstrOptimConfig::default(),
+            ConstrOptimConfig {
+                method: OptimMethod::NelderMead,
+                ..Default::default()
+            },
         );
-        let e = r.unwrap_err();
+        let e = r.unwrap_err().to_string();
         assert!(
             e.contains("cannot be evaluated at initial parameters"),
             "{e}"
@@ -900,7 +920,6 @@ mod tests {
         };
         let r = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(&[0.5, 0.5], f, None, &ui, &ci, config)
             .unwrap();
-        assert!(r.notes.is_empty());
         assert!(r.outer_iterations <= 100 && r.barrier_value.is_finite());
         // The value at the optimum is 0 up to the inner tolerance (R 7.8e-13): rounding-level, so it
         // is checked as small, not against R's digits.
@@ -951,38 +970,67 @@ mod tests {
         assert!(r.message.unwrap().contains("increased"));
     }
 
-    /// BFGS without a gradient runs Nelder-Mead (R's default for a missing gradient) and says so;
-    /// L-BFGS-B runs BFGS and says so. Both reach R's solution of the quadratic problem.
+    /// The inner methods p2a cannot run as asked are refused, naming the method and what is
+    /// missing: BFGS without a gradient (as R's `method = "BFGS"` without `grad`) and L-BFGS-B
+    /// (with or without one). Nothing is substituted. The methods that run (BFGS with the
+    /// gradient, Nelder-Mead without one) reach R's solution of the quadratic problem; a zero,
+    /// negative or non-finite `mu` and a non-positive `outer_eps` are refused by name.
     #[test]
-    fn test_validate_constr_optim_method_substitutions() {
+    fn test_validate_constr_optim_inner_methods() {
         let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
         let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
         let ui = vec![vec![1.0, 1.0]];
         let ci = vec![1.0];
         let case = Case::load("stat_constroptim_legacy");
-        let r = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(
+        let spec = |r: EconResult<ConstrOptimResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        };
+        let no_grad = None::<fn(&[f64]) -> Vec<f64>>;
+
+        let m = spec(constr_optim(
             &[1.0, 1.0],
             f,
-            None,
+            no_grad,
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        ));
+        assert!(m.contains("BFGS") && m.contains("needs a gradient"), "{m}");
+        for g in [None, Some(grad)] {
+            let mut cfg = ConstrOptimConfig::default();
+            cfg.method = OptimMethod::LBFGSB;
+            let m = spec(constr_optim(&[1.0, 1.0], f, g, &ui, &ci, cfg));
+            assert!(m.contains("L-BFGS-B is not available"), "{m}");
+        }
+        for mu in [0.0, -1e-4, f64::NAN, f64::INFINITY] {
+            let mut cfg = ConstrOptimConfig::default();
+            cfg.mu = mu;
+            let m = spec(constr_optim(&[1.0, 1.0], f, Some(grad), &ui, &ci, cfg));
+            assert!(m.contains("mu must be finite and positive"), "{m}");
+        }
+        for eps in [0.0, -1e-5, f64::NAN] {
+            let mut cfg = ConstrOptimConfig::default();
+            cfg.outer_eps = eps;
+            let m = spec(constr_optim(&[1.0, 1.0], f, Some(grad), &ui, &ci, cfg));
+            assert!(m.contains("outer_eps must be finite and positive"), "{m}");
+        }
+
+        let b = constr_optim(
+            &[1.0, 1.0],
+            f,
+            Some(grad),
             &ui,
             &ci,
             ConstrOptimConfig::default(),
         )
         .unwrap();
-        assert_eq!(
-            r.notes,
-            vec!["BFGS needs a gradient; ran Nelder-Mead".to_string()]
-        );
-        let mut cfg = ConstrOptimConfig::default();
-        cfg.method = OptimMethod::LBFGSB;
-        let l = constr_optim(&[1.0, 1.0], f, Some(grad), &ui, &ci, cfg).unwrap();
-        assert_eq!(
-            l.notes,
-            vec!["L-BFGS-B is not available; ran BFGS".to_string()]
-        );
-        for p in [&r.par, &l.par] {
-            for (a, b) in p.iter().zip(case.vector("quadratic_par")) {
-                assert!(iter().allows(*a, b), "{p:?}");
+        let mut nm = ConstrOptimConfig::default();
+        nm.method = OptimMethod::NelderMead;
+        let n = constr_optim(&[1.0, 1.0], f, no_grad, &ui, &ci, nm).unwrap();
+        for p in [&b.par, &n.par] {
+            for (a, r) in p.iter().zip(case.vector("quadratic_par")) {
+                assert!(iter().allows(*a, r), "{p:?}");
             }
         }
         // the defaults are R's

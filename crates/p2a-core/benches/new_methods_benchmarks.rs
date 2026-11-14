@@ -512,7 +512,11 @@ fn constr_optim_benchmark(c: &mut Criterion) {
             })
             .collect();
         let ci = vec![0.0; 10]; // x_i >= 0
-        let config = ConstrOptimConfig::default();
+        // no gradient: Nelder-Mead (BFGS without a gradient is refused)
+        let config = ConstrOptimConfig {
+            method: OptimMethod::NelderMead,
+            ..Default::default()
+        };
         b.iter(|| {
             constr_optim(
                 &[5.0; 10],

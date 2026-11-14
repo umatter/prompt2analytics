@@ -290,13 +290,13 @@
         "p2a-core::stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints",
         "p2a-core::stats::constroptim::tests::test_validate_constr_optim_nelder_mead",
         "p2a-core::stats::constroptim::tests::test_validate_constr_optim_binding_constraint",
-        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_method_substitutions"
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_inner_methods"
       ],
       "quantities": [
         "par and value of three problems (quadratic, lp3, binding)",
         "par of the Nelder-Mead problem",
         "convergence code of all four",
-        "par of the quadratic problem with BFGS without a gradient (Nelder-Mead) and L-BFGS-B (BFGS)"
+        "par of the quadratic problem with BFGS (gradient) and Nelder-Mead (no gradient)"
       ],
       "tolerance": "Tol::iterative(1e-4); convergence codes exact",
       "deviations": [],
