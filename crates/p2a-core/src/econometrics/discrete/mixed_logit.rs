@@ -566,6 +566,7 @@ fn draw_factor(z: f64, dist: RandomDistribution) -> f64 {
             if z <= 0.0 {
                 (2.0 * normal_cdf(z)).sqrt() - 1.0
             } else {
+                // numeric-ok: the triangular quantile at the lower tail Phi(-z), not a p-value
                 1.0 - (2.0 * normal_cdf(-z)).sqrt()
             }
         }
