@@ -56,6 +56,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{eig_symmetric, matrix_inverse};
 use crate::linalg::solve::{LM_QR_TOL, Qr, SYM_RANK_TOL, SingularPolicy, sym_inverse};
 use crate::regression::HacKernel;
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text, relative_change_vec};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided};
@@ -755,23 +756,31 @@ fn moment_covariance(
     }
 }
 
-/// The HAC moment covariance with the lag-count rule: weights `kernel.weight(j, b)` for
-/// `j = 1..=min(b, m - 1)`, `b = bandwidth` or `floor(4 (n/100)^(2/9))`; divided by the
-/// original `n`.
+/// The HAC moment covariance for the lag count `L = bandwidth` or `floor(4 (n/100)^(2/9))`,
+/// divided by the original `n`. Bartlett, Parzen, Truncated and Tukey-Hanning weigh lag `j`
+/// by `k(j / (L + 1))` over the lags of sandwich's `weightsAndrews` (cut after the last weight
+/// above 1e-7: lags 1..=L, 1..=L+1 for Truncated), as `gmm(kernel = .., bw = L + 1)`. The
+/// Quadratic Spectral kernel keeps its earlier rule, `k(j / L)` for `j = 1..=L` (sandwich sums
+/// every lag up to n - 1 for it; a registry deviation filed under ECON-68, the closest
+/// finding). With `prewhite`, the weights are those of the n - 1 prewhitened rows.
 fn hac_covariance(u: Array2<f64>, config: &GeneralGmmConfig, n: usize) -> EconResult<MomentCov> {
     let (eps, d) = if config.prewhite {
-        let (eps, d) = var1_prewhiten(&u)?;
+        let (eps, d) = prewhiten_moments(&u)?;
         (eps, Some(d))
     } else {
         (u, None)
     };
     let m = eps.nrows();
     let b = config.bandwidth.unwrap_or_else(|| newey_west_lags(n));
-    let lags = b.min(m.saturating_sub(1));
+    let weights: Vec<f64> = match config.kernel {
+        HacKernel::QuadraticSpectral => (0..=b.min(m.saturating_sub(1)))
+            .map(|j| config.kernel.weight(j, b))
+            .collect(),
+        kernel => kernel.lag_set(b, m, 1e-7),
+    };
     let mut s = eps.t().dot(&eps);
-    for j in 1..=lags {
+    for (j, &w) in weights.iter().enumerate().skip(1) {
         resource::checkpoint()?;
-        let w = config.kernel.weight(j, b);
         if w.abs() < 1e-15 {
             continue;
         }
@@ -784,8 +793,49 @@ fn hac_covariance(u: Array2<f64>, config: &GeneralGmmConfig, n: usize) -> EconRe
     }
     Ok(MomentCov {
         omega: symmetrize(&(s / n as f64)),
-        lags: Some(lags),
+        lags: Some(weights.len().saturating_sub(1)),
     })
+}
+
+/// VAR(1) prewhitening of the moment conditions (`u_t = A u_(t-1) + eps_t` by least squares
+/// without a constant, as sandwich's `prewhite = 1`): the residuals and `D = (I - A)^-1`. A
+/// well-conditioned, full-rank lagged matrix is solved by the normal equations (OLS's checked
+/// route); anything else, and a singular `I - A`, goes through the shared pivoted-QR
+/// prewhitening and its refusals.
+fn prewhiten_moments(u: &Array2<f64>) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (n, q) = u.dim();
+    if n >= q + 2 {
+        let lagged = u.slice(s![..n - 1, ..]);
+        let current = u.slice(s![1.., ..]);
+        if let Some(ne) = normal_equations_inverse(lagged)? {
+            // B = A' (q x q): current = lagged B + eps
+            let b = ne.coefficients_multi(lagged, current);
+            let mut eps = resource::try_zeros2(n - 1, q, "HAC prewhitening residuals")?;
+            eps.assign(&current);
+            ndarray::linalg::general_mat_mul(-1.0, &lagged, &b, 1.0, &mut eps);
+            let i_minus_a = Array2::<f64>::eye(q) - b.t();
+            if let Ok(d) = matrix_inverse(&i_minus_a.view()) {
+                return Ok((eps, d));
+            }
+        }
+    }
+    crate::regression::ols::var1_prewhiten_scores(u.view()).map_err(moment_prewhitening_error)
+}
+
+/// The shared prewhitening's refusal, reworded for moment conditions.
+fn moment_prewhitening_error(e: EconError) -> EconError {
+    match e {
+        EconError::InvalidSpecification { message } => EconError::InvalidSpecification {
+            message: message
+                .replace("of the scores", "of the moment conditions")
+                .replace("lagged scores", "lagged moment conditions")
+                .replace(
+                    "drop the regressor whose scores are zero",
+                    "drop the instrument whose moment condition is zero",
+                ),
+        },
+        other => other,
+    }
 }
 
 /// A user weighting matrix must be q x q, finite, symmetric and positive definite.
@@ -1195,30 +1245,6 @@ fn validate_config(config: &GeneralGmmConfig, n: usize, q: usize) -> EconResult<
         });
     }
     Ok(())
-}
-
-/// VAR(1) prewhitening of the estimating functions (Andrews and Monahan 1992; sandwich's
-/// `prewhite = 1`): `u_t = A u_{t-1} + eps_t` by OLS without intercept on t = 2..n; returns
-/// the residuals and `D = (I - A)^-1`, so that the meat is `D S(eps) D'`.
-fn var1_prewhiten(u: &Array2<f64>) -> EconResult<(Array2<f64>, Array2<f64>)> {
-    let (n, q) = u.dim();
-    let lagged = u.slice(s![..n - 1, ..]);
-    let current = u.slice(s![1.., ..]);
-    let ll = symmetrize(&lagged.t().dot(&lagged));
-    let ll_inv = sym_inverse(
-        ll.view(),
-        SingularPolicy::Error,
-        "VAR(1) prewhitening cross-product",
-    )?;
-    // B = A' (q x q): current = lagged B + eps
-    let b = ll_inv.inverse.dot(&lagged.t().dot(&current));
-    let eps = &current - &lagged.dot(&b);
-    let i_minus_a = Array2::<f64>::eye(q) - b.t();
-    let d = matrix_inverse(&i_minus_a.view()).map_err(|_| EconError::InvalidSpecification {
-        message: "prewhitening: I - A is singular (the VAR(1) of the moments has a unit root)"
-            .to_string(),
-    })?;
-    Ok((eps, d))
 }
 
 /// Gauss-Newton on `gbar' W gbar` from `start`: `theta <- theta - lambda (G'WG)^-1 G'W gbar`,
@@ -1694,6 +1720,30 @@ mod tests {
     use ndarray::Array1;
     use p2a_validation::{Check, Tol};
 
+    /// The shared prewhitening refusal is reworded for moment conditions; a change of the
+    /// OLS wording must not leave GMM users advice about regressors and scores.
+    #[test]
+    fn test_gmm_prewhitening_refusal_names_moment_conditions() {
+        // the second moment condition is identically zero: its lagged values are dependent
+        let u = Array2::from_shape_fn((60, 2), |(i, j)| {
+            if j == 0 {
+                ((i * 7919) % 13) as f64 / 13.0 - 0.4
+            } else {
+                0.0
+            }
+        });
+        let mut cfg = GeneralGmmConfig::default();
+        cfg.vcov = GmmVcov::HAC;
+        cfg.prewhite = true;
+        let msg = match hac_covariance(u, &cfg, 60) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("prewhitening must refuse a zero moment condition"),
+        };
+        assert!(msg.contains("moment condition"), "{msg}");
+        assert!(!msg.contains("regressor"), "{msg}");
+        assert!(!msg.contains("score"), "{msg}");
+    }
+
     fn cancelled() -> Budget {
         let token = CancelToken::new();
         token.cancel();
@@ -1957,6 +2007,46 @@ mod tests {
         assert_eq!(b.hac_lags, Some(5));
         // prewhitening is an option R distinguishes
         assert!((pw.std_errors[1] / b.std_errors[1] - 1.0).abs() > 1e-6);
+    }
+
+    /// Every kernel on sandwich's lag convention: gmm(type = "twoStep", vcov = "HAC", kernel =
+    /// .., bw = 6, prewhite = 0 | 1) for L = 5 lags, and the number of lags kept. Bartlett
+    /// equals the gmm_linear_iv values. Fails before: Parzen and Tukey-Hanning weighed lag j by
+    /// k(j / L) and Truncated stopped at lag L, so their SEs differed from R.
+    #[test]
+    fn test_validate_gmm_hac_kernels_gmm_iv() {
+        let (case, ds) = crate::test_support::load_case("gmm_hac_kernels_t4");
+        let n = case.scalar("n") as usize;
+        let lags = case.scalar("lags") as usize;
+        let mut check = Check::new(&case);
+        for (tag, kernel) in [
+            ("bartlett", HacKernel::Bartlett),
+            ("parzen", HacKernel::Parzen),
+            ("truncated", HacKernel::Truncated),
+            ("tukey_hanning", HacKernel::TukeyHanning),
+        ] {
+            for prewhite in [false, true] {
+                let tag = if prewhite {
+                    format!("{tag}_pw")
+                } else {
+                    tag.to_string()
+                };
+                let mut cfg = GeneralGmmConfig::default();
+                cfg.kernel = kernel;
+                cfg.bandwidth = Some(lags);
+                cfg.prewhite = prewhite;
+                let r = fit(&ds, cfg);
+                pin(&mut check, &tag, &r, Tol::coef(n), Tol::se(n), true);
+                check.scalar(
+                    &format!("{tag}_n_weights"),
+                    (r.hac_lags.expect("lag count") + 1) as f64,
+                    Tol::exact(),
+                );
+            }
+        }
+        // deviation ECON-68: qs, qs_pw (Quadratic Spectral keeps the L-lag rule; sandwich sums
+        // every lag)
+        check.finish();
     }
 
     /// gmm(type = "cue", vcov = "MDS" | HAC Bartlett with bw = 6, prewhite = 0) with
@@ -2578,9 +2668,10 @@ mod tests {
             )
             .map(|m| m.omega)
         };
-        // Truncated: weight 1 for every lag <= bw, so lags 1..=49 for all of these
-        let reference = w(49);
-        for bw in [50, 500, usize::MAX] {
+        // Truncated: weight 1 for every lag <= bw + 1 (k(1) = 1), so lags 1..=49 for all of
+        // these
+        let reference = w(48);
+        for bw in [49, 50, 500, usize::MAX] {
             match (&reference, &w(bw)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "bandwidth {bw}"),
                 (Err(_), Err(_)) => {}

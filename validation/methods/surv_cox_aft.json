@@ -34,13 +34,7 @@
         "row-order invariance"
       ],
       "tolerance": "validation/README.md: n = 227/228 coefficients 1e-8, SE/z/CI/tests/logLik 1e-6, p 1e-6 relative + 1e-12 absolute; n = 10 coefficients 1e-6, SE/statistics 1e-5; counts exact; default-eps fits 1e-7 (Tol::iterative)",
-      "deviations": [
-        {
-          "finding": "ECON-89",
-          "quantity": "concordance and its SE",
-          "note": "Tier 4: ad hoc SE formula and tied-time pairing differ from survival::concordance; not pinned"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

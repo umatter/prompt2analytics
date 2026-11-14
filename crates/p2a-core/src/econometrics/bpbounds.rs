@@ -91,6 +91,7 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::econometrics::survival::conf_percent;
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::stats::robust::percentile_interval;
@@ -164,8 +165,25 @@ pub struct CellProbabilities {
     pub n_z1: usize,
 }
 
+/// A 0/1 value within 1e-9; anything else (non-finite, 0.4, 2) is refused, naming the
+/// column and the 0-based row.
+fn binary_value(v: f64, column: &str, row: usize) -> EconResult<u8> {
+    if v.is_finite() {
+        if v.abs() <= 1e-9 {
+            return Ok(0);
+        }
+        if (v - 1.0).abs() <= 1e-9 {
+            return Ok(1);
+        }
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!("{column} must be binary (0 or 1), found {v} at row {row} (0-based)"),
+    })
+}
+
 impl CellProbabilities {
-    /// Compute cell probabilities from raw binary data.
+    /// Compute cell probabilities from raw binary data: every value of Z, D and Y must be 0
+    /// or 1 (within 1e-9).
     pub fn from_data(
         z: &ArrayView1<f64>,
         d: &ArrayView1<f64>,
@@ -189,26 +207,9 @@ impl CellProbabilities {
         let mut count_11_z1 = 0usize;
 
         for i in 0..n {
-            let zi = z[i].round() as i32;
-            let di = d[i].round() as i32;
-            let yi = y[i].round() as i32;
-
-            // Validate binary values
-            if zi != 0 && zi != 1 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!("Z must be binary (0 or 1), found {} at index {}", z[i], i),
-                });
-            }
-            if di != 0 && di != 1 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!("D must be binary (0 or 1), found {} at index {}", d[i], i),
-                });
-            }
-            if yi != 0 && yi != 1 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!("Y must be binary (0 or 1), found {} at index {}", y[i], i),
-                });
-            }
+            let zi = binary_value(z[i], "Z", i)?;
+            let di = binary_value(d[i], "D", i)?;
+            let yi = binary_value(y[i], "Y", i)?;
 
             match (zi, di, yi) {
                 (0, 0, 0) => count_00_z0 += 1,
@@ -373,8 +374,21 @@ pub struct BPBoundsResult {
     /// Number of bootstrap replications (if bootstrap was used)
     pub n_bootstrap: Option<usize>,
 
+    /// Number of bootstrap replications whose bounds could be computed (if bootstrap was
+    /// used); fewer than 100 give no intervals.
+    #[serde(default)]
+    pub n_bootstrap_valid: Option<usize>,
+
+    /// Level of the bootstrap intervals, 1 - alpha.
+    #[serde(default = "default_ci_level")]
+    pub ci_level: f64,
+
     /// Warnings about the estimation
     pub warnings: Vec<String>,
+}
+
+fn default_ci_level() -> f64 {
+    0.95
 }
 
 impl fmt::Display for BPBoundsResult {
@@ -424,7 +438,13 @@ impl fmt::Display for BPBoundsResult {
 
         if let Some((ci_lower, ci_upper)) = self.overall_ci {
             writeln!(f)?;
-            writeln!(f, "  Overall 95% CI: [{:.4}, {:.4}]", ci_lower, ci_upper)?;
+            writeln!(
+                f,
+                "  Overall {}% CI: [{:.4}, {:.4}]",
+                conf_percent(self.ci_level),
+                ci_lower,
+                ci_upper
+            )?;
         }
 
         writeln!(f)?;
@@ -542,17 +562,26 @@ pub fn run_bp_bounds(
     // Check if Wald estimate is within bounds
     if wald_estimate < ace_lower - 0.001 || wald_estimate > ace_upper + 0.001 {
         warnings.push(format!(
-            "Wald estimate ({:.4}) is outside the Balke-Pearl bounds [{:.4}, {:.4}]. \
-             This suggests the monotonicity or exclusion restriction assumptions may be violated.",
+            "The Wald ratio ({:.4}) lies outside the Balke-Pearl bounds [{:.4}, {:.4}]. The \
+             Wald ratio estimates the effect among compliers, which can lie outside bounds on \
+             the average effect over the whole population even when every assumption holds.",
             wald_estimate, ace_lower, ace_upper
         ));
     }
 
     // Bootstrap confidence intervals
-    let (ace_lower_ci, ace_upper_ci, overall_ci) = if config.bootstrap_ci {
-        compute_bootstrap_ci(z, d, y, &config)?
+    let (ace_lower_ci, ace_upper_ci, overall_ci, n_bootstrap_valid) = if config.bootstrap_ci {
+        let (lo, hi, overall, valid) = compute_bootstrap_ci(z, d, y, &config)?;
+        if valid < MIN_VALID_BOOTSTRAP {
+            warnings.push(format!(
+                "{valid} of {} bootstrap draws were valid; at least {MIN_VALID_BOOTSTRAP} are \
+                 needed for a percentile interval, so no intervals are reported",
+                config.n_bootstrap
+            ));
+        }
+        (lo, hi, overall, Some(valid))
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
 
     // Warn if bounds are wide
@@ -592,6 +621,8 @@ pub fn run_bp_bounds(
         } else {
             None
         },
+        n_bootstrap_valid,
+        ci_level: 1.0 - config.alpha,
         warnings,
     })
 }
@@ -790,14 +821,25 @@ fn instrumental_inequality_warnings(probs: &CellProbabilities) -> Vec<String> {
         .collect()
 }
 
+/// The fewest valid bootstrap draws that give a percentile interval.
+const MIN_VALID_BOOTSTRAP: usize = 100;
+
+/// The bootstrap intervals of the two bounds and the overall interval.
+type BootstrapIntervals = (
+    Option<(f64, f64)>,
+    Option<(f64, f64)>,
+    Option<(f64, f64)>,
+    usize,
+);
+
 /// Compute bootstrap confidence intervals for the bounds (seeded; `seed = None` uses
-/// [`DEFAULT_BOOTSTRAP_SEED`]).
+/// [`DEFAULT_BOOTSTRAP_SEED`]), and the number of valid draws.
 fn compute_bootstrap_ci(
     z: &ArrayView1<f64>,
     d: &ArrayView1<f64>,
     y: &ArrayView1<f64>,
     config: &BPBoundsConfig,
-) -> EconResult<(Option<(f64, f64)>, Option<(f64, f64)>, Option<(f64, f64)>)> {
+) -> EconResult<BootstrapIntervals> {
     let n = z.len();
     let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
 
@@ -844,9 +886,9 @@ fn compute_bootstrap_ci(
         }
     }
 
-    if lower_bounds.len() < 100 {
-        // Not enough valid bootstrap samples
-        return Ok((None, None, None));
+    let valid = lower_bounds.len();
+    if valid < MIN_VALID_BOOTSTRAP {
+        return Ok((None, None, None, valid));
     }
 
     let lower_ci = bootstrap_interval(&lower_bounds, config.alpha)?;
@@ -855,7 +897,7 @@ fn compute_bootstrap_ci(
     // Overall CI: most conservative interval
     let overall_ci = (lower_ci.0, upper_ci.1);
 
-    Ok((Some(lower_ci), Some(upper_ci), Some(overall_ci)))
+    Ok((Some(lower_ci), Some(upper_ci), Some(overall_ci), valid))
 }
 
 /// Compute Balke-Pearl bounds from pre-computed cell probabilities.
@@ -897,6 +939,8 @@ pub fn bp_bounds_from_probs(probs: CellProbabilities, monotonicity: bool) -> BPB
         bounds_width,
         n_obs,
         n_bootstrap: None,
+        n_bootstrap_valid: None,
+        ci_level: default_ci_level(),
         warnings,
     }
 }
@@ -1456,5 +1500,165 @@ mod tests {
                 },
             )
         }));
+    }
+
+    fn invalid_message<T: std::fmt::Debug>(r: EconResult<T>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bpbounds_non_binary_values_are_refused() {
+        let base = || {
+            (
+                vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+                vec![0.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+                vec![1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            )
+        };
+        let mut config = BPBoundsConfig::default();
+        config.bootstrap_ci = false;
+        let run = |z: Vec<f64>, d: Vec<f64>, y: Vec<f64>| {
+            run_bp_bounds(
+                &Array1::from(z).view(),
+                &Array1::from(d).view(),
+                &Array1::from(y).view(),
+                config.clone(),
+            )
+        };
+        let (mut z, d, y) = base();
+        z[2] = 0.4;
+        let m = invalid_message(run(z, d, y));
+        assert!(
+            m.contains("Z must be binary") && m.contains("row 2 (0-based)"),
+            "{m}"
+        );
+        let (z, mut d, y) = base();
+        d[4] = 2.0;
+        let m = invalid_message(run(z, d, y));
+        assert!(m.contains("D must be binary") && m.contains("row 4"), "{m}");
+        let (z, d, mut y) = base();
+        y[0] = f64::NAN;
+        let m = invalid_message(run(z, d, y));
+        assert!(m.contains("Y must be binary") && m.contains("row 0"), "{m}");
+        let (mut z, d, y) = base();
+        z[3] = 0.5;
+        assert!(invalid_message(run(z, d, y)).contains("0.5"));
+        // within 1e-9 of 1 counts as 1
+        let (mut z, d, y) = base();
+        z[1] = 1.0000000001;
+        let a = run(z, d.clone(), y.clone()).unwrap();
+        let b = run(base().0, d, y).unwrap();
+        assert_eq!(a.ace_lower, b.ace_lower);
+        assert_eq!(a.ace_upper, b.ace_upper);
+    }
+
+    #[test]
+    fn test_bpbounds_wald_outside_bounds_note() {
+        // A table whose complier effect lies outside the population bounds.
+        let probs = CellProbabilities {
+            p00_z0: 0.45,
+            p01_z0: 0.05,
+            p10_z0: 0.05,
+            p11_z0: 0.45,
+            p00_z1: 0.05,
+            p01_z1: 0.05,
+            p10_z1: 0.05,
+            p11_z1: 0.85,
+            n_z0: 100,
+            n_z1: 100,
+        };
+        let m = probs.marginals();
+        let (wald, _) = compute_wald_estimate(&probs, &m);
+        let (lo, hi) = compute_bounds_without_monotonicity(&probs);
+        assert!(
+            wald < lo - 0.001 || wald > hi + 0.001,
+            "{wald} in [{lo}, {hi}]"
+        );
+        // rebuild the data and run
+        let mut z = Vec::new();
+        let mut d = Vec::new();
+        let mut y = Vec::new();
+        for (zz, cells) in [
+            (
+                0.0,
+                [(0.0, 0.0, 45), (0.0, 1.0, 5), (1.0, 0.0, 5), (1.0, 1.0, 45)],
+            ),
+            (
+                1.0,
+                [(0.0, 0.0, 5), (0.0, 1.0, 5), (1.0, 0.0, 5), (1.0, 1.0, 85)],
+            ),
+        ] {
+            for (dd, yy, cnt) in cells {
+                for _ in 0..cnt {
+                    z.push(zz);
+                    d.push(dd);
+                    y.push(yy);
+                }
+            }
+        }
+        let mut config = BPBoundsConfig::default();
+        config.bootstrap_ci = false;
+        let r = run_bp_bounds(
+            &Array1::from(z).view(),
+            &Array1::from(d).view(),
+            &Array1::from(y).view(),
+            config,
+        )
+        .unwrap();
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.contains("outside the Balke-Pearl bounds"))
+            .expect("outside-bounds note");
+        assert!(w.contains("compliers"), "{w}");
+        assert!(!w.contains("violated"), "{w}");
+    }
+
+    fn small_binary_data() -> (Array1<f64>, Array1<f64>, Array1<f64>) {
+        let n = 200;
+        let z: Vec<f64> = (0..n).map(|i| f64::from(u8::from(i % 2 == 0))).collect();
+        let d: Vec<f64> = (0..n)
+            .map(|i| f64::from(u8::from((i % 2 == 0 && i % 7 != 0) || i % 11 == 0)))
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| f64::from(u8::from((d[i] == 1.0 && i % 3 != 0) || i % 5 == 0)))
+            .collect();
+        (Array1::from(z), Array1::from(d), Array1::from(y))
+    }
+
+    #[test]
+    fn test_bpbounds_few_valid_bootstrap_draws_warn() {
+        let (z, d, y) = small_binary_data();
+        let mut config = BPBoundsConfig::default();
+        config.n_bootstrap = 20;
+        config.seed = Some(3);
+        let r = run_bp_bounds(&z.view(), &d.view(), &y.view(), config).unwrap();
+        assert!(r.ace_lower_ci.is_none() && r.overall_ci.is_none());
+        assert_eq!(r.n_bootstrap, Some(20));
+        assert_eq!(r.n_bootstrap_valid, Some(20));
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with(
+                "20 of 20 bootstrap draws were valid; at least 100 are needed for a percentile interval"
+            )),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_bpbounds_display_prints_ci_level() {
+        let (z, d, y) = small_binary_data();
+        let mut config = BPBoundsConfig::default();
+        config.n_bootstrap = 200;
+        config.alpha = 0.1;
+        config.seed = Some(3);
+        let r = run_bp_bounds(&z.view(), &d.view(), &y.view(), config).unwrap();
+        assert_eq!(r.ci_level, 0.9);
+        let text = format!("{r}");
+        assert!(text.contains("Overall 90% CI"), "{text}");
+        assert!(!text.contains("95%"), "{text}");
     }
 }

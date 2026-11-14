@@ -80,12 +80,14 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cor_matrix_small_t4.csv` | 5 × 3 (id, a, b; b missing in row 5) | `stat_cor_matrix_t4` | `r/cases/stats_descriptive_t4.R` | literal values: a = 1, 2, 3, 4, 100 |
 | `generated/cor_matrix_t4.csv` | 40 × 6 (id, a, b, lab, c, i; i Int64, lab text; 2-3 missing cells per numeric column in different rows) | `stat_cor_matrix_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261114 |
 | `generated/cor_test_t4.csv` | 1576 × 3 (set, x, y) | `stat_cor_test_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261113; `pear`, `perm` and the perfect sets literal values |
+| `generated/cox_info_singular.csv` | 8 × 4 (time, status, x, z) | `surv_cox_info_singular_t4` | `r/cases/surv_concordance_t4.R` | literal values: `x` varies only among the two rows censored before the first event, so it is constant in every event-time risk set |
 | `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
 | `generated/density_t4.csv` | 284 × 2 (set, x) | `stat_density_t4` | `r/cases/stats_descriptive_t4.R` | seed 1; `x9`, `ties`, `iqr0`, `const`, `zero`, `dx` literal values |
 | `generated/describe_t4.csv` | 12 × 5 (id, e, o, ni, g; ni Int64, o missing in one row, ni in two, g text) | `stat_describe_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261115 |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/hac_truncated_indefinite.csv` | 40 × 2 (y, x) | `hac_truncated_indefinite` | `r/cases/reg_vcov_t4.R` | seed 5, errors AR(-0.7) |
+| `generated/hettx_frt_sim.csv` | 40 × 5 (y_het, y_homo, treat, x1, x2) | `hettx_dfm_t4` | `r/cases/causal_hettx_t4.R` | seed 20261113; 20 treated (fixed design), `y_het` with effect 1 + 1.5 x1, `y_homo` with the constant effect 2; DFM randomization test of a constant effect |
 | `generated/kalman_intercepts.csv` | 50 × 2 (t, y) | `kalman_intercepts` | `r/cases/ts_statespace.R` | seed 20261124 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/line_t4_eleven.csv` | 11 × 2 (x, y) | `line_tukey_t4` | `r/cases/regression_smoothers_t4.R` | literal values: x = 1:11, an outlier at x = 11 |

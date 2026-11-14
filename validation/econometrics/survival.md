@@ -19,7 +19,17 @@ This document covers what is pinned to R's `survival` package:
   competing risks): integer, float and logical columns, rows with missing values dropped and
   reported, status coded as `Surv()` codes it.
 
-The Cox model's concordance is not R-pinned (ECON-89).
+The Cox model's concordance is reported as `survival::coxph` reports it (`concordancefit`, `timewt = "n"`): a
+pair (i, j) is comparable when i has the event and t_i < t_j, or t_i = t_j with j censored (an event tied with a
+censored time is comparable); C = (concordant + tied.x / 2) / (concordant + discordant + tied.x); the standard
+error is the infinitesimal jackknife sqrt(sum_i ((c_i - d_i) - somers (c_i + d_i + t_i))^2) / (2 npair), summed
+within clusters before squaring when the fit has `cluster`. Two Fenwick-tree sweeps over the time groups,
+O(n log n). R-pinned by `surv_concordance_t4` (lung `age + sex`, efron and breslow: counts 11910, 7793, 311, 28, 0,
+C 0.6028530028979714, SE 0.02549867776973034; `age + sex + ph.ecog`; clustered on `inst`: SE 0.01984781019980545;
+the 10-row heavy-ties fixture). The old code paired tied times differently and used sqrt(C (1 - C) / sqrt(pairs))
+as the SE (lung `age + sex`: C 0.6027). Tests: `test_validate_cox_concordance_lung`,
+`test_validate_cox_concordance_clustered_lung`, `test_validate_cox_concordance_ties_small`; the sweeps against an
+O(n^2) pair loop: `test_concordance_matches_pair_loop`.
 
 ## Reference Implementation
 
@@ -499,6 +509,20 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
   when V is singular but not zero; a zero V is an error, as above), df is their number minus one
   and p the upper tail.
 
+## Timing of the Cox fit with the concordance
+
+`run_cox_ph` (Efron ties, three covariates, a lung-like simulated DGP with integer times and censoring)
+against v0.5.0 (`f80b0131`), release builds, one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), interleaved,
+median of 21 runs, each the mean of 2,000 / 200 / 10 fits. The concordance now computes the per-observation
+counts of the jackknife SE in a second Fenwick-tree sweep; it reuses the fit's risk sets for the time order
+and ranks eta with one sort.
+
+| n | v0.5.0 µs | new µs | new / v0.5.0 |
+|---|---|---|---|
+| 100 | 111 | 110 | 0.99 |
+| 1,000 | 875 | 842 | 0.96 |
+| 10,000 | 9,908 | 9,212 | 0.93 |
+
 ## Known Differences from R
 
 1. **Invalid status codes are an error.** R's `Surv()` turns codes other than 0/1, 1/2 or logical
@@ -510,7 +534,10 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
    chi-square of 0 on 0 df.
 5. **Cox aliasing** is detected by pivoted QR on [1 | X] (tolerance 1e-7, as `lm`), where coxph uses `cholesky2`
    on the information (`toler.chol`). Both drop the later of exactly collinear columns; near-singular designs may
-   differ.
+   differ. A covariate that varies only outside the risk sets of the events (zero information at
+   beta = 0, found by an in-order Cholesky of that information with `toler.chol`'s threshold) is aliased as coxph
+   aliases it: NA coefficient, a warning naming it, the rest fitted without it. R-pinned by
+   `surv_cox_info_singular_t4` (`test_validate_cox_info_singular_covariate`).
 6. **Robust Cox tests with too few clusters.** With no more clusters than coefficients the robust Wald and robust
    score tests are NaN with a warning; coxph reports generalized-inverse statistics. A single-level cluster column
    is refused (coxph returns a variance of about 0).
@@ -518,8 +545,6 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
    explicitly, which the core cannot see; the CLI and MCP surfaces decide.
 8. **AFT start values** (least squares on ln t) differ from survreg's, so iteration counts can differ; the
    estimates agree to the tolerances below.
-9. **Cox concordance** and its SE are not R-pinned (ECON-89: the SE formula and the pairing of tied times differ
-   from `survival::concordance`).
 
 The confidence interval type is `conf_type` "log" (default, as R), "log-log" or "plain"; before
 ECON-7 was fixed p2a used an undisclosed, broken log-log band.

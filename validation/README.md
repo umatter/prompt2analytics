@@ -364,7 +364,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Negative binomial, zero-inflated Poisson and NB (MASS::glm.nb, pscl::zeroinfl) | [count_models.md](econometrics/count_models.md) | R-pinned, known deviations (ECON-64) |
 | Hurdle models (rows used) | [hurdle.md](econometrics/hurdle.md) | R-pinned, known deviations (ECON-16) |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | R-pinned |
-| General GMM (gmm::gmm: linear IV and normal-distribution moments; two-step, iterated, CUE, fixed W) | [general_gmm.md](econometrics/general_gmm.md) | R-pinned, known deviations (ECON-68) |
+| General GMM (gmm::gmm: linear IV and normal-distribution moments; two-step, iterated, CUE, fixed W; HAC kernels on sandwich's lag convention) | [general_gmm.md](econometrics/general_gmm.md) | R-pinned, known deviations (ECON-68) |
 | Marginal treatment effects by local IV | [ivmte.md](econometrics/ivmte.md) | R-pinned |
 | Diff-in-Diff (2x2, lm with HC1 and cluster-robust SEs) | [did.md](econometrics/did.md) | R-pinned |
 | Goodman-Bacon decomposition (bacondecomp) | [bacon.md](econometrics/bacon.md) | R-pinned |
@@ -386,7 +386,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
 | Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-22, CAUS-23) |
 | Double/debiased ML (PLR, IRM, PLIV, IIVM) | [doubleml.md](econometrics/doubleml.md) | R-pinned |
-| Heterogeneous effects (hettx): effect summary with type-7 quantiles and IQR statistic, regression imputation on an aliased arm | [hettx.md](econometrics/hettx.md) | R-pinned |
+| Heterogeneous effects (hettx): effect summary with type-7 quantiles and IQR statistic, regression imputation on an aliased arm, the constant-effect SKS FRT and the HC2 interaction test | [hettx.md](econometrics/hettx.md) | R-pinned |
 | Synthetic control (Synth: simplex QP, V search) | [synth.md](econometrics/synth.md) | R-pinned, known deviations (CAUS-40) |
 | Synthetic control with prediction intervals (SCPI quantities) | [scpi.md](econometrics/scpi.md) | R-pinned, known deviations (CAUS-32) |
 | Generalized synthetic control (gsynth / fect: IFE, matrix completion, bootstrap) | [gsynth.md](econometrics/gsynth.md) | R-pinned, known deviations (CAUS-41, CAUS-43, CAUS-44) |
@@ -406,12 +406,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Survival Analysis
 | Method | File | Status |
 |--------|------|--------|
-| Kaplan-Meier | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
-| Log-Rank Test | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
-| Survival columns (Int64, na.omit, Surv() status coding) | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
-| Cox PH (Breslow/Efron, robust and clustered SEs) | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
-| AFT Models | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
-| Competing Risks | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
+| Kaplan-Meier | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45) |
+| Log-Rank Test | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45) |
+| Survival columns (Int64, na.omit, Surv() status coding) | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45) |
+| Cox PH (Breslow/Efron, robust and clustered SEs) | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45) |
+| AFT Models | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45) |
+| Competing Risks | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45) |
 
 ### Time Series
 | Method | File | Status |

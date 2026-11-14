@@ -144,7 +144,7 @@ pub struct PanelGlsResult {
 
 impl ResultNotes for PanelGlsResult {
     fn notes_warnings(&self) -> Vec<String> {
-        self.warnings.clone()
+        super::types::notes_without_missing(&self.warnings, &self.missing)
     }
 }
 

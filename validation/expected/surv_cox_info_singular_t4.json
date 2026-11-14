@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "surv_cox_info_singular_t4",
+  "area": "econometrics/survival",
+  "method": "Cox PH with a covariate that has no variation within the event-time risk sets: NA coefficient, the rest as the fit without it",
+  "reference": "survival::coxph(Surv(time, status) ~ x + z, coxph.control(eps = 1e-12, toler.chol = 1e-13))",
+  "call": "coxph(Surv(time, status) ~ x + z, data = cox_info_singular)",
+  "dataset": "validation/datasets/generated/cox_info_singular.csv",
+  "datasets": ["validation/datasets/generated/cox_info_singular.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "x_is_na": 1,
+    "coef_z": -0.5875184920647728,
+    "se_z": 0.61447353547678463,
+    "loglik_null": -5.1929568508902104,
+    "loglik": -4.7425350201868701,
+    "score_test": 0.99973981917432586,
+    "wald_test": 0.91419052272081913,
+    "concordance": 0.66666666666666663,
+    "concordance_se": 0.18002057495577389
+  }
+}

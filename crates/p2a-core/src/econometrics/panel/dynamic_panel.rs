@@ -99,7 +99,7 @@ use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::SignificanceLevel;
 
-use super::utils::{EqKind, GmmEquations, GmmLagSpec, gmm_equations, h_entry};
+use super::utils::{EqKind, GmmEquations, GmmLagSpec, gmm_equations, h_entry, label_list};
 
 /// The inversions of the L x L weighting matrices hold about this many L x L matrices at
 /// their peak: the moment matrix and its symmetrised and scaled copies, the
@@ -539,12 +539,7 @@ impl fmt::Display for GmmResult {
 impl ResultNotes for GmmResult {
     /// The warnings without the missing-value note, which Display prints as its last line.
     fn notes_warnings(&self) -> Vec<String> {
-        let note = self.missing.note();
-        self.warnings
-            .iter()
-            .filter(|w| Some(w.as_str()) != note.as_deref())
-            .cloned()
-            .collect()
+        super::types::notes_without_missing(&self.warnings, &self.missing)
     }
 }
 
@@ -932,16 +927,6 @@ fn ab_mtest(
     }
     let stat = num / denom.sqrt();
     (stat, normal_two_sided(stat))
-}
-
-/// "'a', 'b', 'c' (and 4 more)": at most five labels.
-fn label_list(labels: &[String]) -> String {
-    let shown: Vec<String> = labels.iter().take(5).map(|l| format!("'{l}'")).collect();
-    let mut text = shown.join(", ");
-    if labels.len() > 5 {
-        text.push_str(&format!(" (and {} more)", labels.len() - 5));
-    }
-    text
 }
 
 /// Arellano-Bond difference GMM, as `plm::pgmm(transformation = "d")`, or Blundell-Bond

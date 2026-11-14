@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_hettx_dfm",
+      "name": "hettx: Neyman ATE, DFM (2016) randomization test of a constant effect (SKS over the gamma interval), DFM (2019) systematic-variation Wald test (HC2), conditional KS test of idiosyncratic variation",
+      "category": "econometrics",
+      "reference": "base-R transcription of Ding, Feller & Miratrix (2016, 2019) with sandwich::vcovHC(type = 'HC2'); hettx not installed",
+      "doc": "validation/econometrics/hettx.md",
+      "cases": [
+        "hettx_dfm_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_frt_sks_stored_assignments",
+        "p2a-core::econometrics::hettx::tests::test_validate_hettx_systematic_interaction_hc2"
+      ],
+      "quantities": [
+        "ATE and Neyman SE",
+        "1 - gamma interval and the tau grid",
+        "SKS numerator",
+        "p(tau) on every grid point, the max + gamma p-value, the plug-in p-value (stored assignments)",
+        "interaction coefficients, HC2 SEs, Wald chi-squared and p",
+        "systematic variance",
+        "conditional KS numerator and its p-value (plug-in)"
+      ],
+      "tolerance": "validation/README.md, n < 100: coefficients 1e-6, SEs and statistics 1e-5; integer numerators and p-values (multiples of 1/200) exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
