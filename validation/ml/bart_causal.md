@@ -47,7 +47,10 @@ Permutation importance of the estimated CATE: for each covariate (the propensity
 the rows of the squared change of `tau(x) = mu_1(x) - mu_0(x)` when that covariate's column is permuted, reported as
 shares that sum to 1 (all zeros when no permutation changes the CATE). It ranks the covariates the effect varies
 with, not those that predict the outcome; the permutations use their own random stream, so the estimates do not
-depend on them.
+depend on them. Only the trees that split on the permuted covariate can change, and in such a tree a row's
+prediction changes only where a split on that covariate sends the permuted value the other way, so the pass walks
+each row through those trees once (`bart_causal_importance_matches_the_full_permutation_pass` checks it against
+permuting the whole column and predicting both ensembles everywhere).
 
 ### Differences from Full BART
 
@@ -238,6 +241,7 @@ Location: `crates/p2a-core/src/ml/bart_causal.rs` (module tests)
 | `bart_causal_predict_arrays_checks_the_column_count` | Prediction checks the covariate count | Pass |
 | `bart_causal_importance_ranks_the_effect_modifier_first` | Importance ranks the effect modifier above a prognostic covariate | Pass |
 | `bart_causal_importance_is_zero_for_a_constant_cate` | A constant CATE has zero importance | Pass |
+| `bart_causal_importance_matches_the_full_permutation_pass` | The tree-restricted pass equals the full permutation pass | Pass |
 | `bart_causal_outputs_unchanged_by_the_sweep` | Golden: estimates unchanged by the importance pass | Pass |
 
 ### Integration Tests
@@ -250,18 +254,30 @@ cargo test -p p2a-core bart_causal
 
 ## Wall-clock
 
-`release`, `ci` features, base `f80b0131` against this tree, measured as for [bart.md](bart.md) (five interleaved
-rounds, one core, `RAYON_NUM_THREADS=1`, 2026-11-13, load average 26-46). Defaults (200 trees, depth 4, 100
-bootstrap replicates); n x 5 uniform design, a 0/1 treatment with probability 0.5, y = 2 x1 + 0.5 x2 + (1 + x2) w +
-noise. The change is the CATE permutation-importance pass.
+`release`, `ci` features, base `f80b0131` against this tree, measured as for [bart.md](bart.md) (one core,
+`RAYON_NUM_THREADS=1`, base and this tree interleaved with the order alternating, 2026-11-14, load average 4-42 from
+the other lanes' builds). Defaults (200 trees, depth 4, 100 bootstrap replicates); n x p uniform design, a 0/1
+treatment with probability 0.5, y = 2 x1 + 0.5 x2 + (1 + x2) w + noise. The change is mostly the CATE
+permutation-importance pass. Five rounds at p = 5, nine at p = 20.
 
-| n | base (ms) | this tree (ms) | ratio | min ratio |
-|---:|---:|---:|---:|---:|
-| 100 | 312.2 | 324.1 | 1.04 | 1.05 |
-| 1,000 | 4,832.7 | 4,949.8 | 1.02 | 1.02 |
-| 10,000 | 53,957.3 | 54,478.8 | 1.01 | 1.01 |
+| p | n | base (ms) | this tree (ms) | ratio | min ratio |
+|---:|---:|---:|---:|---:|---:|
+| 5 | 100 | 314.3 | 338.5 | 1.08 | 1.04 |
+| 5 | 1,000 | 4,948.9 | 5,153.7 | 1.04 | 1.05 |
+| 5 | 10,000 | 56,301.2 | 57,736.0 | 1.03 | 1.09 |
+| 20 | 100 | 300.6 | 311.6 | 1.04 | 1.04 |
+| 20 | 1,000 | 4,779.4 | 5,044.1 | 1.06 | 1.07 |
 
-Within 1.1x at every size, so the importance pass uses every row.
+A first version of the pass predicted both ensembles at every row for every permuted covariate; at p = 20 it took
+1.12x the base at n = 100 (nine rounds, min ratio 1.12). A cap on the rows it uses would not have helped there,
+since every row is used below 2,000. The pass now walks only the trees that split on the permuted covariate and
+leaves a row's path only where a split on it sends the permuted value the other way, which gives the same
+importance (to rounding) at a fraction of the traversals. Every row is within 1.1x, so the pass uses every row and
+there is no row cap.
+
+Peak RSS (`/usr/bin/time -v`, one fit per process), defaults at n = 10,000, p = 5: base 14,744 kB, this tree
+14,828 kB (1.01x). The importance pass holds one more vector of n (the permuted column), which `memory_bound`
+counts.
 
 ## API Reference
 

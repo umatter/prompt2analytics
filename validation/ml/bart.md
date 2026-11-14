@@ -115,6 +115,19 @@ The single traversal per tree and sweep, the kept leaf index of every row and th
 sweep cheaper even though the corrected kernel grows somewhat larger trees. The default configuration at
 n = 10,000 was not timed (several minutes per fit).
 
+**`keep_trees = true`** (opt-in, not gated): defaults at n = 1,000, this tree only, three fits each in alternation
+(2026-11-14): 12.0 s with kept trees against 12.4 s without (the same within the noise), peak RSS 30,508 kB against
+10,820 kB.
+
+**Peak RSS** (`/usr/bin/time -v`, one fit per process, defaults, 2026-11-14):
+
+| Row | n | base (kB) | this tree (kB) | ratio |
+|---|---:|---:|---:|---:|
+| BART regression, defaults | 1,000 | 11,636 | 10,820 | 0.93 |
+|  | 10,000 | 83,672 | 82,996 | 0.99 |
+
+The `n_mcmc x n` draw matrix dominates on both sides.
+
 ## Deviations
 
 BART 2.9.10's birth ratio (`bprop`) asks whether the parent of the leaf is a nog node with `tree::ntype()`, which
@@ -123,8 +136,11 @@ returns `'t'` for the root before testing for `'n'`. A birth at a child of a roo
 data silenced (`k = 1e6`) wbart averages 1.19 splits per tree on the Friedman design, against 1.38 for the
 restricted Chipman-George-McCulloch prior, which p2a's chain reproduces. p2a keeps the prior. So
 `splits_per_tree` is not compared for either case, nor are pbart's `post_sd_avg` and `width95_avg`, which sit
-about 3 Monte Carlo SDs above pbart's on average over seeds (registry deviations, finding ML-16). The other
-summaries, the split shares among them, agree.
+about 3 Monte Carlo SDs above pbart's on average over seeds (registry deviations, finding ML-16). That the
+quirk explains both gaps was checked by running p2a once with the root-nog quirk emulated: on the silenced design wbart's
+splits per tree came out at R's 1.19, and on the pbart case splits per tree (1.224 against 1.214), `post_sd_avg`
+(0.1184 against 0.1182) and `width95_avg` (0.4481 against 0.4471) all fell within 0.7 Monte Carlo SDs of pbart.
+No other difference remains. The other summaries, the split shares among them, agree.
 
 ## Not pinned
 

@@ -51,7 +51,7 @@
         {
           "finding": "ML-16",
           "quantity": "splits_per_tree, post_sd_avg, width95_avg",
-          "note": "pbart shares wbart's birth ratio at the root's children (see ml_bart_regression), which favours smaller trees; p2a samples the CGM prior, with about 1.41 splits per tree against pbart's 1.21 and posterior SDs about 3 Monte Carlo SDs wider"
+          "note": "pbart shares wbart's birth ratio at the root's children (see ml_bart_regression), which favours smaller trees; p2a samples the CGM prior, with about 1.41 splits per tree against pbart's 1.21 and posterior SDs about 3 Monte Carlo SDs wider; with the quirk emulated, splits_per_tree, post_sd_avg and width95_avg all fall within 0.7 Monte Carlo SDs of pbart"
         }
       ],
       "supersedes_legacy": []
