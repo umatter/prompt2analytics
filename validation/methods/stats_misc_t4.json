@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "spectrum_pgram_t4",
+      "name": "Smoothed and raw periodogram (spec.pgram): ordinates, frequencies, padded length, df and bandwidth over taper, spans, detrending, padding, odd n and fast padding",
+      "category": "stats",
+      "reference": "stats::spec.pgram",
+      "doc": "validation/timeseries/spectrum.md",
+      "cases": [
+        "stat_spectrum_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_raw_tapered",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_smoothed_taper_demean",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_padding",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_pgram_odd_and_fast"
+      ],
+      "quantities": [
+        "freq",
+        "spec",
+        "n.used",
+        "df",
+        "bandwidth"
+      ],
+      "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative, df and bandwidth 1e-5 relative; n.used exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spectrum_ar_t4",
+      "name": "AR spectrum (spec.ar): frequency grid, ordinates, Yule-Walker coefficients and var.pred at a fixed order and with the AIC order",
+      "category": "stats",
+      "reference": "stats::spec.ar; stats::ar.yw",
+      "doc": "validation/timeseries/spectrum.md",
+      "cases": [
+        "stat_spectrum_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_ar_fixed_order",
+        "p2a-core::stats::spectrum::tests::test_validate_spectrum_ar_aic"
+      ],
+      "quantities": [
+        "freq",
+        "spec",
+        "ar coefficients",
+        "var.pred",
+        "AIC order"
+      ],
+      "tolerance": "validation/README.md, n < 100: coefficients 1e-6 relative, var.pred 1e-5 relative; order exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "spline_t4",
+      "name": "Interpolating cubic splines (spline, splinefun): FMM, natural (outside the knots), periodic, hyman and monoH.FC; tied x averaged",
+      "category": "stats",
+      "reference": "stats::spline; stats::splinefun",
+      "doc": "validation/stats/spline.md",
+      "cases": [
+        "stat_spline_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spline::tests::test_validate_spline_fmm",
+        "p2a-core::stats::spline::tests::test_validate_spline_natural_outside",
+        "p2a-core::stats::spline::tests::test_validate_spline_periodic",
+        "p2a-core::stats::spline::tests::test_validate_spline_hyman",
+        "p2a-core::stats::spline::tests::test_validate_splinefun_monoh_fc",
+        "p2a-core::stats::spline::tests::test_validate_spline_ties"
+      ],
+      "quantities": [
+        "y at xout (fmm, natural, periodic, hyman, monoH.FC)",
+        "fmm at the default n",
+        "refusal of a non-monotone hyman spline",
+        "tied-x averages",
+        "default n after ties"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "approx_t4",
+      "name": "Linear and constant interpolation (approx): constant f at the knots, tied x averaged, rule 2",
+      "category": "stats",
+      "reference": "stats::approx",
+      "doc": "validation/stats/spline.md",
+      "cases": [
+        "stat_spline_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::spline::tests::test_validate_approx_constant_at_knots",
+        "p2a-core::stats::spline::tests::test_validate_approx_ties"
+      ],
+      "quantities": [
+        "constant approx at f = 0, 0.5, 1",
+        "linear and constant approx with ties",
+        "rule = 2"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "isoreg_t4",
+      "name": "Isotonic regression with tied x and unsorted input: yc, yf and iKnots as R (order(x, -y))",
+      "category": "stats",
+      "reference": "stats::isoreg",
+      "doc": "validation/stats/isoreg.md",
+      "cases": [
+        "stat_isoreg_t4",
+        "stat_rank_isoreg"
+      ],
+      "tests": [
+        "p2a-core::stats::isoreg::tests::test_validate_isoreg_tied_x"
+      ],
+      "quantities": [
+        "yc (tiedx, ir4, doc)",
+        "iKnots (doc, permuted tiedx)",
+        "yf (permuted tiedx)"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative; knots exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cancor_t4",
+      "name": "Canonical correlation: correlations and coefficients on a small example, without centring, and with fewer x than y columns",
+      "category": "stats",
+      "reference": "stats::cancor",
+      "doc": "validation/multivariate/cancor.md",
+      "cases": [
+        "stat_cancor_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::cancor::tests::test_validate_cancor_example",
+        "p2a-core::stats::cancor::tests::test_validate_cancor_no_centring",
+        "p2a-core::stats::cancor::tests::test_validate_cancor_fewer_x"
+      ],
+      "quantities": [
+        "cor",
+        "xcoef (sign-normalised)",
+        "ycoef (sign-normalised)"
+      ],
+      "tolerance": "validation/README.md by n (10, 100): coefficients 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "factanal_t4",
+      "name": "Factor analysis: a saturated model (dof 0, no test) and promax regression and Bartlett scores",
+      "category": "stats",
+      "reference": "stats::factanal",
+      "doc": "validation/multivariate/factanal.md",
+      "cases": [
+        "stat_factanal_t4"
+      ],
+      "tests": [
+        "p2a-core::stats::factanal::tests::test_validate_factanal_zero_df",
+        "p2a-core::stats::factanal::tests::test_validate_factanal_promax_scores"
+      ],
+      "quantities": [
+        "uniquenesses and loadings (dof 0)",
+        "dof",
+        "absence of the chi-square test",
+        "promax regression scores (first 10 rows)",
+        "promax Bartlett scores (first 10 rows)"
+      ],
+      "tolerance": "Tol::iterative(1e-4) (p2a's fixed point against R's L-BFGS-B optimum, as factanal_rotation); dof exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

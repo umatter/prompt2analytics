@@ -93,13 +93,7 @@
         "xout description"
       ],
       "tolerance": "validation/README.md, n = 10: 1e-6 relative; counts exact",
-      "deviations": [
-        {
-          "finding": "STAT-69",
-          "quantity": "method fmm",
-          "note": "only method = natural is pinned"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -175,26 +169,17 @@
         "p2a-mcp::tier3::wp56_stats_ts::test_validate_mcp_mahalanobis_threshold"
       ],
       "quantities": [
-        "spec.ci multipliers at df 18",
+        "spectrum df (spec.pgram, 6.552102376599634)",
+        "spec.ci multipliers at that df",
         "peak frequency",
+        "first five ordinates",
         "AR: no interval",
         "threshold 7.814727903251179",
         "first ten distances",
         "refusal of a singular covariance (rank 1 of 2)"
       ],
       "tolerance": "multipliers 1e-10 relative (WP40); validation/README.md otherwise; distances at their 4 printed decimals",
-      "deviations": [
-        {
-          "finding": "STAT-39",
-          "quantity": "spectrum df",
-          "note": "p2a 18 for spans c(3, 3), spec.pgram 6.552102376599634; multipliers pinned at p2a's df"
-        },
-        {
-          "finding": "STAT-68",
-          "quantity": "spectral ordinates",
-          "note": "not pinned"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -308,11 +293,6 @@
       ],
       "tolerance": "validation/README.md by n; printed values at their decimals; counts exact",
       "deviations": [
-        {
-          "finding": "STAT-16",
-          "quantity": "cancor correlations and coefficients",
-          "note": "centres pinned only"
-        },
         {
           "finding": "STAT-75",
           "quantity": "model-table SEs",

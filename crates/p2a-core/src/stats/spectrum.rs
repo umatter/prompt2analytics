@@ -27,7 +27,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
 use crate::errors::{EconError, EconResult};
-use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
+use crate::resource::{checkpoint, checkpoint_stride, try_vec, try_with_capacity};
 use crate::traits::estimator::{chi_squared_p_value, chi_squared_quantile, validate_level};
 
 fn size_overflow(what: &str) -> EconError {
@@ -63,8 +63,19 @@ pub struct SpectrumConfig {
     pub demean: bool,
 
     /// Zero-padding ratio (proportion of series length to add as zeros).
-    /// Default: 0.0. Padding increases frequency resolution.
+    /// Default: 0.0. Padding increases frequency resolution. As R's `pad`,
+    /// `trunc(n * pad_ratio)` zeros are added; a ratio of 0 or below adds none.
     pub pad_ratio: f64,
+
+    /// Pad the (already padded) series with zeros to the next highly composite
+    /// length (factors 2, 3 and 5 only), as R's `fast = TRUE`. Default: true,
+    /// R's default. A series of 97 points is then analysed at length 100.
+    #[serde(default = "default_fast")]
+    pub fast: bool,
+}
+
+fn default_fast() -> bool {
+    true
 }
 
 impl Default for SpectrumConfig {
@@ -75,6 +86,7 @@ impl Default for SpectrumConfig {
             detrend: true,
             demean: false,
             pad_ratio: 0.0,
+            fast: true,
         }
     }
 }
@@ -96,6 +108,7 @@ impl SpectrumConfig {
             detrend: true,
             demean: false,
             pad_ratio: 0.0,
+            fast: true,
         }
     }
 }
@@ -105,27 +118,29 @@ impl SpectrumConfig {
 /// Contains the estimated spectral density at a set of Fourier frequencies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectrumResult {
-    /// Frequency values (cycles per unit time).
-    /// Range: (0, 0.5] for normalized frequencies (Nyquist frequency = 0.5).
+    /// Frequency values (cycles per unit time): `j / n_used`, `j = 1..floor(n_used / 2)`, for a
+    /// periodogram; `seq(0, 0.5, length.out = n_freq)` for an AR spectrum.
     pub freq: Vec<f64>,
 
     /// Spectral density estimates at each frequency.
     /// Units: variance per unit frequency (or per Hz if data has time units).
     pub spec: Vec<f64>,
 
-    /// Smoothing bandwidth (in frequency units).
+    /// Smoothing bandwidth (in frequency units), R's `bandwidth`: the smoothing kernel's
+    /// `sqrt(sum((1/12 + i^2) k_i))` (`sqrt(1/12)` unsmoothed) divided by `n_used`.
     /// Larger bandwidth = more smoothing, lower variance, lower resolution.
     pub bandwidth: f64,
 
-    /// Degrees of freedom for confidence interval computation.
-    /// For smoothed periodogram: df ≈ 2 × bandwidth × n.
+    /// Degrees of freedom for confidence interval computation, R's `df`: the kernel's
+    /// `2 / sum(k^2)` (2 unsmoothed) divided by the taper factor `u4 / u2^2` and scaled by
+    /// `n_obs / n_used`.
     /// `f64::INFINITY` for AR spectra, which have no chi-square interval.
     pub df: f64,
 
     /// Number of observations in the original series.
     pub n_obs: usize,
 
-    /// Length of the padded series used for computation.
+    /// Length of the padded series used for computation (R's `n.used`).
     pub n_used: usize,
 
     /// Method used for estimation.
@@ -159,7 +174,7 @@ impl SpectrumResult {
     /// R's `stats:::plot.spec` rule (`spec.ci`): for `X ~ chi^2(df)` the tail `1 - level` is split
     /// in proportion to `P(X > df)` above and `P(X <= df)` below, so the multipliers are
     /// `df / qchisq(1 - (1 - level) P(X > df), df)` and `df / qchisq((1 - level) P(X <= df), df)`.
-    /// The df is p2a's own, which is not `spec.pgram`'s (STAT-39).
+    /// The df is `spec.pgram`'s.
     ///
     /// `Ok(None)` when the df is not finite and positive: an AR spectrum has no chi-square
     /// interval (R's `spec.ar` reports no df). A level outside (0, 1) is an error.
@@ -335,101 +350,96 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         });
     }
 
-    // Zero-padding length. A negative ratio saturates to 0 (no padding), as
-    // R's spec.pgram does for pad <= 0.
-    let n_pad = (n as f64 * config.pad_ratio).round() as usize;
-    let n_used = n
+    // Lengths as R's spec.pgram: N0 = n; `pad` adds `trunc(n * pad)` zeros (R's
+    // `matrix(0, nrow = N * pad)` truncates a non-integer row count, and adds
+    // none for pad <= 0); `fast` pads further to the next 2-3-5 length.
+    let padded = n as f64 * config.pad_ratio;
+    let n_pad = if padded >= 1.0 {
+        if padded >= usize::MAX as f64 {
+            return Err(size_overflow("the padded series"));
+        }
+        padded.trunc() as usize
+    } else {
+        0
+    };
+    let mut n_used = n
         .checked_add(n_pad)
         .ok_or_else(|| size_overflow("the padded series"))?;
+    if config.fast {
+        n_used = nextn(n_used).ok_or_else(|| size_overflow("the padded series"))?;
+    }
 
     if let Some(ref spans) = config.spans {
         validate_spans(spans, n_used)?;
     }
 
-    // Step 1: Preprocess - detrend or demean
-    let mut y: Vec<f64> = if config.detrend {
-        detrend(x)
+    // Steps 1-3: detrend or demean, taper and zero-pad, written straight into
+    // the FFT buffer.
+    let mut fft_buf: Vec<Complex<f64>> =
+        try_with_capacity(n_used, "the FFT buffer for the padded series")?;
+    if config.detrend {
+        let (mean, slope) = detrend_line(x);
+        let centre = (n as f64 + 1.0) / 2.0;
+        fft_buf.extend(
+            x.iter()
+                .enumerate()
+                .map(|(i, &v)| Complex::new(v - mean - slope * ((i + 1) as f64 - centre), 0.0)),
+        );
     } else if config.demean {
         let mean = x.iter().sum::<f64>() / n as f64;
-        x.iter().map(|v| v - mean).collect()
+        fft_buf.extend(x.iter().map(|&v| Complex::new(v - mean, 0.0)));
     } else {
-        x.to_vec()
-    };
-
-    // Step 2: Apply taper
-    if config.taper > 0.0 {
-        apply_cosine_taper(&mut y, config.taper);
+        fft_buf.extend(x.iter().map(|&v| Complex::new(v, 0.0)));
     }
+    apply_cosine_taper(&mut fft_buf, config.taper);
+    fft_buf.resize(n_used, Complex::new(0.0, 0.0));
 
-    // Step 4: Compute raw periodogram using FFT (O(n log n) instead of O(n²))
-    // We compute at frequencies f_j = j/n_used for j = 1, ..., floor(n_used/2)
-    // (skip f_0 = 0 as it's the mean, and we only need positive frequencies)
-    let n_freq = n_used / 2;
-
-    // Prepare FFT input: the real signal as complex values, followed by the
-    // zero padding (Step 3).
-    let mut fft_input: Vec<Complex<f64>> =
-        try_with_capacity(n_used, "the FFT buffer for the padded series")?;
-    fft_input.extend(y.iter().map(|&v| Complex::new(v, 0.0)));
-    fft_input.resize(n_used, Complex::new(0.0, 0.0));
-
-    // Compute FFT
+    // Step 4: the periodogram |X_j|^2 / N0 (R divides by the unpadded length).
+    // The FFT of a real series is conjugate-symmetric, so ordinates
+    // 0..=floor(N/2) hold the whole periodogram.
     let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(n_used);
-    fft.process(&mut fft_input);
-
-    // Extract periodogram from FFT output
-    // FFT output[j] corresponds to frequency j/n_used
-    // Power = |FFT[j]|² / n_used
-    let mut freq = Vec::with_capacity(n_freq);
-    let mut raw_periodogram = Vec::with_capacity(n_freq);
-
-    for j in 1..=n_freq {
-        let f_j = j as f64 / n_used as f64;
-        freq.push(f_j);
-
-        // Power spectral density from FFT
-        let c = &fft_input[j];
-        let power = (c.re * c.re + c.im * c.im) / n_used as f64;
-
-        // Scale by 2 for one-sided spectrum (positive frequencies only)
-        // except at Nyquist if n_used is even
-        let scale = if j == n_freq && n_used % 2 == 0 {
-            1.0
-        } else {
-            2.0
-        };
-        raw_periodogram.push(power * scale);
+    planner.plan_fft_forward(n_used).process(&mut fft_buf);
+    let half = n_used / 2;
+    let n0 = n as f64;
+    let mut pgram = try_vec(half + 1, 0.0, "the periodogram")?;
+    for (p, c) in pgram.iter_mut().zip(&fft_buf) {
+        *p = c.norm_sqr() / n0;
     }
+    // R: the zero-frequency ordinate (zero after demeaning) is replaced by the
+    // mean of its two neighbours, I_1 and I_{N-1}, before smoothing.
+    pgram[0] = 0.5 * (pgram[1] + fft_buf[n_used - 1].norm_sqr() / n0);
+    drop(fft_buf);
 
-    if raw_periodogram.iter().any(|v| !v.is_finite()) {
+    if pgram.iter().any(|v| !v.is_finite()) {
         return Err(EconError::InvalidSpecification {
             message: "the series is too large in magnitude for a periodogram".to_string(),
         });
     }
 
-    // Step 5: Smooth with modified Daniell kernel(s)
-    let (spec, bandwidth, df) = if let Some(ref spans) = config.spans {
-        let smoothed = apply_daniell_smoothing(&raw_periodogram, spans)?;
+    // Step 5: smooth with modified Daniell kernel(s), circularly as R.
+    if let Some(ref spans) = config.spans {
+        apply_daniell_smoothing(&mut pgram, n_used, spans)?;
+    }
 
-        // Compute bandwidth and degrees of freedom
-        // Bandwidth = sum of span weights / n_used
-        // For modified Daniell: effective width = (span - 1)/2 at half-weight
-        let total_width: f64 = spans.iter().map(|&s| s as f64).product::<f64>().sqrt();
-        let bw = total_width / n_used as f64;
+    // Ordinates 1..=floor(N/2), corrected for the taper's loss of power.
+    let u2 = 1.0 - (5.0 / 8.0) * config.taper * 2.0;
+    pgram.remove(0);
+    for v in &mut pgram {
+        *v /= u2;
+    }
+    let spec = pgram;
+    let freq: Vec<f64> = (1..=half).map(|j| j as f64 / n_used as f64).collect();
 
-        // Degrees of freedom ≈ 2 * n_used / L where L is effective kernel length
-        // For convolved Daniell kernels: df ≈ 2 * product of spans
-        let kernel_df: f64 = 2.0 * spans.iter().map(|&s| s as f64).product::<f64>();
-        let effective_df = kernel_df.min(2.0 * n_freq as f64);
-
-        (smoothed, bw, effective_df)
-    } else {
-        // Raw periodogram - no smoothing
-        // df = 2 for chi-squared(2) distribution of periodogram ordinates
-        let bw = 1.0 / n_used as f64; // Frequency resolution
-        (raw_periodogram, bw, 2.0)
+    // R's df and bandwidth: those of the combined kernel (df.kernel = 2 / sum(k^2),
+    // bandwidth.kernel = sqrt(sum((1/12 + i^2) k_i)); 2 and sqrt(1/12) unsmoothed), corrected
+    // for the taper and the padding.
+    let (kernel_df, kernel_bw) = match config.spans {
+        Some(ref spans) => kernel_df_bandwidth(spans)?,
+        None => (2.0, (1.0f64 / 12.0).sqrt()),
     };
+    let u4 = 1.0 - (93.0 / 128.0) * config.taper * 2.0;
+    let df = kernel_df / (u4 / (u2 * u2)) * (n as f64 / n_used as f64);
+    let bandwidth = kernel_bw / n_used as f64;
 
     Ok(SpectrumResult {
         freq,
@@ -446,82 +456,105 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
     })
 }
 
-/// Remove linear trend from a series.
-///
-/// Fits y = a + b*t by least squares and returns residuals.
-fn detrend(x: &[f64]) -> Vec<f64> {
-    let n = x.len();
-    if n == 0 {
-        return vec![];
+/// The smallest integer `>= n` whose only prime factors are 2, 3 and 5 (R's
+/// `nextn`); `None` when it does not fit in `usize`. Found by enumerating
+/// `3^b 5^c` and the smallest power of two that lifts each to `n`.
+fn nextn(n: usize) -> Option<usize> {
+    let target = n.max(1) as u128;
+    let mut best = u128::MAX;
+    let mut p5: u128 = 1;
+    loop {
+        let mut p35 = p5;
+        loop {
+            let mut v = p35;
+            while v < target {
+                v *= 2;
+            }
+            best = best.min(v);
+            if p35 >= target {
+                break;
+            }
+            p35 *= 3;
+        }
+        if p5 >= target {
+            break;
+        }
+        p5 *= 5;
     }
-
-    // Compute linear regression coefficients
-    // t = 0, 1, 2, ..., n-1
-    // mean(t) = (n-1)/2
-    // sum(t) = n(n-1)/2
-    // sum(t^2) = n(n-1)(2n-1)/6
-
-    let n_f = n as f64;
-    let sum_t = n_f * (n_f - 1.0) / 2.0;
-    let sum_t2 = n_f * (n_f - 1.0) * (2.0 * n_f - 1.0) / 6.0;
-    let mean_t = sum_t / n_f;
-
-    let sum_x: f64 = x.iter().sum();
-    let mean_x = sum_x / n_f;
-
-    // sum((t - mean_t) * (x - mean_x)) = sum(t*x) - n * mean_t * mean_x
-    let sum_tx: f64 = x.iter().enumerate().map(|(t, &v)| t as f64 * v).sum();
-    let cov_tx = sum_tx - n_f * mean_t * mean_x;
-
-    // var(t) = sum(t^2)/n - mean_t^2
-    let var_t = sum_t2 / n_f - mean_t * mean_t;
-
-    let slope = if var_t > 1e-15 {
-        cov_tx / (n_f * var_t)
-    } else {
-        0.0
-    };
-    let intercept = mean_x - slope * mean_t;
-
-    // Return residuals
-    x.iter()
-        .enumerate()
-        .map(|(t, &v)| v - (intercept + slope * t as f64))
-        .collect()
+    usize::try_from(best).ok()
 }
 
-/// Apply split cosine bell taper to a series.
-///
-/// Tapers the first and last `p * n` points using a cosine bell function:
-/// w(t) = 0.5 * (1 - cos(π * t / m))  for t = 0, ..., m-1
-/// w(t) = 1  for t = m, ..., n-m-1
-/// w(t) = 0.5 * (1 - cos(π * (n-t) / m))  for t = n-m, ..., n-1
-///
-/// The series is scaled to preserve variance.
-fn apply_cosine_taper(x: &mut [f64], p: f64) {
+/// The degrees of freedom `2 / sum(k^2)` and bandwidth `sqrt(sum((1/12 + i^2) k_i))` of the
+/// convolution `k` of the modified Daniell kernels of `spans` (R's `df.kernel` and
+/// `bandwidth.kernel` of `kernel("modified.daniell", spans %/% 2)`). The spans are validated, so
+/// the kernel is no longer than the series.
+fn kernel_df_bandwidth(spans: &[usize]) -> EconResult<(f64, f64)> {
+    let total: usize = spans.iter().map(|s| s / 2).sum();
+    let mut k = try_vec(2 * total + 1, 0.0, "the smoothing kernel")?;
+    let mut next = try_vec(2 * total + 1, 0.0, "the smoothing kernel")?;
+    k[0] = 1.0;
+    let mut len = 1;
+    for &span in spans {
+        checkpoint()?;
+        let m = span / 2;
+        if m == 0 {
+            continue;
+        }
+        let inner = 1.0 / (2 * m) as f64;
+        let new_len = len + 2 * m;
+        next[..new_len].fill(0.0);
+        for (i, &ki) in k[..len].iter().enumerate() {
+            for j in 0..=2 * m {
+                let w = if j == 0 || j == 2 * m {
+                    0.5 * inner
+                } else {
+                    inner
+                };
+                next[i + j] += ki * w;
+            }
+        }
+        std::mem::swap(&mut k, &mut next);
+        len = new_len;
+    }
+    let half = (len - 1) as f64 / 2.0;
+    let sum_sq: f64 = k[..len].iter().map(|v| v * v).sum();
+    let moment: f64 = k[..len]
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (1.0 / 12.0 + (i as f64 - half).powi(2)) * v)
+        .sum();
+    Ok((2.0 / sum_sq, moment.sqrt()))
+}
+
+/// The mean and slope of R's `spec.pgram` detrending: the detrended value at
+/// time `t = 1..n` is `x - mean - slope (t - (n + 1) / 2)`, with
+/// `slope = sum(x t') / sum(t'^2)` over the centred times `t'`.
+fn detrend_line(x: &[f64]) -> (f64, f64) {
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let centre = (n + 1.0) / 2.0;
+    let sum_t2 = n * (n * n - 1.0) / 12.0;
+    let sum_xt: f64 = x
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| v * ((i + 1) as f64 - centre))
+        .sum();
+    let slope = if sum_t2 > 0.0 { sum_xt / sum_t2 } else { 0.0 };
+    (mean, slope)
+}
+
+/// R's split cosine bell taper (`spec.taper`): with `m = floor(n p)`, the
+/// first and last `m` values are multiplied by
+/// `w_j = 0.5 (1 - cos(pi (2j - 1) / (2m)))`, `j = 1..m` (mirrored at the
+/// end). There is no renormalisation: `spectrum` divides the periodogram by
+/// R's `u2 = 1 - (5/8) 2p` instead.
+fn apply_cosine_taper(x: &mut [Complex<f64>], p: f64) {
     let n = x.len();
-    if n == 0 || p <= 0.0 {
-        return;
-    }
-
-    let m = ((p * n as f64).round() as usize).max(1).min(n / 2);
-
-    // Compute taper weights
-    let mut taper_weights = vec![1.0; n];
-    for t in 0..m {
-        let w = 0.5 * (1.0 - (PI * t as f64 / m as f64).cos());
-        taper_weights[t] = w;
-        taper_weights[n - 1 - t] = w;
-    }
-
-    // Compute normalization factor to preserve variance
-    // sum of squared weights should equal n for variance preservation
-    let sum_w2: f64 = taper_weights.iter().map(|w| w * w).sum();
-    let norm = (n as f64 / sum_w2).sqrt();
-
-    // Apply normalized taper
-    for (t, v) in x.iter_mut().enumerate() {
-        *v *= taper_weights[t] * norm;
+    let m = ((n as f64 * p).floor() as usize).min(n / 2);
+    for j in 1..=m {
+        let w = 0.5 * (1.0 - (PI * (2 * j - 1) as f64 / (2 * m) as f64).cos());
+        x[j - 1] *= w;
+        x[n - j] *= w;
     }
 }
 
@@ -541,26 +574,30 @@ fn compute_fourier_coef(x: &[f64], freq: f64) -> (f64, f64) {
     (cos_sum, sin_sum)
 }
 
-/// Apply modified Daniell smoothing to a periodogram.
+/// Apply modified Daniell smoothing to a periodogram, circularly (R's
+/// `kernapply(circular = TRUE)` with `kernel("modified.daniell", spans %/% 2)`).
 ///
-/// The modified Daniell kernel is a moving average with half-weight at endpoints:
-/// w_k = 1/(2m) for k = -m or k = m
-/// w_k = 1/m for |k| < m
-/// where span = 2m + 1
-///
-/// Multiple spans are convolved together by successive application.
-fn apply_daniell_smoothing(periodogram: &[f64], spans: &[usize]) -> EconResult<Vec<f64>> {
-    let mut result = periodogram.to_vec();
-
+/// `half` holds ordinates `0..=floor(N/2)` of a periodogram of length
+/// `n_full = N`. The periodogram of a real series is symmetric
+/// (`I_{N-j} = I_j`) and every pass of a symmetric kernel keeps it so; a
+/// circular pass over all `N` ordinates therefore equals a pass over the half
+/// with mirrored indices. The modified Daniell kernel of span `2m + 1` has
+/// weight `1/(2m)` inside and `1/(4m)` on both endpoints; several spans are
+/// applied one after another (their convolution is R's combined kernel).
+fn apply_daniell_smoothing(half: &mut Vec<f64>, n_full: usize, spans: &[usize]) -> EconResult<()> {
+    let mut out: Vec<f64> = Vec::new();
     for &span in spans {
         checkpoint()?;
         if span <= 1 {
             continue;
         }
-        result = apply_single_daniell(&result, span);
+        if out.is_empty() {
+            out = try_vec(half.len(), 0.0, "the smoothed periodogram")?;
+        }
+        daniell_pass_mirrored(half, n_full, span / 2, &mut out);
+        std::mem::swap(half, &mut out);
     }
-
-    Ok(result)
+    Ok(())
 }
 
 /// Check smoothing spans against the (padded) series length `n_used`.
@@ -630,55 +667,32 @@ impl RunningSum {
     }
 }
 
-/// Apply a single modified Daniell kernel of given (odd) span.
-///
-/// Output `i` is the weighted mean of `x[i-m..=i+m]` (`m = span / 2`) with
-/// half weight on both endpoints, truncated at the edges of the series. The
-/// full-weight part of the kernel is a sliding window, so one pass costs
-/// O(n) whatever the span.
-fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
-    let n = x.len();
-    if n == 0 || span <= 1 {
-        return x.to_vec();
-    }
-
-    let m = span / 2; // Half-width, at least 1
-    let mut result = Vec::with_capacity(n);
-
-    // Full-weight window for i = 0: [0, min(n - 1, m - 1)].
+/// One circular modified Daniell pass of half-width `m` (`2m < n_full`) over
+/// the ordinates `0..=floor(n_full / 2)` of a symmetric periodogram, written
+/// to `out`. An index `j` outside the half is mirrored: `-j` below zero,
+/// `n_full - j` above `floor(n_full / 2)`; one reflection suffices because
+/// `2m < n_full`. The full-weight part of the kernel is a sliding window, so
+/// one pass costs O(n) whatever the span.
+fn daniell_pass_mirrored(x: &[f64], n_full: usize, m: usize, out: &mut [f64]) {
+    let h = x.len() - 1;
+    let at = |j: isize| -> f64 {
+        let j = j.unsigned_abs();
+        x[if j > h { n_full - j } else { j }]
+    };
+    let inner = 1.0 / (2 * m) as f64;
+    let end = 0.5 * inner;
+    let m = m as isize;
+    // Full-weight window [i - m + 1, i + m - 1] for i = 0.
     let mut window = RunningSum::default();
-    for &v in &x[..m.min(n)] {
-        window.add(v);
+    for j in (1 - m)..m {
+        window.add(at(j));
     }
-
-    for i in 0..n {
-        // The full-weight window is [lo, hi]; it always contains i.
-        let lo = (i + 1).saturating_sub(m);
-        let hi = i.saturating_add(m - 1).min(n - 1);
-        let mut num = window.value();
-        let mut den = (hi - lo + 1) as f64;
-        if i >= m {
-            num += 0.5 * x[i - m];
-            den += 0.5;
-        }
-        let right = i.checked_add(m).filter(|&r| r < n);
-        if let Some(r) = right {
-            num += 0.5 * x[r];
-            den += 0.5;
-        }
-        result.push(num / den);
-
-        // Slide to i + 1: x[i + m] gains full weight, and x[i + 1 - m]
-        // becomes the left half-weight endpoint.
-        if let Some(r) = right {
-            window.add(x[r]);
-        }
-        if i + 1 >= m {
-            window.add(-x[i + 1 - m]);
-        }
+    for (i, o) in out.iter_mut().enumerate() {
+        let i = i as isize;
+        *o = window.value() * inner + (at(i - m) + at(i + m)) * end;
+        window.add(at(i + m));
+        window.add(-at(i + 1 - m));
     }
-
-    result
 }
 
 /// Compute the spectral density using an AR model fit.
@@ -692,7 +706,7 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 /// * `order` - `Some(k)` fits AR(k) with k clamped to `1..=n/2 - 1`; `None`
 ///   selects by AIC among orders 0 to `floor(10·log10 n)`, that maximum
 ///   clamped the same way.
-/// * `n_freq` - Number of frequency points (default: 500)
+/// * `n_freq` - Number of frequency points from 0 to 0.5 (default: 500, as R)
 ///
 /// # Mathematical Details
 ///
@@ -701,6 +715,9 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 /// The spectral density is:
 ///
 /// S(f) = σ² / |1 - Σ_{k=1}^p φ_k exp(-2πi f k)|²
+///
+/// with `σ²` `ar.yw`'s prediction variance (the Levinson innovation variance times
+/// `n / (n - (p + 1))`), at R's `spec.ar` frequencies `seq(0, 0.5, length.out = n_freq)`.
 ///
 /// # Errors
 ///
@@ -755,8 +772,11 @@ pub fn spectrum_ar(
     let p = ar_coefs.len();
     let n_pts = n_freq.unwrap_or(500);
 
+    // ar.yw's var.pred: the Levinson innovation variance times n / (n - (order + 1)).
+    let var_pred = ar_var_pred(innovation_var, n, p);
+
     // Compute spectral density at frequencies
-    let (freq, spec) = ar_spectrum_grid(&ar_coefs, innovation_var, n_pts)?;
+    let (freq, spec) = ar_spectrum_grid(&ar_coefs, var_pred, n_pts)?;
 
     Ok(SpectrumResult {
         freq,
@@ -774,8 +794,9 @@ pub fn spectrum_ar(
 }
 
 /// The AR spectral density `σ² / |1 - Σ_k φ_k exp(-2πi f k)|²` at the
-/// `n_pts` frequencies `f_j = j / (2 n_pts)`, `j = 1, ..., n_pts`; returns
-/// `(freq, spec)`.
+/// `n_pts` frequencies `f_j = 0.5 j / (n_pts - 1)`, `j = 0, ..., n_pts - 1`
+/// (R's `seq(0, 0.5, length.out = n.freq)`; one point is frequency 0);
+/// returns `(freq, spec)`.
 fn ar_spectrum_grid(
     ar_coefs: &[f64],
     innovation_var: f64,
@@ -786,11 +807,15 @@ fn ar_spectrum_grid(
 
     // Each point costs O(p), and p can be as large as n / 2.
     let stride = checkpoint_stride(ar_coefs.len());
-    for j in 1..=n_pts {
+    for j in 0..n_pts {
         if j % stride == 0 {
             checkpoint()?;
         }
-        let f = j as f64 / (2.0 * n_pts as f64); // Frequencies in (0, 0.5]
+        let f = if n_pts > 1 {
+            0.5 * j as f64 / (n_pts - 1) as f64
+        } else {
+            0.0
+        };
         freq.push(f);
 
         // Compute |1 - Σ φ_k exp(-2πi f k)|²
@@ -815,9 +840,16 @@ fn ar_spectrum_grid(
     Ok((freq, spec))
 }
 
+/// `ar.yw`'s prediction variance: the Levinson innovation variance `v` of an AR(`p`) fit to `n`
+/// observations times `n / (n - (p + 1))`.
+fn ar_var_pred(v: f64, n: usize, p: usize) -> f64 {
+    v * n as f64 / (n - (p + 1)) as f64
+}
+
 /// Fit AR(p) model using Yule-Walker equations.
 ///
-/// Returns (coefficients, innovation variance)
+/// Returns (coefficients, innovation variance of the Levinson recursion, unscaled; the AIC uses
+/// it, and [`ar_var_pred`] scales it as `ar.yw`)
 fn fit_ar_yule_walker(x: &[f64], p: usize) -> EconResult<(Vec<f64>, f64)> {
     let n = x.len();
 
@@ -1076,7 +1108,12 @@ mod tests {
     #[test]
     fn test_detrend() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let detrended = detrend(&x);
+        let (mean, slope) = detrend_line(&x);
+        let detrended: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v - mean - slope * ((i + 1) as f64 - 3.0))
+            .collect();
 
         // Linear trend should be completely removed
         // Mean of detrended should be near 0
@@ -1098,28 +1135,29 @@ mod tests {
 
     #[test]
     fn test_cosine_taper() {
-        let mut x = vec![1.0; 20];
+        // R: spec.taper(rep(1, 20), 0.1) has m = floor(2) = 2 tapered points at each end,
+        // 0.5 * (1 - cos(pi * c(1, 3) / 4)), and no renormalisation.
+        let mut x = vec![Complex::new(1.0, 0.0); 20];
         apply_cosine_taper(&mut x, 0.1);
-
-        // First and last 2 points should be tapered (10% of 20 = 2)
-        assert!(x[0] < 1.0, "First point should be tapered down");
-        assert!(x[1] < 1.0, "Second point should be tapered");
-        assert!(
-            x[10].abs() > 0.5,
-            "Middle points should not be heavily tapered"
-        );
-
-        // Symmetry check
-        assert!(approx_eq(x[0], x[19], 1e-10), "Taper should be symmetric");
-        assert!(approx_eq(x[1], x[18], 1e-10), "Taper should be symmetric");
+        let w1 = 0.5 * (1.0 - (PI / 4.0).cos());
+        let w2 = 0.5 * (1.0 - (3.0 * PI / 4.0).cos());
+        for (i, w) in [(0, w1), (1, w2), (18, w2), (19, w1)] {
+            assert!(approx_eq(x[i].re, w, 1e-15), "{i}: {}", x[i].re);
+        }
+        assert!(x[2..18].iter().all(|v| v.re == 1.0));
+        // m = floor(n p): 0.1 of 19 points tapers 1 point at each end, not round(1.9) = 2.
+        let mut y = vec![Complex::new(1.0, 0.0); 19];
+        apply_cosine_taper(&mut y, 0.1);
+        assert!(approx_eq(y[0].re, 0.5, 1e-15) && y[1].re == 1.0 && y[17].re == 1.0);
     }
 
     #[test]
     fn test_daniell_smoothing() {
-        // Test that smoothing reduces variance
+        // Test that smoothing reduces variance: ordinates 0..=9 of a symmetric length-18 periodogram
         let x: Vec<f64> = vec![1.0, 5.0, 2.0, 4.0, 3.0, 6.0, 1.0, 5.0, 2.0, 4.0];
 
-        let smoothed = apply_daniell_smoothing(&x, &[3]).unwrap();
+        let mut smoothed = x.clone();
+        apply_daniell_smoothing(&mut smoothed, 18, &[3]).unwrap();
 
         // Variance should be reduced
         let var_orig: f64 = {
@@ -1277,6 +1315,7 @@ mod tests {
             detrend: true,
             demean: false,
             pad_ratio: 0.0,
+            fast: true,
         };
         let result = spectrum(&x, config).unwrap();
 
@@ -1586,143 +1625,155 @@ mod tests {
         ));
         // Without a budget the grid is computed as before.
         let (freq, spec) = ar_spectrum_grid(&[0.5], 2.0, 4).unwrap();
-        assert_eq!(freq, vec![0.125, 0.25, 0.375, 0.5]);
+        assert_eq!(freq, vec![0.0, 0.5 / 3.0, 1.0 / 3.0, 0.5]);
+        // f = 0: |1 - 0.5|² = 0.25
+        assert!((spec[0] - 2.0 / 0.25).abs() < 1e-12, "{spec:?}");
         // f = 0.5: |1 - 0.5 e^{-iπ}|² = 1.5² = 2.25
         assert!((spec[3] - 2.0 / 2.25).abs() < 1e-12, "{spec:?}");
     }
 
     /// R 4.3.3: x <- mk(64)
-    ///   spec.pgram(x, spans = c(3,3), taper = 0, detrend = TRUE, fast = FALSE, plot = FALSE)$spec[3:29]
-    ///   spec.pgram(x, spans = c(3,5), taper = 0, detrend = TRUE, fast = FALSE, plot = FALSE)$spec[4:28]
-    /// Interior ordinates only. R smooths circularly over all 64 ordinates. This module smooths the 32
-    /// one-sided ones, truncates at the edges, and doubles every ordinate below Nyquist (STAT-68, tier 4;
-    /// drop the 2.0 factor when that lands). Away from both edges the kernel sees the same ordinates, so the
-    /// value is exactly 2 x R's.
+    ///   spec.pgram(x, spans = c(3,3), taper = 0, detrend = TRUE, fast = FALSE, plot = FALSE)$spec
+    ///   spec.pgram(x, spans = c(3,5), taper = 0, detrend = TRUE, fast = FALSE, plot = FALSE)$spec
+    /// Every ordinate, the edges included: R smooths circularly over all 64 ordinates.
     #[test]
     fn test_validate_daniell_interior_against_r() {
-        const R33: [f64; 27] = [
-            0.294751418490341,
-            1.17007599290853,
-            1.76873989206635,
-            1.22699515296737,
-            1.35823766843787,
-            3.95388829751672,
-            5.87221772597407,
-            3.97549758319909,
-            1.0933717954446,
-            0.0942676957167229,
-            0.0552753023526369,
-            0.0276145376573642,
-            0.0177740413045258,
-            0.0313048306960085,
-            0.0562148414270557,
-            0.0636487205499741,
-            0.0447480823053404,
-            0.0253687914716106,
-            0.0549156684327419,
-            0.162137993506803,
-            0.24212869348457,
-            0.181811958853286,
-            0.0694888711707109,
-            0.0182003517065288,
-            0.0107777101276656,
-            0.0132100110502439,
-            0.0170177746538345,
+        const R33: [f64; 32] = [
+            0.015639154180673867,
+            0.0088400405362115686,
+            0.29475141849034109,
+            1.1700759929085298,
+            1.7687398920663475,
+            1.2269951529673682,
+            1.358237668437869,
+            3.9538882975167176,
+            5.8722177259740675,
+            3.975497583199092,
+            1.0933717954446027,
+            0.094267695716722916,
+            0.055275302352636863,
+            0.027614537657364172,
+            0.017774041304525829,
+            0.031304830696008527,
+            0.05621484142705567,
+            0.063648720549974058,
+            0.044748082305340386,
+            0.025368791471610586,
+            0.054915668432741871,
+            0.16213799350680347,
+            0.24212869348457033,
+            0.18181195885328583,
+            0.069488871170710897,
+            0.018200351706528783,
+            0.010777710127665596,
+            0.013210011050243886,
+            0.017017774653834528,
+            0.015780827308339733,
+            0.011813562645424932,
+            0.01011936558346524,
         ];
-        const R35: [f64; 25] = [
-            1.03174565527834,
-            1.19853557293795,
-            1.56348878025211,
-            2.59044172524204,
-            3.61522769720597,
-            3.9646929403579,
-            3.48279476070933,
-            2.03488263945791,
-            0.574323548898619,
-            0.0609411166870433,
-            0.0365246718285814,
-            0.0294596841766859,
-            0.0369944413657909,
-            0.0474767756229914,
-            0.0504814618661979,
-            0.044508756010792,
-            0.0498318753690409,
-            0.0937533924892071,
-            0.148522180958656,
-            0.171974976180045,
-            0.155808782327641,
-            0.100006155279908,
-            0.0401332906491882,
-            0.0157051813783862,
-            0.01389774239075,
+        const R35: [f64; 32] = [
+            0.013829754329979627,
+            0.1551952863355075,
+            0.58945801672237019,
+            1.0317456552783439,
+            1.1985355729379492,
+            1.5634887802521074,
+            2.5904417252420435,
+            3.6152276972059667,
+            3.9646929403579048,
+            3.4827947607093348,
+            2.0348826394579067,
+            0.57432354889861936,
+            0.060941116687043301,
+            0.036524671828581413,
+            0.02945968417668586,
+            0.03699444136579088,
+            0.047476775622991366,
+            0.050481461866197938,
+            0.044508756010792044,
+            0.049831875369040879,
+            0.09375339248920711,
+            0.1485221809586561,
+            0.17197497618004531,
+            0.15580878232764084,
+            0.10000615527990764,
+            0.040133290649188247,
+            0.015705181378386168,
+            0.013897742390750034,
+            0.014495419179291813,
+            0.014415668649629843,
+            0.012950096445902738,
+            0.011813562645425352,
         ];
-        let cfg = |s: Vec<usize>| SpectrumConfig {
-            spans: Some(s),
-            taper: 0.0,
-            detrend: true,
-            demean: false,
-            pad_ratio: 0.0,
+        let cfg = |s: Vec<usize>| {
+            let mut c = SpectrumConfig::with_spans(s);
+            c.taper = 0.0;
+            c.fast = false;
+            c
         };
         let s33 = spectrum(&mk(64), cfg(vec![3, 3])).unwrap().spec;
-        for (i, r) in (2..=28).zip(R33) {
-            approx::assert_relative_eq!(s33[i], 2.0 * r, max_relative = 1e-10);
+        assert_eq!(s33.len(), 32);
+        for (s, r) in s33.iter().zip(R33) {
+            approx::assert_relative_eq!(*s, r, max_relative = 1e-10);
         }
         let s35 = spectrum(&mk(64), cfg(vec![3, 5])).unwrap().spec;
-        for (i, r) in (3..=27).zip(R35) {
-            approx::assert_relative_eq!(s35[i], 2.0 * r, max_relative = 1e-10);
+        for (s, r) in s35.iter().zip(R35) {
+            approx::assert_relative_eq!(*s, r, max_relative = 1e-10);
         }
     }
 
-    /// The pre-change smoother, verbatim (direct sum over every kernel position).
-    fn daniell_reference(x: &[f64], span: usize) -> Vec<f64> {
-        let n = x.len();
-        if n == 0 || span <= 1 {
-            return x.to_vec();
-        }
-
-        let m = span / 2; // Half-width
-        let mut result = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let mut sum = 0.0;
-            let mut weight_sum = 0.0;
-
-            for j in 0..span {
-                let k = j as isize - m as isize;
-                let idx = i as isize + k;
-
-                if idx >= 0 && (idx as usize) < n {
-                    // Half-weight at endpoints of kernel
-                    let w = if j == 0 || j == span - 1 { 0.5 } else { 1.0 };
-                    sum += w * x[idx as usize];
-                    weight_sum += w;
-                }
+    /// R's circular smoothing, naively: every pass is a full circular convolution over all `n` ordinates.
+    fn circular_daniell_reference(full: &[f64], spans: &[usize]) -> Vec<f64> {
+        let n = full.len();
+        let mut x = full.to_vec();
+        for &span in spans {
+            let m = span / 2;
+            if m == 0 {
+                continue;
             }
-
-            result.push(if weight_sum > 0.0 {
-                sum / weight_sum
-            } else {
-                x[i]
-            });
+            let w = |k: usize| {
+                if k == 0 || k == 2 * m {
+                    1.0 / (4 * m) as f64
+                } else {
+                    1.0 / (2 * m) as f64
+                }
+            };
+            x = (0..n)
+                .map(|i| {
+                    (0..=2 * m)
+                        .map(|k| w(k) * x[(i + n + k - m) % n])
+                        .sum::<f64>()
+                })
+                .collect();
         }
-
-        result
+        x
     }
 
+    /// The mirrored half-length pass equals the naive circular convolution over the full periodogram
+    /// (noisy symmetric input, even and odd lengths).
     #[test]
-    fn daniell_sliding_window_matches_direct_reference() {
+    fn daniell_mirrored_pass_matches_full_circular_convolution() {
         let mut rng = ChaCha8Rng::seed_from_u64(11);
-        for n in 1..=60 {
-            let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0).collect();
-            // includes spans wider than the series
-            for span in (1..=2 * n + 3).step_by(2) {
-                let fast = apply_single_daniell(&x, span);
-                let slow = daniell_reference(&x, span);
-                assert_eq!(fast.len(), slow.len());
-                for (a, b) in fast.iter().zip(&slow) {
+        for n_full in [12usize, 13, 40, 41, 97, 100] {
+            let h = n_full / 2;
+            let half: Vec<f64> = (0..=h).map(|_| rng.r#gen::<f64>() * 10.0).collect();
+            let full: Vec<f64> = (0..n_full)
+                .map(|j| half[if j > h { n_full - j } else { j }])
+                .collect();
+            for spans in [vec![3], vec![3, 3], vec![7, 9], vec![1, 5]] {
+                let m: usize = spans.iter().map(|s| s / 2).sum();
+                if 2 * m >= n_full {
+                    continue;
+                }
+                let mut fast = half.clone();
+                apply_daniell_smoothing(&mut fast, n_full, &spans).unwrap();
+                let slow = circular_daniell_reference(&full, &spans);
+                for (j, a) in fast.iter().enumerate() {
+                    let b = slow[j];
                     assert!(
-                        (a - b).abs() <= 1e-12 * b.abs().max(1e-300),
-                        "n={n} span={span}: {a} vs {b}"
+                        (a - b).abs() <= 1e-12 * b.abs(),
+                        "n={n_full} spans={spans:?} j={j}: {a} vs {b}"
                     );
                 }
             }
@@ -1733,16 +1784,140 @@ mod tests {
     /// rounding from the peak and fails this test; the compensated one passes.
     #[test]
     fn daniell_sliding_window_keeps_precision_after_a_large_peak() {
-        let mut x = vec![1e12];
-        x.extend((0..199).map(|i| 1e-3 * (1.5 + (i as f64).sin())));
+        let mut half = vec![1e12];
+        half.extend((0..199).map(|i| 1e-3 * (1.5 + (i as f64).sin())));
+        let n_full = 2 * (half.len() - 1);
+        let full: Vec<f64> = (0..n_full)
+            .map(|j| half[if j >= half.len() { n_full - j } else { j }])
+            .collect();
         for span in [3, 5, 51, 199] {
-            for (a, b) in apply_single_daniell(&x, span)
-                .iter()
-                .zip(daniell_reference(&x, span))
-            {
+            let mut fast = half.clone();
+            apply_daniell_smoothing(&mut fast, n_full, &[span]).unwrap();
+            for (a, b) in fast.iter().zip(circular_daniell_reference(&full, &[span])) {
                 assert!((a - b).abs() <= 1e-9 * b.abs(), "span={span}: {a} vs {b}");
             }
         }
+    }
+
+    /// R 4.3.3 `nextn(1:200)`.
+    #[test]
+    fn nextn_matches_r() {
+        const R: [usize; 200] = [
+            1, 2, 3, 4, 5, 6, 8, 8, 9, 10, 12, 12, 15, 15, 15, 16, 18, 18, 20, 20, 24, 24, 24, 24,
+            25, 27, 27, 30, 30, 30, 32, 32, 36, 36, 36, 36, 40, 40, 40, 40, 45, 45, 45, 45, 45, 48,
+            48, 48, 50, 50, 54, 54, 54, 54, 60, 60, 60, 60, 60, 60, 64, 64, 64, 64, 72, 72, 72, 72,
+            72, 72, 72, 72, 75, 75, 75, 80, 80, 80, 80, 80, 81, 90, 90, 90, 90, 90, 90, 90, 90, 90,
+            96, 96, 96, 96, 96, 96, 100, 100, 100, 100, 108, 108, 108, 108, 108, 108, 108, 108,
+            120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 125, 125, 125, 125, 125,
+            128, 128, 128, 135, 135, 135, 135, 135, 135, 135, 144, 144, 144, 144, 144, 144, 144,
+            144, 144, 150, 150, 150, 150, 150, 150, 160, 160, 160, 160, 160, 160, 160, 160, 160,
+            160, 162, 162, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
+            180, 180, 180, 180, 192, 192, 192, 192, 192, 192, 192, 192, 192, 192, 192, 192, 200,
+            200, 200, 200, 200, 200, 200, 200,
+        ];
+        for (n, r) in (1..=200).zip(R) {
+            assert_eq!(nextn(n), Some(r), "nextn({n})");
+        }
+        assert_eq!(nextn(10_007), Some(10_125));
+        assert_eq!(nextn(usize::MAX), None);
+    }
+
+    /// R 4.3.3: spec.pgram(z75, pad = 0.3, fast = FALSE)$n.used is 97 (75 + trunc(22.5)); with fast it is 100.
+    #[test]
+    fn padding_truncates_as_r() {
+        let z: Vec<f64> = mk(75);
+        let mut c = SpectrumConfig::default();
+        c.pad_ratio = 0.3;
+        c.fast = false;
+        assert_eq!(spectrum(&z, c.clone()).unwrap().n_used, 97);
+        c.fast = true;
+        assert_eq!(spectrum(&z, c).unwrap().n_used, 100);
+    }
+
+    /// The series of case `stat_spectrum_t4` (n = 97), read without loading the case.
+    fn t4_series() -> Vec<f64> {
+        let path = p2a_validation::repo_path("validation/datasets/generated/spectrum_t4.csv");
+        let ds = Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        extract_column(&ds, "z").unwrap()
+    }
+
+    fn pgram_config(spans: Option<Vec<usize>>, taper: f64) -> SpectrumConfig {
+        let mut c = SpectrumConfig::default();
+        c.spans = spans;
+        c.taper = taper;
+        c
+    }
+
+    /// Compare `freq`, `spec` and `n_used` of `r` with the `<key>_*` values of `stat_spectrum_t4`.
+    fn check_pgram(check: &mut p2a_validation::Check, key: &str, r: &SpectrumResult) {
+        use p2a_validation::Tol;
+        check
+            .vector(&format!("{key}_freq"), &r.freq, Tol::coef(96))
+            .vector(&format!("{key}_spec"), &r.spec, Tol::coef(96))
+            .scalar(&format!("{key}_n_used"), r.n_used as f64, Tol::exact())
+            .scalar(&format!("{key}_df"), r.df, Tol::se(96))
+            .scalar(&format!("{key}_bw"), r.bandwidth, Tol::se(96));
+    }
+
+    /// spec.pgram(x, taper = 0.1) on n = 96 and spec.pgram(z75, taper = 0) (odd n).
+    #[test]
+    fn test_validate_spectrum_pgram_raw_tapered() {
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let z = t4_series();
+        let mut check = p2a_validation::Check::new(&case);
+        let r = run_spectrum(&ds, "x", pgram_config(None, 0.1)).unwrap();
+        check_pgram(&mut check, "raw_t10", &r);
+        let r = spectrum(&z[..75], pgram_config(None, 0.0)).unwrap();
+        check_pgram(&mut check, "raw_n75", &r);
+        check.finish();
+    }
+
+    /// Smoothed: spans (3, 3) with taper 0.1; spans (3, 5), taper 0.25, demean only; span 7, no taper, no detrending.
+    #[test]
+    fn test_validate_spectrum_pgram_smoothed_taper_demean() {
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let mut check = p2a_validation::Check::new(&case);
+        let r = run_spectrum(&ds, "x", pgram_config(Some(vec![3, 3]), 0.1)).unwrap();
+        check_pgram(&mut check, "s33_t10", &r);
+        let mut c = pgram_config(Some(vec![3, 5]), 0.25);
+        c.detrend = false;
+        c.demean = true;
+        let r = run_spectrum(&ds, "x", c).unwrap();
+        check_pgram(&mut check, "s35_t25_demean", &r);
+        let mut c = pgram_config(Some(vec![7]), 0.0);
+        c.detrend = false;
+        let r = run_spectrum(&ds, "x", c).unwrap();
+        check_pgram(&mut check, "s7_t0_none", &r);
+        check.finish();
+    }
+
+    /// spec.pgram(x, spans = c(3, 3), pad = 0.5): N0 = 96, N = 144.
+    #[test]
+    fn test_validate_spectrum_pgram_padding() {
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let mut check = p2a_validation::Check::new(&case);
+        let mut c = pgram_config(Some(vec![3, 3]), 0.1);
+        c.pad_ratio = 0.5;
+        let r = run_spectrum(&ds, "x", c).unwrap();
+        check_pgram(&mut check, "s33_pad", &r);
+        check.finish();
+    }
+
+    /// Odd n = 75 (nextn(75) = 75), and n = 97 with R's default fast padding (to 100) and without it.
+    #[test]
+    fn test_validate_spectrum_pgram_odd_and_fast() {
+        let (case, _) = crate::test_support::load_case("stat_spectrum_t4");
+        let z = t4_series();
+        let mut check = p2a_validation::Check::new(&case);
+        let r = spectrum(&z[..75], pgram_config(Some(vec![3, 3]), 0.1)).unwrap();
+        check_pgram(&mut check, "s33_n75", &r);
+        let r = spectrum(&z, pgram_config(Some(vec![3, 3]), 0.1)).unwrap();
+        check_pgram(&mut check, "s33_n97_fast", &r);
+        let mut c = pgram_config(Some(vec![3, 3]), 0.1);
+        c.fast = false;
+        let r = spectrum(&z, c).unwrap();
+        check_pgram(&mut check, "s33_n97_exact", &r);
+        check.finish();
     }
 
     /// Non-finite input is refused (R: na.fail), so the peak and the FFT never see NaN.
@@ -1763,6 +1938,79 @@ mod tests {
         assert!(
             matches!(spectrum(&x, SpectrumConfig::default()), Err(EconError::NonFiniteValues { ref column, count: 1 }) if column == "x")
         );
+    }
+
+    /// spec.ar(x, n.freq = 50, order = 2) and ar(x, aic = FALSE, order.max = 2) (Yule-Walker).
+    #[test]
+    fn test_validate_spectrum_ar_fixed_order() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let r = run_spectrum_ar(&ds, "x", Some(2), Some(50)).unwrap();
+        let x = extract_column(&ds, "x").unwrap();
+        let (coef, v) = fit_ar_yule_walker(&x, 2).unwrap();
+        assert_eq!(r.method, "ar(2)");
+        Check::new(&case)
+            .vector("ar2_freq", &r.freq, Tol::coef(96))
+            .vector("ar2_spec", &r.spec, Tol::coef(96))
+            .vector("ar2_coef", &coef, Tol::coef(96))
+            .scalar("ar2_var_pred", ar_var_pred(v, x.len(), 2), Tol::se(96))
+            .finish();
+    }
+
+    /// spec.ar(x, n.freq = 50) with the order chosen by AIC, and ar(x)'s var.pred.
+    #[test]
+    fn test_validate_spectrum_ar_aic() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t4");
+        let r = run_spectrum_ar(&ds, "x", None, Some(50)).unwrap();
+        let x = extract_column(&ds, "x").unwrap();
+        let max_order = (10.0 * (x.len() as f64).log10()).floor() as usize;
+        let (coef, v) = select_ar_order_aic(&x, max_order).unwrap();
+        assert_eq!(r.method, format!("ar({})", coef.len()));
+        Check::new(&case)
+            .scalar("aic_order", coef.len() as f64, Tol::exact())
+            .vector("aic_spec", &r.spec, Tol::coef(96))
+            .scalar(
+                "aic_var_pred",
+                ar_var_pred(v, x.len(), coef.len()),
+                Tol::se(96),
+            )
+            .finish();
+    }
+
+    /// `kernel_df_bandwidth` against direct sums over one modified Daniell kernel, and the df of the
+    /// (3, 3) convolution (1, 4, 6, 4, 1) / 16; a span of 1 is no smoothing (df 2).
+    #[test]
+    fn kernel_df_bandwidth_matches_direct_sums() {
+        for m in 1..6usize {
+            let w: Vec<f64> = (0..=2 * m)
+                .map(|j| {
+                    if j == 0 || j == 2 * m {
+                        0.25 / m as f64
+                    } else {
+                        0.5 / m as f64
+                    }
+                })
+                .collect();
+            let df = 2.0 / w.iter().map(|v| v * v).sum::<f64>();
+            let bw = w
+                .iter()
+                .enumerate()
+                .map(|(j, v)| (1.0 / 12.0 + (j as f64 - m as f64).powi(2)) * v)
+                .sum::<f64>()
+                .sqrt();
+            let (a, b) = kernel_df_bandwidth(&[2 * m + 1]).unwrap();
+            assert!(
+                (a - df).abs() <= 1e-12 * df && (b - bw).abs() <= 1e-12 * bw,
+                "m={m}"
+            );
+        }
+        // spans (3, 3): k = (1, 4, 6, 4, 1) / 16
+        let k = [1.0, 4.0, 6.0, 4.0, 1.0].map(|v| v / 16.0);
+        let df = 2.0 / k.iter().map(|v| v * v).sum::<f64>();
+        let (a, _) = kernel_df_bandwidth(&[3, 3]).unwrap();
+        assert!((a - df).abs() <= 1e-12 * df);
+        assert_eq!(kernel_df_bandwidth(&[1, 1]).unwrap().0, 2.0);
     }
 
     /// The series of case `stat_spectrum_t3`, read without loading the case.
@@ -1812,13 +2060,18 @@ mod tests {
             let (lo, hi) = at.confidence_interval_multipliers(0.90).unwrap().unwrap();
             ci90.extend([lo, hi]);
         }
+        let raw = run_spectrum(&ds, "x", SpectrumConfig::raw()).unwrap(); // taper 0, detrend
         Check::new(&case)
             .vector("freq", &r.freq, Tol::coef(96))
             .scalar("peak_freq", r.peak_frequency().unwrap().0, Tol::coef(96))
+            .vector("spec", &r.spec, Tol::coef(96))
+            .vector("raw_spec", &raw.spec, Tol::coef(96))
+            .scalar("df", r.df, Tol::se(96))
+            .scalar("bandwidth", r.bandwidth, Tol::se(96))
+            .scalar("raw_df", raw.df, Tol::se(96))
+            .scalar("raw_bandwidth", raw.bandwidth, Tol::se(96))
             .vector("ci95_at_df", &ci95, CI_TOL)
             .vector("ci90_at_df", &ci90, CI_TOL)
             .finish();
-        // deviation STAT-39: df 6.552102376599634 and bandwidth 0.01084201041388611 (p2a 18 and 0.03125).
-        // deviation STAT-68: spec and raw_spec (p2a about 2x R and a different taper).
     }
 }

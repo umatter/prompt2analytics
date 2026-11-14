@@ -61,6 +61,16 @@ Tests (`p2a-core`, `stats::factanal::tests::`):
   Varimax and promax: loadings, variance proportions and promax factor correlations against R's
   rotations at the optimum (`rot_*_tight`), since `factanal`'s own rotated output is R's eps 1e-5
   iterate, up to 7.1e-4 away (registry deviation STAT-23).
+- `test_validate_factanal_zero_df` (case `stat_factanal_t4`, `validation/r/cases/stats_misc_t4.R`):
+  `factanal(X[, 1:3], 1)`, a saturated model with dof 0: uniquenesses and loadings at
+  `Tol::iterative(1e-4)`, dof exact, and no test (R prints none): `chi_squared` and `p_value` are NaN
+  (`null` in JSON, read back as NaN).
+- `test_validate_factanal_promax_scores`: promax with regression and Bartlett scores, the first ten
+  rows of each at `Tol::iterative(1e-4)`. Regression scores are R's `Z S^-1 Lambda` with the sample
+  correlation S (Thomson); R does not use the promax factor correlations there, nor does p2a.
+- `test_factanal_refuses_constant_column` (not R-pinned; R stops with an error): a column with zero
+  variance is refused with `InvalidSpecification` naming it (it used to get a floored standard
+  deviation and a fit of zeros).
 - `test_rotation_and_scores_methods_parse_aliases_and_reject_unknown` (not R-pinned): option spellings
   (`varimax`, `promax`, `none`; scores `none`, `regression`/`thomson`, `bartlett`).
 
@@ -222,6 +232,17 @@ The synthetic tests 1-3 above check properties, not R values.
 
 6. **Uniqueness optimiser**: p2a's own fixed point, pinned at 1e-4 relative to R's L-BFGS-B optimum; R's
    default `factr` itself moves R's uniquenesses by about 7e-6.
+
+
+## Timing against the previous implementation (Tier 4)
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| 6 variables, 2 factors, varimax, regression scores | 100 | 4,176.9 | 4,069.0 | 0.97 |
+| 6 variables, 2 factors, varimax, regression scores | 1,000 | 6,292.1 | 5,857.0 | 0.93 |
+| 6 variables, 2 factors, varimax, regression scores | 10,000 | 8,887.5 | 7,892.5 | 0.89 |
 
 ## Performance Comparison
 

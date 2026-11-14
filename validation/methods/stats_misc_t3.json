@@ -37,7 +37,7 @@
       "tests": ["p2a-core::stats::spline::tests::test_validate_spline_t3_default_n", "p2a-core::stats::spline::tests::test_validate_spline_t3_n_one"],
       "quantities": ["number of points", "x grid", "y"],
       "tolerance": "Tol::coef(30)",
-      "deviations": [{"finding": "STAT-69", "quantity": "method = 'fmm'", "note": "not pinned"}, {"finding": "STAT-40", "quantity": "monotone and periodic methods", "note": "not pinned"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -48,9 +48,9 @@
       "doc": "validation/timeseries/spectrum.md",
       "cases": ["stat_spectrum_t3"],
       "tests": ["p2a-core::stats::spectrum::tests::test_validate_spectrum_t3_grid_and_ci"],
-      "quantities": ["frequencies", "peak frequency", "CI multipliers at given df (levels 0.95, 0.90)"],
+      "quantities": ["frequencies", "peak frequency", "smoothed and raw ordinates (spec, raw_spec)", "df and bandwidth (smoothed and raw)", "CI multipliers at given df (levels 0.95, 0.90)"],
       "tolerance": "Tol::coef(96); multipliers 1e-10 relative",
-      "deviations": [{"finding": "STAT-39", "quantity": "df and bandwidth", "note": "R 6.5521 and 0.010842; p2a 18 and 0.03125"}, {"finding": "STAT-68", "quantity": "spectral ordinates", "note": "p2a about 2x R, different taper and edge smoothing"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {
@@ -120,15 +120,15 @@
     },
     {
       "id": "cancor_t3",
-      "name": "Canonical correlation: centres and dimensions",
+      "name": "Canonical correlation: centres, dimensions, correlations and coefficients",
       "category": "stats",
       "reference": "stats::cancor",
       "doc": "validation/multivariate/cancor.md",
       "cases": ["stat_cancor_t3"],
       "tests": ["p2a-core::stats::cancor::tests::test_validate_cancor_t3_centres"],
-      "quantities": ["xcenter", "ycenter", "number of canonical pairs"],
+      "quantities": ["xcenter", "ycenter", "number of canonical pairs", "cor", "xcoef and ycoef (sign-normalised)"],
       "tolerance": "Tol::coef(100)",
-      "deviations": [{"finding": "STAT-16", "quantity": "canonical correlations, xcoef, ycoef", "note": "Sigma^-1 instead of the Cholesky factor; R values in cor, xcoef, ycoef (sign-normalised)"}],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

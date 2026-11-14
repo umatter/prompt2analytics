@@ -22,13 +22,16 @@ pub struct IsoregResult {
     pub y: Vec<f64>,
     /// Fitted values (isotonic regression estimate)
     pub yf: Vec<f64>,
-    /// Cumulative y values (used in PAVA algorithm)
+    /// Cumulative sums of the ordered y with a leading zero, `n + 1` values (R's
+    /// `yc = cumsum(c(0, y))`)
     pub yc: Vec<f64>,
-    /// Indices where the fitted curve changes value (knots)
+    /// 0-based index of the last element of each pooled block (R's `iKnots - 1`); the fitted
+    /// value changes after each knot but the last
     pub i_knots: Vec<usize>,
-    /// Whether the original x was already sorted
+    /// Whether the original x was already sorted (non-decreasing)
     pub is_ordered: bool,
-    /// Permutation to sort x (if x was not originally sorted)
+    /// Permutation ordering the data by increasing x and, within tied x, decreasing y (R's
+    /// `order(x, -y)`, 0-based), if x was not originally sorted
     pub ord: Option<Vec<usize>>,
     /// Number of observations
     pub n: usize,
@@ -123,25 +126,27 @@ pub fn isoreg(x: &[f64], y: &[f64]) -> Result<IsoregResult, String> {
         return Err(format!("missing values not allowed: x[{i}] is NaN"));
     }
 
-    // Sort by x
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
-
-    // Check if already ordered
-    let is_ordered = indices.iter().enumerate().all(|(i, &idx)| i == idx);
+    // R: data already in non-decreasing x are used as given; otherwise ordered by
+    // order(x, -y), increasing in x and decreasing in y within tied x, so that a tie
+    // pools into one block.
+    let is_ordered = x.windows(2).all(|w| w[0] <= w[1]);
+    let indices: Vec<usize> = if is_ordered {
+        (0..n).collect()
+    } else {
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| x[a].total_cmp(&x[b]).then(y[b].total_cmp(&y[a])));
+        idx
+    };
 
     // Create sorted x and y
     let x_sorted: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
     let y_sorted: Vec<f64> = indices.iter().map(|&i| y[i]).collect();
 
+    // yc = cumsum(c(0, y)) of the ordered y
+    let yc = cumsum_from_zero(&y_sorted);
+
     // Pool Adjacent Violators Algorithm (PAVA)
-    let yf = pava(&y_sorted);
-
-    // Compute cumulative y values
-    let yc = cumsum(&yf);
-
-    // Find knots (where the fitted value changes)
-    let i_knots = find_knots(&yf);
+    let (yf, i_knots) = pava(&y_sorted, &yc);
 
     Ok(IsoregResult {
         x: x_sorted,
@@ -159,27 +164,20 @@ pub fn isoreg(x: &[f64], y: &[f64]) -> Result<IsoregResult, String> {
 ///
 /// Uses an O(n) single-pass stack-based approach: process each element
 /// left to right, pushing onto a stack and merging with the previous
-/// block whenever the monotonicity constraint is violated.
-fn pava(y: &[f64]) -> Vec<f64> {
+/// block while the previous block's mean is strictly greater (adjacent blocks
+/// with equal means stay separate, as R's greatest-convex-minorant pass leaves
+/// them). Each block's value is `(yc[end] - yc[start]) / (end - start)`, R's
+/// arithmetic. Returns the fitted values and the 0-based last index of each
+/// block.
+fn pava(y: &[f64], yc: &[f64]) -> (Vec<f64>, Vec<usize>) {
     let n = y.len();
-    if n == 0 {
-        return vec![];
-    }
-    if n == 1 {
-        return vec![y[0]];
-    }
+    // Stack of blocks: (sum, count); a block's end is the start of the next.
+    let mut stack_sum: Vec<f64> = Vec::with_capacity(n);
+    let mut stack_cnt: Vec<usize> = Vec::with_capacity(n);
 
-    // Stack of blocks: (sum, count, start_index)
-    // Pre-allocate for worst case (no pooling)
-    let mut stack_sum = Vec::with_capacity(n);
-    let mut stack_cnt = Vec::with_capacity(n);
-    let mut stack_start = Vec::with_capacity(n);
-
-    for i in 0..n {
-        // Push new singleton block
-        stack_sum.push(y[i]);
-        stack_cnt.push(1usize);
-        stack_start.push(i);
+    for &yi in y {
+        stack_sum.push(yi);
+        stack_cnt.push(1);
 
         // Merge back while top-of-stack violates monotonicity with previous
         while stack_sum.len() >= 2 {
@@ -189,57 +187,41 @@ fn pava(y: &[f64]) -> Vec<f64> {
             let mean_top = stack_sum[top] / stack_cnt[top] as f64;
 
             if mean_prev > mean_top {
-                // Pool: merge top into prev
                 stack_sum[prev] += stack_sum[top];
                 stack_cnt[prev] += stack_cnt[top];
                 stack_sum.pop();
                 stack_cnt.pop();
-                stack_start.pop();
             } else {
                 break;
             }
         }
     }
 
-    // Reconstruct fitted values from stack
-    let mut yf = vec![0.0; n];
-    for b in 0..stack_sum.len() {
-        let mean = stack_sum[b] / stack_cnt[b] as f64;
-        let start = stack_start[b];
-        let end = start + stack_cnt[b];
-        for v in &mut yf[start..end] {
-            *v = mean;
-        }
+    // Reconstruct fitted values and block ends from the stack
+    let mut yf = Vec::with_capacity(n);
+    let mut knots = Vec::with_capacity(stack_cnt.len());
+    let mut start = 0;
+    for &cnt in &stack_cnt {
+        let end = start + cnt;
+        let mean = (yc[end] - yc[start]) / cnt as f64;
+        yf.extend(std::iter::repeat_n(mean, cnt));
+        knots.push(end - 1);
+        start = end;
     }
 
-    yf
+    (yf, knots)
 }
 
-/// Compute cumulative sum.
-fn cumsum(x: &[f64]) -> Vec<f64> {
-    let mut result = Vec::with_capacity(x.len());
+/// Cumulative sums with a leading zero: `n + 1` values (R's `cumsum(c(0, x))`).
+fn cumsum_from_zero(x: &[f64]) -> Vec<f64> {
+    let mut result = Vec::with_capacity(x.len() + 1);
     let mut sum = 0.0;
+    result.push(sum);
     for &xi in x {
         sum += xi;
         result.push(sum);
     }
     result
-}
-
-/// Find knots (indices where fitted value changes).
-fn find_knots(yf: &[f64]) -> Vec<usize> {
-    let n = yf.len();
-    if n == 0 {
-        return vec![];
-    }
-
-    let mut knots = vec![0]; // First point is always a knot
-    for i in 1..n {
-        if (yf[i] - yf[i - 1]).abs() > 1e-10 {
-            knots.push(i);
-        }
-    }
-    knots
 }
 
 /// Isotonic regression from a single sorted vector.
@@ -462,8 +444,8 @@ mod tests {
     #[test]
     fn test_cumsum() {
         let x = vec![1.0, 2.0, 3.0, 4.0];
-        let cs = cumsum(&x);
-        assert_eq!(cs, vec![1.0, 3.0, 6.0, 10.0]);
+        let cs = cumsum_from_zero(&x);
+        assert_eq!(cs, vec![0.0, 1.0, 3.0, 6.0, 10.0]);
     }
 
     // =========================================================================
@@ -471,27 +453,20 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_isoreg_knots_are_block_starts() {
-        // p2a's i_knots are 0-based block starts (R's iKnots are 1-based block ends: STAT-52);
-        // for data with multiple level changes, knots mark the changes
+    fn test_isoreg_knots_are_block_ends() {
+        // i_knots are R's iKnots - 1: the 0-based last index of each block. Adjacent blocks with
+        // equal means stay separate, so monotone data has one block per point
+        // (R: isoreg(c(1, 1, 3, 3, 5, 5))$iKnots is 1:6).
         let y = vec![1.0, 1.0, 3.0, 3.0, 5.0, 5.0];
         let result = isoreg_y(&y).unwrap();
+        assert_eq!(result.yf, y);
+        assert_eq!(result.i_knots, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(result.yc.len(), 7);
+    }
 
-        // This data is already monotone, so yf = y
-        for i in 0..6 {
-            assert!(
-                (result.yf[i] - y[i]).abs() < 1e-10,
-                "Monotone data unchanged"
-            );
-        }
-
-        // Should have knots at 0, 2, 4 (where value changes)
-        assert!(
-            result.i_knots.len() >= 3,
-            "Should have at least 3 knots: {:?}",
-            result.i_knots
-        );
-        assert_eq!(result.i_knots[0], 0, "First knot at index 0");
+    /// R's 1-based iKnots as p2a's 0-based block ends.
+    fn knots_r(k: &[usize]) -> Vec<f64> {
+        k.iter().map(|&i| (i + 1) as f64).collect()
     }
 
     #[test]
@@ -506,6 +481,7 @@ mod tests {
         let mono = isoreg_y(&col("mono", "y")).unwrap();
         let decr = isoreg_y(&col("decr", "y")).unwrap();
         let un = isoreg(&col("unsorted", "x"), &col("unsorted", "y")).unwrap();
+        let tied = isoreg(&col("tiedx", "x"), &col("tiedx", "y")).unwrap();
         assert!(!un.is_ordered);
         // R's ord is 1-based
         let ord: Vec<f64> = un
@@ -515,12 +491,6 @@ mod tests {
             .iter()
             .map(|&i| (i + 1) as f64)
             .collect();
-        // The number of knots agrees with R's iKnots on doc (and decr, pinned below); the knot
-        // positions and yc do not: deviation STAT-52. On ir4 R keeps two adjacent pooled blocks
-        // with the same fitted value 6 apart (iKnots 4, 5, 6, 9, 10), p2a merges them (4 knots):
-        // deviation STAT-52, iknots_ir4 is not compared.
-        assert_eq!(doc.i_knots.len(), case.vector("iknots_doc").len());
-        // deviation STAT-52: yf_tiedx / iknots_tiedx (tied x not pooled) are not compared
         Check::new(&case)
             .vector("yf_doc", &doc.yf, Tol::coef(9))
             .vector("yf_doc3", &doc3.yf, Tol::coef(9))
@@ -531,6 +501,48 @@ mod tests {
             .vector("yf_unsorted", &un.yf, Tol::coef(15))
             .vector("x_sorted_unsorted", &un.x, Tol::exact())
             .vector("ord_unsorted", &ord, Tol::exact())
+            .vector("iknots_doc", &knots_r(&doc.i_knots), Tol::exact())
+            .vector("iknots_ir4", &knots_r(&ir4.i_knots), Tol::exact())
+            .vector("yc_doc", &doc.yc, Tol::coef(10))
+            .vector("yf_tiedx", &tied.yf, Tol::coef(5))
+            .vector("iknots_tiedx", &knots_r(&tied.i_knots), Tol::exact())
+            .finish();
+    }
+
+    /// Tied x pool through order(x, -y), whatever the row order within a tie; yc has a leading 0.
+    #[test]
+    fn test_validate_isoreg_tied_x() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, _) = crate::test_support::load_case("stat_isoreg_t4");
+        let (_, ds) = crate::test_support::load_case("stat_rank_isoreg");
+        let col = |set: &str, c: &str| column_where(&ds, c, &[("set", set)]);
+        let (tx, ty) = (col("tiedx", "x"), col("tiedx", "y"));
+        let tied = isoreg(&tx, &ty).unwrap();
+        let ir4 = isoreg(&col("ir4", "x"), &col("ir4", "y")).unwrap();
+        let doc = isoreg_y(&col("doc", "y")).unwrap();
+        // R's 1-based permutation of the rows
+        let perm: Vec<usize> = case
+            .vector("perm")
+            .iter()
+            .map(|&p| p as usize - 1)
+            .collect();
+        let px: Vec<f64> = perm.iter().map(|&i| tx[i]).collect();
+        let py: Vec<f64> = perm.iter().map(|&i| ty[i]).collect();
+        let permuted = isoreg(&px, &py).unwrap();
+        assert_eq!(permuted.yf, tied.yf);
+        assert_eq!(permuted.i_knots, tied.i_knots);
+        Check::new(&case)
+            .vector("yc_tiedx", &tied.yc, Tol::coef(10))
+            .vector("yc_ir4", &ir4.yc, Tol::coef(10))
+            .vector("yc_doc", &doc.yc, Tol::coef(10))
+            .vector("iknots_doc", &knots_r(&doc.i_knots), Tol::exact())
+            .vector("yf_tiedx_perm", &permuted.yf, Tol::coef(10))
+            .vector(
+                "iknots_tiedx_perm",
+                &knots_r(&permuted.i_knots),
+                Tol::exact(),
+            )
             .finish();
     }
 

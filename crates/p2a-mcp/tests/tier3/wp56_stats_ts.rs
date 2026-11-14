@@ -843,8 +843,8 @@ async fn test_mcp_stats_spline_default_cap() {
         .map(|(i, v)| v.sin() + 0.01 * ((i * 7 % 11) as f64))
         .collect();
     let ds = p2a_core::data::Dataset::new(df!("x" => x, "y" => y).unwrap());
-    // Tied x values: R's spline averages them (regularize.values) before counting n; here they
-    // are refused, so the default n counts distinct x values whenever the call runs.
+    // Tied x values: R's spline averages them (regularize.values) before counting n, and so does
+    // the core; the default n is 3 x the 10 distinct x values.
     let tx: Vec<f64> = (0..30).map(|i| (i % 10) as f64).collect();
     let ty: Vec<f64> = (0..30)
         .map(|i| (i % 10) as f64 * 0.5 + 0.03 * ((i * 7 % 11) as f64))
@@ -874,14 +874,19 @@ async fn test_mcp_stats_spline_default_cap() {
         .await,
     );
     assert_eq!(k["n_points"].as_u64(), Some(300));
-    let e = refused(
-        &s,
-        &se,
-        "stats_spline",
-        json!({"dataset": "tied", "x": "x", "y": "y"}),
-    )
-    .await;
-    assert!(e.contains("Duplicate x values"), "{e}");
+    let t = json_of(
+        &ok(
+            &s,
+            &se,
+            "stats_spline",
+            json!({"dataset": "tied", "x": "x", "y": "y"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        (t["n_points"].as_u64(), t["n_pairs"].as_u64()),
+        (Some(30), Some(30))
+    );
 }
 
 /// The first `got.len()` entries of a case vector (`Check::vector` compares whole values only).
@@ -1267,7 +1272,7 @@ async fn test_validate_mcp_stats_loglin_nondecomposable() {
 }
 
 /// STAT-38's MCP surface: an AR spectrum has no chi-square interval; the periodogram's is R's
-/// spec.ci at the reported df. Before: confidence_interval_95 always carried two multipliers
+/// spec.ci at spec.pgram's df, and its first ordinates are spec.pgram's. Before: confidence_interval_95 always carried two multipliers
 /// (a NaN pair for AR).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_timeseries_spectrum_ci() {
@@ -1283,16 +1288,29 @@ async fn test_validate_mcp_timeseries_spectrum_ci() {
         .await,
     );
     let ci = &p["confidence_interval_95"];
-    // deviation STAT-39: p2a's df for spans c(3, 3) is 18 where spec.pgram reports
-    // 6.552102376599634; the multipliers are pinned to R's spec.ci at p2a's df (ci_df[2] = 18)
-    assert_eq!(f(&ci["degrees_of_freedom"]), case.vector("ci_df")[2]);
+    // spec.pgram's df for spans c(3, 3) (ci_df[0] = 6.552102376599634) and R's spec.ci at it
+    let df = f(&ci["degrees_of_freedom"]);
+    assert!(
+        Tol::se(96).allows(df, case.vector("ci_df")[0]),
+        "df rust={df}"
+    );
     let want = case.vector("ci95_at_df");
     for (got, w) in [
-        (f(&ci["multiplier_lower"]), want[4]),
-        (f(&ci["multiplier_upper"]), want[5]),
+        (f(&ci["multiplier_lower"]), want[0]),
+        (f(&ci["multiplier_upper"]), want[1]),
     ] {
         // the core's spec.ci reproduces R to 1e-10 relative
         assert!(Tol::new(1e-10, 0.0).allows(got, w), "rust={got} R={w}");
+    }
+    let first5: Vec<f64> = p["spectrum_sample"]["first_5"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| f(&e["spec"]))
+        .collect();
+    let spec = case.vector("spec");
+    for (got, w) in first5.iter().zip(&spec[..5]) {
+        assert!(Tol::coef(96).allows(*got, *w), "spec rust={got} R={w}");
     }
     Check::new(&case)
         .scalar("peak_freq", f(&p["peak"]["frequency"]), Tol::coef(96))
@@ -2335,7 +2353,7 @@ async fn test_validate_mcp_compute_correlation() {
 }
 
 /// STAT-46/STAT-77: multivariate_cancor through the dispatch path, pinned to cancor()'s
-/// centres (stat_cancor_t3).
+/// centres and canonical correlations (stat_cancor_t3).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_cancor_centres() {
     let case = Case::load("stat_cancor_t3");
@@ -2349,8 +2367,9 @@ async fn test_validate_mcp_cancor_centres() {
         )
         .await,
     );
-    // deviation STAT-16: the correlations and coefficients are not pinned here.
+    // the coefficients are pinned (sign-normalised) in the core tests
     Check::new(&case)
+        .vector("cor", &fs(&j["canonical_correlations"]), Tol::coef(100))
         .named(
             "xcenter",
             &["x1", "x2", "x3"],

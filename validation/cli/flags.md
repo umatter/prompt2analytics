@@ -97,8 +97,8 @@ R-pinned (registry `validation/methods/cli_flags.json`, ids `cli_regression_flag
   ([ar.md](../timeseries/ar.md)).
 - **TS-26** (`ts stl`): STL runs in f32 with p2a's default windows; R's `stl` needs `s.window`
   and differs. The test compares the CLI with `run_stl` in process.
-- **STAT-68** (`ts spectrum`): the raw periodogram is twice `spec.pgram`'s, with a different
-  taper. The test compares the CLI with `run_spectrum` in process.
+- `ts spectrum`: the test compares the CLI with `run_spectrum` in process; the periodogram itself
+  is pinned to `spec.pgram` by the core tests ([spectrum.md](../timeseries/spectrum.md)).
 - `reg quantreg --intercept false`: the test checks that the flag reaches `quantreg()` (equal
   to the in-process call); the Barrodale-Roberts coefficients themselves are pinned by the core
   tests ([quantreg.md](../regression/quantreg.md)). R's no-intercept coefficients (`rq_coef`)

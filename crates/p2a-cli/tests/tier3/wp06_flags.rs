@@ -405,7 +405,7 @@ fn test_validate_cli_ts_stl_robust_flag() {
     );
 }
 
-/// ts spectrum --detrend false reaches run_spectrum; not R-pinned (STAT-68: periodogram scale and taper).
+/// ts spectrum --detrend false reaches run_spectrum (the periodogram is R-pinned in the core tests).
 #[cfg(feature = "spectral-analysis")]
 #[test]
 fn test_validate_cli_ts_spectrum_detrend_flag() {

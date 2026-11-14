@@ -426,7 +426,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
 | Phillips-Perron unit root test (PP.test) | [pptest.md](timeseries/pptest.md) | R-pinned, known deviations (STAT-6) |
-| Spectrum (spec.pgram, spec.ar) | [spectrum.md](timeseries/spectrum.md) | R-pinned, known deviations (STAT-39, STAT-68) |
+| Spectrum (spec.pgram, spec.ar) | [spectrum.md](timeseries/spectrum.md) | R-pinned |
 
 ### Forecasting
 | Method | File | Status |
@@ -479,9 +479,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | Median Polish | [medpolish.md](stats/medpolish.md) | R-pinned |
-| Isotonic Regression | [isoreg.md](stats/isoreg.md) | R-pinned, known deviations (STAT-52) |
+| Isotonic Regression | [isoreg.md](stats/isoreg.md) | R-pinned |
 | Log-Linear Models | [loglin.md](stats/loglin.md) | R-pinned |
-| Constrained Optimization | [constroptim.md](stats/constroptim.md) | R-pinned, known deviations (STAT-80) |
+| Constrained Optimization | [constroptim.md](stats/constroptim.md) | R-pinned |
 | SE for Contrasts | [secontrast.md](stats/secontrast.md) | R-pinned |
 | Model Tables | [modeltables.md](stats/modeltables.md) | R-pinned, known deviations (STAT-75) |
 | Fisher's Exact Test (2 × 2) | [fisher.md](stats/fisher.md) | R-pinned |
@@ -492,7 +492,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-26, STAT-27) |
 | Exact Poisson test (poisson.test) | [poisson_test.md](stats/poisson_test.md) | R-pinned |
 | Test of proportions (prop.test) | [prop_test.md](stats/prop_test.md) | R-pinned |
-| Spline and linear interpolation: default number of points (spline, approx) | [spline.md](stats/spline.md) | R-pinned, known deviations (STAT-40, STAT-69) |
+| Spline and linear interpolation: methods, ties and default number of points (spline, splinefun, approx) | [spline.md](stats/spline.md) | R-pinned |
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned |
 | Ansari-Bradley test of scale | [ansari.md](stats/ansari.md) | R-pinned |
 | Exact binomial test | [binom.md](stats/binom.md) | R-pinned |
@@ -501,10 +501,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned |
-| Canonical correlation (cancor) | [cancor.md](multivariate/cancor.md) | R-pinned, known deviations (STAT-16) |
+| Canonical correlation (cancor) | [cancor.md](multivariate/cancor.md) | R-pinned |
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
-| Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-69, STAT-87) |
+| Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-87) |
 | One-way ANOVA | [anova.md](stats/anova.md) | R-pinned |
 | Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
 | Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned, known deviations (STAT-53) |
@@ -563,14 +563,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 |--------|------|--------|
 | CLI exhibits (data describe/head, reg ols, reg diagnostics, panel fe/re/hdfe/hausman) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | MCP `regression_ols` (cov_type, intercept) | [ols.md](regression/ols.md) | R-pinned |
-| CLI `reg ols/clustered/hac/gls/step/quantreg --intercept false`, `reg clustered --cluster2` | [flags.md](cli/flags.md) | R-pinned, known deviations (STAT-68, TS-26) |
-| CLI `ts ar --aic`, `ts stl --robust`, `ts spectrum --detrend` | [flags.md](cli/flags.md) | R-pinned, known deviations (STAT-68, TS-26) |
+| CLI `reg ols/clustered/hac/gls/step/quantreg --intercept false`, `reg clustered --cluster2` | [flags.md](cli/flags.md) | R-pinned, known deviations (TS-26) |
+| CLI `ts ar --aic`, `ts stl --robust`, `ts spectrum --detrend` | [flags.md](cli/flags.md) | R-pinned, known deviations (TS-26) |
 | CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | CLI causal iv, mediation and staggered-did (rows dropped, first-stage HC1 Wald F, units kept after trimming, pre-trend Wald test) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned, known deviations (STAT-85) |
 | MCP regression, discrete, panel and survival tools (glmnet JSON, GLS, quantreg, diagnostics, smoothers, mlogit, Cox robust SEs, AFT, system GMM, unit-root lag selection, PVCM/PMG, panel GLS) and module dispatch | [models.md](mcp/models.md) | R-pinned, known deviations (ECON-16, ECON-20, REG-29, STAT-23, TS-23) |
 | MCP causal tools (option tables and aliases, MatchIt defaults and the matched sample, IPW, ltmle, gformula, gsynth and mediation fields) | [causal_surface.md](mcp/causal_surface.md) | R-pinned, known deviations (REG-27) |
-| MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-16, STAT-39, STAT-68, STAT-69, STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
+| MCP statistics, hypothesis and time-series tools (option spellings, ccf peak, spline and factanal defaults, power solvers, VAR/VARMA/VECM JSON, GARCH and Holt-Winters forecasts) | [mcp_stats_ts.md](stats/mcp_stats_ts.md) | R-pinned, known deviations (STAT-75, STAT-82, TOOL-28, TS-14, TS-22, TS-26, TS-29, TS-34) |
 | MCP data and chart tools (describe_dataset columns, value counts, fill_na, dendrogram) | [mcp_data_tools.md](data/mcp_data_tools.md) | R-pinned, known deviations (DATA-65) |
 | CLI model commands (`reg`, `discrete`, `panel`, `survival`, `stats`), persisted datasets and notes | [models.md](cli/models.md) | R-pinned, known deviations (CLI-21, STAT-6) |
 | CLI causal, time-series, ML, spatial and viz commands (typed options, forecasts, PCA scores, impacts) | [other.md](cli/other.md) | R-pinned, known deviations (CAUS-39, TS-22, TS-24) |

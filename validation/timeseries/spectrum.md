@@ -47,12 +47,55 @@ spec_ci <- function(df, coverage = 0.95) {   # stats:::plot.spec's private spec.
 
 **Rust test:** `stats::spectrum::tests::test_validate_spectrum_t3_grid_and_ci`.
 
+### Periodogram ordinates (R-pinned, `stats_misc_t4.json` `spectrum_pgram_t4`)
+
+Case `stat_spectrum_t4` in `validation/r/cases/stats_misc_t4.R`: `spec.pgram` on the n = 96 series
+above and on `validation/datasets/generated/spectrum_t4.csv` (97 points, AR(0.6) plus a trend), over
+taper 0, 0.1 and 0.25, spans none, 7, (3, 3) and (3, 5), detrending, demeaning only and neither,
+`pad = 0.5`, odd n (the first 75 points) and n = 97 with and without `fast` padding. Frequencies,
+ordinates and `n.used` are compared (`Tol::coef(96)`, `n.used` exact) by
+`test_validate_spectrum_pgram_raw_tapered`, `test_validate_spectrum_pgram_smoothed_taper_demean`,
+`test_validate_spectrum_pgram_padding` and `test_validate_spectrum_pgram_odd_and_fast`, and the
+`stat_spectrum_t3` ordinates (`spec`, `raw_spec`) by `test_validate_spectrum_t3_grid_and_ci`.
+
+`spectrum` computes the periodogram as `spec.pgram`: R's detrending (centred times); the split
+cosine bell of `spec.taper` (`m = floor(n p)` points at each end, weights
+`0.5 (1 - cos(pi (2j - 1) / (2m)))`, no renormalisation) with the ordinates divided by
+`u2 = 1 - (5/8) 2p`; `trunc(n * pad)` zeros of padding and, with `fast = true` (R's default), more
+zeros up to the next length with no prime factor above 5 (`nextn`; 97 points are analysed at
+length 100); `|fft|^2 / N0` with `N0` the unpadded length; the zero-frequency ordinate replaced by
+the mean of its neighbours; and modified Daniell smoothing that wraps around circularly as
+`kernapply(circular = TRUE)` does. Ordinates are on R's scale (no one-sided doubling) at
+frequencies `j / N`, `j = 1..floor(N/2)`. The circular smoothing runs over the ordinates
+`0..floor(N/2)` with mirrored indices, which equals R's pass over all `N` because the periodogram of
+a real series is symmetric; `daniell_mirrored_pass_matches_full_circular_convolution` checks it
+against a naive circular convolution, and `test_validate_daniell_interior_against_r` pins all 32
+ordinates of two smoothed periodograms, edges included. `nextn_matches_r` checks `nextn(1:200)`
+and `padding_truncates_as_r` the `trunc` of the padding.
+
 ### Confidence interval
 
 `SpectrumResult::confidence_interval_multipliers(level)` is R's `plot.spec` rule: the two tails are
 split in proportion to `P(X <= df)` and `P(X > df)` for `X ~ chi^2(df)`, so the multipliers are
 `df / qchisq(1 - (1 - level) P(X > df), df)` and `df / qchisq((1 - level) P(X <= df), df)`. The level
-is validated. The df that goes in is p2a's own (STAT-39, below).
+is validated.
+
+### Degrees of freedom and bandwidth
+
+As `spec.pgram`: the combined modified Daniell kernel `k` of the spans gives `df.kernel = 2 / sum(k^2)`
+and `bandwidth.kernel = sqrt(sum((1/12 + i^2) k_i))` (2 and `sqrt(1/12)` unsmoothed); the df is divided
+by the taper factor `u4 / u2^2`, `u4 = 1 - (93/128) 2 taper`, and scaled by `n / n.used`, the bandwidth
+divided by `n.used`. `_df` and `_bw` of every `stat_spectrum_t4` variant and `df`, `bandwidth`,
+`raw_df`, `raw_bandwidth` of `stat_spectrum_t3` are pinned (`Tol::se(96)`).
+
+### AR spectrum
+
+`spectrum_ar` evaluates at `spec.ar`'s grid `seq(0, 0.5, length.out = n.freq)` (frequency 0 included)
+with `ar.yw`'s `var.pred`, the Levinson innovation variance times `n / (n - (order + 1))` (the AIC
+uses the unscaled variance, as `ar.yw`). `test_validate_spectrum_ar_fixed_order` pins frequencies,
+ordinates, coefficients and `var.pred` of `spec.ar(x, n.freq = 50, order = 2)`;
+`test_validate_spectrum_ar_aic` the AIC order, ordinates and `var.pred` of `spec.ar(x, n.freq = 50)`
+(registry `spectrum_ar_t4`).
 
 **AR spectra report no interval.** R's `spec.ar` has no df. `spectrum_ar` sets df to infinity,
 `confidence_interval_multipliers` returns `Ok(None)` for it, the older `confidence_multipliers` returns
@@ -72,15 +115,19 @@ These compare no R number: `test_spectrum_sine_peak_property`, `test_raw_periodo
 missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 ([acf.md](../stats/acf.md)).
 
-## Known Differences from R
 
-**STAT-39 (df and bandwidth):** on the case above R gives df 6.552102376599634 and bandwidth
-0.01084201041388611; p2a gives 18 and 0.03125. The interval multipliers are pinned at given df, so
-they carry p2a's df until STAT-39 is fixed.
+## Timing against the previous implementation (Tier 4)
 
-**STAT-68 (ordinates):** p2a's spectral ordinates are about twice R's and differ in the taper and in the
-smoothing at the edges. The peak (`spec` 7.658276496605042 at frequency 0.125 in R) is at the same
-frequency. R's `spec`, `raw_spec`, `raw_df` and `raw_bandwidth` are recorded in the case.
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: to be repeated at integration.
+
+| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+|---|---|---|---|---|
+| periodogram, spans (3, 3) | 100 | 10.3 | 9.9 | 0.96 |
+| periodogram, spans (3, 3) | 1,000 | 77.4 | 68.5 | 0.89 |
+| periodogram, spans (3, 3) | 10,000 | 1,100.0 | 965.2 | 0.88 |
+| AR spectrum, AIC order, 500 frequencies | 100 | 304.1 | 315.8 | 1.04 |
+| AR spectrum, AIC order, 500 frequencies | 1,000 | 3,274.4 | 3,269.5 | 1.00 |
+| AR spectrum, AIC order, 500 frequencies | 10,000 | 46,813.6 | 47,103.2 | 1.01 |
 
 ## Performance Comparison
 

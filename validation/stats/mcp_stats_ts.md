@@ -119,12 +119,8 @@ at 200 points on a generated series) load no case and are not registered.
 Registry deviations (quantities kept out of the comparisons, with a `// deviation <id>`
 comment in the test):
 
-- **STAT-69** (`mcp_t3_spline`), method fmm: only method = natural is pinned.
 - **STAT-82** (`mcp_t3_power_mauchly_loglin`), Mauchly p (R's pchisq form): p_value is pinned to the Anderson second-order p (psi_contrasts_p_anderson, contrasts_p_anderson); R's mauchly.test p is a 1e-3 cross-check only.
-- **STAT-39** (`mcp_t3_spectrum_mahalanobis`), spectrum df: p2a 18 for spans c(3, 3), spec.pgram 6.552102376599634; multipliers pinned at p2a's df.
-- **STAT-68** (`mcp_t3_spectrum_mahalanobis`), spectral ordinates: not pinned.
 - **TS-22** (`mcp_t3_garch_statespace_forecasting`), airpass_mult_upr, airpass_mult_lwr: predict.HoltWinters' multiplicative interval formula is wrong; the tool prints point forecasts and a note for multiplicative fits, intervals only for additive and non-seasonal fits (hw_add_upr, hw_add_lwr pinned).
-- **STAT-16** (`mcp_t3_remaining_handlers`), cancor correlations and coefficients: centres pinned only.
 - **STAT-75** (`mcp_t3_remaining_handlers`), model-table SEs: means, grand mean and group sizes pinned.
 - **TS-14** (`mcp_t3_remaining_handlers`), ARMAacf for mixed ARMA: pure AR and MA pinned.
 - **TS-26** (`mcp_t3_remaining_handlers`), MSTL components: observation count and periods only.
@@ -133,9 +129,9 @@ comment in the test):
 - **TOOL-28** (`mcp_t3_remaining_handlers`), arima_sim sd: seed determinism only.
 
 R values recorded for the deviations: `lag_dplyr3_head` (TS-29) and `runmed_median_head`
-(TS-34) in `mcp_series_t3`; the spectrum's `ci_df[0]` is 6.552102376599634 in R where p2a
-uses 18 (STAT-39, `stat_spectrum_t3`); R's canonical correlations are `cor` in
-`stat_cancor_t3` (STAT-16). The PP statistic and p-value are pinned to PP.test (no
+(TS-34) in `mcp_series_t3`; the spectrum's df and multipliers are spec.pgram's
+(`ci_df[0]`, `ci95_at_df[0..2]` of `stat_spectrum_t3`); the canonical correlations are pinned to `cor` of
+`stat_cancor_t3`. The PP statistic and p-value are pinned to PP.test (no
 deviation).
 
 ## Wall-clock

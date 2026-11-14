@@ -74,7 +74,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/anova2_rcbd_t4.csv` | 115 × 3 (subj, cond, y) | `stat_anova2_rcbd_t4` | `r/cases/stats_exact_t4.R` | seed 4411; 40 subjects × 3 conditions with 5 rows dropped |
 | `generated/ap_blobs.csv` | 115 × 2 (x, y) | `apcluster_blobs`; read by `pam_clara_blobs`, `fuzzy_reference_blobs` | `r/cases/ml_mixtures.R` | seed 20261109; the same blobs and noise as `blobs_noise.csv` |
 | `generated/binom_minlike_t4.csv` | 6 × 4 (label, x, n, p) | `stat_binom_minlike_t4` | `r/cases/stats_exact_t4.R` | literal values: six (x, n, p) cells of binom.test's two-sided rule |
-| `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
+| `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3`, `stat_cancor_t4` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
+| `generated/cancor_t4.csv` | 10 × 5 (a1, a2, a3, b1, b2) | `stat_cancor_t4` | `r/cases/stats_misc_t4.R` | fixed values |
 | `generated/cli_mtcars.csv` | 32 × 4 (mpg, wt, hp, qsec) | `cli_viz_residuals` | `r/cases/cli_other.R` | `datasets::mtcars`, the four columns of `lm(mpg ~ wt + hp + qsec)` |
 | `generated/cor_matrix_small_t4.csv` | 5 × 3 (id, a, b; b missing in row 5) | `stat_cor_matrix_t4` | `r/cases/stats_descriptive_t4.R` | literal values: a = 1, 2, 3, 4, 100 |
 | `generated/cor_matrix_t4.csv` | 40 × 6 (id, a, b, lab, c, i; i Int64, lab text; 2-3 missing cells per numeric column in different rows) | `stat_cor_matrix_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261114 |
@@ -108,7 +109,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
 | `generated/robust_weighted_t3.csv` | 25 × 3 (x1, x2, w) | `stat_robust_weighted_t3` | `r/cases/stats_misc_t3.R` | two samples and weights |
 | `generated/secontrast_poly_t4.csv` | 24 × 2 (dose, y) | `stat_secontrast_poly_t4` | `r/cases/stats_exact_t4.R` | seed 20261111; four numeric dose levels, quadratic mean plus noise |
-| `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3` | `r/cases/stats_misc_t3.R` | sine plus noise |
+| `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3`, `stat_spectrum_t4` | `r/cases/stats_misc_t3.R` | sine plus noise |
+| `generated/spectrum_t4.csv` | 97 × 2 (t, z) | `stat_spectrum_t4` | `r/cases/stats_misc_t4.R` | AR(0.6) plus trend, seed 20261113 |
+| `generated/spline_t4.csv` | 12 × 15 (id, sx, sy, fx, fy, px, py, ux, uy, hx, hy, mx, my, tx, ty) | `stat_spline_t4` | `r/cases/stats_misc_t4.R` | seven (x, y) sets, NA-padded; tied x in tx |
 | `generated/vcov_dk_grunfeld_t10.csv` | 100 × 5 (firm, year, inv, value, capital) | `vcov_dk_grunfeld_t10` | `r/cases/reg_vcov_t4.R` | `grunfeld.csv`, years 1935-1944 |
 | `generated/vcov_dk_grunfeld_unbal.csv` | 190 × 5 (firm, year, inv, value, capital) | `vcov_dk_grunfeld_unbal` | `r/cases/reg_vcov_t4.R` | `grunfeld.csv` with 10 rows dropped |
 | `generated/vcov_hac_prewhite_ts.csv` | 300 × 3 (y, x1, x2) | `vcov_hac_prewhite_ts` | `r/cases/reg_vcov_t4.R` | seed 20261111, AR(0.9) regressor and AR(0.7) errors |
@@ -213,7 +216,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
 | `generated/evalue_hr_inputs.csv` | 3 × 4 (id, est, lo, hi) | `evalue_hr_common` | `r/cases/regression_sensitivity_t4.R` | literal values: three hazard ratios with limits, one without a lower limit (empty cell) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
-| `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax` | `r/cases/stats_power_loglin.R` | seed 20261118 |
+| `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax`, `stat_factanal_t4` | `r/cases/stats_power_loglin.R` | seed 20261118 |
 | `generated/feglm_panel.csv` | 480 × 7 (id, time, x, x2, y_gauss, y_bin, y_cnt) | `feglm_families` | `r/cases/econ_panel_t3.R` | seed 20261106 |
 | `generated/fisher_legacy.csv` | 4 × 5 (table, a, b, c, d) | `stat_fisher_legacy` | `r/cases/stats_power_loglin.R` | literal values: the four 2 × 2 tables of `fisher.rs`'s legacy tests |
 | `generated/garch_returns.csv` | 1500 × 5 (t, r_norm, r_t, r_g21, r_norm_dm) | `garch_normal_t` | `r/cases/ts_garch.R` | seed 20261105 |
@@ -263,7 +266,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/rank_binom_grid.csv` | 23 × 5 (label, x, n, p, stat15) | `stat_rank_binom` | `r/cases/stats_rank_t3.R` | literal values: 23 (x, n, p) cells; `stat15` marks the cells of STAT-15 |
 | `generated/rank_fligner.csv` | 102 × 3 (set, group, value) | `stat_rank_fligner` | `r/cases/stats_rank_t3.R` | literal values: the two examples the old tests quoted, and `datasets::InsectSprays` |
 | `generated/rank_friedman_rounding.csv` | 66 × 4 (block, method, time, first12) | `stat_rank_friedman_rounding` | `r/cases/stats_rank_t3.R` | literal values: the `?friedman.test` RoundingTimes data (22 players × 3 methods) in long form; `first12` marks the first 12 players |
-| `generated/rank_isoreg.csv` | 58 × 3 (set, x, y) | `stat_rank_isoreg` | `r/cases/stats_rank_t3.R` | seed 20261026 |
+| `generated/rank_isoreg.csv` | 58 × 3 (set, x, y) | `stat_rank_isoreg`, `stat_isoreg_t4` | `r/cases/stats_rank_t3.R` | seed 20261026 |
 | `generated/rank_kruskal_hw.csv` | 14 × 2 (value, group) | `stat_rank_kruskal_hw` | `r/cases/stats_rank_t3.R` | literal values: Hollander & Wolfe (1973) p. 116, the `?kruskal.test` example |
 | `generated/rank_ks_t4.csv` | 1219 × 3 (set, group, value) | `stat_rank_ks_t4` | `r/cases/stats_rank_t4.R` | seed 20261113 |
 | `generated/rank_quade_store.csv` | 35 × 3 (store, brand, sales) | `stat_rank_quade_store` | `r/cases/stats_rank_t3.R` | literal values: Conover (1999) p. 375, the `?quade.test` hand-lotion example |

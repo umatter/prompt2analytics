@@ -300,7 +300,7 @@ mod dispatch {
     }
 
     /// stats: two-way ANOVA where y and fa are missing in a row whose fb is present (the null-alignment fix of
-    /// 5f86b49, through the dispatcher), MANOVA Pillai (T2-WP07), and factanal (smoke: STAT-23/STAT-49 are Tier 4).
+    /// 5f86b49, through the dispatcher), MANOVA Pillai (T2-WP07), and factanal (smoke: pinned in the core tests).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_validate_dispatch_stats_module() {
         let (av, mv, md) = (
