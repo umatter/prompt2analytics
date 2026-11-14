@@ -729,17 +729,7 @@ fn density_binned(
         }
     }
 
-    // Kernel ordinates at kords = seq(0, 2(up - lo), length 2m), mirrored above m
-    let kords_at = RSeq::new(0.0, 2.0 * (up - lo), size);
-    let mut k: Vec<Complex<f64>> = resource::try_with_capacity(size, "density kernel grid")?;
-    k.extend((0..size).map(|i| {
-        let t = if i <= m {
-            kords_at.at(i)
-        } else {
-            -kords_at.at(size - i)
-        };
-        Complex::new(kernel_function(t, bw, kernel), 0.0)
-    }));
+    let mut k = density_kernel_ordinates(up - lo, m, bw, kernel)?;
 
     resource::checkpoint()?;
     // FftPlanner caches its plans: grids up to DENSITY_CACHED_FFT_MAX reuse a per-thread planner
@@ -922,6 +912,26 @@ pub(crate) fn bw_nrd0(x: &[f64]) -> EconResult<f64> {
 
 /// R's density kernels at distance `t` with bandwidth `bw` (the kernel's standard deviation),
 /// including the 1/bw scaling. The compact kernels are zero at |t| >= a, R's half-width.
+/// The kernel ordinates of [`density_binned`] at kords = seq(0, 2 * span, length 2m), mirrored
+/// above m (R's `kords[(m + 2):(2m)] <- -kords[m:2]`). Every kernel is even, so the ordinates
+/// above m are those below it in reverse order and are copied rather than evaluated again.
+fn density_kernel_ordinates(
+    span: f64,
+    m: usize,
+    bw: f64,
+    kernel: DensityKernel,
+) -> EconResult<Vec<Complex<f64>>> {
+    let size = 2 * m;
+    let kords_at = RSeq::new(0.0, 2.0 * span, size);
+    let mut k: Vec<Complex<f64>> = resource::try_with_capacity(size, "density kernel grid")?;
+    k.extend((0..=m).map(|i| Complex::new(kernel_function(kords_at.at(i), bw, kernel), 0.0)));
+    for i in m + 1..size {
+        let mirrored = k[size - i];
+        k.push(mirrored);
+    }
+    Ok(k)
+}
+
 fn kernel_function(t: f64, bw: f64, kernel: DensityKernel) -> f64 {
     use std::f64::consts::PI;
     let ax = t.abs();
@@ -989,6 +999,53 @@ pub fn run_density(
 
 #[cfg(test)]
 mod tests {
+
+    /// The mirrored kernel ordinates equal the ones evaluated at -kords, as before, for every
+    /// kernel, on the default grid and a larger one, at bandwidths that put the support inside
+    /// and outside the grid (noisy spans and bandwidths, not round numbers).
+    #[test]
+    fn test_density_kernel_mirroring_matches_direct_evaluation() {
+        let kernels = [
+            DensityKernel::Gaussian,
+            DensityKernel::Epanechnikov,
+            DensityKernel::Rectangular,
+            DensityKernel::Triangular,
+            DensityKernel::Biweight,
+            DensityKernel::Cosine,
+            DensityKernel::OptCosine,
+        ];
+        for &kernel in &kernels {
+            for &(span, m, bw) in &[
+                (13.71, 512usize, 0.413),
+                (3.2e-3, 512, 7.9e-5),
+                (941.3, 2048, 31.7),
+                (5.17, 1024, 12.3),
+            ] {
+                let size = 2 * m;
+                let kords_at = RSeq::new(0.0, 2.0 * span, size);
+                let direct: Vec<f64> = (0..size)
+                    .map(|i| {
+                        let t = if i <= m {
+                            kords_at.at(i)
+                        } else {
+                            -kords_at.at(size - i)
+                        };
+                        kernel_function(t, bw, kernel)
+                    })
+                    .collect();
+                let mirrored = density_kernel_ordinates(span, m, bw, kernel).unwrap();
+                assert_eq!(mirrored.len(), size);
+                for (i, (a, b)) in mirrored.iter().zip(&direct).enumerate() {
+                    assert_eq!(a.im, 0.0);
+                    assert!(
+                        a.re == *b || (a.re - b).abs() <= 4.0 * f64::EPSILON * b.abs(),
+                        "{kernel:?} span {span} m {m} bw {bw} i {i}: {} vs {b}",
+                        a.re
+                    );
+                }
+            }
+        }
+    }
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
 

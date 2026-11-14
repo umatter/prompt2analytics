@@ -469,9 +469,13 @@ fn kendall_test(
 
     let (statistic, statistic_name, p_value) =
         if n < KENDALL_EXACT_MAX_N && counts.n1 == 0 && counts.n2 == 0 {
-            // T = (S + n0)/2 concordant pairs
-            let t_obs = u64::try_from((i128::from(s) + i128::from(n0)) / 2).unwrap_or(0);
-            let cdf = kendall_exact_cdf(n)?;
+            // T = (S + n0)/2 concordant pairs; -n0 <= S <= n0, so T is in 0..=n0
+            let t_obs = u64::try_from((i128::from(s) + i128::from(n0)) / 2).map_err(|_| {
+                EconError::Computation(format!(
+                    "Kendall's S = {s} lies outside [-{n0}, {n0}] for n = {n}"
+                ))
+            })?;
+            let cdf = kendall_exact_cdf_cached(n)?;
             let at_most = |k: u64| cdf[usize::try_from(k).unwrap_or(usize::MAX).min(cdf.len() - 1)];
             let less = at_most(t_obs);
             // P(T >= t) = P(T <= n0 - t) by symmetry
@@ -516,6 +520,29 @@ fn kendall_test(
 
 /// R's `cor.test` uses the exact Kendall distribution below this sample size (without ties).
 const KENDALL_EXACT_MAX_N: usize = 50;
+
+/// The exact Kendall tables already computed, one per n below [`KENDALL_EXACT_MAX_N`] (about
+/// 160 KB when all are filled): every call at the same n reads the same table.
+static KENDALL_EXACT_TABLES: [OnceLock<Vec<f64>>; KENDALL_EXACT_MAX_N] =
+    [const { OnceLock::new() }; KENDALL_EXACT_MAX_N];
+
+/// [`kendall_exact_cdf`] for `n` < [`KENDALL_EXACT_MAX_N`], computed once per n. The table is
+/// built outside the cell, so a failed build (allocation ceiling, cancelled budget) stores
+/// nothing and the next call tries again; two threads that race store one of two equal tables.
+fn kendall_exact_cdf_cached(n: usize) -> EconResult<&'static [f64]> {
+    let Some(cell) = KENDALL_EXACT_TABLES.get(n) else {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the exact Kendall distribution is tabulated below n = {KENDALL_EXACT_MAX_N}, got {n}"
+            ),
+        });
+    };
+    if let Some(table) = cell.get() {
+        return Ok(table);
+    }
+    let table = kendall_exact_cdf(n)?;
+    Ok(cell.get_or_init(|| table))
+}
 
 /// `cdf[k]` = P(T <= k) for T the number of concordant pairs (equivalently, of inversions) of a
 /// uniformly random permutation of n elements, k in 0..=n(n-1)/2. Mahonian recursion
@@ -929,6 +956,30 @@ mod tests {
         assert_eq!(counts.s, 55869); // also computed by a port of the old pairwise loop
         let (s, ties_x, ties_y) = kendall_pairwise_reference(&x, &y);
         assert_eq!((counts.s, counts.n1, counts.n2), (s, ties_x, ties_y));
+    }
+
+    /// The cached exact tables equal freshly computed ones (bit for bit) at every n below the
+    /// exact limit, also on a second read and from another thread; n at the limit is refused.
+    #[test]
+    fn test_kendall_exact_cache_matches_fresh_tables() {
+        for n in 0..KENDALL_EXACT_MAX_N {
+            let fresh = kendall_exact_cdf(n).unwrap();
+            assert_eq!(
+                kendall_exact_cdf_cached(n).unwrap(),
+                fresh.as_slice(),
+                "n = {n}"
+            );
+            assert_eq!(
+                kendall_exact_cdf_cached(n).unwrap(),
+                fresh.as_slice(),
+                "n = {n}"
+            );
+        }
+        let other = std::thread::spawn(|| kendall_exact_cdf_cached(37).unwrap().to_vec())
+            .join()
+            .unwrap();
+        assert_eq!(other, kendall_exact_cdf(37).unwrap());
+        assert!(kendall_exact_cdf_cached(KENDALL_EXACT_MAX_N).is_err());
     }
 
     #[test]
