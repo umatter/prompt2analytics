@@ -520,7 +520,10 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
    chi-square of 0 on 0 df.
 5. **Cox aliasing** is detected by pivoted QR on [1 | X] (tolerance 1e-7, as `lm`), where coxph uses `cholesky2`
    on the information (`toler.chol`). Both drop the later of exactly collinear columns; near-singular designs may
-   differ.
+   differ. A covariate that varies only outside the risk sets of the events (zero information at
+   beta = 0, found by an in-order Cholesky of that information with `toler.chol`'s threshold) is aliased as coxph
+   aliases it: NA coefficient, a warning naming it, the rest fitted without it. R-pinned by
+   `surv_cox_info_singular_t4` (`test_validate_cox_info_singular_covariate`).
 6. **Robust Cox tests with too few clusters.** With no more clusters than coefficients the robust Wald and robust
    score tests are NaN with a warning; coxph reports generalized-inverse statistics. A single-level cluster column
    is refused (coxph returns a variance of about 0).

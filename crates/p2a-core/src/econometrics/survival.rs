@@ -86,12 +86,12 @@ fn checked_times(
         let (row, value) = (rows[i], values[i]);
         let message = match rule {
             TimeRule::NonNegative => format!(
-                "Column '{time_col}' has {count} negative value(s) (first at row {row}: \
-                 {value}); survival times must be >= 0"
+                "Column '{time_col}' has {count} negative value(s) (first at row {row} \
+                 (0-based): {value}); survival times must be >= 0"
             ),
             TimeRule::Positive => format!(
-                "Column '{time_col}' has {count} value(s) <= 0 (first at row {row}: {value}); \
-                 AFT models need positive survival times (R survreg: \"Invalid survival \
+                "Column '{time_col}' has {count} value(s) <= 0 (first at row {row} \
+                 (0-based): {value}); AFT models need positive survival times (R survreg: \"Invalid survival \
                  times for this distribution\")"
             ),
         };
@@ -128,7 +128,7 @@ fn surv_status(values: &[f64], rows: &[usize], column: &str) -> EconResult<Vec<b
     }
     Err(EconError::InvalidSpecification {
         message: format!(
-            "Column '{column}' holds status value(s) {} (first unexpected at row {}); code \
+            "Column '{column}' holds status value(s) {} (first unexpected at row {} (0-based)); code \
              it as 0/1 (1 = event), 1/2 (2 = event) or TRUE/FALSE, as R's Surv() does",
             list.join(", "),
             rows.get(first).copied().unwrap_or(first)
@@ -173,18 +173,16 @@ fn extract_survival(
 fn check_conf_level(conf_level: f64) -> EconResult<()> {
     if !(conf_level > 0.0 && conf_level < 1.0) {
         return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
+            message: format!("conf_level must be strictly between 0 and 1, got {conf_level}"),
         });
     }
     Ok(())
 }
 
-/// The last line of a result's Display when rows were dropped.
+/// The last line of a result's Display when rows were dropped (the panel results' helper,
+/// with no warnings: each survival Display prints its warnings itself).
 fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::Result {
-    match missing.note() {
-        Some(note) => writeln!(f, "Missing values: {note}"),
-        None => Ok(()),
-    }
+    crate::econometrics::panel::types::write_warnings_then_missing(f, "", &[], missing)
 }
 
 // =============================================================================
@@ -489,7 +487,7 @@ const KM_TABLE_HEAD: usize = 100;
 const KM_TABLE_TAIL: usize = 50;
 
 /// A confidence level as a percentage: "95" for 0.95, "97.5" for 0.975.
-fn conf_percent(conf_level: f64) -> String {
+pub fn conf_percent(conf_level: f64) -> String {
     let pct = conf_level * 100.0;
     if (pct - pct.round()).abs() < 1e-9 {
         format!("{pct:.0}")
@@ -499,7 +497,7 @@ fn conf_percent(conf_level: f64) -> String {
 }
 
 /// `{:.<decimals>}` of a value, or "NA" for NaN / `None` (R's NA).
-fn fmt_or_na(v: Option<f64>, decimals: usize) -> String {
+pub fn fmt_or_na(v: Option<f64>, decimals: usize) -> String {
     match v {
         Some(x) if !x.is_nan() => format!("{x:.decimals$}"),
         _ => "NA".to_string(),
@@ -914,6 +912,18 @@ pub struct LogRankResult {
     pub missing: MissingSummary,
 }
 
+impl LogRankResult {
+    /// The groups with no expected events, which R's survdiff excludes from the test.
+    pub fn excluded_groups(&self) -> Vec<&str> {
+        self.groups
+            .iter()
+            .zip(&self.expected_per_group)
+            .filter(|(_, e)| **e <= 0.0)
+            .map(|(g, _)| g.as_str())
+            .collect()
+    }
+}
+
 impl fmt::Display for LogRankResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Log-Rank Test")?;
@@ -939,13 +949,7 @@ impl fmt::Display for LogRankResult {
         }
 
         writeln!(f, "{}", "-".repeat(60))?;
-        let excluded: Vec<&str> = self
-            .groups
-            .iter()
-            .zip(&self.expected_per_group)
-            .filter(|(_, e)| **e <= 0.0)
-            .map(|(g, _)| g.as_str())
-            .collect();
+        let excluded = self.excluded_groups();
         if !excluded.is_empty() {
             writeln!(
                 f,
@@ -1018,7 +1022,12 @@ pub fn log_rank_test(
     let n_groups = groups.len();
     if n_groups < 2 {
         return Err(EconError::InvalidSpecification {
-            message: "Log-rank test requires at least 2 groups".to_string(),
+            message: format!(
+                "Log-rank test requires at least 2 groups; column '{group_col}' has {} level(s) \
+                 on the rows used: {}",
+                n_groups,
+                groups.join(", ")
+            ),
         });
     }
     let codes: Vec<usize> = factor.codes.iter().map(|&c| c as usize).collect();
@@ -1173,9 +1182,11 @@ pub fn log_rank_test(
 pub struct CoxConfig {
     /// Method for handling tied event times
     pub ties: TiesMethod,
-    /// Maximum iterations for Newton-Raphson
+    /// Maximum number of Newton-Raphson iterations (default 25, as coxph's `iter.max`); at
+    /// least 1.
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence tolerance on the relative change in the log partial likelihood (default
+    /// 1e-9, as coxph's `eps`; unitless); finite and > 0.
     pub tolerance: f64,
     /// Lin-Wei (1989) robust (sandwich) standard errors from the score residuals, as
     /// `coxph(robust = TRUE)`. Implied by `cluster`.
@@ -1321,7 +1332,7 @@ pub struct CoxResult {
 impl CoxResult {
     /// Degrees of freedom of the overall tests: the identified coefficients.
     pub fn df(&self) -> usize {
-        self.variables.len() - self.aliased.len()
+        self.variables.len().saturating_sub(self.aliased.len())
     }
 }
 
@@ -1549,8 +1560,65 @@ pub fn run_cox_ph(
     // baseline hazard, so a constant covariate is aliased with it; of two collinear covariates
     // the later one is aliased, as coxph decides.
     let aliased_idx = cox_aliased(&data.x, n)?;
-    let id: Vec<usize> = (0..p).filter(|j| !aliased_idx.contains(j)).collect();
-    let aliased: Vec<String> = aliased_idx.iter().map(|&j| names[j].clone()).collect();
+    let mut id: Vec<usize> = (0..p).filter(|j| !aliased_idx.contains(j)).collect();
+    let mut warnings: Vec<String> = aliasing_message(&aliased_idx, &names).into_iter().collect();
+
+    // Identified columns, centred and scaled as coxph does: the partial likelihood does not
+    // change under centring, and scaling makes the iteration independent of the units.
+    let build = |id: &[usize]| -> EconResult<(Array2<f64>, Array1<f64>)> {
+        let mut xs = try_zeros2(n, id.len(), "Cox design")?;
+        let mut scale = Array1::<f64>::zeros(id.len());
+        for (c, &j) in id.iter().enumerate() {
+            let col = &data.x[j];
+            let centre = col.iter().sum::<f64>() / n as f64;
+            let mad = col.iter().map(|v| (v - centre).abs()).sum::<f64>() / n as f64;
+            let s = 1.0 / mad;
+            scale[c] = s;
+            for (cell, &v) in xs.column_mut(c).iter_mut().zip(col) {
+                *cell = (v - centre) * s;
+            }
+        }
+        Ok((xs, scale))
+    };
+    let rs = CoxRiskSets::new(&data.time);
+    let (mut xs, mut scale) = build(&id)?;
+    checkpoint()?;
+    let mut at_zero = cox_pass(
+        &rs,
+        xs.view(),
+        &data.event,
+        Array1::zeros(id.len()).view(),
+        config.ties,
+    );
+    // A covariate with no variation inside any event's risk set has zero information at every
+    // beta: coxph's cholesky2 leaves its coefficient NA and fits the rest without it.
+    let no_info: Vec<usize> = zero_information_columns(&at_zero.information)
+        .into_iter()
+        .map(|c| id[c])
+        .collect();
+    if !no_info.is_empty() && no_info.len() < id.len() {
+        warnings.push(format!(
+            "Coefficients not defined because the covariate has no variation within the risk \
+             sets of the events (zero information): {}",
+            no_info
+                .iter()
+                .map(|&j| names[j].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        id.retain(|j| !no_info.contains(j));
+        (xs, scale) = build(&id)?;
+        at_zero = cox_pass(
+            &rs,
+            xs.view(),
+            &data.event,
+            Array1::zeros(id.len()).view(),
+            config.ties,
+        );
+    }
+    let mut aliased_all: Vec<usize> = aliased_idx.iter().chain(&no_info).copied().collect();
+    aliased_all.sort_unstable();
+    let aliased: Vec<String> = aliased_all.iter().map(|&j| names[j].clone()).collect();
     if id.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -1561,28 +1629,11 @@ pub fn run_cox_ph(
         });
     }
     let q = id.len();
-    let mut warnings: Vec<String> = aliasing_message(&aliased_idx, &names).into_iter().collect();
-
-    // Identified columns, centred and scaled as coxph does: the partial likelihood does not
-    // change under centring, and scaling makes the iteration independent of the units.
-    let mut xs = try_zeros2(n, q, "Cox design")?;
-    let mut scale = Array1::<f64>::zeros(q);
-    for (c, &j) in id.iter().enumerate() {
-        let col = &data.x[j];
-        let centre = col.iter().sum::<f64>() / n as f64;
-        let mad = col.iter().map(|v| (v - centre).abs()).sum::<f64>() / n as f64;
-        let s = 1.0 / mad;
-        scale[c] = s;
-        for (cell, &v) in xs.column_mut(c).iter_mut().zip(col) {
-            *cell = (v - centre) * s;
-        }
-    }
-
-    let rs = CoxRiskSets::new(&data.time);
     let fit = cox_newton(
         &rs,
         xs.view(),
         &data.event,
+        at_zero,
         config.ties,
         config.max_iter,
         config.tolerance,
@@ -1807,6 +1858,37 @@ fn cox_aliased(cols: &[Vec<f64>], n: usize) -> EconResult<Vec<usize>> {
         .collect())
 }
 
+/// The columns whose pivot in an in-order Cholesky factorization of the information falls
+/// below `toler` times its largest diagonal (coxph's `cholesky2`, `toler.chol` =
+/// `.Machine$double.eps^0.75`): columns with no information beyond the earlier ones.
+fn zero_information_columns(info: &Array2<f64>) -> Vec<usize> {
+    let q = info.nrows();
+    let toler = f64::EPSILON.powf(0.75);
+    let max_diag = (0..q).map(|i| info[[i, i]]).fold(0.0, f64::max);
+    let eps = if max_diag > 0.0 {
+        max_diag * toler
+    } else {
+        toler
+    };
+    let mut a = info.clone();
+    let mut out = Vec::new();
+    for i in 0..q {
+        let pivot = a[[i, i]];
+        if !pivot.is_finite() || pivot < eps {
+            out.push(i);
+            continue;
+        }
+        for j in i + 1..q {
+            let t = a[[j, i]] / pivot;
+            for k in j..q {
+                a[[k, j]] -= t * a[[k, i]];
+                a[[j, k]] = a[[k, j]];
+            }
+        }
+    }
+    out
+}
+
 /// The Newton fit of [`cox_newton`]: the estimate (scaled space), the pass at it, the pass at
 /// beta = 0 and the convergence record.
 struct CoxFit {
@@ -1822,6 +1904,7 @@ fn cox_newton(
     rs: &CoxRiskSets,
     x: ArrayView2<f64>,
     event: &[bool],
+    at_zero: CoxPass,
     ties: TiesMethod,
     max_iter: usize,
     tol: f64,
@@ -1836,8 +1919,6 @@ fn cox_newton(
         .inverse
         .dot(&pass.score))
     };
-    checkpoint()?;
-    let at_zero = cox_pass(rs, x, event, Array1::zeros(q).view(), ties);
     let mut beta = Array1::<f64>::zeros(q);
     let mut newbeta = solve(&at_zero)?;
     let mut ll_old = at_zero.loglik;
@@ -2701,25 +2782,9 @@ pub fn run_aft(
         Some(e) => e,
         None => eval(&theta),
     };
-    let var_diag_ok = |v: &Array2<f64>| (0..m).map(|j| v[[j, j]]).collect::<Vec<f64>>();
-    let v = match sym_inverse(
-        e.neg_hessian.view(),
-        SingularPolicy::Error,
-        "AFT information matrix",
-    ) {
-        Ok(inv) => inv.inverse,
-        Err(_) => {
-            return Err(aft_failure(it, change));
-        }
-    };
-    let var_diag = var_diag_ok(&v);
-    aft_check_finite(
-        e.loglik,
-        theta.as_slice().unwrap_or(&[]),
-        &var_diag,
-        it,
-        change,
-    )?;
+    let v = aft_inverse(&e.neg_hessian, it, change)?;
+    let var_diag: Vec<f64> = (0..m).map(|j| v[[j, j]]).collect();
+    aft_check_finite(e.loglik, theta.view(), &var_diag, it, change)?;
     if let Some(note) = convergence.note("AFT model") {
         warnings.push(note);
     }
@@ -2794,6 +2859,20 @@ pub fn run_aft(
     })
 }
 
+/// The inverse of the final AFT information. A cancelled budget or a refused allocation
+/// passes through; any other failure (singular, not finite) is the R2 fit failure.
+fn aft_inverse(neg_hessian: &Array2<f64>, it: usize, change: f64) -> EconResult<Array2<f64>> {
+    match sym_inverse(
+        neg_hessian.view(),
+        SingularPolicy::Error,
+        "AFT information matrix",
+    ) {
+        Ok(inv) => Ok(inv.inverse),
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
+        Err(_) => Err(aft_failure(it, change)),
+    }
+}
+
 fn aft_failure(iterations: usize, last_change: f64) -> EconError {
     EconError::ConvergenceFailure {
         iterations,
@@ -2810,7 +2889,7 @@ fn aft_failure(iterations: usize, last_change: f64) -> EconError {
 /// negative) is an error, not a returned result.
 fn aft_check_finite(
     loglik: f64,
-    theta: &[f64],
+    theta: ArrayView1<f64>,
     var_diag: &[f64],
     iterations: usize,
     last_change: f64,
@@ -3323,7 +3402,7 @@ pub fn run_competing_risks(
             return Err(EconError::InvalidSpecification {
                 message: format!(
                     "Column '{event_type_col}' must hold event codes 0 (censored), 1, 2, ... \
-                     (whole numbers up to 255); row {} is {v}",
+                     (whole numbers up to 255); row {} (0-based) is {v}",
                     cols.rows()[i]
                 ),
             });
@@ -3871,9 +3950,13 @@ mod tests {
                 conf_level,
                 conf_type: KmConfType::Log,
             };
-            invalid_spec(
+            let m = invalid_spec(
                 run_kaplan_meier_with(&ds, "time", "event", None, &config),
                 "conf_level",
+            );
+            assert!(
+                m.contains("strictly between 0 and 1") && m.contains(&format!("got {conf_level}")),
+                "{m}"
             );
         }
         let km95 =
@@ -4266,9 +4349,14 @@ mod tests {
                 for part in [status, "0/1", "1/2", "Surv"] {
                     assert!(m.contains(part), "{status}: {part:?} not in {m}");
                 }
-                if status == "status23" {
-                    assert!(m.contains('3'), "{m}");
-                }
+                // the observed values, not the column name
+                let values = match status {
+                    "status23" => "value(s) 2, 3 ",
+                    "status012" => "value(s) 0, 1, 2 ",
+                    _ => "value(s) 1, 1.5, 2 ",
+                };
+                assert!(m.contains(values), "{status}: {values:?} not in {m}");
+                assert!(m.contains("(0-based)"), "{m}");
             }
         }
         // The valid 1/2 column of the same dataset still gives R's counts.
@@ -4334,6 +4422,18 @@ mod tests {
         let aft = run_aft(&ds, "time", "status", &["age", "ph.karno"], None).unwrap();
         assert_eq!(aft.n_obs, 227);
         assert_eq!(aft.missing.n_dropped, 1);
+
+        // Competing risks reads its columns on its own path: ph.ecog as the event code
+        // (0 censored, 1-3 events) drops its missing row and reports it.
+        let cr = run_competing_risks(&ds, "time", "ph.ecog", 0.95).unwrap();
+        assert_eq!(cr.n_obs, 227);
+        assert_eq!(cr.missing.by_column, vec![("ph.ecog".to_string(), 1)]);
+        assert!(
+            cr.to_string().trim_end().ends_with(
+                "Missing values: 1 of 228 rows dropped because of missing values (ph.ecog: 1)"
+            ),
+            "{cr}"
+        );
     }
 
     #[test]
@@ -5313,6 +5413,7 @@ mod tests {
     /// The tail helpers against R 4.3.3: pnorm(z, lower.tail = FALSE, log.p = TRUE),
     /// exp(dnorm(z, log = TRUE) - that), and pmax(z, 0) + log1p(exp(-abs(z))).
     #[test]
+    #[allow(clippy::excessive_precision)] // R's printed digits, kept as printed
     fn test_aft_tail_helpers_match_r() {
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs() + 1e-300;
         for (z, ls, h) in [
@@ -5382,7 +5483,9 @@ mod tests {
     /// R2: non-finite results are an error, not a returned fit.
     #[test]
     fn test_aft_non_finite_result_is_an_error() {
-        assert!(aft_check_finite(-1.0, &[0.1, 0.2], &[0.01, 0.02], 5, 1e-13).is_ok());
+        assert!(
+            aft_check_finite(-1.0, ArrayView1::from(&[0.1, 0.2]), &[0.01, 0.02], 5, 1e-13).is_ok()
+        );
         for (ll, theta, var) in [
             (f64::NEG_INFINITY, [0.1, 0.2], [0.01, 0.02]),
             (-1.0, [f64::NAN, 0.2], [0.01, 0.02]),
@@ -5390,7 +5493,7 @@ mod tests {
             (-1.0, [0.1, 0.2], [-1e-3, 0.02]),
         ] {
             assert!(matches!(
-                aft_check_finite(ll, &theta, &var, 7, 1e-3),
+                aft_check_finite(ll, ArrayView1::from(&theta), &var, 7, 1e-3),
                 Err(EconError::ConvergenceFailure { iterations: 7, .. })
             ));
         }
@@ -5700,5 +5803,91 @@ mod tests {
         );
         let (_, se2, _) = compute_concordance(&time, &event, &eta, Some((&codes, 13))).unwrap();
         assert!((se2 - se_cl).abs() <= 1e-12 * se_cl, "{se2} vs {se_cl}");
+    }
+
+    /// A covariate that varies only among rows censored before the first event has zero
+    /// information: coxph leaves it NA and fits the rest as without it.
+    #[test]
+    fn test_validate_cox_info_singular_covariate() {
+        let (case, ds) = load_case("surv_cox_info_singular_t4");
+        let n = ds.nrows();
+        let r = run_cox_ph(
+            &ds,
+            "time",
+            "status",
+            &["x", "z"],
+            Some(cox_tight(TiesMethod::Efron)),
+        )
+        .unwrap();
+        assert_eq!(case.scalar("x_is_na"), 1.0);
+        assert!(r.coefficients[0].is_nan() && r.std_errors[0].is_nan());
+        assert_eq!(r.aliased, vec!["x".to_string()]);
+        assert_eq!(r.df(), 1);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("zero information") && w.ends_with(": x")),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .scalar("coef_z", r.coefficients[1], Tol::coef(n))
+            .scalar("se_z", r.std_errors[1], Tol::se(n))
+            .scalar("loglik_null", r.log_likelihood_null, Tol::stat(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("score_test", r.score_test, Tol::stat(n))
+            .scalar("wald_test", r.wald_test, Tol::stat(n))
+            .scalar("concordance", r.concordance, Tol::coef(n))
+            .scalar("concordance_se", r.concordance_se, Tol::se(n))
+            .finish();
+        // the fit without x gives the same numbers
+        let g = run_cox_ph(
+            &ds,
+            "time",
+            "status",
+            &["z"],
+            Some(cox_tight(TiesMethod::Efron)),
+        )
+        .unwrap();
+        assert!((g.coefficients[0] - r.coefficients[1]).abs() <= 1e-12);
+    }
+
+    /// The final AFT information's inverse passes a cancelled budget through instead of
+    /// turning it into the fit-failure text; a singular information is that failure.
+    #[test]
+    fn test_aft_failure_passes_cancellation() {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        let m = Array2::from_shape_vec((2, 2), vec![2.0, 0.3, 0.3, 1.0]).unwrap();
+        assert!(aft_inverse(&m, 4, 1e-10).is_ok());
+        match with_budget(Budget::new(None, token), || aft_inverse(&m, 4, 1e-10)) {
+            Err(EconError::Cancelled(_)) => {}
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+        let singular = Array2::from_shape_vec((2, 2), vec![1.0, 1.0, 1.0, 1.0]).unwrap();
+        assert!(matches!(
+            aft_inverse(&singular, 4, 1e-10),
+            Err(EconError::ConvergenceFailure { iterations: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn test_log_rank_single_group_names_the_column() {
+        let (_, ds) = load_case("surv_logrank_lung");
+        let ds = derive_f64(&ds, "sex", "one", |_, _| 1.0);
+        let m = invalid_spec(log_rank_test(&ds, "time", "status", "one"), "log-rank");
+        assert!(
+            m.contains("column 'one' has 1 level(s)") && m.ends_with(": 1"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_cox_df_saturates_on_inconsistent_result() {
+        let (_, ds) = load_case("surv_cox_info_singular_t4");
+        let mut r = run_cox_ph(&ds, "time", "status", &["z"], None).unwrap();
+        r.aliased = vec!["a".into(), "b".into()];
+        assert_eq!(r.df(), 0);
     }
 }

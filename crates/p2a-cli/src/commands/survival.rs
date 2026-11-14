@@ -1,6 +1,7 @@
 //! Survival analysis commands
 
 use clap::Subcommand;
+use p2a_core::econometrics::survival::{conf_percent as percent, fmt_or_na};
 use p2a_core::econometrics::{KmConfType, KmConfig, run_kaplan_meier_with};
 use p2a_core::{
     AftConfig, AftDistribution, CoxConfig, CoxSeType, TiesMethod, log_rank_test, run_aft,
@@ -13,22 +14,9 @@ use crate::output::{
 };
 use crate::session::SessionManager;
 
-/// "95" for 0.95, "97.5" for 0.975.
-fn percent(conf_level: f64) -> String {
-    let pct = conf_level * 100.0;
-    if (pct - pct.round()).abs() < 1e-9 {
-        format!("{pct:.0}")
-    } else {
-        format!("{pct}")
-    }
-}
-
 /// `{:.4}`, or "NA" for NaN or `None` (R's NA).
 fn na4(v: Option<f64>) -> String {
-    match v {
-        Some(x) if !x.is_nan() => format!("{x:.4}"),
-        _ => "NA".to_string(),
-    }
+    fmt_or_na(v, 4)
 }
 
 /// How the competing-risks standard errors are computed.
@@ -452,13 +440,7 @@ fn execute_log_rank(
                             result.expected_per_group[i]
                         );
                     }
-                    let excluded: Vec<&str> = result
-                        .groups
-                        .iter()
-                        .zip(&result.expected_per_group)
-                        .filter(|(_, e)| **e <= 0.0)
-                        .map(|(g, _)| g.as_str())
-                        .collect();
+                    let excluded = result.excluded_groups();
                     if !excluded.is_empty() {
                         println!(
                             "Groups with no expected events: {} (excluded from the test, as R survdiff)",

@@ -33,7 +33,9 @@
       "cases": [
         "surv_cox_info_singular_t4"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_cox_info_singular_covariate"
+      ],
       "quantities": [
         "NA coefficient of x",
         "coefficient and SE of z",
