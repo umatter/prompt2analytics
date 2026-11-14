@@ -8,6 +8,7 @@
 use crate::data::Dataset;
 use crate::econometrics::{IVResult, SarganTestResult, run_sargan_test};
 use crate::errors::EconResult;
+use crate::traits::estimator::chi_squared_quantile;
 
 use super::{
     Assumption, AssumptionStatus, IdentificationReport, IdentificationWarning, WarningDiagnostics,
@@ -218,14 +219,15 @@ fn check_overidentification(
             "Exclusion restriction",
         )
         .with_diagnostics(
+            // On J's own scale: the 5% critical value of chi-squared on df.
             WarningDiagnostics::new("Sargan J statistic", sargan.j_statistic)
-                .with_threshold(sargan.p_value, true),
+                .with_threshold(chi_squared_quantile(0.95, sargan.df as f64)?, true),
         )
         .with_remediation(vec![
             "Examine theoretical justification for each instrument".to_string(),
             "Consider dropping potentially invalid instruments".to_string(),
             "Report results with different instrument subsets".to_string(),
-            "Use LIML which is more robust to weak instruments".to_string(),
+            "Compare subsets of instruments with a difference-in-Sargan (C) statistic".to_string(),
         ]);
 
         report.add_warning(warning);
@@ -414,5 +416,53 @@ mod tests {
                 .any(|a| a.name.contains("Exclusion")),
             "Should list exclusion restriction assumption"
         );
+    }
+
+    /// An invalid instrument (z2 enters y directly): the overidentification warning's
+    /// diagnostics compare J with the chi-squared 0.95 quantile on its df, and its advice is
+    /// about instrument validity, not weak instruments.
+    #[test]
+    fn test_overid_warning_threshold_is_chi_squared_quantile() {
+        use crate::econometrics::run_iv2sls;
+        let n = 400;
+        let noise = |i: usize, s: f64| ((i as f64 * s).sin() * 43758.5453).fract() - 0.5;
+        let z1: Vec<f64> = (0..n).map(|i| noise(i, 1.7) * 2.0).collect();
+        let z2: Vec<f64> = (0..n).map(|i| noise(i, 2.9) * 2.0).collect();
+        let u: Vec<f64> = (0..n).map(|i| noise(i, 5.3)).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| 0.8 * z1[i] + 0.7 * z2[i] + 0.5 * u[i] + 0.3 * noise(i, 7.1))
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 1.0 + 2.0 * x[i] + 1.5 * z2[i] + u[i])
+            .collect();
+        let df = DataFrame::new(vec![
+            Column::new("y".into(), y),
+            Column::new("x".into(), x),
+            Column::new("z1".into(), z1),
+            Column::new("z2".into(), z2),
+        ])
+        .unwrap();
+        let ds = Dataset::new(df);
+        let r = run_iv2sls(&ds, "y", &[], &["x"], &["z1", "z2"], false).unwrap();
+        let rep = iv_diagnostics(&ds, &r).unwrap();
+        let w = rep
+            .warnings
+            .iter()
+            .find(|w| w.code == "OVERID_REJECTED")
+            .expect("overidentification warning");
+        let d = w.diagnostics.as_ref().unwrap();
+        let sargan = run_sargan_test(&ds, &r).unwrap();
+        assert_eq!(sargan.df, 1);
+        assert_eq!(d.value, sargan.j_statistic);
+        let threshold = d.threshold.unwrap();
+        assert_eq!(threshold, chi_squared_quantile(0.95, 1.0).unwrap());
+        assert!((threshold - 3.841458820694124).abs() < 1e-12);
+        assert!(d.exceeds_threshold && d.value > threshold);
+        assert!(
+            w.remediation
+                .iter()
+                .any(|s| s.contains("difference-in-Sargan (C)"))
+        );
+        assert!(w.remediation.iter().all(|s| !s.contains("LIML")));
     }
 }
