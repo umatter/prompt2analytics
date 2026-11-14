@@ -954,7 +954,7 @@ mod tests {
     /// BFGS without a gradient runs Nelder-Mead (R's default for a missing gradient) and says so;
     /// L-BFGS-B runs BFGS and says so. Both reach R's solution of the quadratic problem.
     #[test]
-    fn test_constr_optim_method_substitutions_are_noted() {
+    fn test_validate_constr_optim_method_substitutions() {
         let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
         let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
         let ui = vec![vec![1.0, 1.0]];

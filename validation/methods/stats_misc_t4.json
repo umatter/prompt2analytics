@@ -108,7 +108,8 @@
       "reference": "stats::isoreg",
       "doc": "validation/stats/isoreg.md",
       "cases": [
-        "stat_isoreg_t4"
+        "stat_isoreg_t4",
+        "stat_rank_isoreg"
       ],
       "tests": [
         "p2a-core::stats::isoreg::tests::test_validate_isoreg_tied_x"

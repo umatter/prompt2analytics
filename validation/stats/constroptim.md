@@ -59,7 +59,7 @@ print(result$value)
 **Rust tests:**
 - `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): x² + y² with x + y ≥ 1 from (1, 1); `quadratic_par` (0.500000000151549 twice) and `quadratic_value` (0.500000000303098), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; the convergence code is pinned exactly, the outer iterations are a path quantity).
 - `stats::constroptim::tests::test_validate_constr_optim_nelder_mead`: Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5); `nelder_mead_par` (1.0000008855605316, 2.0000000235991697) at `Tol::iterative(1e-4)` and the convergence code; the value (R 7.8e-13) is zero up to the inner tolerance, so it is checked below 1e-9, not against R's digits.
-- `test_constr_optim_codes_seven_and_eleven`, `test_constr_optim_method_substitutions_are_noted` (properties): codes 7 and 11, the notes for BFGS without a gradient and for L-BFGS-B, R's defaults.
+- `test_constr_optim_codes_seven_and_eleven` (property), `test_validate_constr_optim_method_substitutions` (the substituted methods reach R's quadratic solution): codes 7 and 11, the notes for BFGS without a gradient and for L-BFGS-B, R's defaults.
 
 ### Test Case 2: Active Constraint
 
