@@ -102,9 +102,12 @@ pub struct MixedLogitConfig {
     pub n_draws: usize,
     /// Use Halton sequences (quasi-random) instead of pseudo-random
     pub halton: bool,
-    /// Maximum iterations. At least 1 (otherwise `InvalidSpecification`).
+    /// BFGS iterations plus Newton steps, per stage (the conditional-logit start, then the
+    /// mixed logit). At least 1 (otherwise `InvalidSpecification`).
     pub max_iter: usize,
-    /// Convergence tolerance. Must be finite and > 0 (otherwise `InvalidSpecification`).
+    /// Converged when `max_k |dLL/dtheta_k| <= tolerance (1 + |LL|)` at the reported
+    /// estimate and the Hessian there is negative definite. Finite and > 0 (otherwise
+    /// `InvalidSpecification`).
     pub tolerance: f64,
     /// Random seed of the pseudo-random draws (`halton: false`); unseeded when `None`.
     pub seed: Option<u64>,
@@ -139,7 +142,9 @@ pub struct MixedLogitResult {
     pub distributions: Vec<RandomDistribution>,
     /// Estimated mean of each random parameter
     pub means: Vec<f64>,
-    /// Estimated standard deviation of random parameters (0 for a fixed coefficient)
+    /// Spread of each random parameter: the standard deviation for normal, the standard
+    /// deviation of ln beta for log-normal, the half-width for uniform and triangular
+    /// (mlogit's `sd.`); 0 for a fixed coefficient
     pub std_devs: Vec<f64>,
     /// Standard errors of means
     pub mean_std_errors: Vec<f64>,
@@ -164,9 +169,10 @@ pub struct MixedLogitResult {
     pub n_alternatives: usize,
     /// Number of simulation draws per decision maker (0 without random parameters)
     pub n_draws: usize,
-    /// Number of iterations
+    /// Iterations (BFGS iterations plus Newton steps), summed over both stages
     pub iterations: usize,
-    /// Converged flag
+    /// `max_k |dLL/dtheta_k| <= tolerance (1 + |LL|)` at the reported estimate and the
+    /// Hessian there is negative definite
     pub converged: bool,
     /// AIC
     pub aic: f64,
@@ -268,6 +274,17 @@ impl fmt::Display for MixedLogitResult {
 
         writeln!(f, "{:-<101}", "")?;
         writeln!(f, "Signif. codes: '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
+        if self.distributions.iter().any(|d| {
+            matches!(
+                d,
+                RandomDistribution::Uniform | RandomDistribution::Triangular
+            )
+        }) {
+            writeln!(
+                f,
+                "Std.Dev: half-width for Uniform and Triangular (mlogit's sd.)"
+            )?;
+        }
         if !self.warnings.is_empty() {
             writeln!(f, "Warnings:")?;
             for w in &self.warnings {
@@ -448,7 +465,9 @@ struct DrawSet {
     /// Draws per unit (R).
     n_draws: usize,
     /// Per random parameter (in `x_cols` order): `n_units * n_draws` draws, unit-major
-    /// (unit u's draws at `u * n_draws .. (u + 1) * n_draws`).
+    /// (unit u's draws at `u * n_draws .. (u + 1) * n_draws`): standard normal from
+    /// [`draw_set`], the factors `e` of [`draw_factor`] after [`into_factors`], which is
+    /// what the likelihood reads (the same for normal and log-normal parameters).
     z: Vec<Vec<f64>>,
     /// The scheme in words, e.g. "Halton, prime 2, first 100 points dropped, 50 draws
     /// per choice situation".
@@ -535,27 +554,50 @@ fn too_many_random(m: usize) -> EconError {
 
 /// The factor `e` of a draw `z`: beta = mu + sigma e (Normal, Uniform, Triangular),
 /// beta = exp(mu + sigma e) (LogNormal). Uniform: `e = 2 Phi(z) - 1`, uniform on
-/// [-1, 1]; Triangular: `e = t(Phi(z))` with `t(u) = 2 sqrt(u) - 1` below 1/2 and
-/// `1 - 2 sqrt(1 - u)` above, the symmetric triangular law on [-1, 1]. Sigma is the
+/// [-1, 1]; Triangular: `e = t(Phi(z))` with `t(u) = sqrt(2u) - 1` up to 1/2 and
+/// `1 - sqrt(2 (1 - u))` above, the symmetric triangular law on [-1, 1] (mlogit's
+/// `make.beta`). `1 - u` is taken as `Phi(-z)`, without cancellation. Sigma is the
 /// half-width of the uniform and triangular laws.
 fn draw_factor(z: f64, dist: RandomDistribution) -> f64 {
     match dist {
         RandomDistribution::Normal | RandomDistribution::LogNormal => z,
         RandomDistribution::Uniform => 2.0 * normal_cdf(z) - 1.0,
         RandomDistribution::Triangular => {
-            let u = normal_cdf(z);
-            if u < 0.5 {
-                2.0 * u.sqrt() - 1.0
+            if z <= 0.0 {
+                (2.0 * normal_cdf(z)).sqrt() - 1.0
             } else {
-                1.0 - 2.0 * (1.0 - u).sqrt()
+                1.0 - (2.0 * normal_cdf(-z)).sqrt()
             }
         }
         RandomDistribution::Fixed => 0.0,
     }
 }
 
+/// Replace the standard normal draws of each random parameter by their factors
+/// ([`draw_factor`]) in place, once per fit, so the likelihood reads the factor of a
+/// draw instead of computing it at every evaluation. `random_dists` lists the laws of the
+/// random parameters in the order of `draws.z`; normal and log-normal draws are their
+/// own factors and are left as they are.
+fn into_factors(draws: &mut DrawSet, random_dists: &[RandomDistribution]) -> EconResult<()> {
+    for (z, &dist) in draws.z.iter_mut().zip(random_dists) {
+        if matches!(
+            dist,
+            RandomDistribution::Uniform | RandomDistribution::Triangular
+        ) {
+            for (j, v) in z.iter_mut().enumerate() {
+                if j % 65_536 == 0 {
+                    resource::checkpoint()?;
+                }
+                *v = draw_factor(*v, dist);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The simulated log-likelihood and its gradient at `theta` = (means in `x_cols` order,
 /// then `s_m` for the random variables in `x_cols` order), with `sigma_m = |s_m|`.
+/// `draws` holds the factors `e` of the draws ([`into_factors`]).
 ///
 /// Unit u (a choice situation, or an individual and all its situations) and draw r give
 /// `l_ur = sum_s ln P_s(chosen | beta_ur)`; the unit contributes
@@ -630,7 +672,7 @@ fn simulated_ll_grad(
             beta[row..row + k].copy_from_slice(&theta[..k]);
             dmu[row..row + k].fill(1.0);
             for (m, &j) in random.iter().enumerate() {
-                let e = draw_factor(draws.z[m][u * r_n + r], dists[j]);
+                let e = draws.z[m][u * r_n + r];
                 let sigma = theta[k + m].abs();
                 if dists[j] == RandomDistribution::LogNormal {
                     let b = (theta[j] + sigma * e).exp();
@@ -1037,7 +1079,11 @@ pub fn run_mixed_logit(
         "choice situation"
     };
     let draws = if n_random > 0 {
-        Some(draw_set(&config, n_units, n_random, unit_label)?)
+        let mut d = draw_set(&config, n_units, n_random, unit_label)?;
+        let random_dists: Vec<RandomDistribution> =
+            random.iter().map(|&j| distributions[j]).collect();
+        into_factors(&mut d, &random_dists)?;
+        Some(d)
     } else {
         None
     };
@@ -1452,6 +1498,107 @@ mod tests {
             // numDeriv's gradient is accurate to about 1e-9
             .named("ln_n_grad", &names, &grad, Tol::new(1e-7, 1e-8))
             .finish();
+    }
+
+    /// mlogit's triangular factor (`make.beta`): `sqrt(2u) - 1` up to 1/2, `1 -
+    /// sqrt(2 (1 - u))` above, at u mapped through the normal quantile as the draws are.
+    #[test]
+    fn test_validate_mixed_logit_triangular_factor() {
+        let (case, _) = case_data("disc_mixed_tri_unif_t4");
+        let factors: Vec<f64> = case
+            .vector("tri_factor_u")
+            .iter()
+            .map(|&u| {
+                let z = crate::traits::estimator::normal_quantile(u).unwrap();
+                draw_factor(z, RandomDistribution::Triangular)
+            })
+            .collect();
+        Check::new(&case)
+            .vector("tri_factor", &factors, Tol::new(1e-13, 1e-15))
+            .finish();
+    }
+
+    /// The simulated log-likelihood and gradient of a triangular and of a uniform random
+    /// coefficient at a fixed point, 50 Halton draws per situation, against mlogit's.
+    #[test]
+    fn test_validate_mixed_logit_triangular_uniform_loglik_gradient() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_tri_unif_t4");
+        let data = choice_data(ds.df(), "id", "alt", "choice", &["x", "w"], None).unwrap();
+        let names = ["x", "w", "sd.x"];
+        let theta = case.by_names("point", &names);
+        for (prefix, dist) in [
+            ("tri", RandomDistribution::Triangular),
+            ("unif", RandomDistribution::Uniform),
+        ] {
+            let mut draws = draw_set(
+                &draws_cfg(50),
+                data.unit_situations.len(),
+                1,
+                "choice situation",
+            )
+            .unwrap();
+            into_factors(&mut draws, &[dist]).unwrap();
+            let dists = [dist, RandomDistribution::Fixed];
+            let (ll, grad) = simulated_ll_grad(&data, &draws, &dists, &theta).unwrap();
+            Check::new(&case)
+                .scalar(&format!("{prefix}_point_loglik"), ll, Tol::new(1e-11, 0.0))
+                // numDeriv's gradient is accurate to about 1e-9
+                .named(
+                    &format!("{prefix}_point_grad"),
+                    &names,
+                    &grad,
+                    Tol::new(1e-7, 1e-8),
+                )
+                .finish();
+        }
+    }
+
+    /// mlogit(rpar = c(x = 't')) and c(x = 'u'), 50 Halton draws per situation: the
+    /// estimates, standard errors and simulated log-likelihood.
+    #[test]
+    fn test_validate_mixed_logit_triangular_uniform_fit() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_tri_unif_t4");
+        for (prefix, dist) in [
+            ("tri", RandomDistribution::Triangular),
+            ("unif", RandomDistribution::Uniform),
+        ] {
+            let spec = RandomParameterSpec {
+                name: "x".to_string(),
+                distribution: dist,
+            };
+            let r = run_mixed_logit(
+                &ds,
+                "id",
+                "alt",
+                "choice",
+                &["x", "w"],
+                &[spec],
+                Some(draws_cfg(50)),
+            )
+            .unwrap();
+            let est = [r.means[0], r.means[1], r.std_devs[0]];
+            let se = [
+                r.mean_std_errors[0],
+                r.mean_std_errors[1],
+                r.std_dev_std_errors[0],
+            ];
+            Check::new(&case)
+                .named(
+                    &format!("{prefix}_coef"),
+                    &NAMES,
+                    &est,
+                    Tol::iterative(1e-6),
+                )
+                .named(&format!("{prefix}_se"), &NAMES, &se, Tol::iterative(1e-5))
+                .scalar(
+                    &format!("{prefix}_loglik"),
+                    r.log_likelihood,
+                    Tol::stat(300),
+                )
+                .finish();
+            assert!(r.converged, "{r}");
+            assert!(r.to_string().contains("half-width"), "{r}");
+        }
     }
 
     /// The simulated log-likelihood at R's optimum, cross-section (one unit per situation)
@@ -2187,6 +2334,12 @@ mod tests {
             .named("se", &NAMES, &se, Tol::iterative(1e-5))
             .scalar("loglik", r.log_likelihood, Tol::stat(300))
             .named("clogit_coef_tight", &["x", "w"], &cl, Tol::iterative(1e-6))
+            .named(
+                "clogit_se_tight",
+                &["x", "w"],
+                &[c.mean_std_errors[0] * 100.0, c.mean_std_errors[1] / 100.0],
+                Tol::iterative(1e-5),
+            )
             .scalar("clogit_loglik_tight", c.log_likelihood, Tol::stat(300))
             .finish();
         assert!(r.converged && c.converged, "{r}\n{c}");

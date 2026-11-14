@@ -24,10 +24,13 @@ coefficient is fixed or random across decision makers, with z standard normal:
 | `Normal` | `mu + sigma z` | `mu`, `sigma` |
 | `LogNormal` | `exp(mu + sigma z)` | `mu`, `sigma` (of the log) |
 | `Uniform` | `mu + sigma (2 Phi(z) - 1)` | `mu`, half-width `sigma` |
-| `Triangular` | `mu + sigma t(Phi(z))`, `t(u) = 2 sqrt(u) - 1` below 1/2, `1 - 2 sqrt(1 - u)` above | `mu`, half-width `sigma` |
+| `Triangular` | `mu + sigma t(Phi(z))`, `t(u) = sqrt(2u) - 1` up to 1/2, `1 - sqrt(2 (1 - u))` above | `mu`, half-width `sigma` |
 
-The uniform and triangular `sigma` are half-widths, not standard deviations (ECON-65 is
-open). `sigma` is estimated as `|s|` of an unconstrained `s`, so `sigma >= 0`; mlogit keeps
+The triangular factor is the symmetric triangular law on [-1, 1], mlogit's `make.beta`
+(`1 - u` is evaluated as `Phi(-z)`). The uniform and triangular `sigma` are half-widths, not
+standard deviations (mlogit's `sd.`); `std_devs` and the Std.Dev column report them, and the
+printed table says so when such a parameter is present. The factors of the uniform and
+triangular draws are computed once per fit, in place of the normal draws. `sigma` is estimated as `|s|` of an unconstrained `s`, so `sigma >= 0`; mlogit keeps
 it signed. With finitely many draws the simulated likelihoods at `s` and `-s` differ: on
 the panel case the signed likelihood has a second local maximum at
 `sd.x = -0.78419952920914038` (log-likelihood -339.96441895353917), above mlogit's
@@ -133,8 +136,11 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/mixed_logit.rs` unless note
 | `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_cross_section` | means and SD 1e-6 relative, SEs 1e-5, log-likelihood 1e-6, counts exact, mlogit's estimate 1e-4; convergence, z, p, AIC |
 | `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_panel` | the same on the panel case, `n_individuals` 100 |
 | `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_no_random_is_conditional_logit` | no random coefficient: the polished conditional logit (`clogit_*_tight`), and `run_conditional_logit` at 1e-8 |
-| `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_badly_scaled_regressors` | `x * 100`, `w / 100`: the scaled R estimate, SEs and log-likelihood, and the scaled conditional logit |
+| `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_badly_scaled_regressors` | `x * 100`, `w / 100`: the scaled R estimate, SEs and log-likelihood, and the scaled conditional logit (coefficients 1e-6, SEs 1e-5) |
 | `econometrics::discrete::mixed_logit::tests::test_validate_gmnl_and_mixl_wrappers` | `run_gmnl` and `run_mixl` give `coef` and `se` |
+| `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_factor` | case `disc_mixed_tri_unif_t4`: the triangular factor at u = 0.25, 0.4999, 0.5, 0.5001, 0.75 (1e-13, abs 1e-15) |
+| `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_uniform_loglik_gradient` | triangular and uniform `x`, 50 Halton draws: simulated log-likelihood at (0.9, -0.7, 1.2) 1e-11, gradient vs numDeriv 1e-7 (abs 1e-8) |
+| `econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_uniform_fit` | mlogit `rpar = c(x = 't')` and `c(x = 'u')`: means and half-width 1e-6, SEs 1e-5, log-likelihood 1e-6 |
 | `p2a-mcp` `tools::handlers::discrete::tests::test_validate_mcp_mixed_logit` | the MCP text at print precision (`Tol::printed(4)`), `Converged: Yes` |
 | `p2a-mcp` `tools::handlers::discrete::tests::test_validate_mcp_mixed_logit_panel` | the same with `individual_id` |
 | `p2a-cli` `tier2::wp18_discrete::test_validate_cli_mixed_logit` | CLI text at print precision; JSON means/SD 1e-6, SEs 1e-5 |
@@ -145,6 +151,12 @@ Not R-pinned (properties and refusals):
 - `econometrics::discrete::mixed_logit::tests::test_mixed_logit_gradient_matches_central_differences`:
   the analytic gradient equals central differences for the normal, log-normal, uniform and
   triangular laws, with `s` on either side of 0.
+- `econometrics::discrete::mixed_logit::tests::test_mixed_logit_refuses_situation_without_choice`,
+  `..._with_two_choices`, `..._with_duplicate_alternative`: a choice situation without
+  exactly one chosen row, or with an alternative twice, is `InvalidSpecification` (mlogit
+  refuses all three: `refused_*` in `disc_clogit_unbalanced_t4`).
+- `econometrics::discrete::mixed_logit::tests::test_mixed_logit_null_is_equal_shares_per_situation`:
+  the null log-likelihood is `-sum_i ln J_i` when choice sets differ in size.
 - `econometrics::discrete::mixed_logit::tests::test_na_mixed_logit_missing_cells_refused`:
   missing choice, attribute, id and individual id, an absent individual column and a text
   attribute.
@@ -161,6 +173,11 @@ Not R-pinned (properties and refusals):
   and the control checks (`test_mixed_logit_rejects_invalid_controls`,
   `test_mixed_logit_impossible_draw_count_is_an_error`, `test_mixed_logit_stops_when_cancelled`).
 
+The null log-likelihood is equal choice probabilities in each situation, `-sum_i ln J_i`
+(the model has no alternative-specific constants); with choice sets of one size J it is
+`-N ln J`.
+
 ## Status
 
-R-pinned (registry `validation/methods/discrete_mixed.json`, id `mixed_logit`).
+R-pinned (registry `validation/methods/discrete_mixed.json`, id `mixed_logit`; the uniform
+and triangular laws: `validation/methods/discrete_t4.json`, id `discrete_mixed_tri_unif`).

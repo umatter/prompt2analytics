@@ -83,6 +83,29 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_mixed_tri_unif",
+      "name": "Mixed logit with a triangular or uniform random coefficient (mlogit)",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(choice ~ x + w | 0, rpar = c(x = 't') | c(x = 'u'), R = 50, halton = NA) on mixed_logit.csv, re-solved as discrete_mixed.R (optim BFGS + numDeriv Newton); the simulated log-likelihood and numDeriv gradient at a fixed point; mlogit's make.beta triangular factor",
+      "doc": "validation/econometrics/mixed_logit.md",
+      "cases": [
+        "disc_mixed_tri_unif_t4"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_factor",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_uniform_loglik_gradient",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_triangular_uniform_fit"
+      ],
+      "quantities": [
+        "triangular draw factor",
+        "simulated log-likelihood and gradient at a fixed point",
+        "means, half-width, SEs, log-likelihood"
+      ],
+      "tolerance": "factor 1e-13 (abs 1e-15); log-likelihood at a point 1e-11; gradient 1e-7 (abs 1e-8, numDeriv); estimates 1e-6, SEs 1e-5 relative; log-likelihood Tol::stat(300)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
