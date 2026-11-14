@@ -784,7 +784,16 @@ fn run_scpi_with(
     }
 
     let mut warnings = Vec::new();
+    // an explicit e_method wins over the deprecated alias
     let e_method = match config.variance_method {
+        Some(vm) if config.e_method != EMethod::All => {
+            warnings.push(format!(
+                "SCPI: variance_method '{vm}' is ignored: e_method '{}' was given (variance_method \
+                 is a deprecated alias of e_method)",
+                config.e_method
+            ));
+            config.e_method
+        }
         Some(vm) => {
             let (m, w) = vm.e_method();
             warnings.extend(w);
@@ -1204,8 +1213,9 @@ fn regularize_w(
         if v == 0.0 {
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "donor {jj} has no variation in the pre-treatment period (scpi needs it to \
-                     choose the regularisation threshold rho)"
+                    "donor column {jj} (0-based, in the order of the donor matrix) has no \
+                     variation in the pre-treatment period (scpi needs it to choose the \
+                     regularisation threshold rho)"
                 ),
             });
         }
@@ -1222,14 +1232,15 @@ fn regularize_w(
     Ok(rho.min(rho_max))
 }
 
-/// scpi's default rho (`"type-2"`) with `regularize.check.lb`.
-fn scpi_rho(res: ArrayView1<f64>, b: ArrayView2<f64>, d0: usize) -> EconResult<f64> {
+/// scpi's default rho (`"type-2"`) with `regularize.check.lb`, and the rule's own rho when that
+/// check raised it (scpi warns then).
+fn scpi_rho(res: ArrayView1<f64>, b: ArrayView2<f64>, d0: usize) -> EconResult<(f64, Option<f64>)> {
     let rho = regularize_w(false, RHO_MAX, res, b, d0)?;
     if rho < 0.001 {
         let r = regularize_w(true, 0.2, res, b, d0)?.max(regularize_w(false, 0.2, res, b, d0)?);
-        return Ok(if r < 0.05 { RHO_MAX } else { r });
+        return Ok((if r < 0.05 { RHO_MAX } else { r }, Some(rho)));
     }
-    Ok(rho)
+    Ok((rho, None))
 }
 
 /// Lower bounds of the localised simplex (scpi's `local.geom.2step`): a weight below rho cannot
@@ -1322,7 +1333,8 @@ fn out_of_sample_bounds(
         if log_sq.iter().any(|v| !v.is_finite()) {
             return Err(EconError::Computation(
                 "SCPI: a pre-treatment residual of the out-of-sample mean model is exactly 0, so \
-                 its log-variance model is undefined"
+                 its log-variance model (e_method gaussian and ls) is undefined; use e_method = \
+                 \"qreg\""
                     .to_string(),
             ));
         }
@@ -1413,7 +1425,13 @@ fn scpi_inference(
 
     // Regularisation: rho, the active donors and the degrees of freedom (w before regularisation)
     let d0 = w.iter().filter(|v| v.abs() >= 1e-6).count();
-    let rho = scpi_rho(res, b, d0)?;
+    let (rho, raised_from) = scpi_rho(res, b, d0)?;
+    if let Some(old) = raised_from {
+        warnings.push(format!(
+            "SCPI: the regularisation threshold rho was {old:.5}, below 0.001; raised to \
+             {rho:.3} (check the donors for collinearity)"
+        ));
+    }
     let is_ridge = matches!(input.constraint, SCPIConstraint::Ridge { .. });
     let mut active: Vec<usize> = if is_ridge {
         (0..j).collect()
@@ -1549,6 +1567,9 @@ fn scpi_inference(
     let mut lb_f = crate::resource::try_vec(n_cells, f64::NAN, "SCPI simulation bounds")?;
     let mut ub_f = crate::resource::try_vec(n_cells, f64::NAN, "SCPI simulation bounds")?;
     let mut c = Array1::zeros(n);
+    // the linear rows are the same in every simulation: scale them once and the simulated
+    // quadratic per simulation
+    let mut sc = problem.scaled();
     for sim in 0..sims {
         crate::resource::checkpoint()?;
         let z = draws.next(sim, j)?;
@@ -1566,18 +1587,20 @@ fn scpi_inference(
             continue;
         }
         // one strictly feasible point serves every objective of this simulation
-        let Some(start) = problem.start() else {
+        sc.quads[0] = scale_quad(&problem.quads[0]);
+        let Some(start) = sc.start()? else {
             continue;
         };
         for t in 0..t1 {
+            crate::resource::checkpoint()?;
             let pt = p.row(t);
             // lower: -max p'delta = min (-p)'delta; upper: -min p'delta
             c.slice_mut(s![..j]).assign(&pt.mapv(|v| -v));
-            if let Some(v) = problem.minimize_from(c.view(), &start) {
+            if let Some(v) = sc.minimize_from(c.view(), &start)? {
                 lb_f[sim * t1 + t] = v;
             }
             c.slice_mut(s![..j]).assign(&pt);
-            if let Some(v) = problem.minimize_from(c.view(), &start) {
+            if let Some(v) = sc.minimize_from(c.view(), &start)? {
                 ub_f[sim * t1 + t] = -v;
             }
         }
@@ -1686,6 +1709,15 @@ struct QcqpStart {
 /// constraint are scaled to unit size).
 const QCQP_GAP: f64 = 1e-10;
 const QCQP_NEWTON_MAX: usize = 60;
+/// Largest Newton decrement `lambda^2` of the last centring that still certifies the gap: for
+/// the logarithmic barrier of `m` constraints, `lambda <= 1/2` gives `c'x - p* <= (2m + 1) / t`
+/// (Nesterov, Introductory Lectures on Convex Optimization, section 4.2), within a factor of
+/// about 2 of the centred bound `m / t`.
+const QCQP_CENTRED: f64 = 0.25;
+/// Growth factor of t between centrings, and the smallest one the careful pass of
+/// [`Qcqp::barrier`] may shrink it to.
+const QCQP_MU: f64 = 50.0;
+const QCQP_MU_MIN: f64 = 2.0;
 
 /// `hess += sum_i w_i d_i d_i'` over the rows `d_i` of `rows`.
 fn add_weighted_gram(hess: &mut Array2<f64>, rows: &Array2<f64>, w: &Array1<f64>) {
@@ -1735,21 +1767,37 @@ fn solve_kkt(
         .then_some((dx, dnu))
 }
 
+/// A quadratic constraint `x' P x + a' x + d <= 0` divided by its largest coefficient.
+fn scale_quad((pk, ak, dk): &(Array2<f64>, Array1<f64>, f64)) -> (Array2<f64>, Array1<f64>, f64) {
+    let s = pk
+        .iter()
+        .chain(ak.iter())
+        .fold(dk.abs(), |a, v| a.max(v.abs()));
+    let s = if s > 0.0 { s } else { 1.0 };
+    (pk / s, ak / s, dk / s)
+}
+
+/// Newton steps per centring ([`QCQP_NEWTON_MAX`]; tests can lower it to reach the stall path).
+#[cfg(not(test))]
+fn newton_max() -> usize {
+    QCQP_NEWTON_MAX
+}
+
+#[cfg(test)]
+thread_local! {
+    static NEWTON_MAX: std::cell::Cell<usize> = const { std::cell::Cell::new(QCQP_NEWTON_MAX) };
+}
+
+#[cfg(test)]
+fn newton_max() -> usize {
+    NEWTON_MAX.with(|c| c.get())
+}
+
 impl Qcqp {
-    /// Each quadratic and each linear inequality scaled to unit size.
+    /// Each quadratic and each linear inequality scaled to unit size. [`Qcqp::start`] and
+    /// [`Qcqp::minimize_from`] work on the scaled problem.
     fn scaled(&self) -> Qcqp {
-        let quads = self
-            .quads
-            .iter()
-            .map(|(pk, ak, dk)| {
-                let s = pk
-                    .iter()
-                    .chain(ak.iter())
-                    .fold(dk.abs(), |a, v| a.max(v.abs()));
-                let s = if s > 0.0 { s } else { 1.0 };
-                (pk / s, ak / s, dk / s)
-            })
-            .collect();
+        let quads = self.quads.iter().map(scale_quad).collect();
         let mut g = self.g.clone();
         let mut h = self.h.clone();
         for (mut row, hv) in g.axis_iter_mut(Axis(0)).zip(h.iter_mut()) {
@@ -1797,26 +1845,28 @@ impl Qcqp {
     }
 
     /// Newton's method on the barrier problem `min t c'x - sum log(-f_i(x))` subject to `A x = b`
-    /// (Boyd and Vandenberghe, sections 10.2 and 11.3) from the strictly feasible `x`: the centred
-    /// point and the multiplier of the equality constraints. With `stop_below`, it returns as soon
-    /// as `c'x` is below that value.
+    /// (Boyd and Vandenberghe, sections 10.2 and 11.3) from the strictly feasible `x`: the last
+    /// point and the last Newton decrement `lambda^2` computed (0 when the steps stopped at
+    /// `stop_below`). Newton stops once half the decrement is at most 1e-9, when the line search
+    /// cannot move, or after [`QCQP_NEWTON_MAX`] steps. With `stop_below`, it returns as soon as
+    /// `c'x` is below that value.
     fn center(
         &self,
         c: &Array1<f64>,
         mut x: Array1<f64>,
         t: f64,
         stop_below: Option<f64>,
-    ) -> Option<(Array1<f64>, Array1<f64>)> {
+    ) -> Option<(Array1<f64>, f64)> {
         let (n, m) = (self.n, self.a_eq.nrows());
         let l = self.g.nrows();
         let phi = |x: &Array1<f64>| -> Option<f64> {
             let (r, f) = self.slacks(x)?;
             Some(t * c.dot(x) - r.mapv(f64::ln).sum() - f.mapv(f64::ln).sum())
         };
-        let mut w = Array1::zeros(m);
-        for _ in 0..QCQP_NEWTON_MAX {
+        let mut last_dec = f64::NAN;
+        for _ in 0..newton_max() {
             if stop_below.is_some_and(|v| c.dot(&x) < v) {
-                break;
+                return Some((x, 0.0));
             }
             let (f, df) = self.constraints(&x);
             // gradient t c + sum df_i / -f_i; Hessian sum (df_i df_i' / f_i^2 + 2 P_i / -f_i)
@@ -1827,12 +1877,12 @@ impl Qcqp {
                 hess.scaled_add(2.0 * inv[l + k], pk);
             }
             add_weighted_gram(&mut hess, &df, &inv.mapv(|v| v * v));
-            let (dx, wn) = solve_kkt(&hess, &self.a_eq, &(-&grad), &Array1::zeros(m))?;
-            w = wn;
+            let (dx, _) = solve_kkt(&hess, &self.a_eq, &(-&grad), &Array1::zeros(m))?;
             // the Newton decrement: half of it bounds the centring error
             let decrement = -grad.dot(&dx);
+            last_dec = decrement;
             if decrement / 2.0 <= 1e-9 {
-                break;
+                return Some((x, decrement));
             }
             // backtracking line search inside the feasible set; the Armijo test allows for the
             // rounding of phi, whose terms grow with t
@@ -1852,31 +1902,78 @@ impl Qcqp {
                 step *= 0.5;
             }
             if !moved {
-                break;
+                return Some((x, decrement));
             }
         }
-        Some((x, w))
+        Some((x, last_dec))
     }
 
     /// The barrier method (Boyd and Vandenberghe, section 11.3) from the strictly feasible `x`:
     /// centring steps at t = 1, 50, 2500, ... until the duality gap `m / t` of the scaled problem
-    /// is below [`QCQP_GAP`]; `None` when a Newton system fails.
-    fn barrier(&self, c: &Array1<f64>, mut x: Array1<f64>) -> Option<Array1<f64>> {
+    /// is below [`QCQP_GAP`]. The gap bound holds only near the central path, so the last
+    /// centring must end with a decrement of at most [`QCQP_CENTRED`]; when it does not, the path
+    /// is followed again with shorter steps. `Ok(None)` when a Newton system fails or no path
+    /// ends centred (as an ECOS failure in scpi).
+    fn barrier(&self, c: &Array1<f64>, x0: &Array1<f64>) -> EconResult<Option<Array1<f64>>> {
+        match self.barrier_path(c, x0, false)? {
+            Some(x) => Ok(Some(x)),
+            None => self.barrier_path(c, x0, true),
+        }
+    }
+
+    /// One pass of [`Qcqp::barrier`]. An uncentred intermediate centring is only a start for the
+    /// next one; with `careful`, it is retried instead from the last centred point with t grown
+    /// by the square root of the previous factor, down to [`QCQP_MU_MIN`]. The budget is checked
+    /// once per centring.
+    fn barrier_path(
+        &self,
+        c: &Array1<f64>,
+        x0: &Array1<f64>,
+        careful: bool,
+    ) -> EconResult<Option<Array1<f64>>> {
         let n_ineq = (self.g.nrows() + self.quads.len()) as f64;
+        let mut x = x0.clone();
         let mut t = 1.0;
+        let mut mu = QCQP_MU;
+        // with `careful`, the last centred point and its t
+        let mut prev: Option<(Array1<f64>, f64)> = None;
         loop {
-            x = self.center(c, x, t, None)?.0;
-            if n_ineq / t < QCQP_GAP {
-                return Some(x);
+            crate::resource::checkpoint()?;
+            let Some((xn, decrement)) = self.center(c, x, t, None) else {
+                return Ok(None);
+            };
+            let last = n_ineq / t < QCQP_GAP;
+            if decrement <= QCQP_CENTRED {
+                if last {
+                    return Ok(Some(xn));
+                }
+                if careful {
+                    prev = Some((xn.clone(), t));
+                }
+            } else {
+                if careful
+                    && mu > QCQP_MU_MIN
+                    && let Some((xp, tp)) = &prev
+                {
+                    mu = mu.sqrt();
+                    x = xp.clone();
+                    t = tp * mu;
+                    continue;
+                }
+                if last {
+                    return Ok(None);
+                }
             }
-            t *= 50.0;
+            x = xn;
+            t *= mu;
         }
     }
 
     /// Phase I: minimise `s` subject to `G x - s <= h`, `f_k(x) - s <= 0` and `A x = b`, from the
-    /// least-norm solution of `A x = b`.
-    fn start(&self) -> Option<QcqpStart> {
-        let sc = self.scaled();
+    /// least-norm solution of `A x = b`, on a problem already [`Qcqp::scaled`]. The budget is
+    /// checked once per centring.
+    fn start(&self) -> EconResult<Option<QcqpStart>> {
+        let sc = self;
         let (n, m) = (sc.n, sc.a_eq.nrows());
         let x0 = if m == 0 {
             Array1::zeros(n)
@@ -1898,14 +1995,10 @@ impl Qcqp {
             )
             .fold(f64::NEG_INFINITY, f64::max);
         if !viol.is_finite() {
-            return if viol == f64::NEG_INFINITY {
-                Some(QcqpStart {
-                    x: x0,
-                    interior: true,
-                })
-            } else {
-                None
-            };
+            return Ok((viol == f64::NEG_INFINITY).then_some(QcqpStart {
+                x: x0,
+                interior: true,
+            }));
         }
         let mut g1 = Array2::zeros((sc.g.nrows(), n + 1));
         g1.slice_mut(s![.., ..n]).assign(&sc.g);
@@ -1941,29 +2034,36 @@ impl Qcqp {
         let mut z = z0;
         let mut t = 1.0;
         while z[n] >= -1e-3 && n_ineq_1 / t >= QCQP_GAP {
-            z = phase1.center(&c1, z, t, Some(-1e-3))?.0;
+            crate::resource::checkpoint()?;
+            let Some((zn, _)) = phase1.center(&c1, z, t, Some(-1e-3)) else {
+                return Ok(None);
+            };
+            z = zn;
             t *= 20.0;
         }
         let x = z.slice(s![..n]).to_owned();
         let interior = z[n] < -1e-12 && sc.slacks(&x).is_some();
-        Some(QcqpStart { x, interior })
+        Ok(Some(QcqpStart { x, interior }))
     }
 
-    /// The optimal value from `start`, or `None` when the barrier iterations fail (as an ECOS
-    /// failure in scpi).
-    fn minimize_from(&self, c: ArrayView1<f64>, start: &QcqpStart) -> Option<f64> {
+    /// The optimal value from `start` on a problem already [`Qcqp::scaled`], or `Ok(None)` when
+    /// the barrier iterations fail or end uncentred (as an ECOS failure in scpi).
+    fn minimize_from(&self, c: ArrayView1<f64>, start: &QcqpStart) -> EconResult<Option<f64>> {
         let c_scale = c.iter().fold(0.0f64, |a, v| a.max(v.abs()));
         if c_scale == 0.0 || !start.interior {
-            return Some(c.dot(&start.x));
+            return Ok(Some(c.dot(&start.x)));
         }
         let cs = &c / c_scale;
-        let x = self.scaled().barrier(&cs, start.x.clone())?;
-        Some(cs.dot(&x) * c_scale)
+        Ok(self.barrier(&cs, &start.x)?.map(|x| cs.dot(&x) * c_scale))
     }
 
     #[cfg(test)]
-    fn minimize(&self, c: ArrayView1<f64>) -> Option<f64> {
-        self.minimize_from(c, &self.start()?)
+    fn minimize(&self, c: ArrayView1<f64>) -> EconResult<Option<f64>> {
+        let sc = self.scaled();
+        match sc.start()? {
+            Some(start) => sc.minimize_from(c, &start),
+            None => Ok(None),
+        }
     }
 }
 
@@ -2676,7 +2776,7 @@ mod tests {
             quads: vec![(Array2::eye(3), &g * -2.0, 0.0)],
         };
         let want = p.dot(&g) - p.dot(&p).sqrt() * g.dot(&g).sqrt();
-        let got = prob.minimize(p.view()).unwrap();
+        let got = prob.minimize(p.view()).unwrap().unwrap();
         assert!((got - want).abs() < 1e-9, "{got} vs {want}");
         // the same ball with sum(x) = 0 and x >= -0.1: the LP on the polytope when it is inside
         let prob2 = Qcqp {
@@ -2688,11 +2788,115 @@ mod tests {
             quads: vec![(Array2::eye(3) * 1e-3, &g * -2.0e-3, 0.0)],
         };
         // without the quadratic: put 0.2 on the cheapest coordinate, -0.1 on the others
-        let got2 = prob2.minimize(p.view()).unwrap();
+        let got2 = prob2.minimize(p.view()).unwrap().unwrap();
         let lp = -0.5 * 0.2 + (1.0 + 2.0) * -0.1;
         let x = array![-0.1, -0.1, 0.2];
         assert!(x.dot(&x) - 2.0 * g.dot(&x) <= 0.0);
         assert!((got2 - lp).abs() < 1e-9, "{got2} vs {lp}");
+    }
+
+    fn ball(g: &Array1<f64>) -> Qcqp {
+        let n = g.len();
+        Qcqp {
+            n,
+            a_eq: Array2::zeros((0, n)),
+            b_eq: Array1::zeros(0),
+            g: Array2::zeros((0, n)),
+            h: Array1::zeros(0),
+            quads: vec![(Array2::eye(n), g * -2.0, 0.0)],
+        }
+    }
+
+    /// A last centring that ends uncentred is a failed solve, not an optimum: with no Newton
+    /// step the barrier method reports no value; with one step per centring, a value it reports
+    /// is within the certified gap of the optimum.
+    #[test]
+    fn test_qcqp_uncentred_last_step_is_a_failure() {
+        let g = array![0.3, -0.2, 0.5];
+        let p = array![1.0, 2.0, -0.5];
+        let sc = ball(&g).scaled();
+        let start = sc.start().unwrap().unwrap();
+        assert!(start.interior);
+        let want = p.dot(&g) - p.dot(&p).sqrt() * g.dot(&g).sqrt();
+        let got = sc.minimize_from(p.view(), &start).unwrap().unwrap();
+        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        let with_steps = |k: usize| {
+            NEWTON_MAX.with(|c| c.set(k));
+            let r = sc.minimize_from(p.view(), &start);
+            NEWTON_MAX.with(|c| c.set(QCQP_NEWTON_MAX));
+            r.unwrap()
+        };
+        assert_eq!(with_steps(0), None);
+        if let Some(v) = with_steps(1) {
+            assert!((v - want).abs() < 1e-8, "{v} vs {want}");
+        }
+    }
+
+    /// The phase I and every barrier centring check the budget.
+    #[test]
+    fn test_qcqp_stops_when_cancelled() {
+        let g = array![0.3, -0.2, 0.5];
+        let p = array![1.0, 2.0, -0.5];
+        let mut prob = ball(&g);
+        // a start outside the set, so that the phase I iterates
+        prob.quads[0].2 = 0.01;
+        let sc = prob.scaled();
+        assert!(matches!(
+            cancelled(|| sc.start()),
+            Err(EconError::Cancelled(_))
+        ));
+        let start = sc.start().unwrap().unwrap();
+        assert!(matches!(
+            cancelled(|| sc.minimize_from(p.view(), &start)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    /// An explicit e_method wins over the deprecated variance_method, with a warning naming it.
+    #[test]
+    fn test_scpi_e_method_wins_over_variance_method() {
+        let (t, d) = generate_test_data();
+        let cfg = SCPIConfig {
+            e_method: EMethod::Qreg,
+            variance_method: Some(VarianceMethod::Gaussian),
+            sims: 10,
+            ..Default::default()
+        };
+        let r = run_scpi(&t.view(), &d.view(), 7, cfg).unwrap();
+        assert_eq!(r.headline_method, EMethod::Qreg);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("variance_method 'gaussian' is ignored")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// scpi warns when its regularize.check.lb raises a rho below 0.001; so does this.
+    #[test]
+    fn test_scpi_warns_when_rho_is_raised() {
+        let n = 20;
+        let d = Array2::from_shape_fn((n, 3), |(t, j)| {
+            let tf = t as f64;
+            10.0 + tf * (1.0 + 0.3 * j as f64) + ((tf * (j as f64 + 1.3)).sin())
+        });
+        // an almost exact convex combination of the donors: tiny residuals, tiny rho
+        let treated = Array1::from_shape_fn(n, |t| {
+            0.6 * d[[t, 0]] + 0.4 * d[[t, 1]] + 1e-7 * ((t as f64) * 2.7).cos()
+        });
+        let cfg = SCPIConfig {
+            sims: 10,
+            ..Default::default()
+        };
+        let r = run_scpi(&treated.view(), &d.view(), 15, cfg).unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w.contains("rho was")
+                && w.contains("below 0.001")
+                && w.contains("collinearity")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     #[test]
