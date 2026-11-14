@@ -218,7 +218,7 @@ impl BartCausalConfig {
     ///   and their treated and control rows, the predictions; one replicate's
     ///   resample, its rows and groups and its predictions; the intervals and
     ///   standard errors, the result's copies and the sorted copy its summary
-    ///   makes.
+    ///   makes, and the permuted column of the importance pass.
     /// - **One tree's working copies.** The subsample's flags, indices and
     ///   rows, and what the recursion holds: every level on the path to the
     ///   node being split holds its children's index vectors, together at most
@@ -264,8 +264,8 @@ impl BartCausalConfig {
         // (3); the replicate's resample indices, y and w (3), its group indices and outcome
         // by group (2) and its predictions (3); the intervals and standard errors (3), the
         // result's copies (3) and the summary's sorted copy (1); the propensity score (1); the
-        // importance pass's saved column and permuted CATE (2).
-        let per_row = 4 + 2 + 3 + 3 + 2 + 3 + 3 + 3 + 1 + 1 + 2;
+        // importance pass's permuted column (1).
+        let per_row = 4 + 2 + 3 + 3 + 2 + 3 + 3 + 3 + 1 + 1 + 1;
         // Per row and covariate: the extracted covariates, the ensembles' covariates and their
         // treated and control rows, the replicate's rows and their treated and control rows.
         let data = mul(mul(8, n), per_row)
@@ -707,6 +707,75 @@ impl RegressionTree {
         }
     }
 
+    /// Whether any split of the tree is on covariate `j`.
+    fn splits_on(&self, j: usize) -> bool {
+        fn walk(node: &TreeNode, j: usize) -> bool {
+            match node {
+                TreeNode::Leaf { .. } => false,
+                TreeNode::Split {
+                    feature_index,
+                    left,
+                    right,
+                    ..
+                } => *feature_index == j || walk(left, j) || walk(right, j),
+            }
+        }
+        self.root.as_ref().is_some_and(|node| walk(node, j))
+    }
+
+    /// The prediction at row `x` with covariate `j` set to `v`, minus the prediction at `x`.
+    /// Both rows follow one path down to the first split on `j` that sends them apart, and the
+    /// change is 0 when they never part.
+    fn change_with(&self, x: &ArrayView1<f64>, j: usize, v: f64) -> f64 {
+        let Some(mut node) = self.root.as_ref() else {
+            return 0.0;
+        };
+        loop {
+            match node {
+                TreeNode::Leaf { .. } => return 0.0,
+                TreeNode::Split {
+                    feature_index,
+                    threshold,
+                    left,
+                    right,
+                } => {
+                    let goes_left = x[*feature_index] <= *threshold;
+                    if *feature_index == j && (v <= *threshold) != goes_left {
+                        let (moved, stays) = if goes_left {
+                            (right, left)
+                        } else {
+                            (left, right)
+                        };
+                        return self.traverse_with(moved, x, j, v) - self.traverse(stays, x);
+                    }
+                    node = if goes_left { left } else { right };
+                }
+            }
+        }
+    }
+
+    /// The prediction below `node` at row `x` with covariate `j` set to `v`.
+    fn traverse_with(&self, mut node: &TreeNode, x: &ArrayView1<f64>, j: usize, v: f64) -> f64 {
+        loop {
+            match node {
+                TreeNode::Leaf { value, .. } => return *value,
+                TreeNode::Split {
+                    feature_index,
+                    threshold,
+                    left,
+                    right,
+                } => {
+                    let value = if *feature_index == j {
+                        v
+                    } else {
+                        x[*feature_index]
+                    };
+                    node = if value <= *threshold { left } else { right };
+                }
+            }
+        }
+    }
+
     fn traverse(&self, node: &TreeNode, x: &ArrayView1<f64>) -> f64 {
         match node {
             TreeNode::Leaf { value, .. } => *value,
@@ -1029,7 +1098,7 @@ pub fn bart_causal_arrays(
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Optionally compute and add propensity scores
-    let (mut x_aug, covariate_names_aug, ensemble_propensity) = if config.include_propensity {
+    let (x_aug, covariate_names_aug, ensemble_propensity) = if config.include_propensity {
         let (propensity, model) = estimate_propensity(x.view(), treatment.view(), &mut rng_state)?;
         let mut x_new = Array2::zeros((n, p + 1));
         for i in 0..n {
@@ -1130,8 +1199,7 @@ pub fn bart_causal_arrays(
     let avg_importance = cate_permutation_importance(
         &ensemble_treated,
         &ensemble_control,
-        &mut x_aug,
-        &cate,
+        x_aug.view(),
         config.seed.unwrap_or(42),
     )?;
 
@@ -1478,46 +1546,54 @@ fn bootstrap_cate(
 
 /// Permutation importance of the CATE: for each column j of `x`, the mean over the rows of
 /// (tau(x_i) - tau(x_i with column j permuted))^2, tau = mu1 - mu0 from the two ensembles, as
-/// shares (all zeros when every change is 0). Column j is permuted in place (Fisher-Yates from
-/// a stream seeded by `seed` and j, apart from the fit's) and restored from one saved copy;
-/// the permuted CATE accumulates into one vector.
+/// shares (all zeros when every change is 0). The permutation is a Fisher-Yates shuffle of a
+/// copy of column j, from a stream seeded by `seed` and j, apart from the fit's. Only the trees
+/// that split on j can change, and a row's change in such a tree is 0 unless a split on j
+/// sends the permuted value the other way, so each row walks those trees once and takes the
+/// other branch only where the two values part.
 fn cate_permutation_importance(
     treated: &TreeEnsemble,
     control: &TreeEnsemble,
-    x: &mut Array2<f64>,
-    cate: &Array1<f64>,
+    x: ArrayView2<f64>,
     seed: u64,
 ) -> EconResult<Array1<f64>> {
     let (n, p) = x.dim();
-    let mut saved = try_with_capacity::<f64>(n, "BART causal importance column")?;
-    saved.resize(n, 0.0);
-    let mut permuted = Array1::from(try_vec_f64(n)?);
+    let mut permuted = try_with_capacity::<f64>(n, "BART causal importance column")?;
+    let mut uses_t = try_with_capacity::<usize>(treated.trees.len(), "BART causal importance")?;
+    let mut uses_c = try_with_capacity::<usize>(control.trees.len(), "BART causal importance")?;
+    let (m_t, m_c) = (treated.trees.len() as f64, control.trees.len() as f64);
     let mut importance = Array1::zeros(p);
     for j in 0..p {
         checkpoint()?;
-        for (s, v) in saved.iter_mut().zip(x.column(j)) {
-            *s = *v;
+        uses_t.clear();
+        uses_t.extend((0..treated.trees.len()).filter(|&t| treated.trees[t].splits_on(j)));
+        uses_c.clear();
+        uses_c.extend((0..control.trees.len()).filter(|&t| control.trees[t].splits_on(j)));
+        if uses_t.is_empty() && uses_c.is_empty() {
+            continue;
         }
+        permuted.clear();
+        permuted.extend(x.column(j).iter().copied());
         let mut rng = seed ^ (j as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        {
-            let mut col = x.column_mut(j);
-            for i in (1..n).rev() {
-                let k = lcg_random(&mut rng) % (i + 1);
-                col.swap(i, k);
-            }
+        for i in (1..n).rev() {
+            let k = lcg_random(&mut rng) % (i + 1);
+            permuted.swap(i, k);
         }
-        permuted.fill(0.0);
-        treated.add_predictions(x.view(), 1.0, &mut permuted);
-        control.add_predictions(x.view(), -1.0, &mut permuted);
-        importance[j] = cate
-            .iter()
-            .zip(&permuted)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f64>()
-            / n as f64;
-        for (v, s) in x.column_mut(j).iter_mut().zip(&saved) {
-            *v = *s;
+        let mut sum_sq = 0.0;
+        for (i, &v) in permuted.iter().enumerate() {
+            let row = x.row(i);
+            let dt: f64 = uses_t
+                .iter()
+                .map(|&t| treated.trees[t].change_with(&row, j, v))
+                .sum();
+            let dc: f64 = uses_c
+                .iter()
+                .map(|&t| control.trees[t].change_with(&row, j, v))
+                .sum();
+            let change = dt / m_t - dc / m_c;
+            sum_sq += change * change;
         }
+        importance[j] = sum_sq / n as f64;
     }
     let total = importance.sum();
     if total > 0.0 && total.is_finite() {
@@ -1526,13 +1602,6 @@ fn cate_permutation_importance(
         importance.fill(0.0);
     }
     Ok(importance)
-}
-
-/// A zero vector of `n` values, allocated fallibly.
-fn try_vec_f64(n: usize) -> EconResult<Vec<f64>> {
-    let mut v = try_with_capacity::<f64>(n, "BART causal permuted CATE")?;
-    v.resize(n, 0.0);
-    Ok(v)
 }
 
 /// The bootstrap needs at least two usable replicates (with 5 treated and 5 control rows each)
@@ -2329,8 +2398,72 @@ mod tests {
                 "seed {seed}: {:?}",
                 r.variable_importance
             );
+            let imp = |name: &str| {
+                r.variable_importance
+                    .iter()
+                    .find(|(v, _)| v == name)
+                    .map(|(_, i)| *i)
+                    .unwrap()
+            };
+            assert!(
+                imp("x0") < 0.5 * imp("x1"),
+                "seed {seed}: {:?}",
+                r.variable_importance
+            );
             let total: f64 = r.variable_importance.iter().map(|(_, v)| v).sum();
             assert!((total - 1.0).abs() < 1e-12, "{total}");
+        }
+    }
+
+    /// The importance pass walks only the trees that split on the permuted covariate; a naive
+    /// pass that permutes the whole column and predicts both ensembles at every row gives the
+    /// same shares, on noisy data with five covariates and the default tree settings.
+    #[test]
+    fn bart_causal_importance_matches_the_full_permutation_pass() {
+        let (n, p) = (300, 5);
+        let mut rng = 77u64;
+        let mut u = || (lcg_random(&mut rng) % 100_000) as f64 / 100_000.0;
+        let x = Array2::from_shape_fn((n, p), |_| u());
+        let y1 = Array1::from_shape_fn(n, |i| 2.0 * x[[i, 0]] + 3.0 * x[[i, 1]] + u());
+        let y0 = Array1::from_shape_fn(n, |i| 2.0 * x[[i, 0]] - x[[i, 2]] + u());
+        let mut state = 5u64;
+        let (mut treated, mut control) = (TreeEnsemble::new(), TreeEnsemble::new());
+        treated
+            .fit(x.view(), y1.view(), 40, 4, 5, 0.632, None, &mut state)
+            .unwrap();
+        control
+            .fit(x.view(), y0.view(), 40, 4, 5, 0.632, None, &mut state)
+            .unwrap();
+        let seed = 11;
+        let got = cate_permutation_importance(&treated, &control, x.view(), seed).unwrap();
+        let cate = &treated.predict(x.view()) - &control.predict(x.view());
+        let mut want = Array1::<f64>::zeros(p);
+        for j in 0..p {
+            let mut xp = x.clone();
+            let mut r = seed ^ (j as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            for i in (1..n).rev() {
+                let k = lcg_random(&mut r) % (i + 1);
+                let (a, b) = (xp[[i, j]], xp[[k, j]]);
+                xp[[i, j]] = b;
+                xp[[k, j]] = a;
+            }
+            let tau = &treated.predict(xp.view()) - &control.predict(xp.view());
+            want[j] = cate
+                .iter()
+                .zip(&tau)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                / n as f64;
+        }
+        want /= want.sum();
+        assert!(want.iter().filter(|&&v| v > 0.0).count() >= 3, "{want}");
+        for j in 0..p {
+            assert!(
+                (got[j] - want[j]).abs() < 1e-10,
+                "x{j}: {} vs {}",
+                got[j],
+                want[j]
+            );
         }
     }
 
@@ -2510,7 +2643,9 @@ mod tests {
         }
     }
 
-    /// Seeds the end-to-end refusal check loops over (see the test for the measured hit rate).
+    /// Seeds the end-to-end refusal check loops over. Measured: 25 of these 400 seeds are
+    /// refused (about 6% per seed: either replicate can draw fewer than 5 treated rows), so the
+    /// loop expects about 25 refusals and both outcomes occur.
     const SEEDS_FOR_REFUSAL: u64 = 400;
 
     #[test]
