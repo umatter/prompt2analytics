@@ -1,7 +1,14 @@
 //! Association rule mining using the Apriori algorithm.
 //!
-//! Implements the classic Apriori algorithm for finding frequent itemsets
+//! Implements the classic Apriori algorithm (and Eclat) for finding frequent itemsets
 //! and generating association rules.
+//!
+//! Conventions follow R's `arules`: an itemset is frequent when its support (count / n) is at least
+//! `min_support`; each rule has a single item on the right-hand side, and every frequent single item gives
+//! a rule with an empty left-hand side (`minlen = 1`; set `min_length = 2` to leave them out); confidence
+//! filters the rules and lift does not (`min_lift` is p2a's own filter, off by default). The default
+//! support and confidence are p2a's, 0.01 and 0.5 (arules: 0.1 and 0.8). There is no `maxtime`: the call
+//! stops at its budget instead.
 //!
 //! ## References
 //!
@@ -20,14 +27,22 @@ use crate::resource::{checkpoint, checkpoint_stride, try_vec, try_with_capacity}
 /// Configuration for Apriori algorithm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AprioriConfig {
-    /// Minimum support threshold (0-1)
+    /// Minimum support, in (0, 1] (arules `supp`): an itemset is frequent when count / n >= min_support
     pub min_support: f64,
-    /// Minimum confidence threshold (0-1)
+    /// Minimum confidence, in [0, 1] (arules `conf`)
     pub min_confidence: f64,
-    /// Minimum lift threshold
+    /// Minimum lift, finite and >= 0; arules has no lift filter, so the default 0 keeps every rule
     pub min_lift: f64,
-    /// Maximum itemset size
+    /// Maximum itemset size, at least 1 (arules `maxlen`)
     pub max_length: usize,
+    /// Minimum itemset size of the reported itemsets and of the rules (left plus right side), 1 to
+    /// `max_length` (arules `minlen`): 1 reports single items and their empty-LHS rules, 2 leaves them out
+    #[serde(default = "default_min_length")]
+    pub min_length: usize,
+}
+
+fn default_min_length() -> usize {
+    1
 }
 
 impl Default for AprioriConfig {
@@ -35,8 +50,9 @@ impl Default for AprioriConfig {
         Self {
             min_support: 0.01,
             min_confidence: 0.5,
-            min_lift: 1.0,
+            min_lift: 0.0,
             max_length: 10,
+            min_length: 1,
         }
     }
 }
@@ -143,7 +159,7 @@ impl std::fmt::Display for AprioriResult {
 }
 
 /// Check the configuration: `min_support` finite in (0, 1], `min_confidence` in [0, 1], `min_lift` finite and
-/// non-negative, `max_length` at least 1.
+/// non-negative, `max_length` at least 1, `min_length` from 1 to `max_length`.
 fn check_config(config: &AprioriConfig) -> EconResult<()> {
     let bad = |message: String| Err(EconError::InvalidSpecification { message });
     if !(config.min_support.is_finite() && config.min_support > 0.0 && config.min_support <= 1.0) {
@@ -168,6 +184,12 @@ fn check_config(config: &AprioriConfig) -> EconResult<()> {
         return bad(format!(
             "max_length must be at least 1, got {}",
             config.max_length
+        ));
+    }
+    if config.min_length < 1 || config.min_length > config.max_length {
+        return bad(format!(
+            "min_length must be between 1 and max_length ({}), got {}",
+            config.max_length, config.min_length
         ));
     }
     Ok(())
@@ -438,8 +460,9 @@ fn mine(
             config.max_length,
         )?
     };
-    let itemsets = to_itemsets(found, &enc.names, n_transactions);
+    let mut itemsets = to_itemsets(found, &enc.names, n_transactions);
     let rules = generate_rules(&itemsets, config)?;
+    itemsets.retain(|s| s.items.len() >= config.min_length);
     Ok(AprioriResult {
         itemsets,
         rules,
@@ -500,7 +523,11 @@ pub fn apriori(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResu
     mine(transactions, config, apriori_itemsets)
 }
 
-/// Association rules from frequent itemsets (all of them, so that every subset's support is known).
+/// Association rules as arules generates them: for every frequent itemset of at least
+/// `max(1, min_length)` items, one rule per item on the right-hand side with the other items on the left
+/// (empty for a single item, whose support is 1). The itemsets must be all frequent itemsets, so that every
+/// left-hand side's support is known (downward closure); a rule whose left-hand side is missing is skipped.
+/// Rules are sorted by lift (descending), then left-hand side, then right-hand side.
 fn generate_rules(
     frequent_itemsets: &[FrequentItemset],
     config: &AprioriConfig,
@@ -509,26 +536,37 @@ fn generate_rules(
         .iter()
         .map(|is| (is.items.as_slice(), is.support))
         .collect();
+    let min_k = config.min_length.max(1);
     let mut rules: Vec<AssociationRule> = Vec::new();
-    for itemset in frequent_itemsets {
-        if itemset.items.len() < 2 {
+    let mut lhs: Vec<String> = Vec::new();
+    for (idx, itemset) in frequent_itemsets.iter().enumerate() {
+        if idx % 256 == 0 {
+            checkpoint()?;
+        }
+        let k = itemset.items.len();
+        if k < min_k {
             continue;
         }
-        checkpoint()?;
-        for lhs in generate_subsets(&itemset.items) {
-            if lhs.is_empty() || lhs.len() == itemset.items.len() {
-                continue;
-            }
-            let rhs: Vec<String> = itemset
-                .items
-                .iter()
-                .filter(|item| !lhs.contains(item))
-                .cloned()
-                .collect();
-            let Some(&support_lhs) = itemset_support.get(lhs.as_slice()) else {
-                continue;
+        for r in 0..k {
+            lhs.clear();
+            lhs.extend(
+                itemset
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != r)
+                    .map(|(_, item)| item.clone()),
+            );
+            let support_lhs = if lhs.is_empty() {
+                1.0
+            } else {
+                match itemset_support.get(lhs.as_slice()) {
+                    Some(&s) => s,
+                    None => continue,
+                }
             };
-            let Some(&support_rhs) = itemset_support.get(rhs.as_slice()) else {
+            let rhs = std::slice::from_ref(&itemset.items[r]);
+            let Some(&support_rhs) = itemset_support.get(rhs) else {
                 continue;
             };
             let confidence = itemset.support / support_lhs;
@@ -545,8 +583,8 @@ fn generate_rules(
                 f64::INFINITY
             };
             rules.push(AssociationRule {
-                lhs,
-                rhs,
+                lhs: lhs.clone(),
+                rhs: rhs.to_vec(),
                 support: itemset.support,
                 confidence,
                 lift,
@@ -564,25 +602,6 @@ fn generate_rules(
             .then_with(|| a.rhs.cmp(&b.rhs))
     });
     Ok(rules)
-}
-
-/// Generate all non-empty subsets of an itemset.
-fn generate_subsets(items: &[String]) -> Vec<Vec<String>> {
-    let n = items.len();
-    let mut subsets: Vec<Vec<String>> = Vec::new();
-
-    // Generate all 2^n - 1 non-empty subsets
-    for mask in 1..(1 << n) {
-        let subset: Vec<String> = items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| mask & (1 << i) != 0)
-            .map(|(_, item)| item.clone())
-            .collect();
-        subsets.push(subset);
-    }
-
-    subsets
 }
 
 /// Convert a data matrix (0/1) to transactions.
@@ -665,6 +684,7 @@ mod tests {
             min_confidence: 0.6,
             min_lift: 1.0,
             max_length: 5,
+            ..Default::default()
         };
 
         let result = apriori(&transactions, &config).unwrap();
@@ -715,6 +735,7 @@ mod tests {
             min_confidence: 0.5,
             min_lift: 1.0,
             max_length: 5,
+            ..Default::default()
         };
 
         let result = apriori(&transactions, &config).unwrap();
@@ -722,8 +743,14 @@ mod tests {
         // Should find A and B as frequent 1-itemsets
         assert_eq!(result.itemsets.len(), 2);
 
-        // No rules possible with only single-item transactions
-        assert_eq!(result.rules.len(), 0);
+        // Only the empty-LHS rules {} => {A} and {} => {B} (support 0.5 >= confidence 0.5), as arules
+        assert_eq!(result.rules.len(), 2);
+        assert!(
+            result
+                .rules
+                .iter()
+                .all(|r| r.lhs.is_empty() && r.rhs.len() == 1)
+        );
     }
 
     #[test]
@@ -750,6 +777,7 @@ mod tests {
             min_confidence: 0.6,
             min_lift: 1.0,
             max_length: 5,
+            ..Default::default()
         };
 
         let result = eclat(&transactions, &config).unwrap();
@@ -801,6 +829,7 @@ mod tests {
             min_confidence: 0.5,
             min_lift: 1.0,
             max_length: 5,
+            ..Default::default()
         };
 
         let result = apriori(&transactions, &config).unwrap();
@@ -825,6 +854,7 @@ mod tests {
             min_confidence: 0.5,
             min_lift: 0.0,
             max_length: 5,
+            ..Default::default()
         };
 
         let result = apriori(&transactions, &config).unwrap();
@@ -859,7 +889,9 @@ mod tests {
             vec!["Käse".to_string()],
         ];
         let r = apriori(&tx, &AprioriConfig::default()).unwrap();
-        assert_eq!(r.rules.len(), 2); // {V}=>{M} conf 1.0 and {M}=>{V} conf 0.75, both lift 1.25
+        // {V}=>{M} conf 1.0 and {M}=>{V} conf 0.75, both lift 1.25; {} => {V} conf 0.6 and {} => {M} conf
+        // 0.8, lift 1 ({} => {Käse} has conf 0.2)
+        assert_eq!(r.rules.len(), 4);
         let out = r.to_string();
         assert!(out.contains("{Vollkornbrot geschnitten ü... "), "{out}");
         assert!(out.contains("{Milch} => {Vollkornbrot ge... "), "{out}"); // ASCII cut, as before
@@ -1077,6 +1109,196 @@ mod tests {
                         .all(|w| (w[0].items.len(), &w[0].items) < (w[1].items.len(), &w[1].items))
                 );
             }
+        }
+    }
+
+    fn rule_key(r: &AssociationRule) -> String {
+        format!("{{{}}} => {{{}}}", r.lhs.join(","), r.rhs.join(","))
+    }
+
+    /// ML-118: every rule has one item on the right, and single items give empty-LHS rules. Before: 12 rules
+    /// of which 3 had a two-item right-hand side, and none with an empty left-hand side.
+    #[test]
+    fn rules_have_one_item_on_the_right() {
+        let baskets = vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]; 4];
+        let c = AprioriConfig {
+            min_support: 0.01,
+            min_confidence: 0.5,
+            ..Default::default()
+        };
+        for f in [apriori, eclat] {
+            let r = f(&baskets, &c).unwrap();
+            assert_eq!(r.rules.len(), 12);
+            assert!(r.rules.iter().all(|x| x.rhs.len() == 1));
+            let by_lhs = |n: usize| r.rules.iter().filter(|x| x.lhs.len() == n).count();
+            assert_eq!((by_lhs(0), by_lhs(1), by_lhs(2)), (3, 6, 3));
+            for x in &r.rules {
+                assert_eq!(
+                    (x.confidence, x.lift, x.conviction),
+                    (1.0, 1.0, f64::INFINITY)
+                );
+            }
+        }
+    }
+
+    /// Every rule with a one-item right-hand side from a brute-force count, against apriori's and eclat's
+    /// rules; `min_length = 2` removes exactly the empty-LHS rules and the single items.
+    #[test]
+    fn rules_match_a_brute_force_enumeration() {
+        let baskets = seeded_baskets(20261115, 200);
+        let n = baskets.len() as f64;
+        let s = 0.05;
+        let truth = brute_force_itemsets(&baskets, s);
+        let support = |items: &[String]| -> f64 {
+            if items.is_empty() {
+                return 1.0;
+            }
+            baskets
+                .iter()
+                .filter(|t| items.iter().all(|i| t.contains(i)))
+                .count() as f64
+                / n
+        };
+        let c = AprioriConfig {
+            min_support: s,
+            min_confidence: 0.3,
+            ..Default::default()
+        };
+        let mut expected: Vec<(String, [f64; 6], usize)> = Vec::new();
+        for (items, count, sup) in &truth {
+            for r in 0..items.len() {
+                let lhs: Vec<String> = items
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != r)
+                    .map(|(_, x)| x.clone())
+                    .collect();
+                let rhs = vec![items[r].clone()];
+                let (sl, sr) = (support(&lhs), support(&rhs));
+                let conf = sup / sl;
+                if conf < c.min_confidence {
+                    continue;
+                }
+                let conviction = if (1.0 - conf).abs() > 1e-10 {
+                    (1.0 - sr) / (1.0 - conf)
+                } else {
+                    f64::INFINITY
+                };
+                expected.push((
+                    format!("{{{}}} => {{{}}}", lhs.join(","), rhs.join(",")),
+                    [*sup, conf, conf / sr, sl, sup - sl * sr, conviction],
+                    *count,
+                ));
+            }
+        }
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        for f in [apriori, eclat] {
+            let r = f(&baskets, &c).unwrap();
+            let mut got: Vec<(String, [f64; 6], usize)> = r
+                .rules
+                .iter()
+                .map(|x| {
+                    (
+                        rule_key(x),
+                        [
+                            x.support,
+                            x.confidence,
+                            x.lift,
+                            x.coverage,
+                            x.leverage,
+                            x.conviction,
+                        ],
+                        x.count,
+                    )
+                })
+                .collect();
+            got.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(got.len(), expected.len());
+            for (g, e) in got.iter().zip(&expected) {
+                assert_eq!((&g.0, g.2), (&e.0, e.2));
+                for (u, v) in g.1.iter().zip(&e.1) {
+                    assert!(
+                        u == v || (u - v).abs() <= 1e-12 * v.abs(),
+                        "{}: {u} {v}",
+                        g.0
+                    );
+                }
+            }
+            let c2 = AprioriConfig {
+                min_length: 2,
+                ..c.clone()
+            };
+            let r2 = f(&baskets, &c2).unwrap();
+            let mut kept: Vec<String> = r
+                .rules
+                .iter()
+                .filter(|x| !x.lhs.is_empty())
+                .map(rule_key)
+                .collect();
+            let mut got2: Vec<String> = r2.rules.iter().map(rule_key).collect();
+            kept.sort();
+            got2.sort();
+            assert_eq!(got2, kept);
+            assert!(r.rules.iter().any(|x| x.lhs.is_empty()));
+            let multi: Vec<Vec<String>> = r
+                .itemsets
+                .iter()
+                .filter(|i| i.items.len() >= 2)
+                .map(|i| i.items.clone())
+                .collect();
+            let got_sets: Vec<Vec<String>> = r2.itemsets.iter().map(|i| i.items.clone()).collect();
+            assert_eq!(got_sets, multi);
+        }
+    }
+
+    /// HEAD's subset enumeration used an i32 mask over 2^k subsets: empty at 31 items, overflow at 32.
+    #[test]
+    fn rule_generator_handles_a_40_item_itemset() {
+        let items: Vec<String> = (0..40).map(|i| format!("i{i:02}")).collect();
+        let set = |v: Vec<String>| FrequentItemset {
+            items: v,
+            support: 1.0,
+            count: 10,
+        };
+        let mut sets = vec![set(items.clone())];
+        for r in 0..40 {
+            sets.push(set(items
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != r)
+                .map(|(_, x)| x.clone())
+                .collect()));
+            sets.push(set(vec![items[r].clone()]));
+        }
+        let rules = generate_rules(&sets, &AprioriConfig::default()).unwrap();
+        let by_lhs = |n: usize| rules.iter().filter(|x| x.lhs.len() == n).count();
+        assert_eq!((by_lhs(39), by_lhs(38), by_lhs(0)), (40, 0, 40));
+        assert_eq!(rules.len(), 80);
+    }
+
+    /// A cancelled budget stops both searches.
+    #[test]
+    fn apriori_stops_at_the_budget() {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let baskets: Vec<Vec<String>> = (0..300)
+            .map(|t| {
+                (0..20)
+                    .filter(|j| (t * 7 + j * 3) % 5 != 0)
+                    .map(|j| format!("x{j}"))
+                    .collect()
+            })
+            .collect();
+        let token = CancelToken::new();
+        token.cancel();
+        for f in [apriori, eclat] {
+            let r = with_budget(Budget::new(None, token.clone()), || {
+                f(&baskets, &config(0.05))
+            });
+            assert!(
+                matches!(r, Err(EconError::Cancelled(_))),
+                "{:?}",
+                r.map(|x| x.itemsets.len())
+            );
         }
     }
 
