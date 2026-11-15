@@ -2551,10 +2551,34 @@ async fn test_validate_mcp_runmed_constant() {
         )
         .await,
     );
-    // deviation TS-34: endrule 'median' is not pinned (R's runmed_median_head is recorded).
     Check::new(&case)
         .vector(
             "runmed_constant_head",
+            &fs(&j["values_sample"]),
+            Tol::coef(96),
+        )
+        .finish();
+    assert_eq!(j["n"].as_u64(), Some(96));
+}
+
+/// timeseries_runmed with endrule 'median' through the dispatch path, pinned to
+/// runmed(endrule = "median") = smoothEnds(runmed(endrule = "keep"), k) (mcp_series_t3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_validate_mcp_runmed_median() {
+    let case = Case::load("mcp_series_t3");
+    let (se, s) = session_with("mcp_series_t3");
+    let j = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_runmed",
+            json!({"dataset": "mcp_series_t3", "column": "z", "k": 5, "endrule": "median"}),
+        )
+        .await,
+    );
+    Check::new(&case)
+        .vector(
+            "runmed_median_head",
             &fs(&j["values_sample"]),
             Tol::coef(96),
         )
@@ -2696,11 +2720,20 @@ async fn test_validate_mcp_arma_acf() {
         )
         .await,
     );
+    let arma11 = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_arma_acf",
+            json!({"ar": [0.5], "ma": [0.3], "lag_max": 6}),
+        )
+        .await,
+    );
     // The tool's PACF starts at lag 0 (1.0, as its ACF does); R's starts at lag 1.
     let pacf_values = fs(&pacf["values"]);
     assert_eq!((pacf_values[0], pacf["lags"][0].as_u64()), (1.0, Some(0)));
-    // deviation TS-14: ARMA(1, 1) is not pinned.
     Check::new(&case)
+        .vector("armaacf_arma11", &fs(&arma11["values"]), Tol::coef(7))
         .vector("armaacf_ar2", &fs(&ar2["values"]), Tol::coef(11))
         .vector("armaacf_ar2_pacf", &pacf_values[1..], Tol::coef(11))
         .vector("armaacf_ma2", &fs(&ma2["values"]), Tol::coef(11))
@@ -2708,24 +2741,28 @@ async fn test_validate_mcp_arma_acf() {
 }
 
 /// STAT-46/STAT-77: timeseries_lag, ts_mstl and timeseries_arima_sim through the dispatch
-/// path. No values are pinned (deviations TS-29, TS-26, TOOL-28).
+/// path. timeseries_lag is pinned to dplyr::lag (lag_dplyr3_head); arima_sim's sd scales the
+/// series. The MSTL components are not pinned (deviation TS-26).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_validate_mcp_lag_mstl_arima_sim() {
+    let case = Case::load("mcp_series_t3");
     let (se, s) = session_with("mcp_series_t3");
-    // deviation TS-29: the values are x[t + 3]; R's dplyr::lag gives lag_dplyr3_head.
-    let lag = json_of(
-        &ok(
-            &s,
-            &se,
-            "timeseries_lag",
-            json!({"dataset": "mcp_series_t3", "column": "z", "k": 3}),
-        )
-        .await,
-    );
+    let lag_of = |k: i32| json!({"dataset": "mcp_series_t3", "column": "z", "k": k});
+    let lag = json_of(&ok(&s, &se, "timeseries_lag", lag_of(3)).await);
     assert_eq!(
         (lag["lag"].as_u64(), lag["n"].as_u64()),
-        (Some(3), Some(93))
+        (Some(3), Some(96))
     );
+    // JSON null is NA, read as NaN, as the case stores R's NA.
+    Check::new(&case)
+        .vector("lag_dplyr3_head", &fs(&lag["values_sample"]), Tol::coef(96))
+        .finish();
+    let lead = json_of(&ok(&s, &se, "timeseries_lag", lag_of(-2)).await);
+    assert_eq!(lead["n"].as_u64(), Some(96));
+    let lead_head = fs(&lead["values_sample"]);
+    assert!(lead_head.iter().all(|v| v.is_finite()), "{lead}");
+    let r = refused(&s, &se, "timeseries_lag", lag_of(96)).await;
+    assert!(r.contains("too large"), "{r}");
     // deviation TS-26: the MSTL components are not pinned.
     let m = ok(
         &s,
@@ -2747,11 +2784,42 @@ async fn test_validate_mcp_lag_mstl_arima_sim() {
     )
     .await;
     assert!(r.contains("missing value"), "{r}");
-    // TOOL-28: sd is not asserted.
     let args = json!({"n": 50, "ar": [0.5], "seed": 42});
     let a = json_of(&ok(&s, &se, "timeseries_arima_sim", args.clone()).await);
     let b = json_of(&ok(&s, &se, "timeseries_arima_sim", args).await);
     assert_eq!(a["values_sample"], b["values_sample"]);
     assert_eq!(a["n"].as_u64(), Some(50));
     assert_eq!(fs(&a["values_sample"]).len(), 50);
+    // sd scales the innovations, so the whole series.
+    let scaled = json_of(
+        &ok(
+            &s,
+            &se,
+            "timeseries_arima_sim",
+            json!({"n": 50, "ar": [0.5], "seed": 42, "sd": 2.5}),
+        )
+        .await,
+    );
+    for (x, y) in fs(&a["values_sample"])
+        .iter()
+        .zip(fs(&scaled["values_sample"]))
+    {
+        assert!((y - 2.5 * x).abs() <= 1e-12 * y.abs(), "{x} {y}");
+    }
+    let r = refused(
+        &s,
+        &se,
+        "timeseries_arima_sim",
+        json!({"n": 50, "ar": [0.5], "sd": 0.0}),
+    )
+    .await;
+    assert!(r.contains("sd"), "{r}");
+    let r = refused(
+        &s,
+        &se,
+        "timeseries_arima_sim",
+        json!({"n": 50, "ar": [1.2]}),
+    )
+    .await;
+    assert!(r.contains("not stationary"), "{r}");
 }
