@@ -1022,7 +1022,13 @@ fn arma_autocorrelation(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Ve
         for (i, &phi) in ar.iter().enumerate().take(k) {
             sum += phi * rho[k - 1 - i];
         }
-        rho[k] = sum;
+        // Flush subnormals: in that range the recursion can cycle through tiny non-zero values
+        // instead of reaching 0, and subnormal arithmetic is slow.
+        rho[k] = if sum.abs() < f64::MIN_POSITIVE {
+            0.0
+        } else {
+            sum
+        };
     }
     Ok(rho)
 }
@@ -1101,13 +1107,23 @@ fn arma_autocovariance_system(ar: &[f64], ma: &[f64], r: usize) -> EconResult<Ve
 }
 
 /// Durbin-Levinson algorithm to compute PACF from ACF.
+///
+/// Autocorrelations and AR coefficients below 1e-150 in magnitude are treated as 0, so no
+/// product of two of them leaves the normal range: subnormal arithmetic is slow, and an exact ACF
+/// of a long lag range decays into it. The PACF changes by less than 1e-150 times the number of
+/// lags.
 fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
     const WHAT: &str = "the partial autocorrelations up to lag_max";
+    const TINY: f64 = 1e-150;
+    let flush = |v: f64| if v.abs() < TINY { 0.0 } else { v };
 
     let p = acf.len() - 1; // acf[0] = 1
     if p == 0 {
         return Ok(vec![]);
     }
+    let mut flushed = try_with_capacity(acf.len(), WHAT)?;
+    flushed.extend(acf.iter().map(|&v| flush(v)));
+    let acf = &flushed[..];
 
     let mut pacf = try_with_capacity(p, WHAT)?;
     let mut phi: Vec<f64> = try_vec(p, 0.0, WHAT)?;
@@ -1139,9 +1155,9 @@ fn durbin_levinson_from_acf(acf: &[f64]) -> EconResult<Vec<f64>> {
 
         prev[..n - 1].copy_from_slice(&phi[..n - 1]);
         for k in 1..n {
-            phi[k - 1] = prev[k - 1] - phi_nn * prev[n - k - 1];
+            phi[k - 1] = flush(prev[k - 1] - phi_nn * prev[n - k - 1]);
         }
-        phi[n - 1] = phi_nn;
+        phi[n - 1] = flush(phi_nn);
     }
 
     Ok(pacf)
@@ -2198,6 +2214,21 @@ mod tests {
         assert!(arma_acf(&[1.5, -0.56], &[], 5, false).is_ok());
     }
 
+    /// A long lag range decays below the normal range: the ACF holds no subnormal value and its
+    /// tail is exactly 0, and the PACF's AR coefficients do not leave the normal range either.
+    #[test]
+    fn test_arma_acf_tail_has_no_subnormals() {
+        let normal_or_zero = |v: &f64| *v == 0.0 || v.abs() >= f64::MIN_POSITIVE;
+        let acf = arma_acf(&[0.5, 0.3], &[0.4], 6_000, false).unwrap().values;
+        assert!(acf.iter().all(normal_or_zero));
+        assert_eq!(*acf.last().unwrap(), 0.0);
+        let pacf = arma_acf(&[0.5], &[0.3], 1_500, true).unwrap().values;
+        assert!(pacf.iter().all(|v| v.is_finite() && normal_or_zero(v)));
+        // The PACF of ARMA(1, 1) decays like (-0.3)^k: its first lags are unaffected.
+        let short = arma_acf(&[0.5], &[0.3], 20, true).unwrap().values;
+        assert_eq!(&pacf[..21], &short[..]);
+    }
+
     #[test]
     fn test_arma_acf_length_is_lag_max_plus_one() {
         let cases: [(&[f64], &[f64], usize); 5] = [
@@ -2679,7 +2710,7 @@ mod tests {
 
     /// R 4.3.3: diffinv(c(2,3,4), differences = 2)            -> 0 0 2 7 16
     ///          diffinv(c(2,3,4,5), lag = 2, differences = 2) -> 0 0 0 0 2 3 8 11
-    /// (zero xi, where this module and R agree; non-zero xi with differences >= 2 is TS-28)
+    /// (zero xi; non-zero xi is pinned in test_validate_diffinv_xi_ts_utils_t4)
     #[test]
     fn test_validate_diffinv_zero_xi_against_r() {
         assert_eq!(
