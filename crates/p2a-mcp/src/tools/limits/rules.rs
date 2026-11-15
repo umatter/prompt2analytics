@@ -2178,26 +2178,27 @@ mod tests {
         let h = super::super::Limits::hosted();
         let cap = h.scpi_work.expect("hosted scpi work budget");
         assert!(scpi_work(200, 5, 20, false) <= cap);
-        assert!(scpi_work(200, 5, 10, true) <= cap);
         assert!(h.check_scpi("scpi", 200, 5, 20, false).is_ok());
-        // the defaults pass up to 28 donors (simplex, ridge) and 10 with the lasso, and on
-        // every smaller panel
-        for donors in 1..=28 {
+        // the defaults pass up to 22 donors (simplex, ridge), and on every smaller panel
+        for donors in 1..=22 {
             assert!(
                 h.check_scpi("scpi", 200, 5, donors, false).is_ok(),
                 "{donors}"
             );
         }
-        for donors in 1..=10 {
-            assert!(
-                h.check_scpi("scpi", 200, 5, donors, true).is_ok(),
-                "{donors}"
-            );
+        assert!(h.check_scpi("scpi", 200, 5, 23, false).is_err());
+        // the lasso at the defaults counts at least the floor's 512,000: refused at every
+        // donor count; 195 simulations, or four periods with up to 8 donors, pass
+        for donors in 1..=SCPI_MIN_DONORS {
+            assert!(h.check_scpi("scpi", 200, 5, donors, true).is_err());
+            assert!(h.check_scpi("scpi", 195, 5, donors, true).is_ok());
+            assert!(h.check_scpi("scpi", 200, 4, donors, true).is_ok());
         }
-        assert!(h.check_scpi("scpi", 200, 5, 29, false).is_err());
+        assert!(h.check_scpi("scpi", 196, 5, 3, true).is_err());
+        assert!(h.check_scpi("scpi", 200, 4, 9, true).is_err());
         // a small panel cannot buy many more simulations than the floor allows
-        assert!(h.check_scpi("scpi", 1_250, 10, 3, false).is_ok());
-        assert!(h.check_scpi("scpi", 1_251, 10, 3, false).is_err());
+        assert!(h.check_scpi("scpi", 781, 10, 3, false).is_ok());
+        assert!(h.check_scpi("scpi", 782, 10, 3, false).is_err());
         let e = h.check_scpi("scpi", 200, 10, 80, false).unwrap_err();
         assert_eq!(e.override_key, "scpi_work");
         assert_eq!(e.parameter, "scpi_work");
@@ -2207,7 +2208,7 @@ mod tests {
         // a panel below the floor is told how many simulations it may run
         let e = h.check_scpi("scpi", 3_000, 5, 6, false).unwrap_err();
         assert!(
-            e.message.contains("set sims to at most 2500"),
+            e.message.contains("set sims to at most 1562"),
             "{}",
             e.message
         );
@@ -2220,7 +2221,7 @@ mod tests {
         );
         let e = h.check_scpi("scpi", 1_000, 5, 20, false).unwrap_err();
         assert!(
-            e.message.contains("keep at most 28 donors"),
+            e.message.contains("keep at most 22 donors"),
             "{}",
             e.message
         );
