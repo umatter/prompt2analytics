@@ -72,7 +72,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | File | Rows × columns | Case(s) | R file | Source |
 |---|---|---|---|---|
 | `generated/anova2_rcbd_t4.csv` | 115 × 3 (subj, cond, y) | `stat_anova2_rcbd_t4` | `r/cases/stats_exact_t4.R` | seed 4411; 40 subjects × 3 conditions with 5 rows dropped |
-| `generated/ap_blobs.csv` | 115 × 2 (x, y) | `apcluster_blobs`; read by `pam_clara_blobs`, `fuzzy_reference_blobs` | `r/cases/ml_mixtures.R` | seed 20261109; the same blobs and noise as `blobs_noise.csv` |
+| `generated/ap_blobs.csv` | 115 × 2 (x, y) | `apcluster_blobs`; read by `pam_clara_blobs`, `fuzzy_reference_blobs`, `fcm_cmeans_from_start`, `fanny_blobs_more`, `spectral_njw`, `cluster_stats_blobs`, `gap_logw_blobs` | `r/cases/ml_mixtures.R` | seed 20261109; the same blobs and noise as `blobs_noise.csv` |
 | `generated/binom_minlike_t4.csv` | 6 × 4 (label, x, n, p) | `stat_binom_minlike_t4` | `r/cases/stats_exact_t4.R` | literal values: six (x, n, p) cells of binom.test's two-sided rule |
 | `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3`, `stat_cancor_t4` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/cancor_t4.csv` | 10 × 5 (a1, a2, a3, b1, b2) | `stat_cancor_t4` | `r/cases/stats_misc_t4.R` | fixed values |
@@ -119,6 +119,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/smooth_spline_t4a.csv` | 120 × 2 (x, y) | `smooth_spline_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261113; x ~ U(0, 50) sorted, y = sin(x / 8) + N(0, 0.3²) |
 | `generated/smooth_spline_t4b.csv` | 150 × 3 (x, y, w) | `smooth_spline_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261113 (after `smooth_spline_t4a`); x on a 0.1 grid in [0, 10] with ties (81 distinct), y = cos(x / 2) + N(0, 0.25²), weights U(0.5, 2) |
 | `generated/smooth_spline_t4c.csv` | 30 × 2 (x, y) | `smooth_spline_t4` | `r/cases/regression_smoothers_t4.R` | seed 20261113 (after `smooth_spline_t4b`); x = 1:30, y = sin(x / 5) + N(0, 0.2²) |
+| `generated/spectral_pair.csv` | 42 × 2 (x, y) | `spectral_njw` | `r/cases/ml_cluster_t4.R` | seed 20261115; two blobs of 20 around (0, 0) and (4, 0) with sd 0.3, and a tight pair near (40, 40) |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3`, `stat_spectrum_t4` | `r/cases/stats_misc_t3.R` | sine plus noise |
 | `generated/spectrum_t4.csv` | 97 × 2 (t, z) | `stat_spectrum_t4` | `r/cases/stats_misc_t4.R` | AR(0.6) plus trend, seed 20261113 |
 | `generated/spline_t4.csv` | 12 × 15 (id, sx, sy, fx, fy, px, py, ux, uy, hx, hy, mx, my, tx, ty) | `stat_spline_t4` | `r/cases/stats_misc_t4.R` | seven (x, y) sets, NA-padded; tied x in tx |

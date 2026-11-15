@@ -1,0 +1,150 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_fcm_t4",
+      "name": "Fuzzy c-means (e1071::cmeans)",
+      "category": "ml",
+      "reference": "e1071::cmeans",
+      "doc": "validation/ml/partitioning.md",
+      "cases": [
+        "fuzzy_reference_blobs",
+        "fcm_cmeans_from_start"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_blobs",
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_from_start"
+      ],
+      "quantities": [
+        "centres",
+        "memberships",
+        "withinerror",
+        "hard partition"
+      ],
+      "tolerance": "coefficients (n = 115); partition exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_fanny_t4",
+      "name": "FANNY (cluster::fanny)",
+      "category": "ml",
+      "reference": "cluster::fanny",
+      "doc": "validation/ml/partitioning.md",
+      "cases": [
+        "fuzzy_reference_blobs",
+        "fanny_blobs_more"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fanny_blobs",
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fanny_blobs_more"
+      ],
+      "quantities": [
+        "memberships",
+        "Dunn coefficients",
+        "objective",
+        "clustering"
+      ],
+      "tolerance": "memberships and coefficients Tol::iterative(1e-6): both stop at tol 1e-15 on the objective's rounding floor, where memberships differ by up to 3.3e-8 (measured in R); objective stat; clustering exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pvclust_t4",
+      "name": "pvclust multiscale fit (pvclust:::msfit) and scale sizes",
+      "category": "ml",
+      "reference": "pvclust:::msfit, pvclust:::boot.hclust",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "pvclust_msfit"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_pvclust_msfit"
+      ],
+      "quantities": [
+        "AU",
+        "BP",
+        "se.au",
+        "v",
+        "c",
+        "degenerate-scale rule",
+        "scale sizes round(p r)"
+      ],
+      "tolerance": "coefficients (10 scales); degenerate rule and sizes exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_spectral_t4",
+      "name": "Spectral clustering (exact NJW embedding)",
+      "category": "ml",
+      "reference": "eigen(D^-1/2 A D^-1/2); kmeans on the row-normalised embedding (kernlab::specc's algorithm)",
+      "doc": "validation/ml/spectral.md",
+      "cases": [
+        "spectral_njw"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::spectral::tests::test_validate_spectral_njw_blobs",
+        "p2a-core::ml::advanced_clustering_mod::spectral::tests::test_validate_spectral_njw_pair"
+      ],
+      "quantities": [
+        "L_sym eigenvalues",
+        "partition up to relabelling"
+      ],
+      "tolerance": "coefficients",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cluster_indices_t4",
+      "name": "Cluster indices: CH, DB, Dunn, ARI, NMI, cluster_stats, gap logW",
+      "category": "ml",
+      "reference": "clusterCrit::intCriteria, fpc::cluster.stats, aricode::NMI/ARI, cluster::clusGap/maxSE",
+      "doc": "validation/ml/cluster_indices.md",
+      "cases": [
+        "cluster_stats_blobs",
+        "partition_agreement",
+        "gap_logw_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::cluster_validation::tests::test_validate_cluster_indices_blobs",
+        "p2a-core::ml::cluster_validation::tests::test_validate_partition_agreement",
+        "p2a-core::ml::cluster_validation::tests::test_validate_gap_logw_and_rule",
+        "p2a-core::ml::advanced_clustering_mod::common::tests::test_validate_cluster_stats_blobs"
+      ],
+      "quantities": [
+        "CH",
+        "DB",
+        "Dunn",
+        "ARI",
+        "NMI (4 averages)",
+        "cluster_stats fields",
+        "gap log_w (k <= 3)",
+        "Tibs2001SEmax"
+      ],
+      "tolerance": "statistics; log_w coefficients",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_kmedoids_optimized_t4",
+      "name": "kmedoids_optimized (PAM)",
+      "category": "ml",
+      "reference": "cluster::pam",
+      "doc": "validation/ml/partitioning.md",
+      "cases": [
+        "pam_clara_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::cluster_optimized::tests::test_validate_kmedoids_optimized_pam"
+      ],
+      "quantities": [
+        "medoids",
+        "total cost"
+      ],
+      "tolerance": "medoids exact; cost coefficients",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

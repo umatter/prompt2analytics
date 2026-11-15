@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "cluster_stats_blobs",
+  "area": "ml/clustering",
+  "method": "clusterCrit::intCriteria and fpc::cluster.stats on ap_blobs, PAM k = 3 partition",
+  "reference": "clusterCrit::intCriteria(x, cl, c('Calinski_Harabasz','Davies_Bouldin','Dunn','Silhouette')); fpc::cluster.stats(dist(x), cl)",
+  "call": "intCriteria(ap_blobs, pam(ap_blobs, 3)$clustering, ...); cluster.stats(dist(ap_blobs), cl)",
+  "dataset": "validation/datasets/generated/ap_blobs.csv",
+  "datasets": ["validation/datasets/generated/ap_blobs.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "cluster": "2.1.6",
+    "clusterCrit": "1.3.0",
+    "fpc": "2.2.15"
+  },
+  "values": {
+    "labels": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 2, 3, 1, 2, 2, 2, 3, 2],
+    "ch": 244.05642758710653,
+    "db": 0.40597252367402986,
+    "dunn": 0.12453710235345887,
+    "silhouette": 0.70415002016090478,
+    "within_ss": 80.772992003006863,
+    "avg_silwidth": 0.70340598358448247,
+    "fpc_ch": 244.05642758710658,
+    "fpc_dunn": 0.12453710235345887,
+    "fpc_average_within": 0.88740157181168799,
+    "fpc_average_between": 3.1596990320089553,
+    "fpc_separation": 0.53065679106883112,
+    "fpc_max_diameter": 4.261033708354085,
+    "fpc_cluster_avg_silwidths": [0.75038652243000625, 0.6324796306308369, 0.72958390742187118],
+    "pairwise_average_within": 0.88660464808945294,
+    "pairwise_average_between": 3.1596990320089553,
+    "db_pairwise_scatter_old": 0.6145029972373407
+  }
+}

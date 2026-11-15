@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "gap_logw_blobs",
+  "area": "ml/clustering",
+  "method": "cluster::clusGap logW (d.power = 2) on ap_blobs and maxSE('Tibs2001SEmax')",
+  "reference": "cluster::clusGap(x, kmeans, K.max = 5, d.power = 2, spaceH0 = 'original')$Tab[, 'logW']; cluster::maxSE(f, SE, 'Tibs2001SEmax'); stats::sd",
+  "call": "clusGap(ap_blobs, kmeans, 5, d.power = 2, spaceH0 = 'original'); maxSE(f, se, 'Tibs2001SEmax')",
+  "dataset": "validation/datasets/generated/ap_blobs.csv",
+  "datasets": ["validation/datasets/generated/ap_blobs.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "cluster": "2.1.6"
+  },
+  "values": {
+    "logW": [5.3771143298931223, 4.7801337610154908, 3.6978602172148678, 3.3522723554479215, 2.9521994657644628],
+    "log_wss": [6.0702615104530677, 5.4732809415754362, 4.3910073977748132, 4.0454195360078664, 3.6453466463244077],
+    "f1": [0.10000000000000001, 0.40000000000000002, 0.55000000000000004, 0.52000000000000002, 0.59999999999999998],
+    "se1": [0.02, 0.029999999999999999, 0.050000000000000003, 0.040000000000000001, 0.029999999999999999],
+    "f2": [0.10000000000000001, 0.20000000000000001, 0.29999999999999999, 0.40000000000000002, 0.5],
+    "se2": [0.01, 0.01, 0.01, 0.01, 0.01],
+    "tibs_k1": 3,
+    "tibs_k2": 5,
+    "sd_example": 0.33665016461206926
+  }
+}
