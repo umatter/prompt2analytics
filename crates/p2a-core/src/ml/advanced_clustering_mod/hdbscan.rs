@@ -1128,10 +1128,8 @@ mod tests {
         ]
     }
 
-    /// Prim's tree and the k-d tree Prim of dual_tree agree on the total weight of the
-    /// mutual-reachability spanning tree; the dual-tree Boruvka builder (unused by HDBSCAN) returns a
-    /// spanning tree. Its weight is not compared: on the 100-point data it is not minimal (265.45
-    /// against 150.95), which the old test hid by calling the k-d tree Prim under its name.
+    /// Prim's tree, the k-d tree Prim and the Boruvka builder of dual_tree (both unused by HDBSCAN)
+    /// agree on the total weight of the mutual-reachability minimum spanning tree.
     fn check_msts(data: &Array2<f64>, ms: usize) {
         use crate::ml::dual_tree::{dual_tree_boruvka_mst, kdtree_prim_mst};
         let pts = Points::new(&data.view(), "test").unwrap();
@@ -1149,6 +1147,11 @@ mod tests {
         assert!(
             (total - total_kp).abs() <= 1e-12 * total,
             "{total} vs {total_kp}"
+        );
+        let total_dt: f64 = dt.edges.iter().map(|e| e.2).sum();
+        assert!(
+            (total - total_dt).abs() <= 1e-12 * total,
+            "{total} vs {total_dt}"
         );
         let mut uf = UnionFind::new(n);
         for &(a, b, _) in &dt.edges {

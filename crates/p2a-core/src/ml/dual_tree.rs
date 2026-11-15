@@ -1,7 +1,9 @@
-//! Dual-Tree Boruvka algorithm for O(n log n) MST construction.
+//! Boruvka's algorithm for the mutual-reachability minimum spanning tree.
 //!
-//! This module implements the Dual-Tree Boruvka algorithm for efficiently
-//! building minimum spanning trees from mutual reachability distances.
+//! [`dual_tree_boruvka_mst`] runs Boruvka's algorithm with k-d tree nearest-other-component
+//! queries: O(log n) rounds of n pruned queries; near O(n log^2 n) for low-dimensional data,
+//! O(n^2) per round in the worst case. The name is historical: the traversal is per query point,
+//! not dual-tree. [`kdtree_prim_mst`] is Prim's algorithm on the dense graph.
 //!
 //! HDBSCAN does not use these builders: its spanning tree is Prim's algorithm with dbscan's tie
 //! order ([`crate::ml::hdbscan()`]).
@@ -16,46 +18,13 @@
 use super::kdtree::{KdNode, KdTree, UnionFind, euclidean_distance};
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
-/// Result of Dual-Tree Boruvka MST construction.
+/// Result of the Boruvka MST construction.
 pub struct DualTreeMstResult {
     /// MST edges as (from, to, weight)
     pub edges: Vec<(usize, usize, f64)>,
-    /// Number of Boruvka iterations
+    /// Number of Boruvka rounds
     pub iterations: usize,
-}
-
-/// Priority queue entry for dual-tree traversal.
-#[derive(Clone)]
-struct DualTreeEntry {
-    /// Minimum possible mutual reachability between the two subtrees
-    min_mr: f64,
-    /// Node in the query tree
-    query_node_idx: usize,
-    /// Node in the reference tree
-    ref_node_idx: usize,
-}
-
-impl PartialEq for DualTreeEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.min_mr == other.min_mr
-    }
-}
-
-impl Eq for DualTreeEntry {}
-
-impl Ord for DualTreeEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Min-heap: smaller distances first
-        other.min_mr.total_cmp(&self.min_mr)
-    }
-}
-
-impl PartialOrd for DualTreeEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 /// Tree node info with pre-computed child indices.
@@ -100,84 +69,138 @@ fn collect_nodes_with_indices(root: &KdNode) -> Vec<TreeNodeInfo<'_>> {
     nodes
 }
 
-/// Build MST using Dual-Tree Boruvka algorithm.
+/// An edge `(weight, lower index, higher index, from, to)`; edges are ordered by
+/// `(weight, lower, higher)`, a total order that keeps Boruvka correct with equal weights.
+#[derive(Clone, Copy, Debug)]
+struct Edge {
+    w: f64,
+    lo: usize,
+    hi: usize,
+    from: usize,
+    to: usize,
+}
+
+impl Edge {
+    fn new(from: usize, to: usize, w: f64) -> Self {
+        Edge {
+            w,
+            lo: from.min(to),
+            hi: from.max(to),
+            from,
+            to,
+        }
+    }
+
+    fn cmp_key(&self, other: &Edge) -> Ordering {
+        self.w
+            .total_cmp(&other.w)
+            .then(self.lo.cmp(&other.lo))
+            .then(self.hi.cmp(&other.hi))
+    }
+}
+
+/// Keep the smaller of `best` and `e` under the edge order.
+fn keep_min(best: &mut Option<Edge>, e: Edge) {
+    if best.is_none_or(|b| e.cmp_key(&b) == Ordering::Less) {
+        *best = Some(e);
+    }
+}
+
+/// Marker of a subtree whose points lie in more than one component.
+const MIXED: usize = usize::MAX;
+
+/// Build the minimum spanning tree of the mutual-reachability graph
+/// (`max(d(i, j), core[i], core[j])`) by Boruvka's algorithm.
 ///
-/// This achieves O(n log n) expected time for low-dimensional data
-/// by using bounding box pruning to avoid computing unnecessary distances.
+/// Each round finds every component's lightest outgoing edge: one k-d tree query per point for
+/// its lightest edge to another component, skipping subtrees whose points all lie in the query's
+/// component and subtrees whose lower bound `max(box distance, core[q], min core of the subtree)`
+/// exceeds the query's best edge; then each component's lightest edge is added. Edges are
+/// compared by `(weight, lower index, higher index)`, so ties cannot close a cycle and the tree
+/// is minimal. O(log n) rounds of n pruned queries: near O(n log^2 n) for low-dimensional data,
+/// O(n^2) per round in the worst case. The name is historical: the traversal is per query point,
+/// not dual-tree.
 ///
 /// # Arguments
 /// * `tree` - KD-tree of the data points
 /// * `core_distances` - Pre-computed core distances for each point
 ///
 /// # Returns
-/// * MST edges as (from, to, mutual_reachability_distance)
+/// * MST edges as (from, to, mutual_reachability_distance) and the number of rounds
 pub fn dual_tree_boruvka_mst(tree: &KdTree, core_distances: &[f64]) -> DualTreeMstResult {
     let n = tree.len();
-    if n <= 1 {
-        return DualTreeMstResult {
-            edges: Vec::new(),
-            iterations: 0,
-        };
+    let root = match tree.root() {
+        Some(r) if n > 1 => r,
+        _ => {
+            return DualTreeMstResult {
+                edges: Vec::new(),
+                iterations: 0,
+            };
+        }
+    };
+    let nodes = collect_nodes_with_indices(root);
+
+    // Minimum core distance of each subtree (fixed over the rounds); children follow their
+    // parent in `nodes`, so a reverse pass sees the children first.
+    let mut min_core = vec![f64::INFINITY; nodes.len()];
+    for idx in (0..nodes.len()).rev() {
+        let info = &nodes[idx];
+        let mut m = core_distances[info.node.point_idx];
+        for c in [info.left_idx, info.right_idx].into_iter().flatten() {
+            m = m.min(min_core[c]);
+        }
+        min_core[idx] = m;
     }
 
     let mut uf = UnionFind::new(n);
     let mut mst = Vec::with_capacity(n - 1);
     let mut iterations = 0;
-
-    // Track current minimum outgoing edge for each component
-    let mut component_min_edge: Vec<Option<(usize, usize, f64)>> = vec![None; n];
+    let mut comp = vec![0usize; n];
+    let mut uniform = vec![MIXED; nodes.len()];
 
     while mst.len() < n - 1 {
         iterations += 1;
+        for (i, c) in comp.iter_mut().enumerate() {
+            *c = uf.find(i);
+        }
+        // The one component of each subtree's points, or MIXED.
+        for idx in (0..nodes.len()).rev() {
+            let info = &nodes[idx];
+            let mut u = comp[info.node.point_idx];
+            for c in [info.left_idx, info.right_idx].into_iter().flatten() {
+                if uniform[c] != u {
+                    u = MIXED;
+                }
+            }
+            uniform[idx] = u;
+        }
 
-        // Reset minimum edges
-        component_min_edge.fill(None);
+        let per_point: Vec<Option<Edge>> = (0..n)
+            .into_par_iter()
+            .map(|q| {
+                nearest_other_component(tree, &nodes, &min_core, &uniform, &comp, core_distances, q)
+            })
+            .collect();
 
-        // Use dual-tree traversal to find minimum edge for each component
-        find_component_min_edges_dual_tree(tree, core_distances, &mut uf, &mut component_min_edge);
+        // Each component's lightest edge (the order is total, so the result does not depend
+        // on the order of the points)
+        let mut best: Vec<Option<Edge>> = vec![None; n];
+        for (q, e) in per_point.into_iter().enumerate() {
+            if let Some(e) = e {
+                keep_min(&mut best[comp[q]], e);
+            }
+        }
 
-        // Collect and add edges
         let mut added_any = false;
-        for i in 0..n {
-            let root = uf.find(i);
-            if root != i {
-                continue; // Only process component roots
-            }
-
-            if let Some((from, to, weight)) = component_min_edge[root] {
-                if uf.find(from) != uf.find(to) {
-                    uf.union(from, to);
-                    mst.push((from, to, weight));
-                    added_any = true;
-
-                    if mst.len() == n - 1 {
-                        break;
-                    }
-                }
+        for e in best.into_iter().flatten() {
+            if uf.find(e.from) != uf.find(e.to) {
+                uf.union(e.from, e.to);
+                mst.push((e.from, e.to, e.w));
+                added_any = true;
             }
         }
-
         if !added_any {
-            // No progress - graph might be disconnected
-            // Fall back to finding any connecting edge
-            let bridges = find_component_bridges(tree, core_distances, &mut uf);
-            for (from, to, weight) in bridges {
-                if uf.find(from) != uf.find(to) {
-                    uf.union(from, to);
-                    mst.push((from, to, weight));
-                    if mst.len() == n - 1 {
-                        break;
-                    }
-                }
-            }
-
-            if mst.len() < n - 1 && !added_any {
-                break; // Truly disconnected
-            }
-        }
-
-        // Safety check
-        if iterations > n {
+            // no finite outgoing edge (non-finite data): nothing more to join
             break;
         }
     }
@@ -188,267 +211,56 @@ pub fn dual_tree_boruvka_mst(tree: &KdTree, core_distances: &[f64]) -> DualTreeM
     }
 }
 
-/// Find minimum outgoing edge for each component using dual-tree traversal.
-fn find_component_min_edges_dual_tree(
+/// The lightest mutual-reachability edge from point `q` to a point of another component.
+fn nearest_other_component(
     tree: &KdTree,
-    core_distances: &[f64],
-    uf: &mut UnionFind,
-    component_min_edge: &mut [Option<(usize, usize, f64)>],
-) {
-    let root = match tree.root() {
-        Some(r) => r,
-        None => return,
-    };
-
-    // Collect nodes with proper child index tracking
-    let nodes = collect_nodes_with_indices(root);
-
-    // Use a priority queue for best-first traversal
-    let mut queue = BinaryHeap::new();
-
-    // Initial entry: root vs root
-    let min_mr = compute_min_mutual_reachability(nodes[0].node, nodes[0].node, core_distances);
-    queue.push(DualTreeEntry {
-        min_mr,
-        query_node_idx: 0,
-        ref_node_idx: 0,
-    });
-
-    while let Some(entry) = queue.pop() {
-        if entry.query_node_idx >= nodes.len() || entry.ref_node_idx >= nodes.len() {
+    nodes: &[TreeNodeInfo<'_>],
+    min_core: &[f64],
+    uniform: &[usize],
+    comp: &[usize],
+    core: &[f64],
+    q: usize,
+) -> Option<Edge> {
+    let data = tree.data();
+    let point = &data[q];
+    let cq = comp[q];
+    let mut best: Option<Edge> = None;
+    let mut stack = vec![0usize];
+    while let Some(idx) = stack.pop() {
+        if uniform[idx] == cq {
             continue;
         }
-
-        let query_info = &nodes[entry.query_node_idx];
-        let ref_info = &nodes[entry.ref_node_idx];
-        let query_node = query_info.node;
-        let ref_node = ref_info.node;
-
-        // Get current best for this component
-        let query_root = uf.find(query_node.point_idx);
-        let current_best = component_min_edge[query_root]
-            .map(|(_, _, w)| w)
-            .unwrap_or(f64::INFINITY);
-
-        // Prune if minimum possible distance exceeds current best
-        if entry.min_mr >= current_best {
+        let info = &nodes[idx];
+        let bound = KdTree::min_dist_to_box(point, &info.node.bounds)
+            .max(core[q])
+            .max(min_core[idx]);
+        // strict: an equal weight can still give a smaller edge under the index order
+        if best.is_some_and(|b| bound > b.w) {
             continue;
         }
-
-        // If both are small nodes, compute exact distances
-        let is_query_leaf = query_info.left_idx.is_none() && query_info.right_idx.is_none();
-        let is_ref_leaf = ref_info.left_idx.is_none() && ref_info.right_idx.is_none();
-
-        if is_query_leaf && is_ref_leaf {
-            // Single point comparison
-            if query_node.point_idx != ref_node.point_idx {
-                let qr = uf.find(query_node.point_idx);
-                let rr = uf.find(ref_node.point_idx);
-
-                if qr != rr {
-                    let dist = euclidean_distance(
-                        &tree.data()[query_node.point_idx],
-                        &tree.data()[ref_node.point_idx],
-                    );
-                    let mr = dist
-                        .max(core_distances[query_node.point_idx])
-                        .max(core_distances[ref_node.point_idx]);
-
-                    update_component_min(
-                        component_min_edge,
-                        qr,
-                        query_node.point_idx,
-                        ref_node.point_idx,
-                        mr,
-                    );
-                    update_component_min(
-                        component_min_edge,
-                        rr,
-                        ref_node.point_idx,
-                        query_node.point_idx,
-                        mr,
-                    );
+        let p = info.node.point_idx;
+        if comp[p] != cq {
+            let w = euclidean_distance(point, &data[p])
+                .max(core[q])
+                .max(core[p]);
+            keep_min(&mut best, Edge::new(q, p, w));
+        }
+        // the nearer child is searched first (pushed last)
+        match (info.left_idx, info.right_idx) {
+            (Some(l), Some(r)) => {
+                let dl = KdTree::min_dist_to_box(point, &nodes[l].node.bounds);
+                let dr = KdTree::min_dist_to_box(point, &nodes[r].node.bounds);
+                if dl <= dr {
+                    stack.extend([r, l]);
+                } else {
+                    stack.extend([l, r]);
                 }
             }
-        } else if query_node.size <= 16 && ref_node.size <= 16 {
-            // Small nodes: compute all pairs
-            let query_points = KdTree::collect_indices(query_node);
-            let ref_points = KdTree::collect_indices(ref_node);
-
-            for &qi in &query_points {
-                for &ri in &ref_points {
-                    if qi == ri {
-                        continue;
-                    }
-
-                    let qr = uf.find(qi);
-                    let rr = uf.find(ri);
-
-                    if qr != rr {
-                        let dist = euclidean_distance(&tree.data()[qi], &tree.data()[ri]);
-                        let mr = dist.max(core_distances[qi]).max(core_distances[ri]);
-
-                        update_component_min(component_min_edge, qr, qi, ri, mr);
-                    }
-                }
-            }
-        } else {
-            // Recurse into children - use pre-computed indices
-            let query_children: Vec<(usize, &KdNode)> = [query_info.left_idx, query_info.right_idx]
-                .iter()
-                .filter_map(|&idx| idx.map(|i| (i, nodes[i].node)))
-                .collect();
-
-            let ref_children: Vec<(usize, &KdNode)> = [ref_info.left_idx, ref_info.right_idx]
-                .iter()
-                .filter_map(|&idx| idx.map(|i| (i, nodes[i].node)))
-                .collect();
-
-            // If we have no children but node isn't leaf, something is wrong
-            // In that case, treat current node as containing only its point
-            if query_children.is_empty() && ref_children.is_empty() {
-                if query_node.point_idx != ref_node.point_idx {
-                    let qr = uf.find(query_node.point_idx);
-                    let rr = uf.find(ref_node.point_idx);
-                    if qr != rr {
-                        let dist = euclidean_distance(
-                            &tree.data()[query_node.point_idx],
-                            &tree.data()[ref_node.point_idx],
-                        );
-                        let mr = dist
-                            .max(core_distances[query_node.point_idx])
-                            .max(core_distances[ref_node.point_idx]);
-                        update_component_min(
-                            component_min_edge,
-                            qr,
-                            query_node.point_idx,
-                            ref_node.point_idx,
-                            mr,
-                        );
-                        update_component_min(
-                            component_min_edge,
-                            rr,
-                            ref_node.point_idx,
-                            query_node.point_idx,
-                            mr,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Generate all child pairs
-            // If one side has no children, pair with the original node
-            let qc_list: Vec<(usize, &KdNode)> = if query_children.is_empty() {
-                vec![(entry.query_node_idx, query_node)]
-            } else {
-                query_children
-            };
-
-            let rc_list: Vec<(usize, &KdNode)> = if ref_children.is_empty() {
-                vec![(entry.ref_node_idx, ref_node)]
-            } else {
-                ref_children
-            };
-
-            for (qc_idx, qc) in &qc_list {
-                for (rc_idx, rc) in &rc_list {
-                    // Skip if same node pair as current (would cause infinite loop)
-                    if *qc_idx == entry.query_node_idx && *rc_idx == entry.ref_node_idx {
-                        continue;
-                    }
-
-                    let min_mr = compute_min_mutual_reachability(qc, rc, core_distances);
-
-                    // Only enqueue if potentially useful
-                    let query_root_temp = uf.find(qc.point_idx);
-                    let current_best = component_min_edge[query_root_temp]
-                        .map(|(_, _, w)| w)
-                        .unwrap_or(f64::INFINITY);
-
-                    if min_mr < current_best {
-                        queue.push(DualTreeEntry {
-                            min_mr,
-                            query_node_idx: *qc_idx,
-                            ref_node_idx: *rc_idx,
-                        });
-                    }
-                }
-            }
+            (Some(c), None) | (None, Some(c)) => stack.push(c),
+            (None, None) => {}
         }
     }
-}
-
-/// Update component minimum edge if this edge is better.
-#[inline]
-fn update_component_min(
-    component_min: &mut [Option<(usize, usize, f64)>],
-    component: usize,
-    from: usize,
-    to: usize,
-    weight: f64,
-) {
-    match &component_min[component] {
-        None => component_min[component] = Some((from, to, weight)),
-        Some((_, _, w)) if weight < *w => component_min[component] = Some((from, to, weight)),
-        _ => {}
-    }
-}
-
-/// Compute minimum possible mutual reachability between two tree nodes.
-fn compute_min_mutual_reachability(node1: &KdNode, node2: &KdNode, _core_distances: &[f64]) -> f64 {
-    // Minimum distance between bounding boxes
-    // This is a lower bound on the mutual reachability distance
-    KdTree::min_box_distance(&node1.bounds, &node2.bounds)
-}
-
-/// Find bridges between disconnected components using brute force.
-fn find_component_bridges(
-    tree: &KdTree,
-    core_distances: &[f64],
-    uf: &mut UnionFind,
-) -> Vec<(usize, usize, f64)> {
-    let n = tree.len();
-
-    // Group points by component
-    let mut component_map: std::collections::HashMap<usize, Vec<usize>> =
-        std::collections::HashMap::new();
-    for i in 0..n {
-        component_map.entry(uf.find(i)).or_default().push(i);
-    }
-
-    let components: Vec<Vec<usize>> = component_map.values().cloned().collect();
-    if components.len() <= 1 {
-        return Vec::new();
-    }
-
-    let mut bridges = Vec::new();
-
-    // Find minimum edge between each pair of components
-    for ci in 0..components.len() {
-        for cj in (ci + 1)..components.len() {
-            let mut min_edge: Option<(usize, usize, f64)> = None;
-
-            for &i in &components[ci] {
-                for &j in &components[cj] {
-                    let dist = euclidean_distance(&tree.data()[i], &tree.data()[j]);
-                    let mr = dist.max(core_distances[i]).max(core_distances[j]);
-
-                    match min_edge {
-                        None => min_edge = Some((i, j, mr)),
-                        Some((_, _, w)) if mr < w => min_edge = Some((i, j, mr)),
-                        _ => {}
-                    }
-                }
-            }
-
-            if let Some(edge) = min_edge {
-                bridges.push(edge);
-            }
-        }
-    }
-
-    bridges
+    best
 }
 
 /// Prim's algorithm on the dense mutual-reachability graph: O(n^2) distance evaluations; the tree
@@ -637,5 +449,104 @@ mod tests {
             total_prim,
             total_dual
         );
+    }
+
+    /// Kruskal on every pair: the minimum spanning tree weight.
+    fn brute_force_mst_weight(data: &[Vec<f64>], core: &[f64]) -> f64 {
+        let n = data.len();
+        let mut edges = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let w = euclidean_distance(&data[i], &data[j])
+                    .max(core[i])
+                    .max(core[j]);
+                edges.push((i, j, w));
+            }
+        }
+        crate::ml::kdtree::kruskal_mst(&edges, n)
+            .iter()
+            .map(|e| e.2)
+            .sum()
+    }
+
+    fn noisy(n: usize, d: usize, seed: u64) -> Vec<Vec<f64>> {
+        use rand::prelude::*;
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..n)
+            .map(|i| {
+                (0..d)
+                    .map(|_| (i % 3) as f64 * 4.0 + rng.r#gen::<f64>())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn check_spanning(edges: &[(usize, usize, f64)], n: usize) {
+        assert_eq!(edges.len(), n - 1);
+        let mut uf = UnionFind::new(n);
+        for &(a, b, _) in edges {
+            assert!(uf.union(a, b), "cycle at ({a}, {b})");
+        }
+        assert_eq!(uf.n_components(), 1);
+    }
+
+    #[test]
+    fn test_boruvka_matches_brute_force_mst() {
+        for d in [2, 5] {
+            for n in [50, 200, 1000] {
+                for ms in [1, 5] {
+                    let data = noisy(n, d, (n * d + ms) as u64);
+                    let tree = KdTree::new(data.clone());
+                    let core = if ms == 1 {
+                        vec![0.0; n]
+                    } else {
+                        tree.compute_core_distances(ms)
+                    };
+                    let r = dual_tree_boruvka_mst(&tree, &core);
+                    check_spanning(&r.edges, n);
+                    let total: f64 = r.edges.iter().map(|e| e.2).sum();
+                    let truth = brute_force_mst_weight(&data, &core);
+                    assert!(
+                        (total - truth).abs() <= 1e-12 * truth,
+                        "d {d} n {n} ms {ms}: {total} vs {truth}"
+                    );
+                    if ms == 1 {
+                        // distinct weights: the edge set is the unique MST
+                        let mut a: Vec<(usize, usize)> = r
+                            .edges
+                            .iter()
+                            .map(|e| (e.0.min(e.1), e.0.max(e.1)))
+                            .collect();
+                        let prim = kdtree_prim_mst(&tree, &core);
+                        let mut b: Vec<(usize, usize)> =
+                            prim.iter().map(|e| (e.0.min(e.1), e.0.max(e.1))).collect();
+                        a.sort_unstable();
+                        b.sort_unstable();
+                        assert_eq!(a, b, "d {d} n {n}");
+                    }
+                    assert!(r.iterations <= (n as f64).log2().ceil() as usize);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_boruvka_ties_give_a_minimum_tree() {
+        let data: Vec<Vec<f64>> = (0..144)
+            .map(|i| vec![(i % 12) as f64, (i / 12) as f64])
+            .collect();
+        for ms in [1, 3] {
+            let tree = KdTree::new(data.clone());
+            let core = if ms == 1 {
+                vec![0.0; 144]
+            } else {
+                tree.compute_core_distances(ms)
+            };
+            let r = dual_tree_boruvka_mst(&tree, &core);
+            check_spanning(&r.edges, 144);
+            let total: f64 = r.edges.iter().map(|e| e.2).sum();
+            let truth = brute_force_mst_weight(&data, &core);
+            assert!((total - truth).abs() <= 1e-12 * truth, "{total} vs {truth}");
+        }
     }
 }
