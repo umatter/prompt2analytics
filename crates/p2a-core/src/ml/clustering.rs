@@ -35,7 +35,8 @@ pub struct KMeansResult {
     pub cluster_sizes: Vec<usize>,
     /// Convergence of the Lloyd iterations (the reported run)
     pub convergence: Convergence,
-    /// Warnings (the iteration limit reached)
+    /// Warnings (the iteration limit reached; a cluster emptied by a centroid update, R's
+    /// "empty cluster: try a better set of initial centers")
     pub warnings: Vec<String>,
 }
 
@@ -137,7 +138,11 @@ pub const KMEANS_DEFAULT_SEED: u64 = 42;
 /// labels those of the returned centroids. Either way the result does not depend on the scale
 /// of the data. A run that reaches `max_iterations` is reported with `convergence.converged ==
 /// false` and a warning. The best of `n_init` runs (smallest inertia, the first on ties) is
-/// returned.
+/// returned; a run whose centroid update leaves a cluster without points keeps that centroid and
+/// carries R's warning "empty cluster: try a better set of initial centers".
+///
+/// `k` above the number of distinct rows is an error ("more cluster centers than distinct data
+/// points.", as R), and so are finite data whose squared distances overflow.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
@@ -175,7 +180,7 @@ pub fn kmeans(
     if n_initializations == 0 {
         return Err("n_init must be at least 1 (got 0)".to_string());
     }
-    let tol_abs = check_kmeans_options(&data, max_iter, tolerance)?;
+    let tol = check_kmeans_options(&data, max_iter, tolerance)?;
 
     let mut rng = StdRng::seed_from_u64(seed.unwrap_or(KMEANS_DEFAULT_SEED));
 
@@ -189,7 +194,7 @@ pub fn kmeans(
         let centroids = kmeans_plusplus_init(&data, k, &mut rng)?;
 
         // Run k-means
-        let result = kmeans_single(&data, centroids, max_iter, tol_abs, false)?;
+        let result = kmeans_single(&data, centroids, max_iter, tol, false)?;
 
         if result.inertia < best_inertia {
             best_inertia = result.inertia;
@@ -197,13 +202,36 @@ pub fn kmeans(
         }
     }
 
-    best_result.ok_or_else(|| "K-means failed to converge".to_string())
+    // Only non-finite inertias (overflowing squared distances) leave no best run.
+    best_result.ok_or_else(|| KMEANS_OVERFLOW.to_string())
+}
+
+/// Error of k-means on finite data whose squared distances overflow.
+const KMEANS_OVERFLOW: &str = "k-means: squared distances overflow; rescale the data";
+
+/// The tolerance of a Lloyd run: `abs` on the sum of squared centroid shifts (0 = until no
+/// point is reassigned) and `rel`, the caller's relative tolerance (`abs / rel` is the mean
+/// column variance).
+#[derive(Debug, Clone, Copy)]
+struct KmTol {
+    abs: f64,
+    rel: f64,
 }
 
 /// Checks `max_iterations`, `tolerance` and the data; returns the absolute tolerance on the
 /// sum of squared centroid shifts (`tolerance` x mean column variance; 0 = until no point is
-/// reassigned).
+/// reassigned) with the relative one.
 fn check_kmeans_options(
+    data: &ArrayView2<f64>,
+    max_iter: usize,
+    tolerance: Option<f64>,
+) -> Result<KmTol, String> {
+    let rel = tolerance.unwrap_or(0.0);
+    let abs = check_kmeans_tolerance(data, max_iter, tolerance)?;
+    Ok(KmTol { abs, rel })
+}
+
+fn check_kmeans_tolerance(
     data: &ArrayView2<f64>,
     max_iter: usize,
     tolerance: Option<f64>,
@@ -275,8 +303,8 @@ pub fn kmeans_from_centers(
         }
     }
     let max_iter = max_iterations.unwrap_or(300);
-    let tol_abs = check_kmeans_options(&data, max_iter, tolerance)?;
-    kmeans_single(&data, centers.to_owned(), max_iter, tol_abs, true)
+    let tol = check_kmeans_options(&data, max_iter, tolerance)?;
+    kmeans_single(&data, centers.to_owned(), max_iter, tol, true)
 }
 
 /// K-means++ initialization.
@@ -313,18 +341,31 @@ fn kmeans_plusplus_init(
             *min_dist = min_dist.min(dist);
         }
 
-        // Sample proportional to squared distance
+        // Sample proportional to squared distance, among points not yet a centre
         let total: f64 = distances.iter().sum();
+        if !total.is_finite() {
+            return Err(KMEANS_OVERFLOW.to_string());
+        }
+        if total <= 0.0 {
+            // every point coincides with a chosen centre (R's error text)
+            return Err("k-means: more cluster centers than distinct data points.".to_string());
+        }
         let threshold = rng.r#gen::<f64>() * total;
         let mut cumsum = 0.0;
-        let mut chosen_idx = 0;
+        let mut chosen_idx = None;
+        let mut last_positive = 0;
         for (idx, &d) in distances.iter().enumerate() {
             cumsum += d;
-            if cumsum >= threshold {
-                chosen_idx = idx;
-                break;
+            if d > 0.0 {
+                last_positive = idx;
+                if cumsum >= threshold {
+                    chosen_idx = Some(idx);
+                    break;
+                }
             }
         }
+        // rounding can leave the running sum just below `threshold` at the end
+        let chosen_idx = chosen_idx.unwrap_or(last_positive);
 
         centroids.row_mut(i).assign(&data.row(chosen_idx));
     }
@@ -343,9 +384,10 @@ fn kmeans_single(
     data: &ArrayView2<f64>,
     mut centroids: Array2<f64>,
     max_iter: usize,
-    tol_abs: f64,
+    tol: KmTol,
     refuse_empty: bool,
 ) -> Result<KMeansResult, String> {
+    let tol_abs = tol.abs;
     let n_samples = data.nrows();
     let k = centroids.nrows();
 
@@ -388,6 +430,9 @@ fn kmeans_single(
     let mut n_iterations = 0;
     let mut reassigned = n_samples;
     let mut converged = false;
+    let mut emptied = false;
+    // relative squared centroid shift of the last update (tolerance runs)
+    let mut last_shift = f64::INFINITY;
 
     for iter in 0..max_iter {
         checkpoint().map_err(|e| e.to_string())?;
@@ -401,18 +446,23 @@ fn kmeans_single(
         n_iterations = iter + 1;
         if reassigned == 0 {
             converged = true;
+            last_shift = 0.0;
             break;
         }
 
         let old_centroids = (tol_abs > 0.0).then(|| centroids.clone());
         let counts = update_centroids(data, &labels, &mut centroids);
-        if refuse_empty && counts.contains(&0) {
-            return Err("empty cluster: try a better set of initial centers".to_string());
+        if counts.contains(&0) {
+            if refuse_empty {
+                return Err("empty cluster: try a better set of initial centers".to_string());
+            }
+            emptied = true;
         }
         if let Some(old) = old_centroids {
             let shift: f64 = (0..k)
                 .map(|j| euclidean_distance_squared(&old.row(j), &centroids.row(j)))
                 .sum();
+            last_shift = shift * tol.rel / tol_abs;
             if shift <= tol_abs {
                 checkpoint().map_err(|e| e.to_string())?;
                 assign(&centroids, &mut new_labels);
@@ -437,15 +487,29 @@ fn kmeans_single(
         inertia += dist;
         cluster_sizes[labels[i]] += 1;
     }
-    let convergence = Convergence::new(
-        converged,
-        n_iterations,
-        max_iter,
-        "points reassigned in the last assignment pass",
-        reassigned as f64,
-        0.0,
-    );
-    let warnings = convergence.note("k-means (Lloyd)").into_iter().collect();
+    let convergence = if tol_abs > 0.0 {
+        Convergence::new(
+            converged,
+            n_iterations,
+            max_iter,
+            "relative centroid shift (sum of squared shifts / mean column variance)",
+            last_shift,
+            tol.rel,
+        )
+    } else {
+        Convergence::new(
+            converged,
+            n_iterations,
+            max_iter,
+            "points reassigned in the last assignment pass",
+            reassigned as f64,
+            0.0,
+        )
+    };
+    let mut warnings: Vec<String> = convergence.note("k-means (Lloyd)").into_iter().collect();
+    if emptied {
+        warnings.push("empty cluster: try a better set of initial centers".to_string());
+    }
 
     Ok(KMeansResult {
         labels,
@@ -1360,6 +1424,68 @@ mod tests {
             err,
             "k-means: data must contain only finite values (row 4, column 0 is NaN); remove or impute missing values first"
         );
+    }
+
+    #[test]
+    fn test_kmeans_refuses_more_centers_than_distinct_rows() {
+        // R: kmeans(matrix(c(1, 1, 1, 2), ncol = 1), 3) stops with "more cluster centers than
+        // distinct data points."
+        let x = array![[1.0], [1.0], [1.0], [2.0]];
+        let e = kmeans(x.view(), 3, None, None, Some(3), Some(1)).unwrap_err();
+        assert!(
+            e.contains("more cluster centers than distinct data points"),
+            "{e}"
+        );
+        let r = kmeans(x.view(), 2, None, None, Some(3), Some(1)).unwrap();
+        assert!(r.cluster_sizes.iter().all(|&c| c > 0));
+    }
+
+    #[test]
+    fn test_kmeans_empty_cluster_warns() {
+        // A centre far from every point loses its points at the first update.
+        let x = array![[0.0, 0.1], [0.2, 0.0], [5.0, 5.1], [5.2, 4.9], [5.1, 5.0]];
+        let start = array![[0.1, 0.0], [5.0, 5.0], [100.0, 100.0]];
+        let r = kmeans_single(&x.view(), start, 50, KmTol { abs: 0.0, rel: 0.0 }, false).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "empty cluster: try a better set of initial centers"),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(r.cluster_sizes[2], 0);
+    }
+
+    #[test]
+    fn test_kmeans_tolerance_convergence_record() {
+        let data = three_clusters(90, 2, 5);
+        let r = kmeans(data.view(), 3, None, Some(1e-4), Some(2), Some(1)).unwrap();
+        let c = &r.convergence;
+        assert!(
+            c.criterion.contains("relative centroid shift"),
+            "{}",
+            c.criterion
+        );
+        assert_eq!(c.tolerance, 1e-4);
+        assert!(c.converged && c.final_change <= 1e-4, "{c:?}");
+        let r = kmeans(data.view(), 3, None, None, Some(2), Some(1)).unwrap();
+        assert_eq!(
+            r.convergence.criterion,
+            "points reassigned in the last assignment pass"
+        );
+        assert_eq!(r.convergence.final_change, 0.0);
+    }
+
+    #[test]
+    fn test_kmeans_overflowing_distances_error() {
+        let x = Array2::from_shape_fn((6, 2), |(i, j)| (1.0 + i as f64 + 0.3 * j as f64) * 1e200);
+        for k in [1, 2] {
+            let e = kmeans(x.view(), k, None, None, Some(2), Some(1)).unwrap_err();
+            assert!(
+                e.contains("squared distances overflow; rescale the data"),
+                "{k}: {e}"
+            );
+        }
     }
 
     #[test]
