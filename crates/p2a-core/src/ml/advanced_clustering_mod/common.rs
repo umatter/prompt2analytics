@@ -25,6 +25,14 @@ pub enum ClusteringAlgorithm {
     BruteForceParallel,
 }
 
+impl ClusteringAlgorithm {
+    /// The neighbour search `hdbscan` and `optics` use for `n` rows of `d` columns.
+    /// Informational: no function takes it.
+    pub fn for_data(n: usize, d: usize) -> ClusteringAlgorithm {
+        select_algorithm(n, d)
+    }
+}
+
 /// Select the neighbour search from the data size.
 pub(crate) fn select_algorithm(n: usize, d: usize) -> ClusteringAlgorithm {
     match (n, d) {
@@ -707,6 +715,15 @@ mod tests {
             .finish();
         let db = crate::ml::cluster_validation::davies_bouldin(x.view(), &labels).unwrap();
         assert_eq!(r.davies_bouldin.to_bits(), db.db_index.to_bits());
+    }
+
+    #[test]
+    fn test_for_data_is_select_algorithm() {
+        for n in [0, 1, 499, 500, 9_999, 10_000, 50_000] {
+            for d in [1, 2, 15, 16, 40] {
+                assert_eq!(ClusteringAlgorithm::for_data(n, d), select_algorithm(n, d));
+            }
+        }
     }
 
     #[test]

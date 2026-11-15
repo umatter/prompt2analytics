@@ -36,6 +36,10 @@
 //! fn same(a: ClusteringAlgorithm) -> Flat { a }
 //! fn same_result(r: HdbscanResult) -> FlatResult { r }
 //! assert_eq!(same(ClusteringAlgorithm::BruteForce), Flat::BruteForce);
+//!
+//! // the neighbour search hdbscan and optics use for n rows of d columns
+//! assert_eq!(ClusteringAlgorithm::for_data(600, 2), ClusteringAlgorithm::KdTreePrim);
+//! assert_eq!(ClusteringAlgorithm::for_data(10, 2), ClusteringAlgorithm::BruteForce);
 //! ```
 
 pub mod affinity;
