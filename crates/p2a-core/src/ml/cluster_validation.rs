@@ -20,6 +20,104 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
+// Label compaction
+// =============================================================================
+
+/// Labels mapped to `0..k` in increasing order of the original label.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompactLabels {
+    /// The compacted label of each observation
+    pub(crate) ids: Vec<usize>,
+    /// Number of distinct labels
+    pub(crate) k: usize,
+    /// The original label of each compacted id (increasing)
+    pub(crate) levels: Vec<usize>,
+}
+
+/// Distinct labels in increasing order mapped to `0..k`. A dense remap table of `max + 1` entries
+/// when `max < 2n`, otherwise a sorted, de-duplicated copy; no buffer is sized by a label value
+/// beyond `2n`.
+pub(crate) fn compact_labels(labels: &[usize], what: &str) -> Result<CompactLabels, String> {
+    let n = labels.len();
+    let to_string = |e: EconError| e.to_string();
+    let max = labels.iter().copied().max().unwrap_or(0);
+    let mut ids = crate::resource::try_vec(n, 0usize, what).map_err(to_string)?;
+    if max / 2 < n.max(1) {
+        let mut remap = crate::resource::try_vec(max + 1, usize::MAX, what).map_err(to_string)?;
+        for &l in labels {
+            remap[l] = 0;
+        }
+        let mut levels = Vec::new();
+        for (l, r) in remap.iter_mut().enumerate() {
+            if *r == 0 {
+                *r = levels.len();
+                levels.push(l);
+            }
+        }
+        for (id, &l) in ids.iter_mut().zip(labels) {
+            *id = remap[l];
+        }
+        let k = levels.len();
+        Ok(CompactLabels { ids, k, levels })
+    } else {
+        let mut levels = crate::resource::try_vec(n, 0usize, what).map_err(to_string)?;
+        levels.copy_from_slice(labels);
+        levels.sort_unstable();
+        levels.dedup();
+        for (id, l) in ids.iter_mut().zip(labels) {
+            *id = levels.binary_search(l).unwrap_or(0);
+        }
+        let k = levels.len();
+        Ok(CompactLabels { ids, k, levels })
+    }
+}
+
+/// The nonzero cells `(t, p, count)` of the contingency table of two compacted labellings, in
+/// lexicographic order of `(t, p)`, with the row and column sums. Dense when `k_t * k_p <= 4n`,
+/// otherwise from the sorted pairs; both give the same cells in the same order.
+#[allow(clippy::type_complexity)]
+fn contingency_cells(
+    t: &CompactLabels,
+    p: &CompactLabels,
+) -> Result<(Vec<(usize, usize, usize)>, Vec<usize>, Vec<usize>), String> {
+    let n = t.ids.len();
+    let what = "contingency table";
+    let to_string = |e: EconError| e.to_string();
+    let mut rows = crate::resource::try_vec(t.k, 0usize, what).map_err(to_string)?;
+    let mut cols = crate::resource::try_vec(p.k, 0usize, what).map_err(to_string)?;
+    for (&a, &b) in t.ids.iter().zip(&p.ids) {
+        rows[a] += 1;
+        cols[b] += 1;
+    }
+    let mut cells = Vec::new();
+    match t.k.checked_mul(p.k) {
+        Some(size) if size <= 4 * n => {
+            let mut table = crate::resource::try_vec(size, 0usize, what).map_err(to_string)?;
+            for (&a, &b) in t.ids.iter().zip(&p.ids) {
+                table[a * p.k + b] += 1;
+            }
+            for (idx, &c) in table.iter().enumerate() {
+                if c > 0 {
+                    cells.push((idx / p.k, idx % p.k, c));
+                }
+            }
+        }
+        _ => {
+            let mut pairs =
+                crate::resource::try_vec(n, (0usize, 0usize), what).map_err(to_string)?;
+            for (pair, (&a, &b)) in pairs.iter_mut().zip(t.ids.iter().zip(&p.ids)) {
+                *pair = (a, b);
+            }
+            pairs.sort_unstable();
+            for run in pairs.chunk_by(|x, y| x == y) {
+                cells.push((run[0].0, run[0].1, run.len()));
+            }
+        }
+    }
+    Ok((cells, rows, cols))
+}
+
+// =============================================================================
 // Silhouette Coefficient
 // =============================================================================
 
@@ -40,12 +138,12 @@ pub struct SilhouetteResult {
     pub average_silhouette: f64,
     /// Cluster assignments (0-indexed)
     pub labels: Vec<usize>,
-    /// Average silhouette width per cluster
+    /// Average silhouette width per cluster, indexed by label id (0 for an id no point has)
     pub cluster_silhouettes: Vec<f64>,
     /// For each point: (cluster, neighbor_cluster, a_i, b_i, s_i)
     /// where a_i = avg distance to own cluster, b_i = avg distance to nearest other cluster
     pub silhouette_info: Vec<SilhouetteInfo>,
-    /// Number of clusters
+    /// Number of clusters: the distinct labels
     pub n_clusters: usize,
     /// Number of observations
     pub n: usize,
@@ -337,8 +435,9 @@ pub(crate) fn check_silhouette_clusters(labels: &[usize], n: usize) -> Result<()
 fn silhouette_result(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteResult {
     let n = labels.len();
     let core = silhouette_core(dist, labels);
-    let n_clusters = core.sizes.len();
-    let mut sums = vec![0.0f64; n_clusters];
+    let n_ids = core.sizes.len();
+    let n_clusters = core.sizes.iter().filter(|&&m| m > 0).count();
+    let mut sums = vec![0.0f64; n_ids];
     for (i, &l) in labels.iter().enumerate() {
         sums[l] += core.widths[i];
     }
@@ -418,11 +517,13 @@ impl std::fmt::Display for CalinskiHarabaszResult {
 /// The index is defined as:
 /// CH = (between_SS / (k-1)) / (within_SS / (n-k))
 ///
-/// Higher values indicate better-defined clusters.
+/// Higher values indicate better-defined clusters. k is the number of distinct labels, so any
+/// label values (gaps, 1-based) give the same index (`clusterCrit::intCriteria`,
+/// "Calinski_Harabasz").
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
-/// * `labels` - Cluster assignments (0-indexed)
+/// * `labels` - Cluster assignments (any ids; at least 2 distinct)
 ///
 /// # Returns
 /// * `CalinskiHarabaszResult` containing the CH index and components
@@ -449,10 +550,17 @@ pub fn calinski_harabasz(
         return Err("Empty data".to_string());
     }
 
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
+    let CompactLabels {
+        ids: labels,
+        k: n_clusters,
+        ..
+    } = compact_labels(labels, "Calinski-Harabasz labels")?;
+    let labels = labels.as_slice();
 
     if n_clusters < 2 {
-        return Err("Need at least 2 clusters for Calinski-Harabasz index".to_string());
+        return Err(format!(
+            "Calinski-Harabasz index needs at least 2 distinct clusters (got {n_clusters})"
+        ));
     }
 
     if n <= n_clusters {
@@ -542,9 +650,10 @@ pub fn run_calinski_harabasz(
 pub struct DaviesBouldinResult {
     /// Davies-Bouldin index (lower is better)
     pub db_index: f64,
-    /// Cluster dispersions (average distance to centroid)
+    /// Cluster dispersions (average distance to centroid), one per distinct label in increasing
+    /// order of the label
     pub dispersions: Vec<f64>,
-    /// Cluster centroids
+    /// Cluster centroids, in the same order
     pub centroids: Vec<Vec<f64>>,
     /// Number of clusters
     pub n_clusters: usize,
@@ -575,11 +684,13 @@ impl std::fmt::Display for DaviesBouldinResult {
 /// The index is the average similarity between each cluster and its most similar cluster,
 /// where similarity = (dispersion_i + dispersion_j) / distance(centroid_i, centroid_j).
 ///
-/// Lower values indicate better-separated clusters.
+/// Lower values indicate better-separated clusters. The dispersion is the mean Euclidean distance
+/// to the centroid and the centroid distance Euclidean (`clusterCrit::intCriteria`,
+/// "Davies_Bouldin"); clusters are the distinct labels, whatever their values.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
-/// * `labels` - Cluster assignments (0-indexed)
+/// * `labels` - Cluster assignments (any ids; at least 2 distinct)
 ///
 /// # Returns
 /// * `DaviesBouldinResult` containing the DB index
@@ -606,10 +717,17 @@ pub fn davies_bouldin(
         return Err("Empty data".to_string());
     }
 
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
+    let CompactLabels {
+        ids: labels,
+        k: n_clusters,
+        ..
+    } = compact_labels(labels, "Davies-Bouldin labels")?;
+    let labels = labels.as_slice();
 
     if n_clusters < 2 {
-        return Err("Need at least 2 clusters for Davies-Bouldin index".to_string());
+        return Err(format!(
+            "Davies-Bouldin index needs at least 2 distinct clusters (got {n_clusters})"
+        ));
     }
 
     // Group points by cluster
@@ -752,11 +870,12 @@ impl std::fmt::Display for DunnIndexResult {
 /// The Dunn index is defined as:
 /// D = min(inter-cluster distance) / max(intra-cluster diameter)
 ///
-/// Higher values indicate compact and well-separated clusters.
+/// Higher values indicate compact and well-separated clusters. Clusters are the distinct labels,
+/// whatever their values (`clusterCrit::intCriteria`, "Dunn").
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
-/// * `labels` - Cluster assignments (0-indexed)
+/// * `labels` - Cluster assignments (any ids; at least 2 distinct)
 ///
 /// # Returns
 /// * `DunnIndexResult` containing the Dunn index
@@ -781,11 +900,16 @@ pub fn dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<DunnInd
         return Err(EconError::EmptyDataset);
     }
 
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
+    let CompactLabels {
+        ids: labels,
+        k: n_clusters,
+        ..
+    } = compact_labels(labels, "Dunn index labels").map_err(EconError::Computation)?;
+    let labels = labels.as_slice();
 
     if n_clusters < 2 {
         return Err(EconError::InvalidSpecification {
-            message: "Need at least 2 clusters for Dunn index".to_string(),
+            message: format!("Dunn index needs at least 2 distinct clusters (got {n_clusters})"),
         });
     }
 
@@ -944,20 +1068,10 @@ pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> EconResult<Ra
         });
     }
 
-    // Build contingency table
-    let n_clusters_true = *labels_true.iter().max().unwrap_or(&0) + 1;
-    let n_clusters_pred = *labels_pred.iter().max().unwrap_or(&0) + 1;
-
-    let mut contingency = vec![vec![0usize; n_clusters_pred]; n_clusters_true];
-    for i in 0..n {
-        contingency[labels_true[i]][labels_pred[i]] += 1;
-    }
-
-    // Compute sums
-    let row_sums: Vec<usize> = contingency.iter().map(|row| row.iter().sum()).collect();
-    let col_sums: Vec<usize> = (0..n_clusters_pred)
-        .map(|j| contingency.iter().map(|row| row[j]).sum())
-        .collect();
+    // Contingency table of the compacted labels (any label values)
+    let t = compact_labels(labels_true, "Rand index labels").map_err(EconError::Computation)?;
+    let p = compact_labels(labels_pred, "Rand index labels").map_err(EconError::Computation)?;
+    let (cells, row_sums, col_sums) = contingency_cells(&t, &p).map_err(EconError::Computation)?;
 
     // Compute combinations
     fn comb2(x: usize) -> f64 {
@@ -970,12 +1084,8 @@ pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> EconResult<Ra
 
     let n_comb = comb2(n);
 
-    // Sum of n_ij choose 2
-    let sum_nij: f64 = contingency
-        .iter()
-        .flat_map(|row| row.iter())
-        .map(|&x| comb2(x))
-        .sum();
+    // Sum of n_ij choose 2 (nonzero cells)
+    let sum_nij: f64 = cells.iter().map(|&(_, _, x)| comb2(x)).sum();
 
     // Sum of a_i choose 2 and b_j choose 2
     let sum_a: f64 = row_sums.iter().map(|&x| comb2(x)).sum();
@@ -1065,7 +1175,11 @@ impl std::fmt::Display for NmiResult {
 /// Compute Normalized Mutual Information between two clusterings.
 ///
 /// NMI measures the mutual information between two clusterings, normalized
-/// by the geometric mean of their entropies.
+/// by the geometric mean of their entropies (or another average of them). Labels may take any
+/// values. When both clusterings have one cluster NMI is 1; otherwise, when the mutual
+/// information is 0 (in particular when exactly one clustering has one cluster), NMI is 0, as
+/// scikit-learn's `normalized_mutual_info_score` (aricode's variants disagree with each other
+/// there).
 ///
 /// # Arguments
 /// * `labels_true` - Ground truth cluster assignments
@@ -1101,20 +1215,10 @@ pub fn nmi(
 
     let method = average_method.unwrap_or("geometric");
 
-    // Build contingency table
-    let n_clusters_true = *labels_true.iter().max().unwrap_or(&0) + 1;
-    let n_clusters_pred = *labels_pred.iter().max().unwrap_or(&0) + 1;
-
-    let mut contingency = vec![vec![0usize; n_clusters_pred]; n_clusters_true];
-    for i in 0..n {
-        contingency[labels_true[i]][labels_pred[i]] += 1;
-    }
-
-    // Compute marginal probabilities
-    let row_sums: Vec<usize> = contingency.iter().map(|row| row.iter().sum()).collect();
-    let col_sums: Vec<usize> = (0..n_clusters_pred)
-        .map(|j| contingency.iter().map(|row| row[j]).sum())
-        .collect();
+    // Contingency table of the compacted labels (any label values)
+    let t = compact_labels(labels_true, "NMI labels").map_err(EconError::Computation)?;
+    let p = compact_labels(labels_pred, "NMI labels").map_err(EconError::Computation)?;
+    let (cells, row_sums, col_sums) = contingency_cells(&t, &p).map_err(EconError::Computation)?;
 
     let n_f = n as f64;
 
@@ -1139,16 +1243,11 @@ pub fn nmi(
 
     // Compute mutual information
     let mut mi = 0.0;
-    for i in 0..n_clusters_true {
-        for j in 0..n_clusters_pred {
-            let n_ij = contingency[i][j];
-            if n_ij > 0 && row_sums[i] > 0 && col_sums[j] > 0 {
-                let p_ij = n_ij as f64 / n_f;
-                let p_i = row_sums[i] as f64 / n_f;
-                let p_j = col_sums[j] as f64 / n_f;
-                mi += p_ij * (p_ij / (p_i * p_j)).ln();
-            }
-        }
+    for &(i, j, n_ij) in &cells {
+        let p_ij = n_ij as f64 / n_f;
+        let p_i = row_sums[i] as f64 / n_f;
+        let p_j = col_sums[j] as f64 / n_f;
+        mi += p_ij * (p_ij / (p_i * p_j)).ln();
     }
 
     // Normalize
@@ -1164,10 +1263,12 @@ pub fn nmi(
         }
     };
 
-    let nmi_value = if normalizer > 0.0 {
-        mi / normalizer
+    let nmi_value = if t.k == 1 && p.k == 1 {
+        1.0 // one cluster on both sides: the same (trivial) partition
+    } else if mi == 0.0 {
+        0.0 // independent; includes one trivial partition against a non-trivial one
     } else {
-        1.0 // Both clusterings are singletons
+        mi / normalizer
     };
 
     Ok(NmiResult {
@@ -1202,9 +1303,10 @@ use rand::prelude::*;
 pub struct GapStatisticResult {
     /// Gap statistic for each k value tested
     pub gap: Vec<f64>,
-    /// Standard error of gap for each k
+    /// Standard error of gap for each k: sd(log W*_kb) sqrt(1 + 1/B), sd with divisor B - 1
     pub se: Vec<f64>,
-    /// log(W_k) - pooled within-cluster dispersion
+    /// log(W_k), W_k the within-cluster sum of squares (the paper's W_k); clusGap's `logW` is
+    /// `log_w - log 2`
     pub log_w: Vec<f64>,
     /// E[log(W_k)] - expected log dispersion under null
     pub e_log_w: Vec<f64>,
@@ -1246,10 +1348,17 @@ impl std::fmt::Display for GapStatisticResult {
 /// values of k with their expected values under a null reference distribution
 /// of the data.
 ///
+/// This is Tibshirani et al. (2001) as `cluster::clusGap(x, kmeans, K.max = k_max, B = n_boot,
+/// d.power = 2, spaceH0 = "original")` with `maxSE(method = "Tibs2001SEmax")`. `log_w` is the log
+/// of the paper's W_k (the within-cluster sum of squares); clusGap's `logW` is `log_w - log 2`
+/// (its W_k sums each pair once), so gap and SE are equal. clusGap's own defaults differ:
+/// `d.power = 1`, `spaceH0 = "scaledPCA"`, `B = 100`, `method = "firstSEmax"`; B defaults to 50
+/// here. The k-means fits (3 starts) run Lloyd to convergence.
+///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `k_max` - Maximum number of clusters to test
-/// * `n_boot` - Number of bootstrap samples (default: 50)
+/// * `n_boot` - Number of reference data sets B (default: 50; at least 2)
 /// * `seed` - Optional random seed for reproducibility
 ///
 /// # Returns
@@ -1258,11 +1367,11 @@ impl std::fmt::Display for GapStatisticResult {
 /// # Algorithm
 ///
 /// For each k = 1, ..., k_max:
-/// 1. Cluster the data and compute W_k (pooled within-cluster dispersion)
-/// 2. Generate B reference datasets (uniform over bounding box)
+/// 1. Cluster the data and compute W_k (within-cluster sum of squares)
+/// 2. Generate B reference datasets (uniform over the bounding box)
 /// 3. Cluster each reference dataset and compute W_kb*
-/// 4. Gap(k) = E[log(W_kb*)] - log(W_k)
-/// 5. Choose smallest k such that Gap(k) >= Gap(k+1) - SE(k+1)
+/// 4. Gap(k) = mean(log W_kb*) - log W_k, SE(k) = sd(log W_kb*) sqrt(1 + 1/B)
+/// 5. Choose the smallest k such that Gap(k) >= Gap(k+1) - SE(k+1) (k_max if none)
 ///
 /// # References
 ///
@@ -1288,6 +1397,12 @@ pub fn gap_statistic(
 
     if k_max > n {
         return Err(format!("k_max ({}) cannot exceed n ({})", k_max, n));
+    }
+
+    if b < 2 {
+        return Err(format!(
+            "n_boot must be at least 2 reference data sets for a standard error (got {b})"
+        ));
     }
 
     let mut rng = match seed {
@@ -1320,6 +1435,7 @@ pub fn gap_statistic(
         // Generate B reference datasets and compute their log(W_kb*)
         let mut log_w_b = Vec::with_capacity(b);
         for _ in 0..b {
+            crate::resource::checkpoint().map_err(|e| e.to_string())?;
             // Generate uniform reference data
             let mut ref_data = Array2::zeros((n, n_features));
             for i in 0..n {
@@ -1337,13 +1453,7 @@ pub fn gap_statistic(
         let mean_log_w_b: f64 = log_w_b.iter().sum::<f64>() / b as f64;
         e_log_w.push(mean_log_w_b);
 
-        let variance: f64 = log_w_b
-            .iter()
-            .map(|&x| (x - mean_log_w_b).powi(2))
-            .sum::<f64>()
-            / b as f64;
-        let sd = variance.sqrt();
-        let se_k = sd * (1.0 + 1.0 / b as f64).sqrt();
+        let se_k = sample_sd(&log_w_b) * (1.0 + 1.0 / b as f64).sqrt();
         se.push(se_k);
 
         // Gap(k) = E[log(W_kb*)] - log(W_k)
@@ -1351,15 +1461,7 @@ pub fn gap_statistic(
         gap.push(gap_k);
     }
 
-    // Determine optimal k using the gap criterion
-    // Choose smallest k such that Gap(k) >= Gap(k+1) - SE(k+1)
-    let mut optimal_k = k_max;
-    for i in 0..(k_max - 1) {
-        if gap[i] >= gap[i + 1] - se[i + 1] {
-            optimal_k = k_values[i];
-            break;
-        }
-    }
+    let optimal_k = tibs2001_se_max(&gap, &se);
 
     Ok(GapStatisticResult {
         gap,
@@ -1373,14 +1475,28 @@ pub fn gap_statistic(
     })
 }
 
-/// Compute pooled within-cluster sum of squares (dispersion).
+/// `cluster::maxSE(f, SE, method = "Tibs2001SEmax")`: the smallest k (1-based) with
+/// `f(k) >= f(k+1) - SE(k+1)`, the last k if none.
+pub(crate) fn tibs2001_se_max(gap: &[f64], se: &[f64]) -> usize {
+    (0..gap.len().saturating_sub(1))
+        .find(|&i| gap[i] >= gap[i + 1] - se[i + 1])
+        .map_or(gap.len(), |i| i + 1)
+}
+
+/// R's `sd`: divisor `len - 1`.
+fn sample_sd(x: &[f64]) -> f64 {
+    let m = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / m;
+    (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (m - 1.0)).sqrt()
+}
+
+/// Within-cluster sum of squares of the best of 3 k-means fits (Lloyd to convergence).
 fn compute_pooled_within_cluster_dispersion(
     data: &ArrayView2<f64>,
     k: usize,
     seed: Option<u64>,
 ) -> Result<f64, String> {
-    // Use kmeans to cluster data
-    let result = super::super::ml::kmeans(data.view(), k, Some(100), Some(1e-4), Some(3), seed)?;
+    let result = super::super::ml::kmeans(data.view(), k, Some(100), None, Some(3), seed)?;
 
     // Inertia is the within-cluster sum of squares
     Ok(result.inertia)
@@ -1736,5 +1852,184 @@ mod tests {
         let result = nmi(&labels_true, &labels_pred, None).unwrap();
 
         assert!((result.nmi - 1.0).abs() < 1e-10);
+    }
+
+    fn validation_blobs(id: &str) -> (p2a_validation::Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
+        let x = blobs(&ds);
+        (case, x)
+    }
+
+    #[test]
+    fn test_validate_cluster_indices_blobs() {
+        // clusterCrit::intCriteria on ap_blobs with pam(ap_blobs, 3)$clustering.
+        let (case, x) = validation_blobs("cluster_stats_blobs");
+        let base = case_labels(&case);
+        let ch = calinski_harabasz(x.view(), &base).unwrap();
+        let db = davies_bouldin(x.view(), &base).unwrap();
+        let dunn = dunn_index(x.view(), &base).unwrap();
+        Check::new(&case)
+            .scalar("ch", ch.ch_index, Tol::stat(115))
+            .scalar("db", db.db_index, Tol::stat(115))
+            .scalar("dunn", dunn.dunn_index, Tol::stat(115))
+            .finish();
+        // The same partition with gapped ids and with 1-based ids gives identical values.
+        for map in [[0usize, 5, 9], [1, 2, 3]] {
+            let l: Vec<usize> = base.iter().map(|&c| map[c]).collect();
+            let ch2 = calinski_harabasz(x.view(), &l).unwrap();
+            let db2 = davies_bouldin(x.view(), &l).unwrap();
+            let dunn2 = dunn_index(x.view(), &l).unwrap();
+            assert_eq!(ch2.ch_index.to_bits(), ch.ch_index.to_bits());
+            assert_eq!(db2.db_index.to_bits(), db.db_index.to_bits());
+            assert_eq!(dunn2.dunn_index.to_bits(), dunn.dunn_index.to_bits());
+            assert_eq!(
+                (ch2.n_clusters, db2.n_clusters, dunn2.n_clusters),
+                (3, 3, 3)
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_partition_agreement() {
+        // aricode::ARI and aricode::NMI(variant = max, min, sqrt, sum) on fixed partitions.
+        let (case, _) = crate::test_support::load_case("partition_agreement");
+        let u: Vec<usize> = case.vector("u").iter().map(|&v| v as usize).collect();
+        let w: Vec<usize> = case.vector("w").iter().map(|&v| v as usize).collect();
+        let big = [0usize, 3, 1000, 1 << 40];
+        let shifted: Vec<usize> = u.iter().map(|&v| v + 7).collect();
+        let mapped: Vec<usize> = w.iter().map(|&v| big[v - 1]).collect();
+        let mut check = Check::new(&case);
+        for (a, b) in [(&u, &w), (&shifted, &w), (&u, &mapped)] {
+            let ri = rand_index(a, b).unwrap();
+            check.scalar("ari", ri.adjusted_rand_index, Tol::stat(15));
+            for (variant, key) in [
+                ("max", "nmi_max"),
+                ("min", "nmi_min"),
+                ("geometric", "nmi_sqrt"),
+                ("arithmetic", "nmi_sum"),
+            ] {
+                check.scalar(key, nmi(a, b, Some(variant)).unwrap().nmi, Tol::stat(15));
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_nmi_degenerate_partitions() {
+        // scikit-learn's normalized_mutual_info_score: 1 when both partitions are one cluster,
+        // 0 when the mutual information is 0 (one trivial partition against a non-trivial one).
+        let one = [4usize; 6];
+        let two = [0usize, 0, 0, 1, 1, 1];
+        for m in ["geometric", "arithmetic", "min", "max"] {
+            assert_eq!(nmi(&one, &one, Some(m)).unwrap().nmi, 1.0);
+            assert_eq!(nmi(&one, &two, Some(m)).unwrap().nmi, 0.0, "{m}");
+            assert_eq!(nmi(&two, &one, Some(m)).unwrap().nmi, 0.0, "{m}");
+            // independent partitions: MI exactly 0
+            let a = [0usize, 0, 1, 1];
+            let b = [0usize, 1, 0, 1];
+            assert_eq!(nmi(&a, &b, Some(m)).unwrap().nmi, 0.0, "{m}");
+        }
+    }
+
+    #[test]
+    fn test_indices_refuse_one_distinct_label() {
+        let x = Array2::from_shape_fn((6, 2), |(i, j)| i as f64 + 0.1 * j as f64);
+        let l = [1usize; 6];
+        assert!(
+            calinski_harabasz(x.view(), &l)
+                .unwrap_err()
+                .contains("at least 2 distinct clusters")
+        );
+        assert!(
+            davies_bouldin(x.view(), &l)
+                .unwrap_err()
+                .contains("at least 2 distinct clusters")
+        );
+        assert!(
+            dunn_index(x.view(), &l)
+                .unwrap_err()
+                .to_string()
+                .contains("at least 2 distinct clusters")
+        );
+    }
+
+    #[test]
+    fn test_huge_labels_do_not_allocate_by_value() {
+        let x = Array2::from_shape_fn((6, 2), |(i, j)| (i / 3) as f64 * 5.0 + 0.1 * (i + j) as f64);
+        let l = [0usize, 0, 0, usize::MAX / 2, usize::MAX / 2, usize::MAX / 2];
+        let m = [0usize, 0, 1, usize::MAX / 2, 1, usize::MAX / 2];
+        crate::resource::with_alloc_ceiling(Some(1 << 20), || {
+            assert_eq!(rand_index(&l, &l).unwrap().adjusted_rand_index, 1.0);
+            assert!(nmi(&l, &m, None).unwrap().nmi.is_finite());
+            assert_eq!(calinski_harabasz(x.view(), &l).unwrap().n_clusters, 2);
+        });
+    }
+
+    #[test]
+    fn test_silhouette_reports_distinct_cluster_count() {
+        let x = Array2::from_shape_fn((6, 2), |(i, j)| {
+            (i / 2) as f64 * 5.0 + 0.1 * (i * 3 + j) as f64
+        });
+        let r = silhouette(x.view(), &[0, 0, 2, 2, 4, 4]).unwrap();
+        assert_eq!(r.n_clusters, 3);
+        assert_eq!(r.cluster_silhouettes.len(), 5);
+        assert_eq!(r.cluster_silhouettes[1], 0.0);
+        assert_eq!(r.cluster_silhouettes[3], 0.0);
+    }
+
+    #[test]
+    fn test_compact_labels_dense_and_sparse_agree() {
+        let dense = compact_labels(&[3, 1, 3, 0, 1], "t").unwrap();
+        assert_eq!(dense.ids, vec![2, 1, 2, 0, 1]);
+        assert_eq!((dense.k, dense.levels.clone()), (3, vec![0, 1, 3]));
+        let sparse = compact_labels(&[3 << 40, 1, 3 << 40, 0, 1], "t").unwrap();
+        assert_eq!(sparse.ids, dense.ids);
+        assert_eq!(sparse.levels, vec![0, 1, 3 << 40]);
+    }
+
+    #[test]
+    fn test_validate_gap_logw_and_rule() {
+        // clusGap(ap_blobs, kmeans, 5, d.power = 2, spaceH0 = "original")$Tab[, "logW"] =
+        // log(WSS) - log 2 (clusGap sums each pair once). k = 4, 5 depend on k-means finding the
+        // global optimum: checked as a property only.
+        let (case, x) = validation_blobs("gap_logw_blobs");
+        let g = gap_statistic(x.view(), 5, Some(5), Some(1)).unwrap();
+        let logw: Vec<f64> = g.log_w[..3]
+            .iter()
+            .map(|v| v - std::f64::consts::LN_2)
+            .collect();
+        let r_logw = case.vector("logW");
+        for (a, b) in logw.iter().zip(&r_logw[..3]) {
+            assert!(Tol::coef(115).allows(*a, *b), "{a} vs {b}");
+        }
+        assert!(g.log_w.windows(2).all(|w| w[1] <= w[0]));
+        let f1 = case.vector("f1");
+        let f2 = case.vector("f2");
+        Check::new(&case)
+            .scalar(
+                "tibs_k1",
+                tibs2001_se_max(&f1, &case.vector("se1")) as f64,
+                Tol::exact(),
+            )
+            .scalar(
+                "tibs_k2",
+                tibs2001_se_max(&f2, &case.vector("se2")) as f64,
+                Tol::exact(),
+            )
+            .scalar("sd_example", sample_sd(&[1.0, 1.5, 0.7, 1.2]), Tol::stat(4))
+            .finish();
+    }
+
+    #[test]
+    fn test_gap_refuses_fewer_than_two_references() {
+        let x = Array2::from_shape_fn((20, 2), |(i, j)| {
+            (i % 2) as f64 * 4.0 + 0.1 * (i + 3 * j) as f64
+        });
+        for b in [0, 1] {
+            let e = gap_statistic(x.view(), 3, Some(b), Some(1)).unwrap_err();
+            assert!(e.contains("at least 2"), "{e}");
+        }
+        let g = gap_statistic(x.view(), 3, Some(2), Some(1)).unwrap();
+        assert!(g.se.iter().all(|s| s.is_finite()));
     }
 }
