@@ -542,118 +542,90 @@ fn node_tests(
     })
 }
 
-/// Find the optimal split point for a selected variable.
+/// partykit's default `minprob`: each child of a split holds at least `ceil(n * minprob)` of
+/// the node's `n` rows (and at least `minbucket`).
+const MINPROB: f64 = 0.01;
+
+/// partykit's default `splittry`: the number of significant inputs, best first, tried for a
+/// binary split before the node becomes a leaf.
+const SPLITTRY: usize = 2;
+
+/// The least rows of a child of a node of `n` rows: `max(minbucket, ceil(n * minprob))`, and at
+/// least one (`minbucket = 0` acts as 1).
+fn node_minimum(n: usize, minbucket: usize) -> usize {
+    let by_share = (n as f64 * MINPROB).ceil() as usize;
+    minbucket.max(by_share).max(1)
+}
+
+/// The cut of `feature` that maximises partykit's two-sample quadratic statistic of `I(x <= u)`
+/// over the rows in `indices`, among the observed values u (except the largest) that leave at
+/// least `mb` rows on each side; the first in ascending order on ties.
 ///
-/// Maximizes the split statistic over all candidate positions of the sorted
-/// feature: information gain for classification, variance reduction for
-/// regression. The rows are sorted once and scanned with running class counts
-/// (classification: the statistic is bit-identical to evaluating every
-/// candidate from scratch) or running sums of the node-centred response
-/// (regression: minimising the within-child sum of squares is maximising the
-/// variance reduction, so the split is the same except at rounding-level
-/// ties). That is O(n log n) per node instead of O(n^2).
+/// - Regression: `(S_L - n_L ybar)^2 / (n_L n_R)` up to a constant factor (the between-group sum
+///   of squares, so the variance-reduction cut).
+/// - Classification: `sum_k (n_Lk - n_L p_k)^2 / p_k / (n_L n_R)` up to a constant factor
+///   (Pearson's X^2 of the 2 x K table), over the classes present.
 ///
-/// Returns the threshold and the left (`x <= threshold`) and right row
+/// The rows are sorted once and scanned with running sums (regression, centred on the node mean)
+/// or running class counts. Returns the break u (left: `x <= u`) and the left and right row
 /// indices, each in sorted order.
 fn find_best_split(
     x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
+    response: &Response<'_>,
     indices: &[usize],
     feature: usize,
-    is_classification: bool,
-    classes: Option<&[f64]>,
-    config: &CtreeConfig,
+    mb: usize,
 ) -> Option<(f64, Vec<usize>, Vec<usize>)> {
     let n = indices.len();
-    // A child needs at least one row, so minbucket = 0 acts as 1.
-    let mb = config.minbucket.max(1);
+    let mb = mb.max(1);
     if n < mb.saturating_mul(2) {
         return None;
     }
-
-    // Sort indices by feature value
     let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Candidate positions split sorted[..pos] from sorted[pos..], skipping
-    // positions between (nearly) equal values.
-    let is_candidate = |pos: usize| (sorted[pos - 1].0 - sorted[pos].0).abs() >= 1e-10;
+    let is_candidate = |pos: usize| sorted[pos - 1].0 != sorted[pos].0;
     let mut best_pos: Option<usize> = None;
+    let mut best_stat = f64::NEG_INFINITY;
 
-    match classes.filter(|_| is_classification) {
-        Some(cls) => {
-            // Information gain (reduction in entropy)
-            let k = cls.len();
-            let class_of: Vec<Option<usize>> = sorted
-                .iter()
-                .map(|&(_, i)| cls.iter().position(|&c| (c - y[i]).abs() < 1e-10))
-                .collect();
-            let mut total = vec![0usize; k];
-            for c in class_of.iter().flatten() {
-                total[*c] += 1;
-            }
-            let parent_entropy = entropy_from_counts(&total, n);
-            let n_total = n as f64;
-
-            let mut left = vec![0usize; k];
-            let mut right = vec![0usize; k];
+    match response {
+        Response::Regression(y) => {
+            let mean = indices.iter().map(|&i| y[i]).sum::<f64>() / n as f64;
+            let mut sum_left = 0.0f64;
             let mut filled = 0usize;
-            let mut best_stat = f64::NEG_INFINITY;
             for pos in mb..=n - mb {
                 while filled < pos {
-                    if let Some(c) = class_of[filled] {
-                        left[c] += 1;
-                    }
+                    sum_left += y[sorted[filled].1] - mean;
                     filled += 1;
                 }
                 if !is_candidate(pos) {
                     continue;
                 }
-                for c in 0..k {
-                    right[c] = total[c] - left[c];
-                }
-                let n_left = pos as f64;
-                let n_right = (n - pos) as f64;
-                let weighted_child = (n_left * entropy_from_counts(&left, pos)
-                    + n_right * entropy_from_counts(&right, n - pos))
-                    / n_total;
-                let stat = parent_entropy - weighted_child;
+                let stat = sum_left * sum_left / (pos as f64 * (n - pos) as f64);
                 if stat > best_stat {
                     best_stat = stat;
                     best_pos = Some(pos);
                 }
             }
         }
-        None => {
-            // Variance reduction (regression). Centring on the node mean
-            // keeps the one-pass sums accurate when |mean| >> sd.
-            let mean = sorted.iter().map(|&(_, i)| y[i]).sum::<f64>() / n as f64;
-            let (sum_all, sum_sq_all) = sorted.iter().fold((0.0f64, 0.0f64), |(s, q), &(_, i)| {
-                let d = y[i] - mean;
-                (s + d, q + d * d)
-            });
-
-            let (mut sum_left, mut sum_sq_left) = (0.0f64, 0.0f64);
+        Response::Classes { class, k } => {
+            let mut total = vec![0usize; *k];
+            for &(_, i) in &sorted {
+                total[class[i]] += 1;
+            }
+            let nf = n as f64;
+            let mut left = vec![0usize; *k];
             let mut filled = 0usize;
-            let mut best_sse = f64::INFINITY;
             for pos in mb..=n - mb {
                 while filled < pos {
-                    let d = y[sorted[filled].1] - mean;
-                    sum_left += d;
-                    sum_sq_left += d * d;
+                    left[class[sorted[filled].1]] += 1;
                     filled += 1;
                 }
                 if !is_candidate(pos) {
                     continue;
                 }
-                let n_left = pos as f64;
-                let n_right = (n - pos) as f64;
-                let sum_right = sum_all - sum_left;
-                let sum_sq_right = sum_sq_all - sum_sq_left;
-                let sse = (sum_sq_left - sum_left * sum_left / n_left).max(0.0)
-                    + (sum_sq_right - sum_right * sum_right / n_right).max(0.0);
-                if sse < best_sse {
-                    best_sse = sse;
+                let stat = pearson_split_statistic(&left, &total, pos, nf);
+                if stat > best_stat {
+                    best_stat = stat;
                     best_pos = Some(pos);
                 }
             }
@@ -661,29 +633,25 @@ fn find_best_split(
     }
 
     best_pos.map(|pos| {
-        let threshold = (sorted[pos - 1].0 + sorted[pos].0) / 2.0;
+        let threshold = sorted[pos - 1].0;
         let left_indices: Vec<usize> = sorted[..pos].iter().map(|(_, i)| *i).collect();
         let right_indices: Vec<usize> = sorted[pos..].iter().map(|(_, i)| *i).collect();
         (threshold, left_indices, right_indices)
     })
 }
 
-/// Entropy (natural log) of the class counts of a side holding `n_side` rows,
-/// summed over the classes in order. Rows that match no class count towards
-/// `n_side` only, as in the original per-candidate pass.
-fn entropy_from_counts(counts: &[usize], n_side: usize) -> f64 {
-    if n_side == 0 {
-        return 0.0;
-    }
-    let n = n_side as f64;
-    let mut entropy = 0.0;
-    for &count in counts {
-        if count > 0 {
-            let p = count as f64 / n;
-            entropy -= p * p.ln();
+/// `sum_k (n_Lk - n_L p_k)^2 / p_k / (n_L n_R)` over the classes present (`p_k = total_k / n`).
+fn pearson_split_statistic(left: &[usize], total: &[usize], n_left: usize, n: f64) -> f64 {
+    let nl = n_left as f64;
+    let mut sum = 0.0;
+    for (&l, &t) in left.iter().zip(total) {
+        if t > 0 {
+            let p = t as f64 / n;
+            let d = l as f64 - nl * p;
+            sum += d * d / p;
         }
     }
-    entropy
+    sum / (nl * (n - nl))
 }
 
 /// Deepest `maxdepth` ctree accepts (`usize::BITS - 2`, 62 on 64-bit targets).
@@ -726,7 +694,6 @@ fn build_ctree(
 ) -> EconResult<CtreeNode> {
     crate::resource::checkpoint()?;
     let n = indices.len();
-    let is_classification = matches!(response, Response::Classes { .. });
 
     // Compute node prediction
     let (prediction, class_probs) = match (response, classes) {
@@ -737,12 +704,13 @@ fn build_ctree(
             }
             let total = counts.iter().sum::<usize>() as f64;
             let probs: Vec<f64> = counts.iter().map(|&c| c as f64 / total.max(1.0)).collect();
-            let best_class_idx = counts
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, c)| *c)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            // The first class with the largest share, as which.max.
+            let mut best_class_idx = 0;
+            for (i, &c) in counts.iter().enumerate() {
+                if c > counts[best_class_idx] {
+                    best_class_idx = i;
+                }
+            }
             (cls[best_class_idx], Some(probs))
         }
         _ => {
@@ -756,7 +724,7 @@ fn build_ctree(
     } else {
         config.maxdepth
     };
-    let stop = depth >= max_depth || n < config.minsplit || n <= config.minbucket.saturating_mul(2);
+    let stop = depth >= max_depth || n < config.minsplit;
     if stop && depth > 0 {
         return Ok(ctree_leaf(node_id, n, prediction, class_probs));
     }
@@ -769,20 +737,18 @@ fn build_ctree(
     if stop {
         return Ok(ctree_leaf(node_id, n, prediction, class_probs));
     }
+    // The most significant input with an admissible cut, among the first SPLITTRY.
     let alpha = 1.0 - config.mincriterion;
-    let Some(&best_var) = tests.significant(alpha).first() else {
-        return Ok(ctree_leaf(node_id, n, prediction, class_probs));
-    };
-    let (best_stat, best_pval) = (tests.statistic[best_var], tests.p_adjusted[best_var]);
-
-    let Some((threshold, left_indices, right_indices)) =
-        find_best_split(x, y, indices, best_var, is_classification, classes, config)
+    let mb = node_minimum(n, config.minbucket);
+    let Some((best_var, (threshold, left_indices, right_indices))) = tests
+        .significant(alpha)
+        .into_iter()
+        .take(SPLITTRY)
+        .find_map(|j| find_best_split(x, response, indices, j, mb).map(|split| (j, split)))
     else {
         return Ok(ctree_leaf(node_id, n, prediction, class_probs));
     };
-    if left_indices.len() < config.minbucket || right_indices.len() < config.minbucket {
-        return Ok(ctree_leaf(node_id, n, prediction, class_probs));
-    }
+    let (best_stat, best_pval) = (tests.statistic[best_var], tests.p_adjusted[best_var]);
 
     // Variable importance: 1 - adjusted p-value of the split
     importance[best_var] += 1.0 - best_pval;
@@ -1234,6 +1200,7 @@ mod tests {
             .vector("statistic", &r.root_statistics, Tol::stat(300))
             .vector("p", &r.root_p_values, tail(300))
             .vector("p_adjusted", &r.root_p_values_adjusted, tail(300))
+            .scalar("split_break", split.threshold, Tol::exact())
             .finish();
         assert_eq!(
             split.feature, 1,
@@ -1364,6 +1331,190 @@ mod tests {
         assert_eq!(split.feature, 1);
         // m = 1: the adjusted p is the raw p.
         assert_eq!(split.p_value.to_bits(), r.root_p_values[1].to_bits());
+    }
+
+    /// The nodes of `root` in preorder (partykit's node numbering).
+    fn preorder(root: &CtreeNode) -> Vec<&CtreeNode> {
+        let (mut out, mut stack) = (Vec::new(), vec![root]);
+        while let Some(node) = stack.pop() {
+            out.push(node);
+            if let (Some(l), Some(r)) = (&node.left, &node.right) {
+                stack.push(r);
+                stack.push(l);
+            }
+        }
+        out
+    }
+
+    /// The per-node quantities of the `ml_trees_t4` cases, in preorder.
+    struct TreeValues {
+        node_n: Vec<f64>,
+        split_var: Vec<f64>,
+        split_break: Vec<f64>,
+        split_statistic: Vec<f64>,
+        split_p_adjusted: Vec<f64>,
+        terminal_prediction: Vec<f64>,
+        terminal_class_prob: Vec<f64>,
+    }
+
+    fn tree_values(r: &CtreeResult) -> TreeValues {
+        let mut v = TreeValues {
+            node_n: Vec::new(),
+            split_var: Vec::new(),
+            split_break: Vec::new(),
+            split_statistic: Vec::new(),
+            split_p_adjusted: Vec::new(),
+            terminal_prediction: Vec::new(),
+            terminal_class_prob: Vec::new(),
+        };
+        for node in preorder(&r.root) {
+            v.node_n.push(node.n as f64);
+            match &node.split {
+                Some(s) => {
+                    v.split_var.push(s.feature as f64);
+                    v.split_break.push(s.threshold);
+                    v.split_statistic.push(s.statistic);
+                    v.split_p_adjusted.push(s.p_value);
+                }
+                None => {
+                    v.terminal_prediction.push(node.prediction);
+                    if let Some(p) = &node.class_probs {
+                        v.terminal_class_prob.extend(p);
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn test_validate_ctree_regression_tree_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_reg_t4");
+        let (x, y) = case_xy(&ds, &["x1", "x2", "x3"], "y");
+        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
+        let v = tree_values(&r);
+        Check::new(&case)
+            .scalar("n_nodes", r.n_nodes as f64, Tol::exact())
+            .scalar("n_terminal", r.n_terminal as f64, Tol::exact())
+            .scalar("depth", r.depth as f64, Tol::exact())
+            .vector("node_n", &v.node_n, Tol::exact())
+            .vector("split_var", &v.split_var, Tol::exact())
+            .vector("split_break", &v.split_break, Tol::exact())
+            .vector("split_statistic", &v.split_statistic, Tol::stat(200))
+            .vector("split_p_adjusted", &v.split_p_adjusted, tail(200))
+            .vector(
+                "terminal_prediction",
+                &v.terminal_prediction,
+                Tol::coef(200),
+            )
+            .vector("root_statistic", &r.root_statistics, Tol::stat(200))
+            .vector("root_p", &r.root_p_values, tail(200))
+            .vector("root_p_adjusted", &r.root_p_values_adjusted, tail(200))
+            .vector("fitted", &r.predictions, Tol::coef(200))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_ctree_classification_tree_t4() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ctree_cls_t4");
+        let r = run_ctree(&ds, "cls", &["x1", "x2", "x3"], &CtreeConfig::default()).unwrap();
+        assert!(r.is_classification);
+        assert_eq!(
+            r.class_names.as_deref(),
+            Some(&["a".to_string(), "b".into(), "c".into()][..])
+        );
+        let v = tree_values(&r);
+        Check::new(&case)
+            .scalar("n_nodes", r.n_nodes as f64, Tol::exact())
+            .scalar("n_terminal", r.n_terminal as f64, Tol::exact())
+            .scalar("depth", r.depth as f64, Tol::exact())
+            .vector("node_n", &v.node_n, Tol::exact())
+            .vector("split_var", &v.split_var, Tol::exact())
+            .vector("split_break", &v.split_break, Tol::exact())
+            .vector("split_statistic", &v.split_statistic, Tol::stat(240))
+            .vector("split_p_adjusted", &v.split_p_adjusted, tail(240))
+            .vector("terminal_prediction", &v.terminal_prediction, Tol::exact())
+            .vector(
+                "terminal_class_prob",
+                &v.terminal_class_prob,
+                Tol::coef(240),
+            )
+            .vector("root_statistic", &r.root_statistics, Tol::stat(240))
+            .vector("root_p", &r.root_p_values, tail(240))
+            .vector("root_p_adjusted", &r.root_p_values_adjusted, tail(240))
+            .vector("fitted_class", &r.predictions, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_ctree_splits_a_node_of_twice_minbucket() {
+        // partykit splits a node of exactly 2 x minbucket rows (one admissible cut).
+        let x = Array2::from_shape_fn((14, 1), |(i, _)| (i + 1) as f64);
+        let y = Array1::from_shape_fn(14, |i| {
+            (if i < 7 { 1.0 } else { 6.0 }) + 0.1 * ((i * 7 % 5) as f64 - 2.0)
+        });
+        let cfg = CtreeConfig {
+            minsplit: 14,
+            minbucket: 7,
+            ..Default::default()
+        };
+        let r = ctree(x.view(), y.view(), &cfg).unwrap();
+        let split = r
+            .root
+            .split
+            .as_ref()
+            .expect("a node of 2 x minbucket rows splits");
+        assert_eq!(split.threshold, 7.0);
+        assert_eq!(
+            (
+                r.root.left.as_ref().unwrap().n,
+                r.root.right.as_ref().unwrap().n
+            ),
+            (7, 7)
+        );
+    }
+
+    #[test]
+    fn test_ctree_minprob_raises_the_node_minimum() {
+        // partykit's minprob = 0.01: a child of a node of 1,000 rows holds at least 10 rows. An outlier
+        // at the largest x makes the best cut of the root isolate it; with minbucket 1 alone that
+        // child had 1 row.
+        let (x, mut y) = noisy_regression(1000, 1, 11);
+        let top = (0..1000)
+            .max_by(|&a, &b| x[[a, 0]].total_cmp(&x[[b, 0]]))
+            .unwrap();
+        y[top] += 500.0;
+        let cfg = CtreeConfig {
+            minsplit: 2,
+            minbucket: 1,
+            ..Default::default()
+        };
+        let r = ctree(x.view(), y.view(), &cfg).unwrap();
+        assert!(r.root.split.is_some());
+        for node in preorder(&r.root) {
+            if let (Some(a), Some(b)) = (&node.left, &node.right) {
+                let mb = (node.n as f64 * 0.01).ceil() as usize;
+                assert!(
+                    a.n >= mb && b.n >= mb,
+                    "node of {}: {} | {}",
+                    node.n,
+                    a.n,
+                    b.n
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ctree_class_ties_take_the_first_class() {
+        // which.max: a 3-3 leaf predicts the first class.
+        let x = Array2::from_shape_fn((6, 1), |(i, _)| i as f64);
+        let y = Array1::from_vec(vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        let r = ctree(x.view(), y.view(), &classification_config()).unwrap();
+        assert!(r.root.split.is_none());
+        assert_eq!(r.root.prediction, 0.0);
     }
 
     /// The default configuration for a classification of numeric class codes.
@@ -1513,42 +1664,6 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, EconError::Cancelled(_)), "{err}");
-    }
-
-    #[test]
-    fn test_ctree_fit_is_unchanged() {
-        let fold = |v: &[f64]| v.iter().fold(0u64, |h, p| h.rotate_left(5) ^ p.to_bits());
-        let (x, y) = noisy_regression(300, 3, 21);
-        let r = ctree(x.view(), y.view(), &CtreeConfig::default()).unwrap();
-        let (xc, _, yc) = rpart_reference_data();
-        let c = ctree(
-            xc.view(),
-            yc.view(),
-            &CtreeConfig {
-                minsplit: 10,
-                minbucket: 5,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let got = (
-            r.n_nodes,
-            r.depth,
-            fold(r.predictions.as_slice()),
-            c.n_nodes,
-            c.depth,
-            fold(c.predictions.as_slice()),
-        );
-        // Captured from the pre-change split search.
-        let expected = (
-            47usize,
-            5usize,
-            6050330675744206437u64,
-            5usize,
-            2usize,
-            18321768893326516225u64,
-        );
-        assert_eq!(got, expected);
     }
 
     #[test]
@@ -1809,244 +1924,105 @@ mod tests {
         assert_eq!(config.testtype, "bonferroni");
     }
 
-    /// The split search as it was before ML-85 (index copies and a full
-    /// variance or entropy pass per candidate), kept as the reference the
-    /// running-sum scan must reproduce.
+    /// partykit's two-sample statistic of every admissible cut computed from scratch, the
+    /// reference the running-sum scan of `find_best_split` must reproduce.
     fn find_best_split_reference(
         x: &ArrayView2<f64>,
-        y: &ArrayView1<f64>,
+        response: &Response<'_>,
         indices: &[usize],
         feature: usize,
-        is_classification: bool,
-        classes: Option<&[f64]>,
-        config: &CtreeConfig,
+        mb: usize,
     ) -> Option<(f64, Vec<usize>, Vec<usize>)> {
         let n = indices.len();
-        if n < config.minbucket.saturating_mul(2) {
-            return None;
-        }
-
-        // Sort indices by feature value
+        let mb = mb.max(1);
         let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
         sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        // Try all possible split points
-        let mut best_stat = f64::NEG_INFINITY;
-        let mut best_threshold = None;
-        let mut best_split_pos = 0;
-
-        for split_pos in config.minbucket..(n - config.minbucket + 1) {
-            // Check if this is a valid split point (different x values)
-            if (sorted[split_pos - 1].0 - sorted[split_pos].0).abs() < 1e-10 {
+        let mut best: Option<(f64, usize)> = None;
+        for pos in mb..(n + 1).saturating_sub(mb) {
+            if sorted[pos - 1].0 == sorted[pos].0 {
                 continue;
             }
-
-            let threshold = (sorted[split_pos - 1].0 + sorted[split_pos].0) / 2.0;
-
-            // Compute test statistic for this split
-            // Create binary indicator for split
-            let left_indices: Vec<usize> = sorted[..split_pos].iter().map(|(_, i)| *i).collect();
-            let right_indices: Vec<usize> = sorted[split_pos..].iter().map(|(_, i)| *i).collect();
-
-            // Compute improvement: difference in within-node variance
-            let stat = compute_split_statistic_reference(
-                y,
-                &left_indices,
-                &right_indices,
-                is_classification,
-                classes,
-            );
-
-            if stat > best_stat {
-                best_stat = stat;
-                best_threshold = Some(threshold);
-                best_split_pos = split_pos;
+            let left = &sorted[..pos];
+            let stat = match response {
+                Response::Regression(y) => {
+                    let mean = indices.iter().map(|&i| y[i]).sum::<f64>() / n as f64;
+                    let mut s = 0.0;
+                    for &(_, i) in left {
+                        s += y[i] - mean;
+                    }
+                    s * s / (pos as f64 * (n - pos) as f64)
+                }
+                Response::Classes { class, k } => {
+                    let mut lc = vec![0usize; *k];
+                    let mut tc = vec![0usize; *k];
+                    for &(_, i) in left {
+                        lc[class[i]] += 1;
+                    }
+                    for &(_, i) in &sorted {
+                        tc[class[i]] += 1;
+                    }
+                    pearson_split_statistic(&lc, &tc, pos, n as f64)
+                }
+            };
+            if best.is_none_or(|(b, _)| stat > b) {
+                best = Some((stat, pos));
             }
         }
-
-        best_threshold.map(|threshold| {
-            let left_indices: Vec<usize> =
-                sorted[..best_split_pos].iter().map(|(_, i)| *i).collect();
-            let right_indices: Vec<usize> =
-                sorted[best_split_pos..].iter().map(|(_, i)| *i).collect();
-            (threshold, left_indices, right_indices)
-        })
-    }
-
-    /// Compute split quality statistic (improvement in criterion).
-    fn compute_split_statistic_reference(
-        y: &ArrayView1<f64>,
-        left_indices: &[usize],
-        right_indices: &[usize],
-        is_classification: bool,
-        classes: Option<&[f64]>,
-    ) -> f64 {
-        let n_left = left_indices.len() as f64;
-        let n_right = right_indices.len() as f64;
-        let n_total = n_left + n_right;
-
-        if n_left < 1.0 || n_right < 1.0 {
-            return f64::NEG_INFINITY;
-        }
-
-        if is_classification && classes.is_some() {
-            // Information gain (reduction in entropy)
-            let cls = classes.unwrap();
-
-            let parent_entropy =
-                compute_entropy_reference(y, &[left_indices, right_indices].concat(), cls);
-            let left_entropy = compute_entropy_reference(y, left_indices, cls);
-            let right_entropy = compute_entropy_reference(y, right_indices, cls);
-
-            let weighted_child = (n_left * left_entropy + n_right * right_entropy) / n_total;
-            parent_entropy - weighted_child
-        } else {
-            // Variance reduction (regression)
-            let parent_var = compute_variance_reference(y, &[left_indices, right_indices].concat());
-            let left_var = compute_variance_reference(y, left_indices);
-            let right_var = compute_variance_reference(y, right_indices);
-
-            let weighted_child = (n_left * left_var + n_right * right_var) / n_total;
-            parent_var - weighted_child
-        }
-    }
-
-    /// Compute entropy for a set of indices.
-    fn compute_entropy_reference(y: &ArrayView1<f64>, indices: &[usize], classes: &[f64]) -> f64 {
-        if indices.is_empty() {
-            return 0.0;
-        }
-
-        let n = indices.len() as f64;
-        let mut entropy = 0.0;
-
-        for &c in classes {
-            let count = indices
-                .iter()
-                .filter(|&&i| (y[i] - c).abs() < 1e-10)
-                .count() as f64;
-            if count > 0.0 {
-                let p = count / n;
-                entropy -= p * p.ln();
-            }
-        }
-
-        entropy
-    }
-
-    /// Compute variance for a set of indices.
-    fn compute_variance_reference(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
-        if indices.len() < 2 {
-            return 0.0;
-        }
-
-        let sum: f64 = indices.iter().map(|&i| y[i]).sum();
-        let mean = sum / indices.len() as f64;
-        indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
-    }
-
-    #[test]
-    fn test_validate_ctree_split_matches_rpart() {
-        // R reference: the rpart script above (minbucket = 5, one variable at a time).
-        let (x, y_reg, y_cls) = rpart_reference_data();
-        let cfg = CtreeConfig {
-            minbucket: 5,
-            ..Default::default()
-        };
-        let idx: Vec<usize> = (0..40).collect();
-        let classes = [0.0, 1.0, 2.0];
-        for (f, thr, n_left) in [(0, 5.125, 21), (1, 3.5, 17), (2, 2.75, 35)] {
-            let (t, l, r) =
-                find_best_split(&x.view(), &y_reg.view(), &idx, f, false, None, &cfg).unwrap();
-            assert!((t - thr).abs() < 1e-12, "anova x{}: {t}", f + 1);
-            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
-        }
-        for (f, thr, n_left) in [(0, 5.125, 21), (1, 6.1, 29), (2, 2.75, 35)] {
-            let (t, l, r) = find_best_split(
-                &x.view(),
-                &y_cls.view(),
-                &idx,
-                f,
-                true,
-                Some(&classes),
-                &cfg,
+        best.map(|(_, pos)| {
+            (
+                sorted[pos - 1].0,
+                sorted[..pos].iter().map(|(_, i)| *i).collect(),
+                sorted[pos..].iter().map(|(_, i)| *i).collect(),
             )
-            .unwrap();
-            assert!((t - thr).abs() < 1e-12, "information x{}: {t}", f + 1);
-            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
-        }
+        })
     }
 
     #[test]
     fn test_ctree_split_matches_naive_reference() {
-        let classes = [0.0, 1.0, 2.0];
         for seed in 0..20u64 {
             let n = 20 + 7 * seed as usize;
             let (mut x, y) = noisy_regression(n, 2, seed);
             for i in 0..n {
                 x[[i, 1]] = x[[i, 1]].round() / 2.0; // tie-heavy feature
             }
-            let y_cls = y.mapv(|v| {
-                if v < 3.0 {
-                    0.0
-                } else if v < 9.0 {
-                    1.0
-                } else {
-                    2.0
-                }
-            });
+            let class: Vec<usize> = y
+                .iter()
+                .map(|&v| {
+                    if v < 3.0 {
+                        0
+                    } else if v < 9.0 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .collect();
             let indices: Vec<usize> = (0..n).filter(|i| i % 5 != 2).collect();
-            for minbucket in [1usize, 3, 7] {
-                let cfg = CtreeConfig {
-                    minbucket,
-                    ..Default::default()
-                };
+            let responses = [
+                Response::Regression(y.view()),
+                Response::Classes {
+                    class: &class,
+                    k: 3,
+                },
+            ];
+            for mb in [1usize, 3, 7] {
                 for f in 0..2 {
-                    let key = |o: Option<(f64, Vec<usize>, Vec<usize>)>| {
-                        o.map(|(t, l, r)| (t.to_bits(), l, r))
-                    };
-                    assert_eq!(
-                        key(find_best_split(
-                            &x.view(),
-                            &y.view(),
-                            &indices,
-                            f,
-                            false,
-                            None,
-                            &cfg
-                        )),
-                        key(find_best_split_reference(
-                            &x.view(),
-                            &y.view(),
-                            &indices,
-                            f,
-                            false,
-                            None,
-                            &cfg
-                        )),
-                        "anova seed {seed} minbucket {minbucket} feature {f}"
-                    );
-                    assert_eq!(
-                        key(find_best_split(
-                            &x.view(),
-                            &y_cls.view(),
-                            &indices,
-                            f,
-                            true,
-                            Some(&classes),
-                            &cfg
-                        )),
-                        key(find_best_split_reference(
-                            &x.view(),
-                            &y_cls.view(),
-                            &indices,
-                            f,
-                            true,
-                            Some(&classes),
-                            &cfg
-                        )),
-                        "information seed {seed} minbucket {minbucket} feature {f}"
-                    );
+                    for (kind, response) in responses.iter().enumerate() {
+                        let key = |o: Option<(f64, Vec<usize>, Vec<usize>)>| {
+                            o.map(|(t, l, r)| (t.to_bits(), l, r))
+                        };
+                        assert_eq!(
+                            key(find_best_split(&x.view(), response, &indices, f, mb)),
+                            key(find_best_split_reference(
+                                &x.view(),
+                                response,
+                                &indices,
+                                f,
+                                mb
+                            )),
+                            "response {kind} seed {seed} mb {mb} feature {f}"
+                        );
+                    }
                 }
             }
         }
@@ -2054,58 +2030,19 @@ mod tests {
 
     #[test]
     fn test_ctree_minbucket_zero_acts_as_one() {
-        // ML-28. The old candidate loop started at split_pos = minbucket, so
-        // minbucket = 0 read sorted[split_pos - 1] at split_pos = 0: "attempt to
-        // subtract with overflow" in debug builds. A child needs at least one
-        // row, so 0 now gives exactly the splits of minbucket = 1.
-        let (x, y_reg, y_cls) = rpart_reference_data();
-        let idx: Vec<usize> = (0..40).collect();
-        let classes = [0.0, 1.0, 2.0];
-        let zero = CtreeConfig {
-            minbucket: 0,
-            ..Default::default()
+        // ML-28. A child needs at least one row, so minbucket = 0 gives the node minimum of
+        // minbucket = 1 and the same tree.
+        assert_eq!(node_minimum(40, 0), node_minimum(40, 1));
+        let (x, y_reg, _) = rpart_reference_data();
+        let fit = |mb: usize| {
+            let cfg = CtreeConfig {
+                minsplit: 2,
+                minbucket: mb,
+                ..Default::default()
+            };
+            ctree(x.view(), y_reg.view(), &cfg).unwrap().predictions
         };
-        let one = CtreeConfig {
-            minbucket: 1,
-            ..Default::default()
-        };
-        for f in 0..3 {
-            assert_eq!(
-                find_best_split(&x.view(), &y_reg.view(), &idx, f, false, None, &zero),
-                find_best_split_reference(&x.view(), &y_reg.view(), &idx, f, false, None, &one),
-                "anova x{}",
-                f + 1
-            );
-            assert_eq!(
-                find_best_split(
-                    &x.view(),
-                    &y_cls.view(),
-                    &idx,
-                    f,
-                    true,
-                    Some(&classes),
-                    &zero
-                ),
-                find_best_split_reference(
-                    &x.view(),
-                    &y_cls.view(),
-                    &idx,
-                    f,
-                    true,
-                    Some(&classes),
-                    &one
-                ),
-                "information x{}",
-                f + 1
-            );
-        }
-        let cfg = CtreeConfig {
-            minsplit: 2,
-            minbucket: 0,
-            ..Default::default()
-        };
-        assert!(ctree(x.view(), y_reg.view(), &cfg).is_ok());
-        assert!(ctree(x.view(), y_cls.view(), &cfg).is_ok());
+        assert_eq!(fit(0), fit(1));
     }
 
     #[test]
