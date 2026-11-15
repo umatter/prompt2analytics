@@ -560,9 +560,14 @@ pub struct VariableImportanceResult {
     pub importance_std: Vec<f64>,
     /// Rank of each feature (1 = most important)
     pub ranks: Vec<usize>,
-    /// Baseline model performance (before permutation)
-    pub baseline_score: f64,
-    /// Number of permutations used
+    /// A model score printed with the importances, named by `baseline_metric`: the out-of-bag R² of a
+    /// random forest, the final training loss of a GBM; `None` when the model has none (CART, a forest
+    /// without OOB rows). For permutation importances, the score before permutation.
+    pub baseline_score: Option<f64>,
+    /// What `baseline_score` is, e.g. "Out-of-bag R²" or "Final training loss".
+    #[serde(default)]
+    pub baseline_metric: Option<String>,
+    /// Number of permutations used; 0 for impurity (MDI) importances
     pub n_permutations: usize,
     /// Model type used
     pub model_type: String,
@@ -570,11 +575,20 @@ pub struct VariableImportanceResult {
 
 impl std::fmt::Display for VariableImportanceResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Variable Importance (Permutation-based)")?;
-        writeln!(f, "========================================")?;
+        let header = if self.n_permutations == 0 {
+            "Variable Importance (impurity-based, MDI)"
+        } else {
+            "Variable Importance (Permutation-based)"
+        };
+        writeln!(f, "{header}")?;
+        writeln!(f, "{:=<1$}", "", header.chars().count())?;
         writeln!(f, "Model: {}", self.model_type)?;
-        writeln!(f, "Baseline R²: {:.4}", self.baseline_score)?;
-        writeln!(f, "Permutations: {}", self.n_permutations)?;
+        if let (Some(metric), Some(value)) = (&self.baseline_metric, self.baseline_score) {
+            writeln!(f, "{metric}: {value:.4}")?;
+        }
+        if self.n_permutations > 0 {
+            writeln!(f, "Permutations: {}", self.n_permutations)?;
+        }
         writeln!(f)?;
 
         // Sort by importance
@@ -655,7 +669,8 @@ pub fn rf_variable_importance(
         importance,
         importance_std: vec![0.0; n_features], // MDI doesn't have std
         ranks,
-        baseline_score: result.oob_score.unwrap_or(0.0),
+        baseline_score: result.oob_score,
+        baseline_metric: result.oob_score.map(|_| "Out-of-bag R²".to_string()),
         n_permutations: 0, // MDI-based, not permutation
         model_type: "Random Forest (MDI)".to_string(),
     }
@@ -681,7 +696,8 @@ pub fn gbm_variable_importance(
         importance,
         importance_std: vec![0.0; n_features],
         ranks,
-        baseline_score: result.final_train_loss,
+        baseline_score: Some(result.final_train_loss),
+        baseline_metric: Some("Final training loss".to_string()),
         n_permutations: 0,
         model_type: "Gradient Boosting (MDI)".to_string(),
     }
@@ -707,7 +723,8 @@ pub fn cart_variable_importance(
         importance,
         importance_std: vec![0.0; n_features],
         ranks,
-        baseline_score: 0.0,
+        baseline_score: None,
+        baseline_metric: None,
         n_permutations: 0,
         model_type: "CART (MDI)".to_string(),
     }
@@ -1294,6 +1311,69 @@ pub(crate) mod tests {
             let e = roc_auc(&pred, &label, Some(m)).unwrap_err();
             assert!(e.contains("n_thresholds"), "{e}");
         }
+    }
+
+    /// ML-132: the impurity importances were headed "Permutation-based" with a "Baseline R²" that was a
+    /// training loss (GBM) or 0 (CART, a forest without OOB).
+    #[test]
+    fn importance_display_names_the_method_and_baseline() {
+        use super::super::{GbmConfig, gbm, random_forest};
+        let (x, y) = super::super::pdp::test_fixtures::two_feature_data();
+        let gc = GbmConfig {
+            n_trees: 10,
+            seed: Some(3),
+            ..Default::default()
+        };
+        let g = gbm_variable_importance(&gbm(x.view(), y.view(), &gc).unwrap(), None).to_string();
+        assert!(
+            g.contains("impurity") && g.contains("Final training loss:"),
+            "{g}"
+        );
+        assert!(
+            !g.contains("Permutation") && !g.contains("R²") && !g.contains("Permutations"),
+            "{g}"
+        );
+        let rf = random_forest(
+            x.view(),
+            y.view(),
+            Some(20),
+            None,
+            None,
+            None,
+            Some(4),
+            None,
+        )
+        .unwrap();
+        let shown = rf_variable_importance(&rf, None).to_string();
+        if rf.oob_score.is_some() {
+            assert!(shown.contains("Out-of-bag R²:"), "{shown}");
+        }
+        let mut no_oob = rf.clone();
+        no_oob.oob_score = None;
+        let shown = rf_variable_importance(&no_oob, None).to_string();
+        assert!(!shown.contains("R²") && !shown.contains("loss"), "{shown}");
+        let fit =
+            super::super::cart(x.view(), y.view(), &super::super::CartConfig::default()).unwrap();
+        let c = cart_variable_importance(&fit, None);
+        assert_eq!(c.baseline_score, None);
+        let shown = c.to_string();
+        assert!(
+            shown.contains("impurity") && !shown.contains("R²") && !shown.contains("Baseline"),
+            "{shown}"
+        );
+        let perm = VariableImportanceResult {
+            n_permutations: 5,
+            baseline_score: Some(0.8),
+            baseline_metric: Some("R²".to_string()),
+            ..c
+        };
+        let shown = perm.to_string();
+        assert!(
+            shown.contains("Permutation-based")
+                && shown.contains("Permutations: 5")
+                && shown.contains("R²: 0.8000"),
+            "{shown}"
+        );
     }
 
     /// Importance ranks put NaN last; ties keep column order. Before, NaN compared equal: [0.2, NaN, 0.5, 0.1]
