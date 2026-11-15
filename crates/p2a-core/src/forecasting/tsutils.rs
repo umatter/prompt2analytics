@@ -1546,7 +1546,7 @@ pub fn arima_sim_with_sd(
                 0.0
             };
             // usize::MAX as f64 rounds up to 2^64, so `<` keeps the cast exact.
-            if !(extra < usize::MAX as f64) {
+            if extra.is_nan() || extra >= usize::MAX as f64 {
                 return Err(size_overflow(WHAT));
             }
             p_plus_q
