@@ -57,6 +57,8 @@ use super::{default_mtry, lcg_random, mul, partition_exact, pow2};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use std::borrow::Cow;
+
 use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
 use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -144,7 +146,8 @@ impl CausalForestConfig {
     ///   with its leaves bounded by the growing part of its subsample (no depth cap; a split may
     ///   leave a single unit in a child), and the out-of-bag sums, counts and flags.
     /// - **Data and results.** The outcome, treatment and covariates [`causal_forest()`]
-    ///   extracts, and the column it is extracting; `Y.hat`, `W.hat`, the residuals, the AIPW
+    ///   extracts, and the column it is extracting; the copies of the outcome and treatment a
+    ///   strided (non-contiguous) caller's columns need; `Y.hat`, `W.hat`, the residuals, the AIPW
     ///   scores, the predictions, the variances and the sorted copy the result's summary makes;
     ///   the leaf list of one unit's out-of-bag prediction; the importances.
     /// - **One tree's working copies**: the permutation the subsamples are drawn from, the
@@ -167,9 +170,10 @@ impl CausalForestConfig {
             .saturating_add(mul(8, words));
         let causal = mul(grown, causal_tree)
             .saturating_add(mul(grown, size_of::<(usize, LeafStats)>() as u128));
-        // y, w, x and the column being extracted (2); Y.hat, W.hat, the two residuals, scores,
-        // predictions, variances and the summary's sorted copy (8); importances (3 per covariate)
-        let data = mul(mul(8, n), p.saturating_add(4 + 8)).saturating_add(mul(24, p));
+        // y, w, x and the column being extracted (2); 10 per-row vectors: the copies of y and w
+        // a strided caller's columns need, Y.hat, W.hat, the two residuals, scores, predictions,
+        // variances and the summary's sorted copy; importances (3 per covariate)
+        let data = mul(mul(8, n), p.saturating_add(4 + 10)).saturating_add(mul(24, p));
         // nuisance out-of-bag sums, counts and flags
         let nuisance =
             mul(17, n).saturating_add(mul(self.max_nodes_per_nuisance_tree(n_obs), node_work));
@@ -485,6 +489,8 @@ pub fn causal_forest(
         });
     }
     let x = cols.matrix(covariate_cols, false)?.data;
+    // The extracted columns are no longer needed once y, w and x are copied out
+    drop(cols);
     causal_forest_arrays(
         x.view(),
         y.view(),
@@ -712,6 +718,15 @@ pub fn causal_forest_arrays_with_nuisance(
             context: "Need at least 5 treated and 5 control units".to_string(),
         });
     }
+    // Every unit must be out of some tree's subsample for its out-of-bag estimates. With groups
+    // (sample_fraction <= 0.5) it always is.
+    let sf = config.sample_fraction;
+    if subsample_size(n, sf, 1) >= n {
+        return Err(invalid(format!(
+            "sample_fraction must leave at least one unit out of each tree's subsample for \
+             out-of-bag estimates (ceil(n * sample_fraction) < n; got {sf} with n = {n})"
+        )));
+    }
     let mtry = config.mtry.unwrap_or_else(|| default_mtry(p));
     if mtry > p {
         return Err(invalid(format!(
@@ -737,8 +752,13 @@ pub fn causal_forest_arrays_with_nuisance(
         honesty: true,
         honesty_fraction: NUISANCE_HONESTY_FRACTION,
     };
-    let y_vec = y.to_vec();
-    let w_vec = w.to_vec();
+    // Borrowed when contiguous; a strided caller's columns are copied once
+    let y_vec: Cow<'_, [f64]> = y
+        .as_slice()
+        .map_or_else(|| Cow::Owned(y.to_vec()), Cow::Borrowed);
+    let w_vec: Cow<'_, [f64]> = w
+        .as_slice()
+        .map_or_else(|| Cow::Owned(w.to_vec()), Cow::Borrowed);
     let fit_nuisance =
         |name: &str, supplied: Option<ArrayView1<f64>>, target: &[f64], rng: &mut u64| {
             nuisance_estimate(
@@ -1105,8 +1125,9 @@ pub fn average_treatment_effect_with(
                 .to_string(),
         });
     }
-    let picked: Vec<f64> = match subset {
-        None => scores.clone(),
+    let owned: Vec<f64>;
+    let picked: &[f64] = match subset {
+        None => scores.as_slice(),
         Some(idx) => {
             let mut seen = try_vec(forest.n_obs, false, "average treatment effect subset")?;
             let mut v = try_with_capacity::<f64>(idx.len(), "average treatment effect subset")?;
@@ -1126,10 +1147,11 @@ pub fn average_treatment_effect_with(
                 }
                 v.push(scores[i]);
             }
-            v
+            owned = v;
+            &owned
         }
     };
-    let (estimate, std_err) = aipw_ate(&picked)?;
+    let (estimate, std_err) = aipw_ate(picked)?;
     let crit = z_critical(level)?;
     Ok(AteEstimate {
         estimate,
@@ -3602,5 +3624,31 @@ mod tests {
             var_sum / mse_sum
         );
         assert!((0.85..=0.995).contains(&cover), "CATE coverage {cover}");
+    }
+
+    #[test]
+    fn test_causal_forest_refuses_a_subsample_without_out_of_bag_units() {
+        // With ci_group_size = 1 a sample_fraction whose subsample is every unit leaves no
+        // out-of-bag tree for any unit. Before: every such fit failed with "use more trees".
+        for (n, sf, refused) in [(60usize, 1.0, true), (50, 0.99, true), (50, 0.98, false)] {
+            let (x, y, w, _) = overlap_test_data(n, 5);
+            // Enough trees that every unit is out of bag somewhere when one unit is left out.
+            let mut c = cfg(800, 5, 3);
+            c.ci_group_size = 1;
+            c.sample_fraction = sf;
+            c.nuisance_trees = Some(800);
+            let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), c);
+            if refused {
+                let e = r.unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message }
+                        if message.contains("sample_fraction must leave at least one unit out of each tree's subsample")
+                            && message.contains(&format!("n = {n}"))),
+                    "{n}, {sf}: {e}"
+                );
+            } else {
+                assert!(r.is_ok(), "{n}, {sf}: {:?}", r.err());
+            }
+        }
     }
 }
