@@ -1,7 +1,7 @@
 //! Time Series Utility Functions
 //!
 //! Provides utility functions for time series manipulation including:
-//! - `lag`: Shift time series by k lags
+//! - `lag`: R's `stats::lag` values (x[t + k]); `lag_padded`: the conventional lag x[t - k]
 //! - `embed`: Create lag embedding matrix for AR models
 //! - `diffinv`: Inverse of differencing (discrete integration)
 //! - `filter`: Linear filtering (convolution and recursive)
@@ -10,7 +10,7 @@
 //! - `arma_acf`: Compute theoretical ACF for ARMA process
 //! - `arma_to_ma`: Convert ARMA to infinite MA representation
 //! - `acf_to_ar`: Compute AR coefficients from ACF (Durbin-Levinson)
-//! - `runmed`: Running median smoothing
+//! - `runmed`: Running median smoothing (R's `smoothEnds` for the median end rule)
 //!
 //! # Mathematical Background
 //!
@@ -21,8 +21,9 @@
 //!
 //! ## ARMA Theoretical ACF (ARMAacf)
 //!
-//! For ARMA(p,q) process, the autocovariances γ(h) satisfy the Yule-Walker equations:
-//! γ(h) = Σᵢ₌₁ᵖ φᵢγ(h-i) + σ² Σⱼ₌₀ᵠ θⱼψ(h-j)  for h ≥ 0
+//! For ARMA(p,q) process, the autocovariances γ(h) satisfy
+//! γ(h) − Σᵢ₌₁ᵖ φᵢγ(|h−i|) = σ² Σⱼ₌ₕ^q θⱼψⱼ₋ₕ  for h ≥ 0 (θ₀ = ψ₀ = 1),
+//! which R's `ARMAacf` solves for h = 0..max(p, q + 1) and extends by the AR recursion.
 //!
 //! ## Durbin-Levinson Algorithm (acf2AR)
 //!
@@ -73,26 +74,24 @@ fn size_overflow(what: &str) -> EconError {
 pub struct LagResult {
     /// The lagged time series values
     pub values: Vec<f64>,
-    /// Number of lags applied (positive = shift back in time)
+    /// The k of R's `stats::lag(x, k)`: element t of `values` is x[t + k] (k > 0 drops the first k
+    /// values, k < 0 the last |k|)
     pub k: i32,
     /// Original series length
     pub original_length: usize,
 }
 
-/// Lag a time series by k observations.
+/// The values of R's `stats::lag(x, k)` on the shifted time base.
 ///
-/// A positive k shifts the time index back by k observations,
-/// meaning the series starts earlier in time (R convention).
+/// R's `lag` shifts the time index back by k and keeps the values; read against the original
+/// index, element t of the result is x[t + k] (a lead in array terms), and the result is |k|
+/// shorter: k > 0 drops the first k values, k < 0 the last |k|. For the conventional lag
+/// x[t - k] at full length with NaN padding (`dplyr::lag`), use [`lag_padded`].
 ///
 /// # Arguments
 ///
 /// * `x` - Input time series
-/// * `k` - Number of lags (positive = shift back, negative = shift forward)
-///
-/// # Returns
-///
-/// A lagged version of the series. Note that unlike R, this returns
-/// the actual shifted values without changing time indices.
+/// * `k` - R's k; |k| must be below the series length
 ///
 /// # Example
 ///
@@ -100,7 +99,7 @@ pub struct LagResult {
 /// use p2a_core::forecasting::tsutils::lag;
 /// let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 /// let result = lag(&x, 1).unwrap();
-/// // result.values contains [2.0, 3.0, 4.0, 5.0] (shifted forward in array)
+/// assert_eq!(result.values, vec![2.0, 3.0, 4.0, 5.0]); // x[t + 1]
 /// ```
 ///
 /// # References
@@ -143,16 +142,27 @@ pub fn lag(x: &[f64], k: i32) -> EconResult<LagResult> {
     })
 }
 
-/// Lag a time series and pad with NaN to maintain original length.
+/// The conventional lag x[t - k] at full length, NaN where it falls outside the series
+/// (`dplyr::lag(x, k)`; a negative k is the lead x[t + |k|], `dplyr::lead`).
 ///
 /// # Arguments
 ///
 /// * `x` - Input time series
-/// * `k` - Number of lags (positive = shift back, negative = shift forward)
+/// * `k` - Positive k lags (NaN at the start), negative k leads (NaN at the end); |k| >= n gives
+///   all NaN
 ///
 /// # Returns
 ///
 /// A vector of the same length as input, with NaN values where data is missing.
+///
+/// # Example
+///
+/// ```
+/// use p2a_core::forecasting::tsutils::lag_padded;
+/// let lagged = lag_padded(&[1.0, 2.0, 3.0], 1).unwrap();
+/// assert!(lagged[0].is_nan());
+/// assert_eq!(&lagged[1..], &[1.0, 2.0]);
+/// ```
 pub fn lag_padded(x: &[f64], k: i32) -> EconResult<Vec<f64>> {
     if x.is_empty() {
         return Err(EconError::InsufficientData {
@@ -331,20 +341,29 @@ pub struct DiffinvResult {
     pub xi: Vec<f64>,
 }
 
-/// Discrete integration: inverse of differencing.
+/// Discrete integration: inverse of differencing (R's `diffinv`).
 ///
-/// Computes the inverse of `diff(x, lag, differences)` using cumulative sums.
+/// Returns the series y of length `x.len() + lag * differences` whose `differences`-fold lag-`lag`
+/// difference is `x` and whose first `lag * differences` values are `xi`.
+///
+/// # Algorithm
+///
+/// R's recursion `diffinv(x, lag, d, xi) = diffinv(diffinv(x, lag, d - 1, diff(xi, lag)), lag, 1,
+/// xi[1:lag])`, unrolled: with D^k the k-th lag-`lag` difference of `xi`, the series is integrated
+/// for k = d - 1 down to 0 with the first `lag` values of D^k as start values.
 ///
 /// # Arguments
 ///
 /// * `x` - Differenced time series
-/// * `lag` - Lag for the differences (default: 1)
-/// * `differences` - Order of integration (default: 1)
-/// * `xi` - Initial values. If None, uses zeros.
+/// * `lag` - Lag for the differences (at least 1)
+/// * `differences` - Order of integration (0 returns `x`)
+/// * `xi` - The first `lag * differences` values of the undifferenced series. `None` means zeros.
 ///
-/// # Returns
+/// # Errors
 ///
-/// The integrated time series.
+/// `InvalidSpecification` for `lag = 0` or an `xi` whose length is not `lag * differences`
+/// (R: "'xi' does not have the right length"); `ResourceLimit` for an output too large to
+/// allocate; `Cancelled` when the budget stops (checked once per level).
 ///
 /// # Example
 ///
@@ -356,6 +375,9 @@ pub struct DiffinvResult {
 /// let result = diffinv(&diffs, 1, 1, Some(&[1.0])).unwrap();
 /// assert!((result.values[0] - 1.0).abs() < 1e-10);
 /// assert!((result.values[3] - 10.0).abs() < 1e-10);
+/// // Twice: the second differences of [1, 3, 7, 14, 25] are [2, 3, 4]
+/// let twice = diffinv(&diffs, 1, 2, Some(&[1.0, 3.0])).unwrap();
+/// assert_eq!(twice.values, vec![1.0, 3.0, 7.0, 14.0, 25.0]);
 /// ```
 ///
 /// # References
@@ -385,7 +407,7 @@ pub fn diffinv(
 
     const WHAT: &str = "the integrated series (length + lag × differences)";
 
-    // For differences > 0, we need lag * differences initial values
+    // lag * differences start values
     let n_xi = lag
         .checked_mul(differences)
         .ok_or_else(|| size_overflow(WHAT))?;
@@ -396,23 +418,44 @@ pub fn diffinv(
     // Admit the output before any work, so an oversized request fails at once.
     check_alloc::<f64>(final_len, WHAT)?;
 
-    // Initial values: a long xi is truncated, a short one padded with zeros.
-    let mut xi_values = try_vec(n_xi, 0.0, WHAT)?;
-    if let Some(v) = xi {
-        let k = v.len().min(n_xi);
-        xi_values[..k].copy_from_slice(&v[..k]);
+    let xi_values = match xi {
+        None => try_vec(n_xi, 0.0, WHAT)?,
+        Some(v) if v.len() == n_xi => {
+            let mut values = try_with_capacity(n_xi, WHAT)?;
+            values.extend_from_slice(v);
+            values
+        }
+        Some(v) => {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "xi must hold lag * differences = {n_xi} values (the first values of the \
+                     undifferenced series), got {}",
+                    v.len()
+                ),
+            });
+        }
+    };
+
+    // heads[k * lag..(k + 1) * lag]: the first lag values of D^k, the k-th lag difference of xi.
+    let mut heads = try_vec(n_xi, 0.0, WHAT)?;
+    let mut level = try_with_capacity(n_xi, WHAT)?;
+    level.extend_from_slice(&xi_values);
+    for k in 0..differences {
+        // Each level costs O(lag (d - k)).
+        checkpoint()?;
+        heads[k * lag..(k + 1) * lag].copy_from_slice(&level[..lag]);
+        let len = level.len();
+        for i in 0..len - lag {
+            level[i] = level[i + lag] - level[i];
+        }
+        level.truncate(len - lag);
     }
 
-    // Start with input
+    // Integrate from the innermost level out.
     let mut result = x.to_vec();
-
-    // Apply cumsum 'differences' times
-    for d in 0..differences {
+    for k in (0..differences).rev() {
         checkpoint()?;
-        let xi_start = d * lag;
-        let xi_for_this_diff = &xi_values[xi_start..xi_start + lag];
-
-        result = cumsum_with_init(&result, lag, xi_for_this_diff)?;
+        result = cumsum_with_init(&result, lag, &heads[k * lag..(k + 1) * lag])?;
     }
 
     Ok(DiffinvResult {
@@ -753,19 +796,34 @@ pub struct ArmaAcfResult {
     pub is_pacf: bool,
 }
 
-/// Compute theoretical ACF for an ARMA process.
+/// Compute the theoretical ACF or PACF of an ARMA process (R's `ARMAacf`).
 ///
-/// Given AR coefficients φ₁, ..., φₚ and MA coefficients θ₁, ..., θ_q,
-/// computes the theoretical autocorrelation function.
+/// Given AR coefficients φ₁, ..., φₚ and MA coefficients θ₁, ..., θ_q of
+/// X_t = Σ φᵢ X_{t-i} + Z_t + Σ θⱼ Z_{t-j}, returns the autocorrelations ρ(0..lag_max).
 ///
-/// Uses the method described in Brockwell & Davis (1991), Section 3.3.
+/// # Algorithm
+///
+/// As R's `ARMAacf`: with r = max(p, q + 1), the AR part padded with zeros to r terms and σ² = 1, the
+/// autocovariances γ(0..r) solve the r + 1 equations
+/// γ(k) − Σᵢ₌₁ʳ φᵢ γ(|k − i|) = Σⱼ₌ₖ^q θⱼ ψⱼ₋ₖ (k = 0..r; θ₀ = ψ₀ = 1, ψ the MA(∞) weights),
+/// solved by Gaussian elimination with partial pivoting; ρ(k) = γ(k) / γ(0), extended by
+/// ρ(k) = Σ φᵢ ρ(k − i) beyond r. AR(1) gives φᵏ and a pure MA(q) the closed form
+/// Σⱼ θⱼ θⱼ₊ₖ / Σⱼ θⱼ². The PACF is the Durbin-Levinson recursion on that ACF.
 ///
 /// # Arguments
 ///
 /// * `ar` - AR coefficients (can be empty for pure MA)
 /// * `ma` - MA coefficients (can be empty for pure AR)
-/// * `lag_max` - Maximum lag to compute
+/// * `lag_max` - Maximum lag; the result always has `lag_max + 1` values (lags 0..lag_max; for
+///   the PACF lag 0 is 1.0). R returns `q + 1` values for a pure MA with `lag.max < q`, and two
+///   values for an AR model with `lag.max = 0`.
 /// * `pacf` - If true, return PACF instead of ACF
+///
+/// # Errors
+///
+/// `InvalidSpecification` when the AR part is not stationary (a root of 1 − φ₁z − ... − φₚzᵖ on or
+/// inside the unit circle, or a non-finite coefficient): the theoretical ACF does not exist there.
+/// R's `ARMAacf` does not check and returns meaningless numbers or a singular-solve error.
 ///
 /// # Example
 ///
@@ -773,7 +831,8 @@ pub struct ArmaAcfResult {
 /// use p2a_core::forecasting::tsutils::arma_acf;
 /// // AR(1) process with coefficient 0.7
 /// let result = arma_acf(&[0.7], &[], 10, false).unwrap();
-/// // ACF should decay geometrically: 0.7, 0.49, 0.343, ...
+/// // ACF decays geometrically: 0.7, 0.49, 0.343, ...
+/// assert!((result.values[2] - 0.49).abs() < 1e-12);
 /// ```
 ///
 /// # References
@@ -781,24 +840,17 @@ pub struct ArmaAcfResult {
 /// - Brockwell, P.J., & Davis, R.A. (1991). *Time Series: Theory and Methods*, Section 3.3
 /// - R `stats::ARMAacf`
 pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResult<ArmaAcfResult> {
-    let _p = ar.len();
-    let _q = ma.len();
-
-    // Compute autocovariances first
-    let acvf = arma_autocovariance(ar, ma, lag_max)?;
-
-    // Normalize to get ACF
-    let gamma0 = acvf[0];
-    if gamma0 <= 0.0 {
+    if !ar_is_stationary(ar)? {
         return Err(EconError::InvalidSpecification {
-            message: "ARMA process has non-positive variance".to_string(),
+            message: format!(
+                "the AR part is not stationary: a root of 1 - ar[1] z - ... - ar[p] z^p lies on or \
+                 inside the unit circle (ar = {ar:?}), so the theoretical ACF does not exist"
+            ),
         });
     }
 
-    let mut acf_values = acvf;
-    for g in acf_values.iter_mut() {
-        *g /= gamma0;
-    }
+    // Autocorrelations ρ(0..lag_max)
+    let acf_values = arma_autocorrelation(ar, ma, lag_max)?;
 
     let values = if pacf {
         // Compute PACF from ACF using Durbin-Levinson
@@ -815,7 +867,7 @@ pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResul
         acf_values
     };
 
-    // lag_max + 1 cannot overflow: arma_autocovariance allocated that many values.
+    // lag_max + 1 cannot overflow: arma_autocorrelation allocated that many values.
     let mut lags = try_with_capacity::<usize>(lag_max + 1, "the lags up to lag_max")?;
     lags.extend(0..=lag_max);
 
@@ -828,192 +880,224 @@ pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResul
     })
 }
 
-/// Compute theoretical autocovariance function for ARMA(p,q) process.
+/// Whether the AR polynomial 1 − φ₁z − ... − φₚzᵖ has every root outside the unit circle.
 ///
-/// Uses equations from Brockwell & Davis (1991), Section 3.3.
-fn arma_autocovariance(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec<f64>> {
+/// Step-down (Schur-Cohn) recursion: the partial autocorrelations a_kk of the AR part are recovered
+/// from k = p down to 1 by a_j ← (a_j + a_k a_{k−j}) / (1 − a_k²); the part is stationary iff every
+/// |a_kk| < 1. Trailing zero coefficients are allowed; a non-finite coefficient is not stationary.
+/// O(p²) time, one buffer of p values.
+pub(crate) fn ar_is_stationary(ar: &[f64]) -> EconResult<bool> {
+    if ar.iter().any(|v| !v.is_finite()) {
+        return Ok(false);
+    }
+    let mut a = try_with_capacity(ar.len(), "the AR step-down recursion")?;
+    a.extend_from_slice(ar);
+    let mut prev = try_vec(ar.len(), 0.0, "the AR step-down recursion")?;
+    // Each order costs O(k).
+    let stride = checkpoint_stride(ar.len().max(1));
+    for k in (1..=ar.len()).rev() {
+        if k % stride == 0 {
+            checkpoint()?;
+        }
+        let ak = a[k - 1];
+        if ak.abs() >= 1.0 || !ak.is_finite() {
+            return Ok(false);
+        }
+        let den = 1.0 - ak * ak;
+        prev[..k - 1].copy_from_slice(&a[..k - 1]);
+        for j in 1..k {
+            a[j - 1] = (prev[j - 1] + ak * prev[k - j - 1]) / den;
+        }
+    }
+    Ok(true)
+}
+
+/// The smallest modulus of the roots of 1 − φ₁z − ... − φₚzᵖ (R's `min(Mod(polyroot(c(1, -ar))))`).
+///
+/// Trailing zero coefficients are dropped first, as `polyroot` drops them. Closed form for p ≤ 2;
+/// above, 1 / max |λ| over the eigenvalues λ of the companion matrix. `f64::INFINITY` when every
+/// coefficient is 0 (no root).
+pub(crate) fn ar_min_root_modulus(ar: &[f64]) -> EconResult<f64> {
+    let p = ar.iter().rposition(|&v| v != 0.0).map_or(0, |i| i + 1);
+    let ar = &ar[..p];
+    if ar.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the AR coefficients must be finite".to_string(),
+        });
+    }
+    // max |λ| over the roots λ of λᵖ − φ₁λᵖ⁻¹ − ... − φₚ (the reciprocals of the polynomial's roots).
+    let max_lambda = match p {
+        0 => return Ok(f64::INFINITY),
+        1 => ar[0].abs(),
+        2 => {
+            let (a1, a2) = (ar[0], ar[1]);
+            let disc = a1 * a1 + 4.0 * a2;
+            if disc >= 0.0 {
+                let sq = disc.sqrt();
+                ((a1 + sq) / 2.0).abs().max(((a1 - sq) / 2.0).abs())
+            } else {
+                (-a2).sqrt()
+            }
+        }
+        _ => {
+            checkpoint()?;
+            let n_cells = checked_len(&[p, p], "the AR companion matrix")?;
+            let mut cells = try_vec(n_cells, 0.0, "the AR companion matrix")?;
+            cells[..p].copy_from_slice(ar);
+            for i in 1..p {
+                cells[i * p + i - 1] = 1.0;
+            }
+            let companion = Array2::from_shape_vec((p, p), cells)
+                .map_err(|e| EconError::Computation(format!("AR companion matrix: {e}")))?;
+            let evs = crate::linalg::matrix_ops::ndarray_to_faer(&companion.view())
+                .eigenvalues()
+                .map_err(|_| {
+                    EconError::Computation(
+                        "the eigenvalues of the AR companion matrix did not converge".to_string(),
+                    )
+                })?;
+            evs.iter().map(|ev| ev.re.hypot(ev.im)).fold(0.0, f64::max)
+        }
+    };
+    Ok(1.0 / max_lambda)
+}
+
+/// Theoretical autocorrelations ρ(0..lag_max) of an ARMA(p, q) process with a stationary AR part
+/// (R's `ARMAacf`; see [`arma_acf`] for the equations).
+fn arma_autocorrelation(ar: &[f64], ma: &[f64], lag_max: usize) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the ARMA autocorrelations up to lag_max";
+
     let p = ar.len();
     let q = ma.len();
-
-    // For pure AR(p): gamma(k) = sum(phi_i * gamma(k-i)) for k > 0
-    // gamma(0) = sigma^2 + sum(phi_i * gamma(i))
-
-    // For ARMA, we need to solve the Yule-Walker equations modified for MA component
-
-    const WHAT: &str = "the ARMA autocovariances up to lag_max";
-
-    let m = p.max(q + 1);
-    let n_lags = lag_max
-        .max(m)
-        .checked_add(1)
-        .ok_or_else(|| size_overflow(WHAT))?;
-
-    let mut gamma = try_vec(n_lags, 0.0, WHAT)?;
-
-    // For sigma^2 = 1 (scale later if needed)
-    // First compute initial autocovariances gamma(0), ..., gamma(m-1)
-    // by solving the modified Yule-Walker equations
-
-    if p == 0 && q == 0 {
-        // White noise: gamma(0) = 1, gamma(k) = 0 for k > 0
-        gamma[0] = 1.0;
-        return Ok(gamma);
-    }
+    let n_lags = lag_max.checked_add(1).ok_or_else(|| size_overflow(WHAT))?;
+    let mut rho = try_vec(n_lags, 0.0, WHAT)?;
+    rho[0] = 1.0;
 
     if p == 0 {
-        // Pure MA(q) process
-        // gamma(k) = sigma^2 * sum(theta_i * theta_{i+k}) for k <= q, 0 otherwise
-        gamma[0] = 1.0 + ma.iter().map(|&t| t * t).sum::<f64>();
-        let stride = checkpoint_stride(q);
+        // Pure MA(q) (white noise for q = 0): γ(k) = Σⱼ θⱼ θⱼ₊ₖ with θ₀ = 1, zero beyond q.
+        let gamma0 = 1.0 + ma.iter().map(|&t| t * t).sum::<f64>();
+        let stride = checkpoint_stride(q.max(1));
         for k in 1..=q.min(lag_max) {
             if k % stride == 0 {
                 checkpoint()?;
             }
-            let mut sum = 0.0;
+            let mut sum = ma[k - 1];
             for i in 0..(q - k) {
                 sum += ma[i] * ma[i + k];
             }
-            if k <= q {
-                sum += ma[k - 1]; // theta_k * 1 term
-            }
-            gamma[k] = sum;
+            rho[k] = sum / gamma0;
         }
-        return Ok(gamma);
+        return Ok(rho);
     }
 
-    if q == 0 {
-        // Pure AR(p) process
-        // Solve Yule-Walker equations
-        // First, compute gamma(0)
-        // gamma(0) = sigma^2 / (1 - sum(phi_i * rho_i))
-        // We need to iterate or solve the system
-
-        // Simple approach: use the fact that for AR(1), gamma(0) = sigma^2 / (1 - phi^2)
-        // For general AR(p), we solve the system iteratively
-
-        // Initial approximation
-        gamma[0] = 1.0;
-
-        // Each lag below costs O(p).
-        let stride = checkpoint_stride(p);
-
-        // Use recursion: gamma(k) = sum(phi_i * gamma(|k-i|))
-        for _ in 0..100 {
-            checkpoint()?;
-            // Iterate to convergence
-            let old_gamma0 = gamma[0];
-
-            // First compute gamma(1) to gamma(p) from gamma(0)
-            for k in 1..=p.min(n_lags - 1) {
-                if k % stride == 0 {
-                    checkpoint()?;
-                }
-                let mut sum = 0.0;
-                for i in 0..p {
-                    let idx = (k as i64 - 1 - i as i64).unsigned_abs() as usize;
-                    if idx < n_lags {
-                        sum += ar[i] * gamma[idx];
-                    }
-                }
-                gamma[k] = sum;
-            }
-
-            // Update gamma(0)
-            let mut sum = 1.0; // sigma^2 = 1
-            for i in 0..p {
-                sum += ar[i] * gamma[i + 1];
-            }
-            gamma[0] = sum;
-
-            if (gamma[0] - old_gamma0).abs() < 1e-12 {
-                break;
-            }
-        }
-
-        // Extend to remaining lags using recursion
-        for k in (p + 1)..n_lags {
-            if k % stride == 0 {
-                checkpoint()?;
-            }
-            let mut sum = 0.0;
-            for i in 0..p {
-                if k > i {
-                    sum += ar[i] * gamma[k - 1 - i];
-                }
-            }
-            gamma[k] = sum;
-        }
-
-        return Ok(gamma);
-    }
-
-    // General ARMA(p,q) case
-    // Use the general recursion from Brockwell & Davis
-
-    // First solve for gamma(0), ..., gamma(max(p, q+1)-1)
-    // Then use the AR recursion for higher lags
-
-    // Simplified approach: compute using numerical solution
-    // gamma(k) for k > q follows AR recursion
-    // For k <= max(p, q), we need the full system
-
-    // For now, use a numerical approach that works well for most cases
-    // Initialize with approximate values from AR part
-    gamma[0] = 1.0;
-
-    // Each lag below costs O(p) (O(q) in the MA contribution).
-    let stride = checkpoint_stride(p);
-
-    // First pass: AR contribution
-    for _ in 0..50 {
+    let r = p.max(q + 1);
+    // ρ(0..=r_known) from the equations; the AR recursion extends beyond.
+    let r_known = if r == 1 {
+        // AR(1): ρ(k) = φᵏ, which the recursion below produces from ρ(0) = 1.
+        0
+    } else {
+        // Every caller-sized solve checks the budget before it starts.
         checkpoint()?;
-        for k in 1..n_lags {
-            if k % stride == 0 {
-                checkpoint()?;
-            }
-            let mut sum = 0.0;
-            for i in 0..p {
-                let idx = (k as i64 - 1 - i as i64).unsigned_abs() as usize;
-                if idx < n_lags {
-                    sum += ar[i] * gamma[idx];
-                }
-            }
-            gamma[k] = sum;
+        let gamma = arma_autocovariance_system(ar, ma, r)?;
+        let gamma0 = gamma[0];
+        if !(gamma0 > 0.0 && gamma0.is_finite()) {
+            return Err(EconError::Computation(
+                "the ARMA autocovariance equations gave a non-positive variance".to_string(),
+            ));
         }
+        let known = r.min(lag_max);
+        for k in 1..=known {
+            rho[k] = gamma[k] / gamma0;
+        }
+        known
+    };
 
-        // Update gamma(0) including MA contribution
-        let mut sum = 1.0;
-        for i in 0..p {
-            sum += ar[i] * gamma[i + 1];
-        }
-        // Add MA contribution to variance
-        for i in 0..q {
-            sum += ma[i] * ma[i];
-        }
-        // Cross terms
-        for k in 0..q.min(p) {
-            sum += 2.0 * ar[k] * ma[k];
-        }
-        gamma[0] = sum.max(0.01); // Ensure positive
-    }
-
-    // Add MA contribution to autocovariances
-    let stride = checkpoint_stride(q);
-    for k in 1..=q.min(n_lags - 1) {
+    // ρ(k) = Σᵢ φᵢ ρ(k − i) for k > r (each lag costs O(p)).
+    let stride = checkpoint_stride(p);
+    for k in (r_known + 1)..n_lags {
         if k % stride == 0 {
             checkpoint()?;
         }
-        let mut ma_contrib = 0.0;
-        for i in 0..(q - k) {
-            ma_contrib += ma[i] * ma[i + k];
+        let mut sum = 0.0;
+        for (i, &phi) in ar.iter().enumerate().take(k) {
+            sum += phi * rho[k - 1 - i];
         }
-        if k <= q {
-            ma_contrib += ma[k - 1];
+        rho[k] = sum;
+    }
+    Ok(rho)
+}
+
+/// γ(0..=r) of an ARMA(p, q) with σ² = 1 and r = max(p, q + 1) ≥ 2, from the r + 1 linear equations
+/// of R's `ARMAacf`, solved by Gaussian elimination with partial pivoting.
+fn arma_autocovariance_system(ar: &[f64], ma: &[f64], r: usize) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the ARMA autocovariance equations";
+    let q = ma.len();
+    let m = r + 1;
+    // AR part padded with zeros to r terms.
+    let mut phi = try_vec(r, 0.0, WHAT)?;
+    phi[..ar.len()].copy_from_slice(ar);
+    let psi = arma_to_ma(&phi, ma, q)?.psi;
+
+    let n_cells = checked_len(&[m, m], WHAT)?;
+    let mut a = try_vec(n_cells, 0.0, WHAT)?;
+    let mut b = try_vec(m, 0.0, WHAT)?;
+    let stride = checkpoint_stride(m);
+    for k in 0..m {
+        if k % stride == 0 {
+            checkpoint()?;
         }
-        gamma[k] += ma_contrib;
+        a[k * m + k] += 1.0;
+        for (i, &phi_i) in phi.iter().enumerate() {
+            a[k * m + (k as isize - (i as isize + 1)).unsigned_abs()] -= phi_i;
+        }
+        // Σⱼ₌ₖ^q θⱼ ψⱼ₋ₖ with θ₀ = ψ₀ = 1.
+        let theta = |j: usize| if j == 0 { 1.0 } else { ma[j - 1] };
+        let psi_at = |j: usize| if j == 0 { 1.0 } else { psi[j - 1] };
+        b[k] = (k..=q).map(|j| theta(j) * psi_at(j - k)).sum();
     }
 
-    Ok(gamma)
+    // Forward elimination with partial pivoting (each column costs O(m²)).
+    let stride = checkpoint_stride(m.saturating_mul(m));
+    for col in 0..m {
+        if col % stride == 0 {
+            checkpoint()?;
+        }
+        let pivot = (col..m)
+            .max_by(|&i, &j| a[i * m + col].abs().total_cmp(&a[j * m + col].abs()))
+            .unwrap_or(col);
+        let pv = a[pivot * m + col];
+        if pv == 0.0 || !pv.is_finite() {
+            return Err(EconError::SingularMatrix {
+                context: "the ARMA autocovariance equations".to_string(),
+                suggestion: "check that the AR part is stationary".to_string(),
+            });
+        }
+        if pivot != col {
+            for j in 0..m {
+                a.swap(pivot * m + j, col * m + j);
+            }
+            b.swap(pivot, col);
+        }
+        for row in (col + 1)..m {
+            let f = a[row * m + col] / pv;
+            if f != 0.0 {
+                for j in col..m {
+                    a[row * m + j] -= f * a[col * m + j];
+                }
+                b[row] -= f * b[col];
+            }
+        }
+    }
+    // Back substitution.
+    let mut x = try_vec(m, 0.0, WHAT)?;
+    for row in (0..m).rev() {
+        let mut sum = b[row];
+        for j in (row + 1)..m {
+            sum -= a[row * m + j] * x[j];
+        }
+        x[row] = sum / a[row * m + row];
+    }
+    Ok(x)
 }
 
 /// Durbin-Levinson algorithm to compute PACF from ACF.
@@ -1310,15 +1394,43 @@ pub struct ArimaSimResult {
     pub n_start: usize,
 }
 
-/// Simulate from an ARIMA model.
+/// Simulate from an ARIMA model with unit-variance innovations (R's `arima.sim` with `sd = 1`).
 ///
-/// Generates a time series following an ARIMA(p,d,q) process:
-/// - First generates an ARMA(p,q) series
-/// - Then undifferences d times to get ARIMA
+/// See [`arima_sim_with_sd`], which this calls with `sd = 1.0`.
+///
+/// # Example
+///
+/// ```
+/// use p2a_core::forecasting::tsutils::arima_sim;
+/// // Simulate AR(1) with coefficient 0.8
+/// let result = arima_sim(&[0.8], &[], 0, 100, None, None, Some(42)).unwrap();
+/// assert_eq!(result.values.len(), 100);
+/// assert_eq!(result.n_start, 28); // R's default burn-in: 1 + ceiling(6 / log(1 / 0.8))
+/// ```
+pub fn arima_sim(
+    ar: &[f64],
+    ma: &[f64],
+    d: usize,
+    n: usize,
+    innovations: Option<&[f64]>,
+    n_start: Option<usize>,
+    seed: Option<u64>,
+) -> EconResult<ArimaSimResult> {
+    arima_sim_with_sd(ar, ma, d, n, 1.0, innovations, n_start, seed)
+}
+
+/// Simulate from an ARIMA model (R's `arima.sim`).
+///
+/// Generates a time series following an ARIMA(p,d,q) process, as R does:
+/// - the innovations are `n_start` burn-in values followed by `n` values;
+/// - the MA filter e[t] + Σ θⱼ e[t − j] is applied, with its first q values set to 0
+///   (R's `x[seq_along(ma)] <- 0`);
+/// - the AR recursion y[t] = x[t] + Σ φᵢ y[t − i] starts from zeros;
+/// - the burn-in is dropped and the series is integrated d times.
 ///
 /// # Arguments
 ///
-/// * `ar` - AR coefficients (can be empty)
+/// * `ar` - AR coefficients (can be empty); the AR part must be stationary
 /// * `ma` - MA coefficients (can be empty)
 /// * `d` - Differencing order (0 for ARMA)
 /// * `n` - Number of observations returned; must be at least 1, as in R's
@@ -1326,14 +1438,22 @@ pub struct ArimaSimResult {
 ///   values for `d > 0` because `diffinv` prepends `d` zeros; this returns the
 ///   `d`-fold cumulative sum of the ARMA part, which is that output without
 ///   the leading zeros.
-/// * `innovations` - Optional pre-specified innovations. If None, uses standard normal.
-/// * `n_start` - Burn-in period length (default: computed from AR/MA orders)
+/// * `sd` - Standard deviation of the generated N(0, sd²) innovations (R's `sd` passed to
+///   `rnorm`); finite and positive. Supplied `innovations` are used as given.
+/// * `innovations` - Optional innovations: the `n_start` burn-in values (R's `start.innov`)
+///   followed by the `n` values (R's `innov`). If None, N(0, sd²) draws.
+/// * `n_start` - Burn-in length. Default R's `p + q + ceiling(6 / log(minroots))` (`p + q` for a
+///   pure MA), where minroots is the smallest modulus of the roots of 1 − φ₁z − ... − φₚzᵖ; the
+///   burn-in grows like 6 / log(minroots) as the AR part nears a unit root, and the allocation
+///   ceiling and the budget bound it. At least `p + q`.
 /// * `seed` - Random seed for reproducibility (if innovations is None)
 ///
 /// # Errors
 ///
-/// - [`EconError::InvalidSpecification`] for `n = 0`, or for `innovations`
-///   shorter than `n` plus the burn-in.
+/// - [`EconError::InvalidSpecification`] for `n = 0`; for an AR part that is not stationary
+///   (R: "'ar' part of model is not stationary"); for `n_start < p + q` (R: "burn-in 'n.start'
+///   must be as long as 'ar + ma'"); for an `sd` that is not finite and positive; or for
+///   `innovations` shorter than `n` plus the burn-in.
 /// - [`EconError::ResourceLimit`] when `n` plus the burn-in overflows or the
 ///   series is too large to allocate (the per-allocation ceiling included).
 /// - [`EconError::Cancelled`] when the budget checked through [`checkpoint`]
@@ -1343,21 +1463,23 @@ pub struct ArimaSimResult {
 /// # Example
 ///
 /// ```
-/// use p2a_core::forecasting::tsutils::arima_sim;
-/// // Simulate AR(1) with coefficient 0.8
-/// let result = arima_sim(&[0.8], &[], 0, 100, None, None, Some(42)).unwrap();
-/// assert_eq!(result.values.len(), 100);
+/// use p2a_core::forecasting::tsutils::arima_sim_with_sd;
+/// let r = arima_sim_with_sd(&[0.5], &[0.3], 0, 50, 2.0, None, None, Some(7)).unwrap();
+/// assert_eq!(r.values.len(), 50);
+/// assert_eq!(r.n_start, 11); // 1 + 1 + ceiling(6 / log(2))
 /// ```
 ///
 /// # References
 ///
 /// - Box et al. (2015), Chapter 3
 /// - R `stats::arima.sim`
-pub fn arima_sim(
+#[allow(clippy::too_many_arguments)]
+pub fn arima_sim_with_sd(
     ar: &[f64],
     ma: &[f64],
     d: usize,
     n: usize,
+    sd: f64,
     innovations: Option<&[f64]>,
     n_start: Option<usize>,
     seed: Option<u64>,
@@ -1376,23 +1498,62 @@ pub fn arima_sim(
             message: "n must be at least 1 (R: 'n' must be strictly positive)".to_string(),
         });
     }
-
-    // Validate stationarity of AR part
-    if p > 0 {
-        // Check that sum of |ar| < 1 (rough check)
-        let sum_ar: f64 = ar.iter().map(|x| x.abs()).sum();
-        if sum_ar >= 1.0 {
-            // This is a rough check; proper check would involve polynomial roots
-            // We'll allow it but warn internally
-        }
+    if !(sd.is_finite() && sd > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("sd must be finite and positive, got {sd}"),
+        });
+    }
+    if ma.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the MA coefficients must be finite".to_string(),
+        });
     }
 
-    // Compute burn-in length if not specified
-    let burn_in = n_start.unwrap_or_else(|| {
-        // R default: max(p, q) * 10 or at least 100
+    // R: minroots <- min(Mod(polyroot(c(1, -ar)))); if (minroots <= 1) stop(...)
+    let not_stationary = || EconError::InvalidSpecification {
+        message: "'ar' part of model is not stationary: a root of 1 - ar[1] z - ... - ar[p] z^p \
+                  lies on or inside the unit circle"
+            .to_string(),
+    };
+    let min_root = if p > 0 {
+        if !ar_is_stationary(ar)? {
+            return Err(not_stationary());
+        }
+        let m = ar_min_root_modulus(ar)?;
+        if m <= 1.0 {
+            return Err(not_stationary());
+        }
+        m
+    } else {
+        f64::INFINITY
+    };
 
-        (p.max(q) * 10).max(100)
-    });
+    let p_plus_q = p.checked_add(q).ok_or_else(|| size_overflow(WHAT))?;
+    let burn_in = match n_start {
+        Some(m) if m < p_plus_q => {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "burn-in 'n_start' must be as long as 'ar + ma' ({p_plus_q}), got {m}"
+                ),
+            });
+        }
+        Some(m) => m,
+        None => {
+            // R: n.start <- p + q + ifelse(p > 0, ceiling(6 / log(minroots)), 0)
+            let extra = if p > 0 {
+                (6.0 / min_root.ln()).ceil()
+            } else {
+                0.0
+            };
+            // usize::MAX as f64 rounds up to 2^64, so `<` keeps the cast exact.
+            if !(extra < usize::MAX as f64) {
+                return Err(size_overflow(WHAT));
+            }
+            p_plus_q
+                .checked_add(extra as usize)
+                .ok_or_else(|| size_overflow(WHAT))?
+        }
+    };
 
     let total_length = n.checked_add(burn_in).ok_or_else(|| size_overflow(WHAT))?;
 
@@ -1407,7 +1568,9 @@ pub fn arima_sim(
                 ),
             });
         }
-        ext_innov[..total_length].to_vec()
+        let mut innov = try_with_capacity(total_length, WHAT)?;
+        innov.extend_from_slice(&ext_innov[..total_length]);
+        innov
     } else {
         // Generate random innovations
         let mut rng = match seed {
@@ -1415,7 +1578,10 @@ pub fn arima_sim(
             None => StdRng::from_entropy(),
         };
         let mut innov: Vec<f64> = try_with_capacity(total_length, WHAT)?;
-        innov.extend((0..total_length).map(|_| -> f64 { StandardNormal.sample(&mut rng) }));
+        innov.extend((0..total_length).map(|_| -> f64 {
+            let z: f64 = StandardNormal.sample(&mut rng);
+            sd * z
+        }));
         innov
     };
 
@@ -1428,20 +1594,20 @@ pub fn arima_sim(
         if t % stride == 0 {
             checkpoint()?;
         }
-        let mut val = innov[t];
-
-        // AR part: sum(phi_i * x[t-i])
-        for i in 0..p {
-            if t > i {
-                val += ar[i] * x[t - 1 - i];
+        // MA filter: e[t] + sum(theta_j * e[t-j]); its first q values are 0, as R's.
+        let mut val = if t < q {
+            0.0
+        } else {
+            let mut v = innov[t];
+            for (j, &theta) in ma.iter().enumerate() {
+                v += theta * innov[t - 1 - j];
             }
-        }
+            v
+        };
 
-        // MA part: sum(theta_j * e[t-j])
-        for j in 0..q {
-            if t > j {
-                val += ma[j] * innov[t - 1 - j];
-            }
+        // AR recursion: sum(phi_i * x[t-i]), zeros before the start
+        for (i, &phi) in ar.iter().enumerate().take(t) {
+            val += phi * x[t - 1 - i];
         }
 
         x[t] = val;
@@ -1490,7 +1656,8 @@ pub enum EndRule {
     Keep,
     /// Extend with constant (edge median value)
     Constant,
-    /// Use median of available values (default, Tukey's rule)
+    /// R's `smoothEnds`: medians of decreasing odd spans of the end-kept series, and Tukey's
+    /// end-point rule for the first and last value (default, as R's `runmed`)
     #[default]
     Median,
 }
@@ -1581,17 +1748,13 @@ pub fn runmed(x: &[f64], k: usize, endrule: EndRule) -> EconResult<RunmedResult>
             }
         }
         EndRule::Median => {
-            // Tukey's rule: use median of available values with decreasing window
+            // R: smoothEnds(runmed(x, k, endrule = "keep"), k). The windows read the kept series y,
+            // never the smoothed values.
             for i in 0..half_k {
-                // Left end: use window from 0 to 2*i (size 2*i+1)
-                let window: Vec<f64> = x[0..=(2 * i)].to_vec();
-                result[i] = median(&window);
-
-                // Right end: use window from n-1-2*i to n-1
-                let right_i = n - 1 - i;
-                let window_right: Vec<f64> = x[(n - 1 - 2 * i)..n].to_vec();
-                result[right_i] = median(&window_right);
+                result[i] = x[i];
+                result[n - 1 - i] = x[n - 1 - i];
             }
+            smooth_ends(&mut result, half_k)?;
         }
     }
 
@@ -1601,6 +1764,56 @@ pub fn runmed(x: &[f64], k: usize, endrule: EndRule) -> EconResult<RunmedResult>
         endrule,
         n_obs: n,
     })
+}
+
+/// R's `smoothEnds(y, 2 h + 1)` in place: for i = 2..=h (while 2 i <= n) the i-th value from each
+/// end becomes the median of the 2 i - 1 values of `y` at that end, then the first and last value
+/// follow Tukey's end-point rule med3(y[1], sm[2], 3 sm[2] - 2 sm[3]).
+fn smooth_ends(y: &mut [f64], h: usize) -> EconResult<()> {
+    let n = y.len();
+    if h < 1 || n < 3 {
+        return Ok(());
+    }
+    let med3 = |a: f64, b: f64, c: f64| -> f64 {
+        // R's med3: the middle value
+        if a < b {
+            if c < b { if a >= c { a } else { c } } else { b }
+        } else if c > b {
+            if a <= c { a } else { c }
+        } else {
+            b
+        }
+    };
+    let mut src = try_with_capacity(n, "the running-median end windows")?;
+    src.extend_from_slice(y);
+    if h >= 2 {
+        y[1] = med3(src[0], src[1], src[2]);
+        y[n - 2] = med3(src[n - 1], src[n - 2], src[n - 3]);
+        let mut window = try_with_capacity(2 * h - 1, "the running-median end windows")?;
+        for i in 3..=h {
+            if 2 * i > n {
+                break;
+            }
+            // Each pair of end windows costs O(i log i).
+            checkpoint()?;
+            window.clear();
+            window.extend_from_slice(&src[..2 * i - 1]);
+            y[i - 1] = median_odd(&mut window);
+            window.clear();
+            window.extend_from_slice(&src[n + 1 - 2 * i..]);
+            y[n - i] = median_odd(&mut window);
+        }
+    }
+    y[0] = med3(src[0], y[1], 3.0 * y[1] - 2.0 * y[2]);
+    y[n - 1] = med3(src[n - 1], y[n - 2], 3.0 * y[n - 2] - 2.0 * y[n - 3]);
+    Ok(())
+}
+
+/// The middle value of an odd-length window (R's `med.odd`), NaN last.
+fn median_odd(w: &mut [f64]) -> f64 {
+    let half = w.len() / 2;
+    let (_, m, _) = w.select_nth_unstable_by(half, f64::total_cmp);
+    *m
 }
 
 /// Compute median of a slice.
@@ -1872,8 +2085,8 @@ mod tests {
         assert_eq!(result.values, vec![2.0, 3.0, 4.0]);
     }
 
-    /// diffinv(x[1:12], xi = 1.5); diffinv(x[1:12], lag = 2, xi = c(1, -2)); diffinv(x[1:12], differences = 2).
-    /// diffinv_d2_xi (differences = 2, xi = c(1, 3); R 1, 3, 5.3503169975, ...) is TS-28: not asserted.
+    /// diffinv(x[1:12], xi = 1.5); diffinv(x[1:12], lag = 2, xi = c(1, -2)); diffinv(x[1:12], differences = 2);
+    /// diffinv(x[1:12], differences = 2, xi = c(1, 3)).
     #[test]
     fn test_validate_diffinv_ts_filter_ar_cpt() {
         let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
@@ -1894,18 +2107,32 @@ mod tests {
                 &diffinv(x12, 1, 2, None).unwrap().values,
                 Tol::coef(12),
             )
-            .finish(); // deviation TS-28: diffinv_d2_xi
+            .vector(
+                "diffinv_d2_xi",
+                &diffinv(x12, 1, 2, Some(&[1.0, 3.0])).unwrap().values,
+                Tol::coef(12),
+            )
+            .finish();
     }
 
-    /// ARMAacf(ar = 0.8), (0.5, -0.3) with its PACF (lags 1..10; R omits lag 0), ma = (0.4, 0.25). Closed-form
-    /// reference: rel 1e-10, abs 1e-12, because the AR recursion stops at |delta gamma(0)| < 1e-12.
-    /// Deviation TS-14: armaacf_arma11 (off by 8.1e-2) and armaacf_ar2_persistent (3.6e-5), not asserted.
+    /// ARMAacf(ar = 0.8), (0.5, -0.3) with its PACF (lags 1..10; R omits lag 0), ma = (0.4, 0.25),
+    /// ARMA(1, 1) (0.5; 0.3) and the persistent AR(2) (1.5, -0.56). Closed-form reference: rel 1e-10, abs 1e-12.
     #[test]
     fn test_validate_arma_acf_ts_filter_ar_cpt() {
         let (case, _) = crate::test_support::load_case("ts_filter_ar_cpt");
         let tol = Tol::new(1e-10, 1e-12);
         let pacf = arma_acf(&[0.5, -0.3], &[], 10, true).unwrap().values;
         Check::new(&case)
+            .vector(
+                "armaacf_arma11",
+                &arma_acf(&[0.5], &[0.3], 6, false).unwrap().values,
+                tol,
+            )
+            .vector(
+                "armaacf_ar2_persistent",
+                &arma_acf(&[1.5, -0.56], &[], 10, false).unwrap().values,
+                tol,
+            )
             .vector(
                 "armaacf_ar1",
                 &arma_acf(&[0.8], &[], 10, false).unwrap().values,
@@ -1923,6 +2150,280 @@ mod tests {
                 tol,
             )
             .finish();
+    }
+
+    /// Case ts_utils_t4: ARMAacf of mixed ARMA(p, q) models, a persistent AR(2), AR(0.99), and lag.max below
+    /// p and below q + 1 (R truncates to lag.max + 1 values there). PACF compared from lag 1, as R returns it.
+    /// Closed-form reference (exact autocovariance equations): rel 1e-10, abs 1e-12.
+    #[test]
+    fn test_validate_arma_acf_mixed_ts_utils_t4() {
+        let (case, _) = crate::test_support::load_case("ts_utils_t4");
+        let tol = Tol::new(1e-10, 1e-12);
+        let acf = |ar: &[f64], ma: &[f64], lag_max: usize| {
+            arma_acf(ar, ma, lag_max, false).unwrap().values
+        };
+        let pacf = |ar: &[f64], ma: &[f64], lag_max: usize| {
+            arma_acf(ar, ma, lag_max, true).unwrap().values[1..].to_vec()
+        };
+        Check::new(&case)
+            .vector("acf_arma11", &acf(&[0.5], &[0.3], 6), tol)
+            .vector("acf_arma12", &acf(&[0.9], &[-0.5, 0.4], 6), tol)
+            .vector("acf_arma21", &acf(&[0.5, 0.3], &[0.4], 6), tol)
+            .vector("pacf_arma21", &pacf(&[0.5, 0.3], &[0.4], 6), tol)
+            .vector("acf_ar2_persistent", &acf(&[1.5, -0.56], &[], 10), tol)
+            .vector("acf_ar1_099", &acf(&[0.99], &[], 5), tol)
+            .vector("acf_arma32", &acf(&[0.4, -0.2, 0.3], &[0.5, 0.25], 8), tol)
+            .vector(
+                "pacf_arma32",
+                &pacf(&[0.4, -0.2, 0.3], &[0.5, 0.25], 8),
+                tol,
+            )
+            .vector("acf_arma13_lag2", &acf(&[0.6], &[0.3, -0.2, 0.1], 2), tol)
+            .vector("acf_ar3_lag1", &acf(&[0.3, 0.2, 0.1], &[], 1), tol)
+            .finish(); // acf_ma3_lag5: R returns q + 1 values for lag.max < q; p2a returns lag_max + 1 (method doc)
+    }
+
+    #[test]
+    fn test_arma_acf_refuses_non_stationary_ar() {
+        for ar in [vec![1.2], vec![1.0], vec![1.5, -0.5], vec![0.5, 0.5]] {
+            for pacf in [false, true] {
+                let err = arma_acf(&ar, &[0.3], 5, pacf).unwrap_err();
+                assert!(
+                    matches!(&err, EconError::InvalidSpecification { message } if message.contains("not stationary")),
+                    "{ar:?}: {err}"
+                );
+            }
+        }
+        assert!(arma_acf(&[0.99], &[], 5, false).is_ok());
+        assert!(arma_acf(&[1.5, -0.56], &[], 5, false).is_ok());
+    }
+
+    #[test]
+    fn test_arma_acf_length_is_lag_max_plus_one() {
+        let cases: [(&[f64], &[f64], usize); 5] = [
+            (&[0.3, 0.2, 0.1], &[], 1),
+            (&[], &[0.6, -0.3, 0.2], 1),
+            (&[0.6], &[0.3, -0.2, 0.1], 2),
+            (&[0.5], &[0.3], 0),
+            (&[0.4, -0.2, 0.3], &[0.5, 0.25], 0),
+        ];
+        for (ar, ma, lag_max) in cases {
+            for pacf in [false, true] {
+                let r = arma_acf(ar, ma, lag_max, pacf).unwrap();
+                assert_eq!(
+                    r.values.len(),
+                    lag_max + 1,
+                    "{ar:?} {ma:?} {lag_max} {pacf}"
+                );
+                assert_eq!(r.lags.len(), lag_max + 1, "{ar:?} {ma:?} {lag_max} {pacf}");
+                assert_eq!(r.values[0], 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ar_min_root_modulus() {
+        let close = |a: f64, b: f64| ((a - b) / b).abs() < 1e-10;
+        assert!(close(ar_min_root_modulus(&[0.5]).unwrap(), 2.0));
+        // 1 - 1.5 z + 0.56 z^2 has roots 1 / 0.8 and 1 / 0.7 (R polyroot: 1.2500000000000018).
+        assert!(close(ar_min_root_modulus(&[1.5, -0.56]).unwrap(), 1.25));
+        // R: min(Mod(polyroot(c(1, -0.4, 0.2, -0.3)))) = 1.4054665058271332
+        assert!(close(
+            ar_min_root_modulus(&[0.4, -0.2, 0.3]).unwrap(),
+            1.4054665058271332
+        ));
+        // Complex pair: 1 - 0.5 z + 0.3 z^2 has |root|^2 = 1 / 0.3.
+        assert!(close(
+            ar_min_root_modulus(&[0.5, -0.3]).unwrap(),
+            (1.0f64 / 0.3).sqrt()
+        ));
+        assert_eq!(ar_min_root_modulus(&[0.0, 0.0]).unwrap(), f64::INFINITY);
+        assert_eq!(ar_min_root_modulus(&[]).unwrap(), f64::INFINITY);
+        assert!(close(ar_min_root_modulus(&[0.5, 0.0]).unwrap(), 2.0)); // trailing zero dropped
+        assert!(ar_is_stationary(&[0.5, 0.0]).unwrap());
+        assert!(!ar_is_stationary(&[0.5, 0.5]).unwrap());
+        assert!(!ar_is_stationary(&[f64::NAN]).unwrap());
+    }
+
+    /// Case ts_utils_t4: diffinv with differences >= 2 and xi, lag 1, 2 and 3. Dyadic inputs, so the sums are
+    /// exact.
+    #[test]
+    fn test_validate_diffinv_xi_ts_utils_t4() {
+        let (case, _) = crate::test_support::load_case("ts_utils_t4");
+        let tol = Tol::new(0.0, 1e-12);
+        let dinv = |x: &[f64], lag: usize, d: usize, xi: &[f64]| {
+            diffinv(x, lag, d, Some(xi)).unwrap().values
+        };
+        Check::new(&case)
+            .vector(
+                "dinv_d2_xi",
+                &dinv(&[2.0, 3.0, 4.0], 1, 2, &[1.0, 3.0]),
+                tol,
+            )
+            .vector(
+                "dinv_l2_d2",
+                &dinv(&[1.0, 2.0, 3.0, 4.0], 2, 2, &[1.0, 2.0, 3.0, 4.0]),
+                tol,
+            )
+            .vector(
+                "dinv_d3",
+                &dinv(&[0.5, -1.0, 2.0, 0.25, 3.0], 1, 3, &[1.0, -2.0, 0.5]),
+                tol,
+            )
+            .vector(
+                "dinv_l3_d2",
+                &dinv(
+                    &[0.5, -1.0, 2.0, 0.25, 3.0, 1.5, -0.75],
+                    3,
+                    2,
+                    &[1.0, -2.0, 0.5, 4.0, 0.0, 2.5],
+                ),
+                tol,
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_diffinv_refuses_wrong_xi_length() {
+        for xi in [vec![1.0], vec![1.0, 2.0, 3.0]] {
+            let err = diffinv(&[2.0, 3.0, 4.0], 1, 2, Some(&xi)).unwrap_err();
+            assert!(
+                matches!(&err, EconError::InvalidSpecification { message }
+                    if message.contains('2') && message.contains(&xi.len().to_string())),
+                "{err}"
+            );
+        }
+        // Round trip: diffinv(diff(x, differences = 2), xi = x[1:2]) == x
+        let x = [1.0, 4.0, 2.0, 8.0, 5.0, 7.0, 3.0];
+        let d1: Vec<f64> = x.windows(2).map(|w| w[1] - w[0]).collect();
+        let d2: Vec<f64> = d1.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(
+            diffinv(&d2, 1, 2, Some(&x[..2])).unwrap().values,
+            x.to_vec()
+        );
+    }
+
+    /// Case ts_utils_t4: runmed(x, k, endrule = "median") = smoothEnds(runmed(x, k, "keep"), k), with Tukey's
+    /// end-point rule. Medians of given values, so exact up to the 3 y[1] - 2 y[2] extrapolation.
+    #[test]
+    fn test_validate_runmed_median_ts_utils_t4() {
+        let (case, _) = crate::test_support::load_case("ts_utils_t4");
+        let tol = Tol::new(0.0, 1e-12);
+        let rm = |x: &[f64], k: usize| runmed(x, k, EndRule::Median).unwrap().values;
+        let z = [
+            3.1, -0.4, 2.2, 5.0, 1.7, 0.3, 4.4, 2.9, -1.2, 0.8, 3.3, 2.0, 6.1,
+        ];
+        Check::new(&case)
+            .vector(
+                "rm_k3_a",
+                &rm(&[5.0, 1.0, 2.0, 3.0, 10.0, 4.0, 6.0], 3),
+                tol,
+            )
+            .vector(
+                "rm_k5_b",
+                &rm(&[5.0, 1.0, 2.0, 3.0, 10.0, 4.0, 6.0, 8.0, 0.0], 5),
+                tol,
+            )
+            .vector(
+                "rm_k3_doc",
+                &rm(&[1.0, 2.0, 100.0, 4.0, 5.0, 6.0, 7.0], 3),
+                tol,
+            )
+            .vector("rm_z_k3", &rm(&z, 3), tol)
+            .vector("rm_z_k7", &rm(&z, 7), tol)
+            .vector("rm_z_k9", &rm(&z, 9), tol)
+            .vector("rm_z_k13", &rm(&z, 13), tol)
+            .vector("rm_n5_k5", &rm(&[3.0, 1.0, 2.0, 9.0, 4.0], 5), tol)
+            .finish();
+    }
+
+    /// Case ts_utils_t4: arima.sim with given innovations (start.innov = e[1:n.start], innov = e[...]) and R's
+    /// default burn-in n.start = p + q + ceiling(6 / log(minroots)).
+    #[test]
+    fn test_validate_arima_sim_given_innovations_ts_utils_t4() {
+        let (case, ds) = crate::test_support::load_case("ts_utils_t4");
+        let e = col(&ds, "e");
+        assert_eq!(e.len(), 40);
+        let arma = arima_sim(&[0.5, -0.3], &[0.4], 0, 20, Some(&e[..33]), Some(13), None).unwrap();
+        let arima = arima_sim(&[0.5], &[0.4], 1, 20, Some(&e[..31]), Some(11), None).unwrap();
+        // R returns n + d values for d > 0, the first d of them 0; p2a returns the rest.
+        let mut arima_r = vec![0.0];
+        arima_r.extend(&arima.values);
+        let models: [(&[f64], &[f64]); 7] = [
+            (&[0.5], &[]),
+            (&[0.99], &[]),
+            (&[0.95], &[]),
+            (&[0.5, -0.3], &[0.4]),
+            (&[], &[0.4, 0.2]),
+            (&[1.5, -0.56], &[]),
+            (&[0.5, 0.0], &[]),
+        ];
+        let nstart: Vec<f64> = models
+            .iter()
+            .map(|(ar, ma)| {
+                arima_sim(ar, ma, 0, 1, None, None, Some(1))
+                    .unwrap()
+                    .n_start as f64
+            })
+            .collect();
+        Check::new(&case)
+            .vector("sim_arma21", &arma.values, Tol::coef(33))
+            .vector("sim_arima111", &arima_r, Tol::coef(33))
+            .vector("nstart", &nstart, Tol::new(0.0, 0.0))
+            .finish();
+    }
+
+    #[test]
+    fn test_arima_sim_refuses_non_stationary_ar() {
+        for ar in [vec![1.2], vec![1.0], vec![0.5, 0.5]] {
+            let err = arima_sim(&ar, &[], 0, 10, None, None, Some(1)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("'ar' part of model is not stationary"),
+                "{ar:?}: {err}"
+            );
+        }
+        let err = arima_sim(&[0.5], &[0.3], 0, 10, None, Some(1), Some(1)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("burn-in 'n_start' must be as long as 'ar + ma'"),
+            "{err}"
+        );
+        assert!(arima_sim(&[0.5], &[0.3], 0, 10, None, Some(2), Some(1)).is_ok());
+    }
+
+    #[test]
+    fn test_arima_sim_sd_scales_the_series() {
+        let one = arima_sim_with_sd(&[0.5, -0.3], &[0.4], 1, 30, 1.0, None, None, Some(9)).unwrap();
+        let big = arima_sim_with_sd(&[0.5, -0.3], &[0.4], 1, 30, 2.5, None, None, Some(9)).unwrap();
+        for (a, b) in one.values.iter().zip(&big.values) {
+            assert!(
+                (b - 2.5 * a).abs() <= 1e-12 * b.abs().max(1e-300),
+                "{a} {b}"
+            );
+        }
+        assert_eq!(
+            one.values,
+            arima_sim(&[0.5, -0.3], &[0.4], 1, 30, None, None, Some(9))
+                .unwrap()
+                .values
+        );
+        for sd in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err = arima_sim_with_sd(&[0.5], &[], 0, 10, sd, None, None, Some(1)).unwrap_err();
+            assert!(
+                matches!(err, EconError::InvalidSpecification { .. }),
+                "{sd}: {err}"
+            );
+        }
+        // Supplied innovations are used as given.
+        let innov: Vec<f64> = (0..40)
+            .map(|i| ((i * 7) % 11) as f64 / 10.0 - 0.5)
+            .collect();
+        let given1 =
+            arima_sim_with_sd(&[0.5], &[], 0, 20, 1.0, Some(&innov), Some(10), None).unwrap();
+        let given2 =
+            arima_sim_with_sd(&[0.5], &[], 0, 20, 3.0, Some(&innov), Some(10), None).unwrap();
+        assert_eq!(given1.values, given2.values);
     }
 
     #[test]
@@ -1990,12 +2491,18 @@ mod tests {
 
     /// Asserts the length only; the direction of lag is TS-29.
     #[test]
-    fn test_lag_length() {
-        let x: Vec<f64> = (1..=5).map(|i| i as f64).collect();
-        let result = lag(&x, 1).unwrap();
-        // In R, lag shifts time index back, so values stay same but time shifts
-        // Our implementation returns shifted array values
-        assert_eq!(result.values.len(), 4);
+    fn test_lag_and_lag_padded_directions() {
+        let y = [1.5, -0.25, 3.0, 2.25, 0.5];
+        // lag: R's stats::lag values on the shifted time base, so element t is y[t + k] (k shorter).
+        assert_eq!(lag(&y, 1).unwrap().values, y[1..].to_vec());
+        assert_eq!(lag(&y, -2).unwrap().values, y[..3].to_vec());
+        // lag_padded: the conventional lag y[t - k] (dplyr::lag), NaN padding, full length.
+        let lp = lag_padded(&y, 1).unwrap();
+        assert!(lp[0].is_nan());
+        assert_eq!(lp[1..].to_vec(), y[..4].to_vec());
+        let ld = lag_padded(&y, -2).unwrap();
+        assert_eq!(ld[..3].to_vec(), y[2..].to_vec());
+        assert!(ld[3].is_nan() && ld[4].is_nan());
     }
 
     /// Validate embed against R
