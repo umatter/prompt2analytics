@@ -145,7 +145,22 @@ the Newton decrement, the relative log-likelihood change (1e-12) and the relativ
 of minus the Hessian at the estimate; for NB, `SE(ln theta)` is pscl's `SE.logtheta` and
 `SE(theta) = theta SE(ln theta)`. A theta above 1e6 (no overdispersion among the positive
 counts) is reported as for ZINB: the coefficient SEs from the coefficient block, the theta
-SEs NaN, `converged = false` and a warning. `iterations` and the convergence record describe
+SEs NaN, `converged = false` and a warning. The NB fit does not climb to that limit when it
+can see it is heading there: when the score in `kappa = 1/theta` at the truncated-Poisson MLE,
+`(1/2) sum [(y - mu)^2 - y + mu^2 / (e^mu - 1)]`, is negative (the limit `kappa = 0` is a local
+maximum), the Poisson limit's log-likelihood is not below the current one, the profile score in
+theta is positive and the Newton step in `(beta, kappa)` reaches `kappa <= 0` (or the profile is
+not concave in `kappa` there), the count part is the limit itself: the truncated-Poisson
+coefficients, SEs and log-likelihood, theta at its bound 1e8, reported as above. On the timing
+data this is decided at the start (one iteration). The full climb took about one Newton step per
+unit of ln theta and ended short of the limit, where the NB log-likelihood differences ln-gamma
+terms of order 1e9 and is rounding noise (its estimates were within 1e-4 of the limit's
+coefficients, 1e-5 of its SEs and 1e-6 of its log-likelihood, relative, on the 27 of the 64
+simulated samples of `test_hurdle_negbin_poisson_limit_rule_matches_full_climb` that reach the
+limit; on the other 37 the test checks that the fit is unchanged bit for bit). pscl reports the large finite theta where `optim`
+stops (theta 23,696 and 4,011 on the `count` timing data at n = 1,000 and 10,000, with a
+log-likelihood 0.0009 and 0.0026 below the Poisson hurdle's); the limit's theta is not pinned.
+`iterations` and the convergence record describe
 the count part (for NB the NB fit's, without its truncated-Poisson start); `converged` is both parts.
 
 Case `disc_hurdle_t4` (`validation/r/cases/discrete_t4.R`, `zeroinfl.csv`, n 500): pscl's
@@ -291,27 +306,31 @@ the same values.
 ### Maximum-likelihood count parts (Tier 4)
 
 The table above predates the change that made the count parts maximum-likelihood fits with the
-exact truncated information. The quiet re-time against v0.5.0 (release, one P core,
-`RAYON_NUM_THREADS=1`, interleaved rounds: five, and ten for the Poisson hurdle on the `count` data
-at n = 1,000; five for the `zeroinfl` and `negbin` rows; ratio of medians, ratio of minima in
-brackets; 2026-11-15):
+exact truncated information. Quiet re-time against v0.5.0 (`f80b0131`) after the Poisson-limit
+rule and the per-count special functions (release, one P core, `RAYON_NUM_THREADS=1`, nine
+interleaved rounds, side order alternating; ratio of medians, ratio of minima in brackets; 1-minute
+load 1.8-2.9; 2026-11-15):
 
 | Fit, data | n = 100 | n = 1,000 | n = 10,000 |
 |---|---|---|---|
-| negative binomial hurdle, `count` data (no overdispersion) | 1.18 [1.19] (353 -> 415 µs) | 6.66 [6.75] (2.1 -> 14 ms) | 5.77 [5.79] (19.9 -> 115 ms) |
-| negative binomial hurdle, `zeroinfl` data | 1.48 [1.50] | 5.91 [6.02] | 2.68 [2.70] |
-| negative binomial hurdle, overdispersed (`negbin`) data | 0.90 [0.91] | 1.03 [1.04] | 1.03 [1.04] |
-| Poisson hurdle, `count` data | 0.80 [0.81] | 1.08 [1.09] | 1.16 [1.17] (12.8 -> 14.9 ms) |
-| Poisson hurdle, `zeroinfl` data | 0.80 [0.81] | 1.13 [1.13] | 1.15 [1.16] |
+| negative binomial hurdle, `count` data (no overdispersion) | 1.01 [1.03] (349 -> 354 µs) | 0.67 [0.67] (2.09 -> 1.41 ms) | 0.73 [0.73] (20.0 -> 14.5 ms) |
+| negative binomial hurdle, `zeroinfl` data | 1.32 [1.33] (215 -> 284 µs), signed off 2026-11-15 | 0.70 [0.71] | 2.17 [2.17] (17.0 -> 36.8 ms), signed off 2026-11-15 |
+| negative binomial hurdle, overdispersed (`negbin`) data | 0.78 [0.79] | 0.84 [0.85] | 0.84 [0.84] |
+| Poisson hurdle, `count` data | 0.72 [0.72] | 0.92 [0.92] | 0.99 [0.99] |
+| Poisson hurdle, `zeroinfl` data | 0.74 [0.75] | 0.97 [0.97] | 1.01 [1.00] |
 
-The cause of the negative binomial rows is the exact maximum-likelihood fit itself. On positives
-with no overdispersion (on the `count` data their variance, 1.37, is below their mean, 2.09)
-v0.5.0 stopped at theta = 3.17, which is not the maximum; the new count part climbs ln theta to the
-Poisson limit (theta 1.9e7 at n = 1,000, 2.2e6 at n = 10,000) in 20-24 Newton iterations, each
-evaluating ln-gamma, digamma and trigamma for every positive row, and reports the limit as ZINB
-does. Where the data are overdispersed and theta has an interior maximum, the fit costs what it
-did (0.90-1.03x). Peak resident memory at n = 10,000 is 1.01x for both hurdles. The rows above
-1.1x are in no sign-off and go to the user (rule 5).
+Before these two changes the negative binomial hurdle took 6.66x and 5.77x of v0.5.0 on the
+`count` data at n = 1,000 and 10,000 (14 and 115 ms): on positives with no overdispersion (on the
+`count` data their variance, 1.37, is below their mean, 2.09) the fit climbed ln theta to the
+Poisson limit in 20-24 Newton iterations, each evaluating ln-gamma, digamma and trigamma for every
+positive row (v0.5.0 stopped at theta = 3.17, which is not the maximum). The Poisson-limit rule
+(above) now recognises the limit at the start, and the count part's ln-gamma, digamma and trigamma
+terms are evaluated once per distinct count, which leaves every fit bit for bit as it was.
+
+The two rows above 1.1x are interior maxima on the `zeroinfl` data (theta 13.1 at n = 100, 195.9 at
+n = 10,000), which the fit reaches in 7 and 15 Newton iterations from theta = 1. Peak resident
+memory at n = 10,000 was 1.01x for both hurdles before these changes, which add two buffers of
+12 bytes per positive count, built once per fit.
 
 ## References
 

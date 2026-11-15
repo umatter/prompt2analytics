@@ -1650,7 +1650,13 @@ struct NewtonMax {
     stopped: bool,
     /// Newton iterations taken.
     iterations: usize,
+    /// The `leave` test of [`maximise_by_newton`] held at the final parameters.
+    left: bool,
 }
+
+/// The test [`maximise_by_newton`] applies at each point before its step:
+/// `(par, ll, grad, hess)` there; `true` ends the ascent.
+type LeaveTest<'a> = &'a mut dyn FnMut(&[f64], f64, &[f64], &Array2<f64>) -> bool;
 
 /// Damped Newton ascent of the log-likelihood `eval(par, grad, hess)` (which fills the
 /// score and the Hessian when they are given), as the zero-inflated fits and the hurdle
@@ -1660,8 +1666,9 @@ struct NewtonMax {
 /// by more than `1e-12 |ll|`. `last_max` caps the last parameter of every trial point
 /// (ln theta). A non-finite log-likelihood, score or Hessian, a Hessian that damping
 /// cannot make negative definite, a non-finite step and a failed line search stop the
-/// loop with a warning prefixed by `what`. On return `par`, `grad` and `hess` belong to
-/// the same point.
+/// loop with a warning prefixed by `what`. `leave`, when given, is asked at every point
+/// before its step and ends the loop (with `left`) when it returns `true`. On return
+/// `par`, `grad` and `hess` belong to the same point.
 #[allow(clippy::too_many_arguments)]
 fn maximise_by_newton<F>(
     mut eval: F,
@@ -1673,6 +1680,7 @@ fn maximise_by_newton<F>(
     max_iter: usize,
     what: &str,
     warnings: &mut Vec<String>,
+    mut leave: Option<LeaveTest<'_>>,
 ) -> EconResult<NewtonMax>
 where
     F: FnMut(&[f64], Option<&mut [f64]>, Option<&mut Array2<f64>>) -> EconResult<f64>,
@@ -1681,6 +1689,7 @@ where
     let mut trial = resource::try_vec(n_params, 0.0, "Newton trial point")?;
     let mut converged = false;
     let mut stopped = false;
+    let mut left = false;
     let mut iterations = 0;
     // `grad` and `hess` always belong to `par`: evaluated together, at the start and at
     // each accepted point.
@@ -1698,6 +1707,12 @@ where
                  {iter}; estimation stopped"
             ));
             stopped = true;
+            break;
+        }
+        if let Some(test) = leave.as_deref_mut()
+            && test(par, ll, grad, hess)
+        {
+            left = true;
             break;
         }
         let Some(step) = newton_step(hess, grad, work) else {
@@ -1756,6 +1771,7 @@ where
         converged,
         stopped,
         iterations,
+        left,
     })
 }
 
@@ -1846,12 +1862,14 @@ fn run_zeroinfl(
         ZI_MAX_ITER,
         "",
         &mut warnings,
+        None,
     )?;
     let NewtonMax {
         ll,
         converged,
         stopped,
         iterations,
+        ..
     } = fit;
     if !converged && !stopped {
         let max_grad = grad.iter().fold(0.0f64, |m, g| m.max(g.abs()));
@@ -2210,7 +2228,10 @@ impl ResultNotes for HurdleResult {
 /// from the inverse of minus that Hessian at the estimate. A singular count-part
 /// information gives `NaN` standard errors and a warning; an NB theta above 1e6 (no
 /// overdispersion in the positive counts) is reported as for ZINB: theta SEs `NaN`,
-/// not converged, a warning. Count-part non-convergence is a warning, never an error.
+/// not converged, a warning. When the Poisson limit is a local maximum and the NB ascent
+/// heads there, the NB count part is that limit: the truncated-Poisson coefficients, SEs
+/// and log-likelihood, theta at its bound 1e8 (pscl reports the large finite theta where
+/// optim stops). Count-part non-convergence is a warning, never an error.
 ///
 /// # Errors
 ///
@@ -2301,8 +2322,13 @@ pub fn run_hurdle(
         x_full[[positive_indices[i], j]]
     });
 
-    let count =
-        fit_truncated_count_part(&y_positive, x_positive.view(), model_type, &mut warnings)?;
+    let count = fit_truncated_count_part(
+        &y_positive,
+        x_positive.view(),
+        model_type,
+        &mut warnings,
+        true,
+    )?;
     let CountPart {
         beta: beta_count,
         std_errors: count_std_errors,
@@ -2422,10 +2448,30 @@ fn ratio_minus_log1p(u: f64) -> f64 {
 }
 
 /// The positive counts of a hurdle count part.
-struct TruncData<'a> {
+struct TruncData<'a, 'b> {
     x: ArrayView2<'a, f64>,
     y: &'a [f64],
     negbin: bool,
+    /// The distinct values of `y`, ascending ([`count_levels`]).
+    levels: &'b [f64],
+    /// Per row, the index of its `y` in `levels`.
+    level: &'b [u32],
+}
+
+/// The distinct values of the counts `y` (ascending) and each row's index among them: the
+/// ln-gamma, digamma and trigamma terms of [`truncated_loglik`] depend on a row only
+/// through its count, so they are evaluated once per distinct count.
+fn count_levels(y: &[f64]) -> EconResult<(Vec<f64>, Vec<u32>)> {
+    let mut levels = resource::try_vec(y.len(), 0.0, "hurdle count levels")?;
+    levels.copy_from_slice(y);
+    levels.sort_by(f64::total_cmp);
+    levels.dedup();
+    let mut level = resource::try_vec(y.len(), 0u32, "hurdle count levels")?;
+    for (l, yi) in level.iter_mut().zip(y) {
+        // every count is among the levels, and there are at most `y.len()` of them
+        *l = levels.partition_point(|v| v < yi) as u32;
+    }
+    Ok((levels, level))
 }
 
 /// Log-likelihood of the zero-truncated count model at `par = (beta[, ln theta])`, with
@@ -2442,7 +2488,7 @@ struct TruncData<'a> {
 ///   for `a, b` in `{eta, t}`; `ln f` and `L` and their derivatives are those of
 ///   [`zi_loglik`] (the positive-count terms and `ln f0`).
 fn truncated_loglik(
-    data: &TruncData<'_>,
+    data: &TruncData<'_, '_>,
     par: &[f64],
     mut grad: Option<&mut [f64]>,
     mut hess: Option<&mut Array2<f64>>,
@@ -2470,8 +2516,39 @@ fn truncated_loglik(
         h.fill(0.0);
     }
     let derivatives = grad.is_some() || hess.is_some();
+    // Per distinct count, the leading terms of the per-row sums below, in their order of
+    // evaluation (so the sums are those of the per-row expressions): NB `ln Gamma(y +
+    // theta) - ln Gamma(theta) - ln Gamma(y + 1)`, `digamma(y + theta) - digamma(theta) +
+    // ln theta + 1` and `trigamma(y + theta) - trigamma(theta) + 1/theta`; Poisson
+    // `ln Gamma(y + 1)`.
+    let nl = data.levels.len();
+    let mut lev_ll = resource::try_vec(nl, 0.0, "hurdle count levels")?;
+    let mut lev_d = resource::try_vec(
+        if negbin && derivatives { nl } else { 0 },
+        0.0,
+        "hurdle count levels",
+    )?;
+    let mut lev_t = resource::try_vec(
+        if negbin && hess.is_some() { nl } else { 0 },
+        0.0,
+        "hurdle count levels",
+    )?;
+    for (j, &yl) in data.levels.iter().enumerate() {
+        if negbin {
+            lev_ll[j] = ln_gamma(yl + theta) - lg_theta - ln_gamma(yl + 1.0);
+            if let Some(d) = lev_d.get_mut(j) {
+                *d = digamma(yl + theta) - dg_theta + log_theta + 1.0;
+            }
+            if let Some(t) = lev_t.get_mut(j) {
+                *t = trigamma(yl + theta) - tg_theta + 1.0 / theta;
+            }
+        } else {
+            lev_ll[j] = ln_gamma(yl + 1.0);
+        }
+    }
     let mut ll = 0.0;
-    for (i, (xr, &yi)) in data.x.outer_iter().zip(data.y).enumerate() {
+    for (i, ((xr, &yi), &li)) in data.x.outer_iter().zip(data.y).zip(data.level).enumerate() {
+        let li = li as usize;
         if i % 1024 == 0 {
             resource::checkpoint()?;
         }
@@ -2488,8 +2565,7 @@ fn truncated_loglik(
             let ln_tm = tm.ln();
             let u = mu / theta;
             let l0 = -theta * u.ln_1p();
-            let ln_f =
-                ln_gamma(yi + theta) - lg_theta - ln_gamma(yi + 1.0) + l0 + yi * (eta - ln_tm);
+            let ln_f = lev_ll[li] + l0 + yi * (eta - ln_tm);
             ll += ln_f - (-l0.exp_m1()).ln();
             if !derivatives {
                 continue;
@@ -2505,16 +2581,11 @@ fn truncated_loglik(
             // ln f(y) and its derivatives
             let f_c = yi - mu * (yi + theta) / tm;
             let f_cc = -theta * mu * (yi + theta) / (tm * tm);
-            let d = digamma(yi + theta) - dg_theta + log_theta + 1.0 - ln_tm - (yi + theta) / tm;
+            let d = lev_d[li] - ln_tm - (yi + theta) / tm;
             let f_t = theta * d;
             let f_ct = -theta * mu * (mu - yi) / (tm * tm);
             let f_tt = if hess.is_some() {
-                theta * d
-                    + theta
-                        * theta
-                        * (trigamma(yi + theta) - tg_theta + 1.0 / theta
-                            - 1.0 / tm
-                            - (mu - yi) / (tm * tm))
+                theta * d + theta * theta * (lev_t[li] - 1.0 / tm - (mu - yi) / (tm * tm))
             } else {
                 0.0
             };
@@ -2527,7 +2598,7 @@ fn truncated_loglik(
             h_tt = f_tt + r * l_tt + rr1 * l_t * l_t;
         } else {
             let p_pos = -(-mu).exp_m1();
-            ll += yi * eta - mu - ln_gamma(yi + 1.0) - p_pos.ln();
+            ll += yi * eta - mu - lev_ll[li] - p_pos.ln();
             if !derivatives {
                 continue;
             }
@@ -2571,6 +2642,91 @@ fn truncated_loglik(
     Ok(ll)
 }
 
+/// The score in `kappa = 1/theta` of the zero-truncated NB log-likelihood at the Poisson
+/// limit `kappa = 0` and the coefficients `beta`: `(1/2) sum [(y - mu)^2 - y + mu^2 /
+/// (e^mu - 1)]`, from `ln f(y) = Poisson + kappa ((y - mu)^2 - y) / 2 + O(kappa^2)` and
+/// `ln f0 = -mu + kappa mu^2 / 2 + O(kappa^2)`. At the truncated-Poisson MLE it is the
+/// slope of the profile log-likelihood in `kappa` at 0 (the coefficient score vanishes
+/// there).
+fn truncated_poisson_limit_score(
+    x: ArrayView2<'_, f64>,
+    y: &[f64],
+    beta: &[f64],
+) -> EconResult<f64> {
+    let mut score = 0.0;
+    for (i, (xr, &yi)) in x.outer_iter().zip(y).enumerate() {
+        if i % 1024 == 0 {
+            resource::checkpoint()?;
+        }
+        let eta = xr
+            .iter()
+            .zip(beta)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .min(700.0);
+        let mu = eta.exp();
+        let d = yi - mu;
+        score += d * d - yi + mu * mu / mu.exp_m1();
+    }
+    Ok(0.5 * score)
+}
+
+/// Whether the NB count-part ascent at `par = (beta, ln theta)` (log-likelihood `ll`,
+/// score `grad`, Hessian `hess`) heads for the Poisson limit `kappa = 1/theta = 0`, whose
+/// log-likelihood is `limit_ll`: the limit is not below `ll`, the profile score in theta
+/// is positive, and the profile in `kappa` is not concave here or the Newton step in
+/// `(beta, kappa)` reaches `kappa <= 0`. With `G` and `D` the profile score and curvature
+/// in `t = ln theta` (the coefficient block profiled out by its Newton step), the profile
+/// curvature in `kappa` is `theta^2 (D + g_t)` and its Newton step ends at `kappa (1 + G /
+/// (D + g_t))`, so both conditions are `D + g_t + G >= 0`.
+fn heads_for_poisson_limit(
+    par: &[f64],
+    ll: f64,
+    grad: &[f64],
+    hess: &Array2<f64>,
+    limit_ll: f64,
+) -> bool {
+    let k = par.len() - 1;
+    // (both are finite: the limit's from a converged fit, `ll` checked by the caller)
+    if limit_ll < ll {
+        return false;
+    }
+    // Cholesky factor of minus the coefficient block
+    let mut l = Array2::<f64>::zeros((k, k));
+    for i in 0..k {
+        for j in 0..=i {
+            let s = (0..j).fold(-hess[[i, j]], |s, m| s - l[[i, m]] * l[[j, m]]);
+            if i == j {
+                if s.is_nan() || s <= 0.0 {
+                    return false;
+                }
+                l[[i, i]] = s.sqrt();
+            } else {
+                l[[i, j]] = s / l[[j, j]];
+            }
+        }
+    }
+    // (-H_bb)^-1 v by forward and back substitution
+    let solve = |v: &mut [f64]| {
+        for i in 0..k {
+            let s = (0..i).fold(v[i], |s, j| s - l[[i, j]] * v[j]);
+            v[i] = s / l[[i, i]];
+        }
+        for i in (0..k).rev() {
+            let s = (i + 1..k).fold(v[i], |s, j| s - l[[j, i]] * v[j]);
+            v[i] = s / l[[i, i]];
+        }
+    };
+    let mut u = grad[..k].to_vec();
+    let mut v: Vec<f64> = (0..k).map(|b| hess[[b, k]]).collect();
+    solve(&mut u);
+    solve(&mut v);
+    let g_t = grad[k];
+    let profile_score = g_t + (0..k).map(|b| hess[[k, b]] * u[b]).sum::<f64>();
+    let profile_curvature = hess[[k, k]] + (0..k).map(|b| hess[[k, b]] * v[b]).sum::<f64>();
+    profile_score > 0.0 && profile_curvature + g_t + profile_score >= 0.0
+}
+
 /// The fitted hurdle count part.
 struct CountPart {
     beta: Vec<f64>,
@@ -2586,6 +2742,12 @@ struct CountPart {
 /// counts `y` with design `x`, by [`maximise_by_newton`] on [`truncated_loglik`]: the
 /// truncated Poisson from `ln(mean y)` in the intercept (its log-likelihood is concave);
 /// NB from the truncated-Poisson MLE with theta = 1, ln theta capped at `ln THETA_MAX`.
+/// With `leave_for_limit`, when the score in `1/theta` at the truncated-Poisson MLE is
+/// negative (the Poisson limit is a local maximum) and the NB ascent heads there
+/// ([`heads_for_poisson_limit`]), the fit is the limit: the truncated-Poisson
+/// coefficients, log-likelihood and information with theta at `THETA_MAX` (the full climb
+/// takes about one Newton step per unit of ln theta to get there and ends short of it by
+/// rounding noise; `false` keeps the climb, for the tests).
 /// Standard errors from the inverse of minus the Hessian at the estimate; theta above
 /// `THETA_POISSON` (no overdispersion in the positives) is handled as ZINB handles it:
 /// the coefficient SEs from the coefficient block, the theta SEs NaN, not converged, a
@@ -2595,6 +2757,7 @@ fn fit_truncated_count_part<'a>(
     x: ArrayView2<'a, f64>,
     model_type: HurdleType,
     warnings: &mut Vec<String>,
+    leave_for_limit: bool,
 ) -> EconResult<CountPart> {
     const WHAT: &str = "hurdle count part: ";
     let k = x.ncols();
@@ -2610,10 +2773,13 @@ fn fit_truncated_count_part<'a>(
     par[0] = y_mean.ln();
 
     // The truncated Poisson: the fit itself, or the NB start.
+    let (levels, level) = count_levels(y)?;
     let poisson = TruncData {
         x,
         y,
         negbin: false,
+        levels: &levels,
+        level: &level,
     };
     let mut p_par = par[..k].to_vec();
     let (mut p_hess, mut p_work, mut p_grad) = if negbin {
@@ -2627,7 +2793,7 @@ fn fit_truncated_count_part<'a>(
     };
     let (fit, iterations) = if negbin {
         // the truncated-Poisson start; its iterations are not the count part's
-        maximise_by_newton(
+        let start = maximise_by_newton(
             |p: &[f64], g: Option<&mut [f64]>, h: Option<&mut Array2<f64>>| {
                 truncated_loglik(&poisson, p, g, h)
             },
@@ -2639,11 +2805,24 @@ fn fit_truncated_count_part<'a>(
             HURDLE_COUNT_MAX_ITER,
             WHAT,
             warnings,
+            None,
         )?;
         par[..k].copy_from_slice(&p_par);
         par[k] = 0.0;
-        let data = TruncData { x, y, negbin: true };
-        let fit = maximise_by_newton(
+        // The Poisson limit 1/theta = 0 is a local maximum when the score in 1/theta is
+        // negative there at the truncated-Poisson MLE (its log-likelihood `start.ll`).
+        let limit_ll = (leave_for_limit
+            && start.converged
+            && truncated_poisson_limit_score(x, y, &p_par)? < 0.0)
+            .then_some(start.ll);
+        let mut leave = |p: &[f64], ll: f64, g: &[f64], h: &Array2<f64>| {
+            limit_ll.is_some_and(|limit| heads_for_poisson_limit(p, ll, g, h, limit))
+        };
+        let data = TruncData {
+            negbin: true,
+            ..poisson
+        };
+        let mut fit = maximise_by_newton(
             |p: &[f64], g: Option<&mut [f64]>, h: Option<&mut Array2<f64>>| {
                 truncated_loglik(&data, p, g, h)
             },
@@ -2655,7 +2834,23 @@ fn fit_truncated_count_part<'a>(
             HURDLE_COUNT_MAX_ITER,
             WHAT,
             warnings,
+            Some(&mut leave),
         )?;
+        if fit.left {
+            // The ascent heads for the limit, where the count part is the truncated-Poisson
+            // fit: its coefficients, log-likelihood and information, with theta at its
+            // bound. (At theta near the bound the NB log-likelihood is
+            // `ln Gamma(theta + y) - ln Gamma(theta)` of terms near 1e9 per row, rounding
+            // noise of the order of the gain the climb would still make.)
+            par[..k].copy_from_slice(&p_par);
+            par[k] = THETA_MAX.ln();
+            grad.fill(0.0);
+            grad[..k].copy_from_slice(&p_grad);
+            hess.fill(0.0);
+            hess.slice_mut(ndarray::s![..k, ..k]).assign(&p_hess);
+            fit.ll = start.ll;
+            fit.converged = true;
+        }
         let iterations = fit.iterations;
         (fit, iterations)
     } else {
@@ -2671,6 +2866,7 @@ fn fit_truncated_count_part<'a>(
             HURDLE_COUNT_MAX_ITER,
             WHAT,
             warnings,
+            None,
         )?;
         let iterations = fit.iterations;
         (fit, iterations)
@@ -4020,10 +4216,13 @@ mod tests {
         ];
         for negbin in [false, true] {
             for (x, beta) in &points {
+                let (levels, level) = count_levels(&y).unwrap();
                 let data = TruncData {
                     x: x.view(),
                     y: &y,
                     negbin,
+                    levels: &levels,
+                    level: &level,
                 };
                 let mut par = beta.clone();
                 if negbin {
@@ -4091,6 +4290,118 @@ mod tests {
         let u: f64 = 1e-8;
         let series = -u * u / 2.0 + 2.0 * u * u * u / 3.0 - 3.0 * u.powi(4) / 4.0;
         assert!((ratio_minus_log1p(u) - series).abs() <= 1e-15 * series.abs());
+    }
+
+    /// Leaving the NB count-part ascent for the Poisson limit (when the score in 1/theta
+    /// is negative at the truncated-Poisson MLE and the ascent heads there) ends where the
+    /// full climb to theta's bound ends, on Poisson, underdispersed, mildly and strongly
+    /// overdispersed counts: where the climb ends past the Poisson limit, the rule's fit is
+    /// the truncated-Poisson fit, which the climb matches to its rounding noise (the NB
+    /// log-likelihood near theta's bound differences ln-gamma terms of order 1e9); an
+    /// interior theta is untouched, bit for bit.
+    #[test]
+    fn test_hurdle_negbin_poisson_limit_rule_matches_full_climb() {
+        use rand::{Rng, SeedableRng};
+        use rand_distr::{Distribution, Gamma, Poisson};
+        let not_limit = |w: &[String]| -> Vec<String> {
+            w.iter()
+                .filter(|m| !m.contains("no overdispersion"))
+                .cloned()
+                .collect()
+        };
+        let (mut left, mut interior) = (0, 0);
+        for dgp in ["poisson", "underdispersed", "mild", "overdispersed"] {
+            for (seed, n) in (0u64..16).zip([100, 300, 1000, 3000].into_iter().cycle()) {
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed * 31 + dgp.len() as u64);
+                let std_normal = Normal::new(0.0, 1.0).unwrap();
+                let (mut ys, mut rows) = (Vec::new(), Vec::new());
+                while ys.len() < n {
+                    let x1 = std_normal.inverse_cdf(rng.r#gen::<f64>());
+                    let x2 = rng.r#gen::<f64>() * 2.0 - 1.0;
+                    let mu = (0.5 + 0.3 * x1 + 0.2 * x2).exp();
+                    let mut mixed = |shape: f64| {
+                        let lambda = Gamma::new(shape, mu / shape).unwrap().sample(&mut rng);
+                        Poisson::new(lambda.max(1e-12)).unwrap().sample(&mut rng)
+                    };
+                    let y = match dgp {
+                        "poisson" => Poisson::new(mu).unwrap().sample(&mut rng),
+                        // binomial(4, mu / 5): variance below the mean
+                        "underdispersed" => {
+                            (0..4).filter(|_| rng.r#gen::<f64>() < mu / 5.0).count() as f64
+                        }
+                        "mild" => mixed(20.0),
+                        _ => mixed(1.5),
+                    };
+                    if y > 0.0 {
+                        ys.push(y);
+                        rows.extend([1.0, x1, x2]);
+                    }
+                }
+                let x = Array2::from_shape_vec((n, 3), rows).unwrap();
+                let (mut w_rule, mut w_full) = (Vec::new(), Vec::new());
+                let rule =
+                    fit_truncated_count_part(&ys, x.view(), HurdleType::NegBin, &mut w_rule, true)
+                        .unwrap();
+                let full =
+                    fit_truncated_count_part(&ys, x.view(), HurdleType::NegBin, &mut w_full, false)
+                        .unwrap();
+                let what = format!("{dgp}, seed {seed}, n {n}");
+                let (t_rule, se_rule) = rule.theta.unwrap();
+                let (t_full, se_full) = full.theta.unwrap();
+                assert_eq!(rule.converged, full.converged, "{what}");
+                if t_full <= THETA_POISSON {
+                    interior += 1;
+                    assert_eq!(t_rule.to_bits(), t_full.to_bits(), "{what}");
+                    assert_eq!(se_rule.to_bits(), se_full.to_bits(), "{what}");
+                    assert_eq!(rule.ll.to_bits(), full.ll.to_bits(), "{what}");
+                    assert_eq!(rule.beta, full.beta, "{what}");
+                    assert_eq!(rule.std_errors, full.std_errors, "{what}");
+                    assert_eq!(rule.iterations, full.iterations, "{what}");
+                    assert_eq!(w_rule, w_full, "{what}");
+                    continue;
+                }
+                left += usize::from(rule.iterations < full.iterations);
+                assert!(t_rule > THETA_POISSON, "{what}: theta {t_rule} vs {t_full}");
+                assert!(se_rule.is_nan() && se_full.is_nan(), "{what}");
+                assert!(rule.iterations <= full.iterations, "{what}");
+                // the climb can end in a failed line search where the score in theta is
+                // rounding noise; the rule never takes that step
+                let w_full: Vec<String> = w_full
+                    .into_iter()
+                    .filter(|m| !m.contains("line search could not increase"))
+                    .collect();
+                assert_eq!(not_limit(&w_rule), not_limit(&w_full), "{what}");
+                assert_eq!(w_rule.len(), w_full.len(), "{what}");
+                // the rule's fit is the truncated Poisson's, bit for bit
+                let mut w_pois = Vec::new();
+                let pois =
+                    fit_truncated_count_part(&ys, x.view(), HurdleType::Poisson, &mut w_pois, true)
+                        .unwrap();
+                assert_eq!(rule.beta, pois.beta, "{what}");
+                assert_eq!(rule.std_errors, pois.std_errors, "{what}");
+                assert_eq!(rule.ll.to_bits(), pois.ll.to_bits(), "{what}");
+                // the full climb ends within its rounding noise of it
+                assert!(
+                    (rule.ll - full.ll).abs() <= 1e-6 * full.ll.abs(),
+                    "{what}: ll {} vs {}",
+                    rule.ll,
+                    full.ll
+                );
+                for (a, b) in rule.beta.iter().zip(&full.beta) {
+                    assert!(
+                        (a - b).abs() <= 1e-4 * b.abs().max(1e-2),
+                        "{what}: {a} vs {b}"
+                    );
+                }
+                for (a, b) in rule.std_errors.iter().zip(&full.std_errors) {
+                    assert!((a - b).abs() <= 1e-5 * b, "{what}: SE {a} vs {b}");
+                }
+            }
+        }
+        assert!(
+            left >= 10 && interior >= 10,
+            "left {left}, interior {interior}"
+        );
     }
 
     /// Underdispersed positive counts: the NB hurdle's theta runs to the Poisson limit,
