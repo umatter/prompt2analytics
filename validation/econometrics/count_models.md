@@ -354,6 +354,14 @@ ZINB to 2e-10 (coefficients) and 1.3e-9 (SEs; the R side takes them from
 `numDeriv::hessian`, p2a from the analytic Hessian). The regressor-scale test holds the
 scaled fits to the unscaled one at 1e-7 relative.
 
+## Timing (Tier 4)
+
+Quiet re-time against v0.5.0 (release, one P core, `RAYON_NUM_THREADS=1`, five interleaved rounds,
+ratio of medians, 2026-11-15): negative binomial 1.02 / 1.01 / 1.01x, ZIP 1.00 / 1.03 / 1.03x and
+ZINB 0.98 / 1.02 / 1.03x at n = 100 / 1,000 / 10,000; peak resident memory at n = 10,000 1.01-1.02x.
+The hurdle models, whose count parts became maximum-likelihood fits and are up to several times
+slower on data without overdispersion, are timed in [hurdle.md](hurdle.md).
+
 ## Status
 
 R-pinned: registry `validation/methods/discrete_ordered_count.json`, ids `discrete_negbin`,

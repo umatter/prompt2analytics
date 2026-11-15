@@ -288,6 +288,31 @@ over 19 steps) where the old code took a plain inverse. Both loops are bound by 
 `exp`, `ln` and divisions; fusing their passes was measured slower, and no cheaper form gives
 the same values.
 
+### Maximum-likelihood count parts (Tier 4)
+
+The table above predates the change that made the count parts maximum-likelihood fits with the
+exact truncated information. The quiet re-time against v0.5.0 (release, one P core,
+`RAYON_NUM_THREADS=1`, interleaved rounds: five, and ten for the Poisson hurdle on the `count` data
+at n = 1,000; five for the `zeroinfl` and `negbin` rows; ratio of medians, ratio of minima in
+brackets; 2026-11-15):
+
+| Fit, data | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| negative binomial hurdle, `count` data (no overdispersion) | 1.18 [1.19] (353 -> 415 µs) | 6.66 [6.75] (2.1 -> 14 ms) | 5.77 [5.79] (19.9 -> 115 ms) |
+| negative binomial hurdle, `zeroinfl` data | 1.48 [1.50] | 5.91 [6.02] | 2.68 [2.70] |
+| negative binomial hurdle, overdispersed (`negbin`) data | 0.90 [0.91] | 1.03 [1.04] | 1.03 [1.04] |
+| Poisson hurdle, `count` data | 0.80 [0.81] | 1.08 [1.09] | 1.16 [1.17] (12.8 -> 14.9 ms) |
+| Poisson hurdle, `zeroinfl` data | 0.80 [0.81] | 1.13 [1.13] | 1.15 [1.16] |
+
+The cause of the negative binomial rows is the exact maximum-likelihood fit itself. On positives
+with no overdispersion (on the `count` data their variance, 1.37, is below their mean, 2.09)
+v0.5.0 stopped at theta = 3.17, which is not the maximum; the new count part climbs ln theta to the
+Poisson limit (theta 1.9e7 at n = 1,000, 2.2e6 at n = 10,000) in 20-24 Newton iterations, each
+evaluating ln-gamma, digamma and trigamma for every positive row, and reports the limit as ZINB
+does. Where the data are overdispersed and theta has an interior maximum, the fit costs what it
+did (0.90-1.03x). Peak resident memory at n = 10,000 is 1.01x for both hurdles. The rows above
+1.1x are in no sign-off and go to the user (rule 5).
+
 ## References
 
 - Mullahy, J. (1986). "Specification and Testing of Some Modified Count Data Models."
