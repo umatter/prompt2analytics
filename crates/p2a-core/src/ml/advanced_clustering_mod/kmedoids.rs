@@ -574,7 +574,8 @@ pub fn run_clara(
 mod tests {
     use super::*;
     use crate::ml::advanced_clustering_mod::common::compute_distance_matrix;
-    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
+    use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+    use crate::resource::{with_alloc_ceiling, with_budget};
     use ndarray::array;
 
     use crate::data::columns::{NaPolicy, numeric_column};
@@ -706,12 +707,6 @@ mod tests {
                 .unwrap_err()
                 .contains("finite")
         );
-    }
-
-    fn cancelled() -> Budget {
-        let t = CancelToken::new();
-        t.cancel();
-        Budget::new(None, t)
     }
 
     fn three_blobs(n: usize, seed: u64) -> Array2<f64> {

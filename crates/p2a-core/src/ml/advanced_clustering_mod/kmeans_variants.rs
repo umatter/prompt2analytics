@@ -818,14 +818,9 @@ pub fn run_skmeans(
 mod tests {
     use super::*;
 
-    use crate::resource::{Budget, CancelToken, with_budget};
+    use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+    use crate::resource::with_budget;
     use ndarray::array;
-
-    fn cancelled() -> Budget {
-        let t = CancelToken::new();
-        t.cancel();
-        Budget::new(None, t)
-    }
 
     fn noisy_blobs() -> Array2<f64> {
         Array2::from_shape_fn((30, 2), |(i, j)| {

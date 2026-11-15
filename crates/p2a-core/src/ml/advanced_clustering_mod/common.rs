@@ -644,6 +644,13 @@ pub(crate) mod test_data {
             .collect()
     }
 
+    /// A budget whose token is already cancelled (cancellation tests).
+    pub(crate) fn cancelled() -> crate::resource::Budget {
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        crate::resource::Budget::new(None, t)
+    }
+
     /// Seeded uniform points with noise in every coordinate (large-n and degenerate-input tests).
     pub(crate) fn uniform(n: usize, d: usize, seed: u64) -> Array2<f64> {
         let mut rng = StdRng::seed_from_u64(seed);

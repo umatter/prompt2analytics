@@ -1128,15 +1128,10 @@ mod tests {
     use super::*;
     use crate::ml::hclust::Dissimilarity;
     use crate::ml::hclust::test_util::*;
-    use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
+    use crate::ml::advanced_clustering_mod::common::test_data::cancelled;
+    use crate::resource::{with_alloc_ceiling, with_budget};
     use ndarray::array;
     use p2a_validation::{Check, Tol};
-
-    fn cancelled() -> Budget {
-        let t = CancelToken::new();
-        t.cancel();
-        Budget::new(None, t)
-    }
 
     /// R 4.3.3 (cluster 2.x): x <- matrix(c(0.12,1.05, 0.48,0.31, 2.91,3.17, 3.36,2.62, 1.07,0.74,
     ///   5.21,0.43, 4.83,1.12, 0.71,2.38, 2.24,2.85, 5.66,0.97, 1.53,1.36, 3.95,3.48), ncol=2, byrow=TRUE)
