@@ -13,7 +13,8 @@
       ],
       "tests": [
         "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_blobs",
-        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_from_start"
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_validate_fcm_cmeans_from_start",
+        "p2a-core::ml::advanced_clustering_mod::fuzzy::tests::test_fcm_random_start_reaches_cmeans_fixed_point"
       ],
       "quantities": [
         "centres",

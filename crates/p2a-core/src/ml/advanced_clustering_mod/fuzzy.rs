@@ -868,6 +868,13 @@ mod tests {
         (centers, membership, labels)
     }
 
+    /// ap_blobs.csv for the property tests (no R values read).
+    fn ap_blobs_file() -> Array2<f64> {
+        let path = p2a_validation::repo_path("validation/datasets/generated/ap_blobs.csv");
+        let ds = crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap());
+        ap_blobs(&ds)
+    }
+
     fn start_centers() -> Array2<f64> {
         array![[0.0, 0.0], [3.0, 0.0], [1.5, 2.5]]
     }
@@ -974,8 +981,7 @@ mod tests {
 
     #[test]
     fn test_fcm_manhattan_centres_are_weighted_medians() {
-        let (_, ds) = crate::test_support::load_case("fcm_cmeans_from_start");
-        let x = ap_blobs(&ds);
+        let x = ap_blobs_file();
         for m in [2.0, 1.5] {
             let r = fuzzy_cmeans(
                 x.view(),
@@ -1365,8 +1371,7 @@ mod tests {
     fn test_fanny_one_sweep_matches_r_maxit_1() {
         // R 4.3.3, cluster 2.1.6: fanny(ap_blobs, 3, memb.exp = 2, maxit = 1, tol = 1e-15)$membership[c(1, 2, 40, 100), ]
         // (one Gauss-Seidel sweep from R's start; a Jacobi sweep is 0.023 off).
-        let (_, ds) = crate::test_support::load_case("fuzzy_reference_blobs");
-        let x = ap_blobs(&ds);
+        let x = ap_blobs_file();
         let r = fanny(x.view(), 3, Some(2.0), Some(1), Some(1e-15), None).unwrap();
         assert_eq!(r.n_iterations, 1);
         let expected = [
@@ -1417,8 +1422,7 @@ mod tests {
 
     #[test]
     fn test_fanny_is_scale_free() {
-        let (_, ds) = crate::test_support::load_case("fuzzy_reference_blobs");
-        let x = ap_blobs(&ds);
+        let x = ap_blobs_file();
         let base = fanny(x.view(), 3, None, None, Some(1e-10), None).unwrap();
         let small = fanny(
             (&x * 2f64.powi(-30)).view(),
@@ -1452,8 +1456,7 @@ mod tests {
 
     #[test]
     fn test_fanny_objective_is_the_criterion_at_the_returned_memberships() {
-        let (_, ds) = crate::test_support::load_case("fuzzy_reference_blobs");
-        let x = ap_blobs(&ds);
+        let x = ap_blobs_file();
         let r = fanny(x.view(), 3, Some(1.7), None, None, None).unwrap();
         let n = x.nrows();
         let mut obj = 0.0;
