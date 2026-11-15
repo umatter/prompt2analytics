@@ -51,7 +51,8 @@ gave shares 0.95513-0.95883 / 0.01079-0.01199 / 0.03037-0.03299 for the random f
 
 - **Forest importances are not R-pinned (band of five randomForest seeds).** The bootstrap and feature draws use
   p2a's RNG, so a forest cannot be matched draw by draw.
-- gbm's Bernoulli and Laplace leaves (ML-94, WT-1) are not pinned; only the Gaussian stump path is.
+- gbm's Bernoulli and Laplace terminal nodes are R-pinned in `gbm.md` (`ml_boosting_t4.json`); this file pins
+  the Gaussian stump path.
 
 ## Wall-clock
 

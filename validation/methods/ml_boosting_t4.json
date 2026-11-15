@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_gbm_leaves",
+      "name": "Gradient boosting terminal nodes (Laplace median, Bernoulli Newton step; gbm::gbm)",
+      "category": "ml",
+      "reference": "gbm 2.3.1, gbm(interaction.depth = 1, n.minobsinnode = 1, bag.fraction = 1)",
+      "doc": "validation/ml/gbm.md",
+      "cases": [
+        "gbm_laplace_stumps",
+        "gbm_bernoulli_stumps"
+      ],
+      "tests": [
+        "p2a-core::ml::gbm::tests::test_validate_gbm_laplace_stumps",
+        "p2a-core::ml::gbm::tests::test_validate_gbm_bernoulli_stumps"
+      ],
+      "quantities": [
+        "initF",
+        "fitted values (probabilities for Bernoulli)",
+        "split variable of each stump",
+        "relative influence",
+        "Laplace MAE"
+      ],
+      "tolerance": "Tol::coef(200) (1e-8, n = 200); split variables exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

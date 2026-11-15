@@ -36,6 +36,8 @@ derived from `validation/methods/*.json`.
 | CART | [cart.md](cart.md) | `run_cart()` | R `rpart::rpart()` |
 | Tree-ensemble impurity importance | [tree_importance.md](tree_importance.md) | `random_forest()`, `run_gbm()` | R `rpart`, `randomForest`, `gbm` |
 | Random forest | [tree_importance.md](tree_importance.md) | `random_forest()` | R `randomForest::randomForest()` |
+| Gradient boosting machine | [gbm.md](gbm.md) | `gbm()`, `run_gbm()` | R `gbm::gbm()` |
+| LightGBM-style histogram boosting | [lightgbm.md](lightgbm.md) | `lightgbm()` | LightGBM 4.7.0 (behaviour quoted, not R-pinned) |
 | Support vector classification | [svm.md](svm.md) | `linear_svm()`, `kernel_svm()` | R `e1071::svm()` |
 | MARS | [mars.md](mars.md) | `run_mars()` | none (`earth` is not installed) |
 | Projection pursuit regression | [ppr.md](ppr.md) | `run_ppr()` | R `stats::ppr()` |
