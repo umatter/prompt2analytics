@@ -82,6 +82,10 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cor_test_t4.csv` | 1576 × 3 (set, x, y) | `stat_cor_test_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261113; `pear`, `perm` and the perfect sets literal values |
 | `generated/cox_info_singular.csv` | 8 × 4 (time, status, x, z) | `surv_cox_info_singular_t4` | `r/cases/surv_concordance_t4.R` | literal values: `x` varies only among the two rows censored before the first event, so it is constant in every event-time risk set |
 | `generated/cr_sim.csv` | 200 × 2 (time, event_type) | `cli_competing_risks` | `r/cases/cli_models.R` | seed 20261023; two exponential causes and uniform censoring, distinct times |
+| `generated/ctree_cls_t4.csv` | 240 × 5 (x1, x2, x3, code, cls; cls text a/b/c, code its 0-based integer) | `ctree_cls_t4` | `r/cases/ml_trees_t4.R` | seed 20261116; classes cut from 1.2 x1 + 2.5 (x2 > 0.6) + N(0, 0.8^2), 66/77/97 rows |
+| `generated/ctree_montecarlo_t4.csv` | 120 × 3 (x1, x2, y) | `ctree_montecarlo_t4` | `r/cases/ml_trees_t4.R` | seed 20261118; y = 0.22 x1 + N(0, 1), x2 pure noise |
+| `generated/ctree_null_root_t4.csv` | 150 × 3 (x1, x2, y) | `ctree_null_root_t4` | `r/cases/ml_trees_t4.R` | seed 20261117; y independent of x1 (normal) and x2 (exponential): the root is not split |
+| `generated/ctree_reg_t4.csv` | 200 × 4 (x1, x2, x3, y) | `ctree_reg_t4` | `r/cases/ml_trees_t4.R` | seed 20261115; y = 1.5 (x1 > 0.3) + 0.8 x2 + N(0, 0.9^2); x3 rounded to 0.1 (many ties) |
 | `generated/density_t4.csv` | 284 × 2 (set, x) | `stat_density_t4` | `r/cases/stats_descriptive_t4.R` | seed 1; `x9`, `ties`, `iqr0`, `const`, `zero`, `dx` literal values |
 | `generated/describe_t4.csv` | 12 × 5 (id, e, o, ni, g; ni Int64, o missing in one row, ni in two, g text) | `stat_describe_t4` | `r/cases/stats_descriptive_t4.R` | seed 20261115 |
 | `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
