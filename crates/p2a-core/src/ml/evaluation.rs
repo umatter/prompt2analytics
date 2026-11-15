@@ -12,15 +12,15 @@ use crate::errors::EconResult;
 /// Result of ROC curve and AUC calculation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RocAucResult {
-    /// True positive rates (sensitivity) at each threshold
+    /// True positive rates (sensitivity) of the rule `score >= threshold` at each threshold
     pub tpr: Vec<f64>,
     /// False positive rates (1 - specificity) at each threshold
     pub fpr: Vec<f64>,
-    /// Thresholds used for ROC curve
+    /// Thresholds in decreasing order: `+inf` (the point (0, 0)), then the distinct scores
     pub thresholds: Vec<f64>,
-    /// Area under the ROC curve
+    /// Area under the ROC curve (Mann-Whitney, ties counted half)
     pub auc: f64,
-    /// Optimal threshold (Youden's J statistic)
+    /// Optimal threshold (Youden's J; the lowest of tied optima): the observed score starting the rule
     pub optimal_threshold: f64,
     /// Metrics at optimal threshold
     pub optimal_metrics: ClassificationMetrics,
@@ -150,173 +150,288 @@ impl std::fmt::Display for ConfusionMatrixResult {
     }
 }
 
-/// Calculate ROC curve and AUC.
+/// The checked inputs of a ROC computation: `(score, is_positive)` sorted by score in decreasing order
+/// (`f64::total_cmp`), with the class counts. Refuses unequal lengths, an empty input, NaN scores or labels
+/// (missing values), infinite scores (as pROC's `roc()`) or labels, and anything but exactly two label values.
+/// The positive class is the larger label; labels are matched exactly.
+pub(crate) fn roc_inputs(
+    predictions: &[f64],
+    actual: &[f64],
+) -> Result<(Vec<(f64, bool)>, usize, usize), String> {
+    let (pos_class, n_pos, n_neg) = roc_classes(predictions, actual)?;
+    let mut pairs: Vec<(f64, bool)> = predictions
+        .iter()
+        .zip(actual)
+        .map(|(&p, &a)| (p, a == pos_class))
+        .collect();
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok((pairs, n_pos, n_neg))
+}
+
+/// The checks of [`roc_inputs`] without the sort: the positive label and the class counts.
+pub(crate) fn roc_classes(
+    predictions: &[f64],
+    actual: &[f64],
+) -> Result<(f64, usize, usize), String> {
+    if predictions.len() != actual.len() {
+        return Err("Predictions and actual values must have the same length".to_string());
+    }
+    if predictions.is_empty() {
+        return Err("Need at least one sample".to_string());
+    }
+    let k = predictions.iter().filter(|p| p.is_nan()).count();
+    if k > 0 {
+        return Err(format!(
+            "predictions contain {k} missing value(s) (NaN); ROC/AUC needs a score for every observation"
+        ));
+    }
+    let k = actual.iter().filter(|v| v.is_nan()).count();
+    if k > 0 {
+        return Err(format!("actual labels contain {k} missing value(s) (NaN)"));
+    }
+    if actual.iter().any(|v| v.is_infinite()) {
+        return Err("actual labels must be finite (two classes)".to_string());
+    }
+    let k = predictions.iter().filter(|p| p.is_infinite()).count();
+    if k > 0 {
+        return Err(format!(
+            "predictions must be finite (pROC refuses infinite scores); found {k} infinite value(s)"
+        ));
+    }
+    let first = actual[0];
+    let mut other: Option<f64> = None;
+    for &v in actual {
+        if v == first {
+            continue;
+        }
+        match other {
+            None => other = Some(v),
+            Some(o) if o == v => {}
+            Some(_) => {
+                let mut unique: Vec<f64> = actual.to_vec();
+                unique.sort_by(f64::total_cmp);
+                unique.dedup();
+                return Err(format!(
+                    "ROC requires exactly 2 classes, found {}",
+                    unique.len()
+                ));
+            }
+        }
+    }
+    let Some(other) = other else {
+        return Err("ROC requires exactly 2 classes, found 1".to_string());
+    };
+    let pos_class = first.max(other);
+    let n_pos = actual.iter().filter(|&&v| v == pos_class).count();
+    Ok((pos_class, n_pos, actual.len() - n_pos))
+}
+
+/// One pass over scores sorted in decreasing order ([`roc_inputs`]): the ROC curve with the rule
+/// `score >= threshold`, the AUC and Youden's optimum.
+#[derive(Debug, Clone)]
+pub(crate) struct RocSweep {
+    /// `+inf` (nothing positive), then each distinct score in decreasing order.
+    pub thresholds: Vec<f64>,
+    /// Positives with `score >= threshold`.
+    pub tp: Vec<usize>,
+    /// Negatives with `score >= threshold`.
+    pub fp: Vec<usize>,
+    /// Area under the curve: the Mann-Whitney statistic with half credit for ties, over `n_pos n_neg`.
+    pub auc: f64,
+    /// Index of Youden's optimum; the lowest threshold among tied optima.
+    pub best: usize,
+}
+
+/// Tied groups of a decreasing sort: `(score, positives, negatives)` per distinct score (exact equality, so
+/// `-0.0` and `0.0` are one group).
+fn tie_groups(sorted_desc: &[(f64, bool)]) -> impl Iterator<Item = (f64, usize, usize)> + '_ {
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        let &(score, _) = sorted_desc.get(i)?;
+        let (mut gp, mut gn) = (0usize, 0usize);
+        while let Some(&(s, is_pos)) = sorted_desc.get(i) {
+            if s != score {
+                break;
+            }
+            if is_pos {
+                gp += 1;
+            } else {
+                gn += 1;
+            }
+            i += 1;
+        }
+        Some((score, gp, gn))
+    })
+}
+
+/// The AUC numerator's contribution of one tie group: `gn (2 tp_above + gp)`, so that the sum over groups is
+/// twice the Mann-Whitney count of (positive, negative) pairs ranked correctly, ties counted half.
+fn auc_term(gn: usize, tp_above: usize, gp: usize) -> u128 {
+    gn as u128 * (2 * tp_above as u128 + gp as u128)
+}
+
+fn auc_from(numerator: u128, n_pos: usize, n_neg: usize) -> f64 {
+    numerator as f64 / (2.0 * n_pos as f64 * n_neg as f64)
+}
+
+/// The ROC sweep of [`RocSweep`] in O(n) over a decreasing sort.
+pub(crate) fn roc_sweep(sorted_desc: &[(f64, bool)], n_pos: usize, n_neg: usize) -> RocSweep {
+    let mut thresholds = vec![f64::INFINITY];
+    let mut tps = vec![0usize];
+    let mut fps = vec![0usize];
+    let (mut tp, mut fp) = (0usize, 0usize);
+    let mut numerator: u128 = 0;
+    let mut best = 0usize;
+    let mut best_j: i128 = 0;
+    for (score, gp, gn) in tie_groups(sorted_desc) {
+        numerator += auc_term(gn, tp, gp);
+        tp += gp;
+        fp += gn;
+        thresholds.push(score);
+        tps.push(tp);
+        fps.push(fp);
+        // Youden's J times n_pos n_neg, in integers so equal values tie exactly; `>=` in the decreasing walk
+        // keeps the lowest threshold among tied optima.
+        let j = tp as i128 * n_neg as i128 - fp as i128 * n_pos as i128;
+        if j >= best_j {
+            best_j = j;
+            best = thresholds.len() - 1;
+        }
+    }
+    RocSweep {
+        thresholds,
+        tp: tps,
+        fp: fps,
+        auc: auc_from(numerator, n_pos, n_neg),
+        best,
+    }
+}
+
+/// The AUC of [`roc_sweep`] without the curve.
+pub(crate) fn auc_sorted_desc(sorted_desc: &[(f64, bool)], n_pos: usize, n_neg: usize) -> f64 {
+    let mut tp = 0usize;
+    let mut numerator: u128 = 0;
+    for (_, gp, gn) in tie_groups(sorted_desc) {
+        numerator += auc_term(gn, tp, gp);
+        tp += gp;
+    }
+    auc_from(numerator, n_pos, n_neg)
+}
+
+/// Indices of the curve points kept under a cap of `m + 1` points: the first, the last and `best`, the rest
+/// evenly spaced by index. `m >= 2`; all points when there are at most `m + 1`.
+fn capped_indices(n_points: usize, best: usize, m: usize) -> Vec<usize> {
+    if n_points <= m + 1 {
+        return (0..n_points).collect();
+    }
+    let last = n_points - 1;
+    let mut idx: Vec<usize> = (0..=m)
+        .map(|i| ((i as u128 * last as u128 + m as u128 / 2) / m as u128) as usize)
+        .collect();
+    if let Err(pos) = idx.binary_search(&best) {
+        // best lies strictly between idx[pos - 1] and idx[pos]; replace the nearer interior neighbour
+        // (one of the two is interior because m >= 2).
+        let (lo, hi) = (pos - 1, pos);
+        let lo_ok = lo > 0;
+        let hi_ok = hi < m;
+        let pick = match (lo_ok, hi_ok) {
+            (true, true) => {
+                if best - idx[lo] <= idx[hi] - best {
+                    lo
+                } else {
+                    hi
+                }
+            }
+            (true, false) => lo,
+            _ => hi,
+        };
+        idx[pick] = best;
+    }
+    idx
+}
+
+/// Calculate the ROC curve, the AUC and Youden's optimal threshold, as pROC.
+///
+/// The rule is `score >= threshold`. The curve starts at `+inf` (nothing classified positive, the point (0, 0))
+/// and has one point per distinct score in decreasing order, each after its whole tie group is counted
+/// (ties are exact equality); k distinct scores give k + 1 points, the (fpr, tpr) pairs of pROC's `roc()`. The
+/// AUC is the Mann-Whitney statistic with half credit for ties over `n_pos n_neg` (pROC's `auc()`,
+/// `wilcox.test`'s W / (n1 n0)), computed from integer counts. Youden's J is compared in integers; among tied
+/// optima the lowest threshold is reported. `optimal_threshold` is the observed score that starts the optimal
+/// rule (pROC reports the midpoint below it). One sort, O(n log n).
 ///
 /// # Arguments
-/// * `predictions` - Predicted probabilities (0-1 scale)
-/// * `actual` - Actual binary labels (0/1 or any two distinct values)
-/// * `n_thresholds` - Number of threshold points for ROC curve (default: 100)
+/// * `predictions` - Scores, larger meaning more likely positive; any finite scale
+/// * `actual` - Labels with exactly two distinct values; the larger is the positive class
+/// * `n_thresholds` - Cap on the returned curve: `None` returns every point; `Some(m)` (m >= 2) at most m + 1
+///   points, always keeping the `+inf` point, the last point and the optimum, the rest evenly spaced by index.
+///   The AUC and the optimum always use every point.
+///
+/// # Errors
+/// Unequal lengths, an empty input, NaN or infinite scores, NaN or infinite labels, anything but two label
+/// values, and `n_thresholds` below 2.
 pub fn roc_auc(
     predictions: &[f64],
     actual: &[f64],
     n_thresholds: Option<usize>,
 ) -> Result<RocAucResult, String> {
-    if predictions.len() != actual.len() {
-        return Err("Predictions and actual values must have the same length".to_string());
-    }
-
-    if predictions.is_empty() {
-        return Err("Need at least one sample".to_string());
-    }
-
-    if predictions.iter().any(|p| p.is_nan()) {
-        return Err(
-            "predictions contain NaN; ROC/AUC needs a score for every observation".to_string(),
-        );
-    }
-
-    if actual.iter().any(|v| !v.is_finite()) {
-        return Err("actual labels must be finite (two classes)".to_string());
-    }
-
-    // Determine positive and negative class values
-    let mut unique_values: Vec<f64> = actual.to_vec();
-    unique_values.sort_by(f64::total_cmp);
-    unique_values.dedup();
-
-    if unique_values.len() != 2 {
+    if let Some(m) = n_thresholds
+        && m < 2
+    {
         return Err(format!(
-            "ROC requires exactly 2 classes, found {}",
-            unique_values.len()
+            "n_thresholds must be at least 2 (the curve keeps its first point, its last point and the optimum), got {m}"
         ));
     }
-
-    let neg_class = unique_values[0];
-    let pos_class = unique_values[1];
-
-    // Convert actual to binary (0/1)
-    let y_true: Vec<i32> = actual
+    let (pairs, n_positive, n_negative) = roc_inputs(predictions, actual)?;
+    let sweep = roc_sweep(&pairs, n_positive, n_negative);
+    let keep = match n_thresholds {
+        Some(m) => capped_indices(sweep.thresholds.len(), sweep.best, m),
+        None => (0..sweep.thresholds.len()).collect(),
+    };
+    let tpr = keep
         .iter()
-        .map(|&v| if (v - pos_class).abs() < 1e-10 { 1 } else { 0 })
+        .map(|&i| sweep.tp[i] as f64 / n_positive as f64)
         .collect();
+    let fpr = keep
+        .iter()
+        .map(|&i| sweep.fp[i] as f64 / n_negative as f64)
+        .collect();
+    let thresholds = keep.iter().map(|&i| sweep.thresholds[i]).collect();
 
-    let n_positive = y_true.iter().filter(|&&y| y == 1).count();
-    let n_negative = y_true.len() - n_positive;
-
-    if n_positive == 0 || n_negative == 0 {
-        return Err("Need at least one positive and one negative sample".to_string());
-    }
-
-    // Generate thresholds
-    let n_thresh = n_thresholds.unwrap_or(100);
-    let mut thresholds: Vec<f64> = (0..=n_thresh).map(|i| i as f64 / n_thresh as f64).collect();
-
-    // Also add unique prediction values as thresholds for more accurate curve
-    let mut pred_thresholds: Vec<f64> = predictions.to_vec();
-    pred_thresholds.sort_by(f64::total_cmp);
-    thresholds.extend(pred_thresholds);
-    thresholds.sort_by(f64::total_cmp);
-    thresholds.dedup();
-
-    let mut tpr = Vec::with_capacity(thresholds.len());
-    let mut fpr = Vec::with_capacity(thresholds.len());
-    let mut best_j = f64::NEG_INFINITY;
-    let mut best_threshold = 0.5;
-    let mut best_metrics = None;
-
-    for &threshold in &thresholds {
-        let mut tp = 0;
-        let mut tn = 0;
-        let mut fp = 0;
-        let mut fn_count = 0;
-
-        for (pred, &actual_label) in predictions.iter().zip(y_true.iter()) {
-            let pred_label = if *pred >= threshold { 1 } else { 0 };
-
-            match (actual_label, pred_label) {
-                (1, 1) => tp += 1,
-                (0, 0) => tn += 1,
-                (0, 1) => fp += 1,
-                (1, 0) => fn_count += 1,
-                _ => {}
-            }
-        }
-
-        let sensitivity = if n_positive > 0 {
-            tp as f64 / n_positive as f64
-        } else {
-            0.0
-        };
-        let specificity = if n_negative > 0 {
-            tn as f64 / n_negative as f64
-        } else {
-            0.0
-        };
-        let precision = if tp + fp > 0 {
-            tp as f64 / (tp + fp) as f64
-        } else {
-            0.0
-        };
-        let f1 = if precision + sensitivity > 0.0 {
-            2.0 * precision * sensitivity / (precision + sensitivity)
-        } else {
-            0.0
-        };
-        let accuracy = (tp + tn) as f64 / (tp + tn + fp + fn_count) as f64;
-        let youden_j = sensitivity + specificity - 1.0;
-
-        tpr.push(sensitivity);
-        fpr.push(1.0 - specificity);
-
-        if youden_j > best_j {
-            best_j = youden_j;
-            best_threshold = threshold;
-            best_metrics = Some(ClassificationMetrics {
-                tp,
-                tn,
-                fp,
-                fn_count,
-                sensitivity,
-                specificity,
-                precision,
-                f1_score: f1,
-                accuracy,
-                youden_j,
-            });
-        }
-    }
-
-    // Calculate AUC using trapezoidal rule
-    // Sort by FPR to ensure proper integration
-    let mut points: Vec<(f64, f64)> = fpr.iter().cloned().zip(tpr.iter().cloned()).collect();
-    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-10 && (a.1 - b.1).abs() < 1e-10);
-
-    let mut auc = 0.0;
-    for i in 1..points.len() {
-        let dx = points[i].0 - points[i - 1].0;
-        let avg_y = (points[i].1 + points[i - 1].1) / 2.0;
-        auc += dx * avg_y;
-    }
+    let (tp, fp) = (sweep.tp[sweep.best], sweep.fp[sweep.best]);
+    let (tn, fn_count) = (n_negative - fp, n_positive - tp);
+    let sensitivity = tp as f64 / n_positive as f64;
+    let specificity = tn as f64 / n_negative as f64;
+    let precision = if tp + fp > 0 {
+        tp as f64 / (tp + fp) as f64
+    } else {
+        0.0
+    };
+    let f1_score = if precision + sensitivity > 0.0 {
+        2.0 * precision * sensitivity / (precision + sensitivity)
+    } else {
+        0.0
+    };
+    let accuracy = (tp + tn) as f64 / (n_positive + n_negative) as f64;
 
     Ok(RocAucResult {
         tpr,
         fpr,
         thresholds,
-        auc,
-        optimal_threshold: best_threshold,
-        optimal_metrics: best_metrics.unwrap_or(ClassificationMetrics {
-            tp: 0,
-            tn: 0,
-            fp: 0,
-            fn_count: 0,
-            sensitivity: 0.0,
-            specificity: 0.0,
-            precision: 0.0,
-            f1_score: 0.0,
-            accuracy: 0.0,
-            youden_j: 0.0,
-        }),
+        auc: sweep.auc,
+        optimal_threshold: sweep.thresholds[sweep.best],
+        optimal_metrics: ClassificationMetrics {
+            tp,
+            tn,
+            fp,
+            fn_count,
+            sensitivity,
+            specificity,
+            precision,
+            f1_score,
+            accuracy,
+            youden_j: sensitivity + specificity - 1.0,
+        },
         n_positive,
         n_negative,
     })
@@ -677,7 +792,7 @@ pub fn cart_partial_dependence(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -949,6 +1064,236 @@ mod tests {
         assert!(e.contains("labels"), "{e}");
         let r = roc_auc(&[0.1, 0.3, 0.8, 0.4], &[0.0, 0.0, 1.0, 1.0], Some(10)).unwrap();
         assert!((r.auc - 1.0).abs() < 1e-12);
+    }
+
+    /// The four score vectors of `ml_roc_small` (set 1-4: ml91, ml91u, ml92, ml93) from the case's dataset.
+    pub(crate) fn roc_small_sets(
+        ds: &crate::data::Dataset,
+    ) -> Vec<(&'static str, Vec<f64>, Vec<f64>)> {
+        use crate::data::columns::{ColumnRequest, NaPolicy};
+        let c = ColumnRequest::new(ds.df())
+            .numerics(&["set", "pred", "label"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let (set, pred, label) = (c.numeric("set"), c.numeric("pred"), c.numeric("label"));
+        ["ml91", "ml91u", "ml92", "ml93"]
+            .iter()
+            .enumerate()
+            .map(|(k, &name)| {
+                let rows: Vec<usize> = (0..set.len())
+                    .filter(|&i| set[i] == (k + 1) as f64)
+                    .collect();
+                (
+                    name,
+                    rows.iter().map(|&i| pred[i]).collect(),
+                    rows.iter().map(|&i| label[i]).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The `ml_roc_ties` columns: class (3/7, loaded as Int64), tied probabilities, integer scores.
+    pub(crate) fn roc_ties_columns(ds: &crate::data::Dataset) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        use crate::data::columns::{ColumnRequest, NaPolicy};
+        let c = ColumnRequest::new(ds.df())
+            .numerics(&["cls", "s_prob", "s_lin"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        (
+            c.numeric("cls").to_vec(),
+            c.numeric("s_prob").to_vec(),
+            c.numeric("s_lin").to_vec(),
+        )
+    }
+
+    fn check_roc(c: &mut p2a_validation::Check<'_>, key: &str, r: &RocAucResult, n: usize) {
+        use p2a_validation::Tol;
+        c.scalar(&format!("{key}_auc"), r.auc, Tol::coef(n))
+            .vector(&format!("{key}_tpr"), &r.tpr, Tol::coef(n))
+            .vector(&format!("{key}_fpr"), &r.fpr, Tol::coef(n))
+            .scalar(
+                &format!("{key}_best_sensitivity"),
+                r.optimal_metrics.sensitivity,
+                Tol::coef(n),
+            )
+            .scalar(
+                &format!("{key}_best_specificity"),
+                r.optimal_metrics.specificity,
+                Tol::coef(n),
+            )
+            .scalar(
+                &format!("{key}_best_threshold"),
+                r.optimal_threshold,
+                Tol::exact(),
+            );
+    }
+
+    /// ML-91. pROC on the findings' score vectors. Before: ml91 AUC 0.6667 (the tie at 1.0 lost the first
+    /// triangle), curves ascending with the 0.01 grid added.
+    #[test]
+    fn test_validate_roc_auc_small() {
+        let (case, ds) = crate::test_support::load_case("ml_roc_small");
+        let mut c = p2a_validation::Check::new(&case);
+        for (key, pred, label) in roc_small_sets(&ds) {
+            let r = roc_auc(&pred, &label, Some(100)).unwrap();
+            check_roc(&mut c, key, &r, pred.len());
+        }
+        c.finish();
+    }
+
+    /// ML-91. 240 rows, classes 3/7; 54 rows tie at 1.0 across both classes. Before: prob AUC about 0.7688.
+    #[test]
+    fn test_validate_roc_auc_ties() {
+        let (case, ds) = crate::test_support::load_case("ml_roc_ties");
+        let (cls, s_prob, s_lin) = roc_ties_columns(&ds);
+        let mut c = p2a_validation::Check::new(&case);
+        check_roc(&mut c, "prob", &roc_auc(&s_prob, &cls, None).unwrap(), 240);
+        check_roc(&mut c, "lin", &roc_auc(&s_lin, &cls, None).unwrap(), 240);
+        c.finish();
+    }
+
+    /// Seeded score/label draws with heavy ties: n in {2, 7, 60, 500}, scores from a 5-value grid or a
+    /// rounded normal.
+    pub(crate) fn tied_draws() -> Vec<(Vec<f64>, Vec<f64>)> {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        use rand_distr::{Distribution, Normal};
+        let mut rng = StdRng::seed_from_u64(20261115);
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let mut out = Vec::new();
+        for draw in 0..50 {
+            let n = [2, 7, 60, 500][draw % 4];
+            loop {
+                let label: Vec<f64> = (0..n)
+                    .map(|_| if rng.gen_bool(0.4) { 1.0 } else { 0.0 })
+                    .collect();
+                if label.iter().all(|&l| l == label[0]) {
+                    continue;
+                }
+                let pred: Vec<f64> = label
+                    .iter()
+                    .map(|&l| {
+                        if draw % 2 == 0 {
+                            [0.0, 0.25, 0.5, 0.75, 1.0][rng.gen_range(0..5usize)]
+                        } else {
+                            ((normal.sample(&mut rng) + 0.7 * l) * 10.0).round() / 10.0
+                        }
+                    })
+                    .collect();
+                out.push((pred, label));
+                break;
+            }
+        }
+        out
+    }
+
+    /// The sweep replaces a quadratic threshold loop: its AUC equals the naive pair count, and every curve
+    /// point's counts equal a direct count of `score >= threshold`.
+    #[test]
+    fn roc_auc_equals_the_pair_count_on_tied_scores() {
+        for (pred, label) in tied_draws() {
+            let r = roc_auc(&pred, &label, None).unwrap();
+            let pos: Vec<f64> = (0..pred.len())
+                .filter(|&i| label[i] == 1.0)
+                .map(|i| pred[i])
+                .collect();
+            let neg: Vec<f64> = (0..pred.len())
+                .filter(|&i| label[i] == 0.0)
+                .map(|i| pred[i])
+                .collect();
+            let mut twice = 0usize;
+            for &p in &pos {
+                for &q in &neg {
+                    twice += if p > q { 2 } else { usize::from(p == q) };
+                }
+            }
+            let naive = twice as f64 / (2.0 * pos.len() as f64 * neg.len() as f64);
+            assert!((r.auc - naive).abs() <= 1e-15, "{} vs {naive}", r.auc);
+            assert_eq!(r.thresholds[0], f64::INFINITY);
+            assert!(r.thresholds.windows(2).all(|w| w[0] > w[1]));
+            for (k, &t) in r.thresholds.iter().enumerate() {
+                let tp = pos.iter().filter(|&&p| p >= t).count();
+                let fp = neg.iter().filter(|&&q| q >= t).count();
+                assert_eq!(r.tpr[k], tp as f64 / pos.len() as f64);
+                assert_eq!(r.fpr[k], fp as f64 / neg.len() as f64);
+            }
+            assert_eq!(*r.tpr.last().unwrap(), 1.0);
+            assert_eq!(*r.fpr.last().unwrap(), 1.0);
+        }
+    }
+
+    /// pROC refuses infinite scores; before, they were accepted.
+    #[test]
+    fn roc_auc_refuses_infinite_scores() {
+        let e = roc_auc(&[0.1, f64::INFINITY, 0.3], &[0.0, 1.0, 1.0], None).unwrap_err();
+        assert!(e.contains("finite"), "{e}");
+        let e = roc_auc(&[0.1, f64::NEG_INFINITY, 0.3], &[0.0, 1.0, 1.0], None).unwrap_err();
+        assert!(e.contains("finite"), "{e}");
+    }
+
+    /// -0.0 and 0.0 are one tie group.
+    #[test]
+    fn roc_auc_groups_signed_zeros() {
+        let r = roc_auc(&[-0.0, 0.0, 0.5], &[1.0, 0.0, 1.0], None).unwrap();
+        assert_eq!(r.thresholds.len(), 3);
+        assert_eq!(r.tpr, vec![0.0, 0.5, 1.0]);
+        assert_eq!(r.fpr, vec![0.0, 0.0, 1.0]);
+        assert!((r.auc - 0.75).abs() < 1e-15);
+    }
+
+    /// ml93 has two tied Youden optima (thresholds 0.9 and 0.5); pROC lists 0.5 first, and so does p2a.
+    #[test]
+    fn roc_auc_reports_the_lowest_of_tied_optima() {
+        let pred = [0.5, 0.5, 0.5, 0.5, 0.2, 0.9];
+        let label = [1.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let r = roc_auc(&pred, &label, None).unwrap();
+        assert_eq!(r.optimal_threshold, 0.5);
+        assert_eq!(
+            (r.optimal_metrics.tp, r.optimal_metrics.fp),
+            (3, 2),
+            "the rule score >= 0.5"
+        );
+    }
+
+    /// `n_thresholds` caps the returned curve; the AUC and the optimum use every point. Before, `Some(10)`
+    /// returned the grid plus every score.
+    #[test]
+    fn roc_auc_caps_the_returned_points() {
+        let n = 1000;
+        let pred: Vec<f64> = (0..n)
+            .map(|i| ((i * 7919) % n) as f64 / n as f64 + 0.3 * (i % 2) as f64)
+            .collect();
+        let label: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+        let full = roc_auc(&pred, &label, None).unwrap();
+        assert!(full.thresholds.len() > 500);
+        for m in [2, 3, 10, 100] {
+            let r = roc_auc(&pred, &label, Some(m)).unwrap();
+            assert!(r.thresholds.len() <= m + 1, "{m}: {}", r.thresholds.len());
+            assert_eq!(r.thresholds[0], f64::INFINITY);
+            assert_eq!(
+                *r.thresholds.last().unwrap(),
+                *full.thresholds.last().unwrap()
+            );
+            assert_eq!((*r.tpr.last().unwrap(), *r.fpr.last().unwrap()), (1.0, 1.0));
+            assert!(r.thresholds.contains(&full.optimal_threshold));
+            assert!(r.thresholds.windows(2).all(|w| w[0] > w[1]));
+            assert_eq!(r.auc, full.auc);
+            assert_eq!(r.optimal_threshold, full.optimal_threshold);
+            assert_eq!(r.optimal_metrics.tp, full.optimal_metrics.tp);
+            assert_eq!(r.optimal_metrics.fp, full.optimal_metrics.fp);
+            // every returned point is a point of the full curve
+            for (k, t) in r.thresholds.iter().enumerate() {
+                let j = full.thresholds.iter().position(|u| u == t).unwrap();
+                assert_eq!((r.tpr[k], r.fpr[k]), (full.tpr[j], full.fpr[j]));
+            }
+        }
+        let small = roc_auc(&[0.1, 0.4, 0.35, 0.8], &[0.0, 0.0, 1.0, 1.0], Some(100)).unwrap();
+        assert_eq!(small.thresholds.len(), 5);
+        for m in [0, 1] {
+            let e = roc_auc(&pred, &label, Some(m)).unwrap_err();
+            assert!(e.contains("n_thresholds"), "{e}");
+        }
     }
 
     /// Importance ranks put NaN last; ties keep column order. Before, NaN compared equal: [0.2, NaN, 0.5, 0.1]
