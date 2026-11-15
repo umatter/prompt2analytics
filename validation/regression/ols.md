@@ -407,14 +407,16 @@ P2A_VALIDATION_VERBOSE=1 cargo test -p p2a-core --lib --no-default-features --fe
 
 ## Timing of step (T4)
 
-Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
-process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
-interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
-cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base f80b0131 and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+Synthetic data: x evenly spaced on [0, 10] with a small
 jitter, y = 3 sin(0.7 x) + noise.
 
 Backward from five noise candidates (two weak signals), AIC.
 
 | n = 100 | n = 1,000 | n = 10,000 |
 |---|---|---|
-| 273 -> 259 us (0.95x) | 0.99 -> 0.97 ms (0.98x) | 8.12 -> 8.36 ms (1.03x) |
+| 281 µs -> 264 µs (0.94x [0.94]) | 971 µs -> 976 µs (1.00x [1.00]) | 6.69 ms -> 6.83 ms (1.02x [1.04]) |

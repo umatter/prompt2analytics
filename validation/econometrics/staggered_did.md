@@ -383,10 +383,11 @@ Rscript validation/r/run.R --check          # did_cs_analytic and did_cs_covaria
 
 ## Timing (against v0.5.0)
 
-Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
-the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
-(load average 38-39), so ratios within about 10% are noise.
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; v0.5.0 (`f80b0131`) and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 Rows are panels of N = n / 10 units over 10 periods, cohorts 4/6/8/never; each side runs its own
 defaults (`min_obs_per_cell = 1` on both). At n = 100 (10 units, 2 never treated) the new code
 refuses the never-treated comparison as did does (the never-treated group is too small), so that
@@ -394,15 +395,15 @@ column has no ratio; the DR row at n = 100 fails overlap on both sides.
 
 | Fit | n = 100 | 1,000 | 10,000 |
 |---|---|---|---|
-| never treated, OR, `bootstrap: 0` | refused | 1.134 (base 1,022, new 1,159 µs) | 1.070 |
-| not yet treated, OR, `bootstrap: 0` | 1.140 (base 157, new 179 µs) | 1.151 (base 1,080, new 1,243 µs) | 1.080 |
-| never treated, OR, `bootstrap: 999` | refused | 0.942 | 0.915 |
-| never treated, DR, `x1 + x2`, `bootstrap: 0` | overlap fails | 0.972 | 1.153 (base 26.4, new 30.5 ms) |
+| never treated, OR, `bootstrap: 0` | refused | 1.31 [1.31] (base 669 µs, new 875 µs) | 1.12 [1.15] (base 8.56 ms, new 9.62 ms) |
+| not yet treated, OR, `bootstrap: 0` | 1.04 [1.04] (base 105 µs, new 109 µs) | 1.35 [1.38] (base 736 µs, new 994 µs) | 1.08 [1.12] (base 9.58 ms, new 10.3 ms) |
+| never treated, OR, `bootstrap: 999` | refused | 1.01 [0.99] | 1.00 [1.00] |
+| never treated, DR, `x1 + x2`, `bootstrap: 0` | overlap fails | 1.09 [1.09] | 1.07 [1.08] (base 17.8 ms, new 19.1 ms) |
 
-Four rows are above 1.10x and go to the user: the analytic fits now run did's sample rules (the
+Three rows are above 1.10x (never treated at 1,000 and 10,000, not yet treated at 1,000) and go to the user: the analytic fits now run did's sample rules (the
 first-period and small-group checks, the duplicate check) and, with the varying base, compute
 each pre-treatment cell against its own base, plus the group-weighted overall; the bootstrap is
-faster because cells no longer carry blocker lists. Not re-measured on an idle machine.
+no slower because cells no longer carry blocker lists.
 
 ## References
 

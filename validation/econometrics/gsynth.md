@@ -124,27 +124,29 @@ Tests (p2a-core, `econometrics::synth::gsynth_tests`): `test_na_gsynth_missing_c
 
 ## Timing
 
-Release builds (`--no-default-features --features ci`) of this tree and of `ff8e7559` (before the
-rewrite to Xu's estimator), one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five
-interleaved processes per side, each the median of 41-401 calls after 10 warm-ups; median of
-medians; 2026-11-14, on a machine under load (load average 38-44), so ratios within about 10% are
-noise. The 50 x 20 panel is the criterion benchmark's generator with 40 control and 10 treated units
+Release builds (`--no-default-features --features ci`) of this tree and of `ff8e7559` (before the rewrite
+to Xu's estimator); one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+The 50 x 20 panel is the criterion benchmark's generator with 40 control and 10 treated units
 over 20 periods. The base computed a different estimate on these panels: power iteration on the
 pre-periods, cross-validation on in-sample fit (CAUS-43).
 
-| Fit | panel | base / new (ms) | new / base |
+| Fit | panel | base / new (ms) | new / base [min] |
 |---|---|---|---|
-| IFE r = 1, unit effects, no covariates (the call of criterion `new_methods_benchmarks`, `gsynth`) | 180 / 500 / 1,500 cells | 0.089 / 0.089; 0.209 / 0.239; 0.563 / 0.545 | 1.00 / 1.14 / 0.97 |
-| IFE r = 2, two-way effects, no covariates | `gsynth_simdata` (1,500 cells) / 50 x 20 panel | 0.520 / 0.591; 0.475 / 0.380 | 1.14 / 0.80 |
-| LOO CV at a single r (`n_factors` = `max_factors` = 2), no covariates; this tree runs LOO, the base the plain fit | `gsynth_simdata` / 50 x 20 panel | 0.519 / 0.603; 0.478 / 0.379 | 1.16 / 0.79 |
-| LOO CV over r = 0..2, no covariates | `gsynth_simdata` / 50 x 20 panel | 1.93 / 0.67; 1.56 / 0.45 | 0.35 / 0.29 |
-| LOO CV over r = 0..5, no covariates | `gsynth_simdata` / 50 x 20 panel | 6.63 / 0.80; 5.30 / 0.57 | 0.12 / 0.11 |
-| default (LOO CV over r = 0..10), no covariates | `gsynth_simdata` / 50 x 20 panel | 24.8 / 1.11; 12.8 / 0.73 | 0.05 / 0.06 |
-| IFE r = 2, covariates X1, X2 | `gsynth_simdata` | 0.650 / 4.72 | 7.27 |
+| IFE r = 1, unit effects, no covariates (the call of criterion `new_methods_benchmarks`, `gsynth`) | 180 / 500 / 1,500 cells | 0.050 / 0.053; 0.116 / 0.137; 0.304 / 0.300 | 1.06 [1.06] / 1.18 [1.20] / 0.99 [1.00] |
+| IFE r = 2, two-way effects, no covariates | `gsynth_simdata` (1,500 cells) / 50 x 20 panel | 0.282 / 0.331; 0.254 / 0.207 | 1.17 [1.17] / 0.81 [0.83] |
+| LOO CV at a single r (`n_factors` = `max_factors` = 2), no covariates; this tree runs LOO, the base the plain fit | `gsynth_simdata` / 50 x 20 panel | 0.282 / 0.340; 0.256 / 0.215 | 1.20 [1.20] / 0.84 [0.84] |
+| LOO CV over r = 0..2, no covariates | `gsynth_simdata` / 50 x 20 panel | 1.041 / 0.372; 0.812 / 0.244 | 0.36 [0.35] / 0.30 [0.31] |
+| LOO CV over r = 0..5, no covariates | `gsynth_simdata` / 50 x 20 panel | 3.659 / 0.442; 2.647 / 0.313 | 0.12 [0.12] / 0.12 [0.12] |
+| default (LOO CV over r = 0..10), no covariates | `gsynth_simdata` / 50 x 20 panel | 13.785 / 0.620; 6.653 / 0.393 | 0.04 [0.04] / 0.06 [0.06] |
+| IFE r = 2, covariates X1, X2 | `gsynth_simdata` | 0.357 / 2.973 | 8.33 [8.39] |
 
-The fits with covariates cost 7.27x, which is accepted: that row is the iteration gsynth runs and
-the base did not. Three rows without covariates are above 1.10x on `gsynth_simdata` and the
-500-cell panel (1.14, 1.14, 1.16), signed off on 2026-11-14 (rule 5); the same calls on the other panels
+The fits with covariates cost 8.33x: that row is the iteration gsynth runs and the base did not
+(accepted at 7.62x in Tier 3; the quiet ratio is above that and goes to the user). Three rows without covariates are above 1.10x on `gsynth_simdata` and the
+500-cell panel (1.14, 1.14, 1.16 on the loaded run; 1.18, 1.17, 1.20 on the quiet re-time), signed off on
+2026-11-14 (rule 5) at the loaded figures, the quiet ones above them going to the user; the same calls on the other panels
 are at or below 1.0x.
 
 The fit with no covariates costs more than the base because the factors come from a full symmetric

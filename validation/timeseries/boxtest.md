@@ -159,7 +159,9 @@ autocorrelations with `na.action = na.pass`.
 *Benchmarks run on 2026-01-19. Rust benchmarks via Criterion, R benchmarks via system.time().*
 
 The dataset wrapper (`run_box_test`) reads its column through the NA-aware extractor since Tier 4,
-which costs 2.2-2.5x of v0.5.0's raw cast at every n; signed off on 2026-11-14 (rule 5).
+which costs 2.2-2.5x of v0.5.0's raw cast at every n; signed off on 2026-11-14 (rule 5). Quiet re-time
+(2026-11-15, lag 10): 1.84 / 2.25 / 1.52x at n = 100 / 1,000 / 10,000 (2.37 µs -> 4.35 µs, 11.5 µs -> 25.9 µs,
+200 µs -> 304 µs).
 
 ## References
 

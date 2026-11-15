@@ -254,20 +254,22 @@ R-pinned through the case `bacon_twfe` above.
 
 ## Timing (against v0.5.0)
 
-Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
-the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
-(load average 38-39), so ratios within about 10% are noise.
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; v0.5.0 (`f80b0131`) and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 Panels of n / 10 units over periods 1-10: cohorts 4/6/8, never treated, and units treated from
 period 1 (always treated in the new code, a cohort at 1 in the old).
 
 | `bacon_decomp` | n = 100 | 1,000 | 10,000 |
 |---|---|---|---|
-| base / new (µs) | 45.4 / 49.9 | 368 / 398 | 4,615 / 4,940 |
-| new / base | 1.10 | 1.08 | 1.07 |
+| base / new (µs) | 30.4 / 33.5 | 250 / 277 | 3,359 / 3,598 |
+| new / base [min] | 1.10 [1.10] | 1.11 [1.10] | 1.07 [1.05] |
 
 The new code checks that the treatment is 0/1 and absorbing (one sort of the rows) and fits the
-Later vs Always Treated comparisons the old code did not.
+Later vs Always Treated comparisons the old code did not. The rows at n = 100 and 1,000 are at
+1.10-1.11x (nine rounds) and go to the user (rule 5).
 
 ## Usage Example (Rust)
 

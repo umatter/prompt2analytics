@@ -64,22 +64,25 @@ rank by Gram-Schmidt instead of adding a ridge, and the same path is 0.46x of th
 
 ### After the span and penalty change (against v0.5.0)
 
-`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
-row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
-average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
-the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
-"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1.
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0); quiet re-time, 2026-11-15 (this tree at
+`2d0bb8b6`): one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base and this tree interleaved per row
+with the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to about 0.8
+s per process); cells are the median of the process medians over five rounds (nine or ten for rows within 1.05-1.15x);
+1-minute load average 1.0-3.0. "ratio" is this tree over the base, "min ratio" the ratio of the minima.
+Friedman-1 data, p = 5, noise sd 1.
 
 | `fast` | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| default (fast for n > 200) | 100 | 2.06 | 2.99 | 1.45 | 1.45 |
-|  | 1,000 | 128 | 145 | 1.14 | 0.98 |
-|  | 10,000 | 1,446 | 1,449 | 1.00 | 1.01 |
-| `Some(false)` | 100 | 2.08 | 2.98 | 1.43 | 1.46 |
-|  | 1,000 | 658 | 1,640 | 2.49 | 2.60 |
-|  | 10,000 | 47,458 | 86,130 | 1.81 | 1.87 |
+| default (fast for n > 200) | 100 | 2.11 | 3.14 | 1.48 | 1.48 |
+|  | 1,000 | 78.2 | 115 | 1.47 | 1.47 |
+|  | 10,000 | 1,104 | 1,243 | 1.12 | 1.13 |
+| `Some(false)` | 100 | 2.12 | 3.14 | 1.48 | 1.48 |
+|  | 1,000 | 535 | 895 | 1.67 | 1.67 |
+|  | 10,000 | 39,988 | 74,301 | 1.86 | 1.86 |
 
-The slower rows come from Friedman's spans, signed off on 2026-11-14 (rule 5) as the price of earth's defaults: at n = 100
+The slower rows come from Friedman's spans, signed off on 2026-11-14 (rule 5) as the price of earth's defaults (at
+the loaded run's 1.45 / 1.14x default and 2.49 / 1.81x without fast mode; the quiet default at n = 1,000 (1.47x) and
+at n = 10,000 (1.12x) and fast mode off at n = 10,000 (1.86x) are above those figures and go to the user): at n = 100
 (no fast mode) each predictor has 17 instead of 11 candidate knots, and without fast mode 164 / 1,426 instead of
 98 / 768 at n = 1,000 / 10,000; the smaller default penalty (2) can also lengthen the forward pass. Fast mode keeps
 `fast_k` knots per predictor in both trees, so its cost at n = 10,000 is unchanged.

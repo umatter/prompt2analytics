@@ -107,31 +107,34 @@ The tests check DGP recovery only, and no number is compared with Cubist output.
 
 ## Wall-clock
 
-`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
-row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
-average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
-the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
-"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. No R timing (Cubist is not installed).
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0); quiet re-time, 2026-11-15 (this tree at
+`2d0bb8b6`): one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base and this tree interleaved per row
+with the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to about 0.8
+s per process); cells are the median of the process medians over five rounds (nine or ten for rows within 1.05-1.15x);
+1-minute load average 1.0-3.0. "ratio" is this tree over the base, "min ratio" the ratio of the minima.
+Friedman-1 data, p = 5, noise sd 1. No R timing (Cubist is not installed).
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| fit, defaults | 100 | 0.47 | 0.48 | 1.03 | 0.99 |
-|  | 1,000 | 7.29 | 7.51 | 1.03 | 1.03 |
-|  | 10,000 | 71.8 | 72.5 | 1.01 | 1.20 |
-| fit, `committees = 5` | 100 | 2.50 | 2.54 | 1.02 | 1.03 |
-|  | 1,000 | 37.0 | 39.8 | 1.08 | 1.02 |
-|  | 10,000 | 380 | 387 | 1.02 | 0.99 |
-| fit, `neighbors = 5` (leave-one-out training pass) | 100 | 1.43 | 1.02 | 0.71 | 0.73 |
-|  | 1,000 | 111 | 52.3 | 0.47 | 0.46 |
-|  | 10,000 | 11,425 | 4,278 | 0.37 | 0.38 |
-| `cubist_predict`, 1,000 new rows, `neighbors = 5` | 100 | 8.93 | 4.83 | 0.54 | 0.54 |
-|  | 1,000 | 101 | 41.3 | 0.41 | 0.40 |
-|  | 10,000 | 1,134 | 397 | 0.35 | 0.36 |
+| fit, defaults | 100 | 0.216 | 0.246 | 1.14 | 1.14 |
+|  | 1,000 | 4.66 | 4.73 | 1.01 | 1.01 |
+|  | 10,000 | 47.2 | 46.4 | 0.98 | 0.99 |
+| fit, `committees = 5` | 100 | 1.39 | 1.64 | 1.18 | 1.19 |
+|  | 1,000 | 23.8 | 23.7 | 0.99 | 0.99 |
+|  | 10,000 | 245 | 236 | 0.96 | 0.96 |
+| fit, `neighbors = 5` (leave-one-out training pass) | 100 | 0.804 | 0.519 | 0.65 | 0.64 |
+|  | 1,000 | 67.7 | 27.3 | 0.40 | 0.41 |
+|  | 10,000 | 6,909 | 2,228 | 0.32 | 0.32 |
+| `cubist_predict`, 1,000 new rows, `neighbors = 5` | 100 | 5.58 | 2.57 | 0.46 | 0.46 |
+|  | 1,000 | 62.8 | 21.7 | 0.34 | 0.34 |
+|  | 10,000 | 698 | 213 | 0.30 | 0.31 |
 
 The neighbour rows are faster because the k nearest cases are selected in linear time instead of sorting every
 training case per prediction. Peak RSS of one `neighbors = 5` fit at n = 10,000 (`/usr/bin/time -v`, whole process):
-6.4 MB base, 7.1 MB this tree (1.11x of a small total: the result now keeps the n model predictions of the
+6.5 MB base, 6.8 MB this tree on the quiet re-time (median of three; 7.1 MB, 1.11x, on the loaded run; a small total: the result now keeps the n model predictions of the
 training rows and the p column ranges for the neighbour step, and the leave-one-out pass holds a distance buffer
 of n entries). Cubist itself changed by two lines between v0.5.0 and the base of this change, but the OLS solve
 its node models call (`normal_equations_inverse`) changed in between too, so these rows include that change as well
-as Cubist's own. The fit rows above 1.1x by the minimum and the peak RSS row were signed off on 2026-11-14 (rule 5).
+as Cubist's own. The fit rows above 1.1x by the minimum on the loaded run and the peak RSS row were signed off on 2026-11-14 (rule 5);
+on the quiet re-time those rows are at 0.96-1.01x, and the n = 100 fits (1.14x defaults,
+1.18x with five committees) are above 1.1x and go to the user.

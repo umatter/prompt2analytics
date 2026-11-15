@@ -107,40 +107,41 @@ planning gaps 1.2e-15 iterative, 1.3e-10 / 6.3e-10 CUE, 1.8e-11 / 6.9e-10 normal
 
 ## Timing
 
-Release builds of three trees: `ff8e7559` (before the GMM rework), v0.5.0 (`f80b0131`) and this
-version. The timing harness fits linear IV with q = 5 instruments and k = 4 coefficients on simulated
-data at n = 100, 1,000 and 10,000, on one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), in nine rounds
-that interleave the three builds. Each round reports the median of 41 calls (21 at n = 10,000) after
-one warm-up call; the table gives the median of the nine medians. The run shared the machine with
-other builds (load average 33-36 on 12 logical CPUs), so ratios within about 0.05 of 1 are noise. In
-`ff8e7559` the MDS rows are its `IID` setting, which summed `z z' e^2`, the MDS form.
+Release builds of three trees: `ff8e7559` (before the GMM rework), v0.5.0 (`f80b0131`) and this version.
+The timing harness fits linear IV with q = 5 instruments and k = 4 coefficients on simulated data at n =
+100, 1,000 and 10,000. Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): one core (`taskset -c 2`,
+`RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the three builds interleaved per row with the order rotated per
+round, each process the median of its calls after a warm-up (calls calibrated to about 0.8 s per
+process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x), the ratio of
+the minima in brackets; 1-minute load average 1.0-3.0. In `ff8e7559` the MDS rows are its `IID` setting,
+which summed `z z' e^2`, the MDS form.
 
-| Fit | n | `ff8e7559` µs | v0.5.0 µs | new µs | new / `ff8e7559` | new / v0.5.0 |
+| Fit | n | `ff8e7559` µs | v0.5.0 µs | new µs | new / `ff8e7559` [min] | new / v0.5.0 [min] |
 |---|---|---|---|---|---|---|
-| one-step, identity W (`vcov = Fixed`) | 100 | 15.5 | 14.7 | 14.3 | 0.92 | 0.97 |
-| one-step, identity W (`vcov = Fixed`) | 1,000 | 52.8 | 46.0 | 46.7 | 0.88 | 1.02 |
-| one-step, identity W (`vcov = Fixed`) | 10,000 | 1,662 | 920.8 | 916.8 | 0.55 | 1.00 |
-| two-step MDS (signed off 2026-11-13) | 100 | 24.1 | 31.4 | 30.2 | 1.25 | 0.96 |
-| two-step MDS | 1,000 | 111.6 | 90.2 | 88.9 | 0.80 | 0.99 |
-| two-step MDS | 10,000 | 2,254 | 1,420 | 1,404 | 0.62 | 0.99 |
-| iterative MDS | 100 | 126.5 | 95.4 | 91.2 | 0.72 | 0.96 |
-| iterative MDS | 1,000 | 307.2 | 142.8 | 140.7 | 0.46 | 0.99 |
-| iterative MDS | 10,000 | 4,128 | 2,150 | 2,071 | 0.50 | 0.96 |
-| two-step IID | 100 | 24.7 | 27.3 | 26.2 | 1.06 | 0.96 |
-| two-step IID | 1,000 | 110.7 | 66.4 | 65.4 | 0.59 | 0.99 |
-| two-step IID | 10,000 | 2,286 | 1,636 | 1,652 | 0.72 | 1.01 |
-| two-step HAC | 100 | 48.5 | 52.1 | 50.4 | 1.04 | 0.97 |
-| two-step HAC | 1,000 | 507.3 | 419.2 | 402.7 | 0.79 | 0.96 |
-| two-step HAC | 10,000 | 8,866 | 5,159 | 5,137 | 0.58 | 1.00 |
-| iterative HAC | 100 | 926.7 | 613.3 | 592.2 | 0.64 | 0.97 |
-| iterative HAC | 1,000 | 1,688 | 697.8 | 680.8 | 0.40 | 0.98 |
-| iterative HAC | 10,000 | 29,525 | 8,980 | 8,886 | 0.30 | 0.99 |
-| CUE MDS (accepted as a correctness change) | 100 | 126.5 | 390.3 | 373.5 | 2.95 | 0.96 |
-| CUE MDS (accepted as a correctness change) | 1,000 | 305.1 | 664.2 | 648.3 | 2.13 | 0.98 |
-| CUE MDS (accepted as a correctness change) | 10,000 | 4,030 | 8,399 | 8,843 | 2.19 | 1.05 |
-| CUE HAC | 100 | 903.3 | 476.8 | 459.6 | 0.51 | 0.96 |
-| CUE HAC | 1,000 | 1,732 | 1,557 | 1,479 | 0.85 | 0.95 |
-| CUE HAC | 10,000 | 30,524 | 27,340 | 28,696 | 0.94 | 1.05 |
+| one-step, identity W (`vcov = Fixed`) | 100 | 39.8 | 38.1 | 38.5 | 0.97 [0.96] | 1.01 [1.00] |
+| one-step, identity W (`vcov = Fixed`) | 1,000 | 212 | 208 | 211 | 1.00 [0.99] | 1.01 [1.01] |
+| one-step, identity W (`vcov = Fixed`) | 10,000 | 2,501 | 2,556 | 2,571 | 1.03 [1.03] | 1.01 [1.00] |
+| two-step MDS (signed off 2026-11-13) | 100 | 50.7 | 55.7 | 56.6 | 1.12 [1.12] | 1.01 [1.02] |
+| two-step MDS | 1,000 | 285 | 255 | 259 | 0.91 [0.91] | 1.02 [1.01] |
+| two-step MDS | 10,000 | 3,194 | 2,892 | 2,938 | 0.92 [0.92] | 1.02 [1.01] |
+| iterative MDS | 100 | 141 | 94.7 | 97.1 | 0.69 [0.70] | 1.03 [1.03] |
+| iterative MDS | 1,000 | 532 | 312 | 320 | 0.60 [0.61] | 1.02 [1.02] |
+| iterative MDS | 10,000 | 5,367 | 3,148 | 3,191 | 0.59 [0.60] | 1.01 [1.02] |
+| two-step IID | 100 | 50.6 | 52.5 | 53.4 | 1.05 [1.05] | 1.02 [1.01] |
+| two-step IID | 1,000 | 286 | 225 | 230 | 0.81 [0.81] | 1.02 [1.02] |
+| two-step IID | 10,000 | 3,194 | 2,485 | 2,525 | 0.79 [0.79] | 1.02 [1.01] |
+| two-step HAC | 100 | 79 | 76.4 | 77.4 | 0.98 [0.97] | 1.01 [1.02] |
+| two-step HAC | 1,000 | 702 | 458 | 461 | 0.66 [0.65] | 1.00 [1.00] |
+| two-step HAC | 10,000 | 10,874 | 5,701 | 5,761 | 0.53 [0.53] | 1.01 [1.01] |
+| iterative HAC | 100 | 602 | 233 | 236 | 0.39 [0.39] | 1.01 [1.01] |
+| iterative HAC | 1,000 | 2,701 | 843 | 856 | 0.32 [0.32] | 1.01 [1.02] |
+| iterative HAC | 10,000 | 36,175 | 9,020 | 9,150 | 0.25 [0.25] | 1.01 [1.01] |
+| CUE MDS (accepted as a correctness change) | 100 | 141 | 204 | 209 | 1.49 [1.52] | 1.03 [1.03] |
+| CUE MDS (accepted as a correctness change) | 1,000 | 531 | 580 | 592 | 1.11 [1.14] | 1.02 [1.02] |
+| CUE MDS (accepted as a correctness change) | 10,000 | 5,366 | 5,654 | 5,676 | 1.06 [1.04] | 1.00 [1.00] |
+| CUE HAC | 100 | 601 | 339 | 346 | 0.58 [0.58] | 1.02 [1.02] |
+| CUE HAC | 1,000 | 2,691 | 1,566 | 1,574 | 0.58 [0.58] | 1.00 [1.00] |
+| CUE HAC | 10,000 | 36,091 | 23,214 | 23,189 | 0.64 [0.65] | 1.00 [1.00] |
 
 Quiet re-time against v0.5.0 alone (2026-11-13; `ff8e7559` was not rebuilt). Release builds of
 v0.5.0 (`f80b0131`) and this version, one P core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), five
@@ -184,7 +185,8 @@ products) instead of the n x q moment matrix and a matrix product of its transpo
 matrix form to rounding. CUE's variance reuses the Omega and the weighting matrix it computed at the
 estimate.
 
-Two-step MDS at n = 100 costs 1.25x of `ff8e7559` (30.2 µs against 24.1 µs); signed off on 2026-11-13 (rule 5).
+Two-step MDS at n = 100 costs 1.12x of `ff8e7559` on the quiet re-time (56.6 µs against 50.7 µs; 1.25x
+on a loaded machine); signed off on 2026-11-13 (rule 5).
 The variance re-evaluates Omega at the two-step estimate, as `gmm::gmm` does (`ff8e7559` reused the
 first-step weighting matrix and did not match R's standard errors), so a two-step fit forms two
 moment covariances and inverts six small matrices (Z'Z, X'Z W Z'X twice, Omega twice,

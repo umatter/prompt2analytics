@@ -279,4 +279,6 @@ on the `descriptive_na` columns.
 
 **Timing:** the default Gaussian density is 1.66x / 1.42x of v0.5.0 at n = 100 / 1,000 and a 100-point
 grid 2.54x (R's binned FFT at every size); signed off on 2026-11-14 (rule 5;
-`validation/stats/new_methods.md`, "Rule 5").
+`validation/stats/new_methods.md`, "Rule 5"). Quiet re-time (2026-11-15): 1.70 / 1.49 / 1.10x at
+n = 100 / 1,000 / 10,000 (68.5 µs -> 116 µs, 105 µs -> 156 µs, 599 µs -> 661 µs); the Epanechnikov kernel
+0.84 / 0.11 / 0.05x; the rows above the signed figures go to the user.

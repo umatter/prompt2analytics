@@ -118,16 +118,34 @@ missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved per row with
+the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to
+about 0.8 s per process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x),
+the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
-| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| periodogram, spans (3, 3) | 100 | 10.3 | 9.9 | 0.96 |
-| periodogram, spans (3, 3) | 1,000 | 77.4 | 68.5 | 0.89 |
-| periodogram, spans (3, 3) | 10,000 | 1,100.0 | 965.2 | 0.88 |
-| AR spectrum, AIC order, 500 frequencies | 100 | 304.1 | 315.8 | 1.04 |
-| AR spectrum, AIC order, 500 frequencies | 1,000 | 3,274.4 | 3,269.5 | 1.00 |
-| AR spectrum, AIC order, 500 frequencies | 10,000 | 46,813.6 | 47,103.2 | 1.01 |
+| periodogram, raw | 100 | 4.5 | 4.3 | 0.95 [0.96] |
+| periodogram, raw | 1,000 | 35.8 | 33.6 | 0.94 [0.94] |
+| periodogram, raw | 10,000 | 471.7 | 515.3 | 1.09 [1.09] |
+| periodogram, spans (3, 3) | 100 | 5.6 | 5.4 | 0.95 [0.96] |
+| periodogram, spans (3, 3) | 1,000 | 45.8 | 40.9 | 0.89 [0.90] |
+| periodogram, spans (3, 3) | 10,000 | 643.4 | 585.9 | 0.91 [0.91] |
+| periodogram, spans (7, 9) | 100 | 5.6 | 5.5 | 0.99 [1.00] |
+| periodogram, spans (7, 9) | 1,000 | 45.8 | 41.7 | 0.91 [0.91] |
+| periodogram, spans (7, 9) | 10,000 | 642.5 | 585.1 | 0.91 [0.91] |
+| periodogram, default (fast padding) | 10,007 | 2,683.5 | 494.0 | 0.18 [0.18] |
+| AR spectrum, order 2 | 100 | 27.1 | 28.8 | 1.06 [1.06] |
+| AR spectrum, order 2 | 1,000 | 41.4 | 42.9 | 1.04 [1.04] |
+| AR spectrum, order 2 | 10,000 | 181.1 | 182.8 | 1.01 [1.01] |
+| AR spectrum, AIC order, 500 frequencies | 100 | 93.6 | 95.2 | 1.02 [1.02] |
+| AR spectrum, AIC order, 500 frequencies | 1,000 | 2,218.9 | 2,220.0 | 1.00 [1.00] |
+| AR spectrum, AIC order, 500 frequencies | 10,000 | 39,341.2 | 39,331.1 | 1.00 [1.00] |
+
+At n = 10,007 (a prime) the default now pads the series to a highly composite
+length as R's `fast = TRUE` (this tree with `fast = false`: 2.65 ms). Peak RSS of a
+spans (3, 3) periodogram at n = 10^6 (one call, whole process): 66.5 MB v0.5.0, 58.6 MB this tree.
 
 ## Performance Comparison
 

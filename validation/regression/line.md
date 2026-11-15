@@ -83,13 +83,15 @@ deletes them, and the dataset paths refuse them.
 
 ## Timing (T4)
 
-Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
-process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
-interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
-cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base f80b0131 and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+Synthetic data: x evenly spaced on [0, 10] with a small
 jitter, y = 3 sin(0.7 x) + noise.
 
 | iter | n = 100 | n = 1,000 | n = 10,000 |
 |---|---|---|---|
-| 1 | 7.3 -> 5.9 us (0.81x) | 64.9 -> 50.1 us (0.77x) | 1.51 -> 1.23 ms (0.82x) |
-| 3 | 10.3 -> 7.7 us (0.75x) | 105 -> 81 us (0.77x) | 2.28 -> 1.78 ms (0.78x) |
+| 1 | 7.92 µs -> 5.77 µs (0.73x [0.73]) | 62.5 µs -> 50.5 µs (0.81x [0.82]) | 1.33 ms -> 1.06 ms (0.80x [0.80]) |
+| 3 | 10.9 µs -> 7.54 µs (0.69x [0.69]) | 100 µs -> 76.8 µs (0.77x [0.76]) | 2.06 ms -> 1.57 ms (0.76x [0.76]) |

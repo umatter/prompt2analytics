@@ -135,12 +135,16 @@ print(result$par)
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved per row with
+the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to
+about 0.8 s per process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x),
+the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
-| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| x² + y², x + y ≥ 1, BFGS | 2 | 235,006.2 | 1,026.5 | < 0.01 |
-| (x - 1)² + (y - 2)², x, y ≥ 0, Nelder-Mead | 2 | 616.1 | 48.7 | 0.08 |
+| x² + y², x + y ≥ 1, BFGS | 2 | 133,269.2 | 559.1 | 0.00 [0.00] |
+| (x - 1)² + (y - 2)², x, y ≥ 0, Nelder-Mead | 2 | 324.1 | 26.3 | 0.08 [0.08] |
 
 n is the number of parameters. The previous barrier ran 100 outer iterations; R's adaptive barrier stops after a few.
 

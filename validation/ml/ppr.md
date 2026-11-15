@@ -128,10 +128,12 @@ under registry deviation ML-34. Registry: `validation/methods/mcp_ml_spatial.jso
 
 ## Timing of the shared spline kernel (T4)
 
-Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
-process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
-interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
-cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base f80b0131 and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+Synthetic data: x evenly spaced on [0, 10] with a small
 jitter, y = 3 sin(0.7 x) + noise.
 
 p = 3, two terms, `sm.method = "spline"` (df 5) and `"gcvspline"`; the outputs are
@@ -139,5 +141,5 @@ bit-identical to the base.
 
 | Smoother | n = 100 | n = 1,000 | n = 10,000 |
 |---|---|---|---|
-| spline | 1.63 -> 1.64 ms (1.01x) | 3.70 -> 3.72 ms (1.01x) | 68.2 -> 68.5 ms (1.00x) |
-| gcvspline | 2.52 -> 2.59 ms (1.03x) | 17.4 -> 15.8 ms (0.91x) | 227 -> 236 ms (1.04x) |
+| spline | 640 µs -> 647 µs (1.01x [1.01]) | 3.25 ms -> 3.35 ms (1.03x [1.03]) | 50.7 ms -> 51.6 ms (1.02x [1.02]) |
+| gcvspline | 1.15 ms -> 1.16 ms (1.01x [1.01]) | 6.49 ms -> 6.65 ms (1.03x [1.03]) | 74 ms -> 75.1 ms (1.02x [1.01]) |

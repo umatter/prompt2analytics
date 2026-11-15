@@ -67,13 +67,30 @@ The MCP tool `stats_spline` reaches the same core; it does not yet report the wa
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved per row with
+the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to
+about 0.8 s per process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x),
+the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
-| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| spline, fmm, default n | 100 | 19.4 | 20.4 | 1.05 |
-| spline, fmm, default n | 1,000 | 212.7 | 228.2 | 1.07 |
-| spline, fmm, default n | 10,000 | 3,676.4 | 3,808.8 | 1.04 |
-| spline, natural, default n | 100 | 20.0 | 21.0 | 1.05 |
-| spline, natural, default n | 1,000 | 218.8 | 237.8 | 1.09 |
-| spline, natural, default n | 10,000 | 3,837.4 | 3,894.4 | 1.01 |
+| spline, fmm, default n | 100 | 12.1 | 12.7 | 1.05 [1.05] |
+| spline, fmm, default n | 1,000 | 143.6 | 146.6 | 1.02 [1.02] |
+| spline, fmm, default n | 10,000 | 2,197.2 | 2,243.0 | 1.02 [1.02] |
+| spline, natural, default n | 100 | 12.2 | 13.0 | 1.07 [1.07] |
+| spline, natural, default n | 1,000 | 144.7 | 150.0 | 1.04 [1.04] |
+| spline, natural, default n | 10,000 | 2,205.2 | 2,269.5 | 1.03 [1.02] |
+| spline, monoH.FC, default n | 100 | 10.4 | 11.5 | 1.11 [1.10] |
+| spline, monoH.FC, default n | 1,000 | 128.5 | 141.2 | 1.10 [1.10] |
+| spline, monoH.FC, default n | 10,000 | 2,174.5 | 2,196.9 | 1.01 [1.01] |
+| approx, linear | 100 | 7.8 | 8.7 | 1.11 [1.12] |
+| approx, linear | 1,000 | 102.8 | 108.9 | 1.06 [1.05] |
+| approx, linear | 10,000 | 1,511.4 | 1,575.5 | 1.04 [1.04] |
+| approx, constant | 100 | 7.3 | 8.6 | 1.19 [1.20] |
+| approx, constant | 1,000 | 94.6 | 103.8 | 1.10 [1.10] |
+| approx, constant | 10,000 | 1,397.7 | 1,486.4 | 1.06 [1.06] |
+
+Hyman splines are new (v0.5.0 had none): 14.3 / 162 / 2,647 µs at n = 100 / 1,000 / 10,000. The rows above 1.1x (approx at n = 100, about 1 µs, and
+monoH.FC at n = 100) are R's tied-x averaging (`regularize.values`) and its monoFC slopes; they go to the user
+(rule 5).

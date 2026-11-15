@@ -236,13 +236,17 @@ The synthetic tests 1-3 above check properties, not R values.
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved per row with
+the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to
+about 0.8 s per process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x),
+the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
-| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| 6 variables, 2 factors, varimax, regression scores | 100 | 4,176.9 | 4,069.0 | 0.97 |
-| 6 variables, 2 factors, varimax, regression scores | 1,000 | 6,292.1 | 5,857.0 | 0.93 |
-| 6 variables, 2 factors, varimax, regression scores | 10,000 | 8,887.5 | 7,892.5 | 0.89 |
+| 6 variables, 2 factors, varimax, regression scores | 100 | 1,934.4 | 1,934.1 | 1.00 [1.00] |
+| 6 variables, 2 factors, varimax, regression scores | 1,000 | 3,359.7 | 3,329.0 | 0.99 [0.99] |
+| 6 variables, 2 factors, varimax, regression scores | 10,000 | 4,618.2 | 4,610.8 | 1.00 [0.99] |
 
 ## Performance Comparison
 

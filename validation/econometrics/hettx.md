@@ -124,33 +124,35 @@ Tolerances: `validation/README.md` for n = 20-40.
 
 Release builds of v0.5.0 (`f80b0131`) and this version, one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`),
 base and new interleaved, median of 11 runs (3 runs for the matching rows at n = 1,000 and 10,000, whose
-v0.5.0 runs take 30-55 s each). Simulated data: three normal covariates, half the units treated, effect
+v0.5.0 runs take 30-55 s each); the cells without a mark are the quiet re-time of 2026-11-15 (this tree at
+`2d0bb8b6`, one process per side and round, five rounds, nine for rows within 1.05-1.15x, load average 1.0-1.7). Simulated data: three normal covariates, half the units treated, effect
 1 + 0.5 x1 plus noise, seed fixed; B = 1000 drawn assignments at n = 100 and 1,000, B = 99 at n = 10,000
-with regression and B = 9 with matching. The other lanes' builds shared the machine, so absolute times
-move between rows; the ratios come from interleaved pairs. "dec" is `decompose = true` (v0.5.0: the
+with regression and B = 9 with matching. "dec" is `decompose = true` (v0.5.0: the
 projection null of the permuted effects; now the HC2 interaction test and the covariate-adjusted KS
 randomization test, two arm regressions and a sort per draw).
 
 | Configuration | n = 100: v0.5.0 / new s (ratio) | n = 1,000 | n = 10,000 |
 |---|---|---|---|
-| MCP default (variance, matching k = 3, decompose) | 0.494 / 0.251 (0.51) | 53.7 / 14.2 (0.27) | 42.2 / 6.65 (0.16) |
-| `HetTxConfig::default()` (v0.5.0 variance + matching; now SKS + matching) | 0.494 / 0.583 (1.18) | 53.9 / 8.04 (0.15) | 34.6 / 1.03 (0.03) |
-| variance, matching | 0.488 / 0.207 (0.42) | 53.6 / 13.8 (0.26) | 33.3 / 6.51 (0.20) |
-| variance, matching, dec | 0.494 / 0.251 (0.51) | 54.8 / 14.0 (0.26) | |
-| range, matching | 0.491 / 0.228 (0.46) | 53.6 / 14.0 (0.26) | |
-| range, matching, dec | 0.494 / 0.269 (0.55) | 53.7 / 14.3 (0.27) | |
-| IQR, matching | 0.497 / 0.561 (1.13) | 53.6 / 16.0 (0.30) | 33.4 / 6.55 (0.20) |
-| IQR, matching, dec | 0.503 / 0.605 (1.20) | 27.6 / 8.43 (0.31) | |
-| MAD, matching | 0.490 / 0.217 (0.44) | 29.8 / 13.8 (0.46) | |
-| MAD, matching, dec | 0.494 / 0.258 (0.52) | 27.7 / 7.11 (0.26) | |
-| variance, regression | 0.0382 / 0.0434 (1.14) | 0.223 / 0.247 (1.11) | 0.127 / 0.122 (0.96) |
-| variance, regression, dec | 0.0420 / 0.0862 (2.05) | 0.268 / 0.519 (1.94) | 0.153 / 0.256 (1.67) |
-| range, regression | 0.0383 / 0.0659 (1.72) | 0.224 / 0.433 (1.94) | 0.128 / 0.211 (1.65) |
-| range, regression, dec | 0.0436 / 0.107 (2.46) | 0.269 / 0.706 (2.63) | 0.154 / 0.344 (2.23) |
-| IQR, regression | 0.0444 / 0.403 (9.09) | 0.290 / 2.39 (8.25) | 0.164 / 1.02 (6.22) |
-| IQR, regression, dec | 0.0500 / 0.448 (8.95) | 0.335 / 2.67 (7.96) | 0.202 / 1.43 (7.05) |
-| MAD, regression | 0.0383 / 0.0550 (1.43) | 0.223 / 0.336 (1.51) | 0.128 / 0.172 (1.35) |
-| MAD, regression, dec | 0.0440 / 0.0990 (2.25) | 0.268 / 0.610 (2.27) | 0.235 / 0.497 (2.11) |
+| MCP default (variance, matching k = 3, decompose) | 0.246 / 0.124 (0.50) | 53.7 / 14.2 (0.27) † | 42.2 / 6.65 (0.16) † |
+| `HetTxConfig::default()` (v0.5.0 variance + matching; now SKS + matching) | 0.246 / 0.275 (1.11) | 26.7 / 3.94 (0.15) | 33.4 / 1.02 (0.03) |
+| variance, matching | 0.243 / 0.101 (0.41) | 53.6 / 13.8 (0.26) † | 33.3 / 6.51 (0.20) † |
+| variance, matching, dec | 0.246 / 0.124 (0.50) | 54.8 / 14.0 (0.26) † |  |
+| range, matching | 0.244 / 0.111 (0.46) | 53.6 / 14.0 (0.26) † |  |
+| range, matching, dec | 0.246 / 0.135 (0.55) | 53.7 / 14.3 (0.27) † |  |
+| IQR, matching | 0.246 / 0.289 (1.17) | 53.6 / 16.0 (0.30) † | 33.4 / 6.55 (0.20) † |
+| IQR, matching, dec | 0.249 / 0.313 (1.25) | 27.6 / 8.43 (0.31) † |  |
+| MAD, matching | 0.244 / 0.105 (0.43) | 29.8 / 13.8 (0.46) † |  |
+| MAD, matching, dec | 0.246 / 0.129 (0.52) | 27.7 / 7.11 (0.26) † |  |
+| variance, regression | 0.0184 / 0.0224 (1.22) | 0.112 / 0.123 (1.09) | 0.134 / 0.113 (0.84) |
+| variance, regression, dec | 0.021 / 0.0438 (2.08) | 0.134 / 0.259 (1.94) | 0.16 / 0.247 (1.55) |
+| range, regression | 0.0186 / 0.0318 (1.71) | 0.113 / 0.214 (1.90) | 0.136 / 0.21 (1.54) |
+| range, regression, dec | 0.0212 / 0.0536 (2.53) | 0.135 / 0.351 (2.60) | 0.16 / 0.344 (2.15) |
+| IQR, regression | 0.0216 / 0.199 (9.23) | 0.146 / 1.2 (8.25) | 0.171 / 1.01 (5.91) |
+| IQR, regression, dec | 0.0241 / 0.223 (9.24) | 0.168 / 1.34 (8.01) | 0.198 / 1.14 (5.77) |
+| MAD, regression | 0.0183 / 0.0267 (1.46) | 0.113 / 0.167 (1.48) | 0.133 / 0.163 (1.23) |
+| MAD, regression, dec | 0.0209 / 0.0479 (2.29) | 0.134 / 0.304 (2.27) | 0.159 / 0.298 (1.88) |
+
+† Not re-timed (the earlier, shared-machine run).
 
 Matching is faster because the k nearest donors are selected instead of sorted. The rows above 1.1x are
 the cost of the test itself, not of an implementation choice: v0.5.0 evaluated one statistic per
@@ -158,4 +160,7 @@ permutation, while the test of a constant effect evaluates it at every one of th
 for every draw (the variance in closed form; the range from the lines' envelopes and the MAD from a kink
 sweep, O(n log n) per draw; the IQR by selection, O(n) per grid value), and regression imputation fits two
 outcomes per arm. The decomposition rows add the idiosyncratic randomization test, which v0.5.0 did not
-run. These rows, and the new default at n = 100, were signed off on 2026-11-14 (rule 5).
+run. These rows, and the new default at n = 100, were signed off on 2026-11-14 (rule 5) at the shared-machine figures;
+three quiet ratios are above them and go to the user: variance with regression at n = 100 (1.22x,
+1.13x by the minima; signed 1.14x), IQR with matching at n = 100 (1.17x; signed 1.13x) and
+with decompose (1.25x; signed 1.20x).

@@ -66,22 +66,24 @@ random draws cannot be reproduced. The method and its OOB rule follow the paper 
 
 ## Wall-clock
 
-`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), five rounds with the sides interleaved per
-row (order alternating per round), one core (`taskset -c 2`), one rayon thread, 2026-11-14. **Preliminary**: the load
-average was 33-70 during the runs (other builds on the machine), so ratios within about 0.05 of 1 are noise. Cells are
-the median of the round medians (each the median of 1-21 calls after a warm-up); "ratio" is this tree over the base,
-"min ratio" the ratio of the minima. Friedman-1 data, p = 5, noise sd 1. No R timing (quantregForest is not installed).
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0); quiet re-time, 2026-11-15 (this tree at
+`2d0bb8b6`): one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base and this tree interleaved per row
+with the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to about 0.8
+s per process); cells are the median of the process medians over five rounds (nine or ten for rows within 1.05-1.15x);
+1-minute load average 1.0-3.0. "ratio" is this tree over the base, "min ratio" the ratio of the minima.
+Friedman-1 data, p = 5, noise sd 1. No R timing (quantregForest is not installed).
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| fit with in-sample and OOB quantiles, 100 trees | 100 | 16.3 | 15.0 | 0.92 | 0.92 |
-|  | 1,000 | 302 | 304 | 1.01 | 1.02 |
-|  | 10,000 | 4,865 | 5,330 | 1.10 | 1.09 |
-| the same, 500 trees (default) | 1,000 | 1,770 | 1,666 | 0.94 | 0.93 |
-| quantiles of 1,000 new rows (base: `predict_quantiles_with_y`) | 100 | 50.2 | 34.4 | 0.68 | 0.67 |
-|  | 1,000 | 98.9 | 83.8 | 0.85 | 0.88 |
-|  | 10,000 | 192 | 188 | 0.98 | 1.03 |
+| fit with in-sample and OOB quantiles, 100 trees | 100 | 11 | 9.3 | 0.85 | 0.84 |
+|  | 1,000 | 173 | 163 | 0.94 | 0.94 |
+|  | 10,000 | 2,909 | 2,821 | 0.97 | 0.97 |
+| the same, 500 trees (default) | 1,000 | 959 | 859 | 0.90 | 0.91 |
+| quantiles of 1,000 new rows (base: `predict_quantiles_with_y`) | 100 | 31 | 14.9 | 0.48 | 0.48 |
+|  | 1,000 | 51.9 | 32.8 | 0.63 | 0.63 |
+|  | 10,000 | 106 | 79.6 | 0.75 | 0.74 |
 
 Peak RSS of one 500-tree fit at n = 10,000 (`/usr/bin/time -v`, whole process): 205 MB base, 103 MB this tree (each
 tree records its leaf members once, as `u32` offsets, and its in-bag rows as a bit set, instead of leaf lists of
-bootstrap draws). The 100-tree fit at n = 10,000 (1.10x) was signed off on 2026-11-14 (rule 5).
+bootstrap draws). The 100-tree fit at n = 10,000 (1.10x on the loaded run) was signed off on 2026-11-14 (rule 5); the quiet re-time
+puts it at 0.97x, so it drops off. Quiet peak RSS (median of three): 205 MB base, 103 MB this tree.

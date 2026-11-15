@@ -83,17 +83,21 @@ above 1.1x are under "Rule 5" below.
 
 ### Rule 5 (Tier 4, signed off 2026-11-14)
 
-Rows above 1.1x of v0.5.0 (`f80b0131`) after the Tier 4 change, measured on a loaded machine (a
-quiet re-timing drops any that comes in at or below 1.1x), signed off on 2026-11-14:
+Rows above 1.1x of v0.5.0 (`f80b0131`) after the Tier 4 change, measured on a loaded machine and signed off on
+2026-11-14; the quiet re-time (2026-11-15, this tree at `2d0bb8b6`, one core, interleaved, five rounds, nine for
+rows within 1.05-1.15x, load average 1.0-3.0) gives the figures in brackets, and rows at or below 1.1x drop off:
 
-- `density`, default Gaussian kernel: 1.66x at n = 100 and 1.42x at n = 1,000; a 100-point grid
-  2.54x. R's binned FFT now runs at every size, where v0.5.0 summed directly on small inputs. The
+- `density`, default Gaussian kernel: 1.66x at n = 100 and 1.42x at n = 1,000 [quiet 1.70x, 1.49x, and
+  1.10x at n = 10,000; 68.5 µs -> 116 µs at n = 100]; a 100-point grid 2.54x [2.09x / 1.51x at
+  n = 100 / 1,000; a 1,000-point grid 1.39x / 1.36x]. The quiet rows above the signed figures go to the user. R's binned FFT now runs at every size, where v0.5.0 summed directly on small inputs. The
   kernel ordinates above m are copied from those below it (every kernel is even) and the FFT plans
   are reused.
 - `cor.test(method = "kendall")`: the exact distribution below n = 50 without ties (up to 10x,
   34 µs at n = 49; R's exact p-value where v0.5.0 used the normal approximation; the table of each n
-  is computed once per process), and with ties 1.27x at n = 100 (the tie-corrected variance).
-- `Box.test` wrappers 2.2-2.5x and `var.test` 1.11x at n = 100: the NA-aware column extractor.
+  is computed once per process), and with ties 1.27x at n = 100 (the tie-corrected variance) [quiet: exact n = 10-49
+  0.91-0.96x, ties 0.97x; both drop off].
+- `Box.test` wrappers 2.2-2.5x and `var.test` 1.11x at n = 100: the NA-aware column extractor [quiet: Box
+  1.84 / 2.25 / 1.52x at n = 100 / 1,000 / 10,000 (2.37 µs -> 4.35 µs at n = 100); var.test 1.05x, drops off].
 
 ## Numerical Validation
 

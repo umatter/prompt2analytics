@@ -192,15 +192,16 @@ Rscript validation/r/run.R --check          # did_2x2_training still reproduces
 
 ## Timing (against v0.5.0)
 
-Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
-the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
-(load average 38-39), so ratios within about 10% are noise.
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; v0.5.0 (`f80b0131`) and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
 | `run_did`, 2x2, HC1 | n = 100 | 1,000 | 10,000 |
 |---|---|---|---|
-| base / new (µs) | 23.0 / 23.4 | 135.5 / 132.7 | 2,445 / 2,559 |
-| new / base | 1.02 | 0.98 | 1.05 |
+| base / new (µs) | 17.4 / 18.1 | 101 / 107 | 1,521 / 1,561 |
+| new / base [min] | 1.04 [1.04] | 1.06 [1.05] | 1.03 [1.03] |
 
 ## References
 

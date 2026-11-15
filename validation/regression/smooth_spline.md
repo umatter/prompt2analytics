@@ -75,21 +75,23 @@ strictly positive and finite") and p2a combines only equal x values; a given `la
 
 ## Timing (T4)
 
-Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
-process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
-interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
-cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base f80b0131 and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+Synthetic data: x evenly spaced on [0, 10] with a small
 jitter, y = 3 sin(0.7 x) + noise.
 
 | Fit | n = 100 | n = 1,000 | n = 10,000 |
 |---|---|---|---|
-| spar 0.5 | 18.2 -> 20.1 us (1.11x; 1.08x on a rerun) | 150 -> 100 us (0.67x) | 2.83 -> 1.23 ms (0.44x) |
-| GCV | 200 -> 98 us (0.49x) | 1.82 -> 0.35 ms (0.19x) | 38.3 -> 2.75 ms (0.07x) |
-| df = 6 | 96 -> 76 us (0.79x) | 0.92 -> 0.33 ms (0.36x) | 16.8 -> 2.96 ms (0.18x) |
-| CV | 205 -> 111 us (0.54x) | 1.85 -> 0.39 ms (0.21x) | 37.4 -> 3.23 ms (0.09x) |
-| predict, 100 points | 4.4 -> 2.9 us (0.66x) | 19.2 -> 3.4 us (0.18x) | 193 -> 3.8 us (0.02x) |
+| spar 0.5 | 20.1 µs -> 21.9 µs (1.09x [1.10]) | 185 µs -> 108 µs (0.58x [0.59]) | 2.75 ms -> 1.09 ms (0.40x [0.40]) |
+| GCV | 258 µs -> 106 µs (0.41x [0.41]) | 2.5 ms -> 456 µs (0.18x [0.18]) | 35.2 ms -> 3.07 ms (0.09x [0.09]) |
+| df = 6 | 114 µs -> 89.5 µs (0.79x [0.79]) | 1.28 ms -> 363 µs (0.28x [0.28]) | 19.1 ms -> 2.89 ms (0.15x [0.15]) |
+| CV | 261 µs -> 115 µs (0.44x [0.45]) | 2.53 ms -> 474 µs (0.19x [0.19]) | 35.6 ms -> 3.25 ms (0.09x [0.09]) |
+| predict, 100 points | 5.01 µs -> 3.88 µs (0.77x [0.77]) | 26.4 µs -> 4.43 µs (0.17x [0.17]) | 253 µs -> 4.43 µs (0.02x [0.02]) |
 
 The search does a few dozen O(n) band solves where the old code bisected and gridded, and
 predict evaluates the stored coefficients instead of refitting. The spar-fixed row at n = 100
-is at the 1.1x line (1.105 and 1.082 on two runs; 2 us). Peak RSS of one GCV fit at n = 10,000:
-8.1 MB before, 8.0 MB after.
+is 1.09x on the quiet re-time (nine rounds). Peak RSS of one GCV fit at n = 10,000 (median of three):
+8.3 MB before, 8.0 MB after.

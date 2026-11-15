@@ -79,16 +79,17 @@ B"); before, it was dropped silently. Fixture tests, not R-pinned:
 
 ## Timing (against v0.5.0)
 
-Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
-the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
-(load average 38-39), so ratios within about 10% are noise.
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; v0.5.0 (`f80b0131`) and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 `run_synthetic_control` with placebos, V = I (`VOptimization::Equal`), 30 periods, treatment at 21:
 
 | Donors | 10 | 40 | 100 |
 |---|---|---|---|
-| base / new (ms) | 1.86 / 1.73 | 21.8 / 21.9 | 160.7 / 161.5 |
-| new / base | 0.93 | 1.00 | 1.00 |
+| base / new (ms) | 1.2 / 1.1 | 14.7 / 14.2 | 87 / 89.9 |
+| new / base [min] | 0.92 [0.91] | 0.97 [0.97] | 1.03 [0.98] |
 
 ## Missing values and column types
 

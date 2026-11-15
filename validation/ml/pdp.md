@@ -111,26 +111,26 @@ at the observation's own x1, its fitted value, bit for bit), `test_model_pd_reje
 
 ## Wall-clock (ICE)
 
-`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0), eleven rounds with the sides interleaved per
-row, one core (`taskset -c 2`), one rayon thread, 2026-11-14, after the index was anchored. **Preliminary**: the load
-average was 8-10 during the runs (other builds on the machine), and the base itself moved by more than 2x at
-n = 1,000 between this run and an earlier one, so ratios within about 0.05 of 1 are noise. Cells are the median of the
-round medians (each the median of 7-41 calls after a warm-up); "ratio" is this tree over the base, "min ratio" the
-ratio of the minima. Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` with a linear predictor, default grid
+`release`, p2a-core with the `ci` features, against `f80b0131` (v0.5.0); quiet re-time, 2026-11-15 (this tree at
+`2d0bb8b6`): one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base and this tree interleaved per row
+with the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to about 0.8
+s per process); cells are the median of the process medians over five rounds (nine or ten for rows within 1.05-1.15x);
+1-minute load average 1.0-3.0. "ratio" is this tree over the base, "min ratio" the ratio of the minima.
+Friedman-1 data, p = 5, noise sd 1. `compute_ice_curves` with a linear predictor, default grid
 (51 points), `IceConfig` defaults.
 
 | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---:|---:|---:|---:|---:|
-| 100 | 0.134 | 0.151 | 1.13 | 1.13 |
-| 1,000 | 4.58 | 5.11 | 1.11 | 1.30 |
-| 10,000 | 70.5 | 68.1 | 0.97 | 0.98 |
+| 100 | 0.143 | 0.167 | 1.17 | 1.17 |
+| 1,000 | 2.13 | 2.34 | 1.09 | 1.09 |
+| 10,000 | 34.7 | 35.7 | 1.03 | 1.02 |
 
 The heterogeneity index adds two passes over the curves. The anchored row sum uses eight partial sums, so it costs
 what `row.sum()` cost before the anchor; with one running sum the index pass alone was measurably slower. The data
 are no longer copied when every row is used, which saves a copy of the data (faster at n = 10,000). The rows at
-n = 100 and 1,000 are at or above 1.1x; they were signed off on 2026-11-14 (rule 5), and a re-timing on a quiet
-machine drops any that comes in at or below 1.1x. Peak RSS at
-n = 10,000 (earlier run): 12.4 MB base, 12.3 MB this tree.
+n = 100 and 1,000 were signed off on 2026-11-14 (rule 5) at the loaded run's 1.13 / 1.11x; on the quiet re-time
+n = 1,000 is at 1.10x and drops off, and n = 100 (1.17x) is above the signed figure and goes to the user. Peak RSS
+at n = 10,000 (one call per process, median of three): 12.4 MB base, 12.0 MB this tree.
 
 ## Running
 

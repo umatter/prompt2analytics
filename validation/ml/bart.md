@@ -94,22 +94,25 @@ glm property: mean absolute difference below 0.085 and correlation above 0.90.
 
 ## Wall-clock
 
-`release`, `ci` features, base `f80b0131` against this tree: one fit per process (a warm-up call, then the median
-of 3 calls, 1 at n = 10,000 and for the default configuration), five rounds with base and this tree interleaved per
-row and the order alternating, one core (`taskset -c 2`), `RAYON_NUM_THREADS=1`, 2026-11-13, load average 26-46
-(five lanes building on the other cores). Data: n x 5 uniform design, y = 2 x1 + 0.5 x2 + noise (probit: y above
-its median). Cells are medians; "ratio" is this tree over the base, "min ratio" the ratio of the minima.
+`release`, `ci` features, base `f80b0131` against this tree; quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`):
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base and this tree interleaved per row with the
+order rotated per round, each process the median of its calls after a warm-up (calls calibrated to about 0.8 s per
+process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x); 1-minute load average
+1.0-3.0. Data: n x 5 uniform design, y = 2 x1 + 0.5 x2 + noise (probit: y above its median). "ratio" is this tree
+over the base, "min ratio" the ratio of the minima.
 
 | Row | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---|---:|---:|---:|---:|---:|
-| BART regression, 50 trees, 20 burn-in, 50 draws | 100 | 44.2 | 20.8 | 0.47 | 0.47 |
-|  | 1,000 | 343.9 | 156.5 | 0.46 | 0.45 |
-|  | 10,000 | 4,678.2 | 1,393.5 | 0.30 | 0.30 |
-| Probit BART, same configuration | 100 | 49.3 | 22.8 | 0.46 | 0.44 |
-|  | 1,000 | 433.7 | 173.3 | 0.40 | 0.41 |
-|  | 10,000 | 5,479.9 | 1,593.6 | 0.29 | 0.30 |
-| BART regression, defaults (200 trees, 1,000 + 1,000 sweeps) | 100 | 3,530.7 | 1,508.4 | 0.43 | 0.43 |
-|  | 1,000 | 14,688.0 | 11,842.5 | 0.81 | 0.83 |
+| BART regression, 50 trees, 20 burn-in, 50 draws | 100 | 24.4 | 13.5 | 0.55 | 0.55 |
+|  | 1,000 | 226 | 108 | 0.48 | 0.48 |
+|  | 10,000 | 3,401 | 978 | 0.29 | 0.29 |
+| Probit BART, same configuration | 100 | 27.9 | 14.4 | 0.52 | 0.52 |
+|  | 1,000 | 277 | 123 | 0.44 | 0.44 |
+|  | 10,000 | 4,091 | 1,133 | 0.28 | 0.28 |
+| BART regression, defaults (200 trees, 1,000 + 1,000 sweeps) | 100 | 1,934 | 965 | 0.50 | 0.50 |
+|  | 1,000 | 8,868 | 8,008 | 0.90 | 0.90 |
+| Probit BART, defaults | 100 | 2,024 | 987 | 0.49 | 0.49 |
+|  | 1,000 | 8,864 | 8,254 | 0.93 | 0.93 |
 
 The single traversal per tree and sweep, the kept leaf index of every row and the integer cutpoint grid make each
 sweep cheaper even though the corrected kernel grows somewhat larger trees. The default configuration at

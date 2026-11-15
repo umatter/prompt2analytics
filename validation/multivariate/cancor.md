@@ -69,17 +69,24 @@ id `cancor_t4`).
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved per row with
+the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to
+about 0.8 s per process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x),
+the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
-| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| 3 x and 2 y columns | 100 | 25.7 | 23.1 | 0.90 |
-| 3 x and 2 y columns | 1,000 | 83.8 | 81.6 | 0.97 |
-| 3 x and 2 y columns | 10,000 | 944.7 | 1,149.7 | 1.22 |
+| 3 x and 2 y columns | 100 | 15.3 | 12.9 | 0.84 [0.85] |
+| 3 x and 2 y columns | 1,000 | 52.6 | 49.9 | 0.95 [0.94] |
+| 3 x and 2 y columns | 10,000 | 745.7 | 724.2 | 0.97 [0.98] |
+| 20 x and 20 y columns | 100 | 242.1 | 260.7 | 1.08 [1.08] |
+| 20 x and 20 y columns | 1,000 | 788.2 | 788.1 | 1.00 [1.01] |
+| 20 x and 20 y columns | 10,000 | 7,547.5 | 7,553.9 | 1.00 [1.00] |
 
 The change touches only the p x p and q x q steps; centring and the covariances, which carry the
-rows, are unchanged. The n = 10,000 gap lies within the spread of the previous code's own runs
-(597-1,149 µs); the row was signed off on 2026-11-14 (rule 5), and a quiet re-timing at or below 1.1x drops it.
+rows, are unchanged. The n = 10,000 row was signed off on 2026-11-14 (rule 5) at the loaded run's 1.22x; the quiet re-time puts it at
+0.97x, so it drops off.
 
 ## Performance Comparison
 

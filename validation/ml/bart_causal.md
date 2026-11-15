@@ -254,19 +254,20 @@ cargo test -p p2a-core bart_causal
 
 ## Wall-clock
 
-`release`, `ci` features, base `f80b0131` against this tree, measured as for [bart.md](bart.md) (one core,
-`RAYON_NUM_THREADS=1`, base and this tree interleaved with the order alternating, 2026-11-14, load average 4-42 from
-the other lanes' builds). Defaults (200 trees, depth 4, 100 bootstrap replicates); n x p uniform design, a 0/1
+`release`, `ci` features, base `f80b0131` against this tree, measured as for [bart.md](bart.md) (quiet re-time,
+2026-11-15, this tree at `2d0bb8b6`, one core, `RAYON_NUM_THREADS=1`, five rounds, nine for rows within 1.05-1.15x,
+load average 1.0-3.0). Defaults (200 trees, depth 4, 100 bootstrap replicates); n x p uniform design, a 0/1
 treatment with probability 0.5, y = 2 x1 + 0.5 x2 + (1 + x2) w + noise. The change is mostly the CATE
-permutation-importance pass. Five rounds at p = 5, nine at p = 20.
+permutation-importance pass.
 
 | p | n | base (ms) | this tree (ms) | ratio | min ratio |
 |---:|---:|---:|---:|---:|---:|
-| 5 | 100 | 314.3 | 338.5 | 1.08 | 1.04 |
-| 5 | 1,000 | 4,948.9 | 5,153.7 | 1.04 | 1.05 |
-| 5 | 10,000 | 56,301.2 | 57,736.0 | 1.03 | 1.09 |
-| 20 | 100 | 300.6 | 311.6 | 1.04 | 1.04 |
-| 20 | 1,000 | 4,779.4 | 5,044.1 | 1.06 | 1.07 |
+| 5 | 100 | 212 | 222 | 1.04 | 1.04 |
+| 5 | 1,000 | 3,106 | 3,233 | 1.04 | 1.04 |
+| 5 | 10,000 | 33,706 | 34,908 | 1.04 | 1.04 |
+| 20 | 100 | 301 | 311 | 1.03 | 1.03 |
+| 20 | 1,000 | 4,669 | 4,913 | 1.05 | 1.05 |
+| 20 | 10,000 | 54,362 | 56,584 | 1.04 | 1.04 |
 
 A first version of the pass predicted both ensembles at every row for every permuted covariate; at p = 20 it took
 1.12x the base at n = 100 (nine rounds, min ratio 1.12). A cap on the rows it uses would not have helped there,
@@ -276,7 +277,7 @@ importance (to rounding) at a fraction of the traversals. Every row is within 1.
 there is no row cap.
 
 Peak RSS (`/usr/bin/time -v`, one fit per process), defaults at n = 10,000, p = 5: base 14,744 kB, this tree
-14,828 kB (1.01x). The importance pass holds one more vector of n (the permuted column), which `memory_bound`
+14,828 kB (1.01x); quiet re-time (median of three) 14,712 / 14,812 kB. The importance pass holds one more vector of n (the permuted column), which `memory_bound`
 counts.
 
 ## API Reference

@@ -199,21 +199,24 @@ LOESS_Robust 0.93 / 0.86 / 0.87 (n = 100 / 1,000 / 5,000).
 
 ## Timing (T4)
 
-Release builds, `--no-default-features --features ci`, base f80b0131 against this tree, one
-process per measurement pinned to one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), nine
-interleaved processes per side, median of the per-process medians; machine load 24-34 on 12
-cores (lane timing, preliminary). Synthetic data: x evenly spaced on [0, 10] with a small
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; base f80b0131 and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+Synthetic data: x evenly spaced on [0, 10] with a small
 jitter, y = 3 sin(0.7 x) + noise.
 
 | Fit (span 0.3) | n = 100 | n = 1,000 | n = 10,000 |
 |---|---|---|---|
-| gaussian, degree 1 | 22.1 -> 23.0 us (1.04x) | 1.18 -> 1.43 ms (1.21x) | 97.9 -> 122.9 ms (1.26x) |
-| gaussian, degree 2 | 24.1 -> 30.6 us (1.27x) | 1.33 -> 2.02 ms (1.52x) | 125.6 -> 212.0 ms (1.69x) |
-| symmetric, iterations 4 | 130 -> 154 us (1.18x) | 7.98 -> 9.24 ms (1.16x) | 611 -> 875 ms (1.43x) |
+| gaussian, degree 1 | 21.7 µs -> 25.2 µs (1.16x [1.16]) | 1.23 ms -> 1.51 ms (1.23x [1.23]) | 108 ms -> 136 ms (1.26x [1.26]) |
+| gaussian, degree 2 | 26.4 µs -> 33.7 µs (1.27x [1.31]) | 1.5 ms -> 2.18 ms (1.46x [1.47]) | 135 ms -> 204 ms (1.51x [1.51]) |
+| symmetric, iterations 4 | 139 µs -> 156 µs (1.12x [1.11]) | 8.23 ms -> 9.64 ms (1.17x [1.16]) | 757 ms -> 885 ms (1.17x [1.17]) |
 
-Above 1.1x; signed off 2026-11-14 (rule 5) as the cost of the exact `one.delta`. The exact `one.delta` needs `sum_j L_ij^2` per row, the
+Above 1.1x; signed off 2026-11-14 (rule 5) as the cost of the exact `one.delta` (at the loaded run's degree 2
+1.27 / 1.52 / 1.69x, degree 1 1.21 / 1.26x at n = 1,000 / 10,000 and symmetric 1.43x at n = 10,000; the quiet rows
+not listed there, degree 1 at n = 100 and symmetric at n = 100 and 1,000, go to the user). The exact `one.delta` needs `sum_j L_ij^2` per row, the
 squared-weight moments `sum w^2 u^j` accumulated in the trace pass: two (degree 1) to five
-(degree 2) more multiply-adds per neighbourhood row, on top of the scaling of `u`. A degree 2
-rerun gave 1.32x / 1.56x / 1.70x. The symmetric family now runs every fit R runs (no early
-stop) and one more fit, of the pseudovalues, for `s`. Peak RSS at n = 10,000 is unchanged
-(7.2 -> 7.3 MB).
+(degree 2) more multiply-adds per neighbourhood row, on top of the scaling of `u`. The symmetric family now runs every fit R runs (no early
+stop) and one more fit, of the pseudovalues, for `s`. Peak RSS of a degree 2 fit at n = 10,000 is unchanged
+(7.3 -> 7.4 MB, one call per process, median of three).

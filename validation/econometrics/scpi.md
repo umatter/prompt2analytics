@@ -93,18 +93,23 @@ of the default interval at least 0.9 minus three Monte Carlo standard errors),
 
 ## Timing (against v0.5.0)
 
-Release builds of v0.5.0 (`f80b0131`) and this tree, `--no-default-features --features ci`; one core
-(`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; five interleaved processes per side, each
-the median of 3-201 calls after 10 warm-ups; median of medians; 2026-11-13, on a machine under load
-(load average 38-39), so ratios within about 10% are noise.
-`run_scpi`, 10 post-treatment periods:
+Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, `--no-default-features --features
+ci`; one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; v0.5.0 (`f80b0131`) and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a
+warm-up (calls calibrated to about 0.8 s per process); cells are the median over five rounds (nine or ten
+for rows within 1.05-1.15x), the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
+`run_scpi`, simplex, defaults (200 simulations), 10 post-treatment periods, on the deterministic noisy panel
+described below; one call per process at J = 40:
 
-| Constraint | J = 10, T0 = 20 | J = 40, T0 = 20 | J = 40, T0 = 50 |
+| | J = 10, T0 = 20 | J = 40, T0 = 20 | J = 40, T0 = 50 |
 |---|---|---|---|
-| simplex, new / base | 0.90 (base 18.3, new 16.5 µs) | 0.90 | 0.95 |
-| lasso_simplex, new / base | 0.002 (base 10.0 ms, new 17.8 µs) | 0.001 | 0.002 |
+| v0.5.0 closed-form heuristic interval | 28.6 µs | 36.7 µs | 289 µs |
+| this tree, simulated intervals | 2.11 s | 2.6 s | 25.4 s |
 
-**After CAUS-32 (scpi's intervals).** The rows above time the closed-form heuristic interval that
+Peak resident memory of the whole process (`/usr/bin/time -v`, one call, median of three) at J = 40, T0 = 50:
+8.0 MB v0.5.0, 9.3 MB this tree.
+
+**After CAUS-32 (scpi's intervals).** v0.5.0 computed the closed-form heuristic interval that
 CAUS-32 replaced. The simulated intervals solve `2 x sims x T1` programs (4,000 at the defaults with
 T1 = 10), so they cost orders of magnitude more; there is no like-for-like base. A first measurement
 (2026-11-14, three processes of 1-3 calls) gave 1.98 s (J = 10, T0 = 20), 15.6 s (J = 40, T0 = 20)
@@ -134,7 +139,8 @@ numbers, and each program holds matrices of the donor count squared.
 
 For scale, R's `scpi()` 3.0.1 on the case's panel (J = 8, T0 = 14, T1 = 6) takes about 5 seconds.
 The time grows linearly with `sims`; the hosted limits cap `sims` and the call's work
-(`scpi_work`). The simulated intervals' cost against v0.5.0's
+(`scpi_work`). At a fixed `scpi_work` the time does not grow with T0 (2026-11-15, one call per
+process, J = 10-28, T0 = 20-1,000, every constraint). The simulated intervals' cost against v0.5.0's
 closed form was signed off on 2026-11-14 (rule 5).
 
 ## Deviations

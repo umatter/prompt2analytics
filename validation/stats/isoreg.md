@@ -125,13 +125,17 @@ exact.
 
 ## Timing against the previous implementation (Tier 4)
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), median of five interleaved runs of a scratch harness at f80b0131 and with this change, on a shared machine (load average 20-60), so differences under about 10% are noise. Preliminary: a quiet re-timing follows.
+Release build, scratch harness at f80b0131 and with this change; `--no-default-features --features ci`;
+one core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; the two builds interleaved per row with
+the order rotated per round, each process the median of its calls after a warm-up (calls calibrated to
+about 0.8 s per process); cells are the median over five rounds (nine or ten for rows within 1.05-1.15x),
+the ratio of the minima in brackets; 1-minute load average 1.0-3.0.
 
-| Method | n | f80b0131 (µs) | this change (µs) | ratio |
+| Method | n | f80b0131 (µs) | this change (µs) | ratio [min] |
 |---|---|---|---|---|
-| unsorted x | 100 | 11.2 | 10.6 | 0.95 |
-| unsorted x | 1,000 | 121.5 | 123.4 | 1.02 |
-| unsorted x | 10,000 | 1,824.9 | 1,935.6 | 1.06 |
+| unsorted x | 100 | 8.0 | 8.1 | 1.01 [1.01] |
+| unsorted x | 1,000 | 88.2 | 93.7 | 1.06 [1.06] |
+| unsorted x | 10,000 | 1,240.3 | 1,271.6 | 1.02 [1.04] |
 
 ## Performance Comparison
 

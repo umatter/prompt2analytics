@@ -672,18 +672,25 @@ Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, 
 | Logit, two-way (criterion) | 100 / 400 / 1,000 | 0.53 / 0.59 / 0.90 |
 | Poisson, two-way (criterion) | 100 / 400 / 1,000 | 0.59 / 0.72 / 0.78 |
 
-After the rewrite to the FE-GLM MLE (2026-11-13; release build, one core, `RAYON_NUM_THREADS=1`,
-five interleaved rounds against `69f40487`, medians, load average 20-40, wall clock): two-way
-panels of 10 periods with x and x2, default controls. The IRLS counts fall from 13-20 to 5,
-because alpaca's update converges quadratically where the one-pass recovery of the effects
-did not. Gaussian keeps the demeaned design while the weights repeat (all 1), so it demeans X
-once.
+After the rewrite to the FE-GLM MLE. Quiet re-time, 2026-11-15 (this tree at `2d0bb8b6`): release builds, one
+core (`taskset -c 2`, `RAYON_NUM_THREADS=1`), cwd `/dev/shm`; v0.5.0 (`f80b0131`), `69f40487` and this tree
+interleaved per row with the order rotated per round, each process the median of its calls after a warm-up; the
+median over five rounds; 1-minute load average 1.0-1.6. Two-way panels of n / 10 entities over 10 periods with x
+and x2, default controls; Gaussian on the unified runner's `panel_n<n>.csv` (entity effects). The IRLS counts fall
+from 13-25 to 5-6, because alpaca's update converges quadratically where the one-pass recovery of the effects did
+not. Gaussian keeps the demeaned design while the weights repeat (all 1), so it demeans X once.
 
-| Fit | n | IRLS iterations base / new | new / base (wall clock) |
-|---|---|---|---|
-| Logit, two-way | 100 / 1,000 / 10,000 | 20, 17, 13 / 5, 5, 5 | 0.28 / 0.31 / 0.41 |
-| Poisson, two-way | 100 / 1,000 / 10,000 | 19, 17, 16 / 5, 5, 5 | 0.27 / 0.31 / 0.32 |
-| Gaussian, two-way | 100 / 1,000 / 10,000 | 2 / 2 | 1.05 / 0.87 / 0.95 |
+| Fit | n | new / `69f40487` | new / v0.5.0 | v0.5.0 / new (ms) |
+|---|---|---|---|---|
+| Logit, two-way | 100 / 1,000 / 10,000 | 0.52 / 0.26 / 0.26 | 0.52 / 0.27 / 0.26 | 0.35 / 0.181; 4.51 / 1.2; 51.7 / 13.4 |
+| Poisson, two-way | 100 / 1,000 / 10,000 | 0.40 / 0.36 / 0.56 | 0.40 / 0.36 / 0.56 | 0.463 / 0.186; 3.7 / 1.34; 26.8 / 15 |
+| Probit, two-way | 100 / 1,000 / 10,000 | 0.70 / 0.31 / 0.27 | 0.70 / 0.30 / 0.27 | 0.313 / 0.22; 4.98 / 1.51; 66.1 / 17.9 |
+| Logit, entity | 100 / 1,000 / 10,000 | 0.79 / 0.56 / 0.56 | 0.80 / 0.55 / 0.53 | 0.125 / 0.0994; 1.26 / 0.696; 14.5 / 7.69 |
+| Gaussian, entity (unified) | 100 / 1,000 / 10,000 | 0.92 / 1.00 / 0.96 | 0.93 / 1.00 / 0.97 | 0.0438 / 0.0409; 0.25 / 0.25; 3.18 / 3.1 |
+
+Peak resident memory of the whole process at n = 10,000 (one call, median of three), v0.5.0 / new: logit
+two-way 13.2 / 13.2 MB, Poisson two-way 13.2 / 13.3 MB, probit two-way 13.2 / 13.1 MB. Gaussian with two-way
+effects was not re-timed (2026-11-13, loaded machine: 1.05 / 0.87 / 0.95 against `69f40487`).
 
 The remaining rows (2026-11-14; release build, `taskset -c 2`, `RAYON_NUM_THREADS=1`, base
 and lane interleaved with alternating order, the median over 11 batches per run and the
@@ -721,6 +728,11 @@ builds (the new default):
 | Doubly robust, IPW | 100 / 1,000 / 10,000 | 1.03 / 1.00 / 0.99 |
 | Doubly robust, Regression | 100 / 1,000 / 10,000 | 1.02 / 1.00 / 1.01 |
 | LTMLE, two periods | 100 / 1,000 / 10,000 | 0.97 / 0.92 / 1.00 |
+
+Quiet re-time of these rows (2026-11-15, protocol as above; n = 100 / 1,000 / 10,000, against `69f40487`, then v0.5.0):
+IPW 1.03 / 1.02 / 1.02, 1.05 / 1.05 / 1.03;
+AIPW 1.05 / 1.07 / 1.04, 1.05 / 1.08 / 1.04; doubly robust IPW 1.04 / 1.06 / 1.03 and Regression 1.04 / 0.98 / 1.01 (against
+`69f40487` only: v0.5.0 refuses `bootstrap = 0`); LTMLE 1.01 / 1.01 / 1.05, 1.00 / 1.00 / 1.04.
 
 These paths read a standard-layout design in place as before (only the k x k workspaces of
 the lean logit IRLS go through the guarded allocator), and the intercept-only fluctuation
