@@ -67,13 +67,14 @@ Property tests that load no case: `test_cart_exact_tie_takes_the_first_candidate
 `test_cart_cv_sums_stay_finite_near_the_upper_scale_bound` (the root risk just inside the upper bound, where the
 fold errors summed in the target's units overflowed and `xstd` came out 0),
 `test_cart_refuses_a_target_scale_out_of_range` (the message gives the sum of squares and the accepted range),
-`test_cart_caps_the_class_count`,
+`test_cart_caps_the_class_count`, `cart_config_from_old_json_still_loads`,
 `a_min_bucket_above_half_of_usize_neither_panics_nor_wraps`.
 
 ## Deviations and what is not implemented
 
-- Surrogate and competitor splits and missing feature values (ML-125). `max_surrogate` (default 5) and
-  `use_surrogate` (default true) are accepted and have no effect, and non-finite features are refused. With complete
+- Surrogate and competitor splits and missing feature values (ML-125): not implemented and not configurable
+  (`CartConfig` has no surrogate options; a serialized configuration that names `max_surrogate` or `use_surrogate`
+  still loads, the keys ignored), and non-finite features are refused. With complete
   data surrogates do not change rpart's tree, but rpart's default `variable.importance` adds the surrogate splits'
   improvements. p2a's importance is rpart's with `maxsurrogate = 0`, so a default-to-default comparison with rpart
   differs in the importance only.

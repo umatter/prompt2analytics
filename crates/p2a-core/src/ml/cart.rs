@@ -94,10 +94,6 @@ pub struct CartConfig {
     /// Number of random cross-validation folds when `folds` is not given; below 2 there is no
     /// cross-validation. Default 10, as rpart.
     pub xval: usize,
-    /// Not implemented (surrogate splits, ML-125): has no effect; non-finite features are refused.
-    pub max_surrogate: usize,
-    /// Not implemented (surrogate splits, ML-125): has no effect; non-finite features are refused.
-    pub use_surrogate: bool,
     /// Seed of the random folds; `None` means 42.
     pub seed: Option<u64>,
     /// The fold (1..=V, every label used) of every row, rpart's `xval = <vector>`. Takes precedence
@@ -115,8 +111,6 @@ impl Default for CartConfig {
             min_bucket: 7,
             cp: 0.01,
             xval: 10,
-            max_surrogate: 5,
-            use_surrogate: true,
             seed: None,
             folds: None,
         }
@@ -1904,8 +1898,6 @@ mod tests {
         config.cp = 0.001;
         config.min_split = 20;
         config.min_bucket = 7;
-        config.max_surrogate = 0;
-        config.use_surrogate = false;
         config.folds = Some(case_folds(ds));
         config
     }
@@ -2089,8 +2081,6 @@ mod tests {
         config.min_bucket = 1;
         config.max_depth = 1;
         config.xval = 0;
-        config.max_surrogate = 0;
-        config.use_surrogate = false;
         let r = run_cart(&ds, "cls", &["x", "z"], &config).unwrap();
         let (x, _, _) = extract_xy(&ds, "cls", &["x", "z"], NaPolicy::Fail).unwrap();
         let prob = cart_predict_proba(&r, x.view()).unwrap();
@@ -2581,6 +2571,19 @@ mod tests {
     }
 
     #[test]
+    fn cart_config_from_old_json_still_loads() {
+        // ML-125: the surrogate options were removed (surrogate splits are not implemented); a serialized
+        // configuration that still names them loads, the two keys ignored.
+        let json = r#"{"method":"Anova","max_depth":30,"min_split":20,"min_bucket":7,"cp":0.01,"xval":10,
+            "max_surrogate":5,"use_surrogate":true,"seed":null}"#;
+        let c: CartConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            (c.min_split, c.min_bucket, c.xval, c.folds),
+            (20, 7, 10, None)
+        );
+    }
+
+    #[test]
     fn test_cart_refuses_a_target_scale_out_of_range() {
         // Before: the guard caught overflow of the root risk only. A root risk of 0 or a subnormal one
         // passed it, and 1 / root_risk filled the table with NaN.
@@ -2827,8 +2830,6 @@ mod tests {
         config.min_split = 20;
         config.min_bucket = 7;
         config.xval = 0;
-        config.max_surrogate = 0;
-        config.use_surrogate = false;
         let r = run_cart(&ds, "y", &["x0", "x1"], &config).unwrap();
         let p5 = cart_prune(&r, 0.05).unwrap();
         let p50 = cart_prune(&r, 0.5).unwrap();
