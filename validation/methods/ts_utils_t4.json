@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_arma_acf_t4",
+      "name": "Theoretical ACF/PACF of mixed ARMA models from the exact autocovariance equations",
+      "category": "forecasting",
+      "reference": "stats::ARMAacf",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_arma_acf_mixed_ts_utils_t4"
+      ],
+      "quantities": [
+        "ACF of mixed ARMA(p, q), persistent AR, lag.max below p and q + 1",
+        "PACF of ARMA(2, 1), ARMA(3, 2)"
+      ],
+      "tolerance": "rel 1e-10, abs 1e-12 (closed form)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_diffinv_t4",
+      "name": "Discrete integration with start values for differences above one",
+      "category": "forecasting",
+      "reference": "stats::diffinv",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_diffinv_xi_ts_utils_t4"
+      ],
+      "quantities": [
+        "integrated series, differences 2 and 3 with xi, lag 1, 2 and 3"
+      ],
+      "tolerance": "abs 1e-12 (dyadic inputs, exact sums)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_runmed_t4",
+      "name": "Running median with the median end rule (smoothEnds)",
+      "category": "forecasting",
+      "reference": "stats::runmed(endrule = 'median'), stats::smoothEnds",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_runmed_median_ts_utils_t4"
+      ],
+      "quantities": [
+        "smoothed series, k = 3, 5, 7, 9 and k = n"
+      ],
+      "tolerance": "abs 1e-12 (medians of given values)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_arima_sim_t4",
+      "name": "ARIMA simulation from given innovations, and R's default burn-in",
+      "category": "forecasting",
+      "reference": "stats::arima.sim(innov, n.start, start.innov)",
+      "doc": "validation/timeseries/filter.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::tsutils::tests::test_validate_arima_sim_given_innovations_ts_utils_t4"
+      ],
+      "quantities": [
+        "series from given innovations (ARMA(2, 1), ARIMA(1, 1, 1))",
+        "default n.start"
+      ],
+      "tolerance": "Tol::coef(33); n.start exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_ar_fixed_order_t4",
+      "name": "AR with a fixed order above the default order.max",
+      "category": "forecasting",
+      "reference": "stats::ar(aic = FALSE, order.max = 20, method = 'yule-walker' | 'burg' | 'ols')",
+      "doc": "validation/timeseries/ar.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::ar::tests::test_validate_ar_fixed_order_above_default_ts_utils_t4"
+      ],
+      "quantities": [
+        "coefficients, var.pred and x.mean of a fixed order above the default order.max (Yule-Walker, Burg, OLS)",
+        "order"
+      ],
+      "tolerance": "coefficients and x.mean Tol::coef(50), var.pred Tol::stat(50), order exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_stl_t4",
+      "name": "STL decomposition (periodic and 13-point seasonal window), also at a level of 1e8",
+      "category": "forecasting",
+      "reference": "stats::stl(s.window = 'periodic' | 13)",
+      "doc": "validation/forecasting/stl.md",
+      "cases": [
+        "ts_utils_t4"
+      ],
+      "tests": [
+        "p2a-core::forecasting::stl::tests::test_validate_stl_periodic_ts_utils_t4",
+        "p2a-core::forecasting::stl::tests::test_validate_stl_swin13_ts_utils_t4",
+        "p2a-core::forecasting::stl::tests::test_validate_stl_level_1e8_ts_utils_t4"
+      ],
+      "quantities": [
+        "seasonal",
+        "trend",
+        "remainder"
+      ],
+      "tolerance": "abs 1e-5 * sd(y) (f32 core after centring and scaling)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

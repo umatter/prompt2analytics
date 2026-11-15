@@ -30,7 +30,9 @@ centring and scaling change no component beyond the f32 rounding. `periodic()` w
 
 **Tolerance.** Absolute 1e-5 * sd(y) = 9.06e-4: stlrs computes in f32, so after centring and scaling the components
 carry about 1e-7 of the series' spread per operation. R's components at level 1e8 agree with those at level 0 to about
-1e-8. Before the centring, p2a's f32 path quantised a remainder at level 1e8 to multiples of 8.
+1e-8. Before the centring, p2a's f32 path quantised a remainder at level 1e8 to multiples of 8. Measured maximum
+|difference| over the six component vectors at both levels (2026-11-16): 5.3e-4 (trend, periodic window; seasonal
+4.0e-5, remainder 4.9e-4), so the tolerance is kept (the maximum is within 2x of it).
 
 `test_stl_reconstructs_exactly` (T + S + R = x to 1e-9 of the level at 1e8), `test_stl_periodic_with_seasonal_length_is_refused`
 and `test_stl_constant_series` hold the properties; `test_stl_recovers_dgp` is a property on a known process, not an R pin.

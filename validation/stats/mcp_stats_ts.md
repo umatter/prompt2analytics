@@ -110,6 +110,7 @@ at 200 points on a generated series) load no case and are not registered.
 | `test_validate_mcp_decompose_additive` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
 | `test_validate_mcp_ar_burg` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
 | `test_validate_mcp_runmed_constant` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
+| `test_validate_mcp_runmed_median` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
 | `test_validate_mcp_series_utilities` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
 | `test_validate_mcp_arma_acf` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
 | `test_validate_mcp_lag_mstl_arima_sim` | `mcp_t3_remaining_handlers` | see validation/stats/mcp_stats_ts.md, one row per test | validation/README.md by n; printed values at their decimals; counts exact |
@@ -122,14 +123,12 @@ comment in the test):
 - **STAT-82** (`mcp_t3_power_mauchly_loglin`), Mauchly p (R's pchisq form): p_value is pinned to the Anderson second-order p (psi_contrasts_p_anderson, contrasts_p_anderson); R's mauchly.test p is a 1e-3 cross-check only.
 - **TS-22** (`mcp_t3_garch_statespace_forecasting`), airpass_mult_upr, airpass_mult_lwr: predict.HoltWinters' multiplicative interval formula is wrong; the tool prints point forecasts and a note for multiplicative fits, intervals only for additive and non-seasonal fits (hw_add_upr, hw_add_lwr pinned).
 - **STAT-75** (`mcp_t3_remaining_handlers`), model-table SEs: means, grand mean and group sizes pinned.
-- **TS-14** (`mcp_t3_remaining_handlers`), ARMAacf for mixed ARMA: pure AR and MA pinned.
-- **TS-26** (`mcp_t3_remaining_handlers`), MSTL components: observation count and periods only.
-- **TS-29** (`mcp_t3_remaining_handlers`), timeseries_lag values: the tool returns x[t + k]; R's dplyr-style lag is lag_dplyr3_head.
-- **TS-34** (`mcp_t3_remaining_handlers`), runmed endrule median: constant pinned here (keep in the option test); R's median is runmed_median_head.
-- **TOOL-28** (`mcp_t3_remaining_handlers`), arima_sim sd: seed determinism only.
+- **TS-26** (`mcp_t3_remaining_handlers`), MSTL components: not pinned against forecast::mstl (f32 core, centred and scaled; level invariance tested in the core); observation count and periods only.
 
-R values recorded for the deviations: `lag_dplyr3_head` (TS-29) and `runmed_median_head`
-(TS-34) in `mcp_series_t3`; the spectrum's df and multipliers are spec.pgram's
+`timeseries_lag` is pinned to `lag_dplyr3_head` (dplyr::lag, NA padding, n values) and `timeseries_runmed` with
+`endrule = 'median'` to `runmed_median_head` (smoothEnds), both in `mcp_series_t3`; `timeseries_arima_sim` is checked
+for `sd` scaling the series and for its refusals (non-finite or non-positive `sd`, a non-stationary AR part); the
+spectrum's df and multipliers are spec.pgram's
 (`ci_df[0]`, `ci95_at_df[0..2]` of `stat_spectrum_t3`); the canonical correlations are pinned to `cor` of
 `stat_cancor_t3`. The PP statistic and p-value are pinned to PP.test (no
 deviation).
