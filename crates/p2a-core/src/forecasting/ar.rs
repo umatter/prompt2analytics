@@ -64,9 +64,11 @@ crate::option_enum!(
 pub struct ArConfig {
     /// Use AIC for order selection (default: true)
     pub aic: bool,
-    /// Maximum order to consider (default: computed from series length)
+    /// Maximum order to consider (default: min(n - 1, floor(10 log10 n)), R's default); below n
+    /// (R: "'order.max' must be < 'n.used'").
     pub order_max: Option<usize>,
-    /// Specific order to use (if aic=false)
+    /// `Some(k)` fits order k (the AIC search is skipped, whatever `aic` is); k < n. The maximum
+    /// order becomes at least k, so a k above the default maximum is fitted as given.
     pub order: Option<usize>,
     /// Fitting method (default: YuleWalker)
     pub method: ArMethod,
@@ -204,12 +206,22 @@ pub fn ar(x: &[f64], config: ArConfig) -> EconResult<ArResult> {
         });
     }
 
-    // Compute default max order: min(n-1, 10 * log10(n))
+    // R: order.max must be < n.used; a fixed order is the order.max of an aic = FALSE call.
+    for (what, value) in [("order_max", config.order_max), ("order", config.order)] {
+        if let Some(k) = value
+            && k >= n
+        {
+            return Err(EconError::InvalidSpecification {
+                message: format!("{what} must be below the number of observations ({n}), got {k}"),
+            });
+        }
+    }
+    // Default max order: min(n - 1, floor(10 log10 n)); a fixed order raises it.
     let default_max = ((n as f64).log10() * 10.0).floor() as usize;
     let max_order = config
         .order_max
         .unwrap_or(default_max.min(n - 1))
-        .min(n - 1);
+        .max(config.order.unwrap_or(0));
 
     // Demean if requested
     let x_mean = if config.demean {
@@ -344,7 +356,7 @@ fn fit_ar_yule_walker_full(
 
     // Select order based on AIC or fixed
     let (selected_order, aic_values) = if let Some(order) = fixed_order {
-        let order = order.min(max_order);
+        // order <= max_order by construction (ar raises max_order to a fixed order).
         (order, None)
     } else if use_aic {
         let mut aic_vals = Vec::with_capacity(max_order + 1);
@@ -479,7 +491,7 @@ fn fit_ar_burg(
 
     // Select order
     let (selected_order, aic_values) = if let Some(order) = fixed_order {
-        let order = order.min(phi_all.len() - 1);
+        // order <= max_order < phi_all.len() by construction.
         (order, None)
     } else if use_aic {
         let mut aic_vals = Vec::with_capacity(phi_all.len());
@@ -870,9 +882,60 @@ mod tests {
             ) && err.to_string().contains("AR(13) by OLS"),
             "{err}"
         );
-        // An order beyond the series is the same refusal.
+        // An order at or beyond the series length is refused before any fit, as R refuses it.
         let err = ar(&s, ols(None, false, Some(usize::MAX))).unwrap_err();
-        assert!(matches!(err, EconError::InsufficientData { .. }), "{err}");
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. }),
+            "{err}"
+        );
+    }
+
+    /// Case ts_utils_t4: ar(x50, aic = FALSE, order.max = 20, demean = TRUE), n = 50, above the default
+    /// order.max 16, for Yule-Walker, Burg and OLS.
+    #[test]
+    fn test_validate_ar_fixed_order_above_default_ts_utils_t4() {
+        let (case, ds) = crate::test_support::load_case("ts_utils_t4");
+        let x = col(&ds, "x50");
+        assert_eq!(x.len(), 50);
+        let mut check = Check::new(&case);
+        for (method, tag) in [
+            (ArMethod::YuleWalker, "yw"),
+            (ArMethod::Burg, "burg"),
+            (ArMethod::Ols, "ols"),
+        ] {
+            let mut c = ArConfig::default();
+            c.method = method;
+            c.aic = false;
+            c.order = Some(20);
+            let r = ar(&x, c).unwrap();
+            assert_eq!(r.order, 20, "{tag}");
+            check
+                .vector(&format!("ar_{tag}_fixed20_coef"), &r.ar, Tol::coef(50))
+                .scalar(&format!("ar_{tag}_fixed20_var"), r.var_pred, Tol::stat(50))
+                .scalar("ar_x_mean", r.x_mean, Tol::coef(50));
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_ar_order_at_or_above_n_is_refused() {
+        let x: Vec<f64> = (0..50)
+            .map(|i| (i as f64 * 0.37).sin() + 0.01 * i as f64)
+            .collect();
+        for method in [ArMethod::YuleWalker, ArMethod::Burg, ArMethod::Ols] {
+            for (order, order_max) in [(Some(50), None), (None, Some(50))] {
+                let mut c = ArConfig::default();
+                c.method = method;
+                c.aic = order.is_none();
+                c.order = order;
+                c.order_max = order_max;
+                let err = ar(&x, c).unwrap_err();
+                assert!(
+                    matches!(&err, EconError::InvalidSpecification { message } if message.contains("50")),
+                    "{method:?} {order:?} {order_max:?}: {err}"
+                );
+            }
+        }
     }
 
     /// A series of an exact low-order recursion: the rank of X'X stops the search at R's rule,

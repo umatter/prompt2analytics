@@ -1,8 +1,8 @@
 # Autoregressive models
 
 `ar`, `run_ar` and `run_ar_with_order` in `crates/p2a-core/src/forecasting/ar.rs`.
-R reference case: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `x` (n = 60) and `s` (n = 24) of
-`validation/datasets/generated/ts_utils.csv`.
+R reference cases: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `x` (n = 60) and `s` (n = 24) of
+`validation/datasets/generated/ts_utils.csv`, and `ts_utils_t4` (`x50`, n = 50).
 
 ## OLS
 
@@ -44,6 +44,15 @@ times n / (n - (order + 1)). An order with n <= order + 1 is `InsufficientData` 
 `ArMethod::Burg` is `ar.burg` with `var.method = 1`. Each order's reflection coefficient and errors use the previous order's
 forward and backward errors, as R's `C_Burg`. The variance is `var[p - 1] (1 - k^2)`, with no n / (n - p - 1) factor.
 
+## Fixed orders and the order bound
+
+`ArConfig::order = Some(k)` fits order k by every method and skips the AIC search; the maximum order becomes
+max(order_max or its default, k), so a k above the default maximum min(n - 1, floor(10 log10 n)) is fitted as given, as
+R's `ar(aic = FALSE, order.max = k)` fits it. An `order` or `order_max` of n or more is `InvalidSpecification` (R:
+"'order.max' must be < 'n.used'"). `test_validate_ar_fixed_order_above_default_ts_utils_t4` pins order 20 on the
+50-value series `x50` of case `ts_utils_t4` (default maximum 16) for Yule-Walker, Burg and OLS (coefficients and
+x.mean `Tol::coef(50)`, var.pred `Tol::stat(50)`); `test_ar_order_at_or_above_n_is_refused` holds the refusal.
+
 ## Budget
 
 Every route checks the budget once per order (`ar_ols_and_burg_honour_cancellation`).
@@ -58,6 +67,7 @@ Every route checks the budget once per order (`ar_ols_and_burg_honour_cancellati
 | `test_validate_ar_ols_fixed_order` | `ar(s, method = "ols", aic = FALSE, order.max = 2 | 3)` | coefficients `Tol::coef(24)`, var `Tol::stat(24)` |
 | `test_validate_ar_yule_walker_var_pred` | `ar(x, method = "yule-walker")`, and fixed order 3 | order exact; coefficients `Tol::coef(60)`, var `Tol::stat(60)` |
 | `test_validate_ar_burg` | `ar(x, method = "burg")`, and fixed order 3 | order exact; coefficients and partial ACF `Tol::coef(60)`; var and AIC `Tol::stat(60)` |
+| `test_validate_ar_fixed_order_above_default_ts_utils_t4` | `ar(x50, aic = FALSE, order.max = 20, method = m)`, m = yule-walker, burg, ols | order 20 exact; coefficients and x.mean `Tol::coef(50)`, var `Tol::stat(50)` |
 
 `test_ar_ols_unestimable_fixed_order_is_an_error` and `test_ar_ols_rank_stop_keeps_the_estimable_orders` hold the refusal and
 the stop; they compare no R number.

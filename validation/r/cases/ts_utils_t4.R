@@ -6,7 +6,8 @@
 #    k = 3, 5, 7, 9 and k = n (TS-34).
 #  * stats::arima.sim with given innovations (start.innov, innov, n.start), ARMA(2, 1) and ARIMA(1, 1, 1),
 #    and R's default burn-in n.start = p + q + ceiling(6 / log(minroots)) (TS-33).
-#  * stats::ar(aic = FALSE, order.max = 20) on n = 50, above the default order.max 16 (TS-30).
+#  * stats::ar(aic = FALSE, order.max = 20) on n = 50, above the default order.max 16 (TS-30); ols with
+#    intercept = FALSE, p2a's convention (validation/timeseries/ar.md).
 #  * stats::stl(s.window = "periodic") and stl(s.window = 13) on a monthly series and on the same series
 #    at level 1e8 (TS-26).
 case("ts_utils_t4", "forecasting/tsutils", "ARMAacf (mixed, persistent), diffinv (d >= 2 with xi), runmed endrule median, arima.sim with given innovations and its burn-in, ar with a fixed order above the default order.max, stl periodic and s.window = 13", function(ctx) {
@@ -60,7 +61,9 @@ case("ts_utils_t4", "forecasting/tsutils", "ARMAacf (mixed, persistent), diffinv
   # --- ar with a fixed order above the default order.max (TS-30) ---
   stopifnot(min(49, floor(10 * log10(50))) == 16)
   for (meth in c("yule-walker", "burg", "ols")) {
-    f <- ar(x50, aic = FALSE, order.max = 20, method = meth, demean = TRUE)
+    # intercept = FALSE for ols (ar.ols defaults intercept = demean); p2a's ar.ols fits no constant after demeaning
+    f <- if (meth == "ols") ar(x50, aic = FALSE, order.max = 20, method = meth, demean = TRUE, intercept = FALSE)
+         else ar(x50, aic = FALSE, order.max = 20, method = meth, demean = TRUE)
     tag <- c("yule-walker" = "yw", burg = "burg", ols = "ols")[[meth]]
     stopifnot(f$order == 20)
     v[[paste0("ar_", tag, "_fixed20_coef")]] <- vec(as.numeric(f$ar)); v[[paste0("ar_", tag, "_fixed20_var")]] <- as.numeric(f$var.pred)
