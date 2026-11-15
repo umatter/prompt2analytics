@@ -17,7 +17,9 @@ derived from `validation/methods/*.json`.
 | Dynamic tree cut | [dynamic_tree_cut.md](dynamic_tree_cut.md) | `run_dynamic_tree_cut()` | R `dynamicTreeCut::cutreeDynamic()` |
 | HDBSCAN | [hdbscan.md](hdbscan.md) | `run_hdbscan()` | R `dbscan::hdbscan()` |
 | OPTICS | [optics.md](optics.md) | `run_optics()` | R `dbscan::optics()`, `extractDBSCAN()`, `extractXi()` |
-| PAM, CLARA, fuzzy c-means, FANNY | [partitioning.md](partitioning.md) | `run_kmedoids()`, `run_clara()`, `run_fuzzy_cmeans()`, `run_fanny()` | R `cluster::pam()`, `clara()`, `fanny()` |
+| PAM, CLARA, fuzzy c-means, FANNY | [partitioning.md](partitioning.md) | `run_kmedoids()`, `run_clara()`, `kmedoids_optimized()`, `run_fuzzy_cmeans()`, `fuzzy_cmeans_from_centers()`, `run_fanny()` | R `cluster::pam()`, `clara()`, `fanny()`, `e1071::cmeans()` |
+| Spectral clustering | [spectral.md](spectral.md) | `spectral_clustering()` | R `kernlab::specc()` (embedding) |
+| Cluster indices | [cluster_indices.md](cluster_indices.md) | `calinski_harabasz()`, `davies_bouldin()`, `dunn_index()`, `rand_index()`, `nmi()`, `gap_statistic()`, `cluster_stats()` | R `clusterCrit::intCriteria()`, `aricode`, `fpc::cluster.stats()`, `cluster::clusGap()` |
 | Affinity propagation | [affinity_propagation.md](affinity_propagation.md) | `run_affinity_propagation()` | R `apcluster::apcluster()` |
 | Gaussian mixtures | [gmm.md](gmm.md) | `run_gaussian_mixture()` | R `mclust::Mclust()` |
 | Mixture EMs | [mixtures.md](mixtures.md) | `run_normal_mix_em()`, `run_mvnorm_mix_em()`, `run_flexmix()` | R `mixtools::normalmixEM()`, `mvnormalmixEM()`, `flexmix::flexmix()` |

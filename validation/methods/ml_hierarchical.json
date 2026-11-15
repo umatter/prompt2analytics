@@ -171,13 +171,7 @@
         "heights"
       ],
       "tolerance": "as ml_hclust",
-      "deviations": [
-        {
-          "finding": "ML-10",
-          "quantity": "AU and BP p-values",
-          "note": "pvclust resamples observations instead of variables (Tier 4); only the tree is pinned"
-        }
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

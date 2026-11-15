@@ -16,7 +16,17 @@ assignment pass, so the labels are always those of the returned centroids (that 
 `tolerance = None` (the MCP and CLI default) is 0: until no point is reassigned. A run that reaches the
 limit has `convergence.converged == false` and a warning ("k-means (Lloyd) did not converge after ...").
 
+With a tolerance, `convergence` records the relative centroid shift of the last update (sum of the squared
+shifts over the mean column variance) against `tolerance`; without one, the points reassigned in the last pass
+against 0.
+
 `kmeans` starts each of `n_init` runs from k-means++ and keeps the smallest inertia (the first on ties).
+k-means++ draws only among points not yet a centre, so `k` above the number of distinct rows is an error with R's
+text ("more cluster centers than distinct data points."); the internal callers (the Gaussian mixture's k-means
+start, the spectral embedding's k-means, `gap_statistic` with `k_max` above the distinct rows) report the same
+error. A run whose centroid update leaves a cluster without points keeps that centroid and carries R's warning
+"empty cluster: try a better set of initial centers". Finite data whose squared distances overflow is an error
+("squared distances overflow; rescale the data").
 `kmeans_from_centers` starts from given centres, as R's `centers =` matrix: the centres must be finite,
 have the data's columns and be distinct ("initial centers are not distinct"), and a cluster that empties is
 an error ("empty cluster: try a better set of initial centers"), both R's texts.
