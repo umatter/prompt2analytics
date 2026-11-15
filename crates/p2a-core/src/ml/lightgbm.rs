@@ -42,8 +42,10 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 
+use super::trees::MAX_TREE_DEPTH;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Objective function for LightGBM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -103,9 +105,9 @@ pub struct LightGbmConfig {
     pub num_iterations: usize,
     /// Learning rate (shrinkage factor), default 0.1
     pub learning_rate: f64,
-    /// Maximum number of leaves in one tree, default 31
+    /// Maximum number of leaves in one tree (2 to 131072, LightGBM's range), default 31
     pub num_leaves: usize,
-    /// Maximum tree depth (-1 means no limit), default -1
+    /// Maximum tree depth (-1 means no limit), default -1; every tree stops at depth 512
     pub max_depth: i32,
     /// Minimum number of data in one leaf, default 20
     pub min_data_in_leaf: usize,
@@ -115,11 +117,13 @@ pub struct LightGbmConfig {
     pub lambda_l2: f64,
     /// Fraction of features to use for each tree, default 1.0
     pub feature_fraction: f64,
-    /// Fraction of data to use for each tree (bagging), default 1.0
+    /// Fraction of rows in each bag, in (0, 1], default 1.0; read only when `bagging_freq > 0`
+    /// (LightGBM's rule)
     pub bagging_fraction: f64,
-    /// Frequency for bagging (0 = disabled), default 0
+    /// Bagging frequency: a new bag is drawn every `bagging_freq` iterations and kept in between;
+    /// 0 (the default) disables bagging whatever `bagging_fraction` says
     pub bagging_freq: usize,
-    /// Maximum number of bins for histogram, default 255
+    /// Maximum number of bins for histogram (at least 2), default 255
     pub max_bin: usize,
     /// Objective function
     pub objective: LightGbmObjective,
@@ -638,6 +642,90 @@ fn compute_leaf_value(grad_sum: f64, hess_sum: f64, lambda_l1: f64, lambda_l2: f
     -adjusted_grad / (hess_sum + lambda_l2).max(1e-10)
 }
 
+/// Median of `v` (the mean of the two middle values for an even count). Reorders `v`; `v` must
+/// not be empty.
+fn median_in_place(v: &mut [f64]) -> f64 {
+    let n = v.len();
+    let mid = n / 2;
+    let (lower, upper, _) = v.select_nth_unstable_by(mid, f64::total_cmp);
+    let upper = *upper;
+    if n.is_multiple_of(2) {
+        let lower_max = lower.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lower_max + upper) / 2.0
+    } else {
+        upper
+    }
+}
+
+/// Largest `num_leaves` LightGBM accepts.
+const MAX_NUM_LEAVES: usize = 131_072;
+
+/// Refuse settings no fit can honour (LightGBM's parameter ranges).
+fn validate_lightgbm_config(c: &LightGbmConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    if c.num_iterations == 0 {
+        return invalid("LightGBM: num_iterations must be at least 1 (got 0)".to_string());
+    }
+    if !(c.learning_rate.is_finite() && c.learning_rate > 0.0) {
+        return invalid(format!(
+            "LightGBM: learning_rate must be finite and above 0 (got {})",
+            c.learning_rate
+        ));
+    }
+    if !(2..=MAX_NUM_LEAVES).contains(&c.num_leaves) {
+        return invalid(format!(
+            "LightGBM: num_leaves must be between 2 and {MAX_NUM_LEAVES} (LightGBM's range; got {})",
+            c.num_leaves
+        ));
+    }
+    if c.max_bin < 2 {
+        return invalid(format!(
+            "LightGBM: max_bin must be at least 2 (got {})",
+            c.max_bin
+        ));
+    }
+    for (name, v) in [
+        ("bagging_fraction", c.bagging_fraction),
+        ("feature_fraction", c.feature_fraction),
+    ] {
+        if !(v > 0.0 && v <= 1.0) {
+            return invalid(format!("LightGBM: {name} must be in (0, 1] (got {v})"));
+        }
+    }
+    Ok(())
+}
+
+/// The rows of iteration `iter` (LightGBM's bagging): with `bagging_freq > 0` and
+/// `bagging_fraction < 1`, a new bag of `ceil(n * bagging_fraction)` rows is drawn at iterations
+/// 0, `bagging_freq`, 2 `bagging_freq`, ... and kept in between; otherwise every row.
+fn bag_rows(
+    iter: usize,
+    config: &LightGbmConfig,
+    n: usize,
+    rng_state: &mut u64,
+    current: &mut Vec<usize>,
+) {
+    if config.bagging_freq == 0 || config.bagging_fraction >= 1.0 {
+        if current.len() != n {
+            current.clear();
+            current.extend(0..n);
+        }
+        return;
+    }
+    if !iter.is_multiple_of(config.bagging_freq) && !current.is_empty() {
+        return;
+    }
+    let n_subsample = ((n as f64) * config.bagging_fraction).ceil() as usize;
+    current.clear();
+    current.extend(0..n);
+    // Fisher-Yates shuffle
+    for i in 0..n_subsample.min(n) {
+        let j = i + lcg_random(rng_state) % (n - i);
+        current.swap(i, j);
+    }
+    current.truncate(n_subsample);
+}
+
 /// Compute split gain using LightGBM's formula.
 /// gain = 0.5 * [G_L^2/(H_L + lambda) + G_R^2/(H_R + lambda) - (G_L+G_R)^2/(H_L+H_R + lambda)]
 #[inline]
@@ -764,9 +852,24 @@ fn fit_tree(
     feature_bins: &[FeatureBins],
     config: &LightGbmConfig,
     feature_subset: &[usize],
+    l1_residuals: Option<&[f64]>,
 ) -> LgbTree {
     let n_features = feature_bins.len();
     let mut tree = LgbTree::new(n_features);
+    // A leaf's output: the Newton step, or for regression_l1 the median residual of its rows
+    // (LightGBM's RenewTreeOutput), from the rows it holds when it is finalised.
+    let leaf_value = |grad_sum: f64, hess_sum: f64, indices: &[usize]| match l1_residuals {
+        Some(r) => {
+            let mut v: Vec<f64> = indices.iter().map(|&i| r[i]).collect();
+            median_in_place(&mut v)
+        }
+        None => compute_leaf_value(grad_sum, hess_sum, config.lambda_l1, config.lambda_l2),
+    };
+    let max_depth = if config.max_depth < 0 {
+        MAX_TREE_DEPTH
+    } else {
+        (config.max_depth as usize).min(MAX_TREE_DEPTH)
+    };
 
     if sample_indices.is_empty() {
         return tree;
@@ -809,7 +912,7 @@ fn fit_tree(
 
     // If no valid split, return single leaf
     if best_split.is_none() || root_leaf.indices.len() < 2 * config.min_data_in_leaf {
-        let value = compute_leaf_value(total_grad, total_hess, config.lambda_l1, config.lambda_l2);
+        let value = leaf_value(total_grad, total_hess, sample_indices);
         tree.root = Some(LgbNode::Leaf {
             value,
             n_samples: sample_indices.len(),
@@ -821,10 +924,10 @@ fn fit_tree(
     let mut leaf_queue: BinaryHeap<LeafInfo> = BinaryHeap::new();
     leaf_queue.push(root_leaf);
 
-    // Track nodes by ID for tree construction
-    // Use 4x num_leaves to accommodate worst-case leaf-wise growth
-    let mut nodes: Vec<Option<LgbNode>> = vec![None; 4 * config.num_leaves + 2];
-    let mut leaf_count = 0;
+    // Nodes by ID, grown as IDs are handed out (two per split)
+    let mut nodes: Vec<Option<LgbNode>> = vec![None; 1];
+    // Leaves of the tree so far: the root, plus one per split
+    let mut n_leaves = 1usize;
     let mut next_id = 0;
 
     // Keep track of parent histograms for subtraction trick
@@ -842,57 +945,13 @@ fn fit_tree(
             nodes.resize(leaf.id + 2, None);
         }
 
-        // Check if we've reached max leaves
-        if leaf_count >= config.num_leaves - 1 {
-            // Convert remaining to leaf node
-            let value = compute_leaf_value(
-                leaf.grad_sum,
-                leaf.hess_sum,
-                config.lambda_l1,
-                config.lambda_l2,
-            );
+        // A tree with num_leaves leaves, a leaf at the depth limit, or one without a
+        // positive-gain split is finalised
+        if n_leaves >= config.num_leaves || leaf.depth >= max_depth || leaf.gain <= 0.0 {
             nodes[leaf.id] = Some(LgbNode::Leaf {
-                value,
+                value: leaf_value(leaf.grad_sum, leaf.hess_sum, &leaf.indices),
                 n_samples: leaf.indices.len(),
             });
-            leaf_count += 1;
-            continue;
-        }
-
-        // Check depth limit
-        let max_depth = if config.max_depth < 0 {
-            usize::MAX
-        } else {
-            config.max_depth as usize
-        };
-        if leaf.depth >= max_depth {
-            let value = compute_leaf_value(
-                leaf.grad_sum,
-                leaf.hess_sum,
-                config.lambda_l1,
-                config.lambda_l2,
-            );
-            nodes[leaf.id] = Some(LgbNode::Leaf {
-                value,
-                n_samples: leaf.indices.len(),
-            });
-            leaf_count += 1;
-            continue;
-        }
-
-        // Check minimum gain
-        if leaf.gain <= 0.0 {
-            let value = compute_leaf_value(
-                leaf.grad_sum,
-                leaf.hess_sum,
-                config.lambda_l1,
-                config.lambda_l2,
-            );
-            nodes[leaf.id] = Some(LgbNode::Leaf {
-                value,
-                n_samples: leaf.indices.len(),
-            });
-            leaf_count += 1;
             continue;
         }
 
@@ -910,19 +969,13 @@ fn fit_tree(
         if left_indices.len() < config.min_data_in_leaf
             || right_indices.len() < config.min_data_in_leaf
         {
-            let value = compute_leaf_value(
-                leaf.grad_sum,
-                leaf.hess_sum,
-                config.lambda_l1,
-                config.lambda_l2,
-            );
             nodes[leaf.id] = Some(LgbNode::Leaf {
-                value,
+                value: leaf_value(leaf.grad_sum, leaf.hess_sum, &leaf.indices),
                 n_samples: leaf.indices.len(),
             });
-            leaf_count += 1;
             continue;
         }
+        n_leaves += 1;
 
         // Update feature importance
         tree.feature_importance_gain[split_feature] += leaf.gain;
@@ -1073,14 +1126,8 @@ fn fit_tree(
 
     // Convert remaining items in queue to leaves
     for leaf in leaf_queue {
-        let value = compute_leaf_value(
-            leaf.grad_sum,
-            leaf.hess_sum,
-            config.lambda_l1,
-            config.lambda_l2,
-        );
         nodes[leaf.id] = Some(LgbNode::Leaf {
-            value,
+            value: leaf_value(leaf.grad_sum, leaf.hess_sum, &leaf.indices),
             n_samples: leaf.indices.len(),
         });
     }
@@ -1186,6 +1233,7 @@ pub fn lightgbm(
         ));
     }
     super::xgboost::check_finite_xy(x, y)?;
+    validate_lightgbm_config(config)?;
 
     // Validate binary targets for classification
     if config.objective == LightGbmObjective::Binary {
@@ -1219,8 +1267,11 @@ pub fn lightgbm(
     let init_pred = compute_init_prediction(&y, config.objective);
     let mut predictions = Array1::from_elem(n_samples, init_pred);
 
-    let mut trees = Vec::with_capacity(config.num_iterations);
-    let mut train_loss = Vec::with_capacity(config.num_iterations + 1);
+    let mut trees = resource::try_with_capacity(config.num_iterations, "LightGBM trees")?;
+    let mut train_loss = resource::try_with_capacity(
+        config.num_iterations.saturating_add(1),
+        "LightGBM training loss",
+    )?;
     let mut total_importance_gain: Array1<f64> = Array1::zeros(n_features);
     let mut total_importance_split: Array1<f64> = Array1::zeros(n_features);
 
@@ -1233,28 +1284,15 @@ pub fn lightgbm(
     ));
 
     // Step 4: Boosting iterations
+    let mut sample_indices: Vec<usize> = Vec::new();
     for iter in 0..config.num_iterations {
+        resource::checkpoint()?;
         // Compute gradients and hessians
         let (gradients, hessians) =
             compute_gradients_hessians(&y, &predictions, config.objective, config.huber_delta);
 
         // Sample rows (bagging)
-        let sample_indices: Vec<usize> = if config.bagging_fraction < 1.0
-            && (config.bagging_freq == 0 || iter % config.bagging_freq == 0)
-        {
-            let n_subsample = ((n_samples as f64) * config.bagging_fraction).ceil() as usize;
-            let mut indices: Vec<usize> = (0..n_samples).collect();
-
-            // Fisher-Yates shuffle
-            for i in 0..n_subsample.min(indices.len()) {
-                let j = i + lcg_random(&mut rng_state) % (indices.len() - i);
-                indices.swap(i, j);
-            }
-            indices.truncate(n_subsample);
-            indices
-        } else {
-            (0..n_samples).collect()
-        };
+        bag_rows(iter, config, n_samples, &mut rng_state, &mut sample_indices);
 
         // Sample features
         let feature_subset: Vec<usize> = if config.feature_fraction < 1.0 {
@@ -1270,6 +1308,10 @@ pub fn lightgbm(
             (0..n_features).collect()
         };
 
+        // regression_l1 leaves are renewed with the median residual of their rows
+        let l1_residuals: Option<Vec<f64>> = (config.objective == LightGbmObjective::RegressionL1)
+            .then(|| y.iter().zip(&predictions).map(|(a, f)| a - f).collect());
+
         // Fit tree
         let tree = fit_tree(
             &binned_data,
@@ -1279,6 +1321,7 @@ pub fn lightgbm(
             &feature_bins,
             config,
             &feature_subset,
+            l1_residuals.as_deref(),
         );
 
         // Update predictions
@@ -1769,6 +1812,7 @@ mod tests {
             num_leaves: 8,
             min_data_in_leaf: 1,
             bagging_fraction: 0.8,
+            bagging_freq: 1,
             feature_fraction: 0.5,
             seed: Some(42),
             ..Default::default()
@@ -1935,5 +1979,264 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A noisy two-feature regression design (deterministic).
+    fn lgb_noisy(n: usize) -> (Array2<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            ((i * (7 + 4 * j) + 3 * j) % 97) as f64 / 9.7 + 0.0001 * i as f64
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            let noise = (((i * 7919) % 1009) as f64 / 1009.0 - 0.5) * 3.0;
+            2.0 * x[[i, 0]] + (x[[i, 1]] * 0.7).sin() * 4.0 + noise
+        });
+        (x, y)
+    }
+
+    fn count_leaves(node: &LgbNode) -> usize {
+        match node {
+            LgbNode::Leaf { .. } => 1,
+            LgbNode::Split { left, right, .. } => count_leaves(left) + count_leaves(right),
+        }
+    }
+
+    fn distinct(v: &[f64]) -> usize {
+        let mut s: Vec<f64> = v.to_vec();
+        s.sort_by(f64::total_cmp);
+        s.dedup();
+        s.len()
+    }
+
+    #[test]
+    fn test_lightgbm_num_leaves_caps_every_tree() {
+        // ML-31. A tree has at most num_leaves leaves. Before: the cap counted only leaves that
+        // were finalised, so a tree kept splitting while positive-gain leaves remained.
+        let (x, y) = lgb_noisy(200);
+        for num_leaves in [2usize, 4, 8, 31] {
+            let mut c = LightGbmConfig::default();
+            c.num_iterations = 1;
+            c.learning_rate = 1.0;
+            c.min_data_in_leaf = 1;
+            c.num_leaves = num_leaves;
+            let r = lightgbm(x.view(), y.view(), &c).unwrap();
+            assert_eq!(
+                distinct(&r.predictions),
+                num_leaves,
+                "num_leaves {num_leaves}"
+            );
+            assert_eq!(count_leaves(r.trees[0].root.as_ref().unwrap()), num_leaves);
+        }
+        let (x, y) = lgb_noisy(4000);
+        for (num_leaves, cap) in [(31usize, 31usize), (4, 4)] {
+            let mut c = LightGbmConfig::default();
+            c.num_iterations = 20;
+            c.num_leaves = num_leaves;
+            let r = lightgbm(x.view(), y.view(), &c).unwrap();
+            for t in &r.trees {
+                let k = count_leaves(t.root.as_ref().unwrap());
+                assert!(k <= cap, "num_leaves {num_leaves}: a tree has {k} leaves");
+            }
+        }
+    }
+
+    #[test]
+    fn test_lightgbm_num_leaves_two_is_the_root_split() {
+        // ML-31. With num_leaves = 2 the tree is the root's best split.
+        let (x, y) = lgb_noisy(300);
+        let mut c = LightGbmConfig::default();
+        c.num_iterations = 1;
+        c.learning_rate = 1.0;
+        c.num_leaves = 2;
+        let r = lightgbm(x.view(), y.view(), &c).unwrap();
+        let init = r.init_prediction;
+        let preds = Array1::from_elem(y.len(), init);
+        let (g, h) = compute_gradients_hessians(&y.view(), &preds, c.objective, c.huber_delta);
+        let n = y.len();
+        let binned = Array2::from_shape_fn((n, 2), |(i, f)| r.feature_bins[f].get_bin(x[[i, f]]));
+        let rows: Vec<usize> = (0..n).collect();
+        let hist = build_histograms(&binned, &g, &h, &rows, &r.feature_bins, &[0, 1]);
+        let (f, b, _) =
+            find_best_split(&hist, &[0, 1], g.sum(), h.sum(), c.min_data_in_leaf, 0.0).unwrap();
+        match r.trees[0].root.as_ref().unwrap() {
+            LgbNode::Split {
+                feature,
+                bin_threshold,
+                left,
+                right,
+                ..
+            } => {
+                assert_eq!((*feature, *bin_threshold), (f, b));
+                assert!(matches!(**left, LgbNode::Leaf { .. }));
+                assert!(matches!(**right, LgbNode::Leaf { .. }));
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_lightgbm_rejects_bad_parameters() {
+        // ML-75. Before: num_leaves 0 and max_bin 0 panicked on a subtraction overflow; the
+        // fractions and the learning rate were not checked.
+        let (x, y) = lgb_noisy(60);
+        let bad = |f: &dyn Fn(&mut LightGbmConfig), what: &str| {
+            let mut c = LightGbmConfig::default();
+            c.num_iterations = 2;
+            f(&mut c);
+            let e = lightgbm(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains(what)),
+                "{what}: {e}"
+            );
+        };
+        for v in [0usize, 1, 131_073] {
+            bad(
+                &|c| c.num_leaves = v,
+                "num_leaves must be between 2 and 131072",
+            );
+        }
+        for v in [0usize, 1] {
+            bad(&|c| c.max_bin = v, "max_bin must be at least 2");
+        }
+        for v in [0.0, -0.5, 1.5, f64::NAN] {
+            bad(&|c| c.bagging_fraction = v, "bagging_fraction");
+            bad(&|c| c.feature_fraction = v, "feature_fraction");
+        }
+        bad(&|c| c.num_iterations = 0, "num_iterations");
+        for v in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            bad(&|c| c.learning_rate = v, "learning_rate");
+        }
+        let mut ok = LightGbmConfig::default();
+        ok.num_iterations = 2;
+        ok.num_leaves = 2;
+        ok.max_bin = 2;
+        assert!(lightgbm(x.view(), y.view(), &ok).is_ok());
+    }
+
+    #[test]
+    fn test_lightgbm_bagging_freq_zero_does_not_bag() {
+        // ML-95. LightGBM bags only with bagging_freq > 0. Before: freq 0 bagged every iteration.
+        let (x, y) = lgb_noisy(200);
+        let mut base = LightGbmConfig::default();
+        base.num_iterations = 10;
+        base.min_data_in_leaf = 5;
+        let full = lightgbm(x.view(), y.view(), &base).unwrap();
+        for seed in [1u64, 2] {
+            let mut c = base.clone();
+            c.bagging_fraction = 0.5;
+            c.bagging_freq = 0;
+            c.seed = Some(seed);
+            let r = lightgbm(x.view(), y.view(), &c).unwrap();
+            assert_eq!(r.predictions, full.predictions, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn test_lightgbm_l1_leaves_are_residual_medians() {
+        // WT-1. LightGBM renews regression_l1 leaves with the median residual of their rows
+        // (RenewTreeOutput; LightGBM 4.7.0: a leaf of 90 rows gives 60.888763 where the mean would
+        // give 62.445831). Before: leaves were -G/H of the sign gradients.
+        let (x, y) = lgb_noisy(200);
+        let mut c = LightGbmConfig::default();
+        c.objective = LightGbmObjective::RegressionL1;
+        c.num_iterations = 1;
+        c.learning_rate = 1.0;
+        c.num_leaves = 4;
+        c.min_data_in_leaf = 5;
+        let r = lightgbm(x.view(), y.view(), &c).unwrap();
+        let init = r.init_prediction;
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            let m = v.len();
+            if m % 2 == 1 {
+                v[m / 2]
+            } else {
+                (v[m / 2 - 1] + v[m / 2]) / 2.0
+            }
+        };
+        let mut groups: Vec<f64> = r.predictions.clone();
+        groups.sort_by(f64::total_cmp);
+        groups.dedup();
+        assert_eq!(groups.len(), 4);
+        for g in groups {
+            let mut res: Vec<f64> = (0..y.len())
+                .filter(|&i| r.predictions[i] == g)
+                .map(|i| y[i] - init)
+                .collect();
+            let want = init + median(&mut res);
+            assert!(
+                (g - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{g} vs {want}"
+            );
+        }
+
+        // Many iterations reach the whole range of a large-scale target.
+        let n = 200;
+        let xs = Array2::from_shape_fn((n, 1), |(i, _)| ((i * 37) % n) as f64 / 20.0);
+        let ys = Array1::from_shape_fn(n, |i| {
+            100.0 * xs[[i, 0]] + (((i * 7919) % 1009) as f64 / 1009.0 - 0.5) * 20.0
+        });
+        let mut c = LightGbmConfig::default();
+        c.objective = LightGbmObjective::RegressionL1;
+        let r = lightgbm(xs.view(), ys.view(), &c).unwrap();
+        let lo = r.predictions.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = r
+            .predictions
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(lo < 150.0 && hi > 850.0, "range [{lo}, {hi}]");
+    }
+
+    #[test]
+    fn test_lightgbm_bag_is_kept_between_rebags() {
+        // ML-95. With bagging_freq = 3 a new bag is drawn at iterations 0, 3, 6 and kept in
+        // between. Before: the iterations between two bags used every row.
+        let n = 50;
+        let mut c = LightGbmConfig::default();
+        c.bagging_fraction = 0.3;
+        c.bagging_freq = 3;
+        let mut rng = 7u64;
+        let mut bag = Vec::new();
+        let mut previous: Vec<usize> = Vec::new();
+        for iter in 0..7 {
+            bag_rows(iter, &c, n, &mut rng, &mut bag);
+            let mut distinct = bag.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), 15, "iteration {iter}");
+            assert_eq!(bag.len(), 15);
+            if iter > 0 {
+                assert_eq!(bag != previous, iter % 3 == 0, "iteration {iter}");
+            }
+            previous = bag.clone();
+        }
+        c.bagging_freq = 0;
+        bag_rows(0, &c, n, &mut rng, &mut bag);
+        assert_eq!(bag, (0..n).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_lightgbm_tree_depth_is_capped() {
+        // Every tree stops at depth 512, even with max_depth -1 and room for 4,096 leaves.
+        let n = 2_000;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |i| (i % 2) as f64);
+        let mut c = LightGbmConfig::default();
+        c.num_iterations = 1;
+        c.max_depth = -1;
+        c.num_leaves = 4_096;
+        c.max_bin = 4_096;
+        c.min_data_in_leaf = 1;
+        c.lambda_l2 = 0.0;
+        let r = lightgbm(x.view(), y.view(), &c).unwrap();
+        let (mut max, mut stack) = (0, vec![(r.trees[0].root.as_ref().unwrap(), 0usize)]);
+        while let Some((node, d)) = stack.pop() {
+            max = max.max(d);
+            if let LgbNode::Split { left, right, .. } = node {
+                stack.push((left, d + 1));
+                stack.push((right, d + 1));
+            }
+        }
+        assert!(max <= MAX_TREE_DEPTH, "depth {max}");
     }
 }
