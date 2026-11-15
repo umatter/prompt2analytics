@@ -11,7 +11,7 @@
 //! | [`optics`](mod@optics) | OPTICS ([`optics()`]), as dbscan::optics, with extractDBSCAN and extractXi |
 //! | [`hdbscan`](mod@hdbscan) | HDBSCAN ([`hdbscan()`]) |
 //! | [`gmm`] | Gaussian mixture models ([`gaussian_mixture`]) |
-//! | [`fuzzy`] | Fuzzy c-means ([`fuzzy_cmeans`]), FANNY ([`fanny`]) |
+//! | [`fuzzy`] | Fuzzy c-means ([`fuzzy_cmeans`], [`fuzzy_cmeans_from_centers`]), FANNY ([`fanny`]) |
 //! | [`kmeans_variants`] | Mini-batch ([`mini_batch_kmeans`]), trimmed ([`trimmed_kmeans`]) and spherical ([`skmeans`]) k-means |
 //! | [`hierarchical`] | DIANA ([`diana`]), AGNES ([`agnes`]), pvclust ([`pvclust`]), fastcluster ([`fastcluster`]) |
 //! | [`mixtures`] | Normal mixtures by EM ([`normal_mix_em`], [`mvnorm_mix_em`]), mixtures of regressions ([`flexmix`]) |
@@ -58,7 +58,8 @@ pub use dynamic_tree_cut::{
     DynamicCutMethod, DynamicTreeCutResult, dynamic_tree_cut, run_dynamic_tree_cut,
 };
 pub use fuzzy::{
-    FannyResult, FcmDistance, FuzzyCMeansResult, fanny, fuzzy_cmeans, run_fanny, run_fuzzy_cmeans,
+    FannyResult, FcmDistance, FuzzyCMeansResult, fanny, fuzzy_cmeans, fuzzy_cmeans_from_centers,
+    run_fanny, run_fuzzy_cmeans,
 };
 pub use gmm::{CovarianceType, GaussianMixtureResult, gaussian_mixture, run_gaussian_mixture};
 pub use hdbscan::{HdbscanResult, hdbscan, run_hdbscan};
